@@ -47,6 +47,7 @@ func newSessionCmd() *cobra.Command {
 	cmd.AddCommand(newSessionListCmd())
 	cmd.AddCommand(newSessionResumeCmd())
 	cmd.AddCommand(newSessionCurrentCmd())
+	cmd.AddCommand(newCleanCmd())
 
 	return cmd
 }

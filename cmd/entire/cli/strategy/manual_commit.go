@@ -152,6 +152,32 @@ func (s *ManualCommitStrategy) EnsureSetup() error {
 	return nil
 }
 
+// ListOrphanedItems returns orphaned items created by the manual-commit strategy.
+// This includes:
+//   - Shadow branches that weren't auto-cleaned during commit condensation
+//   - Session state files with no corresponding checkpoints or shadow branches
+func (s *ManualCommitStrategy) ListOrphanedItems() ([]CleanupItem, error) {
+	var items []CleanupItem
+
+	// Shadow branches (should have been auto-cleaned after condensation)
+	branches, err := ListShadowBranches()
+	if err != nil {
+		return nil, err
+	}
+	for _, branch := range branches {
+		items = append(items, CleanupItem{
+			Type:   CleanupTypeShadowBranch,
+			ID:     branch,
+			Reason: "shadow branch (should have been auto-cleaned)",
+		})
+	}
+
+	// Orphaned session states are detected by ListOrphanedSessionStates
+	// which is strategy-agnostic (checks both shadow branches and checkpoints)
+
+	return items, nil
+}
+
 //nolint:gochecknoinits // Standard pattern for strategy registration
 func init() {
 	// Register manual-commit as the primary strategy name

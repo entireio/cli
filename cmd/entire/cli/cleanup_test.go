@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/strategy"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -64,7 +65,7 @@ func setupCleanTestRepo(t *testing.T) (*git.Repository, plumbing.Hash) {
 	return repo, commitHash
 }
 
-func TestRunClean_NoShadowBranches(t *testing.T) {
+func TestRunClean_NoOrphanedItems(t *testing.T) {
 	setupCleanTestRepo(t)
 
 	var stdout bytes.Buffer
@@ -74,8 +75,8 @@ func TestRunClean_NoShadowBranches(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "No shadow branches") {
-		t.Errorf("Expected 'No shadow branches' message, got: %s", output)
+	if !strings.Contains(output, "No orphaned items") {
+		t.Errorf("Expected 'No orphaned items' message, got: %s", output)
 	}
 }
 
@@ -106,8 +107,8 @@ func TestRunClean_PreviewMode(t *testing.T) {
 	output := stdout.String()
 
 	// Should show preview header
-	if !strings.Contains(output, "shadow branches found") {
-		t.Errorf("Expected 'shadow branches found' in output, got: %s", output)
+	if !strings.Contains(output, "orphaned items") {
+		t.Errorf("Expected 'orphaned items' in output, got: %s", output)
 	}
 
 	// Should list the shadow branches
@@ -253,10 +254,10 @@ func TestRunClean_Subdirectory(t *testing.T) {
 	}
 }
 
-func TestRunClean_PartialFailureReturnsError(t *testing.T) {
-	// This test verifies that runClean returns a non-zero exit code when some
-	// branch deletions fail. We use runCleanWithBranches to inject a list
-	// containing both existing and non-existing branches.
+func TestRunCleanWithItems_PartialFailure(t *testing.T) {
+	// This test verifies that runCleanWithItems returns an error when some
+	// deletions fail. We use runCleanWithItems to inject a list
+	// containing both existing and non-existing items.
 
 	repo, commitHash := setupCleanTestRepo(t)
 
@@ -266,17 +267,18 @@ func TestRunClean_PartialFailureReturnsError(t *testing.T) {
 		t.Fatalf("failed to create shadow branch: %v", err)
 	}
 
-	// Call runCleanWithBranches with a mix of existing and non-existing branches
-	// This simulates the scenario where a branch was deleted between
-	// ListShadowBranches and DeleteShadowBranches calls
-	branches := []string{"entire/abc1234", "entire/nonexistent1234567"}
+	// Call runCleanWithItems with a mix of existing and non-existing branches
+	items := []strategy.CleanupItem{
+		{Type: strategy.CleanupTypeShadowBranch, ID: "entire/abc1234", Reason: "test"},
+		{Type: strategy.CleanupTypeShadowBranch, ID: "entire/nonexistent1234567", Reason: "test"},
+	}
 
 	var stdout bytes.Buffer
-	err := runCleanWithBranches(&stdout, true, branches) // force=true
+	err := runCleanWithItems(&stdout, true, items) // force=true
 
 	// Should return an error because one branch failed to delete
 	if err == nil {
-		t.Fatal("runCleanWithBranches() should return error when branches fail to delete")
+		t.Fatal("runCleanWithItems() should return error when items fail to delete")
 	}
 
 	// Error message should indicate the failure
@@ -286,35 +288,38 @@ func TestRunClean_PartialFailureReturnsError(t *testing.T) {
 
 	// Output should show the successful deletion
 	output := stdout.String()
-	if !strings.Contains(output, "Deleted 1 shadow") {
+	if !strings.Contains(output, "Deleted 1 items") {
 		t.Errorf("Output should show successful deletion, got: %s", output)
 	}
 
 	// Output should also show the failures
-	if !strings.Contains(output, "Failed to delete 1 branch") {
+	if !strings.Contains(output, "Failed to delete 1 items") {
 		t.Errorf("Output should show failures, got: %s", output)
 	}
 }
 
-func TestRunClean_AllFailuresReturnsError(t *testing.T) {
-	// Test that error is returned when ALL branches fail to delete
+func TestRunCleanWithItems_AllFailures(t *testing.T) {
+	// Test that error is returned when ALL items fail to delete
 
 	setupCleanTestRepo(t)
 
-	// Call runCleanWithBranches with only non-existing branches
-	branches := []string{"entire/nonexistent1234567", "entire/alsononexistent"}
+	// Call runCleanWithItems with only non-existing branches
+	items := []strategy.CleanupItem{
+		{Type: strategy.CleanupTypeShadowBranch, ID: "entire/nonexistent1234567", Reason: "test"},
+		{Type: strategy.CleanupTypeShadowBranch, ID: "entire/alsononexistent", Reason: "test"},
+	}
 
 	var stdout bytes.Buffer
-	err := runCleanWithBranches(&stdout, true, branches) // force=true
+	err := runCleanWithItems(&stdout, true, items) // force=true
 
-	// Should return an error because all branches failed to delete
+	// Should return an error because all items failed to delete
 	if err == nil {
-		t.Fatal("runCleanWithBranches() should return error when branches fail to delete")
+		t.Fatal("runCleanWithItems() should return error when items fail to delete")
 	}
 
 	// Error message should indicate 2 failures
-	if !strings.Contains(err.Error(), "failed to delete 2 branches") {
-		t.Errorf("Error should mention 'failed to delete 2 branches', got: %v", err)
+	if !strings.Contains(err.Error(), "failed to delete 2 items") {
+		t.Errorf("Error should mention 'failed to delete 2 items', got: %v", err)
 	}
 
 	// Output should NOT show any successful deletions
@@ -324,7 +329,57 @@ func TestRunClean_AllFailuresReturnsError(t *testing.T) {
 	}
 
 	// Output should show the failures
-	if !strings.Contains(output, "Failed to delete 2 branches") {
+	if !strings.Contains(output, "Failed to delete 2 items") {
 		t.Errorf("Output should show failures, got: %s", output)
+	}
+}
+
+func TestRunCleanWithItems_NoItems(t *testing.T) {
+	setupCleanTestRepo(t)
+
+	var stdout bytes.Buffer
+	err := runCleanWithItems(&stdout, false, []strategy.CleanupItem{})
+	if err != nil {
+		t.Fatalf("runCleanWithItems() error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "No orphaned items") {
+		t.Errorf("Expected 'No orphaned items' message, got: %s", output)
+	}
+}
+
+func TestRunCleanWithItems_MixedTypes_Preview(t *testing.T) {
+	setupCleanTestRepo(t)
+
+	// Test preview mode with different cleanup types
+	items := []strategy.CleanupItem{
+		{Type: strategy.CleanupTypeShadowBranch, ID: "entire/abc1234", Reason: "test"},
+		{Type: strategy.CleanupTypeSessionState, ID: "session-123", Reason: "no checkpoints"},
+		{Type: strategy.CleanupTypeCheckpoint, ID: "checkpoint-abc", Reason: "orphaned"},
+	}
+
+	var stdout bytes.Buffer
+	err := runCleanWithItems(&stdout, false, items) // preview mode
+	if err != nil {
+		t.Fatalf("runCleanWithItems() error = %v", err)
+	}
+
+	output := stdout.String()
+
+	// Should show all types
+	if !strings.Contains(output, "Shadow branches") {
+		t.Errorf("Expected 'Shadow branches' section, got: %s", output)
+	}
+	if !strings.Contains(output, "Session states") {
+		t.Errorf("Expected 'Session states' section, got: %s", output)
+	}
+	if !strings.Contains(output, "Checkpoint metadata") {
+		t.Errorf("Expected 'Checkpoint metadata' section, got: %s", output)
+	}
+
+	// Should show total count
+	if !strings.Contains(output, "Found 3 orphaned items") {
+		t.Errorf("Expected 'Found 3 orphaned items', got: %s", output)
 	}
 }

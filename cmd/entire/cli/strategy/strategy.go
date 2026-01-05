@@ -483,3 +483,15 @@ type SessionSource interface {
 	// GetAdditionalSessions returns sessions not yet on entire/sessions branch.
 	GetAdditionalSessions() ([]*Session, error)
 }
+
+// OrphanedItemsLister is an optional interface for strategies that can identify
+// orphaned items (shadow branches, session states, checkpoints) that should be
+// cleaned up. This is used by the "entire session cleanup" command.
+//
+// ListAllCleanupItems() automatically discovers all registered strategies, checks
+// if they implement OrphanedItemsLister, and combines their orphaned items.
+type OrphanedItemsLister interface {
+	// ListOrphanedItems returns items created by this strategy that are now orphaned.
+	// Each strategy defines what "orphaned" means for its own data structures.
+	ListOrphanedItems() ([]CleanupItem, error)
+}

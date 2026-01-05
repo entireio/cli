@@ -989,6 +989,114 @@ func (s *AutoCommitStrategy) InitializeSession(sessionID string) error {
 	return nil
 }
 
+// ListOrphanedItems returns orphaned items created by the auto-commit strategy.
+// For auto-commit, checkpoints are orphaned when no commit has an Entire-Checkpoint
+// trailer referencing them (e.g., after rebasing or squashing).
+func (s *AutoCommitStrategy) ListOrphanedItems() ([]CleanupItem, error) {
+	repo, err := OpenRepository()
+	if err != nil {
+		return nil, fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	// Get checkpoint store (lazily initialized)
+	cpStore, err := s.getCheckpointStore()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
+	}
+
+	// Get all checkpoints from entire/sessions branch
+	checkpoints, err := cpStore.ListCommitted(context.Background())
+	if err != nil {
+		return []CleanupItem{}, nil //nolint:nilerr // No checkpoints is not an error for cleanup
+	}
+
+	if len(checkpoints) == 0 {
+		return []CleanupItem{}, nil
+	}
+
+	// Filter to only auto-commit checkpoints (identified by strategy in metadata)
+	autoCommitCheckpoints := make(map[string]bool)
+	for _, cp := range checkpoints {
+		result, readErr := cpStore.ReadCommitted(context.Background(), cp.CheckpointID)
+		if readErr != nil || result == nil {
+			continue
+		}
+		// Only consider checkpoints created by this strategy
+		if result.Metadata.Strategy == StrategyNameAutoCommit || result.Metadata.Strategy == StrategyNameDual {
+			autoCommitCheckpoints[cp.CheckpointID] = true
+		}
+	}
+
+	if len(autoCommitCheckpoints) == 0 {
+		return []CleanupItem{}, nil
+	}
+
+	// Find checkpoint IDs referenced in commits
+	referencedCheckpoints := s.findReferencedCheckpoints(repo)
+
+	// Find orphaned checkpoints
+	var items []CleanupItem
+	for checkpointID := range autoCommitCheckpoints {
+		if !referencedCheckpoints[checkpointID] {
+			items = append(items, CleanupItem{
+				Type:   CleanupTypeCheckpoint,
+				ID:     checkpointID,
+				Reason: "no commit references this checkpoint",
+			})
+		}
+	}
+
+	return items, nil
+}
+
+// findReferencedCheckpoints scans commits for Entire-Checkpoint trailers.
+func (s *AutoCommitStrategy) findReferencedCheckpoints(repo *git.Repository) map[string]bool {
+	referenced := make(map[string]bool)
+
+	refs, err := repo.References()
+	if err != nil {
+		return referenced
+	}
+
+	visited := make(map[plumbing.Hash]bool)
+
+	_ = refs.ForEach(func(ref *plumbing.Reference) error { //nolint:errcheck // Best effort
+		if !ref.Name().IsBranch() {
+			return nil
+		}
+		// Skip entire/* branches
+		branchName := strings.TrimPrefix(ref.Name().String(), "refs/heads/")
+		if strings.HasPrefix(branchName, "entire/") {
+			return nil
+		}
+
+		iter, iterErr := repo.Log(&git.LogOptions{From: ref.Hash()})
+		if iterErr != nil {
+			return nil //nolint:nilerr // Best effort
+		}
+
+		count := 0
+		_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best effort
+			count++
+			if count > 1000 {
+				return errors.New("limit reached")
+			}
+			if visited[c.Hash] {
+				return nil
+			}
+			visited[c.Hash] = true
+
+			if checkpointID, found := paths.ParseCheckpointTrailer(c.Message); found {
+				referenced[checkpointID] = true
+			}
+			return nil
+		})
+		return nil
+	})
+
+	return referenced
+}
+
 //nolint:gochecknoinits // Standard pattern for strategy registration
 func init() {
 	// Register auto-commit as the primary strategy name

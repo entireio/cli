@@ -52,7 +52,6 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newStartCmd())
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newExplainCmd())
-	cmd.AddCommand(newCleanCmd())
 
 	// Replace default help command with custom one that supports -t flag
 	cmd.SetHelpCommand(commands.NewHelpCmd(cmd))
