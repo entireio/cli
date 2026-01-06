@@ -233,26 +233,28 @@ func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string, meta
 // - The original commit was created around metadataCreatedAt
 // - Rebase/amend can make the commit newer than the metadata timestamp
 // - We don't need to look at commits older than a few minutes before the metadata
-// If branchHint is provided, searches that branch first before falling back to HEAD.
+// Searches HEAD first (to find merged commits), then falls back to branchHint (for unmerged PRs).
 func findCommitMessageByCheckpointID(repo *git.Repository, checkpointID string, metadataCreatedAt time.Time, branchHint string) string {
 	// Search window: commits from 5 minutes before metadata timestamp to now
 	// The commit can't be much older than the metadata, but can be arbitrarily newer (after rebase)
 	searchLowerBound := metadataCreatedAt.Add(-5 * time.Minute)
 
-	// Try branch hint first if provided
+	// First, search from HEAD (finds merged commits or commits on current branch)
+	head, err := repo.Head()
+	if err == nil {
+		if msg := searchCommitsForCheckpoint(repo, head.Hash(), checkpointID, searchLowerBound); msg != "" {
+			return msg
+		}
+	}
+
+	// Fall back to searching the branch hint (for unmerged PRs or if we're on a different branch)
 	if branchHint != "" {
 		if msg := searchBranchForCheckpoint(repo, branchHint, checkpointID, searchLowerBound); msg != "" {
 			return msg
 		}
 	}
 
-	// Fall back to searching from HEAD
-	head, err := repo.Head()
-	if err != nil {
-		return ""
-	}
-
-	return searchCommitsForCheckpoint(repo, head.Hash(), checkpointID, searchLowerBound)
+	return ""
 }
 
 // searchBranchForCheckpoint searches a specific branch for a checkpoint.
