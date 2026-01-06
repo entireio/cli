@@ -35,6 +35,7 @@ type CheckpointInfo struct {
 	CreatedAt        time.Time `json:"created_at"`
 	CheckpointsCount int       `json:"checkpoints_count"`
 	FilesTouched     []string  `json:"files_touched"`
+	Branch           string    `json:"branch,omitempty"` // Branch where the code commit lives (hint for finding commit message)
 	IsTask           bool      `json:"is_task,omitempty"`
 	ToolUseID        string    `json:"tool_use_id,omitempty"`
 }

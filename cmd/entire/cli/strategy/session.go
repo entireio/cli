@@ -9,6 +9,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/paths"
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -109,7 +110,7 @@ func ListSessions() ([]Session, error) {
 			})
 		} else {
 			// Get description - first try commit message, then fall back to prompt.txt
-			description := getDescriptionForCheckpoint(repo, cp.CheckpointID, cp.CreatedAt)
+			description := getDescriptionForCheckpoint(repo, cp.CheckpointID, cp.CreatedAt, cp.Branch)
 
 			sessionMap[cp.SessionID] = &Session{
 				ID:          cp.SessionID,
@@ -204,9 +205,11 @@ func GetSession(sessionID string) (*Session, error) {
 // then falls back to reading prompt.txt from the entire/sessions branch.
 // The metadataCreatedAt is used to optimize the commit search - we only look at commits
 // from a few minutes before this timestamp up to now (commits can be rebased to be newer).
-func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string, metadataCreatedAt time.Time) string {
+// The branchHint is the branch where the commit was originally created, used to prioritize
+// searching that branch first (useful for unmerged PRs).
+func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string, metadataCreatedAt time.Time, branchHint string) string {
 	// First, try to find the commit message
-	if commitMsg := findCommitMessageByCheckpointID(repo, checkpointID, metadataCreatedAt); commitMsg != "" {
+	if commitMsg := findCommitMessageByCheckpointID(repo, checkpointID, metadataCreatedAt, branchHint); commitMsg != "" {
 		return commitMsg
 	}
 
@@ -226,20 +229,43 @@ func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string, meta
 // - The original commit was created around metadataCreatedAt
 // - Rebase/amend can make the commit newer than the metadata timestamp
 // - We don't need to look at commits older than a few minutes before the metadata
-func findCommitMessageByCheckpointID(repo *git.Repository, checkpointID string, metadataCreatedAt time.Time) string {
+// If branchHint is provided, searches that branch first before falling back to HEAD.
+func findCommitMessageByCheckpointID(repo *git.Repository, checkpointID string, metadataCreatedAt time.Time, branchHint string) string {
 	// Search window: commits from 5 minutes before metadata timestamp to now
 	// The commit can't be much older than the metadata, but can be arbitrarily newer (after rebase)
 	searchLowerBound := metadataCreatedAt.Add(-5 * time.Minute)
 
-	// Get HEAD to start iteration
+	// Try branch hint first if provided
+	if branchHint != "" {
+		if msg := searchBranchForCheckpoint(repo, branchHint, checkpointID, searchLowerBound); msg != "" {
+			return msg
+		}
+	}
+
+	// Fall back to searching from HEAD
 	head, err := repo.Head()
 	if err != nil {
 		return ""
 	}
 
-	// Iterate through commits
+	return searchCommitsForCheckpoint(repo, head.Hash(), checkpointID, searchLowerBound)
+}
+
+// searchBranchForCheckpoint searches a specific branch for a checkpoint.
+func searchBranchForCheckpoint(repo *git.Repository, branchName, checkpointID string, searchLowerBound time.Time) string {
+	// Try to resolve the branch
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	if err != nil {
+		return "" // Branch doesn't exist
+	}
+
+	return searchCommitsForCheckpoint(repo, ref.Hash(), checkpointID, searchLowerBound)
+}
+
+// searchCommitsForCheckpoint searches commits starting from a given hash.
+func searchCommitsForCheckpoint(repo *git.Repository, startHash plumbing.Hash, checkpointID string, searchLowerBound time.Time) string {
 	iter, err := repo.Log(&git.LogOptions{
-		From:  head.Hash(),
+		From:  startHash,
 		Order: git.LogOrderCommitterTime,
 	})
 	if err != nil {

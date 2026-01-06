@@ -1107,3 +1107,18 @@ func GetMainBranchHash(repo *git.Repository) plumbing.Hash {
 	}
 	return plumbing.ZeroHash
 }
+
+// getCurrentBranchName returns the current branch name, or empty string if not on a branch (detached HEAD).
+// Returns short name like "main" or "feature/add-auth", not the full ref path.
+func getCurrentBranchName(repo *git.Repository) string {
+	head, err := repo.Head()
+	if err != nil {
+		return ""
+	}
+
+	if !head.Name().IsBranch() {
+		return "" // Detached HEAD
+	}
+
+	return head.Name().Short()
+}

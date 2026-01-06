@@ -116,6 +116,9 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
 
+	// Get current branch name for commit lookup hint
+	branchName := getCurrentBranchName(repo)
+
 	// Write checkpoint metadata using the checkpoint store
 	if err := store.WriteCommitted(context.Background(), cpkg.WriteCommittedOptions{
 		CheckpointID:     checkpointID,
@@ -126,6 +129,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		Context:          sessionData.Context,
 		FilesTouched:     sessionData.FilesTouched,
 		CheckpointsCount: state.CheckpointCount,
+		Branch:           branchName,
 		EphemeralBranch:  shadowBranchName,
 		AuthorName:       authorName,
 		AuthorEmail:      authorEmail,

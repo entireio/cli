@@ -176,6 +176,9 @@ type WriteCommittedOptions struct {
 	// CheckpointsCount is the number of checkpoints in this session
 	CheckpointsCount int
 
+	// Branch is the branch where the code commit lives (used for finding commit message)
+	Branch string
+
 	// EphemeralBranch is the shadow branch name (for manual-commit strategy)
 	EphemeralBranch string
 
@@ -257,6 +260,7 @@ type CommittedMetadata struct {
 	CreatedAt        time.Time `json:"created_at"`
 	CheckpointsCount int       `json:"checkpoints_count"`
 	FilesTouched     []string  `json:"files_touched"`
+	Branch           string    `json:"branch,omitempty"` // Branch where the code commit lives
 
 	// Task checkpoint fields (only populated for task checkpoints)
 	IsTask    bool   `json:"is_task,omitempty"`
