@@ -330,8 +330,8 @@ func runSessionList() error {
 	}
 
 	// Print header (2-space indent to align with marker column)
-	fmt.Printf("  %-19s  %-11s  %-20s  %s\n", "session-id", "Checkpoints", "Branch", "Description")
-	fmt.Printf("  %-19s  %-11s  %-20s  %s\n", "───────────────────", "───────────", "────────────────────", "────────────────────────────────────────")
+	fmt.Printf("  %-19s  %-11s  %-30s  %s\n", "session-id", "Checkpoints", "Branch", "Description")
+	fmt.Printf("  %-19s  %-11s  %-30s  %s\n", "───────────────────", "───────────", "──────────────────────────────", "────────────────────────────────────────")
 
 	for _, sess := range sessions {
 		// Show session ID - truncate to 19 chars for display
@@ -355,8 +355,8 @@ func runSessionList() error {
 		if branch == "" {
 			branch = "-"
 		}
-		if len(branch) > 20 {
-			branch = branch[:17] + "..."
+		if len(branch) > 30 {
+			branch = branch[:27] + "..."
 		}
 
 		// Truncate description for display
@@ -365,7 +365,7 @@ func runSessionList() error {
 			description = description[:41] + "..."
 		}
 
-		fmt.Printf("%s%-19s  %-11d  %-20s  %s\n", marker, displayID, checkpoints, branch, description)
+		fmt.Printf("%s%-19s  %-11d  %-30s  %s\n", marker, displayID, checkpoints, branch, description)
 	}
 
 	// Print usage hint
