@@ -27,6 +27,9 @@ type Session struct {
 	// (typically the first prompt or derived from commit messages)
 	Description string
 
+	// Branch is the branch where the session's code commit lives
+	Branch string
+
 	// Strategy is the name of the strategy that created this session
 	Strategy string
 
@@ -115,6 +118,7 @@ func ListSessions() ([]Session, error) {
 			sessionMap[cp.SessionID] = &Session{
 				ID:          cp.SessionID,
 				Description: description,
+				Branch:      cp.Branch,
 				Strategy:    "", // Will be set from metadata if available
 				StartTime:   cp.CreatedAt,
 				Checkpoints: []Checkpoint{{
