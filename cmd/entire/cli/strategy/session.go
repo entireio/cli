@@ -112,13 +112,32 @@ func ListSessions() ([]Session, error) {
 				ToolUseID:        cp.ToolUseID,
 			})
 		} else {
-			// Get description - first try commit message, then fall back to prompt.txt
-			description := getDescriptionForCheckpoint(repo, cp.CheckpointID, cp.CreatedAt, cp.Branch)
+			// Get description and determine current location
+			description, foundInHead := findCommitMessageByCheckpointID(repo, cp.CheckpointID, cp.CreatedAt, cp.Branch)
+			if description == "" {
+				// Fall back to reading from entire/sessions branch
+				tree, err := GetMetadataBranchTree(repo)
+				if err == nil {
+					checkpointPath := paths.CheckpointPath(cp.CheckpointID)
+					description = getSessionDescriptionFromTree(tree, checkpointPath)
+				} else {
+					description = NoDescription
+				}
+			}
+
+			// Determine display branch: show current location if different from original
+			displayBranch := cp.Branch
+			if foundInHead && cp.Branch != "" {
+				currentBranch := getCurrentBranchName(repo)
+				if currentBranch != "" && currentBranch != cp.Branch {
+					displayBranch = formatBranchLocation(currentBranch, cp.Branch)
+				}
+			}
 
 			sessionMap[cp.SessionID] = &Session{
 				ID:          cp.SessionID,
 				Description: description,
-				Branch:      cp.Branch,
+				Branch:      displayBranch,
 				Strategy:    "", // Will be set from metadata if available
 				StartTime:   cp.CreatedAt,
 				Checkpoints: []Checkpoint{{
@@ -204,37 +223,15 @@ func GetSession(sessionID string) (*Session, error) {
 	return findSessionByID(sessions, sessionID)
 }
 
-// getDescriptionForCheckpoint gets the description for a checkpoint.
-// First tries to find the commit message from a commit with the Entire-Checkpoint trailer,
-// then falls back to reading prompt.txt from the entire/sessions branch.
-// The metadataCreatedAt is used to optimize the commit search - we only look at commits
-// from a few minutes before this timestamp up to now (commits can be rebased to be newer).
-// The branchHint is the branch where the commit was originally created, used to prioritize
-// searching that branch first (useful for unmerged PRs).
-func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string, metadataCreatedAt time.Time, branchHint string) string {
-	// First, try to find the commit message
-	if commitMsg := findCommitMessageByCheckpointID(repo, checkpointID, metadataCreatedAt, branchHint); commitMsg != "" {
-		return commitMsg
-	}
-
-	// Fall back to reading from entire/sessions branch (prompt.txt or context.md)
-	tree, err := GetMetadataBranchTree(repo)
-	if err != nil {
-		return NoDescription
-	}
-
-	checkpointPath := paths.CheckpointPath(checkpointID)
-	return getSessionDescriptionFromTree(tree, checkpointPath)
-}
-
 // findCommitMessageByCheckpointID searches for a commit with the given Entire-Checkpoint trailer
-// and returns the first line of its commit message.
+// and returns the first line of its commit message, plus whether it was found in HEAD.
 // The search window is from (metadataCreatedAt - 5 minutes) to now, since:
 // - The original commit was created around metadataCreatedAt
 // - Rebase/amend can make the commit newer than the metadata timestamp
 // - We don't need to look at commits older than a few minutes before the metadata
 // Searches HEAD first (to find merged commits), then falls back to branchHint (for unmerged PRs).
-func findCommitMessageByCheckpointID(repo *git.Repository, checkpointID string, metadataCreatedAt time.Time, branchHint string) string {
+// Returns (message, foundInHead).
+func findCommitMessageByCheckpointID(repo *git.Repository, checkpointID string, metadataCreatedAt time.Time, branchHint string) (string, bool) {
 	// Search window: commits from 5 minutes before metadata timestamp to now
 	// The commit can't be much older than the metadata, but can be arbitrarily newer (after rebase)
 	searchLowerBound := metadataCreatedAt.Add(-5 * time.Minute)
@@ -243,18 +240,18 @@ func findCommitMessageByCheckpointID(repo *git.Repository, checkpointID string, 
 	head, err := repo.Head()
 	if err == nil {
 		if msg := searchCommitsForCheckpoint(repo, head.Hash(), checkpointID, searchLowerBound); msg != "" {
-			return msg
+			return msg, true // Found in HEAD
 		}
 	}
 
 	// Fall back to searching the branch hint (for unmerged PRs or if we're on a different branch)
 	if branchHint != "" {
 		if msg := searchBranchForCheckpoint(repo, branchHint, checkpointID, searchLowerBound); msg != "" {
-			return msg
+			return msg, false // Found in branch hint, not in HEAD
 		}
 	}
 
-	return ""
+	return "", false
 }
 
 // searchBranchForCheckpoint searches a specific branch for a checkpoint.
@@ -323,6 +320,12 @@ func extractCommitSubject(message string) string {
 	}
 
 	return subject
+}
+
+// formatBranchLocation formats a branch location string showing current and original branches.
+// Returns "current (was original)" format, e.g., "main (was feature/add-auth)".
+func formatBranchLocation(currentBranch, originalBranch string) string {
+	return fmt.Sprintf("%s (was %s)", currentBranch, originalBranch)
 }
 
 // findSessionByID finds a session by exact ID or prefix match.
