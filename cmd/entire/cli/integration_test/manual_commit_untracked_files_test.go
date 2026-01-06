@@ -5,6 +5,7 @@ package integration
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/strategy"
@@ -116,13 +117,13 @@ func TestShadow_UntrackedFilePreservation(t *testing.T) {
 	t.Logf("Session state:\n%s", stateContent)
 
 	// Verify untracked files are listed in session state
-	if !containsString(stateContent, "config.local.json") {
+	if !strings.Contains(stateContent, "config.local.json") {
 		t.Error("config.local.json should be in UntrackedFilesAtStart")
 	}
-	if !containsString(stateContent, "notes.txt") {
+	if !strings.Contains(stateContent, "notes.txt") {
 		t.Error("notes.txt should be in UntrackedFilesAtStart")
 	}
-	if !containsString(stateContent, ".env.local") {
+	if !strings.Contains(stateContent, ".env.local") {
 		t.Error(".env.local should be in UntrackedFilesAtStart")
 	}
 
@@ -332,17 +333,4 @@ func TestShadow_UntrackedFilesAcrossMultipleSessions(t *testing.T) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-func containsString(haystack, needle string) bool {
-	return len(haystack) > 0 && len(needle) > 0 && findSubstring(haystack, needle)
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i < len(s)-len(substr)+1; i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

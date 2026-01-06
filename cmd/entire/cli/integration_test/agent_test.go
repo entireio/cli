@@ -5,6 +5,7 @@ package integration
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/agent"
@@ -137,7 +138,7 @@ func TestAgentHookInstallation(t *testing.T) {
 			t.Fatalf("failed to read settings.json: %v", err)
 		}
 		content := string(data)
-		if !contains(content, "Read(./.entire/metadata/**)") {
+		if !strings.Contains(content, "Read(./.entire/metadata/**)") {
 			t.Error("settings.json should contain permissions.deny rule for .entire/metadata/**")
 		}
 	})
@@ -199,7 +200,7 @@ func TestAgentHookInstallation(t *testing.T) {
 		}
 
 		content := string(data)
-		if !contains(content, "go run") {
+		if !strings.Contains(content, "go run") {
 			t.Error("localDev hooks should use 'go run', but settings.json doesn't contain it")
 		}
 	})

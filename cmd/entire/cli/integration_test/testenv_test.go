@@ -5,6 +5,7 @@ package integration
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/paths"
@@ -64,7 +65,7 @@ func TestTestEnv_InitEntire(t *testing.T) {
 
 		settingsContent := string(data)
 		expectedStrategy := `"strategy": "` + strategyName + `"`
-		if !contains(settingsContent, expectedStrategy) {
+		if !strings.Contains(settingsContent, expectedStrategy) {
 			t.Errorf("settings.json should contain %s, got: %s", expectedStrategy, settingsContent)
 		}
 
@@ -244,18 +245,4 @@ func TestRunForAllStrategies(t *testing.T) {
 			t.Error("strategyName should not be empty")
 		}
 	})
-}
-
-// contains checks if s contains substr
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

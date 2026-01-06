@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/agent"
@@ -356,7 +357,7 @@ func TestSetupAgentFlag(t *testing.T) {
 
 	// Run enable with --agent flag
 	output := env.RunCLI("enable", "--agent", "claude-code")
-	if contains(output, "error") || contains(output, "Error") {
+	if strings.Contains(output, "error") || strings.Contains(output, "Error") {
 		t.Fatalf("enable --agent claude-code failed\nOutput: %s", output)
 	}
 
@@ -373,7 +374,7 @@ func TestSetupAgentFlag(t *testing.T) {
 		t.Fatalf("failed to read .entire/%s: %v", paths.SettingsFileName, err)
 	}
 
-	if !contains(string(data), `"agent"`) && !contains(string(data), `"agent":`) {
+	if !strings.Contains(string(data), `"agent"`) && !strings.Contains(string(data), `"agent":`) {
 		t.Logf("settings content: %s", data)
 		// Agent field may be omitted if default
 	}
