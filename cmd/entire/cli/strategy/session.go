@@ -255,11 +255,16 @@ func findCommitMessageByCheckpointID(repo *git.Repository, checkpointID string, 
 }
 
 // searchBranchForCheckpoint searches a specific branch for a checkpoint.
+// Tries local branch first, then falls back to remote tracking branch (origin/<branch>).
 func searchBranchForCheckpoint(repo *git.Repository, branchName, checkpointID string, searchLowerBound time.Time) string {
-	// Try to resolve the branch
+	// Try to resolve the local branch first
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
 	if err != nil {
-		return "" // Branch doesn't exist
+		// Local branch doesn't exist, try remote tracking branch
+		ref, err = repo.Reference(plumbing.NewRemoteReferenceName("origin", branchName), true)
+		if err != nil {
+			return "" // Neither local nor remote branch exists
+		}
 	}
 
 	return searchCommitsForCheckpoint(repo, ref.Hash(), checkpointID, searchLowerBound)
