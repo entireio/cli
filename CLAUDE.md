@@ -196,6 +196,19 @@ Legacy names `shadow` and `dual` are only recognized when reading settings or ch
 
 **Note:** Both strategies keep active branch history **clean**. Manual-commit strategy never creates commits on the active branch. Auto-commit strategy creates commits with only the `Entire-Checkpoint` trailer. All detailed metadata is stored on the `entire/sessions` orphan branch or shadow branches.
 
+#### Why Checkpoint ID is the Stable Link (Not Commit Hash)
+
+**Important architectural constraint:** Never store commit hashes as primary links to session data. Commit hashes are mutable - they change during `git commit --amend`, `git rebase`, and `git cherry-pick`.
+
+The `Entire-Checkpoint: <checkpoint-id>` trailer is the **stable link** because:
+1. It's embedded in the commit message content
+2. It travels with the commit through history-rewriting operations
+3. The checkpoint ID (12-hex-char) is immutable once generated
+
+**To find a commit for a checkpoint:** Search git history for commits containing the `Entire-Checkpoint: <id>` trailer, don't store/cache the commit hash.
+
+**Example:** To display the commit message for a session in `entire session list`, search for commits with matching `Entire-Checkpoint` trailer rather than storing the commit hash in metadata.
+
 #### When Modifying Strategies
 - All strategies must implement the full `Strategy` interface
 - Register new strategies in `init()` using `Register()`

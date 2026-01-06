@@ -670,12 +670,16 @@ func TestAutoCommitStrategy_ListSessions_HasDescription(t *testing.T) {
 		t.Fatalf("failed to write log file: %v", err)
 	}
 
-	// Write prompt.txt with description
-	expectedDescription := "Fix the authentication bug in login.go"
+	// Write prompt.txt with description (this is the fallback if no commit is found)
+	promptDescription := "Fix the authentication bug in login.go"
 	promptFile := filepath.Join(metadataDir, paths.PromptFileName)
-	if err := os.WriteFile(promptFile, []byte(expectedDescription+"\n\nMore details here..."), 0o644); err != nil {
+	if err := os.WriteFile(promptFile, []byte(promptDescription+"\n\nMore details here..."), 0o644); err != nil {
 		t.Fatalf("failed to write prompt file: %v", err)
 	}
+
+	// The expected description is the commit message, not prompt.txt
+	// Since we now prefer commit messages over prompt.txt
+	expectedDescription := "Implement user authentication feature"
 
 	metadataDirAbs, err := paths.AbsPath(metadataDir)
 	if err != nil {
@@ -683,8 +687,9 @@ func TestAutoCommitStrategy_ListSessions_HasDescription(t *testing.T) {
 	}
 
 	// Save changes - this creates a checkpoint on entire/sessions
+	// The commit message is what will be shown as the session description
 	ctx := SaveContext{
-		CommitMessage:  "Test checkpoint",
+		CommitMessage:  expectedDescription,
 		MetadataDir:    metadataDir,
 		MetadataDirAbs: metadataDirAbs,
 		NewFiles:       []string{"test.go"},

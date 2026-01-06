@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/paths"
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // NoDescription is the default description for sessions without one.
@@ -106,8 +108,8 @@ func ListSessions() ([]Session, error) {
 				ToolUseID:        cp.ToolUseID,
 			})
 		} else {
-			// Get description from the checkpoint tree
-			description := getDescriptionForCheckpoint(repo, cp.CheckpointID)
+			// Get description - first try commit message, then fall back to prompt.txt
+			description := getDescriptionForCheckpoint(repo, cp.CheckpointID, cp.CreatedAt)
 
 			sessionMap[cp.SessionID] = &Session{
 				ID:          cp.SessionID,
@@ -197,8 +199,18 @@ func GetSession(sessionID string) (*Session, error) {
 	return findSessionByID(sessions, sessionID)
 }
 
-// getDescriptionForCheckpoint reads the description for a checkpoint from the entire/sessions branch.
-func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string) string {
+// getDescriptionForCheckpoint gets the description for a checkpoint.
+// First tries to find the commit message from a commit with the Entire-Checkpoint trailer,
+// then falls back to reading prompt.txt from the entire/sessions branch.
+// The metadataCreatedAt is used to optimize the commit search - we only look at commits
+// from a few minutes before this timestamp up to now (commits can be rebased to be newer).
+func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string, metadataCreatedAt time.Time) string {
+	// First, try to find the commit message
+	if commitMsg := findCommitMessageByCheckpointID(repo, checkpointID, metadataCreatedAt); commitMsg != "" {
+		return commitMsg
+	}
+
+	// Fall back to reading from entire/sessions branch (prompt.txt or context.md)
 	tree, err := GetMetadataBranchTree(repo)
 	if err != nil {
 		return NoDescription
@@ -206,6 +218,79 @@ func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string) stri
 
 	checkpointPath := paths.CheckpointPath(checkpointID)
 	return getSessionDescriptionFromTree(tree, checkpointPath)
+}
+
+// findCommitMessageByCheckpointID searches for a commit with the given Entire-Checkpoint trailer
+// and returns the first line of its commit message.
+// The search window is from (metadataCreatedAt - 5 minutes) to now, since:
+// - The original commit was created around metadataCreatedAt
+// - Rebase/amend can make the commit newer than the metadata timestamp
+// - We don't need to look at commits older than a few minutes before the metadata
+func findCommitMessageByCheckpointID(repo *git.Repository, checkpointID string, metadataCreatedAt time.Time) string {
+	// Search window: commits from 5 minutes before metadata timestamp to now
+	// The commit can't be much older than the metadata, but can be arbitrarily newer (after rebase)
+	searchLowerBound := metadataCreatedAt.Add(-5 * time.Minute)
+
+	// Get HEAD to start iteration
+	head, err := repo.Head()
+	if err != nil {
+		return ""
+	}
+
+	// Iterate through commits
+	iter, err := repo.Log(&git.LogOptions{
+		From:  head.Hash(),
+		Order: git.LogOrderCommitterTime,
+	})
+	if err != nil {
+		return ""
+	}
+	defer iter.Close()
+
+	var foundMsg string
+	maxCommitsToScan := 500 // Safety limit
+
+	//nolint:errcheck,gosec // ForEach error handling via sentinel
+	iter.ForEach(func(c *object.Commit) error {
+		maxCommitsToScan--
+		if maxCommitsToScan <= 0 {
+			return errors.New("limit reached")
+		}
+
+		// Stop if commit is older than our search window
+		if c.Committer.When.Before(searchLowerBound) {
+			return errors.New("too old")
+		}
+
+		// Check if this commit has the matching Entire-Checkpoint trailer
+		if cpID, found := paths.ParseCheckpointTrailer(c.Message); found && cpID == checkpointID {
+			// Found the commit - extract first line of message
+			foundMsg = extractCommitSubject(c.Message)
+			return errors.New("found")
+		}
+
+		return nil
+	})
+
+	return foundMsg
+}
+
+// extractCommitSubject returns the first line of a commit message,
+// excluding any trailing Entire-Checkpoint trailer if it's on the first line.
+func extractCommitSubject(message string) string {
+	lines := strings.SplitN(message, "\n", 2)
+	if len(lines) == 0 {
+		return ""
+	}
+
+	subject := strings.TrimSpace(lines[0])
+
+	// If the subject line is just the trailer, return empty (let fallback handle it)
+	if strings.HasPrefix(subject, paths.CheckpointTrailerKey+":") {
+		return ""
+	}
+
+	return subject
 }
 
 // findSessionByID finds a session by exact ID or prefix match.
