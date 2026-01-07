@@ -10,7 +10,8 @@ set -e # Exit on error
 REPO_DIR="${REPO_DIR:-/tmp/entire-test-repo}"
 BIN_PATH="${BIN_PATH:-/tmp/entire-bin}"
 STRATEGY="${STRATEGY:-manual-commit}"
-SESSION_ID="${SESSION_ID:-test-session-$(date +%s)}"
+# Use proper UUID session ID format (matches Claude Code format)
+SESSION_ID="${SESSION_ID:-$(uuidgen | tr '[:upper:]' '[:lower:]')}"
 TRANSCRIPT_DIR="$REPO_DIR/.claude-test"
 
 # Export for reuse across steps
@@ -80,9 +81,11 @@ create-transcript)
   echo "==> Creating transcript..."
   cd "$REPO_DIR"
 
-  cat >"$TRANSCRIPT_DIR/transcript.jsonl" <<'EOF'
-{"type":"human","message":{"content":"Add a hello world function"}}
-{"type":"assistant","message":{"content":"I'll add a hello world function to app.js"}}
+  # Use proper Claude Code format with timestamps and UUIDs
+  TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  cat >"$TRANSCRIPT_DIR/transcript.jsonl" <<EOF
+{"type":"user","uuid":"$(uuidgen | tr '[:upper:]' '[:lower:]')","sessionId":"$SESSION_ID","timestamp":"$TIMESTAMP","message":{"role":"user","content":"Add a hello world function"}}
+{"type":"assistant","uuid":"$(uuidgen | tr '[:upper:]' '[:lower:]')","sessionId":"$SESSION_ID","timestamp":"$TIMESTAMP","message":{"role":"assistant","content":[{"type":"text","text":"I'll add a hello world function to app.js"}]}}
 EOF
 
   echo "Created: $TRANSCRIPT_DIR/transcript.jsonl"
@@ -235,7 +238,7 @@ info)
   echo "  REPO_DIR=/tmp/entire-test-repo"
   echo "  BIN_PATH=/tmp/entire-bin (must exist before running)"
   echo "  STRATEGY=manual-commit"
-  echo "  SESSION_ID=test-session-\$(date +%s)"
+  echo "  SESSION_ID=uuid (auto-generated)"
   exit 1
   ;;
 esac
