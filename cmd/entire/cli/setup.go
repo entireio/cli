@@ -539,6 +539,15 @@ func setupAgentHooksNonInteractive(agentName, strategyName string, localDev, for
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
 
+	// Let the strategy handle its own setup requirements (creates entire/sessions branch, etc.)
+	strat, err := strategy.Get(settings.Strategy)
+	if err != nil {
+		return fmt.Errorf("failed to get strategy: %w", err)
+	}
+	if err := strat.EnsureSetup(); err != nil {
+		return fmt.Errorf("failed to setup strategy: %w", err)
+	}
+
 	return nil
 }
 

@@ -40,12 +40,12 @@ configure-strategy)
   echo "==> Configuring strategy: $STRATEGY"
   cd "$REPO_DIR"
 
-  mkdir -p .entire
-  printf ".entire/\n.claude-test/\n" >.gitignore
+  # Only ignore test-specific dirs in root .gitignore
+  printf ".claude-test/\n" >.gitignore
   git add .gitignore
   "$BIN_PATH" enable --agent claude-code --strategy "$STRATEGY"
-  git add .entire
-  git add .claude
+  git add .entire/settings.json .entire/.gitignore
+  git add .claude 2>/dev/null || true
   git commit -m "Configure Entire with $STRATEGY strategy"
 
   git checkout -b feature/test-session
@@ -80,9 +80,11 @@ create-transcript)
   echo "==> Creating transcript..."
   cd "$REPO_DIR"
 
-  cat >"$TRANSCRIPT_DIR/transcript.jsonl" <<'EOF'
+  # Create transcript with proper tool_use blocks so extractModifiedFiles works
+  cat >"$TRANSCRIPT_DIR/transcript.jsonl" <<EOF
 {"type":"human","message":{"content":"Add a hello world function"}}
-{"type":"assistant","message":{"content":"I'll add a hello world function to app.js"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"I'll add a hello world function to app.js"},{"type":"tool_use","id":"toolu_test1","name":"Write","input":{"file_path":"$REPO_DIR/app.js","content":"console.log('hello world');\nfunction greet() { return 'hi'; }"}}]}}
+{"type":"tool_result","tool_use_id":"toolu_test1","content":"File written successfully"}
 EOF
 
   echo "Created: $TRANSCRIPT_DIR/transcript.jsonl"
