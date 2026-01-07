@@ -383,3 +383,105 @@ func TestDetermineSettingsTarget_SettingsNotExists_NoFlags(t *testing.T) {
 		t.Error("determineSettingsTarget() should not show notification when creating new settings")
 	}
 }
+
+func TestRunEnableWithStrategy_PreservesExistingSettings(t *testing.T) {
+	setupTestRepo(t)
+
+	// Create initial settings with strategy_options (like push enabled)
+	initialSettings := `{
+		"strategy": "manual-commit",
+		"enabled": true,
+		"strategy_options": {
+			"push": true,
+			"some_other_option": "value"
+		},
+		"agent_options": {
+			"claude-code": {
+				"ignore_untracked": true
+			}
+		}
+	}`
+	writeSettings(t, initialSettings)
+
+	// Run enable with a different strategy
+	var stdout bytes.Buffer
+	err := runEnableWithStrategy(&stdout, "auto-commit", false, false, false, true, false)
+	if err != nil {
+		t.Fatalf("runEnableWithStrategy() error = %v", err)
+	}
+
+	// Load the saved settings and verify strategy_options were preserved
+	settings, err := LoadEntireSettings()
+	if err != nil {
+		t.Fatalf("LoadEntireSettings() error = %v", err)
+	}
+
+	// Strategy should be updated
+	if settings.Strategy != "auto-commit" {
+		t.Errorf("Strategy should be 'auto-commit', got %q", settings.Strategy)
+	}
+
+	// strategy_options should be preserved
+	if settings.StrategyOptions == nil {
+		t.Fatal("strategy_options should be preserved, but got nil")
+	}
+	if settings.StrategyOptions["push"] != true {
+		t.Errorf("strategy_options.push should be true, got %v", settings.StrategyOptions["push"])
+	}
+	if settings.StrategyOptions["some_other_option"] != "value" {
+		t.Errorf("strategy_options.some_other_option should be 'value', got %v", settings.StrategyOptions["some_other_option"])
+	}
+
+	// agent_options should be preserved
+	if settings.AgentOptions == nil {
+		t.Fatal("agent_options should be preserved, but got nil")
+	}
+	claudeOpts, ok := settings.AgentOptions["claude-code"].(map[string]interface{})
+	if !ok {
+		t.Fatal("agent_options.claude-code should exist")
+	}
+	if claudeOpts["ignore_untracked"] != true {
+		t.Errorf("agent_options.claude-code.ignore_untracked should be true, got %v", claudeOpts["ignore_untracked"])
+	}
+}
+
+func TestRunEnableWithStrategy_PreservesLocalSettings(t *testing.T) {
+	setupTestRepo(t)
+
+	// Create project settings
+	writeSettings(t, `{"strategy": "manual-commit", "enabled": true}`)
+
+	// Create local settings with strategy_options
+	localSettings := `{
+		"strategy_options": {
+			"push": true
+		}
+	}`
+	writeLocalSettings(t, localSettings)
+
+	// Run enable with --local flag
+	var stdout bytes.Buffer
+	err := runEnableWithStrategy(&stdout, "auto-commit", false, false, true, false, false)
+	if err != nil {
+		t.Fatalf("runEnableWithStrategy() error = %v", err)
+	}
+
+	// Load the merged settings (project + local)
+	settings, err := LoadEntireSettings()
+	if err != nil {
+		t.Fatalf("LoadEntireSettings() error = %v", err)
+	}
+
+	// Strategy should be updated (from local)
+	if settings.Strategy != "auto-commit" {
+		t.Errorf("Strategy should be 'auto-commit', got %q", settings.Strategy)
+	}
+
+	// strategy_options.push should be preserved
+	if settings.StrategyOptions == nil {
+		t.Fatal("strategy_options should be preserved, but got nil")
+	}
+	if settings.StrategyOptions["push"] != true {
+		t.Errorf("strategy_options.push should be true, got %v", settings.StrategyOptions["push"])
+	}
+}

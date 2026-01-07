@@ -178,12 +178,16 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 		fmt.Fprintln(w, "✓ .entire directory created")
 	}
 
-	// Save the selected strategy and enable
-	settings := &EntireSettings{
-		Strategy: internalStrategy,
-		LocalDev: localDev,
-		Enabled:  true,
+	// Load existing settings to preserve other options (like strategy_options.push)
+	settings, err := LoadEntireSettings()
+	if err != nil {
+		// If we can't load, start with defaults
+		settings = &EntireSettings{}
 	}
+	// Update the specific fields
+	settings.Strategy = internalStrategy
+	settings.LocalDev = localDev
+	settings.Enabled = true
 
 	// Determine which settings file to write to
 	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
@@ -282,12 +286,16 @@ func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProject
 		fmt.Fprintln(w, "✓ .entire directory created")
 	}
 
-	// Save the selected strategy and enable
-	settings := &EntireSettings{
-		Strategy: internalStrategy,
-		LocalDev: localDev,
-		Enabled:  true,
+	// Load existing settings to preserve other options (like strategy_options.push)
+	settings, err := LoadEntireSettings()
+	if err != nil {
+		// If we can't load, start with defaults
+		settings = &EntireSettings{}
 	}
+	// Update the specific fields
+	settings.Strategy = internalStrategy
+	settings.LocalDev = localDev
+	settings.Enabled = true
 
 	// Determine which settings file to write to (interactive prompt if settings.json exists)
 	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
@@ -529,6 +537,15 @@ func setupAgentHooksNonInteractive(agentName, strategyName string, localDev, for
 	// Install git hooks (always reinstall to ensure they're up-to-date)
 	if _, err := strategy.InstallGitHook(true); err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
+	}
+
+	// Let the strategy handle its own setup requirements (creates entire/sessions branch, etc.)
+	strat, err := strategy.Get(settings.Strategy)
+	if err != nil {
+		return fmt.Errorf("failed to get strategy: %w", err)
+	}
+	if err := strat.EnsureSetup(); err != nil {
+		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 
 	return nil
