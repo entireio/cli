@@ -864,6 +864,166 @@ func HardResetWithProtection(commitHash plumbing.Hash) (shortID string, err erro
 	return shortID, nil
 }
 
+// AddFilesWithCLI stages files using git CLI instead of go-git.
+// Uses the git CLI because go-git's worktree.Add() has a caching bug where it
+// doesn't properly detect file changes when files are modified externally (e.g., by Claude).
+// This causes worktree.Commit() to fail with ErrEmptyCommit even when files have changed.
+func AddFilesWithCLI(files []string) {
+	if len(files) == 0 {
+		return
+	}
+
+	ctx := context.Background()
+
+	for _, file := range files {
+		// Use -- to separate file paths from options (handles files starting with -)
+		cmd := exec.CommandContext(ctx, "git", "add", "--", file) //nolint:gosec // file paths are from transcript parsing, not user input
+		if output, err := cmd.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "  Failed to stage %s: %s\n", file, strings.TrimSpace(string(output)))
+		} else {
+			fmt.Fprintf(os.Stderr, "  Staged: %s\n", file)
+		}
+	}
+}
+
+// RemoveFilesWithCLI stages file deletions using git CLI instead of go-git.
+// Uses the git CLI for the same reasons as AddFilesWithCLI.
+func RemoveFilesWithCLI(files []string) {
+	if len(files) == 0 {
+		return
+	}
+
+	ctx := context.Background()
+
+	for _, file := range files {
+		// Use git rm --cached to stage deletion without removing from filesystem
+		// (the file is already deleted, we just need to stage that fact)
+		cmd := exec.CommandContext(ctx, "git", "rm", "--cached", "--ignore-unmatch", "--", file) //nolint:gosec // file paths are from transcript parsing, not user input
+		if output, err := cmd.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "  Failed to stage deleted file %s: %s\n", file, strings.TrimSpace(string(output)))
+		} else {
+			fmt.Fprintf(os.Stderr, "  Staged deleted: %s\n", file)
+		}
+	}
+}
+
+// CommitWithCLI creates a commit using git CLI instead of go-git.
+// Uses the git CLI because go-git's worktree.Commit() relies on its internal index cache,
+// which may not reflect the actual git index state after files are staged via git CLI.
+// Returns the commit hash on success. Returns empty string with nil error if there are
+// no changes to commit (equivalent to git commit with nothing staged).
+func CommitWithCLI(message, authorName, authorEmail string) (string, error) {
+	ctx := context.Background()
+
+	// First check if there's anything to commit
+	statusCmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--quiet")
+	if err := statusCmd.Run(); err == nil {
+		// Exit code 0 means no staged changes
+		fmt.Fprintf(os.Stderr, "No changes to commit (files already committed)\n")
+		// Return current HEAD
+		headCmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+		output, err := headCmd.Output()
+		if err != nil {
+			return "", fmt.Errorf("failed to get HEAD: %w", err)
+		}
+		return strings.TrimSpace(string(output)), nil
+	}
+
+	// Build commit command with author info
+	commitArgs := []string{"commit", "-m", message}
+	if authorName != "" && authorEmail != "" {
+		commitArgs = append(commitArgs, "--author", fmt.Sprintf("%s <%s>", authorName, authorEmail))
+	}
+
+	cmd := exec.CommandContext(ctx, "git", commitArgs...) //nolint:gosec // commitArgs built from controlled inputs
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("commit failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	// Get the new commit hash
+	hashCmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	output, err := hashCmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get commit hash: %w", err)
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+// getCurrentHeadHash returns the current HEAD commit hash using git CLI.
+func getCurrentHeadHash() (string, error) {
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// CommitWithCLIAllowEmpty creates a commit using git CLI, allowing empty commits.
+// This is used for marker commits like TaskStart that need to exist even without file changes.
+// Returns the commit hash on success.
+func CommitWithCLIAllowEmpty(message, authorName, authorEmail string) (string, error) {
+	ctx := context.Background()
+
+	// Build commit command with --allow-empty flag
+	commitArgs := []string{"commit", "--allow-empty", "-m", message}
+	if authorName != "" && authorEmail != "" {
+		commitArgs = append(commitArgs, "--author", fmt.Sprintf("%s <%s>", authorName, authorEmail))
+	}
+
+	cmd := exec.CommandContext(ctx, "git", commitArgs...) //nolint:gosec // commitArgs built from controlled inputs
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("commit failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	// Get the new commit hash
+	hashCmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	output, err := hashCmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get commit hash: %w", err)
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+// StageFilesWithCLI stages files for commit using git CLI.
+// This is a CLI-based alternative to StageFiles that works around go-git's
+// worktree caching bug. Uses AddFilesWithCLI and RemoveFilesWithCLI internally.
+func StageFilesWithCLI(modified, newFiles, deleted []string, stageCtx StageFilesContext) {
+	// Stage modified files (files that exist get added, deleted files get removed)
+	var toAdd []string
+	var toRemove []string
+
+	for _, file := range modified {
+		if fileExists(file) {
+			toAdd = append(toAdd, file)
+		} else {
+			// File was deleted - stage the deletion
+			toRemove = append(toRemove, file)
+		}
+	}
+
+	// Add existing modified files
+	if len(toAdd) > 0 {
+		AddFilesWithCLI(toAdd)
+	}
+
+	// Stage new files
+	if len(newFiles) > 0 {
+		fmt.Fprintf(os.Stderr, "Staging %d new files created during %s:\n", len(newFiles), stageCtx)
+		AddFilesWithCLI(newFiles)
+	}
+
+	// Stage deleted files (from modified list that no longer exist + explicit deleted list)
+	allDeleted := toRemove
+	allDeleted = append(allDeleted, deleted...)
+	if len(allDeleted) > 0 {
+		RemoveFilesWithCLI(allDeleted)
+	}
+}
+
 // collectUntrackedFiles collects all untracked files in the working directory.
 // This is used to capture the initial state when starting a session,
 // ensuring untracked files present at session start are preserved during rewind.

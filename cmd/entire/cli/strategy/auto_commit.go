@@ -172,41 +172,41 @@ func (s *AutoCommitStrategy) SaveChanges(ctx SaveContext) error {
 // commitCodeToActive commits code changes to the active branch.
 // Adds an Entire-Checkpoint trailer for metadata lookup that survives amend/rebase.
 // Returns the commit hash so metadata can be stored on entire/sessions.
-func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveContext, checkpointID string) (plumbing.Hash, error) {
+//
+// Uses git CLI instead of go-git for staging and committing because go-git's
+// worktree.Add() has a caching bug where it doesn't properly detect file changes
+// when files are modified externally (e.g., by Claude). This caused commits to
+// fail silently with ErrEmptyCommit even when files had changed.
+func (s *AutoCommitStrategy) commitCodeToActive(_ *git.Repository, ctx SaveContext, checkpointID string) (plumbing.Hash, error) {
 	// Check if there are any code changes to commit
 	if len(ctx.ModifiedFiles) == 0 && len(ctx.NewFiles) == 0 && len(ctx.DeletedFiles) == 0 {
 		fmt.Fprintf(os.Stderr, "No code changes to commit to active branch\n")
 		// Return current HEAD hash so metadata can still be stored
-		head, err := repo.Head()
+		hashStr, err := getCurrentHeadHash()
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to get HEAD: %w", err)
 		}
-		return head.Hash(), nil
+		return plumbing.NewHash(hashStr), nil
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	// Stage code changes
-	StageFiles(worktree, ctx.ModifiedFiles, ctx.NewFiles, ctx.DeletedFiles, StageForSession)
+	// Stage code changes using git CLI (works around go-git caching bug)
+	StageFilesWithCLI(ctx.ModifiedFiles, ctx.NewFiles, ctx.DeletedFiles, StageForSession)
 
 	// Add checkpoint ID trailer to commit message
 	commitMsg := ctx.CommitMessage + "\n\n" + paths.CheckpointTrailerKey + ": " + checkpointID
 
-	author := &object.Signature{
-		Name:  ctx.AuthorName,
-		Email: ctx.AuthorEmail,
-		When:  time.Now(),
-	}
-	commitHash, err := commitOrHead(repo, worktree, commitMsg, author)
+	// Commit using git CLI
+	commitHashStr, err := CommitWithCLI(commitMsg, ctx.AuthorName, ctx.AuthorEmail)
 	if err != nil {
 		return plumbing.ZeroHash, err
 	}
 
-	fmt.Fprintf(os.Stderr, "Committed code changes to active branch (%s)\n", commitHash.String()[:7])
-	return commitHash, nil
+	shortHash := commitHashStr
+	if len(shortHash) > 7 {
+		shortHash = shortHash[:7]
+	}
+	fmt.Fprintf(os.Stderr, "Committed code changes to active branch (%s)\n", shortHash)
+	return plumbing.NewHash(commitHashStr), nil
 }
 
 // commitMetadataToMetadataBranch commits session metadata to the entire/sessions branch.
@@ -606,7 +606,11 @@ func (s *AutoCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) error
 // commitTaskCodeToActive commits task code changes to the active branch.
 // Adds an Entire-Checkpoint trailer for metadata lookup that survives amend/rebase.
 // For TaskStart checkpoints, creates an empty marker commit even without file changes.
-func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx TaskCheckpointContext, checkpointID string) (plumbing.Hash, error) {
+//
+// Uses git CLI instead of go-git for staging and committing because go-git's
+// worktree.Add() has a caching bug where it doesn't properly detect file changes
+// when files are modified externally (e.g., by Claude).
+func (s *AutoCommitStrategy) commitTaskCodeToActive(_ *git.Repository, ctx TaskCheckpointContext, checkpointID string) (plumbing.Hash, error) {
 	// For TaskStart, we want to create a marker commit even without file changes
 	isTaskStart := ctx.IsIncremental && ctx.IncrementalType == IncrementalTypeTaskStart
 	hasFileChanges := len(ctx.ModifiedFiles) > 0 || len(ctx.NewFiles) > 0 || len(ctx.DeletedFiles) > 0
@@ -615,20 +619,15 @@ func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx Ta
 	if !hasFileChanges && !isTaskStart {
 		fmt.Fprintf(os.Stderr, "No code changes to commit for task checkpoint\n")
 		// Return current HEAD hash so metadata can still be stored
-		head, err := repo.Head()
+		hashStr, err := getCurrentHeadHash()
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to get HEAD: %w", err)
 		}
-		return head.Hash(), nil
+		return plumbing.NewHash(hashStr), nil
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	// Stage code changes
-	StageFiles(worktree, ctx.ModifiedFiles, ctx.NewFiles, ctx.DeletedFiles, StageForTask)
+	// Stage code changes using git CLI (works around go-git caching bug)
+	StageFilesWithCLI(ctx.ModifiedFiles, ctx.NewFiles, ctx.DeletedFiles, StageForTask)
 
 	// Build commit message with checkpoint trailer
 	shortToolUseID := ctx.ToolUseID
@@ -653,35 +652,34 @@ func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx Ta
 	// Add checkpoint ID trailer to commit message
 	commitMsg := subject + "\n\n" + paths.CheckpointTrailerKey + ": " + checkpointID
 
-	author := &object.Signature{
-		Name:  ctx.AuthorName,
-		Email: ctx.AuthorEmail,
-		When:  time.Now(),
-	}
+	var commitHashStr string
+	var err error
 
-	var commitHash plumbing.Hash
 	if isTaskStart {
 		// For TaskStart, allow empty commits (marker commits)
-		commitHash, err = worktree.Commit(commitMsg, &git.CommitOptions{
-			Author:            author,
-			AllowEmptyCommits: true,
-		})
+		commitHashStr, err = CommitWithCLIAllowEmpty(commitMsg, ctx.AuthorName, ctx.AuthorEmail)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to create TaskStart marker commit: %w", err)
 		}
 	} else {
-		commitHash, err = commitOrHead(repo, worktree, commitMsg, author)
+		// Commit using git CLI
+		commitHashStr, err = CommitWithCLI(commitMsg, ctx.AuthorName, ctx.AuthorEmail)
 		if err != nil {
 			return plumbing.ZeroHash, err
 		}
 	}
 
-	if ctx.IsIncremental {
-		fmt.Fprintf(os.Stderr, "Committed incremental checkpoint #%d to active branch (%s)\n", ctx.IncrementalSequence, commitHash.String()[:7])
-	} else {
-		fmt.Fprintf(os.Stderr, "Committed task checkpoint to active branch (%s)\n", commitHash.String()[:7])
+	shortHash := commitHashStr
+	if len(shortHash) > 7 {
+		shortHash = shortHash[:7]
 	}
-	return commitHash, nil
+
+	if ctx.IsIncremental {
+		fmt.Fprintf(os.Stderr, "Committed incremental checkpoint #%d to active branch (%s)\n", ctx.IncrementalSequence, shortHash)
+	} else {
+		fmt.Fprintf(os.Stderr, "Committed task checkpoint to active branch (%s)\n", shortHash)
+	}
+	return plumbing.NewHash(commitHashStr), nil
 }
 
 // commitTaskMetadataToMetadataBranch commits task metadata to the entire/sessions branch.

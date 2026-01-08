@@ -89,9 +89,13 @@ We use github.com/go-git/go-git for most git operations, but with important exce
 
 #### go-git v5 Bugs - Use CLI Instead
 
-**Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**
+**Do NOT use go-git v5 for `checkout`, `reset --hard`, `add`, or `commit` operations on the working branch.**
 
-go-git v5 has a bug where `worktree.Reset()` with `git.HardReset` and `worktree.Checkout()` incorrectly delete untracked directories even when they're listed in `.gitignore`. This would destroy `.entire/` and `.worktrees/` directories.
+go-git v5 has several bugs:
+
+1. **Checkout/Reset bug:** `worktree.Reset()` with `git.HardReset` and `worktree.Checkout()` incorrectly delete untracked directories even when they're listed in `.gitignore`. This would destroy `.entire/` and `.worktrees/` directories.
+
+2. **Worktree caching bug:** `worktree.Add()` has a caching issue where it doesn't properly detect file changes when files are modified externally (e.g., by Claude). This causes `worktree.Commit()` to fail with `ErrEmptyCommit` even when files have actually changed. The auto-commit strategy was silently failing to create commits due to this bug.
 
 Use the git CLI instead:
 ```go
@@ -101,13 +105,25 @@ worktree.Reset(&git.ResetOptions{
     Mode:   git.HardReset,
 })
 
+// WRONG - go-git may not detect external file changes
+worktree.Add(file)
+worktree.Commit(msg, &git.CommitOptions{...})
+
 // CORRECT - use git CLI
 cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hash.String())
+cmd := exec.CommandContext(ctx, "git", "add", "--", file)
+cmd := exec.CommandContext(ctx, "git", "commit", "-m", msg)
 ```
 
-See `HardResetWithProtection()` in `common.go` and `CheckoutBranch()` in `git_operations.go` for examples.
+See these functions in `common.go` for examples:
+- `HardResetWithProtection()` - CLI-based reset
+- `AddFilesWithCLI()` - CLI-based staging
+- `CommitWithCLI()` - CLI-based commit
+- `StageFilesWithCLI()` - Combined staging helper
 
-Regression tests in `hard_reset_test.go` verify this behavior - if go-git v6 fixes this issue, those tests can be used to validate switching back.
+And `CheckoutBranch()` in `git_operations.go`.
+
+Regression tests in `hard_reset_test.go` verify the checkout/reset behavior - if go-git v6 fixes these issues, those tests can be used to validate switching back.
 
 ### Session Strategies (`cmd/entire/cli/strategy/`)
 
