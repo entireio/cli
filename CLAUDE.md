@@ -109,6 +109,40 @@ See `HardResetWithProtection()` in `common.go` and `CheckoutBranch()` in `git_op
 
 Regression tests in `hard_reset_test.go` verify this behavior - if go-git v6 fixes this issue, those tests can be used to validate switching back.
 
+#### Repo Root vs Current Working Directory
+
+**Always use repo root (not `os.Getwd()`) when working with git-relative paths.**
+
+Git commands like `git status` and `worktree.Status()` return paths relative to the **repository root**, not the current working directory. When Claude runs from a subdirectory (e.g., `/repo/frontend`), using `os.Getwd()` to construct absolute paths will produce incorrect results for files in sibling directories.
+
+```go
+// WRONG - breaks when running from subdirectory
+cwd, _ := os.Getwd()  // e.g., /repo/frontend
+absPath := filepath.Join(cwd, file)  // file="api/src/types.ts" → /repo/frontend/api/src/types.ts (WRONG)
+
+// CORRECT - use repo root
+repoRoot, _ := paths.RepoRoot()  // or strategy.GetWorktreePath()
+absPath := filepath.Join(repoRoot, file)  // → /repo/api/src/types.ts (CORRECT)
+```
+
+This also affects path filtering. The `paths.ToRelativePath()` function rejects paths starting with `..`, so computing relative paths from cwd instead of repo root will filter out files in sibling directories:
+
+```go
+// WRONG - filters out sibling directory files
+cwd, _ := os.Getwd()  // /repo/frontend
+relPath := paths.ToRelativePath("/repo/api/file.ts", cwd)  // returns "" (filtered out as "../api/file.ts")
+
+// CORRECT - keeps all repo files
+repoRoot, _ := paths.RepoRoot()
+relPath := paths.ToRelativePath("/repo/api/file.ts", repoRoot)  // returns "api/file.ts"
+```
+
+**When to use `os.Getwd()`:** Only when you actually need the current directory (e.g., finding agent session directories that are cwd-relative).
+
+**When to use repo root:** Any time you're working with paths from git status, git diff, or any git-relative file list.
+
+Test case in `state_test.go`: `TestFilterAndNormalizePaths_SiblingDirectories` documents this bug pattern.
+
 ### Session Strategies (`cmd/entire/cli/strategy/`)
 
 The CLI uses a strategy pattern for managing session data and checkpoints. Each strategy implements the `Strategy` interface defined in `strategy.go`.

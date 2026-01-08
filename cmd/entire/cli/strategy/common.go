@@ -529,9 +529,10 @@ func checkCanRewindWithWarning() (bool, string, error) {
 	}
 
 	var changes []fileChange
-	cwd, err := os.Getwd()
+	// Use repo root, not cwd - git status returns paths relative to repo root
+	repoRoot, err := GetWorktreePath()
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if cwd lookup fails
+		return true, "", nil //nolint:nilerr // Rewind allowed even if repo root lookup fails
 	}
 
 	for file, st := range status {
@@ -552,8 +553,8 @@ func checkCanRewindWithWarning() (bool, string, error) {
 		case st.Staging == git.Added || st.Worktree == git.Added:
 			change.status = "added"
 			// New file - count all lines as added
-			absPath := filepath.Join(cwd, file)
-			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is cwd + relative path from git status
+			absPath := filepath.Join(repoRoot, file)
+			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is repo root + relative path from git status
 				change.added = countLines(content)
 			}
 		case st.Staging == git.Deleted || st.Worktree == git.Deleted:
@@ -573,8 +574,8 @@ func checkCanRewindWithWarning() (bool, string, error) {
 					headContent = []byte(content)
 				}
 			}
-			absPath := filepath.Join(cwd, file)
-			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is cwd + relative path from git status
+			absPath := filepath.Join(repoRoot, file)
+			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is repo root + relative path from git status
 				workContent = content
 			}
 			if headContent != nil && workContent != nil {

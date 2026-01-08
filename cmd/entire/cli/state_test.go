@@ -137,6 +137,89 @@ func TestComputeNewFilesFromTask(t *testing.T) {
 	}
 }
 
+func TestFilterAndNormalizePaths_SiblingDirectories(t *testing.T) {
+	// This test verifies the fix for the bug where files in sibling directories
+	// were filtered out when Claude runs from a subdirectory.
+	// When Claude is in /repo/frontend and edits /repo/api/file.ts,
+	// the relative path would be ../api/file.ts which was incorrectly filtered.
+	// The fix uses repo root instead of cwd, so paths should be api/file.ts.
+
+	tests := []struct {
+		name     string
+		files    []string
+		basePath string // simulates repo root or cwd
+		want     []string
+	}{
+		{
+			name: "files in sibling directories with repo root base",
+			files: []string{
+				"/repo/api/src/lib/github.ts",
+				"/repo/api/src/types.ts",
+				"/repo/frontend/src/pages/api.ts",
+			},
+			basePath: "/repo", // repo root
+			want: []string{
+				"api/src/lib/github.ts",
+				"api/src/types.ts",
+				"frontend/src/pages/api.ts",
+			},
+		},
+		{
+			name: "files in sibling directories with subdirectory base (old buggy behavior)",
+			files: []string{
+				"/repo/api/src/lib/github.ts",
+				"/repo/frontend/src/pages/api.ts",
+			},
+			basePath: "/repo/frontend", // cwd in subdirectory
+			want: []string{
+				// Only frontend file should remain, api file gets filtered
+				// because ../api/... starts with ..
+				"src/pages/api.ts",
+			},
+		},
+		{
+			name: "relative paths pass through unchanged",
+			files: []string{
+				"src/file.ts",
+				"lib/util.go",
+			},
+			basePath: "/repo",
+			want: []string{
+				"src/file.ts",
+				"lib/util.go",
+			},
+		},
+		{
+			name: "infrastructure paths are filtered",
+			files: []string{
+				"/repo/src/file.ts",
+				"/repo/.entire/metadata/session.json",
+			},
+			basePath: "/repo",
+			want: []string{
+				"src/file.ts",
+				// .entire path should be filtered
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FilterAndNormalizePaths(tt.files, tt.basePath)
+			if len(got) != len(tt.want) {
+				t.Errorf("FilterAndNormalizePaths() returned %d files, want %d\ngot: %v\nwant: %v",
+					len(got), len(tt.want), got, tt.want)
+				return
+			}
+			for i, want := range tt.want {
+				if got[i] != want {
+					t.Errorf("FilterAndNormalizePaths()[%d] = %v, want %v", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
 func TestFindActivePreTaskFile(t *testing.T) {
 	// Create a temporary directory for testing and change to it
 	tmpDir := t.TempDir()

@@ -380,10 +380,11 @@ func commitWithMetadata() error {
 	commitMessage := generateCommitMessage(lastPrompt)
 	fmt.Fprintf(os.Stderr, "Using commit message: %s\n", commitMessage)
 
-	// Get current working directory for path conversion
-	cwd, err := os.Getwd()
+	// Get repo root for path conversion (not cwd, since Claude may be in a subdirectory)
+	// Using cwd would filter out files in sibling directories (paths starting with ..)
+	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
+		return fmt.Errorf("failed to get repo root: %w", err)
 	}
 
 	// Load pre-prompt state (captured on UserPromptSubmit)
@@ -408,9 +409,9 @@ func commitWithMetadata() error {
 	}
 
 	// Filter and normalize all paths (CLI responsibility)
-	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, cwd)
-	relNewFiles := FilterAndNormalizePaths(newFiles, cwd)
-	relDeletedFiles := FilterAndNormalizePaths(deletedFiles, cwd)
+	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	relNewFiles := FilterAndNormalizePaths(newFiles, repoRoot)
+	relDeletedFiles := FilterAndNormalizePaths(deletedFiles, repoRoot)
 
 	// Check if there are any changes to commit
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
@@ -805,15 +806,16 @@ func handlePostTask() error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to compute new files: %v\n", err)
 	}
 
-	// Get current working directory for path conversion
-	cwd, err := os.Getwd()
+	// Get repo root for path conversion (not cwd, since Claude may be in a subdirectory)
+	// Using cwd would filter out files in sibling directories (paths starting with ..)
+	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
+		return fmt.Errorf("failed to get repo root: %w", err)
 	}
 
 	// Filter and normalize paths
-	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, cwd)
-	relNewFiles := FilterAndNormalizePaths(newFiles, cwd)
+	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	relNewFiles := FilterAndNormalizePaths(newFiles, repoRoot)
 
 	// Find checkpoint UUID from main transcript (best-effort, ignore errors)
 	transcript, _ := parseTranscript(input.TranscriptPath) //nolint:errcheck // best-effort extraction
