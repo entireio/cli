@@ -702,59 +702,6 @@ const (
 	StageForTask StageFilesContext = "task"
 )
 
-// StageFiles stages modified, new, and deleted files to the git worktree.
-//
-// This function handles three categories of file changes:
-//  1. Modified files: existing files that have been changed
-//  2. New files: files that were created during the session
-//  3. Deleted files: files that were removed during the session
-//
-// Error Handling Strategy:
-//   - Individual file staging errors are logged to stderr but don't fail the operation
-//   - This ensures that partial staging succeeds even if some files have issues
-//   - If a modified file no longer exists, it's treated as a deletion
-//
-// The stageCtx parameter is used for user-facing messages to indicate whether
-// this is staging for a session checkpoint or a task checkpoint.
-func StageFiles(worktree *git.Worktree, modified, newFiles, deleted []string, stageCtx StageFilesContext) {
-	// Stage modified files
-	for _, file := range modified {
-		if fileExists(file) {
-			if _, err := worktree.Add(file); err != nil {
-				fmt.Fprintf(os.Stderr, "  Failed to stage %s: %v\n", file, err)
-			} else {
-				fmt.Fprintf(os.Stderr, "  Staged: %s\n", file)
-			}
-		} else {
-			// File was deleted - stage the deletion
-			if _, err := worktree.Remove(file); err != nil {
-				fmt.Fprintf(os.Stderr, "  File not found or deleted: %s\n", file)
-			}
-		}
-	}
-
-	// Stage new files
-	if len(newFiles) > 0 {
-		fmt.Fprintf(os.Stderr, "Staging %d new files created during %s:\n", len(newFiles), stageCtx)
-		for _, file := range newFiles {
-			if _, err := worktree.Add(file); err != nil {
-				fmt.Fprintf(os.Stderr, "  Failed to stage %s: %v\n", file, err)
-			} else {
-				fmt.Fprintf(os.Stderr, "  Staged new file: %s\n", file)
-			}
-		}
-	}
-
-	// Stage deleted files
-	for _, file := range deleted {
-		if _, err := worktree.Remove(file); err != nil {
-			fmt.Fprintf(os.Stderr, "  Failed to stage deleted file %s: %v\n", file, err)
-		} else {
-			fmt.Fprintf(os.Stderr, "  Staged deleted file: %s\n", file)
-		}
-	}
-}
-
 // getTaskCheckpointFromTree retrieves a task checkpoint from a commit tree.
 // Shared implementation for shadow and linear-shadow strategies.
 func getTaskCheckpointFromTree(point RewindPoint) (*TaskCheckpoint, error) {
