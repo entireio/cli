@@ -1,4 +1,5 @@
 {
-  "local_dev": true,
-  "strategy": "dual"
+  "strategy": "manual-commit",
+  "enabled": true,
+  "local_dev": true
 }
