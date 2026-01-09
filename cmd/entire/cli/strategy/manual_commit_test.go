@@ -752,14 +752,51 @@ func TestAddCheckpointTrailerWithComment_HasComment(t *testing.T) {
 	// Test that addCheckpointTrailerWithComment includes the explanatory comment
 	message := "Test commit message\n"
 
-	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID)
+	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "add password hashing")
 
 	// Should contain the trailer
 	if !strings.Contains(result, paths.CheckpointTrailerKey+": "+testTrailerCheckpointID) {
 		t.Errorf("addCheckpointTrailerWithComment() missing trailer, got: %q", result)
 	}
 
-	// Should contain comment lines
+	// Should contain comment lines with agent name (before prompt)
+	if !strings.Contains(result, "# Remove the Entire-Checkpoint") {
+		t.Errorf("addCheckpointTrailerWithComment() should contain comment, got: %q", result)
+	}
+	if !strings.Contains(result, "Claude Code session context") {
+		t.Errorf("addCheckpointTrailerWithComment() should contain agent name in comment, got: %q", result)
+	}
+
+	// Should contain prompt line (after removal comment)
+	if !strings.Contains(result, "# Last Prompt: \"add password hashing\"") {
+		t.Errorf("addCheckpointTrailerWithComment() should contain prompt, got: %q", result)
+	}
+
+	// Verify order: Remove comment should come before Last Prompt
+	removeIdx := strings.Index(result, "# Remove the Entire-Checkpoint")
+	promptIdx := strings.Index(result, "# Last Prompt:")
+	if promptIdx < removeIdx {
+		t.Errorf("addCheckpointTrailerWithComment() prompt should come after remove comment, got: %q", result)
+	}
+}
+
+func TestAddCheckpointTrailerWithComment_NoPrompt(t *testing.T) {
+	// Test that addCheckpointTrailerWithComment works without a prompt
+	message := "Test commit message\n"
+
+	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "")
+
+	// Should contain the trailer
+	if !strings.Contains(result, paths.CheckpointTrailerKey+": "+testTrailerCheckpointID) {
+		t.Errorf("addCheckpointTrailerWithComment() missing trailer, got: %q", result)
+	}
+
+	// Should NOT contain prompt line when prompt is empty
+	if strings.Contains(result, "# Last Prompt:") {
+		t.Errorf("addCheckpointTrailerWithComment() should not contain prompt line when empty, got: %q", result)
+	}
+
+	// Should still contain the removal comment
 	if !strings.Contains(result, "# Remove the Entire-Checkpoint") {
 		t.Errorf("addCheckpointTrailerWithComment() should contain comment, got: %q", result)
 	}

@@ -264,27 +264,32 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(commitMsgFile string, source str
 	}
 	// Otherwise checkpointID is already set to LastCheckpointID from above
 
+	// Determine agent name and last prompt from session
+	agentName := "Claude Code" // default for backward compatibility
+	var lastPrompt string
+	if hasNewContent && len(sessionsWithContent) > 0 {
+		session := sessionsWithContent[0]
+		if session.AgentType != "" {
+			agentName = session.AgentType
+		}
+		lastPrompt = s.getLastPrompt(repo, session)
+	}
+
+	// Truncate long prompts for display
+	displayPrompt := lastPrompt
+	if len(displayPrompt) > 80 {
+		displayPrompt = displayPrompt[:77] + "..."
+	}
+
 	// Add trailer differently based on commit source
 	if source == "message" {
 		// Using -m or -F: ask user interactively whether to add trailer
 		// (comments won't be stripped by git in this mode)
 
-		// Get the first prompt and agent type to show as context
+		// Build context string for interactive prompt
 		var promptContext string
-		agentName := "Claude Code" // default for backward compatibility
-		if hasNewContent && len(sessionsWithContent) > 0 {
-			session := sessionsWithContent[0]
-			if session.AgentType != "" {
-				agentName = session.AgentType
-			}
-			if firstPrompt := s.getFirstPrompt(repo, session); firstPrompt != "" {
-				// Truncate long prompts for display
-				displayPrompt := firstPrompt
-				if len(displayPrompt) > 80 {
-					displayPrompt = displayPrompt[:77] + "..."
-				}
-				promptContext = "You have an active " + agentName + " session. Prompt:\n\"" + displayPrompt + "\""
-			}
+		if displayPrompt != "" {
+			promptContext = "You have an active " + agentName + " session. Last Prompt:\n\"" + displayPrompt + "\""
 		}
 
 		if !askConfirmTTY("Link this commit to "+agentName+" session context?", promptContext, true) {
@@ -298,7 +303,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(commitMsgFile string, source str
 		message = addCheckpointTrailer(message, checkpointID)
 	} else {
 		// Normal editor flow: add trailer with explanatory comment (will be stripped by git)
-		message = addCheckpointTrailerWithComment(message, checkpointID)
+		message = addCheckpointTrailerWithComment(message, checkpointID, agentName, displayPrompt)
 	}
 
 	logging.Info(logCtx, "prepare-commit-msg: trailer added",
@@ -567,10 +572,17 @@ func addCheckpointTrailer(message, checkpointID string) string {
 // addCheckpointTrailerWithComment adds the Entire-Checkpoint trailer with an explanatory comment.
 // The trailer is placed above the git comment block but below the user's message area,
 // with a comment explaining that the user can remove it if they don't want to link the commit
-// to the Claude session.
-func addCheckpointTrailerWithComment(message, checkpointID string) string {
+// to the agent session. If prompt is non-empty, it's shown as context.
+func addCheckpointTrailerWithComment(message, checkpointID, agentName, prompt string) string {
 	trailer := paths.CheckpointTrailerKey + ": " + checkpointID
-	comment := "# Remove the Entire-Checkpoint trailer above if you don't want to link this commit to Claude session context.\n# The trailer will be added to your next commit based on this branch."
+	commentLines := []string{
+		"# Remove the Entire-Checkpoint trailer above if you don't want to link this commit to " + agentName + " session context.",
+	}
+	if prompt != "" {
+		commentLines = append(commentLines, "# Last Prompt: \""+prompt+"\"")
+	}
+	commentLines = append(commentLines, "# The trailer will be added to your next commit based on this branch.")
+	comment := strings.Join(commentLines, "\n")
 
 	lines := strings.Split(message, "\n")
 
@@ -750,9 +762,9 @@ func getStagedFiles(repo *git.Repository) []string {
 	return staged
 }
 
-// getFirstPrompt retrieves the first user prompt from a session's shadow branch.
+// getLastPrompt retrieves the most recent user prompt from a session's shadow branch.
 // Returns empty string if no prompt can be retrieved.
-func (s *ManualCommitStrategy) getFirstPrompt(repo *git.Repository, state *SessionState) string {
+func (s *ManualCommitStrategy) getLastPrompt(repo *git.Repository, state *SessionState) string {
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit)
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 	ref, err := repo.Reference(refName, true)
@@ -766,8 +778,8 @@ func (s *ManualCommitStrategy) getFirstPrompt(repo *git.Repository, state *Sessi
 		return ""
 	}
 
-	// Return the first prompt
-	return sessionData.Prompts[0]
+	// Return the last prompt (most recent work before commit)
+	return sessionData.Prompts[len(sessionData.Prompts)-1]
 }
 
 // hasOverlappingFiles checks if any file in stagedFiles appears in filesTouched.
