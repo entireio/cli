@@ -8,6 +8,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/agent/claudecode"
+	"entire.io/cli/cmd/entire/cli/agent/opencode"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 
@@ -90,6 +91,23 @@ func init() {
 			return nil
 		}
 		return handlePostTodo()
+	})
+
+	// Register OpenCode handlers
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameSessionStart, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpencodeSessionStart()
+	})
+
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameStop, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpencodeStop()
 	})
 }
 

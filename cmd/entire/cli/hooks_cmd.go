@@ -2,8 +2,9 @@ package cli
 
 import (
 	"entire.io/cli/cmd/entire/cli/agent"
-	// Import claudecode to ensure agent is registered before we iterate
+	// Import agent packages to ensure agents are registered before we iterate
 	_ "entire.io/cli/cmd/entire/cli/agent/claudecode"
+	_ "entire.io/cli/cmd/entire/cli/agent/opencode"
 
 	"github.com/spf13/cobra"
 )

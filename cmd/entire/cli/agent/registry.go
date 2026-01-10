@@ -69,6 +69,7 @@ func Detect() (Agent, error) {
 // Agent name constants
 const (
 	AgentNameClaudeCode = "claude-code"
+	AgentNameOpenCode   = "opencode"
 	AgentNameCursor     = "cursor"
 	AgentNameWindsurf   = "windsurf"
 	AgentNameAider      = "aider"
