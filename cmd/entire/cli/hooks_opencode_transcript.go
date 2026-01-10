@@ -31,14 +31,14 @@ type opencodeTranscriptLine struct {
 		} `json:"summary,omitempty"`
 	} `json:"info"`
 	Parts []struct {
-		ID        string `json:"id"`
-		Type      string `json:"type"` // "text", "tool", "step-start", "step-finish", "patch"
-		Text      string `json:"text,omitempty"`
-		Tool      string `json:"tool,omitempty"`
-		CallID    string `json:"callID,omitempty"`
-		Snapshot  string `json:"snapshot,omitempty"`
-		FilePath  string `json:"filePath,omitempty"`
-		State     *struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"` // "text", "tool", "step-start", "step-finish", "patch"
+		Text     string `json:"text,omitempty"`
+		Tool     string `json:"tool,omitempty"`
+		CallID   string `json:"callID,omitempty"`
+		Snapshot string `json:"snapshot,omitempty"`
+		FilePath string `json:"filePath,omitempty"`
+		State    *struct {
 			Status string                 `json:"status"`
 			Input  map[string]interface{} `json:"input,omitempty"`
 			Output string                 `json:"output,omitempty"`
@@ -92,10 +92,10 @@ func extractOpencodeUserPrompts(lines []opencodeTranscriptLine) []string {
 	var prompts []string
 
 	for _, line := range lines {
-		if line.Info.Role == "user" {
+		if line.Info.Role == transcriptTypeUser {
 			// Extract text from all text parts
 			for _, part := range line.Parts {
-				if part.Type == "text" && part.Text != "" {
+				if part.Type == contentTypeText && part.Text != "" {
 					prompts = append(prompts, strings.TrimSpace(part.Text))
 				}
 			}
@@ -108,10 +108,10 @@ func extractOpencodeUserPrompts(lines []opencodeTranscriptLine) []string {
 // extractOpencodeModifiedFiles extracts modified files from the transcript.
 // Returns lists of modified, new, and deleted files.
 // Note: Paths may be absolute in OpenCode transcripts, caller should normalize them.
-func extractOpencodeModifiedFiles(lines []opencodeTranscriptLine) (modified, new, deleted []string) {
+func extractOpencodeModifiedFiles(lines []opencodeTranscriptLine) (modified, added, deleted []string) {
 	// Track unique files using maps
 	modifiedMap := make(map[string]bool)
-	newMap := make(map[string]bool)
+	addedMap := make(map[string]bool)
 	deletedMap := make(map[string]bool)
 
 	for _, line := range lines {
@@ -125,13 +125,14 @@ func extractOpencodeModifiedFiles(lines []opencodeTranscriptLine) (modified, new
 				// Just use the file path as-is, caller will normalize
 				file := diff.File
 
-				if diff.Before == "" && diff.After != "" {
+				switch {
+				case diff.Before == "" && diff.After != "":
 					// New file
-					newMap[file] = true
-				} else if diff.Before != "" && diff.After == "" {
+					addedMap[file] = true
+				case diff.Before != "" && diff.After == "":
 					// Deleted file
 					deletedMap[file] = true
-				} else if diff.Before != "" && diff.After != "" {
+				case diff.Before != "" && diff.After != "":
 					// Modified file
 					modifiedMap[file] = true
 				}
@@ -155,12 +156,12 @@ func extractOpencodeModifiedFiles(lines []opencodeTranscriptLine) (modified, new
 							delete(deletedMap, file)
 						} else if !modifiedMap[file] {
 							// Assume new file unless we know otherwise
-							newMap[file] = true
+							addedMap[file] = true
 						}
 					case "edit":
 						modifiedMap[file] = true
 						// Remove from new if it was there
-						delete(newMap, file)
+						delete(addedMap, file)
 					}
 				}
 			}
@@ -171,24 +172,24 @@ func extractOpencodeModifiedFiles(lines []opencodeTranscriptLine) (modified, new
 	for file := range modifiedMap {
 		modified = append(modified, file)
 	}
-	for file := range newMap {
+	for file := range addedMap {
 		// Only include if not also in modified
 		if !modifiedMap[file] {
-			new = append(new, file)
+			added = append(added, file)
 		}
 	}
 	for file := range deletedMap {
 		deleted = append(deleted, file)
 	}
 
-	return modified, new, deleted
+	return modified, added, deleted
 }
 
 // extractOpencodeSessionTitle extracts the session title from the first user message.
 // OpenCode generates a nice summary title from the user's prompt.
 func extractOpencodeSessionTitle(lines []opencodeTranscriptLine) string {
 	for _, line := range lines {
-		if line.Info.Role == "user" && line.Info.Summary != nil {
+		if line.Info.Role == transcriptTypeUser && line.Info.Summary != nil {
 			if title := line.Info.Summary.Title; title != "" {
 				return title
 			}
@@ -205,10 +206,11 @@ func generateOpencodeContext(lines []opencodeTranscriptLine) string {
 
 	// Extract user prompts and assistant responses
 	for i, line := range lines {
-		if line.Info.Role == "user" {
+		switch line.Info.Role {
+		case transcriptTypeUser:
 			sb.WriteString(fmt.Sprintf("## Prompt %d\n\n", i+1))
 			for _, part := range line.Parts {
-				if part.Type == "text" && part.Text != "" {
+				if part.Type == contentTypeText && part.Text != "" {
 					sb.WriteString(part.Text)
 					sb.WriteString("\n\n")
 				}
@@ -224,10 +226,10 @@ func generateOpencodeContext(lines []opencodeTranscriptLine) string {
 				}
 				sb.WriteString("\n")
 			}
-		} else if line.Info.Role == "assistant" {
+		case transcriptTypeAssistant:
 			// Extract assistant text responses
 			for _, part := range line.Parts {
-				if part.Type == "text" && part.Text != "" && strings.TrimSpace(part.Text) != "" {
+				if part.Type == contentTypeText && part.Text != "" && strings.TrimSpace(part.Text) != "" {
 					sb.WriteString("**Assistant:** ")
 					sb.WriteString(strings.TrimSpace(part.Text))
 					sb.WriteString("\n\n")

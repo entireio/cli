@@ -63,33 +63,90 @@ func handleOpencodeSessionStart() error {
 // OpenCode plugin exports transcript before calling this hook, so we just need to
 // create a checkpoint from the exported data.
 func handleOpencodeStop() error {
+	// Parse and validate input
+	input, transcriptPath, ag, err := parseOpencodeStopInput()
+	if err != nil {
+		return err
+	}
+
+	modelSessionID := input.SessionID
+	if modelSessionID == "" {
+		modelSessionID = unknownSessionID
+	}
+	entireSessionID := ag.TransformSessionID(modelSessionID)
+
+	// Read session data
+	session, err := ag.ReadSession(input)
+	if err != nil {
+		return fmt.Errorf("failed to read session: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Read OpenCode session from: %s\n", transcriptPath)
+
+	// Setup strategy and session directory
+	sessionDir, sessionDirAbs, err := setupOpencodeSession(modelSessionID, transcriptPath)
+	if err != nil {
+		return err
+	}
+
+	// Process transcript and extract metadata
+	transcriptLines, err := parseOpencodeTranscript(transcriptPath)
+	if err != nil {
+		return fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
+	if err := saveOpencodeSessionMetadata(transcriptLines, sessionDir, sessionDirAbs); err != nil {
+		return err
+	}
+
+	// Extract and save file changes
+	fileChanges, commitMessage, err := extractAndSaveOpencodeFileChanges(transcriptLines, modelSessionID)
+	if err != nil {
+		return err
+	}
+
+	// Save checkpoint
+	if err := saveOpencodeCheckpoint(entireSessionID, sessionDir, sessionDirAbs, transcriptPath, commitMessage, fileChanges); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "Created checkpoint for OpenCode session: %s\n", entireSessionID)
+
+	// Store session data
+	if err := ag.WriteSession(session); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to write session: %v\n", err)
+	}
+
+	return nil
+}
+
+// parseOpencodeStopInput parses and validates the OpenCode stop hook input.
+//
+//nolint:ireturn // Returning agent.Agent interface is intentional for abstraction
+func parseOpencodeStopInput() (*agent.HookInput, string, agent.Agent, error) {
 	// Read stdin
 	stdinData, readErr := io.ReadAll(os.Stdin)
 	if readErr != nil {
-		return fmt.Errorf("failed to read stdin: %w", readErr)
+		return nil, "", nil, fmt.Errorf("failed to read stdin: %w", readErr)
 	}
 
 	// Skip on default branch for strategies that don't allow it
 	skip, branchName := ShouldSkipOnDefaultBranchForStrategy()
 	if skip {
 		fmt.Fprintf(os.Stderr, "Entire: skipping on branch '%s' - create a feature branch to use Entire tracking\n", branchName)
-		return nil // Don't fail the hook, just skip
+		return nil, "", nil, nil
 	}
 
-	// Get the OpenCode agent specifically (not auto-detected agent)
-	// This hook is called via "entire hooks opencode stop", so we know it's OpenCode
+	// Get the OpenCode agent
 	ag, err := agent.Get(agent.AgentNameOpenCode)
 	if err != nil {
-		return fmt.Errorf("failed to get OpenCode agent: %w", err)
+		return nil, "", nil, fmt.Errorf("failed to get OpenCode agent: %w", err)
 	}
 
-	// Create a reader from the data we already read
+	// Parse hook input
 	reader := bytes.NewReader(stdinData)
-
-	// Parse hook input using agent interface
 	input, err := ag.ParseHookInput(agent.HookStop, reader)
 	if err != nil {
-		return fmt.Errorf("failed to parse hook input: %w", err)
+		return nil, "", nil, fmt.Errorf("failed to parse hook input: %w", err)
 	}
 
 	logCtx := logging.WithComponent(context.Background(), "hooks")
@@ -100,71 +157,52 @@ func handleOpencodeStop() error {
 		slog.String("transcript_path", input.SessionRef),
 	)
 
-	modelSessionID := input.SessionID
-	if modelSessionID == "" {
-		modelSessionID = unknownSessionID
-	}
-
-	// Get the Entire session ID from the agent transformation
-	entireSessionID := ag.TransformSessionID(modelSessionID)
-
-	// Get transcript path from RawData (OpenCode plugin exports it to .entire/opencode/sessions/)
+	// Get transcript path
 	transcriptPath, ok := input.RawData["transcript_path"].(string)
 	if !ok || transcriptPath == "" {
-		return errors.New("transcript_path not found in hook input")
+		return nil, "", nil, errors.New("transcript_path not found in hook input")
 	}
 
 	if !fileExists(transcriptPath) {
-		return fmt.Errorf("transcript file not found: %s", transcriptPath)
+		return nil, "", nil, fmt.Errorf("transcript file not found: %s", transcriptPath)
 	}
 
-	// Read the session from OpenCode's exported data
-	session, err := ag.ReadSession(input)
-	if err != nil {
-		return fmt.Errorf("failed to read session: %w", err)
-	}
+	return input, transcriptPath, ag, nil
+}
 
-	fmt.Fprintf(os.Stderr, "Read OpenCode session from: %s\n", transcriptPath)
-
-	// Get git author from local/global config
-	author, err := GetGitAuthor()
-	if err != nil {
-		return fmt.Errorf("failed to get git author: %w", err)
-	}
-
+// setupOpencodeSession sets up the strategy and creates the session directory.
+func setupOpencodeSession(modelSessionID, transcriptPath string) (string, string, error) {
 	// Get the configured strategy
 	strat := GetStrategy()
 
-	// Ensure strategy setup is in place (auto-installs git hook, gitignore, etc. if needed)
+	// Ensure strategy setup is in place
 	if err := strat.EnsureSetup(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
 	}
 
-	// Create session metadata folder (SessionMetadataDir transforms model session ID to entire session ID)
-	// Use AbsPath to ensure we create at repo root, not relative to cwd
+	// Create session metadata folder
 	sessionDir := paths.SessionMetadataDir(modelSessionID)
 	sessionDirAbs, err := paths.AbsPath(sessionDir)
 	if err != nil {
 		sessionDirAbs = sessionDir // Fallback to relative
 	}
 	if err := os.MkdirAll(sessionDirAbs, 0o750); err != nil {
-		return fmt.Errorf("failed to create session directory: %w", err)
+		return "", "", fmt.Errorf("failed to create session directory: %w", err)
 	}
 
 	// Copy transcript to metadata directory
 	logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
 	if err := copyFile(transcriptPath, logFile); err != nil {
-		return fmt.Errorf("failed to copy transcript: %w", err)
+		return "", "", fmt.Errorf("failed to copy transcript: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Copied transcript to: %s\n", sessionDir+"/"+paths.TranscriptFileName)
 
-	// Parse OpenCode transcript
-	transcriptLines, err := parseOpencodeTranscript(transcriptPath)
-	if err != nil {
-		return fmt.Errorf("failed to parse transcript: %w", err)
-	}
+	return sessionDir, sessionDirAbs, nil
+}
 
-	// Extract session title (shown as description in session list)
+// saveOpencodeSessionMetadata extracts and saves prompts and context from the transcript.
+func saveOpencodeSessionMetadata(transcriptLines []opencodeTranscriptLine, sessionDir, sessionDirAbs string) error {
+	// Extract session title
 	sessionTitle := extractOpencodeSessionTitle(transcriptLines)
 	if sessionTitle == "" {
 		sessionTitle = "OpenCode session"
@@ -174,7 +212,7 @@ func handleOpencodeStop() error {
 	allPrompts := extractOpencodeUserPrompts(transcriptLines)
 	promptFile := filepath.Join(sessionDirAbs, paths.PromptFileName)
 
-	// Write session title as first line (used as description), then prompts
+	// Write session title and prompts
 	var promptContent strings.Builder
 	promptContent.WriteString("# ")
 	promptContent.WriteString(sessionTitle)
@@ -188,20 +226,41 @@ func handleOpencodeStop() error {
 	}
 	fmt.Fprintf(os.Stderr, "Extracted %d prompts to: %s\n", len(allPrompts), sessionDir+"/"+paths.PromptFileName)
 
+	// Generate and save context
+	contextContent := generateOpencodeContext(transcriptLines)
+	contextFile := filepath.Join(sessionDirAbs, paths.ContextFileName)
+	if err := os.WriteFile(contextFile, []byte(contextContent), 0o600); err != nil {
+		return fmt.Errorf("failed to write context: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Created context file: %s\n", sessionDir+"/"+paths.ContextFileName)
+
+	return nil
+}
+
+// opencodeFileChanges holds the extracted file changes from an OpenCode session.
+type opencodeFileChanges struct {
+	ModifiedFiles []string
+	NewFiles      []string
+	DeletedFiles  []string
+}
+
+// extractAndSaveOpencodeFileChanges extracts file changes and generates a commit message.
+func extractAndSaveOpencodeFileChanges(transcriptLines []opencodeTranscriptLine, modelSessionID string) (*opencodeFileChanges, string, error) {
 	// Extract modified files from transcript
 	modifiedFiles, newFiles, deletedFiles := extractOpencodeModifiedFiles(transcriptLines)
 
-	// Get current working directory (repo root)
+	// Get repo root for path normalization
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get repo root: %w", err)
+		return nil, "", fmt.Errorf("failed to get repo root: %w", err)
 	}
 
-	// Filter and normalize paths (CLI responsibility)
+	// Filter and normalize paths
 	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
 	relNewFiles := FilterAndNormalizePaths(newFiles, repoRoot)
 	relDeletedFiles := FilterAndNormalizePaths(deletedFiles, repoRoot)
 
+	// Log file changes
 	fmt.Fprintf(os.Stderr, "Files modified during session (%d):\n", len(relModifiedFiles))
 	for _, file := range relModifiedFiles {
 		fmt.Fprintf(os.Stderr, "  - %s\n", file)
@@ -219,15 +278,8 @@ func handleOpencodeStop() error {
 		}
 	}
 
-	// Generate context summary
-	contextContent := generateOpencodeContext(transcriptLines)
-	contextFile := filepath.Join(sessionDirAbs, paths.ContextFileName)
-	if err := os.WriteFile(contextFile, []byte(contextContent), 0o600); err != nil {
-		return fmt.Errorf("failed to write context: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "Created context file: %s\n", sessionDir+"/"+paths.ContextFileName)
-
-	// Build commit message from last prompt
+	// Build commit message
+	allPrompts := extractOpencodeUserPrompts(transcriptLines)
 	var commitMessage string
 	if len(allPrompts) > 0 {
 		lastPrompt := allPrompts[len(allPrompts)-1]
@@ -241,12 +293,30 @@ func handleOpencodeStop() error {
 		commitMessage = "OpenCode session: " + modelSessionID
 	}
 
-	// Build save context with full metadata
+	return &opencodeFileChanges{
+		ModifiedFiles: relModifiedFiles,
+		NewFiles:      relNewFiles,
+		DeletedFiles:  relDeletedFiles,
+	}, commitMessage, nil
+}
+
+// saveOpencodeCheckpoint saves the checkpoint using the configured strategy.
+func saveOpencodeCheckpoint(entireSessionID, sessionDir, sessionDirAbs, transcriptPath, commitMessage string, fileChanges *opencodeFileChanges) error {
+	// Get git author
+	author, err := GetGitAuthor()
+	if err != nil {
+		return fmt.Errorf("failed to get git author: %w", err)
+	}
+
+	// Get the configured strategy
+	strat := GetStrategy()
+
+	// Build save context
 	ctx := strategy.SaveContext{
 		SessionID:      entireSessionID,
-		ModifiedFiles:  relModifiedFiles,
-		NewFiles:       relNewFiles,
-		DeletedFiles:   relDeletedFiles,
+		ModifiedFiles:  fileChanges.ModifiedFiles,
+		NewFiles:       fileChanges.NewFiles,
+		DeletedFiles:   fileChanges.DeletedFiles,
 		MetadataDir:    sessionDir,
 		MetadataDirAbs: sessionDirAbs,
 		CommitMessage:  commitMessage,
@@ -257,13 +327,6 @@ func handleOpencodeStop() error {
 
 	if err := strat.SaveChanges(ctx); err != nil {
 		return fmt.Errorf("failed to save changes: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "Created checkpoint for OpenCode session: %s\n", entireSessionID)
-
-	// Store session data if the agent has a WriteSession method
-	if err := ag.WriteSession(session); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to write session: %v\n", err)
 	}
 
 	return nil
