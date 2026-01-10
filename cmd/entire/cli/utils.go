@@ -38,6 +38,26 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// logFileChanges logs modified, new, and deleted files to stderr.
+func logFileChanges(modified, newFiles, deleted []string) {
+	fmt.Fprintf(os.Stderr, "Files modified during session (%d):\n", len(modified))
+	for _, file := range modified {
+		fmt.Fprintf(os.Stderr, "  - %s\n", file)
+	}
+	if len(newFiles) > 0 {
+		fmt.Fprintf(os.Stderr, "New files created (%d):\n", len(newFiles))
+		for _, file := range newFiles {
+			fmt.Fprintf(os.Stderr, "  + %s\n", file)
+		}
+	}
+	if len(deleted) > 0 {
+		fmt.Fprintf(os.Stderr, "Files deleted (%d):\n", len(deleted))
+		for _, file := range deleted {
+			fmt.Fprintf(os.Stderr, "  x %s\n", file)
+		}
+	}
+}
+
 // copyFile copies a file from src to dst
 func copyFile(src, dst string) error {
 	input, err := os.ReadFile(src) //nolint:gosec // Reading from controlled git metadata path

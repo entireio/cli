@@ -3,11 +3,9 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -63,6 +61,12 @@ func handleOpencodeSessionStart() error {
 // OpenCode plugin exports transcript before calling this hook, so we just need to
 // create a checkpoint from the exported data.
 func handleOpencodeStop() error {
+	// Skip on default branch for strategies that don't allow it
+	if skip, branchName := ShouldSkipOnDefaultBranchForStrategy(); skip {
+		fmt.Fprintf(os.Stderr, "Entire: skipping on branch '%s' - create a feature branch to use Entire tracking\n", branchName)
+		return nil
+	}
+
 	// Parse and validate input
 	input, transcriptPath, ag, err := parseOpencodeStopInput()
 	if err != nil {
@@ -123,19 +127,6 @@ func handleOpencodeStop() error {
 //
 //nolint:ireturn // Returning agent.Agent interface is intentional for abstraction
 func parseOpencodeStopInput() (*agent.HookInput, string, agent.Agent, error) {
-	// Read stdin
-	stdinData, readErr := io.ReadAll(os.Stdin)
-	if readErr != nil {
-		return nil, "", nil, fmt.Errorf("failed to read stdin: %w", readErr)
-	}
-
-	// Skip on default branch for strategies that don't allow it
-	skip, branchName := ShouldSkipOnDefaultBranchForStrategy()
-	if skip {
-		fmt.Fprintf(os.Stderr, "Entire: skipping on branch '%s' - create a feature branch to use Entire tracking\n", branchName)
-		return nil, "", nil, nil
-	}
-
 	// Get the OpenCode agent
 	ag, err := agent.Get(agent.AgentNameOpenCode)
 	if err != nil {
@@ -143,8 +134,7 @@ func parseOpencodeStopInput() (*agent.HookInput, string, agent.Agent, error) {
 	}
 
 	// Parse hook input
-	reader := bytes.NewReader(stdinData)
-	input, err := ag.ParseHookInput(agent.HookStop, reader)
+	input, err := ag.ParseHookInput(agent.HookStop, os.Stdin)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("failed to parse hook input: %w", err)
 	}
@@ -157,7 +147,7 @@ func parseOpencodeStopInput() (*agent.HookInput, string, agent.Agent, error) {
 		slog.String("transcript_path", input.SessionRef),
 	)
 
-	// Get transcript path
+	// Get transcript path from RawData
 	transcriptPath, ok := input.RawData["transcript_path"].(string)
 	if !ok || transcriptPath == "" {
 		return nil, "", nil, errors.New("transcript_path not found in hook input")
@@ -261,22 +251,7 @@ func extractAndSaveOpencodeFileChanges(transcriptLines []opencodeTranscriptLine,
 	relDeletedFiles := FilterAndNormalizePaths(deletedFiles, repoRoot)
 
 	// Log file changes
-	fmt.Fprintf(os.Stderr, "Files modified during session (%d):\n", len(relModifiedFiles))
-	for _, file := range relModifiedFiles {
-		fmt.Fprintf(os.Stderr, "  - %s\n", file)
-	}
-	if len(relNewFiles) > 0 {
-		fmt.Fprintf(os.Stderr, "New files created (%d):\n", len(relNewFiles))
-		for _, file := range relNewFiles {
-			fmt.Fprintf(os.Stderr, "  + %s\n", file)
-		}
-	}
-	if len(relDeletedFiles) > 0 {
-		fmt.Fprintf(os.Stderr, "Files deleted (%d):\n", len(relDeletedFiles))
-		for _, file := range relDeletedFiles {
-			fmt.Fprintf(os.Stderr, "  x %s\n", file)
-		}
-	}
+	logFileChanges(relModifiedFiles, relNewFiles, relDeletedFiles)
 
 	// Build commit message
 	allPrompts := extractOpencodeUserPrompts(transcriptLines)

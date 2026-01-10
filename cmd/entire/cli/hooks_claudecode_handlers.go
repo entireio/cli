@@ -436,22 +436,7 @@ func commitWithMetadata() error {
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "Files modified during session (%d):\n", len(relModifiedFiles))
-	for _, file := range relModifiedFiles {
-		fmt.Fprintf(os.Stderr, "  - %s\n", file)
-	}
-	if len(relNewFiles) > 0 {
-		fmt.Fprintf(os.Stderr, "New files created (%d):\n", len(relNewFiles))
-		for _, file := range relNewFiles {
-			fmt.Fprintf(os.Stderr, "  + %s\n", file)
-		}
-	}
-	if len(relDeletedFiles) > 0 {
-		fmt.Fprintf(os.Stderr, "Files deleted (%d):\n", len(relDeletedFiles))
-		for _, file := range relDeletedFiles {
-			fmt.Fprintf(os.Stderr, "  - %s\n", file)
-		}
-	}
+	logFileChanges(relModifiedFiles, relNewFiles, relDeletedFiles)
 
 	// Create context file before saving changes
 	contextFile := filepath.Join(sessionDirAbs, paths.ContextFileName)

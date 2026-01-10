@@ -31,6 +31,18 @@ func RegisterHookHandler(agentName, hookName string, handler HookHandlerFunc) {
 	hookRegistry[agentName][hookName] = handler
 }
 
+// registerHookWithEnabledCheck registers a handler that skips execution when Entire is disabled.
+// This is a convenience wrapper that avoids repeating the IsEnabled check in every handler.
+func registerHookWithEnabledCheck(agentName, hookName string, handler HookHandlerFunc) {
+	RegisterHookHandler(agentName, hookName, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handler()
+	})
+}
+
 // GetHookHandler returns the handler for an agent's hook, or nil if not found.
 func GetHookHandler(agentName, hookName string) HookHandlerFunc {
 	if handlers, ok := hookRegistry[agentName]; ok {
@@ -39,76 +51,22 @@ func GetHookHandler(agentName, hookName string) HookHandlerFunc {
 	return nil
 }
 
-// init registers Claude Code hook handlers.
-// Each handler checks if Entire is enabled before executing.
+// init registers hook handlers for all supported agents.
+// Each handler automatically checks if Entire is enabled before executing.
 //
 //nolint:gochecknoinits // Hook handler registration at startup is the intended pattern
 func init() {
 	// Register Claude Code handlers
-	RegisterHookHandler(agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, func() error {
-		enabled, err := IsEnabled()
-		if err == nil && !enabled {
-			return nil
-		}
-		return handleSessionStart()
-	})
-
-	RegisterHookHandler(agent.AgentNameClaudeCode, claudecode.HookNameStop, func() error {
-		enabled, err := IsEnabled()
-		if err == nil && !enabled {
-			return nil
-		}
-		return commitWithMetadata()
-	})
-
-	RegisterHookHandler(agent.AgentNameClaudeCode, claudecode.HookNameUserPromptSubmit, func() error {
-		enabled, err := IsEnabled()
-		if err == nil && !enabled {
-			return nil
-		}
-		return captureInitialState()
-	})
-
-	RegisterHookHandler(agent.AgentNameClaudeCode, claudecode.HookNamePreTask, func() error {
-		enabled, err := IsEnabled()
-		if err == nil && !enabled {
-			return nil
-		}
-		return handlePreTask()
-	})
-
-	RegisterHookHandler(agent.AgentNameClaudeCode, claudecode.HookNamePostTask, func() error {
-		enabled, err := IsEnabled()
-		if err == nil && !enabled {
-			return nil
-		}
-		return handlePostTask()
-	})
-
-	RegisterHookHandler(agent.AgentNameClaudeCode, claudecode.HookNamePostTodo, func() error {
-		enabled, err := IsEnabled()
-		if err == nil && !enabled {
-			return nil
-		}
-		return handlePostTodo()
-	})
+	registerHookWithEnabledCheck(agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, handleSessionStart)
+	registerHookWithEnabledCheck(agent.AgentNameClaudeCode, claudecode.HookNameStop, commitWithMetadata)
+	registerHookWithEnabledCheck(agent.AgentNameClaudeCode, claudecode.HookNameUserPromptSubmit, captureInitialState)
+	registerHookWithEnabledCheck(agent.AgentNameClaudeCode, claudecode.HookNamePreTask, handlePreTask)
+	registerHookWithEnabledCheck(agent.AgentNameClaudeCode, claudecode.HookNamePostTask, handlePostTask)
+	registerHookWithEnabledCheck(agent.AgentNameClaudeCode, claudecode.HookNamePostTodo, handlePostTodo)
 
 	// Register OpenCode handlers
-	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameSessionStart, func() error {
-		enabled, err := IsEnabled()
-		if err == nil && !enabled {
-			return nil
-		}
-		return handleOpencodeSessionStart()
-	})
-
-	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameStop, func() error {
-		enabled, err := IsEnabled()
-		if err == nil && !enabled {
-			return nil
-		}
-		return handleOpencodeStop()
-	})
+	registerHookWithEnabledCheck(agent.AgentNameOpenCode, opencode.HookNameSessionStart, handleOpencodeSessionStart)
+	registerHookWithEnabledCheck(agent.AgentNameOpenCode, opencode.HookNameStop, handleOpencodeStop)
 }
 
 // agentHookLogCleanup stores the cleanup function for agent hook logging.
@@ -171,8 +129,7 @@ func newAgentHookVerbCmdWithLogging(agentName, hookName string) *cobra.Command {
 			ctx := logging.WithComponent(context.Background(), "hooks")
 
 			// Get strategy name for logging
-			strategyName := unknownStrategyName
-			strategyName = GetStrategy().Name()
+			strategyName := GetStrategy().Name()
 
 			hookType := getHookType(hookName)
 

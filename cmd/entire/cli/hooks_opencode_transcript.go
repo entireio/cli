@@ -39,10 +39,10 @@ type opencodeTranscriptLine struct {
 		Snapshot string `json:"snapshot,omitempty"`
 		FilePath string `json:"filePath,omitempty"`
 		State    *struct {
-			Status string                 `json:"status"`
-			Input  map[string]interface{} `json:"input,omitempty"`
-			Output string                 `json:"output,omitempty"`
-			Title  string                 `json:"title,omitempty"`
+			Status string         `json:"status"`
+			Input  map[string]any `json:"input,omitempty"`
+			Output string         `json:"output,omitempty"`
+			Title  string         `json:"title,omitempty"`
 		} `json:"state,omitempty"`
 	} `json:"parts"`
 }
@@ -53,14 +53,12 @@ func parseOpencodeTranscript(transcriptPath string) ([]opencodeTranscriptLine, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to open transcript: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	var lines []opencodeTranscriptLine
 	scanner := bufio.NewScanner(file)
-	// Set max buffer size to 10MB (OpenCode messages can be large with tool outputs)
-	const maxCapacity = 10 * 1024 * 1024
-	buf := make([]byte, maxCapacity)
-	scanner.Buffer(buf, maxCapacity)
+	// Use large buffer for very long lines (transcript lines can be huge)
+	scanner.Buffer(make([]byte, 0, ScannerBufferSize), ScannerBufferSize)
 
 	lineNum := 0
 	for scanner.Scan() {
@@ -72,7 +70,7 @@ func parseOpencodeTranscript(transcriptPath string) ([]opencodeTranscriptLine, e
 
 		var line opencodeTranscriptLine
 		if err := json.Unmarshal(data, &line); err != nil {
-			// Log parse error but continue (don't fail entire transcript)
+			// Log parse error but continue (skip malformed lines)
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse transcript line %d: %v\n", lineNum, err)
 			continue
 		}

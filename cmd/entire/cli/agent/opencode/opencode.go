@@ -93,15 +93,9 @@ func (o *OpenCodeAgent) ParseHookInput(hookType agent.HookType, reader io.Reader
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
-	// Parse timestamp
-	var timestamp time.Time
-	if openCodeInput.Timestamp != "" {
-		timestamp, err = time.Parse(time.RFC3339, openCodeInput.Timestamp)
-		if err != nil {
-			// If parsing fails, use current time
-			timestamp = time.Now()
-		}
-	} else {
+	// Parse timestamp, defaulting to current time on empty or invalid input
+	timestamp, err := time.Parse(time.RFC3339, openCodeInput.Timestamp)
+	if err != nil {
 		timestamp = time.Now()
 	}
 
