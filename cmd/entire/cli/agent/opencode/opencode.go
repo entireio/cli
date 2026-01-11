@@ -196,5 +196,7 @@ func (o *OpenCodeAgent) GetHookNames() []string {
 	return []string{
 		HookNameSessionStart,
 		HookNameStop,
+		HookNameTaskStart,
+		HookNameTaskComplete,
 	}
 }

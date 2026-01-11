@@ -67,6 +67,8 @@ func init() {
 	// Register OpenCode handlers
 	registerHookWithEnabledCheck(agent.AgentNameOpenCode, opencode.HookNameSessionStart, handleOpencodeSessionStart)
 	registerHookWithEnabledCheck(agent.AgentNameOpenCode, opencode.HookNameStop, handleOpencodeStop)
+	registerHookWithEnabledCheck(agent.AgentNameOpenCode, opencode.HookNameTaskStart, handleOpencodeTaskStart)
+	registerHookWithEnabledCheck(agent.AgentNameOpenCode, opencode.HookNameTaskComplete, handleOpencodeTaskComplete)
 }
 
 // agentHookLogCleanup stores the cleanup function for agent hook logging.

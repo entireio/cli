@@ -306,3 +306,209 @@ func saveOpencodeCheckpoint(entireSessionID, sessionDir, sessionDirAbs, transcri
 
 	return nil
 }
+
+// handleOpencodeTaskStart handles the task-start hook for OpenCode.
+// This is called before a Task tool (subagent) begins execution.
+func handleOpencodeTaskStart() error {
+	// Skip on default branch for strategies that don't allow it
+	if skip, branchName := ShouldSkipOnDefaultBranchForStrategy(); skip {
+		// Log but don't print to stderr for task hooks (they happen frequently)
+		logCtx := logging.WithComponent(context.Background(), "hooks")
+		logging.Debug(logCtx, "task-start skipped on default branch",
+			slog.String("branch", branchName),
+		)
+		return nil
+	}
+
+	// Get the OpenCode agent
+	ag, err := agent.Get(agent.AgentNameOpenCode)
+	if err != nil {
+		return fmt.Errorf("failed to get OpenCode agent: %w", err)
+	}
+
+	// Parse hook input
+	input, err := ag.ParseHookInput(agent.HookPreToolUse, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithComponent(context.Background(), "hooks")
+	logging.Debug(logCtx, "task-start",
+		slog.String("hook", "task-start"),
+		slog.String("session_id", input.SessionID),
+		slog.String("tool_use_id", input.ToolUseID),
+	)
+
+	// Extract task metadata from tool_input
+	subagentType, description := ParseSubagentTypeAndDescription(input.ToolInput)
+
+	modelSessionID := input.SessionID
+	if modelSessionID == "" {
+		modelSessionID = unknownSessionID
+	}
+	entireSessionID := ag.TransformSessionID(modelSessionID)
+
+	// Create task metadata directory
+	sessionDir := paths.SessionMetadataDir(modelSessionID)
+	taskMetadataDir := strategy.TaskMetadataDir(sessionDir, input.ToolUseID)
+	taskMetadataDirAbs, err := paths.AbsPath(taskMetadataDir)
+	if err != nil {
+		taskMetadataDirAbs = taskMetadataDir // Fallback to relative
+	}
+
+	if err := os.MkdirAll(taskMetadataDirAbs, 0o750); err != nil {
+		return fmt.Errorf("failed to create task metadata directory: %w", err)
+	}
+
+	// Get git author
+	author, err := GetGitAuthor()
+	if err != nil {
+		return fmt.Errorf("failed to get git author: %w", err)
+	}
+
+	// Get the configured strategy
+	strat := GetStrategy()
+
+	// Build task checkpoint context for task start
+	taskCtx := strategy.TaskCheckpointContext{
+		SessionID:       entireSessionID,
+		ToolUseID:       input.ToolUseID,
+		SubagentType:    subagentType,
+		TaskDescription: description,
+		AuthorName:      author.Name,
+		AuthorEmail:     author.Email,
+		// File changes are not yet known at task start
+		ModifiedFiles: []string{},
+		NewFiles:      []string{},
+		DeletedFiles:  []string{},
+	}
+
+	// Save task checkpoint
+	if err := strat.SaveTaskCheckpoint(taskCtx); err != nil {
+		return fmt.Errorf("failed to save task checkpoint: %w", err)
+	}
+
+	logging.Debug(logCtx, "task checkpoint created",
+		slog.String("session_id", entireSessionID),
+		slog.String("tool_use_id", input.ToolUseID),
+	)
+
+	return nil
+}
+
+// handleOpencodeTaskComplete handles the task-complete hook for OpenCode.
+// This is called after a Task tool (subagent) completes execution.
+func handleOpencodeTaskComplete() error {
+	// Skip on default branch for strategies that don't allow it
+	if skip, branchName := ShouldSkipOnDefaultBranchForStrategy(); skip {
+		// Log but don't print to stderr for task hooks (they happen frequently)
+		logCtx := logging.WithComponent(context.Background(), "hooks")
+		logging.Debug(logCtx, "task-complete skipped on default branch",
+			slog.String("branch", branchName),
+		)
+		return nil
+	}
+
+	// Get the OpenCode agent
+	ag, err := agent.Get(agent.AgentNameOpenCode)
+	if err != nil {
+		return fmt.Errorf("failed to get OpenCode agent: %w", err)
+	}
+
+	// Parse hook input
+	input, err := ag.ParseHookInput(agent.HookPostToolUse, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithComponent(context.Background(), "hooks")
+	logging.Debug(logCtx, "task-complete",
+		slog.String("hook", "task-complete"),
+		slog.String("session_id", input.SessionID),
+		slog.String("tool_use_id", input.ToolUseID),
+	)
+
+	// Extract task metadata from tool_input
+	subagentType, description := ParseSubagentTypeAndDescription(input.ToolInput)
+
+	modelSessionID := input.SessionID
+	if modelSessionID == "" {
+		modelSessionID = unknownSessionID
+	}
+	entireSessionID := ag.TransformSessionID(modelSessionID)
+
+	// Create task metadata directory
+	sessionDir := paths.SessionMetadataDir(modelSessionID)
+	taskMetadataDir := strategy.TaskMetadataDir(sessionDir, input.ToolUseID)
+	taskMetadataDirAbs, err := paths.AbsPath(taskMetadataDir)
+	if err != nil {
+		taskMetadataDirAbs = taskMetadataDir // Fallback to relative
+	}
+
+	if err := os.MkdirAll(taskMetadataDirAbs, 0o750); err != nil {
+		return fmt.Errorf("failed to create task metadata directory: %w", err)
+	}
+
+	// Import subagent transcript if provided
+	subagentTranscriptPath := ""
+	if rawPath, ok := input.RawData["subagent_transcript_path"].(string); ok && rawPath != "" {
+		if fileExists(rawPath) {
+			// Copy subagent transcript to task metadata directory
+			destPath := filepath.Join(taskMetadataDirAbs, "agent-"+input.ToolUseID+".jsonl")
+			if err := copyFile(rawPath, destPath); err != nil {
+				logging.Debug(logCtx, "failed to copy subagent transcript",
+					slog.String("error", err.Error()),
+					slog.String("source", rawPath),
+				)
+			} else {
+				subagentTranscriptPath = destPath
+				logging.Debug(logCtx, "copied subagent transcript",
+					slog.String("dest", destPath),
+				)
+			}
+		} else {
+			logging.Debug(logCtx, "subagent transcript not found",
+				slog.String("path", rawPath),
+			)
+		}
+	}
+
+	// Get git author
+	author, err := GetGitAuthor()
+	if err != nil {
+		return fmt.Errorf("failed to get git author: %w", err)
+	}
+
+	// Get the configured strategy
+	strat := GetStrategy()
+
+	// Build task checkpoint context for task completion
+	taskCtx := strategy.TaskCheckpointContext{
+		SessionID:              entireSessionID,
+		ToolUseID:              input.ToolUseID,
+		AgentID:                input.ToolUseID, // Use ToolUseID as AgentID for consistent naming
+		SubagentType:           subagentType,
+		TaskDescription:        description,
+		SubagentTranscriptPath: subagentTranscriptPath,
+		AuthorName:             author.Name,
+		AuthorEmail:            author.Email,
+		// TODO: Extract file changes from subagent transcript if available
+		// For now, we don't have file changes at task completion
+		ModifiedFiles: []string{},
+		NewFiles:      []string{},
+		DeletedFiles:  []string{},
+	}
+
+	// Save task checkpoint
+	if err := strat.SaveTaskCheckpoint(taskCtx); err != nil {
+		return fmt.Errorf("failed to save task checkpoint: %w", err)
+	}
+
+	logging.Debug(logCtx, "task completion checkpoint created",
+		slog.String("session_id", entireSessionID),
+		slog.String("tool_use_id", input.ToolUseID),
+		slog.Bool("has_transcript", subagentTranscriptPath != ""),
+	)
+
+	return nil
+}

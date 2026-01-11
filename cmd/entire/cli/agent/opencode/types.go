@@ -10,4 +10,6 @@ const (
 const (
 	HookNameSessionStart = "session-start"
 	HookNameStop         = "stop"
+	HookNameTaskStart    = "task-start"
+	HookNameTaskComplete = "task-complete"
 )
