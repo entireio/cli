@@ -57,10 +57,7 @@ This removes the git hooks. Your code and commit history remain untouched—only
 | Command | Description |
 | --- | --- |
 | `entire session` | View and manage sessions (list, show details, view logs) |
-| `entire clean` | Clean up old branches and worktrees created by Entire |
-| `entire summarize` | Squash feature branch commits into a single PR-ready commit |
-| `entire hooks` | Manage git hooks (reinstall, uninstall, check status) |
-| `entire explain` | Explain a piece of code |
+| `entire explain` | Explain a session or commit |
 | `entire version` | Show Entire CLI version |
 
 ## How It Works

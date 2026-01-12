@@ -54,7 +54,6 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newDisableCmd())
 	cmd.AddCommand(newStatusCmd())
 	cmd.AddCommand(newHooksCmd())
-	cmd.AddCommand(newSummarizeCmd())
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newExplainCmd())
 

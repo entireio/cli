@@ -200,11 +200,6 @@ These are Go implementations that integrate Entire with different AI coding tool
    - Testing done
 4. **Wait for review** - maintainers will provide feedback
 
-You can also use the Entire CLI to prepare your PR:
-```bash
-entire summarize -m "Your feature description"
-```
-
 ---
 
 ## Community
