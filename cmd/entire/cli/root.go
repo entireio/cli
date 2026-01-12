@@ -42,6 +42,7 @@ func NewRootCmd() *cobra.Command {
 		},
 	}
 
+	cmd.CompletionOptions.HiddenDefaultCmd = true
 	// Add subcommands here
 	cmd.AddCommand(newRewindCmd())
 	cmd.AddCommand(newResumeCmd())
