@@ -28,22 +28,21 @@ func PerformOpen(node *Node) *ActionResult {
 	}
 
 	// Determine session ID and checkpoint ID based on node type
+	// New hierarchy: Branch → Checkpoint → Session
 	var sessionID, checkpointID string
 	switch node.Type {
 	case NodeTypeBranch:
 		result.Error = errors.New("open is only available for sessions and checkpoints")
 		return result
-	case NodeTypeSession:
-		sessionID = node.SessionID
-		// Find most recent checkpoint
-		if len(node.Children) > 0 {
-			checkpointID = node.Children[0].CheckpointID
-		}
 	case NodeTypeCheckpoint:
+		// Checkpoint stores session info directly
 		checkpointID = node.CheckpointID
-		// Get session ID from parent
-		if node.Parent != nil && node.Parent.Type == NodeTypeSession {
-			sessionID = node.Parent.SessionID
+		sessionID = node.SessionID
+	case NodeTypeSession:
+		// Session is under checkpoint - get checkpoint from parent
+		sessionID = node.SessionID
+		if node.Parent != nil && node.Parent.Type == NodeTypeCheckpoint {
+			checkpointID = node.Parent.CheckpointID
 		}
 	}
 
@@ -88,32 +87,31 @@ func PerformResume(node *Node) *ActionResult {
 	}
 
 	// Determine branch and session based on node type
+	// New hierarchy: Branch → Checkpoint → Session
 	var branchName, sessionID, checkpointID string
 	switch node.Type {
 	case NodeTypeBranch:
 		branchName = node.ID
-		// Find most recent session
+		// Find most recent checkpoint (first child)
 		if len(node.Children) > 0 {
-			sessionNode := node.Children[0]
-			sessionID = sessionNode.SessionID
-			if len(sessionNode.Children) > 0 {
-				checkpointID = sessionNode.Children[0].CheckpointID
-			}
+			checkpointNode := node.Children[0]
+			checkpointID = checkpointNode.CheckpointID
+			sessionID = checkpointNode.SessionID
 		}
-	case NodeTypeSession:
+	case NodeTypeCheckpoint:
+		// Checkpoint stores session info directly
+		checkpointID = node.CheckpointID
 		sessionID = node.SessionID
-		if len(node.Children) > 0 {
-			checkpointID = node.Children[0].CheckpointID
-		}
 		// Get branch from parent
 		if node.Parent != nil && node.Parent.Type == NodeTypeBranch {
 			branchName = node.Parent.ID
 		}
-	case NodeTypeCheckpoint:
-		checkpointID = node.CheckpointID
-		// Get session from parent
-		if node.Parent != nil && node.Parent.Type == NodeTypeSession {
-			sessionID = node.Parent.SessionID
+	case NodeTypeSession:
+		// Session is under checkpoint
+		sessionID = node.SessionID
+		// Get checkpoint from parent
+		if node.Parent != nil && node.Parent.Type == NodeTypeCheckpoint {
+			checkpointID = node.Parent.CheckpointID
 			// Get branch from grandparent
 			if node.Parent.Parent != nil && node.Parent.Parent.Type == NodeTypeBranch {
 				branchName = node.Parent.Parent.ID
@@ -181,11 +179,8 @@ func PerformRewind(node *Node) *ActionResult {
 	checkpointID := node.CheckpointID
 	result.CheckpointID = checkpointID
 
-	// Get session ID from parent
-	var sessionID string
-	if node.Parent != nil && node.Parent.Type == NodeTypeSession {
-		sessionID = node.Parent.SessionID
-	}
+	// Checkpoint stores session ID directly in the new hierarchy
+	sessionID := node.SessionID
 	result.SessionID = sessionID
 
 	// Get agent

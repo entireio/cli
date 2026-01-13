@@ -109,28 +109,24 @@ func runListJSON() error {
 		return fmt.Errorf("failed to fetch data: %w", err)
 	}
 
-	// Build JSON output
+	// Build JSON output with new hierarchy: Branch → Checkpoint → Session
 	type checkpointJSON struct {
-		ID        string `json:"id"`
-		Timestamp string `json:"timestamp,omitempty"`
-		Message   string `json:"message,omitempty"`
-		IsTask    bool   `json:"is_task,omitempty"`
-	}
-
-	type sessionJSON struct {
-		ID          string           `json:"id"`
-		Description string           `json:"description,omitempty"`
-		Strategy    string           `json:"strategy,omitempty"`
-		StartTime   string           `json:"start_time,omitempty"`
-		IsActive    bool             `json:"is_active,omitempty"`
-		Checkpoints []checkpointJSON `json:"checkpoints,omitempty"`
+		ID          string `json:"id"`
+		CommitHash  string `json:"commit_hash,omitempty"`
+		CommitMsg   string `json:"commit_msg,omitempty"`
+		Timestamp   string `json:"timestamp,omitempty"`
+		StepsCount  int    `json:"steps_count,omitempty"`
+		SessionID   string `json:"session_id"`
+		Description string `json:"description,omitempty"`
+		IsTask      bool   `json:"is_task,omitempty"`
+		IsActive    bool   `json:"is_active,omitempty"`
 	}
 
 	type branchJSON struct {
-		Name      string        `json:"name"`
-		IsCurrent bool          `json:"is_current,omitempty"`
-		IsMerged  bool          `json:"is_merged,omitempty"`
-		Sessions  []sessionJSON `json:"sessions,omitempty"`
+		Name        string           `json:"name"`
+		IsCurrent   bool             `json:"is_current,omitempty"`
+		IsMerged    bool             `json:"is_merged,omitempty"`
+		Checkpoints []checkpointJSON `json:"checkpoints,omitempty"`
 	}
 
 	type outputJSON struct {
@@ -147,38 +143,27 @@ func runListJSON() error {
 
 	for _, branch := range data.Branches {
 		bj := branchJSON{
-			Name:      branch.Name,
-			IsCurrent: branch.IsCurrent,
-			IsMerged:  branch.IsMerged,
-			Sessions:  make([]sessionJSON, 0, len(branch.Sessions)),
+			Name:        branch.Name,
+			IsCurrent:   branch.IsCurrent,
+			IsMerged:    branch.IsMerged,
+			Checkpoints: make([]checkpointJSON, 0, len(branch.Checkpoints)),
 		}
 
-		for _, sess := range branch.Sessions {
-			sj := sessionJSON{
-				ID:          sess.Session.ID,
-				Description: sess.Session.Description,
-				Strategy:    sess.Session.Strategy,
-				IsActive:    sess.IsActive,
-				Checkpoints: make([]checkpointJSON, 0, len(sess.Session.Checkpoints)),
+		for _, cp := range branch.Checkpoints {
+			cj := checkpointJSON{
+				ID:          cp.CheckpointID,
+				CommitHash:  cp.CommitHash,
+				CommitMsg:   cp.CommitMsg,
+				StepsCount:  cp.StepsCount,
+				SessionID:   cp.SessionID,
+				Description: cp.Description,
+				IsTask:      cp.IsTask,
+				IsActive:    cp.IsActive,
 			}
-
-			if !sess.Session.StartTime.IsZero() {
-				sj.StartTime = sess.Session.StartTime.Format("2006-01-02T15:04:05Z07:00")
+			if !cp.CreatedAt.IsZero() {
+				cj.Timestamp = cp.CreatedAt.Format("2006-01-02T15:04:05Z07:00")
 			}
-
-			for _, cp := range sess.Session.Checkpoints {
-				cj := checkpointJSON{
-					ID:      cp.CheckpointID,
-					Message: cp.Message,
-					IsTask:  cp.IsTaskCheckpoint,
-				}
-				if !cp.Timestamp.IsZero() {
-					cj.Timestamp = cp.Timestamp.Format("2006-01-02T15:04:05Z07:00")
-				}
-				sj.Checkpoints = append(sj.Checkpoints, cj)
-			}
-
-			bj.Sessions = append(bj.Sessions, sj)
+			bj.Checkpoints = append(bj.Checkpoints, cj)
 		}
 
 		output.Branches = append(output.Branches, bj)

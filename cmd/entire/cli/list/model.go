@@ -1,10 +1,8 @@
-// Package list provides a hierarchical interactive view of branches, sessions, and checkpoints.
+// Package list provides a hierarchical interactive view of branches, checkpoints, and sessions.
 package list
 
 import (
 	"time"
-
-	"entire.io/cli/cmd/entire/cli/strategy"
 )
 
 // NodeType identifies the type of item in the tree.
@@ -12,14 +10,14 @@ type NodeType int
 
 const (
 	NodeTypeBranch NodeType = iota
-	NodeTypeSession
 	NodeTypeCheckpoint
+	NodeTypeSession
 )
 
 // Node represents an item in the hierarchical tree view.
 type Node struct {
 	Type     NodeType
-	ID       string // Branch name, session ID, or checkpoint ID
+	ID       string // Branch name, checkpoint ID, or session ID
 	Label    string // Display label
 	Children []*Node
 
@@ -27,19 +25,19 @@ type Node struct {
 	IsCurrent bool
 	IsMerged  bool
 
-	// Session-specific fields
-	SessionID   string
-	Description string
-	Strategy    string
-	StartTime   time.Time
-	IsActive    bool // Currently running session
-
 	// Checkpoint-specific fields
 	CheckpointID     string
+	CommitHash       string
+	CommitMsg        string
 	Timestamp        time.Time
-	Message          string
+	StepsCount       int
 	IsTaskCheckpoint bool
 	ToolUseID        string
+
+	// Session-specific fields (when showing session under checkpoint)
+	SessionID   string
+	Description string
+	IsActive    bool // Currently running session
 
 	// Parent reference for navigation
 	Parent *Node
@@ -49,27 +47,33 @@ type Node struct {
 	Selected bool
 }
 
-// BranchInfo contains information about a branch and its associated sessions.
+// BranchInfo contains information about a branch and its checkpoints.
 type BranchInfo struct {
-	Name      string
-	IsCurrent bool
-	IsMerged  bool
-	Sessions  []SessionInfo
-}
-
-// SessionInfo contains information about a session within a branch.
-type SessionInfo struct {
-	Session     strategy.Session
-	IsActive    bool   // Currently running in an agent
-	BranchName  string // Branch this session is associated with
-	BaseCommit  string // Commit this session started from
+	Name        string
+	IsCurrent   bool
+	IsMerged    bool
 	Checkpoints []CheckpointInfo
 }
 
-// CheckpointInfo contains information about a checkpoint.
+// CheckpointInfo contains information about a checkpoint on a branch.
 type CheckpointInfo struct {
-	Checkpoint strategy.Checkpoint
-	CommitHash string // Code commit hash if committed
+	CheckpointID string
+	SessionID    string    // Session that created this checkpoint
+	CommitHash   string    // Commit with Entire-Checkpoint trailer
+	CommitMsg    string    // Commit message (for display)
+	CreatedAt    time.Time
+	StepsCount   int       // Steps that led to this checkpoint
+	Description  string    // Session description at this point
+	IsTask       bool
+	ToolUseID    string
+	IsActive     bool      // Is the session currently active
+}
+
+// SessionInfo contains session details shown under a checkpoint.
+type SessionInfo struct {
+	SessionID   string
+	Description string
+	IsActive    bool
 }
 
 // TreeData holds the complete data for the hierarchical view.

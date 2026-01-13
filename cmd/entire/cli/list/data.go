@@ -26,6 +26,8 @@ const (
 )
 
 // FetchTreeData gathers all the data needed for the hierarchical view.
+// The hierarchy is: Branch → Checkpoint → Session
+// Checkpoints belong to commits, and the same session may appear in multiple checkpoints.
 func FetchTreeData() (*TreeData, error) {
 	repo, err := strategy.OpenRepository()
 	if err != nil {
@@ -40,12 +42,6 @@ func FetchTreeData() (*TreeData, error) {
 
 	// Get main branch name
 	mainBranch := getMainBranchName(repo)
-
-	// Get all sessions
-	sessions, err := strategy.ListSessions()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list sessions: %w", err)
-	}
 
 	// Get active session states (includes base commit info)
 	activeSessionStates, err := getActiveSessionStates()
@@ -71,18 +67,25 @@ func FetchTreeData() (*TreeData, error) {
 		return isCommitInRecentHistory(repo, state.BaseCommit, currentBranch, maxRecentCommits)
 	}
 
-	// Build checkpoint -> session mapping
-	checkpointToSession := make(map[string]*strategy.Session)
-	for i := range sessions {
-		for _, cp := range sessions[i].Checkpoints {
-			if cp.CheckpointID != "" {
-				checkpointToSession[cp.CheckpointID] = &sessions[i]
-			}
-		}
+	// Fetch checkpoints from entire/sessions branch
+	strategyCheckpoints, err := strategy.ListCheckpoints()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list checkpoints: %w", err)
 	}
 
-	// Find branches and their associated sessions
-	branchSessions := make(map[string][]SessionInfo)
+	// Limit to most recent checkpoints
+	if len(strategyCheckpoints) > maxCheckpointsToScan {
+		strategyCheckpoints = strategyCheckpoints[:maxCheckpointsToScan]
+	}
+
+	// Build checkpoint ID -> strategy.CheckpointInfo mapping
+	checkpointInfoMap := make(map[string]strategy.CheckpointInfo)
+	for _, cp := range strategyCheckpoints {
+		checkpointInfoMap[cp.CheckpointID] = cp
+	}
+
+	// Group checkpoints by branch
+	branchCheckpoints := make(map[string][]CheckpointInfo)
 	branchSet := make(map[string]bool)
 
 	// Always include main and current branch
@@ -95,59 +98,50 @@ func FetchTreeData() (*TreeData, error) {
 
 	// Scan commits on current branch for checkpoint trailers
 	if currentBranch != "" {
-		foundSessions := findSessionsOnBranch(repo, currentBranch, checkpointToSession, mainBranch)
-		for _, sess := range foundSessions {
-			sess.IsActive = isSessionActive(sess.Session.ID)
-			branchSessions[currentBranch] = append(branchSessions[currentBranch], sess)
-		}
+		foundCheckpoints := findCheckpointsOnBranch(repo, currentBranch, checkpointInfoMap, mainBranch, isSessionActive)
+		branchCheckpoints[currentBranch] = foundCheckpoints
 	}
 
 	// Also scan main branch if it's not the current branch
 	if mainBranch != "" && mainBranch != currentBranch {
 		// For main branch, pass empty string as mainBranch param to scan all commits
-		foundSessions := findSessionsOnBranch(repo, mainBranch, checkpointToSession, "")
-		for _, sess := range foundSessions {
-			sess.IsActive = isSessionActive(sess.Session.ID)
-			branchSessions[mainBranch] = append(branchSessions[mainBranch], sess)
-		}
+		foundCheckpoints := findCheckpointsOnBranch(repo, mainBranch, checkpointInfoMap, "", isSessionActive)
+		branchCheckpoints[mainBranch] = foundCheckpoints
 	}
 
-	// Scan checkpoints from entire/sessions to find associated branches
-	checkpoints, err := strategy.ListCheckpoints()
-	if err == nil {
-		// Limit to most recent checkpoints
-		if len(checkpoints) > maxCheckpointsToScan {
-			checkpoints = checkpoints[:maxCheckpointsToScan]
-		}
+	// Scan all checkpoints to find which branches contain them
+	for _, cp := range strategyCheckpoints {
+		// Find which branch(es) contain the commit for this checkpoint
+		branchCommits := findBranchesAndCommitsForCheckpoint(repo, cp.CheckpointID, mainBranch)
+		for branchName, commitInfo := range branchCommits {
+			branchSet[branchName] = true
 
-		for _, cp := range checkpoints {
-			sess, ok := checkpointToSession[cp.CheckpointID]
-			if !ok {
-				continue
+			// Check if we already have this checkpoint on this branch
+			alreadyAdded := false
+			for _, existing := range branchCheckpoints[branchName] {
+				if existing.CheckpointID == cp.CheckpointID {
+					alreadyAdded = true
+					break
+				}
 			}
 
-			// Find which branch(es) contain the commit for this checkpoint
-			branches := findBranchesForCheckpoint(repo, cp.CheckpointID, mainBranch)
-			for _, branch := range branches {
-				branchSet[branch] = true
+			if !alreadyAdded {
+				// Get session description
+				description := getDescriptionForCheckpoint(repo, cp.CheckpointID)
 
-				// Check if we already have this session on this branch
-				alreadyAdded := false
-				for _, existing := range branchSessions[branch] {
-					if existing.Session.ID == sess.ID {
-						alreadyAdded = true
-						break
-					}
+				cpInfo := CheckpointInfo{
+					CheckpointID: cp.CheckpointID,
+					SessionID:    cp.SessionID,
+					CommitHash:   commitInfo.Hash,
+					CommitMsg:    commitInfo.Message,
+					CreatedAt:    cp.CreatedAt,
+					StepsCount:   cp.GetStepsCount(),
+					Description:  description,
+					IsTask:       cp.IsTask,
+					ToolUseID:    cp.ToolUseID,
+					IsActive:     isSessionActive(cp.SessionID),
 				}
-
-				if !alreadyAdded {
-					sessInfo := SessionInfo{
-						Session:    *sess,
-						IsActive:   isSessionActive(sess.ID),
-						BranchName: branch,
-					}
-					branchSessions[branch] = append(branchSessions[branch], sessInfo)
-				}
+				branchCheckpoints[branchName] = append(branchCheckpoints[branchName], cpInfo)
 			}
 		}
 	}
@@ -156,27 +150,15 @@ func FetchTreeData() (*TreeData, error) {
 	var branches []BranchInfo
 	for branchName := range branchSet {
 		info := BranchInfo{
-			Name:      branchName,
-			IsCurrent: branchName == currentBranch,
-			IsMerged:  isBranchMerged(repo, branchName, mainBranch),
-			Sessions:  branchSessions[branchName],
+			Name:        branchName,
+			IsCurrent:   branchName == currentBranch,
+			IsMerged:    isBranchMerged(repo, branchName, mainBranch),
+			Checkpoints: branchCheckpoints[branchName],
 		}
 
-		// Sort sessions by most recent activity
-		sort.Slice(info.Sessions, func(i, j int) bool {
-			iTime := info.Sessions[i].Session.StartTime
-			for _, cp := range info.Sessions[i].Session.Checkpoints {
-				if cp.Timestamp.After(iTime) {
-					iTime = cp.Timestamp
-				}
-			}
-			jTime := info.Sessions[j].Session.StartTime
-			for _, cp := range info.Sessions[j].Session.Checkpoints {
-				if cp.Timestamp.After(jTime) {
-					jTime = cp.Timestamp
-				}
-			}
-			return iTime.After(jTime)
+		// Sort checkpoints by most recent first
+		sort.Slice(info.Checkpoints, func(i, j int) bool {
+			return info.Checkpoints[i].CreatedAt.After(info.Checkpoints[j].CreatedAt)
 		})
 
 		branches = append(branches, info)
@@ -198,9 +180,9 @@ func FetchTreeData() (*TreeData, error) {
 		if branches[j].Name == mainBranch {
 			return false
 		}
-		// Then by most recent session activity (descending)
-		iTime := getMostRecentActivity(branches[i])
-		jTime := getMostRecentActivity(branches[j])
+		// Then by most recent checkpoint activity (descending)
+		iTime := getMostRecentCheckpointActivity(branches[i])
+		jTime := getMostRecentCheckpointActivity(branches[j])
 		return iTime.After(jTime)
 	})
 
@@ -311,8 +293,14 @@ func isCommitInRecentHistory(repo *git.Repository, commitHash string, branchName
 	return found
 }
 
-// findSessionsOnBranch finds sessions associated with commits on a branch.
-func findSessionsOnBranch(repo *git.Repository, branchName string, checkpointToSession map[string]*strategy.Session, mainBranch string) []SessionInfo {
+// commitInfo holds basic commit information for display.
+type commitInfo struct {
+	Hash    string
+	Message string
+}
+
+// findCheckpointsOnBranch finds checkpoints associated with commits on a branch.
+func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpointInfoMap map[string]strategy.CheckpointInfo, mainBranch string, isSessionActive func(string) bool) []CheckpointInfo {
 	refName := plumbing.NewBranchReferenceName(branchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
@@ -325,8 +313,8 @@ func findSessionsOnBranch(repo *git.Repository, branchName string, checkpointToS
 		mergeBaseHash = getMergeBaseHash(repo, branchName, mainBranch)
 	}
 
-	var sessions []SessionInfo
-	seenSessions := make(map[string]bool)
+	var checkpoints []CheckpointInfo
+	seenCheckpoints := make(map[string]bool)
 
 	iter, err := repo.Log(&git.LogOptions{From: ref.Hash()})
 	if err != nil {
@@ -351,32 +339,56 @@ func findSessionsOnBranch(repo *git.Repository, branchName string, checkpointToS
 			return nil
 		}
 
-		sess, ok := checkpointToSession[checkpointID]
-		if !ok || seenSessions[sess.ID] {
+		// Skip if already seen
+		if seenCheckpoints[checkpointID] {
+			return nil
+		}
+		seenCheckpoints[checkpointID] = true
+
+		// Get checkpoint info from map
+		cpInfo, ok := checkpointInfoMap[checkpointID]
+		if !ok {
+			// Checkpoint exists in commit but not in entire/sessions (may have been pruned)
 			return nil
 		}
 
-		seenSessions[sess.ID] = true
-		sessions = append(sessions, SessionInfo{
-			Session:    *sess,
-			BranchName: branchName,
+		// Get session description
+		description := getDescriptionForCheckpoint(repo, checkpointID)
+
+		// Extract first line of commit message for display
+		commitMsg := c.Message
+		if idx := strings.Index(commitMsg, "\n"); idx != -1 {
+			commitMsg = commitMsg[:idx]
+		}
+
+		checkpoints = append(checkpoints, CheckpointInfo{
+			CheckpointID: checkpointID,
+			SessionID:    cpInfo.SessionID,
+			CommitHash:   c.Hash.String()[:7],
+			CommitMsg:    commitMsg,
+			CreatedAt:    cpInfo.CreatedAt,
+			StepsCount:   cpInfo.GetStepsCount(),
+			Description:  description,
+			IsTask:       cpInfo.IsTask,
+			ToolUseID:    cpInfo.ToolUseID,
+			IsActive:     isSessionActive(cpInfo.SessionID),
 		})
 
 		return nil
 	})
 
-	return sessions
+	return checkpoints
 }
 
-// findBranchesForCheckpoint finds branches that contain a commit with this checkpoint ID.
-// Only searches commits unique to each branch (not reachable from main).
-func findBranchesForCheckpoint(repo *git.Repository, checkpointID string, mainBranch string) []string {
-	var branches []string
+// findBranchesAndCommitsForCheckpoint finds branches that contain a commit with this checkpoint ID.
+// Returns a map of branch name -> commit info. Only searches commits unique to each branch (not reachable from main).
+func findBranchesAndCommitsForCheckpoint(repo *git.Repository, checkpointID string, mainBranch string) map[string]commitInfo {
+	result := make(map[string]commitInfo)
 
 	// Get all local branches
 	refs, err := repo.References()
 	if err != nil {
-		return branches
+		return result
 	}
 
 	_ = refs.ForEach(func(ref *plumbing.Reference) error { //nolint:errcheck // Best-effort search
@@ -408,7 +420,6 @@ func findBranchesForCheckpoint(repo *git.Repository, checkpointID string, mainBr
 		}
 
 		count := 0
-		found := false
 		_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best-effort search, errors are intentional stops
 			count++
 			if count > maxCommitsToScanPerBranch {
@@ -422,32 +433,37 @@ func findBranchesForCheckpoint(repo *git.Repository, checkpointID string, mainBr
 
 			cpID, hasTrailer := paths.ParseCheckpointTrailer(c.Message)
 			if hasTrailer && cpID == checkpointID {
-				found = true
+				// Extract first line of commit message
+				commitMsg := c.Message
+				if idx := strings.Index(commitMsg, "\n"); idx != -1 {
+					commitMsg = commitMsg[:idx]
+				}
+				result[branchName] = commitInfo{
+					Hash:    c.Hash.String()[:7],
+					Message: commitMsg,
+				}
 				return errors.New("found")
 			}
 			return nil
 		})
 
-		if found {
-			branches = append(branches, branchName)
-		}
 		return nil
 	})
 
-	return branches
+	return result
 }
 
-// getMostRecentActivity returns the most recent timestamp from a branch's sessions.
-func getMostRecentActivity(branch BranchInfo) time.Time {
+// getDescriptionForCheckpoint reads the description for a checkpoint.
+func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string) string {
+	return strategy.GetDescriptionForCheckpoint(repo, checkpointID)
+}
+
+// getMostRecentCheckpointActivity returns the most recent timestamp from a branch's checkpoints.
+func getMostRecentCheckpointActivity(branch BranchInfo) time.Time {
 	var mostRecent time.Time
-	for _, sess := range branch.Sessions {
-		if sess.Session.StartTime.After(mostRecent) {
-			mostRecent = sess.Session.StartTime
-		}
-		for _, cp := range sess.Session.Checkpoints {
-			if cp.Timestamp.After(mostRecent) {
-				mostRecent = cp.Timestamp
-			}
+	for _, cp := range branch.Checkpoints {
+		if cp.CreatedAt.After(mostRecent) {
+			mostRecent = cp.CreatedAt
 		}
 	}
 	return mostRecent

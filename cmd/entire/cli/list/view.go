@@ -325,12 +325,12 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	// Title
-	b.WriteString(titleStyle.Render("Entire Sessions"))
+	b.WriteString(titleStyle.Render("Entire Checkpoints"))
 	b.WriteString("\n\n")
 
 	// Tree view
 	if len(m.flatList) == 0 {
-		b.WriteString("No sessions found.\n")
+		b.WriteString("No checkpoints found.\n")
 	} else {
 		for i, node := range m.flatList {
 			line := m.renderNode(node, i == m.cursor)
@@ -432,21 +432,51 @@ func (m Model) formatNodeLabel(node *Node) string {
 			label += " (merged)"
 		}
 		if len(node.Children) > 0 {
-			label += fmt.Sprintf("  [%d sessions]", len(node.Children))
+			label += fmt.Sprintf("  [%d checkpoints]", len(node.Children))
+		}
+		return label
+
+	case NodeTypeCheckpoint:
+		// Show commit hash and message (this is the main item now)
+		var parts []string
+
+		// Commit hash
+		if node.CommitHash != "" {
+			parts = append(parts, node.CommitHash)
+		}
+
+		// Commit message (truncated)
+		if node.CommitMsg != "" {
+			msg := node.CommitMsg
+			if len(msg) > 40 {
+				msg = msg[:37] + "..."
+			}
+			parts = append(parts, msg)
+		}
+
+		// Steps count
+		if node.StepsCount > 0 {
+			parts = append(parts, fmt.Sprintf("(%d steps)", node.StepsCount))
+		}
+
+		label := strings.Join(parts, " ")
+
+		if node.IsActive {
+			label += " <active>"
+		}
+
+		if node.IsTaskCheckpoint {
+			label += " [task]"
 		}
 		return label
 
 	case NodeTypeSession:
-		// Truncate session ID for display
+		// Session shown under checkpoint - display session ID and description
 		displayID := node.SessionID
 		if len(displayID) > 19 {
 			displayID = displayID[:19]
 		}
-		label := displayID
-
-		if len(node.Children) > 0 {
-			label += fmt.Sprintf(" (%d checkpoints)", len(node.Children))
-		}
+		label := "Session: " + displayID
 
 		if node.Description != "" && node.Description != "No description" {
 			desc := node.Description
@@ -456,39 +486,6 @@ func (m Model) formatNodeLabel(node *Node) string {
 			label += " - " + desc
 		}
 
-		if node.IsActive {
-			label += " <active>"
-		}
-		return label
-
-	case NodeTypeCheckpoint:
-		// Show checkpoint ID (truncated) and timestamp
-		cpID := node.CheckpointID
-		if len(cpID) > 8 {
-			cpID = cpID[:8]
-		}
-		label := cpID
-
-		if !node.Timestamp.IsZero() {
-			label += "  " + node.Timestamp.Format("15:04")
-		}
-
-		// Add message preview
-		if node.Message != "" {
-			msg := node.Message
-			// Strip "Checkpoint: " prefix if present
-			msg = strings.TrimPrefix(msg, "Checkpoint: ")
-			if len(msg) > 30 {
-				msg = msg[:27] + "..."
-			}
-			if msg != cpID && msg != node.CheckpointID {
-				label += "  " + msg
-			}
-		}
-
-		if node.IsTaskCheckpoint {
-			label += " [task]"
-		}
 		return label
 	}
 
@@ -529,7 +526,7 @@ func (m Model) renderFullHelp() string {
   left/h         Collapse / go to parent
   right/l        Expand
   enter          Toggle expand / perform action
-  o              Open session (restore logs only)
+  o              Open session logs
   r              Resume (switch branch + restore)
   w              Rewind to checkpoint
   c              Collapse all
@@ -538,9 +535,9 @@ func (m Model) renderFullHelp() string {
   q/esc          Quit
 
 Actions:
-  Open    - Copy session logs, show resume command (doesn't change branch)
+  Open    - Copy session logs, show resume command
   Resume  - Switch to branch and restore session
-  Rewind  - Restore code state to checkpoint (may detach HEAD)`)
+  Rewind  - Restore code state to checkpoint`)
 }
 
 // GetResult returns the action result after the model finishes.
