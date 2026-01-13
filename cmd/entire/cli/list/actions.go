@@ -266,12 +266,13 @@ func PerformRewind(node *Node) *ActionResult {
 // restoreSessionLogs copies session logs from entire/sessions to the agent's session directory.
 func restoreSessionLogs(ag agent.Agent, sessionID, checkpointID string) error {
 	// Get session directory for this agent
-	cwd, err := os.Getwd()
+	// Use repo root since session directories are relative to the git repository
+	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
+		return fmt.Errorf("failed to get repository root: %w", err)
 	}
 
-	sessionDir, err := ag.GetSessionDir(cwd)
+	sessionDir, err := ag.GetSessionDir(repoRoot)
 	if err != nil {
 		return fmt.Errorf("failed to determine session directory: %w", err)
 	}
@@ -301,7 +302,7 @@ func restoreSessionLogs(ag agent.Agent, sessionID, checkpointID string) error {
 	agentSession := &agent.AgentSession{
 		SessionID:  agentSessionID,
 		AgentName:  ag.Name(),
-		RepoPath:   cwd,
+		RepoPath:   repoRoot,
 		SessionRef: sessionLogPath,
 		NativeData: logContent,
 	}

@@ -804,11 +804,11 @@ func TestAddCheckpointTrailerWithComment_NoPrompt(t *testing.T) {
 
 func TestCheckpointInfo_JSONRoundTrip(t *testing.T) {
 	original := CheckpointInfo{
-		CheckpointID:     "a1b2c3d4e5f6",
-		SessionID:        "session-123",
-		CreatedAt:        time.Date(2025, 12, 2, 10, 0, 0, 0, time.UTC),
-		CheckpointsCount: 5,
-		FilesTouched:     []string{"file1.go", "file2.go"},
+		CheckpointID: "a1b2c3d4e5f6",
+		SessionID:    "session-123",
+		CreatedAt:    time.Date(2025, 12, 2, 10, 0, 0, 0, time.UTC),
+		StepsCount:   5,
+		FilesTouched: []string{"file1.go", "file2.go"},
 	}
 
 	data, err := json.Marshal(original)
@@ -826,6 +826,36 @@ func TestCheckpointInfo_JSONRoundTrip(t *testing.T) {
 	}
 	if loaded.SessionID != original.SessionID {
 		t.Errorf("SessionID = %q, want %q", loaded.SessionID, original.SessionID)
+	}
+	if loaded.GetStepsCount() != original.StepsCount {
+		t.Errorf("GetStepsCount() = %d, want %d", loaded.GetStepsCount(), original.StepsCount)
+	}
+}
+
+func TestCheckpointInfo_BackwardsCompat(t *testing.T) {
+	// Test reading old JSON with checkpoints_count
+	oldJSON := `{"checkpoint_id":"abc123","session_id":"sess-1","checkpoints_count":7}`
+
+	var loaded CheckpointInfo
+	if err := json.Unmarshal([]byte(oldJSON), &loaded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	// GetStepsCount should fall back to checkpoints_count
+	if loaded.GetStepsCount() != 7 {
+		t.Errorf("GetStepsCount() = %d, want 7 (from checkpoints_count)", loaded.GetStepsCount())
+	}
+
+	// New JSON should use steps_count
+	newJSON := `{"checkpoint_id":"abc123","session_id":"sess-1","steps_count":10}`
+
+	var loaded2 CheckpointInfo
+	if err := json.Unmarshal([]byte(newJSON), &loaded2); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if loaded2.GetStepsCount() != 10 {
+		t.Errorf("GetStepsCount() = %d, want 10 (from steps_count)", loaded2.GetStepsCount())
 	}
 }
 

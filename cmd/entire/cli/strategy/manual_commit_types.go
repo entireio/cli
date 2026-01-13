@@ -28,23 +28,33 @@ type SessionState struct {
 // CheckpointInfo represents checkpoint metadata stored on the sessions branch.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
 type CheckpointInfo struct {
-	CheckpointID     string    `json:"checkpoint_id"` // 12-hex-char from Entire-Checkpoint trailer, used as directory path
-	SessionID        string    `json:"session_id"`
-	CreatedAt        time.Time `json:"created_at"`
-	CheckpointsCount int       `json:"checkpoints_count"`
-	FilesTouched     []string  `json:"files_touched"`
-	Agent            string    `json:"agent,omitempty"` // Human-readable agent name (e.g., "Claude Code")
-	IsTask           bool      `json:"is_task,omitempty"`
-	ToolUseID        string    `json:"tool_use_id,omitempty"`
-	SessionCount     int       `json:"session_count,omitempty"` // Number of sessions (1 if omitted)
-	SessionIDs       []string  `json:"session_ids,omitempty"`   // All session IDs in this checkpoint
+	CheckpointID string    `json:"checkpoint_id"` // 12-hex-char from Entire-Checkpoint trailer, used as directory path
+	SessionID    string    `json:"session_id"`
+	CreatedAt    time.Time `json:"created_at"`
+	StepsCount   int       `json:"steps_count,omitempty"` // Number of steps (prompt->response cycles) that led to this checkpoint
+	FilesTouched []string  `json:"files_touched"`
+	Agent        string    `json:"agent,omitempty"` // Human-readable agent name (e.g., "Claude Code")
+	IsTask       bool      `json:"is_task,omitempty"`
+	ToolUseID    string    `json:"tool_use_id,omitempty"`
+	SessionCount int       `json:"session_count,omitempty"` // Number of sessions (1 if omitted)
+	SessionIDs   []string  `json:"session_ids,omitempty"`   // All session IDs in this checkpoint
+	// Deprecated: kept for backwards compatibility when reading old metadata
+	CheckpointsCount int `json:"checkpoints_count,omitempty"`
+}
+
+// GetStepsCount returns steps count, falling back to CheckpointsCount for backwards compat.
+func (c *CheckpointInfo) GetStepsCount() int {
+	if c.StepsCount > 0 {
+		return c.StepsCount
+	}
+	return c.CheckpointsCount
 }
 
 // CondenseResult contains the result of a session condensation operation.
 type CondenseResult struct {
 	CheckpointID         string // 12-hex-char from Entire-Checkpoint trailer, used as directory path
 	SessionID            string
-	CheckpointsCount     int
+	StepsCount           int
 	FilesTouched         []string
 	TotalTranscriptLines int // Total lines in transcript after this condensation
 }

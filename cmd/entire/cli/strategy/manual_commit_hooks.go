@@ -429,15 +429,15 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		if len(shortID) > 8 {
 			shortID = shortID[:8]
 		}
-		fmt.Fprintf(os.Stderr, "[entire] Condensed session %s: %s (%d checkpoints)\n",
-			shortID, result.CheckpointID, result.CheckpointsCount)
+		fmt.Fprintf(os.Stderr, "[entire] Condensed session %s: %s (%d steps)\n",
+			shortID, result.CheckpointID, result.StepsCount)
 
 		// Log condensation
 		logCtx := logging.WithComponent(context.Background(), "checkpoint")
 		logging.Info(logCtx, "session condensed",
 			slog.String("strategy", "manual-commit"),
 			slog.String("checkpoint_id", result.CheckpointID),
-			slog.Int("checkpoints_condensed", result.CheckpointsCount),
+			slog.Int("steps_condensed", result.StepsCount),
 			slog.Int("transcript_lines", result.TotalTranscriptLines),
 		)
 	}

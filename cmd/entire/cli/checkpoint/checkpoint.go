@@ -173,8 +173,8 @@ type WriteCommittedOptions struct {
 	// FilesTouched are files modified during the session
 	FilesTouched []string
 
-	// CheckpointsCount is the number of checkpoints in this session
-	CheckpointsCount int
+	// StepsCount is the number of steps (prompt->response cycles) that led to this checkpoint
+	StepsCount int
 
 	// EphemeralBranch is the shadow branch name (for manual-commit strategy)
 	EphemeralBranch string
@@ -260,8 +260,8 @@ type CommittedInfo struct {
 	// CreatedAt is when the checkpoint was created
 	CreatedAt time.Time
 
-	// CheckpointsCount is the total number of checkpoints across all sessions
-	CheckpointsCount int
+	// StepsCount is the total number of steps that led to this checkpoint (across all contributing sessions)
+	StepsCount int
 
 	// FilesTouched are files modified during all sessions
 	FilesTouched []string
@@ -282,12 +282,19 @@ type CommittedInfo struct {
 
 // CommittedMetadata contains the metadata stored in metadata.json for each checkpoint.
 type CommittedMetadata struct {
-	CheckpointID     string    `json:"checkpoint_id"`
-	SessionID        string    `json:"session_id"`
-	Strategy         string    `json:"strategy"`
-	CreatedAt        time.Time `json:"created_at"`
-	CheckpointsCount int       `json:"checkpoints_count"`
-	FilesTouched     []string  `json:"files_touched"`
+	CheckpointID string    `json:"checkpoint_id"`
+	SessionID    string    `json:"session_id"`
+	Strategy     string    `json:"strategy"`
+	CreatedAt    time.Time `json:"created_at"`
+	FilesTouched []string  `json:"files_touched"`
+
+	// StepsCount is the number of steps (prompt->response cycles) that led to this checkpoint.
+	// Always written as "steps_count" in new metadata.
+	StepsCount int `json:"steps_count,omitempty"`
+
+	// CheckpointsCount is deprecated, kept for backwards compatibility when reading old metadata.
+	// New metadata always uses StepsCount instead.
+	CheckpointsCount int `json:"checkpoints_count,omitempty"`
 
 	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
 	Agent string `json:"agent,omitempty"`
@@ -299,6 +306,14 @@ type CommittedMetadata struct {
 	// Task checkpoint fields (only populated for task checkpoints)
 	IsTask    bool   `json:"is_task,omitempty"`
 	ToolUseID string `json:"tool_use_id,omitempty"`
+}
+
+// GetStepsCount returns the steps count, falling back to CheckpointsCount for backwards compatibility.
+func (m *CommittedMetadata) GetStepsCount() int {
+	if m.StepsCount > 0 {
+		return m.StepsCount
+	}
+	return m.CheckpointsCount
 }
 
 // Info provides summary information for listing checkpoints.

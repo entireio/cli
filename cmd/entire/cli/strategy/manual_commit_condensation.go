@@ -31,16 +31,16 @@ func (s *ManualCommitStrategy) listCheckpoints() ([]CheckpointInfo, error) {
 	result := make([]CheckpointInfo, 0, len(committed))
 	for _, c := range committed {
 		result = append(result, CheckpointInfo{
-			CheckpointID:     c.CheckpointID,
-			SessionID:        c.SessionID,
-			CreatedAt:        c.CreatedAt,
-			CheckpointsCount: c.CheckpointsCount,
-			FilesTouched:     c.FilesTouched,
-			Agent:            c.Agent,
-			IsTask:           c.IsTask,
-			ToolUseID:        c.ToolUseID,
-			SessionCount:     c.SessionCount,
-			SessionIDs:       c.SessionIDs,
+			CheckpointID: c.CheckpointID,
+			SessionID:    c.SessionID,
+			CreatedAt:    c.CreatedAt,
+			StepsCount:   c.StepsCount,
+			FilesTouched: c.FilesTouched,
+			Agent:        c.Agent,
+			IsTask:       c.IsTask,
+			ToolUseID:    c.ToolUseID,
+			SessionCount: c.SessionCount,
+			SessionIDs:   c.SessionIDs,
 		})
 	}
 
@@ -121,18 +121,18 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 
 	// Write checkpoint metadata using the checkpoint store
 	if err := store.WriteCommitted(context.Background(), cpkg.WriteCommittedOptions{
-		CheckpointID:     checkpointID,
-		SessionID:        state.SessionID,
-		Strategy:         StrategyNameManualCommit,
-		Transcript:       sessionData.Transcript,
-		Prompts:          sessionData.Prompts,
-		Context:          sessionData.Context,
-		FilesTouched:     sessionData.FilesTouched,
-		CheckpointsCount: state.CheckpointCount,
-		EphemeralBranch:  shadowBranchName,
-		AuthorName:       authorName,
-		AuthorEmail:      authorEmail,
-		Agent:            state.AgentType,
+		CheckpointID:    checkpointID,
+		SessionID:       state.SessionID,
+		Strategy:        StrategyNameManualCommit,
+		Transcript:      sessionData.Transcript,
+		Prompts:         sessionData.Prompts,
+		Context:         sessionData.Context,
+		FilesTouched:    sessionData.FilesTouched,
+		StepsCount:      state.CheckpointCount,
+		EphemeralBranch: shadowBranchName,
+		AuthorName:      authorName,
+		AuthorEmail:     authorEmail,
+		Agent:           state.AgentType,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
 	}
@@ -140,7 +140,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 	return &CondenseResult{
 		CheckpointID:         checkpointID,
 		SessionID:            state.SessionID,
-		CheckpointsCount:     state.CheckpointCount,
+		StepsCount:           state.CheckpointCount,
 		FilesTouched:         sessionData.FilesTouched,
 		TotalTranscriptLines: sessionData.FullTranscriptLines,
 	}, nil

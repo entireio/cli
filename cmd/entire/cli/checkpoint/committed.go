@@ -303,17 +303,17 @@ func (s *GitStore) writeTranscript(opts WriteCommittedOptions, basePath string, 
 // If existingMetadata is provided, merges session info from the previous session(s).
 func (s *GitStore) writeMetadataJSON(opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry, existingMetadata *CommittedMetadata) error {
 	metadata := CommittedMetadata{
-		CheckpointID:     opts.CheckpointID,
-		SessionID:        opts.SessionID,
-		Strategy:         opts.Strategy,
-		CreatedAt:        time.Now(),
-		CheckpointsCount: opts.CheckpointsCount,
-		FilesTouched:     opts.FilesTouched,
-		Agent:            opts.Agent,
-		IsTask:           opts.IsTask,
-		ToolUseID:        opts.ToolUseID,
-		SessionCount:     1,
-		SessionIDs:       []string{opts.SessionID},
+		CheckpointID: opts.CheckpointID,
+		SessionID:    opts.SessionID,
+		Strategy:     opts.Strategy,
+		CreatedAt:    time.Now(),
+		StepsCount:   opts.StepsCount,
+		FilesTouched: opts.FilesTouched,
+		Agent:        opts.Agent,
+		IsTask:       opts.IsTask,
+		ToolUseID:    opts.ToolUseID,
+		SessionCount: 1,
+		SessionIDs:   []string{opts.SessionID},
 	}
 
 	// Merge with existing metadata if present (multi-session checkpoint)
@@ -337,8 +337,8 @@ func (s *GitStore) writeMetadataJSON(opts WriteCommittedOptions, basePath string
 		// Merge files touched (deduplicated)
 		metadata.FilesTouched = mergeFilesTouched(existingMetadata.FilesTouched, opts.FilesTouched)
 
-		// Sum checkpoint counts
-		metadata.CheckpointsCount = existingMetadata.CheckpointsCount + opts.CheckpointsCount
+		// Sum steps counts (GetStepsCount handles backwards compat with old checkpoints_count)
+		metadata.StepsCount = existingMetadata.GetStepsCount() + opts.StepsCount
 	}
 
 	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
@@ -652,7 +652,7 @@ func (s *GitStore) ListCommitted(ctx context.Context) ([]CommittedInfo, error) {
 					if err := json.Unmarshal([]byte(content), &metadata); err == nil {
 						info.SessionID = metadata.SessionID
 						info.CreatedAt = metadata.CreatedAt
-						info.CheckpointsCount = metadata.CheckpointsCount
+						info.StepsCount = metadata.GetStepsCount() // Backwards compat with checkpoints_count
 						info.FilesTouched = metadata.FilesTouched
 						info.Agent = metadata.Agent
 						info.IsTask = metadata.IsTask

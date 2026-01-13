@@ -232,6 +232,7 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(_ *git.Repository, c
 		AuthorName:   ctx.AuthorName,
 		AuthorEmail:  ctx.AuthorEmail,
 		Agent:        ctx.AgentType,
+		StepsCount:   1, // Each auto-commit checkpoint represents exactly one step
 	})
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to write committed checkpoint: %w", err)
@@ -742,6 +743,7 @@ func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(_ *git.Repositor
 		AuthorName:             ctx.AuthorName,
 		AuthorEmail:            ctx.AuthorEmail,
 		Agent:                  ctx.AgentType,
+		StepsCount:             1, // Each auto-commit checkpoint represents exactly one step
 	})
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to write task checkpoint: %w", err)
