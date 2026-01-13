@@ -156,35 +156,65 @@ Stored in git common dir (shared across worktrees). Tracks active session info.
 
 ### Temporary Checkpoints
 
-Branch: `entire/<base-commit-hash>`
+Branch: `entire/<base-commit-hash[:7]>`
 
-Contains full worktree snapshot plus metadata overlay:
+Contains full worktree snapshot plus metadata overlay. **Multiple concurrent sessions** can share the same shadow branch - their checkpoints interleave:
 
 ```
 <worktree files...>
-.entire/metadata/<session-id>/
-├── full.jsonl           # Session transcript
+.entire/metadata/<session-id-1>/
+├── full.jsonl           # Session 1 transcript
 ├── prompt.txt           # User prompts
 ├── context.md           # Generated context
-└── subsessions/<id>/    # Nested session data
+└── tasks/<tool-use-id>/ # Task checkpoints
+.entire/metadata/<session-id-2>/
+├── full.jsonl           # Session 2 transcript (concurrent)
+├── ...
 ```
 
 Tied to a base commit. Condensed to committed on user commit.
+
+**Shadow branch lifecycle:**
+- Created on first checkpoint for a base commit
+- Migrated automatically if base commit changes (stash → pull → apply scenario)
+- Deleted after condensation to `entire/sessions`
+- Reset if orphaned (no session state file exists)
 
 ### Committed Checkpoints
 
 Branch: `entire/sessions`
 
-Metadata only, sharded by checkpoint ID:
+Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkpoint**:
 
 ```
 <id[:2]>/<id[2:]>/
-├── metadata.json        # Checkpoint info (includes commit reference)
-├── full.jsonl           # Session transcript
+├── metadata.json        # Checkpoint info (see below)
+├── full.jsonl           # Current/latest session transcript
 ├── prompt.txt
 ├── context.md
-└── subsessions/<id>/    # Nested session data
+├── tasks/<tool-use-id>/ # Task checkpoints
+└── 1/                   # Archived session (if multiple)
+    ├── metadata.json
+    ├── full.jsonl
+    └── ...
 ```
+
+**Multi-session metadata.json:**
+```json
+{
+  "checkpoint_id": "abc123def456",
+  "session_id": "2026-01-13-uuid",
+  "session_ids": ["...", "..."],  // All sessions in this checkpoint
+  "session_count": 2,
+  "strategy": "manual-commit",
+  "files_touched": ["file1.txt"]  // Merged from all sessions
+}
+```
+
+When condensing multiple concurrent sessions:
+- Latest session files at root level
+- Previous sessions archived to numbered subfolders (`1/`, `2/`, etc.)
+- `session_ids` and `files_touched` are merged
 
 ### Package Structure
 
@@ -214,6 +244,32 @@ Strategies determine checkpoint timing and type:
 ## Rewind
 
 Rewind is limited to top-level sessions for simplicity. Subsession rewind out of scope for now.
+
+Each `RewindPoint` includes `SessionID` and `SessionPrompt` to help identify which checkpoint belongs to which session when multiple sessions are interleaved.
+
+## Concurrent Sessions
+
+Multiple AI sessions can run concurrently on the same base commit:
+
+1. **Warning on start** - When a second session starts while another has uncommitted checkpoints, a warning is shown
+2. **Both proceed** - User can continue; checkpoints interleave on the same shadow branch
+3. **Identification** - Each checkpoint is tagged with its session ID; rewind UI shows session prompt
+4. **Condensation** - On commit, all sessions are condensed together with archived subfolders
+
+### Conflict Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Concurrent sessions (same worktree) | Warning shown, both proceed |
+| Orphaned shadow branch (no state file) | Branch reset, new session proceeds |
+| Cross-worktree conflict (state file exists) | `SessionIDConflictError` returned |
+
+### Shadow Branch Migration
+
+If user does stash → pull → apply (HEAD changes without commit):
+- Detection: base commit changed AND old shadow branch still exists
+- Action: branch renamed from `entire/<old>` to `entire/<new>`
+- Result: session continues with checkpoints preserved
 
 ---
 

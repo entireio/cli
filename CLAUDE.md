@@ -168,11 +168,14 @@ Legacy names `shadow` and `dual` are only recognized when reading settings or ch
 
 **Manual-Commit Strategy** (`manual_commit*.go`) - Default
 - **Does not modify** the active branch - no commits created on the working branch
-- Creates shadow branch `entire/<HEAD-commit-hash>` per base commit for checkpoints
+- Creates shadow branch `entire/<HEAD-commit-hash[:7]>` per base commit for checkpoints
+- **Supports multiple concurrent sessions** - checkpoints from different sessions interleave on the same shadow branch
 - Session logs are condensed to permanent `entire/sessions` branch on user commits
 - Builds git trees in-memory using go-git plumbing APIs
 - Rewind restores files from shadow branch commit tree (does not use `git reset`)
 - Tracks session state in `.git/entire-sessions/` (shared across worktrees)
+- **Shadow branch migration** - if user does stash/pull/rebase (HEAD changes without commit), shadow branch is automatically moved to new base commit
+- **Orphaned branch cleanup** - if a shadow branch exists without a corresponding session state file, it is automatically reset when a new session starts
 - PrePush hook can push `entire/sessions` branch alongside user pushes
 - `AllowsMainBranch() = true` - safe to use on main/master since it never modifies commit history
 
@@ -231,15 +234,38 @@ Legacy names `shadow` and `dual` are only recognized when reading settings or ch
 **Both Strategies** - Metadata branch (`entire/sessions`) - sharded checkpoint format:
 ```
 <checkpoint-id[:2]>/<checkpoint-id[2:]>/
-├── metadata.json            # Checkpoint info (checkpoint_id, session_id, strategy, created_at)
-├── full.jsonl               # Session transcript
+├── metadata.json            # Checkpoint info (see below)
+├── full.jsonl               # Current/latest session transcript
 ├── prompt.txt               # User prompts
 ├── context.md               # Generated context
 ├── content_hash.txt         # SHA256 of transcript (shadow only)
-└── tasks/<tool-use-id>/     # Task checkpoints (if applicable)
-    ├── checkpoint.json      # UUID mapping
-    └── agent-<id>.jsonl     # Subagent transcript
+├── tasks/<tool-use-id>/     # Task checkpoints (if applicable)
+│   ├── checkpoint.json      # UUID mapping
+│   └── agent-<id>.jsonl     # Subagent transcript
+└── 1/                       # Archived session (if multiple sessions)
+    ├── metadata.json        # Archived session metadata
+    ├── full.jsonl           # Archived session transcript
+    ├── prompt.txt
+    └── ...
 ```
+
+**Multi-session metadata.json format:**
+```json
+{
+  "checkpoint_id": "abc123def456",
+  "session_id": "2026-01-13-uuid",      // Current/latest session
+  "session_ids": ["2026-01-13-uuid1", "2026-01-13-uuid2"],  // All sessions
+  "session_count": 2,                    // Number of sessions in this checkpoint
+  "strategy": "manual-commit",
+  "created_at": "2026-01-13T12:00:00Z",
+  "files_touched": ["file1.txt", "file2.txt"]  // Merged from all sessions
+}
+```
+
+When multiple sessions are condensed to the same checkpoint (same base commit):
+- Latest session files go at the root level
+- Previous sessions are archived to numbered subfolders (`1/`, `2/`, etc.)
+- `session_ids` array tracks all sessions, `session_count` increments
 
 **Session State** (filesystem, `.git/entire-sessions/`):
 ```
@@ -263,6 +289,27 @@ Legacy names `shadow` and `dual` are only recognized when reading settings or ch
 - `Commit: <short-sha>` - Code commit this checkpoint relates to (manual-commit strategy)
 
 **Note:** Both strategies keep active branch history **clean**. Manual-commit strategy never creates commits on the active branch. Auto-commit strategy creates commits with only the `Entire-Checkpoint` trailer. All detailed metadata is stored on the `entire/sessions` orphan branch or shadow branches.
+
+#### Multi-Session Behavior
+
+**Concurrent Sessions:**
+- When a second session starts while another has uncommitted checkpoints, a warning is shown
+- Both sessions can proceed - their checkpoints interleave on the same shadow branch
+- Each session's `RewindPoint` includes `SessionID` and `SessionPrompt` to help identify which checkpoint belongs to which session
+- On commit, all sessions are condensed together with archived sessions in numbered subfolders
+
+**Orphaned Shadow Branches:**
+- A shadow branch is "orphaned" if it exists but has no corresponding session state file
+- This can happen if the state file is manually deleted or lost
+- When a new session starts with an orphaned branch, the branch is automatically reset
+- If the existing session DOES have a state file (e.g., cross-worktree conflict), a `SessionIDConflictError` is returned
+
+**Shadow Branch Migration (Pull/Rebase):**
+- If user does stash → pull → apply (or rebase), HEAD changes but work isn't committed
+- The shadow branch would be orphaned at the old commit
+- Detection: base commit changed AND old shadow branch still exists (would be deleted if user committed)
+- Action: shadow branch is renamed from `entire/<old-hash>` to `entire/<new-hash>`
+- Session continues seamlessly with checkpoints preserved
 
 #### When Modifying Strategies
 - All strategies must implement the full `Strategy` interface
