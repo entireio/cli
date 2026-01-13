@@ -58,15 +58,14 @@ type BranchInfo struct {
 // CheckpointInfo contains information about a checkpoint on a branch.
 type CheckpointInfo struct {
 	CheckpointID string
-	SessionID    string    // Session that created this checkpoint
 	CommitHash   string    // Commit with Entire-Checkpoint trailer
 	CommitMsg    string    // Commit message (for display)
 	CreatedAt    time.Time
 	StepsCount   int       // Steps that led to this checkpoint
-	Description  string    // Session description at this point
 	IsTask       bool
 	ToolUseID    string
-	IsActive     bool      // Is the session currently active
+	// Sessions associated with this checkpoint (can be multiple from concurrent sessions)
+	Sessions []SessionInfo
 }
 
 // SessionInfo contains session details shown under a checkpoint.

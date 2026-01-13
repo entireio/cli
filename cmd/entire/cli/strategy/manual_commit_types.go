@@ -29,7 +29,9 @@ type SessionState struct {
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
 type CheckpointInfo struct {
 	CheckpointID string    `json:"checkpoint_id"` // 12-hex-char from Entire-Checkpoint trailer, used as directory path
-	SessionID    string    `json:"session_id"`
+	SessionID    string    `json:"session_id"`    // Current/latest session ID
+	SessionIDs   []string  `json:"session_ids"`   // All session IDs (when multiple sessions were condensed together)
+	SessionCount int       `json:"session_count"` // Number of sessions in this checkpoint
 	CreatedAt    time.Time `json:"created_at"`
 	StepsCount   int       `json:"steps_count,omitempty"` // Number of steps (prompt->response cycles) that led to this checkpoint
 	FilesTouched []string  `json:"files_touched"`
@@ -48,6 +50,28 @@ func (c *CheckpointInfo) GetStepsCount() int {
 		return c.StepsCount
 	}
 	return c.CheckpointsCount
+}
+
+// GetSessionIDs returns all session IDs, falling back to single SessionID for backwards compat.
+func (c *CheckpointInfo) GetSessionIDs() []string {
+	if len(c.SessionIDs) > 0 {
+		return c.SessionIDs
+	}
+	if c.SessionID != "" {
+		return []string{c.SessionID}
+	}
+	return nil
+}
+
+// GetSessionCount returns the number of sessions in this checkpoint.
+func (c *CheckpointInfo) GetSessionCount() int {
+	if c.SessionCount > 0 {
+		return c.SessionCount
+	}
+	if c.SessionID != "" {
+		return 1
+	}
+	return 0
 }
 
 // CondenseResult contains the result of a session condensation operation.

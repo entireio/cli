@@ -63,6 +63,11 @@ func FetchTreeData() (*TreeData, error) {
 		if !hasState {
 			return false
 		}
+		// If session was condensed but has no new checkpoints, it's not actively running
+		// (just resumable). Only show as active if it's the current session.
+		if state.CondensedTranscriptLines > 0 && state.CheckpointCount == 0 {
+			return false
+		}
 		// Only consider active if base commit is in recent history
 		return isCommitInRecentHistory(repo, state.BaseCommit, currentBranch, maxRecentCommits)
 	}
@@ -98,14 +103,14 @@ func FetchTreeData() (*TreeData, error) {
 
 	// Scan commits on current branch for checkpoint trailers
 	if currentBranch != "" {
-		foundCheckpoints := findCheckpointsOnBranch(repo, currentBranch, checkpointInfoMap, mainBranch, isSessionActive)
+		foundCheckpoints := findCheckpointsOnBranch(repo, currentBranch, checkpointInfoMap, mainBranch, isSessionActive, activeSessionStates)
 		branchCheckpoints[currentBranch] = foundCheckpoints
 	}
 
 	// Also scan main branch if it's not the current branch
 	if mainBranch != "" && mainBranch != currentBranch {
 		// For main branch, pass empty string as mainBranch param to scan all commits
-		foundCheckpoints := findCheckpointsOnBranch(repo, mainBranch, checkpointInfoMap, "", isSessionActive)
+		foundCheckpoints := findCheckpointsOnBranch(repo, mainBranch, checkpointInfoMap, "", isSessionActive, activeSessionStates)
 		branchCheckpoints[mainBranch] = foundCheckpoints
 	}
 
@@ -126,20 +131,18 @@ func FetchTreeData() (*TreeData, error) {
 			}
 
 			if !alreadyAdded {
-				// Get session description
-				description := getDescriptionForCheckpoint(repo, cp.CheckpointID)
+				// Build sessions list for this checkpoint
+				sessions := buildSessionsForCheckpoint(repo, cp, cp.CheckpointID, isSessionActive, activeSessionStates)
 
 				cpInfo := CheckpointInfo{
 					CheckpointID: cp.CheckpointID,
-					SessionID:    cp.SessionID,
 					CommitHash:   commitInfo.Hash,
 					CommitMsg:    commitInfo.Message,
 					CreatedAt:    cp.CreatedAt,
 					StepsCount:   cp.GetStepsCount(),
-					Description:  description,
 					IsTask:       cp.IsTask,
 					ToolUseID:    cp.ToolUseID,
-					IsActive:     isSessionActive(cp.SessionID),
+					Sessions:     sessions,
 				}
 				branchCheckpoints[branchName] = append(branchCheckpoints[branchName], cpInfo)
 			}
@@ -300,7 +303,7 @@ type commitInfo struct {
 }
 
 // findCheckpointsOnBranch finds checkpoints associated with commits on a branch.
-func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpointInfoMap map[string]strategy.CheckpointInfo, mainBranch string, isSessionActive func(string) bool) []CheckpointInfo {
+func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpointInfoMap map[string]strategy.CheckpointInfo, mainBranch string, isSessionActive func(string) bool, sessionStates map[string]*session.State) []CheckpointInfo {
 	refName := plumbing.NewBranchReferenceName(branchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
@@ -352,26 +355,24 @@ func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpoint
 			return nil
 		}
 
-		// Get session description
-		description := getDescriptionForCheckpoint(repo, checkpointID)
-
 		// Extract first line of commit message for display
 		commitMsg := c.Message
 		if idx := strings.Index(commitMsg, "\n"); idx != -1 {
 			commitMsg = commitMsg[:idx]
 		}
 
+		// Build sessions list for this checkpoint
+		sessions := buildSessionsForCheckpoint(repo, cpInfo, checkpointID, isSessionActive, sessionStates)
+
 		checkpoints = append(checkpoints, CheckpointInfo{
 			CheckpointID: checkpointID,
-			SessionID:    cpInfo.SessionID,
 			CommitHash:   c.Hash.String()[:7],
 			CommitMsg:    commitMsg,
 			CreatedAt:    cpInfo.CreatedAt,
 			StepsCount:   cpInfo.GetStepsCount(),
-			Description:  description,
 			IsTask:       cpInfo.IsTask,
 			ToolUseID:    cpInfo.ToolUseID,
-			IsActive:     isSessionActive(cpInfo.SessionID),
+			Sessions:     sessions,
 		})
 
 		return nil
@@ -456,6 +457,48 @@ func findBranchesAndCommitsForCheckpoint(repo *git.Repository, checkpointID stri
 // getDescriptionForCheckpoint reads the description for a checkpoint.
 func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string) string {
 	return strategy.GetDescriptionForCheckpoint(repo, checkpointID)
+}
+
+// buildSessionsForCheckpoint creates SessionInfo entries for all sessions in a checkpoint.
+// Sessions are sorted by start time with newest first.
+func buildSessionsForCheckpoint(repo *git.Repository, cpInfo strategy.CheckpointInfo, checkpointID string, isSessionActive func(string) bool, sessionStates map[string]*session.State) []SessionInfo {
+	sessionIDs := cpInfo.GetSessionIDs()
+
+	// Sort session IDs by start time (newest first)
+	sort.Slice(sessionIDs, func(i, j int) bool {
+		stateI, hasI := sessionStates[sessionIDs[i]]
+		stateJ, hasJ := sessionStates[sessionIDs[j]]
+		if !hasI && !hasJ {
+			return sessionIDs[i] > sessionIDs[j] // Fallback to reverse lexicographic
+		}
+		if !hasI {
+			return false // Sessions without state go last
+		}
+		if !hasJ {
+			return true // Sessions without state go last
+		}
+		return stateI.StartedAt.After(stateJ.StartedAt)
+	})
+
+	sessions := make([]SessionInfo, 0, len(sessionIDs))
+	for i, sessionID := range sessionIDs {
+		// For the first (newest) session, get description from root
+		// For older sessions, use a placeholder
+		var description string
+		if i == 0 {
+			description = getDescriptionForCheckpoint(repo, checkpointID)
+		} else {
+			description = "Archived session"
+		}
+
+		sessions = append(sessions, SessionInfo{
+			SessionID:   sessionID,
+			Description: description,
+			IsActive:    isSessionActive(sessionID),
+		})
+	}
+
+	return sessions
 }
 
 // getMostRecentCheckpointActivity returns the most recent timestamp from a branch's checkpoints.

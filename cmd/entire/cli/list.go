@@ -109,17 +109,21 @@ func runListJSON() error {
 		return fmt.Errorf("failed to fetch data: %w", err)
 	}
 
-	// Build JSON output with new hierarchy: Branch → Checkpoint → Session
-	type checkpointJSON struct {
-		ID          string `json:"id"`
-		CommitHash  string `json:"commit_hash,omitempty"`
-		CommitMsg   string `json:"commit_msg,omitempty"`
-		Timestamp   string `json:"timestamp,omitempty"`
-		StepsCount  int    `json:"steps_count,omitempty"`
+	// Build JSON output with new hierarchy: Branch → Checkpoint → Sessions
+	type sessionJSON struct {
 		SessionID   string `json:"session_id"`
 		Description string `json:"description,omitempty"`
-		IsTask      bool   `json:"is_task,omitempty"`
 		IsActive    bool   `json:"is_active,omitempty"`
+	}
+
+	type checkpointJSON struct {
+		ID         string        `json:"id"`
+		CommitHash string        `json:"commit_hash,omitempty"`
+		CommitMsg  string        `json:"commit_msg,omitempty"`
+		Timestamp  string        `json:"timestamp,omitempty"`
+		StepsCount int           `json:"steps_count,omitempty"`
+		IsTask     bool          `json:"is_task,omitempty"`
+		Sessions   []sessionJSON `json:"sessions"`
 	}
 
 	type branchJSON struct {
@@ -150,15 +154,23 @@ func runListJSON() error {
 		}
 
 		for _, cp := range branch.Checkpoints {
+			// Build sessions list
+			sessions := make([]sessionJSON, 0, len(cp.Sessions))
+			for _, sess := range cp.Sessions {
+				sessions = append(sessions, sessionJSON{
+					SessionID:   sess.SessionID,
+					Description: sess.Description,
+					IsActive:    sess.IsActive,
+				})
+			}
+
 			cj := checkpointJSON{
-				ID:          cp.CheckpointID,
-				CommitHash:  cp.CommitHash,
-				CommitMsg:   cp.CommitMsg,
-				StepsCount:  cp.StepsCount,
-				SessionID:   cp.SessionID,
-				Description: cp.Description,
-				IsTask:      cp.IsTask,
-				IsActive:    cp.IsActive,
+				ID:         cp.CheckpointID,
+				CommitHash: cp.CommitHash,
+				CommitMsg:  cp.CommitMsg,
+				StepsCount: cp.StepsCount,
+				IsTask:     cp.IsTask,
+				Sessions:   sessions,
 			}
 			if !cp.CreatedAt.IsZero() {
 				cj.Timestamp = cp.CreatedAt.Format("2006-01-02T15:04:05Z07:00")

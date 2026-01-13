@@ -22,6 +22,22 @@ func BuildTree(data *TreeData) []*Node {
 
 		// Add checkpoints as children of branch
 		for _, cp := range branch.Checkpoints {
+			// Determine if any session in this checkpoint is active
+			hasActiveSession := false
+			for _, sess := range cp.Sessions {
+				if sess.IsActive {
+					hasActiveSession = true
+					break
+				}
+			}
+
+			// Use first session's info for the checkpoint node (for backwards compat with actions)
+			var primarySessionID, primaryDescription string
+			if len(cp.Sessions) > 0 {
+				primarySessionID = cp.Sessions[0].SessionID
+				primaryDescription = cp.Sessions[0].Description
+			}
+
 			checkpointNode := &Node{
 				Type:             NodeTypeCheckpoint,
 				ID:               cp.CheckpointID,
@@ -33,25 +49,27 @@ func BuildTree(data *TreeData) []*Node {
 				StepsCount:       cp.StepsCount,
 				IsTaskCheckpoint: cp.IsTask,
 				ToolUseID:        cp.ToolUseID,
-				// Session info for this checkpoint
-				SessionID:   cp.SessionID,
-				Description: cp.Description,
-				IsActive:    cp.IsActive,
+				// Primary session info (for actions that need a session ID)
+				SessionID:   primarySessionID,
+				Description: primaryDescription,
+				IsActive:    hasActiveSession,
 				Parent:      branchNode,
 				Expanded:    false,
 			}
 
-			// Add session as child node for display purposes
-			sessionNode := &Node{
-				Type:        NodeTypeSession,
-				ID:          cp.SessionID + "-" + cp.CheckpointID, // Unique ID for this session instance
-				Label:       formatSessionLabel(cp),
-				SessionID:   cp.SessionID,
-				Description: cp.Description,
-				IsActive:    cp.IsActive,
-				Parent:      checkpointNode,
+			// Add all sessions as child nodes
+			for _, sess := range cp.Sessions {
+				sessionNode := &Node{
+					Type:        NodeTypeSession,
+					ID:          sess.SessionID + "-" + cp.CheckpointID, // Unique ID for this session instance
+					Label:       formatSessionInfoLabel(sess),
+					SessionID:   sess.SessionID,
+					Description: sess.Description,
+					IsActive:    sess.IsActive,
+					Parent:      checkpointNode,
+				}
+				checkpointNode.Children = append(checkpointNode.Children, sessionNode)
 			}
-			checkpointNode.Children = append(checkpointNode.Children, sessionNode)
 
 			branchNode.Children = append(branchNode.Children, checkpointNode)
 		}
@@ -109,9 +127,22 @@ func formatCheckpointLabel(cp CheckpointInfo) string {
 		parts = append(parts, fmt.Sprintf("(%d steps)", cp.StepsCount))
 	}
 
+	// Show session count if multiple sessions
+	if len(cp.Sessions) > 1 {
+		parts = append(parts, fmt.Sprintf("[%d sessions]", len(cp.Sessions)))
+	}
+
 	label := strings.Join(parts, " ")
 
-	if cp.IsActive {
+	// Check if any session is active
+	hasActive := false
+	for _, sess := range cp.Sessions {
+		if sess.IsActive {
+			hasActive = true
+			break
+		}
+	}
+	if hasActive {
 		label += " (active)"
 	}
 
@@ -122,10 +153,10 @@ func formatCheckpointLabel(cp CheckpointInfo) string {
 	return label
 }
 
-// formatSessionLabel creates the display label for a session under a checkpoint.
-func formatSessionLabel(cp CheckpointInfo) string {
+// formatSessionInfoLabel creates the display label for a session under a checkpoint.
+func formatSessionInfoLabel(sess SessionInfo) string {
 	// Truncate session ID for display (e.g., "2025-01-10-abc12345")
-	displayID := cp.SessionID
+	displayID := sess.SessionID
 	if len(displayID) > 19 {
 		displayID = displayID[:19]
 	}
@@ -133,12 +164,16 @@ func formatSessionLabel(cp CheckpointInfo) string {
 	parts := []string{"Session: " + displayID}
 
 	// Add description (truncated)
-	if cp.Description != "" && cp.Description != "No description" {
-		desc := cp.Description
+	if sess.Description != "" && sess.Description != "No description" {
+		desc := sess.Description
 		if len(desc) > 40 {
 			desc = desc[:37] + "..."
 		}
 		parts = append(parts, "- "+desc)
+	}
+
+	if sess.IsActive {
+		parts = append(parts, "(active)")
 	}
 
 	return strings.Join(parts, " ")
