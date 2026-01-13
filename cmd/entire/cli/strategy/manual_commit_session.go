@@ -151,6 +151,7 @@ func (s *ManualCommitStrategy) ClearSessionState(sessionID string) error {
 // on the SAME base commit (current HEAD). This is used to detect concurrent sessions
 // in different terminals but same directory.
 // Returns the first found session with CheckpointCount > 0, or nil if none found.
+// Sessions that have been ended via 'entire disable' (EndedAt is set) are not considered active.
 func (s *ManualCommitStrategy) HasOtherActiveSessionsWithCheckpoints(currentSessionID string) (*SessionState, error) {
 	currentWorktree, err := GetWorktreePath()
 	if err != nil {
@@ -174,6 +175,10 @@ func (s *ManualCommitStrategy) HasOtherActiveSessionsWithCheckpoints(currentSess
 	}
 
 	for _, state := range allStates {
+		// Skip sessions that have been ended via 'entire disable'
+		if state.EndedAt != nil {
+			continue
+		}
 		// Only consider sessions from the same worktree with checkpoints
 		// AND based on the same commit (current HEAD)
 		// Sessions from different base commits are independent and shouldn't trigger warning

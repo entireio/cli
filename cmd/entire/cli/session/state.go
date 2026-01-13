@@ -35,6 +35,9 @@ type State struct {
 	// StartedAt is when the session was started
 	StartedAt time.Time `json:"started_at"`
 
+	// EndedAt is when the session was ended via 'entire disable'
+	EndedAt *time.Time `json:"ended_at,omitempty"`
+
 	// CheckpointCount is the number of checkpoints created in this session
 	CheckpointCount int `json:"checkpoint_count"`
 

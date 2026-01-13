@@ -16,24 +16,24 @@ const (
 
 // SessionState represents the state of an active session.
 type SessionState struct {
-	SessionID                string    `json:"session_id"`
-	BaseCommit               string    `json:"base_commit"`
-	WorktreePath             string    `json:"worktree_path,omitempty"` // Absolute path to the worktree root
-	StartedAt                time.Time `json:"started_at"`
-	CheckpointCount          int       `json:"checkpoint_count"`
-	CondensedTranscriptLines int       `json:"condensed_transcript_lines,omitempty"` // Lines already included in previous condensation
-	UntrackedFilesAtStart    []string  `json:"untracked_files_at_start,omitempty"`   // Files that existed at session start (to preserve during rewind)
-	FilesTouched             []string  `json:"files_touched,omitempty"`              // Files modified/created/deleted during this session
-	ConcurrentWarningShown   bool      `json:"concurrent_warning_shown,omitempty"`   // True if user was warned about concurrent sessions
-	LastCheckpointID         string    `json:"last_checkpoint_id,omitempty"`         // Checkpoint ID from last condensation, reused for subsequent commits without new content
-	AgentType                string    `json:"agent_type,omitempty"`                 // Agent type identifier (e.g., "Claude Code", "Cursor")
-
 	// Token usage tracking (accumulated across all checkpoints in this session)
 	TokenUsage *checkpoint.TokenUsage `json:"token_usage,omitempty"`
 
 	// Transcript position when session started (for multi-session checkpoints on entire/sessions)
-	TranscriptLinesAtStart int    `json:"transcript_lines_at_start,omitempty"`
-	TranscriptUUIDAtStart  string `json:"transcript_uuid_at_start,omitempty"`
+	TranscriptLinesAtStart   int        `json:"transcript_lines_at_start,omitempty"`
+	TranscriptUUIDAtStart    string     `json:"transcript_uuid_at_start,omitempty"`
+	SessionID                string     `json:"session_id"`
+	BaseCommit               string     `json:"base_commit"`
+	WorktreePath             string     `json:"worktree_path,omitempty"` // Absolute path to the worktree root
+	StartedAt                time.Time  `json:"started_at"`
+	EndedAt                  *time.Time `json:"ended_at,omitempty"` // When session was ended via 'entire disable'
+	CheckpointCount          int        `json:"checkpoint_count"`
+	CondensedTranscriptLines int        `json:"condensed_transcript_lines,omitempty"` // Lines already included in previous condensation
+	UntrackedFilesAtStart    []string   `json:"untracked_files_at_start,omitempty"`   // Files that existed at session start (to preserve during rewind)
+	FilesTouched             []string   `json:"files_touched,omitempty"`              // Files modified/created/deleted during this session
+	ConcurrentWarningShown   bool       `json:"concurrent_warning_shown,omitempty"`   // True if user was warned about concurrent sessions
+	LastCheckpointID         string     `json:"last_checkpoint_id,omitempty"`         // Checkpoint ID from last condensation, reused for subsequent commits without new content
+	AgentType                string     `json:"agent_type,omitempty"`                 // Agent type identifier (e.g., "Claude Code", "Cursor")
 }
 
 // CheckpointInfo represents checkpoint metadata stored on the sessions branch.

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/paths"
@@ -423,6 +424,28 @@ func runDisable(w io.Writer, useProjectSettings bool) error {
 	}
 
 	settings.Enabled = false
+
+	// Mark all sessions for this worktree as ended so they won't block new sessions after re-enable
+	// We need to mark ALL sessions (not just current) because the blocking session may be different
+	// from the current session (e.g., when a blocked session creates its own state file)
+	if worktreePath, err := strategy.GetWorktreePath(); err == nil {
+		if sessions, listErr := strategy.ListSessions(); listErr == nil {
+			now := time.Now()
+			for _, sess := range sessions {
+				// Only mark sessions for this worktree that haven't been ended yet
+				state, loadErr := strategy.LoadSessionState(sess.ID)
+				if loadErr != nil || state == nil {
+					continue
+				}
+				if state.WorktreePath == worktreePath && state.EndedAt == nil {
+					state.EndedAt = &now
+					if saveErr := strategy.SaveSessionState(state); saveErr != nil {
+						fmt.Fprintf(w, "Warning: failed to mark session %s as ended: %v\n", sess.ID, saveErr)
+					}
+				}
+			}
+		}
+	}
 
 	// If --project flag is specified, always write to project settings
 	if useProjectSettings {
