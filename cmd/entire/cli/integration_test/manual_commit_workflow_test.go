@@ -474,6 +474,92 @@ func TestShadow_MultipleConcurrentSessions(t *testing.T) {
 	}
 }
 
+// TestShadow_ShadowBranchMigrationOnPull verifies that when the base commit changes
+// (e.g., after stash → pull → apply), the shadow branch is moved to the new commit.
+func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
+	env := NewTestEnv(t)
+	defer env.Cleanup()
+
+	env.InitRepo()
+
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	env.GitCheckoutNewBranch("feature/test")
+	env.InitEntire(strategy.StrategyNameManualCommit)
+
+	originalHead := env.GetHeadHash()
+	originalShadowBranch := "entire/" + originalHead[:7]
+
+	// Start session and create checkpoint
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+
+	env.WriteFile("file.txt", "content")
+	session.CreateTranscript("Add file", []FileChange{{Path: "file.txt", Content: "content"}})
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	// Verify shadow branch exists at original commit
+	if !env.BranchExists(originalShadowBranch) {
+		t.Fatalf("Shadow branch %s should exist", originalShadowBranch)
+	}
+	t.Logf("Original shadow branch: %s", originalShadowBranch)
+
+	// Simulate pull: create a new commit (simulating what pull would do)
+	// In real scenario: stash → pull → apply
+	// Here we just create a commit to simulate HEAD moving
+	env.WriteFile("pulled.txt", "from remote")
+	env.GitAdd("pulled.txt")
+	env.GitCommit("Simulated pull commit")
+
+	newHead := env.GetHeadHash()
+	newShadowBranch := "entire/" + newHead[:7]
+	t.Logf("After simulated pull: old=%s new=%s", originalHead[:7], newHead[:7])
+
+	// Restore the file (simulating stash apply)
+	env.WriteFile("file.txt", "content")
+
+	// Next prompt should migrate the shadow branch
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit after pull failed: %v", err)
+	}
+
+	// Verify old shadow branch is gone and new one exists
+	if env.BranchExists(originalShadowBranch) {
+		t.Errorf("Old shadow branch %s should be deleted after migration", originalShadowBranch)
+	}
+	if !env.BranchExists(newShadowBranch) {
+		t.Errorf("New shadow branch %s should exist after migration", newShadowBranch)
+	}
+
+	// Verify we can still create checkpoints on the new shadow branch
+	env.WriteFile("file2.txt", "more content")
+	session.TranscriptBuilder = NewTranscriptBuilder()
+	session.CreateTranscript("Add file2", []FileChange{{Path: "file2.txt", Content: "more content"}})
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop after migration failed: %v", err)
+	}
+
+	// Verify session state has updated base commit
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state.BaseCommit != newHead {
+		t.Errorf("Session base commit should be %s, got %s", newHead[:7], state.BaseCommit[:7])
+	}
+	if state.CheckpointCount != 2 {
+		t.Errorf("Expected 2 checkpoints after migration, got %d", state.CheckpointCount)
+	}
+
+	t.Log("Shadow branch successfully migrated after base commit change")
+}
+
 // TestShadow_ShadowBranchNaming verifies shadow branches follow the
 // entire/<base-sha[:7]> naming convention.
 func TestShadow_ShadowBranchNaming(t *testing.T) {

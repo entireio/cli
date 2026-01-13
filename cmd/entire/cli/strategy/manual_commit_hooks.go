@@ -702,11 +702,39 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType str
 			needSave = true
 		}
 
-		// Check if HEAD has moved (user committed)
+		// Check if HEAD has moved (user pulled/rebased or committed)
 		if state.BaseCommit != head.Hash().String() {
-			state.BaseCommit = head.Hash().String()
+			oldBaseCommit := state.BaseCommit
+			newBaseCommit := head.Hash().String()
+
+			// Check if old shadow branch exists - if so, user did NOT commit (would have been deleted)
+			// This happens when user does: stash → pull → stash apply, or rebase, etc.
+			oldShadowBranch := getShadowBranchNameForCommit(oldBaseCommit)
+			oldRefName := plumbing.NewBranchReferenceName(oldShadowBranch)
+			if oldRef, err := repo.Reference(oldRefName, true); err == nil {
+				// Old shadow branch exists - move it to new base commit
+				newShadowBranch := getShadowBranchNameForCommit(newBaseCommit)
+				newRefName := plumbing.NewBranchReferenceName(newShadowBranch)
+
+				// Create new reference pointing to same commit
+				newRef := plumbing.NewHashReference(newRefName, oldRef.Hash())
+				if err := repo.Storer.SetReference(newRef); err != nil {
+					return fmt.Errorf("failed to create new shadow branch %s: %w", newShadowBranch, err)
+				}
+
+				// Delete old reference
+				if err := repo.Storer.RemoveReference(oldRefName); err != nil {
+					// Non-fatal: log but continue
+					fmt.Fprintf(os.Stderr, "Warning: failed to remove old shadow branch %s: %v\n", oldShadowBranch, err)
+				}
+
+				fmt.Fprintf(os.Stderr, "Moved shadow branch from %s to %s (base commit changed after pull/rebase)\n",
+					oldShadowBranch, newShadowBranch)
+			}
+
+			state.BaseCommit = newBaseCommit
 			needSave = true
-			fmt.Fprintf(os.Stderr, "Updated session base commit to %s\n", head.Hash().String()[:7])
+			fmt.Fprintf(os.Stderr, "Updated session base commit to %s\n", newBaseCommit[:7])
 		}
 
 		if needSave {
