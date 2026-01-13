@@ -51,7 +51,7 @@ type State struct {
 	// LastCheckpointID is the checkpoint ID from last condensation, reused for subsequent commits without new content
 	LastCheckpointID string `json:"last_checkpoint_id,omitempty"`
 
-	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Cursor")
+	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Gemini CLI")
 	AgentType string `json:"agent_type,omitempty"`
 }
 

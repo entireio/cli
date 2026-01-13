@@ -78,6 +78,28 @@ const (
 // DefaultAgentName is the default when none specified
 const DefaultAgentName = AgentNameClaudeCode
 
+// AgentTypeToRegistryName maps human-readable agent type names (as stored in session state)
+// to their registry names. Used to look up the correct agent when showing resume commands.
+var AgentTypeToRegistryName = map[string]string{
+	"Claude Code": AgentNameClaudeCode,
+	"Gemini CLI":  AgentNameGemini,
+	"Cursor":      AgentNameCursor,
+	"Windsurf":    AgentNameWindsurf,
+	"Aider":       AgentNameAider,
+}
+
+// GetByAgentType retrieves an agent by its human-readable type name (e.g., "Claude Code", "Gemini CLI").
+// This is used to get the correct agent for formatting resume commands based on session state.
+//
+//nolint:ireturn // Factory pattern requires returning the interface
+func GetByAgentType(agentType string) (Agent, error) {
+	registryName, ok := AgentTypeToRegistryName[agentType]
+	if !ok {
+		return nil, fmt.Errorf("unknown agent type: %s", agentType)
+	}
+	return Get(registryName)
+}
+
 // Default returns the default agent.
 // Returns nil if the default agent is not registered.
 //

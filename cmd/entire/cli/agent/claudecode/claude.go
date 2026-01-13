@@ -26,8 +26,6 @@ func init() {
 type ClaudeCodeAgent struct{}
 
 // NewClaudeCodeAgent creates a new Claude Code agent instance.
-//
-//nolint:ireturn // Factory pattern requires returning the interface
 func NewClaudeCodeAgent() agent.Agent {
 	return &ClaudeCodeAgent{}
 }

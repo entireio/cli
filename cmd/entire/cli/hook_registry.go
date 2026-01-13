@@ -8,6 +8,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/agent/claudecode"
+	"entire.io/cli/cmd/entire/cli/agent/geminicli"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 
@@ -91,6 +92,95 @@ func init() {
 		}
 		return handlePostTodo()
 	})
+
+	// Register Gemini CLI handlers
+	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNameSessionStart, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleGeminiSessionStart()
+	})
+
+	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNameSessionEnd, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleGeminiSessionEnd()
+	})
+
+	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNameBeforeTool, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleGeminiBeforeTool()
+	})
+
+	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNameAfterTool, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleGeminiAfterTool()
+	})
+
+	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNameBeforeAgent, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleGeminiBeforeAgent()
+	})
+
+	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNameAfterAgent, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleGeminiAfterAgent()
+	})
+
+	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNameBeforeModel, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleGeminiBeforeModel()
+	})
+
+	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNameAfterModel, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleGeminiAfterModel()
+	})
+
+	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNameBeforeToolSelection, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleGeminiBeforeToolSelection()
+	})
+
+	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNamePreCompress, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleGeminiPreCompress()
+	})
+
+	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNameNotification, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleGeminiNotification()
+	})
 }
 
 // agentHookLogCleanup stores the cleanup function for agent hook logging.
@@ -125,11 +215,14 @@ func newAgentHooksCmd(agentName string, handler agent.HookHandler) *cobra.Comman
 
 // getHookType returns the hook type based on the hook name.
 // Returns "subagent" for task-related hooks (pre-task, post-task, post-todo),
+// "tool" for tool-related hooks (before-tool, after-tool),
 // "agent" for all other agent hooks.
 func getHookType(hookName string) string {
 	switch hookName {
 	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo:
 		return "subagent"
+	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
+		return "tool"
 	default:
 		return "agent"
 	}

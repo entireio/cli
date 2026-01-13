@@ -366,3 +366,237 @@ func (env *TestEnv) GetSessionState(sessionID string) (*strategy.SessionState, e
 	}
 	return &state, nil
 }
+
+// GeminiHookRunner executes Gemini CLI hooks in the test environment.
+type GeminiHookRunner struct {
+	RepoDir          string
+	GeminiProjectDir string
+	T                interface {
+		Helper()
+		Fatalf(format string, args ...interface{})
+		Logf(format string, args ...interface{})
+	}
+}
+
+// NewGeminiHookRunner creates a new Gemini hook runner for the given repo directory.
+func NewGeminiHookRunner(repoDir, geminiProjectDir string, t interface {
+	Helper()
+	Fatalf(format string, args ...interface{})
+	Logf(format string, args ...interface{})
+}) *GeminiHookRunner {
+	return &GeminiHookRunner{
+		RepoDir:          repoDir,
+		GeminiProjectDir: geminiProjectDir,
+		T:                t,
+	}
+}
+
+// runGeminiHookWithInput runs a Gemini hook with the given input.
+func (r *GeminiHookRunner) runGeminiHookWithInput(hookName string, input interface{}) error {
+	r.T.Helper()
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("failed to marshal hook input: %w", err)
+	}
+
+	return r.runGeminiHookInRepoDir(hookName, inputJSON)
+}
+
+func (r *GeminiHookRunner) runGeminiHookInRepoDir(hookName string, inputJSON []byte) error {
+	// Run using the shared test binary
+	// Command structure: entire hooks gemini <hook-name>
+	cmd := exec.Command(getTestBinary(), "hooks", "gemini", hookName)
+	cmd.Dir = r.RepoDir
+	cmd.Stdin = bytes.NewReader(inputJSON)
+	cmd.Env = append(os.Environ(),
+		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+r.GeminiProjectDir,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("hook %s failed: %w\nInput: %s\nOutput: %s",
+			hookName, err, inputJSON, output)
+	}
+
+	r.T.Logf("Gemini hook %s output: %s", hookName, output)
+	return nil
+}
+
+// runGeminiHookWithOutput runs a Gemini hook and returns both stdout and stderr separately.
+func (r *GeminiHookRunner) runGeminiHookWithOutput(hookName string, inputJSON []byte) HookOutput {
+	cmd := exec.Command(getTestBinary(), "hooks", "gemini", hookName)
+	cmd.Dir = r.RepoDir
+	cmd.Stdin = bytes.NewReader(inputJSON)
+	cmd.Env = append(os.Environ(),
+		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+r.GeminiProjectDir,
+	)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	return HookOutput{
+		Stdout: stdout.Bytes(),
+		Stderr: stderr.Bytes(),
+		Err:    err,
+	}
+}
+
+// SimulateGeminiBeforeAgent simulates the BeforeAgent hook for Gemini CLI.
+// This is equivalent to Claude Code's UserPromptSubmit.
+func (r *GeminiHookRunner) SimulateGeminiBeforeAgent(sessionID string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+		"cwd":             r.RepoDir,
+		"hook_event_name": "BeforeAgent",
+		"timestamp":       "2025-01-01T00:00:00Z",
+		"prompt":          "test prompt",
+	}
+
+	return r.runGeminiHookWithInput("before-agent", input)
+}
+
+// SimulateGeminiBeforeAgentWithOutput simulates the BeforeAgent hook and returns the output.
+func (r *GeminiHookRunner) SimulateGeminiBeforeAgentWithOutput(sessionID string) HookOutput {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+		"cwd":             r.RepoDir,
+		"hook_event_name": "BeforeAgent",
+		"timestamp":       "2025-01-01T00:00:00Z",
+		"prompt":          "test prompt",
+	}
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return HookOutput{Err: fmt.Errorf("failed to marshal hook input: %w", err)}
+	}
+
+	return r.runGeminiHookWithOutput("before-agent", inputJSON)
+}
+
+// SimulateGeminiSessionEnd simulates the SessionEnd hook for Gemini CLI.
+// This is equivalent to Claude Code's Stop hook.
+func (r *GeminiHookRunner) SimulateGeminiSessionEnd(sessionID, transcriptPath string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+		"cwd":             r.RepoDir,
+		"hook_event_name": "SessionEnd",
+		"timestamp":       "2025-01-01T00:00:00Z",
+		"reason":          "exit",
+	}
+
+	return r.runGeminiHookWithInput("session-end", input)
+}
+
+// GeminiSession represents a simulated Gemini CLI session.
+type GeminiSession struct {
+	ID             string // Raw model session ID (e.g., "gemini-session-1")
+	EntireID       string // Entire session ID with date prefix (e.g., "2025-12-02-gemini-session-1")
+	TranscriptPath string
+	env            *TestEnv
+}
+
+// NewGeminiSession creates a new simulated Gemini session.
+func (env *TestEnv) NewGeminiSession() *GeminiSession {
+	env.T.Helper()
+
+	env.SessionCounter++
+	sessionID := fmt.Sprintf("gemini-session-%d", env.SessionCounter)
+	entireID := paths.EntireSessionID(sessionID)
+	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", sessionID+".json")
+
+	return &GeminiSession{
+		ID:             sessionID,
+		EntireID:       entireID,
+		TranscriptPath: transcriptPath,
+		env:            env,
+	}
+}
+
+// CreateGeminiTranscript creates a Gemini JSON transcript file for the session.
+func (s *GeminiSession) CreateGeminiTranscript(prompt string, changes []FileChange) string {
+	// Build Gemini-format transcript (JSON, not JSONL)
+	messages := []map[string]interface{}{
+		{
+			"type":    "user",
+			"content": prompt,
+		},
+		{
+			"type":    "assistant",
+			"content": "I'll help you with that.",
+		},
+	}
+
+	for _, change := range changes {
+		messages = append(messages, map[string]interface{}{
+			"type": "tool_use",
+			"name": "write_file",
+			"input": map[string]string{
+				"path":    change.Path,
+				"content": change.Content,
+			},
+		})
+		messages = append(messages, map[string]interface{}{
+			"type":   "tool_result",
+			"output": "File written successfully",
+		})
+	}
+
+	messages = append(messages, map[string]interface{}{
+		"type":    "assistant",
+		"content": "Done!",
+	})
+
+	transcript := map[string]interface{}{
+		"sessionId": s.ID,
+		"messages":  messages,
+	}
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(s.TranscriptPath), 0o755); err != nil {
+		s.env.T.Fatalf("failed to create transcript dir: %v", err)
+	}
+
+	// Write transcript
+	data, err := json.MarshalIndent(transcript, "", "  ")
+	if err != nil {
+		s.env.T.Fatalf("failed to marshal transcript: %v", err)
+	}
+	if err := os.WriteFile(s.TranscriptPath, data, 0o644); err != nil {
+		s.env.T.Fatalf("failed to write transcript: %v", err)
+	}
+
+	return s.TranscriptPath
+}
+
+// SimulateGeminiBeforeAgent is a convenience method on TestEnv.
+func (env *TestEnv) SimulateGeminiBeforeAgent(sessionID string) error {
+	env.T.Helper()
+	runner := NewGeminiHookRunner(env.RepoDir, env.GeminiProjectDir, env.T)
+	return runner.SimulateGeminiBeforeAgent(sessionID)
+}
+
+// SimulateGeminiBeforeAgentWithOutput is a convenience method on TestEnv.
+func (env *TestEnv) SimulateGeminiBeforeAgentWithOutput(sessionID string) HookOutput {
+	env.T.Helper()
+	runner := NewGeminiHookRunner(env.RepoDir, env.GeminiProjectDir, env.T)
+	return runner.SimulateGeminiBeforeAgentWithOutput(sessionID)
+}
+
+// SimulateGeminiSessionEnd is a convenience method on TestEnv.
+func (env *TestEnv) SimulateGeminiSessionEnd(sessionID, transcriptPath string) error {
+	env.T.Helper()
+	runner := NewGeminiHookRunner(env.RepoDir, env.GeminiProjectDir, env.T)
+	return runner.SimulateGeminiSessionEnd(sessionID, transcriptPath)
+}

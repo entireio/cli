@@ -21,6 +21,9 @@ type HookInput struct {
 	SessionRef string
 	Timestamp  time.Time
 
+	// UserPrompt is the user's prompt text (from UserPromptSubmit hooks)
+	UserPrompt string
+
 	// Tool-specific fields (PreToolUse/PostToolUse)
 	ToolName     string
 	ToolUseID    string

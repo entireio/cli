@@ -1412,3 +1412,217 @@ func TestSaveChanges_EmptyBaseCommit_Recovery(t *testing.T) {
 		t.Errorf("CheckpointCount = %d, want 1", loaded.CheckpointCount)
 	}
 }
+
+// TestIsGeminiJSONTranscript tests detection of Gemini JSON transcript format.
+func TestIsGeminiJSONTranscript(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected bool
+	}{
+		{
+			name: "valid Gemini JSON",
+			content: `{
+				"messages": [
+					{"type": "user", "content": "Hello"},
+					{"type": "gemini", "content": "Hi there!"}
+				]
+			}`,
+			expected: true,
+		},
+		{
+			name:     "empty messages array",
+			content:  `{"messages": []}`,
+			expected: false,
+		},
+		{
+			name: "JSONL format (Claude Code)",
+			content: `{"type":"human","message":{"content":"Hello"}}
+{"type":"assistant","message":{"content":"Hi"}}`,
+			expected: false,
+		},
+		{
+			name:     "not JSON",
+			content:  "plain text",
+			expected: false,
+		},
+		{
+			name:     "JSON without messages field",
+			content:  `{"foo": "bar"}`,
+			expected: false,
+		},
+		{
+			name:     "empty string",
+			content:  "",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isGeminiJSONTranscript(tt.content)
+			if result != tt.expected {
+				t.Errorf("isGeminiJSONTranscript() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestExtractUserPromptsFromGeminiJSON tests extraction of user prompts from Gemini JSON format.
+func TestExtractUserPromptsFromGeminiJSON(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected []string
+	}{
+		{
+			name: "single user prompt",
+			content: `{
+				"messages": [
+					{"type": "user", "content": "Create a file called test.txt"}
+				]
+			}`,
+			expected: []string{"Create a file called test.txt"},
+		},
+		{
+			name: "multiple user prompts",
+			content: `{
+				"messages": [
+					{"type": "user", "content": "First prompt"},
+					{"type": "gemini", "content": "Response 1"},
+					{"type": "user", "content": "Second prompt"},
+					{"type": "gemini", "content": "Response 2"}
+				]
+			}`,
+			expected: []string{"First prompt", "Second prompt"},
+		},
+		{
+			name: "no user messages",
+			content: `{
+				"messages": [
+					{"type": "gemini", "content": "Hello!"}
+				]
+			}`,
+			expected: nil,
+		},
+		{
+			name:     "empty messages",
+			content:  `{"messages": []}`,
+			expected: nil,
+		},
+		{
+			name: "user message with empty content",
+			content: `{
+				"messages": [
+					{"type": "user", "content": ""},
+					{"type": "user", "content": "Valid prompt"}
+				]
+			}`,
+			expected: []string{"Valid prompt"},
+		},
+		{
+			name:     "invalid JSON",
+			content:  "not json",
+			expected: nil,
+		},
+		{
+			name: "mixed message types",
+			content: `{
+				"sessionId": "abc123",
+				"messages": [
+					{"type": "user", "content": "Hello"},
+					{"type": "gemini", "content": "Hi!", "toolCalls": []},
+					{"type": "user", "content": "Goodbye"}
+				]
+			}`,
+			expected: []string{"Hello", "Goodbye"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractUserPromptsFromGeminiJSON(tt.content)
+			if len(result) != len(tt.expected) {
+				t.Errorf("extractUserPromptsFromGeminiJSON() returned %d prompts, want %d", len(result), len(tt.expected))
+				return
+			}
+			for i, prompt := range result {
+				if prompt != tt.expected[i] {
+					t.Errorf("prompt[%d] = %q, want %q", i, prompt, tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+// TestExtractUserPromptsFromLines tests extraction of user prompts from JSONL format.
+func TestExtractUserPromptsFromLines(t *testing.T) {
+	tests := []struct {
+		name     string
+		lines    []string
+		expected []string
+	}{
+		{
+			name: "human type message",
+			lines: []string{
+				`{"type":"human","message":{"content":"Hello world"}}`,
+			},
+			expected: []string{"Hello world"},
+		},
+		{
+			name: "user type message",
+			lines: []string{
+				`{"type":"user","message":{"content":"Test prompt"}}`,
+			},
+			expected: []string{"Test prompt"},
+		},
+		{
+			name: "mixed human and assistant",
+			lines: []string{
+				`{"type":"human","message":{"content":"First"}}`,
+				`{"type":"assistant","message":{"content":"Response"}}`,
+				`{"type":"human","message":{"content":"Second"}}`,
+			},
+			expected: []string{"First", "Second"},
+		},
+		{
+			name: "array content",
+			lines: []string{
+				`{"type":"human","message":{"content":[{"type":"text","text":"Part 1"},{"type":"text","text":"Part 2"}]}}`,
+			},
+			expected: []string{"Part 1\n\nPart 2"},
+		},
+		{
+			name: "empty lines ignored",
+			lines: []string{
+				`{"type":"human","message":{"content":"Valid"}}`,
+				"",
+				"  ",
+			},
+			expected: []string{"Valid"},
+		},
+		{
+			name: "invalid JSON ignored",
+			lines: []string{
+				`{"type":"human","message":{"content":"Valid"}}`,
+				"not json",
+			},
+			expected: []string{"Valid"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractUserPromptsFromLines(tt.lines)
+			if len(result) != len(tt.expected) {
+				t.Errorf("extractUserPromptsFromLines() returned %d prompts, want %d", len(result), len(tt.expected))
+				return
+			}
+			for i, prompt := range result {
+				if prompt != tt.expected[i] {
+					t.Errorf("prompt[%d] = %q, want %q", i, prompt, tt.expected[i])
+				}
+			}
+		})
+	}
+}

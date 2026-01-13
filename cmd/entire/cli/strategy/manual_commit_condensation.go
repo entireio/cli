@@ -105,7 +105,8 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 
 	// Extract session data, starting from where we left off last condensation
 	// Use tracked files from session state instead of collecting all files from tree
-	sessionData, err := s.extractSessionData(repo, ref.Hash(), state.SessionID, state.CondensedTranscriptLines, state.FilesTouched)
+	// Pass agent type to handle different transcript formats (JSONL for Claude, JSON for Gemini)
+	sessionData, err := s.extractSessionData(repo, ref.Hash(), state.SessionID, state.CondensedTranscriptLines, state.FilesTouched, state.AgentType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract session data: %w", err)
 	}
@@ -149,7 +150,8 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 // extractSessionData extracts session data from the shadow branch.
 // startLine specifies the first line to include (0 = all lines, for incremental condensation).
 // filesTouched is the list of files tracked during the session (from SessionState.FilesTouched).
-func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRef plumbing.Hash, sessionID string, startLine int, filesTouched []string) (*ExtractedSessionData, error) {
+// agentType identifies the agent (e.g., "Gemini CLI", "Claude Code") to determine transcript format.
+func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRef plumbing.Hash, sessionID string, startLine int, filesTouched []string, agentType string) (*ExtractedSessionData, error) {
 	commit, err := repo.CommitObject(shadowRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commit object: %w", err)
@@ -177,27 +179,39 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 		}
 	}
 
-	// Split into lines and filter
+	// Process transcript based on agent type
 	if fullTranscript != "" {
-		allLines := strings.Split(fullTranscript, "\n")
+		// Check if this is a Gemini CLI transcript (JSON format, not JSONL)
+		isGeminiFormat := strings.Contains(agentType, "Gemini") || isGeminiJSONTranscript(fullTranscript)
 
-		// Trim trailing empty lines (from final \n in JSONL)
-		for len(allLines) > 0 && strings.TrimSpace(allLines[len(allLines)-1]) == "" {
-			allLines = allLines[:len(allLines)-1]
-		}
-
-		data.FullTranscriptLines = len(allLines)
-
-		// Get only lines from startLine onwards for this condensation
-		if startLine < len(allLines) {
-			newLines := allLines[startLine:]
-			data.Transcript = []byte(strings.Join(newLines, "\n"))
-
-			// Extract prompts from the new portion only
-			data.Prompts = extractUserPromptsFromLines(newLines)
-
-			// Generate context from prompts
+		if isGeminiFormat {
+			// Gemini uses JSON format with a "messages" array
+			data.Transcript = []byte(fullTranscript)
+			data.FullTranscriptLines = 1 // JSON is a single "line"
+			data.Prompts = extractUserPromptsFromGeminiJSON(fullTranscript)
 			data.Context = generateContextFromPrompts(data.Prompts)
+		} else {
+			// Claude Code and others use JSONL format (one JSON object per line)
+			allLines := strings.Split(fullTranscript, "\n")
+
+			// Trim trailing empty lines (from final \n in JSONL)
+			for len(allLines) > 0 && strings.TrimSpace(allLines[len(allLines)-1]) == "" {
+				allLines = allLines[:len(allLines)-1]
+			}
+
+			data.FullTranscriptLines = len(allLines)
+
+			// Get only lines from startLine onwards for this condensation
+			if startLine < len(allLines) {
+				newLines := allLines[startLine:]
+				data.Transcript = []byte(strings.Join(newLines, "\n"))
+
+				// Extract prompts from the new portion only
+				data.Prompts = extractUserPromptsFromLines(newLines)
+
+				// Generate context from prompts
+				data.Context = generateContextFromPrompts(data.Prompts)
+			}
 		}
 	}
 
@@ -205,6 +219,52 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 	data.FilesTouched = filesTouched
 
 	return data, nil
+}
+
+// isGeminiJSONTranscript detects if the transcript is in Gemini's JSON format.
+// Gemini transcripts start with a JSON object containing a "messages" array.
+func isGeminiJSONTranscript(content string) bool {
+	content = strings.TrimSpace(content)
+	// Quick check: Gemini JSON starts with { and contains "messages"
+	if !strings.HasPrefix(content, "{") {
+		return false
+	}
+	// Try to parse as Gemini format
+	var transcript struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(content), &transcript); err != nil {
+		return false
+	}
+	return len(transcript.Messages) > 0
+}
+
+// extractUserPromptsFromGeminiJSON extracts user prompts from Gemini's JSON transcript format.
+// Gemini transcripts are structured as: {"messages": [{"type": "user", "content": "..."}, ...]}
+func extractUserPromptsFromGeminiJSON(content string) []string {
+	var transcript struct {
+		Messages []struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+
+	if err := json.Unmarshal([]byte(content), &transcript); err != nil {
+		return nil
+	}
+
+	var prompts []string
+	for _, msg := range transcript.Messages {
+		if msg.Type == "user" && msg.Content != "" {
+			// Strip IDE context tags for consistency with Claude Code handling
+			cleaned := textutil.StripIDEContextTags(msg.Content)
+			if cleaned != "" {
+				prompts = append(prompts, cleaned)
+			}
+		}
+	}
+
+	return prompts
 }
 
 // extractUserPromptsFromLines extracts user prompts from JSONL transcript lines.

@@ -346,6 +346,7 @@ func (s *ManualCommitStrategy) GetAdditionalSessions() ([]*Session, error) {
 }
 
 // getDescriptionFromShadowBranch reads the session description from the shadow branch.
+// sessionID is expected to be an Entire session ID (already date-prefixed like "2026-01-12-abc123").
 func (s *ManualCommitStrategy) getDescriptionFromShadowBranch(sessionID, baseCommit string) string {
 	repo, err := OpenRepository()
 	if err != nil {
@@ -369,7 +370,9 @@ func (s *ManualCommitStrategy) getDescriptionFromShadowBranch(sessionID, baseCom
 		return ""
 	}
 
-	metadataDir := paths.SessionMetadataDir(sessionID)
+	// Use SessionMetadataDirFromEntireID since sessionID is already an Entire session ID
+	// (with date prefix like "2026-01-12-abc123")
+	metadataDir := paths.SessionMetadataDirFromEntireID(sessionID)
 	return getSessionDescriptionFromTree(tree, metadataDir)
 }
 

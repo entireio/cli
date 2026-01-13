@@ -41,3 +41,8 @@ go.work.sum
 
 # worktrees
 .worktrees/
+test-gemini.txt
+entire-main
+entire-test
+test_claude.txt
+cmd/entire/entire

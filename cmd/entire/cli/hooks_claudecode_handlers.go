@@ -164,8 +164,20 @@ func checkConcurrentSessions(ag agent.Agent, entireSessionID string) (bool, erro
 			fmt.Fprintf(os.Stderr, "Warning: failed to save session state: %v\n", saveErr)
 		}
 
-		// Get resume command for the other session
-		resumeCmd := ag.FormatResumeCommand(ag.ExtractAgentSessionID(otherSession.SessionID))
+		// Get resume command for the other session using the CONFLICTING session's agent type.
+		// If the conflicting session is from a different agent (e.g., Gemini when we're Claude),
+		// use that agent's resume command format. Otherwise, use our own format (backward compatible).
+		var resumeCmd string
+		if otherSession.AgentType != "" && otherSession.AgentType != agentType {
+			// Different agent type - look up the conflicting agent
+			if conflictingAgent, agentErr := agent.GetByAgentType(otherSession.AgentType); agentErr == nil {
+				resumeCmd = conflictingAgent.FormatResumeCommand(conflictingAgent.ExtractAgentSessionID(otherSession.SessionID))
+			}
+		}
+		// Fall back to current agent if same type or couldn't get the conflicting agent
+		if resumeCmd == "" {
+			resumeCmd = ag.FormatResumeCommand(ag.ExtractAgentSessionID(otherSession.SessionID))
+		}
 
 		// Try to read the other session's initial prompt
 		otherPrompt := strategy.ReadSessionPromptFromShadow(repo, otherSession.BaseCommit, otherSession.SessionID)
@@ -219,8 +231,19 @@ func handleSessionInitErrors(ag agent.Agent, initErr error) error {
 	// Check for session ID conflict error (shadow branch has different session)
 	var sessionConflictErr *strategy.SessionIDConflictError
 	if errors.As(initErr, &sessionConflictErr) {
-		// Get agent's resume command format
-		resumeCmd := ag.FormatResumeCommand(ag.ExtractAgentSessionID(sessionConflictErr.ExistingSession))
+		// Try to get the conflicting session's agent type from its state file
+		// If it's a different agent type, use that agent's resume command format
+		var resumeCmd string
+		existingState, loadErr := strategy.LoadSessionState(sessionConflictErr.ExistingSession)
+		if loadErr == nil && existingState != nil && existingState.AgentType != "" {
+			if conflictingAgent, agentErr := agent.GetByAgentType(existingState.AgentType); agentErr == nil {
+				resumeCmd = conflictingAgent.FormatResumeCommand(conflictingAgent.ExtractAgentSessionID(sessionConflictErr.ExistingSession))
+			}
+		}
+		// Fall back to current agent if we couldn't get the conflicting agent
+		if resumeCmd == "" {
+			resumeCmd = ag.FormatResumeCommand(ag.ExtractAgentSessionID(sessionConflictErr.ExistingSession))
+		}
 		fmt.Fprintf(os.Stderr, "\n"+
 			"Warning: Session ID conflict detected!\n\n"+
 			"   Shadow branch: %s\n"+

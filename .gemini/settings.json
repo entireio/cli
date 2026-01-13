@@ -1,0 +1,141 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "name": "entire-session-start",
+            "type": "command",
+            "command": "entire hooks gemini session-start"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "exit",
+        "hooks": [
+          {
+            "name": "entire-session-end-exit",
+            "type": "command",
+            "command": "entire hooks gemini session-end"
+          }
+        ]
+      },
+      {
+        "matcher": "logout",
+        "hooks": [
+          {
+            "name": "entire-session-end-logout",
+            "type": "command",
+            "command": "entire hooks gemini session-end"
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "name": "entire-before-agent",
+            "type": "command",
+            "command": "entire hooks gemini before-agent"
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "hooks": [
+          {
+            "name": "entire-after-agent",
+            "type": "command",
+            "command": "entire hooks gemini after-agent"
+          }
+        ]
+      }
+    ],
+    "BeforeModel": [
+      {
+        "hooks": [
+          {
+            "name": "entire-before-model",
+            "type": "command",
+            "command": "entire hooks gemini before-model"
+          }
+        ]
+      }
+    ],
+    "AfterModel": [
+      {
+        "hooks": [
+          {
+            "name": "entire-after-model",
+            "type": "command",
+            "command": "entire hooks gemini after-model"
+          }
+        ]
+      }
+    ],
+    "BeforeToolSelection": [
+      {
+        "hooks": [
+          {
+            "name": "entire-before-tool-selection",
+            "type": "command",
+            "command": "entire hooks gemini before-tool-selection"
+          }
+        ]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "entire-before-tool",
+            "type": "command",
+            "command": "entire hooks gemini before-tool"
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "entire-after-tool",
+            "type": "command",
+            "command": "entire hooks gemini after-tool"
+          }
+        ]
+      }
+    ],
+    "PreCompress": [
+      {
+        "hooks": [
+          {
+            "name": "entire-pre-compress",
+            "type": "command",
+            "command": "entire hooks gemini pre-compress"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "name": "entire-notification",
+            "type": "command",
+            "command": "entire hooks gemini notification"
+          }
+        ]
+      }
+    ]
+  },
+  "tools": {
+    "enableHooks": true
+  }
+}
