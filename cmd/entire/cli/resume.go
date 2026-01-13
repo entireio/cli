@@ -361,13 +361,15 @@ func resumeSession(sessionID, checkpointID string) error {
 		}
 	}
 
-	// Get session directory for this agent
-	cwd, err := os.Getwd()
+	// Get repo root for session directory lookup
+	// Use repo root instead of CWD because Claude stores sessions per-repo,
+	// and running from a subdirectory would look up the wrong session directory
+	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
+		return fmt.Errorf("failed to get repository root: %w", err)
 	}
 
-	sessionDir, err := ag.GetSessionDir(cwd)
+	sessionDir, err := ag.GetSessionDir(repoRoot)
 	if err != nil {
 		return fmt.Errorf("failed to determine session directory: %w", err)
 	}
@@ -396,7 +398,7 @@ func resumeSession(sessionID, checkpointID string) error {
 		agentSession := &agent.AgentSession{
 			SessionID:  agentSessionID,
 			AgentName:  ag.Name(),
-			RepoPath:   cwd,
+			RepoPath:   repoRoot,
 			SessionRef: sessionLogPath,
 			NativeData: logContent,
 		}

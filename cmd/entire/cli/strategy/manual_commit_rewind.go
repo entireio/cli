@@ -598,13 +598,15 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint) error {
 		}
 	}
 
-	// Get current working directory for Claude project path
-	cwd, err := os.Getwd()
+	// Get repo root for Claude project path lookup
+	// Use repo root instead of CWD because Claude stores sessions per-repo,
+	// and running from a subdirectory would look up the wrong session directory
+	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
+		return fmt.Errorf("failed to get repository root: %w", err)
 	}
 
-	claudeProjectDir, err := paths.GetClaudeProjectDir(cwd)
+	claudeProjectDir, err := paths.GetClaudeProjectDir(repoRoot)
 	if err != nil {
 		return fmt.Errorf("failed to get Claude project directory: %w", err)
 	}

@@ -561,14 +561,16 @@ func restoreSessionTranscript(transcriptFile, sessionID string) error {
 		return fmt.Errorf("failed to get agent: %w", err)
 	}
 
-	// Get current working directory for agent's session directory lookup
-	cwd, err := os.Getwd()
+	// Get repo root for agent's session directory lookup
+	// Use repo root instead of CWD because Claude stores sessions per-repo,
+	// and running from a subdirectory would look up the wrong session directory
+	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
+		return fmt.Errorf("failed to get repository root: %w", err)
 	}
 
 	// Get agent's session storage directory
-	sessionDir, err := ag.GetSessionDir(cwd)
+	sessionDir, err := ag.GetSessionDir(repoRoot)
 	if err != nil {
 		return fmt.Errorf("failed to get agent session directory: %w", err)
 	}
@@ -599,14 +601,16 @@ func restoreSessionTranscriptFromStrategy(strat strategy.Strategy, checkpointID,
 		return "", fmt.Errorf("failed to get agent: %w", err)
 	}
 
-	// Get current working directory for agent's session directory lookup
-	cwd, err := os.Getwd()
+	// Get repo root for agent's session directory lookup
+	// Use repo root instead of CWD because Claude stores sessions per-repo,
+	// and running from a subdirectory would look up the wrong session directory
+	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return "", fmt.Errorf("failed to get current directory: %w", err)
+		return "", fmt.Errorf("failed to get repository root: %w", err)
 	}
 
 	// Get agent's session storage directory
-	agentSessionDir, err := ag.GetSessionDir(cwd)
+	agentSessionDir, err := ag.GetSessionDir(repoRoot)
 	if err != nil {
 		return "", fmt.Errorf("failed to get agent session directory: %w", err)
 	}
@@ -663,14 +667,16 @@ func restoreTaskCheckpointTranscript(strat strategy.Strategy, point strategy.Rew
 	// Truncate at checkpoint UUID
 	truncated := TruncateTranscriptAtUUID(transcript, checkpointUUID)
 
-	// Get current working directory for agent's session directory lookup
-	cwd, err := os.Getwd()
+	// Get repo root for agent's session directory lookup
+	// Use repo root instead of CWD because Claude stores sessions per-repo,
+	// and running from a subdirectory would look up the wrong session directory
+	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
+		return fmt.Errorf("failed to get repository root: %w", err)
 	}
 
 	// Get agent's session storage directory
-	agentSessionDir, err := ag.GetSessionDir(cwd)
+	agentSessionDir, err := ag.GetSessionDir(repoRoot)
 	if err != nil {
 		return fmt.Errorf("failed to get agent session directory: %w", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"entire.io/cli/cmd/entire/cli/agent"
+	"entire.io/cli/cmd/entire/cli/paths"
 )
 
 // Ensure ClaudeCodeAgent implements HookSupport and HookHandler
@@ -57,12 +58,18 @@ var entireHookPrefixes = []string{
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
-	cwd, err := os.Getwd()
+	// Use repo root instead of CWD to find .claude directory
+	// This ensures hooks are installed correctly when run from a subdirectory
+	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return 0, fmt.Errorf("failed to get current directory: %w", err)
+		// Fallback to CWD if not in a git repo (e.g., during tests)
+		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when RepoRoot() fails (tests run outside git repos)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get current directory: %w", err)
+		}
 	}
 
-	settingsPath := filepath.Join(cwd, ".claude", ClaudeSettingsFileName)
+	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
 
 	// Read existing settings if they exist
 	var settings ClaudeSettings
@@ -210,8 +217,13 @@ func (c *ClaudeCodeAgent) UninstallHooks() error {
 
 // AreHooksInstalled checks if Entire hooks are installed.
 func (c *ClaudeCodeAgent) AreHooksInstalled() bool {
-	settingsPath := ".claude/" + ClaudeSettingsFileName
-	data, err := os.ReadFile(settingsPath)
+	// Use repo root to find .claude directory when run from a subdirectory
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		repoRoot = "." // Fallback to CWD if not in a git repo
+	}
+	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
 		return false
 	}

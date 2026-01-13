@@ -500,6 +500,15 @@ func (s *GitStore) buildTreeWithChanges(
 	modifiedFiles, deletedFiles []string,
 	metadataDir, metadataDirAbs string,
 ) (plumbing.Hash, error) {
+	// Get repo root for resolving file paths
+	// This is critical because fileExists() and createBlobFromFile() use os.Stat()
+	// which resolves relative to CWD. The modifiedFiles are repo-relative paths,
+	// so we must resolve them against repo root, not CWD.
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to get repo root: %w", err)
+	}
+
 	// Get the base tree
 	baseTree, err := s.repo.TreeObject(baseTreeHash)
 	if err != nil {
@@ -519,12 +528,14 @@ func (s *GitStore) buildTreeWithChanges(
 
 	// Add/update modified files
 	for _, file := range modifiedFiles {
-		if !fileExists(file) {
+		// Resolve path relative to repo root for filesystem operations
+		absPath := filepath.Join(repoRoot, file)
+		if !fileExists(absPath) {
 			delete(entries, file)
 			continue
 		}
 
-		blobHash, mode, err := createBlobFromFile(s.repo, file)
+		blobHash, mode, err := createBlobFromFile(s.repo, absPath)
 		if err != nil {
 			// Skip files that can't be staged (may have been deleted since detection)
 			continue

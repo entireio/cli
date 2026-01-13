@@ -721,9 +721,18 @@ const (
 // The stageCtx parameter is used for user-facing messages to indicate whether
 // this is staging for a session checkpoint or a task checkpoint.
 func StageFiles(worktree *git.Worktree, modified, newFiles, deleted []string, stageCtx StageFilesContext) {
+	// Get repo root for resolving file paths
+	// This is critical because fileExists() uses os.Stat() which resolves relative to CWD,
+	// but worktree.Add/Remove resolve relative to repo root. If CWD != repo root,
+	// fileExists() could return false for existing files, causing worktree.Remove()
+	// to incorrectly delete them.
+	repoRoot := worktree.Filesystem.Root()
+
 	// Stage modified files
 	for _, file := range modified {
-		if fileExists(file) {
+		// Resolve path relative to repo root for existence check
+		absPath := filepath.Join(repoRoot, file)
+		if fileExists(absPath) {
 			if _, err := worktree.Add(file); err != nil {
 				fmt.Fprintf(os.Stderr, "  Failed to stage %s: %v\n", file, err)
 			} else {

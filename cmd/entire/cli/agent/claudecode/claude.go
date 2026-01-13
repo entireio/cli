@@ -44,12 +44,22 @@ func (c *ClaudeCodeAgent) Description() string {
 
 // DetectPresence checks if Claude Code is configured in the repository.
 func (c *ClaudeCodeAgent) DetectPresence() (bool, error) {
+	// Get repo root to check for .claude directory
+	// This is needed because the CLI may be run from a subdirectory
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		// Not in a git repo, fall back to CWD-relative check
+		repoRoot = "."
+	}
+
 	// Check for .claude directory
-	if _, err := os.Stat(".claude"); err == nil {
+	claudeDir := filepath.Join(repoRoot, ".claude")
+	if _, err := os.Stat(claudeDir); err == nil {
 		return true, nil
 	}
 	// Check for .claude/settings.json
-	if _, err := os.Stat(".claude/settings.json"); err == nil {
+	settingsFile := filepath.Join(repoRoot, ".claude", "settings.json")
+	if _, err := os.Stat(settingsFile); err == nil {
 		return true, nil
 	}
 	return false, nil

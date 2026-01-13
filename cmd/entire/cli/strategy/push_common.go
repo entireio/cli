@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -76,13 +77,23 @@ func hasUnpushedSessionsCommon(repo *git.Repository, remote string, localHash pl
 // getPushSessionsConfig reads the push_sessions setting from strategy options.
 // Checks settings.local.json first (user preference), then settings.json (shared).
 func getPushSessionsConfig() string {
+	// Use repo root to find settings files when run from a subdirectory
+	localSettingsPath, err := paths.AbsPath(".entire/settings.local.json")
+	if err != nil {
+		localSettingsPath = ".entire/settings.local.json" // Fallback
+	}
+	sharedSettingsPath, err := paths.AbsPath(".entire/settings.json")
+	if err != nil {
+		sharedSettingsPath = ".entire/settings.json" // Fallback
+	}
+
 	// Try local settings first (user preference, not committed)
-	if val := readPushSessionsFromFile(".entire/settings.local.json"); val != "" {
+	if val := readPushSessionsFromFile(localSettingsPath); val != "" {
 		return val
 	}
 
 	// Fall back to shared settings
-	if val := readPushSessionsFromFile(".entire/settings.json"); val != "" {
+	if val := readPushSessionsFromFile(sharedSettingsPath); val != "" {
 		return val
 	}
 
@@ -117,11 +128,15 @@ func readPushSessionsFromFile(settingsPath string) string {
 // setPushSessionsConfig saves the push_sessions setting to settings.local.json.
 // This is a user preference that should not be committed to the repository.
 func setPushSessionsConfig(value string) error {
-	localSettingsFile := ".entire/settings.local.json"
+	// Use repo root to find settings file when run from a subdirectory
+	localSettingsFile, err := paths.AbsPath(".entire/settings.local.json")
+	if err != nil {
+		localSettingsFile = ".entire/settings.local.json" // Fallback
+	}
 
 	// Read existing local settings or start fresh
 	var settings map[string]interface{}
-	data, err := os.ReadFile(localSettingsFile)
+	data, err := os.ReadFile(localSettingsFile) //nolint:gosec // Path is controlled
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("failed to read local settings: %w", err)

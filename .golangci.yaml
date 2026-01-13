@@ -79,6 +79,9 @@ linters:
     forbidigo:
       analyze-types: true
       forbid:
+        - pattern: '^os\.Getwd$'
+          msg: "os.Getwd() breaks when running from subdirectories - use paths.RepoRoot() for git-relative paths"
+          pkg: '^os$'
         - pattern: '^.*\.Reset$'
           msg: "go-git Reset deletes .gitignored dirs - use HardResetWithProtection() from common.go"
           pkg: 'github\.com/go-git/go-git'
