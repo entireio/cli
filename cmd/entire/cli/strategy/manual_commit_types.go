@@ -38,8 +38,6 @@ type CheckpointInfo struct {
 	Agent        string    `json:"agent,omitempty"` // Human-readable agent name (e.g., "Claude Code")
 	IsTask       bool      `json:"is_task,omitempty"`
 	ToolUseID    string    `json:"tool_use_id,omitempty"`
-	SessionCount int       `json:"session_count,omitempty"` // Number of sessions (1 if omitted)
-	SessionIDs   []string  `json:"session_ids,omitempty"`   // All session IDs in this checkpoint
 	// Deprecated: kept for backwards compatibility when reading old metadata
 	CheckpointsCount int `json:"checkpoints_count,omitempty"`
 }

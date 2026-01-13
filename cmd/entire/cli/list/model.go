@@ -58,10 +58,10 @@ type BranchInfo struct {
 // CheckpointInfo contains information about a checkpoint on a branch.
 type CheckpointInfo struct {
 	CheckpointID string
-	CommitHash   string    // Commit with Entire-Checkpoint trailer
-	CommitMsg    string    // Commit message (for display)
+	CommitHash   string // Commit with Entire-Checkpoint trailer
+	CommitMsg    string // Commit message (for display)
 	CreatedAt    time.Time
-	StepsCount   int       // Steps that led to this checkpoint
+	StepsCount   int // Steps that led to this checkpoint
 	IsTask       bool
 	ToolUseID    string
 	// Sessions associated with this checkpoint (can be multiple from concurrent sessions)
