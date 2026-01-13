@@ -20,6 +20,9 @@ import (
 	"entire.io/cli/cmd/entire/cli/strategy"
 )
 
+// ErrSessionSkipped is returned when a session should be skipped (e.g., due to concurrent warning).
+var ErrSessionSkipped = errors.New("session skipped")
+
 // geminiBlockingResponse represents a JSON response for Gemini CLI hooks.
 // When decision is "block", Gemini CLI will block the current operation and show the reason to the user.
 type geminiBlockingResponse struct {
@@ -241,7 +244,7 @@ func parseGeminiSessionEnd() (*geminiSessionContext, error) {
 	entireSessionID := currentSessionIDWithFallback(modelSessionID)
 
 	if shouldSkipHooksForWarnedSession(entireSessionID) {
-		return nil, nil // Signal to skip
+		return nil, ErrSessionSkipped
 	}
 
 	transcriptPath := input.SessionRef
@@ -439,10 +442,10 @@ func commitWithMetadataGemini() error {
 
 	ctx, err := parseGeminiSessionEnd()
 	if err != nil {
+		if errors.Is(err, ErrSessionSkipped) {
+			return nil // Skip signaled
+		}
 		return err
-	}
-	if ctx == nil {
-		return nil // Skip signaled
 	}
 
 	if err := setupGeminiSessionDir(ctx); err != nil {
@@ -477,7 +480,10 @@ func createContextFileForGemini(contextFile, commitMessage, sessionID string, pr
 		sb.WriteString("\n")
 	}
 
-	return os.WriteFile(contextFile, []byte(sb.String()), 0o600)
+	if err := os.WriteFile(contextFile, []byte(sb.String()), 0o600); err != nil {
+		return fmt.Errorf("failed to write context file: %w", err)
+	}
+	return nil
 }
 
 // handleGeminiBeforeTool handles the BeforeTool hook for Gemini CLI.
@@ -600,79 +606,12 @@ func handleGeminiBeforeAgent() error {
 			agentType = agentType[:idx]
 		}
 		if initErr := initializer.InitializeSession(entireSessionID, agentType); initErr != nil {
-			if handleErr := handleGeminiSessionInitErrors(ag, initErr); handleErr != nil {
+			if handleErr := handleSessionInitErrors(ag, initErr); handleErr != nil {
 				return handleErr
 			}
 		}
 	}
 
-	return nil
-}
-
-// handleGeminiSessionInitErrors handles session initialization errors for Gemini CLI.
-// Provides user-friendly error messages for common error cases.
-func handleGeminiSessionInitErrors(ag agent.Agent, initErr error) error {
-	// Check for shadow branch conflict error (worktree conflict)
-	var conflictErr *strategy.ShadowBranchConflictError
-	if errors.As(initErr, &conflictErr) {
-		fmt.Fprintf(os.Stderr, "\n"+
-			"Warning: Shadow branch conflict detected!\n\n"+
-			"   Branch: %s\n"+
-			"   Existing session: %s\n"+
-			"   From worktree: %s\n"+
-			"   Started: %s\n\n"+
-			"   This may indicate another agent session is active from a different worktree,\n"+
-			"   or a previous session wasn't completed.\n\n"+
-			"   Options:\n"+
-			"   1. Commit your changes (git commit) to create a new base commit\n"+
-			"   2. Run 'entire rewind reset' to discard the shadow branch and start fresh\n"+
-			"   3. Continue the previous session from the original worktree: %s\n\n",
-			conflictErr.Branch,
-			conflictErr.ExistingSession,
-			conflictErr.ExistingWorktree,
-			conflictErr.LastActivity.Format(time.RFC822),
-			conflictErr.ExistingWorktree,
-		)
-		return fmt.Errorf("shadow branch conflict: %w", initErr)
-	}
-
-	// Check for session ID conflict error (shadow branch has different session)
-	var sessionConflictErr *strategy.SessionIDConflictError
-	if errors.As(initErr, &sessionConflictErr) {
-		// Try to get the conflicting session's agent type from its state file
-		// If it's a different agent type, use that agent's resume command format
-		var resumeCmd string
-		existingState, loadErr := strategy.LoadSessionState(sessionConflictErr.ExistingSession)
-		if loadErr == nil && existingState != nil && existingState.AgentType != "" {
-			if conflictingAgent, agentErr := agent.GetByAgentType(existingState.AgentType); agentErr == nil {
-				resumeCmd = conflictingAgent.FormatResumeCommand(conflictingAgent.ExtractAgentSessionID(sessionConflictErr.ExistingSession))
-			}
-		}
-		// Fall back to current agent if we couldn't get the conflicting agent
-		if resumeCmd == "" {
-			resumeCmd = ag.FormatResumeCommand(ag.ExtractAgentSessionID(sessionConflictErr.ExistingSession))
-		}
-		fmt.Fprintf(os.Stderr, "\n"+
-			"Warning: Session ID conflict detected!\n\n"+
-			"   Shadow branch: %s\n"+
-			"   Existing session: %s\n"+
-			"   New session: %s\n\n"+
-			"   The shadow branch already has checkpoints from a different session.\n"+
-			"   Starting a new session would orphan the existing work.\n\n"+
-			"   Options:\n"+
-			"   1. Commit your changes (git commit) to create a new base commit\n"+
-			"   2. Run 'entire rewind reset' to discard the shadow branch and start fresh\n"+
-			"   3. Resume the existing session: %s\n\n",
-			sessionConflictErr.ShadowBranch,
-			sessionConflictErr.ExistingSession,
-			sessionConflictErr.NewSession,
-			resumeCmd,
-		)
-		return fmt.Errorf("session ID conflict: %w", initErr)
-	}
-
-	// Unknown error type
-	fmt.Fprintf(os.Stderr, "Warning: failed to initialize session state: %v\n", initErr)
 	return nil
 }
 

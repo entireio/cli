@@ -91,7 +91,7 @@ var AgentTypeToRegistryName = map[string]string{
 // GetByAgentType retrieves an agent by its human-readable type name (e.g., "Claude Code", "Gemini CLI").
 // This is used to get the correct agent for formatting resume commands based on session state.
 //
-//nolint:ireturn // Factory pattern requires returning the interface
+
 func GetByAgentType(agentType string) (Agent, error) {
 	registryName, ok := AgentTypeToRegistryName[agentType]
 	if !ok {

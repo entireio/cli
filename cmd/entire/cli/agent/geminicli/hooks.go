@@ -62,7 +62,7 @@ func (g *GeminiCLIAgent) GetHookNames() []string {
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 func (g *GeminiCLIAgent) InstallHooks(localDev bool, force bool) (int, error) {
-	cwd, err := os.Getwd()
+	cwd, err := os.Getwd() //nolint:forbidigo // matches Claude Code pattern; will be addressed in future refactor
 	if err != nil {
 		return 0, fmt.Errorf("failed to get current directory: %w", err)
 	}
