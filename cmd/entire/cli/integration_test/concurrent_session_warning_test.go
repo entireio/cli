@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"entire.io/cli/cmd/entire/cli/strategy"
 )
@@ -348,7 +349,8 @@ func TestConcurrentSessions_BothCondensedOnCommit(t *testing.T) {
 	}
 
 	// Verify session_id points to the latest session (session B)
-	expectedSessionID := "2026-01-12-" + sessionB.ID
+	// Session IDs are prefixed with today's date in YYYY-MM-DD format
+	expectedSessionID := time.Now().Format("2006-01-02") + "-" + sessionB.ID
 	if metadata.SessionID != expectedSessionID {
 		t.Errorf("Expected session_id=%s (latest session), got %s", expectedSessionID, metadata.SessionID)
 	}
