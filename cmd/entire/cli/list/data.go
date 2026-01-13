@@ -150,6 +150,7 @@ func FetchTreeData() (*TreeData, error) {
 	}
 
 	// Build branch list
+	// Note: checkpoints are already in git commit order (newest first) from findCheckpointsOnBranch
 	var branches []BranchInfo
 	for branchName := range branchSet {
 		info := BranchInfo{
@@ -158,11 +159,6 @@ func FetchTreeData() (*TreeData, error) {
 			IsMerged:    isBranchMerged(repo, branchName, mainBranch),
 			Checkpoints: branchCheckpoints[branchName],
 		}
-
-		// Sort checkpoints by most recent first
-		sort.Slice(info.Checkpoints, func(i, j int) bool {
-			return info.Checkpoints[i].CreatedAt.After(info.Checkpoints[j].CreatedAt)
-		})
 
 		branches = append(branches, info)
 	}
