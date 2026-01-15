@@ -71,6 +71,45 @@ func TestParseTranscript_LargeLines(t *testing.T) {
 	}
 }
 
+func TestParseTranscript_LineExceedsScannerBuffer(t *testing.T) {
+	// Create a line larger than the 10MB ScannerBufferSize limit.
+	// This simulates a transcript with a very large tool output (e.g., reading a huge file).
+	// The current implementation using bufio.Scanner will fail with "token too long".
+	largeContent := strings.Repeat("x", 11*1024*1024) // 11MB - exceeds 10MB limit
+	content := `{"type":"user","uuid":"user-1","message":{"content":"` + largeContent + `"}}`
+
+	tmpFile := createTempTranscript(t, content)
+
+	lines, err := parseTranscript(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error parsing line exceeding buffer: %v", err)
+	}
+
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(lines))
+	}
+}
+
+func TestParseTranscriptFromLine_LineExceedsScannerBuffer(t *testing.T) {
+	// Same test for parseTranscriptFromLine - should handle lines > 10MB
+	largeContent := strings.Repeat("x", 11*1024*1024) // 11MB
+	content := `{"type":"user","uuid":"user-1","message":{"content":"` + largeContent + `"}}`
+
+	tmpFile := createTempTranscript(t, content)
+
+	lines, totalLines, err := parseTranscriptFromLine(tmpFile, 0)
+	if err != nil {
+		t.Fatalf("unexpected error parsing line exceeding buffer: %v", err)
+	}
+
+	if totalLines != 1 {
+		t.Errorf("expected totalLines=1, got %d", totalLines)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 parsed line, got %d", len(lines))
+	}
+}
+
 func TestExtractLastUserPrompt_StringContent(t *testing.T) {
 	transcript := []transcriptLine{
 		{Type: "user", UUID: "u1", Message: []byte(`{"content":"First prompt"}`)},

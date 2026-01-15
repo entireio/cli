@@ -2,8 +2,10 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,8 +21,8 @@ const (
 	contentTypeText         = "text"
 )
 
-// parseTranscript reads and parses a Claude Code transcript file
-// Uses a large buffer to handle very long lines (tool outputs can be huge)
+// parseTranscript reads and parses a Claude Code transcript file.
+// Uses bufio.Reader to handle arbitrarily long lines.
 func parseTranscript(path string) ([]transcriptLine, error) {
 	file, err := os.Open(path) //nolint:gosec // Reading from controlled git metadata path
 	if err != nil {
@@ -29,25 +31,37 @@ func parseTranscript(path string) ([]transcriptLine, error) {
 	defer func() { _ = file.Close() }()
 
 	var lines []transcriptLine
-	scanner := bufio.NewScanner(file)
-	// Use large buffer for very long lines (transcript lines can be huge)
-	scanner.Buffer(make([]byte, 0, ScannerBufferSize), ScannerBufferSize)
+	reader := bufio.NewReader(file)
 
-	for scanner.Scan() {
-		var line transcriptLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue // Skip malformed lines
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("failed to read transcript: %w", err)
 		}
-		lines = append(lines, line)
+
+		// Handle empty line or EOF without content
+		if len(lineBytes) == 0 {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+
+		var line transcriptLine
+		if err := json.Unmarshal(lineBytes, &line); err == nil {
+			lines = append(lines, line)
+		}
+
+		if err == io.EOF {
+			break
+		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to scan transcript: %w", err)
-	}
 	return lines, nil
 }
 
 // parseTranscriptFromLine reads and parses a transcript file starting from a specific line.
+// Uses bufio.Reader to handle arbitrarily long lines.
 // Returns:
 //   - lines: parsed transcript lines from startLine onwards (malformed lines skipped)
 //   - totalLines: total number of lines in the file (including malformed ones)
@@ -63,45 +77,70 @@ func parseTranscriptFromLine(path string, startLine int) ([]transcriptLine, int,
 	defer func() { _ = file.Close() }()
 
 	var lines []transcriptLine
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, ScannerBufferSize), ScannerBufferSize)
+	reader := bufio.NewReader(file)
 
 	totalLines := 0
-	for scanner.Scan() {
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return nil, 0, fmt.Errorf("failed to read transcript: %w", err)
+		}
+
+		// Handle empty line or EOF without content
+		if len(lineBytes) == 0 {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+
 		// Count all lines for totalLines, but only parse after startLine
 		if totalLines >= startLine {
 			var line transcriptLine
-			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
+			if err := json.Unmarshal(lineBytes, &line); err == nil {
 				lines = append(lines, line)
 			}
-			// Note: malformed lines are silently skipped (consistent with parseTranscript)
 		}
 		totalLines++
+
+		if err == io.EOF {
+			break
+		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, 0, fmt.Errorf("failed to scan transcript: %w", err)
-	}
 	return lines, totalLines, nil
 }
 
-// parseTranscriptFromBytes parses transcript content from a byte slice
+// parseTranscriptFromBytes parses transcript content from a byte slice.
+// Uses bufio.Reader to handle arbitrarily long lines.
 func parseTranscriptFromBytes(content []byte) ([]transcriptLine, error) {
 	var lines []transcriptLine
-	scanner := bufio.NewScanner(strings.NewReader(string(content)))
-	scanner.Buffer(make([]byte, 0, ScannerBufferSize), ScannerBufferSize)
+	reader := bufio.NewReader(bytes.NewReader(content))
 
-	for scanner.Scan() {
-		var line transcriptLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue // Skip malformed lines
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("failed to read transcript: %w", err)
 		}
-		lines = append(lines, line)
+
+		// Handle empty line or EOF without content
+		if len(lineBytes) == 0 {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+
+		var line transcriptLine
+		if err := json.Unmarshal(lineBytes, &line); err == nil {
+			lines = append(lines, line)
+		}
+
+		if err == io.EOF {
+			break
+		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to scan transcript: %w", err)
-	}
 	return lines, nil
 }
 
