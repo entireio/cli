@@ -552,7 +552,12 @@ func runSessionCurrent() error {
 	}
 
 	fmt.Printf("Session:     %s\n", session.ID)
-	fmt.Printf("Strategy:    %s\n", session.Strategy)
+	// Use session.Strategy if available, otherwise fall back to current strategy
+	displayStrategy := session.Strategy
+	if displayStrategy == "" {
+		displayStrategy = strat.Name()
+	}
+	fmt.Printf("Strategy:    %s\n", displayStrategy)
 	if session.Description != "" && session.Description != strategy.NoDescription {
 		fmt.Printf("Description: %s\n", session.Description)
 	}
