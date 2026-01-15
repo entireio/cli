@@ -108,6 +108,9 @@ func runRewindReset(force bool) error {
 }
 
 func runRewindInteractive() error {
+	// Fetch latest entire/sessions from origin
+	FetchSessionsBranch()
+
 	// Skip on default branch for strategies that don't allow it
 	if skip, _ := ShouldSkipOnDefaultBranchForStrategy(); skip {
 		fmt.Println("Entire tracking is disabled on the default branch for this strategy.")
@@ -326,6 +329,9 @@ func runRewindInteractive() error {
 }
 
 func runRewindList() error {
+	// Fetch latest entire/sessions from origin
+	FetchSessionsBranch()
+
 	// Skip on default branch for strategies that don't allow it
 	if skip, _ := ShouldSkipOnDefaultBranchForStrategy(); skip {
 		// Return empty list for programmatic consumers
@@ -384,6 +390,9 @@ func runRewindToWithOptions(commitID string, logsOnly bool, reset bool) error {
 }
 
 func runRewindToInternal(commitID string, logsOnly bool, reset bool) error {
+	// Fetch latest entire/sessions from origin
+	FetchSessionsBranch()
+
 	// Skip on default branch for strategies that don't allow it
 	if skip, _ := ShouldSkipOnDefaultBranchForStrategy(); skip {
 		return errors.New("entire tracking is disabled on the default branch for this strategy - create a feature branch to use rewind")

@@ -142,6 +142,11 @@ func FetchTreeData() (*TreeData, error) {
 					StepsCount:   cp.GetStepsCount(),
 					IsTask:       cp.IsTask,
 					ToolUseID:    cp.ToolUseID,
+					Author:       commitInfo.Author,
+					Insertions:   commitInfo.Insertions,
+					Deletions:    commitInfo.Deletions,
+					FileCount:    len(cp.FilesTouched),
+					Agent:        cp.Agent,
 					Sessions:     sessions,
 				}
 				branchCheckpoints[branchName] = append(branchCheckpoints[branchName], cpInfo)
@@ -149,15 +154,28 @@ func FetchTreeData() (*TreeData, error) {
 		}
 	}
 
+	// Fetch uncommitted shadow branch checkpoints for current branch (manual-commit strategy only)
+	if currentBranch != "" {
+		uncommittedCheckpoints := fetchUncommittedCheckpoints(checkpointInfoMap, isSessionActive)
+		if len(uncommittedCheckpoints) > 0 {
+			branchCheckpoints[currentBranch] = append(uncommittedCheckpoints, branchCheckpoints[currentBranch]...)
+		}
+	}
+
 	// Build branch list
-	// Note: checkpoints are already in git commit order (newest first) from findCheckpointsOnBranch
 	var branches []BranchInfo
 	for branchName := range branchSet {
+		// Sort checkpoints by CreatedAt (newest first)
+		cps := branchCheckpoints[branchName]
+		sort.Slice(cps, func(i, j int) bool {
+			return cps[i].CreatedAt.After(cps[j].CreatedAt)
+		})
+
 		info := BranchInfo{
 			Name:        branchName,
 			IsCurrent:   branchName == currentBranch,
 			IsMerged:    isBranchMerged(repo, branchName, mainBranch),
-			Checkpoints: branchCheckpoints[branchName],
+			Checkpoints: cps,
 		}
 
 		branches = append(branches, info)
@@ -294,8 +312,11 @@ func isCommitInRecentHistory(repo *git.Repository, commitHash string, branchName
 
 // commitInfo holds basic commit information for display.
 type commitInfo struct {
-	Hash    string
-	Message string
+	Hash       string
+	Message    string
+	Author     string
+	Insertions int
+	Deletions  int
 }
 
 // findCheckpointsOnBranch finds checkpoints associated with commits on a branch.
@@ -357,6 +378,9 @@ func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpoint
 			commitMsg = commitMsg[:idx]
 		}
 
+		// Get diff stats
+		insertions, deletions := getCommitDiffStats(repo, c)
+
 		// Build sessions list for this checkpoint
 		sessions := buildSessionsForCheckpoint(repo, cpInfo, checkpointID, isSessionActive, sessionStates)
 
@@ -368,6 +392,11 @@ func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpoint
 			StepsCount:   cpInfo.GetStepsCount(),
 			IsTask:       cpInfo.IsTask,
 			ToolUseID:    cpInfo.ToolUseID,
+			Author:       c.Author.Name,
+			Insertions:   insertions,
+			Deletions:    deletions,
+			FileCount:    len(cpInfo.FilesTouched),
+			Agent:        cpInfo.Agent,
 			Sessions:     sessions,
 		})
 
@@ -435,9 +464,14 @@ func findBranchesAndCommitsForCheckpoint(repo *git.Repository, checkpointID stri
 				if idx := strings.Index(commitMsg, "\n"); idx != -1 {
 					commitMsg = commitMsg[:idx]
 				}
+				// Get diff stats
+				insertions, deletions := getCommitDiffStats(repo, c)
 				result[branchName] = commitInfo{
-					Hash:    c.Hash.String()[:7],
-					Message: commitMsg,
+					Hash:       c.Hash.String()[:7],
+					Message:    commitMsg,
+					Author:     c.Author.Name,
+					Insertions: insertions,
+					Deletions:  deletions,
 				}
 				return errors.New("found")
 			}
@@ -456,25 +490,17 @@ func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string) stri
 }
 
 // buildSessionsForCheckpoint creates SessionInfo entries for all sessions in a checkpoint.
-// Sessions are sorted by start time with newest first.
-func buildSessionsForCheckpoint(repo *git.Repository, cpInfo strategy.CheckpointInfo, checkpointID string, isSessionActive func(string) bool, sessionStates map[string]*session.State) []SessionInfo {
+// Sessions are kept in the order they appear in the session_ids array from metadata.
+func buildSessionsForCheckpoint(repo *git.Repository, cpInfo strategy.CheckpointInfo, checkpointID string, isSessionActive func(string) bool, _ map[string]*session.State) []SessionInfo {
 	sessionIDs := cpInfo.GetSessionIDs()
 
-	// Sort session IDs by start time (newest first)
-	sort.Slice(sessionIDs, func(i, j int) bool {
-		stateI, hasI := sessionStates[sessionIDs[i]]
-		stateJ, hasJ := sessionStates[sessionIDs[j]]
-		if !hasI && !hasJ {
-			return sessionIDs[i] > sessionIDs[j] // Fallback to reverse lexicographic
-		}
-		if !hasI {
-			return false // Sessions without state go last
-		}
-		if !hasJ {
-			return true // Sessions without state go last
-		}
-		return stateI.StartedAt.After(stateJ.StartedAt)
-	})
+	// Calculate per-session step count (estimate: divide evenly among sessions)
+	totalSteps := cpInfo.GetStepsCount()
+	sessionCount := len(sessionIDs)
+	if sessionCount == 0 {
+		sessionCount = 1
+	}
+	perSessionSteps := totalSteps / sessionCount
 
 	sessions := make([]SessionInfo, 0, len(sessionIDs))
 	for i, sessionID := range sessionIDs {
@@ -491,6 +517,8 @@ func buildSessionsForCheckpoint(repo *git.Repository, cpInfo strategy.Checkpoint
 			SessionID:   sessionID,
 			Description: description,
 			IsActive:    isSessionActive(sessionID),
+			Agent:       cpInfo.Agent,
+			StepsCount:  perSessionSteps,
 		})
 	}
 
@@ -572,4 +600,263 @@ func getMergeBaseHash(repo *git.Repository, branch1, branch2 string) plumbing.Ha
 	}
 
 	return mergeBase[0].Hash
+}
+
+// getCommitDiffStats computes the number of insertions and deletions for a commit.
+// Returns (0, 0) if stats cannot be computed.
+func getCommitDiffStats(_ *git.Repository, c *object.Commit) (insertions, deletions int) {
+	return getCommitDiffStatsFiltered(c, nil)
+}
+
+// getCommitDiffStatsFiltered computes diff stats, optionally excluding paths matching a prefix.
+// Returns (insertions, deletions, fileCount).
+func getCommitDiffStatsFiltered(c *object.Commit, excludePrefixes []string) (insertions, deletions int) {
+	// Get parent tree (empty tree for initial commits)
+	var parentTree *object.Tree
+	if c.NumParents() > 0 {
+		parent, err := c.Parent(0)
+		if err == nil {
+			parentTree, err = parent.Tree()
+			if err != nil {
+				return 0, 0
+			}
+		}
+	}
+
+	// Get current tree
+	currentTree, err := c.Tree()
+	if err != nil {
+		return 0, 0
+	}
+
+	// Compute diff
+	changes, err := parentTree.Diff(currentTree)
+	if err != nil {
+		return 0, 0
+	}
+
+	// Sum up stats from all changes
+	for _, change := range changes {
+		patch, err := change.Patch()
+		if err != nil {
+			continue
+		}
+		for _, fileStat := range patch.Stats() {
+			// Check if file should be excluded
+			excluded := false
+			for _, prefix := range excludePrefixes {
+				if strings.HasPrefix(fileStat.Name, prefix) {
+					excluded = true
+					break
+				}
+			}
+			if excluded {
+				continue
+			}
+			insertions += fileStat.Addition
+			deletions += fileStat.Deletion
+		}
+	}
+
+	return insertions, deletions
+}
+
+// getShadowCommitStats computes diff stats for a shadow commit, excluding metadata files.
+func getShadowCommitStats(repo *git.Repository, commitHash string) (insertions, deletions, fileCount int) {
+	hash := plumbing.NewHash(commitHash)
+	commit, err := repo.CommitObject(hash)
+	if err != nil {
+		return 0, 0, 0
+	}
+
+	// Exclude .entire/ metadata directory
+	excludePrefixes := []string{".entire/"}
+	insertions, deletions = getCommitDiffStatsFiltered(commit, excludePrefixes)
+
+	// Count files changed (excluding metadata)
+	fileCount = countFilesChanged(commit, excludePrefixes)
+
+	return insertions, deletions, fileCount
+}
+
+// countFilesChanged counts the number of files changed in a commit, excluding specified prefixes.
+func countFilesChanged(c *object.Commit, excludePrefixes []string) int {
+	var parentTree *object.Tree
+	if c.NumParents() > 0 {
+		parent, err := c.Parent(0)
+		if err == nil {
+			parentTree, err = parent.Tree()
+			if err != nil {
+				parentTree = nil
+			}
+		}
+	}
+
+	currentTree, err := c.Tree()
+	if err != nil {
+		return 0
+	}
+
+	changes, err := parentTree.Diff(currentTree)
+	if err != nil {
+		return 0
+	}
+
+	count := 0
+	for _, change := range changes {
+		// Get the file path from the change
+		var filePath string
+		if change.To.Name != "" {
+			filePath = change.To.Name
+		} else if change.From.Name != "" {
+			filePath = change.From.Name
+		}
+
+		// Check if file should be excluded
+		excluded := false
+		for _, prefix := range excludePrefixes {
+			if strings.HasPrefix(filePath, prefix) {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			count++
+		}
+	}
+
+	return count
+}
+
+// fetchUncommittedCheckpoints retrieves shadow branch checkpoints that haven't been committed yet.
+// Only works when manual-commit strategy is active.
+// Task checkpoints are nested under their parent prompt checkpoint.
+func fetchUncommittedCheckpoints(committedCheckpoints map[string]strategy.CheckpointInfo, isSessionActive func(string) bool) []CheckpointInfo {
+	// Get current strategy
+	strat := GetStrategy()
+	if strat == nil {
+		return nil
+	}
+
+	// Only manual-commit strategy has shadow branch checkpoints
+	if strat.Name() != "manual-commit" {
+		return nil
+	}
+
+	// Get rewind points from the strategy (includes uncommitted shadow branch checkpoints)
+	rewindPoints, err := strat.GetRewindPoints(50)
+	if err != nil {
+		return nil
+	}
+
+	// Open repository for computing diff stats
+	repo, err := strategy.OpenRepository()
+	if err != nil {
+		return nil
+	}
+
+	// Build set of committed checkpoint IDs to avoid duplicates
+	committedIDs := make(map[string]bool)
+	for cpID := range committedCheckpoints {
+		committedIDs[cpID] = true
+	}
+
+	// First pass: separate prompt checkpoints and task checkpoints
+	// Task checkpoints will be nested under their parent prompt checkpoint
+	var promptCheckpoints []CheckpointInfo
+	var taskCheckpoints []CheckpointInfo
+
+	for _, point := range rewindPoints {
+		// Skip logs-only points (these are already committed)
+		if point.IsLogsOnly {
+			continue
+		}
+
+		// Skip if this checkpoint ID is already in the committed list
+		if point.CheckpointID != "" && committedIDs[point.CheckpointID] {
+			continue
+		}
+
+		// This is an uncommitted shadow branch checkpoint
+		shortHash := point.ID
+		if len(shortHash) > 7 {
+			shortHash = shortHash[:7]
+		}
+
+		// Get diff stats for this shadow commit (excluding .entire/ metadata)
+		insertions, deletions, fileCount := getShadowCommitStats(repo, point.ID)
+
+		// Build session info from the rewind point
+		var sessions []SessionInfo
+		if point.SessionID != "" {
+			sessions = append(sessions, SessionInfo{
+				SessionID:   point.SessionID,
+				Description: point.SessionPrompt,
+				IsActive:    isSessionActive(point.SessionID),
+				StepsCount:  0, // Not available from rewind point
+			})
+		}
+
+		cpInfo := CheckpointInfo{
+			CheckpointID:  point.ID, // Use commit hash as ID for uncommitted checkpoints
+			CommitHash:    shortHash,
+			CommitMsg:     point.Message,
+			CreatedAt:     point.Date,
+			IsTask:        point.IsTaskCheckpoint,
+			ToolUseID:     point.ToolUseID,
+			Insertions:    insertions,
+			Deletions:     deletions,
+			FileCount:     fileCount,
+			IsUncommitted: true,
+			Sessions:      sessions,
+		}
+
+		if point.IsTaskCheckpoint {
+			taskCheckpoints = append(taskCheckpoints, cpInfo)
+		} else {
+			promptCheckpoints = append(promptCheckpoints, cpInfo)
+		}
+	}
+
+	// Second pass: nest task checkpoints under their parent prompt checkpoint
+	// Task checkpoints belong to the most recent prompt checkpoint in the same session
+	// that was created before them
+	for i := range promptCheckpoints {
+		prompt := &promptCheckpoints[i]
+		promptSessionID := ""
+		if len(prompt.Sessions) > 0 {
+			promptSessionID = prompt.Sessions[0].SessionID
+		}
+
+		// Find task checkpoints that belong to this prompt
+		// (same session, created after this prompt but before the next prompt)
+		var nextPromptTime time.Time
+		// Find the next prompt checkpoint in same session (if any)
+		for j := i - 1; j >= 0; j-- { // Go backwards since list is newest-first
+			if len(promptCheckpoints[j].Sessions) > 0 &&
+				promptCheckpoints[j].Sessions[0].SessionID == promptSessionID {
+				nextPromptTime = promptCheckpoints[j].CreatedAt
+				break
+			}
+		}
+
+		for _, task := range taskCheckpoints {
+			taskSessionID := ""
+			if len(task.Sessions) > 0 {
+				taskSessionID = task.Sessions[0].SessionID
+			}
+
+			// Task belongs to this prompt if:
+			// 1. Same session
+			// 2. Created after this prompt
+			// 3. Created before the next prompt (or no next prompt)
+			if taskSessionID == promptSessionID &&
+				task.CreatedAt.After(prompt.CreatedAt) &&
+				(nextPromptTime.IsZero() || task.CreatedAt.Before(nextPromptTime)) {
+				prompt.TaskCheckpoints = append(prompt.TaskCheckpoints, task)
+			}
+		}
+	}
+
+	return promptCheckpoints
 }

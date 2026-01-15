@@ -49,6 +49,11 @@ func BuildTree(data *TreeData) []*Node {
 				StepsCount:       cp.StepsCount,
 				IsTaskCheckpoint: cp.IsTask,
 				ToolUseID:        cp.ToolUseID,
+				Author:           cp.Author,
+				Insertions:       cp.Insertions,
+				Deletions:        cp.Deletions,
+				FileCount:        cp.FileCount,
+				IsUncommitted:    cp.IsUncommitted,
 				// Primary session info (for actions that need a session ID)
 				SessionID:   primarySessionID,
 				Description: primaryDescription,
@@ -66,9 +71,33 @@ func BuildTree(data *TreeData) []*Node {
 					SessionID:   sess.SessionID,
 					Description: sess.Description,
 					IsActive:    sess.IsActive,
+					Agent:       sess.Agent,
+					SessionStep: sess.StepsCount,
 					Parent:      checkpointNode,
 				}
 				checkpointNode.Children = append(checkpointNode.Children, sessionNode)
+			}
+
+			// Add task checkpoints as child nodes (nested under parent prompt)
+			for _, taskCp := range cp.TaskCheckpoints {
+				taskNode := &Node{
+					Type:             NodeTypeCheckpoint,
+					ID:               taskCp.CheckpointID,
+					Label:            formatCheckpointLabel(taskCp),
+					CheckpointID:     taskCp.CheckpointID,
+					CommitHash:       taskCp.CommitHash,
+					CommitMsg:        taskCp.CommitMsg,
+					Timestamp:        taskCp.CreatedAt,
+					IsTaskCheckpoint: true,
+					ToolUseID:        taskCp.ToolUseID,
+					IsUncommitted:    taskCp.IsUncommitted,
+					// Inherit session info from parent
+					SessionID:   primarySessionID,
+					Description: taskCp.CommitMsg,
+					Parent:      checkpointNode,
+					Expanded:    false,
+				}
+				checkpointNode.Children = append(checkpointNode.Children, taskNode)
 			}
 
 			branchNode.Children = append(branchNode.Children, checkpointNode)
@@ -113,13 +142,9 @@ func formatCheckpointLabel(cp CheckpointInfo) string {
 		parts = append(parts, cp.CommitHash)
 	}
 
-	// Show commit message (truncated)
+	// Show commit message
 	if cp.CommitMsg != "" {
-		msg := cp.CommitMsg
-		if len(msg) > 50 {
-			msg = msg[:47] + "..."
-		}
-		parts = append(parts, msg)
+		parts = append(parts, cp.CommitMsg)
 	}
 
 	// Show steps count
@@ -163,13 +188,9 @@ func formatSessionInfoLabel(sess SessionInfo) string {
 
 	parts := []string{"Session: " + displayID}
 
-	// Add description (truncated)
+	// Add description
 	if sess.Description != "" && sess.Description != "No description" {
-		desc := sess.Description
-		if len(desc) > 40 {
-			desc = desc[:37] + "..."
-		}
-		parts = append(parts, "- "+desc)
+		parts = append(parts, "- "+sess.Description)
 	}
 
 	if sess.IsActive {

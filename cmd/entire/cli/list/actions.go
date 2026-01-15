@@ -3,7 +3,6 @@ package list
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"entire.io/cli/cmd/entire/cli/agent"
@@ -18,6 +17,13 @@ var currentStrategy strategy.Strategy
 // SetStrategy sets the current strategy for actions.
 func SetStrategy(s strategy.Strategy) {
 	currentStrategy = s
+}
+
+// GetStrategy returns the current strategy (used by FetchTreeData for shadow checkpoints).
+//
+//nolint:ireturn // Need to return interface for polymorphism
+func GetStrategy() strategy.Strategy {
+	return currentStrategy
 }
 
 // PerformOpen opens a session or checkpoint without changing branches.
@@ -86,12 +92,11 @@ func PerformResume(node *Node) *ActionResult {
 		Action: ActionResume,
 	}
 
-	// Determine branch and session based on node type
+	// Determine session and checkpoint based on node type
 	// New hierarchy: Branch → Checkpoint → Session
-	var branchName, sessionID, checkpointID string
+	var sessionID, checkpointID string
 	switch node.Type {
 	case NodeTypeBranch:
-		branchName = node.ID
 		// Find most recent checkpoint (first child)
 		if len(node.Children) > 0 {
 			checkpointNode := node.Children[0]
@@ -102,20 +107,12 @@ func PerformResume(node *Node) *ActionResult {
 		// Checkpoint stores session info directly
 		checkpointID = node.CheckpointID
 		sessionID = node.SessionID
-		// Get branch from parent
-		if node.Parent != nil && node.Parent.Type == NodeTypeBranch {
-			branchName = node.Parent.ID
-		}
 	case NodeTypeSession:
 		// Session is under checkpoint
 		sessionID = node.SessionID
 		// Get checkpoint from parent
 		if node.Parent != nil && node.Parent.Type == NodeTypeCheckpoint {
 			checkpointID = node.Parent.CheckpointID
-			// Get branch from grandparent
-			if node.Parent.Parent != nil && node.Parent.Parent.Type == NodeTypeBranch {
-				branchName = node.Parent.Parent.ID
-			}
 		}
 	}
 
@@ -132,12 +129,8 @@ func PerformResume(node *Node) *ActionResult {
 		}
 	}
 
-	// If we have a branch and it's not the current one, we need to checkout
-	// Note: This doesn't actually checkout here - we just prepare the message
-	// The actual checkout would be done by the caller using the resume command
-	if branchName != "" {
-		result.Message = fmt.Sprintf("Branch: %s\nSession: %s", branchName, sessionID)
-	} else if sessionID != "" {
+	// Match messaging from `entire resume`: "Session: %s"
+	if sessionID != "" {
 		result.Message = "Session: " + sessionID
 	}
 
@@ -247,7 +240,12 @@ func PerformRewind(node *Node) *ActionResult {
 		return result
 	}
 
-	result.Message = "Rewound to checkpoint: " + checkpointID[:8]
+	// Match messaging from `entire rewind`: "Rewound to %s."
+	shortID := checkpointID
+	if len(shortID) > 7 {
+		shortID = shortID[:7]
+	}
+	result.Message = fmt.Sprintf("Rewound to %s.", shortID)
 
 	// Generate resume command
 	if sessionID != "" {
@@ -259,6 +257,7 @@ func PerformRewind(node *Node) *ActionResult {
 }
 
 // restoreSessionLogs copies session logs from entire/sessions to the agent's session directory.
+// Uses strategy.RestoreSessionFile which includes timestamp-based safety guards.
 func restoreSessionLogs(ag agent.Agent, sessionID, checkpointID string) error {
 	// Get session directory for this agent
 	// Use repo root since session directories are relative to the git repository
@@ -276,11 +275,6 @@ func restoreSessionLogs(ag agent.Agent, sessionID, checkpointID string) error {
 	agentSessionID := ag.ExtractAgentSessionID(sessionID)
 	sessionLogPath := filepath.Join(sessionDir, agentSessionID+".jsonl")
 
-	// Check if already exists
-	if fileExists(sessionLogPath) {
-		return nil // Already restored
-	}
-
 	// Get strategy
 	strat := currentStrategy
 	if strat == nil {
@@ -293,30 +287,18 @@ func restoreSessionLogs(ag agent.Agent, sessionID, checkpointID string) error {
 		return fmt.Errorf("failed to get session log: %w", err)
 	}
 
-	// Create an AgentSession with the native data
-	agentSession := &agent.AgentSession{
-		SessionID:  agentSessionID,
-		AgentName:  ag.Name(),
-		RepoPath:   repoRoot,
-		SessionRef: sessionLogPath,
-		NativeData: logContent,
+	// Use the consolidated restore function with safety guards
+	// force=false means it won't overwrite if local has newer timestamps
+	result, err := strategy.RestoreSessionFile(sessionLogPath, logContent, false)
+	if err != nil {
+		return fmt.Errorf("failed to restore session: %w", err)
 	}
 
-	// Create directory if it doesn't exist
-	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
-		return fmt.Errorf("failed to create session directory: %w", err)
-	}
-
-	// Write the session using the agent's WriteSession method
-	if err := ag.WriteSession(agentSession); err != nil {
-		return fmt.Errorf("failed to write session: %w", err)
+	// If local is newer, that's fine for Open/Resume - we don't want to overwrite
+	// user's more recent work. The session already exists locally.
+	if result.Status == strategy.StatusLocalNewer || result.Status == strategy.StatusUnchanged {
+		return nil // Already have local session (possibly with newer content)
 	}
 
 	return nil
-}
-
-// fileExists checks if a file exists.
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

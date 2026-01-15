@@ -54,6 +54,9 @@ are currently running in an agent.`,
 }
 
 func runListInteractive() error {
+	// Fetch latest entire/sessions from origin
+	FetchSessionsBranch()
+
 	// Set the strategy for actions
 	list.SetStrategy(GetStrategy())
 
@@ -103,6 +106,9 @@ func runListInteractive() error {
 }
 
 func runListJSON() error {
+	// Fetch latest entire/sessions from origin
+	FetchSessionsBranch()
+
 	// Fetch data
 	data, err := list.FetchTreeData()
 	if err != nil {

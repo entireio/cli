@@ -57,10 +57,6 @@ func cleanPromptForCommit(prompt string) string {
 	cleaned = strings.TrimSuffix(cleaned, "?")
 	cleaned = strings.TrimSpace(cleaned)
 
-	// Truncate to 72 characters (rune-safe for multi-byte UTF-8)
-	cleaned = stringutil.TruncateRunes(cleaned, 72, "")
-	cleaned = strings.TrimSpace(cleaned)
-
 	// Capitalize first letter (rune-safe for multi-byte UTF-8)
 	cleaned = stringutil.CapitalizeFirst(cleaned)
 

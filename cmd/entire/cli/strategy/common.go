@@ -219,7 +219,7 @@ func GetMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
 	return tree, nil
 }
 
-// ExtractFirstPrompt extracts and truncates the first meaningful prompt from prompt content.
+// ExtractFirstPrompt extracts the first meaningful prompt from prompt content.
 // Prompts are separated by "\n\n---\n\n". Skips empty prompts and separator-only content.
 // Returns empty string if no valid prompt is found.
 func ExtractFirstPrompt(content string) string {
@@ -241,11 +241,7 @@ func ExtractFirstPrompt(content string) string {
 		break
 	}
 
-	if firstPrompt == "" {
-		return ""
-	}
-
-	return TruncateDescription(firstPrompt, MaxDescriptionLength)
+	return firstPrompt
 }
 
 // ReadSessionPromptFromTree reads the first meaningful prompt from a checkpoint's prompt.txt file in a git tree.

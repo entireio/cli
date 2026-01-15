@@ -24,6 +24,33 @@ func openRepository() (*git.Repository, error) {
 	return repo, nil
 }
 
+// FetchSessionsBranch fetches the entire/sessions branch from origin.
+// This ensures we have the latest checkpoint metadata before listing/resuming/rewinding.
+// Silently does nothing if:
+// - No remote named "origin" exists
+// - The branch doesn't exist on the remote
+// - Already up to date
+// - Any fetch error occurs (user can still work with local data)
+func FetchSessionsBranch() {
+	repo, err := openRepository()
+	if err != nil {
+		return
+	}
+
+	remote, err := repo.Remote("origin")
+	if err != nil {
+		return
+	}
+
+	// Fetch entire/sessions branch
+	// Use refspec that updates local branch to match remote
+	refSpec := config.RefSpec("+refs/heads/entire/sessions:refs/heads/entire/sessions")
+	//nolint:errcheck,gosec // Intentionally ignoring errors - user can still work with local data
+	remote.Fetch(&git.FetchOptions{
+		RefSpecs: []config.RefSpec{refSpec},
+	})
+}
+
 // GitAuthor represents the git user configuration
 type GitAuthor struct {
 	Name  string

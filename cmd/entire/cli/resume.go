@@ -51,6 +51,9 @@ you'll be prompted to confirm resuming from the older checkpoint.`,
 }
 
 func runResume(branchName string, force bool) error {
+	// Fetch latest entire/sessions from origin
+	FetchSessionsBranch()
+
 	// Check if we're already on this branch
 	currentBranch, err := GetCurrentBranch()
 	if err == nil && currentBranch == branchName {

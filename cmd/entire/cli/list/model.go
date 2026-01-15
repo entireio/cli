@@ -33,11 +33,18 @@ type Node struct {
 	StepsCount       int
 	IsTaskCheckpoint bool
 	ToolUseID        string
+	Author           string // Commit author name
+	Insertions       int    // Lines added in commit
+	Deletions        int    // Lines removed in commit
+	FileCount        int    // Number of files touched
+	IsUncommitted    bool   // True for shadow branch checkpoints (not yet committed)
 
 	// Session-specific fields (when showing session under checkpoint)
 	SessionID   string
 	Description string
-	IsActive    bool // Currently running session
+	IsActive    bool   // Currently running session
+	Agent       string // Agent name for badge display
+	SessionStep int    // Step count for this session
 
 	// Parent reference for navigation
 	Parent *Node
@@ -57,15 +64,23 @@ type BranchInfo struct {
 
 // CheckpointInfo contains information about a checkpoint on a branch.
 type CheckpointInfo struct {
-	CheckpointID string
-	CommitHash   string // Commit with Entire-Checkpoint trailer
-	CommitMsg    string // Commit message (for display)
-	CreatedAt    time.Time
-	StepsCount   int // Steps that led to this checkpoint
-	IsTask       bool
-	ToolUseID    string
+	CheckpointID  string
+	CommitHash    string // Commit with Entire-Checkpoint trailer (or shadow commit hash if uncommitted)
+	CommitMsg     string // Commit message (for display)
+	CreatedAt     time.Time
+	StepsCount    int // Steps that led to this checkpoint
+	IsTask        bool
+	ToolUseID     string
+	Author        string // Commit author name
+	Insertions    int    // Lines added in commit
+	Deletions     int    // Lines removed in commit
+	FileCount     int    // Number of files touched
+	Agent         string // Agent name (e.g., "Claude Code")
+	IsUncommitted bool   // True for shadow branch checkpoints (not yet committed)
 	// Sessions associated with this checkpoint (can be multiple from concurrent sessions)
 	Sessions []SessionInfo
+	// TaskCheckpoints are nested task/subagent checkpoints under this prompt checkpoint
+	TaskCheckpoints []CheckpointInfo
 }
 
 // SessionInfo contains session details shown under a checkpoint.
@@ -73,6 +88,8 @@ type SessionInfo struct {
 	SessionID   string
 	Description string
 	IsActive    bool
+	Agent       string // Agent name for badge display
+	StepsCount  int    // Step count for this session
 }
 
 // TreeData holds the complete data for the hierarchical view.

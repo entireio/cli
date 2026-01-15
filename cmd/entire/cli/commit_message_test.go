@@ -123,21 +123,16 @@ func TestCleanPromptForCommit(t *testing.T) {
 			expected: "Fix the bug",
 		},
 
-		// Truncation
+		// Long prompts (no longer truncated)
 		{
-			name:     "truncates at 72 characters and trims trailing space",
+			name:     "long prompts are kept intact",
 			input:    "This is a very long prompt that exceeds the seventy two character limit and should be truncated",
-			expected: "This is a very long prompt that exceeds the seventy two character limit",
+			expected: "This is a very long prompt that exceeds the seventy two character limit and should be truncated",
 		},
 		{
-			name:     "keeps prompts under 72 chars intact",
+			name:     "short prompts stay intact",
 			input:    "Short prompt",
 			expected: "Short prompt",
-		},
-		{
-			name:     "exactly 72 characters stays intact",
-			input:    "This is exactly seventy two characters long which is the maximum allowed",
-			expected: "This is exactly seventy two characters long which is the maximum allowed",
 		},
 
 		// Edge cases
