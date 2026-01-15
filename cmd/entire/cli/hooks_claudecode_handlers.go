@@ -92,6 +92,11 @@ func parseAndLogHookInput() (*hookInputData, error) {
 // checkConcurrentSessions checks for concurrent session conflicts and shows warnings if needed.
 // Returns true if the hook should be skipped due to an unresolved conflict.
 func checkConcurrentSessions(ag agent.Agent, entireSessionID string) (bool, error) {
+	// Check if warnings are disabled via settings
+	if IsMultiSessionWarningDisabled() {
+		return false, nil
+	}
+
 	strat := GetStrategy()
 
 	concurrentChecker, ok := strat.(strategy.ConcurrentSessionChecker)
@@ -164,30 +169,19 @@ func checkConcurrentSessions(ag agent.Agent, entireSessionID string) (bool, erro
 			fmt.Fprintf(os.Stderr, "Warning: failed to save session state: %v\n", saveErr)
 		}
 
-		// Get resume command for the other session using the CONFLICTING session's agent type.
-		// If the conflicting session is from a different agent (e.g., Gemini when we're Claude),
-		// use that agent's resume command format. Otherwise, use our own format (backward compatible).
-		var resumeCmd string
-		if otherSession.AgentType != "" && otherSession.AgentType != agentType {
-			// Different agent type - look up the conflicting agent
-			if conflictingAgent, agentErr := agent.GetByAgentType(otherSession.AgentType); agentErr == nil {
-				resumeCmd = conflictingAgent.FormatResumeCommand(conflictingAgent.ExtractAgentSessionID(otherSession.SessionID))
-			}
-		}
-		// Fall back to current agent if same type or couldn't get the conflicting agent
-		if resumeCmd == "" {
-			resumeCmd = ag.FormatResumeCommand(ag.ExtractAgentSessionID(otherSession.SessionID))
-		}
+		// Get resume command for the other session
+		resumeCmd := ag.FormatResumeCommand(ag.ExtractAgentSessionID(otherSession.SessionID))
 
 		// Try to read the other session's initial prompt
 		otherPrompt := strategy.ReadSessionPromptFromShadow(repo, otherSession.BaseCommit, otherSession.SessionID)
 
 		// Build message with other session's prompt if available
 		var message string
+		suppressHint := "\n\nTo suppress this warning in future sessions, run:\n  entire enable --disable-multisession-warning"
 		if otherPrompt != "" {
-			message = fmt.Sprintf("Another session is active: \"%s\"\n\nYou can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: %s\n\nPress the up arrow key to get your prompt back.", otherPrompt, resumeCmd)
+			message = fmt.Sprintf("Another session is active: \"%s\"\n\nYou can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: %s%s\n\nPress the up arrow key to get your prompt back.", otherPrompt, resumeCmd, suppressHint)
 		} else {
-			message = "Another session is active with uncommitted changes. You can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: " + resumeCmd + "\n\nPress the up arrow key to get your prompt back."
+			message = "Another session is active with uncommitted changes. You can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: " + resumeCmd + suppressHint + "\n\nPress the up arrow key to get your prompt back."
 		}
 
 		// Output blocking JSON response - warn about concurrent sessions but allow continuation
@@ -231,19 +225,13 @@ func handleSessionInitErrors(ag agent.Agent, initErr error) error {
 	// Check for session ID conflict error (shadow branch has different session)
 	var sessionConflictErr *strategy.SessionIDConflictError
 	if errors.As(initErr, &sessionConflictErr) {
-		// Try to get the conflicting session's agent type from its state file
-		// If it's a different agent type, use that agent's resume command format
-		var resumeCmd string
-		existingState, loadErr := strategy.LoadSessionState(sessionConflictErr.ExistingSession)
-		if loadErr == nil && existingState != nil && existingState.AgentType != "" {
-			if conflictingAgent, agentErr := agent.GetByAgentType(existingState.AgentType); agentErr == nil {
-				resumeCmd = conflictingAgent.FormatResumeCommand(conflictingAgent.ExtractAgentSessionID(sessionConflictErr.ExistingSession))
-			}
+		// If multi-session warnings are disabled, skip this error silently
+		// The user has explicitly opted to work with multiple concurrent sessions
+		if IsMultiSessionWarningDisabled() {
+			return nil
 		}
-		// Fall back to current agent if we couldn't get the conflicting agent
-		if resumeCmd == "" {
-			resumeCmd = ag.FormatResumeCommand(ag.ExtractAgentSessionID(sessionConflictErr.ExistingSession))
-		}
+		// Get agent's resume command format
+		resumeCmd := ag.FormatResumeCommand(ag.ExtractAgentSessionID(sessionConflictErr.ExistingSession))
 		fmt.Fprintf(os.Stderr, "\n"+
 			"Warning: Session ID conflict detected!\n\n"+
 			"   Shadow branch: %s\n"+
@@ -254,7 +242,9 @@ func handleSessionInitErrors(ag agent.Agent, initErr error) error {
 			"   Options:\n"+
 			"   1. Commit your changes (git commit) to create a new base commit\n"+
 			"   2. Run 'entire rewind reset' to discard the shadow branch and start fresh\n"+
-			"   3. Resume the existing session: %s\n\n",
+			"   3. Resume the existing session: %s\n\n"+
+			"   To suppress this warning in future sessions, run:\n"+
+			"     entire enable --disable-multisession-warning\n\n",
 			sessionConflictErr.ShadowBranch,
 			sessionConflictErr.ExistingSession,
 			sessionConflictErr.NewSession,
