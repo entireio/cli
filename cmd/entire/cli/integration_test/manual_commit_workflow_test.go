@@ -545,7 +545,7 @@ func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
 		t.Fatalf("SimulateStop after migration failed: %v", err)
 	}
 
-	// Verify session state has updated base commit
+	// Verify session state has updated base commit and preserves agent type
 	state, err := env.GetSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
@@ -555,6 +555,11 @@ func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
 	}
 	if state.CheckpointCount != 2 {
 		t.Errorf("Expected 2 checkpoints after migration, got %d", state.CheckpointCount)
+	}
+	// Verify agent_type is preserved across checkpoints and migration
+	expectedAgentType := "Claude Code"
+	if state.AgentType != expectedAgentType {
+		t.Errorf("Session AgentType should be %q, got %q", expectedAgentType, state.AgentType)
 	}
 
 	t.Log("Shadow branch successfully migrated after base commit change")
@@ -681,7 +686,7 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 		t.Errorf("content_hash.txt should exist at %s", hashPath)
 	}
 
-	// Verify metadata.json can be read and parsed (agent field is tested in unit tests)
+	// Verify metadata.json can be read and parsed
 	metadataContent, found := env.ReadFileFromBranch("entire/sessions", metadataPath)
 	if !found {
 		t.Fatal("metadata.json should be readable")
@@ -690,14 +695,13 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 	if err := json.Unmarshal([]byte(metadataContent), &metadata); err != nil {
 		t.Fatalf("failed to parse metadata.json: %v", err)
 	}
-	// Log agent value for debugging (may be empty in test environment due to agent detection)
-	t.Logf("Agent field in metadata.json: %q (empty is OK in test environment)", metadata.Agent)
 
-	// List all files in the checkpoint to help debug
-	t.Log("Files in entire/sessions:")
-	branches := env.ListBranchesWithPrefix("entire/sessions")
-	for _, b := range branches {
-		t.Logf("  Branch: %s", b)
+	// Verify agent field is populated (from ClaudeCodeAgent.Description())
+	expectedAgent := "Claude Code"
+	if metadata.Agent != expectedAgent {
+		t.Errorf("metadata.json Agent = %q, want %q", metadata.Agent, expectedAgent)
+	} else {
+		t.Logf("✓ metadata.json has agent: %q", metadata.Agent)
 	}
 }
 
@@ -1663,4 +1667,68 @@ func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
 	}
 
 	t.Log("Trailer removal opt-out test completed successfully!")
+}
+
+// TestShadow_SessionsBranchCommitTrailers verifies that commits on the entire/sessions
+// branch contain the expected trailers: Entire-Session, Entire-Strategy, and Entire-Agent.
+func TestShadow_SessionsBranchCommitTrailers(t *testing.T) {
+	env := NewTestEnv(t)
+	defer env.Cleanup()
+
+	// Setup
+	env.InitRepo()
+	env.WriteFile("README.md", "# Test Repository")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+	env.GitCheckoutNewBranch("feature/trailer-test")
+	env.InitEntire(strategy.StrategyNameManualCommit)
+
+	// Start session and create checkpoint
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+
+	fileContent := "package main\n\nfunc main() {}\n"
+	env.WriteFile("main.go", fileContent)
+	session.CreateTranscript("Create main.go", []FileChange{{Path: "main.go", Content: fileContent}})
+
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	// Commit to trigger condensation
+	env.GitCommitWithShadowHooks("Add main.go", "main.go")
+
+	// Get the commit message on entire/sessions branch
+	sessionsCommitMsg := env.GetLatestCommitMessageOnBranch("entire/sessions")
+	t.Logf("entire/sessions commit message:\n%s", sessionsCommitMsg)
+
+	// Verify required trailers are present
+	requiredTrailers := map[string]string{
+		paths.SessionTrailerKey:  "",                                // Entire-Session: <session-id>
+		paths.StrategyTrailerKey: strategy.StrategyNameManualCommit, // Entire-Strategy: manual-commit
+		paths.AgentTrailerKey:    "Claude Code",                     // Entire-Agent: Claude Code
+	}
+
+	for trailerKey, expectedValue := range requiredTrailers {
+		if !strings.Contains(sessionsCommitMsg, trailerKey+":") {
+			t.Errorf("entire/sessions commit should have %s trailer", trailerKey)
+			continue
+		}
+
+		// If we have an expected value, verify it
+		if expectedValue != "" {
+			expectedTrailer := trailerKey + ": " + expectedValue
+			if !strings.Contains(sessionsCommitMsg, expectedTrailer) {
+				t.Errorf("entire/sessions commit should have %q, got message:\n%s", expectedTrailer, sessionsCommitMsg)
+			} else {
+				t.Logf("✓ Found trailer: %s", expectedTrailer)
+			}
+		} else {
+			t.Logf("✓ Found trailer: %s", trailerKey)
+		}
+	}
+
+	t.Log("Sessions branch commit trailers test completed successfully!")
 }

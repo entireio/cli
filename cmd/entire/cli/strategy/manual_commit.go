@@ -71,6 +71,7 @@ func sessionStateToStrategy(state *session.State) *SessionState {
 		FilesTouched:             state.FilesTouched,
 		ConcurrentWarningShown:   state.ConcurrentWarningShown,
 		LastCheckpointID:         state.LastCheckpointID,
+		AgentType:                state.AgentType,
 	}
 }
 
@@ -90,6 +91,7 @@ func sessionStateFromStrategy(state *SessionState) *session.State {
 		FilesTouched:             state.FilesTouched,
 		ConcurrentWarningShown:   state.ConcurrentWarningShown,
 		LastCheckpointID:         state.LastCheckpointID,
+		AgentType:                state.AgentType,
 	}
 }
 
