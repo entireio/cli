@@ -15,7 +15,22 @@ Entire integrates with Claude Code through six hooks that fire at different poin
 | `PostToolUse[Task]`      | Subagent finishes              | Create final checkpoint for subagent work      |
 | `PostToolUse[TodoWrite]` | Subagent updates its todo list | Create incremental checkpoint if files changed |
 
-## `SessionStart`
+### Critical Capabilities
+
+  1. Prompt blocking - UserPromptSubmit hook needs to support returning a response to be shown in the cli session.
+    - Claude Code allows us to return a JSON response to stdout that can:
+      - Allow continuation: {"continue": true}
+      - Block with message: {"continue": false, "stopReason": "Your message here"}
+  2. Transcript access - Hooks receive transcript path; system needs to read it for:
+    - Extracting user prompts
+    - Extracting modified files
+    - Generating summaries
+  3. Tool use ID tracking - For subagent checkpoints, need unique tool_use_id to correlate PreToolUse and PostToolUse events
+  4. Stdin parsing - Hook input comes as JSON on stdin; agent must define its input schema
+
+## Detailed Hook Info
+
+### `SessionStart`
 
 - **Command**: `entire hooks claude-code session-start`
 - **Handler**: `handleSessionStart()` in `hooks_claudecode_handlers.go:907`
@@ -28,7 +43,7 @@ Fires when a new chat session begins in Claude Code.
 2.  **Generate Entire Session ID**: Creates a date-prefixed identifier by combining today's date with the model's session ID (e.g., `2026-01-15-ab310c99-f579-4a12-8b3c-1234567890ab`).
 3.  **Persist Session ID**: Writes the Entire session ID to `.entire/current_session`. This file is read by subsequent hooks to maintain session context across hook invocations, even if the session spans midnight (date boundary).
 
-## `UserPromptSubmit`
+### `UserPromptSubmit`
 
 - **Command**: `entire hooks claude-code user-prompt-submit`
 - **Handler**: `captureInitialState()` in `hooks_claudecode_handlers.go:248`
@@ -56,7 +71,7 @@ Fires every time the user submits a prompt. Prepares the repository state tracki
     - **Manual-commit strategy**: Creates or validates the shadow branch (`entire/<HEAD-hash[:7]>`), saves session state to `.git/entire-sessions/<session-id>.json` with `BaseCommit`, `WorktreePath`, and `AgentType`.
     - Handles shadow branch conflicts (from other worktrees) and session ID conflicts with appropriate error messages and recovery options.
 
-## `Stop`
+### `Stop`
 
 - **Command**: `entire hooks claude-code stop`
 - **Handler**: `commitWithMetadata()` in `hooks_claudecode_handlers.go:288`
@@ -98,7 +113,7 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
 
 7.  **Cleanup**: Deletes the temporary `.entire/tmp/pre-prompt-<session-id>.json` file.
 
-## `PreToolUse[Task]`
+### `PreToolUse[Task]`
 
 - **Command**: `entire hooks claude-code pre-task`
 - **Handler**: `handlePreTask()` in `hooks_claudecode_handlers.go:668`
@@ -126,7 +141,7 @@ Fires just before a subagent (Task tool) begins execution. Creates a clear start
     - This allows rewinding to the exact state before the subagent made any changes.
     - Includes subagent type and description in commit metadata for better rewind UX.
 
-## `PostToolUse[Task]`
+### `PostToolUse[Task]`
 
 - **Command**: `entire hooks claude-code post-task`
 - **Handler**: `handlePostTask()` in `hooks_claudecode_handlers.go:770`
@@ -160,7 +175,7 @@ Fires after a subagent finishes its work. Creates the final checkpoint for the s
 
 7.  **Cleanup**: Deletes `.entire/tmp/pre-task-<tool-use-id>.json`.
 
-## `PostToolUse[TodoWrite]`
+### `PostToolUse[TodoWrite]`
 
 - **Command**: `entire hooks claude-code post-todo`
 - **Handler**: `handlePostTodo()` in `hooks_claudecode_handlers.go:550`
