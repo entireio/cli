@@ -425,6 +425,12 @@ func (s *ManualCommitStrategy) PostCommit() error {
 			fmt.Fprintf(os.Stderr, "[entire] Warning: failed to update session state: %v\n", err)
 		}
 
+		// Update current_session to reflect this session's activity
+		// This ensures the session that just created a checkpoint is marked as active
+		if err := paths.WriteCurrentSession(state.SessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "[entire] Warning: failed to update current session: %v\n", err)
+		}
+
 		shortID := state.SessionID
 		if len(shortID) > 8 {
 			shortID = shortID[:8]

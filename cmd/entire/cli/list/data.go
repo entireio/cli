@@ -19,10 +19,10 @@ import (
 
 const (
 	// maxCheckpointsToScan limits how many checkpoints we scan from entire/sessions
-	maxCheckpointsToScan = 50
+	maxCheckpointsToScan = 200
 
 	// maxCommitsToScanPerBranch limits commit traversal per branch
-	maxCommitsToScanPerBranch = 50
+	maxCommitsToScanPerBranch = 100
 )
 
 // FetchTreeData gathers all the data needed for the hierarchical view.
@@ -101,23 +101,31 @@ func FetchTreeData() (*TreeData, error) {
 		branchSet[currentBranch] = true
 	}
 
+	// Build set of commits reachable from main (used to filter feature branches)
+	mainCommits := getCommitsReachableFromMain(repo, mainBranch, maxCommitsToScanPerBranch*2)
+
 	// Scan commits on current branch for checkpoint trailers
 	if currentBranch != "" {
-		foundCheckpoints := findCheckpointsOnBranch(repo, currentBranch, checkpointInfoMap, mainBranch, isSessionActive, activeSessionStates)
+		// If current branch IS main, don't filter out main commits (we want to see them)
+		filterCommits := mainCommits
+		if currentBranch == mainBranch {
+			filterCommits = nil
+		}
+		foundCheckpoints := findCheckpointsOnBranch(repo, currentBranch, checkpointInfoMap, filterCommits, isSessionActive, activeSessionStates)
 		branchCheckpoints[currentBranch] = foundCheckpoints
 	}
 
 	// Also scan main branch if it's not the current branch
 	if mainBranch != "" && mainBranch != currentBranch {
-		// For main branch, pass empty string as mainBranch param to scan all commits
-		foundCheckpoints := findCheckpointsOnBranch(repo, mainBranch, checkpointInfoMap, "", isSessionActive, activeSessionStates)
+		// For main branch, pass nil to scan all commits (don't filter out main commits from main)
+		foundCheckpoints := findCheckpointsOnBranch(repo, mainBranch, checkpointInfoMap, nil, isSessionActive, activeSessionStates)
 		branchCheckpoints[mainBranch] = foundCheckpoints
 	}
 
 	// Scan all checkpoints to find which branches contain them
 	for _, cp := range strategyCheckpoints {
 		// Find which branch(es) contain the commit for this checkpoint
-		branchCommits := findBranchesAndCommitsForCheckpoint(repo, cp.CheckpointID, mainBranch)
+		branchCommits := findBranchesAndCommitsForCheckpoint(repo, cp.CheckpointID, mainBranch, mainCommits)
 		for branchName, commitInfo := range branchCommits {
 			branchSet[branchName] = true
 
@@ -320,17 +328,11 @@ type commitInfo struct {
 }
 
 // findCheckpointsOnBranch finds checkpoints associated with commits on a branch.
-func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpointInfoMap map[string]strategy.CheckpointInfo, mainBranch string, isSessionActive func(string) bool, sessionStates map[string]*session.State) []CheckpointInfo {
+func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpointInfoMap map[string]strategy.CheckpointInfo, mainCommits map[plumbing.Hash]bool, isSessionActive func(string) bool, sessionStates map[string]*session.State) []CheckpointInfo {
 	refName := plumbing.NewBranchReferenceName(branchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
 		return nil
-	}
-
-	// Find merge-base with main to know where to stop
-	var mergeBaseHash plumbing.Hash
-	if mainBranch != "" && mainBranch != branchName {
-		mergeBaseHash = getMergeBaseHash(repo, branchName, mainBranch)
 	}
 
 	var checkpoints []CheckpointInfo
@@ -348,9 +350,10 @@ func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpoint
 			return errors.New("limit reached")
 		}
 
-		// Stop at merge-base (commits at and before this are shared with main)
-		if mergeBaseHash != plumbing.ZeroHash && c.Hash == mergeBaseHash {
-			return errors.New("reached merge-base")
+		// Skip commits that are reachable from main (shared commits)
+		// This handles branches that have merged main into them
+		if mainCommits != nil && mainCommits[c.Hash] {
+			return nil
 		}
 
 		// Check for checkpoint trailer
@@ -408,7 +411,7 @@ func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpoint
 
 // findBranchesAndCommitsForCheckpoint finds branches that contain a commit with this checkpoint ID.
 // Returns a map of branch name -> commit info. Only searches commits unique to each branch (not reachable from main).
-func findBranchesAndCommitsForCheckpoint(repo *git.Repository, checkpointID string, mainBranch string) map[string]commitInfo {
+func findBranchesAndCommitsForCheckpoint(repo *git.Repository, checkpointID string, mainBranch string, mainCommits map[plumbing.Hash]bool) map[string]commitInfo {
 	result := make(map[string]commitInfo)
 
 	// Get all local branches
@@ -433,13 +436,7 @@ func findBranchesAndCommitsForCheckpoint(repo *git.Repository, checkpointID stri
 			return nil
 		}
 
-		// Find merge-base with main for this specific branch
-		var mergeBaseHash plumbing.Hash
-		if mainBranch != "" {
-			mergeBaseHash = getMergeBaseHash(repo, branchName, mainBranch)
-		}
-
-		// Search commits unique to this branch (stop at merge-base)
+		// Search commits unique to this branch
 		iter, err := repo.Log(&git.LogOptions{From: ref.Hash()})
 		if err != nil {
 			return nil //nolint:nilerr // Continue to next branch on error
@@ -452,9 +449,9 @@ func findBranchesAndCommitsForCheckpoint(repo *git.Repository, checkpointID stri
 				return errors.New("limit reached")
 			}
 
-			// Stop at merge-base - commits at and before this are shared with main
-			if mergeBaseHash != plumbing.ZeroHash && c.Hash == mergeBaseHash {
-				return errors.New("reached merge-base")
+			// Skip commits that are reachable from main (shared commits)
+			if mainCommits != nil && mainCommits[c.Hash] {
+				return nil
 			}
 
 			cpID, hasTrailer := paths.ParseCheckpointTrailer(c.Message)
@@ -571,35 +568,37 @@ func isBranchMerged(repo *git.Repository, branchName, mainBranch string) bool {
 	return isAncestor
 }
 
-// getMergeBaseHash finds the merge-base between two branches.
-// Returns ZeroHash if merge-base cannot be determined.
-func getMergeBaseHash(repo *git.Repository, branch1, branch2 string) plumbing.Hash {
-	ref1, err := repo.Reference(plumbing.NewBranchReferenceName(branch1), true)
+// getCommitsReachableFromMain returns a set of commit hashes reachable from the main branch.
+// This is used to filter out commits that are shared with main when listing branch-specific checkpoints.
+func getCommitsReachableFromMain(repo *git.Repository, mainBranch string, limit int) map[plumbing.Hash]bool {
+	result := make(map[plumbing.Hash]bool)
+
+	if mainBranch == "" {
+		return result
+	}
+
+	refName := plumbing.NewBranchReferenceName(mainBranch)
+	ref, err := repo.Reference(refName, true)
 	if err != nil {
-		return plumbing.ZeroHash
+		return result
 	}
 
-	ref2, err := repo.Reference(plumbing.NewBranchReferenceName(branch2), true)
+	iter, err := repo.Log(&git.LogOptions{From: ref.Hash()})
 	if err != nil {
-		return plumbing.ZeroHash
+		return result
 	}
 
-	commit1, err := repo.CommitObject(ref1.Hash())
-	if err != nil {
-		return plumbing.ZeroHash
-	}
+	count := 0
+	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best-effort
+		count++
+		if count > limit {
+			return errors.New("limit reached")
+		}
+		result[c.Hash] = true
+		return nil
+	})
 
-	commit2, err := repo.CommitObject(ref2.Hash())
-	if err != nil {
-		return plumbing.ZeroHash
-	}
-
-	mergeBase, err := commit1.MergeBase(commit2)
-	if err != nil || len(mergeBase) == 0 {
-		return plumbing.ZeroHash
-	}
-
-	return mergeBase[0].Hash
+	return result
 }
 
 // getCommitDiffStats computes the number of insertions and deletions for a commit.

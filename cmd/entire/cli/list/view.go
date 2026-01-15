@@ -73,6 +73,13 @@ var (
 
 	keyUnavailableStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("241")) // Dim for unavailable actions
+
+	// Session lane styles
+	laneActiveStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("46")) // Green for active session lane
+
+	laneInactiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("244")) // Gray for other session lanes
 )
 
 // keyMap defines the keybindings for the TUI.
@@ -169,6 +176,33 @@ const (
 	filePlural   = "files"
 )
 
+// Session lane constants
+const (
+	maxSessionLanes = 3 // Maximum parallel session lanes to display
+)
+
+// LanePosition indicates where a checkpoint is in its session's sequence
+type LanePosition int
+
+const (
+	LanePositionNone   LanePosition = iota // No lane assigned (overflow)
+	LanePositionStart                      // First checkpoint in session (╭)
+	LanePositionMiddle                     // Middle checkpoint (│)
+	LanePositionEnd                        // Last checkpoint in session (╰)
+	LanePositionSingle                     // Only checkpoint in session (•)
+)
+
+// LaneState represents the rendering state for a single lane at a checkpoint row
+type LaneState struct {
+	Position LanePosition // What character to show
+	IsActive bool         // Is this the active session's lane?
+}
+
+// SessionLaneInfo holds pre-computed lane state for all lanes at a checkpoint row
+type SessionLaneInfo struct {
+	Lanes [maxSessionLanes]LaneState // State for each lane position
+}
+
 // Model is the bubbletea model for the list view.
 //
 //nolint:recvcheck // Mixed receivers required by bubbletea's interface pattern
@@ -177,6 +211,9 @@ type Model struct {
 	tree     []*Node
 	flatList []*Node
 	cursor   int
+
+	// Session lane info for checkpoints (keyed by flat list index)
+	sessionLanes map[int]SessionLaneInfo
 
 	// Viewport for scrolling
 	viewport viewport.Model
@@ -216,8 +253,169 @@ func (m *Model) updateFlatList() {
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
+	// Compute session lanes for checkpoints
+	m.computeSessionLanes()
 	// Update viewport content
 	m.updateViewportContent()
+}
+
+// computeSessionLanes analyzes the flat list and assigns session lanes to checkpoints.
+// Lanes are assigned based on session continuity, with the active session in lane 1.
+// Multiple sessions per checkpoint are supported - each session gets its own lane.
+func (m *Model) computeSessionLanes() {
+	m.sessionLanes = make(map[int]SessionLaneInfo)
+
+	// Collect all (checkpoint_index, session_id, is_active) tuples
+	// A checkpoint can have multiple sessions (from its child nodes)
+	type sessionEntry struct {
+		checkpointIdx int
+		sessionID     string
+		isActive      bool
+	}
+	var entries []sessionEntry
+	checkpointIndices := make(map[int]bool) // Track which indices are checkpoints
+
+	for i, node := range m.flatList {
+		if node.Type != NodeTypeCheckpoint {
+			continue
+		}
+		checkpointIndices[i] = true
+
+		// Collect sessions from child nodes (the actual session nodes)
+		for _, child := range node.Children {
+			if child.Type == NodeTypeSession && child.SessionID != "" {
+				entries = append(entries, sessionEntry{
+					checkpointIdx: i,
+					sessionID:     child.SessionID,
+					isActive:      child.IsActive,
+				})
+			}
+		}
+
+		// Fallback: if no child sessions, use the checkpoint's own session ID
+		if len(node.Children) == 0 && node.SessionID != "" {
+			entries = append(entries, sessionEntry{
+				checkpointIdx: i,
+				sessionID:     node.SessionID,
+				isActive:      node.IsActive,
+			})
+		}
+	}
+
+	if len(entries) == 0 {
+		return
+	}
+
+	// Find the active session ID
+	var activeSessionID string
+	for _, e := range entries {
+		if e.isActive {
+			activeSessionID = e.sessionID
+			break
+		}
+	}
+
+	// Track which checkpoints each session appears at (for gap detection)
+	sessionCheckpoints := make(map[string]map[int]bool)
+	sessionFirstIdx := make(map[string]int)
+	sessionLastIdx := make(map[string]int)
+	for _, e := range entries {
+		if sessionCheckpoints[e.sessionID] == nil {
+			sessionCheckpoints[e.sessionID] = make(map[int]bool)
+		}
+		sessionCheckpoints[e.sessionID][e.checkpointIdx] = true
+
+		if _, seen := sessionFirstIdx[e.sessionID]; !seen {
+			sessionFirstIdx[e.sessionID] = e.checkpointIdx
+		}
+		sessionLastIdx[e.sessionID] = e.checkpointIdx
+	}
+
+	// Assign lanes to sessions
+	// Process sessions in order of their first appearance, active session gets priority
+	sessionToLane := make(map[string]int)
+	laneInUse := [maxSessionLanes]bool{}
+
+	// First, try to assign lane 1 to active session
+	if activeSessionID != "" {
+		sessionToLane[activeSessionID] = 1
+		laneInUse[0] = true
+	}
+
+	// Then assign lanes to other sessions in order of first appearance
+	for _, e := range entries {
+		if _, hasLane := sessionToLane[e.sessionID]; hasLane {
+			continue // Already assigned
+		}
+		// Find first available lane
+		for l, inUse := range laneInUse {
+			if !inUse {
+				sessionToLane[e.sessionID] = l + 1
+				laneInUse[l] = true
+				break
+			}
+		}
+		// If no lane available, session gets lane 0 (no visualization)
+		if _, hasLane := sessionToLane[e.sessionID]; !hasLane {
+			sessionToLane[e.sessionID] = 0
+		}
+
+		// Free up lanes for sessions that have ended before this checkpoint
+		for sid, lane := range sessionToLane {
+			if lane > 0 && sessionLastIdx[sid] < e.checkpointIdx {
+				laneInUse[lane-1] = false
+			}
+		}
+	}
+
+	// Build lane info for each checkpoint
+	for cpIdx := range checkpointIndices {
+		var laneInfo SessionLaneInfo
+
+		// For each lane, determine what to show
+		for laneNum := 1; laneNum <= maxSessionLanes; laneNum++ {
+			laneIdx := laneNum - 1
+
+			// Find which session (if any) owns this lane and has a checkpoint here
+			for sid, lane := range sessionToLane {
+				if lane != laneNum {
+					continue
+				}
+
+				// Only show lane character if session actually has a checkpoint at this index
+				// This creates visual gaps when a session wasn't active during certain commits
+				if !sessionCheckpoints[sid][cpIdx] {
+					continue // Session doesn't have a checkpoint here - show gap
+				}
+
+				firstIdx := sessionFirstIdx[sid]
+				lastIdx := sessionLastIdx[sid]
+
+				// Determine position for this session at this checkpoint
+				// Visual convention: ╭ at top of span, ╰ at bottom
+				// firstIdx = top of list (smallest index), lastIdx = bottom (largest index)
+				var position LanePosition
+				switch {
+				case firstIdx == lastIdx:
+					position = LanePositionSingle
+				case cpIdx == firstIdx:
+					position = LanePositionStart // Top of span = ╭
+				case cpIdx == lastIdx:
+					position = LanePositionEnd // Bottom of span = ╰
+				default:
+					position = LanePositionMiddle
+				}
+
+				laneInfo.Lanes[laneIdx] = LaneState{
+					Position: position,
+					IsActive: sid == activeSessionID,
+				}
+				break // Only one session per lane
+			}
+		}
+
+		m.sessionLanes[cpIdx] = laneInfo
+	}
 }
 
 // updateViewportContent updates the viewport with current tree content.
@@ -635,6 +833,15 @@ func (m Model) renderHelpBar() string {
 
 // renderNode renders a single node in the tree.
 func (m Model) renderNode(node *Node, selected bool) string {
+	// Find flat index for this node (needed for session lanes)
+	flatIndex := -1
+	for i, n := range m.flatList {
+		if n == node {
+			flatIndex = i
+			break
+		}
+	}
+
 	depth := GetNodeDepth(node)
 	indent := strings.Repeat(" ", depth) // 1 space per level for tighter layout
 
@@ -681,7 +888,7 @@ func (m Model) renderNode(node *Node, selected bool) string {
 
 	// For checkpoints, use two-column layout with right-aligned metadata
 	if node.Type == NodeTypeCheckpoint {
-		return m.renderCheckpointNode(node, selPrefix, indent, expander, icon)
+		return m.renderCheckpointNode(node, selPrefix, indent, expander, icon, flatIndex)
 	}
 
 	// Build label for non-checkpoint nodes
@@ -710,8 +917,64 @@ func (m Model) renderNode(node *Node, selected bool) string {
 	return selPrefix + indent + expander + styledIcon + style.Render(label)
 }
 
+// renderSessionLanes renders the session lane prefix for a checkpoint.
+// Returns a fixed-width string (6 chars) showing lane lines: "│ │ │ " or similar.
+func (m Model) renderSessionLanes(flatIndex int) string {
+	laneInfo, hasLane := m.sessionLanes[flatIndex]
+	if !hasLane {
+		// No lane info means not a checkpoint or no sessions
+		return strings.Repeat(" ", maxSessionLanes*2)
+	}
+
+	// Lane characters
+	const (
+		laneStart  = "╭"
+		laneMid    = "│"
+		laneEnd    = "╰"
+		laneSingle = "•"
+		laneEmpty  = " "
+	)
+
+	var result strings.Builder
+	for i := range maxSessionLanes {
+		state := laneInfo.Lanes[i]
+
+		// Determine character based on lane position
+		var char string
+		switch state.Position {
+		case LanePositionStart:
+			char = laneStart
+		case LanePositionMiddle:
+			char = laneMid
+		case LanePositionEnd:
+			char = laneEnd
+		case LanePositionSingle:
+			char = laneSingle
+		case LanePositionNone:
+			char = laneEmpty
+		}
+
+		// Apply styling - green for active session's lane, gray for others
+		if char != laneEmpty {
+			if state.IsActive {
+				result.WriteString(laneActiveStyle.Render(char))
+			} else {
+				result.WriteString(laneInactiveStyle.Render(char))
+			}
+		} else {
+			result.WriteString(char)
+		}
+		result.WriteString(" ") // Space between lanes
+	}
+
+	return result.String()
+}
+
 // renderCheckpointNode renders a checkpoint with metadata following the message.
-func (m Model) renderCheckpointNode(node *Node, selPrefix, indent, expander, icon string) string {
+func (m Model) renderCheckpointNode(node *Node, selPrefix, indent, expander, icon string, flatIndex int) string {
+	// Session lanes (always render, even if empty, to keep alignment)
+	lanes := m.renderSessionLanes(flatIndex)
+
 	// Build left-side content (SHA + message)
 	var leftParts []string
 	if node.IsUncommitted {
@@ -776,7 +1039,7 @@ func (m Model) renderCheckpointNode(node *Node, selPrefix, indent, expander, ico
 		styledRight = separator + m.styleRightMetadata(rightParts, node)
 	}
 
-	return selPrefix + indent + expander + icon + styledLeft + styledRight
+	return selPrefix + indent + expander + lanes + icon + styledLeft + styledRight
 }
 
 // styleRightMetadata applies colors to the right-side metadata.
