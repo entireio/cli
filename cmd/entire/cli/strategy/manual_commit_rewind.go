@@ -689,6 +689,10 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 		fmt.Fprintf(os.Stderr, "Restoring %d sessions from checkpoint:\n", totalSessions)
 	}
 
+	// At this point, either force=true or user confirmed override, so we use force=true
+	// for RestoreSessionFile to skip per-file timestamp checks (already handled above)
+	forceWrite := true
+
 	// Restore archived sessions first (oldest to newest)
 	for _, archived := range result.ArchivedSessions {
 		if len(archived.Transcript) == 0 {
@@ -712,9 +716,13 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 		}
 
 		fmt.Fprintf(os.Stderr, "    Writing to: %s\n", claudeSessionFile)
-		if err := os.WriteFile(claudeSessionFile, archived.Transcript, 0o600); err != nil {
+		restoreResult, err := RestoreSessionFile(claudeSessionFile, archived.Transcript, forceWrite)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "    Warning: failed to write transcript: %v\n", err)
 			continue
+		}
+		if !restoreResult.Written && restoreResult.Status == StatusUnchanged {
+			fmt.Fprintf(os.Stderr, "    (unchanged)\n")
 		}
 	}
 
@@ -741,8 +749,12 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 		fmt.Fprintf(os.Stderr, "Writing transcript to: %s\n", claudeSessionFile)
 	}
 
-	if err := os.WriteFile(claudeSessionFile, result.Transcript, 0o600); err != nil {
+	restoreResult, err := RestoreSessionFile(claudeSessionFile, result.Transcript, forceWrite)
+	if err != nil {
 		return fmt.Errorf("failed to write transcript: %w", err)
+	}
+	if !restoreResult.Written && restoreResult.Status == StatusUnchanged {
+		fmt.Fprintf(os.Stderr, "(unchanged)\n")
 	}
 
 	return nil
