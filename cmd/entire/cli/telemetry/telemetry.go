@@ -2,10 +2,13 @@ package telemetry
 
 import (
 	"context"
+	"net"
+	"net/http"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/denisbrodbeck/machineid"
 	"github.com/posthog/posthog-go"
@@ -50,6 +53,14 @@ type NoOpClient struct{}
 func (n *NoOpClient) TrackCommand(_ *cobra.Command) {}
 func (n *NoOpClient) Close()                        {}
 
+// silentLogger suppresses PostHog log output - expected for CLI best-effort telemetry
+type silentLogger struct{}
+
+func (silentLogger) Logf(_ string, _ ...interface{})   {}
+func (silentLogger) Debugf(_ string, _ ...interface{}) {}
+func (silentLogger) Warnf(_ string, _ ...interface{})  {}
+func (silentLogger) Errorf(_ string, _ ...interface{}) {}
+
 // PostHogClient is the real telemetry client
 type PostHogClient struct {
 	client     posthog.Client
@@ -78,9 +89,22 @@ func NewClient(version string, telemetryEnabled *bool) Client {
 		return &NoOpClient{}
 	}
 
+	// Use a fast-timeout HTTP transport for telemetry - we don't want to block CLI exit
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 100 * time.Millisecond,
+		}).DialContext,
+		TLSHandshakeTimeout:   100 * time.Millisecond,
+		ResponseHeaderTimeout: 100 * time.Millisecond,
+	}
+
 	client, err := posthog.NewWithConfig(PostHogAPIKey, posthog.Config{
-		Endpoint:     PostHogEndpoint,
-		DisableGeoIP: posthog.Ptr(true),
+		Endpoint:           PostHogEndpoint,
+		ShutdownTimeout:    100 * time.Millisecond, // Don't block CLI exit waiting for telemetry
+		BatchUploadTimeout: 200 * time.Millisecond, // Fast timeout - telemetry is best-effort
+		Transport:          transport,
+		Logger:             silentLogger{}, // Suppress warnings on timeout (expected)
+		DisableGeoIP:       posthog.Ptr(true),
 		DefaultEventProperties: posthog.NewProperties().
 			Set("cli_version", version).
 			Set("os", runtime.GOOS).
