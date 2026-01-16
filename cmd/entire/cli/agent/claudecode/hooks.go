@@ -243,14 +243,8 @@ func (c *ClaudeCodeAgent) AreHooksInstalled() bool {
 		return false
 	}
 
-	// Check for at least one of our hooks (new or old format)
-	return hookCommandExists(settings.Hooks.Stop, "entire hooks claude-code stop") ||
-		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code stop") ||
-		// Backwards compatibility: check for old hook formats
-		hookCommandExists(settings.Hooks.Stop, "entire hooks claudecode stop") ||
-		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claudecode stop") ||
-		hookCommandExists(settings.Hooks.Stop, "entire rewind claude-hook --stop") ||
-		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go rewind claude-hook --stop")
+	// Check if any Stop hook is an Entire hook (covers all formats: relative, absolute path, go run)
+	return hasEntireHook(settings.Hooks.Stop)
 }
 
 // GetSupportedHooks returns the hook types Claude Code supports.
@@ -329,6 +323,18 @@ func isEntireHook(command string) bool {
 	for _, pattern := range entireHookPatterns {
 		if pattern.MatchString(command) {
 			return true
+		}
+	}
+	return false
+}
+
+// hasEntireHook checks if any hook in the matcher list is an Entire hook
+func hasEntireHook(matchers []ClaudeHookMatcher) bool {
+	for _, matcher := range matchers {
+		for _, hook := range matcher.Hooks {
+			if isEntireHook(hook.Command) {
+				return true
+			}
 		}
 	}
 	return false

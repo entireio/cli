@@ -111,7 +111,9 @@ func TestAgentHookInstallation(t *testing.T) {
 			t.Fatal("claude-code agent does not implement HookSupport")
 		}
 
-		count, err := hookAgent.InstallHooks(false, false)
+		// Use localDev=true so hooks use "go run" format which is recognized by AreHooksInstalled()
+		// (localDev=false would use os.Executable() which returns the test binary path)
+		count, err := hookAgent.InstallHooks(true, false)
 		if err != nil {
 			t.Fatalf("InstallHooks() error = %v", err)
 		}
