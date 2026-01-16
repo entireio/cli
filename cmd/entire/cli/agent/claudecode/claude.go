@@ -58,7 +58,7 @@ func (c *ClaudeCodeAgent) DetectPresence() (bool, error) {
 		return true, nil
 	}
 	// Check for .claude/settings.json
-	settingsFile := filepath.Join(repoRoot, ".claude", "settings.json")
+	settingsFile := filepath.Join(repoRoot, c.GetHookConfigPath())
 	if _, err := os.Stat(settingsFile); err == nil {
 		return true, nil
 	}
@@ -67,7 +67,7 @@ func (c *ClaudeCodeAgent) DetectPresence() (bool, error) {
 
 // GetHookConfigPath returns the path to Claude's hook config file.
 func (c *ClaudeCodeAgent) GetHookConfigPath() string {
-	return ".claude/settings.json"
+	return filepath.Join(".claude", "settings.json")
 }
 
 // SupportsHooks returns true as Claude Code supports lifecycle hooks.

@@ -69,7 +69,7 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		}
 	}
 
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
+	settingsPath := filepath.Join(repoRoot, c.GetHookConfigPath())
 
 	// Read existing settings if they exist
 	var settings ClaudeSettings
@@ -222,7 +222,7 @@ func (c *ClaudeCodeAgent) AreHooksInstalled() bool {
 	if err != nil {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
+	settingsPath := filepath.Join(repoRoot, c.GetHookConfigPath())
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
 		return false
