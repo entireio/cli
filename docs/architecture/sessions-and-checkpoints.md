@@ -118,6 +118,17 @@ type CommittedCheckpoint struct {
     Prompts    []string
     Context    []byte
     CreatedAt  time.Time
+    TokenUsage *TokenUsage   // Token usage for this checkpoint
+}
+
+// TokenUsage represents aggregated token usage for a checkpoint
+type TokenUsage struct {
+    InputTokens         int         // Fresh input tokens (not from cache)
+    CacheCreationTokens int         // Tokens written to cache
+    CacheReadTokens     int         // Tokens read from cache
+    OutputTokens        int         // Output tokens generated
+    APICallCount        int         // Number of API calls made
+    SubagentTokens      *TokenUsage // Nested usage from spawned subagents
 }
 ```
 
@@ -207,7 +218,19 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
   "session_ids": ["...", "..."],  // All sessions in this checkpoint
   "session_count": 2,
   "strategy": "manual-commit",
-  "files_touched": ["file1.txt"]  // Merged from all sessions
+  "files_touched": ["file1.txt"],  // Merged from all sessions
+  "token_usage": {                 // Token usage for this checkpoint
+    "input_tokens": 1500,
+    "cache_creation_tokens": 200,
+    "cache_read_tokens": 800,
+    "output_tokens": 500,
+    "api_call_count": 3,
+    "subagent_tokens": {           // Optional: usage from spawned agents
+      "input_tokens": 1000,
+      "output_tokens": 300,
+      "api_call_count": 2
+    }
+  }
 }
 ```
 
