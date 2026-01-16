@@ -196,9 +196,13 @@ func handleGeminiSessionStart() error {
 }
 
 // handleGeminiSessionEnd handles the SessionEnd hook for Gemini CLI.
-// This is equivalent to Claude Code's "stop" hook - it commits the session changes with metadata.
-// Uses Gemini-specific transcript parsing since Gemini uses JSON format (not JSONL like Claude).
+// This fires when the user explicitly exits the session (via "exit" or "logout" commands).
+// Note: The primary checkpoint creation happens in AfterAgent (equivalent to Claude's Stop).
+// SessionEnd serves as a cleanup/fallback - it will commit any uncommitted changes that
+// weren't captured by AfterAgent (e.g., if the user exits mid-response).
 func handleGeminiSessionEnd() error {
+	// Note: Don't parse stdin here - commitWithMetadataGemini() does its own parsing
+	// and stdin can only be read once. Logging happens inside parseGeminiSessionEnd().
 	return commitWithMetadataGemini()
 }
 
@@ -243,7 +247,11 @@ func parseGeminiSessionEnd() (*geminiSessionContext, error) {
 
 	entireSessionID := currentSessionIDWithFallback(modelSessionID)
 
-	if shouldSkipHooksForWarnedSession(entireSessionID) {
+	// Check if this session was already warned about concurrent sessions
+	// (checkConcurrentSessionsGemini handles this in BeforeAgent, but we also check here
+	// in case the session was warned and user continued anyway)
+	state, stateErr := strategy.LoadSessionState(entireSessionID)
+	if stateErr == nil && state != nil && state.ConcurrentWarningShown {
 		return nil, ErrSessionSkipped
 	}
 
@@ -617,30 +625,71 @@ func handleGeminiBeforeAgent() error {
 
 // handleGeminiAfterAgent handles the AfterAgent hook for Gemini CLI.
 // This fires after the agent has finished processing and generated a response.
-// This is a Gemini-specific hook - Claude Code doesn't have an equivalent.
+// This is equivalent to Claude Code's "Stop" hook - it commits the session changes with metadata.
+// AfterAgent fires after EVERY user prompt/response cycle, making it the correct place
+// for checkpoint creation (not SessionEnd, which only fires on explicit exit).
 func handleGeminiAfterAgent() error {
-	// Get the agent for hook input parsing
-	ag, err := GetAgent()
-	if err != nil {
-		return fmt.Errorf("failed to get agent: %w", err)
+	// Skip on default branch for strategies that don't allow it
+	if skip, branchName := ShouldSkipOnDefaultBranchForStrategy(); skip {
+		fmt.Fprintf(os.Stderr, "Entire: skipping on branch '%s' - create a feature branch to use Entire tracking\n", branchName)
+		return nil
 	}
 
-	// Parse hook input - AfterAgent is similar to session/tool hooks
-	input, err := ag.ParseHookInput(agent.HookPostToolUse, os.Stdin)
+	// Always use Gemini agent for Gemini hooks
+	ag, err := agent.Get("gemini")
+	if err != nil {
+		return fmt.Errorf("failed to get gemini agent: %w", err)
+	}
+
+	// Parse hook input using HookStop - AfterAgent provides the same data as Stop
+	// (session_id, transcript_path) which is what we need for committing
+	input, err := ag.ParseHookInput(agent.HookStop, os.Stdin)
 	if err != nil {
 		return fmt.Errorf("failed to parse hook input: %w", err)
 	}
 
 	logCtx := logging.WithComponent(context.Background(), "hooks")
-	logging.Debug(logCtx, "gemini-after-agent",
+	logging.Info(logCtx, "gemini-after-agent",
 		slog.String("hook", "after-agent"),
 		slog.String("hook_type", "agent"),
 		slog.String("model_session_id", input.SessionID),
+		slog.String("transcript_path", input.SessionRef),
 	)
 
-	// For now, AfterAgent is mainly for logging
-	// Future: Could be used for streaming/incremental state capture
-	return nil
+	modelSessionID := input.SessionID
+	if modelSessionID == "" {
+		modelSessionID = "unknown"
+	}
+
+	entireSessionID := currentSessionIDWithFallback(modelSessionID)
+
+	// Skip if this session was warned about concurrent sessions
+	state, stateErr := strategy.LoadSessionState(entireSessionID)
+	if stateErr == nil && state != nil && state.ConcurrentWarningShown {
+		return nil
+	}
+
+	transcriptPath := input.SessionRef
+	if transcriptPath == "" || !fileExists(transcriptPath) {
+		return fmt.Errorf("transcript file not found or empty: %s", transcriptPath)
+	}
+
+	// Create session context and commit
+	ctx := &geminiSessionContext{
+		entireSessionID: entireSessionID,
+		modelSessionID:  modelSessionID,
+		transcriptPath:  transcriptPath,
+	}
+
+	if err := setupGeminiSessionDir(ctx); err != nil {
+		return err
+	}
+
+	if err := extractGeminiMetadata(ctx); err != nil {
+		return err
+	}
+
+	return commitGeminiSession(ctx)
 }
 
 // handleGeminiBeforeModel handles the BeforeModel hook for Gemini CLI.
