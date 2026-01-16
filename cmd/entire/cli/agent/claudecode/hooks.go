@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
-	"strings"
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/paths"
@@ -48,10 +48,10 @@ func (c *ClaudeCodeAgent) GetHookNames() []string {
 	}
 }
 
-// entireHookPrefixes are command prefixes that identify Entire hooks (both old and new formats)
-var entireHookPrefixes = []string{
-	"entire ",
-	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go ",
+// entireHookPatterns are regex patterns that identify Entire hooks
+var entireHookPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^entire `),
+	regexp.MustCompile(`^go run \$\{CLAUDE_PROJECT_DIR\}/cmd/entire/main\.go `),
 }
 
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
@@ -316,8 +316,8 @@ func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string)
 
 // isEntireHook checks if a command is an Entire hook (old or new format)
 func isEntireHook(command string) bool {
-	for _, prefix := range entireHookPrefixes {
-		if strings.HasPrefix(command, prefix) {
+	for _, pattern := range entireHookPatterns {
+		if pattern.MatchString(command) {
 			return true
 		}
 	}
