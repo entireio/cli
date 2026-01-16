@@ -88,7 +88,18 @@ func InstallGitHook(silent bool) (int, error) {
 	if isLocalDev() {
 		cmdPrefix = "go run ./cmd/entire/main.go"
 	} else {
-		cmdPrefix = "entire"
+		// Use absolute path to currently-running binary (avoids depending on PATH being set
+		// correctly when hooks run, also useful for local dev)
+		execPath, err := os.Executable()
+		if err != nil {
+			return 0, fmt.Errorf("failed to get executable path: %w", err)
+		}
+		// Resolve any symlinks to get the real path
+		execPath, err = filepath.EvalSymlinks(execPath)
+		if err != nil {
+			return 0, fmt.Errorf("failed to resolve executable path: %w", err)
+		}
+		cmdPrefix = execPath
 	}
 
 	installedCount := 0
