@@ -52,6 +52,7 @@ func (c *ClaudeCodeAgent) GetHookNames() []string {
 var entireHookPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^entire `),
 	regexp.MustCompile(`^go run \$\{CLAUDE_PROJECT_DIR\}/cmd/entire/main\.go `),
+	regexp.MustCompile(`^/.+/entire `), // absolute path to entire binary
 }
 
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
