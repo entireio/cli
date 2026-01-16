@@ -76,6 +76,8 @@ func (s *ManualCommitStrategy) GetRewindPoints(limit int) ([]RewindPoint, error)
 				ToolUseID:        cp.ToolUseID,
 				SessionID:        cp.SessionID,
 				SessionPrompt:    sessionPrompt,
+				BaseCommit:       state.BaseCommit,
+				Agent:            state.AgentType,
 			})
 		}
 	}

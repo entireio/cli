@@ -89,6 +89,7 @@ type keyMap struct {
 	Quit     key.Binding
 	Collapse key.Binding
 	Expand   key.Binding
+	Toggle   key.Binding
 }
 
 var keys = keyMap{
@@ -140,6 +141,10 @@ var keys = keyMap{
 		key.WithKeys("e"),
 		key.WithHelp("e", "expand all"),
 	),
+	Toggle: key.NewBinding(
+		key.WithKeys("t"),
+		key.WithHelp("t", "toggle view mode"),
+	),
 }
 
 // PendingAction represents an action awaiting confirmation.
@@ -178,6 +183,10 @@ type Model struct {
 	flatList []*Node
 	cursor   int
 
+	// Source data and view mode for toggling
+	treeData *TreeData
+	viewMode ViewMode
+
 	// Viewport for scrolling
 	viewport viewport.Model
 	ready    bool
@@ -204,6 +213,37 @@ func NewModel(tree []*Node) Model {
 	}
 	m.updateFlatList()
 	return m
+}
+
+// NewModelWithData creates a new list view model with tree data for view mode toggling.
+func NewModelWithData(data *TreeData) Model {
+	m := Model{
+		treeData: data,
+		viewMode: ViewModeSessionsFirst, // Sessions-first is the default
+		cursor:   0,
+	}
+	m.tree = BuildTreeWithMode(data, m.viewMode)
+	m.updateFlatList()
+	return m
+}
+
+// toggleViewMode switches between checkpoints-first and sessions-first views.
+func (m *Model) toggleViewMode() {
+	if m.treeData == nil {
+		return // Can't toggle without source data
+	}
+
+	// Toggle the mode
+	if m.viewMode == ViewModeCheckpointsFirst {
+		m.viewMode = ViewModeSessionsFirst
+	} else {
+		m.viewMode = ViewModeCheckpointsFirst
+	}
+
+	// Rebuild tree with new mode
+	m.tree = BuildTreeWithMode(m.treeData, m.viewMode)
+	m.cursor = 0
+	m.updateFlatList()
 }
 
 // updateFlatList rebuilds the flat list based on expansion state.
@@ -371,6 +411,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				expandAll(node)
 			}
 			m.updateFlatList()
+
+		case key.Matches(msg, keys.Toggle):
+			// Toggle between checkpoints-first and sessions-first views
+			m.toggleViewMode()
 		}
 
 	case tea.WindowSizeMsg:
@@ -528,8 +572,12 @@ func (m Model) View() string {
 
 	var b strings.Builder
 
-	// Title
-	b.WriteString(titleStyle.Render("Entire Checkpoints"))
+	// Title with view mode indicator
+	title := "Entire Sessions"
+	if m.viewMode == ViewModeCheckpointsFirst {
+		title = "Entire Checkpoints"
+	}
+	b.WriteString(titleStyle.Render(title))
 	b.WriteString("\n\n")
 
 	// Tree view using viewport for scrolling
@@ -621,11 +669,14 @@ func (m Model) renderHelpBar() string {
 		return keyUnavailableStyle.Render(hint)
 	}
 
+	// Check if toggle is available (requires treeData)
+	canToggle := m.treeData != nil
+
 	parts := []string{
 		styleKey("[o]pen", canOpen),
 		styleKey("[r]esume", canResume),
 		styleKey("[w]ind", canRewind),
-		keyAvailableStyle.Render("[enter]toggle"),
+		styleKey("[t]oggle", canToggle),
 		keyAvailableStyle.Render("[?]help"),
 		keyAvailableStyle.Render("[q]uit"),
 	}
@@ -712,15 +763,16 @@ func (m Model) renderNode(node *Node, selected bool) string {
 
 // renderCheckpointNode renders a checkpoint with metadata following the message.
 func (m Model) renderCheckpointNode(node *Node, selPrefix, indent, expander, icon string) string {
-	// Build left-side content (SHA + message)
-	var leftParts []string
+	// Build left-side content: SHA (dim) + message (bright)
+	var shaText string
 	if node.IsUncommitted {
-		leftParts = append(leftParts, "       ") // 7 spaces for alignment
+		shaText = "[ NEW ]" // 7 chars to match SHA width
 	} else if node.CommitHash != "" {
-		leftParts = append(leftParts, node.CommitHash)
+		shaText = node.CommitHash
 	}
 
 	// Add commit message (sanitize newlines to prevent UI issues)
+	var msgText string
 	if node.CommitMsg != "" {
 		msg := strings.ReplaceAll(node.CommitMsg, "\n", " ")
 		msg = strings.ReplaceAll(msg, "\r", "")
@@ -728,10 +780,8 @@ func (m Model) renderCheckpointNode(node *Node, selPrefix, indent, expander, ico
 		for strings.Contains(msg, "  ") {
 			msg = strings.ReplaceAll(msg, "  ", " ")
 		}
-		leftParts = append(leftParts, strings.TrimSpace(msg))
+		msgText = strings.TrimSpace(msg)
 	}
-
-	leftText := strings.Join(leftParts, " ")
 
 	// Build right-side metadata
 	var rightParts []string
@@ -766,8 +816,16 @@ func (m Model) renderCheckpointNode(node *Node, selPrefix, indent, expander, ico
 		rightParts = append(rightParts, "[task]")
 	}
 
-	// Style the parts - use brighter style for the message (before em dash)
-	styledLeft := checkpointMessageStyle.Render(leftText)
+	// Style the parts: SHA in dim, message in bright
+	var styledLeft string
+	switch {
+	case shaText != "" && msgText != "":
+		styledLeft = dimStyle.Render(shaText) + " " + checkpointMessageStyle.Render(msgText)
+	case shaText != "":
+		styledLeft = dimStyle.Render(shaText)
+	case msgText != "":
+		styledLeft = checkpointMessageStyle.Render(msgText)
+	}
 
 	// Style right metadata with colors, preceded by em dash separator
 	var styledRight string
@@ -825,7 +883,7 @@ func (m Model) formatNodeLabel(node *Node) string {
 			label += " *"
 		}
 		if node.IsMerged {
-			label += " (merged)"
+			label += labelMerged
 		}
 		if len(node.Children) > 0 {
 			label += fmt.Sprintf("  [%d checkpoints]", len(node.Children))
@@ -839,31 +897,70 @@ func (m Model) formatNodeLabel(node *Node) string {
 
 	case NodeTypeSession:
 		// Format: prompt [agent badge] [N steps]
-		var parts []string
+		// Build suffix first to calculate available space for prompt
 
-		// Prompt/description (main content, no truncation, sanitize newlines)
+		// Build the suffix (agent badge + step count)
+		var suffix string
+		if node.Agent != "" {
+			suffix = "[" + node.Agent + "]"
+		}
+		if node.SessionStep > 0 {
+			if suffix != "" {
+				suffix += " "
+			}
+			suffix += fmt.Sprintf("(%d steps)", node.SessionStep)
+		}
+
+		// Calculate available width for prompt
+		// Account for: selection prefix (2) + indent (depth) + expander (2) + icon (2) + space before suffix (1)
+		depth := GetNodeDepth(node)
+		prefixWidth := 2 + depth + 2 + 2
+		suffixWidth := len(suffix)
+		if suffixWidth > 0 {
+			suffixWidth++ // Account for space before suffix
+		}
+
+		// Use terminal width or default to 100
+		termWidth := m.width
+		if termWidth == 0 {
+			termWidth = 100
+		}
+
+		// Calculate max description width (minimum 20 chars)
+		maxDescWidth := termWidth - prefixWidth - suffixWidth - 2 // 2 for safety margin
+		if maxDescWidth < 20 {
+			maxDescWidth = 20
+		}
+
+		// Prompt/description (truncate if needed)
+		var desc string
 		if node.Description != "" && node.Description != "No description" {
-			desc := strings.ReplaceAll(node.Description, "\n", " ")
+			desc = strings.ReplaceAll(node.Description, "\n", " ")
 			desc = strings.ReplaceAll(desc, "\r", "")
 			for strings.Contains(desc, "  ") {
 				desc = strings.ReplaceAll(desc, "  ", " ")
 			}
-			parts = append(parts, strings.TrimSpace(desc))
+			desc = strings.TrimSpace(desc)
 		} else {
 			// Fallback to session ID if no description (ASCII, so byte truncation is safe)
-			displayID := node.SessionID
-			if len(displayID) > 19 {
-				displayID = displayID[:19]
+			desc = node.SessionID
+			if len(desc) > 19 {
+				desc = desc[:19]
 			}
-			parts = append(parts, displayID)
 		}
 
-		// Agent badge
+		// Truncate description if too long (rune-aware)
+		descRunes := []rune(desc)
+		if len(descRunes) > maxDescWidth {
+			desc = string(descRunes[:maxDescWidth-1]) + "…"
+		}
+
+		// Build final label
+		var parts []string
+		parts = append(parts, desc)
 		if node.Agent != "" {
 			parts = append(parts, agentBadgeStyle.Render("["+node.Agent+"]"))
 		}
-
-		// Step count
 		if node.SessionStep > 0 {
 			parts = append(parts, dimStyle.Render(fmt.Sprintf("(%d steps)", node.SessionStep)))
 		}
@@ -952,6 +1049,7 @@ func (m Model) renderFullHelp() string {
   o              Open session logs
   r              Resume (switch branch + restore)
   w              Rewind to checkpoint
+  t              Toggle view (checkpoints/sessions first)
   c              Collapse all
   e              Expand all
   ?              Toggle help

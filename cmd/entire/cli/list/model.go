@@ -99,6 +99,16 @@ type TreeData struct {
 	MainBranch    string
 }
 
+// ViewMode determines the hierarchy structure of the tree.
+type ViewMode int
+
+const (
+	// ViewModeCheckpointsFirst shows Branch → Checkpoints → Sessions
+	ViewModeCheckpointsFirst ViewMode = iota
+	// ViewModeSessionsFirst shows Branch → Sessions → Checkpoints
+	ViewModeSessionsFirst
+)
+
 // Action represents an action that can be performed on a node.
 type Action string
 

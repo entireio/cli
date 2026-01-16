@@ -5,6 +5,22 @@ import (
 	"strings"
 )
 
+// Label constants used in tree formatting
+const (
+	labelMerged = " (merged)"
+)
+
+// BuildTreeWithMode converts TreeData into a hierarchical Node tree based on view mode.
+func BuildTreeWithMode(data *TreeData, mode ViewMode) []*Node {
+	switch mode {
+	case ViewModeSessionsFirst:
+		return BuildTreeSessionsFirst(data)
+	case ViewModeCheckpointsFirst:
+		return BuildTree(data)
+	}
+	return BuildTree(data) // Default fallback
+}
+
 // BuildTree converts TreeData into a hierarchical Node tree.
 // Hierarchy: Branch → Checkpoint → Session (shown as nested info)
 func BuildTree(data *TreeData) []*Node {
@@ -109,6 +125,156 @@ func BuildTree(data *TreeData) []*Node {
 	return nodes
 }
 
+// BuildTreeSessionsFirst converts TreeData into a hierarchical Node tree.
+// Hierarchy: Branch → Session → Checkpoint
+// This groups checkpoints by session, showing sessions as the primary organization.
+func BuildTreeSessionsFirst(data *TreeData) []*Node {
+	var nodes []*Node
+
+	for _, branch := range data.Branches {
+		branchNode := &Node{
+			Type:      NodeTypeBranch,
+			ID:        branch.Name,
+			Label:     formatBranchLabelForSessions(branch),
+			IsCurrent: branch.IsCurrent,
+			IsMerged:  branch.IsMerged,
+			Expanded:  branch.IsCurrent,
+		}
+
+		// Group checkpoints by session ID
+		sessionCheckpoints := make(map[string][]CheckpointInfo)
+		sessionOrder := []string{} // Track order of first appearance
+		sessionActive := make(map[string]bool)
+		sessionDescriptions := make(map[string]string)
+		sessionAgents := make(map[string]string)
+
+		for _, cp := range branch.Checkpoints {
+			for _, sess := range cp.Sessions {
+				if _, seen := sessionCheckpoints[sess.SessionID]; !seen {
+					sessionOrder = append(sessionOrder, sess.SessionID)
+				}
+				sessionCheckpoints[sess.SessionID] = append(sessionCheckpoints[sess.SessionID], cp)
+				if sess.IsActive {
+					sessionActive[sess.SessionID] = true
+				}
+				// Use first description we see for the session
+				if sessionDescriptions[sess.SessionID] == "" && sess.Description != "" {
+					sessionDescriptions[sess.SessionID] = sess.Description
+				}
+				if sessionAgents[sess.SessionID] == "" && sess.Agent != "" {
+					sessionAgents[sess.SessionID] = sess.Agent
+				}
+			}
+		}
+
+		// Create session nodes with checkpoint children
+		for _, sessionID := range sessionOrder {
+			checkpoints := sessionCheckpoints[sessionID]
+
+			// Count total steps across all checkpoints
+			totalSteps := 0
+			for _, cp := range checkpoints {
+				totalSteps += cp.StepsCount
+			}
+
+			sessionNode := &Node{
+				Type:        NodeTypeSession,
+				ID:          sessionID,
+				SessionID:   sessionID,
+				Description: sessionDescriptions[sessionID],
+				IsActive:    sessionActive[sessionID],
+				Agent:       sessionAgents[sessionID],
+				SessionStep: totalSteps,
+				Parent:      branchNode,
+				Expanded:    sessionActive[sessionID], // Expand active sessions
+			}
+
+			// Add checkpoints as children of session
+			for _, cp := range checkpoints {
+				checkpointNode := &Node{
+					Type:             NodeTypeCheckpoint,
+					ID:               cp.CheckpointID,
+					Label:            formatCheckpointLabel(cp),
+					CheckpointID:     cp.CheckpointID,
+					CommitHash:       cp.CommitHash,
+					CommitMsg:        cp.CommitMsg,
+					Timestamp:        cp.CreatedAt,
+					StepsCount:       cp.StepsCount,
+					IsTaskCheckpoint: cp.IsTask,
+					ToolUseID:        cp.ToolUseID,
+					Author:           cp.Author,
+					Insertions:       cp.Insertions,
+					Deletions:        cp.Deletions,
+					FileCount:        cp.FileCount,
+					IsUncommitted:    cp.IsUncommitted,
+					SessionID:        sessionID,
+					Parent:           sessionNode,
+					Expanded:         false,
+				}
+
+				// Add task checkpoints as nested children
+				for _, taskCp := range cp.TaskCheckpoints {
+					taskNode := &Node{
+						Type:             NodeTypeCheckpoint,
+						ID:               taskCp.CheckpointID,
+						Label:            formatCheckpointLabel(taskCp),
+						CheckpointID:     taskCp.CheckpointID,
+						CommitHash:       taskCp.CommitHash,
+						CommitMsg:        taskCp.CommitMsg,
+						Timestamp:        taskCp.CreatedAt,
+						IsTaskCheckpoint: true,
+						ToolUseID:        taskCp.ToolUseID,
+						IsUncommitted:    taskCp.IsUncommitted,
+						SessionID:        sessionID,
+						Parent:           checkpointNode,
+						Expanded:         false,
+					}
+					checkpointNode.Children = append(checkpointNode.Children, taskNode)
+				}
+
+				sessionNode.Children = append(sessionNode.Children, checkpointNode)
+			}
+
+			branchNode.Children = append(branchNode.Children, sessionNode)
+		}
+
+		nodes = append(nodes, branchNode)
+	}
+
+	return nodes
+}
+
+// formatBranchLabelForSessions creates the display label for a branch in sessions-first mode.
+func formatBranchLabelForSessions(branch BranchInfo) string {
+	label := branch.Name
+
+	if branch.IsCurrent {
+		label += " *"
+	}
+
+	if branch.IsMerged {
+		label += labelMerged
+	}
+
+	// Count unique sessions
+	sessionSet := make(map[string]bool)
+	for _, cp := range branch.Checkpoints {
+		for _, sess := range cp.Sessions {
+			sessionSet[sess.SessionID] = true
+		}
+	}
+	sessionCount := len(sessionSet)
+	if sessionCount > 0 {
+		label += fmt.Sprintf("  [%d session", sessionCount)
+		if sessionCount > 1 {
+			label += "s"
+		}
+		label += "]"
+	}
+
+	return label
+}
+
 // formatBranchLabel creates the display label for a branch.
 func formatBranchLabel(branch BranchInfo) string {
 	label := branch.Name
@@ -118,7 +284,7 @@ func formatBranchLabel(branch BranchInfo) string {
 	}
 
 	if branch.IsMerged {
-		label += " (merged)"
+		label += labelMerged
 	}
 
 	checkpointCount := len(branch.Checkpoints)

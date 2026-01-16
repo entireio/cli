@@ -136,6 +136,11 @@ type RewindPoint struct {
 	// SessionPrompts contains the first prompt for each session (parallel to SessionIDs).
 	// Used to display context when showing resume commands for multi-session checkpoints.
 	SessionPrompts []string
+
+	// BaseCommit is the commit hash that this checkpoint's shadow branch is based on.
+	// Used to compute accurate diff stats for uncommitted checkpoints.
+	// Only populated for shadow branch checkpoints (manual-commit strategy).
+	BaseCommit string
 }
 
 // RewindPreview describes what will happen when rewinding to a checkpoint.

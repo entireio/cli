@@ -19,10 +19,10 @@ import (
 
 const (
 	// maxCheckpointsToScan limits how many checkpoints we scan from entire/sessions
-	maxCheckpointsToScan = 50
+	maxCheckpointsToScan = 200
 
 	// maxCommitsToScanPerBranch limits commit traversal per branch
-	maxCommitsToScanPerBranch = 50
+	maxCommitsToScanPerBranch = 100
 )
 
 // FetchTreeData gathers all the data needed for the hierarchical view.
@@ -101,23 +101,31 @@ func FetchTreeData() (*TreeData, error) {
 		branchSet[currentBranch] = true
 	}
 
+	// Build set of commits reachable from main (used to filter feature branches)
+	mainCommits := getCommitsReachableFromMain(repo, mainBranch, maxCommitsToScanPerBranch*2)
+
 	// Scan commits on current branch for checkpoint trailers
 	if currentBranch != "" {
-		foundCheckpoints := findCheckpointsOnBranch(repo, currentBranch, checkpointInfoMap, mainBranch, isSessionActive, activeSessionStates)
+		// If current branch IS main, don't filter out main commits (we want to see them)
+		filterCommits := mainCommits
+		if currentBranch == mainBranch {
+			filterCommits = nil
+		}
+		foundCheckpoints := findCheckpointsOnBranch(repo, currentBranch, checkpointInfoMap, filterCommits, isSessionActive, activeSessionStates)
 		branchCheckpoints[currentBranch] = foundCheckpoints
 	}
 
 	// Also scan main branch if it's not the current branch
 	if mainBranch != "" && mainBranch != currentBranch {
-		// For main branch, pass empty string as mainBranch param to scan all commits
-		foundCheckpoints := findCheckpointsOnBranch(repo, mainBranch, checkpointInfoMap, "", isSessionActive, activeSessionStates)
+		// For main branch, pass nil to scan all commits (don't filter out main commits from main)
+		foundCheckpoints := findCheckpointsOnBranch(repo, mainBranch, checkpointInfoMap, nil, isSessionActive, activeSessionStates)
 		branchCheckpoints[mainBranch] = foundCheckpoints
 	}
 
 	// Scan all checkpoints to find which branches contain them
 	for _, cp := range strategyCheckpoints {
 		// Find which branch(es) contain the commit for this checkpoint
-		branchCommits := findBranchesAndCommitsForCheckpoint(repo, cp.CheckpointID, mainBranch)
+		branchCommits := findBranchesAndCommitsForCheckpoint(repo, cp.CheckpointID, mainBranch, mainCommits)
 		for branchName, commitInfo := range branchCommits {
 			branchSet[branchName] = true
 
@@ -320,17 +328,11 @@ type commitInfo struct {
 }
 
 // findCheckpointsOnBranch finds checkpoints associated with commits on a branch.
-func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpointInfoMap map[string]strategy.CheckpointInfo, mainBranch string, isSessionActive func(string) bool, sessionStates map[string]*session.State) []CheckpointInfo {
+func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpointInfoMap map[string]strategy.CheckpointInfo, mainCommits map[plumbing.Hash]bool, isSessionActive func(string) bool, sessionStates map[string]*session.State) []CheckpointInfo {
 	refName := plumbing.NewBranchReferenceName(branchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
 		return nil
-	}
-
-	// Find merge-base with main to know where to stop
-	var mergeBaseHash plumbing.Hash
-	if mainBranch != "" && mainBranch != branchName {
-		mergeBaseHash = getMergeBaseHash(repo, branchName, mainBranch)
 	}
 
 	var checkpoints []CheckpointInfo
@@ -348,9 +350,10 @@ func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpoint
 			return errors.New("limit reached")
 		}
 
-		// Stop at merge-base (commits at and before this are shared with main)
-		if mergeBaseHash != plumbing.ZeroHash && c.Hash == mergeBaseHash {
-			return errors.New("reached merge-base")
+		// Skip commits that are reachable from main (shared commits)
+		// This handles branches that have merged main into them
+		if mainCommits != nil && mainCommits[c.Hash] {
+			return nil
 		}
 
 		// Check for checkpoint trailer
@@ -408,7 +411,7 @@ func findCheckpointsOnBranch(repo *git.Repository, branchName string, checkpoint
 
 // findBranchesAndCommitsForCheckpoint finds branches that contain a commit with this checkpoint ID.
 // Returns a map of branch name -> commit info. Only searches commits unique to each branch (not reachable from main).
-func findBranchesAndCommitsForCheckpoint(repo *git.Repository, checkpointID string, mainBranch string) map[string]commitInfo {
+func findBranchesAndCommitsForCheckpoint(repo *git.Repository, checkpointID string, mainBranch string, mainCommits map[plumbing.Hash]bool) map[string]commitInfo {
 	result := make(map[string]commitInfo)
 
 	// Get all local branches
@@ -433,13 +436,7 @@ func findBranchesAndCommitsForCheckpoint(repo *git.Repository, checkpointID stri
 			return nil
 		}
 
-		// Find merge-base with main for this specific branch
-		var mergeBaseHash plumbing.Hash
-		if mainBranch != "" {
-			mergeBaseHash = getMergeBaseHash(repo, branchName, mainBranch)
-		}
-
-		// Search commits unique to this branch (stop at merge-base)
+		// Search commits unique to this branch
 		iter, err := repo.Log(&git.LogOptions{From: ref.Hash()})
 		if err != nil {
 			return nil //nolint:nilerr // Continue to next branch on error
@@ -452,9 +449,9 @@ func findBranchesAndCommitsForCheckpoint(repo *git.Repository, checkpointID stri
 				return errors.New("limit reached")
 			}
 
-			// Stop at merge-base - commits at and before this are shared with main
-			if mergeBaseHash != plumbing.ZeroHash && c.Hash == mergeBaseHash {
-				return errors.New("reached merge-base")
+			// Skip commits that are reachable from main (shared commits)
+			if mainCommits != nil && mainCommits[c.Hash] {
+				return nil
 			}
 
 			cpID, hasTrailer := paths.ParseCheckpointTrailer(c.Message)
@@ -571,41 +568,103 @@ func isBranchMerged(repo *git.Repository, branchName, mainBranch string) bool {
 	return isAncestor
 }
 
-// getMergeBaseHash finds the merge-base between two branches.
-// Returns ZeroHash if merge-base cannot be determined.
-func getMergeBaseHash(repo *git.Repository, branch1, branch2 string) plumbing.Hash {
-	ref1, err := repo.Reference(plumbing.NewBranchReferenceName(branch1), true)
+// getCommitsReachableFromMain returns a set of commit hashes reachable from the main branch.
+// This is used to filter out commits that are shared with main when listing branch-specific checkpoints.
+func getCommitsReachableFromMain(repo *git.Repository, mainBranch string, limit int) map[plumbing.Hash]bool {
+	result := make(map[plumbing.Hash]bool)
+
+	if mainBranch == "" {
+		return result
+	}
+
+	refName := plumbing.NewBranchReferenceName(mainBranch)
+	ref, err := repo.Reference(refName, true)
 	if err != nil {
-		return plumbing.ZeroHash
+		return result
 	}
 
-	ref2, err := repo.Reference(plumbing.NewBranchReferenceName(branch2), true)
+	iter, err := repo.Log(&git.LogOptions{From: ref.Hash()})
 	if err != nil {
-		return plumbing.ZeroHash
+		return result
 	}
 
-	commit1, err := repo.CommitObject(ref1.Hash())
-	if err != nil {
-		return plumbing.ZeroHash
-	}
+	count := 0
+	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best-effort
+		count++
+		if count > limit {
+			return errors.New("limit reached")
+		}
+		result[c.Hash] = true
+		return nil
+	})
 
-	commit2, err := repo.CommitObject(ref2.Hash())
-	if err != nil {
-		return plumbing.ZeroHash
-	}
-
-	mergeBase, err := commit1.MergeBase(commit2)
-	if err != nil || len(mergeBase) == 0 {
-		return plumbing.ZeroHash
-	}
-
-	return mergeBase[0].Hash
+	return result
 }
 
 // getCommitDiffStats computes the number of insertions and deletions for a commit.
 // Returns (0, 0) if stats cannot be computed.
 func getCommitDiffStats(_ *git.Repository, c *object.Commit) (insertions, deletions int) {
 	return getCommitDiffStatsFiltered(c, nil)
+}
+
+// getDiffStatsAgainstBase computes diff stats between a commit and a specified base commit.
+// This is used for shadow branch checkpoints where the parent commit doesn't reflect
+// the actual base state (shadow commits store complete trees).
+func getDiffStatsAgainstBase(repo *git.Repository, commitHash, baseCommitHash string) (insertions, deletions int) {
+	if commitHash == "" || baseCommitHash == "" {
+		return 0, 0
+	}
+
+	// Get the shadow commit
+	shadowHash := plumbing.NewHash(commitHash)
+	shadowCommit, err := repo.CommitObject(shadowHash)
+	if err != nil {
+		return 0, 0
+	}
+
+	// Get the base commit (resolve short hash if needed)
+	baseHash, err := repo.ResolveRevision(plumbing.Revision(baseCommitHash))
+	if err != nil {
+		return 0, 0
+	}
+	baseCommit, err := repo.CommitObject(*baseHash)
+	if err != nil {
+		return 0, 0
+	}
+
+	// Get trees
+	baseTree, err := baseCommit.Tree()
+	if err != nil {
+		return 0, 0
+	}
+	shadowTree, err := shadowCommit.Tree()
+	if err != nil {
+		return 0, 0
+	}
+
+	// Compute diff, excluding .entire metadata
+	changes, err := baseTree.Diff(shadowTree)
+	if err != nil {
+		return 0, 0
+	}
+
+	// Sum up stats from all changes, excluding .entire metadata
+	for _, change := range changes {
+		patch, err := change.Patch()
+		if err != nil {
+			continue
+		}
+		for _, fileStat := range patch.Stats() {
+			// Skip .entire metadata files
+			if strings.HasPrefix(fileStat.Name, ".entire/") {
+				continue
+			}
+			insertions += fileStat.Addition
+			deletions += fileStat.Deletion
+		}
+	}
+
+	return insertions, deletions
 }
 
 // getCommitDiffStatsFiltered computes diff stats, optionally excluding paths matching a prefix.
@@ -661,73 +720,6 @@ func getCommitDiffStatsFiltered(c *object.Commit, excludePrefixes []string) (ins
 	return insertions, deletions
 }
 
-// getShadowCommitStats computes diff stats for a shadow commit, excluding metadata files.
-func getShadowCommitStats(repo *git.Repository, commitHash string) (insertions, deletions, fileCount int) {
-	hash := plumbing.NewHash(commitHash)
-	commit, err := repo.CommitObject(hash)
-	if err != nil {
-		return 0, 0, 0
-	}
-
-	// Exclude .entire/ metadata directory
-	excludePrefixes := []string{".entire/"}
-	insertions, deletions = getCommitDiffStatsFiltered(commit, excludePrefixes)
-
-	// Count files changed (excluding metadata)
-	fileCount = countFilesChanged(commit, excludePrefixes)
-
-	return insertions, deletions, fileCount
-}
-
-// countFilesChanged counts the number of files changed in a commit, excluding specified prefixes.
-func countFilesChanged(c *object.Commit, excludePrefixes []string) int {
-	var parentTree *object.Tree
-	if c.NumParents() > 0 {
-		parent, err := c.Parent(0)
-		if err == nil {
-			parentTree, err = parent.Tree()
-			if err != nil {
-				parentTree = nil
-			}
-		}
-	}
-
-	currentTree, err := c.Tree()
-	if err != nil {
-		return 0
-	}
-
-	changes, err := parentTree.Diff(currentTree)
-	if err != nil {
-		return 0
-	}
-
-	count := 0
-	for _, change := range changes {
-		// Get the file path from the change
-		var filePath string
-		if change.To.Name != "" {
-			filePath = change.To.Name
-		} else if change.From.Name != "" {
-			filePath = change.From.Name
-		}
-
-		// Check if file should be excluded
-		excluded := false
-		for _, prefix := range excludePrefixes {
-			if strings.HasPrefix(filePath, prefix) {
-				excluded = true
-				break
-			}
-		}
-		if !excluded {
-			count++
-		}
-	}
-
-	return count
-}
-
 // fetchUncommittedCheckpoints retrieves shadow branch checkpoints that haven't been committed yet.
 // Only works when manual-commit strategy is active.
 // Task checkpoints are nested under their parent prompt checkpoint.
@@ -749,7 +741,7 @@ func fetchUncommittedCheckpoints(committedCheckpoints map[string]strategy.Checkp
 		return nil
 	}
 
-	// Open repository for computing diff stats
+	// Open repo for diff stats calculation
 	repo, err := strategy.OpenRepository()
 	if err != nil {
 		return nil
@@ -759,6 +751,17 @@ func fetchUncommittedCheckpoints(committedCheckpoints map[string]strategy.Checkp
 	committedIDs := make(map[string]bool)
 	for cpID := range committedCheckpoints {
 		committedIDs[cpID] = true
+	}
+
+	// Count checkpoints per session (shadow branch commits = steps)
+	sessionCheckpointCount := make(map[string]int)
+	for _, point := range rewindPoints {
+		if point.IsLogsOnly || (point.CheckpointID != "" && committedIDs[point.CheckpointID]) {
+			continue
+		}
+		if point.SessionID != "" {
+			sessionCheckpointCount[point.SessionID]++
+		}
 	}
 
 	// First pass: separate prompt checkpoints and task checkpoints
@@ -783,8 +786,9 @@ func fetchUncommittedCheckpoints(committedCheckpoints map[string]strategy.Checkp
 			shortHash = shortHash[:7]
 		}
 
-		// Get diff stats for this shadow commit (excluding .entire/ metadata)
-		insertions, deletions, fileCount := getShadowCommitStats(repo, point.ID)
+		// Compute diff stats against the base commit (not the parent commit)
+		// Shadow commits store complete trees, so we diff against the original HEAD
+		insertions, deletions := getDiffStatsAgainstBase(repo, point.ID, point.BaseCommit)
 
 		// Build session info from the rewind point
 		var sessions []SessionInfo
@@ -793,7 +797,8 @@ func fetchUncommittedCheckpoints(committedCheckpoints map[string]strategy.Checkp
 				SessionID:   point.SessionID,
 				Description: point.SessionPrompt,
 				IsActive:    isSessionActive(point.SessionID),
-				StepsCount:  0, // Not available from rewind point
+				Agent:       point.Agent,                             // Agent comes from session state
+				StepsCount:  sessionCheckpointCount[point.SessionID], // Count of shadow branch commits
 			})
 		}
 
@@ -804,10 +809,11 @@ func fetchUncommittedCheckpoints(committedCheckpoints map[string]strategy.Checkp
 			CreatedAt:     point.Date,
 			IsTask:        point.IsTaskCheckpoint,
 			ToolUseID:     point.ToolUseID,
+			IsUncommitted: true,
 			Insertions:    insertions,
 			Deletions:     deletions,
-			FileCount:     fileCount,
-			IsUncommitted: true,
+			StepsCount:    1, // Each uncommitted checkpoint = 1 step
+			Agent:         point.Agent,
 			Sessions:      sessions,
 		}
 

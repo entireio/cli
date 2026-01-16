@@ -3,12 +3,64 @@ package cli
 import (
 	"fmt"
 	"os"
+	"sync"
+	"time"
 
 	"entire.io/cli/cmd/entire/cli/list"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )
+
+// spinner frames for loading indicator
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// loadingSpinner displays a loading spinner until stopped.
+type loadingSpinner struct {
+	message string
+	stop    chan struct{}
+	done    sync.WaitGroup
+}
+
+// newLoadingSpinner creates and starts a loading spinner with the given message.
+func newLoadingSpinner(message string) *loadingSpinner {
+	s := &loadingSpinner{
+		message: message,
+		stop:    make(chan struct{}),
+	}
+	s.done.Add(1)
+	go s.run()
+	return s
+}
+
+// run displays the spinner animation.
+func (s *loadingSpinner) run() {
+	defer s.done.Done()
+	frame := 0
+	ticker := time.NewTicker(80 * time.Millisecond)
+	defer ticker.Stop()
+
+	// Print initial frame
+	fmt.Printf("\r%s %s", spinnerFrames[frame], s.message)
+
+	for {
+		select {
+		case <-s.stop:
+			// Clear the line
+			fmt.Print("\r\033[K")
+			return
+		case <-ticker.C:
+			frame = (frame + 1) % len(spinnerFrames)
+			fmt.Printf("\r%s %s", spinnerFrames[frame], s.message)
+		}
+	}
+}
+
+// Stop stops the spinner and clears the line.
+func (s *loadingSpinner) Stop() {
+	close(s.stop)
+	s.done.Wait()
+}
 
 func newListCmd() *cobra.Command {
 	var jsonOutput bool
@@ -54,6 +106,9 @@ are currently running in an agent.`,
 }
 
 func runListInteractive() error {
+	// Show loading spinner while fetching data
+	spinner := newLoadingSpinner("Loading checkpoints...")
+
 	// Fetch latest entire/sessions from origin
 	FetchSessionsBranch()
 
@@ -62,20 +117,19 @@ func runListInteractive() error {
 
 	// Fetch data
 	data, err := list.FetchTreeData()
+	spinner.Stop()
+
 	if err != nil {
 		return fmt.Errorf("failed to fetch data: %w", err)
 	}
 
-	// Build tree
-	tree := list.BuildTree(data)
-
-	if len(tree) == 0 {
+	if len(data.Branches) == 0 {
 		fmt.Println("No sessions found.")
 		return nil
 	}
 
-	// Create and run the TUI
-	model := list.NewModel(tree)
+	// Create model with data (enables view mode toggling)
+	model := list.NewModelWithData(data)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	finalModel, err := p.Run()
