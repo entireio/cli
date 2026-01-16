@@ -111,22 +111,31 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	}
 
 	// Define hook commands
-	var sessionStartCmd, stopCmd, userPromptSubmitCmd, preTaskCmd, postTaskCmd, postTodoCmd string
+	var cmdPrefix string
 	if localDev {
-		sessionStartCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code session-start"
-		stopCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code stop"
-		userPromptSubmitCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code user-prompt-submit"
-		preTaskCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code pre-task"
-		postTaskCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-task"
-		postTodoCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-todo"
+		cmdPrefix = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go"
 	} else {
-		sessionStartCmd = "entire hooks claude-code session-start"
-		stopCmd = "entire hooks claude-code stop"
-		userPromptSubmitCmd = "entire hooks claude-code user-prompt-submit"
-		preTaskCmd = "entire hooks claude-code pre-task"
-		postTaskCmd = "entire hooks claude-code post-task"
-		postTodoCmd = "entire hooks claude-code post-todo"
+		// Use absolute path to currently-running binary (avoids depending on PATH being set
+		// correctly when hooks run)
+		execPath, err := os.Executable()
+		if err != nil {
+			return 0, fmt.Errorf("failed to get executable path: %w", err)
+		}
+		// Resolve any symlinks to get the real path
+		execPath, err = filepath.EvalSymlinks(execPath)
+		if err != nil {
+			return 0, fmt.Errorf("failed to resolve executable path: %w", err)
+		}
+		cmdPrefix = execPath
 	}
+
+	// Define hook commands
+	sessionStartCmd := cmdPrefix + " hooks claude-code session-start"
+	stopCmd := cmdPrefix + " hooks claude-code stop"
+	userPromptSubmitCmd := cmdPrefix + " hooks claude-code user-prompt-submit"
+	preTaskCmd := cmdPrefix + " hooks claude-code pre-task"
+	postTaskCmd := cmdPrefix + " hooks claude-code post-task"
+	postTodoCmd := cmdPrefix + " hooks claude-code post-todo"
 
 	count := 0
 
