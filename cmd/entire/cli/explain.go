@@ -93,14 +93,13 @@ session or commit.`,
 }
 
 // runExplain routes to the appropriate explain function based on flags.
-// The verbose, full, generate, and limit parameters are accepted for future use
+// The verbose, full, and generate parameters are accepted for future use
 // but are not yet implemented in the output formatting.
 func runExplain(w io.Writer, sessionID, commitRef string, noPager, verbose, full, generate bool, limit int) error {
 	// Silence unused variable warnings until these are implemented
 	_ = verbose
 	_ = full
 	_ = generate
-	_ = limit
 
 	// Error if both flags are provided
 	if sessionID != "" && commitRef != "" {
@@ -115,23 +114,65 @@ func runExplain(w io.Writer, sessionID, commitRef string, noPager, verbose, full
 		return runExplainCommit(w, commitRef)
 	}
 
-	// Default: explain current session
-	return runExplainDefault(w, noPager)
+	// Default: explain branch-level view
+	return runExplainDefault(w, noPager, verbose, full, generate, limit)
 }
 
-// runExplainDefault explains the current session.
-func runExplainDefault(w io.Writer, noPager bool) error {
+// defaultLimitOnMain is the default number of checkpoints to show on main/master branches.
+const defaultLimitOnMain = 10
+
+// runExplainDefault explains the current branch state.
+// If there's an active session, it delegates to runExplainSession.
+// Otherwise, it shows branch-level information.
+// The verbose, full, and generate parameters are accepted for future use.
+func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit int) error {
+	// Silence unused variable warnings until these are implemented
+	_ = verbose
+	_ = full
+	_ = generate
+
+	// Get current branch info
+	isDefault, branchName, err := IsOnDefaultBranch()
+	if err != nil {
+		branchName = "unknown"
+	}
+
+	// Apply default limit on main branch when limit is 0 (auto)
+	effectiveLimit := limit
+	if isDefault && limit == 0 {
+		effectiveLimit = defaultLimitOnMain
+	}
+
 	// Read current session
 	currentSessionID, err := paths.ReadCurrentSession()
 	if err != nil {
 		return fmt.Errorf("failed to read current session: %w", err)
 	}
 
+	// If no current session, show branch-level view instead of erroring
 	if currentSessionID == "" {
-		return errors.New("no active session. Use --session or --commit to specify what to explain")
+		// For now, just show branch info with no checkpoints
+		output := formatBranchHeader(branchName, 0, isDefault, effectiveLimit)
+		if noPager {
+			fmt.Fprint(w, output)
+		} else {
+			outputWithPager(w, output)
+		}
+		return nil
 	}
 
 	return runExplainSession(w, currentSessionID, noPager)
+}
+
+// formatBranchHeader returns the header for branch-level explain output.
+func formatBranchHeader(branchName string, checkpointCount int, isDefault bool, limit int) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Branch: %s\n", branchName))
+	if isDefault && limit > 0 {
+		sb.WriteString(fmt.Sprintf("(showing last %d checkpoints)\n", limit))
+	}
+	sb.WriteString(fmt.Sprintf("Checkpoints: %d\n", checkpointCount))
+	return sb.String()
 }
 
 // runExplainSession explains a specific session.

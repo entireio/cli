@@ -228,30 +228,57 @@ func TestExplainCommit_WithEntireData(t *testing.T) {
 	}
 }
 
-func TestExplainDefault_NoCurrentSession(t *testing.T) {
+// setupExplainTestRepo creates a git repo with an initial commit and .entire directory.
+// It sets the working directory to the temp directory via t.Chdir.
+func setupExplainTestRepo(t *testing.T) {
+	t.Helper()
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Initialize git repo
-	if _, err := git.PlainInit(tmpDir, false); err != nil {
+	repo, err := git.PlainInit(tmpDir, false)
+	if err != nil {
 		t.Fatalf("failed to init git repo: %v", err)
 	}
 
-	// Create .entire directory but no current_session file
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	_, err = w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
 	if err := os.MkdirAll(".entire", 0o750); err != nil {
 		t.Fatalf("failed to create .entire dir: %v", err)
 	}
+}
+
+func TestExplainDefault_NoCurrentSession(t *testing.T) {
+	setupExplainTestRepo(t)
 
 	var stdout bytes.Buffer
-	err := runExplainDefault(&stdout, false)
+	// With the new branch-centric view, no current session should show branch info instead of error
+	err := runExplainDefault(&stdout, true, false, false, false, 0)
 
-	if err == nil {
-		t.Error("expected error when no current session, got nil")
+	// Should NOT error - just show branch-level info
+	if err != nil {
+		t.Fatalf("runExplainDefault() should not error with no session, got: %v", err)
 	}
-	// Case-insensitive check for "no active session"
-	errLower := strings.ToLower(err.Error())
-	if !strings.Contains(errLower, "no active session") {
-		t.Errorf("expected 'no active session' in error, got: %v", err)
+
+	// Should show branch info
+	output := stdout.String()
+	if !strings.Contains(output, "Branch:") {
+		t.Errorf("expected output to contain 'Branch:', got:\n%s", output)
 	}
 }
 
@@ -737,5 +764,100 @@ func TestFormatSessionInfo_DoesNotShowMessageWhenHasInteractions(t *testing.T) {
 	// The output should contain ## Prompt and ## Responses for the interaction
 	if !strings.Contains(output, "## Prompt") {
 		t.Errorf("expected output to contain '## Prompt' when has interactions, got:\n%s", output)
+	}
+}
+
+func TestRunExplainDefault_ShowsBranchInfo(t *testing.T) {
+	setupExplainTestRepo(t)
+
+	var stdout bytes.Buffer
+	// Call runExplainDefault with noPager=true to avoid pager issues in test
+	err := runExplainDefault(&stdout, true, false, false, false, 0)
+
+	// Should not error (may have no checkpoints, but should still show branch info)
+	if err != nil {
+		t.Fatalf("runExplainDefault() error = %v", err)
+	}
+
+	// For now, we're just checking the function runs and includes branch info
+	output := stdout.String()
+	if !strings.Contains(output, "Branch:") {
+		t.Errorf("expected output to contain 'Branch:', got:\n%s", output)
+	}
+}
+
+func TestRunExplainDefault_DefaultLimitOnMainBranch(t *testing.T) {
+	setupExplainTestRepo(t)
+
+	var stdout bytes.Buffer
+	// Call with limit=0 (auto) - should apply default limit on main branch
+	err := runExplainDefault(&stdout, true, false, false, false, 0)
+
+	if err != nil {
+		t.Fatalf("runExplainDefault() error = %v", err)
+	}
+
+	output := stdout.String()
+	// On main/master branch with limit=0, should show "(showing last 10 checkpoints)"
+	if !strings.Contains(output, "showing last 10 checkpoints") {
+		t.Errorf("expected output to indicate default limit on main branch, got:\n%s", output)
+	}
+}
+
+func TestFormatBranchHeader(t *testing.T) {
+	tests := []struct {
+		name            string
+		branchName      string
+		checkpointCount int
+		isDefault       bool
+		limit           int
+		wantContains    []string
+		wantNotContains []string
+	}{
+		{
+			name:            "feature branch no limit",
+			branchName:      "feature/my-feature",
+			checkpointCount: 5,
+			isDefault:       false,
+			limit:           0,
+			wantContains:    []string{"Branch: feature/my-feature", "Checkpoints: 5"},
+			wantNotContains: []string{"showing last"},
+		},
+		{
+			name:            "main branch with default limit",
+			branchName:      "main",
+			checkpointCount: 15,
+			isDefault:       true,
+			limit:           10,
+			wantContains:    []string{"Branch: main", "showing last 10 checkpoints", "Checkpoints: 15"},
+			wantNotContains: []string{},
+		},
+		{
+			name:            "main branch with explicit limit",
+			branchName:      "main",
+			checkpointCount: 20,
+			isDefault:       true,
+			limit:           5,
+			wantContains:    []string{"Branch: main", "showing last 5 checkpoints", "Checkpoints: 20"},
+			wantNotContains: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output := formatBranchHeader(tt.branchName, tt.checkpointCount, tt.isDefault, tt.limit)
+
+			for _, want := range tt.wantContains {
+				if !strings.Contains(output, want) {
+					t.Errorf("expected output to contain %q, got:\n%s", want, output)
+				}
+			}
+
+			for _, notWant := range tt.wantNotContains {
+				if strings.Contains(output, notWant) {
+					t.Errorf("expected output to NOT contain %q, got:\n%s", notWant, output)
+				}
+			}
+		})
 	}
 }
