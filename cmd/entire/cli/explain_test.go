@@ -8,11 +8,22 @@ import (
 	"testing"
 	"time"
 
+	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+// toCheckpointsWithMeta converts a slice of RewindPoints to checkpointWithMeta
+// with nil metadata. This is a test helper for backwards compatibility.
+func toCheckpointsWithMeta(points []strategy.RewindPoint) []checkpointWithMeta {
+	result := make([]checkpointWithMeta, len(points))
+	for i, p := range points {
+		result[i] = checkpointWithMeta{Point: p, Metadata: nil}
+	}
+	return result
+}
 
 func TestNewExplainCmd(t *testing.T) {
 	cmd := newExplainCmd()
@@ -823,7 +834,7 @@ func TestFormatBranchExplain_DefaultOutput(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", points, false, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", toCheckpointsWithMeta(points), false, false, false, 0, 1)
 
 	// Branch header
 	if !strings.Contains(output, "Branch: feature/test") {
@@ -864,7 +875,7 @@ func TestFormatBranchExplain_MultipleCheckpoints(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", points, false, false, false, 0, 3)
+	output := formatBranchExplain("feature/test", toCheckpointsWithMeta(points), false, false, false, 0, 3)
 
 	// All checkpoints should be listed
 	if !strings.Contains(output, "[abc123def456]") {
@@ -893,7 +904,7 @@ func TestFormatBranchExplain_WithVerbose(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", points, true, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", toCheckpointsWithMeta(points), true, false, false, 0, 1)
 
 	// Verbose mode should show session ID
 	if !strings.Contains(output, "Session: 2026-01-19-session1") {
@@ -918,7 +929,7 @@ func TestFormatBranchExplain_LimitedOnMain(t *testing.T) {
 	}
 
 	// isDefault=true, limit=2, totalCount=15 (more than limit)
-	output := formatBranchExplain("main", points, false, false, true, 2, 15)
+	output := formatBranchExplain("main", toCheckpointsWithMeta(points), false, false, true, 2, 15)
 
 	// Header should show limited view info
 	if !strings.Contains(output, "Checkpoints: 15 (showing last 2)") {
@@ -961,7 +972,7 @@ func TestFormatBranchExplain_TruncatesLongCheckpointID(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", points, false, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", toCheckpointsWithMeta(points), false, false, false, 0, 1)
 
 	// Should truncate to 12 chars
 	if !strings.Contains(output, "[abc123def456]") {
@@ -970,5 +981,134 @@ func TestFormatBranchExplain_TruncatesLongCheckpointID(t *testing.T) {
 	// Should NOT contain the full ID
 	if strings.Contains(output, "[abc123def456789012345]") {
 		t.Errorf("expected checkpoint ID to be truncated, got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_WithMetadata(t *testing.T) {
+	now := time.Now()
+	checkpoints := []checkpointWithMeta{
+		{
+			Point: strategy.RewindPoint{
+				CheckpointID: "abc123def456",
+				Date:         now,
+				SessionID:    "2026-01-19-session1",
+			},
+			Metadata: &checkpoint.CommittedMetadata{
+				Intent:  "Add user authentication",
+				Outcome: "Implemented JWT-based auth",
+			},
+		},
+	}
+
+	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 1)
+
+	// Should display real intent from metadata
+	if !strings.Contains(output, "Intent: Add user authentication") {
+		t.Errorf("expected real intent, got:\n%s", output)
+	}
+	// Should display real outcome from metadata
+	if !strings.Contains(output, "Outcome: Implemented JWT-based auth") {
+		t.Errorf("expected real outcome, got:\n%s", output)
+	}
+	// Should NOT show placeholder text for intent/outcome
+	if strings.Contains(output, "(not generated)") {
+		t.Errorf("expected no placeholder text when metadata is present, got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_PartialMetadata(t *testing.T) {
+	// Test with only Intent populated, Outcome should show placeholder
+	now := time.Now()
+	checkpoints := []checkpointWithMeta{
+		{
+			Point: strategy.RewindPoint{
+				CheckpointID: "abc123def456",
+				Date:         now,
+				SessionID:    "2026-01-19-session1",
+			},
+			Metadata: &checkpoint.CommittedMetadata{
+				Intent:  "Fix login bug",
+				Outcome: "", // Empty - should show placeholder
+			},
+		},
+	}
+
+	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 1)
+
+	// Should display real intent
+	if !strings.Contains(output, "Intent: Fix login bug") {
+		t.Errorf("expected real intent, got:\n%s", output)
+	}
+	// Should show placeholder for empty outcome
+	if !strings.Contains(output, "Outcome: (not generated)") {
+		t.Errorf("expected placeholder for empty outcome, got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_NilMetadata(t *testing.T) {
+	// Test with nil metadata - should show placeholders
+	now := time.Now()
+	checkpoints := []checkpointWithMeta{
+		{
+			Point: strategy.RewindPoint{
+				CheckpointID: "abc123def456",
+				Date:         now,
+				SessionID:    "2026-01-19-session1",
+			},
+			Metadata: nil, // No metadata loaded
+		},
+	}
+
+	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 1)
+
+	// Should show placeholders for both
+	if !strings.Contains(output, "Intent: (not generated)") {
+		t.Errorf("expected placeholder for intent with nil metadata, got:\n%s", output)
+	}
+	if !strings.Contains(output, "Outcome: (not generated)") {
+		t.Errorf("expected placeholder for outcome with nil metadata, got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_MixedMetadata(t *testing.T) {
+	// Test with multiple checkpoints - some with metadata, some without
+	now := time.Now()
+	checkpoints := []checkpointWithMeta{
+		{
+			Point: strategy.RewindPoint{
+				CheckpointID: "abc123def456",
+				Date:         now,
+				SessionID:    "2026-01-19-session1",
+			},
+			Metadata: &checkpoint.CommittedMetadata{
+				Intent:  "First checkpoint intent",
+				Outcome: "First checkpoint outcome",
+			},
+		},
+		{
+			Point: strategy.RewindPoint{
+				CheckpointID: "def456789012",
+				Date:         now.Add(-time.Hour),
+				SessionID:    "2026-01-19-session1",
+			},
+			Metadata: nil, // No metadata for this one
+		},
+	}
+
+	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 2)
+
+	// First checkpoint should have real values
+	if !strings.Contains(output, "Intent: First checkpoint intent") {
+		t.Errorf("expected first checkpoint intent, got:\n%s", output)
+	}
+	if !strings.Contains(output, "Outcome: First checkpoint outcome") {
+		t.Errorf("expected first checkpoint outcome, got:\n%s", output)
+	}
+
+	// The output should contain at least one placeholder (from the second checkpoint)
+	// Count occurrences of "(not generated)" - should be 2 (intent + outcome for second checkpoint)
+	placeholderCount := strings.Count(output, "(not generated)")
+	if placeholderCount != 2 {
+		t.Errorf("expected 2 placeholders for second checkpoint, got %d in:\n%s", placeholderCount, output)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
@@ -50,6 +51,13 @@ type checkpointDetail struct {
 	Interactions []interaction
 	// Files is the aggregate list of all files modified (for backwards compat)
 	Files []string
+}
+
+// checkpointWithMeta holds a rewind point together with its loaded metadata.
+// Used by formatBranchExplain to display metadata summaries when available.
+type checkpointWithMeta struct {
+	Point    strategy.RewindPoint
+	Metadata *checkpoint.CommittedMetadata
 }
 
 func newExplainCmd() *cobra.Command {
@@ -157,8 +165,17 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 		points = points[:effectiveLimit]
 	}
 
+	// Load metadata for each checkpoint
+	checkpoints := make([]checkpointWithMeta, len(points))
+	for i, point := range points {
+		checkpoints[i] = checkpointWithMeta{
+			Point:    point,
+			Metadata: loadCheckpointMetadata(point.CheckpointID),
+		}
+	}
+
 	// Format output
-	output := formatBranchExplain(branchName, points, verbose, full, isDefault, effectiveLimit, totalCount)
+	output := formatBranchExplain(branchName, checkpoints, verbose, full, isDefault, effectiveLimit, totalCount)
 
 	if noPager {
 		fmt.Fprint(w, output)
@@ -172,13 +189,13 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 // formatBranchExplain formats the branch-level explain output.
 // Parameters:
 //   - branchName: the current branch name
-//   - points: the rewind points to display (already limited)
+//   - checkpoints: the checkpoints with metadata to display (already limited)
 //   - verbose: show additional details like session IDs
 //   - full: show complete transcript (future use)
 //   - isDefault: whether on main/master branch
 //   - limit: the applied limit (0 means no limit)
 //   - totalCount: total number of checkpoints before limiting
-func formatBranchExplain(branchName string, points []strategy.RewindPoint, verbose, full bool, isDefault bool, limit, totalCount int) string {
+func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, verbose, full bool, isDefault bool, limit, totalCount int) string {
 	// Silence unused parameter warnings until full is implemented
 	_ = full
 
@@ -189,7 +206,7 @@ func formatBranchExplain(branchName string, points []strategy.RewindPoint, verbo
 	if isDefault && limit > 0 && totalCount > limit {
 		sb.WriteString(fmt.Sprintf("Checkpoints: %d (showing last %d)\n", totalCount, limit))
 	} else {
-		sb.WriteString(fmt.Sprintf("Checkpoints: %d\n", len(points)))
+		sb.WriteString(fmt.Sprintf("Checkpoints: %d\n", len(checkpoints)))
 	}
 
 	sb.WriteString("\n")
@@ -203,7 +220,10 @@ func formatBranchExplain(branchName string, points []strategy.RewindPoint, verbo
 	sb.WriteString("\n\n")
 
 	// Checkpoint details
-	for _, point := range points {
+	for _, cp := range checkpoints {
+		point := cp.Point
+		meta := cp.Metadata
+
 		id := point.CheckpointID
 		if len(id) > 12 {
 			id = id[:12]
@@ -214,8 +234,19 @@ func formatBranchExplain(branchName string, points []strategy.RewindPoint, verbo
 			sb.WriteString(fmt.Sprintf("  Session: %s\n", point.SessionID))
 		}
 
-		sb.WriteString("  Intent: (not generated)\n")
-		sb.WriteString("  Outcome: (not generated)\n")
+		// Display intent - real value if available, otherwise placeholder
+		intent := "(not generated)"
+		if meta != nil && meta.Intent != "" {
+			intent = meta.Intent
+		}
+		sb.WriteString(fmt.Sprintf("  Intent: %s\n", intent))
+
+		// Display outcome - real value if available, otherwise placeholder
+		outcome := "(not generated)"
+		if meta != nil && meta.Outcome != "" {
+			outcome = meta.Outcome
+		}
+		sb.WriteString(fmt.Sprintf("  Outcome: %s\n", outcome))
 
 		sb.WriteString("\n")
 	}
@@ -615,4 +646,22 @@ func outputWithPager(w io.Writer, content string) {
 
 	// Direct output for non-terminal or short content
 	fmt.Fprint(w, content)
+}
+
+// loadCheckpointMetadata loads the CommittedMetadata for a checkpoint ID.
+// Returns nil if metadata cannot be loaded (e.g., no repository, no sessions branch,
+// checkpoint doesn't exist, or any other error).
+func loadCheckpointMetadata(checkpointID string) *checkpoint.CommittedMetadata {
+	repo, err := openRepository()
+	if err != nil {
+		return nil
+	}
+
+	store := checkpoint.NewGitStore(repo)
+	result, err := store.ReadCommitted(context.Background(), checkpointID)
+	if err != nil || result == nil {
+		return nil
+	}
+
+	return &result.Metadata
 }
