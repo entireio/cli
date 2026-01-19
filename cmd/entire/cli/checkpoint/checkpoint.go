@@ -299,6 +299,12 @@ type CommittedMetadata struct {
 	// Task checkpoint fields (only populated for task checkpoints)
 	IsTask    bool   `json:"is_task,omitempty"`
 	ToolUseID string `json:"tool_use_id,omitempty"`
+
+	// Summary fields for explain output (lazily generated, may be empty)
+	Intent         string   `json:"intent,omitempty"`          // What the user was trying to accomplish
+	Outcome        string   `json:"outcome,omitempty"`         // What was actually achieved
+	Learnings      []string `json:"learnings,omitempty"`       // Key insights discovered during the session
+	FrictionPoints []string `json:"friction_points,omitempty"` // Difficulties or blockers encountered
 }
 
 // Info provides summary information for listing checkpoints.

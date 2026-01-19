@@ -182,3 +182,38 @@ func TestWriteCommitted_AgentField(t *testing.T) {
 			paths.AgentTrailerKey, agentName, commit.Message)
 	}
 }
+
+func TestCommittedMetadata_SummaryFields(t *testing.T) {
+	meta := CommittedMetadata{
+		CheckpointID:   "abc123def456",
+		SessionID:      "2026-01-19-test",
+		Intent:         "Add user authentication",
+		Outcome:        "Implemented JWT-based auth with refresh tokens",
+		Learnings:      []string{"go-jwt library requires explicit algorithm", "refresh tokens need separate storage"},
+		FrictionPoints: []string{"Initial approach with sessions didn't scale"},
+	}
+
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	var decoded CommittedMetadata
+	err = json.Unmarshal(data, &decoded)
+	if err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if decoded.Intent != "Add user authentication" {
+		t.Errorf("Intent = %q, want %q", decoded.Intent, "Add user authentication")
+	}
+	if decoded.Outcome != "Implemented JWT-based auth with refresh tokens" {
+		t.Errorf("Outcome = %q, want %q", decoded.Outcome, "Implemented JWT-based auth with refresh tokens")
+	}
+	if len(decoded.Learnings) != 2 {
+		t.Errorf("len(Learnings) = %d, want 2", len(decoded.Learnings))
+	}
+	if len(decoded.FrictionPoints) != 1 {
+		t.Errorf("len(FrictionPoints) = %d, want 1", len(decoded.FrictionPoints))
+	}
+}
