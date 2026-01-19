@@ -121,18 +121,21 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 
 	// Write checkpoint metadata using the checkpoint store
 	if err := store.WriteCommitted(context.Background(), cpkg.WriteCommittedOptions{
-		CheckpointID:     checkpointID,
-		SessionID:        state.SessionID,
-		Strategy:         StrategyNameManualCommit,
-		Transcript:       sessionData.Transcript,
-		Prompts:          sessionData.Prompts,
-		Context:          sessionData.Context,
-		FilesTouched:     sessionData.FilesTouched,
-		CheckpointsCount: state.CheckpointCount,
-		EphemeralBranch:  shadowBranchName,
-		AuthorName:       authorName,
-		AuthorEmail:      authorEmail,
-		Agent:            state.AgentType,
+		CheckpointID:           checkpointID,
+		SessionID:              state.SessionID,
+		Strategy:               StrategyNameManualCommit,
+		Transcript:             sessionData.Transcript,
+		Prompts:                sessionData.Prompts,
+		Context:                sessionData.Context,
+		FilesTouched:           sessionData.FilesTouched,
+		CheckpointsCount:       state.CheckpointCount,
+		EphemeralBranch:        shadowBranchName,
+		AuthorName:             authorName,
+		AuthorEmail:            authorEmail,
+		Agent:                  state.AgentType,
+		TranscriptUUIDAtStart:  state.TranscriptUUIDAtStart,
+		TranscriptLinesAtStart: state.TranscriptLinesAtStart,
+		TokenUsage:             state.TokenUsage,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
 	}
