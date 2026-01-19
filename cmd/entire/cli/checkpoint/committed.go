@@ -699,14 +699,25 @@ func (s *GitStore) ensureSessionsBranch() error {
 		return nil // Branch exists
 	}
 
-	// Create orphan branch with empty tree
-	emptyTreeHash, err := BuildTreeFromEntries(s.repo, make(map[string]object.TreeEntry))
+	// Create initial tree with README explaining the branch's purpose
+	entries := make(map[string]object.TreeEntry)
+	readmeBlob, err := CreateBlobFromContent(s.repo, []byte(paths.SessionsBranchReadme))
+	if err != nil {
+		return fmt.Errorf("failed to create README blob: %w", err)
+	}
+	entries[paths.ReadmeFileName] = object.TreeEntry{
+		Name: paths.ReadmeFileName,
+		Mode: filemode.Regular,
+		Hash: readmeBlob,
+	}
+
+	treeHash, err := BuildTreeFromEntries(s.repo, entries)
 	if err != nil {
 		return err
 	}
 
 	authorName, authorEmail := getGitAuthorFromRepo(s.repo)
-	commitHash, err := s.createCommit(emptyTreeHash, plumbing.ZeroHash, "Initialize sessions branch", authorName, authorEmail)
+	commitHash, err := s.createCommit(treeHash, plumbing.ZeroHash, "Initialize sessions branch", authorName, authorEmail)
 	if err != nil {
 		return err
 	}

@@ -33,6 +33,40 @@ const (
 	CheckpointFileName       = "checkpoint.json"
 	ContentHashFileName      = "content_hash.txt"
 	SettingsFileName         = "settings.json"
+	ReadmeFileName           = "README.md"
+)
+
+// README content for directories and branches created by Entire.
+// These help developers understand what these locations are for.
+const (
+	// EntireDirReadme is placed in .entire/ to explain its purpose.
+	EntireDirReadme = `# .entire
+
+This directory is created by [Entire](https://entire.io) to store local session state.
+
+- In ` + "`.gitignore`" + ` - not committed to the repository
+- Safe to delete - will be recreated as needed
+`
+
+	// SessionStateDirReadme is placed in .git/entire-sessions/ to explain its purpose.
+	SessionStateDirReadme = `# entire-sessions
+
+This directory is created by [Entire](https://entire.io) to track active session state.
+
+- Located in ` + "`.git/`" + ` so it's shared across worktrees
+- Safe to delete, but you'll lose ability to rewind uncommitted checkpoints
+`
+
+	// SessionsBranchReadme is placed at the root of the entire/sessions branch.
+	SessionsBranchReadme = `# entire/sessions
+
+This is an orphan branch created by [Entire](https://entire.io) to store checkpoint metadata.
+
+- Not meant to be checked out for normal work
+- Keeps session history separate from your main branch
+- Used by ` + "`entire rewind`" + ` to restore previous states
+- **Do not delete** - you will lose all session history and rewind capability
+`
 )
 
 // Metadata trailer key used in commit messages
@@ -524,6 +558,13 @@ func WriteCurrentSession(sessionID string) error {
 	// Ensure .entire directory exists
 	if err := os.MkdirAll(entireDirAbs, 0o750); err != nil {
 		return fmt.Errorf("failed to create .entire directory: %w", err)
+	}
+
+	// Write README if it doesn't exist (explains what this directory is for)
+	readmePath := filepath.Join(entireDirAbs, ReadmeFileName)
+	if _, statErr := os.Stat(readmePath); os.IsNotExist(statErr) {
+		// Best-effort: don't fail if README can't be written
+		_ = os.WriteFile(readmePath, []byte(EntireDirReadme), 0o644) //nolint:errcheck,gosec // best-effort, README should be world-readable
 	}
 
 	// Write session ID to file (no newline, just the ID)

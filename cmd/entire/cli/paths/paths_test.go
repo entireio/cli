@@ -267,6 +267,58 @@ func TestReadCurrentSession_EmptyFile(t *testing.T) {
 	}
 }
 
+func TestWriteCurrentSession_CreatesReadme(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Write a session - this should also create README
+	if err := WriteCurrentSession("test-session-123"); err != nil {
+		t.Fatalf("WriteCurrentSession() error = %v", err)
+	}
+
+	// Verify README was created
+	readmePath := filepath.Join(EntireDir, ReadmeFileName)
+	content, err := os.ReadFile(readmePath)
+	if err != nil {
+		t.Fatalf("README should exist at %s: %v", readmePath, err)
+	}
+
+	// Verify content matches expected
+	if string(content) != EntireDirReadme {
+		t.Errorf("README content mismatch\ngot:\n%s\nwant:\n%s", string(content), EntireDirReadme)
+	}
+}
+
+func TestWriteCurrentSession_DoesNotOverwriteExistingReadme(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Create .entire directory with custom README
+	if err := os.MkdirAll(EntireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire dir: %v", err)
+	}
+	customContent := "# Custom README\n\nUser-modified content\n"
+	readmePath := filepath.Join(EntireDir, ReadmeFileName)
+	if err := os.WriteFile(readmePath, []byte(customContent), 0o644); err != nil {
+		t.Fatalf("failed to write custom README: %v", err)
+	}
+
+	// Write a session - should NOT overwrite existing README
+	if err := WriteCurrentSession("test-session-456"); err != nil {
+		t.Fatalf("WriteCurrentSession() error = %v", err)
+	}
+
+	// Verify README still has custom content
+	content, err := os.ReadFile(readmePath)
+	if err != nil {
+		t.Fatalf("failed to read README: %v", err)
+	}
+
+	if string(content) != customContent {
+		t.Errorf("README was overwritten\ngot:\n%s\nwant:\n%s", string(content), customContent)
+	}
+}
+
 func TestParseBaseCommitTrailer(t *testing.T) {
 	tests := []struct {
 		name      string

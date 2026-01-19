@@ -127,6 +127,13 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 		return fmt.Errorf("failed to create session state directory: %w", err)
 	}
 
+	// Write README if it doesn't exist (explains what this directory is for)
+	readmePath := filepath.Join(s.stateDir, paths.ReadmeFileName)
+	if _, err := os.Stat(readmePath); os.IsNotExist(err) {
+		// Best-effort: don't fail if README can't be written
+		_ = os.WriteFile(readmePath, []byte(paths.SessionStateDirReadme), 0o644) //nolint:errcheck,gosec // best-effort, README should be world-readable
+	}
+
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal session state: %w", err)

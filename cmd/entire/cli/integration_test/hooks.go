@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
@@ -291,6 +292,29 @@ func (env *TestEnv) ClearSessionState(sessionID string) error {
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
 	return nil
+}
+
+// CountSessionStateFiles returns the number of session state files in .git/entire-sessions/.
+// Only counts .json files, excluding README.md and other non-session files.
+func (env *TestEnv) CountSessionStateFiles() (int, error) {
+	env.T.Helper()
+
+	sessionStateDir := filepath.Join(env.RepoDir, ".git", "entire-sessions")
+	entries, err := os.ReadDir(sessionStateDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // HookOutput contains the result of running a hook.

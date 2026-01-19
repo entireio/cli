@@ -87,6 +87,84 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	}
 }
 
+// TestEnsureSessionsBranch_CreatesReadme verifies that the README.md is created
+// in the root of the entire/sessions branch when it's first initialized.
+func TestEnsureSessionsBranch_CreatesReadme(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create worktree and make initial commit
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	// Create checkpoint store and write a committed checkpoint
+	// (this triggers ensureSessionsBranch)
+	store := NewGitStore(repo)
+	err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID: "a1b2c3d4e5f6",
+		SessionID:    "test-session-123",
+		Strategy:     "manual-commit",
+		Transcript:   []byte("test transcript"),
+		AuthorName:   "Test Author",
+		AuthorEmail:  "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	// Get the sessions branch
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get sessions branch: %v", err)
+	}
+
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	// Verify README.md exists in the branch root
+	readmeInBranch, err := tree.File(paths.ReadmeFileName)
+	if err != nil {
+		t.Fatalf("README.md should exist in sessions branch root: %v", err)
+	}
+
+	content, err := readmeInBranch.Contents()
+	if err != nil {
+		t.Fatalf("failed to read README.md content: %v", err)
+	}
+
+	// Verify content matches expected
+	if content != paths.SessionsBranchReadme {
+		t.Errorf("README.md content mismatch\ngot:\n%s\nwant:\n%s", content, paths.SessionsBranchReadme)
+	}
+}
+
 // TestWriteCommitted_AgentField verifies that the Agent field is written
 // to both metadata.json and the commit message trailer.
 func TestWriteCommitted_AgentField(t *testing.T) {

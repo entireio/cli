@@ -429,13 +429,12 @@ func TestShadow_MultipleConcurrentSessions(t *testing.T) {
 	}
 
 	// Verify session state file exists
-	sessionStateDir := filepath.Join(env.RepoDir, ".git", "entire-sessions")
-	entries, err := os.ReadDir(sessionStateDir)
+	stateFileCount, err := env.CountSessionStateFiles()
 	if err != nil {
-		t.Fatalf("Failed to read session state dir: %v", err)
+		t.Fatalf("Failed to count session state files: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Errorf("Expected 1 session state file, got %d", len(entries))
+	if stateFileCount != 1 {
+		t.Errorf("Expected 1 session state file, got %d", stateFileCount)
 	}
 
 	// Starting a second session while session1 has uncommitted checkpoints triggers warning
@@ -450,12 +449,12 @@ func TestShadow_MultipleConcurrentSessions(t *testing.T) {
 
 	// Verify session2 state file was created with ConcurrentWarningShown flag
 	// This is set by the hook when it outputs continue:false
-	entries, err = os.ReadDir(sessionStateDir)
+	stateFileCount, err = env.CountSessionStateFiles()
 	if err != nil {
-		t.Fatalf("Failed to read session state dir: %v", err)
+		t.Fatalf("Failed to count session state files: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Errorf("Expected 2 session state files after second session attempt, got %d", len(entries))
+	if stateFileCount != 2 {
+		t.Errorf("Expected 2 session state files after second session attempt, got %d", stateFileCount)
 	}
 
 	// Clear session1 state file - this makes the shadow branch "orphaned"
