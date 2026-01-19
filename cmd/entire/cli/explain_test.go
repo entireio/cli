@@ -33,6 +33,33 @@ func TestNewExplainCmd(t *testing.T) {
 	}
 }
 
+func TestNewExplainCmd_NewFlags(t *testing.T) {
+	cmd := newExplainCmd()
+
+	// Verbose flag
+	if cmd.Flags().Lookup("verbose") == nil {
+		t.Error("expected --verbose flag to exist")
+	}
+	if cmd.Flags().ShorthandLookup("v") == nil {
+		t.Error("expected -v shorthand to exist")
+	}
+
+	// Full flag
+	if cmd.Flags().Lookup("full") == nil {
+		t.Error("expected --full flag to exist")
+	}
+
+	// Generate flag
+	if cmd.Flags().Lookup("generate") == nil {
+		t.Error("expected --generate flag to exist")
+	}
+
+	// Limit flag
+	if cmd.Flags().Lookup("limit") == nil {
+		t.Error("expected --limit flag to exist")
+	}
+}
+
 func TestExplainSession_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -231,7 +258,7 @@ func TestExplainDefault_NoCurrentSession(t *testing.T) {
 func TestExplainBothFlagsError(t *testing.T) {
 	// Test that providing both --session and --commit returns an error
 	var stdout bytes.Buffer
-	err := runExplain(&stdout, "session-id", "commit-sha", false)
+	err := runExplain(&stdout, "session-id", "commit-sha", false, false, false, false, 0)
 
 	if err == nil {
 		t.Error("expected error when both flags provided, got nil")

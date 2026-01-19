@@ -56,6 +56,10 @@ func newExplainCmd() *cobra.Command {
 	var sessionFlag string
 	var commitFlag string
 	var noPagerFlag bool
+	var verboseFlag bool
+	var fullFlag bool
+	var generateFlag bool
+	var limitFlag int
 
 	cmd := &cobra.Command{
 		Use:   "explain",
@@ -73,19 +77,31 @@ session or commit.`,
 				return nil
 			}
 
-			return runExplain(cmd.OutOrStdout(), sessionFlag, commitFlag, noPagerFlag)
+			return runExplain(cmd.OutOrStdout(), sessionFlag, commitFlag, noPagerFlag, verboseFlag, fullFlag, generateFlag, limitFlag)
 		},
 	}
 
 	cmd.Flags().StringVar(&sessionFlag, "session", "", "Explain a specific session (ID or prefix)")
 	cmd.Flags().StringVar(&commitFlag, "commit", "", "Explain a specific commit (SHA or ref)")
 	cmd.Flags().BoolVar(&noPagerFlag, "no-pager", false, "Disable pager output")
+	cmd.Flags().BoolVarP(&verboseFlag, "verbose", "v", false, "Show prompts, files, and session IDs")
+	cmd.Flags().BoolVar(&fullFlag, "full", false, "Show complete transcript")
+	cmd.Flags().BoolVar(&generateFlag, "generate", false, "Generate AI summaries for checkpoints")
+	cmd.Flags().IntVar(&limitFlag, "limit", 0, "Limit number of checkpoints shown (0 = auto)")
 
 	return cmd
 }
 
 // runExplain routes to the appropriate explain function based on flags.
-func runExplain(w io.Writer, sessionID, commitRef string, noPager bool) error {
+// The verbose, full, generate, and limit parameters are accepted for future use
+// but are not yet implemented in the output formatting.
+func runExplain(w io.Writer, sessionID, commitRef string, noPager, verbose, full, generate bool, limit int) error {
+	// Silence unused variable warnings until these are implemented
+	_ = verbose
+	_ = full
+	_ = generate
+	_ = limit
+
 	// Error if both flags are provided
 	if sessionID != "" && commitRef != "" {
 		return errors.New("cannot specify both --session and --commit")
