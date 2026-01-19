@@ -24,7 +24,7 @@ func main() {
 		cancel()
 	}()
 
-	// Load telemetry preference from settings (ignore errors - default to enabled)
+	// Load telemetry preference from settings (ignore errors - nil defaults to disabled)
 	var telemetryEnabled *bool
 	if settings, err := cli.LoadEntireSettings(); err == nil {
 		telemetryEnabled = settings.Telemetry

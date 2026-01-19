@@ -195,14 +195,10 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 	}
 
 	// Handle telemetry for non-interactive mode
+	// Note: if telemetry is nil (not configured), it defaults to disabled
 	if noTelemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
-		// --no-telemetry flag always overrides existing setting
 		f := false
 		settings.Telemetry = &f
-	} else if settings.Telemetry == nil {
-		// Default to enabled in non-interactive mode (only if not already set)
-		t := true
-		settings.Telemetry = &t
 	}
 
 	// Determine which settings file to write to
@@ -635,14 +631,10 @@ func setupAgentHooksNonInteractive(agentName, strategyName string, localDev, for
 	}
 
 	// Handle telemetry for non-interactive mode
+	// Note: if telemetry is nil (not configured), it defaults to disabled
 	if noTelemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
-		// --no-telemetry flag always overrides existing setting
 		f := false
 		settings.Telemetry = &f
-	} else if settings.Telemetry == nil {
-		// Default to enabled in non-interactive mode (only if not already set)
-		t := true
-		settings.Telemetry = &t
 	}
 
 	if err := SaveEntireSettings(settings); err != nil {

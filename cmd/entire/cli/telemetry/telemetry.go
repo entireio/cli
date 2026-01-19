@@ -70,7 +70,7 @@ type PostHogClient struct {
 }
 
 // NewClient creates a new telemetry client based on opt-out settings.
-// The telemetryEnabled parameter comes from settings; nil means not configured (default to enabled).
+// The telemetryEnabled parameter comes from settings; nil means not configured (default to disabled).
 //
 //nolint:ireturn // Factory function - returns NoOpClient or PostHogClient based on settings
 func NewClient(version string, telemetryEnabled *bool) Client {
@@ -79,8 +79,8 @@ func NewClient(version string, telemetryEnabled *bool) Client {
 		return &NoOpClient{}
 	}
 
-	// Check settings preference (nil = not set, default to enabled)
-	if telemetryEnabled != nil && !*telemetryEnabled {
+	// Check settings preference (nil = not set, default to disabled)
+	if telemetryEnabled == nil || !*telemetryEnabled {
 		return &NoOpClient{}
 	}
 

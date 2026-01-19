@@ -36,6 +36,17 @@ func TestNewClientTelemetryDisabledInSettings(t *testing.T) {
 	}
 }
 
+func TestNewClientNilTelemetryDefaultsToDisabled(t *testing.T) {
+	// Ensure no opt-out env var is set
+	t.Setenv("ENTIRE_TELEMETRY_OPTOUT", "")
+
+	client := NewClient("1.0.0", nil)
+
+	if _, ok := client.(*NoOpClient); !ok {
+		t.Error("telemetryEnabled=nil should return NoOpClient (disabled by default)")
+	}
+}
+
 func TestNoOpClientMethods(_ *testing.T) {
 	client := &NoOpClient{}
 
