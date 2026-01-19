@@ -122,13 +122,10 @@ func runExplain(w io.Writer, sessionID, commitRef string, noPager, verbose, full
 const defaultLimitOnMain = 10
 
 // runExplainDefault explains the current branch state.
-// If there's an active session, it delegates to runExplainSession.
-// Otherwise, it shows branch-level information.
-// The verbose, full, and generate parameters are accepted for future use.
+// Shows branch-level information with checkpoint listing.
+// The verbose, full, and generate parameters control output detail level.
 func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit int) error {
-	// Silence unused variable warnings until these are implemented
-	_ = verbose
-	_ = full
+	// Silence unused variable warnings until generate is implemented
 	_ = generate
 
 	// Get current branch info
@@ -143,35 +140,91 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 		effectiveLimit = defaultLimitOnMain
 	}
 
-	// Read current session
-	currentSessionID, err := paths.ReadCurrentSession()
+	strat := GetStrategy()
+
+	// Get all rewind points (pass 0 for no limit at strategy level)
+	allPoints, err := strat.GetRewindPoints(0)
 	if err != nil {
-		return fmt.Errorf("failed to read current session: %w", err)
+		// If no rewind points available, show empty branch view
+		allPoints = nil
 	}
 
-	// If no current session, show branch-level view instead of erroring
-	if currentSessionID == "" {
-		// For now, just show branch info with no checkpoints
-		output := formatBranchHeader(branchName, 0, isDefault, effectiveLimit)
-		if noPager {
-			fmt.Fprint(w, output)
-		} else {
-			outputWithPager(w, output)
-		}
-		return nil
+	totalCount := len(allPoints)
+
+	// Apply limit
+	points := allPoints
+	if effectiveLimit > 0 && len(points) > effectiveLimit {
+		points = points[:effectiveLimit]
 	}
 
-	return runExplainSession(w, currentSessionID, noPager)
+	// Format output
+	output := formatBranchExplain(branchName, points, verbose, full, isDefault, effectiveLimit, totalCount)
+
+	if noPager {
+		fmt.Fprint(w, output)
+	} else {
+		outputWithPager(w, output)
+	}
+
+	return nil
 }
 
-// formatBranchHeader returns the header for branch-level explain output.
-func formatBranchHeader(branchName string, checkpointCount int, isDefault bool, limit int) string {
+// formatBranchExplain formats the branch-level explain output.
+// Parameters:
+//   - branchName: the current branch name
+//   - points: the rewind points to display (already limited)
+//   - verbose: show additional details like session IDs
+//   - full: show complete transcript (future use)
+//   - isDefault: whether on main/master branch
+//   - limit: the applied limit (0 means no limit)
+//   - totalCount: total number of checkpoints before limiting
+func formatBranchExplain(branchName string, points []strategy.RewindPoint, verbose, full bool, isDefault bool, limit, totalCount int) string {
+	// Silence unused parameter warnings until full is implemented
+	_ = full
+
 	var sb strings.Builder
+
+	// Header
 	sb.WriteString(fmt.Sprintf("Branch: %s\n", branchName))
-	if isDefault && limit > 0 {
-		sb.WriteString(fmt.Sprintf("(showing last %d checkpoints)\n", limit))
+	if isDefault && limit > 0 && totalCount > limit {
+		sb.WriteString(fmt.Sprintf("Checkpoints: %d (showing last %d)\n", totalCount, limit))
+	} else {
+		sb.WriteString(fmt.Sprintf("Checkpoints: %d\n", len(points)))
 	}
-	sb.WriteString(fmt.Sprintf("Checkpoints: %d\n", checkpointCount))
+
+	sb.WriteString("\n")
+
+	// Branch-level intent/outcome placeholders
+	sb.WriteString("Intent: (run with --generate to create summary)\n")
+	sb.WriteString("Outcome: (run with --generate to create summary)\n")
+
+	sb.WriteString("\n")
+	sb.WriteString(strings.Repeat("\u2500", 40)) // Unicode box drawing character for line
+	sb.WriteString("\n\n")
+
+	// Checkpoint details
+	for _, point := range points {
+		id := point.CheckpointID
+		if len(id) > 12 {
+			id = id[:12]
+		}
+		sb.WriteString(fmt.Sprintf("[%s] %s\n", id, point.Date.Format("2006-01-02 15:04")))
+
+		if verbose && point.SessionID != "" {
+			sb.WriteString(fmt.Sprintf("  Session: %s\n", point.SessionID))
+		}
+
+		sb.WriteString("  Intent: (not generated)\n")
+		sb.WriteString("  Outcome: (not generated)\n")
+
+		sb.WriteString("\n")
+	}
+
+	// Footer for limited view
+	if isDefault && limit > 0 && totalCount > limit {
+		sb.WriteString(fmt.Sprintf("(%d total checkpoints. Use --limit N to adjust)\n", totalCount))
+	}
+
 	return sb.String()
 }
 

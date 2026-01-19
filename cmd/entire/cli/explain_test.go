@@ -798,66 +798,177 @@ func TestRunExplainDefault_DefaultLimitOnMainBranch(t *testing.T) {
 	}
 
 	output := stdout.String()
-	// On main/master branch with limit=0, should show "(showing last 10 checkpoints)"
-	if !strings.Contains(output, "showing last 10 checkpoints") {
-		t.Errorf("expected output to indicate default limit on main branch, got:\n%s", output)
+	// On main/master branch with 0 checkpoints, shouldn't show limit message
+	// (the limit message only appears when totalCount > limit)
+	// Instead, verify the new format is shown
+	if !strings.Contains(output, "Branch:") {
+		t.Errorf("expected output to contain 'Branch:', got:\n%s", output)
+	}
+	if !strings.Contains(output, "Checkpoints: 0") {
+		t.Errorf("expected output to contain 'Checkpoints: 0', got:\n%s", output)
+	}
+	// Should show intent/outcome placeholders in new format
+	if !strings.Contains(output, "Intent:") {
+		t.Errorf("expected output to contain 'Intent:', got:\n%s", output)
 	}
 }
 
-func TestFormatBranchHeader(t *testing.T) {
-	tests := []struct {
-		name            string
-		branchName      string
-		checkpointCount int
-		isDefault       bool
-		limit           int
-		wantContains    []string
-		wantNotContains []string
-	}{
+func TestFormatBranchExplain_DefaultOutput(t *testing.T) {
+	now := time.Now()
+	points := []strategy.RewindPoint{
 		{
-			name:            "feature branch no limit",
-			branchName:      "feature/my-feature",
-			checkpointCount: 5,
-			isDefault:       false,
-			limit:           0,
-			wantContains:    []string{"Branch: feature/my-feature", "Checkpoints: 5"},
-			wantNotContains: []string{"showing last"},
-		},
-		{
-			name:            "main branch with default limit",
-			branchName:      "main",
-			checkpointCount: 15,
-			isDefault:       true,
-			limit:           10,
-			wantContains:    []string{"Branch: main", "showing last 10 checkpoints", "Checkpoints: 15"},
-			wantNotContains: []string{},
-		},
-		{
-			name:            "main branch with explicit limit",
-			branchName:      "main",
-			checkpointCount: 20,
-			isDefault:       true,
-			limit:           5,
-			wantContains:    []string{"Branch: main", "showing last 5 checkpoints", "Checkpoints: 20"},
-			wantNotContains: []string{},
+			CheckpointID: "abc123def456",
+			Date:         now,
+			SessionID:    "2026-01-19-session1",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			output := formatBranchHeader(tt.branchName, tt.checkpointCount, tt.isDefault, tt.limit)
+	output := formatBranchExplain("feature/test", points, false, false, false, 0, 1)
 
-			for _, want := range tt.wantContains {
-				if !strings.Contains(output, want) {
-					t.Errorf("expected output to contain %q, got:\n%s", want, output)
-				}
-			}
+	// Branch header
+	if !strings.Contains(output, "Branch: feature/test") {
+		t.Errorf("expected 'Branch: feature/test', got:\n%s", output)
+	}
+	if !strings.Contains(output, "Checkpoints: 1") {
+		t.Errorf("expected 'Checkpoints: 1', got:\n%s", output)
+	}
 
-			for _, notWant := range tt.wantNotContains {
-				if strings.Contains(output, notWant) {
-					t.Errorf("expected output to NOT contain %q, got:\n%s", notWant, output)
-				}
-			}
-		})
+	// Checkpoint listing
+	if !strings.Contains(output, "[abc123def456]") {
+		t.Errorf("expected checkpoint ID in output, got:\n%s", output)
+	}
+
+	// Placeholder text
+	if !strings.Contains(output, "Intent:") {
+		t.Errorf("expected 'Intent:', got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_MultipleCheckpoints(t *testing.T) {
+	now := time.Now()
+	points := []strategy.RewindPoint{
+		{
+			CheckpointID: "abc123def456",
+			Date:         now,
+			SessionID:    "2026-01-19-session1",
+		},
+		{
+			CheckpointID: "def456789012",
+			Date:         now.Add(-time.Hour),
+			SessionID:    "2026-01-19-session1",
+		},
+		{
+			CheckpointID: "ghi789012345",
+			Date:         now.Add(-2 * time.Hour),
+			SessionID:    "2026-01-19-session1",
+		},
+	}
+
+	output := formatBranchExplain("feature/test", points, false, false, false, 0, 3)
+
+	// All checkpoints should be listed
+	if !strings.Contains(output, "[abc123def456]") {
+		t.Errorf("expected first checkpoint ID, got:\n%s", output)
+	}
+	if !strings.Contains(output, "[def456789012]") {
+		t.Errorf("expected second checkpoint ID, got:\n%s", output)
+	}
+	if !strings.Contains(output, "[ghi789012345]") {
+		t.Errorf("expected third checkpoint ID, got:\n%s", output)
+	}
+
+	// Should show checkpoints count
+	if !strings.Contains(output, "Checkpoints: 3") {
+		t.Errorf("expected 'Checkpoints: 3', got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_WithVerbose(t *testing.T) {
+	now := time.Now()
+	points := []strategy.RewindPoint{
+		{
+			CheckpointID: "abc123def456",
+			Date:         now,
+			SessionID:    "2026-01-19-session1",
+		},
+	}
+
+	output := formatBranchExplain("feature/test", points, true, false, false, 0, 1)
+
+	// Verbose mode should show session ID
+	if !strings.Contains(output, "Session: 2026-01-19-session1") {
+		t.Errorf("expected session ID in verbose output, got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_LimitedOnMain(t *testing.T) {
+	now := time.Now()
+	// Create 3 points but simulate showing only 2
+	points := []strategy.RewindPoint{
+		{
+			CheckpointID: "abc123def456",
+			Date:         now,
+			SessionID:    "2026-01-19-session1",
+		},
+		{
+			CheckpointID: "def456789012",
+			Date:         now.Add(-time.Hour),
+			SessionID:    "2026-01-19-session1",
+		},
+	}
+
+	// isDefault=true, limit=2, totalCount=15 (more than limit)
+	output := formatBranchExplain("main", points, false, false, true, 2, 15)
+
+	// Header should show limited view info
+	if !strings.Contains(output, "Checkpoints: 15 (showing last 2)") {
+		t.Errorf("expected limited count in header, got:\n%s", output)
+	}
+
+	// Footer should show total with hint
+	if !strings.Contains(output, "15 total checkpoints") {
+		t.Errorf("expected total count in footer, got:\n%s", output)
+	}
+	if !strings.Contains(output, "--limit") {
+		t.Errorf("expected --limit hint in footer, got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_NoCheckpoints(t *testing.T) {
+	output := formatBranchExplain("feature/empty", nil, false, false, false, 0, 0)
+
+	// Should show branch with 0 checkpoints
+	if !strings.Contains(output, "Branch: feature/empty") {
+		t.Errorf("expected branch name, got:\n%s", output)
+	}
+	if !strings.Contains(output, "Checkpoints: 0") {
+		t.Errorf("expected 'Checkpoints: 0', got:\n%s", output)
+	}
+
+	// Should still show intent/outcome placeholders
+	if !strings.Contains(output, "Intent:") {
+		t.Errorf("expected 'Intent:', got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_TruncatesLongCheckpointID(t *testing.T) {
+	now := time.Now()
+	points := []strategy.RewindPoint{
+		{
+			CheckpointID: "abc123def456789012345", // Longer than 12 chars
+			Date:         now,
+			SessionID:    "2026-01-19-session1",
+		},
+	}
+
+	output := formatBranchExplain("feature/test", points, false, false, false, 0, 1)
+
+	// Should truncate to 12 chars
+	if !strings.Contains(output, "[abc123def456]") {
+		t.Errorf("expected truncated checkpoint ID (12 chars), got:\n%s", output)
+	}
+	// Should NOT contain the full ID
+	if strings.Contains(output, "[abc123def456789012345]") {
+		t.Errorf("expected checkpoint ID to be truncated, got:\n%s", output)
 	}
 }
