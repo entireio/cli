@@ -48,14 +48,15 @@ const (
 // This is used by strategies to implement their storage approach.
 //
 // The interface matches the GitStore implementation signatures directly:
-// - WriteTemporary takes WriteTemporaryOptions and returns the commit hash
+// - WriteTemporary takes WriteTemporaryOptions and returns a result with commit hash and skip status
 // - ReadTemporary takes baseCommit (not sessionID) since shadow branches are keyed by commit
 // - List methods return implementation-specific info types for richer data
 type Store interface {
 	// WriteTemporary writes a temporary checkpoint (full state) to a shadow branch.
 	// Shadow branches are named entire/<base-commit-short-hash>.
-	// Returns the commit hash of the created checkpoint.
-	WriteTemporary(ctx context.Context, opts WriteTemporaryOptions) (plumbing.Hash, error)
+	// Returns a result containing the commit hash and whether the checkpoint was skipped.
+	// Checkpoints are skipped (deduplicated) when the tree hash matches the previous checkpoint.
+	WriteTemporary(ctx context.Context, opts WriteTemporaryOptions) (WriteTemporaryResult, error)
 
 	// ReadTemporary reads the latest checkpoint from a shadow branch.
 	// baseCommit is the commit hash the session is based on.
@@ -75,6 +76,16 @@ type Store interface {
 
 	// ListCommitted lists all committed checkpoints.
 	ListCommitted(ctx context.Context) ([]CommittedInfo, error)
+}
+
+// WriteTemporaryResult contains the result of writing a temporary checkpoint.
+type WriteTemporaryResult struct {
+	// CommitHash is the hash of the created or existing checkpoint commit
+	CommitHash plumbing.Hash
+
+	// Skipped is true if the checkpoint was skipped due to no changes
+	// (tree hash matched the previous checkpoint)
+	Skipped bool
 }
 
 // WriteTemporaryOptions contains options for writing a temporary checkpoint.

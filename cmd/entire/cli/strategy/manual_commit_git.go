@@ -57,7 +57,7 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 
 	// Use WriteTemporary to create the checkpoint
 	isFirstCheckpointOfSession := state.CheckpointCount == 0
-	_, err = store.WriteTemporary(context.Background(), checkpoint.WriteTemporaryOptions{
+	result, err := store.WriteTemporary(context.Background(), checkpoint.WriteTemporaryOptions{
 		SessionID:         sessionID,
 		BaseCommit:        state.BaseCommit,
 		ModifiedFiles:     ctx.ModifiedFiles,
@@ -72,6 +72,19 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to write temporary checkpoint: %w", err)
+	}
+
+	// If checkpoint was skipped due to deduplication (no changes), return early
+	if result.Skipped {
+		logCtx := logging.WithComponent(context.Background(), "checkpoint")
+		logging.Info(logCtx, "checkpoint skipped (no changes)",
+			slog.String("strategy", "manual-commit"),
+			slog.String("checkpoint_type", "session"),
+			slog.Int("checkpoint_count", state.CheckpointCount),
+			slog.String("shadow_branch", shadowBranchName),
+		)
+		fmt.Fprintf(os.Stderr, "Skipped checkpoint (no changes since last checkpoint)\n")
+		return nil
 	}
 
 	// Update session state

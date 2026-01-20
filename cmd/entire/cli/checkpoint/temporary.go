@@ -34,18 +34,20 @@ const (
 
 // WriteTemporary writes a temporary checkpoint to a shadow branch.
 // Shadow branches are named entire/<base-commit-short-hash>.
-// Returns the commit hash of the created checkpoint.
-func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOptions) (plumbing.Hash, error) {
+// Returns the result containing commit hash and whether it was skipped.
+// If the new tree hash matches the last checkpoint's tree hash, the checkpoint
+// is skipped to avoid duplicate commits (deduplication).
+func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOptions) (WriteTemporaryResult, error) {
 	_ = ctx // Reserved for future use (e.g., cancellation)
 
 	// Validate base commit - required for shadow branch naming
 	if opts.BaseCommit == "" {
-		return plumbing.ZeroHash, errors.New("BaseCommit is required for temporary checkpoint")
+		return WriteTemporaryResult{}, errors.New("BaseCommit is required for temporary checkpoint")
 	}
 
 	// Validate session ID to prevent path traversal
 	if err := paths.ValidateSessionID(opts.SessionID); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("invalid temporary checkpoint options: %w", err)
+		return WriteTemporaryResult{}, fmt.Errorf("invalid temporary checkpoint options: %w", err)
 	}
 
 	// Get shadow branch name
@@ -54,7 +56,15 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 	// Get or create shadow branch
 	parentHash, baseTreeHash, err := s.getOrCreateShadowBranch(shadowBranchName)
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to get shadow branch: %w", err)
+		return WriteTemporaryResult{}, fmt.Errorf("failed to get shadow branch: %w", err)
+	}
+
+	// Get the last checkpoint's tree hash for deduplication
+	var lastTreeHash plumbing.Hash
+	if parentHash != plumbing.ZeroHash {
+		if lastCommit, err := s.repo.CommitObject(parentHash); err == nil {
+			lastTreeHash = lastCommit.TreeHash
+		}
 	}
 
 	// Collect all files to include
@@ -64,7 +74,7 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 		// This ensures untracked files present at session start are included
 		allFiles, err = collectWorkingDirectoryFiles()
 		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to collect working directory files: %w", err)
+			return WriteTemporaryResult{}, fmt.Errorf("failed to collect working directory files: %w", err)
 		}
 	} else {
 		// For subsequent checkpoints, only include modified/new files
@@ -76,7 +86,15 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 	// Build tree with changes
 	treeHash, err := s.buildTreeWithChanges(baseTreeHash, allFiles, opts.DeletedFiles, opts.MetadataDir, opts.MetadataDirAbs)
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to build tree: %w", err)
+		return WriteTemporaryResult{}, fmt.Errorf("failed to build tree: %w", err)
+	}
+
+	// Deduplication: skip if tree hash matches the last checkpoint
+	if lastTreeHash != plumbing.ZeroHash && treeHash == lastTreeHash {
+		return WriteTemporaryResult{
+			CommitHash: parentHash,
+			Skipped:    true,
+		}, nil
 	}
 
 	// Create checkpoint commit with trailers
@@ -84,17 +102,20 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 
 	commitHash, err := s.createCommit(treeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to create commit: %w", err)
+		return WriteTemporaryResult{}, fmt.Errorf("failed to create commit: %w", err)
 	}
 
 	// Update branch reference
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 	newRef := plumbing.NewHashReference(refName, commitHash)
 	if err := s.repo.Storer.SetReference(newRef); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to update branch reference: %w", err)
+		return WriteTemporaryResult{}, fmt.Errorf("failed to update branch reference: %w", err)
 	}
 
-	return commitHash, nil
+	return WriteTemporaryResult{
+		CommitHash: commitHash,
+		Skipped:    false,
+	}, nil
 }
 
 // ReadTemporary reads the latest checkpoint from a shadow branch.
