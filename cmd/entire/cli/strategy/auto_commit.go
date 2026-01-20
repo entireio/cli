@@ -144,9 +144,21 @@ func (s *AutoCommitStrategy) SaveChanges(ctx SaveContext) error {
 	// We do code first to avoid orphaned metadata if this step fails.
 	// If metadata commit fails after this, the code commit exists but GetRewindPoints
 	// already handles missing metadata gracefully (skips commits without metadata).
-	_, err = s.commitCodeToActive(repo, ctx, checkpointID)
+	codeResult, err := s.commitCodeToActive(repo, ctx, checkpointID)
 	if err != nil {
 		return fmt.Errorf("failed to commit code to active branch: %w", err)
+	}
+
+	// If no code commit was created (no changes), skip metadata creation
+	// This prevents orphaned metadata commits that don't correspond to any code commit
+	if !codeResult.Created {
+		logCtx := logging.WithComponent(context.Background(), "checkpoint")
+		logging.Info(logCtx, "checkpoint skipped (no changes)",
+			slog.String("strategy", "auto-commit"),
+			slog.String("checkpoint_type", "session"),
+		)
+		fmt.Fprintf(os.Stderr, "Skipped checkpoint (no changes since last commit)\n")
+		return nil
 	}
 
 	// Step 2: Commit metadata to entire/sessions branch using sharded path
@@ -170,24 +182,30 @@ func (s *AutoCommitStrategy) SaveChanges(ctx SaveContext) error {
 	return nil
 }
 
+// commitCodeResult contains the result of committing code to the active branch.
+type commitCodeResult struct {
+	CommitHash plumbing.Hash
+	Created    bool // True if a new commit was created, false if skipped (no changes)
+}
+
 // commitCodeToActive commits code changes to the active branch.
 // Adds an Entire-Checkpoint trailer for metadata lookup that survives amend/rebase.
-// Returns the commit hash so metadata can be stored on entire/sessions.
-func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveContext, checkpointID string) (plumbing.Hash, error) {
+// Returns the result containing commit hash and whether a commit was created.
+func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveContext, checkpointID string) (commitCodeResult, error) {
 	// Check if there are any code changes to commit
 	if len(ctx.ModifiedFiles) == 0 && len(ctx.NewFiles) == 0 && len(ctx.DeletedFiles) == 0 {
 		fmt.Fprintf(os.Stderr, "No code changes to commit to active branch\n")
-		// Return current HEAD hash so metadata can still be stored
+		// Return current HEAD hash but mark as not created
 		head, err := repo.Head()
 		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to get HEAD: %w", err)
+			return commitCodeResult{}, fmt.Errorf("failed to get HEAD: %w", err)
 		}
-		return head.Hash(), nil
+		return commitCodeResult{CommitHash: head.Hash(), Created: false}, nil
 	}
 
 	worktree, err := repo.Worktree()
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to get worktree: %w", err)
+		return commitCodeResult{}, fmt.Errorf("failed to get worktree: %w", err)
 	}
 
 	// Stage code changes
@@ -203,11 +221,11 @@ func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveCo
 	}
 	commitHash, err := commitOrHead(repo, worktree, commitMsg, author)
 	if err != nil {
-		return plumbing.ZeroHash, err
+		return commitCodeResult{}, err
 	}
 
 	fmt.Fprintf(os.Stderr, "Committed code changes to active branch (%s)\n", commitHash.String()[:7])
-	return commitHash, nil
+	return commitCodeResult{CommitHash: commitHash, Created: true}, nil
 }
 
 // commitMetadataToMetadataBranch commits session metadata to the entire/sessions branch.

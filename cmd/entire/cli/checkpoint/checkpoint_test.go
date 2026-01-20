@@ -182,3 +182,128 @@ func TestWriteCommitted_AgentField(t *testing.T) {
 			paths.AgentTrailerKey, agentName, commit.Message)
 	}
 }
+
+// TestWriteTemporary_Deduplication verifies that WriteTemporary skips creating
+// a new commit when the tree hash matches the previous checkpoint.
+func TestWriteTemporary_Deduplication(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create worktree and make initial commit
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	// Change to temp dir so paths.RepoRoot() works correctly
+	t.Chdir(tempDir)
+
+	// Create a test file that will be included in checkpoints
+	testFile := filepath.Join(tempDir, "test.go")
+	if err := os.WriteFile(testFile, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	// Create metadata directory
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Create checkpoint store
+	store := NewGitStore(repo)
+
+	// First checkpoint should be created
+	baseCommit := initialCommit.String()
+	result1, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "test-session",
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{"test.go"},
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "Checkpoint 1",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: true,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() first call error = %v", err)
+	}
+	if result1.Skipped {
+		t.Error("first checkpoint should not be skipped")
+	}
+	if result1.CommitHash == plumbing.ZeroHash {
+		t.Error("first checkpoint should have a commit hash")
+	}
+
+	// Second checkpoint with identical content should be skipped
+	result2, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "test-session",
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{"test.go"},
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "Checkpoint 2",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: false,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() second call error = %v", err)
+	}
+	if !result2.Skipped {
+		t.Error("second checkpoint with identical content should be skipped")
+	}
+	if result2.CommitHash != result1.CommitHash {
+		t.Errorf("skipped checkpoint should return previous commit hash, got %s, want %s",
+			result2.CommitHash, result1.CommitHash)
+	}
+
+	// Modify the file and create another checkpoint - should NOT be skipped
+	if err := os.WriteFile(testFile, []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("failed to modify test file: %v", err)
+	}
+
+	result3, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "test-session",
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{"test.go"},
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "Checkpoint 3",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: false,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() third call error = %v", err)
+	}
+	if result3.Skipped {
+		t.Error("third checkpoint with modified content should NOT be skipped")
+	}
+	if result3.CommitHash == result1.CommitHash {
+		t.Error("third checkpoint should have a different commit hash than first")
+	}
+}
