@@ -14,7 +14,9 @@ import (
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
+	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -147,11 +149,16 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 
 	strat := GetStrategy()
 
-	// Get all rewind points (pass 0 for no limit at strategy level)
+	// Get all rewind points (uncommitted checkpoints on shadow branches)
 	allPoints, err := strat.GetRewindPoints(0)
 	if err != nil {
-		// If no rewind points available, show empty branch view
 		allPoints = nil
+	}
+
+	// If no uncommitted rewind points, also check for committed checkpoints
+	// This shows the development history after work has been committed
+	if len(allPoints) == 0 {
+		allPoints = getCommittedCheckpointsAsRewindPoints()
 	}
 
 	totalCount := len(allPoints)
@@ -200,6 +207,132 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 	return nil
 }
 
+// getCommittedCheckpointsAsRewindPoints loads committed checkpoints from entire/sessions
+// and converts them to RewindPoint format for display.
+// Only returns checkpoints that are associated with commits on the current branch
+// (by looking at Entire-Checkpoint trailers on code commits).
+func getCommittedCheckpointsAsRewindPoints() []strategy.RewindPoint {
+	repo, err := openRepository()
+	if err != nil {
+		return nil
+	}
+
+	// Get checkpoint IDs from Entire-Checkpoint trailers on current branch commits
+	branchCheckpointIDs := getBranchCheckpointIDs(repo)
+
+	store := checkpoint.NewGitStore(repo)
+	committed, err := store.ListCommitted(context.Background())
+	if err != nil {
+		return nil
+	}
+
+	points := make([]strategy.RewindPoint, 0, len(committed))
+	for _, info := range committed {
+		// Skip task checkpoints in the main listing
+		if info.IsTask {
+			continue
+		}
+
+		// Filter: only include checkpoints that are linked to commits on this branch
+		if !branchCheckpointIDs[info.CheckpointID] {
+			continue
+		}
+
+		points = append(points, strategy.RewindPoint{
+			ID:           info.CheckpointID,
+			CheckpointID: info.CheckpointID,
+			SessionID:    info.SessionID,
+			Date:         info.CreatedAt,
+			Message:      "Checkpoint " + info.CheckpointID[:8],
+			IsLogsOnly:   true, // Committed checkpoints are logs-only (can't full rewind)
+		})
+	}
+
+	return points
+}
+
+// getBranchCheckpointIDs returns a set of checkpoint IDs that are associated with
+// commits on the current branch (by looking at Entire-Checkpoint trailers).
+func getBranchCheckpointIDs(repo *git.Repository) map[string]bool {
+	checkpointIDs := make(map[string]bool)
+
+	head, err := repo.Head()
+	if err != nil {
+		return checkpointIDs
+	}
+
+	// Find the merge-base with main/master to only include commits unique to this branch
+	mainRef := strategy.GetMainBranchHash(repo)
+
+	// If on main branch or can't find main, include all checkpoints from recent commits
+	if mainRef == plumbing.ZeroHash {
+		iter, err := repo.Log(&git.LogOptions{From: head.Hash()})
+		if err != nil {
+			return checkpointIDs
+		}
+		const maxCommits = 100
+		count := 0
+		_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Sentinel error stops iteration
+			if count >= maxCommits {
+				return errors.New("limit reached")
+			}
+			count++
+			extractCheckpointID(c.Message, checkpointIDs)
+			return nil
+		})
+		return checkpointIDs
+	}
+
+	// Find merge-base between HEAD and main using go-git's native method
+	headCommit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return checkpointIDs
+	}
+
+	mainCommit, err := repo.CommitObject(mainRef)
+	if err != nil {
+		return checkpointIDs
+	}
+
+	mergeBaseCommits, err := headCommit.MergeBase(mainCommit)
+	if err != nil || len(mergeBaseCommits) == 0 {
+		return checkpointIDs
+	}
+	mergeBase := mergeBaseCommits[0].Hash
+
+	// Walk from HEAD back to merge-base, collecting checkpoint IDs from trailers
+	iter, err := repo.Log(&git.LogOptions{From: head.Hash()})
+	if err != nil {
+		return checkpointIDs
+	}
+
+	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Sentinel error stops iteration
+		// Stop when we reach the merge-base (commits from main)
+		if c.Hash == mergeBase {
+			return errors.New("reached merge-base")
+		}
+		extractCheckpointID(c.Message, checkpointIDs)
+		return nil
+	})
+
+	return checkpointIDs
+}
+
+// extractCheckpointID extracts the Entire-Checkpoint trailer value from a commit message
+// and adds it to the checkpointIDs map.
+func extractCheckpointID(message string, checkpointIDs map[string]bool) {
+	const trailerPrefix = "Entire-Checkpoint: "
+	for _, line := range strings.Split(message, "\n") {
+		if checkpointID, found := strings.CutPrefix(line, trailerPrefix); found {
+			checkpointID = strings.TrimSpace(checkpointID)
+			if checkpointID != "" {
+				checkpointIDs[checkpointID] = true
+			}
+			break // Only one checkpoint trailer per commit
+		}
+	}
+}
+
 // formatBranchExplain formats the branch-level explain output.
 // Parameters:
 //   - branchName: the current branch name
@@ -213,11 +346,11 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, ve
 	var sb strings.Builder
 
 	// Header
-	sb.WriteString(fmt.Sprintf("Branch: %s\n", branchName))
+	fmt.Fprintf(&sb, "Branch: %s\n", branchName)
 	if isDefault && limit > 0 && totalCount > limit {
-		sb.WriteString(fmt.Sprintf("Checkpoints: %d (showing last %d)\n", totalCount, limit))
+		fmt.Fprintf(&sb, "Checkpoints: %d (showing last %d)\n", totalCount, limit)
 	} else {
-		sb.WriteString(fmt.Sprintf("Checkpoints: %d\n", len(checkpoints)))
+		fmt.Fprintf(&sb, "Checkpoints: %d\n", len(checkpoints))
 	}
 
 	sb.WriteString("\n")
@@ -239,10 +372,10 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, ve
 		if len(id) > 12 {
 			id = id[:12]
 		}
-		sb.WriteString(fmt.Sprintf("[%s] %s\n", id, point.Date.Format("2006-01-02 15:04")))
+		fmt.Fprintf(&sb, "[%s] %s\n", id, point.Date.Format("2006-01-02 15:04"))
 
 		if verbose && point.SessionID != "" {
-			sb.WriteString(fmt.Sprintf("  Session: %s\n", point.SessionID))
+			fmt.Fprintf(&sb, "  Session: %s\n", point.SessionID)
 		}
 
 		// In verbose mode, show the session prompt
@@ -252,7 +385,7 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, ve
 			if len(prompt) > 100 {
 				prompt = prompt[:97] + "..."
 			}
-			sb.WriteString(fmt.Sprintf("  Prompt: %s\n", prompt))
+			fmt.Fprintf(&sb, "  Prompt: %s\n", prompt)
 		}
 
 		// Display intent - prefer stored metadata, then generated, then placeholder
@@ -262,7 +395,7 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, ve
 		} else if cp.GeneratedSummary != nil && cp.GeneratedSummary.Intent != "" {
 			intent = cp.GeneratedSummary.Intent
 		}
-		sb.WriteString(fmt.Sprintf("  Intent: %s\n", intent))
+		fmt.Fprintf(&sb, "  Intent: %s\n", intent)
 
 		// Display outcome - prefer stored metadata, then generated, then placeholder
 		outcome := "(not generated)"
@@ -271,11 +404,11 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, ve
 		} else if cp.GeneratedSummary != nil && cp.GeneratedSummary.Outcome != "" {
 			outcome = cp.GeneratedSummary.Outcome
 		}
-		sb.WriteString(fmt.Sprintf("  Outcome: %s\n", outcome))
+		fmt.Fprintf(&sb, "  Outcome: %s\n", outcome)
 
 		// In verbose mode, show files touched
 		if verbose && meta != nil && len(meta.FilesTouched) > 0 {
-			sb.WriteString(fmt.Sprintf("  Files: %d", len(meta.FilesTouched)))
+			fmt.Fprintf(&sb, "  Files: %d", len(meta.FilesTouched))
 			// Show first few files
 			maxFiles := 3
 			if len(meta.FilesTouched) <= maxFiles {
@@ -556,18 +689,18 @@ func formatSessionInfo(session *strategy.Session, sourceRef string, checkpoints 
 	var sb strings.Builder
 
 	// Session header
-	sb.WriteString(fmt.Sprintf("Session: %s\n", session.ID))
-	sb.WriteString(fmt.Sprintf("Strategy: %s\n", session.Strategy))
+	fmt.Fprintf(&sb, "Session: %s\n", session.ID)
+	fmt.Fprintf(&sb, "Strategy: %s\n", session.Strategy)
 
 	if !session.StartTime.IsZero() {
-		sb.WriteString(fmt.Sprintf("Started: %s\n", session.StartTime.Format("2006-01-02 15:04:05")))
+		fmt.Fprintf(&sb, "Started: %s\n", session.StartTime.Format("2006-01-02 15:04:05"))
 	}
 
 	if sourceRef != "" {
-		sb.WriteString(fmt.Sprintf("Source Ref: %s\n", sourceRef))
+		fmt.Fprintf(&sb, "Source Ref: %s\n", sourceRef)
 	}
 
-	sb.WriteString(fmt.Sprintf("Checkpoints: %d\n", len(checkpoints)))
+	fmt.Fprintf(&sb, "Checkpoints: %d\n", len(checkpoints))
 
 	// Checkpoint details
 	for _, cp := range checkpoints {
@@ -578,15 +711,15 @@ func formatSessionInfo(session *strategy.Session, sourceRef string, checkpoints 
 		if cp.IsTaskCheckpoint {
 			taskMarker = " [Task]"
 		}
-		sb.WriteString(fmt.Sprintf("─── Checkpoint %d [%s] %s%s ───\n",
-			cp.Index, cp.ShortID, cp.Timestamp.Format("2006-01-02 15:04"), taskMarker))
+		fmt.Fprintf(&sb, "─── Checkpoint %d [%s] %s%s ───\n",
+			cp.Index, cp.ShortID, cp.Timestamp.Format("2006-01-02 15:04"), taskMarker)
 		sb.WriteString("\n")
 
 		// Display all interactions in this checkpoint
 		for i, inter := range cp.Interactions {
 			// For multiple interactions, add a sub-header
 			if len(cp.Interactions) > 1 {
-				sb.WriteString(fmt.Sprintf("### Interaction %d\n\n", i+1))
+				fmt.Fprintf(&sb, "### Interaction %d\n\n", i+1)
 			}
 
 			// Prompt section
@@ -605,9 +738,9 @@ func formatSessionInfo(session *strategy.Session, sourceRef string, checkpoints 
 
 			// Files modified for this interaction
 			if len(inter.Files) > 0 {
-				sb.WriteString(fmt.Sprintf("Files Modified (%d):\n", len(inter.Files)))
+				fmt.Fprintf(&sb, "Files Modified (%d):\n", len(inter.Files))
 				for _, file := range inter.Files {
-					sb.WriteString(fmt.Sprintf("  - %s\n", file))
+					fmt.Fprintf(&sb, "  - %s\n", file)
 				}
 				sb.WriteString("\n")
 			}
@@ -622,9 +755,9 @@ func formatSessionInfo(session *strategy.Session, sourceRef string, checkpoints 
 			}
 			// Show aggregate files if available
 			if len(cp.Files) > 0 {
-				sb.WriteString(fmt.Sprintf("Files Modified (%d):\n", len(cp.Files)))
+				fmt.Fprintf(&sb, "Files Modified (%d):\n", len(cp.Files))
 				for _, file := range cp.Files {
-					sb.WriteString(fmt.Sprintf("  - %s\n", file))
+					fmt.Fprintf(&sb, "  - %s\n", file)
 				}
 			}
 		}
@@ -637,25 +770,25 @@ func formatSessionInfo(session *strategy.Session, sourceRef string, checkpoints 
 func formatCommitInfo(info *commitInfo) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("Commit: %s (%s)\n", info.SHA, info.ShortSHA))
-	sb.WriteString(fmt.Sprintf("Date: %s\n", info.Date.Format("2006-01-02 15:04:05")))
+	fmt.Fprintf(&sb, "Commit: %s (%s)\n", info.SHA, info.ShortSHA)
+	fmt.Fprintf(&sb, "Date: %s\n", info.Date.Format("2006-01-02 15:04:05"))
 
 	if info.HasEntire && info.SessionID != "" {
-		sb.WriteString(fmt.Sprintf("Session: %s\n", info.SessionID))
+		fmt.Fprintf(&sb, "Session: %s\n", info.SessionID)
 	}
 
 	sb.WriteString("\n")
 
 	// Message
 	sb.WriteString("Message:\n")
-	sb.WriteString(fmt.Sprintf("  %s\n", info.Message))
+	fmt.Fprintf(&sb, "  %s\n", info.Message)
 	sb.WriteString("\n")
 
 	// Files modified
 	if len(info.Files) > 0 {
-		sb.WriteString(fmt.Sprintf("Files Modified (%d):\n", len(info.Files)))
+		fmt.Fprintf(&sb, "Files Modified (%d):\n", len(info.Files))
 		for _, file := range info.Files {
-			sb.WriteString(fmt.Sprintf("  - %s\n", file))
+			fmt.Fprintf(&sb, "  - %s\n", file)
 		}
 		sb.WriteString("\n")
 	}
