@@ -225,13 +225,16 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(_ *git.Repository, c
 
 	// Write committed checkpoint using the checkpoint store
 	err = store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
-		CheckpointID: checkpointID,
-		SessionID:    sessionID,
-		Strategy:     StrategyNameAutoCommit, // Use new strategy name
-		MetadataDir:  ctx.MetadataDirAbs,     // Copy all files from metadata dir
-		AuthorName:   ctx.AuthorName,
-		AuthorEmail:  ctx.AuthorEmail,
-		Agent:        ctx.AgentType,
+		CheckpointID:           checkpointID,
+		SessionID:              sessionID,
+		Strategy:               StrategyNameAutoCommit, // Use new strategy name
+		MetadataDir:            ctx.MetadataDirAbs,     // Copy all files from metadata dir
+		AuthorName:             ctx.AuthorName,
+		AuthorEmail:            ctx.AuthorEmail,
+		Agent:                  ctx.AgentType,
+		TranscriptUUIDAtStart:  ctx.TranscriptUUIDAtStart,
+		TranscriptLinesAtStart: ctx.TranscriptLinesAtStart,
+		TokenUsage:             ctx.TokenUsage,
 	})
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to write committed checkpoint: %w", err)

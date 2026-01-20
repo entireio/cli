@@ -87,7 +87,8 @@ func runResume(branchName string, force bool) error {
 		// Fetch and checkout the remote branch
 		fmt.Fprintf(os.Stderr, "Fetching branch '%s' from origin...\n", branchName)
 		if err := FetchAndCheckoutRemoteBranch(branchName); err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "Failed to checkout branch: %v\n", err)
+			return NewSilentError(errors.New("failed to checkout branch"))
 		}
 		fmt.Fprintf(os.Stderr, "Switched to branch '%s'\n", branchName)
 	} else {
@@ -102,7 +103,8 @@ func runResume(branchName string, force bool) error {
 
 		// Checkout the branch
 		if err := CheckoutBranch(branchName); err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "Failed to checkout branch: %v\n", err)
+			return NewSilentError(errors.New("failed to checkout branch"))
 		}
 		fmt.Fprintf(os.Stderr, "Switched to branch '%s'\n", branchName)
 	}
@@ -314,7 +316,7 @@ func promptResumeFromOlderCheckpoint() (bool, error) {
 }
 
 // checkRemoteMetadata checks if checkpoint metadata exists on origin/entire/sessions
-// and provides guidance to the user.
+// and automatically fetches it if available.
 func checkRemoteMetadata(repo *git.Repository, checkpointID string) error {
 	// Try to get remote metadata branch tree
 	remoteTree, err := strategy.GetRemoteMetadataBranchTree(repo)
@@ -325,18 +327,22 @@ func checkRemoteMetadata(repo *git.Repository, checkpointID string) error {
 	}
 
 	// Check if the checkpoint exists on the remote
-	_, err = strategy.ReadCheckpointMetadata(remoteTree, paths.CheckpointPath(checkpointID))
+	metadata, err := strategy.ReadCheckpointMetadata(remoteTree, paths.CheckpointPath(checkpointID))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Checkpoint '%s' found in commit but session metadata not available\n", checkpointID)
 		return nil //nolint:nilerr // Informational message, not a fatal error
 	}
 
-	// Metadata exists on remote but not locally
-	fmt.Fprintf(os.Stderr, "Checkpoint '%s' found in commit but session metadata not available locally\n", checkpointID)
-	fmt.Fprintf(os.Stderr, "The metadata exists on origin. To fetch it, run:\n")
-	fmt.Fprintf(os.Stderr, "  git fetch origin entire/sessions:entire/sessions\n")
-	fmt.Fprintf(os.Stderr, "\nThen run this command again.\n")
-	return nil
+	// Metadata exists on remote but not locally - fetch it automatically
+	fmt.Fprintf(os.Stderr, "Fetching session metadata from origin...\n")
+	if err := FetchMetadataBranch(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to fetch metadata: %v\n", err)
+		fmt.Fprintf(os.Stderr, "You can try manually: git fetch origin entire/sessions:entire/sessions\n")
+		return NewSilentError(errors.New("failed to fetch metadata"))
+	}
+
+	// Now resume the session with the fetched metadata
+	return resumeSession(metadata.SessionID, checkpointID, false)
 }
 
 // resumeSession restores and displays the resume command for a specific session.

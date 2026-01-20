@@ -265,3 +265,146 @@ func TestFindActivePreTaskFile(t *testing.T) {
 		t.Errorf("FindActivePreTaskFile() taskID = %v, want toolu_abc123", taskID)
 	}
 }
+
+// setupTestRepoWithTranscript sets up a temporary git repo with a transcript file
+// and returns the transcriptPath. Used by PrePromptState transcript tests.
+func setupTestRepoWithTranscript(t *testing.T, transcriptContent string, transcriptName string) (transcriptPath string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Initialize git repo
+	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
+		t.Fatalf("Failed to create .git: %v", err)
+	}
+	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("Failed to create HEAD: %v", err)
+	}
+
+	// Clear the repo root cache to pick up the new repo
+	paths.ClearRepoRootCache()
+
+	// Create .entire/tmp directory
+	if err := os.MkdirAll(paths.EntireTmpDir, 0o755); err != nil {
+		t.Fatalf("Failed to create tmp dir: %v", err)
+	}
+
+	// Create transcript file if content provided
+	if transcriptContent != "" {
+		transcriptPath = filepath.Join(tmpDir, transcriptName)
+		if err := os.WriteFile(transcriptPath, []byte(transcriptContent), 0o644); err != nil {
+			t.Fatalf("Failed to create transcript file: %v", err)
+		}
+	}
+
+	return transcriptPath
+}
+
+func TestPrePromptState_WithTranscriptPosition(t *testing.T) {
+	const expectedUUID = "user-2"
+	transcriptContent := `{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
+{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}
+{"type":"user","uuid":"` + expectedUUID + `","message":{"content":"How are you?"}}`
+
+	transcriptPath := setupTestRepoWithTranscript(t, transcriptContent, "transcript.jsonl")
+
+	sessionID := "test-session-123"
+
+	// Capture state with transcript path
+	if err := CapturePrePromptState(sessionID, transcriptPath); err != nil {
+		t.Fatalf("CapturePrePromptState() error = %v", err)
+	}
+
+	// Load and verify
+	state, err := LoadPrePromptState(sessionID)
+	if err != nil {
+		t.Fatalf("LoadPrePromptState() error = %v", err)
+	}
+	if state == nil {
+		t.Fatal("LoadPrePromptState() returned nil")
+	}
+
+	// Verify transcript position was captured
+	if state.LastTranscriptUUID != expectedUUID {
+		t.Errorf("LastTranscriptUUID = %q, want %q", state.LastTranscriptUUID, expectedUUID)
+	}
+	if state.LastTranscriptLineCount != 3 {
+		t.Errorf("LastTranscriptLineCount = %d, want 3", state.LastTranscriptLineCount)
+	}
+
+	// Cleanup
+	if err := CleanupPrePromptState(sessionID); err != nil {
+		t.Errorf("CleanupPrePromptState() error = %v", err)
+	}
+}
+
+func TestPrePromptState_WithEmptyTranscriptPath(t *testing.T) {
+	setupTestRepoWithTranscript(t, "", "") // No transcript file
+
+	sessionID := "test-session-empty-transcript"
+
+	// Capture state with empty transcript path
+	if err := CapturePrePromptState(sessionID, ""); err != nil {
+		t.Fatalf("CapturePrePromptState() error = %v", err)
+	}
+
+	// Load and verify
+	state, err := LoadPrePromptState(sessionID)
+	if err != nil {
+		t.Fatalf("LoadPrePromptState() error = %v", err)
+	}
+	if state == nil {
+		t.Fatal("LoadPrePromptState() returned nil")
+	}
+
+	// Transcript position should be empty/zero when no transcript provided
+	if state.LastTranscriptUUID != "" {
+		t.Errorf("LastTranscriptUUID = %q, want empty", state.LastTranscriptUUID)
+	}
+	if state.LastTranscriptLineCount != 0 {
+		t.Errorf("LastTranscriptLineCount = %d, want 0", state.LastTranscriptLineCount)
+	}
+
+	// Cleanup
+	if err := CleanupPrePromptState(sessionID); err != nil {
+		t.Errorf("CleanupPrePromptState() error = %v", err)
+	}
+}
+
+func TestPrePromptState_WithSummaryOnlyTranscript(t *testing.T) {
+	// Summary rows have leafUuid but not uuid
+	transcriptContent := `{"type":"summary","leafUuid":"leaf-1","summary":"Previous context"}
+{"type":"summary","leafUuid":"leaf-2","summary":"More context"}`
+
+	transcriptPath := setupTestRepoWithTranscript(t, transcriptContent, "transcript-summary.jsonl")
+
+	sessionID := "test-session-summary-only"
+
+	// Capture state
+	if err := CapturePrePromptState(sessionID, transcriptPath); err != nil {
+		t.Fatalf("CapturePrePromptState() error = %v", err)
+	}
+
+	// Load and verify
+	state, err := LoadPrePromptState(sessionID)
+	if err != nil {
+		t.Fatalf("LoadPrePromptState() error = %v", err)
+	}
+	if state == nil {
+		t.Fatal("LoadPrePromptState() returned nil")
+	}
+
+	// Line count should be 2, but UUID should be empty (summary rows don't have uuid)
+	if state.LastTranscriptLineCount != 2 {
+		t.Errorf("LastTranscriptLineCount = %d, want 2", state.LastTranscriptLineCount)
+	}
+	if state.LastTranscriptUUID != "" {
+		t.Errorf("LastTranscriptUUID = %q, want empty (summary rows don't have uuid)", state.LastTranscriptUUID)
+	}
+
+	// Cleanup
+	if err := CleanupPrePromptState(sessionID); err != nil {
+		t.Errorf("CleanupPrePromptState() error = %v", err)
+	}
+}

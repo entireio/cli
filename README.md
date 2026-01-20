@@ -159,6 +159,21 @@ Local settings override project settings field-by-field. When you run `entire st
 | "shadow branch conflict" | Run `entire rewind reset --force` |
 | "session not found" | Check available sessions with `entire session list` |
 
+### SSH Authentication Errors
+
+If you see an error like this when running `entire resume`:
+
+```
+Failed to fetch metadata: failed to fetch entire/sessions from origin: ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey], no supported methods remain
+```
+
+This is a [known issue with go-git's SSH handling](https://github.com/go-git/go-git/issues/411). Fix it by adding GitHub's host keys to your known_hosts file:
+
+```bash
+ssh-keyscan -t rsa github.com > ~/.ssh/known_hosts
+ssh-keyscan -t ecdsa github.com >> ~/.ssh/known_hosts
+```
+
 ### Debug Mode
 
 ```bash

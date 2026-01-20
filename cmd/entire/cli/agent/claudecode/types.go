@@ -70,3 +70,19 @@ var FileModificationTools = []string{
 	ToolMCPWrite,
 	ToolMCPEdit,
 }
+
+// messageUsage represents token usage from a Claude API response.
+// This is specific to Claude/Anthropic's API format.
+type messageUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+}
+
+// messageWithUsage represents an assistant message with usage data.
+// Used for extracting token counts from Claude Code transcripts.
+type messageWithUsage struct {
+	ID    string       `json:"id"`
+	Usage messageUsage `json:"usage"`
+}

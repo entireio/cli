@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/agent"
+	"entire.io/cli/cmd/entire/cli/agent/claudecode"
+	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
@@ -275,8 +277,8 @@ func captureInitialState() error {
 		return nil
 	}
 
-	// CLI captures state directly
-	if err := CapturePrePromptState(hookData.entireSessionID); err != nil {
+	// CLI captures state directly (including transcript position)
+	if err := CapturePrePromptState(hookData.entireSessionID, hookData.input.SessionRef); err != nil {
 		return err
 	}
 
@@ -506,19 +508,43 @@ func commitWithMetadata() error {
 		agentType = sessionState.AgentType
 	}
 
+	// Get transcript position from pre-prompt state (captured at checkpoint start)
+	var transcriptUUIDAtStart string
+	var transcriptLinesAtStart int
+	if preState != nil {
+		transcriptUUIDAtStart = preState.LastTranscriptUUID
+		transcriptLinesAtStart = preState.LastTranscriptLineCount
+	}
+
+	// Calculate token usage for this checkpoint (Claude Code specific)
+	var tokenUsage *checkpoint.TokenUsage
+	if transcriptPath != "" {
+		// Subagents are stored in a subagents/ directory next to the main transcript
+		subagentsDir := filepath.Join(filepath.Dir(transcriptPath), entireSessionID, "subagents")
+		usage, err := claudecode.CalculateTotalTokenUsage(transcriptPath, transcriptLinesAtStart, subagentsDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to calculate token usage: %v\n", err)
+		} else {
+			tokenUsage = usage
+		}
+	}
+
 	// Build fully-populated save context and delegate to strategy
 	ctx := strategy.SaveContext{
-		SessionID:      entireSessionID,
-		ModifiedFiles:  relModifiedFiles,
-		NewFiles:       relNewFiles,
-		DeletedFiles:   relDeletedFiles,
-		MetadataDir:    sessionDir,
-		MetadataDirAbs: sessionDirAbs,
-		CommitMessage:  commitMessage,
-		TranscriptPath: transcriptPath,
-		AuthorName:     author.Name,
-		AuthorEmail:    author.Email,
-		AgentType:      agentType,
+		SessionID:              entireSessionID,
+		ModifiedFiles:          relModifiedFiles,
+		NewFiles:               relNewFiles,
+		DeletedFiles:           relDeletedFiles,
+		MetadataDir:            sessionDir,
+		MetadataDirAbs:         sessionDirAbs,
+		CommitMessage:          commitMessage,
+		TranscriptPath:         transcriptPath,
+		AuthorName:             author.Name,
+		AuthorEmail:            author.Email,
+		AgentType:              agentType,
+		TranscriptUUIDAtStart:  transcriptUUIDAtStart,
+		TranscriptLinesAtStart: transcriptLinesAtStart,
+		TokenUsage:             tokenUsage,
 	}
 
 	if err := strat.SaveChanges(ctx); err != nil {

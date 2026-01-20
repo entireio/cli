@@ -118,6 +118,17 @@ type CommittedCheckpoint struct {
     Prompts    []string
     Context    []byte
     CreatedAt  time.Time
+    TokenUsage *TokenUsage   // Token usage for this checkpoint
+}
+
+// TokenUsage represents aggregated token usage for a checkpoint
+type TokenUsage struct {
+    InputTokens         int         // Fresh input tokens (not from cache)
+    CacheCreationTokens int         // Tokens written to cache
+    CacheReadTokens     int         // Tokens read from cache
+    OutputTokens        int         // Output tokens generated
+    APICallCount        int         // Number of API calls made
+    SubagentTokens      *TokenUsage // Nested usage from spawned subagents
 }
 ```
 
@@ -207,7 +218,19 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
   "session_ids": ["...", "..."],  // All sessions in this checkpoint
   "session_count": 2,
   "strategy": "manual-commit",
-  "files_touched": ["file1.txt"]  // Merged from all sessions
+  "files_touched": ["file1.txt"],  // Merged from all sessions
+  "token_usage": {                 // Token usage for this checkpoint
+    "input_tokens": 1500,
+    "cache_creation_tokens": 200,
+    "cache_read_tokens": 800,
+    "output_tokens": 500,
+    "api_call_count": 3,
+    "subagent_tokens": {           // Optional: usage from spawned agents
+      "input_tokens": 1000,
+      "output_tokens": 300,
+      "api_call_count": 2
+    }
+  }
 }
 ```
 
@@ -215,6 +238,83 @@ When condensing multiple concurrent sessions:
 - Latest session files at root level
 - Previous sessions archived to numbered subfolders (`1/`, `2/`, etc.)
 - `session_ids` and `files_touched` are merged
+
+### Checkpoint ID Linking
+
+The checkpoint ID is the **stable identifier** that links user commits to metadata across branches.
+
+**Format:** 12-hex-character random ID (e.g., `a3b2c4d5e6f7`)
+
+**Generation:**
+- Manual-commit: Generated during condensation (post-commit hook)
+- Auto-commit: Generated when creating the commit
+
+**Usage:**
+
+1. **User commit trailer** (both strategies):
+   - `Entire-Checkpoint: a3b2c4d5e6f7` added to user's commit message
+   - Auto-commit: Added programmatically
+   - Manual-commit: Added by `prepare-commit-msg` hook (user can remove)
+
+2. **Directory sharding** on `entire/sessions`:
+   - Path: `<id[:2]>/<id[2:]>/` (e.g., `a3/b2c4d5e6f7/`)
+   - First 2 chars = shard (256 possible shards)
+   - Remaining 10 chars = directory name
+
+3. **Commit subject** on `entire/sessions`:
+   - Format: `Checkpoint: a3b2c4d5e6f7`
+   - Makes `git log entire/sessions` readable
+
+**Bidirectional Lookup:**
+
+```
+User commit → Metadata:
+  1. Extract "Entire-Checkpoint: a3b2c4d5e6f7" from commit message
+  2. Look up metadata:
+     - Approach A: Read entire/sessions tree at a3/b2c4d5e6f7/
+     - Approach B: Search git log entire/sessions for "Checkpoint: a3b2c4d5e6f7"
+
+Metadata → User commits:
+  Given checkpoint ID a3b2c4d5e6f7
+  → Search branch history for commits with "Entire-Checkpoint: a3b2c4d5e6f7"
+```
+
+**Example Flow:**
+
+```
+                    User creates commit
+                           ↓
+           prepare-commit-msg hook adds trailer
+                           ↓
+┌──────────────────────────────────────────────────┐
+│ Commit on main branch:                           │
+│   "Implement login feature                       │
+│                                                   │
+│   Entire-Checkpoint: a3b2c4d5e6f7"               │
+└──────────────────────────────────────────────────┘
+                           ↓
+                  post-commit hook runs
+                           ↓
+          Condense shadow → entire/sessions
+                           ↓
+┌──────────────────────────────────────────────────┐
+│ Commit on entire/sessions:                       │
+│   Subject: "Checkpoint: a3b2c4d5e6f7"            │
+│                                                   │
+│   Tree: a3/b2c4d5e6f7/                           │
+│     ├── metadata.json                            │
+│     │   (checkpoint_id: "a3b2c4d5e6f7")          │
+│     ├── full.jsonl                               │
+│     ├── prompt.txt                               │
+│     └── context.md                               │
+│                                                   │
+│   Trailers:                                      │
+│     Entire-Session: 2026-01-20-uuid              │
+│     Entire-Strategy: manual-commit               │
+└──────────────────────────────────────────────────┘
+```
+
+The checkpoint ID creates a **bidirectional link**: user commits can find their metadata, and metadata can find the commits that reference it.
 
 ### Package Structure
 

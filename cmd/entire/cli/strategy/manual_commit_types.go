@@ -1,6 +1,10 @@
 package strategy
 
-import "time"
+import (
+	"time"
+
+	"entire.io/cli/cmd/entire/cli/checkpoint"
+)
 
 const (
 	// sessionStateDirName is the directory name for session state files within git common dir.
@@ -23,6 +27,13 @@ type SessionState struct {
 	ConcurrentWarningShown   bool      `json:"concurrent_warning_shown,omitempty"`   // True if user was warned about concurrent sessions
 	LastCheckpointID         string    `json:"last_checkpoint_id,omitempty"`         // Checkpoint ID from last condensation, reused for subsequent commits without new content
 	AgentType                string    `json:"agent_type,omitempty"`                 // Agent type identifier (e.g., "Claude Code", "Cursor")
+
+	// Token usage tracking (accumulated across all checkpoints in this session)
+	TokenUsage *checkpoint.TokenUsage `json:"token_usage,omitempty"`
+
+	// Transcript position when session started (for multi-session checkpoints on entire/sessions)
+	TranscriptLinesAtStart int    `json:"transcript_lines_at_start,omitempty"`
+	TranscriptUUIDAtStart  string `json:"transcript_uuid_at_start,omitempty"`
 }
 
 // CheckpointInfo represents checkpoint metadata stored on the sessions branch.

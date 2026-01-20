@@ -80,6 +80,17 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 	// Track touched files (modified, new, and deleted)
 	state.FilesTouched = mergeFilesTouched(state.FilesTouched, ctx.ModifiedFiles, ctx.NewFiles, ctx.DeletedFiles)
 
+	// On first checkpoint, store the initial transcript position
+	if isFirstCheckpointOfSession {
+		state.TranscriptLinesAtStart = ctx.TranscriptLinesAtStart
+		state.TranscriptUUIDAtStart = ctx.TranscriptUUIDAtStart
+	}
+
+	// Accumulate token usage
+	if ctx.TokenUsage != nil {
+		state.TokenUsage = accumulateTokenUsage(state.TokenUsage, ctx.TokenUsage)
+	}
+
 	// Save updated state
 	if err := s.saveSessionState(state); err != nil {
 		return fmt.Errorf("failed to save session state: %w", err)
@@ -254,6 +265,39 @@ func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
 	// Sort for deterministic output
 	sort.Strings(result)
 	return result
+}
+
+// accumulateTokenUsage adds new token usage to existing accumulated usage.
+// If existing is nil, returns a copy of incoming. If incoming is nil, returns existing unchanged.
+func accumulateTokenUsage(existing, incoming *checkpoint.TokenUsage) *checkpoint.TokenUsage {
+	if incoming == nil {
+		return existing
+	}
+	if existing == nil {
+		// Return a copy to avoid sharing the pointer
+		return &checkpoint.TokenUsage{
+			InputTokens:         incoming.InputTokens,
+			CacheCreationTokens: incoming.CacheCreationTokens,
+			CacheReadTokens:     incoming.CacheReadTokens,
+			OutputTokens:        incoming.OutputTokens,
+			APICallCount:        incoming.APICallCount,
+			SubagentTokens:      incoming.SubagentTokens,
+		}
+	}
+
+	// Accumulate values
+	existing.InputTokens += incoming.InputTokens
+	existing.CacheCreationTokens += incoming.CacheCreationTokens
+	existing.CacheReadTokens += incoming.CacheReadTokens
+	existing.OutputTokens += incoming.OutputTokens
+	existing.APICallCount += incoming.APICallCount
+
+	// Accumulate subagent tokens if present
+	if incoming.SubagentTokens != nil {
+		existing.SubagentTokens = accumulateTokenUsage(existing.SubagentTokens, incoming.SubagentTokens)
+	}
+
+	return existing
 }
 
 // deleteShadowBranch deletes a shadow branch by name using an existing repo handle.

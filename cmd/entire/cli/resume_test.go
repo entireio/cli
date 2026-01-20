@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -496,12 +497,18 @@ func TestCheckRemoteMetadata_MetadataExistsOnRemote(t *testing.T) {
 		t.Fatalf("Failed to remove local metadata branch: %v", err)
 	}
 
-	// Call checkRemoteMetadata - should find it on remote and suggest fetch
+	// Call checkRemoteMetadata - should find it on remote and attempt to fetch
+	// In this test environment without a real origin remote, the fetch will fail
+	// but it should return a SilentError (user-friendly error message already printed)
 	err = checkRemoteMetadata(repo, checkpointID)
-	if err != nil {
-		t.Errorf("checkRemoteMetadata() returned error: %v", err)
+	if err == nil {
+		t.Error("checkRemoteMetadata() should return SilentError when fetch fails")
+	} else {
+		var silentErr *SilentError
+		if !errors.As(err, &silentErr) {
+			t.Errorf("checkRemoteMetadata() should return SilentError, got: %v", err)
+		}
 	}
-	// Note: We can't easily capture stderr in this test, but the function should not error
 }
 
 func TestCheckRemoteMetadata_NoRemoteMetadataBranch(t *testing.T) {
@@ -611,10 +618,16 @@ func TestResumeFromCurrentBranch_FallsBackToRemote(t *testing.T) {
 		t.Fatalf("Failed to create commit with checkpoint: %v", err)
 	}
 
-	// Run resumeFromCurrentBranch - should fall back to remote and suggest fetch
+	// Run resumeFromCurrentBranch - should fall back to remote and attempt fetch
+	// In this test environment without a real origin remote, the fetch will fail
+	// but it should return a SilentError (user-friendly error message already printed)
 	err = resumeFromCurrentBranch("master", false)
-	if err != nil {
-		t.Errorf("resumeFromCurrentBranch() returned error when falling back to remote: %v", err)
+	if err == nil {
+		t.Error("resumeFromCurrentBranch() should return SilentError when fetch fails")
+	} else {
+		var silentErr *SilentError
+		if !errors.As(err, &silentErr) {
+			t.Errorf("resumeFromCurrentBranch() should return SilentError, got: %v", err)
+		}
 	}
-	// The function should print the fetch suggestion to stderr (can't easily verify output)
 }

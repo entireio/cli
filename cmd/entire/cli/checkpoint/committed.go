@@ -304,17 +304,20 @@ func (s *GitStore) writeTranscript(opts WriteCommittedOptions, basePath string, 
 // If existingMetadata is provided, merges session info from the previous session(s).
 func (s *GitStore) writeMetadataJSON(opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry, existingMetadata *CommittedMetadata) error {
 	metadata := CommittedMetadata{
-		CheckpointID:     opts.CheckpointID,
-		SessionID:        opts.SessionID,
-		Strategy:         opts.Strategy,
-		CreatedAt:        time.Now(),
-		CheckpointsCount: opts.CheckpointsCount,
-		FilesTouched:     opts.FilesTouched,
-		Agent:            opts.Agent,
-		IsTask:           opts.IsTask,
-		ToolUseID:        opts.ToolUseID,
-		SessionCount:     1,
-		SessionIDs:       []string{opts.SessionID},
+		CheckpointID:           opts.CheckpointID,
+		SessionID:              opts.SessionID,
+		Strategy:               opts.Strategy,
+		CreatedAt:              time.Now(),
+		CheckpointsCount:       opts.CheckpointsCount,
+		FilesTouched:           opts.FilesTouched,
+		Agent:                  opts.Agent,
+		IsTask:                 opts.IsTask,
+		ToolUseID:              opts.ToolUseID,
+		SessionCount:           1,
+		SessionIDs:             []string{opts.SessionID},
+		TranscriptUUIDAtStart:  opts.TranscriptUUIDAtStart,
+		TranscriptLinesAtStart: opts.TranscriptLinesAtStart,
+		TokenUsage:             opts.TokenUsage,
 	}
 
 	// Merge with existing metadata if present (multi-session checkpoint)

@@ -42,7 +42,17 @@ func NewRootCmd() *cobra.Command {
 			HiddenDefaultCmd: true,
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
-			telemetry.GetClient(cmd.Context()).TrackCommand(cmd)
+			// Load telemetry preference from settings (ignore errors - nil defaults to disabled)
+			var telemetryEnabled *bool
+			settings, err := LoadEntireSettings()
+			if err == nil {
+				telemetryEnabled = settings.Telemetry
+			}
+
+			// Initialize telemetry client and add to context
+			telemetryClient := telemetry.NewClient(Version, telemetryEnabled)
+			defer telemetryClient.Close()
+			telemetryClient.TrackCommand(cmd, settings.Strategy, settings.Agent, settings.Enabled)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()

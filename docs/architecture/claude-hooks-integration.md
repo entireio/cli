@@ -65,6 +65,7 @@ Fires every time the user submits a prompt. Prepares the repository state tracki
     - Runs `git status` to get a list of all **untracked files** in the repository.
     - Saves this list to `.entire/tmp/pre-prompt-<session-id>.json`.
     - This baseline is compared later (in the `Stop` hook) to determine which files were newly created by Claude.
+    - Records the current transcript line count (`TranscriptLinesAtStart`) for incremental token usage calculation.
 
 3.  **Initialize Session Strategy**:
     - For strategies that implement `SessionInitializer`, calls `InitializeSession()`.
@@ -102,16 +103,26 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
 
 4.  **Generate Commit Message**: Derives from the last user prompt, truncated and formatted appropriately.
 
-5.  **Invoke Strategy**:
+5.  **Calculate Token Usage**:
 
-    - Builds a `SaveContext` with session ID, file lists, metadata paths, and git author info.
+    - Parses the transcript from `TranscriptLinesAtStart` (captured at prompt start) to calculate tokens used in this turn.
+    - Extracts token counts from assistant messages: input tokens, cache creation/read tokens, output tokens.
+    - Deduplicates by message ID (streaming creates multiple rows per message; uses highest output_tokens).
+    - Finds spawned subagents by scanning for `agentId:` in Task tool results.
+    - Calculates subagent token usage from their transcript files (`agent-<id>.jsonl`).
+    - Aggregates into a `TokenUsage` struct with nested `SubagentTokens`.
+
+6.  **Invoke Strategy**:
+
+    - Builds a `SaveContext` with session ID, file lists, metadata paths, git author info, and token usage.
     - Calls `strategy.SaveChanges(ctx)` to create the checkpoint.
     - **Manual-commit**: Builds a git tree in-memory and commits to the shadow branch.
     - **Auto-commit**: Creates a commit on the active branch with the `Entire-Checkpoint` trailer.
+    - Token usage is stored in `metadata.json` for later analysis and reporting.
 
-6.  **Update Session State** (auto-commit only): Updates `CondensedTranscriptLines` to track transcript position for incremental parsing.
+7.  **Update Session State** (auto-commit only): Updates `CondensedTranscriptLines` to track transcript position for incremental parsing.
 
-7.  **Cleanup**: Deletes the temporary `.entire/tmp/pre-prompt-<session-id>.json` file.
+8.  **Cleanup**: Deletes the temporary `.entire/tmp/pre-prompt-<session-id>.json` file.
 
 ### `PreToolUse[Task]`
 

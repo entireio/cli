@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="Install binaries into ~/go/bin"
+
+set -eu
+
+export GOBIN=${GOPATH:-$HOME/go}/bin
+echo "NOTE: we're overriding \$GOBIN: $GOBIN" 1>&2
+
+go install ./cmd/entire

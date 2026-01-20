@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v5"
@@ -364,4 +365,43 @@ func FetchAndCheckoutRemoteBranch(branchName string) error {
 
 	// Checkout the new local branch
 	return CheckoutBranch(branchName)
+}
+
+// FetchMetadataBranch fetches the entire/sessions branch from origin and creates/updates the local branch.
+// This is used when the metadata branch exists on remote but not locally.
+func FetchMetadataBranch() error {
+	repo, err := openRepository()
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	branchName := paths.MetadataBranchName
+
+	// Fetch the specific branch from origin
+	remote, err := repo.Remote("origin")
+	if err != nil {
+		return fmt.Errorf("failed to get origin remote: %w", err)
+	}
+
+	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
+	err = remote.Fetch(&git.FetchOptions{
+		RefSpecs: []config.RefSpec{config.RefSpec(refSpec)},
+	})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return fmt.Errorf("failed to fetch %s from origin: %w", branchName, err)
+	}
+
+	// Get the remote branch reference
+	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", branchName), true)
+	if err != nil {
+		return fmt.Errorf("branch '%s' not found on origin: %w", branchName, err)
+	}
+
+	// Create or update local branch pointing to the same commit
+	localRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(branchName), remoteRef.Hash())
+	if err := repo.Storer.SetReference(localRef); err != nil {
+		return fmt.Errorf("failed to create local %s branch: %w", branchName, err)
+	}
+
+	return nil
 }

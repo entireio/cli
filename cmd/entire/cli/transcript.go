@@ -549,3 +549,60 @@ func writeTranscript(path string, transcript []transcriptLine) error {
 
 	return nil
 }
+
+// TranscriptPosition contains the position information for a transcript file.
+type TranscriptPosition struct {
+	LastUUID  string // Last non-empty UUID (from user/assistant messages)
+	LineCount int    // Total number of lines
+}
+
+// GetTranscriptPosition reads a transcript file and returns the last UUID and line count.
+// Returns empty position if file doesn't exist or is empty.
+// Only considers UUIDs from actual messages (user/assistant), not summary rows which use leafUuid.
+func GetTranscriptPosition(path string) (TranscriptPosition, error) {
+	if path == "" {
+		return TranscriptPosition{}, nil
+	}
+
+	file, err := os.Open(path) //nolint:gosec // Reading from controlled transcript path
+	if err != nil {
+		if os.IsNotExist(err) {
+			return TranscriptPosition{}, nil
+		}
+		return TranscriptPosition{}, fmt.Errorf("failed to open transcript: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	var pos TranscriptPosition
+	reader := bufio.NewReader(file)
+
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return TranscriptPosition{}, fmt.Errorf("failed to read transcript: %w", err)
+		}
+
+		if len(lineBytes) == 0 {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+
+		pos.LineCount++
+
+		// Parse line to extract UUID (only from user/assistant messages, not summaries)
+		var line transcriptLine
+		if err := json.Unmarshal(lineBytes, &line); err == nil {
+			if line.UUID != "" {
+				pos.LastUUID = line.UUID
+			}
+		}
+
+		if err == io.EOF {
+			break
+		}
+	}
+
+	return pos, nil
+}

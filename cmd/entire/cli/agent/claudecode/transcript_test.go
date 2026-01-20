@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -235,4 +236,312 @@ func TestFindCheckpointUUID(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Token calculation tests - Claude Code specific token format
+
+func TestCalculateTokenUsage_BasicMessages(t *testing.T) {
+	transcript := []TranscriptLine{
+		{
+			Type: "assistant",
+			UUID: "asst-1",
+			Message: mustMarshal(t, map[string]interface{}{
+				"id": "msg_001",
+				"usage": map[string]int{
+					"input_tokens":                10,
+					"cache_creation_input_tokens": 100,
+					"cache_read_input_tokens":     50,
+					"output_tokens":               20,
+				},
+			}),
+		},
+		{
+			Type: "assistant",
+			UUID: "asst-2",
+			Message: mustMarshal(t, map[string]interface{}{
+				"id": "msg_002",
+				"usage": map[string]int{
+					"input_tokens":                5,
+					"cache_creation_input_tokens": 200,
+					"cache_read_input_tokens":     0,
+					"output_tokens":               30,
+				},
+			}),
+		},
+	}
+
+	usage := CalculateTokenUsage(transcript)
+
+	if usage.APICallCount != 2 {
+		t.Errorf("APICallCount = %d, want 2", usage.APICallCount)
+	}
+	if usage.InputTokens != 15 {
+		t.Errorf("InputTokens = %d, want 15", usage.InputTokens)
+	}
+	if usage.CacheCreationTokens != 300 {
+		t.Errorf("CacheCreationTokens = %d, want 300", usage.CacheCreationTokens)
+	}
+	if usage.CacheReadTokens != 50 {
+		t.Errorf("CacheReadTokens = %d, want 50", usage.CacheReadTokens)
+	}
+	if usage.OutputTokens != 50 {
+		t.Errorf("OutputTokens = %d, want 50", usage.OutputTokens)
+	}
+}
+
+func TestCalculateTokenUsage_StreamingDeduplication(t *testing.T) {
+	// Simulate streaming: multiple rows with same message ID, increasing output_tokens
+	transcript := []TranscriptLine{
+		{
+			Type: "assistant",
+			UUID: "asst-1",
+			Message: mustMarshal(t, map[string]interface{}{
+				"id": "msg_001",
+				"usage": map[string]int{
+					"input_tokens":                10,
+					"cache_creation_input_tokens": 100,
+					"cache_read_input_tokens":     50,
+					"output_tokens":               1, // First streaming chunk
+				},
+			}),
+		},
+		{
+			Type: "assistant",
+			UUID: "asst-2",
+			Message: mustMarshal(t, map[string]interface{}{
+				"id": "msg_001", // Same message ID
+				"usage": map[string]int{
+					"input_tokens":                10,
+					"cache_creation_input_tokens": 100,
+					"cache_read_input_tokens":     50,
+					"output_tokens":               5, // More output
+				},
+			}),
+		},
+		{
+			Type: "assistant",
+			UUID: "asst-3",
+			Message: mustMarshal(t, map[string]interface{}{
+				"id": "msg_001", // Same message ID
+				"usage": map[string]int{
+					"input_tokens":                10,
+					"cache_creation_input_tokens": 100,
+					"cache_read_input_tokens":     50,
+					"output_tokens":               20, // Final output
+				},
+			}),
+		},
+	}
+
+	usage := CalculateTokenUsage(transcript)
+
+	// Should deduplicate to 1 API call with the highest output_tokens
+	if usage.APICallCount != 1 {
+		t.Errorf("APICallCount = %d, want 1 (should deduplicate by message ID)", usage.APICallCount)
+	}
+	if usage.OutputTokens != 20 {
+		t.Errorf("OutputTokens = %d, want 20 (should take highest)", usage.OutputTokens)
+	}
+	// Input/cache tokens should not be duplicated
+	if usage.InputTokens != 10 {
+		t.Errorf("InputTokens = %d, want 10", usage.InputTokens)
+	}
+}
+
+func TestCalculateTokenUsage_IgnoresUserMessages(t *testing.T) {
+	transcript := []TranscriptLine{
+		{
+			Type:    "user",
+			UUID:    "user-1",
+			Message: mustMarshal(t, map[string]interface{}{"content": "hello"}),
+		},
+		{
+			Type: "assistant",
+			UUID: "asst-1",
+			Message: mustMarshal(t, map[string]interface{}{
+				"id": "msg_001",
+				"usage": map[string]int{
+					"input_tokens":                10,
+					"cache_creation_input_tokens": 100,
+					"cache_read_input_tokens":     0,
+					"output_tokens":               20,
+				},
+			}),
+		},
+	}
+
+	usage := CalculateTokenUsage(transcript)
+
+	if usage.APICallCount != 1 {
+		t.Errorf("APICallCount = %d, want 1", usage.APICallCount)
+	}
+}
+
+func TestCalculateTokenUsage_EmptyTranscript(t *testing.T) {
+	usage := CalculateTokenUsage(nil)
+
+	if usage.APICallCount != 0 {
+		t.Errorf("APICallCount = %d, want 0", usage.APICallCount)
+	}
+	if usage.InputTokens != 0 {
+		t.Errorf("InputTokens = %d, want 0", usage.InputTokens)
+	}
+}
+
+func TestExtractSpawnedAgentIDs_FromToolResult(t *testing.T) {
+	transcript := []TranscriptLine{
+		{
+			Type: "user",
+			UUID: "user-1",
+			Message: mustMarshal(t, map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_abc123",
+						"content": []map[string]string{
+							{"type": "text", "text": "Result from agent\n\nagentId: ac66d4b (for resuming)"},
+						},
+					},
+				},
+			}),
+		},
+	}
+
+	agentIDs := ExtractSpawnedAgentIDs(transcript)
+
+	if len(agentIDs) != 1 {
+		t.Fatalf("Expected 1 agent ID, got %d", len(agentIDs))
+	}
+	if _, ok := agentIDs["ac66d4b"]; !ok {
+		t.Errorf("Expected agent ID 'ac66d4b', got %v", agentIDs)
+	}
+	if agentIDs["ac66d4b"] != "toolu_abc123" {
+		t.Errorf("Expected tool_use_id 'toolu_abc123', got %s", agentIDs["ac66d4b"])
+	}
+}
+
+func TestExtractSpawnedAgentIDs_MultipleAgents(t *testing.T) {
+	transcript := []TranscriptLine{
+		{
+			Type: "user",
+			UUID: "user-1",
+			Message: mustMarshal(t, map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_001",
+						"content": []map[string]string{
+							{"type": "text", "text": "agentId: aaa1111"},
+						},
+					},
+				},
+			}),
+		},
+		{
+			Type: "user",
+			UUID: "user-2",
+			Message: mustMarshal(t, map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_002",
+						"content": []map[string]string{
+							{"type": "text", "text": "agentId: bbb2222"},
+						},
+					},
+				},
+			}),
+		},
+	}
+
+	agentIDs := ExtractSpawnedAgentIDs(transcript)
+
+	if len(agentIDs) != 2 {
+		t.Fatalf("Expected 2 agent IDs, got %d", len(agentIDs))
+	}
+	if _, ok := agentIDs["aaa1111"]; !ok {
+		t.Errorf("Expected agent ID 'aaa1111'")
+	}
+	if _, ok := agentIDs["bbb2222"]; !ok {
+		t.Errorf("Expected agent ID 'bbb2222'")
+	}
+}
+
+func TestExtractSpawnedAgentIDs_NoAgentID(t *testing.T) {
+	transcript := []TranscriptLine{
+		{
+			Type: "user",
+			UUID: "user-1",
+			Message: mustMarshal(t, map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_001",
+						"content": []map[string]string{
+							{"type": "text", "text": "Some result without agent ID"},
+						},
+					},
+				},
+			}),
+		},
+	}
+
+	agentIDs := ExtractSpawnedAgentIDs(transcript)
+
+	if len(agentIDs) != 0 {
+		t.Errorf("Expected 0 agent IDs, got %d: %v", len(agentIDs), agentIDs)
+	}
+}
+
+func TestExtractAgentIDFromText(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		expected string
+	}{
+		{
+			name:     "standard format",
+			text:     "agentId: ac66d4b (for resuming)",
+			expected: "ac66d4b",
+		},
+		{
+			name:     "at end of text",
+			text:     "Result text\n\nagentId: abc1234",
+			expected: "abc1234",
+		},
+		{
+			name:     "no agent ID",
+			text:     "Some text without agent ID",
+			expected: "",
+		},
+		{
+			name:     "empty text",
+			text:     "",
+			expected: "",
+		},
+		{
+			name:     "agent ID with newline after",
+			text:     "agentId: xyz9999\nMore text",
+			expected: "xyz9999",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractAgentIDFromText(tt.text)
+			if got != tt.expected {
+				t.Errorf("extractAgentIDFromText(%q) = %q, want %q", tt.text, got, tt.expected)
+			}
+		})
+	}
+}
+
+// mustMarshal is a test helper that marshals a value to JSON or fails the test
+func mustMarshal(t *testing.T, v interface{}) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+	return data
 }
