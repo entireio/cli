@@ -208,6 +208,13 @@ func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveCo
 		return commitCodeResult{}, fmt.Errorf("failed to get worktree: %w", err)
 	}
 
+	// Get HEAD hash before commit to detect if commitOrHead actually creates a new commit
+	// (commitOrHead returns HEAD hash without error when git.ErrEmptyCommit occurs)
+	headBefore, err := repo.Head()
+	if err != nil {
+		return commitCodeResult{}, fmt.Errorf("failed to get HEAD: %w", err)
+	}
+
 	// Stage code changes
 	StageFiles(worktree, ctx.ModifiedFiles, ctx.NewFiles, ctx.DeletedFiles, StageForSession)
 
@@ -224,8 +231,12 @@ func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveCo
 		return commitCodeResult{}, err
 	}
 
-	fmt.Fprintf(os.Stderr, "Committed code changes to active branch (%s)\n", commitHash.String()[:7])
-	return commitCodeResult{CommitHash: commitHash, Created: true}, nil
+	// Check if a new commit was actually created by comparing with HEAD before
+	created := commitHash != headBefore.Hash()
+	if created {
+		fmt.Fprintf(os.Stderr, "Committed code changes to active branch (%s)\n", commitHash.String()[:7])
+	}
+	return commitCodeResult{CommitHash: commitHash, Created: created}, nil
 }
 
 // commitMetadataToMetadataBranch commits session metadata to the entire/sessions branch.

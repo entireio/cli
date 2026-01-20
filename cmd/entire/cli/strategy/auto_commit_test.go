@@ -902,6 +902,120 @@ func TestAutoCommitStrategy_GetCheckpointLog_ReadsFullJsonl(t *testing.T) {
 	}
 }
 
+// TestAutoCommitStrategy_SaveChanges_FilesAlreadyCommitted verifies that SaveChanges
+// skips creating metadata when files are listed but already committed by the user.
+// This handles the case where git.ErrEmptyCommit occurs during commit.
+func TestAutoCommitStrategy_SaveChanges_FilesAlreadyCommitted(t *testing.T) {
+	// Setup temp git repo
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create initial commit
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	readmeFile := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	_, err = worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	// Setup strategy
+	s := NewAutoCommitStrategy()
+	if err := s.EnsureSetup(); err != nil {
+		t.Fatalf("EnsureSetup() error = %v", err)
+	}
+
+	// Create a test file and commit it manually (simulating user committing before hook runs)
+	testFile := filepath.Join(dir, "test.go")
+	if err := os.WriteFile(testFile, []byte("package main"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := worktree.Add("test.go"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	userCommit, err := worktree.Commit("User committed the file first", &git.CommitOptions{
+		Author: &object.Signature{Name: "User", Email: "user@test.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit test file: %v", err)
+	}
+
+	// Get count of commits on entire/sessions before the call
+	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("entire/sessions branch not found: %v", err)
+	}
+	sessionsCommitBefore := sessionsRef.Hash()
+
+	// Create metadata directory
+	sessionID := "2025-12-22-already-committed-test"
+	metadataDir := filepath.Join(dir, paths.EntireMetadataDir, sessionID)
+	if err := os.MkdirAll(metadataDir, 0o750); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	logFile := filepath.Join(metadataDir, paths.TranscriptFileName)
+	if err := os.WriteFile(logFile, []byte("test session log"), 0o644); err != nil {
+		t.Fatalf("failed to write log file: %v", err)
+	}
+
+	metadataDirAbs, err := paths.AbsPath(metadataDir)
+	if err != nil {
+		metadataDirAbs = metadataDir
+	}
+
+	// Call SaveChanges with the file that was already committed
+	// This simulates the hook running after the user already committed the changes
+	ctx := SaveContext{
+		CommitMessage:  "Should be skipped - file already committed",
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		NewFiles:       []string{"test.go"}, // File exists but already committed
+		ModifiedFiles:  []string{},
+		DeletedFiles:   []string{},
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	}
+
+	// SaveChanges should succeed without error (skip is not an error)
+	if err := s.SaveChanges(ctx); err != nil {
+		t.Fatalf("SaveChanges() error = %v", err)
+	}
+
+	// Verify HEAD is still the user's commit (no new code commit created)
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("failed to get HEAD: %v", err)
+	}
+	if head.Hash() != userCommit {
+		t.Errorf("HEAD should still be user's commit %s, got %s", userCommit, head.Hash())
+	}
+
+	// Verify entire/sessions branch has no new commits (metadata not created)
+	sessionsRefAfter, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("entire/sessions branch not found after SaveChanges: %v", err)
+	}
+	if sessionsRefAfter.Hash() != sessionsCommitBefore {
+		t.Errorf("entire/sessions should not have new commits when files already committed, before=%s after=%s",
+			sessionsCommitBefore, sessionsRefAfter.Hash())
+	}
+}
+
 // TestAutoCommitStrategy_SaveChanges_NoChangesSkipped verifies that SaveChanges
 // skips creating metadata when there are no code changes to commit.
 // This ensures 1:1 mapping between code commits and metadata commits.
