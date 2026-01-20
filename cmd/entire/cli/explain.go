@@ -553,22 +553,27 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, br
 			}
 
 			var filesTouched []string
+			var learnings, frictionPoints []string
 			if meta != nil {
 				filesTouched = meta.FilesTouched
+				learnings = meta.Learnings
+				frictionPoints = meta.FrictionPoints
 			}
 
 			formatCheckpointDetail(&sb, checkpointFormatData{
-				ShortID:       shortID,
-				FullID:        point.CheckpointID,
-				SessionID:     point.SessionID,
-				Created:       point.Date,
-				FilesTouched:  filesTouched,
-				Transcript:    cp.Transcript,
-				Intent:        intent,
-				Outcome:       outcome,
-				IntentMarker:  intentMarker,
-				OutcomeMarker: outcomeMarker,
-				CommitMessage: cp.CommitMessage,
+				ShortID:        shortID,
+				FullID:         point.CheckpointID,
+				SessionID:      point.SessionID,
+				Created:        point.Date,
+				FilesTouched:   filesTouched,
+				Transcript:     cp.Transcript,
+				Intent:         intent,
+				Outcome:        outcome,
+				IntentMarker:   intentMarker,
+				OutcomeMarker:  outcomeMarker,
+				CommitMessage:  cp.CommitMessage,
+				Learnings:      learnings,
+				FrictionPoints: frictionPoints,
 			})
 
 			// In full mode, show the complete transcript
@@ -668,9 +673,11 @@ type checkpointFormatData struct {
 	Transcript    string
 	Intent        string
 	Outcome       string
-	IntentMarker  string // "*" for heuristic, "^" for commit message
-	OutcomeMarker string
-	CommitMessage string // Git commit message associated with this checkpoint
+	IntentMarker    string // "*" for heuristic, "^" for commit message
+	OutcomeMarker   string
+	CommitMessage   string   // Git commit message associated with this checkpoint
+	Learnings       []string // Key technical insights from the session
+	FrictionPoints  []string // Difficulties encountered during the session
 }
 
 // formatCheckpointDetail formats a single checkpoint's details for verbose output.
@@ -692,6 +699,20 @@ func formatCheckpointDetail(sb *strings.Builder, data checkpointFormatData) {
 		fmt.Fprintf(sb, "Outcome:%s %s\n", data.OutcomeMarker, data.Outcome)
 	} else {
 		sb.WriteString("Outcome: " + notGeneratedPlaceholder + "\n")
+	}
+
+	// Learnings and Friction Points
+	if len(data.Learnings) > 0 {
+		sb.WriteString("\nLearnings:\n")
+		for _, l := range data.Learnings {
+			fmt.Fprintf(sb, "  - %s\n", l)
+		}
+	}
+	if len(data.FrictionPoints) > 0 {
+		sb.WriteString("\nFriction Points:\n")
+		for _, f := range data.FrictionPoints {
+			fmt.Fprintf(sb, "  - %s\n", f)
+		}
 	}
 	sb.WriteString("\n")
 
@@ -1392,17 +1413,19 @@ func runExplainCheckpoint(w io.Writer, checkpointIDPrefix string, generate bool)
 	// Use shared formatter for consistent output
 	var sb strings.Builder
 	formatCheckpointDetail(&sb, checkpointFormatData{
-		ShortID:       shortID,
-		FullID:        fullCheckpointID,
-		SessionID:     result.Metadata.SessionID,
-		Created:       result.Metadata.CreatedAt,
-		FilesTouched:  result.Metadata.FilesTouched,
-		Transcript:    string(result.Transcript),
-		Intent:        intent,
-		Outcome:       outcome,
-		IntentMarker:  intentMarker,
-		OutcomeMarker: outcomeMarker,
-		CommitMessage: commitMessage,
+		ShortID:        shortID,
+		FullID:         fullCheckpointID,
+		SessionID:      result.Metadata.SessionID,
+		Created:        result.Metadata.CreatedAt,
+		FilesTouched:   result.Metadata.FilesTouched,
+		Transcript:     string(result.Transcript),
+		Intent:         intent,
+		Outcome:        outcome,
+		IntentMarker:   intentMarker,
+		OutcomeMarker:  outcomeMarker,
+		CommitMessage:  commitMessage,
+		Learnings:      result.Metadata.Learnings,
+		FrictionPoints: result.Metadata.FrictionPoints,
 	})
 	fmt.Fprint(w, sb.String())
 
