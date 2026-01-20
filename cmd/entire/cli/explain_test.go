@@ -279,7 +279,7 @@ func TestExplainDefault_NoCurrentSession(t *testing.T) {
 
 	var stdout bytes.Buffer
 	// With the new branch-centric view, no current session should show branch info instead of error
-	err := runExplainDefault(&stdout, true, false, false, false, 0)
+	err := runExplainDefault(&stdout, true, false, false, false, false, 0)
 
 	// Should NOT error - just show branch-level info
 	if err != nil {
@@ -296,7 +296,7 @@ func TestExplainDefault_NoCurrentSession(t *testing.T) {
 func TestExplainBothFlagsError(t *testing.T) {
 	// Test that providing both --session and --commit returns an error
 	var stdout bytes.Buffer
-	err := runExplain(&stdout, "session-id", "commit-sha", false, false, false, false, 0)
+	err := runExplain(&stdout, "session-id", "commit-sha", false, false, false, false, false, 0)
 
 	if err == nil {
 		t.Error("expected error when both flags provided, got nil")
@@ -783,7 +783,7 @@ func TestRunExplainDefault_ShowsBranchInfo(t *testing.T) {
 
 	var stdout bytes.Buffer
 	// Call runExplainDefault with noPager=true to avoid pager issues in test
-	err := runExplainDefault(&stdout, true, false, false, false, 0)
+	err := runExplainDefault(&stdout, true, false, false, false, false, 0)
 
 	// Should not error (may have no checkpoints, but should still show branch info)
 	if err != nil {
@@ -802,7 +802,7 @@ func TestRunExplainDefault_DefaultLimitOnMainBranch(t *testing.T) {
 
 	var stdout bytes.Buffer
 	// Call with limit=0 (auto) - should apply default limit on main branch
-	err := runExplainDefault(&stdout, true, false, false, false, 0)
+	err := runExplainDefault(&stdout, true, false, false, false, false, 0)
 
 	if err != nil {
 		t.Fatalf("runExplainDefault() error = %v", err)
@@ -834,7 +834,7 @@ func TestFormatBranchExplain_DefaultOutput(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", toCheckpointsWithMeta(points), false, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", toCheckpointsWithMeta(points), nil, false, false, false, 0, 1)
 
 	// Branch header
 	if !strings.Contains(output, "Branch: feature/test") {
@@ -875,7 +875,7 @@ func TestFormatBranchExplain_MultipleCheckpoints(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", toCheckpointsWithMeta(points), false, false, false, 0, 3)
+	output := formatBranchExplain("feature/test", toCheckpointsWithMeta(points), nil, false, false, false, 0, 3)
 
 	// All checkpoints should be listed
 	if !strings.Contains(output, "[abc123def456]") {
@@ -911,7 +911,7 @@ func TestFormatBranchExplain_WithVerbose(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", checkpoints, true, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", checkpoints, nil, true, false, false, 0, 1)
 
 	// Verbose mode should show session ID
 	if !strings.Contains(output, "Session: 2026-01-19-session1") {
@@ -946,7 +946,7 @@ func TestFormatBranchExplain_WithVerbose_TruncatesLongPrompt(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", checkpoints, true, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", checkpoints, nil, true, false, false, 0, 1)
 
 	// Long prompts should be truncated with ellipsis
 	if !strings.Contains(output, "Prompt:") {
@@ -975,7 +975,7 @@ func TestFormatBranchExplain_WithVerbose_ManyFiles(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", checkpoints, true, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", checkpoints, nil, true, false, false, 0, 1)
 
 	// Should show count and first 3 files with ellipsis
 	if !strings.Contains(output, "Files: 5") {
@@ -1006,7 +1006,7 @@ func TestFormatBranchExplain_LimitedOnMain(t *testing.T) {
 	}
 
 	// isDefault=true, limit=2, totalCount=15 (more than limit)
-	output := formatBranchExplain("main", toCheckpointsWithMeta(points), false, false, true, 2, 15)
+	output := formatBranchExplain("main", toCheckpointsWithMeta(points), nil, false, false, true, 2, 15)
 
 	// Header should show limited view info
 	if !strings.Contains(output, "Checkpoints: 15 (showing last 2)") {
@@ -1023,7 +1023,7 @@ func TestFormatBranchExplain_LimitedOnMain(t *testing.T) {
 }
 
 func TestFormatBranchExplain_NoCheckpoints(t *testing.T) {
-	output := formatBranchExplain("feature/empty", nil, false, false, false, 0, 0)
+	output := formatBranchExplain("feature/empty", nil, nil, false, false, false, 0, 0)
 
 	// Should show branch with 0 checkpoints
 	if !strings.Contains(output, "Branch: feature/empty") {
@@ -1055,7 +1055,7 @@ func TestFormatBranchExplain_WithFull(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", checkpoints, false, true, false, 0, 1)
+	output := formatBranchExplain("feature/test", checkpoints, nil, false, true, false, 0, 1)
 
 	// Full mode should show transcript markers
 	if !strings.Contains(output, "--- Transcript ---") {
@@ -1083,7 +1083,7 @@ func TestFormatBranchExplain_WithFull_NoTranscript(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", checkpoints, false, true, false, 0, 1)
+	output := formatBranchExplain("feature/test", checkpoints, nil, false, true, false, 0, 1)
 
 	// Should NOT show transcript markers when transcript is empty
 	if strings.Contains(output, "--- Transcript ---") {
@@ -1101,7 +1101,7 @@ func TestFormatBranchExplain_TruncatesLongCheckpointID(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", toCheckpointsWithMeta(points), false, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", toCheckpointsWithMeta(points), nil, false, false, false, 0, 1)
 
 	// Should truncate to 12 chars
 	if !strings.Contains(output, "[abc123def456]") {
@@ -1129,7 +1129,7 @@ func TestFormatBranchExplain_WithMetadata(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 1)
 
 	// Should display real intent from metadata
 	if !strings.Contains(output, "Intent: Add user authentication") {
@@ -1162,7 +1162,7 @@ func TestFormatBranchExplain_PartialMetadata(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 1)
 
 	// Should display real intent
 	if !strings.Contains(output, "Intent: Fix login bug") {
@@ -1188,7 +1188,7 @@ func TestFormatBranchExplain_NilMetadata(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 1)
 
 	// Should show placeholders for both
 	if !strings.Contains(output, "Intent: (not generated)") {
@@ -1224,7 +1224,7 @@ func TestFormatBranchExplain_MixedMetadata(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 2)
+	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 2)
 
 	// First checkpoint should have real values
 	if !strings.Contains(output, "Intent: First checkpoint intent") {
@@ -1260,7 +1260,7 @@ func TestFormatBranchExplain_WithGeneratedSummary(t *testing.T) {
 		},
 	}
 
-	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 1)
 
 	// Should display generated intent
 	if !strings.Contains(output, "Intent: Generated intent from transcript") {
@@ -1297,7 +1297,7 @@ func TestFormatBranchExplain_MetadataTakesPrecedenceOverGenerated(t *testing.T) 
 		},
 	}
 
-	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 1)
 
 	// Should display stored intent, not generated
 	if !strings.Contains(output, "Intent: Stored intent") {

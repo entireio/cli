@@ -72,6 +72,7 @@ func newExplainCmd() *cobra.Command {
 	var verboseFlag bool
 	var fullFlag bool
 	var generateFlag bool
+	var forceFlag bool
 	var limitFlag int
 
 	cmd := &cobra.Command{
@@ -90,7 +91,7 @@ session or commit.`,
 				return nil
 			}
 
-			return runExplain(cmd.OutOrStdout(), sessionFlag, commitFlag, noPagerFlag, verboseFlag, fullFlag, generateFlag, limitFlag)
+			return runExplain(cmd.OutOrStdout(), sessionFlag, commitFlag, noPagerFlag, verboseFlag, fullFlag, generateFlag, forceFlag, limitFlag)
 		},
 	}
 
@@ -100,6 +101,7 @@ session or commit.`,
 	cmd.Flags().BoolVarP(&verboseFlag, "verbose", "v", false, "Show prompts, files, and session IDs")
 	cmd.Flags().BoolVar(&fullFlag, "full", false, "Show complete transcript")
 	cmd.Flags().BoolVar(&generateFlag, "generate", false, "Generate AI summaries for checkpoints")
+	cmd.Flags().BoolVar(&forceFlag, "force", false, "Force regeneration of existing summaries (use with --generate)")
 	cmd.Flags().IntVar(&limitFlag, "limit", 0, "Limit number of checkpoints shown (0 = auto)")
 
 	return cmd
@@ -107,7 +109,7 @@ session or commit.`,
 
 // runExplain routes to the appropriate explain function based on flags.
 // The verbose and full parameters are accepted for future use.
-func runExplain(w io.Writer, sessionID, commitRef string, noPager, verbose, full, generate bool, limit int) error {
+func runExplain(w io.Writer, sessionID, commitRef string, noPager, verbose, full, generate, force bool, limit int) error {
 	// Silence unused variable warnings until verbose/full are implemented
 	_ = verbose
 	_ = full
@@ -126,7 +128,7 @@ func runExplain(w io.Writer, sessionID, commitRef string, noPager, verbose, full
 	}
 
 	// Default: explain branch-level view
-	return runExplainDefault(w, noPager, verbose, full, generate, limit)
+	return runExplainDefault(w, noPager, verbose, full, generate, force, limit)
 }
 
 // defaultLimitOnMain is the default number of checkpoints to show on main/master branches.
@@ -134,8 +136,9 @@ const defaultLimitOnMain = 10
 
 // runExplainDefault explains the current branch state.
 // Shows branch-level information with checkpoint listing.
-// The verbose, full, and generate parameters control output detail level.
-func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit int) error {
+// The verbose, full, generate, and force parameters control output detail level.
+// When force is true, regenerates summaries even if they already exist.
+func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool, limit int) error {
 	// Get current branch info
 	isDefault, branchName, err := IsOnDefaultBranch()
 	if err != nil {
@@ -173,6 +176,10 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 		points = points[:effectiveLimit]
 	}
 
+	// Track token usage when generating summaries
+	var totalInputTokens, totalOutputTokens int
+	var generatedCount, fallbackCount int
+
 	// Load metadata for each checkpoint
 	checkpoints := make([]checkpointWithMeta, len(points))
 	for i, point := range points {
@@ -183,14 +190,35 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 			CommitMessage: commitMessages[point.CheckpointID], // Fallback if no summary
 		}
 
-		// If --generate and no stored summary, generate one from transcript and save it
-		if generate && (meta == nil || meta.Intent == "") {
-			summary := generateSummaryForCheckpoint(point.CheckpointID)
-			checkpoints[i].GeneratedSummary = summary
+		// If --generate and (no stored summary OR --force), generate one from transcript and save it
+		needsGeneration := meta == nil || meta.Intent == "" || force
+		if generate && needsGeneration {
+			shortID := point.CheckpointID
+			if len(shortID) > 12 {
+				shortID = shortID[:12]
+			}
+			fmt.Fprintf(os.Stderr, "Generating summary for checkpoint %s...", shortID)
 
-			// Persist the generated summary to checkpoint metadata (only if non-empty)
-			if summary != nil && (summary.Intent != "" || summary.Outcome != "") {
-				saveSummaryToCheckpoint(point.CheckpointID, summary)
+			result := generateSummaryForCheckpointWithUsage(point.CheckpointID)
+			if result != nil {
+				checkpoints[i].GeneratedSummary = result.Summary
+				totalInputTokens += result.InputTokens
+				totalOutputTokens += result.OutputTokens
+				generatedCount++
+
+				if result.UsedFallback {
+					fallbackCount++
+					fmt.Fprintf(os.Stderr, " (using heuristic)\n")
+				} else {
+					fmt.Fprintf(os.Stderr, " done\n")
+				}
+
+				// Persist the generated summary to checkpoint metadata (only if non-empty)
+				if result.Summary != nil && (result.Summary.Intent != "" || result.Summary.Outcome != "") {
+					saveSummaryToCheckpoint(point.CheckpointID, result.Summary)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, " failed\n")
 			}
 		}
 
@@ -200,8 +228,39 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 		}
 	}
 
+	// Generate branch-level summary if --generate and we have checkpoints with intents
+	var branchSummary *Summary
+	if generate && len(checkpoints) > 0 {
+		fmt.Fprintf(os.Stderr, "Generating branch summary...\n")
+		result := generateBranchSummaryFromCheckpointsWithUsage(checkpoints)
+		if result != nil {
+			branchSummary = result.Summary
+			totalInputTokens += result.InputTokens
+			totalOutputTokens += result.OutputTokens
+		}
+	}
+
+	// Show generation stats
+	if generate && generatedCount > 0 {
+		switch {
+		case fallbackCount > 0 && fallbackCount == generatedCount:
+			fmt.Fprintf(os.Stderr, "Generated %d summary(ies) using heuristic (Claude CLI unavailable)\n\n", generatedCount)
+		case fallbackCount > 0:
+			fmt.Fprintf(os.Stderr, "Generated %d summary(ies) (%d using heuristic fallback)\n\n", generatedCount, fallbackCount)
+		default:
+			fmt.Fprintf(os.Stderr, "Generated %d summary(ies)\n\n", generatedCount)
+		}
+	} else if generate && len(points) > 0 {
+		fmt.Fprintf(os.Stderr, "No checkpoints needed summary generation\n\n")
+	}
+
 	// Format output
-	output := formatBranchExplain(branchName, checkpoints, verbose, full, isDefault, effectiveLimit, totalCount)
+	output := formatBranchExplain(branchName, checkpoints, branchSummary, verbose, full, isDefault, effectiveLimit, totalCount)
+
+	// Append token usage if any summarization was done
+	if generate && (totalInputTokens > 0 || totalOutputTokens > 0) {
+		output += fmt.Sprintf("\nToken usage: %d input, %d output\n", totalInputTokens, totalOutputTokens)
+	}
 
 	if noPager {
 		fmt.Fprint(w, output)
@@ -351,12 +410,13 @@ func extractCheckpointInfo(c *object.Commit, checkpointMessages map[string]strin
 // Parameters:
 //   - branchName: the current branch name
 //   - checkpoints: the checkpoints with metadata to display (already limited)
+//   - branchSummary: optional AI-generated summary for the entire branch
 //   - verbose: show additional details like session IDs
 //   - full: show complete transcript (future use)
 //   - isDefault: whether on main/master branch
 //   - limit: the applied limit (0 means no limit)
 //   - totalCount: total number of checkpoints before limiting
-func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, verbose, full bool, isDefault bool, limit, totalCount int) string {
+func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, branchSummary *Summary, verbose, full bool, isDefault bool, limit, totalCount int) string {
 	var sb strings.Builder
 
 	// Header
@@ -369,9 +429,18 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, ve
 
 	sb.WriteString("\n")
 
-	// Branch-level intent/outcome placeholders
-	sb.WriteString("Intent: (run with --generate to create summary)\n")
-	sb.WriteString("Outcome: (run with --generate to create summary)\n")
+	// Branch-level intent/outcome - use AI summary if available
+	if branchSummary != nil && branchSummary.Intent != "" {
+		fmt.Fprintf(&sb, "Intent: %s\n", branchSummary.Intent)
+	} else {
+		sb.WriteString("Intent: (run with --generate to create summary)\n")
+	}
+
+	if branchSummary != nil && branchSummary.Outcome != "" {
+		fmt.Fprintf(&sb, "Outcome: %s\n", branchSummary.Outcome)
+	} else {
+		sb.WriteString("Outcome: (run with --generate to create summary)\n")
+	}
 
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("\u2500", 40)) // Unicode box drawing character for line
@@ -916,9 +985,43 @@ func loadCheckpointTranscript(checkpointID string) string {
 	return string(result.Transcript)
 }
 
-// generateSummaryForCheckpoint loads a checkpoint's transcript and generates a summary.
+// generateBranchSummaryFromCheckpointsWithUsage aggregates checkpoint intents into a branch-level summary
+// and returns token usage information.
+// Returns nil if summarization fails or there are no intents to summarize.
+func generateBranchSummaryFromCheckpointsWithUsage(checkpoints []checkpointWithMeta) *SummaryResult {
+	// Collect checkpoint intents (prefer stored > generated > commit message)
+	var intents []string
+	for _, cp := range checkpoints {
+		intent := ""
+		switch {
+		case cp.Metadata != nil && cp.Metadata.Intent != "":
+			intent = cp.Metadata.Intent
+		case cp.GeneratedSummary != nil && cp.GeneratedSummary.Intent != "":
+			intent = cp.GeneratedSummary.Intent
+		case cp.CommitMessage != "":
+			intent = cp.CommitMessage
+		}
+		if intent != "" {
+			intents = append(intents, intent)
+		}
+	}
+
+	if len(intents) == 0 {
+		return nil
+	}
+
+	result, err := GenerateBranchSummaryWithUsage(context.Background(), intents)
+	if err != nil {
+		// Silent failure - branch summary is optional
+		return nil
+	}
+	return result
+}
+
+// generateSummaryForCheckpointWithUsage loads a checkpoint's transcript and generates a summary
+// using AI summarization via Claude CLI. Falls back to heuristic extraction if AI fails.
 // Returns nil if the transcript cannot be loaded or parsed.
-func generateSummaryForCheckpoint(checkpointID string) *Summary {
+func generateSummaryForCheckpointWithUsage(checkpointID string) *SummaryResult {
 	repo, err := openRepository()
 	if err != nil {
 		return nil
@@ -935,9 +1038,10 @@ func generateSummaryForCheckpoint(checkpointID string) *Summary {
 		return nil
 	}
 
-	summary, err := GenerateSummary(transcript)
+	// Use AI summarization which falls back to heuristic extraction if Claude CLI unavailable
+	summaryResult, err := GenerateAISummaryWithUsage(context.Background(), transcript)
 	if err != nil {
 		return nil
 	}
-	return summary
+	return summaryResult
 }

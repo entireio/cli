@@ -136,6 +136,68 @@ func Init(sessionID string) error {
 	return nil
 }
 
+// InitGeneral initializes the logger to write to a general-purpose log file (entire.log)
+// instead of a session-specific file. Use this when logging outside of a session context.
+//
+// If the log file cannot be created, falls back to stderr.
+// Log level is controlled by ENTIRE_LOG_LEVEL environment variable.
+func InitGeneral() error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Close any existing log file (flush buffer first)
+	if logBufWriter != nil {
+		_ = logBufWriter.Flush()
+		logBufWriter = nil
+	}
+	if logFile != nil {
+		_ = logFile.Close()
+		logFile = nil
+	}
+
+	// Get log level from environment first, then settings
+	levelStr := os.Getenv(LogLevelEnvVar)
+	if levelStr == "" && logLevelGetter != nil {
+		levelStr = logLevelGetter()
+	}
+	level := parseLogLevel(levelStr)
+
+	// Warn if invalid level was provided
+	if levelStr != "" && !isValidLogLevel(levelStr) {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: invalid log level %q, defaulting to INFO\n", levelStr)
+	}
+
+	// Determine log file path
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		// Fall back to current directory
+		repoRoot = "."
+	}
+
+	logsPath := filepath.Join(repoRoot, LogsDir)
+	if err := os.MkdirAll(logsPath, 0o750); err != nil {
+		// Fall back to stderr
+		logger = createLogger(os.Stderr, level)
+		return nil
+	}
+
+	logFilePath := filepath.Join(logsPath, "entire.log")
+	f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // path is from trusted constants (LogsDir + hardcoded filename)
+	if err != nil {
+		// Fall back to stderr
+		logger = createLogger(os.Stderr, level)
+		return nil
+	}
+
+	logFile = f
+	// Write directly without buffering for general-purpose logs.
+	// This ensures logs are flushed immediately (important for debugging short-lived commands).
+	logger = createLogger(f, level)
+	currentSessionID = "" // No session ID for general logging
+
+	return nil
+}
+
 // Close closes the log file if one is open.
 // Flushes any buffered data before closing.
 // Safe to call multiple times.
