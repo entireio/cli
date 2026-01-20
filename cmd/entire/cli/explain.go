@@ -170,9 +170,15 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 			Metadata: meta,
 		}
 
-		// If --generate and no stored summary, generate one from transcript
+		// If --generate and no stored summary, generate one from transcript and save it
 		if generate && (meta == nil || meta.Intent == "") {
-			checkpoints[i].GeneratedSummary = generateSummaryForCheckpoint(point.CheckpointID)
+			summary := generateSummaryForCheckpoint(point.CheckpointID)
+			checkpoints[i].GeneratedSummary = summary
+
+			// Persist the generated summary to checkpoint metadata (only if non-empty)
+			if summary != nil && (summary.Intent != "" || summary.Outcome != "") {
+				saveSummaryToCheckpoint(point.CheckpointID, summary)
+			}
 		}
 	}
 
@@ -670,6 +676,27 @@ func loadCheckpointMetadata(checkpointID string) *checkpoint.CommittedMetadata {
 	}
 
 	return &result.Metadata
+}
+
+// saveSummaryToCheckpoint persists a generated summary to checkpoint metadata.
+// Errors are silently ignored since saving is best-effort (display still works).
+func saveSummaryToCheckpoint(checkpointID string, summary *Summary) {
+	repo, err := openRepository()
+	if err != nil {
+		return
+	}
+
+	store := checkpoint.NewGitStore(repo)
+	//nolint:errcheck,gosec // Best-effort save - display works even if save fails
+	store.UpdateSummary(context.Background(), checkpoint.UpdateSummaryOptions{
+		CheckpointID:   checkpointID,
+		Intent:         summary.Intent,
+		Outcome:        summary.Outcome,
+		Learnings:      summary.Learnings,
+		FrictionPoints: summary.FrictionPoints,
+		AuthorName:     "Entire CLI",
+		AuthorEmail:    "cli@entire.io",
+	})
 }
 
 // generateSummaryForCheckpoint loads a checkpoint's transcript and generates a summary.

@@ -75,6 +75,28 @@ type Store interface {
 
 	// ListCommitted lists all committed checkpoints.
 	ListCommitted(ctx context.Context) ([]CommittedInfo, error)
+
+	// UpdateSummary updates the summary fields of an existing checkpoint.
+	// This is used by --generate to persist generated summaries.
+	UpdateSummary(ctx context.Context, opts UpdateSummaryOptions) error
+}
+
+// UpdateSummaryOptions contains options for updating checkpoint summary fields.
+type UpdateSummaryOptions struct {
+	// CheckpointID is the checkpoint to update
+	CheckpointID string
+
+	// Summary fields to update
+	Intent         string
+	Outcome        string
+	Learnings      []string
+	FrictionPoints []string
+
+	// AuthorName is the name to use for commits
+	AuthorName string
+
+	// AuthorEmail is the email to use for commits
+	AuthorEmail string
 }
 
 // WriteTemporaryOptions contains options for writing a temporary checkpoint.

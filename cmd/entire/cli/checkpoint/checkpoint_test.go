@@ -217,3 +217,143 @@ func TestCommittedMetadata_SummaryFields(t *testing.T) {
 		t.Errorf("len(FrictionPoints) = %d, want 1", len(decoded.FrictionPoints))
 	}
 }
+
+func TestUpdateSummary(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create worktree and make initial commit
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	// Create checkpoint store
+	store := NewGitStore(repo)
+	checkpointID := "a1b2c3d4e5f6"
+	sessionID := "test-session-123"
+
+	// First, create a checkpoint without summary fields
+	err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID: checkpointID,
+		SessionID:    sessionID,
+		Strategy:     "manual-commit",
+		Transcript:   []byte("test transcript"),
+		AuthorName:   "Test Author",
+		AuthorEmail:  "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	// Verify checkpoint has no summary
+	result, err := store.ReadCommitted(context.Background(), checkpointID)
+	if err != nil {
+		t.Fatalf("ReadCommitted() error = %v", err)
+	}
+	if result.Metadata.Intent != "" {
+		t.Errorf("Initial Intent should be empty, got %q", result.Metadata.Intent)
+	}
+
+	// Update the summary
+	err = store.UpdateSummary(context.Background(), UpdateSummaryOptions{
+		CheckpointID:   checkpointID,
+		Intent:         "Add a feature",
+		Outcome:        "Feature was added successfully",
+		Learnings:      []string{"Learned something new"},
+		FrictionPoints: []string{"Had to debug issue"},
+		AuthorName:     "Test Author",
+		AuthorEmail:    "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("UpdateSummary() error = %v", err)
+	}
+
+	// Verify summary was updated
+	result, err = store.ReadCommitted(context.Background(), checkpointID)
+	if err != nil {
+		t.Fatalf("ReadCommitted() after update error = %v", err)
+	}
+	if result.Metadata.Intent != "Add a feature" {
+		t.Errorf("Intent = %q, want %q", result.Metadata.Intent, "Add a feature")
+	}
+	if result.Metadata.Outcome != "Feature was added successfully" {
+		t.Errorf("Outcome = %q, want %q", result.Metadata.Outcome, "Feature was added successfully")
+	}
+	if len(result.Metadata.Learnings) != 1 || result.Metadata.Learnings[0] != "Learned something new" {
+		t.Errorf("Learnings = %v, want [Learned something new]", result.Metadata.Learnings)
+	}
+	if len(result.Metadata.FrictionPoints) != 1 || result.Metadata.FrictionPoints[0] != "Had to debug issue" {
+		t.Errorf("FrictionPoints = %v, want [Had to debug issue]", result.Metadata.FrictionPoints)
+	}
+
+	// Verify other metadata fields are preserved
+	if result.Metadata.SessionID != sessionID {
+		t.Errorf("SessionID = %q, want %q (should be preserved)", result.Metadata.SessionID, sessionID)
+	}
+	if result.Metadata.Strategy != "manual-commit" {
+		t.Errorf("Strategy = %q, want %q (should be preserved)", result.Metadata.Strategy, "manual-commit")
+	}
+}
+
+func TestUpdateSummary_CheckpointNotFound(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create worktree and make initial commit
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	store := NewGitStore(repo)
+
+	// Try to update a non-existent checkpoint
+	err = store.UpdateSummary(context.Background(), UpdateSummaryOptions{
+		CheckpointID: "nonexistent1",
+		Intent:       "Test",
+		AuthorName:   "Test Author",
+		AuthorEmail:  "test@example.com",
+	})
+
+	// Should return an error (either sessions branch doesn't exist or checkpoint not found)
+	if err == nil {
+		t.Error("UpdateSummary() for non-existent checkpoint should return error")
+	}
+}

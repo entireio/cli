@@ -41,3 +41,5 @@ go.work.sum
 
 # worktrees
 .worktrees/
+
+docs/requirements/

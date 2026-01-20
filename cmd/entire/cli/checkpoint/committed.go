@@ -676,6 +676,83 @@ func (s *GitStore) ListCommitted(ctx context.Context) ([]CommittedInfo, error) {
 	return checkpoints, nil
 }
 
+// UpdateSummary updates the summary fields of an existing checkpoint's metadata.
+// This is used by --generate to persist generated summaries.
+//
+// Note: This uses a read-modify-write pattern that is not safe for concurrent calls.
+// In practice, this is acceptable since explain --generate is typically run by
+// one user at a time and writes to the metadata branch are infrequent.
+func (s *GitStore) UpdateSummary(ctx context.Context, opts UpdateSummaryOptions) error {
+	_ = ctx // Reserved for future use
+
+	// Validate checkpoint ID
+	if err := paths.ValidateCheckpointID(opts.CheckpointID); err != nil {
+		return fmt.Errorf("invalid checkpoint ID: %w", err)
+	}
+
+	// Get current branch tip and flatten tree
+	ref, entries, err := s.getSessionsBranchEntries()
+	if err != nil {
+		return err
+	}
+
+	// Check if checkpoint exists
+	basePath := paths.CheckpointPath(opts.CheckpointID) + "/"
+	metadataPath := basePath + paths.MetadataFileName
+	entry, exists := entries[metadataPath]
+	if !exists {
+		return fmt.Errorf("checkpoint not found: %s", opts.CheckpointID)
+	}
+
+	// Read existing metadata
+	existingMetadata, err := s.readMetadataFromBlob(entry.Hash)
+	if err != nil {
+		return fmt.Errorf("failed to read existing metadata: %w", err)
+	}
+
+	// Update summary fields
+	existingMetadata.Intent = opts.Intent
+	existingMetadata.Outcome = opts.Outcome
+	existingMetadata.Learnings = opts.Learnings
+	existingMetadata.FrictionPoints = opts.FrictionPoints
+
+	// Write updated metadata
+	metadataJSON, err := jsonutil.MarshalIndentWithNewline(existingMetadata, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+	blobHash, err := CreateBlobFromContent(s.repo, metadataJSON)
+	if err != nil {
+		return fmt.Errorf("failed to create metadata blob: %w", err)
+	}
+	entries[metadataPath] = object.TreeEntry{
+		Name: metadataPath,
+		Mode: filemode.Regular,
+		Hash: blobHash,
+	}
+
+	// Build and commit
+	newTreeHash, err := BuildTreeFromEntries(s.repo, entries)
+	if err != nil {
+		return err
+	}
+
+	commitMsg := fmt.Sprintf("Update summary for checkpoint %s\n\nEntire-Checkpoint: %s",
+		opts.CheckpointID[:12], opts.CheckpointID)
+	newCommitHash, err := s.createCommit(newTreeHash, ref.Hash(), commitMsg, opts.AuthorName, opts.AuthorEmail)
+	if err != nil {
+		return err
+	}
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	newRef := plumbing.NewHashReference(refName, newCommitHash)
+	if err := s.repo.Storer.SetReference(newRef); err != nil {
+		return fmt.Errorf("failed to set branch reference: %w", err)
+	}
+
+	return nil
+}
+
 // GetTranscript retrieves the transcript for a specific checkpoint ID.
 func (s *GitStore) GetTranscript(ctx context.Context, checkpointID string) ([]byte, error) {
 	result, err := s.ReadCommitted(ctx, checkpointID)
