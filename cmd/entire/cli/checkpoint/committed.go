@@ -754,6 +754,113 @@ func (s *GitStore) UpdateSummary(ctx context.Context, opts UpdateSummaryOptions)
 	return nil
 }
 
+// BatchUpdateSummary updates summary fields for multiple checkpoints in a single commit.
+// This reduces noise on the entire/sessions branch when generating many summaries.
+//
+// Note: Like UpdateSummary, this uses a read-modify-write pattern that is not safe
+// for concurrent calls. See UpdateSummary documentation for details.
+func (s *GitStore) BatchUpdateSummary(ctx context.Context, updates []UpdateSummaryOptions) error {
+	_ = ctx // Reserved for future use
+
+	if len(updates) == 0 {
+		return nil
+	}
+
+	// Validate all checkpoint IDs upfront
+	for _, opts := range updates {
+		if err := paths.ValidateCheckpointID(opts.CheckpointID); err != nil {
+			return fmt.Errorf("invalid checkpoint ID %s: %w", opts.CheckpointID, err)
+		}
+	}
+
+	// Get current branch tip and flatten tree (once for all updates)
+	ref, entries, err := s.getSessionsBranchEntries()
+	if err != nil {
+		return err
+	}
+
+	// Get author info from first update (all should be the same)
+	authorName := updates[0].AuthorName
+	authorEmail := updates[0].AuthorEmail
+
+	// Track which checkpoints were updated for commit message
+	var updatedIDs []string
+
+	// Update each checkpoint's metadata
+	for _, opts := range updates {
+		basePath := paths.CheckpointPath(opts.CheckpointID) + "/"
+		metadataPath := basePath + paths.MetadataFileName
+		entry, exists := entries[metadataPath]
+		if !exists {
+			// Skip missing checkpoints (don't fail the whole batch)
+			continue
+		}
+
+		// Read existing metadata
+		existingMetadata, err := s.readMetadataFromBlob(entry.Hash)
+		if err != nil {
+			// Skip on read error
+			continue
+		}
+
+		// Update summary fields
+		existingMetadata.Intent = opts.Intent
+		existingMetadata.Outcome = opts.Outcome
+		existingMetadata.Learnings = opts.Learnings
+		existingMetadata.FrictionPoints = opts.FrictionPoints
+		existingMetadata.SummarySource = opts.SummarySource
+
+		// Write updated metadata
+		metadataJSON, err := jsonutil.MarshalIndentWithNewline(existingMetadata, "", "  ")
+		if err != nil {
+			continue
+		}
+		blobHash, err := CreateBlobFromContent(s.repo, metadataJSON)
+		if err != nil {
+			continue
+		}
+		entries[metadataPath] = object.TreeEntry{
+			Name: metadataPath,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		}
+		updatedIDs = append(updatedIDs, opts.CheckpointID[:12])
+	}
+
+	// If no checkpoints were actually updated, nothing to commit
+	if len(updatedIDs) == 0 {
+		return nil
+	}
+
+	// Build and commit
+	newTreeHash, err := BuildTreeFromEntries(s.repo, entries)
+	if err != nil {
+		return err
+	}
+
+	// Build commit message listing all updated checkpoints
+	var commitMsg string
+	if len(updatedIDs) == 1 {
+		commitMsg = "Update summary for checkpoint " + updatedIDs[0]
+	} else {
+		commitMsg = fmt.Sprintf("Update summaries for %d checkpoints\n\nCheckpoints: %s",
+			len(updatedIDs), strings.Join(updatedIDs, ", "))
+	}
+
+	newCommitHash, err := s.createCommit(newTreeHash, ref.Hash(), commitMsg, authorName, authorEmail)
+	if err != nil {
+		return err
+	}
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	newRef := plumbing.NewHashReference(refName, newCommitHash)
+	if err := s.repo.Storer.SetReference(newRef); err != nil {
+		return fmt.Errorf("failed to set branch reference: %w", err)
+	}
+
+	return nil
+}
+
 // GetTranscript retrieves the transcript for a specific checkpoint ID.
 func (s *GitStore) GetTranscript(ctx context.Context, checkpointID string) ([]byte, error) {
 	result, err := s.ReadCommitted(ctx, checkpointID)

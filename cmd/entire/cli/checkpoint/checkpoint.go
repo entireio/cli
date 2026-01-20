@@ -79,6 +79,10 @@ type Store interface {
 	// UpdateSummary updates the summary fields of an existing checkpoint.
 	// This is used by --generate to persist generated summaries.
 	UpdateSummary(ctx context.Context, opts UpdateSummaryOptions) error
+
+	// BatchUpdateSummary updates summary fields for multiple checkpoints in a single commit.
+	// This reduces noise on the entire/sessions branch when generating many summaries.
+	BatchUpdateSummary(ctx context.Context, updates []UpdateSummaryOptions) error
 }
 
 // Summary source constants indicate how a summary was generated.

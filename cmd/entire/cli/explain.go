@@ -181,6 +181,9 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 	var totalInputTokens, totalOutputTokens int
 	var generatedCount, fallbackCount int
 
+	// Collect summaries to save (batched at the end to reduce commits)
+	var summariesToSave []checkpoint.UpdateSummaryOptions
+
 	// Load metadata for each checkpoint
 	checkpoints := make([]checkpointWithMeta, len(points))
 	for i, point := range points {
@@ -215,13 +218,22 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 					fmt.Fprintf(os.Stderr, " done\n")
 				}
 
-				// Persist the generated summary to checkpoint metadata (only if non-empty)
+				// Queue summary for batch save (only if non-empty)
 				if result.Summary != nil && (result.Summary.Intent != "" || result.Summary.Outcome != "") {
 					source := checkpoint.SummarySourceAI
 					if result.UsedFallback {
 						source = checkpoint.SummarySourceHeuristic
 					}
-					saveSummaryToCheckpoint(point.CheckpointID, result.Summary, source)
+					summariesToSave = append(summariesToSave, checkpoint.UpdateSummaryOptions{
+						CheckpointID:   point.CheckpointID,
+						Intent:         result.Summary.Intent,
+						Outcome:        result.Summary.Outcome,
+						Learnings:      result.Summary.Learnings,
+						FrictionPoints: result.Summary.FrictionPoints,
+						SummarySource:  source,
+						AuthorName:     "Entire CLI",
+						AuthorEmail:    "cli@entire.io",
+					})
 				}
 			} else {
 				fmt.Fprintf(os.Stderr, " failed\n")
@@ -232,6 +244,11 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 		if full {
 			checkpoints[i].Transcript = loadCheckpointTranscript(point.CheckpointID)
 		}
+	}
+
+	// Batch save all generated summaries in a single commit
+	if len(summariesToSave) > 0 {
+		batchSaveSummaries(summariesToSave)
 	}
 
 	// Generate branch-level summary if --generate and we have checkpoints with intents
@@ -976,10 +993,9 @@ func loadCheckpointMetadata(checkpointID string) *checkpoint.CommittedMetadata {
 	return &result.Metadata
 }
 
-// saveSummaryToCheckpoint persists a generated summary to checkpoint metadata.
+// batchSaveSummaries persists multiple generated summaries in a single commit.
 // Errors are silently ignored since saving is best-effort (display still works).
-// source indicates how the summary was generated: "ai", "heuristic", or "commit".
-func saveSummaryToCheckpoint(checkpointID string, summary *Summary, source string) {
+func batchSaveSummaries(updates []checkpoint.UpdateSummaryOptions) {
 	repo, err := openRepository()
 	if err != nil {
 		return
@@ -987,16 +1003,7 @@ func saveSummaryToCheckpoint(checkpointID string, summary *Summary, source strin
 
 	store := checkpoint.NewGitStore(repo)
 	//nolint:errcheck,gosec // Best-effort save - display works even if save fails
-	store.UpdateSummary(context.Background(), checkpoint.UpdateSummaryOptions{
-		CheckpointID:   checkpointID,
-		Intent:         summary.Intent,
-		Outcome:        summary.Outcome,
-		Learnings:      summary.Learnings,
-		FrictionPoints: summary.FrictionPoints,
-		SummarySource:  source,
-		AuthorName:     "Entire CLI",
-		AuthorEmail:    "cli@entire.io",
-	})
+	store.BatchUpdateSummary(context.Background(), updates)
 }
 
 // loadCheckpointTranscript loads the raw transcript content for a checkpoint.
