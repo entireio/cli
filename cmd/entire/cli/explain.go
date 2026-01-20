@@ -56,8 +56,9 @@ type checkpointDetail struct {
 // checkpointWithMeta holds a rewind point together with its loaded metadata.
 // Used by formatBranchExplain to display metadata summaries when available.
 type checkpointWithMeta struct {
-	Point    strategy.RewindPoint
-	Metadata *checkpoint.CommittedMetadata
+	Point            strategy.RewindPoint
+	Metadata         *checkpoint.CommittedMetadata
+	GeneratedSummary *Summary // Populated by --generate when no stored summary exists
 }
 
 func newExplainCmd() *cobra.Command {
@@ -101,13 +102,11 @@ session or commit.`,
 }
 
 // runExplain routes to the appropriate explain function based on flags.
-// The verbose, full, and generate parameters are accepted for future use
-// but are not yet implemented in the output formatting.
+// The verbose and full parameters are accepted for future use.
 func runExplain(w io.Writer, sessionID, commitRef string, noPager, verbose, full, generate bool, limit int) error {
-	// Silence unused variable warnings until these are implemented
+	// Silence unused variable warnings until verbose/full are implemented
 	_ = verbose
 	_ = full
-	_ = generate
 
 	// Error if both flags are provided
 	if sessionID != "" && commitRef != "" {
@@ -133,9 +132,6 @@ const defaultLimitOnMain = 10
 // Shows branch-level information with checkpoint listing.
 // The verbose, full, and generate parameters control output detail level.
 func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit int) error {
-	// Silence unused variable warnings until generate is implemented
-	_ = generate
-
 	// Get current branch info
 	isDefault, branchName, err := IsOnDefaultBranch()
 	if err != nil {
@@ -168,9 +164,15 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 	// Load metadata for each checkpoint
 	checkpoints := make([]checkpointWithMeta, len(points))
 	for i, point := range points {
+		meta := loadCheckpointMetadata(point.CheckpointID)
 		checkpoints[i] = checkpointWithMeta{
 			Point:    point,
-			Metadata: loadCheckpointMetadata(point.CheckpointID),
+			Metadata: meta,
+		}
+
+		// If --generate and no stored summary, generate one from transcript
+		if generate && (meta == nil || meta.Intent == "") {
+			checkpoints[i].GeneratedSummary = generateSummaryForCheckpoint(point.CheckpointID)
 		}
 	}
 
@@ -234,17 +236,21 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, ve
 			sb.WriteString(fmt.Sprintf("  Session: %s\n", point.SessionID))
 		}
 
-		// Display intent - real value if available, otherwise placeholder
+		// Display intent - prefer stored metadata, then generated, then placeholder
 		intent := "(not generated)"
 		if meta != nil && meta.Intent != "" {
 			intent = meta.Intent
+		} else if cp.GeneratedSummary != nil && cp.GeneratedSummary.Intent != "" {
+			intent = cp.GeneratedSummary.Intent
 		}
 		sb.WriteString(fmt.Sprintf("  Intent: %s\n", intent))
 
-		// Display outcome - real value if available, otherwise placeholder
+		// Display outcome - prefer stored metadata, then generated, then placeholder
 		outcome := "(not generated)"
 		if meta != nil && meta.Outcome != "" {
 			outcome = meta.Outcome
+		} else if cp.GeneratedSummary != nil && cp.GeneratedSummary.Outcome != "" {
+			outcome = cp.GeneratedSummary.Outcome
 		}
 		sb.WriteString(fmt.Sprintf("  Outcome: %s\n", outcome))
 
@@ -664,4 +670,30 @@ func loadCheckpointMetadata(checkpointID string) *checkpoint.CommittedMetadata {
 	}
 
 	return &result.Metadata
+}
+
+// generateSummaryForCheckpoint loads a checkpoint's transcript and generates a summary.
+// Returns nil if the transcript cannot be loaded or parsed.
+func generateSummaryForCheckpoint(checkpointID string) *Summary {
+	repo, err := openRepository()
+	if err != nil {
+		return nil
+	}
+
+	store := checkpoint.NewGitStore(repo)
+	result, err := store.ReadCommitted(context.Background(), checkpointID)
+	if err != nil || result == nil || len(result.Transcript) == 0 {
+		return nil
+	}
+
+	transcript, err := parseTranscriptFromBytes(result.Transcript)
+	if err != nil {
+		return nil
+	}
+
+	summary, err := GenerateSummary(transcript)
+	if err != nil {
+		return nil
+	}
+	return summary
 }

@@ -1112,3 +1112,76 @@ func TestFormatBranchExplain_MixedMetadata(t *testing.T) {
 		t.Errorf("expected 2 placeholders for second checkpoint, got %d in:\n%s", placeholderCount, output)
 	}
 }
+
+func TestFormatBranchExplain_WithGeneratedSummary(t *testing.T) {
+	// Test that GeneratedSummary is used when Metadata has no intent/outcome
+	now := time.Now()
+	checkpoints := []checkpointWithMeta{
+		{
+			Point: strategy.RewindPoint{
+				CheckpointID: "abc123def456",
+				Date:         now,
+				SessionID:    "2026-01-19-session1",
+			},
+			Metadata: nil, // No stored metadata
+			GeneratedSummary: &Summary{
+				Intent:  "Generated intent from transcript",
+				Outcome: "Generated outcome from transcript",
+			},
+		},
+	}
+
+	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 1)
+
+	// Should display generated intent
+	if !strings.Contains(output, "Intent: Generated intent from transcript") {
+		t.Errorf("expected generated intent, got:\n%s", output)
+	}
+	// Should display generated outcome
+	if !strings.Contains(output, "Outcome: Generated outcome from transcript") {
+		t.Errorf("expected generated outcome, got:\n%s", output)
+	}
+	// Should NOT show placeholder text
+	if strings.Contains(output, "(not generated)") {
+		t.Errorf("expected no placeholder text when generated summary is present, got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_MetadataTakesPrecedenceOverGenerated(t *testing.T) {
+	// Test that stored Metadata takes precedence over GeneratedSummary
+	now := time.Now()
+	checkpoints := []checkpointWithMeta{
+		{
+			Point: strategy.RewindPoint{
+				CheckpointID: "abc123def456",
+				Date:         now,
+				SessionID:    "2026-01-19-session1",
+			},
+			Metadata: &checkpoint.CommittedMetadata{
+				Intent:  "Stored intent",
+				Outcome: "Stored outcome",
+			},
+			GeneratedSummary: &Summary{
+				Intent:  "Generated intent - should not be used",
+				Outcome: "Generated outcome - should not be used",
+			},
+		},
+	}
+
+	output := formatBranchExplain("feature/test", checkpoints, false, false, false, 0, 1)
+
+	// Should display stored intent, not generated
+	if !strings.Contains(output, "Intent: Stored intent") {
+		t.Errorf("expected stored intent, got:\n%s", output)
+	}
+	if strings.Contains(output, "Generated intent") {
+		t.Errorf("should not show generated intent when stored exists, got:\n%s", output)
+	}
+	// Should display stored outcome, not generated
+	if !strings.Contains(output, "Outcome: Stored outcome") {
+		t.Errorf("expected stored outcome, got:\n%s", output)
+	}
+	if strings.Contains(output, "Generated outcome") {
+		t.Errorf("should not show generated outcome when stored exists, got:\n%s", output)
+	}
+}
