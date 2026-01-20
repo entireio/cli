@@ -44,7 +44,8 @@ const maxSummaryFieldLength = 200
 const maxTranscriptMessages = 50
 
 // claudeTimeout is the timeout for Claude CLI calls.
-const claudeTimeout = 60 * time.Second
+// Large transcripts can take a while to process, so we use a generous timeout.
+const claudeTimeout = 120 * time.Second
 
 // ErrClaudeCLINotFound is returned when the claude CLI is not available.
 var ErrClaudeCLINotFound = errors.New("claude CLI not found")
@@ -295,6 +296,10 @@ func callClaudeWithUsage(ctx context.Context, prompt string) (*ClaudeResponse, e
 	cmd.Dir = os.TempDir()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		// Check for timeout
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("claude CLI timed out after %v", claudeTimeout)
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			// Include exit code, stderr, and any output for debugging
