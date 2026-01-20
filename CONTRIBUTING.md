@@ -1,17 +1,29 @@
-
 # Contributing to the Entire CLI
 
-Thank you for your interest in contributing to Entire! We welcome contributions from everyone. 
+Thank you for your interest in contributing to Entire! We welcome contributions from everyone.
 
 Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
 
-> **New to Entire?** See the [CLI User Guide](ENTIRE-CLI-GUIDE.md) for setup and usage documentation.
+> **New to Entire?** See the [README](README.md) for setup and usage documentation.
+
+---
+
+## First-Time Contributors
+
+New to the project? Welcome! Here's how to get started:
+
+### Good First Issues
+
+We recommend starting with:
+- **Documentation improvements** - Fix typos, clarify explanations, add examples
+- **Test contributions** - Add test cases, improve coverage
+- **Small bug fixes** - Issues labeled `good-first-issue`
 
 ---
 
 ## Submitting Issues
 
-All feature requests, bug reports, and general issues should be submitted through [GitHub Issues](https://github.com/entire-io/entire-cli/issues). Please search for existing issues before opening a new one.
+All feature requests, bug reports, and general issues should be submitted through [GitHub Issues](https://github.com/entireio/cli/issues). Please search for existing issues before opening a new one.
 
 For security-related issues, see the Security section below.
 
@@ -39,8 +51,8 @@ Please represent the project and community respectfully in all public and privat
 
 There are many ways to contribute:
 
-- **Feature requests** - Open a [GitHub Issue](https://github.com/entire-io/entire-cli/issues) to discuss your idea
-- **Bug reports** - Report issues via [GitHub Issues](https://github.com/entire-io/entire-cli/issues) (see [Reporting Bugs](#reporting-bugs))
+- **Feature requests** - Open a [GitHub Issue](https://github.com/entireio/cli/issues) to discuss your idea
+- **Bug reports** - Report issues via [GitHub Issues](https://github.com/entireio/cli/issues) (see [Reporting Bugs](#reporting-bugs))
 - **Code contributions** - Fix bugs, add features, improve tests
 - **Documentation** - Improve guides, fix typos, add examples
 - **Community** - Help others, answer questions, share knowledge
@@ -53,7 +65,7 @@ Good bug reports help us fix issues quickly. When reporting a bug, please includ
 ### Required Information
 
 1. **Entire CLI version** - run `entire version`
-2. **Operating system** 
+2. **Operating system**
 3. **Go version** - run `go version`
 
 ### What to Include
@@ -71,18 +83,32 @@ Please answer these questions in your bug report:
 
 ## Local Setup
 
-> See [CLAUDE.md](CLAUDE.md) for detailed architecture and development reference.
+### Prerequisites
+
+- **Go 1.25.x** - Check with `go version`
+- **mise** - Task runner and version manager. Install with `curl https://mise.run | sh`
+
+### Clone and Install
 
 ```bash
-# Prerequisites: Go 1.25+, mise
-go version
-mise --version
-
-# Clone and install dependencies
-git clone https://github.com/entire/cli.git
+# Clone the repository
+git clone https://github.com/entireio/cli.git
 cd cli
+
+# Install dependencies (mise will install the correct Go version)
+mise install
+
+# Download Go modules
 go mod download
+
+# Build the CLI
+mise run build
+
+# Verify setup by running tests
+mise run test
 ```
+
+> See [CLAUDE.md](CLAUDE.md) for detailed architecture and development reference.
 
 ---
 
@@ -90,14 +116,10 @@ go mod download
 
 1. **Create a branch** for your changes:
    ```bash
-   # Using entire CLI (recommended)
-   entire start your-feature-name
-   
-   # Or manually
    git checkout -b feature/your-feature-name
    ```
 
-2. **Make your changes** - follow standard Go idioms and handle errors explicitly
+2. **Make your changes** - follow the [Code Style](#code-style) guidelines
 
 3. **Test your changes** - see [Testing](#testing)
 
@@ -105,6 +127,19 @@ go mod download
    ```bash
    git commit -m "Add feature: description of what you added"
    ```
+
+---
+
+## Code Style
+
+Follow standard Go idioms and conventions. For detailed guidance, see the **Go Code Style** section in [CLAUDE.md](CLAUDE.md).
+
+### Key Points
+
+- **Error handling**: Handle all errors explicitly - don't leave them unchecked
+- **Formatting**: Code must pass `gofmt` (run `mise run fmt`)
+- **Linting**: Code must pass `golangci-lint` (run `mise run lint`)
+- **Naming**: Use meaningful, descriptive names following Go conventions
 
 ---
 
@@ -121,10 +156,6 @@ mise run test:integration
 
 # Full CI suite
 mise run test:ci
-
-# Linting and formatting
-mise run lint
-mise run fmt
 ```
 
 Integration tests use the `//go:build integration` build tag and are located in `cmd/entire/cli/integration_test/`.
@@ -173,13 +204,13 @@ These are markdown files that define specialized behaviors for Claude Code (e.g.
 
 These are Go implementations that integrate Entire with different AI coding tools (Claude, Cursor, Aider, etc.) using the Agent abstraction layer.
 
-- **Location:** `cmd/entire/cli/` (see `setup.go` and related files)
+- **Location:** `cmd/entire/cli/agent/`
 - **Steps:**
-   1. Implement the `Agent` interface (see [agent-abstraction/README.md](../devenv/cli/docs/requirements/agent-abstraction/README.md))
+   1. Implement the `Agent` interface in `agent/agent.go`
    2. Register your agent in the agent registry
    3. Add setup and hook configuration as needed
    4. Ensure session and checkpoint tracking is handled per the abstraction
-- **Reference:** See [CLAUDE.md](CLAUDE.md) and [agent-abstraction/README.md](../devenv/cli/docs/requirements/agent-abstraction/README.md) for architecture and code examples.
+- **Reference:** See [CLAUDE.md](CLAUDE.md) for architecture and code examples.
 
 ---
 
@@ -202,6 +233,36 @@ These are Go implementations that integrate Entire with different AI coding tool
 
 ---
 
+## Troubleshooting
+
+### Common Setup Issues
+
+**`go mod download` fails with timeout**
+```bash
+# Try using direct mode
+GOPROXY=direct go mod download
+```
+
+**`mise install` fails**
+```bash
+# Ensure mise is properly installed
+curl https://mise.run | sh
+
+# Reload your shell
+source ~/.zshrc  # or ~/.bashrc
+```
+
+**Binary not updating after rebuild**
+```bash
+# Check which binary is being used
+which entire
+type -a entire
+
+# You may have multiple installations - update the correct path
+```
+
+---
+
 ## Community
 
 Join the Entire community:
@@ -209,14 +270,14 @@ Join the Entire community:
 - **Slack** - [Join our workspace][slack] for discussions and support
 - **Events & Meetups** - [See upcoming events][events]
 
-[slack]: https://entire.io/slack
+[slack]: https://entire-community.slack.com
 [events]: https://entire.io/events
 
 ---
 
 ## Additional Resources
 
-- [CLI User Guide](ENTIRE-CLI-GUIDE.md) - Usage documentation
+- [README](README.md) - Setup and usage documentation
 - [CLAUDE.md](CLAUDE.md) - Architecture and development reference
 - [Code of Conduct](CODE_OF_CONDUCT.md) - Community guidelines
 - [Security Policy](SECURITY.md) - Reporting security vulnerabilities

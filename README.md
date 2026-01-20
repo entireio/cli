@@ -1,26 +1,24 @@
 # Entire CLI
 
-The Entire CLI helps you track and restore your development sessions when working with AI coding tools like Claude Code. It automatically creates checkpoints of your work, allowing you to rewind to any point or resume previous sessions.
+Entire hooks into your git workflow to capture AI agent sessions on every push. Sessions are indexed alongside commits, creating a searchable record of how code was written. Runs locally, stays in your repo.
 
-## Installation
-
-First, tap the repository (requires SSH access):
+## Quick Start
 
 ```bash
+# Install via Homebrew (requires SSH access)
 brew tap entirehq/tap git@github.com:entirehq/homebrew-entire.git
-```
-
-Then install:
-
-```bash
 brew install entirehq/tap/entire
+
+# Enable in your project
+cd your-project && entire enable
+
+# Check status
+entire status
 ```
 
 ## Typical Workflow
 
 ### 1. Enable Entire in Your Repository
-
-First, set up Entire in your git repository:
 
 ```bash
 entire enable
@@ -30,10 +28,10 @@ This installs Claude Code and git hooks that automatically capture checkpoints w
 
 ### 2. Work with Claude Code
 
-Just use Claude Code normally. Entire runs in the background, creating checkpoints automatically. You can check the status anytime:
+Just use Claude Code normally. Entire runs in the background, creating checkpoints automatically:
 
 ```bash
-entire status
+entire status  # Check current session status anytime
 ```
 
 ### 3. Rewind to a Previous Checkpoint
@@ -44,7 +42,7 @@ If you want to undo some changes and go back to an earlier checkpoint:
 entire rewind
 ```
 
-This shows you all available checkpoints in the current session. Select one to restore your code to that exact state.
+This shows all available checkpoints in the current session. Select one to restore your code to that exact state.
 
 ### 4. Resume a Previous Session
 
@@ -54,35 +52,145 @@ To see and restore sessions from earlier work:
 entire resume
 ```
 
-This lists all your past sessions with timestamps. You can view the full conversation history or restore the code from any session.
+Lists all past sessions with timestamps. You can view the conversation history or restore the code from any session.
 
 ### 5. Disable Entire (Optional)
-
-If you want to remove Entire from a repository:
 
 ```bash
 entire disable
 ```
 
-This removes the git hooks. Your code and commit history remain untouched—only the Entire hooks are removed.
+Removes the git hooks. Your code and commit history remain untouched.
 
-## Other Useful Commands
+## Key Concepts
 
-| Command          | Description                                              |
-| ---------------- | -------------------------------------------------------- |
+### Sessions
+
+A **session** represents a complete interaction with your AI agent, from start to finish. Each session captures all prompts, responses, files modified, and timestamps.
+
+**Session ID format:** `YYYY-MM-DD-<UUID>` (e.g., `2026-01-08-abc123de-f456-7890-abcd-ef1234567890`)
+
+Sessions are stored separately from your code commits on the `entire/sessions` branch.
+
+### Checkpoints
+
+A **checkpoint** is a snapshot within a session that you can rewind to—a "save point" in your work.
+
+**When checkpoints are created:**
+- **Manual-commit strategy**: When you make a git commit
+- **Auto-commit strategy**: After each agent response
+
+**Checkpoint IDs** are 12-character hex strings (e.g., `a3b2c4d5e6f7`).
+
+### Strategies
+
+Entire offers two strategies for capturing your work:
+
+| Aspect | Manual-Commit | Auto-Commit |
+|--------|---------------|-------------|
+| Code commits | None on your branch | Created automatically after each agent response |
+| Safe on main branch | Yes | No - creates commits |
+| Rewind | Always possible, non-destructive | Full rewind on feature branches; logs-only on main |
+| Best for | Most workflows - keeps git history clean | Teams wanting automatic code commits |
+
+## Commands Reference
+
+| Command | Description |
+|---------|-------------|
+| `entire enable` | Enable Entire in your repository, install hooks |
+| `entire disable` | Remove Entire hooks from repository |
+| `entire status` | Show current session and strategy info |
+| `entire rewind` | Rewind to a previous checkpoint |
+| `entire resume` | Resume a previous session |
+| `entire explain` | Explain a session or commit |
 | `entire session` | View and manage sessions (list, show details, view logs) |
-| `entire explain` | Explain a session or commit                              |
-| `entire version` | Show Entire CLI version                                  |
+| `entire version` | Show Entire CLI version |
 
-## How It Works
+## Configuration
 
-Entire uses hooks to capture your development sessions automatically:
+Entire uses two configuration files in the `.entire/` directory:
 
-- **Checkpoints**: Saved automatically when Claude Code makes changes
-- **Metadata**: Stored in special git branches (never mixed with your code)
-- **Clean History**: Your main branch stays clean—no extra commits from Entire
+### settings.json (Project Settings)
 
-Use `entire status` to see your current checkpoint strategy and session information.
+Shared across the team, typically committed to git:
+
+```json
+{
+  "strategy": "manual-commit",
+  "agent": "claude-code",
+  "enabled": true
+}
+```
+
+### settings.local.json (Local Settings)
+
+Personal overrides, gitignored by default:
+
+```json
+{
+  "enabled": false,
+  "log_level": "debug"
+}
+```
+
+### Configuration Options
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `strategy` | `manual-commit`, `auto-commit` | Session capture strategy |
+| `enabled` | `true`, `false` | Enable/disable Entire |
+| `agent` | `claude-code`, `gemini`, etc. | AI agent to integrate with |
+| `log_level` | `debug`, `info`, `warn`, `error` | Logging verbosity |
+| `strategy_options.push_sessions` | `true`, `false` | Auto-push `entire/sessions` branch on git push |
+
+### Settings Priority
+
+Local settings override project settings field-by-field. When you run `entire status`, it shows both project and local (effective) settings.
+
+## Troubleshooting
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| "Not a git repository" | Navigate to a git repository first |
+| "Entire is disabled" | Run `entire enable` |
+| "No rewind points found" | Work with Claude Code and commit (manual-commit) or wait for agent response (auto-commit) |
+| "shadow branch conflict" | Run `entire rewind reset --force` |
+| "session not found" | Check available sessions with `entire session list` |
+
+### Debug Mode
+
+```bash
+# Via environment variable
+ENTIRE_LOG_LEVEL=debug entire status
+
+# Or via settings.local.json
+{
+  "log_level": "debug"
+}
+```
+
+### Resetting State
+
+```bash
+# Reset shadow branch for current commit
+entire rewind reset --force
+
+# Disable and re-enable
+entire disable && entire enable --force
+```
+
+### Accessibility
+
+For screen reader users, enable accessible mode:
+
+```bash
+export ACCESSIBLE=1
+entire enable
+```
+
+This uses simpler text prompts instead of interactive TUI elements.
 
 ## Development
 
@@ -134,3 +242,13 @@ mise run fmt
 - `cmd/entire/cli/checkpoint/` - Checkpoint storage abstractions
 - `cmd/entire/cli/session/` - Session state management
 - `cmd/entire/cli/integration_test/` - Integration tests
+
+## Getting Help
+
+```bash
+entire --help              # General help
+entire <command> --help    # Command-specific help
+```
+
+- **GitHub Issues:** Report bugs or request features at https://github.com/entireio/cli/issues
+- **Contributing:** See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
