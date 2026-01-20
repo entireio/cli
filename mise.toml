@@ -1,4 +1,5 @@
 [tools]
+# Please also keep the version aligned in the go.mod file
 go = { version = '1.25.5', postinstall = "go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest && go install github.com/go-delve/delve/cmd/dlv@latest" }
 golangci-lint = 'latest'
 
@@ -16,15 +17,15 @@ run = "gofmt -w ."
 
 [tasks.test]
 description = "Run tests"
-run = "go test ./..."
+run = "ENTIRE_TELEMETRY_OPTOUT=1 go test ./..."
 
 [tasks."test:integration"]
 description = "Run integration tests"
-run = "go test -tags=integration ./cmd/entire/cli/integration_test/..."
+run = "ENTIRE_TELEMETRY_OPTOUT=1 go test -tags=integration ./cmd/entire/cli/integration_test/..."
 
 [tasks."test:ci"]
 description = "Run all tests (unit + integration) with race detection"
-run = "go test -tags=integration -race ./..."
+run = "ENTIRE_TELEMETRY_OPTOUT=1 go test -tags=integration -race ./..."
 
 [tasks.build]
 description = "Build the CLI"

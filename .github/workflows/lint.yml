@@ -17,10 +17,6 @@ jobs:
         with:
           fetch-depth: "0"
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: stable
-
       - uses: jdx/mise-action@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
