@@ -278,7 +278,8 @@ func (s *AutoCommitStrategy) GetRewindPoints(limit int) ([]RewindPoint, error) {
 	count := 0
 
 	err = iter.ForEach(func(c *object.Commit) error {
-		if count >= logsOnlyScanLimit || len(points) >= limit {
+		// limit == 0 means no limit; otherwise stop when we have enough points
+		if count >= logsOnlyScanLimit || (limit > 0 && len(points) >= limit) {
 			return errStop
 		}
 		count++
