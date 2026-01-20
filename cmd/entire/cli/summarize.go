@@ -370,15 +370,39 @@ func parseSummaryResponse(response string) (*Summary, error) {
 	}
 
 	// If that fails, try to extract JSON from the response
-	// Claude sometimes wraps JSON in explanatory text
-	startIdx := strings.Index(response, "{")
-	endIdx := strings.LastIndex(response, "}")
+	// Claude sometimes wraps JSON in markdown code blocks or explanatory text
 
-	if startIdx == -1 || endIdx == -1 || endIdx <= startIdx {
-		return nil, errors.New("no valid JSON found in response")
+	// First, try to strip markdown code blocks
+	cleanedResponse := response
+	if strings.Contains(response, "```") {
+		// Extract content between code block markers
+		start := strings.Index(response, "```")
+		if start != -1 {
+			// Skip past the opening ``` and any language identifier (e.g., ```json)
+			contentStart := start + 3
+			if newline := strings.Index(response[contentStart:], "\n"); newline != -1 {
+				contentStart += newline + 1
+			}
+			end := strings.LastIndex(response, "```")
+			if end > contentStart {
+				cleanedResponse = response[contentStart:end]
+			}
+		}
 	}
 
-	jsonStr := response[startIdx : endIdx+1]
+	startIdx := strings.Index(cleanedResponse, "{")
+	endIdx := strings.LastIndex(cleanedResponse, "}")
+
+	if startIdx == -1 || endIdx == -1 || endIdx <= startIdx {
+		// Truncate response for error message
+		preview := response
+		if len(preview) > 200 {
+			preview = preview[:200] + "..."
+		}
+		return nil, fmt.Errorf("no valid JSON found in response: %q", preview)
+	}
+
+	jsonStr := cleanedResponse[startIdx : endIdx+1]
 	if err := json.Unmarshal([]byte(jsonStr), &sr); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}

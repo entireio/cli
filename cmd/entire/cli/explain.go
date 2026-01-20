@@ -678,16 +678,6 @@ func formatCheckpointDetail(sb *strings.Builder, data checkpointFormatData) {
 			fmt.Fprintf(sb, "  Tool results: %d\n", toolResultCount)
 			fmt.Fprintf(sb, "  Assistant: %d\n", assistantCount)
 			fmt.Fprintf(sb, "  Other: %d\n", otherCount)
-
-			// Show formatted size and preview
-			formatted := formatTranscriptForAI(transcript)
-			fmt.Fprintf(sb, "\nFormatted transcript size: %d bytes\n", len(formatted))
-
-			preview := formatted
-			if len(preview) > 500 {
-				preview = preview[:500] + "..."
-			}
-			fmt.Fprintf(sb, "\n--- Formatted Transcript Preview ---\n%s\n--- End Preview ---\n", preview)
 		}
 	}
 }
