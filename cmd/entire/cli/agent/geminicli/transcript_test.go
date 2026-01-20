@@ -100,7 +100,7 @@ func TestExtractModifiedFiles(t *testing.T) {
 func TestExtractModifiedFiles_AlternativeFieldNames(t *testing.T) {
 	t.Parallel()
 
-	// Test different field names for file path
+	// Test different field names for file path (path, filename)
 	data := []byte(`{
   "messages": [
     {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"path": "via_path.go"}}]},
@@ -151,6 +151,34 @@ func TestExtractModifiedFiles_NoToolUses(t *testing.T) {
 
 	if len(files) != 0 {
 		t.Errorf("ExtractModifiedFiles() got %d files, want 0", len(files))
+	}
+}
+
+func TestExtractModifiedFiles_ReplaceTool(t *testing.T) {
+	t.Parallel()
+
+	// Test the "replace" tool which is used by Gemini CLI for file edits
+	data := []byte(`{
+  "messages": [
+    {"type": "user", "content": "make the output uppercase"},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "read_file", "args": {"file_path": "random_letter.rb"}}]},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "replace", "args": {"file_path": "/path/to/random_letter.rb", "old_string": "sample", "new_string": "sample.upcase"}}]},
+    {"type": "gemini", "content": "Done!"}
+  ]
+}`)
+
+	files, err := ExtractModifiedFiles(data)
+	if err != nil {
+		t.Fatalf("ExtractModifiedFiles() error = %v", err)
+	}
+
+	// Should have random_letter.rb (read_file not included)
+	if len(files) != 1 {
+		t.Errorf("ExtractModifiedFiles() got %d files, want 1", len(files))
+	}
+
+	if len(files) > 0 && files[0] != "/path/to/random_letter.rb" {
+		t.Errorf("ExtractModifiedFiles() got file %q, want /path/to/random_letter.rb", files[0])
 	}
 }
 

@@ -77,10 +77,14 @@ type toolHookInputRaw struct {
 }
 
 // Tool names used in Gemini CLI that modify files
+// Note: Gemini CLI uses different names in different contexts:
+// - Internal/transcript names: write_file, replace
+// - Display names: WriteFile, Edit
 const (
 	ToolWriteFile = "write_file"
 	ToolEditFile  = "edit_file"
 	ToolSaveFile  = "save_file"
+	ToolReplace   = "replace"
 )
 
 // FileModificationTools lists tools that create or modify files in Gemini CLI
@@ -88,4 +92,5 @@ var FileModificationTools = []string{
 	ToolWriteFile,
 	ToolEditFile,
 	ToolSaveFile,
+	ToolReplace,
 }
