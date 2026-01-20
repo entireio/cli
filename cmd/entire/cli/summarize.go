@@ -292,8 +292,9 @@ func callClaudeWithUsage(ctx context.Context, prompt string) (*ClaudeResponse, e
 	defer cancel()
 
 	// Run claude CLI with print mode and JSON output.
+	// Use Haiku model for faster, cheaper summarization.
 	// Run from temp dir to avoid triggering project-specific hooks that could interfere.
-	cmd := exec.CommandContext(ctx, claudePath, "-p", prompt, "--output-format", "json") //nolint:gosec // claudePath is from exec.LookPath, prompt is user content
+	cmd := exec.CommandContext(ctx, claudePath, "-p", prompt, "--output-format", "json", "--model", "haiku") //nolint:gosec // claudePath is from exec.LookPath, prompt is user content
 	cmd.Dir = os.TempDir()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
