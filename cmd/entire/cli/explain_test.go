@@ -896,19 +896,96 @@ func TestFormatBranchExplain_MultipleCheckpoints(t *testing.T) {
 
 func TestFormatBranchExplain_WithVerbose(t *testing.T) {
 	now := time.Now()
-	points := []strategy.RewindPoint{
+	checkpoints := []checkpointWithMeta{
 		{
-			CheckpointID: "abc123def456",
-			Date:         now,
-			SessionID:    "2026-01-19-session1",
+			Point: strategy.RewindPoint{
+				CheckpointID:  "abc123def456",
+				Date:          now,
+				SessionID:     "2026-01-19-session1",
+				SessionPrompt: "Add a logout button",
+			},
+			Metadata: &checkpoint.CommittedMetadata{
+				Intent:       "Add logout button",
+				FilesTouched: []string{"src/auth.go", "src/handler.go", "tests/auth_test.go"},
+			},
 		},
 	}
 
-	output := formatBranchExplain("feature/test", toCheckpointsWithMeta(points), true, false, false, 0, 1)
+	output := formatBranchExplain("feature/test", checkpoints, true, false, false, 0, 1)
 
 	// Verbose mode should show session ID
 	if !strings.Contains(output, "Session: 2026-01-19-session1") {
 		t.Errorf("expected session ID in verbose output, got:\n%s", output)
+	}
+
+	// Verbose mode should show prompt
+	if !strings.Contains(output, "Prompt: Add a logout button") {
+		t.Errorf("expected prompt in verbose output, got:\n%s", output)
+	}
+
+	// Verbose mode should show files count and first few files
+	if !strings.Contains(output, "Files: 3") {
+		t.Errorf("expected files count in verbose output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "src/auth.go") {
+		t.Errorf("expected file names in verbose output, got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_WithVerbose_TruncatesLongPrompt(t *testing.T) {
+	now := time.Now()
+	longPrompt := strings.Repeat("a", 150)
+	checkpoints := []checkpointWithMeta{
+		{
+			Point: strategy.RewindPoint{
+				CheckpointID:  "abc123def456",
+				Date:          now,
+				SessionID:     "session1",
+				SessionPrompt: longPrompt,
+			},
+		},
+	}
+
+	output := formatBranchExplain("feature/test", checkpoints, true, false, false, 0, 1)
+
+	// Long prompts should be truncated with ellipsis
+	if !strings.Contains(output, "Prompt:") {
+		t.Errorf("expected prompt in verbose output, got:\n%s", output)
+	}
+	if strings.Contains(output, longPrompt) {
+		t.Errorf("prompt should be truncated, got full prompt in:\n%s", output)
+	}
+	if !strings.Contains(output, "...") {
+		t.Errorf("truncated prompt should have ellipsis, got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_WithVerbose_ManyFiles(t *testing.T) {
+	now := time.Now()
+	checkpoints := []checkpointWithMeta{
+		{
+			Point: strategy.RewindPoint{
+				CheckpointID: "abc123def456",
+				Date:         now,
+				SessionID:    "session1",
+			},
+			Metadata: &checkpoint.CommittedMetadata{
+				FilesTouched: []string{"a.go", "b.go", "c.go", "d.go", "e.go"},
+			},
+		},
+	}
+
+	output := formatBranchExplain("feature/test", checkpoints, true, false, false, 0, 1)
+
+	// Should show count and first 3 files with ellipsis
+	if !strings.Contains(output, "Files: 5") {
+		t.Errorf("expected files count in verbose output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "a.go") || !strings.Contains(output, "b.go") || !strings.Contains(output, "c.go") {
+		t.Errorf("expected first 3 files in verbose output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "...)") {
+		t.Errorf("expected ellipsis for many files, got:\n%s", output)
 	}
 }
 

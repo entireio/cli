@@ -242,6 +242,16 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, ve
 			sb.WriteString(fmt.Sprintf("  Session: %s\n", point.SessionID))
 		}
 
+		// In verbose mode, show the session prompt
+		if verbose && point.SessionPrompt != "" {
+			// Truncate long prompts for readability
+			prompt := point.SessionPrompt
+			if len(prompt) > 100 {
+				prompt = prompt[:97] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("  Prompt: %s\n", prompt))
+		}
+
 		// Display intent - prefer stored metadata, then generated, then placeholder
 		intent := "(not generated)"
 		if meta != nil && meta.Intent != "" {
@@ -259,6 +269,23 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, ve
 			outcome = cp.GeneratedSummary.Outcome
 		}
 		sb.WriteString(fmt.Sprintf("  Outcome: %s\n", outcome))
+
+		// In verbose mode, show files touched
+		if verbose && meta != nil && len(meta.FilesTouched) > 0 {
+			sb.WriteString(fmt.Sprintf("  Files: %d", len(meta.FilesTouched)))
+			// Show first few files
+			maxFiles := 3
+			if len(meta.FilesTouched) <= maxFiles {
+				sb.WriteString(" (")
+				sb.WriteString(strings.Join(meta.FilesTouched, ", "))
+				sb.WriteString(")")
+			} else {
+				sb.WriteString(" (")
+				sb.WriteString(strings.Join(meta.FilesTouched[:maxFiles], ", "))
+				sb.WriteString(", ...)")
+			}
+			sb.WriteString("\n")
+		}
 
 		sb.WriteString("\n")
 	}
