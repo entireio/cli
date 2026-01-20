@@ -296,15 +296,15 @@ func TestExplainDefault_NoCurrentSession(t *testing.T) {
 func TestExplainBothFlagsError(t *testing.T) {
 	// Test that providing both --session and --commit returns an error
 	var stdout bytes.Buffer
-	err := runExplain(&stdout, "session-id", "commit-sha", false, false, false, false, false, 0)
+	err := runExplain(&stdout, "session-id", "commit-sha", "", false, false, false, false, false, 0)
 
 	if err == nil {
 		t.Error("expected error when both flags provided, got nil")
 	}
-	// Case-insensitive check for "cannot specify both"
+	// Case-insensitive check for "cannot specify multiple"
 	errLower := strings.ToLower(err.Error())
-	if !strings.Contains(errLower, "cannot specify both") {
-		t.Errorf("expected 'cannot specify both' in error, got: %v", err)
+	if !strings.Contains(errLower, "cannot specify multiple") {
+		t.Errorf("expected 'cannot specify multiple' in error, got: %v", err)
 	}
 }
 
@@ -913,50 +913,49 @@ func TestFormatBranchExplain_WithVerbose(t *testing.T) {
 
 	output := formatBranchExplain("feature/test", checkpoints, nil, true, false, false, 0, 1)
 
-	// Verbose mode should show session ID in header line (in parentheses)
-	if !strings.Contains(output, "(2026-01-19-session1)") {
-		t.Errorf("expected session ID in header line, got:\n%s", output)
+	// Verbose mode should show checkpoint ID
+	if !strings.Contains(output, "Checkpoint: abc123def456") {
+		t.Errorf("expected checkpoint ID, got:\n%s", output)
 	}
 
-	// Verbose mode should show prompt
-	if !strings.Contains(output, "Prompt: Add a logout button") {
-		t.Errorf("expected prompt in verbose output, got:\n%s", output)
+	// Verbose mode should show session ID as separate field
+	if !strings.Contains(output, "Session ID: 2026-01-19-session1") {
+		t.Errorf("expected session ID field, got:\n%s", output)
 	}
 
-	// Verbose mode should show files count and first few files
-	if !strings.Contains(output, "Files: 3") {
+	// Verbose mode should show intent
+	if !strings.Contains(output, "Intent: Add logout button") {
+		t.Errorf("expected intent in verbose output, got:\n%s", output)
+	}
+
+	// Verbose mode should show files touched count
+	if !strings.Contains(output, "Files touched: 3") {
 		t.Errorf("expected files count in verbose output, got:\n%s", output)
-	}
-	if !strings.Contains(output, "src/auth.go") {
-		t.Errorf("expected file names in verbose output, got:\n%s", output)
 	}
 }
 
-func TestFormatBranchExplain_WithVerbose_TruncatesLongPrompt(t *testing.T) {
+func TestFormatBranchExplain_WithVerbose_ShowsCreatedDate(t *testing.T) {
 	now := time.Now()
-	longPrompt := strings.Repeat("a", 150)
 	checkpoints := []checkpointWithMeta{
 		{
 			Point: strategy.RewindPoint{
-				CheckpointID:  "abc123def456",
-				Date:          now,
-				SessionID:     "session1",
-				SessionPrompt: longPrompt,
+				CheckpointID: "abc123def456",
+				Date:         now,
+				SessionID:    "session1",
 			},
 		},
 	}
 
 	output := formatBranchExplain("feature/test", checkpoints, nil, true, false, false, 0, 1)
 
-	// Long prompts should be truncated with ellipsis
-	if !strings.Contains(output, "Prompt:") {
-		t.Errorf("expected prompt in verbose output, got:\n%s", output)
+	// Verbose mode should show Created timestamp
+	if !strings.Contains(output, "Created:") {
+		t.Errorf("expected Created field in verbose output, got:\n%s", output)
 	}
-	if strings.Contains(output, longPrompt) {
-		t.Errorf("prompt should be truncated, got full prompt in:\n%s", output)
-	}
-	if !strings.Contains(output, "...") {
-		t.Errorf("truncated prompt should have ellipsis, got:\n%s", output)
+
+	// Should show session ID
+	if !strings.Contains(output, "Session ID: session1") {
+		t.Errorf("expected session ID in verbose output, got:\n%s", output)
 	}
 }
 
@@ -977,15 +976,9 @@ func TestFormatBranchExplain_WithVerbose_ManyFiles(t *testing.T) {
 
 	output := formatBranchExplain("feature/test", checkpoints, nil, true, false, false, 0, 1)
 
-	// Should show count and first 3 files with ellipsis
-	if !strings.Contains(output, "Files: 5") {
+	// Should show files touched count
+	if !strings.Contains(output, "Files touched: 5") {
 		t.Errorf("expected files count in verbose output, got:\n%s", output)
-	}
-	if !strings.Contains(output, "a.go") || !strings.Contains(output, "b.go") || !strings.Contains(output, "c.go") {
-		t.Errorf("expected first 3 files in verbose output, got:\n%s", output)
-	}
-	if !strings.Contains(output, "...)") {
-		t.Errorf("expected ellipsis for many files, got:\n%s", output)
 	}
 }
 

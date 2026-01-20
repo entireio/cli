@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -69,6 +70,7 @@ type checkpointWithMeta struct {
 func newExplainCmd() *cobra.Command {
 	var sessionFlag string
 	var commitFlag string
+	var checkpointFlag string
 	var noPagerFlag bool
 	var verboseFlag bool
 	var fullFlag bool
@@ -92,12 +94,13 @@ session or commit.`,
 				return nil
 			}
 
-			return runExplain(cmd.OutOrStdout(), sessionFlag, commitFlag, noPagerFlag, verboseFlag, fullFlag, generateFlag, forceFlag, limitFlag)
+			return runExplain(cmd.OutOrStdout(), sessionFlag, commitFlag, checkpointFlag, noPagerFlag, verboseFlag, fullFlag, generateFlag, forceFlag, limitFlag)
 		},
 	}
 
 	cmd.Flags().StringVar(&sessionFlag, "session", "", "Explain a specific session (ID or prefix)")
 	cmd.Flags().StringVar(&commitFlag, "commit", "", "Explain a specific commit (SHA or ref)")
+	cmd.Flags().StringVar(&checkpointFlag, "checkpoint", "", "Generate summary for a single checkpoint (ID or prefix)")
 	cmd.Flags().BoolVar(&noPagerFlag, "no-pager", false, "Disable pager output")
 	cmd.Flags().BoolVarP(&verboseFlag, "verbose", "v", false, "Show prompts, files, and session IDs")
 	cmd.Flags().BoolVar(&fullFlag, "full", false, "Show complete transcript")
@@ -110,14 +113,24 @@ session or commit.`,
 
 // runExplain routes to the appropriate explain function based on flags.
 // The verbose and full parameters are accepted for future use.
-func runExplain(w io.Writer, sessionID, commitRef string, noPager, verbose, full, generate, force bool, limit int) error {
+func runExplain(w io.Writer, sessionID, commitRef, checkpointID string, noPager, verbose, full, generate, force bool, limit int) error {
 	// Silence unused variable warnings until verbose/full are implemented
 	_ = verbose
 	_ = full
 
-	// Error if both flags are provided
-	if sessionID != "" && commitRef != "" {
-		return errors.New("cannot specify both --session and --commit")
+	// Error if multiple mutually-exclusive flags are provided
+	flagCount := 0
+	if sessionID != "" {
+		flagCount++
+	}
+	if commitRef != "" {
+		flagCount++
+	}
+	if checkpointID != "" {
+		flagCount++
+	}
+	if flagCount > 1 {
+		return errors.New("cannot specify multiple of --session, --commit, --checkpoint")
 	}
 
 	// Route to appropriate handler
@@ -127,6 +140,9 @@ func runExplain(w io.Writer, sessionID, commitRef string, noPager, verbose, full
 	if commitRef != "" {
 		return runExplainCommit(w, commitRef)
 	}
+	if checkpointID != "" {
+		return runExplainCheckpoint(w, checkpointID, generate)
+	}
 
 	// Default: explain branch-level view
 	return runExplainDefault(w, noPager, verbose, full, generate, force, limit)
@@ -134,6 +150,9 @@ func runExplain(w io.Writer, sessionID, commitRef string, noPager, verbose, full
 
 // defaultLimitOnMain is the default number of checkpoints to show on main/master branches.
 const defaultLimitOnMain = 10
+
+// notGeneratedPlaceholder is the placeholder text for missing summaries.
+const notGeneratedPlaceholder = "(not generated)"
 
 // runExplainDefault explains the current branch state.
 // Shows branch-level information with checkpoint listing.
@@ -240,8 +259,8 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 			}
 		}
 
-		// If --full, load the transcript content
-		if full {
+		// If --full or --verbose, load the transcript content
+		if full || verbose {
 			checkpoints[i].Transcript = loadCheckpointTranscript(point.CheckpointID)
 		}
 	}
@@ -482,112 +501,75 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, br
 	sb.WriteString("\n\n")
 
 	// Checkpoint details
-	for _, cp := range checkpoints {
+	for i, cp := range checkpoints {
 		point := cp.Point
 		meta := cp.Metadata
 
-		id := point.CheckpointID
-		if len(id) > 12 {
-			id = id[:12]
-		}
+		// Build intent/outcome with markers
+		intent, intentMarker := getIntentWithMarker(cp)
+		outcome, outcomeMarker := getOutcomeWithMarker(cp)
 
-		// Header line: [id] date (session-id in verbose mode)
-		if verbose && point.SessionID != "" {
-			fmt.Fprintf(&sb, "[%s] %s (%s)\n", id, point.Date.Format("2006-01-02 15:04"), point.SessionID)
+		if verbose {
+			// Verbose mode: use detailed format (same as --checkpoint)
+			if i > 0 {
+				sb.WriteString("\n────────────────────────────────────────\n\n")
+			}
+
+			shortID := point.CheckpointID
+			if len(shortID) > 12 {
+				shortID = shortID[:12]
+			}
+
+			var filesTouched []string
+			if meta != nil {
+				filesTouched = meta.FilesTouched
+			}
+
+			formatCheckpointDetail(&sb, checkpointFormatData{
+				ShortID:       shortID,
+				FullID:        point.CheckpointID,
+				SessionID:     point.SessionID,
+				Created:       point.Date,
+				FilesTouched:  filesTouched,
+				Transcript:    cp.Transcript,
+				Intent:        intent,
+				Outcome:       outcome,
+				IntentMarker:  intentMarker,
+				OutcomeMarker: outcomeMarker,
+			})
+
+			// In full mode, show the complete transcript
+			if full && cp.Transcript != "" {
+				sb.WriteString("\n--- Full Transcript ---\n")
+				sb.WriteString(cp.Transcript)
+				sb.WriteString("\n--- End Transcript ---\n")
+			}
 		} else {
+			// Compact mode: simple list format
+			id := point.CheckpointID
+			if len(id) > 12 {
+				id = id[:12]
+			}
+
 			fmt.Fprintf(&sb, "[%s] %s\n", id, point.Date.Format("2006-01-02 15:04"))
-		}
+			fmt.Fprintf(&sb, "  Intent:%s %s\n", intentMarker, intent)
+			fmt.Fprintf(&sb, "  Outcome:%s %s\n", outcomeMarker, outcome)
 
-		// In verbose mode, show the session prompt
-		if verbose && point.SessionPrompt != "" {
-			// Truncate long prompts for readability
-			prompt := point.SessionPrompt
-			if len(prompt) > 100 {
-				prompt = prompt[:97] + "..."
+			// In full mode, show the complete transcript even in compact mode
+			if full && cp.Transcript != "" {
+				sb.WriteString("\n  --- Transcript ---\n")
+				for _, line := range strings.Split(cp.Transcript, "\n") {
+					if line != "" {
+						sb.WriteString("  ")
+						sb.WriteString(line)
+						sb.WriteString("\n")
+					}
+				}
+				sb.WriteString("  --- End Transcript ---\n")
 			}
-			fmt.Fprintf(&sb, "  Prompt: %s\n", prompt)
-		}
 
-		// Display intent - prefer stored metadata, then generated, then commit message, then placeholder
-		// Markers: * = heuristic fallback, ^ = commit message fallback
-		intent := "(not generated)"
-		intentMarker := ""
-		switch {
-		case meta != nil && meta.Intent != "":
-			intent = meta.Intent
-			// Check stored source for marker
-			switch meta.SummarySource {
-			case checkpoint.SummarySourceHeuristic:
-				intentMarker = "*"
-			case checkpoint.SummarySourceCommit:
-				intentMarker = "^"
-			}
-		case cp.GeneratedSummary != nil && cp.GeneratedSummary.Intent != "":
-			intent = cp.GeneratedSummary.Intent
-			if cp.UsedHeuristic {
-				intentMarker = "*"
-			}
-		case cp.CommitMessage != "":
-			// Use commit message as fallback (truncate if too long)
-			intent = cp.CommitMessage
-			if len(intent) > 80 {
-				intent = intent[:77] + "..."
-			}
-			intentMarker = "^" // Different marker for commit message fallback
-		}
-		fmt.Fprintf(&sb, "  Intent:%s\n    %s\n", intentMarker, intent)
-
-		// Display outcome - prefer stored metadata, then generated, then placeholder
-		// (commit message doesn't make sense for outcome)
-		outcome := "(not generated)"
-		outcomeMarker := ""
-		if meta != nil && meta.Outcome != "" {
-			outcome = meta.Outcome
-			// Check stored source for marker
-			if meta.SummarySource == checkpoint.SummarySourceHeuristic {
-				outcomeMarker = "*"
-			}
-		} else if cp.GeneratedSummary != nil && cp.GeneratedSummary.Outcome != "" {
-			outcome = cp.GeneratedSummary.Outcome
-			if cp.UsedHeuristic {
-				outcomeMarker = "*"
-			}
-		}
-		fmt.Fprintf(&sb, "  Outcome:%s\n    %s\n", outcomeMarker, outcome)
-
-		// In verbose mode, show files touched
-		if verbose && meta != nil && len(meta.FilesTouched) > 0 {
-			fmt.Fprintf(&sb, "  Files: %d", len(meta.FilesTouched))
-			// Show first few files
-			maxFiles := 3
-			if len(meta.FilesTouched) <= maxFiles {
-				sb.WriteString(" (")
-				sb.WriteString(strings.Join(meta.FilesTouched, ", "))
-				sb.WriteString(")")
-			} else {
-				sb.WriteString(" (")
-				sb.WriteString(strings.Join(meta.FilesTouched[:maxFiles], ", "))
-				sb.WriteString(", ...)")
-			}
 			sb.WriteString("\n")
 		}
-
-		// In full mode, show the complete transcript
-		if full && cp.Transcript != "" {
-			sb.WriteString("\n  --- Transcript ---\n")
-			// Indent each line of the transcript
-			lines := strings.Split(cp.Transcript, "\n")
-			for _, line := range lines {
-				if line != "" {
-					sb.WriteString("  ")
-					sb.WriteString(line)
-					sb.WriteString("\n")
-				}
-			}
-			sb.WriteString("  --- End Transcript ---\n")
-		}
-
-		sb.WriteString("\n")
 	}
 
 	// Footer for limited view
@@ -596,6 +578,166 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, br
 	}
 
 	return sb.String()
+}
+
+// getIntentWithMarker extracts the intent and marker from a checkpoint.
+// Markers: "*" = heuristic, "^" = commit message fallback.
+func getIntentWithMarker(cp checkpointWithMeta) (intent, marker string) {
+	intent = notGeneratedPlaceholder
+	switch {
+	case cp.Metadata != nil && cp.Metadata.Intent != "":
+		intent = cp.Metadata.Intent
+		switch cp.Metadata.SummarySource {
+		case checkpoint.SummarySourceHeuristic:
+			marker = "*"
+		case checkpoint.SummarySourceCommit:
+			marker = "^"
+		}
+	case cp.GeneratedSummary != nil && cp.GeneratedSummary.Intent != "":
+		intent = cp.GeneratedSummary.Intent
+		if cp.UsedHeuristic {
+			marker = "*"
+		}
+	case cp.CommitMessage != "":
+		intent = cp.CommitMessage
+		if len(intent) > 80 {
+			intent = intent[:77] + "..."
+		}
+		marker = "^"
+	}
+	return
+}
+
+// getOutcomeWithMarker extracts the outcome and marker from a checkpoint.
+func getOutcomeWithMarker(cp checkpointWithMeta) (outcome, marker string) {
+	outcome = notGeneratedPlaceholder
+	if cp.Metadata != nil && cp.Metadata.Outcome != "" {
+		outcome = cp.Metadata.Outcome
+		if cp.Metadata.SummarySource == checkpoint.SummarySourceHeuristic {
+			marker = "*"
+		}
+	} else if cp.GeneratedSummary != nil && cp.GeneratedSummary.Outcome != "" {
+		outcome = cp.GeneratedSummary.Outcome
+		if cp.UsedHeuristic {
+			marker = "*"
+		}
+	}
+	return
+}
+
+// checkpointFormatData holds the data needed to format a checkpoint's details.
+type checkpointFormatData struct {
+	ShortID       string
+	FullID        string
+	SessionID     string
+	Created       time.Time
+	FilesTouched  []string
+	Transcript    string
+	Intent        string
+	Outcome       string
+	IntentMarker  string // "*" for heuristic, "^" for commit message
+	OutcomeMarker string
+}
+
+// formatCheckpointDetail formats a single checkpoint's details for verbose output.
+func formatCheckpointDetail(sb *strings.Builder, data checkpointFormatData) {
+	// Header: Checkpoint ID and timestamp
+	fmt.Fprintf(sb, "Checkpoint: %s\n", data.ShortID)
+	if !data.Created.IsZero() {
+		fmt.Fprintf(sb, "Created: %s\n", data.Created.Format("2006-01-02 15:04:05"))
+	}
+	sb.WriteString("\n")
+
+	// Intent and Outcome
+	if data.Intent != "" && data.Intent != notGeneratedPlaceholder {
+		fmt.Fprintf(sb, "Intent:%s %s\n", data.IntentMarker, data.Intent)
+	} else {
+		sb.WriteString("Intent: " + notGeneratedPlaceholder + "\n")
+	}
+	if data.Outcome != "" && data.Outcome != notGeneratedPlaceholder {
+		fmt.Fprintf(sb, "Outcome:%s %s\n", data.OutcomeMarker, data.Outcome)
+	} else {
+		sb.WriteString("Outcome: " + notGeneratedPlaceholder + "\n")
+	}
+	sb.WriteString("\n")
+
+	// Metadata
+	if data.SessionID != "" {
+		fmt.Fprintf(sb, "Session ID: %s\n", data.SessionID)
+	}
+	fmt.Fprintf(sb, "Transcript size: %d bytes\n", len(data.Transcript))
+	fmt.Fprintf(sb, "Files touched: %d\n", len(data.FilesTouched))
+
+	// Parse transcript and show message counts
+	if data.Transcript != "" {
+		if transcript, err := parseTranscriptFromBytes([]byte(data.Transcript)); err == nil {
+			sb.WriteString("\n")
+			fmt.Fprintf(sb, "Transcript messages: %d\n", len(transcript))
+			humanCount, toolResultCount, assistantCount, otherCount := countMessageTypes(transcript)
+			fmt.Fprintf(sb, "  Human prompts: %d\n", humanCount)
+			fmt.Fprintf(sb, "  Tool results: %d\n", toolResultCount)
+			fmt.Fprintf(sb, "  Assistant: %d\n", assistantCount)
+			fmt.Fprintf(sb, "  Other: %d\n", otherCount)
+
+			// Show formatted size and preview
+			formatted := formatTranscriptForAI(transcript)
+			fmt.Fprintf(sb, "\nFormatted transcript size: %d bytes\n", len(formatted))
+
+			preview := formatted
+			if len(preview) > 500 {
+				preview = preview[:500] + "..."
+			}
+			fmt.Fprintf(sb, "\n--- Formatted Transcript Preview ---\n%s\n--- End Preview ---\n", preview)
+		}
+	}
+}
+
+// countMessageTypes counts human prompts, tool results, assistant messages, and other types.
+func countMessageTypes(transcript []transcriptLine) (human, toolResult, assistant, other int) {
+	for _, line := range transcript {
+		switch line.Type {
+		case transcriptTypeUser:
+			if isToolResultMessage(line.Message) {
+				toolResult++
+			} else {
+				human++
+			}
+		case transcriptTypeAssistant:
+			assistant++
+		default:
+			other++
+		}
+	}
+	return
+}
+
+// isToolResultMessage checks if a user message contains only tool_result content.
+func isToolResultMessage(message json.RawMessage) bool {
+	var msg struct {
+		Content interface{} `json:"content"`
+	}
+	if err := json.Unmarshal(message, &msg); err != nil {
+		return false
+	}
+
+	// String content is human input
+	if _, ok := msg.Content.(string); ok {
+		return false
+	}
+
+	// Array content - check if all items are tool_result
+	if arr, ok := msg.Content.([]interface{}); ok {
+		for _, item := range arr {
+			if m, ok := item.(map[string]interface{}); ok {
+				if m["type"] != contentTypeToolResult {
+					return false
+				}
+			}
+		}
+		return len(arr) > 0
+	}
+
+	return false
 }
 
 // runExplainSession explains a specific session.
@@ -1127,4 +1269,165 @@ func generateSummaryForCheckpointWithUsage(checkpointID string) *SummaryResult {
 		return nil
 	}
 	return summaryResult
+}
+
+// runExplainCheckpoint shows details for a single checkpoint.
+// When generate is true, also generates a summary with verbose debug output.
+// This is useful for debugging why certain checkpoints fail AI summarization.
+func runExplainCheckpoint(w io.Writer, checkpointIDPrefix string, generate bool) error {
+	repo, err := openRepository()
+	if err != nil {
+		return fmt.Errorf("not a git repository: %w", err)
+	}
+
+	store := checkpoint.NewGitStore(repo)
+
+	// Find checkpoint by prefix
+	committed, err := store.ListCommitted(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to list checkpoints: %w", err)
+	}
+
+	var fullCheckpointID string
+	for _, info := range committed {
+		if strings.HasPrefix(info.CheckpointID, checkpointIDPrefix) {
+			fullCheckpointID = info.CheckpointID
+			break
+		}
+	}
+
+	if fullCheckpointID == "" {
+		return fmt.Errorf("checkpoint not found: %s", checkpointIDPrefix)
+	}
+
+	shortID := fullCheckpointID
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
+	}
+
+	// Load checkpoint data
+	result, err := store.ReadCommitted(context.Background(), fullCheckpointID)
+	if err != nil {
+		return fmt.Errorf("failed to read checkpoint: %w", err)
+	}
+
+	// Get intent and outcome from existing metadata
+	intent := notGeneratedPlaceholder
+	outcome := notGeneratedPlaceholder
+	var intentMarker, outcomeMarker string
+	if result.Metadata.Intent != "" {
+		intent = result.Metadata.Intent
+		if result.Metadata.SummarySource == checkpoint.SummarySourceHeuristic {
+			intentMarker = "*"
+		}
+	}
+	if result.Metadata.Outcome != "" {
+		outcome = result.Metadata.Outcome
+		if result.Metadata.SummarySource == checkpoint.SummarySourceHeuristic {
+			outcomeMarker = "*"
+		}
+	}
+
+	// Use shared formatter for consistent output
+	var sb strings.Builder
+	formatCheckpointDetail(&sb, checkpointFormatData{
+		ShortID:       shortID,
+		FullID:        fullCheckpointID,
+		SessionID:     result.Metadata.SessionID,
+		Created:       result.Metadata.CreatedAt,
+		FilesTouched:  result.Metadata.FilesTouched,
+		Transcript:    string(result.Transcript),
+		Intent:        intent,
+		Outcome:       outcome,
+		IntentMarker:  intentMarker,
+		OutcomeMarker: outcomeMarker,
+	})
+	fmt.Fprint(w, sb.String())
+
+	// Additional debugging info specific to --checkpoint mode
+	fmt.Fprintf(w, "\nFull ID: %s\n", fullCheckpointID)
+
+	// Parse transcript for additional debugging info
+	transcript, err := parseTranscriptFromBytes(result.Transcript)
+	if err != nil {
+		return fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
+	// Format transcript for AI and show stats
+	formatted := formatTranscriptForAI(transcript)
+	fmt.Fprintf(w, "Formatted transcript size: %d bytes\n", len(formatted))
+
+	// Show first 500 chars of formatted transcript
+	preview := formatted
+	if len(preview) > 500 {
+		preview = preview[:500] + "..."
+	}
+	fmt.Fprintf(w, "\n--- Formatted Transcript Preview ---\n%s\n--- End Preview ---\n", preview)
+
+	// Only generate summary if --generate flag is set
+	if !generate {
+		fmt.Fprintf(w, "\n(use --generate to create AI summary)\n")
+		return nil
+	}
+
+	// Generate summary with detailed output
+	fmt.Fprintf(w, "\nGenerating AI summary...\n")
+
+	summaryResult, err := GenerateAISummaryWithUsage(context.Background(), transcript)
+	if err != nil {
+		fmt.Fprintf(w, "Error: %v\n", err)
+		return nil
+	}
+
+	if summaryResult.UsedFallback {
+		fmt.Fprintf(w, "Result: FALLBACK (heuristic)\n")
+		fmt.Fprintf(w, "Fallback reason: %s\n", summaryResult.FallbackReason)
+	} else {
+		fmt.Fprintf(w, "Result: SUCCESS (AI)\n")
+		fmt.Fprintf(w, "Input tokens: %d\n", summaryResult.InputTokens)
+		fmt.Fprintf(w, "Output tokens: %d\n", summaryResult.OutputTokens)
+	}
+
+	fmt.Fprintf(w, "\n--- Summary ---\n")
+	if summaryResult.Summary != nil {
+		fmt.Fprintf(w, "Intent: %s\n", summaryResult.Summary.Intent)
+		fmt.Fprintf(w, "Outcome: %s\n", summaryResult.Summary.Outcome)
+		if len(summaryResult.Summary.Learnings) > 0 {
+			fmt.Fprintf(w, "Learnings:\n")
+			for _, l := range summaryResult.Summary.Learnings {
+				fmt.Fprintf(w, "  - %s\n", l)
+			}
+		}
+		if len(summaryResult.Summary.FrictionPoints) > 0 {
+			fmt.Fprintf(w, "Friction Points:\n")
+			for _, f := range summaryResult.Summary.FrictionPoints {
+				fmt.Fprintf(w, "  - %s\n", f)
+			}
+		}
+
+		// Save the summary to the checkpoint
+		summarySource := checkpoint.SummarySourceAI
+		if summaryResult.UsedFallback {
+			summarySource = checkpoint.SummarySourceHeuristic
+		}
+
+		authorName, authorEmail := strategy.GetGitAuthorFromRepo(repo)
+		updateErr := store.UpdateSummary(context.Background(), checkpoint.UpdateSummaryOptions{
+			CheckpointID:   fullCheckpointID,
+			Intent:         summaryResult.Summary.Intent,
+			Outcome:        summaryResult.Summary.Outcome,
+			Learnings:      summaryResult.Summary.Learnings,
+			FrictionPoints: summaryResult.Summary.FrictionPoints,
+			SummarySource:  summarySource,
+			AuthorName:     authorName,
+			AuthorEmail:    authorEmail,
+		})
+		if updateErr != nil {
+			fmt.Fprintf(w, "\nWarning: failed to save summary: %v\n", updateErr)
+		} else {
+			fmt.Fprintf(w, "\nSummary saved to checkpoint.\n")
+		}
+	}
+
+	return nil
 }

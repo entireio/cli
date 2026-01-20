@@ -19,6 +19,7 @@ const (
 	transcriptTypeUser      = "user"
 	transcriptTypeAssistant = "assistant"
 	contentTypeText         = "text"
+	contentTypeToolResult   = "tool_result"
 )
 
 // parseTranscript reads and parses a Claude Code transcript file.

@@ -192,25 +192,55 @@ func truncateTranscriptForAI(transcript []transcriptLine, maxMessages int) strin
 }
 
 // extractTextFromMessage extracts text content from a user message JSON.
+// Handles both direct text content and tool_result messages.
 func extractTextFromMessage(message json.RawMessage) string {
 	var msg userMessage
 	if err := json.Unmarshal(message, &msg); err != nil {
 		return ""
 	}
 
-	// Handle string content
+	// Handle string content (direct human input)
 	if str, ok := msg.Content.(string); ok {
 		return str
 	}
 
-	// Handle array content (only if it contains text blocks)
+	// Handle array content (contains text blocks and/or tool_result blocks)
 	if arr, ok := msg.Content.([]interface{}); ok {
 		var texts []string
 		for _, item := range arr {
 			if m, ok := item.(map[string]interface{}); ok {
-				if m["type"] == contentTypeText {
-					if text, ok := m["text"].(string); ok {
+				msgType, ok := m["type"].(string)
+				if !ok {
+					continue
+				}
+
+				switch msgType {
+				case contentTypeText:
+					// Direct text block
+					if text, ok := m["text"].(string); ok && text != "" {
 						texts = append(texts, text)
+					}
+				case contentTypeToolResult:
+					// Tool result - extract content if it's a string or has nested text
+					if content, ok := m["content"].(string); ok && content != "" {
+						// Skip very long tool results (likely file contents)
+						if len(content) < 500 {
+							texts = append(texts, content)
+						}
+					} else if contentArr, ok := m["content"].([]interface{}); ok {
+						// Nested content array (e.g., tool_result with text blocks)
+						for _, nested := range contentArr {
+							if nm, ok := nested.(map[string]interface{}); ok {
+								if nm["type"] == contentTypeText {
+									if text, ok := nm["text"].(string); ok && text != "" {
+										// Skip very long nested text (likely file contents)
+										if len(text) < 500 {
+											texts = append(texts, text)
+										}
+									}
+								}
+							}
+						}
 					}
 				}
 			}
