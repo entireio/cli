@@ -59,6 +59,7 @@ type checkpointWithMeta struct {
 	Point            strategy.RewindPoint
 	Metadata         *checkpoint.CommittedMetadata
 	GeneratedSummary *Summary // Populated by --generate when no stored summary exists
+	Transcript       string   // Populated for --full mode
 }
 
 func newExplainCmd() *cobra.Command {
@@ -180,6 +181,11 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 				saveSummaryToCheckpoint(point.CheckpointID, summary)
 			}
 		}
+
+		// If --full, load the transcript content
+		if full {
+			checkpoints[i].Transcript = loadCheckpointTranscript(point.CheckpointID)
+		}
 	}
 
 	// Format output
@@ -204,9 +210,6 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 //   - limit: the applied limit (0 means no limit)
 //   - totalCount: total number of checkpoints before limiting
 func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, verbose, full bool, isDefault bool, limit, totalCount int) string {
-	// Silence unused parameter warnings until full is implemented
-	_ = full
-
 	var sb strings.Builder
 
 	// Header
@@ -285,6 +288,21 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, ve
 				sb.WriteString(", ...)")
 			}
 			sb.WriteString("\n")
+		}
+
+		// In full mode, show the complete transcript
+		if full && cp.Transcript != "" {
+			sb.WriteString("\n  --- Transcript ---\n")
+			// Indent each line of the transcript
+			lines := strings.Split(cp.Transcript, "\n")
+			for _, line := range lines {
+				if line != "" {
+					sb.WriteString("  ")
+					sb.WriteString(line)
+					sb.WriteString("\n")
+				}
+			}
+			sb.WriteString("  --- End Transcript ---\n")
 		}
 
 		sb.WriteString("\n")
@@ -724,6 +742,23 @@ func saveSummaryToCheckpoint(checkpointID string, summary *Summary) {
 		AuthorName:     "Entire CLI",
 		AuthorEmail:    "cli@entire.io",
 	})
+}
+
+// loadCheckpointTranscript loads the raw transcript content for a checkpoint.
+// Returns empty string if the transcript cannot be loaded.
+func loadCheckpointTranscript(checkpointID string) string {
+	repo, err := openRepository()
+	if err != nil {
+		return ""
+	}
+
+	store := checkpoint.NewGitStore(repo)
+	result, err := store.ReadCommitted(context.Background(), checkpointID)
+	if err != nil || result == nil || len(result.Transcript) == 0 {
+		return ""
+	}
+
+	return string(result.Transcript)
 }
 
 // generateSummaryForCheckpoint loads a checkpoint's transcript and generates a summary.

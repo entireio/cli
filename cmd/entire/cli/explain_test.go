@@ -1039,6 +1039,58 @@ func TestFormatBranchExplain_NoCheckpoints(t *testing.T) {
 	}
 }
 
+func TestFormatBranchExplain_WithFull(t *testing.T) {
+	now := time.Now()
+	transcript := `{"type":"user","message":{"content":"Add logout"}}
+{"type":"assistant","message":{"content":"Done!"}}`
+
+	checkpoints := []checkpointWithMeta{
+		{
+			Point: strategy.RewindPoint{
+				CheckpointID: "abc123def456",
+				Date:         now,
+				SessionID:    "session1",
+			},
+			Transcript: transcript,
+		},
+	}
+
+	output := formatBranchExplain("feature/test", checkpoints, false, true, false, 0, 1)
+
+	// Full mode should show transcript markers
+	if !strings.Contains(output, "--- Transcript ---") {
+		t.Errorf("expected transcript start marker, got:\n%s", output)
+	}
+	if !strings.Contains(output, "--- End Transcript ---") {
+		t.Errorf("expected transcript end marker, got:\n%s", output)
+	}
+	// Should contain transcript content
+	if !strings.Contains(output, "Add logout") {
+		t.Errorf("expected transcript content, got:\n%s", output)
+	}
+}
+
+func TestFormatBranchExplain_WithFull_NoTranscript(t *testing.T) {
+	now := time.Now()
+	checkpoints := []checkpointWithMeta{
+		{
+			Point: strategy.RewindPoint{
+				CheckpointID: "abc123def456",
+				Date:         now,
+				SessionID:    "session1",
+			},
+			Transcript: "", // Empty transcript
+		},
+	}
+
+	output := formatBranchExplain("feature/test", checkpoints, false, true, false, 0, 1)
+
+	// Should NOT show transcript markers when transcript is empty
+	if strings.Contains(output, "--- Transcript ---") {
+		t.Errorf("should not show transcript markers when empty, got:\n%s", output)
+	}
+}
+
 func TestFormatBranchExplain_TruncatesLongCheckpointID(t *testing.T) {
 	now := time.Now()
 	points := []strategy.RewindPoint{
