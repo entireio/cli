@@ -232,7 +232,7 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 
 				if result.UsedFallback {
 					fallbackCount++
-					fmt.Fprintf(os.Stderr, " (using heuristic)\n")
+					fmt.Fprintf(os.Stderr, " (using heuristic: %s)\n", result.FallbackReason)
 				} else {
 					fmt.Fprintf(os.Stderr, " done\n")
 				}
