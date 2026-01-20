@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -861,6 +862,150 @@ func (s *GitStore) BatchUpdateSummary(ctx context.Context, updates []UpdateSumma
 	return nil
 }
 
+// BatchUpdateWithBranchSummary updates checkpoint summaries and branch summary in a single commit.
+func (s *GitStore) BatchUpdateWithBranchSummary(ctx context.Context, updates []UpdateSummaryOptions, branchSummary *BranchSummary) error {
+	_ = ctx // Reserved for future use
+
+	// Need at least checkpoint updates or a branch summary
+	if len(updates) == 0 && branchSummary == nil {
+		return nil
+	}
+
+	// Validate all checkpoint IDs upfront
+	for _, opts := range updates {
+		if err := paths.ValidateCheckpointID(opts.CheckpointID); err != nil {
+			return fmt.Errorf("invalid checkpoint ID %s: %w", opts.CheckpointID, err)
+		}
+	}
+
+	// Ensure sessions branch exists
+	if err := s.ensureSessionsBranch(); err != nil {
+		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	}
+
+	// Get current branch tip and flatten tree (once for all updates)
+	ref, entries, err := s.getSessionsBranchEntries()
+	if err != nil {
+		return err
+	}
+
+	// Get author info from first update or branch summary
+	var authorName, authorEmail string
+	if len(updates) > 0 {
+		authorName = updates[0].AuthorName
+		authorEmail = updates[0].AuthorEmail
+	}
+
+	// Track what was updated for commit message
+	var updatedIDs []string
+
+	// Update each checkpoint's metadata
+	for _, opts := range updates {
+		basePath := paths.CheckpointPath(opts.CheckpointID) + "/"
+		metadataPath := basePath + paths.MetadataFileName
+		entry, exists := entries[metadataPath]
+		if !exists {
+			// Skip missing checkpoints (don't fail the whole batch)
+			continue
+		}
+
+		// Read existing metadata
+		existingMetadata, err := s.readMetadataFromBlob(entry.Hash)
+		if err != nil {
+			// Skip on read error
+			continue
+		}
+
+		// Update summary fields
+		existingMetadata.Intent = opts.Intent
+		existingMetadata.Outcome = opts.Outcome
+		existingMetadata.Learnings = opts.Learnings
+		existingMetadata.FrictionPoints = opts.FrictionPoints
+		existingMetadata.SummarySource = opts.SummarySource
+
+		// Write updated metadata
+		metadataJSON, err := jsonutil.MarshalIndentWithNewline(existingMetadata, "", "  ")
+		if err != nil {
+			continue
+		}
+		blobHash, err := CreateBlobFromContent(s.repo, metadataJSON)
+		if err != nil {
+			continue
+		}
+		entries[metadataPath] = object.TreeEntry{
+			Name: metadataPath,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		}
+		updatedIDs = append(updatedIDs, opts.CheckpointID[:12])
+	}
+
+	// Add branch summary if provided
+	var branchName string
+	if branchSummary != nil {
+		if branchSummary.GeneratedAt.IsZero() {
+			branchSummary.GeneratedAt = time.Now()
+		}
+
+		summaryJSON, err := jsonutil.MarshalIndentWithNewline(branchSummary, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal branch summary: %w", err)
+		}
+
+		blobHash, err := CreateBlobFromContent(s.repo, summaryJSON)
+		if err != nil {
+			return fmt.Errorf("failed to create branch summary blob: %w", err)
+		}
+
+		summaryPath := branchSummaryPath(branchSummary.BranchName)
+		entries[summaryPath] = object.TreeEntry{
+			Name: summaryPath,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		}
+		branchName = branchSummary.BranchName
+	}
+
+	// If nothing was actually updated, nothing to commit
+	if len(updatedIDs) == 0 && branchName == "" {
+		return nil
+	}
+
+	// Build and commit
+	newTreeHash, err := BuildTreeFromEntries(s.repo, entries)
+	if err != nil {
+		return err
+	}
+
+	// Build commit message
+	var commitMsg string
+	switch {
+	case len(updatedIDs) > 0 && branchName != "":
+		commitMsg = fmt.Sprintf("Generate summaries for branch %s\n\nCheckpoints: %s",
+			branchName, strings.Join(updatedIDs, ", "))
+	case len(updatedIDs) == 1:
+		commitMsg = "Update summary for checkpoint " + updatedIDs[0]
+	case len(updatedIDs) > 1:
+		commitMsg = fmt.Sprintf("Update summaries for %d checkpoints\n\nCheckpoints: %s",
+			len(updatedIDs), strings.Join(updatedIDs, ", "))
+	default:
+		commitMsg = "Update branch summary: " + branchName
+	}
+
+	newCommitHash, err := s.createCommit(newTreeHash, ref.Hash(), commitMsg, authorName, authorEmail)
+	if err != nil {
+		return err
+	}
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	newRef := plumbing.NewHashReference(refName, newCommitHash)
+	if err := s.repo.Storer.SetReference(newRef); err != nil {
+		return fmt.Errorf("failed to set branch reference: %w", err)
+	}
+
+	return nil
+}
+
 // GetTranscript retrieves the transcript for a specific checkpoint ID.
 func (s *GitStore) GetTranscript(ctx context.Context, checkpointID string) ([]byte, error) {
 	result, err := s.ReadCommitted(ctx, checkpointID)
@@ -874,6 +1019,118 @@ func (s *GitStore) GetTranscript(ctx context.Context, checkpointID string) ([]by
 		return nil, fmt.Errorf("no transcript found for checkpoint: %s", checkpointID)
 	}
 	return result.Transcript, nil
+}
+
+// branchSummaryPath returns the path for a branch summary on the sessions branch.
+// Format: _branches/<branch-name>/summary.json
+// Branch names with slashes (e.g., "feature/foo") create nested directories.
+func branchSummaryPath(branchName string) string {
+	return "_branches/" + branchName + "/summary.json"
+}
+
+// WriteBranchSummary writes a branch summary to the entire/sessions branch.
+func (s *GitStore) WriteBranchSummary(ctx context.Context, summary *BranchSummary, authorName, authorEmail string) error {
+	_ = ctx // Reserved for future use
+
+	if summary == nil {
+		return errors.New("summary cannot be nil")
+	}
+	if summary.BranchName == "" {
+		return errors.New("branch name cannot be empty")
+	}
+
+	// Ensure sessions branch exists
+	if err := s.ensureSessionsBranch(); err != nil {
+		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	}
+
+	// Set GeneratedAt if not already set
+	if summary.GeneratedAt.IsZero() {
+		summary.GeneratedAt = time.Now()
+	}
+
+	// Get current branch entries
+	ref, entries, err := s.getSessionsBranchEntries()
+	if err != nil {
+		return err
+	}
+
+	// Serialize summary
+	summaryJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal summary: %w", err)
+	}
+
+	// Create blob
+	blobHash, err := CreateBlobFromContent(s.repo, summaryJSON)
+	if err != nil {
+		return fmt.Errorf("failed to create blob: %w", err)
+	}
+
+	// Add to entries
+	summaryPath := branchSummaryPath(summary.BranchName)
+	entries[summaryPath] = object.TreeEntry{
+		Name: summaryPath,
+		Mode: filemode.Regular,
+		Hash: blobHash,
+	}
+
+	// Build tree and commit
+	newTreeHash, err := BuildTreeFromEntries(s.repo, entries)
+	if err != nil {
+		return err
+	}
+
+	commitMsg := "Update branch summary: " + summary.BranchName
+	newCommitHash, err := s.createCommit(newTreeHash, ref.Hash(), commitMsg, authorName, authorEmail)
+	if err != nil {
+		return err
+	}
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	newRef := plumbing.NewHashReference(refName, newCommitHash)
+	if err := s.repo.Storer.SetReference(newRef); err != nil {
+		return fmt.Errorf("failed to set branch reference: %w", err)
+	}
+
+	return nil
+}
+
+// ReadBranchSummary reads a branch summary by branch name.
+// Returns nil, nil if the branch summary does not exist.
+func (s *GitStore) ReadBranchSummary(ctx context.Context, branchName string) (*BranchSummary, error) {
+	_ = ctx // Reserved for future use
+
+	if branchName == "" {
+		return nil, errors.New("branch name cannot be empty")
+	}
+
+	// Get sessions branch tree
+	tree, err := s.getSessionsBranchTree()
+	if err != nil {
+		// Branch doesn't exist - no summaries
+		return nil, nil //nolint:nilnil,nilerr // Expected: branch not existing means no summary
+	}
+
+	// Try to find the summary file
+	summaryPath := branchSummaryPath(branchName)
+	file, err := tree.File(summaryPath)
+	if err != nil {
+		// File not found - no summary for this branch
+		return nil, nil //nolint:nilnil,nilerr // Expected: file not found means no summary
+	}
+
+	content, err := file.Contents()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read summary file: %w", err)
+	}
+
+	var summary BranchSummary
+	if err := json.Unmarshal([]byte(content), &summary); err != nil {
+		return nil, fmt.Errorf("failed to parse summary: %w", err)
+	}
+
+	return &summary, nil
 }
 
 // ensureSessionsBranch ensures the entire/sessions branch exists.

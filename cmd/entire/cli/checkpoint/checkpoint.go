@@ -83,6 +83,18 @@ type Store interface {
 	// BatchUpdateSummary updates summary fields for multiple checkpoints in a single commit.
 	// This reduces noise on the entire/sessions branch when generating many summaries.
 	BatchUpdateSummary(ctx context.Context, updates []UpdateSummaryOptions) error
+
+	// WriteBranchSummary writes a branch summary to the entire/sessions branch.
+	// Summaries are stored at _branches/<branch-name>/summary.json.
+	WriteBranchSummary(ctx context.Context, summary *BranchSummary, authorName, authorEmail string) error
+
+	// ReadBranchSummary reads a branch summary by branch name.
+	// Returns nil, nil if the branch summary does not exist.
+	ReadBranchSummary(ctx context.Context, branchName string) (*BranchSummary, error)
+
+	// BatchUpdateWithBranchSummary updates checkpoint summaries and branch summary in a single commit.
+	// This is used by --generate to persist all summaries together.
+	BatchUpdateWithBranchSummary(ctx context.Context, updates []UpdateSummaryOptions, branchSummary *BranchSummary) error
 }
 
 // Summary source constants indicate how a summary was generated.
@@ -91,6 +103,37 @@ const (
 	SummarySourceHeuristic = "heuristic" // Heuristic fallback (first prompt, last response)
 	SummarySourceCommit    = "commit"    // Derived from commit message
 )
+
+// BranchSummary holds an aggregated summary for an entire branch.
+// Stored on entire/sessions at _branches/<branch-name>/summary.json.
+type BranchSummary struct {
+	// BranchName is the git branch this summary is for
+	BranchName string `json:"branch_name"`
+
+	// Intent is the high-level goal of the work on this branch
+	Intent string `json:"intent"`
+
+	// Outcome is what was accomplished on this branch
+	Outcome string `json:"outcome"`
+
+	// GeneratedAt is when this summary was generated
+	GeneratedAt time.Time `json:"generated_at"`
+
+	// HeadCommit is the commit SHA the branch was at when summary was generated
+	HeadCommit string `json:"head_commit"`
+
+	// Model is the AI model used to generate the summary (e.g., "claude-sonnet-4-20250514")
+	Model string `json:"model,omitempty"`
+
+	// Agent is the tool that generated the summary (e.g., "Claude Code")
+	Agent string `json:"agent,omitempty"`
+
+	// CheckpointCount is the number of checkpoints summarized
+	CheckpointCount int `json:"checkpoint_count"`
+
+	// CheckpointIDs are the checkpoint IDs that were summarized
+	CheckpointIDs []string `json:"checkpoint_ids,omitempty"`
+}
 
 // UpdateSummaryOptions contains options for updating checkpoint summary fields.
 type UpdateSummaryOptions struct {

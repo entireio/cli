@@ -246,13 +246,9 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 		}
 	}
 
-	// Batch save all generated summaries in a single commit
-	if len(summariesToSave) > 0 {
-		batchSaveSummaries(summariesToSave)
-	}
-
 	// Generate branch-level summary if --generate and we have checkpoints with intents
 	var branchSummary *Summary
+	var branchSummaryToSave *checkpoint.BranchSummary
 	if generate && len(checkpoints) > 0 {
 		fmt.Fprintf(os.Stderr, "Generating branch summary...\n")
 		result := generateBranchSummaryFromCheckpointsWithUsage(checkpoints)
@@ -260,7 +256,23 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 			branchSummary = result.Summary
 			totalInputTokens += result.InputTokens
 			totalOutputTokens += result.OutputTokens
+
+			// Prepare branch summary for persistence
+			branchSummaryToSave = &checkpoint.BranchSummary{
+				BranchName:      branchName,
+				Intent:          result.Summary.Intent,
+				Outcome:         result.Summary.Outcome,
+				HeadCommit:      getCurrentHeadShort(),
+				Agent:           "Entire CLI",
+				CheckpointCount: len(checkpoints),
+				CheckpointIDs:   extractCheckpointIDs(checkpoints),
+			}
 		}
+	}
+
+	// Batch save all generated summaries and branch summary in a single commit
+	if len(summariesToSave) > 0 || branchSummaryToSave != nil {
+		batchSaveSummariesWithBranch(summariesToSave, branchSummaryToSave)
 	}
 
 	// Show generation stats
@@ -993,9 +1005,9 @@ func loadCheckpointMetadata(checkpointID string) *checkpoint.CommittedMetadata {
 	return &result.Metadata
 }
 
-// batchSaveSummaries persists multiple generated summaries in a single commit.
+// batchSaveSummariesWithBranch persists checkpoint summaries and branch summary in a single commit.
 // Errors are silently ignored since saving is best-effort (display still works).
-func batchSaveSummaries(updates []checkpoint.UpdateSummaryOptions) {
+func batchSaveSummariesWithBranch(updates []checkpoint.UpdateSummaryOptions, branchSummary *checkpoint.BranchSummary) {
 	repo, err := openRepository()
 	if err != nil {
 		return
@@ -1003,7 +1015,40 @@ func batchSaveSummaries(updates []checkpoint.UpdateSummaryOptions) {
 
 	store := checkpoint.NewGitStore(repo)
 	//nolint:errcheck,gosec // Best-effort save - display works even if save fails
-	store.BatchUpdateSummary(context.Background(), updates)
+	store.BatchUpdateWithBranchSummary(context.Background(), updates, branchSummary)
+}
+
+// getCurrentHeadShort returns the short SHA of the current HEAD commit.
+// Returns empty string if HEAD cannot be resolved.
+func getCurrentHeadShort() string {
+	repo, err := openRepository()
+	if err != nil {
+		return ""
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		return ""
+	}
+
+	sha := head.Hash().String()
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
+// extractCheckpointIDs extracts checkpoint IDs from a slice of checkpointWithMeta.
+func extractCheckpointIDs(checkpoints []checkpointWithMeta) []string {
+	ids := make([]string, 0, len(checkpoints))
+	for _, cp := range checkpoints {
+		id := cp.Point.CheckpointID
+		if len(id) > 12 {
+			id = id[:12]
+		}
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // loadCheckpointTranscript loads the raw transcript content for a checkpoint.

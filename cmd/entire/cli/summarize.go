@@ -296,6 +296,13 @@ func callClaudeWithUsage(ctx context.Context, prompt string) (*ClaudeResponse, e
 
 	// If result is empty, Claude might not have responded
 	if claudeOutput.Result == "" {
+		// Log the full output for debugging
+		ensureLoggingInitialized()
+		logging.Debug(context.Background(), "Claude CLI returned empty result",
+			"full_output", string(output),
+			"is_error", claudeOutput.IsError,
+			"input_tokens", claudeOutput.Usage.InputTokens,
+			"output_tokens", claudeOutput.Usage.OutputTokens)
 		return nil, errors.New("claude CLI returned empty result")
 	}
 

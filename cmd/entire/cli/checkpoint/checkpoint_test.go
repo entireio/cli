@@ -314,6 +314,282 @@ func TestUpdateSummary(t *testing.T) {
 	}
 }
 
+func TestBranchSummary_WriteAndRead(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create worktree and make initial commit
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	store := NewGitStore(repo)
+
+	// Write a branch summary
+	branchSummary := &BranchSummary{
+		BranchName:      "feature/test-branch",
+		Intent:          "Implement user authentication",
+		Outcome:         "Added JWT-based auth system",
+		HeadCommit:      "abc1234def5678",
+		Model:           "claude-sonnet-4-20250514",
+		Agent:           "Claude Code",
+		CheckpointCount: 3,
+		CheckpointIDs:   []string{"a1b2c3d4e5f6", "b2c3d4e5f6a7", "c3d4e5f6a7b8"},
+	}
+
+	err = store.WriteBranchSummary(context.Background(), branchSummary, "Test Author", "test@example.com")
+	if err != nil {
+		t.Fatalf("WriteBranchSummary() error = %v", err)
+	}
+
+	// Read it back
+	readSummary, err := store.ReadBranchSummary(context.Background(), "feature/test-branch")
+	if err != nil {
+		t.Fatalf("ReadBranchSummary() error = %v", err)
+	}
+	if readSummary == nil {
+		t.Fatal("ReadBranchSummary() returned nil")
+	}
+
+	// Verify fields
+	if readSummary.BranchName != branchSummary.BranchName {
+		t.Errorf("BranchName = %q, want %q", readSummary.BranchName, branchSummary.BranchName)
+	}
+	if readSummary.Intent != branchSummary.Intent {
+		t.Errorf("Intent = %q, want %q", readSummary.Intent, branchSummary.Intent)
+	}
+	if readSummary.Outcome != branchSummary.Outcome {
+		t.Errorf("Outcome = %q, want %q", readSummary.Outcome, branchSummary.Outcome)
+	}
+	if readSummary.HeadCommit != branchSummary.HeadCommit {
+		t.Errorf("HeadCommit = %q, want %q", readSummary.HeadCommit, branchSummary.HeadCommit)
+	}
+	if readSummary.Model != branchSummary.Model {
+		t.Errorf("Model = %q, want %q", readSummary.Model, branchSummary.Model)
+	}
+	if readSummary.Agent != branchSummary.Agent {
+		t.Errorf("Agent = %q, want %q", readSummary.Agent, branchSummary.Agent)
+	}
+	if readSummary.CheckpointCount != branchSummary.CheckpointCount {
+		t.Errorf("CheckpointCount = %d, want %d", readSummary.CheckpointCount, branchSummary.CheckpointCount)
+	}
+	if len(readSummary.CheckpointIDs) != len(branchSummary.CheckpointIDs) {
+		t.Errorf("CheckpointIDs length = %d, want %d", len(readSummary.CheckpointIDs), len(branchSummary.CheckpointIDs))
+	}
+	// GeneratedAt should be set automatically
+	if readSummary.GeneratedAt.IsZero() {
+		t.Error("GeneratedAt should be set automatically")
+	}
+}
+
+func TestBatchUpdateWithBranchSummary(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create worktree and make initial commit
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	store := NewGitStore(repo)
+
+	// Create two checkpoints first
+	checkpoint1 := "a1b2c3d4e5f6"
+	checkpoint2 := "b2c3d4e5f6a7"
+	for _, cpID := range []string{checkpoint1, checkpoint2} {
+		err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
+			CheckpointID: cpID,
+			SessionID:    "test-session",
+			Strategy:     "manual-commit",
+			Transcript:   []byte("test transcript"),
+			AuthorName:   "Test Author",
+			AuthorEmail:  "test@example.com",
+		})
+		if err != nil {
+			t.Fatalf("WriteCommitted() error = %v", err)
+		}
+	}
+
+	// Count commits before batch update
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get ref: %v", err)
+	}
+	commitsBefore := countCommits(t, repo, ref.Hash())
+
+	// Now do a batch update with checkpoint summaries AND a branch summary
+	updates := []UpdateSummaryOptions{
+		{
+			CheckpointID:  checkpoint1,
+			Intent:        "First task intent",
+			Outcome:       "First task outcome",
+			SummarySource: SummarySourceAI,
+			AuthorName:    "Test Author",
+			AuthorEmail:   "test@example.com",
+		},
+		{
+			CheckpointID:  checkpoint2,
+			Intent:        "Second task intent",
+			Outcome:       "Second task outcome",
+			SummarySource: SummarySourceAI,
+			AuthorName:    "Test Author",
+			AuthorEmail:   "test@example.com",
+		},
+	}
+
+	branchSummary := &BranchSummary{
+		BranchName:      "feature/test",
+		Intent:          "Overall branch intent",
+		Outcome:         "Overall branch outcome",
+		HeadCommit:      "abc1234",
+		CheckpointCount: 2,
+		CheckpointIDs:   []string{checkpoint1, checkpoint2},
+	}
+
+	err = store.BatchUpdateWithBranchSummary(context.Background(), updates, branchSummary)
+	if err != nil {
+		t.Fatalf("BatchUpdateWithBranchSummary() error = %v", err)
+	}
+
+	// Count commits after - should only add ONE commit (not 3)
+	ref, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get ref after: %v", err)
+	}
+	commitsAfter := countCommits(t, repo, ref.Hash())
+
+	if commitsAfter != commitsBefore+1 {
+		t.Errorf("Expected 1 new commit, got %d (before: %d, after: %d)",
+			commitsAfter-commitsBefore, commitsBefore, commitsAfter)
+	}
+
+	// Verify checkpoint summaries were updated
+	result1, err := store.ReadCommitted(context.Background(), checkpoint1)
+	if err != nil {
+		t.Fatalf("ReadCommitted() error = %v", err)
+	}
+	if result1.Metadata.Intent != "First task intent" {
+		t.Errorf("Checkpoint1 Intent = %q, want %q", result1.Metadata.Intent, "First task intent")
+	}
+
+	result2, err := store.ReadCommitted(context.Background(), checkpoint2)
+	if err != nil {
+		t.Fatalf("ReadCommitted() error = %v", err)
+	}
+	if result2.Metadata.Intent != "Second task intent" {
+		t.Errorf("Checkpoint2 Intent = %q, want %q", result2.Metadata.Intent, "Second task intent")
+	}
+
+	// Verify branch summary was written
+	readSummary, err := store.ReadBranchSummary(context.Background(), "feature/test")
+	if err != nil {
+		t.Fatalf("ReadBranchSummary() error = %v", err)
+	}
+	if readSummary == nil {
+		t.Fatal("ReadBranchSummary() returned nil")
+	}
+	if readSummary.Intent != "Overall branch intent" {
+		t.Errorf("BranchSummary Intent = %q, want %q", readSummary.Intent, "Overall branch intent")
+	}
+}
+
+func countCommits(t *testing.T, repo *git.Repository, hash plumbing.Hash) int {
+	t.Helper()
+	count := 0
+	iter, err := repo.Log(&git.LogOptions{From: hash})
+	if err != nil {
+		t.Fatalf("failed to get log: %v", err)
+	}
+	defer iter.Close()
+	for {
+		_, err := iter.Next()
+		if err != nil {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func TestBranchSummary_ReadNotFound(t *testing.T) {
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create worktree and make initial commit
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	store := NewGitStore(repo)
+
+	// Try to read non-existent branch summary
+	summary, err := store.ReadBranchSummary(context.Background(), "nonexistent/branch")
+
+	// Should return nil, nil for not found
+	if err != nil {
+		t.Errorf("ReadBranchSummary() error = %v, want nil", err)
+	}
+	if summary != nil {
+		t.Errorf("ReadBranchSummary() = %v, want nil", summary)
+	}
+}
+
 func TestUpdateSummary_CheckpointNotFound(t *testing.T) {
 	tempDir := t.TempDir()
 
