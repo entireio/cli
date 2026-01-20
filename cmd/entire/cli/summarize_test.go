@@ -352,7 +352,7 @@ Hope that helps!`
 func TestBuildCheckpointSummaryPrompt(t *testing.T) {
 	transcriptText := "User: Add a button\n\nAssistant: Done!"
 
-	prompt := buildCheckpointSummaryPrompt(transcriptText)
+	prompt := buildCheckpointSummaryPrompt(transcriptText, "")
 
 	// Should contain the transcript
 	if !strings.Contains(prompt, transcriptText) {
@@ -369,6 +369,20 @@ func TestBuildCheckpointSummaryPrompt(t *testing.T) {
 		if !strings.Contains(strings.ToLower(prompt), field) {
 			t.Errorf("Prompt should mention %s", field)
 		}
+	}
+
+	// Test with commit message
+	commitMessage := "feat: add dark mode toggle"
+	promptWithCommit := buildCheckpointSummaryPrompt(transcriptText, commitMessage)
+
+	// Should contain the commit message
+	if !strings.Contains(promptWithCommit, commitMessage) {
+		t.Error("Prompt should contain the commit message when provided")
+	}
+
+	// Should mention using commit message for outcome
+	if !strings.Contains(promptWithCommit, "commit message") {
+		t.Error("Prompt should mention using commit message to determine outcome")
 	}
 }
 

@@ -222,7 +222,7 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 			}
 			fmt.Fprintf(os.Stderr, "Generating summary for checkpoint %s...", shortID)
 
-			result := generateSummaryForCheckpointWithUsage(point.CheckpointID)
+			result := generateSummaryForCheckpointWithUsage(point.CheckpointID, commitMessages[point.CheckpointID])
 			if result != nil {
 				checkpoints[i].GeneratedSummary = result.Summary
 				checkpoints[i].UsedHeuristic = result.UsedFallback
@@ -265,10 +265,11 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 		}
 	}
 
-	// Generate branch-level summary if --generate and we have checkpoints with intents
+	// Generate or load branch-level summary
 	var branchSummary *Summary
 	var branchSummaryToSave *checkpoint.BranchSummary
 	if generate && len(checkpoints) > 0 {
+		// Generate new branch summary
 		fmt.Fprintf(os.Stderr, "Generating branch summary...\n")
 		result := generateBranchSummaryFromCheckpointsWithUsage(checkpoints)
 		if result != nil {
@@ -287,6 +288,9 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 				CheckpointIDs:   extractCheckpointIDs(checkpoints),
 			}
 		}
+	} else if len(checkpoints) > 0 {
+		// Load saved branch summary if available
+		branchSummary = loadSavedBranchSummary(branchName)
 	}
 
 	// Batch save all generated summaries and branch summary in a single commit
@@ -446,18 +450,46 @@ func extractCheckpointInfo(c *object.Commit, checkpointMessages map[string]strin
 		if checkpointID, found := strings.CutPrefix(line, trailerPrefix); found {
 			checkpointID = strings.TrimSpace(checkpointID)
 			if checkpointID != "" {
-				// Get the commit subject (first line of message)
-				subject := strings.Split(c.Message, "\n")[0]
+				// Get the full commit message (excluding trailers)
+				// Trailers are typically at the end after a blank line
+				message := extractCommitMessageBody(c.Message)
 				// If multiple commits share a checkpoint, concatenate messages
 				if existing, ok := checkpointMessages[checkpointID]; ok {
-					checkpointMessages[checkpointID] = existing + "; " + subject
+					checkpointMessages[checkpointID] = existing + "\n\n---\n\n" + message
 				} else {
-					checkpointMessages[checkpointID] = subject
+					checkpointMessages[checkpointID] = message
 				}
 			}
 			break // Only one checkpoint trailer per commit
 		}
 	}
+}
+
+// extractCommitMessageBody extracts the commit message without trailing metadata.
+// Removes lines that look like trailers (Key: Value format at end) and Co-Authored-By.
+func extractCommitMessageBody(message string) string {
+	lines := strings.Split(message, "\n")
+
+	// Find where trailers start (from the end, looking for Key: Value patterns)
+	trailerStart := len(lines)
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		// Check if it looks like a trailer (contains ": " and starts with a word)
+		if strings.Contains(line, ": ") && !strings.HasPrefix(line, " ") {
+			// Common trailers: Co-Authored-By, Entire-Checkpoint, Signed-off-by, etc.
+			trailerStart = i
+		} else {
+			// Non-trailer line found, stop
+			break
+		}
+	}
+
+	// Join lines up to trailer start, trimming trailing empty lines
+	result := strings.TrimRight(strings.Join(lines[:trailerStart], "\n"), "\n ")
+	return result
 }
 
 // formatBranchExplain formats the branch-level explain output.
@@ -536,6 +568,7 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, br
 				Outcome:       outcome,
 				IntentMarker:  intentMarker,
 				OutcomeMarker: outcomeMarker,
+				CommitMessage: cp.CommitMessage,
 			})
 
 			// In full mode, show the complete transcript
@@ -637,6 +670,7 @@ type checkpointFormatData struct {
 	Outcome       string
 	IntentMarker  string // "*" for heuristic, "^" for commit message
 	OutcomeMarker string
+	CommitMessage string // Git commit message associated with this checkpoint
 }
 
 // formatCheckpointDetail formats a single checkpoint's details for verbose output.
@@ -667,8 +701,11 @@ func formatCheckpointDetail(sb *strings.Builder, data checkpointFormatData) {
 	}
 	fmt.Fprintf(sb, "Transcript size: %d bytes\n", len(data.Transcript))
 	fmt.Fprintf(sb, "Files touched: %d\n", len(data.FilesTouched))
+	if data.CommitMessage != "" {
+		fmt.Fprintf(sb, "Commit: %s\n", data.CommitMessage)
+	}
 
-	// Parse transcript and show message counts
+	// Parse transcript and show message counts + preview
 	if data.Transcript != "" {
 		if transcript, err := parseTranscriptFromBytes([]byte(data.Transcript)); err == nil {
 			sb.WriteString("\n")
@@ -678,6 +715,15 @@ func formatCheckpointDetail(sb *strings.Builder, data checkpointFormatData) {
 			fmt.Fprintf(sb, "  Tool results: %d\n", toolResultCount)
 			fmt.Fprintf(sb, "  Assistant: %d\n", assistantCount)
 			fmt.Fprintf(sb, "  Other: %d\n", otherCount)
+
+			// Show formatted transcript preview (what gets sent to AI)
+			formatted := formatTranscriptForAI(transcript)
+			fmt.Fprintf(sb, "\nFormatted transcript size: %d bytes\n", len(formatted))
+			preview := formatted
+			if len(preview) > 500 {
+				preview = preview[:500] + "..."
+			}
+			fmt.Fprintf(sb, "\n--- Transcript Preview ---\n%s\n--- End Preview ---\n", preview)
 		}
 	}
 }
@@ -1200,6 +1246,26 @@ func loadCheckpointTranscript(checkpointID string) string {
 	return string(result.Transcript)
 }
 
+// loadSavedBranchSummary loads a previously saved branch summary from the checkpoint store.
+// Returns nil if no summary exists or an error occurs.
+func loadSavedBranchSummary(branchName string) *Summary {
+	repo, err := openRepository()
+	if err != nil {
+		return nil
+	}
+
+	store := checkpoint.NewGitStore(repo)
+	saved, err := store.ReadBranchSummary(context.Background(), branchName)
+	if err != nil || saved == nil {
+		return nil
+	}
+
+	return &Summary{
+		Intent:  saved.Intent,
+		Outcome: saved.Outcome,
+	}
+}
+
 // generateBranchSummaryFromCheckpointsWithUsage aggregates checkpoint intents into a branch-level summary
 // and returns token usage information.
 // Returns nil if summarization fails or there are no intents to summarize.
@@ -1235,8 +1301,9 @@ func generateBranchSummaryFromCheckpointsWithUsage(checkpoints []checkpointWithM
 
 // generateSummaryForCheckpointWithUsage loads a checkpoint's transcript and generates a summary
 // using AI summarization via Claude CLI. Falls back to heuristic extraction if AI fails.
+// If commitMessage is provided, it's included as context to help determine the outcome.
 // Returns nil if the transcript cannot be loaded or parsed.
-func generateSummaryForCheckpointWithUsage(checkpointID string) *SummaryResult {
+func generateSummaryForCheckpointWithUsage(checkpointID, commitMessage string) *SummaryResult {
 	repo, err := openRepository()
 	if err != nil {
 		return nil
@@ -1254,7 +1321,7 @@ func generateSummaryForCheckpointWithUsage(checkpointID string) *SummaryResult {
 	}
 
 	// Use AI summarization which falls back to heuristic extraction if Claude CLI unavailable
-	summaryResult, err := GenerateAISummaryWithUsage(context.Background(), transcript)
+	summaryResult, err := GenerateAISummaryWithUsage(context.Background(), transcript, commitMessage)
 	if err != nil {
 		return nil
 	}
@@ -1318,6 +1385,10 @@ func runExplainCheckpoint(w io.Writer, checkpointIDPrefix string, generate bool)
 		}
 	}
 
+	// Get commit message associated with this checkpoint
+	commitMessages := getBranchCheckpointInfo(repo)
+	commitMessage := commitMessages[fullCheckpointID]
+
 	// Use shared formatter for consistent output
 	var sb strings.Builder
 	formatCheckpointDetail(&sb, checkpointFormatData{
@@ -1331,28 +1402,12 @@ func runExplainCheckpoint(w io.Writer, checkpointIDPrefix string, generate bool)
 		Outcome:       outcome,
 		IntentMarker:  intentMarker,
 		OutcomeMarker: outcomeMarker,
+		CommitMessage: commitMessage,
 	})
 	fmt.Fprint(w, sb.String())
 
 	// Additional debugging info specific to --checkpoint mode
 	fmt.Fprintf(w, "\nFull ID: %s\n", fullCheckpointID)
-
-	// Parse transcript for additional debugging info
-	transcript, err := parseTranscriptFromBytes(result.Transcript)
-	if err != nil {
-		return fmt.Errorf("failed to parse transcript: %w", err)
-	}
-
-	// Format transcript for AI and show stats
-	formatted := formatTranscriptForAI(transcript)
-	fmt.Fprintf(w, "Formatted transcript size: %d bytes\n", len(formatted))
-
-	// Show first 500 chars of formatted transcript
-	preview := formatted
-	if len(preview) > 500 {
-		preview = preview[:500] + "..."
-	}
-	fmt.Fprintf(w, "\n--- Formatted Transcript Preview ---\n%s\n--- End Preview ---\n", preview)
 
 	// Only generate summary if --generate flag is set
 	if !generate {
@@ -1360,10 +1415,16 @@ func runExplainCheckpoint(w io.Writer, checkpointIDPrefix string, generate bool)
 		return nil
 	}
 
+	// Parse transcript for generation
+	transcript, err := parseTranscriptFromBytes(result.Transcript)
+	if err != nil {
+		return fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
 	// Generate summary with detailed output
 	fmt.Fprintf(w, "\nGenerating AI summary...\n")
 
-	summaryResult, err := GenerateAISummaryWithUsage(context.Background(), transcript)
+	summaryResult, err := GenerateAISummaryWithUsage(context.Background(), transcript, commitMessage)
 	if err != nil {
 		fmt.Fprintf(w, "Error: %v\n", err)
 		return nil
