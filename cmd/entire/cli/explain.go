@@ -61,6 +61,7 @@ type checkpointWithMeta struct {
 	Point            strategy.RewindPoint
 	Metadata         *checkpoint.CommittedMetadata
 	GeneratedSummary *Summary // Populated by --generate when no stored summary exists
+	UsedHeuristic    bool     // True if GeneratedSummary was created via heuristic fallback
 	Transcript       string   // Populated for --full mode
 	CommitMessage    string   // Fallback: git commit message(s) associated with this checkpoint
 }
@@ -202,6 +203,7 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 			result := generateSummaryForCheckpointWithUsage(point.CheckpointID)
 			if result != nil {
 				checkpoints[i].GeneratedSummary = result.Summary
+				checkpoints[i].UsedHeuristic = result.UsedFallback
 				totalInputTokens += result.InputTokens
 				totalOutputTokens += result.OutputTokens
 				generatedCount++
@@ -215,7 +217,11 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate, force bool
 
 				// Persist the generated summary to checkpoint metadata (only if non-empty)
 				if result.Summary != nil && (result.Summary.Intent != "" || result.Summary.Outcome != "") {
-					saveSummaryToCheckpoint(point.CheckpointID, result.Summary)
+					source := checkpoint.SummarySourceAI
+					if result.UsedFallback {
+						source = checkpoint.SummarySourceHeuristic
+					}
+					saveSummaryToCheckpoint(point.CheckpointID, result.Summary, source)
 				}
 			} else {
 				fmt.Fprintf(os.Stderr, " failed\n")
@@ -431,15 +437,15 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, br
 
 	// Branch-level intent/outcome - use AI summary if available
 	if branchSummary != nil && branchSummary.Intent != "" {
-		fmt.Fprintf(&sb, "Intent: %s\n", branchSummary.Intent)
+		fmt.Fprintf(&sb, "Intent:\n  %s\n", branchSummary.Intent)
 	} else {
-		sb.WriteString("Intent: (run with --generate to create summary)\n")
+		sb.WriteString("Intent:\n  (run with --generate to create summary)\n")
 	}
 
 	if branchSummary != nil && branchSummary.Outcome != "" {
-		fmt.Fprintf(&sb, "Outcome: %s\n", branchSummary.Outcome)
+		fmt.Fprintf(&sb, "Outcome:\n  %s\n", branchSummary.Outcome)
 	} else {
-		sb.WriteString("Outcome: (run with --generate to create summary)\n")
+		sb.WriteString("Outcome:\n  (run with --generate to create summary)\n")
 	}
 
 	sb.WriteString("\n")
@@ -455,10 +461,12 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, br
 		if len(id) > 12 {
 			id = id[:12]
 		}
-		fmt.Fprintf(&sb, "[%s] %s\n", id, point.Date.Format("2006-01-02 15:04"))
 
+		// Header line: [id] date (session-id in verbose mode)
 		if verbose && point.SessionID != "" {
-			fmt.Fprintf(&sb, "  Session: %s\n", point.SessionID)
+			fmt.Fprintf(&sb, "[%s] %s (%s)\n", id, point.Date.Format("2006-01-02 15:04"), point.SessionID)
+		} else {
+			fmt.Fprintf(&sb, "[%s] %s\n", id, point.Date.Format("2006-01-02 15:04"))
 		}
 
 		// In verbose mode, show the session prompt
@@ -472,30 +480,51 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, br
 		}
 
 		// Display intent - prefer stored metadata, then generated, then commit message, then placeholder
+		// Markers: * = heuristic fallback, ^ = commit message fallback
 		intent := "(not generated)"
+		intentMarker := ""
 		switch {
 		case meta != nil && meta.Intent != "":
 			intent = meta.Intent
+			// Check stored source for marker
+			switch meta.SummarySource {
+			case checkpoint.SummarySourceHeuristic:
+				intentMarker = "*"
+			case checkpoint.SummarySourceCommit:
+				intentMarker = "^"
+			}
 		case cp.GeneratedSummary != nil && cp.GeneratedSummary.Intent != "":
 			intent = cp.GeneratedSummary.Intent
+			if cp.UsedHeuristic {
+				intentMarker = "*"
+			}
 		case cp.CommitMessage != "":
 			// Use commit message as fallback (truncate if too long)
 			intent = cp.CommitMessage
 			if len(intent) > 80 {
 				intent = intent[:77] + "..."
 			}
+			intentMarker = "^" // Different marker for commit message fallback
 		}
-		fmt.Fprintf(&sb, "  Intent: %s\n", intent)
+		fmt.Fprintf(&sb, "  Intent:%s\n    %s\n", intentMarker, intent)
 
 		// Display outcome - prefer stored metadata, then generated, then placeholder
 		// (commit message doesn't make sense for outcome)
 		outcome := "(not generated)"
+		outcomeMarker := ""
 		if meta != nil && meta.Outcome != "" {
 			outcome = meta.Outcome
+			// Check stored source for marker
+			if meta.SummarySource == checkpoint.SummarySourceHeuristic {
+				outcomeMarker = "*"
+			}
 		} else if cp.GeneratedSummary != nil && cp.GeneratedSummary.Outcome != "" {
 			outcome = cp.GeneratedSummary.Outcome
+			if cp.UsedHeuristic {
+				outcomeMarker = "*"
+			}
 		}
-		fmt.Fprintf(&sb, "  Outcome: %s\n", outcome)
+		fmt.Fprintf(&sb, "  Outcome:%s\n    %s\n", outcomeMarker, outcome)
 
 		// In verbose mode, show files touched
 		if verbose && meta != nil && len(meta.FilesTouched) > 0 {
@@ -949,7 +978,8 @@ func loadCheckpointMetadata(checkpointID string) *checkpoint.CommittedMetadata {
 
 // saveSummaryToCheckpoint persists a generated summary to checkpoint metadata.
 // Errors are silently ignored since saving is best-effort (display still works).
-func saveSummaryToCheckpoint(checkpointID string, summary *Summary) {
+// source indicates how the summary was generated: "ai", "heuristic", or "commit".
+func saveSummaryToCheckpoint(checkpointID string, summary *Summary, source string) {
 	repo, err := openRepository()
 	if err != nil {
 		return
@@ -963,6 +993,7 @@ func saveSummaryToCheckpoint(checkpointID string, summary *Summary) {
 		Outcome:        summary.Outcome,
 		Learnings:      summary.Learnings,
 		FrictionPoints: summary.FrictionPoints,
+		SummarySource:  source,
 		AuthorName:     "Entire CLI",
 		AuthorEmail:    "cli@entire.io",
 	})

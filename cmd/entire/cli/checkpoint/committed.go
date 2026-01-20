@@ -715,6 +715,7 @@ func (s *GitStore) UpdateSummary(ctx context.Context, opts UpdateSummaryOptions)
 	existingMetadata.Outcome = opts.Outcome
 	existingMetadata.Learnings = opts.Learnings
 	existingMetadata.FrictionPoints = opts.FrictionPoints
+	existingMetadata.SummarySource = opts.SummarySource
 
 	// Write updated metadata
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(existingMetadata, "", "  ")

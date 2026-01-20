@@ -913,9 +913,9 @@ func TestFormatBranchExplain_WithVerbose(t *testing.T) {
 
 	output := formatBranchExplain("feature/test", checkpoints, nil, true, false, false, 0, 1)
 
-	// Verbose mode should show session ID
-	if !strings.Contains(output, "Session: 2026-01-19-session1") {
-		t.Errorf("expected session ID in verbose output, got:\n%s", output)
+	// Verbose mode should show session ID in header line (in parentheses)
+	if !strings.Contains(output, "(2026-01-19-session1)") {
+		t.Errorf("expected session ID in header line, got:\n%s", output)
 	}
 
 	// Verbose mode should show prompt
@@ -1131,12 +1131,12 @@ func TestFormatBranchExplain_WithMetadata(t *testing.T) {
 
 	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 1)
 
-	// Should display real intent from metadata
-	if !strings.Contains(output, "Intent: Add user authentication") {
+	// Should display real intent from metadata (now on separate line)
+	if !strings.Contains(output, "Intent:") || !strings.Contains(output, "Add user authentication") {
 		t.Errorf("expected real intent, got:\n%s", output)
 	}
-	// Should display real outcome from metadata
-	if !strings.Contains(output, "Outcome: Implemented JWT-based auth") {
+	// Should display real outcome from metadata (now on separate line)
+	if !strings.Contains(output, "Outcome:") || !strings.Contains(output, "Implemented JWT-based auth") {
 		t.Errorf("expected real outcome, got:\n%s", output)
 	}
 	// Should NOT show placeholder text for intent/outcome
@@ -1164,12 +1164,12 @@ func TestFormatBranchExplain_PartialMetadata(t *testing.T) {
 
 	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 1)
 
-	// Should display real intent
-	if !strings.Contains(output, "Intent: Fix login bug") {
+	// Should display real intent (now on separate line)
+	if !strings.Contains(output, "Intent:") || !strings.Contains(output, "Fix login bug") {
 		t.Errorf("expected real intent, got:\n%s", output)
 	}
-	// Should show placeholder for empty outcome
-	if !strings.Contains(output, "Outcome: (not generated)") {
+	// Should show placeholder for empty outcome (now on separate line)
+	if !strings.Contains(output, "Outcome:") || !strings.Contains(output, "(not generated)") {
 		t.Errorf("expected placeholder for empty outcome, got:\n%s", output)
 	}
 }
@@ -1190,12 +1190,14 @@ func TestFormatBranchExplain_NilMetadata(t *testing.T) {
 
 	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 1)
 
-	// Should show placeholders for both
-	if !strings.Contains(output, "Intent: (not generated)") {
+	// Should show placeholders for both (now on separate lines)
+	if !strings.Contains(output, "Intent:") || !strings.Contains(output, "(not generated)") {
 		t.Errorf("expected placeholder for intent with nil metadata, got:\n%s", output)
 	}
-	if !strings.Contains(output, "Outcome: (not generated)") {
-		t.Errorf("expected placeholder for outcome with nil metadata, got:\n%s", output)
+	// Count occurrences of "(not generated)" - should appear for both intent and outcome
+	notGenCount := strings.Count(output, "(not generated)")
+	if notGenCount < 2 {
+		t.Errorf("expected placeholder for both intent and outcome, got only %d placeholders:\n%s", notGenCount, output)
 	}
 }
 
@@ -1226,11 +1228,11 @@ func TestFormatBranchExplain_MixedMetadata(t *testing.T) {
 
 	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 2)
 
-	// First checkpoint should have real values
-	if !strings.Contains(output, "Intent: First checkpoint intent") {
+	// First checkpoint should have real values (now on separate lines)
+	if !strings.Contains(output, "First checkpoint intent") {
 		t.Errorf("expected first checkpoint intent, got:\n%s", output)
 	}
-	if !strings.Contains(output, "Outcome: First checkpoint outcome") {
+	if !strings.Contains(output, "First checkpoint outcome") {
 		t.Errorf("expected first checkpoint outcome, got:\n%s", output)
 	}
 
@@ -1262,12 +1264,12 @@ func TestFormatBranchExplain_WithGeneratedSummary(t *testing.T) {
 
 	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 1)
 
-	// Should display generated intent
-	if !strings.Contains(output, "Intent: Generated intent from transcript") {
+	// Should display generated intent (now on separate line)
+	if !strings.Contains(output, "Generated intent from transcript") {
 		t.Errorf("expected generated intent, got:\n%s", output)
 	}
-	// Should display generated outcome
-	if !strings.Contains(output, "Outcome: Generated outcome from transcript") {
+	// Should display generated outcome (now on separate line)
+	if !strings.Contains(output, "Generated outcome from transcript") {
 		t.Errorf("expected generated outcome, got:\n%s", output)
 	}
 	// Should NOT show placeholder text
@@ -1299,15 +1301,15 @@ func TestFormatBranchExplain_MetadataTakesPrecedenceOverGenerated(t *testing.T) 
 
 	output := formatBranchExplain("feature/test", checkpoints, nil, false, false, false, 0, 1)
 
-	// Should display stored intent, not generated
-	if !strings.Contains(output, "Intent: Stored intent") {
+	// Should display stored intent, not generated (now on separate line)
+	if !strings.Contains(output, "Stored intent") {
 		t.Errorf("expected stored intent, got:\n%s", output)
 	}
 	if strings.Contains(output, "Generated intent") {
 		t.Errorf("should not show generated intent when stored exists, got:\n%s", output)
 	}
-	// Should display stored outcome, not generated
-	if !strings.Contains(output, "Outcome: Stored outcome") {
+	// Should display stored outcome, not generated (now on separate line)
+	if !strings.Contains(output, "Stored outcome") {
 		t.Errorf("expected stored outcome, got:\n%s", output)
 	}
 	if strings.Contains(output, "Generated outcome") {
