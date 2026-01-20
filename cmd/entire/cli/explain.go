@@ -62,6 +62,7 @@ type checkpointWithMeta struct {
 	Metadata         *checkpoint.CommittedMetadata
 	GeneratedSummary *Summary // Populated by --generate when no stored summary exists
 	Transcript       string   // Populated for --full mode
+	CommitMessage    string   // Fallback: git commit message(s) associated with this checkpoint
 }
 
 func newExplainCmd() *cobra.Command {
@@ -155,10 +156,13 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 		allPoints = nil
 	}
 
+	// Map of checkpoint ID -> commit message (for fallback display)
+	var commitMessages map[string]string
+
 	// If no uncommitted rewind points, also check for committed checkpoints
 	// This shows the development history after work has been committed
 	if len(allPoints) == 0 {
-		allPoints = getCommittedCheckpointsAsRewindPoints()
+		allPoints, commitMessages = getCommittedCheckpointsAsRewindPoints()
 	}
 
 	totalCount := len(allPoints)
@@ -174,8 +178,9 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 	for i, point := range points {
 		meta := loadCheckpointMetadata(point.CheckpointID)
 		checkpoints[i] = checkpointWithMeta{
-			Point:    point,
-			Metadata: meta,
+			Point:         point,
+			Metadata:      meta,
+			CommitMessage: commitMessages[point.CheckpointID], // Fallback if no summary
 		}
 
 		// If --generate and no stored summary, generate one from transcript and save it
@@ -211,19 +216,20 @@ func runExplainDefault(w io.Writer, noPager, verbose, full, generate bool, limit
 // and converts them to RewindPoint format for display.
 // Only returns checkpoints that are associated with commits on the current branch
 // (by looking at Entire-Checkpoint trailers on code commits).
-func getCommittedCheckpointsAsRewindPoints() []strategy.RewindPoint {
+// Also returns a map of checkpoint ID -> commit message for fallback display.
+func getCommittedCheckpointsAsRewindPoints() ([]strategy.RewindPoint, map[string]string) {
 	repo, err := openRepository()
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
-	// Get checkpoint IDs from Entire-Checkpoint trailers on current branch commits
-	branchCheckpointIDs := getBranchCheckpointIDs(repo)
+	// Get checkpoint IDs and commit messages from Entire-Checkpoint trailers
+	checkpointMessages := getBranchCheckpointInfo(repo)
 
 	store := checkpoint.NewGitStore(repo)
 	committed, err := store.ListCommitted(context.Background())
 	if err != nil {
-		return nil
+		return nil, checkpointMessages
 	}
 
 	points := make([]strategy.RewindPoint, 0, len(committed))
@@ -234,7 +240,7 @@ func getCommittedCheckpointsAsRewindPoints() []strategy.RewindPoint {
 		}
 
 		// Filter: only include checkpoints that are linked to commits on this branch
-		if !branchCheckpointIDs[info.CheckpointID] {
+		if _, ok := checkpointMessages[info.CheckpointID]; !ok {
 			continue
 		}
 
@@ -248,17 +254,18 @@ func getCommittedCheckpointsAsRewindPoints() []strategy.RewindPoint {
 		})
 	}
 
-	return points
+	return points, checkpointMessages
 }
 
-// getBranchCheckpointIDs returns a set of checkpoint IDs that are associated with
-// commits on the current branch (by looking at Entire-Checkpoint trailers).
-func getBranchCheckpointIDs(repo *git.Repository) map[string]bool {
-	checkpointIDs := make(map[string]bool)
+// getBranchCheckpointInfo returns checkpoint IDs and their associated commit messages
+// for commits on the current branch (by looking at Entire-Checkpoint trailers).
+// Returns: map of checkpoint ID -> commit message (subject line)
+func getBranchCheckpointInfo(repo *git.Repository) map[string]string {
+	checkpointMessages := make(map[string]string)
 
 	head, err := repo.Head()
 	if err != nil {
-		return checkpointIDs
+		return checkpointMessages
 	}
 
 	// Find the merge-base with main/master to only include commits unique to this branch
@@ -268,7 +275,7 @@ func getBranchCheckpointIDs(repo *git.Repository) map[string]bool {
 	if mainRef == plumbing.ZeroHash {
 		iter, err := repo.Log(&git.LogOptions{From: head.Hash()})
 		if err != nil {
-			return checkpointIDs
+			return checkpointMessages
 		}
 		const maxCommits = 100
 		count := 0
@@ -277,33 +284,33 @@ func getBranchCheckpointIDs(repo *git.Repository) map[string]bool {
 				return errors.New("limit reached")
 			}
 			count++
-			extractCheckpointID(c.Message, checkpointIDs)
+			extractCheckpointInfo(c, checkpointMessages)
 			return nil
 		})
-		return checkpointIDs
+		return checkpointMessages
 	}
 
 	// Find merge-base between HEAD and main using go-git's native method
 	headCommit, err := repo.CommitObject(head.Hash())
 	if err != nil {
-		return checkpointIDs
+		return checkpointMessages
 	}
 
 	mainCommit, err := repo.CommitObject(mainRef)
 	if err != nil {
-		return checkpointIDs
+		return checkpointMessages
 	}
 
 	mergeBaseCommits, err := headCommit.MergeBase(mainCommit)
 	if err != nil || len(mergeBaseCommits) == 0 {
-		return checkpointIDs
+		return checkpointMessages
 	}
 	mergeBase := mergeBaseCommits[0].Hash
 
 	// Walk from HEAD back to merge-base, collecting checkpoint IDs from trailers
 	iter, err := repo.Log(&git.LogOptions{From: head.Hash()})
 	if err != nil {
-		return checkpointIDs
+		return checkpointMessages
 	}
 
 	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Sentinel error stops iteration
@@ -311,22 +318,29 @@ func getBranchCheckpointIDs(repo *git.Repository) map[string]bool {
 		if c.Hash == mergeBase {
 			return errors.New("reached merge-base")
 		}
-		extractCheckpointID(c.Message, checkpointIDs)
+		extractCheckpointInfo(c, checkpointMessages)
 		return nil
 	})
 
-	return checkpointIDs
+	return checkpointMessages
 }
 
-// extractCheckpointID extracts the Entire-Checkpoint trailer value from a commit message
-// and adds it to the checkpointIDs map.
-func extractCheckpointID(message string, checkpointIDs map[string]bool) {
+// extractCheckpointInfo extracts the Entire-Checkpoint trailer and commit subject
+// and adds them to the checkpointMessages map.
+func extractCheckpointInfo(c *object.Commit, checkpointMessages map[string]string) {
 	const trailerPrefix = "Entire-Checkpoint: "
-	for _, line := range strings.Split(message, "\n") {
+	for _, line := range strings.Split(c.Message, "\n") {
 		if checkpointID, found := strings.CutPrefix(line, trailerPrefix); found {
 			checkpointID = strings.TrimSpace(checkpointID)
 			if checkpointID != "" {
-				checkpointIDs[checkpointID] = true
+				// Get the commit subject (first line of message)
+				subject := strings.Split(c.Message, "\n")[0]
+				// If multiple commits share a checkpoint, concatenate messages
+				if existing, ok := checkpointMessages[checkpointID]; ok {
+					checkpointMessages[checkpointID] = existing + "; " + subject
+				} else {
+					checkpointMessages[checkpointID] = subject
+				}
 			}
 			break // Only one checkpoint trailer per commit
 		}
@@ -388,16 +402,24 @@ func formatBranchExplain(branchName string, checkpoints []checkpointWithMeta, ve
 			fmt.Fprintf(&sb, "  Prompt: %s\n", prompt)
 		}
 
-		// Display intent - prefer stored metadata, then generated, then placeholder
+		// Display intent - prefer stored metadata, then generated, then commit message, then placeholder
 		intent := "(not generated)"
-		if meta != nil && meta.Intent != "" {
+		switch {
+		case meta != nil && meta.Intent != "":
 			intent = meta.Intent
-		} else if cp.GeneratedSummary != nil && cp.GeneratedSummary.Intent != "" {
+		case cp.GeneratedSummary != nil && cp.GeneratedSummary.Intent != "":
 			intent = cp.GeneratedSummary.Intent
+		case cp.CommitMessage != "":
+			// Use commit message as fallback (truncate if too long)
+			intent = cp.CommitMessage
+			if len(intent) > 80 {
+				intent = intent[:77] + "..."
+			}
 		}
 		fmt.Fprintf(&sb, "  Intent: %s\n", intent)
 
 		// Display outcome - prefer stored metadata, then generated, then placeholder
+		// (commit message doesn't make sense for outcome)
 		outcome := "(not generated)"
 		if meta != nil && meta.Outcome != "" {
 			outcome = meta.Outcome
