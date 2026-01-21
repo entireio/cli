@@ -350,7 +350,22 @@ func commitGeminiSession(ctx *geminiSessionContext) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load pre-prompt state: %v\n", err)
 	}
 	if preState != nil {
-		fmt.Fprintf(os.Stderr, "Loaded pre-prompt state: %d pre-existing untracked files\n", len(preState.UntrackedFiles))
+		fmt.Fprintf(os.Stderr, "Loaded pre-prompt state: %d pre-existing untracked files, start message index: %d\n", len(preState.UntrackedFiles), preState.StartMessageIndex)
+	}
+
+	// Calculate token usage for this prompt/response cycle (Gemini-specific)
+	if ctx.transcriptPath != "" {
+		startIndex := 0
+		if preState != nil {
+			startIndex = preState.StartMessageIndex
+		}
+		tokenUsage, tokenErr := geminicli.CalculateTokenUsageFromFile(ctx.transcriptPath, startIndex)
+		if tokenErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to calculate token usage: %v\n", tokenErr)
+		} else if tokenUsage != nil && tokenUsage.APICallCount > 0 {
+			fmt.Fprintf(os.Stderr, "Token usage for this checkpoint: input=%d, output=%d, cache_read=%d, api_calls=%d\n",
+				tokenUsage.InputTokens, tokenUsage.OutputTokens, tokenUsage.CacheReadTokens, tokenUsage.APICallCount)
+		}
 	}
 
 	newFiles, err := ComputeNewFiles(preState)
@@ -600,8 +615,10 @@ func handleGeminiBeforeAgent() error {
 		return nil
 	}
 
-	// Capture pre-prompt state (same as Claude Code's captureInitialState)
-	if err := CapturePrePromptState(entireSessionID); err != nil {
+	// Capture pre-prompt state with transcript position (Gemini-specific)
+	// This captures both untracked files and the current transcript message count
+	// so we can calculate token usage for just this prompt/response cycle
+	if err := CaptureGeminiPrePromptState(entireSessionID, input.SessionRef); err != nil {
 		return fmt.Errorf("failed to capture pre-prompt state: %w", err)
 	}
 

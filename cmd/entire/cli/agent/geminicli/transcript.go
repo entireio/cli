@@ -3,6 +3,7 @@ package geminicli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 )
 
 // Transcript parsing types - Gemini CLI uses JSON format for session storage
@@ -165,4 +166,108 @@ func ExtractLastAssistantMessageFromTranscript(transcript *GeminiTranscript) str
 		}
 	}
 	return ""
+}
+
+// TranscriptPosition holds the position information for a Gemini transcript
+type TranscriptPosition struct {
+	MessageCount int // Total number of messages
+}
+
+// GetTranscriptPosition reads a Gemini transcript file and returns the message count.
+// Returns empty position if file doesn't exist or is empty.
+// For Gemini, position is based on message count (not lines like Claude Code's JSONL).
+func GetTranscriptPosition(path string) (TranscriptPosition, error) {
+	if path == "" {
+		return TranscriptPosition{}, nil
+	}
+
+	data, err := os.ReadFile(path) //nolint:gosec // Reading from controlled transcript path
+	if err != nil {
+		if os.IsNotExist(err) {
+			return TranscriptPosition{}, nil
+		}
+		return TranscriptPosition{}, fmt.Errorf("failed to read transcript: %w", err)
+	}
+
+	if len(data) == 0 {
+		return TranscriptPosition{}, nil
+	}
+
+	transcript, err := ParseTranscript(data)
+	if err != nil {
+		return TranscriptPosition{}, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
+	return TranscriptPosition{
+		MessageCount: len(transcript.Messages),
+	}, nil
+}
+
+// TokenUsage represents aggregated token usage for a checkpoint
+type TokenUsage struct {
+	// InputTokens is the number of input tokens (fresh, not from cache)
+	InputTokens int `json:"input_tokens"`
+	// OutputTokens is the number of output tokens generated
+	OutputTokens int `json:"output_tokens"`
+	// CacheReadTokens is the number of tokens read from cache
+	CacheReadTokens int `json:"cache_read_tokens"`
+	// APICallCount is the number of API calls made
+	APICallCount int `json:"api_call_count"`
+}
+
+// CalculateTokenUsage calculates token usage from a Gemini transcript.
+// This is specific to Gemini's API format where each message may have a tokens object
+// with input, output, cached, thoughts, tool, and total counts.
+// Only processes messages from startMessageIndex onwards (0-indexed).
+func CalculateTokenUsage(data []byte, startMessageIndex int) *TokenUsage {
+	var transcript struct {
+		Messages []geminiMessageWithTokens `json:"messages"`
+	}
+
+	if err := json.Unmarshal(data, &transcript); err != nil {
+		return &TokenUsage{}
+	}
+
+	usage := &TokenUsage{}
+
+	for i, msg := range transcript.Messages {
+		// Skip messages before startMessageIndex
+		if i < startMessageIndex {
+			continue
+		}
+
+		// Only count tokens from gemini (assistant) messages
+		if msg.Type != MessageTypeGemini {
+			continue
+		}
+
+		if msg.Tokens == nil {
+			continue
+		}
+
+		usage.APICallCount++
+		usage.InputTokens += msg.Tokens.Input
+		usage.OutputTokens += msg.Tokens.Output
+		usage.CacheReadTokens += msg.Tokens.Cached
+	}
+
+	return usage
+}
+
+// CalculateTokenUsageFromFile calculates token usage from a Gemini transcript file.
+// If startMessageIndex > 0, only considers messages from that index onwards.
+func CalculateTokenUsageFromFile(path string, startMessageIndex int) (*TokenUsage, error) {
+	if path == "" {
+		return &TokenUsage{}, nil
+	}
+
+	data, err := os.ReadFile(path) //nolint:gosec // Reading from controlled transcript path
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &TokenUsage{}, nil
+		}
+		return nil, fmt.Errorf("failed to read transcript: %w", err)
+	}
+
+	return CalculateTokenUsage(data, startMessageIndex), nil
 }

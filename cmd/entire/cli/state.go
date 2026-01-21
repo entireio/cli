@@ -20,6 +20,10 @@ type PrePromptState struct {
 	SessionID      string   `json:"session_id"`
 	Timestamp      string   `json:"timestamp"`
 	UntrackedFiles []string `json:"untracked_files"`
+	// StartMessageIndex is the message count in the transcript when this state
+	// was captured. Used for calculating token usage since the prompt started.
+	// Only set for Gemini sessions. Zero means not set or session just started.
+	StartMessageIndex int `json:"start_message_index"`
 }
 
 // CapturePrePromptState captures current untracked files before a prompt
@@ -65,6 +69,68 @@ func CapturePrePromptState(sessionID string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "Captured state before prompt: %d untracked files\n", len(untrackedFiles))
+	return nil
+}
+
+// CaptureGeminiPrePromptState captures current untracked files and transcript position
+// before a prompt for Gemini sessions. This is called by the BeforeAgent hook.
+// The transcriptPath is the path to the Gemini session transcript (JSON format).
+func CaptureGeminiPrePromptState(sessionID, transcriptPath string) error {
+	if sessionID == "" {
+		sessionID = unknownSessionID
+	}
+
+	// Get absolute path for tmp directory
+	tmpDirAbs, err := paths.AbsPath(paths.EntireTmpDir)
+	if err != nil {
+		tmpDirAbs = paths.EntireTmpDir // Fallback to relative
+	}
+
+	// Create tmp directory if it doesn't exist
+	if err := os.MkdirAll(tmpDirAbs, 0o750); err != nil {
+		return fmt.Errorf("failed to create tmp directory: %w", err)
+	}
+
+	// Get list of untracked files (excluding .entire directory itself)
+	untrackedFiles, err := getUntrackedFilesForState()
+	if err != nil {
+		return fmt.Errorf("failed to get untracked files: %w", err)
+	}
+
+	// Get transcript position (message count) for Gemini
+	var startMessageIndex int
+	if transcriptPath != "" {
+		// Import function is in geminicli package, but to avoid circular import,
+		// we'll just count messages directly here using the same logic
+		if data, readErr := os.ReadFile(transcriptPath); readErr == nil && len(data) > 0 { //nolint:gosec // Reading from controlled transcript path
+			var transcript struct {
+				Messages []any `json:"messages"`
+			}
+			if jsonErr := json.Unmarshal(data, &transcript); jsonErr == nil {
+				startMessageIndex = len(transcript.Messages)
+			}
+		}
+	}
+
+	// Create state file
+	stateFile := prePromptStateFile(sessionID)
+	state := PrePromptState{
+		SessionID:         sessionID,
+		Timestamp:         time.Now().UTC().Format(time.RFC3339),
+		UntrackedFiles:    untrackedFiles,
+		StartMessageIndex: startMessageIndex,
+	}
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal state: %w", err)
+	}
+
+	if err := os.WriteFile(stateFile, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write state file: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Captured Gemini state before prompt: %d untracked files, transcript position: %d\n", len(untrackedFiles), startMessageIndex)
 	return nil
 }
 

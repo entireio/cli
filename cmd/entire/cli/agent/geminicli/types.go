@@ -96,3 +96,22 @@ var FileModificationTools = []string{
 	ToolSaveFile,
 	ToolReplace,
 }
+
+// geminiMessageTokens represents token usage from a Gemini API response.
+// This is specific to Gemini's API format where each message has a tokens object.
+type geminiMessageTokens struct {
+	Input    int `json:"input"`
+	Output   int `json:"output"`
+	Cached   int `json:"cached"`
+	Thoughts int `json:"thoughts"`
+	Tool     int `json:"tool"`
+	Total    int `json:"total"`
+}
+
+// geminiMessageWithTokens represents a Gemini message with token usage data.
+// Used for extracting token counts from Gemini transcripts.
+type geminiMessageWithTokens struct {
+	ID     string               `json:"id"`
+	Type   string               `json:"type"`
+	Tokens *geminiMessageTokens `json:"tokens,omitempty"`
+}
