@@ -1220,6 +1220,17 @@ func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 	return name, email
 }
 
+// GetCurrentBranchName returns the short name of the current branch if HEAD points to a branch.
+// Returns an empty string if in detached HEAD state or if there's an error reading HEAD.
+// This is used to capture branch metadata for checkpoints.
+func GetCurrentBranchName(repo *git.Repository) string {
+	head, err := repo.Head()
+	if err != nil || !head.Name().IsBranch() {
+		return ""
+	}
+	return head.Name().Short()
+}
+
 // getMainBranchHash returns the hash of the main branch (main or master).
 // Returns ZeroHash if no main branch is found.
 func GetMainBranchHash(repo *git.Repository) plumbing.Hash {

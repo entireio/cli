@@ -308,6 +308,7 @@ func (s *GitStore) writeMetadataJSON(opts WriteCommittedOptions, basePath string
 		SessionID:              opts.SessionID,
 		Strategy:               opts.Strategy,
 		CreatedAt:              time.Now(),
+		Branch:                 opts.Branch,
 		CheckpointsCount:       opts.CheckpointsCount,
 		FilesTouched:           opts.FilesTouched,
 		Agent:                  opts.Agent,
@@ -499,14 +500,18 @@ func (s *GitStore) readArchivedSessions(checkpointTree *object.Tree, sessionCoun
 }
 
 // buildCommitMessage constructs the commit message with proper trailers.
+// The commit subject is always "Checkpoint: <id>" for consistency.
+// If CommitSubject is provided (e.g., for task checkpoints), it's included in the body.
 func (s *GitStore) buildCommitMessage(opts WriteCommittedOptions, taskMetadataPath string) string {
 	var commitMsg strings.Builder
 
-	// Use custom subject if provided
+	// Subject line is always the checkpoint ID for consistent formatting
+	commitMsg.WriteString(fmt.Sprintf("Checkpoint: %s\n\n", opts.CheckpointID))
+
+	// Include custom description in body if provided (e.g., task checkpoint details)
 	if opts.CommitSubject != "" {
 		commitMsg.WriteString(opts.CommitSubject + "\n\n")
 	}
-	commitMsg.WriteString(fmt.Sprintf("Checkpoint: %s\n\n", opts.CheckpointID))
 	commitMsg.WriteString(fmt.Sprintf("%s: %s\n", paths.SessionTrailerKey, opts.SessionID))
 	commitMsg.WriteString(fmt.Sprintf("%s: %s\n", paths.StrategyTrailerKey, opts.Strategy))
 	if opts.Agent != "" {

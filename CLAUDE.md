@@ -272,23 +272,86 @@ When multiple sessions are condensed to the same checkpoint (same base commit):
 <session-id>.json            # Active session state (base_commit, checkpoint_count, etc.)
 ```
 
+#### Checkpoint ID Linking
+
+Both strategies use a **12-hex-char random checkpoint ID** (e.g., `a3b2c4d5e6f7`) as the stable identifier linking user commits to metadata.
+
+**How checkpoint IDs work:**
+
+1. **Generated once per checkpoint**: Either when saving (auto-commit) or when condensing (manual-commit)
+
+2. **Added to user commits** via `Entire-Checkpoint` trailer:
+   - **Auto-commit**: Added programmatically when creating the commit
+   - **Manual-commit**: Added via `prepare-commit-msg` hook (user can remove it before committing)
+
+3. **Used for directory sharding** on `entire/sessions` branch:
+   - Path format: `<id[:2]>/<id[2:]>/`
+   - Example: `a3b2c4d5e6f7` → `a3/b2c4d5e6f7/`
+   - Creates 256 shards to avoid directory bloat
+
+4. **Appears in commit subject** on `entire/sessions` commits:
+   - Format: `Checkpoint: a3b2c4d5e6f7`
+   - Makes `git log entire/sessions` readable and searchable
+
+**Bidirectional linking:**
+
+```
+User commit → Metadata (two approaches):
+  Approach 1: Extract "Entire-Checkpoint: a3b2c4d5e6f7" trailer
+              → Look up a3/b2c4d5e6f7/ directory on entire/sessions branch
+
+  Approach 2: Extract "Entire-Checkpoint: a3b2c4d5e6f7" trailer
+              → Search entire/sessions commit history for "Checkpoint: a3b2c4d5e6f7" subject
+
+Metadata → User commits:
+  Given checkpoint ID a3b2c4d5e6f7
+  → Search user branch history for commits with "Entire-Checkpoint: a3b2c4d5e6f7" trailer
+```
+
+**Example:**
+```
+User's commit (on main branch):
+  "Implement login feature
+
+  Entire-Checkpoint: a3b2c4d5e6f7"
+       ↓ ↑
+       Linked via checkpoint ID
+       ↓ ↑
+entire/sessions commit:
+  Subject: "Checkpoint: a3b2c4d5e6f7"
+
+  Tree: a3/b2c4d5e6f7/
+    ├── metadata.json (checkpoint_id: "a3b2c4d5e6f7")
+    ├── full.jsonl (session transcript)
+    ├── prompt.txt
+    └── context.md
+```
+
 #### Commit Trailers
 
-**On active branch commits (auto-commit strategy only):**
+**On user's active branch commits (both strategies):**
 - `Entire-Checkpoint: <checkpoint-id>` - 12-hex-char ID linking to metadata on `entire/sessions`
+  - Auto-commit: Always added when creating commits
+  - Manual-commit: Added by hook; user can remove to skip linking
 
-**On shadow branch commits (`entire/<commit-hash>`):**
+**On shadow branch commits (`entire/<commit-hash>`) - manual-commit only:**
 - `Entire-Session: <session-id>` - Session identifier
 - `Entire-Metadata: <path>` - Path to metadata directory within the tree
-- `Entire-Task-Metadata: <path>` - Path to task metadata directory
+- `Entire-Task-Metadata: <path>` - Path to task metadata directory (for task checkpoints)
 - `Entire-Strategy: manual-commit` - Strategy that created the commit
 
-**On metadata branch commits (`entire/sessions`):**
-- `Entire-Session: <session-id>` - Session identifier
-- `Entire-Strategy: <strategy>` - Strategy that created the checkpoint
-- `Commit: <short-sha>` - Code commit this checkpoint relates to (manual-commit strategy)
+**On metadata branch commits (`entire/sessions`) - both strategies:**
 
-**Note:** Both strategies keep active branch history **clean**. Manual-commit strategy never creates commits on the active branch. Auto-commit strategy creates commits with only the `Entire-Checkpoint` trailer. All detailed metadata is stored on the `entire/sessions` orphan branch or shadow branches.
+Commit subject: `Checkpoint: <checkpoint-id>` (or custom subject for task checkpoints)
+
+Trailers:
+- `Entire-Session: <session-id>` - Session identifier
+- `Entire-Strategy: <strategy>` - Strategy name (manual-commit or auto-commit)
+- `Entire-Agent: <agent-name>` - Agent name (optional, e.g., "Claude Code")
+- `Ephemeral-branch: <branch>` - Shadow branch name (optional, manual-commit only)
+- `Entire-Metadata-Task: <path>` - Task metadata path (optional, for task checkpoints)
+
+**Note:** Both strategies keep active branch history **clean** - the only addition to user commits is the single `Entire-Checkpoint` trailer. Manual-commit never creates commits on the active branch (user creates them manually). Auto-commit creates commits but only adds the checkpoint trailer. All detailed session data (transcripts, prompts, context) is stored on the `entire/sessions` orphan branch or shadow branches.
 
 #### Multi-Session Behavior
 

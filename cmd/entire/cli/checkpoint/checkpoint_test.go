@@ -182,3 +182,169 @@ func TestWriteCommitted_AgentField(t *testing.T) {
 			paths.AgentTrailerKey, agentName, commit.Message)
 	}
 }
+
+// setupBranchTestRepo creates a test repository with an initial commit.
+func setupBranchTestRepo(t *testing.T) (*git.Repository, plumbing.Hash) {
+	t.Helper()
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	commitHash, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	return repo, commitHash
+}
+
+// verifyBranchInMetadata reads and verifies the branch field in metadata.json.
+func verifyBranchInMetadata(t *testing.T, repo *git.Repository, checkpointID, expectedBranch string, shouldOmit bool) {
+	t.Helper()
+
+	metadataRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get metadata branch reference: %v", err)
+	}
+
+	commit, err := repo.CommitObject(metadataRef.Hash())
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	shardedPath := paths.CheckpointPath(checkpointID)
+	metadataPath := shardedPath + "/" + paths.MetadataFileName
+	metadataFile, err := tree.File(metadataPath)
+	if err != nil {
+		t.Fatalf("failed to find metadata.json at %s: %v", metadataPath, err)
+	}
+
+	content, err := metadataFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read metadata.json: %v", err)
+	}
+
+	var metadata CommittedMetadata
+	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
+		t.Fatalf("failed to parse metadata.json: %v", err)
+	}
+
+	if metadata.Branch != expectedBranch {
+		t.Errorf("metadata.Branch = %q, want %q", metadata.Branch, expectedBranch)
+	}
+
+	if shouldOmit && strings.Contains(content, `"branch"`) {
+		t.Errorf("metadata.json should not contain 'branch' field when empty (omitempty), got:\n%s", content)
+	}
+}
+
+// TestWriteCommitted_BranchField verifies that the Branch field is correctly
+// captured in metadata.json when on a branch, and is empty when in detached HEAD.
+func TestWriteCommitted_BranchField(t *testing.T) {
+	t.Run("on branch", func(t *testing.T) {
+		repo, commitHash := setupBranchTestRepo(t)
+
+		// Create a feature branch and switch to it
+		branchName := "feature/test-branch"
+		branchRef := plumbing.NewBranchReferenceName(branchName)
+		ref := plumbing.NewHashReference(branchRef, commitHash)
+		if err := repo.Storer.SetReference(ref); err != nil {
+			t.Fatalf("failed to create branch: %v", err)
+		}
+
+		worktree, err := repo.Worktree()
+		if err != nil {
+			t.Fatalf("failed to get worktree: %v", err)
+		}
+		if err := worktree.Checkout(&git.CheckoutOptions{Branch: branchRef}); err != nil {
+			t.Fatalf("failed to checkout branch: %v", err)
+		}
+
+		// Get current branch name
+		var currentBranch string
+		head, err := repo.Head()
+		if err == nil && head.Name().IsBranch() {
+			currentBranch = head.Name().Short()
+		}
+
+		// Write a committed checkpoint with branch information
+		checkpointID := "a1b2c3d4e5f6"
+		store := NewGitStore(repo)
+		err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
+			CheckpointID: checkpointID,
+			SessionID:    "test-session-123",
+			Strategy:     "manual-commit",
+			Branch:       currentBranch,
+			Transcript:   []byte("test transcript content"),
+			AuthorName:   "Test Author",
+			AuthorEmail:  "test@example.com",
+		})
+		if err != nil {
+			t.Fatalf("WriteCommitted() error = %v", err)
+		}
+
+		verifyBranchInMetadata(t, repo, checkpointID, branchName, false)
+	})
+
+	t.Run("detached HEAD", func(t *testing.T) {
+		repo, commitHash := setupBranchTestRepo(t)
+
+		// Checkout the commit directly (detached HEAD)
+		worktree, err := repo.Worktree()
+		if err != nil {
+			t.Fatalf("failed to get worktree: %v", err)
+		}
+		if err := worktree.Checkout(&git.CheckoutOptions{Hash: commitHash}); err != nil {
+			t.Fatalf("failed to checkout commit: %v", err)
+		}
+
+		// Verify we're in detached HEAD
+		head, err := repo.Head()
+		if err != nil {
+			t.Fatalf("failed to get HEAD: %v", err)
+		}
+		if head.Name().IsBranch() {
+			t.Fatalf("expected detached HEAD, but on branch %s", head.Name().Short())
+		}
+
+		// Write a committed checkpoint (branch should be empty in detached HEAD)
+		checkpointID := "b2c3d4e5f6a7"
+		store := NewGitStore(repo)
+		err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
+			CheckpointID: checkpointID,
+			SessionID:    "test-session-456",
+			Strategy:     "manual-commit",
+			Branch:       "", // Empty when in detached HEAD
+			Transcript:   []byte("test transcript content"),
+			AuthorName:   "Test Author",
+			AuthorEmail:  "test@example.com",
+		})
+		if err != nil {
+			t.Fatalf("WriteCommitted() error = %v", err)
+		}
+
+		verifyBranchInMetadata(t, repo, checkpointID, "", true)
+	})
+}

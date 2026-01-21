@@ -161,6 +161,9 @@ type WriteCommittedOptions struct {
 	// Strategy is the name of the strategy that created this checkpoint
 	Strategy string
 
+	// Branch is the branch name where the checkpoint was created (empty if detached HEAD)
+	Branch string
+
 	// Transcript is the session transcript content (full.jsonl)
 	Transcript []byte
 
@@ -293,6 +296,7 @@ type CommittedMetadata struct {
 	SessionID        string    `json:"session_id"`
 	Strategy         string    `json:"strategy"`
 	CreatedAt        time.Time `json:"created_at"`
+	Branch           string    `json:"branch,omitempty"` // Branch where checkpoint was created (empty if detached HEAD)
 	CheckpointsCount int       `json:"checkpoints_count"`
 	FilesTouched     []string  `json:"files_touched"`
 

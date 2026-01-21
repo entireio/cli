@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -186,6 +187,105 @@ func TestGetMainRepoRoot(t *testing.T) {
 
 		if root != tmpDir {
 			t.Errorf("GetMainRepoRoot() = %q, want %q", root, tmpDir)
+		}
+	})
+}
+
+func TestGetCurrentBranchName(t *testing.T) {
+	t.Run("on branch", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		repo, err := git.PlainInit(tmpDir, false)
+		if err != nil {
+			t.Fatalf("failed to init repo: %v", err)
+		}
+
+		// Create initial commit
+		testFile := filepath.Join(tmpDir, "test.txt")
+		if err := os.WriteFile(testFile, []byte("test"), 0o644); err != nil {
+			t.Fatalf("failed to write file: %v", err)
+		}
+
+		wt, err := repo.Worktree()
+		if err != nil {
+			t.Fatalf("failed to get worktree: %v", err)
+		}
+
+		if _, err := wt.Add("test.txt"); err != nil {
+			t.Fatalf("failed to add file: %v", err)
+		}
+
+		if _, err := wt.Commit("Initial commit", &git.CommitOptions{
+			Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+		}); err != nil {
+			t.Fatalf("failed to commit: %v", err)
+		}
+
+		// Should be on default branch (master or main)
+		branchName := GetCurrentBranchName(repo)
+		if branchName == "" {
+			t.Error("GetCurrentBranchName() returned empty string, expected branch name")
+		}
+
+		// Create and checkout a new branch
+		head, err := repo.Head()
+		if err != nil {
+			t.Fatalf("failed to get HEAD: %v", err)
+		}
+
+		newBranch := "feature/test-branch"
+		if err := wt.Checkout(&git.CheckoutOptions{
+			Branch: plumbing.NewBranchReferenceName(newBranch),
+			Create: true,
+			Hash:   head.Hash(),
+		}); err != nil {
+			t.Fatalf("failed to checkout branch: %v", err)
+		}
+
+		// Should return the new branch name
+		branchName = GetCurrentBranchName(repo)
+		if branchName != newBranch {
+			t.Errorf("GetCurrentBranchName() = %q, want %q", branchName, newBranch)
+		}
+	})
+
+	t.Run("detached HEAD", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		repo, err := git.PlainInit(tmpDir, false)
+		if err != nil {
+			t.Fatalf("failed to init repo: %v", err)
+		}
+
+		// Create initial commit
+		testFile := filepath.Join(tmpDir, "test.txt")
+		if err := os.WriteFile(testFile, []byte("test"), 0o644); err != nil {
+			t.Fatalf("failed to write file: %v", err)
+		}
+
+		wt, err := repo.Worktree()
+		if err != nil {
+			t.Fatalf("failed to get worktree: %v", err)
+		}
+
+		if _, err := wt.Add("test.txt"); err != nil {
+			t.Fatalf("failed to add file: %v", err)
+		}
+
+		commitHash, err := wt.Commit("Initial commit", &git.CommitOptions{
+			Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+		})
+		if err != nil {
+			t.Fatalf("failed to commit: %v", err)
+		}
+
+		// Checkout the commit directly (detached HEAD)
+		if err := wt.Checkout(&git.CheckoutOptions{Hash: commitHash}); err != nil {
+			t.Fatalf("failed to checkout commit: %v", err)
+		}
+
+		// Should return empty string for detached HEAD
+		branchName := GetCurrentBranchName(repo)
+		if branchName != "" {
+			t.Errorf("GetCurrentBranchName() = %q, want empty string for detached HEAD", branchName)
 		}
 	})
 }

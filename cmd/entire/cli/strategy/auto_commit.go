@@ -214,7 +214,7 @@ func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveCo
 // Metadata is stored at sharded path: <checkpointID[:2]>/<checkpointID[2:]>/
 // This allows direct lookup from the checkpoint ID trailer on the code commit.
 // Uses checkpoint.WriteCommitted for git operations.
-func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(_ *git.Repository, ctx SaveContext, checkpointID string) (plumbing.Hash, error) {
+func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository, ctx SaveContext, checkpointID string) (plumbing.Hash, error) {
 	store, err := s.getCheckpointStore()
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to get checkpoint store: %w", err)
@@ -223,12 +223,16 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(_ *git.Repository, c
 	// Extract session ID from metadata dir
 	sessionID := filepath.Base(ctx.MetadataDir)
 
+	// Get current branch name
+	branchName := GetCurrentBranchName(repo)
+
 	// Write committed checkpoint using the checkpoint store
 	err = store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
 		CheckpointID:           checkpointID,
 		SessionID:              sessionID,
 		Strategy:               StrategyNameAutoCommit, // Use new strategy name
-		MetadataDir:            ctx.MetadataDirAbs,     // Copy all files from metadata dir
+		Branch:                 branchName,
+		MetadataDir:            ctx.MetadataDirAbs, // Copy all files from metadata dir
 		AuthorName:             ctx.AuthorName,
 		AuthorEmail:            ctx.AuthorEmail,
 		Agent:                  ctx.AgentType,
@@ -700,7 +704,7 @@ func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx Ta
 // Returns the metadata commit hash.
 // When IsIncremental is true, only writes the incremental checkpoint file, skipping transcripts.
 // Uses checkpoint.WriteCommitted for git operations.
-func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(_ *git.Repository, ctx TaskCheckpointContext, checkpointID string) (plumbing.Hash, error) {
+func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(repo *git.Repository, ctx TaskCheckpointContext, checkpointID string) (plumbing.Hash, error) {
 	store, err := s.getCheckpointStore()
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to get checkpoint store: %w", err)
@@ -726,11 +730,15 @@ func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(_ *git.Repositor
 		messageSubject = FormatSubagentEndMessage(ctx.SubagentType, ctx.TaskDescription, shortToolUseID)
 	}
 
+	// Get current branch name
+	branchName := GetCurrentBranchName(repo)
+
 	// Write committed checkpoint using the checkpoint store
 	err = store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
 		CheckpointID:           checkpointID,
 		SessionID:              ctx.SessionID,
 		Strategy:               StrategyNameAutoCommit,
+		Branch:                 branchName,
 		IsTask:                 true,
 		ToolUseID:              ctx.ToolUseID,
 		AgentID:                ctx.AgentID,
