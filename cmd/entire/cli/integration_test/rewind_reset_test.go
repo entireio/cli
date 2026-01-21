@@ -3,8 +3,6 @@
 package integration
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -88,27 +86,25 @@ func TestRewindReset_ClearsSessionState(t *testing.T) {
 	}
 
 	// Verify session state files exist
-	sessionStateDir := filepath.Join(env.RepoDir, ".git", "entire-sessions")
-	entries, err := os.ReadDir(sessionStateDir)
+	numStateFilesBefore, err := env.CountSessionStateFiles()
 	if err != nil {
-		t.Fatalf("Failed to read session state dir: %v", err)
+		t.Fatalf("Failed to count session state files: %v", err)
 	}
-	if len(entries) == 0 {
+	if numStateFilesBefore == 0 {
 		t.Fatal("Expected session state files before reset")
 	}
-	numStateFilesBefore := len(entries)
 
 	// Run rewind reset
 	output := env.RunCLI("rewind", "reset", "--force")
 	t.Logf("Rewind reset output:\n%s", output)
 
 	// Verify session state files are cleared
-	entries, err = os.ReadDir(sessionStateDir)
+	numStateFilesAfter, err := env.CountSessionStateFiles()
 	if err != nil {
-		t.Fatalf("Failed to read session state dir after reset: %v", err)
+		t.Fatalf("Failed to count session state files after reset: %v", err)
 	}
-	if len(entries) > 0 {
-		t.Errorf("Expected no session state files after reset, got %d", len(entries))
+	if numStateFilesAfter > 0 {
+		t.Errorf("Expected no session state files after reset, got %d", numStateFilesAfter)
 	}
 
 	// Verify output indicates clearing
@@ -187,13 +183,12 @@ func TestRewindReset_WithMultipleSessions(t *testing.T) {
 	}
 
 	// Verify session state file exists
-	sessionStateDir := filepath.Join(env.RepoDir, ".git", "entire-sessions")
-	entries, err := os.ReadDir(sessionStateDir)
+	stateFileCount, err := env.CountSessionStateFiles()
 	if err != nil {
-		t.Fatalf("Failed to read session state dir: %v", err)
+		t.Fatalf("Failed to count session state files: %v", err)
 	}
-	if len(entries) < 1 {
-		t.Fatalf("Expected at least 1 session state file, got %d", len(entries))
+	if stateFileCount < 1 {
+		t.Fatalf("Expected at least 1 session state file, got %d", stateFileCount)
 	}
 
 	// Run rewind reset
@@ -201,12 +196,12 @@ func TestRewindReset_WithMultipleSessions(t *testing.T) {
 	t.Logf("Rewind reset output:\n%s", output)
 
 	// Verify all session state files are cleared
-	entries, err = os.ReadDir(sessionStateDir)
+	stateFileCount, err = env.CountSessionStateFiles()
 	if err != nil {
-		t.Fatalf("Failed to read session state dir after reset: %v", err)
+		t.Fatalf("Failed to count session state files after reset: %v", err)
 	}
-	if len(entries) > 0 {
-		t.Errorf("Expected no session state files after reset, got %d", len(entries))
+	if stateFileCount > 0 {
+		t.Errorf("Expected no session state files after reset, got %d", stateFileCount)
 	}
 
 	// Verify shadow branch is deleted
