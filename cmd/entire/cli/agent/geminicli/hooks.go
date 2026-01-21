@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"entire.io/cli/cmd/entire/cli/agent"
+	"entire.io/cli/cmd/entire/cli/paths"
 )
 
 // Ensure GeminiCLIAgent implements HookSupport and HookHandler
@@ -62,12 +63,18 @@ func (g *GeminiCLIAgent) GetHookNames() []string {
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 func (g *GeminiCLIAgent) InstallHooks(localDev bool, force bool) (int, error) {
-	cwd, err := os.Getwd() //nolint:forbidigo // matches Claude Code pattern; will be addressed in future refactor
+	// Use repo root instead of CWD to find .gemini directory
+	// This ensures hooks are installed correctly when run from a subdirectory
+	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return 0, fmt.Errorf("failed to get current directory: %w", err)
+		// Fallback to CWD if not in a git repo (e.g., during tests)
+		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when RepoRoot() fails (tests run outside git repos)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get current directory: %w", err)
+		}
 	}
 
-	settingsPath := filepath.Join(cwd, ".gemini", GeminiSettingsFileName)
+	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
 
 	// Read existing settings if they exist
 	var settings GeminiSettings
@@ -199,8 +206,13 @@ func (g *GeminiCLIAgent) InstallHooks(localDev bool, force bool) (int, error) {
 
 // UninstallHooks removes Entire hooks from Gemini CLI settings.
 func (g *GeminiCLIAgent) UninstallHooks() error {
-	settingsPath := ".gemini/" + GeminiSettingsFileName
-	data, err := os.ReadFile(settingsPath)
+	// Use repo root to find .gemini directory when run from a subdirectory
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		repoRoot = "." // Fallback to CWD if not in a git repo
+	}
+	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
 		return nil //nolint:nilerr // No settings file means nothing to uninstall
 	}
@@ -251,8 +263,13 @@ func (g *GeminiCLIAgent) UninstallHooks() error {
 
 // AreHooksInstalled checks if Entire hooks are installed.
 func (g *GeminiCLIAgent) AreHooksInstalled() bool {
-	settingsPath := ".gemini/" + GeminiSettingsFileName
-	data, err := os.ReadFile(settingsPath)
+	// Use repo root to find .gemini directory when run from a subdirectory
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		repoRoot = "." // Fallback to CWD if not in a git repo
+	}
+	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
 		return false
 	}

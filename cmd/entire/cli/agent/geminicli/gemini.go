@@ -41,12 +41,22 @@ func (g *GeminiCLIAgent) Description() string {
 
 // DetectPresence checks if Gemini CLI is configured in the repository.
 func (g *GeminiCLIAgent) DetectPresence() (bool, error) {
+	// Get repo root to check for .gemini directory
+	// This is needed because the CLI may be run from a subdirectory
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		// Not in a git repo, fall back to CWD-relative check
+		repoRoot = "."
+	}
+
 	// Check for .gemini directory
-	if _, err := os.Stat(".gemini"); err == nil {
+	geminiDir := filepath.Join(repoRoot, ".gemini")
+	if _, err := os.Stat(geminiDir); err == nil {
 		return true, nil
 	}
 	// Check for .gemini/settings.json
-	if _, err := os.Stat(".gemini/settings.json"); err == nil {
+	settingsFile := filepath.Join(repoRoot, ".gemini", "settings.json")
+	if _, err := os.Stat(settingsFile); err == nil {
 		return true, nil
 	}
 	return false, nil
