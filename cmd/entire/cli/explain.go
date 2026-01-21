@@ -236,7 +236,14 @@ func formatCheckpointOutput(result *checkpoint.ReadCommittedResult, checkpointID
 
 	// Full: add transcript
 	if full {
-		// TODO: implement full output in Task 12
+		sb.WriteString("\n")
+		sb.WriteString("Transcript:\n")
+		if len(result.Transcript) > 0 {
+			sb.WriteString(string(result.Transcript))
+			sb.WriteString("\n")
+		} else {
+			sb.WriteString("  (none)\n")
+		}
 	}
 
 	return sb.String()

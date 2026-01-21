@@ -869,3 +869,46 @@ func TestFormatCheckpointOutput_Verbose(t *testing.T) {
 		t.Error("verbose output should show prompts")
 	}
 }
+
+func TestFormatCheckpointOutput_Full(t *testing.T) {
+	result := &checkpoint.ReadCommittedResult{
+		Metadata: checkpoint.CommittedMetadata{
+			CheckpointID:     "abc123def456",
+			SessionID:        "2026-01-21-test-session",
+			CreatedAt:        time.Date(2026, 1, 21, 10, 30, 0, 0, time.UTC),
+			FilesTouched:     []string{"main.go", "util.go"},
+			CheckpointsCount: 3,
+			TokenUsage: &checkpoint.TokenUsage{
+				InputTokens:  10000,
+				OutputTokens: 5000,
+			},
+		},
+		Prompts:    "Add a new feature",
+		Transcript: []byte(`{"type":"user","content":"Add a new feature"}` + "\n" + `{"type":"assistant","content":"I'll add that feature for you."}`),
+	}
+
+	output := formatCheckpointOutput(result, "abc123def456", false, true)
+
+	// Should show checkpoint ID (like default)
+	if !strings.Contains(output, "abc123def456") {
+		t.Error("expected checkpoint ID in output")
+	}
+	// Full should also include verbose sections (files, prompts)
+	if !strings.Contains(output, "Files:") {
+		t.Error("full output should include files section")
+	}
+	if !strings.Contains(output, "Prompts:") {
+		t.Error("full output should include prompts section")
+	}
+	// Full should show transcript section
+	if !strings.Contains(output, "Transcript:") {
+		t.Error("full output should have Transcript section")
+	}
+	// Should contain actual transcript content
+	if !strings.Contains(output, "Add a new feature") {
+		t.Error("full output should show transcript content")
+	}
+	if !strings.Contains(output, "assistant") {
+		t.Error("full output should show assistant messages in transcript")
+	}
+}
