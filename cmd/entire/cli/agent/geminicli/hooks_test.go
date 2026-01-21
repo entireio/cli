@@ -67,19 +67,19 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 		t.Errorf("Notification hooks = %d, want 1", len(settings.Hooks.Notification))
 	}
 
-	// Verify hook commands
-	verifyHookCommand(t, settings.Hooks.SessionStart, "", "entire hooks gemini session-start")
-	verifyHookCommand(t, settings.Hooks.SessionEnd, "exit", "entire hooks gemini session-end")
-	verifyHookCommand(t, settings.Hooks.SessionEnd, "logout", "entire hooks gemini session-end")
-	verifyHookCommand(t, settings.Hooks.BeforeAgent, "", "entire hooks gemini before-agent")
-	verifyHookCommand(t, settings.Hooks.AfterAgent, "", "entire hooks gemini after-agent")
-	verifyHookCommand(t, settings.Hooks.BeforeModel, "", "entire hooks gemini before-model")
-	verifyHookCommand(t, settings.Hooks.AfterModel, "", "entire hooks gemini after-model")
-	verifyHookCommand(t, settings.Hooks.BeforeToolSelection, "", "entire hooks gemini before-tool-selection")
-	verifyHookCommand(t, settings.Hooks.BeforeTool, "*", "entire hooks gemini before-tool")
-	verifyHookCommand(t, settings.Hooks.AfterTool, "*", "entire hooks gemini after-tool")
-	verifyHookCommand(t, settings.Hooks.PreCompress, "", "entire hooks gemini pre-compress")
-	verifyHookCommand(t, settings.Hooks.Notification, "", "entire hooks gemini notification")
+	// Verify hook commands (always use go run)
+	verifyHookCommand(t, settings.Hooks.SessionStart, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini session-start")
+	verifyHookCommand(t, settings.Hooks.SessionEnd, "exit", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini session-end")
+	verifyHookCommand(t, settings.Hooks.SessionEnd, "logout", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini session-end")
+	verifyHookCommand(t, settings.Hooks.BeforeAgent, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini before-agent")
+	verifyHookCommand(t, settings.Hooks.AfterAgent, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini after-agent")
+	verifyHookCommand(t, settings.Hooks.BeforeModel, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini before-model")
+	verifyHookCommand(t, settings.Hooks.AfterModel, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini after-model")
+	verifyHookCommand(t, settings.Hooks.BeforeToolSelection, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini before-tool-selection")
+	verifyHookCommand(t, settings.Hooks.BeforeTool, "*", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini before-tool")
+	verifyHookCommand(t, settings.Hooks.AfterTool, "*", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini after-tool")
+	verifyHookCommand(t, settings.Hooks.PreCompress, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini pre-compress")
+	verifyHookCommand(t, settings.Hooks.Notification, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini notification")
 }
 
 func TestInstallHooks_LocalDev(t *testing.T) {

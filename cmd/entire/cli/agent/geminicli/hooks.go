@@ -61,7 +61,7 @@ func (g *GeminiCLIAgent) GetHookNames() []string {
 // InstallHooks installs Gemini CLI hooks in .gemini/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
-func (g *GeminiCLIAgent) InstallHooks(localDev bool, force bool) (int, error) {
+func (g *GeminiCLIAgent) InstallHooks(_ bool, force bool) (int, error) {
 	cwd, err := os.Getwd() //nolint:forbidigo // matches Claude Code pattern; will be addressed in future refactor
 	if err != nil {
 		return 0, fmt.Errorf("failed to get current directory: %w", err)
@@ -97,13 +97,8 @@ func (g *GeminiCLIAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	settings.Tools.EnableHooks = true
 	settings.Hooks.Enabled = true
 
-	// Define hook commands based on localDev mode
-	var cmdPrefix string
-	if localDev {
-		cmdPrefix = "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini "
-	} else {
-		cmdPrefix = "entire hooks gemini "
-	}
+	// Always use go run for Gemini hooks (matches local development pattern)
+	cmdPrefix := "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini "
 
 	// Check for idempotency BEFORE removing hooks
 	// If the exact same hook command already exists, return 0 (no changes needed)
