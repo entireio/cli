@@ -342,8 +342,8 @@ type CommittedMetadata struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 
 	// Transcript position at checkpoint start - tracks what was added during this checkpoint
-	TranscriptUUIDAtStart  string `json:"transcript_uuid_at_start,omitempty"`  // Last UUID when checkpoint started
-	TranscriptLinesAtStart int    `json:"transcript_lines_at_start,omitempty"` // Line count when checkpoint started
+	TranscriptUUIDAtStart  string `json:"transcript_uuid_at_start,omitempty"` // Last UUID when checkpoint started (Claude Code only)
+	TranscriptLinesAtStart int    `json:"transcript_lines_at_start"`          // Line/message count when checkpoint started
 
 	// Token usage for this checkpoint
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`

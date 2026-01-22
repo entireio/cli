@@ -15,6 +15,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/agent/geminicli"
+	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/session"
@@ -352,16 +353,26 @@ func commitGeminiSession(ctx *geminiSessionContext) error {
 		fmt.Fprintf(os.Stderr, "Loaded pre-prompt state: %d pre-existing untracked files, start message index: %d\n", len(preState.UntrackedFiles), preState.StartMessageIndex)
 	}
 
+	// Get transcript position from pre-prompt state
+	var startMessageIndex int
+	if preState != nil {
+		startMessageIndex = preState.StartMessageIndex
+	}
+
 	// Calculate token usage for this prompt/response cycle (Gemini-specific)
+	var tokenUsage *checkpoint.TokenUsage
 	if ctx.transcriptPath != "" {
-		startIndex := 0
-		if preState != nil {
-			startIndex = preState.StartMessageIndex
-		}
-		tokenUsage, tokenErr := geminicli.CalculateTokenUsageFromFile(ctx.transcriptPath, startIndex)
+		usage, tokenErr := geminicli.CalculateTokenUsageFromFile(ctx.transcriptPath, startMessageIndex)
 		if tokenErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to calculate token usage: %v\n", tokenErr)
-		} else if tokenUsage != nil && tokenUsage.APICallCount > 0 {
+		} else if usage != nil && usage.APICallCount > 0 {
+			// Convert from geminicli.TokenUsage to checkpoint.TokenUsage
+			tokenUsage = &checkpoint.TokenUsage{
+				InputTokens:     usage.InputTokens,
+				OutputTokens:    usage.OutputTokens,
+				CacheReadTokens: usage.CacheReadTokens,
+				APICallCount:    usage.APICallCount,
+			}
 			fmt.Fprintf(os.Stderr, "Token usage for this checkpoint: input=%d, output=%d, cache_read=%d, api_calls=%d\n",
 				tokenUsage.InputTokens, tokenUsage.OutputTokens, tokenUsage.CacheReadTokens, tokenUsage.APICallCount)
 		}
@@ -409,17 +420,38 @@ func commitGeminiSession(ctx *geminiSessionContext) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
 	}
 
+	// Get agent type from the hook agent (determined by which hook command is running)
+	// This is authoritative - if we're in "entire hooks gemini session-end", it's Gemini CLI
+	hookAgent, agentErr := GetCurrentHookAgent()
+	if agentErr != nil {
+		return fmt.Errorf("failed to get agent: %w", agentErr)
+	}
+	agentType := hookAgent.Description()
+	if idx := strings.Index(agentType, " - "); idx > 0 {
+		agentType = agentType[:idx]
+	}
+
+	// Get transcript UUID at start from pre-prompt state
+	var transcriptUUIDAtStart string
+	if preState != nil {
+		transcriptUUIDAtStart = preState.LastTranscriptUUID
+	}
+
 	saveCtx := strategy.SaveContext{
-		SessionID:      ctx.entireSessionID,
-		ModifiedFiles:  relModifiedFiles,
-		NewFiles:       relNewFiles,
-		DeletedFiles:   relDeletedFiles,
-		MetadataDir:    ctx.sessionDir,
-		MetadataDirAbs: ctx.sessionDirAbs,
-		CommitMessage:  ctx.commitMessage,
-		TranscriptPath: ctx.transcriptPath,
-		AuthorName:     author.Name,
-		AuthorEmail:    author.Email,
+		SessionID:              ctx.entireSessionID,
+		ModifiedFiles:          relModifiedFiles,
+		NewFiles:               relNewFiles,
+		DeletedFiles:           relDeletedFiles,
+		MetadataDir:            ctx.sessionDir,
+		MetadataDirAbs:         ctx.sessionDirAbs,
+		CommitMessage:          ctx.commitMessage,
+		TranscriptPath:         ctx.transcriptPath,
+		AuthorName:             author.Name,
+		AuthorEmail:            author.Email,
+		AgentType:              agentType,
+		TranscriptLinesAtStart: startMessageIndex,
+		TranscriptUUIDAtStart:  transcriptUUIDAtStart,
+		TokenUsage:             tokenUsage,
 	}
 
 	if err := strat.SaveChanges(saveCtx); err != nil {
