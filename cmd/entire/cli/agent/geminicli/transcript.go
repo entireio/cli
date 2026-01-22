@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"entire.io/cli/cmd/entire/cli/agent"
 )
 
 // Transcript parsing types - Gemini CLI uses JSON format for session storage
@@ -168,32 +170,20 @@ func ExtractLastAssistantMessageFromTranscript(transcript *GeminiTranscript) str
 	return ""
 }
 
-// TokenUsage represents aggregated token usage for a checkpoint
-type TokenUsage struct {
-	// InputTokens is the number of input tokens (fresh, not from cache)
-	InputTokens int `json:"input_tokens"`
-	// OutputTokens is the number of output tokens generated
-	OutputTokens int `json:"output_tokens"`
-	// CacheReadTokens is the number of tokens read from cache
-	CacheReadTokens int `json:"cache_read_tokens"`
-	// APICallCount is the number of API calls made
-	APICallCount int `json:"api_call_count"`
-}
-
 // CalculateTokenUsage calculates token usage from a Gemini transcript.
 // This is specific to Gemini's API format where each message may have a tokens object
 // with input, output, cached, thoughts, tool, and total counts.
 // Only processes messages from startMessageIndex onwards (0-indexed).
-func CalculateTokenUsage(data []byte, startMessageIndex int) *TokenUsage {
+func CalculateTokenUsage(data []byte, startMessageIndex int) *agent.TokenUsage {
 	var transcript struct {
 		Messages []geminiMessageWithTokens `json:"messages"`
 	}
 
 	if err := json.Unmarshal(data, &transcript); err != nil {
-		return &TokenUsage{}
+		return &agent.TokenUsage{}
 	}
 
-	usage := &TokenUsage{}
+	usage := &agent.TokenUsage{}
 
 	for i, msg := range transcript.Messages {
 		// Skip messages before startMessageIndex
@@ -221,15 +211,15 @@ func CalculateTokenUsage(data []byte, startMessageIndex int) *TokenUsage {
 
 // CalculateTokenUsageFromFile calculates token usage from a Gemini transcript file.
 // If startMessageIndex > 0, only considers messages from that index onwards.
-func CalculateTokenUsageFromFile(path string, startMessageIndex int) (*TokenUsage, error) {
+func CalculateTokenUsageFromFile(path string, startMessageIndex int) (*agent.TokenUsage, error) {
 	if path == "" {
-		return &TokenUsage{}, nil
+		return &agent.TokenUsage{}, nil
 	}
 
 	data, err := os.ReadFile(path) //nolint:gosec // Reading from controlled transcript path
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &TokenUsage{}, nil
+			return &agent.TokenUsage{}, nil
 		}
 		return nil, fmt.Errorf("failed to read transcript: %w", err)
 	}

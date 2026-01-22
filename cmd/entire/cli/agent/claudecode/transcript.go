@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/agent"
 )
 
 // Transcript parsing types - Claude Code uses JSONL format
@@ -227,7 +227,7 @@ func FindCheckpointUUID(lines []TranscriptLine, toolUseID string) (string, bool)
 //
 // Due to streaming, multiple transcript rows may share the same message.id.
 // We deduplicate by taking the row with the highest output_tokens for each message.id.
-func CalculateTokenUsage(transcript []TranscriptLine) *checkpoint.TokenUsage {
+func CalculateTokenUsage(transcript []TranscriptLine) *agent.TokenUsage {
 	// Map from message.id to the usage with highest output_tokens
 	usageByMessageID := make(map[string]messageUsage)
 
@@ -253,7 +253,7 @@ func CalculateTokenUsage(transcript []TranscriptLine) *checkpoint.TokenUsage {
 	}
 
 	// Sum up all unique messages
-	usage := &checkpoint.TokenUsage{
+	usage := &agent.TokenUsage{
 		APICallCount: len(usageByMessageID),
 	}
 	for _, u := range usageByMessageID {
@@ -268,9 +268,9 @@ func CalculateTokenUsage(transcript []TranscriptLine) *checkpoint.TokenUsage {
 
 // CalculateTokenUsageFromFile calculates token usage from a Claude Code transcript file.
 // If startLine > 0, only considers lines from startLine onwards.
-func CalculateTokenUsageFromFile(path string, startLine int) (*checkpoint.TokenUsage, error) {
+func CalculateTokenUsageFromFile(path string, startLine int) (*agent.TokenUsage, error) {
 	if path == "" {
-		return &checkpoint.TokenUsage{}, nil
+		return &agent.TokenUsage{}, nil
 	}
 
 	transcript, err := parseTranscriptFromLine(path, startLine)
@@ -409,7 +409,7 @@ func extractAgentIDFromText(text string) string {
 // CalculateTotalTokenUsage calculates token usage for a turn, including subagents.
 // It parses the main transcript from startLine, extracts spawned agent IDs,
 // and calculates their token usage from transcripts in subagentsDir.
-func CalculateTotalTokenUsage(transcriptPath string, startLine int, subagentsDir string) (*checkpoint.TokenUsage, error) {
+func CalculateTotalTokenUsage(transcriptPath string, startLine int, subagentsDir string) (*agent.TokenUsage, error) {
 	// Calculate main transcript usage
 	mainUsage, err := CalculateTokenUsageFromFile(transcriptPath, startLine)
 	if err != nil {
@@ -426,7 +426,7 @@ func CalculateTotalTokenUsage(transcriptPath string, startLine int, subagentsDir
 
 	// Calculate subagent token usage
 	if len(agentIDs) > 0 {
-		subagentUsage := &checkpoint.TokenUsage{}
+		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {
 			agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
 			agentUsage, err := CalculateTokenUsageFromFile(agentPath, 0)

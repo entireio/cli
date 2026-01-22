@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 )
 
@@ -202,7 +202,7 @@ type SaveContext struct {
 	TranscriptLinesAtStart int    // Line count when checkpoint started
 
 	// TokenUsage contains the token usage for this checkpoint
-	TokenUsage *checkpoint.TokenUsage
+	TokenUsage *agent.TokenUsage
 }
 
 // TaskCheckpointContext contains all information needed for saving a task checkpoint.

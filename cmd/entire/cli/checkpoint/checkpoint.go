@@ -11,7 +11,9 @@ import (
 	"errors"
 	"time"
 
+	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
@@ -242,7 +244,7 @@ type WriteCommittedOptions struct {
 	TranscriptLinesAtStart int    // Line count when checkpoint started
 
 	// TokenUsage contains the token usage for this checkpoint
-	TokenUsage *TokenUsage
+	TokenUsage *agent.TokenUsage
 }
 
 // ReadCommittedResult contains the result of reading a committed checkpoint.
@@ -338,23 +340,7 @@ type CommittedMetadata struct {
 	TranscriptLinesAtStart int    `json:"transcript_lines_at_start,omitempty"` // Line count when checkpoint started
 
 	// Token usage for this checkpoint
-	TokenUsage *TokenUsage `json:"token_usage,omitempty"`
-}
-
-// TokenUsage represents aggregated token usage for a checkpoint
-type TokenUsage struct {
-	// Input tokens (fresh, not from cache)
-	InputTokens int `json:"input_tokens"`
-	// Tokens written to cache (billable at cache write rate)
-	CacheCreationTokens int `json:"cache_creation_tokens"`
-	// Tokens read from cache (discounted rate)
-	CacheReadTokens int `json:"cache_read_tokens"`
-	// Output tokens generated
-	OutputTokens int `json:"output_tokens"`
-	// Number of API calls made
-	APICallCount int `json:"api_call_count"`
-	// Subagent token usage (if any agents were spawned)
-	SubagentTokens *TokenUsage `json:"subagent_tokens,omitempty"`
+	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 }
 
 // Info provides summary information for listing checkpoints.

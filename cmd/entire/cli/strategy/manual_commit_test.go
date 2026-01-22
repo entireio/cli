@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/trailers"
@@ -1193,7 +1193,7 @@ func TestSessionState_TokenUsagePersistence(t *testing.T) {
 		CheckpointCount:        5,
 		TranscriptLinesAtStart: 42,
 		TranscriptUUIDAtStart:  "test-uuid-abc123",
-		TokenUsage: &checkpoint.TokenUsage{
+		TokenUsage: &agent.TokenUsage{
 			InputTokens:         1000,
 			CacheCreationTokens: 200,
 			CacheReadTokens:     300,

@@ -3,7 +3,7 @@ package strategy
 import (
 	"time"
 
-	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 )
 
@@ -31,7 +31,7 @@ type SessionState struct {
 	TranscriptPath           string          `json:"transcript_path,omitempty"`            // Path to the live transcript file (for mid-session commit detection)
 
 	// Token usage tracking (accumulated across all checkpoints in this session)
-	TokenUsage *checkpoint.TokenUsage `json:"token_usage,omitempty"`
+	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 
 	// Transcript position when session started (for multi-session checkpoints on entire/sessions)
 	TranscriptLinesAtStart int    `json:"transcript_lines_at_start,omitempty"`
@@ -69,5 +69,5 @@ type ExtractedSessionData struct {
 	Prompts             []string // All user prompts from this portion
 	Context             []byte   // Generated context.md content
 	FilesTouched        []string
-	TokenUsage          *checkpoint.TokenUsage // Token usage calculated from transcript (since TranscriptLinesAtStart)
+	TokenUsage          *agent.TokenUsage // Token usage calculated from transcript (since TranscriptLinesAtStart)
 }

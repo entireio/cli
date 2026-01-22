@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
@@ -283,13 +284,13 @@ func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
 
 // accumulateTokenUsage adds new token usage to existing accumulated usage.
 // If existing is nil, returns a copy of incoming. If incoming is nil, returns existing unchanged.
-func accumulateTokenUsage(existing, incoming *checkpoint.TokenUsage) *checkpoint.TokenUsage {
+func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsage {
 	if incoming == nil {
 		return existing
 	}
 	if existing == nil {
 		// Return a copy to avoid sharing the pointer
-		return &checkpoint.TokenUsage{
+		return &agent.TokenUsage{
 			InputTokens:         incoming.InputTokens,
 			CacheCreationTokens: incoming.CacheCreationTokens,
 			CacheReadTokens:     incoming.CacheReadTokens,

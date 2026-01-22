@@ -15,7 +15,6 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/agent/claudecode"
-	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
@@ -548,7 +547,7 @@ func commitWithMetadata() error {
 	}
 
 	// Calculate token usage for this checkpoint (Claude Code specific)
-	var tokenUsage *checkpoint.TokenUsage
+	var tokenUsage *agent.TokenUsage
 	if transcriptPath != "" {
 		// Subagents are stored in a subagents/ directory next to the main transcript
 		subagentsDir := filepath.Join(filepath.Dir(transcriptPath), entireSessionID, "subagents")
