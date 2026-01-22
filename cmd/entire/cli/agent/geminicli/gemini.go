@@ -2,16 +2,19 @@
 package geminicli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/agent"
+	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 )
 
@@ -381,10 +384,14 @@ func (g *GeminiCLIAgent) ChunkTranscript(content []byte, maxSize int) ([][]byte,
 	var currentMessages []GeminiMessage
 	currentSize := len(`{"messages":[]}`) // Base JSON structure size
 
-	for _, msg := range transcript.Messages {
+	for i, msg := range transcript.Messages {
 		// Marshal message to get its size
 		msgBytes, err := json.Marshal(msg)
 		if err != nil {
+			logging.Warn(context.Background(), "failed to marshal Gemini message during chunking",
+				slog.Int("message_index", i),
+				slog.String("error", err.Error()),
+			)
 			continue
 		}
 		msgSize := len(msgBytes) + 1 // +1 for comma separator
