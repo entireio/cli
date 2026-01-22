@@ -13,6 +13,8 @@ import (
 	"unicode"
 
 	agentpkg "entire.io/cli/cmd/entire/cli/agent"
+	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/jsonutil"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
@@ -341,22 +343,34 @@ func runRewindInteractive() error {
 		transcriptFile = filepath.Join(selectedPoint.MetadataDir, paths.TranscriptFileNameLegacy)
 	}
 
-	// Try to restore using GetSessionLog first (for strategies that store transcripts in git)
-	// Use checkpoint ID if available (auto-commit strategy), otherwise use commit ID (manual-commit strategy)
-	lookupID := selectedPoint.CheckpointID
-	if lookupID == "" {
-		lookupID = selectedPoint.ID
+	// Try to restore transcript using the appropriate method:
+	// 1. Checkpoint storage (committed checkpoints with valid checkpoint ID)
+	// 2. Shadow branch (uncommitted checkpoints with commit hash)
+	// 3. Local file (active sessions)
+	var restored bool
+	if !selectedPoint.CheckpointID.IsEmpty() {
+		// Try checkpoint storage first for committed checkpoints
+		if returnedSessionID, err := restoreSessionTranscriptFromStrategy(selectedPoint.CheckpointID, sessionID, agent); err == nil {
+			sessionID = returnedSessionID
+			restored = true
+		}
 	}
-	if returnedSessionID, err := restoreSessionTranscriptFromStrategy(start, lookupID, sessionID, agent); err != nil {
+
+	if !restored && selectedPoint.MetadataDir != "" && len(selectedPoint.ID) == 40 {
+		// Try shadow branch for uncommitted checkpoints (ID is a 40-char commit hash)
+		if returnedSessionID, err := restoreSessionTranscriptFromShadow(selectedPoint.ID, selectedPoint.MetadataDir, sessionID, agent); err == nil {
+			sessionID = returnedSessionID
+			restored = true
+		}
+	}
+
+	if !restored {
 		// Fall back to local file
 		if err := restoreSessionTranscript(transcriptFile, sessionID, agent); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to restore session transcript: %v\n", err)
 			fmt.Fprintf(os.Stderr, "  Source: %s\n", transcriptFile)
 			fmt.Fprintf(os.Stderr, "  Session ID: %s\n", sessionID)
 		}
-	} else {
-		// Use session ID returned from strategy (may differ from what we extracted from metadata path)
-		sessionID = returnedSessionID
 	}
 
 	fmt.Printf("Rewound to %s. %s\n", shortID, formatResumeCommand(sessionID, agent))
@@ -402,7 +416,7 @@ func runRewindList() error {
 			IsTaskCheckpoint: p.IsTaskCheckpoint,
 			ToolUseID:        p.ToolUseID,
 			IsLogsOnly:       p.IsLogsOnly,
-			CondensationID:   p.CheckpointID,
+			CondensationID:   p.CheckpointID.String(),
 			SessionID:        p.SessionID,
 			SessionPrompt:    p.SessionPrompt,
 		}
@@ -538,20 +552,32 @@ func runRewindToInternal(commitID string, logsOnly bool, reset bool) error {
 		transcriptFile = filepath.Join(selectedPoint.MetadataDir, paths.TranscriptFileNameLegacy)
 	}
 
-	// Try to restore using GetSessionLog first (for strategies that store transcripts in git)
-	// Use checkpoint ID if available (auto-commit strategy), otherwise use commit ID (manual-commit strategy)
-	lookupID := selectedPoint.CheckpointID
-	if lookupID == "" {
-		lookupID = selectedPoint.ID
+	// Try to restore transcript using the appropriate method:
+	// 1. Checkpoint storage (committed checkpoints with valid checkpoint ID)
+	// 2. Shadow branch (uncommitted checkpoints with commit hash)
+	// 3. Local file (active sessions)
+	var restored bool
+	if !selectedPoint.CheckpointID.IsEmpty() {
+		// Try checkpoint storage first for committed checkpoints
+		if returnedSessionID, err := restoreSessionTranscriptFromStrategy(selectedPoint.CheckpointID, sessionID, agent); err == nil {
+			sessionID = returnedSessionID
+			restored = true
+		}
 	}
-	if returnedSessionID, err := restoreSessionTranscriptFromStrategy(start, lookupID, sessionID, agent); err != nil {
+
+	if !restored && selectedPoint.MetadataDir != "" && len(selectedPoint.ID) == 40 {
+		// Try shadow branch for uncommitted checkpoints (ID is a 40-char commit hash)
+		if returnedSessionID, err := restoreSessionTranscriptFromShadow(selectedPoint.ID, selectedPoint.MetadataDir, sessionID, agent); err == nil {
+			sessionID = returnedSessionID
+			restored = true
+		}
+	}
+
+	if !restored {
 		// Fall back to local file
 		if err := restoreSessionTranscript(transcriptFile, sessionID, agent); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to restore session transcript: %v\n", err)
 		}
-	} else {
-		// Use session ID returned from strategy (may differ from what we extracted from metadata path)
-		sessionID = returnedSessionID
 	}
 
 	fmt.Printf("Rewound to %s. %s\n", selectedPoint.ID[:7], formatResumeCommand(sessionID, agent))
@@ -717,13 +743,53 @@ func restoreSessionTranscript(transcriptFile, sessionID string, agent agentpkg.A
 	return nil
 }
 
-// restoreSessionTranscriptFromStrategy restores a session transcript using GetSessionLog.
+// restoreSessionTranscriptFromStrategy restores a session transcript from checkpoint storage.
 // This is used for strategies that store transcripts in git branches rather than local files.
-// Returns the session ID that was actually used (may differ from input if strategy provides one).
-func restoreSessionTranscriptFromStrategy(strat strategy.Strategy, checkpointID, sessionID string, agent agentpkg.Agent) (string, error) {
+// Returns the session ID that was actually used (may differ from input if checkpoint provides one).
+func restoreSessionTranscriptFromStrategy(cpID id.CheckpointID, sessionID string, agent agentpkg.Agent) (string, error) {
+	// Get transcript content from checkpoint storage
+	content, returnedSessionID, err := checkpoint.LookupSessionLog(cpID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get session log: %w", err)
+	}
+
+	// Use session ID returned from checkpoint if available
+	// Otherwise fall back to the passed-in sessionID
+	if returnedSessionID != "" {
+		sessionID = returnedSessionID
+	}
+
+	return writeTranscriptToAgentSession(content, sessionID, agent)
+}
+
+// restoreSessionTranscriptFromShadow restores a session transcript from a shadow branch commit.
+// This is used for uncommitted checkpoints where the transcript is stored in the shadow branch tree.
+func restoreSessionTranscriptFromShadow(commitHash, metadataDir, sessionID string, agent agentpkg.Agent) (string, error) {
+	// Open repository
+	repo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
+	if err != nil {
+		return "", fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	// Parse commit hash
+	hash := plumbing.NewHash(commitHash)
+	if hash.IsZero() {
+		return "", fmt.Errorf("invalid commit hash: %s", commitHash)
+	}
+
+	// Get transcript from shadow branch commit tree
+	store := checkpoint.NewGitStore(repo)
+	content, err := store.GetTranscriptFromCommit(hash, metadataDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to get transcript from shadow branch: %w", err)
+	}
+
+	return writeTranscriptToAgentSession(content, sessionID, agent)
+}
+
+// writeTranscriptToAgentSession writes transcript content to the agent's session storage.
+func writeTranscriptToAgentSession(content []byte, sessionID string, agent agentpkg.Agent) (string, error) {
 	// Get repo root for agent's session directory lookup
-	// Use repo root instead of CWD because Claude stores sessions per-repo,
-	// and running from a subdirectory would look up the wrong session directory
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
 		return "", fmt.Errorf("failed to get repository root: %w", err)
@@ -738,18 +804,6 @@ func restoreSessionTranscriptFromStrategy(strat strategy.Strategy, checkpointID,
 	// Ensure session directory exists
 	if err := os.MkdirAll(agentSessionDir, 0o750); err != nil {
 		return "", fmt.Errorf("failed to create agent session directory: %w", err)
-	}
-
-	// Get transcript content from strategy
-	content, returnedSessionID, err := strat.GetSessionLog(checkpointID)
-	if err != nil {
-		return "", fmt.Errorf("failed to get session log: %w", err)
-	}
-
-	// Use session ID returned from strategy if available (some strategies store it in git)
-	// Otherwise fall back to the passed-in sessionID
-	if returnedSessionID != "" {
-		sessionID = returnedSessionID
 	}
 
 	// Write transcript to agent's session storage

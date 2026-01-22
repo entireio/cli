@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"entire.io/cli/cmd/entire/cli/agent"
+	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
 	"entire.io/cli/cmd/entire/cli/trailers"
@@ -66,20 +68,19 @@ func newSessionRawCmd() *cobra.Command {
 }
 
 func runSessionRaw(commitRef string) error {
-	start := GetStrategy()
-	// First try to get the log directly via the strategy
-	content, _, err := start.GetSessionLog(commitRef)
-	if err == nil {
-		fmt.Print(string(content))
-		return nil
+	// First try as checkpoint ID directly
+	if cpID, err := id.NewCheckpointID(commitRef); err == nil {
+		content, _, err := checkpoint.LookupSessionLog(cpID)
+		if err == nil {
+			fmt.Print(string(content))
+			return nil
+		}
+		if !errors.Is(err, checkpoint.ErrCheckpointNotFound) && !errors.Is(err, checkpoint.ErrNoTranscript) {
+			return fmt.Errorf("failed to get session log: %w", err)
+		}
 	}
 
-	// If that fails, try to resolve through source ref trailers
-	if !errors.Is(err, strategy.ErrNoMetadata) {
-		return err
-	}
-
-	// Try to find session via trailers
+	// Try to resolve as commit ref and extract checkpoint trailer
 	repo, err := openRepository()
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
@@ -95,16 +96,15 @@ func runSessionRaw(commitRef string) error {
 		return fmt.Errorf("failed to get commit: %w", err)
 	}
 
-	_, sourceRef := parseSessionTrailers(commit.Message)
-	if sourceRef != "" {
-		sourceCommit := extractSourceCommit(sourceRef)
-		if sourceCommit != "" {
-			content, _, err := start.GetSessionLog(sourceCommit)
-			if err != nil {
-				return fmt.Errorf("failed to get session log: %w", err)
-			}
+	// Try Entire-Checkpoint trailer
+	if cpID, found := trailers.ParseCheckpoint(commit.Message); found {
+		content, _, err := checkpoint.LookupSessionLog(cpID)
+		if err == nil {
 			fmt.Print(string(content))
 			return nil
+		}
+		if !errors.Is(err, checkpoint.ErrCheckpointNotFound) && !errors.Is(err, checkpoint.ErrNoTranscript) {
+			return fmt.Errorf("failed to get session log: %w", err)
 		}
 	}
 
@@ -264,8 +264,6 @@ func runSessionResume(sessionID string) error {
 		ag = agent.Default()
 	}
 
-	strat := GetStrategy()
-
 	// Verify session exists
 	session, err := strategy.GetSession(sessionID)
 	if err != nil {
@@ -291,15 +289,15 @@ func runSessionResume(sessionID string) error {
 	}
 
 	// Find the most recent checkpoint for this session to get the session log
-	var checkpointID string
+	var checkpointID id.CheckpointID
 	if len(session.Checkpoints) > 0 {
 		// Get the most recent checkpoint
 		checkpointID = session.Checkpoints[len(session.Checkpoints)-1].CheckpointID
 	}
 
 	// Restore agent session if we have a checkpoint
-	if checkpointID != "" {
-		if err := restoreAgentSession(ag, session.ID, checkpointID, strat); err != nil {
+	if !checkpointID.IsEmpty() {
+		if err := restoreAgentSession(ag, session.ID, checkpointID); err != nil {
 			// Non-fatal: session is set, but memory restoration failed
 			fmt.Fprintf(os.Stderr, "Warning: could not restore session: %v\n", err)
 		}
@@ -315,7 +313,7 @@ func runSessionResume(sessionID string) error {
 
 // restoreAgentSession restores the session transcript using the agent abstraction.
 // This is agent-agnostic and works with any registered agent.
-func restoreAgentSession(ag agent.Agent, sessionID, checkpointID string, strat strategy.Strategy) error {
+func restoreAgentSession(ag agent.Agent, sessionID string, checkpointID id.CheckpointID) error {
 	// Get repo root for session directory lookup
 	// Use repo root instead of CWD because Claude stores sessions per-repo,
 	// and running from a subdirectory would look up the wrong session directory
@@ -339,9 +337,9 @@ func restoreAgentSession(ag agent.Agent, sessionID, checkpointID string, strat s
 	}
 
 	// Get session log content
-	logContent, _, err := strat.GetSessionLog(checkpointID)
+	logContent, _, err := checkpoint.LookupSessionLog(checkpointID)
 	if err != nil {
-		if errors.Is(err, strategy.ErrNoMetadata) {
+		if errors.Is(err, checkpoint.ErrCheckpointNotFound) || errors.Is(err, checkpoint.ErrNoTranscript) {
 			return nil // No metadata available, skip restoration
 		}
 		return fmt.Errorf("failed to get session log: %w", err)
@@ -458,8 +456,8 @@ func filterSessionsForCurrentBranch(sessions []strategy.Session) []strategy.Sess
 	checkpointToSession := make(map[string]string)
 	for _, sess := range sessions {
 		for _, cp := range sess.Checkpoints {
-			if cp.CheckpointID != "" {
-				checkpointToSession[cp.CheckpointID] = sess.ID
+			if !cp.CheckpointID.IsEmpty() {
+				checkpointToSession[cp.CheckpointID.String()] = sess.ID
 			}
 		}
 	}

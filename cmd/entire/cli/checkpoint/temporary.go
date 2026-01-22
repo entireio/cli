@@ -459,6 +459,41 @@ func extractToolUseIDFromPath(metadataDir string) string {
 // errStop is a sentinel error used to break out of git log iteration.
 var errStop = errors.New("stop iteration")
 
+// GetTranscriptFromCommit retrieves the transcript from a specific commit's tree.
+// This is used for shadow branch checkpoints where the transcript is stored in the commit tree
+// rather than on the entire/sessions branch.
+// commitHash is the commit to read from, metadataDir is the path within the tree.
+func (s *GitStore) GetTranscriptFromCommit(commitHash plumbing.Hash, metadataDir string) ([]byte, error) {
+	commit, err := s.repo.CommitObject(commitHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit: %w", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit tree: %w", err)
+	}
+
+	// Try current format first, then legacy
+	transcriptPath := metadataDir + "/" + paths.TranscriptFileName
+	if file, fileErr := tree.File(transcriptPath); fileErr == nil {
+		content, contentErr := file.Contents()
+		if contentErr == nil {
+			return []byte(content), nil
+		}
+	}
+
+	transcriptPath = metadataDir + "/" + paths.TranscriptFileNameLegacy
+	if file, fileErr := tree.File(transcriptPath); fileErr == nil {
+		content, contentErr := file.Contents()
+		if contentErr == nil {
+			return []byte(content), nil
+		}
+	}
+
+	return nil, ErrNoTranscript
+}
+
 // ShadowBranchExists checks if a shadow branch exists for the given base commit.
 func (s *GitStore) ShadowBranchExists(baseCommit string) bool {
 	shadowBranchName := ShadowBranchNameForCommit(baseCommit)

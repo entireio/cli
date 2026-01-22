@@ -240,7 +240,7 @@ func gatherCheckpointDetails(strat strategy.Strategy, session *strategy.Session)
 		}
 
 		// Use checkpoint ID for display (truncate long IDs)
-		detail.ShortID = cp.CheckpointID
+		detail.ShortID = cp.CheckpointID.String()
 		if len(detail.ShortID) > 12 {
 			detail.ShortID = detail.ShortID[:12]
 		}

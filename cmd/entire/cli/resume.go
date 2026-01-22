@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 
 	"entire.io/cli/cmd/entire/cli/agent"
+	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
@@ -396,7 +398,7 @@ func resumeSession(sessionID, checkpointID string, force bool) error {
 		// Create a logs-only rewind point to trigger full multi-session restore
 		point := strategy.RewindPoint{
 			IsLogsOnly:   true,
-			CheckpointID: checkpointID,
+			CheckpointID: id.CheckpointID(checkpointID), // Convert string to typed ID
 		}
 
 		if err := restorer.RestoreLogsOnly(point, force); err != nil {
@@ -482,11 +484,21 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID, checkpo
 	agentSessionID := ag.ExtractAgentSessionID(sessionID)
 	sessionLogPath := filepath.Join(sessionDir, agentSessionID+".jsonl")
 
-	strat := GetStrategy()
-
-	logContent, _, err := strat.GetSessionLog(checkpointID)
+	cpID, err := id.NewCheckpointID(checkpointID)
 	if err != nil {
-		if errors.Is(err, strategy.ErrNoMetadata) {
+		logging.Debug(ctx, "resume session: invalid checkpoint ID",
+			slog.String("checkpoint_id", checkpointID),
+			slog.String("error", err.Error()),
+		)
+		fmt.Fprintf(os.Stderr, "Session '%s' found in commit trailer but session log not available\n", sessionID)
+		fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
+		fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(agentSessionID))
+		return nil
+	}
+
+	logContent, _, err := checkpoint.LookupSessionLog(cpID)
+	if err != nil {
+		if errors.Is(err, checkpoint.ErrCheckpointNotFound) || errors.Is(err, checkpoint.ErrNoTranscript) {
 			logging.Debug(ctx, "resume session completed (no metadata)",
 				slog.String("checkpoint_id", checkpointID),
 				slog.String("session_id", sessionID),

@@ -388,7 +388,7 @@ func TestListSessionsMultiSessionCheckpoint(t *testing.T) {
 		if len(sess.Checkpoints) != 1 {
 			t.Errorf("Session %q has %d checkpoints, want 1", sess.ID, len(sess.Checkpoints))
 		}
-		if len(sess.Checkpoints) > 0 && sess.Checkpoints[0].CheckpointID != checkpointID {
+		if len(sess.Checkpoints) > 0 && sess.Checkpoints[0].CheckpointID.String() != checkpointID {
 			t.Errorf("Session %q checkpoint ID = %q, want %q", sess.ID, sess.Checkpoints[0].CheckpointID, checkpointID)
 		}
 	}

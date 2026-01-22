@@ -361,7 +361,7 @@ func (s *AutoCommitStrategy) GetRewindPoints(limit int) ([]RewindPoint, error) {
 			MetadataDir:      metadataDir,
 			Date:             c.Author.When,
 			IsLogsOnly:       isLogsOnly,
-			CheckpointID:     cpID.String(),
+			CheckpointID:     cpID,
 			IsTaskCheckpoint: metadata.IsTask,
 			ToolUseID:        metadata.ToolUseID,
 			Agent:            metadata.Agent,
@@ -478,85 +478,6 @@ func (s *AutoCommitStrategy) PreviewRewind(_ RewindPoint) (*RewindPreview, error
 	// Auto-commit uses git reset --hard which doesn't affect untracked files
 	// Return empty preview to indicate no untracked files will be deleted
 	return &RewindPreview{}, nil
-}
-
-func (s *AutoCommitStrategy) GetSessionLog(checkpointID string) ([]byte, string, error) {
-	// Session logs are on the entire/sessions branch in checkpoint directories
-	store, err := s.getCheckpointStore()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to get checkpoint store: %w", err)
-	}
-
-	// Use checkpoint.ReadCommitted for new format
-	result, err := store.ReadCommitted(context.Background(), checkpointID)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-	if result == nil {
-		// Try legacy format directly if not found in sharded format
-		return s.getSessionLogLegacy(checkpointID)
-	}
-
-	return result.Transcript, result.Metadata.SessionID, nil
-}
-
-// getSessionLogLegacy reads session logs from legacy format (cond-xxx/full.jsonl).
-func (s *AutoCommitStrategy) getSessionLogLegacy(checkpointID string) ([]byte, string, error) {
-	repo, err := OpenRepository()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to open git repository: %w", err)
-	}
-	// Get the entire/sessions branch
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return nil, "", fmt.Errorf("metadata branch %s not found: %w", paths.MetadataBranchName, err)
-	}
-
-	metadataCommit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to get metadata branch commit: %w", err)
-	}
-
-	tree, err := metadataCommit.Tree()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to get metadata tree: %w", err)
-	}
-
-	// Legacy path format
-	basePath := checkpointID
-
-	// Get session ID from metadata.json
-	var sessionID string
-	metadataPath := basePath + "/metadata.json"
-	if metaFile, fileErr := tree.File(metadataPath); fileErr == nil {
-		if content, contentErr := metaFile.Contents(); contentErr == nil {
-			var metadata map[string]interface{}
-			if json.Unmarshal([]byte(content), &metadata) == nil {
-				if sid, ok := metadata["session_id"].(string); ok {
-					sessionID = sid
-				}
-			}
-		}
-	}
-
-	// Try current format first, then legacy
-	transcriptPath := basePath + "/" + paths.TranscriptFileName
-	file, err := tree.File(transcriptPath)
-	if err != nil {
-		transcriptPath = basePath + "/" + paths.TranscriptFileNameLegacy
-		file, err = tree.File(transcriptPath)
-		if err != nil {
-			return nil, "", fmt.Errorf("failed to find session log (tried %s and %s): %w", paths.TranscriptFileName, paths.TranscriptFileNameLegacy, err)
-		}
-	}
-
-	content, err := file.Contents()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read session log: %w", err)
-	}
-
-	return []byte(content), sessionID, nil
 }
 
 // EnsureSetup ensures the strategy's required setup is in place.
@@ -929,10 +850,10 @@ func (s *AutoCommitStrategy) findTaskCheckpointPath(repo *git.Repository, commit
 // GetMetadataRef returns a reference to the metadata for the given checkpoint.
 // For auto-commit strategy, returns the checkpoint path on entire/sessions branch.
 func (s *AutoCommitStrategy) GetMetadataRef(checkpoint Checkpoint) string {
-	if checkpoint.CheckpointID == "" {
+	if checkpoint.CheckpointID.IsEmpty() {
 		return ""
 	}
-	return paths.MetadataBranchName + ":" + paths.CheckpointPath(checkpoint.CheckpointID)
+	return paths.MetadataBranchName + ":" + checkpoint.CheckpointID.Path()
 }
 
 // GetSessionMetadataRef returns a reference to the most recent metadata for a session.
@@ -955,7 +876,7 @@ func (s *AutoCommitStrategy) GetSessionContext(sessionID string) string {
 
 	// Get the most recent checkpoint
 	cp := session.Checkpoints[0]
-	if cp.CheckpointID == "" {
+	if cp.CheckpointID.IsEmpty() {
 		return ""
 	}
 
@@ -964,7 +885,7 @@ func (s *AutoCommitStrategy) GetSessionContext(sessionID string) string {
 		return ""
 	}
 
-	result, err := store.ReadCommitted(context.Background(), cp.CheckpointID)
+	result, err := store.ReadCommitted(context.Background(), cp.CheckpointID.String())
 	if err != nil || result == nil {
 		return ""
 	}
@@ -975,7 +896,7 @@ func (s *AutoCommitStrategy) GetSessionContext(sessionID string) string {
 // GetCheckpointLog returns the session transcript for a specific checkpoint.
 // For auto-commit strategy, looks up checkpoint by ID on the entire/sessions branch using the checkpoint store.
 func (s *AutoCommitStrategy) GetCheckpointLog(cp Checkpoint) ([]byte, error) {
-	if cp.CheckpointID == "" {
+	if cp.CheckpointID.IsEmpty() {
 		return nil, ErrNoMetadata
 	}
 
@@ -984,7 +905,7 @@ func (s *AutoCommitStrategy) GetCheckpointLog(cp Checkpoint) ([]byte, error) {
 		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
 	}
 
-	result, err := store.ReadCommitted(context.Background(), cp.CheckpointID)
+	result, err := store.ReadCommitted(context.Background(), cp.CheckpointID.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}

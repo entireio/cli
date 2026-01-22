@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"github.com/go-git/go-git/v5"
 )
@@ -39,7 +40,7 @@ type Session struct {
 type Checkpoint struct {
 	// CheckpointID is the stable 12-hex-char identifier for this checkpoint.
 	// Used to look up metadata at <id[:2]>/<id[2:]>/ on entire/sessions branch.
-	CheckpointID string
+	CheckpointID id.CheckpointID
 
 	// Message is the commit message or checkpoint description
 	Message string
@@ -110,9 +111,12 @@ func ListSessions() ([]Session, error) {
 				continue
 			}
 
+			// Convert string to typed CheckpointID
+			cpID := id.CheckpointID(cp.CheckpointID)
+
 			if existing, ok := sessionMap[sessionID]; ok {
 				existing.Checkpoints = append(existing.Checkpoints, Checkpoint{
-					CheckpointID:     cp.CheckpointID,
+					CheckpointID:     cpID,
 					Message:          "Checkpoint: " + cp.CheckpointID,
 					Timestamp:        cp.CreatedAt,
 					IsTaskCheckpoint: cp.IsTask,
@@ -128,7 +132,7 @@ func ListSessions() ([]Session, error) {
 					Strategy:    "", // Will be set from metadata if available
 					StartTime:   cp.CreatedAt,
 					Checkpoints: []Checkpoint{{
-						CheckpointID:     cp.CheckpointID,
+						CheckpointID:     cpID,
 						Message:          "Checkpoint: " + cp.CheckpointID,
 						Timestamp:        cp.CreatedAt,
 						IsTaskCheckpoint: cp.IsTask,
@@ -161,10 +165,10 @@ func ListSessions() ([]Session, error) {
 				// Merge checkpoints - deduplicate by CheckpointID
 				existingCPIDs := make(map[string]bool)
 				for _, cp := range existing.Checkpoints {
-					existingCPIDs[cp.CheckpointID] = true
+					existingCPIDs[cp.CheckpointID.String()] = true
 				}
 				for _, cp := range addSession.Checkpoints {
-					if !existingCPIDs[cp.CheckpointID] {
+					if !existingCPIDs[cp.CheckpointID.String()] {
 						existing.Checkpoints = append(existing.Checkpoints, cp)
 					}
 				}

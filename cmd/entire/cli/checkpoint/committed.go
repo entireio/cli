@@ -701,6 +701,38 @@ func (s *GitStore) GetTranscript(ctx context.Context, checkpointID string) ([]by
 	return result.Transcript, nil
 }
 
+// GetSessionLog retrieves the session transcript and session ID for a checkpoint.
+// This is the primary method for looking up session logs by checkpoint ID.
+// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
+// Returns ErrNoTranscript if the checkpoint exists but has no transcript.
+func (s *GitStore) GetSessionLog(cpID id.CheckpointID) ([]byte, string, error) {
+	result, err := s.ReadCommitted(context.Background(), cpID.String())
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read checkpoint: %w", err)
+	}
+	if result == nil {
+		return nil, "", ErrCheckpointNotFound
+	}
+	if len(result.Transcript) == 0 {
+		return nil, "", ErrNoTranscript
+	}
+	return result.Transcript, result.Metadata.SessionID, nil
+}
+
+// LookupSessionLog is a convenience function that opens the repository and retrieves
+// a session log by checkpoint ID. This is the primary entry point for callers that
+// don't already have a GitStore instance.
+// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
+// Returns ErrNoTranscript if the checkpoint exists but has no transcript.
+func LookupSessionLog(cpID id.CheckpointID) ([]byte, string, error) {
+	repo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to open git repository: %w", err)
+	}
+	store := NewGitStore(repo)
+	return store.GetSessionLog(cpID)
+}
+
 // ensureSessionsBranch ensures the entire/sessions branch exists.
 func (s *GitStore) ensureSessionsBranch() error {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
