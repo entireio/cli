@@ -129,3 +129,19 @@ type TranscriptAnalyzer interface {
 	//   - error: any error encountered during reading
 	ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error)
 }
+
+// TranscriptChunker is implemented by agents that support transcript chunking.
+// This allows agents to split large transcripts into chunks for storage (GitHub has
+// a 100MB blob limit) and reassemble them when reading.
+type TranscriptChunker interface {
+	Agent
+
+	// ChunkTranscript splits a transcript into chunks if it exceeds maxSize.
+	// Returns a slice of chunks. If the transcript fits in one chunk, returns single-element slice.
+	// The chunking is format-aware: JSONL splits at line boundaries, JSON splits message arrays.
+	ChunkTranscript(content []byte, maxSize int) ([][]byte, error)
+
+	// ReassembleTranscript combines chunks back into a single transcript.
+	// Handles format-specific reassembly (JSONL concatenation, JSON message merging).
+	ReassembleTranscript(chunks [][]byte) ([]byte, error)
+}

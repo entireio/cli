@@ -413,3 +413,23 @@ func (c *ClaudeCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffse
 
 	return ExtractModifiedFiles(lines), lineNum, nil
 }
+
+// TranscriptChunker interface implementation
+
+// ChunkTranscript splits a JSONL transcript at line boundaries.
+// Claude Code uses JSONL format (one JSON object per line), so chunking
+// is done at newline boundaries to preserve message integrity.
+func (c *ClaudeCodeAgent) ChunkTranscript(content []byte, maxSize int) ([][]byte, error) {
+	chunks, err := agent.ChunkJSONL(content, maxSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to chunk JSONL transcript: %w", err)
+	}
+	return chunks, nil
+}
+
+// ReassembleTranscript concatenates JSONL chunks with newlines.
+//
+//nolint:unparam // error return is required by interface, kept for consistency
+func (c *ClaudeCodeAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
+	return agent.ReassembleJSONL(chunks), nil
+}

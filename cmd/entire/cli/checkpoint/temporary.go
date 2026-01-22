@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/jsonutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/trailers"
@@ -316,15 +317,24 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 	} else {
 		// Final checkpoint: add transcripts and checkpoint.json
 
-		// Add session transcript
+		// Add session transcript (with chunking support for large transcripts)
 		if opts.TranscriptPath != "" {
 			if transcriptContent, readErr := os.ReadFile(opts.TranscriptPath); readErr == nil {
-				if blobHash, blobErr := CreateBlobFromContent(s.repo, transcriptContent); blobErr == nil {
-					transcriptPath := sessionMetadataDir + "/" + paths.TranscriptFileName
-					entries[transcriptPath] = object.TreeEntry{
-						Name: transcriptPath,
-						Mode: filemode.Regular,
-						Hash: blobHash,
+				// Detect agent type from content for proper chunking
+				agentType := agent.DetectAgentTypeFromContent(transcriptContent)
+
+				// Chunk if necessary
+				chunks, chunkErr := agent.ChunkTranscript(transcriptContent, agentType)
+				if chunkErr == nil {
+					for i, chunk := range chunks {
+						chunkPath := sessionMetadataDir + "/" + agent.ChunkFileName(paths.TranscriptFileName, i)
+						if blobHash, blobErr := CreateBlobFromContent(s.repo, chunk); blobErr == nil {
+							entries[chunkPath] = object.TreeEntry{
+								Name: chunkPath,
+								Mode: filemode.Regular,
+								Hash: blobHash,
+							}
+						}
 					}
 				}
 			}
@@ -463,6 +473,7 @@ var errStop = errors.New("stop iteration")
 // This is used for shadow branch checkpoints where the transcript is stored in the commit tree
 // rather than on the entire/sessions branch.
 // commitHash is the commit to read from, metadataDir is the path within the tree.
+// Handles both chunked and non-chunked transcripts.
 func (s *GitStore) GetTranscriptFromCommit(commitHash plumbing.Hash, metadataDir string) ([]byte, error) {
 	commit, err := s.repo.CommitObject(commitHash)
 	if err != nil {
@@ -474,7 +485,18 @@ func (s *GitStore) GetTranscriptFromCommit(commitHash plumbing.Hash, metadataDir
 		return nil, fmt.Errorf("failed to get commit tree: %w", err)
 	}
 
-	// Try current format first, then legacy
+	// Try to get the metadata subtree for chunk detection
+	subTree, subTreeErr := tree.Tree(metadataDir)
+	if subTreeErr == nil {
+		// Use the helper function that handles chunking
+		// Pass empty agent type - it will be auto-detected from content
+		transcript, err := readTranscriptFromTree(subTree, "")
+		if err == nil && transcript != nil {
+			return transcript, nil
+		}
+	}
+
+	// Fall back to direct file access (for backwards compatibility)
 	transcriptPath := metadataDir + "/" + paths.TranscriptFileName
 	if file, fileErr := tree.File(transcriptPath); fileErr == nil {
 		content, contentErr := file.Contents()
