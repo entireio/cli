@@ -66,13 +66,16 @@ func Detect() (Agent, error) {
 	return nil, fmt.Errorf("no agent detected (available: %v)", List())
 }
 
-// Agent name constants
+// Agent name constants (internal registry identifiers)
 const (
 	AgentNameClaudeCode = "claude-code"
-	AgentNameCursor     = "cursor"
-	AgentNameWindsurf   = "windsurf"
-	AgentNameAider      = "aider"
 	AgentNameGemini     = "gemini"
+)
+
+// Agent type constants (human-readable display names)
+const (
+	AgentTypeClaudeCode = "Claude Code"
+	AgentTypeGemini     = "Gemini CLI"
 )
 
 // DefaultAgentName is the default when none specified
@@ -81,11 +84,8 @@ const DefaultAgentName = AgentNameClaudeCode
 // AgentTypeToRegistryName maps human-readable agent type names (as stored in session state)
 // to their registry names. Used to look up the correct agent when showing resume commands.
 var AgentTypeToRegistryName = map[string]string{
-	"Claude Code": AgentNameClaudeCode,
-	"Gemini CLI":  AgentNameGemini,
-	"Cursor":      AgentNameCursor,
-	"Windsurf":    AgentNameWindsurf,
-	"Aider":       AgentNameAider,
+	AgentTypeClaudeCode: AgentNameClaudeCode,
+	AgentTypeGemini:     AgentNameGemini,
 }
 
 // GetByAgentType retrieves an agent by its human-readable type name (e.g., "Claude Code", "Gemini CLI").

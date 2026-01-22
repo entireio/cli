@@ -164,7 +164,7 @@ type geminiTranscriptDetect struct {
 }
 
 // DetectAgentTypeFromContent detects the agent type from transcript content.
-// Returns "Gemini CLI" if it appears to be Gemini JSON format, empty string otherwise.
+// Returns AgentTypeGemini if it appears to be Gemini JSON format, empty string otherwise.
 // This is used when the agent type is unknown but we need to chunk/reassemble correctly.
 func DetectAgentTypeFromContent(content []byte) string {
 	// Quick check: Gemini JSON starts with { and has a messages array
@@ -181,7 +181,7 @@ func DetectAgentTypeFromContent(content []byte) string {
 
 	// Must have at least one message to be considered Gemini format
 	if len(transcript.Messages) > 0 {
-		return "Gemini CLI"
+		return AgentTypeGemini
 	}
 
 	return ""

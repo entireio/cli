@@ -135,15 +135,6 @@ func TestAgentNameConstants(t *testing.T) {
 	if AgentNameClaudeCode != "claude-code" {
 		t.Errorf("expected AgentNameClaudeCode %q, got %q", "claude-code", AgentNameClaudeCode)
 	}
-	if AgentNameCursor != "cursor" {
-		t.Errorf("expected AgentNameCursor %q, got %q", "cursor", AgentNameCursor)
-	}
-	if AgentNameWindsurf != "windsurf" {
-		t.Errorf("expected AgentNameWindsurf %q, got %q", "windsurf", AgentNameWindsurf)
-	}
-	if AgentNameAider != "aider" {
-		t.Errorf("expected AgentNameAider %q, got %q", "aider", AgentNameAider)
-	}
 	if AgentNameGemini != "gemini" {
 		t.Errorf("expected AgentNameGemini %q, got %q", "gemini", AgentNameGemini)
 	}
