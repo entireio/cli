@@ -162,6 +162,37 @@ func TestReassembleJSONL_MultipleChunks(t *testing.T) {
 	}
 }
 
+func TestChunkJSONL_OversizedLine(t *testing.T) {
+	// A single line that exceeds maxSize should return an error
+	maxSize := 100
+	oversizedLine := `{"type":"human","message":"` + strings.Repeat("x", maxSize) + `"}`
+	content := []byte(oversizedLine)
+
+	_, err := ChunkJSONL(content, maxSize)
+	if err == nil {
+		t.Fatal("Expected error for oversized line, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum chunk size") {
+		t.Errorf("Expected error about exceeding chunk size, got: %v", err)
+	}
+}
+
+func TestChunkJSONL_OversizedLineInMiddle(t *testing.T) {
+	// An oversized line in the middle of content should return an error
+	maxSize := 100
+	normalLine := `{"type":"human","message":"short"}`
+	oversizedLine := `{"type":"assistant","message":"` + strings.Repeat("x", maxSize) + `"}`
+	content := []byte(normalLine + "\n" + oversizedLine + "\n" + normalLine)
+
+	_, err := ChunkJSONL(content, maxSize)
+	if err == nil {
+		t.Fatal("Expected error for oversized line, got nil")
+	}
+	if !strings.Contains(err.Error(), "line 2") {
+		t.Errorf("Expected error to mention line 2, got: %v", err)
+	}
+}
+
 func TestDetectAgentTypeFromContent(t *testing.T) {
 	tests := []struct {
 		name     string

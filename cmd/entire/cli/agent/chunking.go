@@ -78,9 +78,15 @@ func ChunkJSONL(content []byte, maxSize int) ([][]byte, error) {
 	var chunks [][]byte
 	var currentChunk strings.Builder
 
-	for _, line := range lines {
+	for i, line := range lines {
 		// Check if adding this line would exceed the chunk size
 		lineWithNewline := line + "\n"
+
+		// Check if a single line exceeds maxSize - this is an error since we can't split JSONL lines
+		if len(lineWithNewline) > maxSize {
+			return nil, fmt.Errorf("JSONL line %d exceeds maximum chunk size (%d bytes > %d bytes); cannot split a single JSON object", i+1, len(lineWithNewline), maxSize)
+		}
+
 		if currentChunk.Len()+len(lineWithNewline) > maxSize && currentChunk.Len() > 0 {
 			// Save current chunk and start a new one
 			chunks = append(chunks, []byte(strings.TrimSuffix(currentChunk.String(), "\n")))
