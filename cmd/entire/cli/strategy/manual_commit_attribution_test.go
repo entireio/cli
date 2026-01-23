@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"sort"
 	"testing"
 
 	"github.com/go-git/go-git/v5/plumbing"
@@ -220,6 +221,11 @@ func buildTestTree(t *testing.T, files map[string]string) *object.Tree {
 			Hash: hash,
 		})
 	}
+
+	// Sort entries by name (required by git tree format)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name < entries[j].Name
+	})
 
 	// Create the tree
 	tree := &object.Tree{
@@ -668,5 +674,92 @@ func TestCalculateAttributionWithAccumulated_EmptyFilesTouched(t *testing.T) {
 
 	if result != nil {
 		t.Errorf("expected nil result for empty filesTouched, got %+v", result)
+	}
+}
+
+// TestCalculateAttributionWithAccumulated_UserEditsNonAgentFile tests the bug where
+// post-checkpoint user edits to files the agent never touched are undercounted.
+//
+// Bug scenario:
+// 1. Agent touches file1.go (added to filesTouched)
+// 2. User edits file2.go between checkpoints → captured in PromptAttributions
+// 3. User edits file2.go again AFTER last checkpoint, before commit
+// 4. BUG: Post-checkpoint calculation only looks at filesTouched (file1.go),
+//    missing the file2.go edits in step 3
+//
+// This causes undercounted user contributions and inflated agent percentage.
+func TestCalculateAttributionWithAccumulated_UserEditsNonAgentFile(t *testing.T) {
+	// Base: two files
+	baseTree := buildTestTree(t, map[string]string{
+		"file1.go": "package main\n",
+		"file2.go": "package util\n",
+	})
+
+	// Shadow (agent work): agent adds to file1.go only
+	shadowTree := buildTestTree(t, map[string]string{
+		"file1.go": "package main\n\nfunc agent1() {}\nfunc agent2() {}\n",
+		"file2.go": "package util\n\n// User edit 1\n// User edit 2\n",
+	})
+
+	// Head (final commit): user adds more to file2.go AFTER last checkpoint
+	headTree := buildTestTree(t, map[string]string{
+		"file1.go": "package main\n\nfunc agent1() {}\nfunc agent2() {}\n",
+		"file2.go": "package util\n\n// User edit 1\n// User edit 2\n// User edit 3\n// User edit 4\n",
+	})
+
+	// filesTouched only includes file1.go (agent-touched)
+	filesTouched := []string{"file1.go"}
+
+	// PromptAttributions captured user edits to file2.go between checkpoints
+	promptAttributions := []PromptAttribution{
+		{
+			CheckpointNumber: 1,
+			UserLinesAdded:   2, // User edit 1, 2 (between checkpoints)
+			UserLinesRemoved: 0,
+		},
+	}
+
+	result := CalculateAttributionWithAccumulated(
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+	)
+
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// Expected calculation:
+	// - Agent added 3 lines to file1.go (2 functions + 1 blank)
+	// - User added 2 lines to file2.go between checkpoints (from PromptAttribution)
+	// - User added 2 MORE lines to file2.go after last checkpoint (post-checkpoint)
+	// - Total user added: 2 + 2 = 4
+	// - agentLinesInCommit: 3
+	// - Total: 3 + 4 = 7
+	// - Agent percentage: 3/7 = 42.9%
+	//
+	// BUG (if not fixed): Post-checkpoint calculation only looks at file1.go,
+	// so it would miss the 2 post-checkpoint edits to file2.go:
+	// - Total user added: 2 + 0 = 2 (WRONG)
+	// - Total: 3 + 2 = 5 (WRONG)
+	// - Agent percentage: 3/5 = 60% (WRONG, inflated)
+
+	t.Logf("Attribution: agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
+		result.AgentLines, result.HumanAdded, result.TotalCommitted, result.AgentPercentage)
+
+	if result.AgentLines != 3 {
+		t.Errorf("AgentLines = %d, want 3", result.AgentLines)
+	}
+
+	if result.HumanAdded != 4 {
+		t.Errorf("HumanAdded = %d, want 4 (2 between + 2 post-checkpoint, including file agent never touched)",
+			result.HumanAdded)
+	}
+
+	if result.TotalCommitted != 7 {
+		t.Errorf("TotalCommitted = %d, want 7 (3 agent + 4 user)", result.TotalCommitted)
+	}
+
+	// Agent percentage should be 3/7 = 42.9%
+	if result.AgentPercentage < 42.8 || result.AgentPercentage > 43.0 {
+		t.Errorf("AgentPercentage = %.1f%%, want ~42.9%% (not inflated)", result.AgentPercentage)
 	}
 }

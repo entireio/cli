@@ -9,6 +9,46 @@ import (
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
+// getAllChangedFilesBetweenTrees returns a list of all files that differ between two trees.
+// This includes files that were added, modified, or deleted in either tree.
+func getAllChangedFilesBetweenTrees(tree1, tree2 *object.Tree) []string {
+	if tree1 == nil && tree2 == nil {
+		return nil
+	}
+
+	fileSet := make(map[string]struct{})
+
+	// Get all files from tree1
+	if tree1 != nil {
+		//nolint:errcheck // Errors ignored - just collecting file names for diff comparison
+		_ = tree1.Files().ForEach(func(f *object.File) error {
+			fileSet[f.Name] = struct{}{}
+			return nil
+		})
+	}
+
+	// Get all files from tree2
+	if tree2 != nil {
+		//nolint:errcheck // Errors ignored - just collecting file names for diff comparison
+		_ = tree2.Files().ForEach(func(f *object.File) error {
+			fileSet[f.Name] = struct{}{}
+			return nil
+		})
+	}
+
+	// Convert set to slice and filter to only files that actually changed
+	var changed []string
+	for filePath := range fileSet {
+		content1 := getFileContent(tree1, filePath)
+		content2 := getFileContent(tree2, filePath)
+		if content1 != content2 {
+			changed = append(changed, filePath)
+		}
+	}
+
+	return changed
+}
+
 // getFileContent retrieves the content of a file from a tree.
 // Returns empty string if the file doesn't exist, can't be read, or is a binary file.
 //
@@ -127,19 +167,27 @@ func CalculateAttributionWithAccumulated(
 		accumulatedUserRemoved += pa.UserLinesRemoved
 	}
 
-	// Calculate user edits AFTER the final checkpoint (shadow → head)
-	// These are edits the user made after the last agent checkpoint
-	var postCheckpointUserAdded, postCheckpointUserRemoved int
+	// Calculate agent contribution (base → shadow) for agent-touched files
 	var totalAgentAdded int
-
 	for _, filePath := range filesTouched {
 		baseContent := getFileContent(baseTree, filePath)
 		shadowContent := getFileContent(shadowTree, filePath)
-		headContent := getFileContent(headTree, filePath)
 
 		// Agent contribution: base → shadow
 		_, agentAdded, _ := diffLines(baseContent, shadowContent)
 		totalAgentAdded += agentAdded
+	}
+
+	// Calculate user edits AFTER the final checkpoint (shadow → head)
+	// IMPORTANT: Must check ALL files that changed between shadow and head,
+	// not just filesTouched, because user may have edited files the agent never touched.
+	// This ensures we count all post-checkpoint user work, matching what PromptAttributions
+	// captures for between-checkpoint edits.
+	var postCheckpointUserAdded, postCheckpointUserRemoved int
+	allChangedFiles := getAllChangedFilesBetweenTrees(shadowTree, headTree)
+	for _, filePath := range allChangedFiles {
+		shadowContent := getFileContent(shadowTree, filePath)
+		headContent := getFileContent(headTree, filePath)
 
 		// Post-checkpoint user edits: shadow → head
 		_, postUserAdded, postUserRemoved := diffLines(shadowContent, headContent)

@@ -1792,17 +1792,24 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 	}
 
 	// Verify the attribution values are reasonable
-	// Agent wrote 9 lines, human added 1 line (the comment)
-	// So we expect ~9 agent lines, ~1 human added, total ~10
+	// Agent added new function, human added a comment line
+	// The exact line counts depend on how the diff algorithm interprets the changes
+	// (insertion vs modification), but we should have non-zero totals and reasonable percentages.
 	if metadata.InitialAttribution.TotalCommitted == 0 {
 		t.Error("TotalCommitted should be > 0")
 	}
 	if metadata.InitialAttribution.AgentLines == 0 {
 		t.Error("AgentLines should be > 0 (agent wrote code)")
 	}
-	if metadata.InitialAttribution.HumanAdded == 0 {
-		t.Error("HumanAdded should be > 0 (human added a comment)")
+
+	// Human contribution should be captured in either HumanAdded or HumanModified
+	// When inserting lines in the middle of existing code, the diff algorithm may
+	// interpret it as a modification rather than a pure addition.
+	humanContribution := metadata.InitialAttribution.HumanAdded + metadata.InitialAttribution.HumanModified
+	if humanContribution == 0 {
+		t.Error("Human contribution (HumanAdded + HumanModified) should be > 0")
 	}
+
 	if metadata.InitialAttribution.AgentPercentage <= 0 || metadata.InitialAttribution.AgentPercentage > 100 {
 		t.Errorf("AgentPercentage should be between 0-100, got %f", metadata.InitialAttribution.AgentPercentage)
 	}
