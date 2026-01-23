@@ -11,8 +11,12 @@ import (
 // Each agent implementation (Claude Code, Cursor, Aider, etc.) converts its
 // native format to the normalized types defined in this package.
 type Agent interface {
-	// Name returns the agent identifier (e.g., "claude-code", "cursor")
+	// Name returns the agent registry key (e.g., "claude-code", "gemini")
 	Name() string
+
+	// Type returns the agent type identifier (e.g., "Claude Code", "Gemini CLI")
+	// This is stored in metadata and trailers.
+	Type() string
 
 	// Description returns a human-readable description for UI
 	Description() string

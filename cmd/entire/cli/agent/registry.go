@@ -66,40 +66,42 @@ func Detect() (Agent, error) {
 	return nil, fmt.Errorf("no agent detected (available: %v)", List())
 }
 
-// Agent name constants (internal registry identifiers)
+// Agent name constants (registry keys)
 const (
 	AgentNameClaudeCode = "claude-code"
 	AgentNameGemini     = "gemini"
 )
 
-// Agent type constants (human-readable display names)
+// Agent type constants (type identifiers stored in metadata/trailers)
 const (
 	AgentTypeClaudeCode = "Claude Code"
 	AgentTypeGemini     = "Gemini CLI"
 )
 
-// DefaultAgentName is the default when none specified
+// DefaultAgentName is the registry key for the default agent.
 const DefaultAgentName = AgentNameClaudeCode
 
-// AgentTypeToRegistryName maps human-readable agent type names (as stored in session state)
-// to their registry names. Used to look up the correct agent when showing resume commands.
-var AgentTypeToRegistryName = map[string]string{
-	AgentTypeClaudeCode: AgentNameClaudeCode,
-	AgentTypeGemini:     AgentNameGemini,
-}
-
-// GetByAgentType retrieves an agent by its type name.
-// Accepts either human-readable names (e.g., "Claude Code", "Gemini CLI") or
-// registry names (e.g., "claude-code", "gemini").
-//
-
+// GetByAgentType retrieves an agent by its type identifier or registry key.
+// Accepts either type identifiers (e.g., "Claude Code", "Gemini CLI") or
+// registry keys (e.g., "claude-code", "gemini").
 func GetByAgentType(agentType string) (Agent, error) {
-	// Try human-readable name first
-	if registryName, ok := AgentTypeToRegistryName[agentType]; ok {
-		return Get(registryName)
+	// Try registry key first
+	if ag, err := Get(agentType); err == nil {
+		return ag, nil
 	}
-	// Fall back to treating it as a registry name
-	return Get(agentType)
+
+	// Search by Type()
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	for _, factory := range registry {
+		ag := factory()
+		if ag.Type() == agentType {
+			return ag, nil
+		}
+	}
+
+	return nil, fmt.Errorf("unknown agent: %s", agentType)
 }
 
 // Default returns the default agent.

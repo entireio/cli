@@ -31,9 +31,14 @@ func NewClaudeCodeAgent() agent.Agent {
 	return &ClaudeCodeAgent{}
 }
 
-// Name returns the agent identifier.
+// Name returns the agent registry key.
 func (c *ClaudeCodeAgent) Name() string {
 	return agent.AgentNameClaudeCode
+}
+
+// Type returns the agent type identifier.
+func (c *ClaudeCodeAgent) Type() string {
+	return agent.AgentTypeClaudeCode
 }
 
 // Description returns a human-readable description.

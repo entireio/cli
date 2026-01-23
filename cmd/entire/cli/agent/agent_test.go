@@ -13,8 +13,9 @@ type mockAgent struct{}
 
 var _ Agent = (*mockAgent)(nil) // Compile-time interface check
 
-func (m *mockAgent) Name() string                  { return mockAgentName }
-func (m *mockAgent) Description() string           { return "Mock agent for testing" }
+func (m *mockAgent) Name() string        { return mockAgentName }
+func (m *mockAgent) Type() string        { return "Mock Agent" }
+func (m *mockAgent) Description() string { return "Mock agent for testing" }
 func (m *mockAgent) DetectPresence() (bool, error) { return false, nil }
 func (m *mockAgent) GetHookConfigPath() string     { return "" }
 func (m *mockAgent) SupportsHooks() bool           { return false }
