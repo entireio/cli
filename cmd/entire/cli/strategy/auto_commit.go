@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -138,13 +140,15 @@ func (s *AutoCommitStrategy) SaveChanges(ctx SaveContext) error {
 	}
 
 	// Generate checkpoint ID for this commit
-	checkpointID := paths.GenerateCheckpointID()
-
+	cpID, err := id.Generate()
+	if err != nil {
+		return fmt.Errorf("failed to generate checkpoint ID: %w", err)
+	}
 	// Step 1: Commit code changes to active branch with checkpoint ID trailer
 	// We do code first to avoid orphaned metadata if this step fails.
 	// If metadata commit fails after this, the code commit exists but GetRewindPoints
 	// already handles missing metadata gracefully (skips commits without metadata).
-	codeResult, err := s.commitCodeToActive(repo, ctx, checkpointID)
+	codeResult, err := s.commitCodeToActive(repo, ctx, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to commit code to active branch: %w", err)
 	}
@@ -163,7 +167,7 @@ func (s *AutoCommitStrategy) SaveChanges(ctx SaveContext) error {
 
 	// Step 2: Commit metadata to entire/sessions branch using sharded path
 	// Path is <checkpointID[:2]>/<checkpointID[2:]>/ for direct lookup
-	_, err = s.commitMetadataToMetadataBranch(repo, ctx, checkpointID)
+	_, err = s.commitMetadataToMetadataBranch(repo, ctx, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to commit metadata to entire/sessions branch: %w", err)
 	}
@@ -173,7 +177,7 @@ func (s *AutoCommitStrategy) SaveChanges(ctx SaveContext) error {
 	logging.Info(logCtx, "checkpoint saved",
 		slog.String("strategy", "auto-commit"),
 		slog.String("checkpoint_type", "session"),
-		slog.String("checkpoint_id", checkpointID),
+		slog.String("checkpoint_id", cpID.String()),
 		slog.Int("modified_files", len(ctx.ModifiedFiles)),
 		slog.Int("new_files", len(ctx.NewFiles)),
 		slog.Int("deleted_files", len(ctx.DeletedFiles)),
@@ -191,7 +195,7 @@ type commitCodeResult struct {
 // commitCodeToActive commits code changes to the active branch.
 // Adds an Entire-Checkpoint trailer for metadata lookup that survives amend/rebase.
 // Returns the result containing commit hash and whether a commit was created.
-func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveContext, checkpointID string) (commitCodeResult, error) {
+func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveContext, checkpointID id.CheckpointID) (commitCodeResult, error) {
 	// Check if there are any code changes to commit
 	if len(ctx.ModifiedFiles) == 0 && len(ctx.NewFiles) == 0 && len(ctx.DeletedFiles) == 0 {
 		fmt.Fprintf(os.Stderr, "No code changes to commit to active branch\n")
@@ -219,7 +223,7 @@ func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveCo
 	StageFiles(worktree, ctx.ModifiedFiles, ctx.NewFiles, ctx.DeletedFiles, StageForSession)
 
 	// Add checkpoint ID trailer to commit message
-	commitMsg := ctx.CommitMessage + "\n\n" + paths.CheckpointTrailerKey + ": " + checkpointID
+	commitMsg := ctx.CommitMessage + "\n\n" + trailers.CheckpointTrailerKey + ": " + checkpointID.String()
 
 	author := &object.Signature{
 		Name:  ctx.AuthorName,
@@ -243,7 +247,7 @@ func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveCo
 // Metadata is stored at sharded path: <checkpointID[:2]>/<checkpointID[2:]>/
 // This allows direct lookup from the checkpoint ID trailer on the code commit.
 // Uses checkpoint.WriteCommitted for git operations.
-func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository, ctx SaveContext, checkpointID string) (plumbing.Hash, error) {
+func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository, ctx SaveContext, checkpointID id.CheckpointID) (plumbing.Hash, error) {
 	store, err := s.getCheckpointStore()
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to get checkpoint store: %w", err)
@@ -320,13 +324,13 @@ func (s *AutoCommitStrategy) GetRewindPoints(limit int) ([]RewindPoint, error) {
 		count++
 
 		// Check for Entire-Checkpoint trailer
-		checkpointID, found := paths.ParseCheckpointTrailer(c.Message)
+		cpID, found := trailers.ParseCheckpoint(c.Message)
 		if !found {
 			return nil
 		}
 
 		// Look up metadata from sharded path
-		checkpointPath := paths.CheckpointPath(checkpointID)
+		checkpointPath := cpID.Path()
 		metadata, err := ReadCheckpointMetadata(metadataTree, checkpointPath)
 		if err != nil {
 			// Checkpoint exists in commit but no metadata found - skip this commit
@@ -359,7 +363,7 @@ func (s *AutoCommitStrategy) GetRewindPoints(limit int) ([]RewindPoint, error) {
 			MetadataDir:      metadataDir,
 			Date:             c.Author.When,
 			IsLogsOnly:       isLogsOnly,
-			CheckpointID:     checkpointID,
+			CheckpointID:     cpID,
 			IsTaskCheckpoint: metadata.IsTask,
 			ToolUseID:        metadata.ToolUseID,
 			Agent:            metadata.Agent,
@@ -438,7 +442,7 @@ func (s *AutoCommitStrategy) findTaskMetadataPathForCommit(repo *git.Repository,
 		if strings.Contains(commit.Message, "Commit: "+shortSHA) &&
 			strings.Contains(commit.Message, toolUseID) {
 			// Parse task metadata trailer
-			if taskPath, found := paths.ParseTaskMetadataTrailer(commit.Message); found {
+			if taskPath, found := trailers.ParseTaskMetadata(commit.Message); found {
 				foundTaskPath = taskPath
 				return errStop // Found it
 			}
@@ -476,85 +480,6 @@ func (s *AutoCommitStrategy) PreviewRewind(_ RewindPoint) (*RewindPreview, error
 	// Auto-commit uses git reset --hard which doesn't affect untracked files
 	// Return empty preview to indicate no untracked files will be deleted
 	return &RewindPreview{}, nil
-}
-
-func (s *AutoCommitStrategy) GetSessionLog(checkpointID string) ([]byte, string, error) {
-	// Session logs are on the entire/sessions branch in checkpoint directories
-	store, err := s.getCheckpointStore()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to get checkpoint store: %w", err)
-	}
-
-	// Use checkpoint.ReadCommitted for new format
-	result, err := store.ReadCommitted(context.Background(), checkpointID)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-	if result == nil {
-		// Try legacy format directly if not found in sharded format
-		return s.getSessionLogLegacy(checkpointID)
-	}
-
-	return result.Transcript, result.Metadata.SessionID, nil
-}
-
-// getSessionLogLegacy reads session logs from legacy format (cond-xxx/full.jsonl).
-func (s *AutoCommitStrategy) getSessionLogLegacy(checkpointID string) ([]byte, string, error) {
-	repo, err := OpenRepository()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to open git repository: %w", err)
-	}
-	// Get the entire/sessions branch
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return nil, "", fmt.Errorf("metadata branch %s not found: %w", paths.MetadataBranchName, err)
-	}
-
-	metadataCommit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to get metadata branch commit: %w", err)
-	}
-
-	tree, err := metadataCommit.Tree()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to get metadata tree: %w", err)
-	}
-
-	// Legacy path format
-	basePath := checkpointID
-
-	// Get session ID from metadata.json
-	var sessionID string
-	metadataPath := basePath + "/metadata.json"
-	if metaFile, fileErr := tree.File(metadataPath); fileErr == nil {
-		if content, contentErr := metaFile.Contents(); contentErr == nil {
-			var metadata map[string]interface{}
-			if json.Unmarshal([]byte(content), &metadata) == nil {
-				if sid, ok := metadata["session_id"].(string); ok {
-					sessionID = sid
-				}
-			}
-		}
-	}
-
-	// Try current format first, then legacy
-	transcriptPath := basePath + "/" + paths.TranscriptFileName
-	file, err := tree.File(transcriptPath)
-	if err != nil {
-		transcriptPath = basePath + "/" + paths.TranscriptFileNameLegacy
-		file, err = tree.File(transcriptPath)
-		if err != nil {
-			return nil, "", fmt.Errorf("failed to find session log (tried %s and %s): %w", paths.TranscriptFileName, paths.TranscriptFileNameLegacy, err)
-		}
-	}
-
-	content, err := file.Contents()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read session log: %w", err)
-	}
-
-	return []byte(content), sessionID, nil
 }
 
 // EnsureSetup ensures the strategy's required setup is in place.
@@ -607,17 +532,20 @@ func (s *AutoCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) error
 	}
 
 	// Generate checkpoint ID for this task checkpoint
-	checkpointID := paths.GenerateCheckpointID()
+	cpID, err := id.Generate()
+	if err != nil {
+		return fmt.Errorf("failed to generate checkpoint ID: %w", err)
+	}
 
 	// Step 1: Commit code changes to active branch with checkpoint ID trailer
 	// We do code first to avoid orphaned metadata if this step fails.
-	_, err = s.commitTaskCodeToActive(repo, ctx, checkpointID)
+	_, err = s.commitTaskCodeToActive(repo, ctx, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to commit task code to active branch: %w", err)
 	}
 
 	// Step 2: Commit task metadata to entire/sessions branch at sharded path
-	_, err = s.commitTaskMetadataToMetadataBranch(repo, ctx, checkpointID)
+	_, err = s.commitTaskMetadataToMetadataBranch(repo, ctx, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to commit task metadata to entire/sessions branch: %w", err)
 	}
@@ -627,7 +555,7 @@ func (s *AutoCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) error
 	attrs := []any{
 		slog.String("strategy", "auto-commit"),
 		slog.String("checkpoint_type", "task"),
-		slog.String("checkpoint_id", checkpointID),
+		slog.String("checkpoint_id", cpID.String()),
 		slog.String("checkpoint_uuid", ctx.CheckpointUUID),
 		slog.String("tool_use_id", ctx.ToolUseID),
 		slog.String("subagent_type", ctx.SubagentType),
@@ -650,7 +578,7 @@ func (s *AutoCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) error
 // commitTaskCodeToActive commits task code changes to the active branch.
 // Adds an Entire-Checkpoint trailer for metadata lookup that survives amend/rebase.
 // For TaskStart checkpoints, creates an empty marker commit even without file changes.
-func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx TaskCheckpointContext, checkpointID string) (plumbing.Hash, error) {
+func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx TaskCheckpointContext, checkpointID id.CheckpointID) (plumbing.Hash, error) {
 	// For TaskStart, we want to create a marker commit even without file changes
 	isTaskStart := ctx.IsIncremental && ctx.IncrementalType == IncrementalTypeTaskStart
 	hasFileChanges := len(ctx.ModifiedFiles) > 0 || len(ctx.NewFiles) > 0 || len(ctx.DeletedFiles) > 0
@@ -695,7 +623,7 @@ func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx Ta
 	}
 
 	// Add checkpoint ID trailer to commit message
-	commitMsg := subject + "\n\n" + paths.CheckpointTrailerKey + ": " + checkpointID
+	commitMsg := subject + "\n\n" + trailers.CheckpointTrailerKey + ": " + checkpointID.String()
 
 	author := &object.Signature{
 		Name:  ctx.AuthorName,
@@ -733,7 +661,7 @@ func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx Ta
 // Returns the metadata commit hash.
 // When IsIncremental is true, only writes the incremental checkpoint file, skipping transcripts.
 // Uses checkpoint.WriteCommitted for git operations.
-func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(repo *git.Repository, ctx TaskCheckpointContext, checkpointID string) (plumbing.Hash, error) {
+func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(repo *git.Repository, ctx TaskCheckpointContext, checkpointID id.CheckpointID) (plumbing.Hash, error) {
 	store, err := s.getCheckpointStore()
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to get checkpoint store: %w", err)
@@ -927,10 +855,10 @@ func (s *AutoCommitStrategy) findTaskCheckpointPath(repo *git.Repository, commit
 // GetMetadataRef returns a reference to the metadata for the given checkpoint.
 // For auto-commit strategy, returns the checkpoint path on entire/sessions branch.
 func (s *AutoCommitStrategy) GetMetadataRef(checkpoint Checkpoint) string {
-	if checkpoint.CheckpointID == "" {
+	if checkpoint.CheckpointID.IsEmpty() {
 		return ""
 	}
-	return paths.MetadataBranchName + ":" + paths.CheckpointPath(checkpoint.CheckpointID)
+	return paths.MetadataBranchName + ":" + checkpoint.CheckpointID.Path()
 }
 
 // GetSessionMetadataRef returns a reference to the most recent metadata for a session.
@@ -953,7 +881,7 @@ func (s *AutoCommitStrategy) GetSessionContext(sessionID string) string {
 
 	// Get the most recent checkpoint
 	cp := session.Checkpoints[0]
-	if cp.CheckpointID == "" {
+	if cp.CheckpointID.IsEmpty() {
 		return ""
 	}
 
@@ -973,7 +901,7 @@ func (s *AutoCommitStrategy) GetSessionContext(sessionID string) string {
 // GetCheckpointLog returns the session transcript for a specific checkpoint.
 // For auto-commit strategy, looks up checkpoint by ID on the entire/sessions branch using the checkpoint store.
 func (s *AutoCommitStrategy) GetCheckpointLog(cp Checkpoint) ([]byte, error) {
-	if cp.CheckpointID == "" {
+	if cp.CheckpointID.IsEmpty() {
 		return nil, ErrNoMetadata
 	}
 
@@ -1076,7 +1004,7 @@ func (s *AutoCommitStrategy) ListOrphanedItems() ([]CleanupItem, error) {
 		}
 		// Only consider checkpoints created by this strategy
 		if result.Metadata.Strategy == StrategyNameAutoCommit || result.Metadata.Strategy == StrategyNameDual {
-			autoCommitCheckpoints[cp.CheckpointID] = true
+			autoCommitCheckpoints[cp.CheckpointID.String()] = true
 		}
 	}
 
@@ -1139,8 +1067,8 @@ func (s *AutoCommitStrategy) findReferencedCheckpoints(repo *git.Repository) map
 			}
 			visited[c.Hash] = true
 
-			if checkpointID, found := paths.ParseCheckpointTrailer(c.Message); found {
-				referenced[checkpointID] = true
+			if cpID, found := trailers.ParseCheckpoint(c.Message); found {
+				referenced[cpID.String()] = true
 			}
 			return nil
 		})

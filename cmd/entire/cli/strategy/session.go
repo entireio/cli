@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/go-git/go-git/v5"
 )
 
@@ -39,7 +39,7 @@ type Session struct {
 type Checkpoint struct {
 	// CheckpointID is the stable 12-hex-char identifier for this checkpoint.
 	// Used to look up metadata at <id[:2]>/<id[2:]>/ on entire/sessions branch.
-	CheckpointID string
+	CheckpointID id.CheckpointID
 
 	// Message is the commit message or checkpoint description
 	Message string
@@ -113,7 +113,7 @@ func ListSessions() ([]Session, error) {
 			if existing, ok := sessionMap[sessionID]; ok {
 				existing.Checkpoints = append(existing.Checkpoints, Checkpoint{
 					CheckpointID:     cp.CheckpointID,
-					Message:          "Checkpoint: " + cp.CheckpointID,
+					Message:          "Checkpoint: " + cp.CheckpointID.String(),
 					Timestamp:        cp.CreatedAt,
 					IsTaskCheckpoint: cp.IsTask,
 					ToolUseID:        cp.ToolUseID,
@@ -129,7 +129,7 @@ func ListSessions() ([]Session, error) {
 					StartTime:   cp.CreatedAt,
 					Checkpoints: []Checkpoint{{
 						CheckpointID:     cp.CheckpointID,
-						Message:          "Checkpoint: " + cp.CheckpointID,
+						Message:          "Checkpoint: " + cp.CheckpointID.String(),
 						Timestamp:        cp.CreatedAt,
 						IsTaskCheckpoint: cp.IsTask,
 						ToolUseID:        cp.ToolUseID,
@@ -161,10 +161,10 @@ func ListSessions() ([]Session, error) {
 				// Merge checkpoints - deduplicate by CheckpointID
 				existingCPIDs := make(map[string]bool)
 				for _, cp := range existing.Checkpoints {
-					existingCPIDs[cp.CheckpointID] = true
+					existingCPIDs[cp.CheckpointID.String()] = true
 				}
 				for _, cp := range addSession.Checkpoints {
-					if !existingCPIDs[cp.CheckpointID] {
+					if !existingCPIDs[cp.CheckpointID.String()] {
 						existing.Checkpoints = append(existing.Checkpoints, cp)
 					}
 				}
@@ -212,14 +212,13 @@ func GetSession(sessionID string) (*Session, error) {
 }
 
 // getDescriptionForCheckpoint reads the description for a checkpoint from the entire/sessions branch.
-func getDescriptionForCheckpoint(repo *git.Repository, checkpointID string) string {
+func getDescriptionForCheckpoint(repo *git.Repository, checkpointID id.CheckpointID) string {
 	tree, err := GetMetadataBranchTree(repo)
 	if err != nil {
 		return NoDescription
 	}
 
-	checkpointPath := paths.CheckpointPath(checkpointID)
-	return getSessionDescriptionFromTree(tree, checkpointPath)
+	return getSessionDescriptionFromTree(tree, checkpointID.Path())
 }
 
 // findSessionByID finds a session by exact ID or prefix match.

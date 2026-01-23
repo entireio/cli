@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 )
 
 // ErrNoMetadata is returned when a commit does not have an Entire metadata trailer.
@@ -112,7 +113,8 @@ type RewindPoint struct {
 
 	// CheckpointID is the stable 12-hex-char identifier for logs-only points.
 	// Used to retrieve logs from entire/sessions/<id[:2]>/<id[2:]>/full.jsonl
-	CheckpointID string
+	// Empty for shadow branch checkpoints (uncommitted).
+	CheckpointID id.CheckpointID
 
 	// Agent is the human-readable name of the agent that created this checkpoint
 	// (e.g., "Claude Code", "Cursor")
@@ -374,11 +376,6 @@ type Strategy interface {
 	// This allows showing warnings about files that will be deleted before the rewind.
 	// Returns nil if preview is not supported (e.g., auto-commit strategy).
 	PreviewRewind(point RewindPoint) (*RewindPreview, error)
-
-	// GetSessionLog returns the raw session log (full.log) and session ID for a given commit.
-	// Returns ErrNoMetadata if the commit doesn't have an Entire metadata trailer.
-	// The session ID is extracted from the commit trailers or metadata directory.
-	GetSessionLog(checkpointID string) (logContent []byte, sessionID string, err error)
 
 	// GetTaskCheckpoint returns the task checkpoint for a given rewind point.
 	// For strategies that store checkpoints in git (auto-commit), this reads from the branch.

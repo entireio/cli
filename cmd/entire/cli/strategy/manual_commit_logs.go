@@ -1,176 +1,15 @@
 package strategy
 
 import (
-	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5/plumbing"
 )
-
-// GetSessionLog returns the session transcript and session ID.
-func (s *ManualCommitStrategy) GetSessionLog(commitHash string) ([]byte, string, error) {
-	repo, err := OpenRepository()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to open git repository: %w", err)
-	}
-
-	// Try to look up by checkpoint ID first (12 hex chars)
-	if len(commitHash) == 12 {
-		log, err := s.getCheckpointLog(commitHash)
-		if err == nil {
-			// Find session ID from metadata (best-effort lookup)
-			checkpoints, _ := s.listCheckpoints() //nolint:errcheck // Best-effort session ID lookup
-			for _, cp := range checkpoints {
-				if cp.CheckpointID == commitHash {
-					return log, cp.SessionID, nil
-				}
-			}
-			return log, "", nil
-		}
-	}
-
-	// Try to look up by commit
-	hash, err := repo.ResolveRevision(plumbing.Revision(commitHash))
-	if err == nil {
-		commit, err := repo.CommitObject(*hash)
-		if err == nil {
-			// Check for Entire-Checkpoint trailer
-			checkpointID, hasTrailer := paths.ParseCheckpointTrailer(commit.Message)
-			if hasTrailer && checkpointID != "" {
-				log, logErr := s.getCheckpointLog(checkpointID)
-				if logErr == nil {
-					// Find session ID
-					checkpoints, _ := s.listCheckpoints() //nolint:errcheck // Best-effort session ID lookup
-					for _, cp := range checkpoints {
-						if cp.CheckpointID == checkpointID {
-							return log, cp.SessionID, nil
-						}
-					}
-					return log, "", nil
-				}
-			}
-
-			// Fall back to Entire-Session trailer
-			sessionID, found := paths.ParseSessionTrailer(commit.Message)
-			if found {
-				log, err := s.getSessionLogBySessionID(sessionID)
-				if err == nil {
-					return log, sessionID, nil
-				}
-			}
-
-			// Try metadata trailer (shadow branch commit)
-			metadataDir, found := paths.ParseMetadataTrailer(commit.Message)
-			if found {
-				sessionID := filepath.Base(metadataDir)
-				tree, treeErr := commit.Tree()
-				if treeErr == nil {
-					// Try current format first, then legacy
-					logPath := filepath.Join(metadataDir, paths.TranscriptFileName)
-					if file, fileErr := tree.File(logPath); fileErr == nil {
-						if content, contentErr := file.Contents(); contentErr == nil {
-							return []byte(content), sessionID, nil
-						}
-					}
-					logPath = filepath.Join(metadataDir, paths.TranscriptFileNameLegacy)
-					if file, fileErr := tree.File(logPath); fileErr == nil {
-						if content, contentErr := file.Contents(); contentErr == nil {
-							return []byte(content), sessionID, nil
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Try as session ID (commitHash is actually a sessionID)
-	log, err := s.getSessionLogBySessionID(commitHash)
-	if err != nil {
-		return nil, "", err
-	}
-	return log, commitHash, nil
-}
-
-// getSessionLogBySessionID returns all transcripts for a session.
-func (s *ManualCommitStrategy) getSessionLogBySessionID(sessionID string) ([]byte, error) {
-	checkpoints, err := s.getCheckpointsForSession(sessionID)
-	if err != nil {
-		// Fall back to active session shadow branch
-		return s.getSessionLogFromShadow(sessionID)
-	}
-
-	// Sort by time (oldest first)
-	sort.Slice(checkpoints, func(i, j int) bool {
-		return checkpoints[i].CreatedAt.Before(checkpoints[j].CreatedAt)
-	})
-
-	var result []byte
-	for i, cp := range checkpoints {
-		log, err := s.getCheckpointLog(cp.CheckpointID)
-		if err != nil {
-			continue
-		}
-		if i > 0 {
-			result = append(result, []byte("\n\n--- Next commit ---\n\n")...)
-		}
-		result = append(result, log...)
-	}
-
-	if len(result) == 0 {
-		return s.getSessionLogFromShadow(sessionID)
-	}
-
-	return result, nil
-}
-
-// getSessionLogFromShadow gets transcript from active shadow branch.
-func (s *ManualCommitStrategy) getSessionLogFromShadow(sessionID string) ([]byte, error) {
-	repo, err := OpenRepository()
-	if err != nil {
-		return nil, fmt.Errorf("failed to open git repository: %w", err)
-	}
-
-	state, err := s.loadSessionState(sessionID)
-	if err != nil || state == nil {
-		return nil, fmt.Errorf("no active session: %s", sessionID)
-	}
-
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit)
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get shadow branch reference: %w", err)
-	}
-
-	commit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit object: %w", err)
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit tree: %w", err)
-	}
-
-	metadataDir := paths.SessionMetadataDir(sessionID)
-	if file, fileErr := tree.File(metadataDir + "/" + paths.TranscriptFileName); fileErr == nil {
-		if content, contentErr := file.Contents(); contentErr == nil {
-			return []byte(content), nil
-		}
-	}
-	if file, fileErr := tree.File(metadataDir + "/" + paths.TranscriptFileNameLegacy); fileErr == nil {
-		if content, contentErr := file.Contents(); contentErr == nil {
-			return []byte(content), nil
-		}
-	}
-
-	return nil, errors.New("no transcript found")
-}
 
 // GetTaskCheckpoint retrieves a task checkpoint.
 func (s *ManualCommitStrategy) GetTaskCheckpoint(point RewindPoint) (*TaskCheckpoint, error) {
@@ -228,10 +67,10 @@ func (s *ManualCommitStrategy) GetSessionInfo() (*SessionInfo, error) {
 // GetMetadataRef returns a reference to the metadata for the given checkpoint.
 // For manual-commit strategy, returns the sharded path on entire/sessions branch.
 func (s *ManualCommitStrategy) GetMetadataRef(checkpoint Checkpoint) string {
-	if checkpoint.CheckpointID == "" {
+	if checkpoint.CheckpointID.IsEmpty() {
 		return ""
 	}
-	return paths.MetadataBranchName + ":" + paths.CheckpointPath(checkpoint.CheckpointID)
+	return paths.MetadataBranchName + ":" + checkpoint.CheckpointID.Path()
 }
 
 // GetSessionMetadataRef returns a reference to the most recent metadata commit for a session.
@@ -251,7 +90,7 @@ func (s *ManualCommitStrategy) GetSessionMetadataRef(_ string) string {
 
 	// The tip of entire/sessions contains all condensed sessions
 	// Return a reference to it (sessionID is not used as all sessions are on the same branch)
-	return paths.FormatSourceRefTrailer(paths.MetadataBranchName, ref.Hash().String())
+	return trailers.FormatSourceRef(paths.MetadataBranchName, ref.Hash().String())
 }
 
 // GetSessionContext returns the context.md content for a session.
@@ -307,7 +146,7 @@ func (s *ManualCommitStrategy) GetSessionContext(sessionID string) string {
 // GetCheckpointLog returns the session transcript for a specific checkpoint.
 // For manual-commit strategy, metadata is stored at sharded paths on entire/sessions branch.
 func (s *ManualCommitStrategy) GetCheckpointLog(checkpoint Checkpoint) ([]byte, error) {
-	if checkpoint.CheckpointID == "" {
+	if checkpoint.CheckpointID.IsEmpty() {
 		return nil, ErrNoMetadata
 	}
 	return s.getCheckpointLog(checkpoint.CheckpointID)

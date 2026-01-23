@@ -10,6 +10,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
+	"entire.io/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -171,7 +172,7 @@ func TestExplainCommit_WithEntireData(t *testing.T) {
 
 	// Commit with Entire-Metadata trailer
 	metadataDir := ".entire/metadata/" + sessionID
-	commitMessage := paths.FormatMetadataTrailer("Add new feature", metadataDir)
+	commitMessage := trailers.FormatMetadata("Add new feature", metadataDir)
 	commitHash, err := w.Commit(commitMessage, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  "Test",

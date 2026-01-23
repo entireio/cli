@@ -11,7 +11,9 @@ import (
 	"time"
 
 	cpkg "entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/charmbracelet/huh"
 	"github.com/go-git/go-git/v5"
@@ -147,9 +149,9 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(limit int) ([]RewindPoint
 
 	// Build map of checkpoint ID -> checkpoint info
 	// Checkpoint ID is the stable link from Entire-Checkpoint trailer
-	checkpointInfoMap := make(map[string]CheckpointInfo)
+	checkpointInfoMap := make(map[id.CheckpointID]CheckpointInfo)
 	for _, cp := range checkpoints {
-		if cp.CheckpointID != "" {
+		if !cp.CheckpointID.IsEmpty() {
 			checkpointInfoMap[cp.CheckpointID] = cp
 		}
 	}
@@ -180,14 +182,13 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(limit int) ([]RewindPoint
 		}
 		count++
 
-		// Extract checkpoint ID from Entire-Checkpoint trailer
-		checkpointID, hasTrailer := paths.ParseCheckpointTrailer(c.Message)
-		if !hasTrailer || checkpointID == "" {
+		// Extract checkpoint ID from Entire-Checkpoint trailer (ParseCheckpoint validates format)
+		cpID, found := trailers.ParseCheckpoint(c.Message)
+		if !found {
 			return nil
 		}
-
 		// Check if this checkpoint ID has metadata on entire/sessions
-		cpInfo, found := checkpointInfoMap[checkpointID]
+		cpInfo, found := checkpointInfoMap[cpID]
 		if !found {
 			return nil
 		}
@@ -272,7 +273,7 @@ func (s *ManualCommitStrategy) Rewind(point RewindPoint) error {
 	}
 
 	// Load session state to get untracked files that existed at session start
-	sessionID, hasSessionTrailer := paths.ParseSessionTrailer(commit.Message)
+	sessionID, hasSessionTrailer := trailers.ParseSession(commit.Message)
 	var preservedUntrackedFiles map[string]bool
 	if hasSessionTrailer {
 		state, stateErr := s.loadSessionState(sessionID)
@@ -430,7 +431,7 @@ func (s *ManualCommitStrategy) Rewind(point RewindPoint) error {
 // include prompts from the rewound point, not prompts from later checkpoints.
 func (s *ManualCommitStrategy) resetShadowBranchToCheckpoint(repo *git.Repository, commit *object.Commit) error {
 	// Extract session ID from the checkpoint commit's Entire-Session trailer
-	sessionID, found := paths.ParseSessionTrailer(commit.Message)
+	sessionID, found := trailers.ParseSession(commit.Message)
 	if !found {
 		return errors.New("checkpoint has no Entire-Session trailer")
 	}
@@ -492,7 +493,7 @@ func (s *ManualCommitStrategy) PreviewRewind(point RewindPoint) (*RewindPreview,
 	}
 
 	// Load session state to get untracked files that existed at session start
-	sessionID, hasSessionTrailer := paths.ParseSessionTrailer(commit.Message)
+	sessionID, hasSessionTrailer := trailers.ParseSession(commit.Message)
 	var preservedUntrackedFiles map[string]bool
 	if hasSessionTrailer {
 		state, stateErr := s.loadSessionState(sessionID)
@@ -623,7 +624,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 		return errors.New("not a logs-only rewind point")
 	}
 
-	if point.CheckpointID == "" {
+	if point.CheckpointID.IsEmpty() {
 		return errors.New("missing checkpoint ID")
 	}
 
@@ -766,7 +767,7 @@ func (s *ManualCommitStrategy) extractSessionIDFromCommit(commitHash string) str
 	}
 
 	// Parse Entire-Session trailer
-	sessionID, found := paths.ParseSessionTrailer(commit.Message)
+	sessionID, found := trailers.ParseSession(commit.Message)
 	if found {
 		return sessionID
 	}

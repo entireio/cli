@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
 )
@@ -73,7 +74,7 @@ func TestShadowStrategy_LastCheckpointID_ReusedAcrossCommits(t *testing.T) {
 	if state == nil {
 		t.Fatal("Session state should exist after first commit")
 	}
-	if state.LastCheckpointID != firstCheckpointID {
+	if state.LastCheckpointID.String() != firstCheckpointID {
 		t.Errorf("Session state LastCheckpointID = %q, want %q", state.LastCheckpointID, firstCheckpointID)
 	}
 
@@ -99,7 +100,7 @@ func TestShadowStrategy_LastCheckpointID_ReusedAcrossCommits(t *testing.T) {
 	}
 
 	// Verify the checkpoint exists on entire/sessions branch
-	checkpointPath := paths.CheckpointPath(firstCheckpointID)
+	checkpointPath := paths.CheckpointPath(id.MustCheckpointID(firstCheckpointID))
 	if !env.FileExistsInBranch(paths.MetadataBranchName, checkpointPath+"/"+paths.MetadataFileName) {
 		t.Errorf("Checkpoint metadata should exist at %s on %s branch",
 			checkpointPath, paths.MetadataBranchName)
@@ -141,7 +142,7 @@ func TestShadowStrategy_LastCheckpointID_ClearedOnNewPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get session state: %v", err)
 	}
-	if state.LastCheckpointID != firstCheckpointID {
+	if state.LastCheckpointID.String() != firstCheckpointID {
 		t.Errorf("LastCheckpointID should be set to %s, got %s", firstCheckpointID, state.LastCheckpointID)
 	}
 
@@ -360,7 +361,7 @@ func TestShadowStrategy_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
 
 	// Verify data exists on entire/sessions
 	checkpointID := env.GetLatestCheckpointID()
-	checkpointPath := paths.CheckpointPath(checkpointID)
+	checkpointPath := paths.CheckpointPath(id.MustCheckpointID(checkpointID))
 	if !env.FileExistsInBranch(paths.MetadataBranchName, checkpointPath+"/"+paths.MetadataFileName) {
 		t.Error("Checkpoint metadata should exist on entire/sessions branch")
 	}

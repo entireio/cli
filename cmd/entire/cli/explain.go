@@ -12,6 +12,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
+	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/spf13/cobra"
@@ -239,7 +240,7 @@ func gatherCheckpointDetails(strat strategy.Strategy, session *strategy.Session)
 		}
 
 		// Use checkpoint ID for display (truncate long IDs)
-		detail.ShortID = cp.CheckpointID
+		detail.ShortID = cp.CheckpointID.String()
 		if len(detail.ShortID) > 12 {
 			detail.ShortID = detail.ShortID[:12]
 		}
@@ -316,8 +317,8 @@ func runExplainCommit(w io.Writer, commitRef string) error {
 	}
 
 	// Check for Entire metadata
-	metadataDir, hasMetadata := paths.ParseMetadataTrailer(commit.Message)
-	sessionID, hasSession := paths.ParseSessionTrailer(commit.Message)
+	metadataDir, hasMetadata := trailers.ParseMetadata(commit.Message)
+	sessionID, hasSession := trailers.ParseSession(commit.Message)
 
 	// If no session trailer, try to extract from metadata path.
 	// Note: extractSessionIDFromMetadata is defined in rewind.go as it's used

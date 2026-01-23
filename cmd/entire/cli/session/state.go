@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/jsonutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 )
@@ -51,7 +52,7 @@ type State struct {
 	ConcurrentWarningShown bool `json:"concurrent_warning_shown,omitempty"`
 
 	// LastCheckpointID is the checkpoint ID from last condensation, reused for subsequent commits without new content
-	LastCheckpointID string `json:"last_checkpoint_id,omitempty"`
+	LastCheckpointID id.CheckpointID `json:"last_checkpoint_id,omitempty"`
 
 	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Gemini CLI", "Cursor")
 	AgentType string `json:"agent_type,omitempty"`

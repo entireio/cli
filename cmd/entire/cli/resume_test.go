@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
@@ -306,10 +307,10 @@ func TestRunResume_UncommittedChanges(t *testing.T) {
 
 // createCheckpointOnMetadataBranch creates a checkpoint on the entire/sessions branch.
 // Returns the checkpoint ID.
-func createCheckpointOnMetadataBranch(t *testing.T, repo *git.Repository, sessionID string) string {
+func createCheckpointOnMetadataBranch(t *testing.T, repo *git.Repository, sessionID string) id.CheckpointID {
 	t.Helper()
 
-	checkpointID := "abc123def456" // Fixed ID for testing
+	checkpointID := id.MustCheckpointID("abc123def456") // Fixed ID for testing
 
 	// Get existing metadata branch or create it
 	if err := strategy.EnsureMetadataBranch(repo); err != nil {
@@ -333,7 +334,7 @@ func createCheckpointOnMetadataBranch(t *testing.T, repo *git.Repository, sessio
   "session_id": %q,
   "created_at": "2025-01-01T00:00:00Z",
   "strategy": "auto-commit"
-}`, checkpointID, sessionID)
+}`, checkpointID.String(), sessionID)
 
 	// Create blob for metadata
 	blob := repo.Storer.NewEncodedObject()
@@ -372,7 +373,8 @@ func createCheckpointOnMetadataBranch(t *testing.T, repo *git.Repository, sessio
 	}
 
 	// Build tree structure: <id[:2]>/<id[2:]>/metadata.json
-	shardedPath := paths.CheckpointPath(checkpointID)
+	shardedPath := checkpointID.Path()
+	checkpointIDStr := checkpointID.String()
 
 	// Create checkpoint tree with metadata and transcript files
 	// Entries must be sorted alphabetically
@@ -394,7 +396,7 @@ func createCheckpointOnMetadataBranch(t *testing.T, repo *git.Repository, sessio
 	// Create inner shard tree (id[2:])
 	innerTree := object.Tree{
 		Entries: []object.TreeEntry{
-			{Name: checkpointID[2:], Mode: filemode.Dir, Hash: checkpointTreeHash},
+			{Name: checkpointIDStr[2:], Mode: filemode.Dir, Hash: checkpointTreeHash},
 		},
 	}
 	innerTreeObj := repo.Storer.NewEncodedObject()
@@ -420,7 +422,7 @@ func createCheckpointOnMetadataBranch(t *testing.T, repo *git.Repository, sessio
 		}
 	}
 	rootEntries = append(rootEntries, object.TreeEntry{
-		Name: checkpointID[:2],
+		Name: checkpointIDStr[:2],
 		Mode: filemode.Dir,
 		Hash: innerTreeHash,
 	})
@@ -560,7 +562,7 @@ func TestCheckRemoteMetadata_CheckpointNotOnRemote(t *testing.T) {
 	}
 
 	// Call checkRemoteMetadata with a DIFFERENT checkpoint ID (not on remote)
-	err = checkRemoteMetadata(repo, "different12345")
+	err = checkRemoteMetadata(repo, "abcd12345678")
 	if err != nil {
 		t.Errorf("checkRemoteMetadata() returned error for missing checkpoint: %v", err)
 	}
@@ -607,7 +609,7 @@ func TestResumeFromCurrentBranch_FallsBackToRemote(t *testing.T) {
 		t.Fatalf("Failed to add feature file: %v", err)
 	}
 
-	commitMsg := "Add feature\n\nEntire-Checkpoint: " + checkpointID
+	commitMsg := "Add feature\n\nEntire-Checkpoint: " + checkpointID.String()
 	_, err = w.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  "Test User",

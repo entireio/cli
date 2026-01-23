@@ -8,6 +8,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/agent/claudecode"
 	cpkg "entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/textutil"
 
@@ -71,7 +72,7 @@ func (s *ManualCommitStrategy) getCheckpointsForSession(sessionID string) ([]Che
 
 // getCheckpointLog returns the transcript for a specific checkpoint ID.
 // Uses checkpoint.GitStore.ReadCommitted() for reading from entire/sessions.
-func (s *ManualCommitStrategy) getCheckpointLog(checkpointID string) ([]byte, error) {
+func (s *ManualCommitStrategy) getCheckpointLog(checkpointID id.CheckpointID) ([]byte, error) {
 	store, err := s.getCheckpointStore()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
@@ -95,7 +96,7 @@ func (s *ManualCommitStrategy) getCheckpointLog(checkpointID string) ([]byte, er
 // checkpointID is the 12-hex-char value from the Entire-Checkpoint trailer.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
 // Uses checkpoint.GitStore.WriteCommitted for the git operations.
-func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointID string, state *SessionState) (*CondenseResult, error) {
+func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointID id.CheckpointID, state *SessionState) (*CondenseResult, error) {
 	// Get shadow branch
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit)
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)

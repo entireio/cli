@@ -9,9 +9,12 @@ import (
 	"path/filepath"
 
 	"entire.io/cli/cmd/entire/cli/agent"
+	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
+	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/charmbracelet/huh"
 	"github.com/go-git/go-git/v5"
@@ -126,7 +129,7 @@ func resumeFromCurrentBranch(branchName string, force bool) error {
 	if err != nil {
 		return err
 	}
-	if result.checkpointID == "" {
+	if result.checkpointID.IsEmpty() {
 		fmt.Fprintf(os.Stderr, "No Entire checkpoint found on branch '%s'\n", branchName)
 		return nil
 	}
@@ -158,7 +161,7 @@ func resumeFromCurrentBranch(branchName string, force bool) error {
 	}
 
 	// Look up metadata from sharded path
-	metadata, err := strategy.ReadCheckpointMetadata(metadataTree, paths.CheckpointPath(checkpointID))
+	metadata, err := strategy.ReadCheckpointMetadata(metadataTree, checkpointID.Path())
 	if err != nil {
 		// Checkpoint exists in commit but no local metadata - check remote
 		return checkRemoteMetadata(repo, checkpointID)
@@ -169,7 +172,7 @@ func resumeFromCurrentBranch(branchName string, force bool) error {
 
 // branchCheckpointResult contains the result of searching for a checkpoint on a branch.
 type branchCheckpointResult struct {
-	checkpointID      string
+	checkpointID      id.CheckpointID
 	commitHash        string
 	commitMessage     string
 	newerCommitsExist bool // true if there are branch-only commits (not merge commits) without checkpoints
@@ -194,8 +197,8 @@ func findBranchCheckpoint(repo *git.Repository, branchName string) (*branchCheck
 	}
 
 	// First, check if HEAD itself has a checkpoint (most common case)
-	if checkpointID, found := paths.ParseCheckpointTrailer(headCommit.Message); found {
-		result.checkpointID = checkpointID
+	if cpID, found := trailers.ParseCheckpoint(headCommit.Message); found {
+		result.checkpointID = cpID
 		result.commitHash = head.Hash().String()
 		result.commitMessage = headCommit.Message
 		result.newerCommitsExist = false
@@ -263,8 +266,8 @@ func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branc
 		}
 
 		// Check for checkpoint trailer
-		if checkpointID, found := paths.ParseCheckpointTrailer(current.Message); found {
-			result.checkpointID = checkpointID
+		if cpID, found := trailers.ParseCheckpoint(current.Message); found {
+			result.checkpointID = cpID
 			result.commitHash = current.Hash.String()
 			result.commitMessage = current.Message
 			// Only warn about branch work commits, not merge commits
@@ -320,7 +323,7 @@ func promptResumeFromOlderCheckpoint() (bool, error) {
 
 // checkRemoteMetadata checks if checkpoint metadata exists on origin/entire/sessions
 // and automatically fetches it if available.
-func checkRemoteMetadata(repo *git.Repository, checkpointID string) error {
+func checkRemoteMetadata(repo *git.Repository, checkpointID id.CheckpointID) error {
 	// Try to get remote metadata branch tree
 	remoteTree, err := strategy.GetRemoteMetadataBranchTree(repo)
 	if err != nil {
@@ -330,7 +333,7 @@ func checkRemoteMetadata(repo *git.Repository, checkpointID string) error {
 	}
 
 	// Check if the checkpoint exists on the remote
-	metadata, err := strategy.ReadCheckpointMetadata(remoteTree, paths.CheckpointPath(checkpointID))
+	metadata, err := strategy.ReadCheckpointMetadata(remoteTree, checkpointID.Path())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Checkpoint '%s' found in commit but session metadata not available\n", checkpointID)
 		return nil //nolint:nilerr // Informational message, not a fatal error
@@ -351,7 +354,7 @@ func checkRemoteMetadata(repo *git.Repository, checkpointID string) error {
 // resumeSession restores and displays the resume command for a specific session.
 // For multi-session checkpoints, restores ALL sessions and shows commands for each.
 // If force is false, prompts for confirmation when local logs have newer timestamps.
-func resumeSession(sessionID, checkpointID string, force bool) error {
+func resumeSession(sessionID string, checkpointID id.CheckpointID, force bool) error {
 	// Get the current agent (auto-detect or use default)
 	ag, err := agent.Detect()
 	if err != nil {
@@ -365,7 +368,7 @@ func resumeSession(sessionID, checkpointID string, force bool) error {
 	ctx := logging.WithAgent(logging.WithComponent(context.Background(), "resume"), ag.Name())
 
 	logging.Debug(ctx, "resume session started",
-		slog.String("checkpoint_id", checkpointID),
+		slog.String("checkpoint_id", checkpointID.String()),
 		slog.String("session_id", sessionID),
 	)
 
@@ -423,7 +426,7 @@ func resumeSession(sessionID, checkpointID string, force bool) error {
 			return nil //nolint:nilerr // Graceful fallback to single session
 		}
 
-		metadata, err := strategy.ReadCheckpointMetadata(metadataTree, paths.CheckpointPath(checkpointID))
+		metadata, err := strategy.ReadCheckpointMetadata(metadataTree, checkpointID.Path())
 		if err != nil || metadata.SessionCount <= 1 {
 			// Single session or can't read metadata - show standard single session output
 			agentSID := ag.ExtractAgentSessionID(sessionID)
@@ -434,11 +437,11 @@ func resumeSession(sessionID, checkpointID string, force bool) error {
 		}
 
 		// Multi-session: show all resume commands with prompts
-		checkpointPath := paths.CheckpointPath(checkpointID)
+		checkpointPath := checkpointID.Path()
 		sessionPrompts := strategy.ReadAllSessionPromptsFromTree(metadataTree, checkpointPath, metadata.SessionCount, metadata.SessionIDs)
 
 		logging.Debug(ctx, "resume session completed (multi-session)",
-			slog.String("checkpoint_id", checkpointID),
+			slog.String("checkpoint_id", checkpointID.String()),
 			slog.Int("session_count", metadata.SessionCount),
 		)
 
@@ -477,17 +480,25 @@ func resumeSession(sessionID, checkpointID string, force bool) error {
 // resumeSingleSession restores a single session (fallback when multi-session restore fails).
 // Always overwrites existing session logs to ensure consistency with checkpoint state.
 // If force is false, prompts for confirmation when local log has newer timestamps.
-func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID, checkpointID, sessionDir, repoRoot string, force bool) error {
+func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, checkpointID id.CheckpointID, sessionDir, repoRoot string, force bool) error {
 	agentSessionID := ag.ExtractAgentSessionID(sessionID)
 	sessionLogPath := filepath.Join(sessionDir, agentSessionID+".jsonl")
 
-	strat := GetStrategy()
+	if checkpointID.IsEmpty() {
+		logging.Debug(ctx, "resume session: empty checkpoint ID",
+			slog.String("checkpoint_id", checkpointID.String()),
+		)
+		fmt.Fprintf(os.Stderr, "Session '%s' found in commit trailer but session log not available\n", sessionID)
+		fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
+		fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(agentSessionID))
+		return nil
+	}
 
-	logContent, _, err := strat.GetSessionLog(checkpointID)
+	logContent, _, err := checkpoint.LookupSessionLog(checkpointID)
 	if err != nil {
-		if errors.Is(err, strategy.ErrNoMetadata) {
+		if errors.Is(err, checkpoint.ErrCheckpointNotFound) || errors.Is(err, checkpoint.ErrNoTranscript) {
 			logging.Debug(ctx, "resume session completed (no metadata)",
-				slog.String("checkpoint_id", checkpointID),
+				slog.String("checkpoint_id", checkpointID.String()),
 				slog.String("session_id", sessionID),
 			)
 			fmt.Fprintf(os.Stderr, "Session '%s' found in commit trailer but session log not available\n", sessionID)
@@ -496,7 +507,7 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID, checkpo
 			return nil
 		}
 		logging.Error(ctx, "resume session failed",
-			slog.String("checkpoint_id", checkpointID),
+			slog.String("checkpoint_id", checkpointID.String()),
 			slog.String("session_id", sessionID),
 			slog.String("error", err.Error()),
 		)
@@ -539,7 +550,7 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID, checkpo
 	// Write the session using the agent's WriteSession method
 	if err := ag.WriteSession(agentSession); err != nil {
 		logging.Error(ctx, "resume session failed during write",
-			slog.String("checkpoint_id", checkpointID),
+			slog.String("checkpoint_id", checkpointID.String()),
 			slog.String("session_id", sessionID),
 			slog.String("error", err.Error()),
 		)
@@ -547,7 +558,7 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID, checkpo
 	}
 
 	logging.Debug(ctx, "resume session completed",
-		slog.String("checkpoint_id", checkpointID),
+		slog.String("checkpoint_id", checkpointID.String()),
 		slog.String("session_id", sessionID),
 	)
 

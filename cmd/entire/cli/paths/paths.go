@@ -2,8 +2,6 @@ package paths
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 )
 
 // Directory constants
@@ -36,44 +36,17 @@ const (
 	SettingsFileName         = "settings.json"
 )
 
-// Metadata trailer key used in commit messages
-const MetadataTrailerKey = "Entire-Metadata"
-
-// MetadataTaskTrailerKey is the trailer key for task checkpoint commits
-const MetadataTaskTrailerKey = "Entire-Metadata-Task"
-
-// StrategyTrailerKey is the trailer key indicating which strategy created the commit
-const StrategyTrailerKey = "Entire-Strategy"
-
 // MetadataBranchName is the orphan branch used by auto-commit and manual-commit strategies to store metadata
 const MetadataBranchName = "entire/sessions"
 
-// BaseCommitTrailerKey links shadow commits to their base code commit
-const BaseCommitTrailerKey = "Base-Commit"
-
-// SessionTrailerKey identifies which session created a commit
-const SessionTrailerKey = "Entire-Session"
-
-// CondensationTrailerKey identifies the condensation ID for a commit
-const CondensationTrailerKey = "Entire-Condensation"
-
-// SourceRefTrailerKey links code commits to their metadata on a shadow/metadata branch
-// Format: "<branch>@<commit-hash>" e.g. "entire/metadata@abc123def456"
-const SourceRefTrailerKey = "Entire-Source-Ref"
-
-// CheckpointTrailerKey links commits to their checkpoint metadata on entire/sessions.
-// Format: 12 hex characters e.g. "a3b2c4d5e6f7"
-// This trailer survives git amend and rebase operations.
-const CheckpointTrailerKey = "Entire-Checkpoint"
-
-// EphemeralBranchTrailerKey identifies the shadow branch that a checkpoint originated from.
-// Used in manual-commit strategy checkpoint commits on entire/sessions branch.
-// Format: full branch name e.g. "entire/2b4c177"
-const EphemeralBranchTrailerKey = "Ephemeral-branch"
-
-// AgentTrailerKey identifies the agent that created a checkpoint.
-// Format: human-readable agent name e.g. "Claude Code", "Cursor"
-const AgentTrailerKey = "Entire-Agent"
+// CheckpointPath returns the sharded storage path for a checkpoint ID.
+// Uses first 2 characters as shard (256 buckets), remaining as folder name.
+// Example: "a3b2c4d5e6f7" -> "a3/b2c4d5e6f7"
+//
+// Deprecated: Use checkpointID.Path() directly instead.
+func CheckpointPath(checkpointID id.CheckpointID) string {
+	return checkpointID.Path()
+}
 
 // repoRootCache caches the repository root to avoid repeated git commands.
 // The cache is keyed by the current working directory to handle directory changes.
@@ -156,16 +129,6 @@ func AbsPath(relPath string) (string, error) {
 	return filepath.Join(root, relPath), nil
 }
 
-// FormatSourceRefTrailer creates a trailer value linking to a metadata commit.
-// Format: "<branch>@<commit-hash-prefix>"
-func FormatSourceRefTrailer(branch, commitHash string) string {
-	shortHash := commitHash
-	if len(shortHash) > 12 {
-		shortHash = shortHash[:12]
-	}
-	return fmt.Sprintf("%s@%s", branch, shortHash)
-}
-
 // IsInfrastructurePath returns true if the path is part of CLI infrastructure
 // (i.e., inside the .entire directory)
 func IsInfrastructurePath(path string) bool {
@@ -185,186 +148,8 @@ func ToRelativePath(absPath, cwd string) string {
 	return relPath
 }
 
-// FormatMetadataTrailer creates a commit message with metadata trailer
-func FormatMetadataTrailer(message, metadataDir string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n", message, MetadataTrailerKey, metadataDir)
-}
-
-// FormatMetadataTrailerWithStrategy creates a commit message with metadata and strategy trailers
-func FormatMetadataTrailerWithStrategy(message, metadataDir, strategy string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n%s: %s\n", message, MetadataTrailerKey, metadataDir, StrategyTrailerKey, strategy)
-}
-
-// FormatShadowCommitMessage creates a commit message for manual-commit strategy checkpoints.
-// Includes Entire-Metadata, Entire-Session, and Entire-Strategy trailers.
-func FormatShadowCommitMessage(message, metadataDir, sessionID string) string {
-	var sb strings.Builder
-	sb.WriteString(message)
-	sb.WriteString("\n\n")
-	sb.WriteString(fmt.Sprintf("%s: %s\n", MetadataTrailerKey, metadataDir))
-	sb.WriteString(fmt.Sprintf("%s: %s\n", SessionTrailerKey, sessionID))
-	sb.WriteString(fmt.Sprintf("%s: %s\n", StrategyTrailerKey, "manual-commit"))
-	return sb.String()
-}
-
-// FormatShadowTaskCommitMessage creates a commit message for manual-commit task checkpoints.
-// Includes Entire-Metadata-Task, Entire-Session, and Entire-Strategy trailers.
-func FormatShadowTaskCommitMessage(message, taskMetadataDir, sessionID string) string {
-	var sb strings.Builder
-	sb.WriteString(message)
-	sb.WriteString("\n\n")
-	sb.WriteString(fmt.Sprintf("%s: %s\n", MetadataTaskTrailerKey, taskMetadataDir))
-	sb.WriteString(fmt.Sprintf("%s: %s\n", SessionTrailerKey, sessionID))
-	sb.WriteString(fmt.Sprintf("%s: %s\n", StrategyTrailerKey, "manual-commit"))
-	return sb.String()
-}
-
-// FormatStrategyTrailer creates a commit message with just the strategy trailer (no metadata dir)
-func FormatStrategyTrailer(message, strategy string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n", message, StrategyTrailerKey, strategy)
-}
-
-// ParseStrategyTrailer extracts strategy from commit message.
-// Returns the strategy name and true if found, empty string and false otherwise.
-func ParseStrategyTrailer(commitMessage string) (string, bool) {
-	matches := strategyTrailerRegex.FindStringSubmatch(commitMessage)
-	if len(matches) > 1 {
-		return NormalizeStrategyName(strings.TrimSpace(matches[1])), true
-	}
-	return "", false
-}
-
-// NormalizeStrategyName maps legacy strategy names to current names.
-// These are the strategy names used during initial development and are kept for backwards
-// compatibility
-func NormalizeStrategyName(name string) string {
-	switch name {
-	case "dual":
-		return "auto-commit"
-	case "shadow":
-		return "manual-commit"
-	default:
-		return name
-	}
-}
-
-// ParseMetadataTrailer extracts metadata dir from commit message.
-// Returns the metadata directory and true if found, empty string and false otherwise.
-func ParseMetadataTrailer(commitMessage string) (string, bool) {
-	matches := metadataTrailerRegex.FindStringSubmatch(commitMessage)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1]), true
-	}
-	return "", false
-}
-
-// FormatTaskMetadataTrailer creates a commit message with task metadata trailer
-func FormatTaskMetadataTrailer(message, taskMetadataDir string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n", message, MetadataTaskTrailerKey, taskMetadataDir)
-}
-
-// FormatTaskMetadataTrailerWithStrategy creates a commit message with task metadata and strategy trailers
-func FormatTaskMetadataTrailerWithStrategy(message, taskMetadataDir, strategy string) string {
-	return fmt.Sprintf("%s\n\n%s: %s\n%s: %s\n", message, MetadataTaskTrailerKey, taskMetadataDir, StrategyTrailerKey, strategy)
-}
-
-// ParseTaskMetadataTrailer extracts task metadata dir from commit message.
-// Returns the task metadata directory and true if found, empty string and false otherwise.
-func ParseTaskMetadataTrailer(commitMessage string) (string, bool) {
-	matches := taskMetadataTrailerRegex.FindStringSubmatch(commitMessage)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1]), true
-	}
-	return "", false
-}
-
-// ParseBaseCommitTrailer extracts the base commit SHA from a commit message.
-// Returns the full SHA and true if found, empty string and false otherwise.
-func ParseBaseCommitTrailer(commitMessage string) (string, bool) {
-	matches := baseCommitTrailerRegex.FindStringSubmatch(commitMessage)
-	if len(matches) > 1 {
-		return matches[1], true
-	}
-	return "", false
-}
-
-// ParseCondensationTrailer extracts the condensation ID from a commit message.
-// Returns the condensation ID and true if found, empty string and false otherwise.
-func ParseCondensationTrailer(commitMessage string) (string, bool) {
-	matches := condensationTrailerRegex.FindStringSubmatch(commitMessage)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1]), true
-	}
-	return "", false
-}
-
-// ParseSessionTrailer extracts the session ID from a commit message.
-// Returns the session ID and true if found, empty string and false otherwise.
-// Note: If multiple Entire-Session trailers exist, this returns only the first one.
-// Use ParseAllSessionTrailers to get all session IDs.
-func ParseSessionTrailer(commitMessage string) (string, bool) {
-	matches := sessionTrailerRegex.FindStringSubmatch(commitMessage)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1]), true
-	}
-	return "", false
-}
-
-// GenerateCheckpointID generates a unique 12-character hex checkpoint ID.
-// Uses crypto/rand for secure random generation.
-// Returns 12 hex characters (6 bytes = ~281 trillion unique values).
-func GenerateCheckpointID() string {
-	b := make([]byte, 6)
-	//nolint:errcheck,gosec // crypto/rand.Read is documented to always succeed on supported platforms
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// ParseCheckpointTrailer extracts the checkpoint ID from a commit message.
-// Returns the checkpoint ID and true if found, empty string and false otherwise.
-func ParseCheckpointTrailer(commitMessage string) (string, bool) {
-	matches := checkpointTrailerRegex.FindStringSubmatch(commitMessage)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1]), true
-	}
-	return "", false
-}
-
-// CheckpointPath returns the sharded path for a checkpoint ID on entire/sessions.
-// Uses first 2 characters as shard (256 buckets), remaining as folder name.
-// Example: "a3b2c4d5e6f7" -> "a3/b2c4d5e6f7"
-func CheckpointPath(checkpointID string) string {
-	if len(checkpointID) < 3 {
-		return checkpointID
-	}
-	return checkpointID[:2] + "/" + checkpointID[2:]
-}
-
-// Pre-compiled regexes for trailer parsing (compiled at package init for performance)
-var (
-	// checkpointIDRegex matches valid checkpoint IDs (12 lowercase hex characters)
-	checkpointIDRegex = regexp.MustCompile(`^[a-f0-9]{12}$`)
-
-	// pathSafeRegex matches strings safe for use in file paths (no path separators or traversal)
-	pathSafeRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
-
-	// Trailer parsing regexes
-	strategyTrailerRegex     = regexp.MustCompile(StrategyTrailerKey + `:\s*(.+)`)
-	metadataTrailerRegex     = regexp.MustCompile(MetadataTrailerKey + `:\s*(.+)`)
-	taskMetadataTrailerRegex = regexp.MustCompile(MetadataTaskTrailerKey + `:\s*(.+)`)
-	baseCommitTrailerRegex   = regexp.MustCompile(BaseCommitTrailerKey + `:\s*([a-f0-9]{40})`)
-	condensationTrailerRegex = regexp.MustCompile(CondensationTrailerKey + `:\s*(.+)`)
-	sessionTrailerRegex      = regexp.MustCompile(SessionTrailerKey + `:\s*(.+)`)
-	checkpointTrailerRegex   = regexp.MustCompile(CheckpointTrailerKey + `:\s*([a-f0-9]+)`)
-)
-
-// ValidateCheckpointID validates that a checkpoint ID is exactly 12 lowercase hex characters.
-func ValidateCheckpointID(id string) error {
-	if !checkpointIDRegex.MatchString(id) {
-		return fmt.Errorf("invalid checkpoint ID %q: must be 12 lowercase hex characters", id)
-	}
-	return nil
-}
+// pathSafeRegex matches strings safe for use in file paths (no path separators or traversal)
+var pathSafeRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
 
 // ValidateSessionID validates that a session ID is non-empty and doesn't contain path separators.
 func ValidateSessionID(id string) error {
@@ -398,30 +183,6 @@ func ValidateAgentID(id string) error {
 		return fmt.Errorf("invalid agent ID %q: must be alphanumeric with underscores/hyphens only", id)
 	}
 	return nil
-}
-
-// TODO: THIS SHOULD BE REPLACED WITH ParseCheckpointTrailer ?!
-// ParseAllSessionTrailers extracts all session IDs from a commit message.
-// A commit can have multiple Entire-Session trailers if multiple sessions
-// contributed to it. Returns a slice of session IDs (may be empty).
-func ParseAllSessionTrailers(commitMessage string) []string {
-	matches := sessionTrailerRegex.FindAllStringSubmatch(commitMessage, -1)
-
-	var sessionIDs []string
-	seen := make(map[string]bool)
-
-	for _, match := range matches {
-		if len(match) > 1 {
-			sessionID := strings.TrimSpace(match[1])
-			// Deduplicate
-			if !seen[sessionID] {
-				seen[sessionID] = true
-				sessionIDs = append(sessionIDs, sessionID)
-			}
-		}
-	}
-
-	return sessionIDs
 }
 
 // nonAlphanumericRegex matches any non-alphanumeric character

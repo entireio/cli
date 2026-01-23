@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -111,13 +112,13 @@ func TestAutoCommitStrategy_SaveChanges_CommitHasMetadataRef(t *testing.T) {
 	}
 
 	// Active branch commits should be clean - no Entire-* trailers
-	if strings.Contains(commit.Message, paths.StrategyTrailerKey) {
+	if strings.Contains(commit.Message, trailers.StrategyTrailerKey) {
 		t.Errorf("code commit should NOT have strategy trailer, got message:\n%s", commit.Message)
 	}
-	if strings.Contains(commit.Message, paths.SourceRefTrailerKey) {
+	if strings.Contains(commit.Message, trailers.SourceRefTrailerKey) {
 		t.Errorf("code commit should NOT have source-ref trailer, got message:\n%s", commit.Message)
 	}
-	if strings.Contains(commit.Message, paths.SessionTrailerKey) {
+	if strings.Contains(commit.Message, trailers.SessionTrailerKey) {
 		t.Errorf("code commit should NOT have session trailer, got message:\n%s", commit.Message)
 	}
 
@@ -132,10 +133,10 @@ func TestAutoCommitStrategy_SaveChanges_CommitHasMetadataRef(t *testing.T) {
 	}
 
 	// Metadata commit should have the checkpoint format with session ID and strategy
-	if !strings.Contains(sessionsCommit.Message, paths.SessionTrailerKey) {
+	if !strings.Contains(sessionsCommit.Message, trailers.SessionTrailerKey) {
 		t.Errorf("sessions branch commit should have session trailer, got message:\n%s", sessionsCommit.Message)
 	}
-	if !strings.Contains(sessionsCommit.Message, paths.StrategyTrailerKey) {
+	if !strings.Contains(sessionsCommit.Message, trailers.StrategyTrailerKey) {
 		t.Errorf("sessions branch commit should have strategy trailer, got message:\n%s", sessionsCommit.Message)
 	}
 }
@@ -224,7 +225,7 @@ func TestAutoCommitStrategy_SaveChanges_MetadataRefPointsToValidCommit(t *testin
 	}
 
 	// Code commit should be clean - no Entire-* trailers
-	if strings.Contains(commit.Message, paths.SourceRefTrailerKey) {
+	if strings.Contains(commit.Message, trailers.SourceRefTrailerKey) {
 		t.Errorf("code commit should NOT have source-ref trailer, got:\n%s", commit.Message)
 	}
 
@@ -245,13 +246,13 @@ func TestAutoCommitStrategy_SaveChanges_MetadataRefPointsToValidCommit(t *testin
 	}
 
 	// Verify it contains the session ID
-	if !strings.Contains(metadataCommit.Message, paths.SessionTrailerKey+": "+sessionID) {
-		t.Errorf("metadata commit missing %s trailer for %s", paths.SessionTrailerKey, sessionID)
+	if !strings.Contains(metadataCommit.Message, trailers.SessionTrailerKey+": "+sessionID) {
+		t.Errorf("metadata commit missing %s trailer for %s", trailers.SessionTrailerKey, sessionID)
 	}
 
 	// Verify it contains the strategy (auto-commit)
-	if !strings.Contains(metadataCommit.Message, paths.StrategyTrailerKey+": "+StrategyNameAutoCommit) {
-		t.Errorf("metadata commit missing %s trailer for %s", paths.StrategyTrailerKey, StrategyNameAutoCommit)
+	if !strings.Contains(metadataCommit.Message, trailers.StrategyTrailerKey+": "+StrategyNameAutoCommit) {
+		t.Errorf("metadata commit missing %s trailer for %s", trailers.StrategyTrailerKey, StrategyNameAutoCommit)
 	}
 }
 
@@ -333,10 +334,10 @@ func TestAutoCommitStrategy_SaveTaskCheckpoint_CommitHasMetadataRef(t *testing.T
 	}
 
 	// Task checkpoint commit should be clean - no Entire-* trailers
-	if strings.Contains(commit.Message, paths.SourceRefTrailerKey) {
+	if strings.Contains(commit.Message, trailers.SourceRefTrailerKey) {
 		t.Errorf("task checkpoint commit should NOT have source-ref trailer, got message:\n%s", commit.Message)
 	}
-	if strings.Contains(commit.Message, paths.StrategyTrailerKey) {
+	if strings.Contains(commit.Message, trailers.StrategyTrailerKey) {
 		t.Errorf("task checkpoint commit should NOT have strategy trailer, got message:\n%s", commit.Message)
 	}
 
@@ -526,7 +527,7 @@ func TestAutoCommitStrategy_SaveTaskCheckpoint_NonTaskStartNoChangesAmendedForMe
 	}
 
 	// Verify metadata was committed to the branch
-	if !strings.Contains(metadataCommit.Message, paths.MetadataTaskTrailerKey) {
+	if !strings.Contains(metadataCommit.Message, trailers.MetadataTaskTrailerKey) {
 		t.Error("metadata should still be committed to entire/sessions branch")
 	}
 }

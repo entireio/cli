@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/session"
@@ -295,8 +296,12 @@ func DeleteOrphanedCheckpoints(checkpointIDs []string) (deleted []string, failed
 
 	// Find and remove entries matching checkpoint paths
 	for path := range entries {
-		for checkpointID := range checkpointSet {
-			cpPath := paths.CheckpointPath(checkpointID)
+		for checkpointIDStr := range checkpointSet {
+			cpID, err := id.NewCheckpointID(checkpointIDStr)
+			if err != nil {
+				continue // Skip invalid checkpoint IDs
+			}
+			cpPath := cpID.Path()
 			if strings.HasPrefix(path, cpPath+"/") {
 				delete(entries, path)
 			}

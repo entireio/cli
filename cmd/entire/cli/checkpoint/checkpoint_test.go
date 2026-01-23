@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -121,7 +123,7 @@ func TestWriteCommitted_AgentField(t *testing.T) {
 	store := NewGitStore(repo)
 
 	// Write a committed checkpoint with Agent field
-	checkpointID := "a1b2c3d4e5f6"
+	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
 	sessionID := "test-session-123"
 	agentName := "Claude Code"
 
@@ -155,7 +157,7 @@ func TestWriteCommitted_AgentField(t *testing.T) {
 	}
 
 	// Read metadata.json from the sharded path
-	shardedPath := paths.CheckpointPath(checkpointID)
+	shardedPath := checkpointID.Path()
 	metadataPath := shardedPath + "/" + paths.MetadataFileName
 	metadataFile, err := tree.File(metadataPath)
 	if err != nil {
@@ -177,9 +179,9 @@ func TestWriteCommitted_AgentField(t *testing.T) {
 	}
 
 	// Verify commit message contains Entire-Agent trailer
-	if !strings.Contains(commit.Message, paths.AgentTrailerKey+": "+agentName) {
+	if !strings.Contains(commit.Message, trailers.AgentTrailerKey+": "+agentName) {
 		t.Errorf("commit message should contain %s trailer with value %q, got:\n%s",
-			paths.AgentTrailerKey, agentName, commit.Message)
+			trailers.AgentTrailerKey, agentName, commit.Message)
 	}
 }
 
@@ -341,7 +343,7 @@ func setupBranchTestRepo(t *testing.T) (*git.Repository, plumbing.Hash) {
 }
 
 // verifyBranchInMetadata reads and verifies the branch field in metadata.json.
-func verifyBranchInMetadata(t *testing.T, repo *git.Repository, checkpointID, expectedBranch string, shouldOmit bool) {
+func verifyBranchInMetadata(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID, expectedBranch string, shouldOmit bool) {
 	t.Helper()
 
 	metadataRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
@@ -359,7 +361,7 @@ func verifyBranchInMetadata(t *testing.T, repo *git.Repository, checkpointID, ex
 		t.Fatalf("failed to get tree: %v", err)
 	}
 
-	shardedPath := paths.CheckpointPath(checkpointID)
+	shardedPath := checkpointID.Path()
 	metadataPath := shardedPath + "/" + paths.MetadataFileName
 	metadataFile, err := tree.File(metadataPath)
 	if err != nil {
@@ -415,7 +417,7 @@ func TestWriteCommitted_BranchField(t *testing.T) {
 		}
 
 		// Write a committed checkpoint with branch information
-		checkpointID := "a1b2c3d4e5f6"
+		checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
 		store := NewGitStore(repo)
 		err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
 			CheckpointID: checkpointID,
@@ -455,7 +457,7 @@ func TestWriteCommitted_BranchField(t *testing.T) {
 		}
 
 		// Write a committed checkpoint (branch should be empty in detached HEAD)
-		checkpointID := "b2c3d4e5f6a7"
+		checkpointID := id.MustCheckpointID("b2c3d4e5f6a7")
 		store := NewGitStore(repo)
 		err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
 			CheckpointID: checkpointID,

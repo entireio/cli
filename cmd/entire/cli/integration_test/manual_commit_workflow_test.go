@@ -12,6 +12,7 @@ import (
 	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
+	"entire.io/cli/cmd/entire/cli/trailers"
 )
 
 // TestShadow_FullWorkflow tests the complete shadow workflow as described in
@@ -1706,9 +1707,9 @@ func TestShadow_SessionsBranchCommitTrailers(t *testing.T) {
 
 	// Verify required trailers are present
 	requiredTrailers := map[string]string{
-		paths.SessionTrailerKey:  "",                                // Entire-Session: <session-id>
-		paths.StrategyTrailerKey: strategy.StrategyNameManualCommit, // Entire-Strategy: manual-commit
-		paths.AgentTrailerKey:    "Claude Code",                     // Entire-Agent: Claude Code
+		trailers.SessionTrailerKey:  "",                                // Entire-Session: <session-id>
+		trailers.StrategyTrailerKey: strategy.StrategyNameManualCommit, // Entire-Strategy: manual-commit
+		trailers.AgentTrailerKey:    "Claude Code",                     // Entire-Agent: Claude Code
 	}
 
 	for trailerKey, expectedValue := range requiredTrailers {

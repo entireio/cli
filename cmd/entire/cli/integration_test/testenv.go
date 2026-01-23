@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/jsonutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
+	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -1075,11 +1077,11 @@ func (env *TestEnv) GetCheckpointIDFromCommitMessage(commitSHA string) string {
 	env.T.Helper()
 
 	msg := env.GetCommitMessage(commitSHA)
-	checkpointID, found := paths.ParseCheckpointTrailer(msg)
+	cpID, found := trailers.ParseCheckpoint(msg)
 	if !found {
 		return ""
 	}
-	return checkpointID
+	return cpID.String()
 }
 
 // GetLatestCheckpointIDFromHistory walks backwards from HEAD on the active branch
@@ -1107,8 +1109,8 @@ func (env *TestEnv) GetLatestCheckpointIDFromHistory() string {
 	var checkpointID string
 	//nolint:errcheck // ForEach callback handles errors
 	commitIter.ForEach(func(c *object.Commit) error {
-		if id, found := paths.ParseCheckpointTrailer(c.Message); found {
-			checkpointID = id
+		if cpID, found := trailers.ParseCheckpoint(c.Message); found {
+			checkpointID = cpID.String()
 			return errors.New("stop iteration") // Found it, stop
 		}
 		return nil
@@ -1123,11 +1125,9 @@ func (env *TestEnv) GetLatestCheckpointIDFromHistory() string {
 
 // ShardedCheckpointPath returns the sharded path for a checkpoint ID.
 // Format: <id[:2]>/<id[2:]>
+// Delegates to id.CheckpointID.Path() for consistency.
 func ShardedCheckpointPath(checkpointID string) string {
-	if len(checkpointID) < 3 {
-		return checkpointID
-	}
-	return checkpointID[:2] + "/" + checkpointID[2:]
+	return id.CheckpointID(checkpointID).Path()
 }
 
 func findModuleRoot() string {
