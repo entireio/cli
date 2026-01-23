@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -457,7 +456,7 @@ func runStatus(w io.Writer) error {
 		localSettingsPath = EntireSettingsLocalFile
 	}
 
-	// Check if either settings file exists
+	// Check which settings files exist (for source label)
 	_, projectErr := os.Stat(settingsPath)
 	if projectErr != nil && !errors.Is(projectErr, fs.ErrNotExist) {
 		return fmt.Errorf("cannot access project settings file: %w", projectErr)
@@ -474,40 +473,25 @@ func runStatus(w io.Writer) error {
 		return nil
 	}
 
-	// Load and display project settings (if exists)
-	if projectExists {
-		data, readErr := os.ReadFile(settingsPath) //nolint:gosec // path is from AbsPath or constant
-		if readErr != nil {
-			return fmt.Errorf("failed to read project settings: %w", readErr)
-		}
-		projectSettings := &EntireSettings{
-			Strategy: strategy.DefaultStrategyName,
-			Enabled:  true,
-		}
-		if unmarshalErr := json.Unmarshal(data, projectSettings); unmarshalErr != nil {
-			return fmt.Errorf("failed to parse project settings: %w", unmarshalErr)
-		}
-		projectSettings.Strategy = strategy.NormalizeStrategyName(projectSettings.Strategy)
-		fmt.Fprintln(w, formatSettingsStatus("Project", projectSettings))
+	// Load merged settings
+	settings, err := LoadEntireSettings()
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+	settings.Strategy = strategy.NormalizeStrategyName(settings.Strategy)
+
+	// Determine source label
+	var sourceLabel string
+	switch {
+	case projectExists && localExists:
+		sourceLabel = "Project + Local"
+	case localExists:
+		sourceLabel = "Local"
+	default:
+		sourceLabel = "Project"
 	}
 
-	// Load and display local settings (if exists)
-	if localExists {
-		data, readErr := os.ReadFile(localSettingsPath) //nolint:gosec // path is from AbsPath or constant
-		if readErr != nil {
-			return fmt.Errorf("failed to read local settings: %w", readErr)
-		}
-		localSettings := &EntireSettings{
-			Strategy: strategy.DefaultStrategyName,
-			Enabled:  true,
-		}
-		if unmarshalErr := json.Unmarshal(data, localSettings); unmarshalErr != nil {
-			return fmt.Errorf("failed to parse local settings: %w", unmarshalErr)
-		}
-		localSettings.Strategy = strategy.NormalizeStrategyName(localSettings.Strategy)
-		fmt.Fprintln(w, formatSettingsStatus("Local", localSettings))
-	}
-
+	fmt.Fprintln(w, formatSettingsStatus(sourceLabel, settings))
 	return nil
 }
 

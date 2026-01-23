@@ -518,6 +518,9 @@ func TestRunStatus_LocalSettingsOnly(t *testing.T) {
 
 func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 	setupTestRepo(t)
+	// Project: enabled=true, strategy=manual-commit
+	// Local: enabled=false, strategy=auto-commit
+	// Merged: enabled=false (local overrides), strategy=auto-commit (local overrides)
 	writeSettings(t, `{"strategy": "manual-commit", "enabled": true}`)
 	writeLocalSettings(t, `{"strategy": "auto-commit", "enabled": false}`)
 
@@ -527,11 +530,9 @@ func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Project, enabled (manual-commit)") {
-		t.Errorf("Expected output to show 'Project, enabled (manual-commit)', got: %s", output)
-	}
-	if !strings.Contains(output, "Local, disabled (auto-commit)") {
-		t.Errorf("Expected output to show 'Local, disabled (auto-commit)', got: %s", output)
+	// Should show merged settings with "Project + Local" source label
+	if !strings.Contains(output, "Project + Local, disabled (auto-commit)") {
+		t.Errorf("Expected output to show 'Project + Local, disabled (auto-commit)', got: %s", output)
 	}
 }
 
