@@ -106,7 +106,7 @@ func readPushSessionsFromFile(settingsPath string) (bool, bool) {
 	}
 
 	var settings struct {
-		StrategyOptions map[string]interface{} `json:"strategy_options"`
+		StrategyOptions map[string]any `json:"strategy_options"`
 	}
 	if err := json.Unmarshal(data, &settings); err != nil {
 		return false, false
@@ -160,7 +160,8 @@ func tryPushSessionsCommon(remote, branchName string) error {
 	defer cancel()
 
 	// Use --no-verify to prevent recursive hook calls
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", remote, branchName)
+	// Use -u to set up tracking relationship on first push
+	cmd := exec.CommandContext(ctx, "git", "push", "-u", "--no-verify", remote, branchName)
 	cmd.Stdin = nil // Disconnect stdin to prevent hanging in hook context
 
 	output, err := cmd.CombinedOutput()
