@@ -212,7 +212,98 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 
 // UninstallHooks removes Entire hooks from Claude Code settings.
 func (c *ClaudeCodeAgent) UninstallHooks() error {
-	// Implementation would remove our hooks from .claude/settings.json
+	// Use repo root to find .claude directory when run from a subdirectory
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		repoRoot = "." // Fallback to CWD if not in a git repo
+	}
+	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	if err != nil {
+		return nil //nolint:nilerr // No settings file means nothing to uninstall
+	}
+
+	var rawSettings map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSettings); err != nil {
+		return fmt.Errorf("failed to parse settings.json: %w", err)
+	}
+
+	var settings ClaudeSettings
+	if hooksRaw, ok := rawSettings["hooks"]; ok {
+		if err := json.Unmarshal(hooksRaw, &settings.Hooks); err != nil {
+			return fmt.Errorf("failed to parse hooks: %w", err)
+		}
+	}
+
+	// Remove Entire hooks from all hook types
+	settings.Hooks.SessionStart = removeEntireHooks(settings.Hooks.SessionStart)
+	settings.Hooks.Stop = removeEntireHooks(settings.Hooks.Stop)
+	settings.Hooks.UserPromptSubmit = removeEntireHooks(settings.Hooks.UserPromptSubmit)
+	settings.Hooks.PreToolUse = removeEntireHooksFromMatchers(settings.Hooks.PreToolUse)
+	settings.Hooks.PostToolUse = removeEntireHooksFromMatchers(settings.Hooks.PostToolUse)
+
+	// Also remove the metadata deny rule from permissions
+	var rawPermissions map[string]json.RawMessage
+	if permRaw, ok := rawSettings["permissions"]; ok {
+		if err := json.Unmarshal(permRaw, &rawPermissions); err != nil {
+			// If parsing fails, just skip permissions cleanup
+			rawPermissions = nil
+		}
+	}
+
+	if rawPermissions != nil {
+		if denyRaw, ok := rawPermissions["deny"]; ok {
+			var denyRules []string
+			if err := json.Unmarshal(denyRaw, &denyRules); err == nil {
+				// Filter out the metadata deny rule
+				filteredRules := make([]string, 0, len(denyRules))
+				for _, rule := range denyRules {
+					if rule != metadataDenyRule {
+						filteredRules = append(filteredRules, rule)
+					}
+				}
+				if len(filteredRules) > 0 {
+					denyJSON, err := json.Marshal(filteredRules)
+					if err == nil {
+						rawPermissions["deny"] = denyJSON
+					}
+				} else {
+					// Remove empty deny array
+					delete(rawPermissions, "deny")
+				}
+			}
+		}
+
+		// If permissions is empty, remove it entirely
+		if len(rawPermissions) > 0 {
+			permJSON, err := json.Marshal(rawPermissions)
+			if err == nil {
+				rawSettings["permissions"] = permJSON
+			}
+		} else {
+			delete(rawSettings, "permissions")
+		}
+	}
+
+	// Marshal hooks back
+	hooksJSON, err := json.Marshal(settings.Hooks)
+	if err != nil {
+		return fmt.Errorf("failed to marshal hooks: %w", err)
+	}
+	rawSettings["hooks"] = hooksJSON
+
+	// Write back
+	output, err := json.MarshalIndent(rawSettings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings: %w", err)
+	}
+
+	// Add trailing newline
+	output = append(output, '\n')
+
+	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
+		return fmt.Errorf("failed to write settings.json: %w", err)
+	}
 	return nil
 }
 

@@ -522,3 +522,36 @@ func DeleteAllCleanupItems(items []CleanupItem) (*CleanupResult, error) {
 
 	return result, nil
 }
+
+// MetadataBranchExists checks if the entire/sessions branch exists.
+func MetadataBranchExists() bool {
+	repo, err := OpenRepository()
+	if err != nil {
+		return false
+	}
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	_, err = repo.Reference(refName, true)
+	return err == nil
+}
+
+// DeleteMetadataBranch deletes the entire/sessions branch.
+// Returns true if the branch was deleted, false if it didn't exist.
+func DeleteMetadataBranch() (bool, error) {
+	repo, err := OpenRepository()
+	if err != nil {
+		return false, err
+	}
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	ref, err := repo.Reference(refName, true)
+	if err != nil {
+		// Branch doesn't exist
+		return false, nil //nolint:nilerr // Branch not existing is not an error
+	}
+
+	if err := repo.Storer.RemoveReference(ref.Name()); err != nil {
+		return false, fmt.Errorf("failed to delete branch: %w", err)
+	}
+	return true, nil
+}

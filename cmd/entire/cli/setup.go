@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/session"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
 	"github.com/charmbracelet/huh"
@@ -104,17 +106,32 @@ func newEnableCmd() *cobra.Command {
 
 func newDisableCmd() *cobra.Command {
 	var useProjectSettings bool
+	var uninstall bool
+	var force bool
 
 	cmd := &cobra.Command{
 		Use:   "disable",
 		Short: "Disable Entire",
-		Long:  "Disable Entire temporarily. Hooks will exit silently and commands will show a disabled message.",
+		Long: `Disable Entire temporarily. Hooks will exit silently and commands will show a disabled message.
+
+Use --uninstall to completely remove Entire from this repository, including:
+  - .entire/ directory (settings, logs, metadata)
+  - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
+  - Session state files (.git/entire-sessions/)
+  - Shadow branches (entire/<hash>)
+  - Metadata branch (entire/sessions)
+  - Agent hooks (Claude Code, Gemini CLI)`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if uninstall {
+				return runUninstall(cmd.OutOrStdout(), cmd.ErrOrStderr(), force)
+			}
 			return runDisable(cmd.OutOrStdout(), useProjectSettings)
 		},
 	}
 
 	cmd.Flags().BoolVar(&useProjectSettings, "project", false, "Update settings.json instead of settings.local.json")
+	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "Completely remove Entire from this repository")
+	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
 
 	return cmd
 }
@@ -964,4 +981,269 @@ func promptTelemetryConsent(settings *EntireSettings, telemetryFlag bool) error 
 
 	settings.Telemetry = &consent
 	return nil
+}
+
+// runUninstall completely removes Entire from the repository.
+func runUninstall(w, errW io.Writer, force bool) error {
+	// Check if we're in a git repository
+	if _, err := paths.RepoRoot(); err != nil {
+		fmt.Fprintln(errW, "Not a git repository. Nothing to uninstall.")
+		return NewSilentError(errors.New("not a git repository"))
+	}
+
+	// Gather counts for display
+	sessionStateCount := countSessionStates()
+	shadowBranchCount := countShadowBranches()
+	metadataBranchExists := checkMetadataBranchExists()
+	gitHooksInstalled := strategy.IsGitHookInstalled()
+	claudeHooksInstalled := checkClaudeCodeHooksInstalled()
+	geminiHooksInstalled := checkGeminiCLIHooksInstalled()
+	entireDirExists := checkEntireDirExists()
+
+	// Check if there's anything to uninstall
+	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
+		shadowBranchCount == 0 && !metadataBranchExists &&
+		!claudeHooksInstalled && !geminiHooksInstalled {
+		fmt.Fprintln(w, "Entire is not installed in this repository.")
+		return nil
+	}
+
+	// Show confirmation prompt unless --force
+	if !force {
+		fmt.Fprintln(w, "\nThis will completely remove Entire from this repository:")
+		if entireDirExists {
+			fmt.Fprintln(w, "  - .entire/ directory")
+		}
+		if gitHooksInstalled {
+			fmt.Fprintln(w, "  - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)")
+		}
+		if sessionStateCount > 0 {
+			fmt.Fprintf(w, "  - Session state files (%d)\n", sessionStateCount)
+		}
+		if shadowBranchCount > 0 {
+			fmt.Fprintf(w, "  - Shadow branches (%d)\n", shadowBranchCount)
+		}
+		if metadataBranchExists {
+			fmt.Fprintln(w, "  - entire/sessions branch (session history)")
+		}
+		switch {
+		case claudeHooksInstalled && geminiHooksInstalled:
+			fmt.Fprintln(w, "  - Agent hooks (Claude Code, Gemini CLI)")
+		case claudeHooksInstalled:
+			fmt.Fprintln(w, "  - Agent hooks (Claude Code)")
+		case geminiHooksInstalled:
+			fmt.Fprintln(w, "  - Agent hooks (Gemini CLI)")
+		}
+		fmt.Fprintln(w)
+
+		var confirmed bool
+		form := NewAccessibleForm(
+			huh.NewGroup(
+				huh.NewConfirm().
+					Title("Are you sure you want to uninstall Entire?").
+					Affirmative("Yes, uninstall").
+					Negative("Cancel").
+					Value(&confirmed),
+			),
+		)
+
+		if err := form.Run(); err != nil {
+			return fmt.Errorf("confirmation cancelled: %w", err)
+		}
+
+		if !confirmed {
+			fmt.Fprintln(w, "Uninstall cancelled.")
+			return nil
+		}
+	}
+
+	fmt.Fprintln(w, "\nUninstalling Entire CLI...")
+
+	// 1. Remove agent hooks (lowest risk)
+	if err := removeAgentHooks(w); err != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove agent hooks: %v\n", err)
+	}
+
+	// 2. Remove git hooks
+	removed, err := strategy.RemoveGitHook()
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove git hooks: %v\n", err)
+	} else if removed > 0 {
+		fmt.Fprintf(w, "  Removed git hooks (%d)\n", removed)
+	}
+
+	// 3. Remove session state files
+	statesRemoved, err := removeAllSessionStates()
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove session states: %v\n", err)
+	} else if statesRemoved > 0 {
+		fmt.Fprintf(w, "  Removed session states (%d)\n", statesRemoved)
+	}
+
+	// 4. Remove .entire/ directory
+	if err := removeEntireDirectory(); err != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove .entire directory: %v\n", err)
+	} else if entireDirExists {
+		fmt.Fprintln(w, "  Removed .entire directory")
+	}
+
+	// 5. Remove shadow branches
+	branchesRemoved, err := removeAllShadowBranches()
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove shadow branches: %v\n", err)
+	} else if branchesRemoved > 0 {
+		fmt.Fprintf(w, "  Removed %d shadow branches\n", branchesRemoved)
+	}
+
+	// 6. Remove metadata branch
+	metadataRemoved, err := strategy.DeleteMetadataBranch()
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove entire/sessions branch: %v\n", err)
+	} else if metadataRemoved {
+		fmt.Fprintln(w, "  Removed entire/sessions branch")
+	}
+
+	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")
+	return nil
+}
+
+// countSessionStates returns the number of active session state files.
+func countSessionStates() int {
+	store, err := session.NewStateStore()
+	if err != nil {
+		return 0
+	}
+	states, err := store.List(context.Background())
+	if err != nil {
+		return 0
+	}
+	return len(states)
+}
+
+// countShadowBranches returns the number of shadow branches.
+func countShadowBranches() int {
+	branches, err := strategy.ListShadowBranches()
+	if err != nil {
+		return 0
+	}
+	return len(branches)
+}
+
+// checkMetadataBranchExists checks if the entire/sessions branch exists.
+func checkMetadataBranchExists() bool {
+	return strategy.MetadataBranchExists()
+}
+
+// checkClaudeCodeHooksInstalled checks if Claude Code hooks are installed.
+func checkClaudeCodeHooksInstalled() bool {
+	ag, err := agent.Get(agent.AgentNameClaudeCode)
+	if err != nil {
+		return false
+	}
+	hookAgent, ok := ag.(agent.HookSupport)
+	if !ok {
+		return false
+	}
+	return hookAgent.AreHooksInstalled()
+}
+
+// checkGeminiCLIHooksInstalled checks if Gemini CLI hooks are installed.
+func checkGeminiCLIHooksInstalled() bool {
+	ag, err := agent.Get(agent.AgentNameGemini)
+	if err != nil {
+		return false
+	}
+	hookAgent, ok := ag.(agent.HookSupport)
+	if !ok {
+		return false
+	}
+	return hookAgent.AreHooksInstalled()
+}
+
+// checkEntireDirExists checks if the .entire directory exists.
+func checkEntireDirExists() bool {
+	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
+	if err != nil {
+		entireDirAbs = paths.EntireDir
+	}
+	_, err = os.Stat(entireDirAbs)
+	return err == nil
+}
+
+// removeAgentHooks removes hooks from all agents that support hooks.
+func removeAgentHooks(w io.Writer) error {
+	var errs []error
+
+	// Remove Claude Code hooks
+	claudeAgent, err := agent.Get(agent.AgentNameClaudeCode)
+	if err == nil {
+		if hookAgent, ok := claudeAgent.(agent.HookSupport); ok {
+			if err := hookAgent.UninstallHooks(); err != nil {
+				errs = append(errs, err)
+			} else {
+				fmt.Fprintln(w, "  Removed Claude Code hooks")
+			}
+		}
+	}
+
+	// Remove Gemini CLI hooks
+	geminiAgent, err := agent.Get(agent.AgentNameGemini)
+	if err == nil {
+		if hookAgent, ok := geminiAgent.(agent.HookSupport); ok {
+			if err := hookAgent.UninstallHooks(); err != nil {
+				errs = append(errs, err)
+			} else {
+				fmt.Fprintln(w, "  Removed Gemini CLI hooks")
+			}
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// removeAllSessionStates removes all session state files and the directory.
+func removeAllSessionStates() (int, error) {
+	store, err := session.NewStateStore()
+	if err != nil {
+		return 0, fmt.Errorf("failed to create state store: %w", err)
+	}
+
+	// Count states before removing
+	states, err := store.List(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("failed to list session states: %w", err)
+	}
+	count := len(states)
+
+	// Remove the entire directory
+	if err := store.RemoveAll(); err != nil {
+		return 0, fmt.Errorf("failed to remove session states: %w", err)
+	}
+
+	return count, nil
+}
+
+// removeEntireDirectory removes the .entire directory.
+func removeEntireDirectory() error {
+	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
+	if err != nil {
+		entireDirAbs = paths.EntireDir
+	}
+	if err := os.RemoveAll(entireDirAbs); err != nil {
+		return fmt.Errorf("failed to remove .entire directory: %w", err)
+	}
+	return nil
+}
+
+// removeAllShadowBranches removes all shadow branches.
+func removeAllShadowBranches() (int, error) {
+	branches, err := strategy.ListShadowBranches()
+	if err != nil {
+		return 0, fmt.Errorf("failed to list shadow branches: %w", err)
+	}
+	if len(branches) == 0 {
+		return 0, nil
+	}
+	deleted, _, err := strategy.DeleteShadowBranches(branches)
+	return len(deleted), err
 }

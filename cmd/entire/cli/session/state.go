@@ -181,6 +181,15 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// RemoveAll removes the entire session state directory.
+// This is used during uninstall to completely remove all session state.
+func (s *StateStore) RemoveAll() error {
+	if err := os.RemoveAll(s.stateDir); err != nil {
+		return fmt.Errorf("failed to remove session state directory: %w", err)
+	}
+	return nil
+}
+
 // List returns all session states.
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 	_ = ctx // Reserved for future use

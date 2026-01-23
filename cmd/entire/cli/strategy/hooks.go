@@ -19,6 +19,9 @@ const (
 	settingsFile     = ".entire/settings.json"
 )
 
+// gitHookNames are the git hooks managed by Entire CLI
+var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "pre-push"}
+
 // GetGitDir returns the actual git directory path by delegating to git itself.
 // This handles both regular repositories and worktrees, and inherits git's
 // security validation for gitdir references.
@@ -54,8 +57,7 @@ func IsGitHookInstalled() bool {
 	if err != nil {
 		return false
 	}
-	hooks := []string{"prepare-commit-msg", "commit-msg", "post-commit", "pre-push"}
-	for _, hook := range hooks {
+	for _, hook := range gitHookNames {
 		hookPath := filepath.Join(gitDir, "hooks", hook)
 		data, err := os.ReadFile(hookPath) //nolint:gosec // Path is constructed from constants
 		if err != nil {
@@ -180,6 +182,32 @@ func writeHookFile(path, content string) (bool, error) {
 		return false, fmt.Errorf("failed to write hook file %s: %w", path, err)
 	}
 	return true, nil
+}
+
+// RemoveGitHook removes all Entire CLI git hooks from the repository.
+// Returns the number of hooks removed.
+func RemoveGitHook() (int, error) {
+	gitDir, err := GetGitDir()
+	if err != nil {
+		return 0, err
+	}
+
+	removed := 0
+
+	for _, hook := range gitHookNames {
+		hookPath := filepath.Join(gitDir, "hooks", hook)
+		data, err := os.ReadFile(hookPath) //nolint:gosec // path is controlled
+		if err != nil {
+			continue // Hook doesn't exist
+		}
+
+		if strings.Contains(string(data), entireHookMarker) {
+			if err := os.Remove(hookPath); err == nil {
+				removed++
+			}
+		}
+	}
+	return removed, nil
 }
 
 // isLocalDev reads the local_dev setting from .entire/settings.json
