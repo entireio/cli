@@ -2,16 +2,19 @@
 package geminicli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/agent"
+	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 )
 
@@ -355,4 +358,93 @@ func (g *GeminiCLIAgent) ExtractModifiedFilesFromOffset(path string, startOffset
 	}
 
 	return files, totalMessages, nil
+}
+
+// TranscriptChunker interface implementation
+
+// ChunkTranscript splits a Gemini JSON transcript by distributing messages across chunks.
+// Gemini uses JSON format with a {"messages": [...]} structure, so chunking splits
+// the messages array while preserving the JSON structure in each chunk.
+func (g *GeminiCLIAgent) ChunkTranscript(content []byte, maxSize int) ([][]byte, error) {
+	var transcript GeminiTranscript
+	if err := json.Unmarshal(content, &transcript); err != nil {
+		// Fall back to JSONL chunking if not valid Gemini JSON
+		chunks, chunkErr := agent.ChunkJSONL(content, maxSize)
+		if chunkErr != nil {
+			return nil, fmt.Errorf("failed to chunk as JSONL: %w", chunkErr)
+		}
+		return chunks, nil
+	}
+
+	if len(transcript.Messages) == 0 {
+		return [][]byte{content}, nil
+	}
+
+	var chunks [][]byte
+	var currentMessages []GeminiMessage
+	currentSize := len(`{"messages":[]}`) // Base JSON structure size
+
+	for i, msg := range transcript.Messages {
+		// Marshal message to get its size
+		msgBytes, err := json.Marshal(msg)
+		if err != nil {
+			logging.Warn(context.Background(), "failed to marshal Gemini message during chunking",
+				slog.Int("message_index", i),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		msgSize := len(msgBytes) + 1 // +1 for comma separator
+
+		if currentSize+msgSize > maxSize && len(currentMessages) > 0 {
+			// Save current chunk
+			chunkData, err := json.Marshal(GeminiTranscript{Messages: currentMessages})
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal chunk: %w", err)
+			}
+			chunks = append(chunks, chunkData)
+
+			// Start new chunk
+			currentMessages = nil
+			currentSize = len(`{"messages":[]}`)
+		}
+
+		currentMessages = append(currentMessages, msg)
+		currentSize += msgSize
+	}
+
+	// Add the last chunk
+	if len(currentMessages) > 0 {
+		chunkData, err := json.Marshal(GeminiTranscript{Messages: currentMessages})
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal final chunk: %w", err)
+		}
+		chunks = append(chunks, chunkData)
+	}
+
+	// Ensure we created at least one chunk (could be empty if all messages failed to marshal)
+	if len(chunks) == 0 {
+		return nil, errors.New("failed to create any chunks: all messages failed to marshal")
+	}
+
+	return chunks, nil
+}
+
+// ReassembleTranscript merges Gemini JSON chunks by combining their message arrays.
+func (g *GeminiCLIAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
+	var allMessages []GeminiMessage
+
+	for _, chunk := range chunks {
+		var transcript GeminiTranscript
+		if err := json.Unmarshal(chunk, &transcript); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal chunk: %w", err)
+		}
+		allMessages = append(allMessages, transcript.Messages...)
+	}
+
+	result, err := json.Marshal(GeminiTranscript{Messages: allMessages})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal reassembled transcript: %w", err)
+	}
+	return result, nil
 }

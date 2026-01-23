@@ -387,6 +387,66 @@ func verifyBranchInMetadata(t *testing.T, repo *git.Repository, checkpointID id.
 	}
 }
 
+// TestArchiveExistingSession_ChunkedTranscript verifies that when archiving
+// a session with chunked transcripts, all chunk files are moved to the archive folder.
+func TestArchiveExistingSession_ChunkedTranscript(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+
+	basePath := "a1/b2c3d4e5f6/"
+
+	// Simulate existing checkpoint with chunked transcript
+	// Chunk 0 is the base file (full.jsonl), chunks 1+ have suffixes (.001, .002)
+	entries := map[string]object.TreeEntry{
+		basePath + paths.MetadataFileName:            {Name: basePath + paths.MetadataFileName, Hash: plumbing.NewHash("aaa")},
+		basePath + paths.TranscriptFileName:          {Name: basePath + paths.TranscriptFileName, Hash: plumbing.NewHash("bbb")},          // chunk 0
+		basePath + paths.TranscriptFileName + ".001": {Name: basePath + paths.TranscriptFileName + ".001", Hash: plumbing.NewHash("ccc")}, // chunk 1
+		basePath + paths.TranscriptFileName + ".002": {Name: basePath + paths.TranscriptFileName + ".002", Hash: plumbing.NewHash("ddd")}, // chunk 2
+		basePath + paths.PromptFileName:              {Name: basePath + paths.PromptFileName, Hash: plumbing.NewHash("eee")},
+		basePath + paths.ContextFileName:             {Name: basePath + paths.ContextFileName, Hash: plumbing.NewHash("fff")},
+		basePath + paths.ContentHashFileName:         {Name: basePath + paths.ContentHashFileName, Hash: plumbing.NewHash("ggg")},
+	}
+
+	existingMetadata := &CommittedMetadata{
+		SessionCount: 1,
+	}
+
+	// Archive the existing session
+	store.archiveExistingSession(basePath, existingMetadata, entries)
+
+	archivePath := basePath + "1/"
+
+	// Verify standard files were archived
+	if _, ok := entries[archivePath+paths.MetadataFileName]; !ok {
+		t.Error("metadata.json should be archived to 1/")
+	}
+	if _, ok := entries[archivePath+paths.TranscriptFileName]; !ok {
+		t.Error("full.jsonl (chunk 0) should be archived to 1/")
+	}
+	if _, ok := entries[archivePath+paths.PromptFileName]; !ok {
+		t.Error("prompt.txt should be archived to 1/")
+	}
+
+	// Verify chunk files were archived
+	if _, ok := entries[archivePath+paths.TranscriptFileName+".001"]; !ok {
+		t.Error("full.jsonl.001 (chunk 1) should be archived to 1/")
+	}
+	if _, ok := entries[archivePath+paths.TranscriptFileName+".002"]; !ok {
+		t.Error("full.jsonl.002 (chunk 2) should be archived to 1/")
+	}
+
+	// Verify original locations are cleared
+	if _, ok := entries[basePath+paths.TranscriptFileName]; ok {
+		t.Error("original full.jsonl should be removed from base path")
+	}
+	if _, ok := entries[basePath+paths.TranscriptFileName+".001"]; ok {
+		t.Error("original full.jsonl.001 should be removed from base path")
+	}
+	if _, ok := entries[basePath+paths.TranscriptFileName+".002"]; ok {
+		t.Error("original full.jsonl.002 should be removed from base path")
+	}
+}
+
 // TestWriteCommitted_BranchField verifies that the Branch field is correctly
 // captured in metadata.json when on a branch, and is empty when in detached HEAD.
 func TestWriteCommitted_BranchField(t *testing.T) {

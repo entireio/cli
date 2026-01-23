@@ -88,16 +88,18 @@ var AgentTypeToRegistryName = map[string]string{
 	"Aider":       AgentNameAider,
 }
 
-// GetByAgentType retrieves an agent by its human-readable type name (e.g., "Claude Code", "Gemini CLI").
-// This is used to get the correct agent for formatting resume commands based on session state.
+// GetByAgentType retrieves an agent by its type name.
+// Accepts either human-readable names (e.g., "Claude Code", "Gemini CLI") or
+// registry names (e.g., "claude-code", "gemini").
 //
 
 func GetByAgentType(agentType string) (Agent, error) {
-	registryName, ok := AgentTypeToRegistryName[agentType]
-	if !ok {
-		return nil, fmt.Errorf("unknown agent type: %s", agentType)
+	// Try human-readable name first
+	if registryName, ok := AgentTypeToRegistryName[agentType]; ok {
+		return Get(registryName)
 	}
-	return Get(registryName)
+	// Fall back to treating it as a registry name
+	return Get(agentType)
 }
 
 // Default returns the default agent.

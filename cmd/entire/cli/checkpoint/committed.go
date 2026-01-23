@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,8 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/jsonutil"
+	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/trailers"
 
@@ -265,6 +268,7 @@ func (s *GitStore) writeStandardCheckpointEntries(opts WriteCommittedOptions, ba
 }
 
 // writeTranscript writes the transcript file from in-memory content or file path.
+// If the transcript exceeds MaxChunkSize, it's split into multiple chunk files.
 func (s *GitStore) writeTranscript(opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry) error {
 	transcript := opts.Transcript
 	if len(transcript) == 0 && opts.TranscriptPath != "" {
@@ -279,17 +283,27 @@ func (s *GitStore) writeTranscript(opts WriteCommittedOptions, basePath string, 
 		return nil
 	}
 
-	blobHash, err := CreateBlobFromContent(s.repo, transcript)
+	// Chunk the transcript if it's too large
+	chunks, err := agent.ChunkTranscript(transcript, opts.Agent)
 	if err != nil {
-		return err
-	}
-	entries[basePath+paths.TranscriptFileName] = object.TreeEntry{
-		Name: basePath + paths.TranscriptFileName,
-		Mode: filemode.Regular,
-		Hash: blobHash,
+		return fmt.Errorf("failed to chunk transcript: %w", err)
 	}
 
-	// Content hash for deduplication
+	// Write chunk files
+	for i, chunk := range chunks {
+		chunkPath := basePath + agent.ChunkFileName(paths.TranscriptFileName, i)
+		blobHash, err := CreateBlobFromContent(s.repo, chunk)
+		if err != nil {
+			return err
+		}
+		entries[chunkPath] = object.TreeEntry{
+			Name: chunkPath,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		}
+	}
+
+	// Content hash for deduplication (hash of full transcript)
 	contentHash := fmt.Sprintf("sha256:%x", sha256.Sum256(transcript))
 	hashBlob, err := CreateBlobFromContent(s.repo, []byte(contentHash))
 	if err != nil {
@@ -427,6 +441,17 @@ func (s *GitStore) archiveExistingSession(basePath string, existingMetadata *Com
 		paths.ContentHashFileName,
 	}
 
+	// Also include transcript chunk files (full.jsonl.001, full.jsonl.002, etc.)
+	chunkPrefix := basePath + paths.TranscriptFileName + "."
+	for srcPath := range entries {
+		if strings.HasPrefix(srcPath, chunkPrefix) {
+			chunkSuffix := strings.TrimPrefix(srcPath, basePath+paths.TranscriptFileName)
+			if idx := agent.ParseChunkIndex(paths.TranscriptFileName+chunkSuffix, paths.TranscriptFileName); idx > 0 {
+				filesToArchive = append(filesToArchive, paths.TranscriptFileName+chunkSuffix)
+			}
+		}
+	}
+
 	// Move each file to archive folder
 	for _, filename := range filesToArchive {
 		srcPath := basePath + filename
@@ -446,7 +471,7 @@ func (s *GitStore) archiveExistingSession(basePath string, existingMetadata *Com
 
 // readArchivedSessions reads transcript data from archived session subfolders (1/, 2/, etc.).
 // Returns sessions ordered by folder index (oldest first).
-func (s *GitStore) readArchivedSessions(checkpointTree *object.Tree, sessionCount int) []ArchivedSession {
+func (s *GitStore) readArchivedSessions(checkpointTree *object.Tree, sessionCount int, agentType string) []ArchivedSession {
 	var archived []ArchivedSession
 
 	// Archived sessions are in numbered folders: 1/, 2/, etc.
@@ -475,15 +500,9 @@ func (s *GitStore) readArchivedSessions(checkpointTree *object.Tree, sessionCoun
 			}
 		}
 
-		// Read transcript (try current format first, then legacy)
-		if file, fileErr := subTree.File(paths.TranscriptFileName); fileErr == nil {
-			if content, contentErr := file.Contents(); contentErr == nil {
-				session.Transcript = []byte(content)
-			}
-		} else if file, fileErr := subTree.File(paths.TranscriptFileNameLegacy); fileErr == nil {
-			if content, contentErr := file.Contents(); contentErr == nil {
-				session.Transcript = []byte(content)
-			}
+		// Read transcript (handles both chunked and non-chunked formats)
+		if transcript, err := readTranscriptFromTree(subTree, agentType); err == nil && transcript != nil {
+			session.Transcript = transcript
 		}
 
 		// Read prompts
@@ -577,15 +596,9 @@ func (s *GitStore) ReadCommitted(ctx context.Context, checkpointID id.Checkpoint
 		}
 	}
 
-	// Read transcript (try current format first, then legacy)
-	if file, fileErr := checkpointTree.File(paths.TranscriptFileName); fileErr == nil {
-		if content, contentErr := file.Contents(); contentErr == nil {
-			result.Transcript = []byte(content)
-		}
-	} else if file, fileErr := checkpointTree.File(paths.TranscriptFileNameLegacy); fileErr == nil {
-		if content, contentErr := file.Contents(); contentErr == nil {
-			result.Transcript = []byte(content)
-		}
+	// Read transcript (handles both chunked and non-chunked formats)
+	if transcript, err := readTranscriptFromTree(checkpointTree, result.Metadata.Agent); err == nil && transcript != nil {
+		result.Transcript = transcript
 	}
 
 	// Read prompts
@@ -604,7 +617,7 @@ func (s *GitStore) ReadCommitted(ctx context.Context, checkpointID id.Checkpoint
 
 	// Read archived sessions if this is a multi-session checkpoint
 	if result.Metadata.SessionCount > 1 {
-		result.ArchivedSessions = s.readArchivedSessions(checkpointTree, result.Metadata.SessionCount)
+		result.ArchivedSessions = s.readArchivedSessions(checkpointTree, result.Metadata.SessionCount, result.Metadata.Agent)
 	}
 
 	return result, nil
@@ -884,4 +897,84 @@ func getGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 	}
 
 	return name, email
+}
+
+// readTranscriptFromTree reads a transcript from a git tree, handling both chunked and non-chunked formats.
+// It checks for chunk files first (.001, .002, etc.), then falls back to the base file.
+// The agentType is used for reassembling chunks in the correct format.
+func readTranscriptFromTree(tree *object.Tree, agentType string) ([]byte, error) {
+	// Collect all transcript-related files
+	var chunkFiles []string
+	var hasBaseFile bool
+
+	for _, entry := range tree.Entries {
+		if entry.Name == paths.TranscriptFileName || entry.Name == paths.TranscriptFileNameLegacy {
+			hasBaseFile = true
+		}
+		// Check for chunk files (full.jsonl.001, full.jsonl.002, etc.)
+		if strings.HasPrefix(entry.Name, paths.TranscriptFileName+".") {
+			idx := agent.ParseChunkIndex(entry.Name, paths.TranscriptFileName)
+			if idx > 0 {
+				chunkFiles = append(chunkFiles, entry.Name)
+			}
+		}
+	}
+
+	// If we have chunk files, read and reassemble them
+	if len(chunkFiles) > 0 {
+		// Sort chunk files by index
+		chunkFiles = agent.SortChunkFiles(chunkFiles, paths.TranscriptFileName)
+
+		// Check if base file should be included as chunk 0.
+		// NOTE: This assumes the chunking convention where the unsuffixed file
+		// (full.jsonl) is chunk 0, and numbered files (.001, .002) are chunks 1+.
+		if hasBaseFile {
+			chunkFiles = append([]string{paths.TranscriptFileName}, chunkFiles...)
+		}
+
+		var chunks [][]byte
+		for _, chunkFile := range chunkFiles {
+			file, err := tree.File(chunkFile)
+			if err != nil {
+				logging.Warn(context.Background(), "failed to read transcript chunk file from tree",
+					slog.String("chunk_file", chunkFile),
+					slog.String("error", err.Error()),
+				)
+				continue
+			}
+			content, err := file.Contents()
+			if err != nil {
+				logging.Warn(context.Background(), "failed to read transcript chunk contents",
+					slog.String("chunk_file", chunkFile),
+					slog.String("error", err.Error()),
+				)
+				continue
+			}
+			chunks = append(chunks, []byte(content))
+		}
+
+		if len(chunks) > 0 {
+			result, err := agent.ReassembleTranscript(chunks, agentType)
+			if err != nil {
+				return nil, fmt.Errorf("failed to reassemble transcript: %w", err)
+			}
+			return result, nil
+		}
+	}
+
+	// Fall back to reading base file (non-chunked or backwards compatibility)
+	if file, err := tree.File(paths.TranscriptFileName); err == nil {
+		if content, err := file.Contents(); err == nil {
+			return []byte(content), nil
+		}
+	}
+
+	// Try legacy filename
+	if file, err := tree.File(paths.TranscriptFileNameLegacy); err == nil {
+		if content, err := file.Contents(); err == nil {
+			return []byte(content), nil
+		}
+	}
+
+	return nil, nil
 }

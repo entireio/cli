@@ -779,7 +779,7 @@ func restoreSessionTranscriptFromShadow(commitHash, metadataDir, sessionID strin
 
 	// Get transcript from shadow branch commit tree
 	store := checkpoint.NewGitStore(repo)
-	content, err := store.GetTranscriptFromCommit(hash, metadataDir)
+	content, err := store.GetTranscriptFromCommit(hash, metadataDir, agent.Name())
 	if err != nil {
 		return "", fmt.Errorf("failed to get transcript from shadow branch: %w", err)
 	}

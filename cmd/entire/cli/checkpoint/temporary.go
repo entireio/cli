@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/jsonutil"
+	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/trailers"
 
@@ -316,15 +319,36 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 	} else {
 		// Final checkpoint: add transcripts and checkpoint.json
 
-		// Add session transcript
+		// Add session transcript (with chunking support for large transcripts)
 		if opts.TranscriptPath != "" {
 			if transcriptContent, readErr := os.ReadFile(opts.TranscriptPath); readErr == nil {
-				if blobHash, blobErr := CreateBlobFromContent(s.repo, transcriptContent); blobErr == nil {
-					transcriptPath := sessionMetadataDir + "/" + paths.TranscriptFileName
-					entries[transcriptPath] = object.TreeEntry{
-						Name: transcriptPath,
-						Mode: filemode.Regular,
-						Hash: blobHash,
+				// Detect agent type from content for proper chunking
+				agentType := agent.DetectAgentTypeFromContent(transcriptContent)
+
+				// Chunk if necessary
+				chunks, chunkErr := agent.ChunkTranscript(transcriptContent, agentType)
+				if chunkErr != nil {
+					logging.Warn(context.Background(), "failed to chunk transcript, checkpoint will be saved without transcript",
+						slog.String("error", chunkErr.Error()),
+						slog.String("session_id", opts.SessionID),
+					)
+				} else {
+					for i, chunk := range chunks {
+						chunkPath := sessionMetadataDir + "/" + agent.ChunkFileName(paths.TranscriptFileName, i)
+						blobHash, blobErr := CreateBlobFromContent(s.repo, chunk)
+						if blobErr != nil {
+							logging.Warn(context.Background(), "failed to create blob for transcript chunk",
+								slog.String("error", blobErr.Error()),
+								slog.String("session_id", opts.SessionID),
+								slog.Int("chunk_index", i),
+							)
+							continue
+						}
+						entries[chunkPath] = object.TreeEntry{
+							Name: chunkPath,
+							Mode: filemode.Regular,
+							Hash: blobHash,
+						}
 					}
 				}
 			}
@@ -463,7 +487,9 @@ var errStop = errors.New("stop iteration")
 // This is used for shadow branch checkpoints where the transcript is stored in the commit tree
 // rather than on the entire/sessions branch.
 // commitHash is the commit to read from, metadataDir is the path within the tree.
-func (s *GitStore) GetTranscriptFromCommit(commitHash plumbing.Hash, metadataDir string) ([]byte, error) {
+// agentType is used for reassembling chunked transcripts in the correct format.
+// Handles both chunked and non-chunked transcripts.
+func (s *GitStore) GetTranscriptFromCommit(commitHash plumbing.Hash, metadataDir, agentType string) ([]byte, error) {
 	commit, err := s.repo.CommitObject(commitHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commit: %w", err)
@@ -474,7 +500,17 @@ func (s *GitStore) GetTranscriptFromCommit(commitHash plumbing.Hash, metadataDir
 		return nil, fmt.Errorf("failed to get commit tree: %w", err)
 	}
 
-	// Try current format first, then legacy
+	// Try to get the metadata subtree for chunk detection
+	subTree, subTreeErr := tree.Tree(metadataDir)
+	if subTreeErr == nil {
+		// Use the helper function that handles chunking
+		transcript, err := readTranscriptFromTree(subTree, agentType)
+		if err == nil && transcript != nil {
+			return transcript, nil
+		}
+	}
+
+	// Fall back to direct file access (for backwards compatibility)
 	transcriptPath := metadataDir + "/" + paths.TranscriptFileName
 	if file, fileErr := tree.File(transcriptPath); fileErr == nil {
 		content, contentErr := file.Contents()
