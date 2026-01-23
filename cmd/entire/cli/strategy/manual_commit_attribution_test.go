@@ -631,19 +631,14 @@ func TestCalculateAttributionWithAccumulated_WithPromptAttributions(t *testing.T
 	// - base → shadow: +12 lines added (includes agent + user between)
 	// - shadow → head: +1 line added (user after)
 	// - accumulatedUserAdded: 2 (from PromptAttributions)
+	// - totalAgentAdded: 12 - 2 = 10 (correctly separates user lines from agent work)
 	// - totalUserAdded: 2 + 1 = 3
-	// - totalAgentAdded: 12 (base → shadow, includes mixed content)
-	// - The function doesn't separate agent from user in the shadow snapshot,
-	//   so totalAgentAdded is actually 12 (not 10), which is a known limitation
-	// - agentLinesInCommit: 12
-	// - Total: 12 + 3 = 15
-	// - Agent percentage: 12/15 = 80%
-	//
-	// Note: This test documents current behavior. Ideally, totalAgentAdded would be 10
-	// (excluding the 2 user lines), but the algorithm doesn't currently separate them.
+	// - agentLinesInCommit: 10
+	// - Total: 10 + 3 = 13
+	// - Agent percentage: 10/13 = 76.9%
 
-	if result.AgentLines != 12 {
-		t.Errorf("AgentLines = %d, want 12 (includes user lines in shadow snapshot)", result.AgentLines)
+	if result.AgentLines != 10 {
+		t.Errorf("AgentLines = %d, want 10 (excludes user lines in shadow snapshot)", result.AgentLines)
 	}
 	if result.HumanAdded != 3 {
 		t.Errorf("HumanAdded = %d, want 3 (2 between + 1 after)", result.HumanAdded)
@@ -654,11 +649,11 @@ func TestCalculateAttributionWithAccumulated_WithPromptAttributions(t *testing.T
 	if result.HumanRemoved != 0 {
 		t.Errorf("HumanRemoved = %d, want 0", result.HumanRemoved)
 	}
-	if result.TotalCommitted != 15 {
-		t.Errorf("TotalCommitted = %d, want 15 (12 + 3)", result.TotalCommitted)
+	if result.TotalCommitted != 13 {
+		t.Errorf("TotalCommitted = %d, want 13 (10 + 3)", result.TotalCommitted)
 	}
-	if result.AgentPercentage < 79.9 || result.AgentPercentage > 80.1 {
-		t.Errorf("AgentPercentage = %.1f%%, want 80.0%%", result.AgentPercentage)
+	if result.AgentPercentage < 76.8 || result.AgentPercentage > 77.0 {
+		t.Errorf("AgentPercentage = %.1f%%, want 76.9%%", result.AgentPercentage)
 	}
 }
 
@@ -681,11 +676,11 @@ func TestCalculateAttributionWithAccumulated_EmptyFilesTouched(t *testing.T) {
 // post-checkpoint user edits to files the agent never touched are undercounted.
 //
 // Bug scenario:
-// 1. Agent touches file1.go (added to filesTouched)
-// 2. User edits file2.go between checkpoints → captured in PromptAttributions
-// 3. User edits file2.go again AFTER last checkpoint, before commit
-// 4. BUG: Post-checkpoint calculation only looks at filesTouched (file1.go),
-//    missing the file2.go edits in step 3
+//  1. Agent touches file1.go (added to filesTouched)
+//  2. User edits file2.go between checkpoints → captured in PromptAttributions
+//  3. User edits file2.go again AFTER last checkpoint, before commit
+//  4. BUG: Post-checkpoint calculation only looks at filesTouched (file1.go),
+//     missing the file2.go edits in step 3
 //
 // This causes undercounted user contributions and inflated agent percentage.
 func TestCalculateAttributionWithAccumulated_UserEditsNonAgentFile(t *testing.T) {
@@ -696,15 +691,16 @@ func TestCalculateAttributionWithAccumulated_UserEditsNonAgentFile(t *testing.T)
 	})
 
 	// Shadow (agent work): agent adds to file1.go only
+	// file2.go is NOT in shadow tree because it's not in filesTouched
 	shadowTree := buildTestTree(t, map[string]string{
 		"file1.go": "package main\n\nfunc agent1() {}\nfunc agent2() {}\n",
-		"file2.go": "package util\n\n// User edit 1\n// User edit 2\n",
 	})
 
 	// Head (final commit): user adds more to file2.go AFTER last checkpoint
+	// file2.go has: 1 base line + 2 accumulated + 2 post-checkpoint = 5 lines total
 	headTree := buildTestTree(t, map[string]string{
 		"file1.go": "package main\n\nfunc agent1() {}\nfunc agent2() {}\n",
-		"file2.go": "package util\n\n// User edit 1\n// User edit 2\n// User edit 3\n// User edit 4\n",
+		"file2.go": "package util\n\n// User edit 1\n// User edit 2\n// User edit 3\n",
 	})
 
 	// filesTouched only includes file1.go (agent-touched)

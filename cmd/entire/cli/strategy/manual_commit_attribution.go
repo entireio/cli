@@ -9,6 +9,16 @@ import (
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
+// contains checks if a slice contains a string.
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
 // getAllChangedFilesBetweenTrees returns a list of all files that differ between two trees.
 // This includes files that were added, modified, or deleted in either tree.
 func getAllChangedFilesBetweenTrees(tree1, tree2 *object.Tree) []string {
@@ -167,36 +177,58 @@ func CalculateAttributionWithAccumulated(
 		accumulatedUserRemoved += pa.UserLinesRemoved
 	}
 
-	// Calculate agent contribution (base → shadow) for agent-touched files
-	var totalAgentAdded int
+	// Calculate attribution for agent-touched files
+	// IMPORTANT: shadowTree is a snapshot of the worktree at checkpoint time,
+	// which includes both agent work AND accumulated user edits (to agent-touched files).
+	// So base→shadow diff = (agent work + accumulated user work to these files).
+	var totalAgentAndUserWork int
+	var postCheckpointUserAdded, postCheckpointUserRemoved int
+
 	for _, filePath := range filesTouched {
 		baseContent := getFileContent(baseTree, filePath)
 		shadowContent := getFileContent(shadowTree, filePath)
-
-		// Agent contribution: base → shadow
-		_, agentAdded, _ := diffLines(baseContent, shadowContent)
-		totalAgentAdded += agentAdded
-	}
-
-	// Calculate user edits AFTER the final checkpoint (shadow → head)
-	// IMPORTANT: Must check ALL files that changed between shadow and head,
-	// not just filesTouched, because user may have edited files the agent never touched.
-	// This ensures we count all post-checkpoint user work, matching what PromptAttributions
-	// captures for between-checkpoint edits.
-	var postCheckpointUserAdded, postCheckpointUserRemoved int
-	allChangedFiles := getAllChangedFilesBetweenTrees(shadowTree, headTree)
-	for _, filePath := range allChangedFiles {
-		shadowContent := getFileContent(shadowTree, filePath)
 		headContent := getFileContent(headTree, filePath)
 
-		// Post-checkpoint user edits: shadow → head
+		// Total work in shadow: base → shadow (agent + accumulated user work for this file)
+		_, workAdded, _ := diffLines(baseContent, shadowContent)
+		totalAgentAndUserWork += workAdded
+
+		// Post-checkpoint user edits: shadow → head (only post-checkpoint edits for this file)
 		_, postUserAdded, postUserRemoved := diffLines(shadowContent, headContent)
 		postCheckpointUserAdded += postUserAdded
 		postCheckpointUserRemoved += postUserRemoved
 	}
 
-	// Total user contribution = accumulated (between checkpoints) + post-checkpoint
-	totalUserAdded := accumulatedUserAdded + postCheckpointUserAdded
+	// Calculate total user edits to non-agent files (files not in filesTouched)
+	// These files are not in the shadow tree, so base→head captures ALL their user edits
+	nonAgentFiles := getAllChangedFilesBetweenTrees(baseTree, headTree)
+	var allUserEditsToNonAgentFiles int
+	for _, filePath := range nonAgentFiles {
+		if contains(filesTouched, filePath) {
+			continue // Skip agent-touched files
+		}
+
+		baseContent := getFileContent(baseTree, filePath)
+		headContent := getFileContent(headTree, filePath)
+		_, userAdded, _ := diffLines(baseContent, headContent)
+		allUserEditsToNonAgentFiles += userAdded
+	}
+
+	// Separate accumulated edits by file type
+	// accumulatedUserAdded includes edits to BOTH agent and non-agent files
+	// For agent work calculation, we only need to subtract edits to agent files
+	// Heuristic: assume accumulated edits to non-agent files = min(total edits to non-agent files, total accumulated)
+	accumulatedToNonAgentFiles := min(allUserEditsToNonAgentFiles, accumulatedUserAdded)
+	accumulatedToAgentFiles := accumulatedUserAdded - accumulatedToNonAgentFiles
+
+	// Agent work = (base→shadow for agent files) - (accumulated user edits to agent files only)
+	totalAgentAdded := max(0, totalAgentAndUserWork-accumulatedToAgentFiles)
+
+	// Post-checkpoint edits to non-agent files = total edits - accumulated portion
+	postToNonAgentFiles := allUserEditsToNonAgentFiles - accumulatedToNonAgentFiles
+
+	// Total user contribution = accumulated (all files) + post-checkpoint (agent files) + post-checkpoint (non-agent files)
+	totalUserAdded := accumulatedUserAdded + postCheckpointUserAdded + postToNonAgentFiles
 	totalUserRemoved := accumulatedUserRemoved + postCheckpointUserRemoved
 
 	// Estimate modified lines (user changed existing agent lines)
