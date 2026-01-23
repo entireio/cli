@@ -398,13 +398,13 @@ func TestArchiveExistingSession_ChunkedTranscript(t *testing.T) {
 	// Simulate existing checkpoint with chunked transcript
 	// Chunk 0 is the base file (full.jsonl), chunks 1+ have suffixes (.001, .002)
 	entries := map[string]object.TreeEntry{
-		basePath + paths.MetadataFileName:          {Name: basePath + paths.MetadataFileName, Hash: plumbing.NewHash("aaa")},
-		basePath + paths.TranscriptFileName:        {Name: basePath + paths.TranscriptFileName, Hash: plumbing.NewHash("bbb")},        // chunk 0
+		basePath + paths.MetadataFileName:            {Name: basePath + paths.MetadataFileName, Hash: plumbing.NewHash("aaa")},
+		basePath + paths.TranscriptFileName:          {Name: basePath + paths.TranscriptFileName, Hash: plumbing.NewHash("bbb")},          // chunk 0
 		basePath + paths.TranscriptFileName + ".001": {Name: basePath + paths.TranscriptFileName + ".001", Hash: plumbing.NewHash("ccc")}, // chunk 1
 		basePath + paths.TranscriptFileName + ".002": {Name: basePath + paths.TranscriptFileName + ".002", Hash: plumbing.NewHash("ddd")}, // chunk 2
-		basePath + paths.PromptFileName:            {Name: basePath + paths.PromptFileName, Hash: plumbing.NewHash("eee")},
-		basePath + paths.ContextFileName:           {Name: basePath + paths.ContextFileName, Hash: plumbing.NewHash("fff")},
-		basePath + paths.ContentHashFileName:       {Name: basePath + paths.ContentHashFileName, Hash: plumbing.NewHash("ggg")},
+		basePath + paths.PromptFileName:              {Name: basePath + paths.PromptFileName, Hash: plumbing.NewHash("eee")},
+		basePath + paths.ContextFileName:             {Name: basePath + paths.ContextFileName, Hash: plumbing.NewHash("fff")},
+		basePath + paths.ContentHashFileName:         {Name: basePath + paths.ContentHashFileName, Hash: plumbing.NewHash("ggg")},
 	}
 
 	existingMetadata := &CommittedMetadata{
