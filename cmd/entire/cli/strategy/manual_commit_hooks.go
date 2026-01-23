@@ -438,7 +438,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		// After condensation, the session continues from the NEW commit (HEAD), so we:
 		// 1. Update BaseCommit to new HEAD - session now tracks from new commit
 		// 2. Reset CheckpointCount to 0 - no checkpoints exist on new shadow branch yet
-		// 3. Update CondensedTranscriptLines - track transcript offset for incremental context
+		// 3. Update CondensedTranscriptLines - track transcript position for detecting new content
 		//
 		// This is critical: if we don't update BaseCommit, listAllSessionStates will try
 		// to find shadow branch for old commit (which gets deleted), and since CheckpointCount > 0,

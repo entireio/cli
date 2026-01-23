@@ -64,7 +64,7 @@ type CondenseResult struct {
 
 // ExtractedSessionData contains data extracted from a shadow branch.
 type ExtractedSessionData struct {
-	Transcript          []byte   // Transcript content (lines after startLine for incremental extraction)
+	Transcript          []byte   // Full transcript content for the session
 	FullTranscriptLines int      // Total line count in full transcript
 	Prompts             []string // All user prompts from this portion
 	Context             []byte   // Generated context.md content

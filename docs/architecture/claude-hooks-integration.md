@@ -84,7 +84,7 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
 1.  **Parse Transcript**:
 
     - Reads the JSONL transcript from the path provided by Claude Code.
-    - For strategies that track transcript position (auto-commit), reads from `CondensedTranscriptLines` offset to only parse new lines since the last checkpoint.
+    - Parses the full transcript. `CondensedTranscriptLines` is used only to detect whether new content exists since the last checkpoint.
     - Extracts **modified files** by scanning for Write/Edit tool uses in the transcript.
 
 2.  **Extract and Save Metadata** (to `.entire/metadata/<session-id>/`):
@@ -120,7 +120,7 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
     - **Auto-commit**: Creates a commit on the active branch with the `Entire-Checkpoint` trailer.
     - Token usage is stored in `metadata.json` for later analysis and reporting.
 
-7.  **Update Session State** (auto-commit only): Updates `CondensedTranscriptLines` to track transcript position for incremental parsing.
+7.  **Update Session State**: Updates `CondensedTranscriptLines` to track transcript position for detecting new content in future checkpoints.
 
 8.  **Cleanup**: Deletes the temporary `.entire/tmp/pre-prompt-<session-id>.json` file.
 

@@ -210,7 +210,6 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 			data.FullTranscriptLines = len(allLines)
 
 			// Always store the full transcript for complete session history
-			// (startLine is only used for detecting new content, not for truncation)
 			data.Transcript = []byte(strings.Join(allLines, "\n"))
 
 			// Extract prompts from the full transcript
