@@ -421,3 +421,130 @@ func TestPromptAttribution_AlwaysStored(t *testing.T) {
 		t.Errorf("PromptAttributions[1].CheckpointNumber = %d, want 2", attr2.CheckpointNumber)
 	}
 }
+
+// TestPromptAttribution_CapturesPrePromptEdits tests that user edits made BEFORE
+// the first prompt are correctly attributed to the user, not the agent.
+// This verifies the fix for the bug where CheckpointCount > 0 guard and early
+// return on missing shadow branch prevented attribution of pre-prompt edits.
+func TestPromptAttribution_CapturesPrePromptEdits(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create initial commit with a file (base state: "A")
+	testFile := filepath.Join(dir, "test.go")
+	baseContent := "package main\n"
+	if err := os.WriteFile(testFile, []byte(baseContent), 0o644); err != nil {
+		t.Fatalf("failed to write initial file: %v", err)
+	}
+	if _, err := worktree.Add("test.go"); err != nil {
+		t.Fatalf("failed to stage file: %v", err)
+	}
+	_, err = worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	// === USER EDITS BEFORE FIRST PROMPT ===
+	// User manually edits the file BEFORE starting the session
+	prePromptContent := baseContent + "// User added line 1\n// User added line 2\n"
+	if err := os.WriteFile(testFile, []byte(prePromptContent), 0o644); err != nil {
+		t.Fatalf("failed to write pre-prompt user edits: %v", err)
+	}
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-01-24-preprompt-test"
+
+	// Create metadata directory
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	if err := os.MkdirAll(metadataDirAbs, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(testTranscript), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// === PROMPT 1 START ===
+	// This should capture the user's pre-prompt edits (2 lines)
+	if err := s.InitializeSession(sessionID, "Claude Code", ""); err != nil {
+		t.Fatalf("InitializeSession() error = %v", err)
+	}
+
+	// Verify PendingPromptAttribution captured pre-prompt edits
+	state, err := s.loadSessionState(sessionID)
+	if err != nil {
+		t.Fatalf("loadSessionState() error = %v", err)
+	}
+
+	if state.PendingPromptAttribution == nil {
+		t.Fatal("PendingPromptAttribution is nil - pre-prompt edits not captured!")
+	}
+
+	// Should capture the 2 lines the user added before the first prompt
+	if state.PendingPromptAttribution.UserLinesAdded != 2 {
+		t.Errorf("PendingPromptAttribution.UserLinesAdded = %d, want 2 (pre-prompt user edits)",
+			state.PendingPromptAttribution.UserLinesAdded)
+	}
+
+	if state.PendingPromptAttribution.CheckpointNumber != 1 {
+		t.Errorf("PendingPromptAttribution.CheckpointNumber = %d, want 1",
+			state.PendingPromptAttribution.CheckpointNumber)
+	}
+
+	// === CHECKPOINT 1: Agent adds 1 line ===
+	agentContent := prePromptContent + "func agentFunc() {}\n"
+	if err := os.WriteFile(testFile, []byte(agentContent), 0o644); err != nil {
+		t.Fatalf("failed to write agent changes: %v", err)
+	}
+
+	err = s.SaveChanges(SaveContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"test.go"},
+		NewFiles:       []string{},
+		DeletedFiles:   []string{},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	})
+	if err != nil {
+		t.Fatalf("SaveChanges() error = %v", err)
+	}
+
+	// Reload state to verify PromptAttributions
+	state, err = s.loadSessionState(sessionID)
+	if err != nil {
+		t.Fatalf("loadSessionState() after checkpoint error = %v", err)
+	}
+
+	// PromptAttributions should now contain the pre-prompt edits
+	if len(state.PromptAttributions) != 1 {
+		t.Fatalf("expected 1 PromptAttribution, got %d", len(state.PromptAttributions))
+	}
+
+	attr1 := state.PromptAttributions[0]
+	if attr1.UserLinesAdded != 2 {
+		t.Errorf("PromptAttributions[0].UserLinesAdded = %d, want 2 (pre-prompt user edits)",
+			attr1.UserLinesAdded)
+	}
+
+	// Agent work should be 0 for the first attribution (only user edits captured)
+	if attr1.AgentLinesAdded != 0 {
+		t.Errorf("PromptAttributions[0].AgentLinesAdded = %d, want 0 (no prior checkpoints)",
+			attr1.AgentLinesAdded)
+	}
+}

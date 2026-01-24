@@ -819,15 +819,13 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 		}
 
 		// Calculate attribution at prompt start (BEFORE agent makes any changes)
-		// This captures user edits since the last checkpoint
-		// Always store attribution when there's a previous checkpoint, even if zero,
-		// to maintain a complete history for each checkpoint.
-		if state.CheckpointCount > 0 {
-			// Only calculate if there's a previous checkpoint to compare against
-			promptAttr := s.calculatePromptAttributionAtStart(repo, state)
-			state.PendingPromptAttribution = &promptAttr
-			needSave = true
-		}
+		// This captures user edits since the last checkpoint (or base commit for first prompt).
+		// IMPORTANT: Always calculate attribution, even for the first checkpoint, to capture
+		// user edits made before the first prompt. The inner CalculatePromptAttribution handles
+		// nil lastCheckpointTree by falling back to baseTree.
+		promptAttr := s.calculatePromptAttributionAtStart(repo, state)
+		state.PendingPromptAttribution = &promptAttr
+		needSave = true
 
 		// Check if HEAD has moved (user pulled/rebased or committed)
 		if state.BaseCommit != head.Hash().String() {
@@ -905,9 +903,17 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 	}
 
 	// Initialize new session
-	_, err = s.initializeSession(repo, sessionID, agentType, transcriptPath)
+	state, err = s.initializeSession(repo, sessionID, agentType, transcriptPath)
 	if err != nil {
 		return fmt.Errorf("failed to initialize session: %w", err)
+	}
+
+	// Calculate attribution for pre-prompt edits
+	// This captures any user edits made before the first prompt
+	promptAttr := s.calculatePromptAttributionAtStart(repo, state)
+	state.PendingPromptAttribution = &promptAttr
+	if err = s.saveSessionState(state); err != nil {
+		return fmt.Errorf("failed to save attribution: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "Initialized shadow session: %s\n", sessionID)
@@ -930,30 +936,32 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 	nextCheckpointNum := state.CheckpointCount + 1
 	result := PromptAttribution{CheckpointNumber: nextCheckpointNum}
 
-	// Get last checkpoint tree from shadow branch
+	// Get last checkpoint tree from shadow branch (if it exists)
+	// For the first checkpoint, no shadow branch exists yet - this is fine,
+	// CalculatePromptAttribution will use baseTree as the reference instead.
+	var lastCheckpointTree *object.Tree
 	shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit)
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
-		logging.Debug(logCtx, "prompt attribution skipped: shadow branch not found",
-			slog.String("shadow_branch", shadowBranchName),
-			slog.String("error", err.Error()))
-		return result // No shadow branch yet
-	}
-
-	shadowCommit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		logging.Debug(logCtx, "prompt attribution skipped: failed to get shadow commit",
-			slog.String("shadow_ref", ref.Hash().String()),
-			slog.String("error", err.Error()))
-		return result
-	}
-
-	lastCheckpointTree, err := shadowCommit.Tree()
-	if err != nil {
-		logging.Debug(logCtx, "prompt attribution skipped: failed to get shadow tree",
-			slog.String("error", err.Error()))
-		return result
+		logging.Debug(logCtx, "prompt attribution: no shadow branch yet (first checkpoint)",
+			slog.String("shadow_branch", shadowBranchName))
+		// Continue with lastCheckpointTree = nil
+	} else {
+		shadowCommit, err := repo.CommitObject(ref.Hash())
+		if err != nil {
+			logging.Debug(logCtx, "prompt attribution: failed to get shadow commit",
+				slog.String("shadow_ref", ref.Hash().String()),
+				slog.String("error", err.Error()))
+			// Continue with lastCheckpointTree = nil
+		} else {
+			lastCheckpointTree, err = shadowCommit.Tree()
+			if err != nil {
+				logging.Debug(logCtx, "prompt attribution: failed to get shadow tree",
+					slog.String("error", err.Error()))
+				// Continue with lastCheckpointTree = nil
+			}
+		}
 	}
 
 	// Get base tree for agent lines calculation
