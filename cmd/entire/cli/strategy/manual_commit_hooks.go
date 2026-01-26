@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"entire.io/cli/cmd/entire/cli/agent"
@@ -133,6 +135,43 @@ func stripCheckpointTrailer(message string) string {
 	return strings.Join(result, "\n")
 }
 
+// isGitSequenceOperation checks if git is currently in the middle of a rebase,
+// cherry-pick, or revert operation. During these operations, commits are being
+// replayed and should not be linked to agent sessions.
+//
+// Detects:
+//   - rebase: .git/rebase-merge/ or .git/rebase-apply/ directories
+//   - cherry-pick: .git/CHERRY_PICK_HEAD file
+//   - revert: .git/REVERT_HEAD file
+func isGitSequenceOperation() bool {
+	// Get git directory (handles worktrees correctly)
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return false // Can't determine, assume not in sequence operation
+	}
+	gitDir := strings.TrimSpace(string(output))
+
+	// Check for rebase state directories
+	if _, err := os.Stat(filepath.Join(gitDir, "rebase-merge")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "rebase-apply")); err == nil {
+		return true
+	}
+
+	// Check for cherry-pick and revert state files
+	if _, err := os.Stat(filepath.Join(gitDir, "CHERRY_PICK_HEAD")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "REVERT_HEAD")); err == nil {
+		return true
+	}
+
+	return false
+}
+
 // PrepareCommitMsg is called by the git prepare-commit-msg hook.
 // Adds an Entire-Checkpoint trailer to the commit message with a stable checkpoint ID.
 // Only adds a trailer if there's actually new session content to condense.
@@ -148,6 +187,16 @@ func stripCheckpointTrailer(message string) string {
 //nolint:unparam // error return required by interface but hooks must return nil
 func (s *ManualCommitStrategy) PrepareCommitMsg(commitMsgFile string, source string) error {
 	logCtx := logging.WithComponent(context.Background(), "checkpoint")
+
+	// Skip during rebase, cherry-pick, or revert operations
+	// These are replaying existing commits and should not be linked to agent sessions
+	if isGitSequenceOperation() {
+		logging.Debug(logCtx, "prepare-commit-msg: skipped during git sequence operation",
+			slog.String("strategy", "manual-commit"),
+			slog.String("source", source),
+		)
+		return nil
+	}
 
 	// Skip for merge, squash, and commit (amend) sources
 	// These are auto-generated or reusing existing messages - not from Claude sessions
