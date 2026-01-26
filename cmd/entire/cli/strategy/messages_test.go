@@ -51,62 +51,6 @@ func TestTruncateDescription(t *testing.T) {
 	}
 }
 
-func TestFormatSubagentStartMessage(t *testing.T) {
-	tests := []struct {
-		name        string
-		agentType   string
-		description string
-		toolUseID   string
-		want        string
-	}{
-		{
-			name:        "full message with all fields",
-			agentType:   "dev",
-			description: "Implement user authentication",
-			toolUseID:   "toolu_019t1c",
-			want:        "Starting 'dev' agent: Implement user authentication (toolu_019t1c)",
-		},
-		{
-			name:        "empty description",
-			agentType:   "dev",
-			description: "",
-			toolUseID:   "toolu_019t1c",
-			want:        "Starting 'dev' agent (toolu_019t1c)",
-		},
-		{
-			name:        "empty agent type",
-			agentType:   "",
-			description: "Implement user authentication",
-			toolUseID:   "toolu_019t1c",
-			want:        "Starting agent: Implement user authentication (toolu_019t1c)",
-		},
-		{
-			name:        "both empty",
-			agentType:   "",
-			description: "",
-			toolUseID:   "toolu_019t1c",
-			want:        "Task: toolu_019t1c",
-		},
-		{
-			name:        "long description truncated",
-			agentType:   "dev",
-			description: "This is a very long description that should be truncated to fit within the limit",
-			toolUseID:   "toolu_019t1c",
-			want:        "Starting 'dev' agent: This is a very long description that should be truncated ... (toolu_019t1c)",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := FormatSubagentStartMessage(tt.agentType, tt.description, tt.toolUseID)
-			if got != tt.want {
-				t.Errorf("FormatSubagentStartMessage(%q, %q, %q) = %q, want %q",
-					tt.agentType, tt.description, tt.toolUseID, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestFormatSubagentEndMessage(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -316,23 +260,7 @@ func TestFormatIncrementalSubject(t *testing.T) {
 		want                string
 	}{
 		{
-			name:            "TaskStart with full details",
-			incrementalType: IncrementalTypeTaskStart,
-			subagentType:    "dev",
-			taskDescription: "Implement user authentication",
-			shortToolUseID:  "toolu_019t1c",
-			want:            "Starting 'dev' agent: Implement user authentication (toolu_019t1c)",
-		},
-		{
-			name:            "TaskStart with empty description",
-			incrementalType: IncrementalTypeTaskStart,
-			subagentType:    "dev",
-			taskDescription: "",
-			shortToolUseID:  "toolu_019t1c",
-			want:            "Starting 'dev' agent (toolu_019t1c)",
-		},
-		{
-			name:                "Regular incremental with todo content",
+			name:                "incremental with todo content",
 			incrementalType:     "TodoWrite",
 			todoContent:         "Set up Node.js project",
 			incrementalSequence: 1,
@@ -340,7 +268,7 @@ func TestFormatIncrementalSubject(t *testing.T) {
 			want:                "Set up Node.js project (toolu_01CJhrr)",
 		},
 		{
-			name:                "Regular incremental without todo content",
+			name:                "incremental without todo content",
 			incrementalType:     "TodoWrite",
 			todoContent:         "",
 			incrementalSequence: 3,

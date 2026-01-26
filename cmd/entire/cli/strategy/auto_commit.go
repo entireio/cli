@@ -578,14 +578,12 @@ func (s *AutoCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) error
 
 // commitTaskCodeToActive commits task code changes to the active branch.
 // Adds an Entire-Checkpoint trailer for metadata lookup that survives amend/rebase.
-// For TaskStart checkpoints, creates an empty marker commit even without file changes.
+// Skips commit creation if there are no file changes.
 func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx TaskCheckpointContext, checkpointID id.CheckpointID) (plumbing.Hash, error) {
-	// For TaskStart, we want to create a marker commit even without file changes
-	isTaskStart := ctx.IsIncremental && ctx.IncrementalType == IncrementalTypeTaskStart
 	hasFileChanges := len(ctx.ModifiedFiles) > 0 || len(ctx.NewFiles) > 0 || len(ctx.DeletedFiles) > 0
 
-	// If no file changes and not a TaskStart, skip code commit
-	if !hasFileChanges && !isTaskStart {
+	// If no file changes, skip code commit
+	if !hasFileChanges {
 		fmt.Fprintf(os.Stderr, "No code changes to commit for task checkpoint\n")
 		// Return current HEAD hash so metadata can still be stored
 		head, err := repo.Head()
@@ -632,21 +630,9 @@ func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx Ta
 		When:  time.Now(),
 	}
 
-	var commitHash plumbing.Hash
-	if isTaskStart {
-		// For TaskStart, allow empty commits (marker commits)
-		commitHash, err = worktree.Commit(commitMsg, &git.CommitOptions{
-			Author:            author,
-			AllowEmptyCommits: true,
-		})
-		if err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("failed to create TaskStart marker commit: %w", err)
-		}
-	} else {
-		commitHash, err = commitOrHead(repo, worktree, commitMsg, author)
-		if err != nil {
-			return plumbing.ZeroHash, err
-		}
+	commitHash, err := commitOrHead(repo, worktree, commitMsg, author)
+	if err != nil {
+		return plumbing.ZeroHash, err
 	}
 
 	if ctx.IsIncremental {

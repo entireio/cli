@@ -774,9 +774,10 @@ func handlePreTask() error {
 	// Log context to stdout
 	logPreTaskHookContext(os.Stdout, input)
 
-	// Capture pre-task state locally (for computing new files when task completes)
-	// We don't create a shadow branch commit here - commits are only created
-	// when the task actually makes file changes (in handlePostTask/handlePostTodo)
+	// Capture pre-task state locally (for computing new files when task completes).
+	// We don't create a shadow branch commit here. Commits are created during
+	// task completion (handlePostTask/handlePostTodo) only if the task resulted
+	// in file changes.
 	if err := CapturePreTaskState(input.ToolUseID); err != nil {
 		return fmt.Errorf("failed to capture pre-task state: %w", err)
 	}

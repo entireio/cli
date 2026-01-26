@@ -357,86 +357,7 @@ func TestAutoCommitStrategy_SaveTaskCheckpoint_CommitHasMetadataRef(t *testing.T
 	}
 }
 
-func TestAutoCommitStrategy_SaveTaskCheckpoint_TaskStartCreatesEmptyCommit(t *testing.T) {
-	// Setup temp git repo
-	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Create initial commit (needed for a valid repo state)
-	worktree, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-	readmeFile := filepath.Join(dir, "README.md")
-	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
-		t.Fatalf("failed to write README: %v", err)
-	}
-	if _, err := worktree.Add("README.md"); err != nil {
-		t.Fatalf("failed to add README: %v", err)
-	}
-	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
-	})
-	if err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	// Setup strategy
-	s := NewAutoCommitStrategy()
-	if err := s.EnsureSetup(); err != nil {
-		t.Fatalf("EnsureSetup() error = %v", err)
-	}
-
-	// Create a TaskStart checkpoint with NO file changes
-	ctx := TaskCheckpointContext{
-		SessionID:           "test-session-taskstart",
-		ToolUseID:           "toolu_taskstart123",
-		IsIncremental:       true,
-		IncrementalType:     IncrementalTypeTaskStart,
-		IncrementalSequence: 1,
-		SubagentType:        "dev",
-		TaskDescription:     "Implement feature",
-		// No file changes
-		ModifiedFiles: []string{},
-		NewFiles:      []string{},
-		DeletedFiles:  []string{},
-		AuthorName:    "Test",
-		AuthorEmail:   "test@test.com",
-	}
-
-	if err := s.SaveTaskCheckpoint(ctx); err != nil {
-		t.Fatalf("SaveTaskCheckpoint() error = %v", err)
-	}
-
-	// Verify a NEW commit was created (not just returning HEAD)
-	head, err := repo.Head()
-	if err != nil {
-		t.Fatalf("failed to get HEAD: %v", err)
-	}
-
-	if head.Hash() == initialCommit {
-		t.Error("TaskStart should create a new commit even without file changes, but HEAD is still the initial commit")
-	}
-
-	// Verify the commit message contains the expected content
-	commit, err := repo.CommitObject(head.Hash())
-	if err != nil {
-		t.Fatalf("failed to get HEAD commit: %v", err)
-	}
-
-	// TaskStart commits should have "Starting" in the message
-	expectedSubstring := "Starting 'dev' agent: Implement feature"
-	if !strings.Contains(commit.Message, expectedSubstring) {
-		t.Errorf("commit message should contain %q, got:\n%s", expectedSubstring, commit.Message)
-	}
-}
-
-func TestAutoCommitStrategy_SaveTaskCheckpoint_NonTaskStartNoChangesAmendedForMetadata(t *testing.T) {
+func TestAutoCommitStrategy_SaveTaskCheckpoint_NoChangesSkipsCommit(t *testing.T) {
 	// Setup temp git repo
 	dir := t.TempDir()
 	repo, err := git.PlainInit(dir, false)
@@ -471,12 +392,12 @@ func TestAutoCommitStrategy_SaveTaskCheckpoint_NonTaskStartNoChangesAmendedForMe
 		t.Fatalf("EnsureSetup() error = %v", err)
 	}
 
-	// Create a regular incremental checkpoint (not TaskStart) with NO file changes
+	// Create an incremental checkpoint with NO file changes
 	ctx := TaskCheckpointContext{
-		SessionID:           "test-session-nontaskstart",
-		ToolUseID:           "toolu_nontaskstart456",
+		SessionID:           "test-session-nochanges",
+		ToolUseID:           "toolu_nochanges456",
 		IsIncremental:       true,
-		IncrementalType:     "TodoWrite", // NOT TaskStart
+		IncrementalType:     "TodoWrite",
 		IncrementalSequence: 2,
 		TodoContent:         "Write some code",
 		// No file changes
@@ -512,7 +433,7 @@ func TestAutoCommitStrategy_SaveTaskCheckpoint_NonTaskStartNoChangesAmendedForMe
 
 	// The tree hash should be the same (no file changes)
 	if newCommit.TreeHash != oldCommit.TreeHash {
-		t.Error("non-TaskStart checkpoint without file changes should have the same tree hash")
+		t.Error("checkpoint without file changes should have the same tree hash")
 	}
 
 	// Metadata should still be stored on entire/sessions branch

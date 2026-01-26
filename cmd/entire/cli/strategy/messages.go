@@ -21,17 +21,6 @@ func TruncateDescription(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// FormatSubagentStartMessage formats a commit message for when a subagent starts.
-// Format: "Starting '<agent-type>' agent: <description> (<tool-use-id>)"
-//
-// Edge cases:
-//   - Empty description: "Starting '<agent-type>' agent (<tool-use-id>)"
-//   - Empty agentType: "Starting agent: <description> (<tool-use-id>)"
-//   - Both empty: "Task: <tool-use-id>"
-func FormatSubagentStartMessage(agentType, description, toolUseID string) string {
-	return formatSubagentMessage("Starting", agentType, description, toolUseID)
-}
-
 // FormatSubagentEndMessage formats a commit message for when a subagent completes.
 // Format: "Completed '<agent-type>' agent: <description> (<tool-use-id>)"
 //
@@ -67,10 +56,11 @@ func formatSubagentMessage(verb, agentType, description, toolUseID string) strin
 }
 
 // FormatIncrementalSubject formats the commit message subject for incremental checkpoints.
-// Handles both TaskStart (starting agent) and regular incremental (TodoWrite) checkpoints.
+// Delegates to FormatIncrementalMessage.
 //
-// For TaskStart: delegates to FormatSubagentStartMessage
-// For other types: delegates to FormatIncrementalMessage
+// Note: The incrementalType, subagentType, and taskDescription parameters are kept for
+// API compatibility but are not currently used. They may be used in the future for
+// different checkpoint types.
 func FormatIncrementalSubject(
 	incrementalType string,
 	subagentType string,
@@ -79,9 +69,8 @@ func FormatIncrementalSubject(
 	incrementalSequence int,
 	shortToolUseID string,
 ) string {
-	if incrementalType == IncrementalTypeTaskStart {
-		return FormatSubagentStartMessage(subagentType, taskDescription, shortToolUseID)
-	}
+	// Currently all incremental checkpoints use the same format
+	_, _, _ = incrementalType, subagentType, taskDescription // Silence unused warnings
 	return FormatIncrementalMessage(todoContent, incrementalSequence, shortToolUseID)
 }
 

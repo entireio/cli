@@ -25,10 +25,6 @@ var ErrNotTaskCheckpoint = errors.New("not a task checkpoint")
 // ErrNotImplemented is returned when a feature is not yet implemented.
 var ErrNotImplemented = errors.New("not implemented")
 
-// IncrementalTypeTaskStart is the incremental type for the starting checkpoint
-// created during PreToolUse[Task] hook before a subagent begins execution.
-const IncrementalTypeTaskStart = "TaskStart"
-
 // ShadowBranchConflictError is returned when a shadow branch already exists
 // with activity from a different session or worktree.
 type ShadowBranchConflictError struct {
