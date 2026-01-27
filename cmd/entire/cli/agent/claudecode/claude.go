@@ -14,6 +14,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/sessionid"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -142,7 +143,7 @@ func (c *ClaudeCodeAgent) GetSessionID(input *agent.HookInput) string {
 // TransformSessionID converts a Claude session ID to an Entire session ID.
 // Format: YYYY-MM-DD-<claude-session-id>
 func (c *ClaudeCodeAgent) TransformSessionID(agentSessionID string) string {
-	return paths.EntireSessionID(agentSessionID)
+	return sessionid.EntireSessionID(agentSessionID)
 }
 
 // ExtractAgentSessionID extracts the Claude session ID from an Entire session ID.

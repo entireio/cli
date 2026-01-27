@@ -1,6 +1,7 @@
 package geminicli
 
 import (
+	"os"
 	"testing"
 )
 
@@ -268,4 +269,217 @@ func TestExtractLastUserPromptFromTranscript(t *testing.T) {
 	if got != "last prompt" {
 		t.Errorf("got %q, want 'last prompt'", got)
 	}
+}
+
+func TestCalculateTokenUsage_BasicMessages(t *testing.T) {
+	t.Parallel()
+
+	// Gemini transcript with token usage in messages
+	data := []byte(`{
+  "messages": [
+    {"id": "1", "type": "user", "content": "hello"},
+    {"id": "2", "type": "gemini", "content": "hi there", "tokens": {"input": 10, "output": 20, "cached": 5, "thoughts": 0, "tool": 0, "total": 35}},
+    {"id": "3", "type": "user", "content": "how are you?"},
+    {"id": "4", "type": "gemini", "content": "I'm doing well", "tokens": {"input": 15, "output": 25, "cached": 3, "thoughts": 0, "tool": 0, "total": 43}}
+  ]
+}`)
+
+	usage := CalculateTokenUsage(data, 0)
+
+	// Should have 2 API calls (2 gemini messages)
+	if usage.APICallCount != 2 {
+		t.Errorf("APICallCount = %d, want 2", usage.APICallCount)
+	}
+
+	// Input tokens: 10 + 15 = 25
+	if usage.InputTokens != 25 {
+		t.Errorf("InputTokens = %d, want 25", usage.InputTokens)
+	}
+
+	// Output tokens: 20 + 25 = 45
+	if usage.OutputTokens != 45 {
+		t.Errorf("OutputTokens = %d, want 45", usage.OutputTokens)
+	}
+
+	// Cache read tokens: 5 + 3 = 8
+	if usage.CacheReadTokens != 8 {
+		t.Errorf("CacheReadTokens = %d, want 8", usage.CacheReadTokens)
+	}
+}
+
+func TestCalculateTokenUsage_StartIndex(t *testing.T) {
+	t.Parallel()
+
+	// Gemini transcript with 4 messages - test starting from index 2
+	data := []byte(`{
+  "messages": [
+    {"id": "1", "type": "user", "content": "hello"},
+    {"id": "2", "type": "gemini", "content": "hi", "tokens": {"input": 10, "output": 20, "cached": 0, "total": 30}},
+    {"id": "3", "type": "user", "content": "how are you?"},
+    {"id": "4", "type": "gemini", "content": "great", "tokens": {"input": 15, "output": 25, "cached": 5, "total": 45}}
+  ]
+}`)
+
+	// Start from index 2 - should only count the last gemini message
+	usage := CalculateTokenUsage(data, 2)
+
+	// Should have 1 API call (only the gemini message at index 3)
+	if usage.APICallCount != 1 {
+		t.Errorf("APICallCount = %d, want 1", usage.APICallCount)
+	}
+
+	// Only tokens from message at index 3
+	if usage.InputTokens != 15 {
+		t.Errorf("InputTokens = %d, want 15", usage.InputTokens)
+	}
+
+	if usage.OutputTokens != 25 {
+		t.Errorf("OutputTokens = %d, want 25", usage.OutputTokens)
+	}
+
+	if usage.CacheReadTokens != 5 {
+		t.Errorf("CacheReadTokens = %d, want 5", usage.CacheReadTokens)
+	}
+}
+
+func TestCalculateTokenUsage_IgnoresUserMessages(t *testing.T) {
+	t.Parallel()
+
+	// Even if user messages have tokens (they shouldn't), they should be ignored
+	data := []byte(`{
+  "messages": [
+    {"id": "1", "type": "user", "content": "hello", "tokens": {"input": 100, "output": 100, "cached": 100, "total": 300}},
+    {"id": "2", "type": "gemini", "content": "hi", "tokens": {"input": 10, "output": 20, "cached": 5, "total": 35}}
+  ]
+}`)
+
+	usage := CalculateTokenUsage(data, 0)
+
+	// Should only count gemini message tokens
+	if usage.APICallCount != 1 {
+		t.Errorf("APICallCount = %d, want 1", usage.APICallCount)
+	}
+
+	if usage.InputTokens != 10 {
+		t.Errorf("InputTokens = %d, want 10", usage.InputTokens)
+	}
+
+	if usage.OutputTokens != 20 {
+		t.Errorf("OutputTokens = %d, want 20", usage.OutputTokens)
+	}
+}
+
+func TestCalculateTokenUsage_EmptyTranscript(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"messages": []}`)
+	usage := CalculateTokenUsage(data, 0)
+
+	if usage.APICallCount != 0 {
+		t.Errorf("APICallCount = %d, want 0", usage.APICallCount)
+	}
+	if usage.InputTokens != 0 {
+		t.Errorf("InputTokens = %d, want 0", usage.InputTokens)
+	}
+	if usage.OutputTokens != 0 {
+		t.Errorf("OutputTokens = %d, want 0", usage.OutputTokens)
+	}
+	if usage.CacheReadTokens != 0 {
+		t.Errorf("CacheReadTokens = %d, want 0", usage.CacheReadTokens)
+	}
+}
+
+func TestCalculateTokenUsage_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`not valid json`)
+	usage := CalculateTokenUsage(data, 0)
+
+	// Should return empty usage on parse error
+	if usage.APICallCount != 0 {
+		t.Errorf("APICallCount = %d, want 0", usage.APICallCount)
+	}
+}
+
+func TestCalculateTokenUsage_MissingTokensField(t *testing.T) {
+	t.Parallel()
+
+	// Gemini message without tokens field
+	data := []byte(`{
+  "messages": [
+    {"id": "1", "type": "user", "content": "hello"},
+    {"id": "2", "type": "gemini", "content": "hi there"}
+  ]
+}`)
+
+	usage := CalculateTokenUsage(data, 0)
+
+	// No tokens to count
+	if usage.APICallCount != 0 {
+		t.Errorf("APICallCount = %d, want 0", usage.APICallCount)
+	}
+}
+
+func TestGeminiCLIAgent_GetTranscriptPosition(t *testing.T) {
+	t.Parallel()
+
+	// Create a temp file with transcript data
+	tmpFile := t.TempDir() + "/transcript.json"
+
+	data := []byte(`{
+  "messages": [
+    {"type": "user", "content": "hello"},
+    {"type": "gemini", "content": "hi"},
+    {"type": "user", "content": "bye"}
+  ]
+}`)
+
+	if err := writeTestFile(t, tmpFile, data); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	agent := &GeminiCLIAgent{}
+	messageCount, err := agent.GetTranscriptPosition(tmpFile)
+	if err != nil {
+		t.Fatalf("GetTranscriptPosition() error = %v", err)
+	}
+
+	if messageCount != 3 {
+		t.Errorf("GetTranscriptPosition() = %d, want 3", messageCount)
+	}
+}
+
+func TestGeminiCLIAgent_GetTranscriptPosition_EmptyPath(t *testing.T) {
+	t.Parallel()
+
+	agent := &GeminiCLIAgent{}
+	messageCount, err := agent.GetTranscriptPosition("")
+	if err != nil {
+		t.Fatalf("GetTranscriptPosition() error = %v", err)
+	}
+
+	if messageCount != 0 {
+		t.Errorf("GetTranscriptPosition() = %d, want 0", messageCount)
+	}
+}
+
+func TestGeminiCLIAgent_GetTranscriptPosition_NonexistentFile(t *testing.T) {
+	t.Parallel()
+
+	agent := &GeminiCLIAgent{}
+	messageCount, err := agent.GetTranscriptPosition("/nonexistent/file.json")
+	if err != nil {
+		t.Fatalf("GetTranscriptPosition() error = %v", err)
+	}
+
+	// Should return 0 for nonexistent file
+	if messageCount != 0 {
+		t.Errorf("GetTranscriptPosition() = %d, want 0", messageCount)
+	}
+}
+
+// writeTestFile is a helper to write test data to a file
+func writeTestFile(t *testing.T, path string, data []byte) error {
+	t.Helper()
+	return os.WriteFile(path, data, 0o644)
 }

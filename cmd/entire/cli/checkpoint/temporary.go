@@ -17,6 +17,7 @@ import (
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/trailers"
+	"entire.io/cli/cmd/entire/cli/validation"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -51,7 +52,7 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 	}
 
 	// Validate session ID to prevent path traversal
-	if err := paths.ValidateSessionID(opts.SessionID); err != nil {
+	if err := validation.ValidateSessionID(opts.SessionID); err != nil {
 		return WriteTemporaryResult{}, fmt.Errorf("invalid temporary checkpoint options: %w", err)
 	}
 
@@ -216,13 +217,13 @@ func (s *GitStore) WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTa
 	}
 
 	// Validate identifiers to prevent path traversal and malformed data
-	if err := paths.ValidateSessionID(opts.SessionID); err != nil {
+	if err := validation.ValidateSessionID(opts.SessionID); err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("invalid task checkpoint options: %w", err)
 	}
-	if err := paths.ValidateToolUseID(opts.ToolUseID); err != nil {
+	if err := validation.ValidateToolUseID(opts.ToolUseID); err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("invalid task checkpoint options: %w", err)
 	}
-	if err := paths.ValidateAgentID(opts.AgentID); err != nil {
+	if err := validation.ValidateAgentID(opts.AgentID); err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("invalid task checkpoint options: %w", err)
 	}
 

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v5"
@@ -231,7 +232,7 @@ func TestSubagentCheckpoints_NoPreTaskFile(t *testing.T) {
 func verifyCheckpointStorage(t *testing.T, env *TestEnv, strategyName, sessionID, taskToolUseID string) {
 	t.Helper()
 
-	entireSessionID := paths.EntireSessionID(sessionID)
+	entireSessionID := sessionid.EntireSessionID(sessionID)
 
 	switch strategyName {
 	case strategy.StrategyNameManualCommit:

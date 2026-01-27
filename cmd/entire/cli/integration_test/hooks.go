@@ -10,7 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/strategy"
 )
 
@@ -218,7 +218,7 @@ func (env *TestEnv) NewSession() *Session {
 
 	env.SessionCounter++
 	sessionID := fmt.Sprintf("test-session-%d", env.SessionCounter)
-	entireID := paths.EntireSessionID(sessionID)
+	entireID := sessionid.EntireSessionID(sessionID)
 	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", sessionID+".jsonl")
 
 	return &Session{
@@ -331,8 +331,8 @@ func (env *TestEnv) ClearSessionState(sessionID string) error {
 	env.T.Helper()
 
 	// Session state is stored in .git/entire-sessions/<session-id>.json
-	// Use paths.EntireSessionID to get the full session ID with date prefix
-	entireSessionID := paths.EntireSessionID(sessionID)
+	// Use sessionid.EntireSessionID to get the full session ID with date prefix
+	entireSessionID := sessionid.EntireSessionID(sessionID)
 	stateFile := filepath.Join(env.RepoDir, ".git", "entire-sessions", entireSessionID+".json")
 
 	if err := os.Remove(stateFile); err != nil && !os.IsNotExist(err) {
@@ -397,7 +397,7 @@ func (env *TestEnv) SimulateUserPromptSubmitWithOutput(sessionID string) HookOut
 func (env *TestEnv) GetSessionState(sessionID string) (*strategy.SessionState, error) {
 	env.T.Helper()
 
-	entireSessionID := paths.EntireSessionID(sessionID)
+	entireSessionID := sessionid.EntireSessionID(sessionID)
 	stateFile := filepath.Join(env.RepoDir, ".git", "entire-sessions", entireSessionID+".json")
 
 	data, err := os.ReadFile(stateFile)
@@ -577,7 +577,7 @@ func (env *TestEnv) NewGeminiSession() *GeminiSession {
 
 	env.SessionCounter++
 	sessionID := fmt.Sprintf("gemini-session-%d", env.SessionCounter)
-	entireID := paths.EntireSessionID(sessionID)
+	entireID := sessionid.EntireSessionID(sessionID)
 	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", sessionID+".json")
 
 	return &GeminiSession{

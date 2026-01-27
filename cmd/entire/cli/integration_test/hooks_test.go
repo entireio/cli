@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/sessionid"
 )
 
 func TestHookRunner_SimulateUserPromptSubmit(t *testing.T) {
@@ -23,7 +23,7 @@ func TestHookRunner_SimulateUserPromptSubmit(t *testing.T) {
 		}
 
 		// Verify pre-prompt state was captured (uses entire session ID with date prefix)
-		entireSessionID := paths.EntireSessionID(modelSessionID)
+		entireSessionID := sessionid.EntireSessionID(modelSessionID)
 		statePath := filepath.Join(env.RepoDir, ".entire", "tmp", "pre-prompt-"+entireSessionID+".json")
 		if _, err := os.Stat(statePath); os.IsNotExist(err) {
 			t.Error("pre-prompt state file should exist")

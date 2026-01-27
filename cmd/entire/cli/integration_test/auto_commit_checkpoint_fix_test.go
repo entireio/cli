@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/strategy"
 )
 
@@ -234,7 +234,7 @@ func TestDualStrategy_IncrementalPromptContent(t *testing.T) {
 func TestDualStrategy_SessionStateTracksTranscriptOffset(t *testing.T) {
 	env := NewFeatureBranchEnv(t, strategy.StrategyNameAutoCommit)
 	session := env.NewSession()
-	entireSessionID := paths.EntireSessionID(session.ID)
+	entireSessionID := sessionid.EntireSessionID(session.ID)
 
 	// First prompt
 	err := env.SimulateUserPromptSubmit(session.ID)

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/validation"
 )
 
 // LogLevelEnvVar is the environment variable that controls log level.
@@ -77,7 +78,7 @@ func SetLogLevelGetter(getter func() string) {
 // Log level is controlled by ENTIRE_LOG_LEVEL environment variable.
 func Init(sessionID string) error {
 	// Validate session ID to prevent path traversal attacks
-	if err := paths.ValidateSessionID(sessionID); err != nil {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID for logging: %w", err)
 	}
 

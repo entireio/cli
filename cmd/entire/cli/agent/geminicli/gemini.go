@@ -16,6 +16,7 @@ import (
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/sessionid"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -159,7 +160,7 @@ func (g *GeminiCLIAgent) GetSessionID(input *agent.HookInput) string {
 // TransformSessionID converts a Gemini session ID to an Entire session ID.
 // Format: YYYY-MM-DD-<gemini-session-id>
 func (g *GeminiCLIAgent) TransformSessionID(agentSessionID string) string {
-	return paths.EntireSessionID(agentSessionID)
+	return sessionid.EntireSessionID(agentSessionID)
 }
 
 // ExtractAgentSessionID extracts the Gemini session ID from an Entire session ID.

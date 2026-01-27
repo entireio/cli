@@ -9,6 +9,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v5"
@@ -235,7 +236,7 @@ func TestResumeFromCurrentBranch_WithEntireCheckpointTrailer(t *testing.T) {
 	}
 
 	// Verify that the session log was written to the Claude project directory
-	claudeSessionID := paths.ModelSessionID(sessionID)
+	claudeSessionID := sessionid.ModelSessionID(sessionID)
 	expectedLogPath := filepath.Join(claudeDir, claudeSessionID+".jsonl")
 
 	content, err := os.ReadFile(expectedLogPath)

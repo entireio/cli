@@ -253,6 +253,37 @@ func TestClaudeCodeHooksCmd_HasLoggingHooks(t *testing.T) {
 	}
 }
 
+func TestGeminiCLIHooksCmd_HasLoggingHooks(t *testing.T) {
+	// This test verifies that the gemini hooks command has PersistentPreRunE
+	// and PersistentPostRunE for logging initialization and cleanup
+
+	// Get the actual hooks command which contains the gemini subcommand
+	hooksCmd := newHooksCmd()
+
+	// Find the gemini subcommand
+	var geminiCmd *cobra.Command
+	for _, sub := range hooksCmd.Commands() {
+		if sub.Use == "gemini" {
+			geminiCmd = sub
+			break
+		}
+	}
+
+	if geminiCmd == nil {
+		t.Fatal("expected to find gemini subcommand under hooks")
+	}
+
+	// Verify PersistentPreRunE is set
+	if geminiCmd.PersistentPreRunE == nil {
+		t.Error("expected PersistentPreRunE to be set for logging initialization")
+	}
+
+	// Verify PersistentPostRunE is set
+	if geminiCmd.PersistentPostRunE == nil {
+		t.Error("expected PersistentPostRunE to be set for logging cleanup")
+	}
+}
+
 func TestHookCommand_SetsCurrentHookAgentName(t *testing.T) {
 	// Verify that newAgentHookVerbCmdWithLogging sets currentHookAgentName
 	// correctly for the handler, and clears it after
