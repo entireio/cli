@@ -436,15 +436,23 @@ func getBranchCheckpoints(repo *git.Repository, limit int) ([]strategy.RewindPoi
 	headShort := head.Hash().String()[:7]
 	tempCheckpoints, _ := store.ListTemporaryCheckpoints(context.Background(), headShort, "", limit) //nolint:errcheck // Best-effort, continue without temp checkpoints
 	for _, tc := range tempCheckpoints {
+		shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
+		if commitErr != nil {
+			continue
+		}
+
+		// Filter out checkpoints with no code changes (only .entire/ metadata changed)
+		// This also filters out the first checkpoint which is just a baseline copy
+		if !hasCodeChanges(shadowCommit) {
+			continue
+		}
+
 		// Read session prompt from the shadow branch commit's tree (not from entire/sessions)
 		// Temporary checkpoints store their metadata in the shadow branch, not in entire/sessions
 		var sessionPrompt string
-		shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
-		if commitErr == nil {
-			shadowTree, treeErr := shadowCommit.Tree()
-			if treeErr == nil {
-				sessionPrompt = strategy.ReadSessionPromptFromTree(shadowTree, tc.MetadataDir)
-			}
+		shadowTree, treeErr := shadowCommit.Tree()
+		if treeErr == nil {
+			sessionPrompt = strategy.ReadSessionPromptFromTree(shadowTree, tc.MetadataDir)
 		}
 
 		points = append(points, strategy.RewindPoint{
@@ -1114,6 +1122,54 @@ func formatCheckpointGroup(sb *strings.Builder, group checkpointGroup) {
 		message := truncateString(commit.message, maxMessageDisplayLength)
 		fmt.Fprintf(sb, "  %s (%s) %s\n", dateTimeStr, commit.gitSHA, message)
 	}
+}
+
+// hasCodeChanges returns true if the commit has changes to non-metadata files.
+// Returns false if:
+//   - The commit has no parent (first commit on shadow branch, just baseline copy)
+//   - The commit only modified .entire/ metadata files
+//
+// This is used to filter out temporary checkpoints that don't represent
+// meaningful code changes (e.g., periodic transcript saves).
+func hasCodeChanges(commit *object.Commit) bool {
+	// First commit on shadow branch is a baseline copy, not a meaningful change
+	if commit.NumParents() == 0 {
+		return false
+	}
+
+	parent, err := commit.Parent(0)
+	if err != nil {
+		return true // Can't check, assume meaningful
+	}
+
+	commitTree, err := commit.Tree()
+	if err != nil {
+		return true
+	}
+
+	parentTree, err := parent.Tree()
+	if err != nil {
+		return true
+	}
+
+	changes, err := parentTree.Diff(commitTree)
+	if err != nil {
+		return true
+	}
+
+	// Check if any non-metadata file was changed
+	for _, change := range changes {
+		name := change.To.Name
+		if name == "" {
+			name = change.From.Name
+		}
+		// Skip .entire/ metadata files
+		if !strings.HasPrefix(name, ".entire/") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // truncateString truncates a string to the specified length, adding "..." if truncated.

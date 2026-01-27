@@ -1309,12 +1309,7 @@ func TestGetBranchCheckpoints_ReadsPromptFromShadowBranch(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	// Modify the test file so there's something to checkpoint
-	if err := os.WriteFile(testFile, []byte("modified content"), 0o644); err != nil {
-		t.Fatalf("failed to modify test file: %v", err)
-	}
-
-	// Create a checkpoint on the shadow branch
+	// Create first checkpoint (baseline copy) - this one gets filtered out
 	store := checkpoint.NewGitStore(repo)
 	baseCommit := initialCommit.String()[:7]
 	_, err = store.WriteTemporary(context.Background(), checkpoint.WriteTemporaryOptions{
@@ -1323,13 +1318,34 @@ func TestGetBranchCheckpoints_ReadsPromptFromShadowBranch(t *testing.T) {
 		ModifiedFiles:     []string{"test.txt"},
 		MetadataDir:       ".entire/metadata/" + sessionID,
 		MetadataDirAbs:    metadataDir,
-		CommitMessage:     "Test checkpoint",
+		CommitMessage:     "First checkpoint (baseline)",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
 		IsFirstCheckpoint: true,
 	})
 	if err != nil {
-		t.Fatalf("WriteTemporary() error = %v", err)
+		t.Fatalf("WriteTemporary() first checkpoint error = %v", err)
+	}
+
+	// Modify test file again for a second checkpoint with actual code changes
+	if err := os.WriteFile(testFile, []byte("second modification"), 0o644); err != nil {
+		t.Fatalf("failed to modify test file: %v", err)
+	}
+
+	// Create second checkpoint (has code changes, won't be filtered)
+	_, err = store.WriteTemporary(context.Background(), checkpoint.WriteTemporaryOptions{
+		SessionID:         sessionID,
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{"test.txt"},
+		MetadataDir:       ".entire/metadata/" + sessionID,
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "Second checkpoint with code changes",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: false, // Not first, has parent
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() second checkpoint error = %v", err)
 	}
 
 	// Now call getBranchCheckpoints and verify the prompt is read
@@ -1338,12 +1354,12 @@ func TestGetBranchCheckpoints_ReadsPromptFromShadowBranch(t *testing.T) {
 		t.Fatalf("getBranchCheckpoints() error = %v", err)
 	}
 
-	// Should have at least one temporary checkpoint
+	// Should have at least one temporary checkpoint (the second one with code changes)
 	var foundTempCheckpoint bool
 	for _, point := range points {
 		if !point.IsLogsOnly && point.SessionID == sessionID {
 			foundTempCheckpoint = true
-			// Verify the prompt was read correctly
+			// Verify the prompt was read correctly from the shadow branch tree
 			if point.SessionPrompt != expectedPrompt {
 				t.Errorf("expected prompt %q, got %q", expectedPrompt, point.SessionPrompt)
 			}
@@ -1527,6 +1543,224 @@ func TestGetBranchCheckpoints_OnFeatureBranch(t *testing.T) {
 	// Should return empty list (no checkpoints yet)
 	if len(points) != 0 {
 		t.Errorf("expected 0 checkpoints, got %d", len(points))
+	}
+}
+
+func TestHasCodeChanges_FirstCommitReturnsFalse(t *testing.T) {
+	// First commit on a shadow branch (no parent) should return false
+	// since it's just a baseline copy, not a meaningful code change
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, err := git.PlainInit(tmpDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create first commit (has no parent)
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	commitHash, err := w.Commit("first commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create commit: %v", err)
+	}
+
+	commit, err := repo.CommitObject(commitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	// First commit (no parent) should return false
+	if hasCodeChanges(commit) {
+		t.Error("hasCodeChanges() should return false for first commit (baseline copy)")
+	}
+}
+
+func TestHasCodeChanges_OnlyMetadataChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, err := git.PlainInit(tmpDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create first commit
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	_, err = w.Commit("first commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create first commit: %v", err)
+	}
+
+	// Create second commit with only .entire/ metadata changes
+	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", "session-123")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write metadata file: %v", err)
+	}
+	if _, err := w.Add(".entire"); err != nil {
+		t.Fatalf("failed to add .entire: %v", err)
+	}
+	commitHash, err := w.Commit("metadata only commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create second commit: %v", err)
+	}
+
+	commit, err := repo.CommitObject(commitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	// Only .entire/ changes should return false
+	if hasCodeChanges(commit) {
+		t.Error("hasCodeChanges() should return false when only .entire/ files changed")
+	}
+}
+
+func TestHasCodeChanges_WithCodeChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, err := git.PlainInit(tmpDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create first commit
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	_, err = w.Commit("first commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create first commit: %v", err)
+	}
+
+	// Create second commit with code changes
+	if err := os.WriteFile(testFile, []byte("modified"), 0o644); err != nil {
+		t.Fatalf("failed to modify test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add modified file: %v", err)
+	}
+	commitHash, err := w.Commit("code change commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create second commit: %v", err)
+	}
+
+	commit, err := repo.CommitObject(commitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	// Code changes should return true
+	if !hasCodeChanges(commit) {
+		t.Error("hasCodeChanges() should return true when code files changed")
+	}
+}
+
+func TestHasCodeChanges_MixedChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, err := git.PlainInit(tmpDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create first commit
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	_, err = w.Commit("first commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create first commit: %v", err)
+	}
+
+	// Create second commit with BOTH code and metadata changes
+	if err := os.WriteFile(testFile, []byte("modified"), 0o644); err != nil {
+		t.Fatalf("failed to modify test file: %v", err)
+	}
+	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", "session-123")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write metadata file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	if _, err := w.Add(".entire"); err != nil {
+		t.Fatalf("failed to add .entire: %v", err)
+	}
+	commitHash, err := w.Commit("mixed changes commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create second commit: %v", err)
+	}
+
+	commit, err := repo.CommitObject(commitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	// Mixed changes should return true (code changes present)
+	if !hasCodeChanges(commit) {
+		t.Error("hasCodeChanges() should return true when commit has both code and metadata changes")
 	}
 }
 
