@@ -493,7 +493,7 @@ func runStatus(w io.Writer, detailed bool) error {
 	return nil
 }
 
-// runStatusLong shows the effective status plus detailed status for each settings file.
+// runStatusDetailed shows the effective status plus detailed status for each settings file.
 func runStatusDetailed(w io.Writer, settingsPath, localSettingsPath string, projectExists, localExists bool) error {
 	// First show the effective/merged status
 	settings, err := LoadEntireSettings()
