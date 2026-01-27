@@ -253,7 +253,6 @@ func applyDefaultStrategy(settings *EntireSettings) {
 		settings.Strategy = strategy.DefaultStrategyName
 	}
 	settings.Strategy = strategy.NormalizeStrategyName(settings.Strategy)
-
 }
 
 func saveSettingsToFile(settings *EntireSettings, filePath string) error {
