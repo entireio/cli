@@ -894,3 +894,256 @@ func TestGetAllChangedFilesBetweenTrees(t *testing.T) {
 		}
 	})
 }
+
+// TestEstimateUserSelfModifications tests the LIFO heuristic for user self-modifications.
+func TestEstimateUserSelfModifications(t *testing.T) {
+	tests := []struct {
+		name                  string
+		accumulatedUserAdded  map[string]int
+		postCheckpointRemoved map[string]int
+		expectedSelfModified  int
+	}{
+		{
+			name:                  "no removals",
+			accumulatedUserAdded:  map[string]int{"file.go": 5},
+			postCheckpointRemoved: map[string]int{},
+			expectedSelfModified:  0,
+		},
+		{
+			name:                  "removals less than user added",
+			accumulatedUserAdded:  map[string]int{"file.go": 5},
+			postCheckpointRemoved: map[string]int{"file.go": 3},
+			expectedSelfModified:  3, // All 3 removals are self-modifications
+		},
+		{
+			name:                  "removals equal to user added",
+			accumulatedUserAdded:  map[string]int{"file.go": 5},
+			postCheckpointRemoved: map[string]int{"file.go": 5},
+			expectedSelfModified:  5, // All 5 removals are self-modifications
+		},
+		{
+			name:                  "removals exceed user added",
+			accumulatedUserAdded:  map[string]int{"file.go": 3},
+			postCheckpointRemoved: map[string]int{"file.go": 5},
+			expectedSelfModified:  3, // Only 3 are self-modifications, 2 must be agent lines
+		},
+		{
+			name:                  "no user additions to file",
+			accumulatedUserAdded:  map[string]int{},
+			postCheckpointRemoved: map[string]int{"file.go": 5},
+			expectedSelfModified:  0, // All removals target agent lines
+		},
+		{
+			name:                  "multiple files",
+			accumulatedUserAdded:  map[string]int{"a.go": 3, "b.go": 2},
+			postCheckpointRemoved: map[string]int{"a.go": 2, "b.go": 4},
+			expectedSelfModified:  4, // 2 from a.go + 2 from b.go (capped at user additions)
+		},
+		{
+			name:                  "removal from file user never touched",
+			accumulatedUserAdded:  map[string]int{"a.go": 5},
+			postCheckpointRemoved: map[string]int{"b.go": 3},
+			expectedSelfModified:  0, // User never added to b.go, so all removals are agent lines
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := estimateUserSelfModifications(tt.accumulatedUserAdded, tt.postCheckpointRemoved)
+			if result != tt.expectedSelfModified {
+				t.Errorf("estimateUserSelfModifications() = %d, want %d", result, tt.expectedSelfModified)
+			}
+		})
+	}
+}
+
+// TestCalculateAttributionWithAccumulated_UserSelfModification tests the per-file tracking fix:
+// when a user modifies their own previously-added lines (not agent lines),
+// it should NOT reduce the agent's contribution.
+//
+// Bug scenario before fix:
+// 1. Agent adds 10 lines
+// 2. User adds 5 lines of their own (captured in PromptAttribution)
+// 3. User later removes 3 of their own lines and adds 3 different ones
+// 4. OLD: humanModified=3 was subtracted from agent lines (WRONG)
+// 5. NEW: humanModified=3 but userSelfModified=3, so agent lines unchanged (CORRECT)
+func TestCalculateAttributionWithAccumulated_UserSelfModification(t *testing.T) {
+	// Base: empty file
+	baseTree := buildTestTree(t, map[string]string{
+		"main.go": "",
+	})
+
+	// Shadow (checkpoint state): agent added 10 lines, user added 5 lines between checkpoints
+	// The shadow includes both because it's a snapshot of the worktree at checkpoint time
+	shadowTree := buildTestTree(t, map[string]string{
+		"main.go": "agent1\nagent2\nagent3\nagent4\nagent5\nagent6\nagent7\nagent8\nagent9\nagent10\nuser1\nuser2\nuser3\nuser4\nuser5\n",
+	})
+
+	// Head (commit state): user removed 3 of their own lines and added 3 different ones
+	// Agent lines are unchanged
+	headTree := buildTestTree(t, map[string]string{
+		"main.go": "agent1\nagent2\nagent3\nagent4\nagent5\nagent6\nagent7\nagent8\nagent9\nagent10\nuser1\nuser2\nnew_user1\nnew_user2\nnew_user3\n",
+	})
+
+	filesTouched := []string{"main.go"}
+
+	// PromptAttribution captured that user added 5 lines between checkpoints
+	promptAttributions := []PromptAttribution{
+		{
+			CheckpointNumber: 2,
+			UserLinesAdded:   5,
+			UserLinesRemoved: 0,
+			UserAddedPerFile: map[string]int{"main.go": 5}, // KEY: per-file tracking
+		},
+	}
+
+	result := CalculateAttributionWithAccumulated(
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+	)
+
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// Expected calculation with per-file tracking:
+	// - base → shadow: 15 lines added (10 agent + 5 user)
+	// - accumulatedUserAdded: 5 (from PromptAttribution)
+	// - totalAgentAdded: 15 - 5 = 10
+	// - shadow → head: +3 lines added, -3 lines removed (user modification)
+	// - totalUserAdded: 5 + 3 = 8
+	// - totalUserRemoved: 3
+	// - totalHumanModified: min(8, 3) = 3
+	// - userSelfModified: min(3 removed from main.go, 5 user added to main.go) = 3
+	// - humanModifiedAgent: 3 - 3 = 0 (no agent lines were modified!)
+	// - agentLinesInCommit: 10 - 0 - 0 = 10 (CORRECT: agent lines unchanged)
+	// - Total: 10 + 5 = 15
+	// - Agent percentage: 10/15 = 66.7%
+
+	t.Logf("Attribution: agent=%d, human_added=%d, human_modified=%d, total=%d, percentage=%.1f%%",
+		result.AgentLines, result.HumanAdded, result.HumanModified, result.TotalCommitted, result.AgentPercentage)
+
+	if result.AgentLines != 10 {
+		t.Errorf("AgentLines = %d, want 10 (agent lines should NOT be reduced by user self-modifications)", result.AgentLines)
+	}
+	if result.HumanAdded != 5 {
+		t.Errorf("HumanAdded = %d, want 5 (8 total - 3 modifications)", result.HumanAdded)
+	}
+	if result.HumanModified != 3 {
+		t.Errorf("HumanModified = %d, want 3 (total modifications for reporting)", result.HumanModified)
+	}
+	if result.TotalCommitted != 15 {
+		t.Errorf("TotalCommitted = %d, want 15", result.TotalCommitted)
+	}
+	if result.AgentPercentage < 66.6 || result.AgentPercentage > 66.8 {
+		t.Errorf("AgentPercentage = %.1f%%, want ~66.7%%", result.AgentPercentage)
+	}
+}
+
+// TestCalculateAttributionWithAccumulated_MixedModifications tests the case where
+// user modifies both their own lines AND agent lines.
+func TestCalculateAttributionWithAccumulated_MixedModifications(t *testing.T) {
+	// Base: empty file
+	baseTree := buildTestTree(t, map[string]string{
+		"main.go": "",
+	})
+
+	// Shadow: agent added 10 lines, user added 3 lines
+	shadowTree := buildTestTree(t, map[string]string{
+		"main.go": "agent1\nagent2\nagent3\nagent4\nagent5\nagent6\nagent7\nagent8\nagent9\nagent10\nuser1\nuser2\nuser3\n",
+	})
+
+	// Head: user removed 5 lines (3 own + 2 agent) and added 5 new lines
+	// Net effect: user modified 5 lines total
+	headTree := buildTestTree(t, map[string]string{
+		"main.go": "agent1\nagent2\nagent3\nagent4\nagent5\nagent6\nagent7\nagent8\nnew1\nnew2\nnew3\nnew4\nnew5\n",
+	})
+
+	filesTouched := []string{"main.go"}
+
+	promptAttributions := []PromptAttribution{
+		{
+			CheckpointNumber: 2,
+			UserLinesAdded:   3,
+			UserLinesRemoved: 0,
+			UserAddedPerFile: map[string]int{"main.go": 3},
+		},
+	}
+
+	result := CalculateAttributionWithAccumulated(
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+	)
+
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// Expected calculation:
+	// - base → shadow: 13 lines added (10 agent + 3 user)
+	// - accumulatedUserAdded: 3
+	// - totalAgentAdded: 13 - 3 = 10
+	// - shadow → head: +5 added, -5 removed
+	// - totalUserAdded: 3 + 5 = 8
+	// - totalUserRemoved: 5
+	// - totalHumanModified: min(8, 5) = 5
+	// - userSelfModified: min(5 removed, 3 user added) = 3 (user exhausted their pool)
+	// - humanModifiedAgent: 5 - 3 = 2 (2 modifications targeted agent lines)
+	// - agentLinesInCommit: 10 - 0 - 2 = 8 (reduced by modifications to agent lines only)
+	// - pureUserAdded: 8 - 5 = 3
+	// - Total: 10 + 3 = 13
+	// - Agent percentage: 8/13 = 61.5%
+
+	t.Logf("Attribution: agent=%d, human_added=%d, human_modified=%d, total=%d, percentage=%.1f%%",
+		result.AgentLines, result.HumanAdded, result.HumanModified, result.TotalCommitted, result.AgentPercentage)
+
+	if result.AgentLines != 8 {
+		t.Errorf("AgentLines = %d, want 8 (10 - 2 modifications to agent lines)", result.AgentLines)
+	}
+	if result.HumanModified != 5 {
+		t.Errorf("HumanModified = %d, want 5", result.HumanModified)
+	}
+	if result.TotalCommitted != 13 {
+		t.Errorf("TotalCommitted = %d, want 13", result.TotalCommitted)
+	}
+	if result.AgentPercentage < 61.4 || result.AgentPercentage > 61.6 {
+		t.Errorf("AgentPercentage = %.1f%%, want ~61.5%%", result.AgentPercentage)
+	}
+}
+
+// TestCalculatePromptAttribution_PopulatesPerFile verifies that CalculatePromptAttribution
+// correctly populates the UserAddedPerFile map.
+func TestCalculatePromptAttribution_PopulatesPerFile(t *testing.T) {
+	// Base: two files
+	baseTree := buildTestTree(t, map[string]string{
+		"a.go": "line1\n",
+		"b.go": "line1\n",
+	})
+
+	// Last checkpoint: agent added lines to both files
+	lastCheckpointTree := buildTestTree(t, map[string]string{
+		"a.go": "line1\nagent1\n",
+		"b.go": "line1\nagent1\nagent2\n",
+	})
+
+	// Current worktree: user added lines to both files
+	worktreeFiles := map[string]string{
+		"a.go": "line1\nagent1\nuser1\nuser2\nuser3\n", // +3 user lines
+		"b.go": "line1\nagent1\nagent2\nuser1\n",       // +1 user line
+	}
+
+	result := CalculatePromptAttribution(baseTree, lastCheckpointTree, worktreeFiles, 2)
+
+	if result.UserLinesAdded != 4 {
+		t.Errorf("UserLinesAdded = %d, want 4 (3 + 1)", result.UserLinesAdded)
+	}
+
+	if result.UserAddedPerFile == nil {
+		t.Fatal("UserAddedPerFile should not be nil")
+	}
+
+	if result.UserAddedPerFile["a.go"] != 3 {
+		t.Errorf("UserAddedPerFile[a.go] = %d, want 3", result.UserAddedPerFile["a.go"])
+	}
+	if result.UserAddedPerFile["b.go"] != 1 {
+		t.Errorf("UserAddedPerFile[b.go] = %d, want 1", result.UserAddedPerFile["b.go"])
+	}
+}

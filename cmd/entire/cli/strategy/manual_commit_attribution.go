@@ -154,10 +154,13 @@ func countLinesStr(content string) int {
 // 1. Sum user edits from PromptAttributions (captured at each prompt start)
 // 2. Add user edits after the final checkpoint (shadow → head diff)
 // 3. Calculate agent lines from base → shadow
-// 4. Compute percentages
+// 4. Estimate user self-modifications vs agent modifications using per-file tracking
+// 5. Compute percentages
 //
 // Note: Binary files (detected by null bytes) are silently excluded from attribution
 // calculations since line-based diffing only applies to text files.
+//
+// See docs/architecture/attribution.md for details on the per-file tracking approach.
 func CalculateAttributionWithAccumulated(
 	baseTree *object.Tree,
 	shadowTree *object.Tree,
@@ -170,10 +173,16 @@ func CalculateAttributionWithAccumulated(
 	}
 
 	// Sum accumulated user lines from prompt attributions
+	// Also aggregate per-file user additions for accurate modification tracking
 	var accumulatedUserAdded, accumulatedUserRemoved int
+	accumulatedUserAddedPerFile := make(map[string]int)
 	for _, pa := range promptAttributions {
 		accumulatedUserAdded += pa.UserLinesAdded
 		accumulatedUserRemoved += pa.UserLinesRemoved
+		// Merge per-file data from all prompt attributions
+		for filePath, added := range pa.UserAddedPerFile {
+			accumulatedUserAddedPerFile[filePath] += added
+		}
 	}
 
 	// Calculate attribution for agent-touched files
@@ -182,6 +191,7 @@ func CalculateAttributionWithAccumulated(
 	// So base→shadow diff = (agent work + accumulated user work to these files).
 	var totalAgentAndUserWork int
 	var postCheckpointUserAdded, postCheckpointUserRemoved int
+	postCheckpointUserRemovedPerFile := make(map[string]int)
 
 	for _, filePath := range filesTouched {
 		baseContent := getFileContent(baseTree, filePath)
@@ -196,6 +206,11 @@ func CalculateAttributionWithAccumulated(
 		_, postUserAdded, postUserRemoved := diffLines(shadowContent, headContent)
 		postCheckpointUserAdded += postUserAdded
 		postCheckpointUserRemoved += postUserRemoved
+
+		// Track per-file removals for self-modification estimation
+		if postUserRemoved > 0 {
+			postCheckpointUserRemovedPerFile[filePath] = postUserRemoved
+		}
 	}
 
 	// Calculate total user edits to non-agent files (files not in filesTouched)
@@ -230,11 +245,22 @@ func CalculateAttributionWithAccumulated(
 	totalUserAdded := accumulatedUserAdded + postCheckpointUserAdded + postToNonAgentFiles
 	totalUserRemoved := accumulatedUserRemoved + postCheckpointUserRemoved
 
-	// Estimate modified lines (user changed existing agent lines)
+	// Estimate modified lines (user changed existing lines)
 	// Lines that were both added and removed are treated as modifications.
-	humanModified := min(totalUserAdded, totalUserRemoved)
-	pureUserAdded := totalUserAdded - humanModified
-	pureUserRemoved := totalUserRemoved - humanModified
+	totalHumanModified := min(totalUserAdded, totalUserRemoved)
+
+	// Estimate user self-modifications using per-file tracking (see docs/architecture/attribution.md)
+	// When a user removes lines from a file, assume they're removing their own lines first (LIFO).
+	// Only after exhausting their own additions should we count removals as targeting agent lines.
+	userSelfModified := estimateUserSelfModifications(accumulatedUserAddedPerFile, postCheckpointUserRemovedPerFile)
+
+	// humanModifiedAgent = modifications that targeted agent lines (not user's own lines)
+	humanModifiedAgent := max(0, totalHumanModified-userSelfModified)
+
+	// Remaining modifications are user self-modifications (user edited their own code)
+	// These should NOT be subtracted from agent lines
+	pureUserAdded := totalUserAdded - totalHumanModified
+	pureUserRemoved := totalUserRemoved - totalHumanModified
 
 	// Total net additions = agent additions + pure user additions - pure user removals
 	// This reconstructs the base → head diff from our tracked changes.
@@ -251,9 +277,10 @@ func CalculateAttributionWithAccumulated(
 
 	// Calculate agent lines actually in the commit (excluding removed and modified)
 	// Agent added lines, but user removed some and modified others.
-	// Modified lines are now attributed to the user, not the agent.
+	// Only subtract modifications that targeted AGENT lines (humanModifiedAgent),
+	// not user self-modifications.
 	// Clamp to 0 to handle cases where user removed/modified more than agent added.
-	agentLinesInCommit := max(0, totalAgentAdded-pureUserRemoved-humanModified)
+	agentLinesInCommit := max(0, totalAgentAdded-pureUserRemoved-humanModifiedAgent)
 
 	// Calculate percentage
 	var agentPercentage float64
@@ -265,11 +292,29 @@ func CalculateAttributionWithAccumulated(
 		CalculatedAt:    time.Now(),
 		AgentLines:      agentLinesInCommit,
 		HumanAdded:      pureUserAdded,
-		HumanModified:   humanModified,
+		HumanModified:   totalHumanModified, // Total modifications (for reporting)
 		HumanRemoved:    pureUserRemoved,
 		TotalCommitted:  totalCommitted,
 		AgentPercentage: agentPercentage,
 	}
+}
+
+// estimateUserSelfModifications estimates how many removed lines were the user's own additions.
+// Uses LIFO assumption: when a user removes lines from a file, they likely remove their own
+// recent additions before touching agent lines.
+//
+// See docs/architecture/attribution.md for the rationale behind this heuristic.
+func estimateUserSelfModifications(
+	accumulatedUserAddedPerFile map[string]int,
+	postCheckpointUserRemovedPerFile map[string]int,
+) int {
+	var selfModified int
+	for filePath, removed := range postCheckpointUserRemovedPerFile {
+		userAddedToFile := accumulatedUserAddedPerFile[filePath]
+		// User can only self-modify up to what they previously added
+		selfModified += min(removed, userAddedToFile)
+	}
+	return selfModified
 }
 
 // CalculatePromptAttribution computes line-level attribution at the start of a prompt.
@@ -295,6 +340,7 @@ func CalculatePromptAttribution(
 ) PromptAttribution {
 	result := PromptAttribution{
 		CheckpointNumber: checkpointNumber,
+		UserAddedPerFile: make(map[string]int),
 	}
 
 	if len(worktreeFiles) == 0 {
@@ -316,6 +362,13 @@ func CalculatePromptAttribution(
 		_, userAdded, userRemoved := diffLines(referenceContent, worktreeContent)
 		result.UserLinesAdded += userAdded
 		result.UserLinesRemoved += userRemoved
+
+		// Track per-file user additions for accurate modification tracking
+		// Track per-file user additions for accurate modification tracking
+		// This enables distinguishing user self-modifications from agent modifications
+		if userAdded > 0 {
+			result.UserAddedPerFile[filePath] = userAdded
+		}
 
 		// Agent lines so far: diff(base, lastCheckpoint)
 		// Only calculate if we have a previous checkpoint

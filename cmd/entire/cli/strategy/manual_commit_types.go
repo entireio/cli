@@ -53,17 +53,23 @@ type SessionState struct {
 //   - CheckpointNumber: Which checkpoint this attribution is for (1-indexed)
 //   - UserLinesAdded/Removed: User edits since the last checkpoint (lastCheckpoint → worktree)
 //   - AgentLinesAdded/Removed: Cumulative agent work so far (base → lastCheckpoint)
+//   - UserAddedPerFile: Per-file breakdown of user additions (for accurate modification tracking)
 //
 // Note: For checkpoint 1, AgentLinesAdded/Removed are always 0 because there is no previous
 // checkpoint to compare against. This doesn't mean the agent hasn't done work yet - it means
 // we can't measure cumulative agent work until after the first checkpoint is created.
 // These fields become meaningful starting from checkpoint 2.
+//
+// UserAddedPerFile enables accurate tracking of user self-modifications. When a user modifies
+// their own previously-added lines (not agent lines), we shouldn't subtract from the agent's
+// contribution. See docs/architecture/attribution.md for details.
 type PromptAttribution struct {
-	CheckpointNumber  int `json:"checkpoint_number"`
-	UserLinesAdded    int `json:"user_lines_added"`
-	UserLinesRemoved  int `json:"user_lines_removed"`
-	AgentLinesAdded   int `json:"agent_lines_added"`   // Always 0 for checkpoint 1 (no previous checkpoint)
-	AgentLinesRemoved int `json:"agent_lines_removed"` // Always 0 for checkpoint 1 (no previous checkpoint)
+	CheckpointNumber  int            `json:"checkpoint_number"`
+	UserLinesAdded    int            `json:"user_lines_added"`
+	UserLinesRemoved  int            `json:"user_lines_removed"`
+	AgentLinesAdded   int            `json:"agent_lines_added"`             // Always 0 for checkpoint 1 (no previous checkpoint)
+	AgentLinesRemoved int            `json:"agent_lines_removed"`           // Always 0 for checkpoint 1 (no previous checkpoint)
+	UserAddedPerFile  map[string]int `json:"user_added_per_file,omitempty"` // Per-file user additions for modification tracking
 }
 
 // CheckpointInfo represents checkpoint metadata stored on the sessions branch.
