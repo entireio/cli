@@ -60,8 +60,11 @@ run = """
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Create temp config with lower threshold for comprehensive check
-config=$(mktemp).yaml
+# Create temp files with proper extensions (works on both Linux and macOS)
+tmpdir=$(mktemp -d)
+config="$tmpdir/config.yaml"
+json_out="$tmpdir/output.json"
+
 cat > "$config" << 'YAML'
 version: "2"
 linters:
@@ -73,7 +76,6 @@ linters:
 YAML
 
 # Run with JSON output for summary, text output for details
-json_out=$(mktemp).json
 golangci-lint run -c "$config" --new=false --max-issues-per-linter=0 --max-same-issues=0 \
   --output.json.path="$json_out" --output.text.path=/dev/stderr ./... 2>&1 || true
 
@@ -86,17 +88,20 @@ else
   echo "  (install jq for summary)"
 fi
 
-rm -f "$config" "$json_out"
+rm -rf "$tmpdir"
 """
 
 [tasks."dup:staged"]
 description = "Check duplication in staged files only (threshold 75, same as CI)"
 run = """
-staged=$(git diff --cached --name-only --diff-filter=ACM | grep '\\.go$' || true)
-if [ -z "$staged" ]; then
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Get staged Go files, preserving paths with spaces using null delimiters throughout
+if ! git diff --cached --name-only -z --diff-filter=ACM | grep -z '\\.go$' | grep -zq .; then
   echo "No staged Go files to check"
   exit 0
 fi
 echo "Checking staged files for duplication..."
-printf '%s\n' "$staged" | xargs golangci-lint run --enable-only dupl --new=false --max-issues-per-linter=0 --max-same-issues=0
+git diff --cached --name-only -z --diff-filter=ACM | grep -z '\\.go$' | xargs -0 golangci-lint run --enable-only dupl --new=false --max-issues-per-linter=0 --max-same-issues=0
 """
