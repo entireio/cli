@@ -2,7 +2,6 @@ package paths
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,7 +9,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 )
@@ -148,43 +146,6 @@ func ToRelativePath(absPath, cwd string) string {
 	return relPath
 }
 
-// pathSafeRegex matches strings safe for use in file paths (no path separators or traversal)
-var pathSafeRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
-
-// ValidateSessionID validates that a session ID is non-empty and doesn't contain path separators.
-func ValidateSessionID(id string) error {
-	if id == "" {
-		return errors.New("session ID cannot be empty")
-	}
-	if strings.ContainsAny(id, "/\\") {
-		return fmt.Errorf("invalid session ID %q: contains path separators", id)
-	}
-	return nil
-}
-
-// ValidateToolUseID validates that a tool use ID contains only safe characters for paths.
-// Tool use IDs can be UUIDs or prefixed identifiers like "toolu_xxx".
-func ValidateToolUseID(id string) error {
-	if id == "" {
-		return nil // Empty is allowed (optional field)
-	}
-	if !pathSafeRegex.MatchString(id) {
-		return fmt.Errorf("invalid tool use ID %q: must be alphanumeric with underscores/hyphens only", id)
-	}
-	return nil
-}
-
-// ValidateAgentID validates that an agent ID contains only safe characters for paths.
-func ValidateAgentID(id string) error {
-	if id == "" {
-		return nil // Empty is allowed (optional field)
-	}
-	if !pathSafeRegex.MatchString(id) {
-		return fmt.Errorf("invalid agent ID %q: must be alphanumeric with underscores/hyphens only", id)
-	}
-	return nil
-}
-
 // nonAlphanumericRegex matches any non-alphanumeric character
 var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
 
@@ -213,32 +174,8 @@ func GetClaudeProjectDir(repoPath string) (string, error) {
 	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
 }
 
-// EntireSessionID generates the full Entire session ID from a Claude session ID.
-// The format is: YYYY-MM-DD-<claude-session-id>
-func EntireSessionID(claudeSessionID string) string {
-	return time.Now().Format("2006-01-02") + "-" + claudeSessionID
-}
-
-// ModelSessionID extracts the Claude session ID from an Entire session ID.
-// The Entire session ID format is: YYYY-MM-DD-<claude-session-id>
-// Returns the original string if it doesn't match the expected format.
-func ModelSessionID(entireSessionID string) string {
-	// Expected format: YYYY-MM-DD-<model-session-id> (11 chars prefix: "2025-12-02-")
-	if len(entireSessionID) > 11 && entireSessionID[4] == '-' && entireSessionID[7] == '-' && entireSessionID[10] == '-' {
-		return entireSessionID[11:]
-	}
-	// Return as-is if not in expected format (backwards compatibility)
-	return entireSessionID
-}
-
-// SessionMetadataDir returns the path to a session's metadata directory.
-// Takes a raw Claude session ID and adds the date prefix automatically.
-func SessionMetadataDir(claudeSessionID string) string {
-	return EntireMetadataDir + "/" + EntireSessionID(claudeSessionID)
-}
-
 // SessionMetadataDirFromEntireID returns the path to a session's metadata directory.
-// Takes an Entire session ID (already date-prefixed) without adding another prefix.
+// Takes an Entire session ID (already date-prefixed).
 func SessionMetadataDirFromEntireID(entireSessionID string) string {
 	return EntireMetadataDir + "/" + entireSessionID
 }

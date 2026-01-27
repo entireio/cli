@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/sessionid"
 )
 
 // TestSubdirectory_EntireDirCreatedAtRepoRoot verifies that when the CLI is run
@@ -65,7 +65,7 @@ func TestSubdirectory_EntireDirCreatedAtRepoRoot(t *testing.T) {
 		}
 
 		// Verify the pre-prompt state file was created at repo root
-		entireSessionID := paths.EntireSessionID(sessionID)
+		entireSessionID := sessionid.EntireSessionID(sessionID)
 		stateFile := filepath.Join(env.RepoDir, ".entire", "tmp", "pre-prompt-"+entireSessionID+".json")
 		if _, err := os.Stat(stateFile); os.IsNotExist(err) {
 			t.Errorf("pre-prompt state file should exist at %s, but it doesn't", stateFile)

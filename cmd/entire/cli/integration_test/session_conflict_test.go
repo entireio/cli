@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v5"
@@ -239,7 +239,7 @@ func TestSessionIDConflict_ExistingSessionWithState(t *testing.T) {
 
 	// Manually create a state file for the other session (simulating cross-worktree scenario)
 	// This makes the shadow branch NOT orphaned
-	entireOtherSessionID := paths.EntireSessionID(otherSessionID)
+	entireOtherSessionID := sessionid.EntireSessionID(otherSessionID)
 	otherState := &strategy.SessionState{
 		SessionID:       entireOtherSessionID,
 		BaseCommit:      baseHead,
@@ -311,7 +311,7 @@ func createOrphanedShadowBranch(t *testing.T, repoDir, branchName, sessionID str
 	}
 
 	// Create an Entire session ID with date prefix
-	entireSessionID := paths.EntireSessionID(sessionID)
+	entireSessionID := sessionid.EntireSessionID(sessionID)
 
 	// Create commit message with Entire-Session trailer
 	commitMsg := "Orphaned checkpoint\n\n" +

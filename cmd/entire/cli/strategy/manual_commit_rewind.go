@@ -13,6 +13,7 @@ import (
 	cpkg "entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/charmbracelet/huh"
@@ -703,7 +704,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 			continue
 		}
 
-		modelSessionID := paths.ModelSessionID(sessionID)
+		modelSessionID := sessionid.ModelSessionID(sessionID)
 		claudeSessionFile := filepath.Join(claudeProjectDir, modelSessionID+".jsonl")
 
 		// Get first prompt for display
@@ -729,7 +730,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 		}
 	}
 
-	modelSessionID := paths.ModelSessionID(sessionID)
+	modelSessionID := sessionid.ModelSessionID(sessionID)
 	claudeSessionFile := filepath.Join(claudeProjectDir, modelSessionID+".jsonl")
 
 	if totalSessions > 1 {
@@ -834,7 +835,7 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(claudeProjectDir strin
 			continue
 		}
 
-		modelSessionID := paths.ModelSessionID(archived.SessionID)
+		modelSessionID := sessionid.ModelSessionID(archived.SessionID)
 		localPath := filepath.Join(claudeProjectDir, modelSessionID+".jsonl")
 
 		localTime := paths.GetLastTimestampFromFile(localPath)
@@ -852,7 +853,7 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(claudeProjectDir strin
 
 	// Check primary session
 	if result.Metadata.SessionID != "" && len(result.Transcript) > 0 {
-		modelSessionID := paths.ModelSessionID(result.Metadata.SessionID)
+		modelSessionID := sessionid.ModelSessionID(result.Metadata.SessionID)
 		localPath := filepath.Join(claudeProjectDir, modelSessionID+".jsonl")
 
 		localTime := paths.GetLastTimestampFromFile(localPath)

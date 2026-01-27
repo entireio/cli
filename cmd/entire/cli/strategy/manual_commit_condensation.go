@@ -172,9 +172,8 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 	}
 
 	data := &ExtractedSessionData{}
-	// sessionID is already an "entire session ID" (with date prefix), so construct path directly
-	// Don't use paths.SessionMetadataDir which would add another date prefix
-	metadataDir := paths.EntireMetadataDir + "/" + sessionID
+	// sessionID is already an "entire session ID" (with date prefix)
+	metadataDir := paths.SessionMetadataDirFromEntireID(sessionID)
 
 	// Extract transcript
 	var fullTranscript string

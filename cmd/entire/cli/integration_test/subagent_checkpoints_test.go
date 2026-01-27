@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v5"
@@ -177,6 +178,65 @@ func TestSubagentCheckpoints_NoFileChanges(t *testing.T) {
 	})
 }
 
+// TestSubagentCheckpoints_PostTaskNoFileChanges tests that PostTask is skipped when no file changes
+// and the pre-task state is still cleaned up.
+func TestSubagentCheckpoints_PostTaskNoFileChanges(t *testing.T) {
+	t.Parallel()
+	RunForAllStrategies(t, func(t *testing.T, env *TestEnv, strategyName string) {
+		// Create a session
+		session := env.NewSession()
+
+		// Create transcript (no file changes in transcript either)
+		session.CreateTranscript("Quick task with no file changes", []FileChange{})
+
+		// Simulate user prompt submit
+		err := env.SimulateUserPromptSubmit(session.ID)
+		if err != nil {
+			t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+		}
+
+		// Create pre-task file to simulate subagent context
+		taskToolUseID := "toolu_01TaskNoFileChanges"
+		err = env.SimulatePreTask(session.ID, session.TranscriptPath, taskToolUseID)
+		if err != nil {
+			t.Fatalf("SimulatePreTask failed: %v", err)
+		}
+
+		// Verify pre-task file was created
+		preTaskFile := filepath.Join(env.RepoDir, ".entire", "tmp", "pre-task-"+taskToolUseID+".json")
+		if _, err := os.Stat(preTaskFile); os.IsNotExist(err) {
+			t.Fatal("pre-task file should exist after SimulatePreTask")
+		}
+
+		// Get git log before PostTask
+		beforeCommits := env.GetGitLog()
+
+		// Call PostTask WITHOUT making any file changes
+		err = env.SimulatePostTask(PostTaskInput{
+			SessionID:      session.ID,
+			TranscriptPath: session.TranscriptPath,
+			ToolUseID:      taskToolUseID,
+			AgentID:        "agent-no-changes",
+		})
+		if err != nil {
+			t.Fatalf("SimulatePostTask should not fail: %v", err)
+		}
+
+		// Get git log after PostTask
+		afterCommits := env.GetGitLog()
+
+		// Verify no new commits were created on the main branch
+		if len(afterCommits) != len(beforeCommits) {
+			t.Errorf("Expected no new commits when no file changes, before=%d after=%d", len(beforeCommits), len(afterCommits))
+		}
+
+		// Verify pre-task file is cleaned up even though no checkpoint was created
+		if _, err := os.Stat(preTaskFile); !os.IsNotExist(err) {
+			t.Error("Pre-task file should be removed after PostTask even with no file changes")
+		}
+	})
+}
+
 // TestSubagentCheckpoints_NoPreTaskFile tests that PostTodo is a no-op
 // when there's no active pre-task file (main agent context).
 func TestSubagentCheckpoints_NoPreTaskFile(t *testing.T) {
@@ -231,7 +291,7 @@ func TestSubagentCheckpoints_NoPreTaskFile(t *testing.T) {
 func verifyCheckpointStorage(t *testing.T, env *TestEnv, strategyName, sessionID, taskToolUseID string) {
 	t.Helper()
 
-	entireSessionID := paths.EntireSessionID(sessionID)
+	entireSessionID := sessionid.EntireSessionID(sessionID)
 
 	switch strategyName {
 	case strategy.StrategyNameManualCommit:

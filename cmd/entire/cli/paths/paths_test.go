@@ -1,6 +1,7 @@
 package paths
 
 import (
+	"entire.io/cli/cmd/entire/cli/sessionid"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -166,7 +167,7 @@ func TestReadCurrentSession_EmptyFile(t *testing.T) {
 func TestEntireSessionID(t *testing.T) {
 	claudeSessionID := "8f76b0e8-b8f1-4a87-9186-848bdd83d62e"
 
-	result := EntireSessionID(claudeSessionID)
+	result := sessionid.EntireSessionID(claudeSessionID)
 
 	// Should match format: YYYY-MM-DD-<claude-session-id>
 	pattern := `^\d{4}-\d{2}-\d{2}-` + regexp.QuoteMeta(claudeSessionID) + `$`
@@ -175,7 +176,7 @@ func TestEntireSessionID(t *testing.T) {
 		t.Fatalf("regex error: %v", err)
 	}
 	if !matched {
-		t.Errorf("EntireSessionID() = %q, want format YYYY-MM-DD-%s", result, claudeSessionID)
+		t.Errorf("sessionid.EntireSessionID() = %q, want format YYYY-MM-DD-%s", result, claudeSessionID)
 	}
 }
 
@@ -191,34 +192,18 @@ func TestEntireSessionID_PreservesInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := EntireSessionID(tt.claudeSessionID)
+			result := sessionid.EntireSessionID(tt.claudeSessionID)
 
 			// Should end with the original Claude session ID
 			suffix := "-" + tt.claudeSessionID
 			if len(result) < len(suffix) || result[len(result)-len(suffix):] != suffix {
-				t.Errorf("EntireSessionID(%q) = %q, should end with %q", tt.claudeSessionID, result, suffix)
+				t.Errorf("sessionid.EntireSessionID(%q) = %q, should end with %q", tt.claudeSessionID, result, suffix)
 			}
 
 			// Should start with date prefix (11 chars: YYYY-MM-DD-)
 			if len(result) < 11 {
-				t.Errorf("EntireSessionID(%q) = %q, too short for date prefix", tt.claudeSessionID, result)
+				t.Errorf("sessionid.EntireSessionID(%q) = %q, too short for date prefix", tt.claudeSessionID, result)
 			}
 		})
-	}
-}
-
-func TestSessionMetadataDir(t *testing.T) {
-	claudeSessionID := "abc123"
-
-	result := SessionMetadataDir(claudeSessionID)
-
-	// Should match format: .entire/metadata/YYYY-MM-DD-<claude-session-id>
-	pattern := `^\.entire/metadata/\d{4}-\d{2}-\d{2}-` + regexp.QuoteMeta(claudeSessionID) + `$`
-	matched, err := regexp.MatchString(pattern, result)
-	if err != nil {
-		t.Fatalf("regex error: %v", err)
-	}
-	if !matched {
-		t.Errorf("SessionMetadataDir() = %q, want format .entire/metadata/YYYY-MM-DD-%s", result, claudeSessionID)
 	}
 }

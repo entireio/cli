@@ -98,6 +98,15 @@ func (env *TestEnv) Cleanup() {
 	// No-op - temp dirs are cleaned up by t.TempDir()
 }
 
+// cliEnv returns the environment variables for CLI execution.
+// Includes both Claude and Gemini project dirs so tests work for any agent.
+func (env *TestEnv) cliEnv() []string {
+	return append(os.Environ(),
+		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
+		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
+	)
+}
+
 // RunCLI runs the entire CLI with the given arguments and returns stdout.
 func (env *TestEnv) RunCLI(args ...string) string {
 	env.T.Helper()
@@ -115,9 +124,7 @@ func (env *TestEnv) RunCLIWithError(args ...string) (string, error) {
 	// Run CLI using the shared binary
 	cmd := exec.Command(getTestBinary(), args...)
 	cmd.Dir = env.RepoDir
-	cmd.Env = append(os.Environ(),
-		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
-	)
+	cmd.Env = env.cliEnv()
 
 	output, err := cmd.CombinedOutput()
 	return string(output), err
@@ -130,9 +137,7 @@ func (env *TestEnv) RunCLIWithStdin(stdin string, args ...string) string {
 	// Run CLI with stdin using the shared binary
 	cmd := exec.Command(getTestBinary(), args...)
 	cmd.Dir = env.RepoDir
-	cmd.Env = append(os.Environ(),
-		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
-	)
+	cmd.Env = env.cliEnv()
 	cmd.Stdin = strings.NewReader(stdin)
 
 	output, err := cmd.CombinedOutput()
@@ -615,9 +620,7 @@ func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	// Run rewind --list using the shared binary
 	cmd := exec.Command(getTestBinary(), "rewind", "--list")
 	cmd.Dir = env.RepoDir
-	cmd.Env = append(os.Environ(),
-		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
-	)
+	cmd.Env = env.cliEnv()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -665,9 +668,7 @@ func (env *TestEnv) Rewind(commitID string) error {
 	// Run rewind --to <commitID> using the shared binary
 	cmd := exec.Command(getTestBinary(), "rewind", "--to", commitID)
 	cmd.Dir = env.RepoDir
-	cmd.Env = append(os.Environ(),
-		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
-	)
+	cmd.Env = env.cliEnv()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -686,9 +687,7 @@ func (env *TestEnv) RewindLogsOnly(commitID string) error {
 	// Run rewind --to <commitID> --logs-only using the shared binary
 	cmd := exec.Command(getTestBinary(), "rewind", "--to", commitID, "--logs-only")
 	cmd.Dir = env.RepoDir
-	cmd.Env = append(os.Environ(),
-		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
-	)
+	cmd.Env = env.cliEnv()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -707,9 +706,7 @@ func (env *TestEnv) RewindReset(commitID string) error {
 	// Run rewind --to <commitID> --reset using the shared binary
 	cmd := exec.Command(getTestBinary(), "rewind", "--to", commitID, "--reset")
 	cmd.Dir = env.RepoDir
-	cmd.Env = append(os.Environ(),
-		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
-	)
+	cmd.Env = env.cliEnv()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {

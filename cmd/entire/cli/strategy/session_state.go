@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"entire.io/cli/cmd/entire/cli/jsonutil"
-	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/validation"
 )
 
 // Session state management functions shared across all strategies.
@@ -36,7 +36,7 @@ func sessionStateFile(sessionID string) (string, error) {
 // Returns (nil, nil) when session file doesn't exist (not an error condition).
 func LoadSessionState(sessionID string) (*SessionState, error) {
 	// Validate session ID to prevent path traversal
-	if err := paths.ValidateSessionID(sessionID); err != nil {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return nil, fmt.Errorf("invalid session ID: %w", err)
 	}
 
@@ -63,7 +63,7 @@ func LoadSessionState(sessionID string) (*SessionState, error) {
 // SaveSessionState saves the session state atomically.
 func SaveSessionState(state *SessionState) error {
 	// Validate session ID to prevent path traversal
-	if err := paths.ValidateSessionID(state.SessionID); err != nil {
+	if err := validation.ValidateSessionID(state.SessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
 
@@ -100,7 +100,7 @@ func SaveSessionState(state *SessionState) error {
 // ClearSessionState removes the session state file for the given session ID.
 func ClearSessionState(sessionID string) error {
 	// Validate session ID to prevent path traversal
-	if err := paths.ValidateSessionID(sessionID); err != nil {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
 
