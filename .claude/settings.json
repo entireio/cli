@@ -7,6 +7,10 @@
           {
             "type": "command",
             "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code session-start"
+          },
+          {
+            "type": "command",
+            "command": "entire hooks claude-code session-start"
           }
         ]
       }
@@ -18,6 +22,10 @@
           {
             "type": "command",
             "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code user-prompt-submit"
+          },
+          {
+            "type": "command",
+            "command": "entire hooks claude-code user-prompt-submit"
           }
         ]
       }
@@ -29,6 +37,10 @@
           {
             "type": "command",
             "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code stop"
+          },
+          {
+            "type": "command",
+            "command": "entire hooks claude-code stop"
           }
         ]
       }
@@ -40,6 +52,10 @@
           {
             "type": "command",
             "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code pre-task"
+          },
+          {
+            "type": "command",
+            "command": "entire hooks claude-code pre-task"
           }
         ]
       }
@@ -51,6 +67,10 @@
           {
             "type": "command",
             "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-task"
+          },
+          {
+            "type": "command",
+            "command": "entire hooks claude-code post-task"
           }
         ]
       },
@@ -60,6 +80,10 @@
           {
             "type": "command",
             "command": "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-todo"
+          },
+          {
+            "type": "command",
+            "command": "entire hooks claude-code post-todo"
           }
         ]
       }
