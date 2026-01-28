@@ -592,8 +592,8 @@ func handleGeminiBeforeAgent() error {
 		return errors.New("no session_id in input")
 	}
 
-	// Use agent session ID directly as entire session ID (identity function)
-	entireSessionID := input.SessionID
+	// Get the entire session ID, handling legacy date-prefixed format
+	entireSessionID := currentSessionIDWithFallback(input.SessionID)
 
 	// Check for concurrent sessions before proceeding
 	// This will output a blocking response and exit if there's a conflict (first time only)
