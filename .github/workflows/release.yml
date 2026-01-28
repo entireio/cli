@@ -35,7 +35,6 @@ jobs:
           version: latest
           args: release --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAP_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
           MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
