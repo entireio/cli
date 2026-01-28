@@ -4,19 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/jsonutil"
-	"entire.io/cli/cmd/entire/cli/logging"
-	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/validation"
 )
 
@@ -331,72 +327,57 @@ func GetWorktreePath() (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-// GetOrCreateEntireSessionID returns a stable session ID for the given agent session ID.
-// If a session state already exists with this ID, returns that session ID
-// (preserving the original date prefix). Otherwise creates a new ID with today's date.
+// FindLegacyEntireSessionID checks for existing session state files with a legacy date-prefixed format.
+// Takes an agent session ID and returns the corresponding entire session ID if found
+// (e.g., "2026-01-20-abc123" for agent ID "abc123"), or empty string if no legacy session exists.
 //
-// When multiple state files exist for the same ID (due to the midnight-crossing bug),
-// this function picks the most recent by date and cleans up older duplicates.
-//
-// This function never returns an error - it always falls back to generating a new ID
-// if any issues occur (e.g., corrupt git repo, permission problems, invalid ID).
-//
-// Note: This function is not thread-safe. Concurrent calls with the same ID may
-// race on file cleanup. In practice this is not an issue since agent hooks are
-// called sequentially within a session.
-func GetOrCreateEntireSessionID(agentSessionID string) string {
+// This provides backward compatibility when resuming sessions that were created before
+// the session ID format change (when EntireSessionID added a date prefix).
+func FindLegacyEntireSessionID(agentSessionID string) string {
+	if agentSessionID == "" {
+		return ""
+	}
+
 	// Validate ID format to prevent path traversal attacks
 	if err := validation.ValidateAgentSessionID(agentSessionID); err != nil {
-		logging.Warn(context.Background(), "invalid agent session ID",
-			slog.String("input", agentSessionID),
-			slog.Any("error", err))
-		// Invalid ID - return it anyway (will fail downstream with clearer error)
-		// Don't generate random ID as that breaks session continuity
-		return sessionid.EntireSessionID(agentSessionID)
+		return ""
 	}
 
 	commonDir, err := getGitCommonDir()
 	if err != nil {
-		// Can't get common dir (corrupt git repo?) - fall back to new ID
-		return sessionid.EntireSessionID(agentSessionID)
+		return ""
 	}
 
 	stateDir := filepath.Join(commonDir, sessionStateDirName)
 	entries, err := os.ReadDir(stateDir)
 	if err != nil {
-		// State dir doesn't exist or can't read it - fall back to new ID
-		return sessionid.EntireSessionID(agentSessionID)
+		return ""
 	}
 
-	// Collect all matching session IDs
-	var matches []string
+	// Look for state files with legacy date-prefixed format matching this agent ID
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
+		if strings.HasSuffix(entry.Name(), ".tmp") {
+			continue
+		}
 
 		existingSessionID := strings.TrimSuffix(entry.Name(), ".json")
-		existingUUID := sessionid.ModelSessionID(existingSessionID)
 
-		if existingUUID == agentSessionID {
-			matches = append(matches, existingSessionID)
+		// Check if this is a legacy format (has date prefix) that matches our agent ID
+		// Legacy format: YYYY-MM-DD-<agent-uuid> (11 char prefix)
+		if len(existingSessionID) > 11 &&
+			existingSessionID[4] == '-' &&
+			existingSessionID[7] == '-' &&
+			existingSessionID[10] == '-' {
+			// Extract the agent ID portion and compare
+			extractedAgentID := existingSessionID[11:]
+			if extractedAgentID == agentSessionID {
+				return existingSessionID
+			}
 		}
 	}
 
-	if len(matches) == 0 {
-		// No existing session found - create new ID with today's date
-		return sessionid.EntireSessionID(agentSessionID)
-	}
-
-	// Pick most recent (YYYY-MM-DD sorts correctly lexicographically)
-	sort.Strings(matches)
-	mostRecent := matches[len(matches)-1]
-
-	// Best-effort cleanup of old duplicates (ignore errors)
-	for _, oldID := range matches[:len(matches)-1] {
-		oldFile := filepath.Join(stateDir, oldID+".json")
-		_ = os.Remove(oldFile)
-	}
-
-	return mostRecent
+	return ""
 }

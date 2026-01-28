@@ -1,11 +1,11 @@
 package paths
 
 import (
-	"entire.io/cli/cmd/entire/cli/sessionid"
 	"os"
 	"path/filepath"
-	"regexp"
 	"testing"
+
+	"entire.io/cli/cmd/entire/cli/sessionid"
 )
 
 func TestIsInfrastructurePath(t *testing.T) {
@@ -169,14 +169,9 @@ func TestEntireSessionID(t *testing.T) {
 
 	result := sessionid.EntireSessionID(claudeSessionID)
 
-	// Should match format: YYYY-MM-DD-<claude-session-id>
-	pattern := `^\d{4}-\d{2}-\d{2}-` + regexp.QuoteMeta(claudeSessionID) + `$`
-	matched, err := regexp.MatchString(pattern, result)
-	if err != nil {
-		t.Fatalf("regex error: %v", err)
-	}
-	if !matched {
-		t.Errorf("sessionid.EntireSessionID() = %q, want format YYYY-MM-DD-%s", result, claudeSessionID)
+	// EntireSessionID is now an identity function - should return the input unchanged
+	if result != claudeSessionID {
+		t.Errorf("sessionid.EntireSessionID() = %q, want %q (identity function)", result, claudeSessionID)
 	}
 }
 
@@ -194,15 +189,9 @@ func TestEntireSessionID_PreservesInput(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := sessionid.EntireSessionID(tt.claudeSessionID)
 
-			// Should end with the original Claude session ID
-			suffix := "-" + tt.claudeSessionID
-			if len(result) < len(suffix) || result[len(result)-len(suffix):] != suffix {
-				t.Errorf("sessionid.EntireSessionID(%q) = %q, should end with %q", tt.claudeSessionID, result, suffix)
-			}
-
-			// Should start with date prefix (11 chars: YYYY-MM-DD-)
-			if len(result) < 11 {
-				t.Errorf("sessionid.EntireSessionID(%q) = %q, too short for date prefix", tt.claudeSessionID, result)
+			// EntireSessionID is now an identity function
+			if result != tt.claudeSessionID {
+				t.Errorf("sessionid.EntireSessionID(%q) = %q, want %q (identity function)", tt.claudeSessionID, result, tt.claudeSessionID)
 			}
 		})
 	}

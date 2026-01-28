@@ -141,19 +141,16 @@ func (c *ClaudeCodeAgent) GetSessionID(input *agent.HookInput) string {
 }
 
 // TransformSessionID converts a Claude session ID to an Entire session ID.
-// Format: YYYY-MM-DD-<claude-session-id>
+// This is now an identity function - the agent session ID IS the Entire session ID.
 func (c *ClaudeCodeAgent) TransformSessionID(agentSessionID string) string {
-	return sessionid.EntireSessionID(agentSessionID)
+	return agentSessionID
 }
 
 // ExtractAgentSessionID extracts the Claude session ID from an Entire session ID.
+// Since Entire session ID = agent session ID (identity), this returns the input unchanged.
+// For backwards compatibility with legacy date-prefixed IDs, it strips the prefix if present.
 func (c *ClaudeCodeAgent) ExtractAgentSessionID(entireSessionID string) string {
-	// Expected format: YYYY-MM-DD-<model-session-id> (11 chars prefix: "2025-12-02-")
-	if len(entireSessionID) > 11 && entireSessionID[4] == '-' && entireSessionID[7] == '-' && entireSessionID[10] == '-' {
-		return entireSessionID[11:]
-	}
-	// Return as-is if not in expected format (backwards compatibility)
-	return entireSessionID
+	return sessionid.ModelSessionID(entireSessionID)
 }
 
 // GetSessionDir returns the directory where Claude stores session transcripts.

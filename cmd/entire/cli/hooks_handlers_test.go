@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"os/exec"
-	"strings"
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/paths"
@@ -49,8 +48,9 @@ func TestCurrentSessionIDWithFallback_FallsBackToModel(t *testing.T) {
 	if got == "" {
 		t.Fatal("currentSessionIDWithFallback() returned empty string")
 	}
-	if !strings.HasSuffix(got, "-"+modelID) {
-		t.Fatalf("currentSessionIDWithFallback() = %q, want suffix %q", got, "-"+modelID)
+	// Now that EntireSessionID is an identity function, we expect the model ID directly
+	if got != modelID {
+		t.Fatalf("currentSessionIDWithFallback() = %q, want %q (model ID directly)", got, modelID)
 	}
 }
 
@@ -79,8 +79,9 @@ func TestCurrentSessionIDWithFallback_InvalidPersistedFallsBack(t *testing.T) {
 	if got == invalid {
 		t.Fatal("currentSessionIDWithFallback() returned invalid session ID, should have fallen back")
 	}
-	if !strings.HasSuffix(got, "-"+modelID) {
-		t.Fatalf("currentSessionIDWithFallback() = %q, want suffix %q", got, "-"+modelID)
+	// Now that EntireSessionID is an identity function, we expect the model ID directly
+	if got != modelID {
+		t.Fatalf("currentSessionIDWithFallback() = %q, want %q (model ID directly)", got, modelID)
 	}
 }
 
@@ -109,7 +110,8 @@ func TestCurrentSessionIDWithFallback_MismatchedPersistedFallsBack(t *testing.T)
 	if got == persisted {
 		t.Fatal("currentSessionIDWithFallback() returned persisted ID for mismatched model session")
 	}
-	if !strings.HasSuffix(got, "-"+modelID) {
-		t.Fatalf("currentSessionIDWithFallback() = %q, want suffix %q", got, "-"+modelID)
+	// Now that EntireSessionID is an identity function, we expect the model ID directly
+	if got != modelID {
+		t.Fatalf("currentSessionIDWithFallback() = %q, want %q (model ID directly)", got, modelID)
 	}
 }

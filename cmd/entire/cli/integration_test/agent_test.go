@@ -410,30 +410,25 @@ func TestClaudeCodeHelperMethods(t *testing.T) {
 		}
 	})
 
-	t.Run("TransformSessionID adds date prefix", func(t *testing.T) {
+	t.Run("TransformSessionID is identity function", func(t *testing.T) {
 		t.Parallel()
 
 		ag, _ := agent.Get("claude-code")
 		entireID := ag.TransformSessionID("abc123")
 
-		// Should have format YYYY-MM-DD-abc123
-		if len(entireID) < 15 { // "2025-01-01-abc123" is 17 chars
-			t.Errorf("TransformSessionID() = %q, too short", entireID)
-		}
-		if entireID[4] != '-' || entireID[7] != '-' || entireID[10] != '-' {
-			t.Errorf("TransformSessionID() = %q, want date prefix format", entireID)
-		}
-		if entireID[11:] != "abc123" {
-			t.Errorf("TransformSessionID() suffix = %q, want %q", entireID[11:], "abc123")
+		// TransformSessionID is now an identity function
+		if entireID != "abc123" {
+			t.Errorf("TransformSessionID() = %q, want %q (identity function)", entireID, "abc123")
 		}
 	})
 
-	t.Run("ExtractAgentSessionID removes date prefix", func(t *testing.T) {
+	t.Run("ExtractAgentSessionID handles legacy date prefix", func(t *testing.T) {
 		t.Parallel()
 
 		ag, _ := agent.Get("claude-code")
 		agentID := ag.ExtractAgentSessionID("2025-12-18-abc123")
 
+		// Should still extract the agent ID from legacy format
 		if agentID != "abc123" {
 			t.Errorf("ExtractAgentSessionID() = %q, want %q", agentID, "abc123")
 		}
@@ -833,30 +828,25 @@ func TestGeminiCLISessionOperations(t *testing.T) {
 func TestGeminiCLIHelperMethods(t *testing.T) {
 	t.Parallel()
 
-	t.Run("TransformSessionID adds date prefix", func(t *testing.T) {
+	t.Run("TransformSessionID is identity function", func(t *testing.T) {
 		t.Parallel()
 
 		ag, _ := agent.Get("gemini")
 		entireID := ag.TransformSessionID("abc123")
 
-		// Should have format YYYY-MM-DD-abc123
-		if len(entireID) < 15 { // "2025-01-01-abc123" is 17 chars
-			t.Errorf("TransformSessionID() = %q, too short", entireID)
-		}
-		if entireID[4] != '-' || entireID[7] != '-' || entireID[10] != '-' {
-			t.Errorf("TransformSessionID() = %q, want date prefix format", entireID)
-		}
-		if entireID[11:] != "abc123" {
-			t.Errorf("TransformSessionID() suffix = %q, want %q", entireID[11:], "abc123")
+		// TransformSessionID is now an identity function
+		if entireID != "abc123" {
+			t.Errorf("TransformSessionID() = %q, want %q (identity function)", entireID, "abc123")
 		}
 	})
 
-	t.Run("ExtractAgentSessionID removes date prefix", func(t *testing.T) {
+	t.Run("ExtractAgentSessionID handles legacy date prefix", func(t *testing.T) {
 		t.Parallel()
 
 		ag, _ := agent.Get("gemini")
 		agentID := ag.ExtractAgentSessionID("2025-12-18-abc123")
 
+		// Should still extract the agent ID from legacy format
 		if agentID != "abc123" {
 			t.Errorf("ExtractAgentSessionID() = %q, want %q", agentID, "abc123")
 		}

@@ -24,7 +24,8 @@ import (
 )
 
 // currentSessionIDWithFallback returns the persisted Entire session ID when available.
-// Falls back to deriving from the model session ID for backward compatibility.
+// Falls back to using the model session ID directly (since agent ID = entire ID now).
+// The persisted session is checked for backwards compatibility with legacy date-prefixed IDs.
 func currentSessionIDWithFallback(modelSessionID string) string {
 	entireSessionID, err := paths.ReadCurrentSession()
 	if err != nil {
@@ -44,8 +45,8 @@ func currentSessionIDWithFallback(modelSessionID string) string {
 	if modelSessionID == "" {
 		return ""
 	}
-	// Get or create stable session ID (reuses existing if session resumed across days)
-	return session.GetOrCreateEntireSessionID(modelSessionID)
+	// Use agent session ID directly as entire session ID (identity function)
+	return modelSessionID
 }
 
 // hookInputData contains parsed hook input and session identifiers.
@@ -207,6 +208,47 @@ func checkConcurrentSessions(ag agent.Agent, entireSessionID string) (bool, erro
 	}
 
 	return false, nil
+}
+
+// handleSessionStartCommon is the shared implementation for session start hooks.
+// Used by both Claude Code and Gemini CLI handlers.
+func handleSessionStartCommon() error {
+	ag, err := GetCurrentHookAgent()
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	input, err := ag.ParseHookInput(agent.HookSessionStart, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Info(logCtx, "session-start",
+		slog.String("hook", "session-start"),
+		slog.String("hook_type", "agent"),
+		slog.String("model_session_id", input.SessionID),
+		slog.String("transcript_path", input.SessionRef),
+	)
+
+	if input.SessionID == "" {
+		return errors.New("no session_id in input")
+	}
+
+	// Check for existing legacy session (backward compatibility with date-prefixed format)
+	// If found, preserve the old session ID to avoid orphaning state files
+	entireSessionID := session.FindLegacyEntireSessionID(input.SessionID)
+	if entireSessionID == "" {
+		// No legacy session found - use agent session ID directly (new format)
+		entireSessionID = input.SessionID
+	}
+
+	if err := paths.WriteCurrentSession(entireSessionID); err != nil {
+		return fmt.Errorf("failed to set current session: %w", err)
+	}
+
+	fmt.Printf("Current session set to: %s\n", entireSessionID)
+	return nil
 }
 
 // handleSessionInitErrors handles session initialization errors and provides user-friendly messages.
@@ -620,10 +662,10 @@ func commitWithMetadata() error {
 	return nil
 }
 
-// handlePostTodo handles the PostToolUse[TodoWrite] hook for subagent checkpoints.
+// handleClaudeCodePostTodo handles the PostToolUse[TodoWrite] hook for subagent checkpoints.
 // Creates a checkpoint if we're in a subagent context (active pre-task file exists).
 // Skips silently if not in subagent context (main agent).
-func handlePostTodo() error {
+func handleClaudeCodePostTodo() error {
 	input, err := parseSubagentCheckpointHookInput(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("failed to parse PostToolUse[TodoWrite] input: %w", err)
@@ -747,8 +789,8 @@ func handlePostTodo() error {
 	return nil
 }
 
-// handlePreTask handles the PreToolUse[Task] hook
-func handlePreTask() error {
+// handleClaudeCodePreTask handles the PreToolUse[Task] hook
+func handleClaudeCodePreTask() error {
 	// Skip on default branch for strategies that don't allow it
 	if skip, branchName := ShouldSkipOnDefaultBranchForStrategy(); skip {
 		fmt.Fprintf(os.Stderr, "Entire: skipping on branch '%s' - create a feature branch to use Entire tracking\n", branchName)
@@ -780,7 +822,7 @@ func handlePreTask() error {
 
 	// Capture pre-task state locally (for computing new files when task completes).
 	// We don't create a shadow branch commit here. Commits are created during
-	// task completion (handlePostTask/handlePostTodo) only if the task resulted
+	// task completion (handleClaudeCodePostTask/handleClaudeCodePostTodo) only if the task resulted
 	// in file changes.
 	if err := CapturePreTaskState(input.ToolUseID); err != nil {
 		return fmt.Errorf("failed to capture pre-task state: %w", err)
@@ -789,8 +831,8 @@ func handlePreTask() error {
 	return nil
 }
 
-// handlePostTask handles the PostToolUse[Task] hook
-func handlePostTask() error {
+// handleClaudeCodePostTask handles the PostToolUse[Task] hook
+func handleClaudeCodePostTask() error {
 	// Skip on default branch for strategies that don't allow it
 	if skip, branchName := ShouldSkipOnDefaultBranchForStrategy(); skip {
 		fmt.Fprintf(os.Stderr, "Entire: skipping on branch '%s' - create a feature branch to use Entire tracking\n", branchName)
@@ -910,7 +952,7 @@ func handlePostTask() error {
 	}
 
 	// Build task checkpoint context - strategy handles metadata creation
-	// Note: Incremental checkpoints are now created during task execution via handlePostTodo,
+	// Note: Incremental checkpoints are now created during task execution via handleClaudeCodePostTodo,
 	// so we don't need to collect/cleanup staging area here.
 	ctx := strategy.TaskCheckpointContext{
 		SessionID:              entireSessionID,
@@ -940,43 +982,9 @@ func handlePostTask() error {
 	return nil
 }
 
-// handleSessionStart handles the SessionStart hook for Claude Code.
-// It reads session info from stdin and sets it as the current session.
-func handleSessionStart() error {
-	// Get the agent for session ID transformation
-	ag, err := GetCurrentHookAgent()
-	if err != nil {
-		return fmt.Errorf("failed to get agent: %w", err)
-	}
-
-	// Parse hook input using agent interface
-	input, err := ag.ParseHookInput(agent.HookSessionStart, os.Stdin)
-	if err != nil {
-		return fmt.Errorf("failed to parse hook input: %w", err)
-	}
-
-	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
-	logging.Info(logCtx, "session-start",
-		slog.String("hook", "session-start"),
-		slog.String("hook_type", "agent"),
-		slog.String("model_session_id", input.SessionID),
-		slog.String("transcript_path", input.SessionRef),
-	)
-
-	if input.SessionID == "" {
-		return errors.New("no session_id in input")
-	}
-
-	// Get or create stable session ID (reuses existing if session resumed across days)
-	entireSessionID := session.GetOrCreateEntireSessionID(input.SessionID)
-
-	// Write session ID to current_session file
-	if err := paths.WriteCurrentSession(entireSessionID); err != nil {
-		return fmt.Errorf("failed to set current session: %w", err)
-	}
-
-	fmt.Printf("Current session set to: %s\n", entireSessionID)
-	return nil
+// handleClaudeCodeSessionStart handles the SessionStart hook for Claude Code.
+func handleClaudeCodeSessionStart() error {
+	return handleSessionStartCommon()
 }
 
 // hookResponse represents a JSON response for Claude Code hooks.

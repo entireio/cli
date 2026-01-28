@@ -2,13 +2,11 @@ package session
 
 import (
 	"context"
-
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/go-git/go-git/v5"
 )
 
 func TestSession_IsSubSession(t *testing.T) {
@@ -46,121 +44,6 @@ func TestSession_IsSubSession(t *testing.T) {
 	}
 }
 
-// TestGetOrCreateEntireSessionID tests the stable session ID generation logic.
-func TestGetOrCreateEntireSessionID(t *testing.T) {
-	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	agentUUID := "a6c3cac2-2f45-43aa-8c69-419f66a3b5e1"
-
-	// First call - should create new session ID with today's date
-	sessionID1 := GetOrCreateEntireSessionID(agentUUID)
-
-	// Verify format: YYYY-MM-DD-<uuid>
-	if len(sessionID1) < 11 {
-		t.Fatalf("Session ID too short: %s", sessionID1)
-	}
-	expectedSuffix := "-" + agentUUID
-	if sessionID1[len(sessionID1)-len(expectedSuffix):] != expectedSuffix {
-		t.Errorf("Session ID should end with %s, got %s", expectedSuffix, sessionID1)
-	}
-
-	// Create a state store and save a state to simulate existing session
-	store, err := NewStateStore()
-	if err != nil {
-		t.Fatalf("NewStateStore() error = %v", err)
-	}
-
-	state := &State{
-		SessionID:       sessionID1,
-		BaseCommit:      "test123",
-		StartedAt:       time.Now(),
-		CheckpointCount: 1,
-	}
-	if err := store.Save(context.Background(), state); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	// Second call - should reuse existing session ID
-	sessionID2 := GetOrCreateEntireSessionID(agentUUID)
-
-	if sessionID2 != sessionID1 {
-		t.Errorf("Expected to reuse session ID %s, got %s", sessionID1, sessionID2)
-	}
-}
-
-// TestGetOrCreateEntireSessionID_MultipleStates tests cleanup of duplicate state files.
-func TestGetOrCreateEntireSessionID_MultipleStates(t *testing.T) {
-	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	agentUUID := "b7d4dbd3-3e56-54bb-a70a-52ae77d94c6f"
-
-	// Simulate the bug: create state files from different days
-	oldSessionID := "2026-01-22-" + agentUUID
-	newSessionID := "2026-01-23-" + agentUUID
-
-	store, err := NewStateStore()
-	if err != nil {
-		t.Fatalf("NewStateStore() error = %v", err)
-	}
-
-	oldState := &State{
-		SessionID:       oldSessionID,
-		BaseCommit:      "old123",
-		StartedAt:       time.Now().Add(-24 * time.Hour),
-		CheckpointCount: 2,
-	}
-	if err := store.Save(context.Background(), oldState); err != nil {
-		t.Fatalf("Save(old) error = %v", err)
-	}
-
-	newState := &State{
-		SessionID:       newSessionID,
-		BaseCommit:      "new456",
-		StartedAt:       time.Now(),
-		CheckpointCount: 3,
-	}
-	if err := store.Save(context.Background(), newState); err != nil {
-		t.Fatalf("Save(new) error = %v", err)
-	}
-
-	// Call GetOrCreateEntireSessionID - should pick the newest and cleanup old
-	selectedID := GetOrCreateEntireSessionID(agentUUID)
-
-	// Should pick the most recent (2026-01-23)
-	if selectedID != newSessionID {
-		t.Errorf("Expected most recent session ID %s, got %s", newSessionID, selectedID)
-	}
-
-	// Old state file should be cleaned up
-	oldStateLoaded, err := store.Load(context.Background(), oldSessionID)
-	if err != nil {
-		t.Fatalf("Load(old) error = %v", err)
-	}
-	if oldStateLoaded != nil {
-		t.Errorf("Old state file should have been cleaned up, but still exists")
-	}
-
-	// New state file should still exist
-	newStateLoaded, err := store.Load(context.Background(), newSessionID)
-	if err != nil {
-		t.Fatalf("Load(new) error = %v", err)
-	}
-	if newStateLoaded == nil {
-		t.Errorf("New state file should exist")
-	}
-}
 func TestStateStore_RemoveAll(t *testing.T) {
 	// Create a temp directory for the state store
 	tmpDir := t.TempDir()
@@ -262,4 +145,102 @@ func TestStateStore_RemoveAll_NonExistentDirectory(t *testing.T) {
 	if err := store.RemoveAll(); err != nil {
 		t.Fatalf("RemoveAll() on non-existent directory error = %v", err)
 	}
+}
+
+func TestFindLegacyEntireSessionID(t *testing.T) {
+	// Create a temp git repo
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Initialize git repo
+	cmd := exec.CommandContext(context.Background(), "git", "init")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create state directory with legacy-format session files
+	stateDir := filepath.Join(tmpDir, ".git", sessionStateDirName)
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		t.Fatalf("failed to create state dir: %v", err)
+	}
+
+	t.Run("finds legacy session", func(t *testing.T) {
+		agentID := "abc123-def456"
+		legacySessionID := "2026-01-20-" + agentID
+
+		// Create a legacy-format state file
+		stateFile := filepath.Join(stateDir, legacySessionID+".json")
+		if err := os.WriteFile(stateFile, []byte(`{"session_id":"`+legacySessionID+`"}`), 0o600); err != nil {
+			t.Fatalf("failed to write state file: %v", err)
+		}
+		defer os.Remove(stateFile)
+
+		found := FindLegacyEntireSessionID(agentID)
+		if found != legacySessionID {
+			t.Errorf("FindLegacyEntireSessionID(%q) = %q, want %q", agentID, found, legacySessionID)
+		}
+	})
+
+	t.Run("returns empty for non-existent session", func(t *testing.T) {
+		found := FindLegacyEntireSessionID("nonexistent-session-id")
+		if found != "" {
+			t.Errorf("FindLegacyEntireSessionID(nonexistent) = %q, want empty string", found)
+		}
+	})
+
+	t.Run("returns empty for new-format session", func(t *testing.T) {
+		// Create a new-format state file (no date prefix)
+		newSessionID := "new-format-session-id"
+		stateFile := filepath.Join(stateDir, newSessionID+".json")
+		if err := os.WriteFile(stateFile, []byte(`{"session_id":"`+newSessionID+`"}`), 0o600); err != nil {
+			t.Fatalf("failed to write state file: %v", err)
+		}
+		defer os.Remove(stateFile)
+
+		// Should not find it as "legacy" since it doesn't have date prefix
+		found := FindLegacyEntireSessionID(newSessionID)
+		if found != "" {
+			t.Errorf("FindLegacyEntireSessionID(new-format) = %q, want empty string", found)
+		}
+	})
+
+	t.Run("returns empty for empty agent ID", func(t *testing.T) {
+		found := FindLegacyEntireSessionID("")
+		if found != "" {
+			t.Errorf("FindLegacyEntireSessionID('') = %q, want empty string", found)
+		}
+	})
+
+	t.Run("returns empty for path traversal attempts", func(t *testing.T) {
+		// Should reject IDs with path traversal sequences
+		maliciousIDs := []string{
+			"../../../etc/passwd",
+			"session/../../../etc",
+			"session/id",
+			"session.json/../..",
+		}
+		for _, id := range maliciousIDs {
+			found := FindLegacyEntireSessionID(id)
+			if found != "" {
+				t.Errorf("FindLegacyEntireSessionID(%q) = %q, want empty string (should be rejected)", id, found)
+			}
+		}
+	})
+
+	t.Run("ignores tmp files", func(t *testing.T) {
+		agentID := "tmp-test-id"
+		legacySessionID := "2026-01-21-" + agentID
+
+		// Create a .tmp file (should be ignored)
+		tmpFile := filepath.Join(stateDir, legacySessionID+".json.tmp")
+		if err := os.WriteFile(tmpFile, []byte(`{"session_id":"`+legacySessionID+`"}`), 0o600); err != nil {
+			t.Fatalf("failed to write tmp file: %v", err)
+		}
+		defer os.Remove(tmpFile)
+
+		found := FindLegacyEntireSessionID(agentID)
+		if found != "" {
+			t.Errorf("FindLegacyEntireSessionID should ignore .tmp files, got %q", found)
+		}
+	})
 }

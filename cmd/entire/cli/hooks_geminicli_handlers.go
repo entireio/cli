@@ -17,7 +17,6 @@ import (
 	"entire.io/cli/cmd/entire/cli/agent/geminicli"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
-	"entire.io/cli/cmd/entire/cli/session"
 	"entire.io/cli/cmd/entire/cli/strategy"
 )
 
@@ -164,42 +163,8 @@ func checkConcurrentSessionsGemini(entireSessionID string) {
 }
 
 // handleGeminiSessionStart handles the SessionStart hook for Gemini CLI.
-// It reads session info from stdin and sets it as the current session.
 func handleGeminiSessionStart() error {
-	// Get the agent for session ID transformation
-	ag, err := GetCurrentHookAgent()
-	if err != nil {
-		return fmt.Errorf("failed to get agent: %w", err)
-	}
-
-	// Parse hook input using agent interface
-	input, err := ag.ParseHookInput(agent.HookSessionStart, os.Stdin)
-	if err != nil {
-		return fmt.Errorf("failed to parse hook input: %w", err)
-	}
-
-	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
-	logging.Info(logCtx, "gemini-session-start",
-		slog.String("hook", "session-start"),
-		slog.String("hook_type", "agent"),
-		slog.String("model_session_id", input.SessionID),
-		slog.String("transcript_path", input.SessionRef),
-	)
-
-	if input.SessionID == "" {
-		return errors.New("no session_id in input")
-	}
-
-	// Get or create stable session ID (reuses existing if session resumed across days)
-	entireSessionID := session.GetOrCreateEntireSessionID(input.SessionID)
-
-	// Write session ID to current_session file
-	if err := paths.WriteCurrentSession(entireSessionID); err != nil {
-		return fmt.Errorf("failed to set current session: %w", err)
-	}
-
-	fmt.Printf("Current session set to: %s\n", entireSessionID)
-	return nil
+	return handleSessionStartCommon()
 }
 
 // handleGeminiSessionEnd handles the SessionEnd hook for Gemini CLI.
@@ -627,8 +592,8 @@ func handleGeminiBeforeAgent() error {
 		return errors.New("no session_id in input")
 	}
 
-	// Get or create stable session ID (reuses existing if session resumed across days)
-	entireSessionID := session.GetOrCreateEntireSessionID(input.SessionID)
+	// Get the entire session ID, handling legacy date-prefixed format
+	entireSessionID := currentSessionIDWithFallback(input.SessionID)
 
 	// Check for concurrent sessions before proceeding
 	// This will output a blocking response and exit if there's a conflict (first time only)

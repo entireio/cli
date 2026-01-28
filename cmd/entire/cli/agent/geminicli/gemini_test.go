@@ -228,13 +228,10 @@ func TestGetSessionID(t *testing.T) {
 func TestTransformSessionID(t *testing.T) {
 	ag := &GeminiCLIAgent{}
 
-	// TransformSessionID should add date prefix
+	// TransformSessionID is now an identity function
 	result := ag.TransformSessionID("abc123")
-	if result == "abc123" {
-		t.Error("TransformSessionID() should add date prefix")
-	}
-	if len(result) < len("abc123")+11 { // 11 chars for "YYYY-MM-DD-"
-		t.Errorf("TransformSessionID() result too short: %q", result)
+	if result != "abc123" {
+		t.Errorf("TransformSessionID() = %q, want abc123 (identity function)", result)
 	}
 }
 
