@@ -298,7 +298,7 @@ func findCommitMessageForCheckpoint(repo *git.Repository, checkpointID id.Checkp
 			break
 		}
 		count++
-		if count > maxCommitsToSearch {
+		if count > commitScanLimit {
 			break
 		}
 
@@ -1041,8 +1041,6 @@ func outputWithPager(w io.Writer, content string) {
 
 // Constants for formatting output
 const (
-	// maxCommitsToSearch is the maximum number of commits to search for checkpoint trailers
-	maxCommitsToSearch = 500
 	// maxIntentDisplayLength is the maximum length for intent text before truncation
 	maxIntentDisplayLength = 80
 	// maxMessageDisplayLength is the maximum length for checkpoint messages before truncation
