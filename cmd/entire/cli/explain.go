@@ -176,6 +176,9 @@ func runExplainCheckpoint(w io.Writer, checkpointIDPrefix string, noPager, verbo
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
+	if result == nil {
+		return fmt.Errorf("checkpoint not found: %s", fullCheckpointID)
+	}
 
 	// Look up the commit message for this checkpoint
 	commitMessage := findCommitMessageForCheckpoint(repo, fullCheckpointID)
@@ -463,6 +466,9 @@ func getBranchCheckpoints(repo *git.Repository, limit int) ([]strategy.RewindPoi
 	}
 	defer iter.Close()
 
+	// Fetch metadata branch tree once (used for reading session prompts)
+	metadataTree, _ := strategy.GetMetadataBranchTree(repo) //nolint:errcheck // Best-effort, continue without prompts
+
 	var points []strategy.RewindPoint
 	count := 0
 	consecutiveMainCount := 0
@@ -510,7 +516,7 @@ func getBranchCheckpoints(repo *git.Repository, limit int) ([]strategy.RewindPoi
 		}
 
 		// Read session prompt from metadata branch (best-effort)
-		if metadataTree, treeErr := strategy.GetMetadataBranchTree(repo); treeErr == nil && metadataTree != nil {
+		if metadataTree != nil {
 			point.SessionPrompt = strategy.ReadSessionPromptFromTree(metadataTree, cpID.Path())
 		}
 
