@@ -211,6 +211,22 @@ func TestFindLegacyEntireSessionID(t *testing.T) {
 		}
 	})
 
+	t.Run("returns empty for path traversal attempts", func(t *testing.T) {
+		// Should reject IDs with path traversal sequences
+		maliciousIDs := []string{
+			"../../../etc/passwd",
+			"session/../../../etc",
+			"session/id",
+			"session.json/../..",
+		}
+		for _, id := range maliciousIDs {
+			found := FindLegacyEntireSessionID(id)
+			if found != "" {
+				t.Errorf("FindLegacyEntireSessionID(%q) = %q, want empty string (should be rejected)", id, found)
+			}
+		}
+	})
+
 	t.Run("ignores tmp files", func(t *testing.T) {
 		agentID := "tmp-test-id"
 		legacySessionID := "2026-01-21-" + agentID

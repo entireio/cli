@@ -338,6 +338,11 @@ func FindLegacyEntireSessionID(agentSessionID string) string {
 		return ""
 	}
 
+	// Validate ID format to prevent path traversal attacks
+	if err := validation.ValidateAgentSessionID(agentSessionID); err != nil {
+		return ""
+	}
+
 	commonDir, err := getGitCommonDir()
 	if err != nil {
 		return ""
