@@ -946,7 +946,7 @@ func TestFormatCheckpointOutput_Default(t *testing.T) {
 	}
 	// Should NOT show full file list in default mode
 	if strings.Contains(output, "main.go") {
-		t.Error("default output should not show file list (use --verbose)")
+		t.Error("default output should not show file list (use --full)")
 	}
 }
 

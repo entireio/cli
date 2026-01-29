@@ -53,7 +53,13 @@ func newEnableCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "enable",
 		Short: "Enable Entire",
-		Long:  "Enable Entire with interactive setup for session tracking mode",
+		Long: `Enable Entire with session tracking for your AI agent workflows.
+
+Uses the manual-commit strategy by default. To use a different strategy:
+
+  entire enable --strategy auto-commit
+
+Strategies: manual-commit (default), auto-commit`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Check if we're in a git repository first - this is a prerequisite error,
 			// not a usage error, so we silence Cobra's output and use SilentError
@@ -136,14 +142,20 @@ Use --uninstall to completely remove Entire from this repository, including:
 }
 
 func newStatusCmd() *cobra.Command {
-	return &cobra.Command{
+	var detailed bool
+
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show Entire status",
 		Long:  "Show whether Entire is currently enabled or disabled",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runStatus(cmd.OutOrStdout())
+			return runStatus(cmd.OutOrStdout(), detailed)
 		},
 	}
+
+	cmd.Flags().BoolVar(&detailed, "detailed", false, "Show detailed status for each settings file")
+
+	return cmd
 }
 
 // runEnableWithStrategy enables Entire with a specified strategy (non-interactive).
@@ -274,32 +286,11 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 	return nil
 }
 
-// runEnableInteractive runs the interactive enable flow with strategy selection.
+// runEnableInteractive runs the interactive enable flow.
 func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProjectSettings, forceHooks, setupShell, skipPushSessions, telemetry, disableMultisessionWarning bool) error {
-	// Build strategy options with user-friendly names
-	var selectedStrategy string
-	options := []huh.Option[string]{
-		huh.NewOption(strategyDisplayManualCommit+"  Sessions are only captured when you commit", strategyDisplayManualCommit),
-		huh.NewOption(strategyDisplayAutoCommit+"  Automatically capture sessions after agent response completion", strategyDisplayAutoCommit),
-	}
-
-	form := NewAccessibleForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Options(options...).
-				Value(&selectedStrategy),
-		),
-	)
-
-	if err := form.Run(); err != nil {
-		return fmt.Errorf("selection cancelled: %w", err)
-	}
-
-	// Map display name to internal strategy name
-	internalStrategy, ok := strategyDisplayToInternal[selectedStrategy]
-	if !ok {
-		return fmt.Errorf("unknown strategy: %s", selectedStrategy)
-	}
+	// Use the default strategy (manual-commit)
+	internalStrategy := strategy.DefaultStrategyName
+	fmt.Fprintf(w, "Using %s strategy (use --strategy to change)\n\n", strategyInternalToDisplay[internalStrategy])
 
 	// Setup Claude Code hooks
 	hooksInstalled, err := setupClaudeCodeHook(localDev, forceHooks)
@@ -410,7 +401,7 @@ func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProject
 	}
 
 	// Show success message with display name
-	fmt.Fprintf(w, "\n✓ %s strategy enabled\n", selectedStrategy)
+	fmt.Fprintf(w, "\n✓ %s strategy enabled\n", strategyInternalToDisplay[internalStrategy])
 
 	return nil
 }
@@ -455,7 +446,7 @@ func runDisable(w io.Writer, useProjectSettings bool) error {
 	return nil
 }
 
-func runStatus(w io.Writer) error {
+func runStatus(w io.Writer, detailed bool) error {
 	// Check if we're in a git repository
 	if _, repoErr := paths.RepoRoot(); repoErr != nil {
 		fmt.Fprintln(w, "✕ not a git repository")
@@ -472,7 +463,7 @@ func runStatus(w io.Writer) error {
 		localSettingsPath = EntireSettingsLocalFile
 	}
 
-	// Check which settings files exist (for source label)
+	// Check which settings files exist
 	_, projectErr := os.Stat(settingsPath)
 	if projectErr != nil && !errors.Is(projectErr, fs.ErrNotExist) {
 		return fmt.Errorf("cannot access project settings file: %w", projectErr)
@@ -489,29 +480,66 @@ func runStatus(w io.Writer) error {
 		return nil
 	}
 
-	// Load merged settings
+	if detailed {
+		return runStatusDetailed(w, settingsPath, localSettingsPath, projectExists, localExists)
+	}
+
+	// Short output: just show the effective/merged state
 	settings, err := LoadEntireSettings()
 	if err != nil {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
-	settings.Strategy = strategy.NormalizeStrategyName(settings.Strategy)
 
-	// Determine source label
-	var sourceLabel string
-	switch {
-	case projectExists && localExists:
-		sourceLabel = "Project + Local"
-	case localExists:
-		sourceLabel = "Local"
-	default:
-		sourceLabel = "Project"
-	}
-
-	fmt.Fprintln(w, formatSettingsStatus(sourceLabel, settings))
+	fmt.Fprintln(w, formatSettingsStatusShort(settings))
 	return nil
 }
 
-// formatSettingsStatus formats a settings status line.
+// runStatusDetailed shows the effective status plus detailed status for each settings file.
+func runStatusDetailed(w io.Writer, settingsPath, localSettingsPath string, projectExists, localExists bool) error {
+	// First show the effective/merged status
+	settings, err := LoadEntireSettings()
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+	fmt.Fprintln(w, formatSettingsStatusShort(settings))
+	fmt.Fprintln(w) // blank line
+
+	// Show project settings if it exists
+	if projectExists {
+		projectSettings, err := loadSettingsFromFile(settingsPath)
+		if err != nil {
+			return fmt.Errorf("failed to load project settings: %w", err)
+		}
+		fmt.Fprintln(w, formatSettingsStatus("Project", projectSettings))
+	}
+
+	// Show local settings if it exists
+	if localExists {
+		localSettings, err := loadSettingsFromFile(localSettingsPath)
+		if err != nil {
+			return fmt.Errorf("failed to load local settings: %w", err)
+		}
+		fmt.Fprintln(w, formatSettingsStatus("Local", localSettings))
+	}
+
+	return nil
+}
+
+// formatSettingsStatusShort formats a short settings status line.
+// Output format: "Enabled (manual-commit)" or "Disabled (auto-commit)"
+func formatSettingsStatusShort(settings *EntireSettings) string {
+	displayName := settings.Strategy
+	if dn, ok := strategyInternalToDisplay[settings.Strategy]; ok {
+		displayName = dn
+	}
+
+	if settings.Enabled {
+		return fmt.Sprintf("Enabled (%s)", displayName)
+	}
+	return fmt.Sprintf("Disabled (%s)", displayName)
+}
+
+// formatSettingsStatus formats a settings status line with source prefix.
 // Output format: "Project, enabled (manual-commit)" or "Local, disabled (auto-commit)"
 func formatSettingsStatus(prefix string, settings *EntireSettings) string {
 	displayName := settings.Strategy

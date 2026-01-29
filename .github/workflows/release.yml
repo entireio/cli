@@ -18,8 +18,6 @@ jobs:
           fetch-depth: 0
 
       - uses: jdx/mise-action@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate Homebrew Tap token
         id: app-token

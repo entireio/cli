@@ -13,6 +13,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/strategy"
 	"entire.io/cli/cmd/entire/cli/trailers"
 
@@ -298,23 +299,34 @@ func explainTemporaryCheckpoint(repo *git.Repository, store *checkpoint.GitStore
 		return "", false
 	}
 
-	// Find checkpoint matching the SHA prefix - check for ambiguity
-	var matchIdx = -1
-	for i, tc := range tempCheckpoints {
+	// Find checkpoints matching the SHA prefix - check for ambiguity
+	var matches []checkpoint.TemporaryCheckpointInfo
+	for _, tc := range tempCheckpoints {
 		if strings.HasPrefix(tc.CommitHash.String(), shaPrefix) {
-			if matchIdx >= 0 {
-				// Multiple matches - ambiguous prefix
-				return "", false
-			}
-			matchIdx = i
+			matches = append(matches, tc)
 		}
 	}
 
-	if matchIdx < 0 {
+	if len(matches) == 0 {
 		return "", false
 	}
 
-	tc := tempCheckpoints[matchIdx]
+	if len(matches) > 1 {
+		// Multiple matches - return ambiguous error as output
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Ambiguous checkpoint prefix %q matches %d temporary checkpoints:\n\n", shaPrefix, len(matches))
+		for _, m := range matches {
+			shortID := m.CommitHash.String()[:7]
+			fmt.Fprintf(&sb, "  %s  %s  session %s\n",
+				shortID,
+				m.Timestamp.Format("2006-01-02 15:04:05"),
+				m.SessionID)
+		}
+		sb.WriteString("\nPlease use a longer checkpoint prefix to disambiguate.\n")
+		return sb.String(), true
+	}
+
+	tc := matches[0]
 
 	// Found exactly one match - read metadata from shadow branch commit tree
 	shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
@@ -678,7 +690,7 @@ func getBranchCheckpoints(repo *git.Repository, limit int) ([]strategy.RewindPoi
 		point := strategy.RewindPoint{
 			ID:           c.Hash.String(),
 			Message:      message,
-			Date:         c.Author.When,
+			Date:         c.Committer.When,
 			IsLogsOnly:   true, // Committed checkpoints are logs-only
 			CheckpointID: cpID,
 			SessionID:    cpInfo.SessionID,
@@ -798,7 +810,9 @@ func runExplainBranchDefault(w io.Writer, noPager bool) error {
 	// Get checkpoints for this branch (strategy-agnostic)
 	points, err := getBranchCheckpoints(repo, branchCheckpointsLimit)
 	if err != nil {
-		points = nil // Continue with empty list on error
+		// Log the error but continue with empty list so user sees helpful message
+		logging.Warn(context.Background(), "failed to get branch checkpoints", "error", err)
+		points = nil
 	}
 
 	// Format output
@@ -1284,11 +1298,15 @@ func groupByCheckpointID(points []strategy.RewindPoint) []checkpointGroup {
 	var order []string // Track insertion order for stable iteration
 
 	for _, point := range points {
-		// Determine the checkpoint ID to use
+		// Determine the checkpoint ID to use for grouping
 		cpID := point.CheckpointID.String()
 		if cpID == "" {
-			// All temporary checkpoints group together under "temporary"
-			cpID = "temporary"
+			// Temporary checkpoints: group by session ID to preserve per-session prompts
+			// Use session ID prefix for readability (format: YYYY-MM-DD-uuid)
+			cpID = point.SessionID
+			if cpID == "" {
+				cpID = "temporary" // Fallback if no session ID
+			}
 		}
 
 		group, exists := groupMap[cpID]
@@ -1321,6 +1339,10 @@ func groupByCheckpointID(points []strategy.RewindPoint) []checkpointGroup {
 		}
 		if point.IsTaskCheckpoint {
 			group.isTask = true
+		}
+		// Update prompt if the group's prompt is empty but this point has one
+		if group.prompt == "" && point.SessionPrompt != "" {
+			group.prompt = point.SessionPrompt
 		}
 	}
 

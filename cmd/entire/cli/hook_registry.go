@@ -50,7 +50,7 @@ func init() {
 		if err == nil && !enabled {
 			return nil
 		}
-		return handleSessionStart()
+		return handleClaudeCodeSessionStart()
 	})
 
 	RegisterHookHandler(agent.AgentNameClaudeCode, claudecode.HookNameStop, func() error {
@@ -74,7 +74,7 @@ func init() {
 		if err == nil && !enabled {
 			return nil
 		}
-		return handlePreTask()
+		return handleClaudeCodePreTask()
 	})
 
 	RegisterHookHandler(agent.AgentNameClaudeCode, claudecode.HookNamePostTask, func() error {
@@ -82,7 +82,7 @@ func init() {
 		if err == nil && !enabled {
 			return nil
 		}
-		return handlePostTask()
+		return handleClaudeCodePostTask()
 	})
 
 	RegisterHookHandler(agent.AgentNameClaudeCode, claudecode.HookNamePostTodo, func() error {
@@ -90,7 +90,7 @@ func init() {
 		if err == nil && !enabled {
 			return nil
 		}
-		return handlePostTodo()
+		return handleClaudeCodePostTodo()
 	})
 
 	// Register Gemini CLI handlers
@@ -260,7 +260,7 @@ func newAgentHookVerbCmdWithLogging(agentName agent.AgentName, hookName string) 
 		RunE: func(_ *cobra.Command, _ []string) error {
 			// Skip silently if not in a git repository - hooks shouldn't prevent the agent from working
 			if _, err := paths.RepoRoot(); err != nil {
-				return nil //nolint:nilerr // intentional silent skip when no git repo
+				return nil
 			}
 
 			start := time.Now()

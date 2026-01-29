@@ -29,8 +29,8 @@ type PrePromptState struct {
 
 	// Transcript position at prompt start - tracks what was added during this checkpoint
 	// Used for Claude Code sessions.
-	LastTranscriptUUID      string `json:"last_transcript_uuid,omitempty"`       // Last UUID when prompt started
-	LastTranscriptLineCount int    `json:"last_transcript_line_count,omitempty"` // Line count when prompt started
+	LastTranscriptIdentifier string `json:"last_transcript_identifier,omitempty"` // Last identifier when prompt started (UUID for Claude, message ID for Gemini)
+	LastTranscriptLineCount  int    `json:"last_transcript_line_count,omitempty"` // Line count when prompt started
 }
 
 // CapturePrePromptState captures current untracked files and transcript position before a prompt
@@ -72,11 +72,11 @@ func CapturePrePromptState(sessionID, transcriptPath string) error {
 	// Create state file
 	stateFile := prePromptStateFile(sessionID)
 	state := PrePromptState{
-		SessionID:               sessionID,
-		Timestamp:               time.Now().UTC().Format(time.RFC3339),
-		UntrackedFiles:          untrackedFiles,
-		LastTranscriptUUID:      transcriptPos.LastUUID,
-		LastTranscriptLineCount: transcriptPos.LineCount,
+		SessionID:                sessionID,
+		Timestamp:                time.Now().UTC().Format(time.RFC3339),
+		UntrackedFiles:           untrackedFiles,
+		LastTranscriptIdentifier: transcriptPos.LastUUID,
+		LastTranscriptLineCount:  transcriptPos.LineCount,
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
@@ -118,17 +118,24 @@ func CaptureGeminiPrePromptState(sessionID, transcriptPath string) error {
 		return fmt.Errorf("failed to get untracked files: %w", err)
 	}
 
-	// Get transcript position (message count) for Gemini
+	// Get transcript position (message count and last message ID) for Gemini
 	var startMessageIndex int
+	var lastMessageID string
 	if transcriptPath != "" {
-		// Import function is in geminicli package, but to avoid circular import,
-		// we'll just count messages directly here using the same logic
+		// Read transcript and extract both message count and last message ID
 		if data, readErr := os.ReadFile(transcriptPath); readErr == nil && len(data) > 0 { //nolint:gosec // Reading from controlled transcript path
 			var transcript struct {
-				Messages []any `json:"messages"`
+				Messages []struct {
+					ID string `json:"id"`
+				} `json:"messages"`
 			}
 			if jsonErr := json.Unmarshal(data, &transcript); jsonErr == nil {
 				startMessageIndex = len(transcript.Messages)
+				if startMessageIndex > 0 {
+					lastMessageID = transcript.Messages[startMessageIndex-1].ID
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: failed to parse transcript for message tracking: %v\n", jsonErr)
 			}
 		}
 	}
@@ -136,10 +143,11 @@ func CaptureGeminiPrePromptState(sessionID, transcriptPath string) error {
 	// Create state file
 	stateFile := prePromptStateFile(sessionID)
 	state := PrePromptState{
-		SessionID:         sessionID,
-		Timestamp:         time.Now().UTC().Format(time.RFC3339),
-		UntrackedFiles:    untrackedFiles,
-		StartMessageIndex: startMessageIndex,
+		SessionID:                sessionID,
+		Timestamp:                time.Now().UTC().Format(time.RFC3339),
+		UntrackedFiles:           untrackedFiles,
+		StartMessageIndex:        startMessageIndex,
+		LastTranscriptIdentifier: lastMessageID,
 	}
 
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -151,7 +159,7 @@ func CaptureGeminiPrePromptState(sessionID, transcriptPath string) error {
 		return fmt.Errorf("failed to write state file: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Captured Gemini state before prompt: %d untracked files, transcript position: %d\n", len(untrackedFiles), startMessageIndex)
+	fmt.Fprintf(os.Stderr, "Captured Gemini state before prompt: %d untracked files, transcript position: %d (last msg id: %s)\n", len(untrackedFiles), startMessageIndex, lastMessageID)
 	return nil
 }
 

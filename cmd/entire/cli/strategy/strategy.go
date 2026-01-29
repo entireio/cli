@@ -194,8 +194,8 @@ type SaveContext struct {
 	AgentType agent.AgentType
 
 	// Transcript position at checkpoint start - tracks what was added during this checkpoint
-	TranscriptUUIDAtStart  string // Last UUID when checkpoint started
-	TranscriptLinesAtStart int    // Line count when checkpoint started
+	TranscriptIdentifierAtStart string // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
+	TranscriptLinesAtStart      int    // Line count when checkpoint started
 
 	// TokenUsage contains the token usage for this checkpoint
 	TokenUsage *agent.TokenUsage

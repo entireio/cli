@@ -158,19 +158,16 @@ func (g *GeminiCLIAgent) GetSessionID(input *agent.HookInput) string {
 }
 
 // TransformSessionID converts a Gemini session ID to an Entire session ID.
-// Format: YYYY-MM-DD-<gemini-session-id>
+// This is now an identity function - the agent session ID IS the Entire session ID.
 func (g *GeminiCLIAgent) TransformSessionID(agentSessionID string) string {
-	return sessionid.EntireSessionID(agentSessionID)
+	return agentSessionID
 }
 
 // ExtractAgentSessionID extracts the Gemini session ID from an Entire session ID.
+// Since Entire session ID = agent session ID (identity), this returns the input unchanged.
+// For backwards compatibility with legacy date-prefixed IDs, it strips the prefix if present.
 func (g *GeminiCLIAgent) ExtractAgentSessionID(entireSessionID string) string {
-	// Expected format: YYYY-MM-DD-<agent-session-id> (11 chars prefix: "2025-12-02-")
-	if len(entireSessionID) > 11 && entireSessionID[4] == '-' && entireSessionID[7] == '-' && entireSessionID[10] == '-' {
-		return entireSessionID[11:]
-	}
-	// Return as-is if not in expected format (backwards compatibility)
-	return entireSessionID
+	return sessionid.ModelSessionID(entireSessionID)
 }
 
 // GetSessionDir returns the directory where Gemini stores session transcripts.

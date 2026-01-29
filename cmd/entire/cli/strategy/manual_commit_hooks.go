@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"entire.io/cli/cmd/entire/cli/agent"
+	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
@@ -18,6 +20,8 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/utils/binary"
 )
 
 // askConfirmTTY prompts the user for a yes/no confirmation via /dev/tty.
@@ -180,7 +184,7 @@ func isGitSequenceOperation() bool {
 //   - "message": using -m or -F flag - prompts user interactively via /dev/tty
 //   - "merge", "squash", "commit": skip trailer entirely (auto-generated or amend commits)
 //
-//nolint:unparam // error return required by interface but hooks must return nil
+
 func (s *ManualCommitStrategy) PrepareCommitMsg(commitMsgFile string, source string) error {
 	logCtx := logging.WithComponent(context.Background(), "checkpoint")
 
@@ -484,6 +488,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		// 1. Update BaseCommit to new HEAD - session now tracks from new commit
 		// 2. Reset CheckpointCount to 0 - no checkpoints exist on new shadow branch yet
 		// 3. Update CondensedTranscriptLines - track transcript position for detecting new content
+		// 4. Clear PromptAttributions - they were already used in condensation, reset for next cycle
 		//
 		// This is critical: if we don't update BaseCommit, listAllSessionStates will try
 		// to find shadow branch for old commit (which gets deleted), and since CheckpointCount > 0,
@@ -492,6 +497,11 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		state.BaseCommit = head.Hash().String()
 		state.CheckpointCount = 0
 		state.CondensedTranscriptLines = result.TotalTranscriptLines
+
+		// Clear attribution tracking - condensation already used these values
+		// If we don't clear them, they'll be double-counted in the next condensation
+		state.PromptAttributions = nil
+		state.PendingPromptAttribution = nil
 
 		// Save checkpoint ID so subsequent commits without new content can reuse it
 		state.LastCheckpointID = checkpointID
@@ -854,6 +864,15 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 			needSave = true
 		}
 
+		// Calculate attribution at prompt start (BEFORE agent makes any changes)
+		// This captures user edits since the last checkpoint (or base commit for first prompt).
+		// IMPORTANT: Always calculate attribution, even for the first checkpoint, to capture
+		// user edits made before the first prompt. The inner CalculatePromptAttribution handles
+		// nil lastCheckpointTree by falling back to baseTree.
+		promptAttr := s.calculatePromptAttributionAtStart(repo, state)
+		state.PendingPromptAttribution = &promptAttr
+		needSave = true
+
 		// Check if HEAD has moved (user pulled/rebased or committed)
 		if state.BaseCommit != head.Hash().String() {
 			oldBaseCommit := state.BaseCommit
@@ -930,13 +949,133 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 	}
 
 	// Initialize new session
-	_, err = s.initializeSession(repo, sessionID, agentType, transcriptPath)
+	state, err = s.initializeSession(repo, sessionID, agentType, transcriptPath)
 	if err != nil {
 		return fmt.Errorf("failed to initialize session: %w", err)
 	}
 
+	// Calculate attribution for pre-prompt edits
+	// This captures any user edits made before the first prompt
+	promptAttr := s.calculatePromptAttributionAtStart(repo, state)
+	state.PendingPromptAttribution = &promptAttr
+	if err = s.saveSessionState(state); err != nil {
+		return fmt.Errorf("failed to save attribution: %w", err)
+	}
+
 	fmt.Fprintf(os.Stderr, "Initialized shadow session: %s\n", sessionID)
 	return nil
+}
+
+// calculatePromptAttributionAtStart calculates attribution at prompt start (before agent runs).
+// This captures user changes since the last checkpoint - no filtering needed since
+// the agent hasn't made any changes yet.
+//
+// IMPORTANT: This reads from the worktree (not staging area) to match what WriteTemporary
+// captures in checkpoints. If we read staged content but checkpoints capture worktree content,
+// unstaged changes would be in the checkpoint but not counted in PromptAttribution, causing
+// them to be incorrectly attributed to the agent later.
+func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
+	repo *git.Repository,
+	state *SessionState,
+) PromptAttribution {
+	logCtx := logging.WithComponent(context.Background(), "attribution")
+	nextCheckpointNum := state.CheckpointCount + 1
+	result := PromptAttribution{CheckpointNumber: nextCheckpointNum}
+
+	// Get last checkpoint tree from shadow branch (if it exists)
+	// For the first checkpoint, no shadow branch exists yet - this is fine,
+	// CalculatePromptAttribution will use baseTree as the reference instead.
+	var lastCheckpointTree *object.Tree
+	shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit)
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+	ref, err := repo.Reference(refName, true)
+	if err != nil {
+		logging.Debug(logCtx, "prompt attribution: no shadow branch yet (first checkpoint)",
+			slog.String("shadow_branch", shadowBranchName))
+		// Continue with lastCheckpointTree = nil
+	} else {
+		shadowCommit, err := repo.CommitObject(ref.Hash())
+		if err != nil {
+			logging.Debug(logCtx, "prompt attribution: failed to get shadow commit",
+				slog.String("shadow_ref", ref.Hash().String()),
+				slog.String("error", err.Error()))
+			// Continue with lastCheckpointTree = nil
+		} else {
+			lastCheckpointTree, err = shadowCommit.Tree()
+			if err != nil {
+				logging.Debug(logCtx, "prompt attribution: failed to get shadow tree",
+					slog.String("error", err.Error()))
+				// Continue with lastCheckpointTree = nil
+			}
+		}
+	}
+
+	// Get base tree for agent lines calculation
+	var baseTree *object.Tree
+	if baseCommit, err := repo.CommitObject(plumbing.NewHash(state.BaseCommit)); err == nil {
+		if tree, treeErr := baseCommit.Tree(); treeErr == nil {
+			baseTree = tree
+		} else {
+			logging.Debug(logCtx, "prompt attribution: base tree unavailable",
+				slog.String("error", treeErr.Error()))
+		}
+	} else {
+		logging.Debug(logCtx, "prompt attribution: base commit unavailable",
+			slog.String("base_commit", state.BaseCommit),
+			slog.String("error", err.Error()))
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree",
+			slog.String("error", err.Error()))
+		return result
+	}
+
+	// Get worktree status to find ALL changed files
+	status, err := worktree.Status()
+	if err != nil {
+		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
+			slog.String("error", err.Error()))
+		return result
+	}
+
+	worktreeRoot := worktree.Filesystem.Root()
+
+	// Build map of changed files with their worktree content
+	// IMPORTANT: We read from worktree (not staging area) to match what WriteTemporary
+	// captures in checkpoints. This ensures attribution is consistent.
+	changedFiles := make(map[string]string)
+	for filePath, fileStatus := range status {
+		// Skip unmodified files
+		if fileStatus.Worktree == git.Unmodified && fileStatus.Staging == git.Unmodified {
+			continue
+		}
+		// Skip .entire metadata directory (session data, not user code)
+		if strings.HasPrefix(filePath, paths.EntireMetadataDir+"/") || strings.HasPrefix(filePath, ".entire/") {
+			continue
+		}
+
+		// Always read from worktree to match checkpoint behavior
+		fullPath := filepath.Join(worktreeRoot, filePath)
+		var content string
+		if data, err := os.ReadFile(fullPath); err == nil { //nolint:gosec // filePath is from git worktree status
+			// Use git's binary detection algorithm (matches getFileContent behavior).
+			// Binary files are excluded from line-based attribution calculations.
+			isBinary, binErr := binary.IsBinary(bytes.NewReader(data))
+			if binErr == nil && !isBinary {
+				content = string(data)
+			}
+		}
+		// else: file deleted, unreadable, or binary - content remains empty string
+
+		changedFiles[filePath] = content
+	}
+
+	// Use CalculatePromptAttribution from manual_commit_attribution.go
+	result = CalculatePromptAttribution(baseTree, lastCheckpointTree, changedFiles, nextCheckpointNum)
+
+	return result
 }
 
 // getStagedFiles returns a list of files staged for commit.

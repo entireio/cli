@@ -323,11 +323,12 @@ func TestPrePromptState_WithTranscriptPosition(t *testing.T) {
 	}
 	if state == nil {
 		t.Fatal("LoadPrePromptState() returned nil")
+		return // unreachable but satisfies staticcheck
 	}
 
 	// Verify transcript position was captured
-	if state.LastTranscriptUUID != expectedUUID {
-		t.Errorf("LastTranscriptUUID = %q, want %q", state.LastTranscriptUUID, expectedUUID)
+	if state.LastTranscriptIdentifier != expectedUUID {
+		t.Errorf("LastTranscriptIdentifier = %q, want %q", state.LastTranscriptIdentifier, expectedUUID)
 	}
 	if state.LastTranscriptLineCount != 3 {
 		t.Errorf("LastTranscriptLineCount = %d, want 3", state.LastTranscriptLineCount)
@@ -356,11 +357,12 @@ func TestPrePromptState_WithEmptyTranscriptPath(t *testing.T) {
 	}
 	if state == nil {
 		t.Fatal("LoadPrePromptState() returned nil")
+		return // unreachable but satisfies staticcheck
 	}
 
 	// Transcript position should be empty/zero when no transcript provided
-	if state.LastTranscriptUUID != "" {
-		t.Errorf("LastTranscriptUUID = %q, want empty", state.LastTranscriptUUID)
+	if state.LastTranscriptIdentifier != "" {
+		t.Errorf("LastTranscriptIdentifier = %q, want empty", state.LastTranscriptIdentifier)
 	}
 	if state.LastTranscriptLineCount != 0 {
 		t.Errorf("LastTranscriptLineCount = %d, want 0", state.LastTranscriptLineCount)
@@ -399,8 +401,8 @@ func TestPrePromptState_WithSummaryOnlyTranscript(t *testing.T) {
 	if state.LastTranscriptLineCount != 2 {
 		t.Errorf("LastTranscriptLineCount = %d, want 2", state.LastTranscriptLineCount)
 	}
-	if state.LastTranscriptUUID != "" {
-		t.Errorf("LastTranscriptUUID = %q, want empty (summary rows don't have uuid)", state.LastTranscriptUUID)
+	if state.LastTranscriptIdentifier != "" {
+		t.Errorf("LastTranscriptIdentifier = %q, want empty (summary rows don't have uuid)", state.LastTranscriptIdentifier)
 	}
 
 	// Cleanup

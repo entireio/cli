@@ -214,21 +214,9 @@ func TestGeminiHooks_SessionStartUpdatesSessionID(t *testing.T) {
 
 	currentSessionID := strings.TrimSpace(string(data))
 
-	// Verify the session ID has the date prefix (format: YYYY-MM-DD-<session-id>)
-	expectedSuffix := "-" + geminiSessionID
-	if !strings.HasSuffix(currentSessionID, expectedSuffix) {
-		t.Errorf("current session ID = %q, should end with %q", currentSessionID, expectedSuffix)
-	}
-
-	// Verify the date prefix is present (11 chars: YYYY-MM-DD-)
-	if len(currentSessionID) < 11+len(geminiSessionID) {
-		t.Fatalf("current session ID = %q, too short for date prefix", currentSessionID)
-	}
-
-	// Verify the date prefix format (YYYY-MM-DD-)
-	datePrefix := currentSessionID[:11]
-	if len(datePrefix) != 11 || datePrefix[4] != '-' || datePrefix[7] != '-' || datePrefix[10] != '-' {
-		t.Errorf("current session ID = %q, date prefix %q doesn't match format YYYY-MM-DD-", currentSessionID, datePrefix)
+	// Session IDs are now used directly (no date prefix - identity function)
+	if currentSessionID != geminiSessionID {
+		t.Errorf("current session ID = %q, want %q (agent ID directly)", currentSessionID, geminiSessionID)
 	}
 }
 

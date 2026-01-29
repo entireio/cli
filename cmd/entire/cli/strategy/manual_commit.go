@@ -60,23 +60,46 @@ func sessionStateToStrategy(state *session.State) *SessionState {
 	if state == nil {
 		return nil
 	}
-	return &SessionState{
-		SessionID:                state.SessionID,
-		BaseCommit:               state.BaseCommit,
-		WorktreePath:             state.WorktreePath,
-		StartedAt:                state.StartedAt,
-		CheckpointCount:          state.CheckpointCount,
-		CondensedTranscriptLines: state.CondensedTranscriptLines,
-		UntrackedFilesAtStart:    state.UntrackedFilesAtStart,
-		FilesTouched:             state.FilesTouched,
-		ConcurrentWarningShown:   state.ConcurrentWarningShown,
-		LastCheckpointID:         state.LastCheckpointID,
-		AgentType:                state.AgentType,
-		TokenUsage:               state.TokenUsage,
-		TranscriptLinesAtStart:   state.TranscriptLinesAtStart,
-		TranscriptUUIDAtStart:    state.TranscriptUUIDAtStart,
-		TranscriptPath:           state.TranscriptPath,
+	result := &SessionState{
+		SessionID:                   state.SessionID,
+		BaseCommit:                  state.BaseCommit,
+		WorktreePath:                state.WorktreePath,
+		StartedAt:                   state.StartedAt,
+		CheckpointCount:             state.CheckpointCount,
+		CondensedTranscriptLines:    state.CondensedTranscriptLines,
+		UntrackedFilesAtStart:       state.UntrackedFilesAtStart,
+		FilesTouched:                state.FilesTouched,
+		ConcurrentWarningShown:      state.ConcurrentWarningShown,
+		LastCheckpointID:            state.LastCheckpointID,
+		AgentType:                   state.AgentType,
+		TokenUsage:                  state.TokenUsage,
+		TranscriptLinesAtStart:      state.TranscriptLinesAtStart,
+		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
+		TranscriptPath:              state.TranscriptPath,
 	}
+	// Convert PromptAttributions
+	for _, pa := range state.PromptAttributions {
+		result.PromptAttributions = append(result.PromptAttributions, PromptAttribution{
+			CheckpointNumber:  pa.CheckpointNumber,
+			UserLinesAdded:    pa.UserLinesAdded,
+			UserLinesRemoved:  pa.UserLinesRemoved,
+			AgentLinesAdded:   pa.AgentLinesAdded,
+			AgentLinesRemoved: pa.AgentLinesRemoved,
+			UserAddedPerFile:  pa.UserAddedPerFile,
+		})
+	}
+	// Convert PendingPromptAttribution
+	if state.PendingPromptAttribution != nil {
+		result.PendingPromptAttribution = &PromptAttribution{
+			CheckpointNumber:  state.PendingPromptAttribution.CheckpointNumber,
+			UserLinesAdded:    state.PendingPromptAttribution.UserLinesAdded,
+			UserLinesRemoved:  state.PendingPromptAttribution.UserLinesRemoved,
+			AgentLinesAdded:   state.PendingPromptAttribution.AgentLinesAdded,
+			AgentLinesRemoved: state.PendingPromptAttribution.AgentLinesRemoved,
+			UserAddedPerFile:  state.PendingPromptAttribution.UserAddedPerFile,
+		}
+	}
+	return result
 }
 
 // sessionStateFromStrategy converts strategy.SessionState to session.State.
@@ -84,23 +107,46 @@ func sessionStateFromStrategy(state *SessionState) *session.State {
 	if state == nil {
 		return nil
 	}
-	return &session.State{
-		SessionID:                state.SessionID,
-		BaseCommit:               state.BaseCommit,
-		WorktreePath:             state.WorktreePath,
-		StartedAt:                state.StartedAt,
-		CheckpointCount:          state.CheckpointCount,
-		CondensedTranscriptLines: state.CondensedTranscriptLines,
-		UntrackedFilesAtStart:    state.UntrackedFilesAtStart,
-		FilesTouched:             state.FilesTouched,
-		ConcurrentWarningShown:   state.ConcurrentWarningShown,
-		LastCheckpointID:         state.LastCheckpointID,
-		AgentType:                state.AgentType,
-		TokenUsage:               state.TokenUsage,
-		TranscriptLinesAtStart:   state.TranscriptLinesAtStart,
-		TranscriptUUIDAtStart:    state.TranscriptUUIDAtStart,
-		TranscriptPath:           state.TranscriptPath,
+	result := &session.State{
+		SessionID:                   state.SessionID,
+		BaseCommit:                  state.BaseCommit,
+		WorktreePath:                state.WorktreePath,
+		StartedAt:                   state.StartedAt,
+		CheckpointCount:             state.CheckpointCount,
+		CondensedTranscriptLines:    state.CondensedTranscriptLines,
+		UntrackedFilesAtStart:       state.UntrackedFilesAtStart,
+		FilesTouched:                state.FilesTouched,
+		ConcurrentWarningShown:      state.ConcurrentWarningShown,
+		LastCheckpointID:            state.LastCheckpointID,
+		AgentType:                   state.AgentType,
+		TokenUsage:                  state.TokenUsage,
+		TranscriptLinesAtStart:      state.TranscriptLinesAtStart,
+		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
+		TranscriptPath:              state.TranscriptPath,
 	}
+	// Convert PromptAttributions
+	for _, pa := range state.PromptAttributions {
+		result.PromptAttributions = append(result.PromptAttributions, session.PromptAttribution{
+			CheckpointNumber:  pa.CheckpointNumber,
+			UserLinesAdded:    pa.UserLinesAdded,
+			UserLinesRemoved:  pa.UserLinesRemoved,
+			AgentLinesAdded:   pa.AgentLinesAdded,
+			AgentLinesRemoved: pa.AgentLinesRemoved,
+			UserAddedPerFile:  pa.UserAddedPerFile,
+		})
+	}
+	// Convert PendingPromptAttribution
+	if state.PendingPromptAttribution != nil {
+		result.PendingPromptAttribution = &session.PromptAttribution{
+			CheckpointNumber:  state.PendingPromptAttribution.CheckpointNumber,
+			UserLinesAdded:    state.PendingPromptAttribution.UserLinesAdded,
+			UserLinesRemoved:  state.PendingPromptAttribution.UserLinesRemoved,
+			AgentLinesAdded:   state.PendingPromptAttribution.AgentLinesAdded,
+			AgentLinesRemoved: state.PendingPromptAttribution.AgentLinesRemoved,
+			UserAddedPerFile:  state.PendingPromptAttribution.UserAddedPerFile,
+		}
+	}
+	return result
 }
 
 // NewManualCommitStrategy creates a new manual-commit strategy instance.

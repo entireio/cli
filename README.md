@@ -97,7 +97,7 @@ Entire offers two strategies for capturing your work:
 
 | Command | Description |
 |---------|-------------|
-| `entire enable` | Enable Entire in your repository, install hooks |
+| `entire enable` | Enable Entire in your repository (uses `manual-commit` by default) |
 | `entire disable` | Remove Entire hooks from repository |
 | `entire status` | Show current session and strategy info |
 | `entire rewind` | Rewind to a previous checkpoint |
@@ -105,6 +105,29 @@ Entire offers two strategies for capturing your work:
 | `entire explain` | Explain a session or commit |
 | `entire session` | View and manage sessions (list, show details, view logs) |
 | `entire version` | Show Entire CLI version |
+
+### `entire enable` Flags
+
+| Flag | Description |
+|------|-------------|
+| `--strategy <name>` | Strategy to use: `manual-commit` (default) or `auto-commit` |
+| `--force`, `-f` | Force reinstall hooks (removes existing Entire hooks first) |
+| `--local` | Write settings to `settings.local.json` instead of `settings.json` |
+| `--project` | Write settings to `settings.json` even if it already exists |
+| `--telemetry=false` | Disable anonymous usage analytics |
+
+**Examples:**
+
+```bash
+# Use auto-commit strategy
+entire enable --strategy auto-commit
+
+# Force reinstall hooks
+entire enable --force
+
+# Save settings locally (not committed to git)
+entire enable --local
+```
 
 ## Configuration
 

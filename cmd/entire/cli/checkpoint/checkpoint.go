@@ -240,11 +240,15 @@ type WriteCommittedOptions struct {
 	Agent agent.AgentType
 
 	// Transcript position at checkpoint start - tracks what was added during this checkpoint
-	TranscriptUUIDAtStart  string // Last UUID when checkpoint started
-	TranscriptLinesAtStart int    // Line count when checkpoint started
+	TranscriptIdentifierAtStart string // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
+	TranscriptLinesAtStart      int    // Line count when checkpoint started
 
 	// TokenUsage contains the token usage for this checkpoint
 	TokenUsage *agent.TokenUsage
+
+	// InitialAttribution is line-level attribution calculated at commit time
+	// comparing checkpoint tree (agent work) to committed tree (may include human edits)
+	InitialAttribution *InitialAttribution
 }
 
 // ReadCommittedResult contains the result of reading a committed checkpoint.
@@ -338,14 +342,17 @@ type CommittedMetadata struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 
 	// Transcript position at checkpoint start - tracks what was added during this checkpoint
-	TranscriptUUIDAtStart  string `json:"transcript_uuid_at_start,omitempty"`  // Last UUID when checkpoint started
-	TranscriptLinesAtStart int    `json:"transcript_lines_at_start,omitempty"` // Line count when checkpoint started
+	TranscriptIdentifierAtStart string `json:"transcript_identifier_at_start,omitempty"` // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
+	TranscriptLinesAtStart      int    `json:"transcript_lines_at_start,omitempty"`      // Line/message count when checkpoint started
 
 	// Token usage for this checkpoint
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 
 	// AI-generated summary of the checkpoint
 	Summary *Summary `json:"summary,omitempty"`
+
+	// InitialAttribution is line-level attribution calculated at commit time
+	InitialAttribution *InitialAttribution `json:"initial_attribution,omitempty"`
 }
 
 // Summary contains AI-generated summary of a checkpoint.
@@ -370,6 +377,30 @@ type CodeLearning struct {
 	Line    int    `json:"line,omitempty"`     // Start line number
 	EndLine int    `json:"end_line,omitempty"` // End line for ranges (optional)
 	Finding string `json:"finding"`            // What was learned
+}
+
+// InitialAttribution captures line-level attribution metrics at commit time.
+// This is a point-in-time snapshot comparing the checkpoint tree (agent work)
+// against the committed tree (may include human edits).
+//
+// Attribution Metrics:
+//   - TotalCommitted measures "net additions" (lines added that remain in the commit)
+//   - AgentPercentage represents "of the new code added, what percentage came from the agent"
+//   - Deletion work is tracked separately in HumanRemoved (not included in percentage)
+//
+// Deletion-Only Commits:
+// For commits with only deletions (no additions), TotalCommitted will be 0 and
+// AgentPercentage will be 0. This is by design - the percentage metric is only
+// meaningful for commits that add code. Deletion contributions are captured in
+// the HumanRemoved field but don't affect the attribution percentage.
+type InitialAttribution struct {
+	CalculatedAt    time.Time `json:"calculated_at"`
+	AgentLines      int       `json:"agent_lines"`      // Lines added by agent (base → shadow diff)
+	HumanAdded      int       `json:"human_added"`      // Lines added by human (excluding modifications)
+	HumanModified   int       `json:"human_modified"`   // Lines modified by human (estimate: min(added, removed))
+	HumanRemoved    int       `json:"human_removed"`    // Lines removed by human (excluding modifications)
+	TotalCommitted  int       `json:"total_committed"`  // Net additions in commit (agent + human new lines, not total file size)
+	AgentPercentage float64   `json:"agent_percentage"` // agent_lines / total_committed * 100 (0 for deletion-only commits)
 }
 
 // Info provides summary information for listing checkpoints.

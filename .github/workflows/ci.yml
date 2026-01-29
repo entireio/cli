@@ -7,11 +7,9 @@ on:
       - main
 jobs:
   test:
-    runs-on: ubuntu-latest 
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: jdx/mise-action@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Tests
         run: mise run test:ci

@@ -1268,8 +1268,6 @@ func GetMainBranchHash(repo *git.Repository) plumbing.Hash {
 // First checks origin/HEAD, then falls back to checking if main/master exists.
 // Returns empty string if unable to determine.
 // NOTE: Duplicated from cli/git_operations.go - see ENT-129 for consolidation.
-//
-
 func GetDefaultBranchName(repo *git.Repository) string {
 	// Try to get the symbolic reference for origin/HEAD
 	ref, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", "HEAD"), true)

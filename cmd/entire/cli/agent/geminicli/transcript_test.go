@@ -231,6 +231,192 @@ func TestExtractLastUserPrompt(t *testing.T) {
 	}
 }
 
+func TestGetLastMessageID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		data    string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "transcript with message IDs",
+			data: `{"messages": [
+				{"id": "msg-1", "type": "user", "content": "hello"},
+				{"id": "msg-2", "type": "gemini", "content": "hi there"}
+			]}`,
+			want:    "msg-2",
+			wantErr: false,
+		},
+		{
+			name:    "empty transcript",
+			data:    `{"messages": []}`,
+			want:    "",
+			wantErr: false,
+		},
+		{
+			name: "message without ID (empty ID field)",
+			data: `{"messages": [
+				{"type": "user", "content": "hello"},
+				{"type": "gemini", "content": "hi"}
+			]}`,
+			want:    "",
+			wantErr: false,
+		},
+		{
+			name: "mixed - some with IDs, some without",
+			data: `{"messages": [
+				{"id": "msg-1", "type": "user", "content": "hello"},
+				{"type": "gemini", "content": "hi"}
+			]}`,
+			want:    "",
+			wantErr: false,
+		},
+		{
+			name:    "invalid JSON",
+			data:    `not valid json`,
+			want:    "",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := GetLastMessageID([]byte(tt.data))
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GetLastMessageID() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("GetLastMessageID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetLastMessageIDFromTranscript(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		transcript *GeminiTranscript
+		want       string
+	}{
+		{
+			name: "transcript with message IDs",
+			transcript: &GeminiTranscript{
+				Messages: []GeminiMessage{
+					{ID: "msg-1", Type: "user", Content: "hello"},
+					{ID: "msg-2", Type: "gemini", Content: "hi there"},
+				},
+			},
+			want: "msg-2",
+		},
+		{
+			name: "empty transcript",
+			transcript: &GeminiTranscript{
+				Messages: []GeminiMessage{},
+			},
+			want: "",
+		},
+		{
+			name: "message without ID",
+			transcript: &GeminiTranscript{
+				Messages: []GeminiMessage{
+					{Type: "user", Content: "hello"},
+				},
+			},
+			want: "",
+		},
+		{
+			name:       "nil messages",
+			transcript: &GeminiTranscript{},
+			want:       "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := GetLastMessageIDFromTranscript(tt.transcript)
+			if got != tt.want {
+				t.Errorf("GetLastMessageIDFromTranscript() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetLastMessageIDFromFile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty path", func(t *testing.T) {
+		t.Parallel()
+		got, err := GetLastMessageIDFromFile("")
+		if err != nil {
+			t.Errorf("GetLastMessageIDFromFile() error = %v", err)
+		}
+		if got != "" {
+			t.Errorf("GetLastMessageIDFromFile() = %q, want empty string", got)
+		}
+	})
+
+	t.Run("non-existent file", func(t *testing.T) {
+		t.Parallel()
+		got, err := GetLastMessageIDFromFile("/nonexistent/path/transcript.json")
+		if err != nil {
+			t.Errorf("GetLastMessageIDFromFile() error = %v, want nil for non-existent file", err)
+		}
+		if got != "" {
+			t.Errorf("GetLastMessageIDFromFile() = %q, want empty string", got)
+		}
+	})
+
+	t.Run("empty file", func(t *testing.T) {
+		t.Parallel()
+		tmpFile := t.TempDir() + "/empty.json"
+		if err := os.WriteFile(tmpFile, []byte(""), 0o644); err != nil {
+			t.Fatalf("failed to create test file: %v", err)
+		}
+		got, err := GetLastMessageIDFromFile(tmpFile)
+		if err != nil {
+			t.Errorf("GetLastMessageIDFromFile() error = %v", err)
+		}
+		if got != "" {
+			t.Errorf("GetLastMessageIDFromFile() = %q, want empty string", got)
+		}
+	})
+
+	t.Run("valid file with message IDs", func(t *testing.T) {
+		t.Parallel()
+		tmpFile := t.TempDir() + "/transcript.json"
+		content := `{"messages": [{"id": "abc-123", "type": "user", "content": "hello"}]}`
+		if err := os.WriteFile(tmpFile, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to create test file: %v", err)
+		}
+		got, err := GetLastMessageIDFromFile(tmpFile)
+		if err != nil {
+			t.Errorf("GetLastMessageIDFromFile() error = %v", err)
+		}
+		if got != "abc-123" {
+			t.Errorf("GetLastMessageIDFromFile() = %q, want 'abc-123'", got)
+		}
+	})
+
+	t.Run("invalid JSON file", func(t *testing.T) {
+		t.Parallel()
+		tmpFile := t.TempDir() + "/invalid.json"
+		if err := os.WriteFile(tmpFile, []byte("not valid json"), 0o644); err != nil {
+			t.Fatalf("failed to create test file: %v", err)
+		}
+		_, err := GetLastMessageIDFromFile(tmpFile)
+		if err == nil {
+			t.Error("GetLastMessageIDFromFile() expected error for invalid JSON")
+		}
+	})
+}
+
 func TestExtractModifiedFilesFromTranscript(t *testing.T) {
 	t.Parallel()
 

@@ -24,7 +24,7 @@ func Register(name AgentName, factory Factory) {
 
 // Get retrieves an agent by name.
 //
-//nolint:ireturn // Factory pattern requires returning the interface
+
 func Get(name AgentName) (Agent, error) {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
@@ -52,7 +52,7 @@ func List() []AgentName {
 // Detect attempts to auto-detect which agent is being used.
 // Checks each registered agent's DetectPresence method.
 //
-//nolint:ireturn // Factory pattern requires returning the interface
+
 func Detect() (Agent, error) {
 	registryMu.RLock()
 	defer registryMu.RUnlock()

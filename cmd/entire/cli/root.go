@@ -42,6 +42,11 @@ func NewRootCmd() *cobra.Command {
 			HiddenDefaultCmd: true,
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+			// Skip analytics for the analytics command itself (prevents recursion)
+			if cmd.Name() == "__send_analytics" {
+				return
+			}
+
 			// Load telemetry preference from settings (ignore errors - nil defaults to disabled)
 			var telemetryEnabled *bool
 			settings, err := LoadEntireSettings()
@@ -49,10 +54,13 @@ func NewRootCmd() *cobra.Command {
 				telemetryEnabled = settings.Telemetry
 			}
 
-			// Initialize telemetry client and add to context
-			telemetryClient := telemetry.NewClient(Version, telemetryEnabled)
-			defer telemetryClient.Close()
-			telemetryClient.TrackCommand(cmd, settings.Strategy, settings.Agent, settings.Enabled)
+			// Check if telemetry is enabled
+			if telemetryEnabled == nil || !*telemetryEnabled {
+				return
+			}
+
+			// Use detached tracking (non-blocking)
+			telemetry.TrackCommandDetached(cmd, settings.Strategy, settings.Agent, settings.Enabled, Version)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
@@ -70,6 +78,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newExplainCmd())
 	cmd.AddCommand(newDebugCmd())
+	cmd.AddCommand(newSendAnalyticsCmd())
 
 	// Replace default help command with custom one that supports -t flag
 	cmd.SetHelpCommand(NewHelpCmd(cmd))
@@ -85,6 +94,19 @@ func newVersionCmd() *cobra.Command {
 			fmt.Printf("Entire CLI %s (%s)\n", Version, Commit)
 			fmt.Printf("Go version: %s\n", runtime.Version())
 			fmt.Printf("OS/Arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+		},
+	}
+}
+
+// newSendAnalyticsCmd creates the hidden command for sending analytics from a detached subprocess.
+// This command is invoked by TrackCommandDetached and should not be called directly by users.
+func newSendAnalyticsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "__send_analytics",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
+		Run: func(_ *cobra.Command, args []string) {
+			telemetry.SendEvent(args[0])
 		},
 	}
 }

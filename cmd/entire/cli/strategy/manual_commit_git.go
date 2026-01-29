@@ -57,6 +57,27 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 	shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit)
 	branchExisted := store.ShadowBranchExists(state.BaseCommit)
 
+	// Use the pending attribution calculated at prompt start (in InitializeSession)
+	// This was calculated BEFORE the agent made changes, so it accurately captures user edits
+	var promptAttr PromptAttribution
+	if state.PendingPromptAttribution != nil {
+		promptAttr = *state.PendingPromptAttribution
+		state.PendingPromptAttribution = nil // Clear after use
+	} else {
+		// No pending attribution (e.g., first checkpoint or session initialized without it)
+		promptAttr = PromptAttribution{CheckpointNumber: state.CheckpointCount + 1}
+	}
+
+	// Log the prompt attribution for debugging
+	attrLogCtx := logging.WithComponent(context.Background(), "attribution")
+	logging.Debug(attrLogCtx, "prompt attribution at checkpoint save",
+		slog.Int("checkpoint_number", promptAttr.CheckpointNumber),
+		slog.Int("user_added", promptAttr.UserLinesAdded),
+		slog.Int("user_removed", promptAttr.UserLinesRemoved),
+		slog.Int("agent_added", promptAttr.AgentLinesAdded),
+		slog.Int("agent_removed", promptAttr.AgentLinesRemoved),
+		slog.String("session_id", sessionID))
+
 	// Use WriteTemporary to create the checkpoint
 	isFirstCheckpointOfSession := state.CheckpointCount == 0
 	result, err := store.WriteTemporary(context.Background(), checkpoint.WriteTemporaryOptions{
@@ -92,13 +113,16 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 	// Update session state
 	state.CheckpointCount++
 
+	// Store the prompt attribution we calculated before saving
+	state.PromptAttributions = append(state.PromptAttributions, promptAttr)
+
 	// Track touched files (modified, new, and deleted)
 	state.FilesTouched = mergeFilesTouched(state.FilesTouched, ctx.ModifiedFiles, ctx.NewFiles, ctx.DeletedFiles)
 
 	// On first checkpoint, store the initial transcript position
 	if isFirstCheckpointOfSession {
 		state.TranscriptLinesAtStart = ctx.TranscriptLinesAtStart
-		state.TranscriptUUIDAtStart = ctx.TranscriptUUIDAtStart
+		state.TranscriptIdentifierAtStart = ctx.TranscriptIdentifierAtStart
 	}
 
 	// Accumulate token usage

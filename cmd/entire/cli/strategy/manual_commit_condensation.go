@@ -4,17 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/agent/claudecode"
 	cpkg "entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/textutil"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // listCheckpoints returns all checkpoints from the sessions branch.
@@ -126,24 +129,112 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 	// Get current branch name
 	branchName := GetCurrentBranchName(repo)
 
+	// Calculate initial attribution using accumulated prompt attribution data.
+	// This uses user edits captured at each prompt start (before agent works),
+	// plus any user edits after the final checkpoint (shadow → head).
+	logCtx := logging.WithComponent(context.Background(), "attribution")
+	var attribution *cpkg.InitialAttribution
+	headRef, headErr := repo.Head()
+	if headErr != nil {
+		logging.Debug(logCtx, "attribution skipped: failed to get HEAD",
+			slog.String("error", headErr.Error()))
+	} else {
+		headCommit, commitErr := repo.CommitObject(headRef.Hash())
+		if commitErr != nil {
+			logging.Debug(logCtx, "attribution skipped: failed to get HEAD commit",
+				slog.String("error", commitErr.Error()))
+		} else {
+			headTree, treeErr := headCommit.Tree()
+			if treeErr != nil {
+				logging.Debug(logCtx, "attribution skipped: failed to get HEAD tree",
+					slog.String("error", treeErr.Error()))
+			} else {
+				// Get shadow branch tree (checkpoint tree - what the agent wrote)
+				shadowCommit, shadowErr := repo.CommitObject(ref.Hash())
+				if shadowErr != nil {
+					logging.Debug(logCtx, "attribution skipped: failed to get shadow commit",
+						slog.String("error", shadowErr.Error()),
+						slog.String("shadow_ref", ref.Hash().String()))
+				} else {
+					shadowTree, shadowTreeErr := shadowCommit.Tree()
+					if shadowTreeErr != nil {
+						logging.Debug(logCtx, "attribution skipped: failed to get shadow tree",
+							slog.String("error", shadowTreeErr.Error()))
+					} else {
+						// Get base tree (state before session started)
+						var baseTree *object.Tree
+						if baseCommit, baseErr := repo.CommitObject(plumbing.NewHash(state.BaseCommit)); baseErr == nil {
+							if tree, baseTErr := baseCommit.Tree(); baseTErr == nil {
+								baseTree = tree
+							} else {
+								logging.Debug(logCtx, "attribution: base tree unavailable",
+									slog.String("error", baseTErr.Error()))
+							}
+						} else {
+							logging.Debug(logCtx, "attribution: base commit unavailable",
+								slog.String("error", baseErr.Error()),
+								slog.String("base_commit", state.BaseCommit))
+						}
+
+						// Log accumulated prompt attributions for debugging
+						var totalUserAdded, totalUserRemoved int
+						for i, pa := range state.PromptAttributions {
+							totalUserAdded += pa.UserLinesAdded
+							totalUserRemoved += pa.UserLinesRemoved
+							logging.Debug(logCtx, "prompt attribution data",
+								slog.Int("checkpoint", pa.CheckpointNumber),
+								slog.Int("user_added", pa.UserLinesAdded),
+								slog.Int("user_removed", pa.UserLinesRemoved),
+								slog.Int("agent_added", pa.AgentLinesAdded),
+								slog.Int("agent_removed", pa.AgentLinesRemoved),
+								slog.Int("index", i))
+						}
+
+						attribution = CalculateAttributionWithAccumulated(
+							baseTree,
+							shadowTree,
+							headTree,
+							sessionData.FilesTouched,
+							state.PromptAttributions,
+						)
+
+						if attribution != nil {
+							logging.Info(logCtx, "attribution calculated",
+								slog.Int("agent_lines", attribution.AgentLines),
+								slog.Int("human_added", attribution.HumanAdded),
+								slog.Int("human_modified", attribution.HumanModified),
+								slog.Int("human_removed", attribution.HumanRemoved),
+								slog.Int("total_committed", attribution.TotalCommitted),
+								slog.Float64("agent_percentage", attribution.AgentPercentage),
+								slog.Int("accumulated_user_added", totalUserAdded),
+								slog.Int("accumulated_user_removed", totalUserRemoved),
+								slog.Int("files_touched", len(sessionData.FilesTouched)))
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Write checkpoint metadata using the checkpoint store
 	if err := store.WriteCommitted(context.Background(), cpkg.WriteCommittedOptions{
-		CheckpointID:           checkpointID,
-		SessionID:              state.SessionID,
-		Strategy:               StrategyNameManualCommit,
-		Branch:                 branchName,
-		Transcript:             sessionData.Transcript,
-		Prompts:                sessionData.Prompts,
-		Context:                sessionData.Context,
-		FilesTouched:           sessionData.FilesTouched,
-		CheckpointsCount:       state.CheckpointCount,
-		EphemeralBranch:        shadowBranchName,
-		AuthorName:             authorName,
-		AuthorEmail:            authorEmail,
-		Agent:                  state.AgentType,
-		TranscriptUUIDAtStart:  state.TranscriptUUIDAtStart,
-		TranscriptLinesAtStart: state.TranscriptLinesAtStart,
-		TokenUsage:             sessionData.TokenUsage,
+		CheckpointID:                checkpointID,
+		SessionID:                   state.SessionID,
+		Strategy:                    StrategyNameManualCommit,
+		Branch:                      branchName,
+		Transcript:                  sessionData.Transcript,
+		Prompts:                     sessionData.Prompts,
+		Context:                     sessionData.Context,
+		FilesTouched:                sessionData.FilesTouched,
+		CheckpointsCount:            state.CheckpointCount,
+		EphemeralBranch:             shadowBranchName,
+		AuthorName:                  authorName,
+		AuthorEmail:                 authorEmail,
+		Agent:                       state.AgentType,
+		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
+		TranscriptLinesAtStart:      state.TranscriptLinesAtStart,
+		TokenUsage:                  sessionData.TokenUsage,
+		InitialAttribution:          attribution,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
 	}

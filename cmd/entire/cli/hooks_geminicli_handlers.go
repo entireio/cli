@@ -17,7 +17,6 @@ import (
 	"entire.io/cli/cmd/entire/cli/agent/geminicli"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
-	"entire.io/cli/cmd/entire/cli/session"
 	"entire.io/cli/cmd/entire/cli/strategy"
 )
 
@@ -164,42 +163,8 @@ func checkConcurrentSessionsGemini(entireSessionID string) {
 }
 
 // handleGeminiSessionStart handles the SessionStart hook for Gemini CLI.
-// It reads session info from stdin and sets it as the current session.
 func handleGeminiSessionStart() error {
-	// Get the agent for session ID transformation
-	ag, err := GetCurrentHookAgent()
-	if err != nil {
-		return fmt.Errorf("failed to get agent: %w", err)
-	}
-
-	// Parse hook input using agent interface
-	input, err := ag.ParseHookInput(agent.HookSessionStart, os.Stdin)
-	if err != nil {
-		return fmt.Errorf("failed to parse hook input: %w", err)
-	}
-
-	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
-	logging.Info(logCtx, "gemini-session-start",
-		slog.String("hook", "session-start"),
-		slog.String("hook_type", "agent"),
-		slog.String("model_session_id", input.SessionID),
-		slog.String("transcript_path", input.SessionRef),
-	)
-
-	if input.SessionID == "" {
-		return errors.New("no session_id in input")
-	}
-
-	// Get or create stable session ID (reuses existing if session resumed across days)
-	entireSessionID := session.GetOrCreateEntireSessionID(input.SessionID)
-
-	// Write session ID to current_session file
-	if err := paths.WriteCurrentSession(entireSessionID); err != nil {
-		return fmt.Errorf("failed to set current session: %w", err)
-	}
-
-	fmt.Printf("Current session set to: %s\n", entireSessionID)
-	return nil
+	return handleSessionStartCommon()
 }
 
 // handleGeminiSessionEnd handles the SessionEnd hook for Gemini CLI.
@@ -352,16 +317,20 @@ func commitGeminiSession(ctx *geminiSessionContext) error {
 		fmt.Fprintf(os.Stderr, "Loaded pre-prompt state: %d pre-existing untracked files, start message index: %d\n", len(preState.UntrackedFiles), preState.StartMessageIndex)
 	}
 
+	// Get transcript position from pre-prompt state
+	var startMessageIndex int
+	if preState != nil {
+		startMessageIndex = preState.StartMessageIndex
+	}
+
 	// Calculate token usage for this prompt/response cycle (Gemini-specific)
+	var tokenUsage *agent.TokenUsage
 	if ctx.transcriptPath != "" {
-		startIndex := 0
-		if preState != nil {
-			startIndex = preState.StartMessageIndex
-		}
-		tokenUsage, tokenErr := geminicli.CalculateTokenUsageFromFile(ctx.transcriptPath, startIndex)
+		usage, tokenErr := geminicli.CalculateTokenUsageFromFile(ctx.transcriptPath, startMessageIndex)
 		if tokenErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to calculate token usage: %v\n", tokenErr)
-		} else if tokenUsage != nil && tokenUsage.APICallCount > 0 {
+		} else if usage != nil && usage.APICallCount > 0 {
+			tokenUsage = usage
 			fmt.Fprintf(os.Stderr, "Token usage for this checkpoint: input=%d, output=%d, cache_read=%d, api_calls=%d\n",
 				tokenUsage.InputTokens, tokenUsage.OutputTokens, tokenUsage.CacheReadTokens, tokenUsage.APICallCount)
 		}
@@ -409,17 +378,35 @@ func commitGeminiSession(ctx *geminiSessionContext) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
 	}
 
+	// Get agent type from the hook agent (determined by which hook command is running)
+	// This is authoritative - if we're in "entire hooks gemini session-end", it's Gemini CLI
+	hookAgent, agentErr := GetCurrentHookAgent()
+	if agentErr != nil {
+		return fmt.Errorf("failed to get agent: %w", agentErr)
+	}
+	agentType := hookAgent.Type()
+
+	// Get transcript identifier at start from pre-prompt state
+	var transcriptIdentifierAtStart string
+	if preState != nil {
+		transcriptIdentifierAtStart = preState.LastTranscriptIdentifier
+	}
+
 	saveCtx := strategy.SaveContext{
-		SessionID:      ctx.entireSessionID,
-		ModifiedFiles:  relModifiedFiles,
-		NewFiles:       relNewFiles,
-		DeletedFiles:   relDeletedFiles,
-		MetadataDir:    ctx.sessionDir,
-		MetadataDirAbs: ctx.sessionDirAbs,
-		CommitMessage:  ctx.commitMessage,
-		TranscriptPath: ctx.transcriptPath,
-		AuthorName:     author.Name,
-		AuthorEmail:    author.Email,
+		SessionID:                   ctx.entireSessionID,
+		ModifiedFiles:               relModifiedFiles,
+		NewFiles:                    relNewFiles,
+		DeletedFiles:                relDeletedFiles,
+		MetadataDir:                 ctx.sessionDir,
+		MetadataDirAbs:              ctx.sessionDirAbs,
+		CommitMessage:               ctx.commitMessage,
+		TranscriptPath:              ctx.transcriptPath,
+		AuthorName:                  author.Name,
+		AuthorEmail:                 author.Email,
+		AgentType:                   agentType,
+		TranscriptLinesAtStart:      startMessageIndex,
+		TranscriptIdentifierAtStart: transcriptIdentifierAtStart,
+		TokenUsage:                  tokenUsage,
 	}
 
 	if err := strat.SaveChanges(saveCtx); err != nil {
@@ -605,8 +592,8 @@ func handleGeminiBeforeAgent() error {
 		return errors.New("no session_id in input")
 	}
 
-	// Get or create stable session ID (reuses existing if session resumed across days)
-	entireSessionID := session.GetOrCreateEntireSessionID(input.SessionID)
+	// Get the entire session ID, handling legacy date-prefixed format
+	entireSessionID := currentSessionIDWithFallback(input.SessionID)
 
 	// Check for concurrent sessions before proceeding
 	// This will output a blocking response and exit if there's a conflict (first time only)

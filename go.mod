@@ -1,6 +1,6 @@
 module entire.io/cli
 
-go 1.25.5
+go 1.25.6
 
 require (
 	github.com/charmbracelet/huh v0.8.0
@@ -8,6 +8,7 @@ require (
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/go-git/go-git/v5 v5.16.4
 	github.com/posthog/posthog-go v1.9.1
+	github.com/sergi/go-diff v1.4.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	golang.org/x/term v0.39.0
@@ -52,7 +53,6 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/pjbgf/sha1cd v0.3.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3 // indirect
 	github.com/skeema/knownhosts v1.3.1 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
