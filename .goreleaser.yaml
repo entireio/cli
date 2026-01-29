@@ -1,4 +1,6 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema-pro.json
 version: 2
+pro: true
 
 before:
   hooks:
@@ -119,3 +121,18 @@ homebrew_casks:
       bash: "completions/entire.bash"
       zsh: "completions/entire.zsh"
       fish: "completions/entire.fish"
+
+npms:
+  - name: "@entire/entire"
+    repository: "git+https://github.com/entireio/cli.git"
+    bugs: https://github.com/entireio/cli/issues
+    description: CLI for Entire
+    homepage: https://github.com/entireio/cli
+    license: MIT
+    access: public
+    keywords:
+      - entire
+      - cli
+      - claude
+      - gemini
+      - opencode
