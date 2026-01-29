@@ -1,0 +1,19 @@
+{
+  "name": "entire-cli-e2e",
+  "version": "1.0.0",
+  "description": "E2E tests for Entire CLI using Claude Agent SDK",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest watch"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

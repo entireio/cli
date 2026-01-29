@@ -91,6 +91,11 @@ fi
 rm -rf "$tmpdir"
 """
 
+[tasks."test:e2e"]
+description = "Run E2E tests with Claude Agent SDK"
+run = "cd e2e && npm test"
+depends = ["build"]
+
 [tasks."dup:staged"]
 description = "Check duplication in staged files only (threshold 75, same as CI)"
 run = """
