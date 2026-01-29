@@ -1507,21 +1507,21 @@ func TestIsAncestorOf(t *testing.T) {
 
 	t.Run("commit is ancestor of later commit", func(t *testing.T) {
 		// commit1 should be an ancestor of commit2
-		if !isAncestorOf(repo, commit1, commit2) {
+		if !strategy.IsAncestorOf(repo, commit1, commit2) {
 			t.Error("expected commit1 to be ancestor of commit2")
 		}
 	})
 
 	t.Run("commit is not ancestor of earlier commit", func(t *testing.T) {
 		// commit2 should NOT be an ancestor of commit1
-		if isAncestorOf(repo, commit2, commit1) {
+		if strategy.IsAncestorOf(repo, commit2, commit1) {
 			t.Error("expected commit2 to NOT be ancestor of commit1")
 		}
 	})
 
 	t.Run("commit is ancestor of itself", func(t *testing.T) {
 		// A commit should be considered an ancestor of itself
-		if !isAncestorOf(repo, commit1, commit1) {
+		if !strategy.IsAncestorOf(repo, commit1, commit1) {
 			t.Error("expected commit to be ancestor of itself")
 		}
 	})

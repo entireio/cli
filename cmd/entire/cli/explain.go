@@ -516,7 +516,7 @@ func getBranchCheckpoints(repo *git.Repository, limit int) ([]strategy.RewindPoi
 		// On feature branches, skip commits that are reachable from main
 		// (but continue scanning - there may be more feature branch commits)
 		if mainBranchHash != plumbing.ZeroHash {
-			if isAncestorOf(repo, c.Hash, mainBranchHash) {
+			if strategy.IsAncestorOf(repo, c.Hash, mainBranchHash) {
 				consecutiveMainCount++
 				if consecutiveMainCount >= consecutiveMainLimit {
 					return errStopIteration // Likely exhausted feature branch commits
@@ -609,36 +609,6 @@ func getBranchCheckpoints(repo *git.Repository, limit int) ([]strategy.RewindPoi
 	}
 
 	return points, nil
-}
-
-// isAncestorOf checks if commit is an ancestor of (or equal to) target.
-// Returns true if target can reach commit by following parent links.
-func isAncestorOf(repo *git.Repository, commit, target plumbing.Hash) bool {
-	if commit == target {
-		return true
-	}
-
-	iter, err := repo.Log(&git.LogOptions{From: target})
-	if err != nil {
-		return false
-	}
-	defer iter.Close()
-
-	found := false
-	count := 0
-	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best-effort search, errors are non-fatal
-		count++
-		if count > 1000 {
-			return errStopIteration
-		}
-		if c.Hash == commit {
-			found = true
-			return errStopIteration
-		}
-		return nil
-	})
-
-	return found
 }
 
 // runExplainBranchDefault shows all checkpoints on the current branch grouped by date.
@@ -1239,7 +1209,7 @@ func formatCheckpointGroup(sb *strings.Builder, group checkpointGroup) {
 	// Skip [temporary] indicator when cpID is already "temporary" to avoid redundancy
 	var indicators []string
 	if group.isTask {
-		indicators = append(indicators, "[task]")
+		indicators = append(indicators, "[Task]")
 	}
 	if group.isTemporary && cpID != "temporary" {
 		indicators = append(indicators, "[temporary]")

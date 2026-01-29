@@ -36,6 +36,37 @@ const (
 // Each package needs its own package-scoped sentinel for git log iteration patterns.
 var errStop = errors.New("stop iteration")
 
+// IsAncestorOf checks if commit is an ancestor of (or equal to) target.
+// Returns true if target can reach commit by following parent links.
+// Limits search to 1000 commits to avoid excessive traversal.
+func IsAncestorOf(repo *git.Repository, commit, target plumbing.Hash) bool {
+	if commit == target {
+		return true
+	}
+
+	iter, err := repo.Log(&git.LogOptions{From: target})
+	if err != nil {
+		return false
+	}
+	defer iter.Close()
+
+	found := false
+	count := 0
+	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best-effort search, errors are non-fatal
+		count++
+		if count > 1000 {
+			return errStop
+		}
+		if c.Hash == commit {
+			found = true
+			return errStop
+		}
+		return nil
+	})
+
+	return found
+}
+
 // ListCheckpoints returns all checkpoints from the entire/sessions branch.
 // Scans sharded paths: <id[:2]>/<id[2:]>/ directories containing metadata.json.
 // Used by both manual-commit and auto-commit strategies.

@@ -349,7 +349,7 @@ func (s *AutoCommitStrategy) GetRewindPoints(limit int) ([]RewindPoint, error) {
 		// Full rewind is allowed if commit is only on this branch (not reachable from main)
 		isLogsOnly := false
 		if mainBranchHash != plumbing.ZeroHash {
-			if isAncestor(repo, c.Hash, mainBranchHash) {
+			if IsAncestorOf(repo, c.Hash, mainBranchHash) {
 				isLogsOnly = true
 			}
 		}
@@ -385,36 +385,6 @@ func (s *AutoCommitStrategy) GetRewindPoints(limit int) ([]RewindPoint, error) {
 	}
 
 	return points, nil
-}
-
-// isAncestor checks if commit is an ancestor of (or equal to) target.
-// Returns true if target can reach commit by following parent links.
-func isAncestor(repo *git.Repository, commit, target plumbing.Hash) bool {
-	if commit == target {
-		return true
-	}
-
-	// Walk from target backwards to see if we reach commit
-	iter, err := repo.Log(&git.LogOptions{From: target})
-	if err != nil {
-		return false
-	}
-
-	found := false
-	count := 0
-	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best-effort search, errors are non-fatal
-		count++
-		if count > 1000 {
-			return errStop // Limit search depth
-		}
-		if c.Hash == commit {
-			found = true
-			return errStop
-		}
-		return nil
-	})
-
-	return found
 }
 
 // findTaskMetadataPathForCommit looks up the task metadata path for a task checkpoint commit
