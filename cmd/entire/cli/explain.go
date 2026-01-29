@@ -15,6 +15,7 @@ import (
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/strategy"
+	"entire.io/cli/cmd/entire/cli/summarise"
 	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5"
@@ -243,22 +244,19 @@ func generateCheckpointSummary(w, errW io.Writer, store *checkpoint.GitStore, ch
 
 	// Check if transcript exists
 	if len(result.Transcript) == 0 {
-		return fmt.Errorf("checkpoint %s has no transcript to summarize", checkpointID.String()[:checkpointIDDisplayLength])
+		return fmt.Errorf("checkpoint %s has no transcript to summarise", checkpointID.String()[:checkpointIDDisplayLength])
 	}
 
-	// Parse the transcript
-	transcript, err := parseTranscriptFromBytes(result.Transcript)
+	// Build condensed transcript for summarisation
+	condensed, err := summarise.BuildCondensedTranscriptFromBytes(result.Transcript)
 	if err != nil {
 		return fmt.Errorf("failed to parse transcript: %w", err)
 	}
-
-	// Build condensed transcript for summarization
-	condensed := BuildCondensedTranscript(transcript)
 	if len(condensed) == 0 {
-		return fmt.Errorf("checkpoint %s transcript has no content to summarize", checkpointID.String()[:checkpointIDDisplayLength])
+		return fmt.Errorf("checkpoint %s transcript has no content to summarise", checkpointID.String()[:checkpointIDDisplayLength])
 	}
 
-	input := SummaryInput{
+	input := summarise.Input{
 		Transcript:   condensed,
 		FilesTouched: result.Metadata.FilesTouched,
 	}
@@ -267,7 +265,7 @@ func generateCheckpointSummary(w, errW io.Writer, store *checkpoint.GitStore, ch
 	fmt.Fprintln(errW, "Generating summary...")
 
 	// Generate summary using Claude CLI
-	generator := &ClaudeCLIGenerator{}
+	generator := &summarise.ClaudeGenerator{}
 	ctx := context.Background()
 	summary, err := generator.Generate(ctx, input)
 	if err != nil {

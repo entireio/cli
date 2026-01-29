@@ -1,4 +1,4 @@
-package cli
+package summarise
 
 import (
 	"context"
@@ -7,16 +7,16 @@ import (
 	"testing"
 )
 
-func TestClaudeCLIGenerator_CommandNotFound(t *testing.T) {
-	gen := &ClaudeCLIGenerator{
+func TestClaudeGenerator_CommandNotFound(t *testing.T) {
+	gen := &ClaudeGenerator{
 		CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 			// Return a command that doesn't exist
 			return exec.CommandContext(ctx, "nonexistent-command-that-should-not-exist-12345")
 		},
 	}
 
-	input := SummaryInput{
-		Transcript: []TranscriptEntry{
+	input := Input{
+		Transcript: []Entry{
 			{Type: EntryTypeUser, Content: "Hello"},
 		},
 	}
@@ -32,16 +32,16 @@ func TestClaudeCLIGenerator_CommandNotFound(t *testing.T) {
 	}
 }
 
-func TestClaudeCLIGenerator_NonZeroExit(t *testing.T) {
-	gen := &ClaudeCLIGenerator{
+func TestClaudeGenerator_NonZeroExit(t *testing.T) {
+	gen := &ClaudeGenerator{
 		CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 			// Return a command that will exit with non-zero status
 			return exec.CommandContext(ctx, "sh", "-c", "echo 'error message' >&2; exit 1")
 		},
 	}
 
-	input := SummaryInput{
-		Transcript: []TranscriptEntry{
+	input := Input{
+		Transcript: []Entry{
 			{Type: EntryTypeUser, Content: "Hello"},
 		},
 	}
@@ -56,7 +56,7 @@ func TestClaudeCLIGenerator_NonZeroExit(t *testing.T) {
 	}
 }
 
-func TestClaudeCLIGenerator_ErrorCases(t *testing.T) {
+func TestClaudeGenerator_ErrorCases(t *testing.T) {
 	tests := []struct {
 		name          string
 		cmdOutput     string
@@ -76,14 +76,14 @@ func TestClaudeCLIGenerator_ErrorCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gen := &ClaudeCLIGenerator{
+			gen := &ClaudeGenerator{
 				CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 					return exec.CommandContext(ctx, "echo", tt.cmdOutput)
 				},
 			}
 
-			input := SummaryInput{
-				Transcript: []TranscriptEntry{
+			input := Input{
+				Transcript: []Entry{
 					{Type: EntryTypeUser, Content: "Hello"},
 				},
 			}
@@ -100,8 +100,8 @@ func TestClaudeCLIGenerator_ErrorCases(t *testing.T) {
 	}
 }
 
-func TestClaudeCLIGenerator_ValidResponse(t *testing.T) {
-	gen := &ClaudeCLIGenerator{
+func TestClaudeGenerator_ValidResponse(t *testing.T) {
+	gen := &ClaudeGenerator{
 		CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 			// Use compact JSON to avoid newline issues with echo
 			response := `{"result":"{\"intent\":\"User wanted to fix a bug\",\"outcome\":\"Bug was fixed successfully\",\"learnings\":{\"repo\":[\"The repo uses Go modules\"],\"code\":[{\"path\":\"main.go\",\"line\":10,\"finding\":\"Entry point\"}],\"workflow\":[\"Run tests before committing\"]},\"friction\":[\"Slow CI pipeline\"],\"open_items\":[\"Add more tests\"]}"}`
@@ -109,8 +109,8 @@ func TestClaudeCLIGenerator_ValidResponse(t *testing.T) {
 		},
 	}
 
-	input := SummaryInput{
-		Transcript: []TranscriptEntry{
+	input := Input{
+		Transcript: []Entry{
 			{Type: EntryTypeUser, Content: "Fix the bug"},
 		},
 	}
@@ -145,8 +145,8 @@ func TestClaudeCLIGenerator_ValidResponse(t *testing.T) {
 	}
 }
 
-func TestClaudeCLIGenerator_MarkdownCodeBlock(t *testing.T) {
-	gen := &ClaudeCLIGenerator{
+func TestClaudeGenerator_MarkdownCodeBlock(t *testing.T) {
+	gen := &ClaudeGenerator{
 		CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 			// Return summary wrapped in markdown code block - use literal newlines escaped in the JSON string
 			response := `{"result":"` + "```json\\n{\\\"intent\\\":\\\"Test markdown extraction\\\",\\\"outcome\\\":\\\"Works\\\",\\\"learnings\\\":{\\\"repo\\\":[],\\\"code\\\":[],\\\"workflow\\\":[]},\\\"friction\\\":[],\\\"open_items\\\":[]}\\n```" + `"}`
@@ -154,8 +154,8 @@ func TestClaudeCLIGenerator_MarkdownCodeBlock(t *testing.T) {
 		},
 	}
 
-	input := SummaryInput{
-		Transcript: []TranscriptEntry{
+	input := Input{
+		Transcript: []Entry{
 			{Type: EntryTypeUser, Content: "Test"},
 		},
 	}
@@ -170,10 +170,10 @@ func TestClaudeCLIGenerator_MarkdownCodeBlock(t *testing.T) {
 	}
 }
 
-func TestBuildSummarizationPrompt(t *testing.T) {
+func TestBuildSummarisationPrompt(t *testing.T) {
 	transcriptText := "[User] Hello\n\n[Assistant] Hi"
 
-	prompt := BuildSummarizationPrompt(transcriptText)
+	prompt := BuildSummarisationPrompt(transcriptText)
 
 	if !strings.Contains(prompt, "<transcript>") {
 		t.Error("prompt should contain <transcript> tag")

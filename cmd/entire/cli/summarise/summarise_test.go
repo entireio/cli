@@ -1,4 +1,4 @@
-package cli
+package summarise
 
 import (
 	"encoding/json"
@@ -6,7 +6,7 @@ import (
 )
 
 func TestBuildCondensedTranscript_UserPrompts(t *testing.T) {
-	transcript := []transcriptLine{
+	transcript := []TranscriptLine{
 		{
 			Type: "user",
 			UUID: "user-1",
@@ -32,7 +32,7 @@ func TestBuildCondensedTranscript_UserPrompts(t *testing.T) {
 }
 
 func TestBuildCondensedTranscript_AssistantResponses(t *testing.T) {
-	transcript := []transcriptLine{
+	transcript := []TranscriptLine{
 		{
 			Type: "assistant",
 			UUID: "assistant-1",
@@ -60,7 +60,7 @@ func TestBuildCondensedTranscript_AssistantResponses(t *testing.T) {
 }
 
 func TestBuildCondensedTranscript_ToolCalls(t *testing.T) {
-	transcript := []transcriptLine{
+	transcript := []TranscriptLine{
 		{
 			Type: "assistant",
 			UUID: "assistant-1",
@@ -98,7 +98,7 @@ func TestBuildCondensedTranscript_ToolCalls(t *testing.T) {
 }
 
 func TestBuildCondensedTranscript_ToolCallWithCommand(t *testing.T) {
-	transcript := []transcriptLine{
+	transcript := []TranscriptLine{
 		{
 			Type: "assistant",
 			UUID: "assistant-1",
@@ -128,7 +128,7 @@ func TestBuildCondensedTranscript_ToolCallWithCommand(t *testing.T) {
 }
 
 func TestBuildCondensedTranscript_StripIDEContextTags(t *testing.T) {
-	transcript := []transcriptLine{
+	transcript := []TranscriptLine{
 		{
 			Type: "user",
 			UUID: "user-1",
@@ -150,7 +150,7 @@ func TestBuildCondensedTranscript_StripIDEContextTags(t *testing.T) {
 }
 
 func TestBuildCondensedTranscript_StripSystemTags(t *testing.T) {
-	transcript := []transcriptLine{
+	transcript := []TranscriptLine{
 		{
 			Type: "user",
 			UUID: "user-1",
@@ -172,7 +172,7 @@ func TestBuildCondensedTranscript_StripSystemTags(t *testing.T) {
 }
 
 func TestBuildCondensedTranscript_MixedContent(t *testing.T) {
-	transcript := []transcriptLine{
+	transcript := []TranscriptLine{
 		{
 			Type: "user",
 			UUID: "user-1",
@@ -218,7 +218,7 @@ func TestBuildCondensedTranscript_MixedContent(t *testing.T) {
 }
 
 func TestBuildCondensedTranscript_EmptyTranscript(t *testing.T) {
-	transcript := []transcriptLine{}
+	transcript := []TranscriptLine{}
 
 	entries := BuildCondensedTranscript(transcript)
 
@@ -229,7 +229,7 @@ func TestBuildCondensedTranscript_EmptyTranscript(t *testing.T) {
 
 func TestBuildCondensedTranscript_UserArrayContent(t *testing.T) {
 	// Test user message with array content (text blocks)
-	transcript := []transcriptLine{
+	transcript := []TranscriptLine{
 		{
 			Type: "user",
 			UUID: "user-1",
@@ -261,7 +261,7 @@ func TestBuildCondensedTranscript_UserArrayContent(t *testing.T) {
 }
 
 func TestBuildCondensedTranscript_SkipsEmptyContent(t *testing.T) {
-	transcript := []transcriptLine{
+	transcript := []TranscriptLine{
 		{
 			Type: "user",
 			UUID: "user-1",
@@ -288,8 +288,8 @@ func TestBuildCondensedTranscript_SkipsEmptyContent(t *testing.T) {
 }
 
 func TestFormatCondensedTranscript_BasicFormat(t *testing.T) {
-	input := SummaryInput{
-		Transcript: []TranscriptEntry{
+	input := Input{
+		Transcript: []Entry{
 			{Type: EntryTypeUser, Content: "Hello"},
 			{Type: EntryTypeAssistant, Content: "Hi there"},
 			{Type: EntryTypeTool, ToolName: "Read", ToolDetail: "/file.go"},
@@ -310,8 +310,8 @@ func TestFormatCondensedTranscript_BasicFormat(t *testing.T) {
 }
 
 func TestFormatCondensedTranscript_WithFiles(t *testing.T) {
-	input := SummaryInput{
-		Transcript: []TranscriptEntry{
+	input := Input{
+		Transcript: []Entry{
 			{Type: EntryTypeUser, Content: "Create files"},
 		},
 		FilesTouched: []string{"file1.go", "file2.go"},
@@ -331,8 +331,8 @@ func TestFormatCondensedTranscript_WithFiles(t *testing.T) {
 }
 
 func TestFormatCondensedTranscript_ToolWithoutDetail(t *testing.T) {
-	input := SummaryInput{
-		Transcript: []TranscriptEntry{
+	input := Input{
+		Transcript: []Entry{
 			{Type: EntryTypeTool, ToolName: "TaskList"},
 		},
 	}
@@ -346,7 +346,7 @@ func TestFormatCondensedTranscript_ToolWithoutDetail(t *testing.T) {
 }
 
 func TestFormatCondensedTranscript_EmptyInput(t *testing.T) {
-	input := SummaryInput{}
+	input := Input{}
 
 	result := FormatCondensedTranscript(input)
 
