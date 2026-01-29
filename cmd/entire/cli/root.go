@@ -37,6 +37,7 @@ func NewRootCmd() *cobra.Command {
 		Long:  "A command-line interface for Entire" + gettingStarted + accessibilityHelp,
 		// Let main.go handle error printing to avoid duplication
 		SilenceErrors: true,
+		SilenceUsage:  true,
 		// Hide completion command from help but keep it functional
 		CompletionOptions: cobra.CompletionOptions{
 			HiddenDefaultCmd: true,
@@ -67,6 +68,11 @@ func NewRootCmd() *cobra.Command {
 		},
 	}
 
+	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		fmt.Fprint(cmd.OutOrStderr(), cmd.UsageString())
+		fmt.Fprintf(cmd.OutOrStderr(), "\nError: Invalid usage: %v\n", err)
+		return NewSilentError(err)
+	})
 	// Add subcommands here
 	cmd.AddCommand(newRewindCmd())
 	cmd.AddCommand(newResumeCmd())
