@@ -204,14 +204,6 @@ main() {
     local install_dir="${ENTIRE_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
     local binary_path="${tmp_dir}/${BINARY_NAME}"
 
-    # Find binary in extracted files
-    if [[ ! -f "$binary_path" ]]; then
-        binary_path=$(find "$tmp_dir" -name "$BINARY_NAME" -type f | head -n 1)
-        if [[ -z "$binary_path" || ! -f "$binary_path" ]]; then
-            error "Could not find ${BINARY_NAME} binary in archive"
-        fi
-    fi
-
     chmod +x "$binary_path"
 
     info "Installing to ${install_dir}..."
