@@ -3,7 +3,6 @@
 # Usage: curl -fsSL https://entire.io/install.sh | bash
 #
 # Environment variables:
-#   ENTIRE_VERSION    - Install a specific version (e.g., "1.0.0")
 #   ENTIRE_INSTALL_DIR - Override install directory
 
 set -euo pipefail
@@ -52,18 +51,13 @@ Entire CLI Installer
 
 Usage:
     curl -fsSL https://entire.io/install.sh | bash
-    curl -fsSL https://entire.io/install.sh | ENTIRE_VERSION=1.0.0 bash
 
 Environment Variables:
-    ENTIRE_VERSION      Install a specific version (default: latest)
     ENTIRE_INSTALL_DIR  Override install directory (default: $HOME/.local/bin)
 
 Examples:
     # Install latest version
     curl -fsSL https://entire.io/install.sh | bash
-
-    # Install specific version
-    curl -fsSL https://entire.io/install.sh | ENTIRE_VERSION=1.0.0 bash
 
     # Install to custom directory
     curl -fsSL https://entire.io/install.sh | ENTIRE_INSTALL_DIR=~/.local/bin bash
