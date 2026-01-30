@@ -188,7 +188,7 @@ main() {
     if download_file "$checksums_url" "$checksums_path" 2>/dev/null; then
         info "Verifying checksum..."
         local expected_checksum
-        expected_checksum=$(grep "${archive_name}" "$checksums_path" | awk '{print $1}')
+        expected_checksum=$(grep -iE "${archive_name}\$" "$checksums_path" | awk '{print $1}' || true)
         if [[ -n "$expected_checksum" ]]; then
             verify_checksum "$archive_path" "$expected_checksum"
             success "Checksum verified"
