@@ -195,7 +195,7 @@ main() {
             error "Checksum for ${archive_name} not found in checksums.txt"
         fi
     else
-        warn "Checksums file not available. Skipping verification."
+        error "Checksums file not available."
     fi
 
     # Extract archive
