@@ -186,21 +186,21 @@ main() {
         error "Failed to download from ${download_url}\nPlease check that the version exists and try again."
     fi
 
-    # Verify checksum if available
+    # Download and verify checksums
+    info "Downloading checksums..."
     local checksums_path="${tmp_dir}/checksums.txt"
-    if download_file "$checksums_url" "$checksums_path" 2>/dev/null; then
-        info "Verifying checksum..."
-        local expected_checksum
-        expected_checksum=$(grep -E "${archive_name}\$" "$checksums_path" | awk '{print $1}' || true)
-        if [[ -n "$expected_checksum" ]]; then
-            verify_checksum "$archive_path" "$expected_checksum"
-            success "Checksum verified"
-        else
-            error "Checksum for ${archive_name} not found in checksums.txt"
-        fi
-    else
-        error "Checksums file not available."
+    if ! download_file "$checksums_url" "$checksums_path"; then
+        error "Failed to download checksums from ${checksums_url}"
     fi
+
+    info "Verifying checksum..."
+    local expected_checksum
+    expected_checksum=$(grep -iE "${archive_name}\$" "$checksums_path" | awk '{print $1}' || true)
+    if [[ -z "$expected_checksum" ]]; then
+        error "Checksum for ${archive_name} not found in checksums.txt"
+    fi
+    verify_checksum "$archive_path" "$expected_checksum"
+    success "Checksum verified"
 
     # Extract archive
     info "Extracting..."
