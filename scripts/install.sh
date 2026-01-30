@@ -193,7 +193,7 @@ main() {
             verify_checksum "$archive_path" "$expected_checksum"
             success "Checksum verified"
         else
-            warn "Checksum for ${archive_name} not found in checksums.txt"
+            error "Checksum for ${archive_name} not found in checksums.txt"
         fi
     else
         warn "Checksums file not available. Skipping verification."
