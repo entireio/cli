@@ -1130,8 +1130,8 @@ func TestDeleteShadowBranch_NonExistent(t *testing.T) {
 	}
 }
 
-// TestSessionState_LastCheckpointID verifies that LastCheckpointID is persisted correctly.
-func TestSessionState_LastCheckpointID(t *testing.T) {
+// TestSessionState_FieldPersistence verifies that various fields are persisted correctly.
+func TestSessionState_FieldPersistence(t *testing.T) {
 	dir := t.TempDir()
 	_, err := git.PlainInit(dir, false)
 	if err != nil {
@@ -1142,13 +1142,14 @@ func TestSessionState_LastCheckpointID(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 
-	// Create session state with LastCheckpointID
+	// Create session state with LastCheckpointID and ShadowBranchSuffix
 	state := &SessionState{
-		SessionID:        "test-session-123",
-		BaseCommit:       "abc123def456",
-		StartedAt:        time.Now(),
-		CheckpointCount:  5,
-		LastCheckpointID: "a1b2c3d4e5f6",
+		SessionID:          "test-session-123",
+		BaseCommit:         "abc123def456",
+		StartedAt:          time.Now(),
+		CheckpointCount:    5,
+		LastCheckpointID:   "a1b2c3d4e5f6",
+		ShadowBranchSuffix: 3,
 	}
 
 	// Save state
@@ -1157,7 +1158,7 @@ func TestSessionState_LastCheckpointID(t *testing.T) {
 		t.Fatalf("saveSessionState() error = %v", err)
 	}
 
-	// Load state and verify LastCheckpointID
+	// Load state and verify fields
 	loaded, err := s.loadSessionState("test-session-123")
 	if err != nil {
 		t.Fatalf("loadSessionState() error = %v", err)
@@ -1168,6 +1169,9 @@ func TestSessionState_LastCheckpointID(t *testing.T) {
 
 	if loaded.LastCheckpointID != state.LastCheckpointID {
 		t.Errorf("LastCheckpointID = %q, want %q", loaded.LastCheckpointID, state.LastCheckpointID)
+	}
+	if loaded.ShadowBranchSuffix != state.ShadowBranchSuffix {
+		t.Errorf("ShadowBranchSuffix = %d, want %d", loaded.ShadowBranchSuffix, state.ShadowBranchSuffix)
 	}
 }
 
@@ -1823,47 +1827,6 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		metadata.InitialAttribution.AgentPercentage)
 }
 
-// TestSessionState_ShadowBranchSuffixPersistence verifies that ShadowBranchSuffix is
-// persisted correctly across session state save/load cycles.
-func TestSessionState_ShadowBranchSuffixPersistence(t *testing.T) {
-	dir := t.TempDir()
-	_, err := git.PlainInit(dir, false)
-	if err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	s := &ManualCommitStrategy{}
-
-	// Create session state with ShadowBranchSuffix
-	state := &SessionState{
-		SessionID:          "test-session-suffix",
-		BaseCommit:         "abc123def456",
-		StartedAt:          time.Now(),
-		CheckpointCount:    2,
-		ShadowBranchSuffix: 3, // Testing non-default suffix value
-	}
-
-	// Save state
-	err = s.saveSessionState(state)
-	if err != nil {
-		t.Fatalf("saveSessionState() error = %v", err)
-	}
-
-	// Load state and verify ShadowBranchSuffix
-	loaded, err := s.loadSessionState("test-session-suffix")
-	if err != nil {
-		t.Fatalf("loadSessionState() error = %v", err)
-	}
-	if loaded == nil {
-		t.Fatal("loadSessionState() returned nil")
-	}
-
-	if loaded.ShadowBranchSuffix != state.ShadowBranchSuffix {
-		t.Errorf("ShadowBranchSuffix = %d, want %d", loaded.ShadowBranchSuffix, state.ShadowBranchSuffix)
-	}
-}
 
 // TestExtractUserPromptsFromLines tests extraction of user prompts from JSONL format.
 func TestExtractUserPromptsFromLines(t *testing.T) {
