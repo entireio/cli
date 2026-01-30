@@ -10,7 +10,7 @@ set -euo pipefail
 
 GITHUB_REPO="entireio/cli"
 BINARY_NAME="entire"
-DEFAULT_INSTALL_DIR="/usr/local/bin"
+DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 
 # Colors (disabled in non-interactive mode)
 if [[ -t 1 ]]; then
@@ -222,6 +222,8 @@ main() {
     # Install binary
     info "Installing to ${install_dir}..."
     local install_path="${install_dir}/${BINARY_NAME}"
+
+    mkdir -p "${install_dir}"
 
     # Install binary
     if [[ ! -d "$install_dir" ]]; then
