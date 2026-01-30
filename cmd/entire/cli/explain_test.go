@@ -1526,6 +1526,7 @@ func TestGetBranchCheckpoints_ReadsPromptFromShadowBranch(t *testing.T) {
 	_, err = store.WriteTemporary(context.Background(), checkpoint.WriteTemporaryOptions{
 		SessionID:         sessionID,
 		BaseCommit:        baseCommit,
+		Suffix:            1,
 		ModifiedFiles:     []string{"test.txt"},
 		MetadataDir:       ".entire/metadata/" + sessionID,
 		MetadataDirAbs:    metadataDir,
@@ -1547,6 +1548,7 @@ func TestGetBranchCheckpoints_ReadsPromptFromShadowBranch(t *testing.T) {
 	_, err = store.WriteTemporary(context.Background(), checkpoint.WriteTemporaryOptions{
 		SessionID:         sessionID,
 		BaseCommit:        baseCommit,
+		Suffix:            1,
 		ModifiedFiles:     []string{"test.txt"},
 		MetadataDir:       ".entire/metadata/" + sessionID,
 		MetadataDirAbs:    metadataDir,

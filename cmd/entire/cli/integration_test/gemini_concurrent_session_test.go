@@ -11,10 +11,10 @@ import (
 	"entire.io/cli/cmd/entire/cli/strategy"
 )
 
-// TestGeminiConcurrentSessionWarning_BlocksFirstPrompt verifies that when a user starts
-// a new Gemini session while another session has uncommitted changes (checkpoints),
-// the first prompt is blocked with a Gemini-format JSON response (decision: block).
-func TestGeminiConcurrentSessionWarning_BlocksFirstPrompt(t *testing.T) {
+// TestGeminiConcurrentSessionWarning_DisabledByDefault verifies that by default,
+// no warning is shown when a second Gemini session starts with uncommitted changes.
+// Warnings are opt-in since shadow branch suffixes make concurrent sessions safe.
+func TestGeminiConcurrentSessionWarning_DisabledByDefault(t *testing.T) {
 	env := NewTestEnv(t)
 	defer env.Cleanup()
 
@@ -23,7 +23,78 @@ func TestGeminiConcurrentSessionWarning_BlocksFirstPrompt(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
+
+	// Initialize Entire with default settings (no warning enabled)
 	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+
+	// Start session A and create a checkpoint
+	sessionA := env.NewGeminiSession()
+	if err := env.SimulateGeminiBeforeAgent(sessionA.ID); err != nil {
+		t.Fatalf("SimulateGeminiBeforeAgent (sessionA) failed: %v", err)
+	}
+
+	env.WriteFile("file.txt", "content from session A")
+	sessionA.CreateGeminiTranscript("Add file", []FileChange{{Path: "file.txt", Content: "content from session A"}})
+	if err := env.SimulateGeminiAfterAgent(sessionA.ID, sessionA.TranscriptPath); err != nil {
+		t.Fatalf("SimulateGeminiAfterAgent (sessionA) failed: %v", err)
+	}
+
+	// Verify session A has checkpoints
+	stateA, err := env.GetSessionState(sessionA.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState (sessionA) failed: %v", err)
+	}
+	if stateA == nil || stateA.CheckpointCount == 0 {
+		t.Fatal("Session A should have at least 1 checkpoint")
+	}
+	t.Logf("Session A has %d checkpoint(s)", stateA.CheckpointCount)
+
+	// Start session B - should NOT be blocked because warnings are disabled by default
+	sessionB := env.NewGeminiSession()
+	output := env.SimulateGeminiBeforeAgentWithOutput(sessionB.ID)
+
+	// The hook should succeed without blocking
+	if output.Err != nil {
+		t.Fatalf("Hook should succeed without blocking, got error: %v\nStderr: %s", output.Err, output.Stderr)
+	}
+
+	// Check if we got a blocking response (which we shouldn't)
+	if len(output.Stdout) > 0 {
+		var response struct {
+			Decision string `json:"decision"`
+			Reason   string `json:"reason,omitempty"`
+		}
+		if json.Unmarshal(output.Stdout, &response) == nil && response.Decision == "block" {
+			t.Errorf("Should NOT show concurrent session warning by default, got: %s", output.Stdout)
+		}
+	}
+
+	// Session B should not have ConcurrentWarningShown set
+	stateB, _ := env.GetSessionState(sessionB.ID)
+	if stateB != nil && stateB.ConcurrentWarningShown {
+		t.Error("Session B should not have ConcurrentWarningShown set when warnings are disabled by default")
+	}
+
+	t.Log("No concurrent session warning shown by default (warnings are opt-in)")
+}
+
+// TestGeminiConcurrentSessionWarning_EnabledViaSetting verifies that when
+// enable_multisession_warning is set in strategy_options, the first prompt is
+// blocked with a Gemini-format JSON response (decision: block).
+func TestGeminiConcurrentSessionWarning_EnabledViaSetting(t *testing.T) {
+	env := NewTestEnv(t)
+	defer env.Cleanup()
+
+	env.InitRepo()
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+	env.GitCheckoutNewBranch("feature/test")
+
+	// Initialize Entire with multi-session warning ENABLED
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewGeminiSession()
@@ -85,11 +156,11 @@ func TestGeminiConcurrentSessionWarning_BlocksFirstPrompt(t *testing.T) {
 		t.Errorf("Reason should contain %q, got: %s", expectedResumeCmd, response.Reason)
 	}
 
-	t.Logf("Received expected blocking response: %s", output.Stdout)
+	t.Logf("Received expected blocking response when warnings enabled: %s", output.Stdout)
 }
 
 // TestGeminiConcurrentSessionWarning_SetsWarningFlag verifies that after the first prompt
-// is blocked, the session state has ConcurrentWarningShown set to true.
+// is blocked (when warnings are enabled), the session state has ConcurrentWarningShown set to true.
 func TestGeminiConcurrentSessionWarning_SetsWarningFlag(t *testing.T) {
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -99,7 +170,11 @@ func TestGeminiConcurrentSessionWarning_SetsWarningFlag(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+
+	// Enable warnings
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewGeminiSession()
@@ -143,7 +218,11 @@ func TestGeminiConcurrentSessionWarning_SubsequentPromptsSucceed(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+
+	// Enable warnings
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewGeminiSession()
@@ -220,7 +299,11 @@ func TestGeminiConcurrentSessionWarning_NoWarningWithoutCheckpoints(t *testing.T
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+
+	// Enable warnings
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A but do NOT create any checkpoints
 	sessionA := env.NewGeminiSession()
@@ -278,7 +361,11 @@ func TestGeminiConcurrentSessionWarning_ResumeCommandFormat(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+
+	// Enable warnings
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewGeminiSession()
@@ -331,8 +418,11 @@ func TestCrossAgentConcurrentSession_ClaudeSessionShowsClaudeResumeInGemini(t *t
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	// Initialize with Claude Code agent first
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, agent.AgentNameClaudeCode)
+
+	// Initialize with Claude Code agent first, with warnings enabled
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, agent.AgentNameClaudeCode, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start Claude session A and create a checkpoint
 	sessionA := env.NewSession()
@@ -410,8 +500,11 @@ func TestCrossAgentConcurrentSession_GeminiSessionShowsGeminiResumeInClaude(t *t
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	// Initialize with Gemini agent first
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, agent.AgentNameGemini)
+
+	// Initialize with Gemini agent first, with warnings enabled
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, agent.AgentNameGemini, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start Gemini session A and create a checkpoint
 	sessionA := env.NewGeminiSession()
@@ -477,121 +570,6 @@ func TestCrossAgentConcurrentSession_GeminiSessionShowsGeminiResumeInClaude(t *t
 	t.Logf("Cross-agent blocking correctly shows Gemini resume command: %s", response.StopReason)
 }
 
-// TestGeminiConcurrentSessionWarning_DisabledViaSetting verifies that when
-// disable_multisession_warning is set in strategy_options, no warning is shown.
-func TestGeminiConcurrentSessionWarning_DisabledViaSetting(t *testing.T) {
-	env := NewTestEnv(t)
-	defer env.Cleanup()
-
-	env.InitRepo()
-	env.WriteFile("README.md", "# Test")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-	env.GitCheckoutNewBranch("feature/test")
-
-	// Initialize Entire with multi-session warning disabled
-	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
-		"disable_multisession_warning": true,
-	})
-
-	// Start session A and create a checkpoint
-	sessionA := env.NewGeminiSession()
-	if err := env.SimulateGeminiBeforeAgent(sessionA.ID); err != nil {
-		t.Fatalf("SimulateGeminiBeforeAgent (sessionA) failed: %v", err)
-	}
-
-	env.WriteFile("file.txt", "content from session A")
-	sessionA.CreateGeminiTranscript("Add file", []FileChange{{Path: "file.txt", Content: "content from session A"}})
-	if err := env.SimulateGeminiAfterAgent(sessionA.ID, sessionA.TranscriptPath); err != nil {
-		t.Fatalf("SimulateGeminiAfterAgent (sessionA) failed: %v", err)
-	}
-
-	// Verify session A has checkpoints
-	stateA, err := env.GetSessionState(sessionA.ID)
-	if err != nil {
-		t.Fatalf("GetSessionState (sessionA) failed: %v", err)
-	}
-	if stateA == nil || stateA.CheckpointCount == 0 {
-		t.Fatal("Session A should have at least 1 checkpoint")
-	}
-	t.Logf("Session A has %d checkpoint(s)", stateA.CheckpointCount)
-
-	// Start session B - should NOT be blocked because warnings are disabled
-	sessionB := env.NewGeminiSession()
-	output := env.SimulateGeminiBeforeAgentWithOutput(sessionB.ID)
-
-	// The hook should succeed without blocking
-	if output.Err != nil {
-		t.Fatalf("Hook should succeed without blocking, got error: %v\nStderr: %s", output.Err, output.Stderr)
-	}
-
-	// Check if we got a blocking response (which we shouldn't)
-	if len(output.Stdout) > 0 {
-		var response struct {
-			Decision string `json:"decision"`
-			Reason   string `json:"reason,omitempty"`
-		}
-		if json.Unmarshal(output.Stdout, &response) == nil && response.Decision == "block" {
-			t.Errorf("Should NOT show concurrent session warning when disabled, got: %s", output.Stdout)
-		}
-	}
-
-	// Session B should not have ConcurrentWarningShown set
-	stateB, _ := env.GetSessionState(sessionB.ID)
-	if stateB != nil && stateB.ConcurrentWarningShown {
-		t.Error("Session B should not have ConcurrentWarningShown set when warnings are disabled")
-	}
-
-	t.Log("No concurrent session warning shown when setting is disabled")
-}
-
-// TestGeminiConcurrentSessionWarning_ContainsSuppressHint verifies that the warning message
-// includes instructions on how to suppress future warnings.
-func TestGeminiConcurrentSessionWarning_ContainsSuppressHint(t *testing.T) {
-	env := NewTestEnv(t)
-	defer env.Cleanup()
-
-	env.InitRepo()
-	env.WriteFile("README.md", "# Test")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
-
-	// Start session A and create a checkpoint
-	sessionA := env.NewGeminiSession()
-	if err := env.SimulateGeminiBeforeAgent(sessionA.ID); err != nil {
-		t.Fatalf("SimulateGeminiBeforeAgent (sessionA) failed: %v", err)
-	}
-
-	env.WriteFile("file.txt", "content from session A")
-	sessionA.CreateGeminiTranscript("Add file", []FileChange{{Path: "file.txt", Content: "content from session A"}})
-	if err := env.SimulateGeminiAfterAgent(sessionA.ID, sessionA.TranscriptPath); err != nil {
-		t.Fatalf("SimulateGeminiAfterAgent (sessionA) failed: %v", err)
-	}
-
-	// Start session B - first prompt should be blocked with warning
-	sessionB := env.NewGeminiSession()
-	output := env.SimulateGeminiBeforeAgentWithOutput(sessionB.ID)
-
-	// Parse the JSON response
-	var response struct {
-		Decision string `json:"decision"`
-		Reason   string `json:"reason"`
-	}
-	if err := json.Unmarshal(output.Stdout, &response); err != nil {
-		t.Fatalf("Failed to parse JSON response: %v\nStdout: %s", err, output.Stdout)
-	}
-
-	// Verify the warning message contains the suppression hint
-	expectedHint := "entire enable --disable-multisession-warning"
-	if !strings.Contains(response.Reason, expectedHint) {
-		t.Errorf("Warning message should contain suppression hint %q, got: %s", expectedHint, response.Reason)
-	}
-
-	t.Logf("Warning message correctly includes suppression hint")
-}
-
 // TestGeminiConcurrentSessions_BothCondensedOnCommit verifies that when two sessions have
 // interleaved checkpoints, committing preserves both sessions' logs on entire/sessions.
 func TestGeminiConcurrentSessions_BothCondensedOnCommit(t *testing.T) {
@@ -603,7 +581,11 @@ func TestGeminiConcurrentSessions_BothCondensedOnCommit(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+
+	// Enable warnings so we can test the full flow
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Session A: create checkpoint
 	sessionA := env.NewGeminiSession()

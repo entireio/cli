@@ -10,10 +10,10 @@ import (
 	"entire.io/cli/cmd/entire/cli/strategy"
 )
 
-// TestConcurrentSessionWarning_BlocksFirstPrompt verifies that when a user starts
-// a new Claude session while another session has uncommitted changes (checkpoints),
-// the first prompt is blocked with a continue:false JSON response.
-func TestConcurrentSessionWarning_BlocksFirstPrompt(t *testing.T) {
+// TestConcurrentSessionWarning_DisabledByDefault verifies that by default,
+// no warning is shown when a second session starts with uncommitted changes.
+// Warnings are opt-in since shadow branch suffixes make concurrent sessions safe.
+func TestConcurrentSessionWarning_DisabledByDefault(t *testing.T) {
 	env := NewTestEnv(t)
 	defer env.Cleanup()
 
@@ -22,7 +22,77 @@ func TestConcurrentSessionWarning_BlocksFirstPrompt(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
+
+	// Initialize Entire with default settings (no warning enabled)
 	env.InitEntire(strategy.StrategyNameManualCommit)
+
+	// Start session A and create a checkpoint
+	sessionA := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(sessionA.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit (sessionA) failed: %v", err)
+	}
+
+	env.WriteFile("file.txt", "content from session A")
+	sessionA.CreateTranscript("Add file", []FileChange{{Path: "file.txt", Content: "content from session A"}})
+	if err := env.SimulateStop(sessionA.ID, sessionA.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop (sessionA) failed: %v", err)
+	}
+
+	// Verify session A has checkpoints
+	stateA, err := env.GetSessionState(sessionA.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState (sessionA) failed: %v", err)
+	}
+	if stateA == nil || stateA.CheckpointCount == 0 {
+		t.Fatal("Session A should have at least 1 checkpoint")
+	}
+	t.Logf("Session A has %d checkpoint(s)", stateA.CheckpointCount)
+
+	// Start session B - should NOT be blocked because warnings are disabled by default
+	sessionB := env.NewSession()
+	output := env.SimulateUserPromptSubmitWithOutput(sessionB.ID)
+
+	// The hook should succeed
+	if output.Err != nil {
+		t.Fatalf("Hook should succeed without blocking, got error: %v\nStderr: %s", output.Err, output.Stderr)
+	}
+
+	// Check if we got a blocking response (which we shouldn't)
+	if len(output.Stdout) > 0 {
+		var response struct {
+			Continue   bool   `json:"continue"`
+			StopReason string `json:"stopReason,omitempty"`
+		}
+		if json.Unmarshal(output.Stdout, &response) == nil && !response.Continue {
+			t.Errorf("Should NOT show concurrent session warning by default, got: %s", output.Stdout)
+		}
+	}
+
+	// Session B should not have ConcurrentWarningShown set
+	stateB, _ := env.GetSessionState(sessionB.ID)
+	if stateB != nil && stateB.ConcurrentWarningShown {
+		t.Error("Session B should not have ConcurrentWarningShown set when warnings are disabled by default")
+	}
+
+	t.Log("No concurrent session warning shown by default (warnings are opt-in)")
+}
+
+// TestConcurrentSessionWarning_EnabledViaSetting verifies that when
+// enable_multisession_warning is set in strategy_options, warnings are shown.
+func TestConcurrentSessionWarning_EnabledViaSetting(t *testing.T) {
+	env := NewTestEnv(t)
+	defer env.Cleanup()
+
+	env.InitRepo()
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+	env.GitCheckoutNewBranch("feature/test")
+
+	// Initialize Entire with multi-session warning ENABLED
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewSession()
@@ -49,7 +119,7 @@ func TestConcurrentSessionWarning_BlocksFirstPrompt(t *testing.T) {
 	}
 	t.Logf("Session A has %d checkpoint(s)", stateA.CheckpointCount)
 
-	// Start session B - first prompt should be blocked
+	// Start session B - first prompt should be blocked because warnings are enabled
 	sessionB := env.NewSession()
 	output := env.SimulateUserPromptSubmitWithOutput(sessionB.ID)
 
@@ -69,7 +139,7 @@ func TestConcurrentSessionWarning_BlocksFirstPrompt(t *testing.T) {
 
 	// Verify continue is false
 	if response.Continue {
-		t.Error("Expected continue:false in JSON response")
+		t.Error("Expected continue:false in JSON response when warnings are enabled")
 	}
 
 	// Verify stop reason contains expected message
@@ -78,11 +148,11 @@ func TestConcurrentSessionWarning_BlocksFirstPrompt(t *testing.T) {
 		t.Errorf("StopReason should contain %q, got: %s", expectedMessage, response.StopReason)
 	}
 
-	t.Logf("Received expected blocking response: %s", output.Stdout)
+	t.Logf("Received expected blocking response when warnings enabled: %s", output.Stdout)
 }
 
 // TestConcurrentSessionWarning_SetsWarningFlag verifies that after the first prompt
-// is blocked, the session state has ConcurrentWarningShown set to true.
+// is blocked (when warnings are enabled), the session state has ConcurrentWarningShown set to true.
 func TestConcurrentSessionWarning_SetsWarningFlag(t *testing.T) {
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -92,7 +162,11 @@ func TestConcurrentSessionWarning_SetsWarningFlag(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
+
+	// Enable warnings
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewSession()
@@ -136,7 +210,11 @@ func TestConcurrentSessionWarning_SubsequentPromptsSucceed(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
+
+	// Enable warnings
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewSession()
@@ -210,7 +288,11 @@ func TestConcurrentSessionWarning_NoWarningWithoutCheckpoints(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
+
+	// Enable warnings
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A but do NOT create any checkpoints
 	sessionA := env.NewSession()
@@ -256,121 +338,6 @@ func TestConcurrentSessionWarning_NoWarningWithoutCheckpoints(t *testing.T) {
 	t.Log("No concurrent session warning shown when existing session has no checkpoints")
 }
 
-// TestConcurrentSessionWarning_DisabledViaSetting verifies that when
-// disable_multisession_warning is set in strategy_options, no warning is shown.
-func TestConcurrentSessionWarning_DisabledViaSetting(t *testing.T) {
-	env := NewTestEnv(t)
-	defer env.Cleanup()
-
-	env.InitRepo()
-	env.WriteFile("README.md", "# Test")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-	env.GitCheckoutNewBranch("feature/test")
-
-	// Initialize Entire with multi-session warning disabled
-	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
-		"disable_multisession_warning": true,
-	})
-
-	// Start session A and create a checkpoint
-	sessionA := env.NewSession()
-	if err := env.SimulateUserPromptSubmit(sessionA.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit (sessionA) failed: %v", err)
-	}
-
-	env.WriteFile("file.txt", "content from session A")
-	sessionA.CreateTranscript("Add file", []FileChange{{Path: "file.txt", Content: "content from session A"}})
-	if err := env.SimulateStop(sessionA.ID, sessionA.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop (sessionA) failed: %v", err)
-	}
-
-	// Verify session A has checkpoints
-	stateA, err := env.GetSessionState(sessionA.ID)
-	if err != nil {
-		t.Fatalf("GetSessionState (sessionA) failed: %v", err)
-	}
-	if stateA == nil || stateA.CheckpointCount == 0 {
-		t.Fatal("Session A should have at least 1 checkpoint")
-	}
-	t.Logf("Session A has %d checkpoint(s)", stateA.CheckpointCount)
-
-	// Start session B - should NOT be blocked because warnings are disabled
-	sessionB := env.NewSession()
-	output := env.SimulateUserPromptSubmitWithOutput(sessionB.ID)
-
-	// The hook should succeed
-	if output.Err != nil {
-		t.Fatalf("Hook should succeed without blocking, got error: %v\nStderr: %s", output.Err, output.Stderr)
-	}
-
-	// Check if we got a blocking response (which we shouldn't)
-	if len(output.Stdout) > 0 {
-		var response struct {
-			Continue   bool   `json:"continue"`
-			StopReason string `json:"stopReason,omitempty"`
-		}
-		if json.Unmarshal(output.Stdout, &response) == nil && !response.Continue {
-			t.Errorf("Should NOT show concurrent session warning when disabled, got: %s", output.Stdout)
-		}
-	}
-
-	// Session B should not have ConcurrentWarningShown set
-	stateB, _ := env.GetSessionState(sessionB.ID)
-	if stateB != nil && stateB.ConcurrentWarningShown {
-		t.Error("Session B should not have ConcurrentWarningShown set when warnings are disabled")
-	}
-
-	t.Log("No concurrent session warning shown when setting is disabled")
-}
-
-// TestConcurrentSessionWarning_ContainsSuppressHint verifies that the warning message
-// includes instructions on how to suppress future warnings.
-func TestConcurrentSessionWarning_ContainsSuppressHint(t *testing.T) {
-	env := NewTestEnv(t)
-	defer env.Cleanup()
-
-	env.InitRepo()
-	env.WriteFile("README.md", "# Test")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
-
-	// Start session A and create a checkpoint
-	sessionA := env.NewSession()
-	if err := env.SimulateUserPromptSubmit(sessionA.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit (sessionA) failed: %v", err)
-	}
-
-	env.WriteFile("file.txt", "content from session A")
-	sessionA.CreateTranscript("Add file", []FileChange{{Path: "file.txt", Content: "content from session A"}})
-	if err := env.SimulateStop(sessionA.ID, sessionA.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop (sessionA) failed: %v", err)
-	}
-
-	// Start session B - first prompt should be blocked with warning
-	sessionB := env.NewSession()
-	output := env.SimulateUserPromptSubmitWithOutput(sessionB.ID)
-
-	// Parse the JSON response
-	var response struct {
-		Continue   bool   `json:"continue"`
-		StopReason string `json:"stopReason"`
-	}
-	if err := json.Unmarshal(output.Stdout, &response); err != nil {
-		t.Fatalf("Failed to parse JSON response: %v\nStdout: %s", err, output.Stdout)
-	}
-
-	// Verify the warning message contains the suppression hint
-	expectedHint := "entire enable --disable-multisession-warning"
-	if !strings.Contains(response.StopReason, expectedHint) {
-		t.Errorf("Warning message should contain suppression hint %q, got: %s", expectedHint, response.StopReason)
-	}
-
-	t.Logf("Warning message correctly includes suppression hint")
-}
-
 // TestConcurrentSessions_BothCondensedOnCommit verifies that when two sessions have
 // interleaved checkpoints, committing preserves both sessions' logs on entire/sessions.
 func TestConcurrentSessions_BothCondensedOnCommit(t *testing.T) {
@@ -382,7 +349,11 @@ func TestConcurrentSessions_BothCondensedOnCommit(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
+
+	// Enable warnings so we can test the full flow
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Session A: create checkpoint
 	sessionA := env.NewSession()

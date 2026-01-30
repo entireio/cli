@@ -109,6 +109,11 @@ type WriteTemporaryOptions struct {
 	// BaseCommit is the commit hash this session is based on
 	BaseCommit string
 
+	// Suffix is the shadow branch suffix (1, 2, 3...).
+	// Required: branches are named entire/<hash>-<suffix>.
+	// A value of 0 is invalid and will cause an error.
+	Suffix int
+
 	// ModifiedFiles are files that have been modified (relative paths)
 	ModifiedFiles []string
 
@@ -431,6 +436,11 @@ type WriteTemporaryTaskOptions struct {
 
 	// BaseCommit is the commit hash this session is based on
 	BaseCommit string
+
+	// Suffix is the shadow branch suffix (1, 2, 3...).
+	// Required: branches are named entire/<hash>-<suffix>.
+	// A value of 0 is invalid and will cause an error.
+	Suffix int
 
 	// ToolUseID is the unique identifier for this Task tool invocation
 	ToolUseID string

@@ -56,8 +56,13 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 		return WriteTemporaryResult{}, fmt.Errorf("invalid temporary checkpoint options: %w", err)
 	}
 
-	// Get shadow branch name
-	shadowBranchName := ShadowBranchNameForCommit(opts.BaseCommit)
+	// Validate suffix
+	if opts.Suffix < 1 {
+		return WriteTemporaryResult{}, errors.New("suffix must be >= 1 for temporary checkpoint")
+	}
+
+	// Get shadow branch name with suffix
+	shadowBranchName := ShadowBranchNameForCommitWithSuffix(opts.BaseCommit, opts.Suffix)
 
 	// Get or create shadow branch
 	parentHash, baseTreeHash, err := s.getOrCreateShadowBranch(shadowBranchName)
@@ -184,8 +189,12 @@ func (s *GitStore) ListTemporary(ctx context.Context) ([]TemporaryInfo, error) {
 
 		sessionID, _ := trailers.ParseSession(commit.Message)
 
-		// Extract base commit from branch name
-		baseCommit := strings.TrimPrefix(branchName, ShadowBranchPrefix)
+		// Extract base commit from branch name (handles both suffixed and legacy formats)
+		baseCommit, _, ok := ParseShadowBranchName(branchName)
+		if !ok {
+			// Fall back to simple prefix trimming for backward compatibility
+			baseCommit = strings.TrimPrefix(branchName, ShadowBranchPrefix)
+		}
 
 		results = append(results, TemporaryInfo{
 			BranchName:   branchName,
@@ -227,8 +236,13 @@ func (s *GitStore) WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTa
 		return plumbing.ZeroHash, fmt.Errorf("invalid task checkpoint options: %w", err)
 	}
 
-	// Get shadow branch name
-	shadowBranchName := ShadowBranchNameForCommit(opts.BaseCommit)
+	// Validate suffix
+	if opts.Suffix < 1 {
+		return plumbing.ZeroHash, errors.New("suffix must be >= 1 for task checkpoint")
+	}
+
+	// Get shadow branch name with suffix
+	shadowBranchName := ShadowBranchNameForCommitWithSuffix(opts.BaseCommit, opts.Suffix)
 
 	// Get or create shadow branch
 	parentHash, baseTreeHash, err := s.getOrCreateShadowBranch(shadowBranchName)
@@ -393,29 +407,56 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 	return BuildTreeFromEntries(s.repo, entries)
 }
 
-// ListTemporaryCheckpoints lists all checkpoint commits on a shadow branch.
+// ListTemporaryCheckpoints lists all checkpoint commits on shadow branches for a base commit.
 // This returns individual commits (rewind points), not just branch info.
 // The sessionID filter, if provided, limits results to commits from that session.
+// Searches all matching branches (suffixed and legacy).
 func (s *GitStore) ListTemporaryCheckpoints(ctx context.Context, baseCommit string, sessionID string, limit int) ([]TemporaryCheckpointInfo, error) {
 	_ = ctx // Reserved for future use
 
-	shadowBranchName := ShadowBranchNameForCommit(baseCommit)
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+	// Find all shadow branches for this base commit
+	branchNames := ListShadowBranchNamesForCommit(baseCommit, 10) // Check up to 10 suffixes
+	var refs []*plumbing.Reference
+	for _, branchName := range branchNames {
+		refName := plumbing.NewBranchReferenceName(branchName)
+		r, err := s.repo.Reference(refName, true)
+		if err == nil {
+			refs = append(refs, r)
+		}
+	}
+	if len(refs) == 0 {
+		return nil, nil // No shadow branches found
+	}
 
-	ref, err := s.repo.Reference(refName, true)
-	if err != nil {
-		return nil, nil //nolint:nilerr // No shadow branch is expected case
+	var results []TemporaryCheckpointInfo
+
+	// Collect checkpoints from all matching branches
+	for _, ref := range refs {
+		branchResults := s.listCheckpointsFromRef(ref, sessionID, limit-len(results))
+		results = append(results, branchResults...)
+		if len(results) >= limit {
+			return results[:limit], nil
+		}
+	}
+
+	return results, nil
+}
+
+// listCheckpointsFromRef lists checkpoints from a single branch reference.
+func (s *GitStore) listCheckpointsFromRef(ref *plumbing.Reference, sessionID string, limit int) []TemporaryCheckpointInfo {
+	if limit <= 0 {
+		return nil
 	}
 
 	iter, err := s.repo.Log(&git.LogOptions{From: ref.Hash()})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get commit log: %w", err)
+		return nil // Can't get log, return empty
 	}
 
 	var results []TemporaryCheckpointInfo
 	count := 0
 
-	err = iter.ForEach(func(c *object.Commit) error {
+	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Stop condition uses sentinel error
 		if count >= limit*5 { // Scan more to allow for session filtering
 			return errStop
 		}
@@ -464,11 +505,7 @@ func (s *GitStore) ListTemporaryCheckpoints(ctx context.Context, baseCommit stri
 		return nil
 	})
 
-	if err != nil && !errors.Is(err, errStop) {
-		return nil, fmt.Errorf("error iterating commits: %w", err)
-	}
-
-	return results, nil
+	return results
 }
 
 // ListAllTemporaryCheckpoints lists checkpoint commits from ALL shadow branches.

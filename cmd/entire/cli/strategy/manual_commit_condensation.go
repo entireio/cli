@@ -101,8 +101,14 @@ func (s *ManualCommitStrategy) getCheckpointLog(checkpointID id.CheckpointID) ([
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
 // Uses checkpoint.GitStore.WriteCommitted for the git operations.
 func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointID id.CheckpointID, state *SessionState) (*CondenseResult, error) {
-	// Get shadow branch
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit)
+	// Get shadow branch using suffix from session state
+	// If suffix is 0 (legacy), fall back to unsuffixed branch name for backward compatibility
+	var shadowBranchName string
+	if state.ShadowBranchSuffix > 0 {
+		shadowBranchName = cpkg.ShadowBranchNameForCommitWithSuffix(state.BaseCommit, state.ShadowBranchSuffix)
+	} else {
+		shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit)
+	}
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {

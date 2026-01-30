@@ -53,8 +53,8 @@ func outputGeminiBlockingResponse(reason string) {
 // If the warning was already shown, subsequent calls proceed normally (both sessions create interleaved checkpoints).
 // Note: This function may call os.Exit(0) and not return if a blocking response is needed on first conflict.
 func checkConcurrentSessionsGemini(entireSessionID string) {
-	// Check if warnings are disabled via settings
-	if IsMultiSessionWarningDisabled() {
+	// Check if warnings are enabled via settings (off by default)
+	if !IsMultiSessionWarningEnabled() {
 		return
 	}
 
@@ -149,11 +149,10 @@ func checkConcurrentSessionsGemini(entireSessionID string) {
 
 		// Build message - matches Claude Code format but with Gemini-specific instructions
 		var message string
-		suppressHint := "\n\nTo suppress this warning in future sessions, run:\n  entire enable --disable-multisession-warning"
 		if otherPrompt != "" {
-			message = fmt.Sprintf("Another session is active: \"%s\"\n\nYou can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Gemini CLI and run: %s%s\n\nPress the up arrow key to get your prompt back.", otherPrompt, resumeCmd, suppressHint)
+			message = fmt.Sprintf("Another session is active: \"%s\"\n\nYou can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Gemini CLI and run: %s\n\nPress the up arrow key to get your prompt back.", otherPrompt, resumeCmd)
 		} else {
-			message = "Another session is active with uncommitted changes. You can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Gemini CLI and run: " + resumeCmd + suppressHint + "\n\nPress the up arrow key to get your prompt back."
+			message = "Another session is active with uncommitted changes. You can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Gemini CLI and run: " + resumeCmd + "\n\nPress the up arrow key to get your prompt back."
 		}
 
 		// Output blocking JSON response and exit

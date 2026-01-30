@@ -98,8 +98,8 @@ func parseAndLogHookInput() (*hookInputData, error) {
 // checkConcurrentSessions checks for concurrent session conflicts and shows warnings if needed.
 // Returns true if the hook should be skipped due to an unresolved conflict.
 func checkConcurrentSessions(ag agent.Agent, entireSessionID string) (bool, error) {
-	// Check if warnings are disabled via settings
-	if IsMultiSessionWarningDisabled() {
+	// Check if warnings are enabled via settings (off by default)
+	if !IsMultiSessionWarningEnabled() {
 		return false, nil
 	}
 
@@ -191,11 +191,10 @@ func checkConcurrentSessions(ag agent.Agent, entireSessionID string) (bool, erro
 
 		// Build message with other session's prompt if available
 		var message string
-		suppressHint := "\n\nTo suppress this warning in future sessions, run:\n  entire enable --disable-multisession-warning"
 		if otherPrompt != "" {
-			message = fmt.Sprintf("Another session is active: \"%s\"\n\nYou can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: %s%s\n\nPress the up arrow key to get your prompt back.", otherPrompt, resumeCmd, suppressHint)
+			message = fmt.Sprintf("Another session is active: \"%s\"\n\nYou can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: %s\n\nPress the up arrow key to get your prompt back.", otherPrompt, resumeCmd)
 		} else {
-			message = "Another session is active with uncommitted changes. You can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: " + resumeCmd + suppressHint + "\n\nPress the up arrow key to get your prompt back."
+			message = "Another session is active with uncommitted changes. You can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: " + resumeCmd + "\n\nPress the up arrow key to get your prompt back."
 		}
 
 		// Output blocking JSON response - warn about concurrent sessions but allow continuation
@@ -285,9 +284,9 @@ func handleSessionInitErrors(ag agent.Agent, initErr error) error {
 	// Check for session ID conflict error (shadow branch has different session)
 	var sessionConflictErr *strategy.SessionIDConflictError
 	if errors.As(initErr, &sessionConflictErr) {
-		// If multi-session warnings are disabled, skip this error silently
-		// The user has explicitly opted to work with multiple concurrent sessions
-		if IsMultiSessionWarningDisabled() {
+		// If multi-session warnings are not enabled, skip this error silently
+		// Concurrent sessions are safe with shadow branch suffixes
+		if !IsMultiSessionWarningEnabled() {
 			return nil
 		}
 
@@ -322,9 +321,7 @@ func handleSessionInitErrors(ag agent.Agent, initErr error) error {
 				"Options:\n"+
 				"1. Commit your changes (git commit) to create a new base commit\n"+
 				"2. Run 'entire rewind reset' to discard the shadow branch and start fresh\n"+
-				"3. Resume the existing session: %s\n\n"+
-				"To suppress this warning in future sessions, run:\n"+
-				"  entire enable --disable-multisession-warning",
+				"3. Resume the existing session: %s",
 			sessionConflictErr.ShadowBranch,
 			sessionConflictErr.ExistingSession,
 			sessionConflictErr.NewSession,

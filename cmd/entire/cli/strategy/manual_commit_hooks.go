@@ -986,7 +986,13 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 	// For the first checkpoint, no shadow branch exists yet - this is fine,
 	// CalculatePromptAttribution will use baseTree as the reference instead.
 	var lastCheckpointTree *object.Tree
-	shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit)
+	// Use suffixed branch name if suffix is set, otherwise fall back to unsuffixed (legacy)
+	var shadowBranchName string
+	if state.ShadowBranchSuffix > 0 {
+		shadowBranchName = checkpoint.ShadowBranchNameForCommitWithSuffix(state.BaseCommit, state.ShadowBranchSuffix)
+	} else {
+		shadowBranchName = checkpoint.ShadowBranchNameForCommit(state.BaseCommit)
+	}
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {

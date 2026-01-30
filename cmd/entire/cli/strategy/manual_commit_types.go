@@ -43,6 +43,11 @@ type SessionState struct {
 	// PendingPromptAttribution holds attribution calculated at prompt start (before agent runs).
 	// This is moved to PromptAttributions when SaveChanges is called.
 	PendingPromptAttribution *PromptAttribution `json:"pending_prompt_attribution,omitempty"`
+
+	// ShadowBranchSuffix is the numeric suffix for the shadow branch (1, 2, 3...).
+	// A value of 0 indicates no suffix has been assigned yet (legacy format or new session).
+	// Each session starts at suffix 1, and increments when previous work is dismissed.
+	ShadowBranchSuffix int `json:"shadow_branch_suffix,omitempty"`
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt,

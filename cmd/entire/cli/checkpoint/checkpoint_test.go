@@ -405,6 +405,7 @@ func TestWriteTemporary_Deduplication(t *testing.T) {
 	result1, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
 		SessionID:         "test-session",
 		BaseCommit:        baseCommit,
+		Suffix:            1,
 		ModifiedFiles:     []string{"test.go"},
 		MetadataDir:       ".entire/metadata/test-session",
 		MetadataDirAbs:    metadataDir,
@@ -427,6 +428,7 @@ func TestWriteTemporary_Deduplication(t *testing.T) {
 	result2, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
 		SessionID:         "test-session",
 		BaseCommit:        baseCommit,
+		Suffix:            1,
 		ModifiedFiles:     []string{"test.go"},
 		MetadataDir:       ".entire/metadata/test-session",
 		MetadataDirAbs:    metadataDir,
@@ -454,6 +456,7 @@ func TestWriteTemporary_Deduplication(t *testing.T) {
 	result3, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
 		SessionID:         "test-session",
 		BaseCommit:        baseCommit,
+		Suffix:            1,
 		ModifiedFiles:     []string{"test.go"},
 		MetadataDir:       ".entire/metadata/test-session",
 		MetadataDirAbs:    metadataDir,

@@ -1823,6 +1823,48 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		metadata.InitialAttribution.AgentPercentage)
 }
 
+// TestSessionState_ShadowBranchSuffixPersistence verifies that ShadowBranchSuffix is
+// persisted correctly across session state save/load cycles.
+func TestSessionState_ShadowBranchSuffixPersistence(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	// Create session state with ShadowBranchSuffix
+	state := &SessionState{
+		SessionID:          "test-session-suffix",
+		BaseCommit:         "abc123def456",
+		StartedAt:          time.Now(),
+		CheckpointCount:    2,
+		ShadowBranchSuffix: 3, // Testing non-default suffix value
+	}
+
+	// Save state
+	err = s.saveSessionState(state)
+	if err != nil {
+		t.Fatalf("saveSessionState() error = %v", err)
+	}
+
+	// Load state and verify ShadowBranchSuffix
+	loaded, err := s.loadSessionState("test-session-suffix")
+	if err != nil {
+		t.Fatalf("loadSessionState() error = %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("loadSessionState() returned nil")
+	}
+
+	if loaded.ShadowBranchSuffix != state.ShadowBranchSuffix {
+		t.Errorf("ShadowBranchSuffix = %d, want %d", loaded.ShadowBranchSuffix, state.ShadowBranchSuffix)
+	}
+}
+
 // TestExtractUserPromptsFromLines tests extraction of user prompts from JSONL format.
 func TestExtractUserPromptsFromLines(t *testing.T) {
 	tests := []struct {

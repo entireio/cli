@@ -47,6 +47,17 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 		}
 	}
 
+	// Determine suffix before writing checkpoint
+	suffix, isNewSuffix, err := s.determineSuffix(repo, state)
+	if err != nil {
+		return fmt.Errorf("failed to determine suffix: %w", err)
+	}
+
+	// Update state with new suffix if needed
+	if isNewSuffix || state.ShadowBranchSuffix == 0 {
+		state.ShadowBranchSuffix = suffix
+	}
+
 	// Get checkpoint store
 	store, err := s.getCheckpointStore()
 	if err != nil {
@@ -54,8 +65,8 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 	}
 
 	// Check if shadow branch exists to report whether we created it
-	shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit)
-	branchExisted := store.ShadowBranchExists(state.BaseCommit)
+	shadowBranchName := checkpoint.ShadowBranchNameForCommitWithSuffix(state.BaseCommit, suffix)
+	branchExisted := shadowBranchExists(repo, shadowBranchName)
 
 	// Use the pending attribution calculated at prompt start (in InitializeSession)
 	// This was calculated BEFORE the agent made changes, so it accurately captures user edits
@@ -83,6 +94,7 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 	result, err := store.WriteTemporary(context.Background(), checkpoint.WriteTemporaryOptions{
 		SessionID:         sessionID,
 		BaseCommit:        state.BaseCommit,
+		Suffix:            suffix,
 		ModifiedFiles:     ctx.ModifiedFiles,
 		NewFiles:          ctx.NewFiles,
 		DeletedFiles:      ctx.DeletedFiles,
@@ -180,6 +192,17 @@ func (s *ManualCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) err
 		}
 	}
 
+	// Determine suffix before writing checkpoint
+	suffix, isNewSuffix, err := s.determineSuffix(repo, state)
+	if err != nil {
+		return fmt.Errorf("failed to determine suffix: %w", err)
+	}
+
+	// Update state with new suffix if needed
+	if isNewSuffix || state.ShadowBranchSuffix == 0 {
+		state.ShadowBranchSuffix = suffix
+	}
+
 	// Get checkpoint store
 	store, err := s.getCheckpointStore()
 	if err != nil {
@@ -187,8 +210,8 @@ func (s *ManualCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) err
 	}
 
 	// Check if shadow branch exists to report whether we created it
-	shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit)
-	branchExisted := store.ShadowBranchExists(state.BaseCommit)
+	shadowBranchName := checkpoint.ShadowBranchNameForCommitWithSuffix(state.BaseCommit, suffix)
+	branchExisted := shadowBranchExists(repo, shadowBranchName)
 
 	// Compute metadata paths for commit message
 	sessionMetadataDir := paths.SessionMetadataDirFromEntireID(ctx.SessionID)
@@ -223,6 +246,7 @@ func (s *ManualCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) err
 	_, err = store.WriteTemporaryTask(context.Background(), checkpoint.WriteTemporaryTaskOptions{
 		SessionID:              ctx.SessionID,
 		BaseCommit:             state.BaseCommit,
+		Suffix:                 suffix,
 		ToolUseID:              ctx.ToolUseID,
 		AgentID:                ctx.AgentID,
 		ModifiedFiles:          ctx.ModifiedFiles,
