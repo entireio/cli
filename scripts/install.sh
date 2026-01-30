@@ -56,7 +56,7 @@ Usage:
 
 Environment Variables:
     ENTIRE_VERSION      Install a specific version (default: latest)
-    ENTIRE_INSTALL_DIR  Override install directory (default: /usr/local/bin)
+    ENTIRE_INSTALL_DIR  Override install directory (default: $HOME/.local/bin)
 
 Examples:
     # Install latest version
