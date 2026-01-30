@@ -89,6 +89,7 @@ func (s *ManualCommitStrategy) determineSuffix(repo *git.Repository, state *Sess
 
 // handleLegacySuffix handles sessions with suffix=0 (legacy or new session).
 // If a legacy branch exists (entire/<hash>), it renames it to suffixed format (entire/<hash>-1).
+// If suffixed branches already exist (from other sessions), finds the next available suffix.
 func (s *ManualCommitStrategy) handleLegacySuffix(repo *git.Repository, state *SessionState) (int, bool, error) {
 	baseCommitShort := state.BaseCommit
 	if len(baseCommitShort) > checkpoint.ShadowBranchHashLength {
@@ -101,8 +102,10 @@ func (s *ManualCommitStrategy) handleLegacySuffix(repo *git.Repository, state *S
 	// Check if legacy branch exists
 	ref, err := repo.Reference(legacyRefName, true)
 	if err != nil {
-		// No legacy branch, start fresh at suffix 1
-		return 1, true, nil //nolint:nilerr // Reference not found is expected case
+		// No legacy branch - find next available suffix
+		// Other sessions may have already created suffixed branches (e.g., entire/<hash>-1)
+		nextSuffix := findNextAvailableSuffix(repo, baseCommitShort)
+		return nextSuffix, true, nil //nolint:nilerr // Reference not found is expected case
 	}
 
 	// Legacy branch exists - rename to suffixed format
@@ -122,6 +125,19 @@ func (s *ManualCommitStrategy) handleLegacySuffix(repo *git.Repository, state *S
 
 	// Return suffix 1, continuing on the migrated branch
 	return 1, false, nil
+}
+
+// findNextAvailableSuffix finds the next available shadow branch suffix.
+// Checks for existing branches entire/<hash>-1, entire/<hash>-2, etc.
+func findNextAvailableSuffix(repo *git.Repository, baseCommitShort string) int {
+	for suffix := 1; suffix <= 100; suffix++ { // Cap at 100 to avoid infinite loop
+		branchName := checkpoint.ShadowBranchNameForCommitWithSuffix(baseCommitShort, suffix)
+		if !shadowBranchExists(repo, branchName) {
+			return suffix
+		}
+	}
+	// Fallback: return next suffix after cap
+	return 101
 }
 
 // shadowBranchExists checks if a shadow branch exists.

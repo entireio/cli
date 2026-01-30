@@ -555,23 +555,190 @@ func (s *ManualCommitStrategy) PostCommit() error {
 }
 
 // filterSessionsWithNewContent returns sessions that have new transcript content
-// beyond what was already condensed.
+// beyond what was already condensed AND whose changes are actually present in staged files.
+// This ensures that sessions whose changes were discarded (e.g., via git restore)
+// are not included in the commit's attribution.
 func (s *ManualCommitStrategy) filterSessionsWithNewContent(repo *git.Repository, sessions []*SessionState) []*SessionState {
 	var result []*SessionState
 
-	for _, state := range sessions {
-		hasNew, err := s.sessionHasNewContent(repo, state)
-		if err != nil {
-			// On error, include the session (fail open for hooks)
-			result = append(result, state)
-			continue
-		}
-		if hasNew {
-			result = append(result, state)
+	// Get staged files once for all sessions
+	stagedFiles := getStagedFiles(repo)
+
+	// Get staged content hashes for comparison
+	stagedHashes := getStagedFileHashes(repo)
+
+	logCtx := logging.WithComponent(context.Background(), "checkpoint")
+
+	// Debug: write to a file since git hooks may redirect stderr
+	debugFile, _ := os.OpenFile("/tmp/entire-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec,errcheck // debug only
+	if debugFile != nil {
+		defer debugFile.Close()
+	}
+	debugLog := func(format string, args ...interface{}) {
+		if debugFile != nil {
+			fmt.Fprintf(debugFile, format+"\n", args...)
 		}
 	}
 
+	debugLog("filterSessionsWithNewContent called with %d sessions, stagedFiles=%v, stagedHashes=%d",
+		len(sessions), stagedFiles, len(stagedHashes))
+
+	for _, state := range sessions {
+		debugLog("checking session %s (suffix=%d, files=%v)",
+			state.SessionID[:8], state.ShadowBranchSuffix, state.FilesTouched)
+
+		hasNew, err := s.sessionHasNewContent(repo, state)
+		if err != nil {
+			// On error, include the session (fail open for hooks)
+			debugLog("session %s: error checking content: %v", state.SessionID[:8], err)
+			result = append(result, state)
+			continue
+		}
+		if !hasNew {
+			debugLog("session %s has no new content", state.SessionID[:8])
+			continue
+		}
+
+		debugLog("session %s has new content", state.SessionID[:8])
+
+		// Session has new content - but verify its files overlap with staged files.
+		// If the session touched files that aren't being committed (e.g., user did
+		// git restore to discard the session's changes), don't include this session.
+		if len(state.FilesTouched) > 0 && len(stagedFiles) > 0 {
+			if !hasOverlappingFiles(stagedFiles, state.FilesTouched) {
+				// Session's files aren't in staged files - changes were likely discarded
+				logging.Debug(logCtx, "filterSessionsWithNewContent: session excluded (no file overlap)",
+					slog.String("session_id", state.SessionID),
+					slog.Int("session_files", len(state.FilesTouched)),
+					slog.Int("staged_files", len(stagedFiles)),
+				)
+				continue
+			}
+
+			// Files overlap, but we need to verify the session's CONTENT is actually
+			// in the staged files. If another session overwrote this session's changes
+			// (or user did git restore then another session modified the same file),
+			// the checkpoint content won't match staged content.
+			contentMatches := s.sessionContentMatchesStaged(repo, state, stagedHashes)
+			debugLog("session %s content match: %v (suffix=%d)", state.SessionID[:8], contentMatches, state.ShadowBranchSuffix)
+			if !contentMatches {
+				logging.Debug(logCtx, "filterSessionsWithNewContent: session excluded (content mismatch)",
+					slog.String("session_id", state.SessionID),
+					slog.Int("session_files", len(state.FilesTouched)),
+				)
+				continue
+			}
+		}
+
+		result = append(result, state)
+	}
+
 	return result
+}
+
+// getStagedFileHashes returns a map of staged file paths to their blob hashes.
+func getStagedFileHashes(repo *git.Repository) map[string]plumbing.Hash {
+	result := make(map[string]plumbing.Hash)
+
+	idx, err := repo.Storer.Index()
+	if err != nil {
+		return result
+	}
+
+	for _, entry := range idx.Entries {
+		result[entry.Name] = entry.Hash
+	}
+
+	return result
+}
+
+// sessionContentMatchesStaged checks if at least one of the session's touched files
+// has content in the staging area that matches the session's checkpoint content.
+// This detects when a session's changes were overwritten by another session or discarded.
+func (s *ManualCommitStrategy) sessionContentMatchesStaged(repo *git.Repository, state *SessionState, stagedHashes map[string]plumbing.Hash) bool {
+	logCtx := logging.WithComponent(context.Background(), "checkpoint")
+
+	// Get the session's shadow branch tree
+	var shadowBranchName string
+	if state.ShadowBranchSuffix > 0 {
+		shadowBranchName = checkpoint.ShadowBranchNameForCommitWithSuffix(state.BaseCommit, state.ShadowBranchSuffix)
+	} else {
+		shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit)
+	}
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+	ref, err := repo.Reference(refName, true)
+	if err != nil {
+		// No shadow branch - can't verify, fail open
+		logging.Debug(logCtx, "sessionContentMatchesStaged: no shadow branch, fail open",
+			slog.String("session_id", state.SessionID),
+			slog.String("shadow_branch", shadowBranchName),
+		)
+		return true
+	}
+
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		logging.Debug(logCtx, "sessionContentMatchesStaged: failed to get commit, fail open",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()),
+		)
+		return true // fail open
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		logging.Debug(logCtx, "sessionContentMatchesStaged: failed to get tree, fail open",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()),
+		)
+		return true // fail open
+	}
+
+	// Check each touched file - if ANY file's checkpoint content matches staged content,
+	// the session contributed to this commit
+	for _, filePath := range state.FilesTouched {
+		stagedHash, inStaged := stagedHashes[filePath]
+		if !inStaged {
+			logging.Debug(logCtx, "sessionContentMatchesStaged: file not in staged",
+				slog.String("session_id", state.SessionID),
+				slog.String("file", filePath),
+			)
+			continue // file not staged, skip
+		}
+
+		// Get file hash from checkpoint tree
+		checkpointFile, err := tree.File(filePath)
+		if err != nil {
+			logging.Debug(logCtx, "sessionContentMatchesStaged: file not in checkpoint tree",
+				slog.String("session_id", state.SessionID),
+				slog.String("file", filePath),
+				slog.String("error", err.Error()),
+			)
+			continue // file not in checkpoint, skip
+		}
+
+		logging.Debug(logCtx, "sessionContentMatchesStaged: comparing hashes",
+			slog.String("session_id", state.SessionID),
+			slog.String("file", filePath),
+			slog.String("checkpoint_hash", checkpointFile.Hash.String()),
+			slog.String("staged_hash", stagedHash.String()),
+			slog.Bool("match", checkpointFile.Hash == stagedHash),
+		)
+
+		// Compare hashes - if they match, this session's content is being committed
+		if checkpointFile.Hash == stagedHash {
+			return true
+		}
+	}
+
+	logging.Debug(logCtx, "sessionContentMatchesStaged: no content match",
+		slog.String("session_id", state.SessionID),
+		slog.Int("files_checked", len(state.FilesTouched)),
+	)
+
+	// None of the session's checkpoint content matches staged content
+	// This means the session's changes were overwritten or discarded
+	return false
 }
 
 // sessionHasNewContent checks if a session has new transcript content
