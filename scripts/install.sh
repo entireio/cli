@@ -230,10 +230,6 @@ main() {
 
     mkdir -p "${install_dir}"
 
-    # Install binary
-    if [[ ! -d "$install_dir" ]]; then
-        error "Install directory does not exist: ${install_dir}"
-    fi
     if [[ ! -w "$install_dir" ]]; then
         error "Cannot write to ${install_dir}. Run with sudo or set ENTIRE_INSTALL_DIR to a writable location."
     fi
