@@ -83,7 +83,16 @@ func (s *ManualCommitStrategy) listAllSessionStates() ([]*SessionState, error) {
 		// AND has no LastCheckpointID (not recently condensed)
 		// Sessions with LastCheckpointID are valid - they were condensed and the shadow
 		// branch was intentionally deleted. Keep them for LastCheckpointID reuse.
-		shadowBranch := getShadowBranchNameForCommit(state.BaseCommit)
+		//
+		// Use the correct shadow branch name based on suffix:
+		// - If ShadowBranchSuffix > 0: use suffixed format (entire/<hash>-N)
+		// - Otherwise: use legacy format (entire/<hash>)
+		var shadowBranch string
+		if state.ShadowBranchSuffix > 0 {
+			shadowBranch = checkpoint.ShadowBranchNameForCommitWithSuffix(state.BaseCommit, state.ShadowBranchSuffix)
+		} else {
+			shadowBranch = getShadowBranchNameForCommit(state.BaseCommit)
+		}
 		refName := plumbing.NewBranchReferenceName(shadowBranch)
 		if _, err := repo.Reference(refName, true); err != nil {
 			// Shadow branch doesn't exist

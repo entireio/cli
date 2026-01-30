@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/trailers"
 
@@ -49,7 +50,13 @@ func (s *ManualCommitStrategy) GetSessionInfo() (*SessionInfo, error) {
 
 	// Return info for most recent session
 	state := sessions[0]
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit)
+	// Use suffixed shadow branch name if session has a suffix
+	var shadowBranchName string
+	if state.ShadowBranchSuffix > 0 {
+		shadowBranchName = checkpoint.ShadowBranchNameForCommitWithSuffix(state.BaseCommit, state.ShadowBranchSuffix)
+	} else {
+		shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit)
+	}
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 
 	info := &SessionInfo{
@@ -174,7 +181,7 @@ func (s *ManualCommitStrategy) GetAdditionalSessions() ([]*Session, error) {
 		}
 
 		// Try to get description from shadow branch
-		if description := s.getDescriptionFromShadowBranch(state.SessionID, state.BaseCommit); description != "" {
+		if description := s.getDescriptionFromShadowBranch(state.SessionID, state.BaseCommit, state.ShadowBranchSuffix); description != "" {
 			session.Description = description
 		}
 
@@ -186,13 +193,19 @@ func (s *ManualCommitStrategy) GetAdditionalSessions() ([]*Session, error) {
 
 // getDescriptionFromShadowBranch reads the session description from the shadow branch.
 // sessionID is expected to be an Entire session ID (already date-prefixed like "2026-01-12-abc123").
-func (s *ManualCommitStrategy) getDescriptionFromShadowBranch(sessionID, baseCommit string) string {
+func (s *ManualCommitStrategy) getDescriptionFromShadowBranch(sessionID, baseCommit string, suffix int) string {
 	repo, err := OpenRepository()
 	if err != nil {
 		return ""
 	}
 
-	shadowBranchName := getShadowBranchNameForCommit(baseCommit)
+	// Use suffixed shadow branch name if suffix > 0
+	var shadowBranchName string
+	if suffix > 0 {
+		shadowBranchName = checkpoint.ShadowBranchNameForCommitWithSuffix(baseCommit, suffix)
+	} else {
+		shadowBranchName = getShadowBranchNameForCommit(baseCommit)
+	}
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {

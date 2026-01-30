@@ -34,7 +34,7 @@ func TestSessionIDConflict_OrphanedBranchIsReset(t *testing.T) {
 	env.InitEntire(strategy.StrategyNameManualCommit)
 
 	baseHead := env.GetHeadHash()
-	shadowBranch := "entire/" + baseHead[:7]
+	shadowBranch := "entire/" + baseHead[:7] + "-1"
 
 	// Create a session and checkpoint (this creates the shadow branch)
 	session1 := env.NewSession()
@@ -223,7 +223,10 @@ func TestSessionIDConflict_ExistingSessionWithState(t *testing.T) {
 	env.GitCommit("Initial commit")
 
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
+	// Enable multi-session warning to test conflict detection
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	baseHead := env.GetHeadHash()
 	shadowBranch := "entire/" + baseHead[:7]

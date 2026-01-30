@@ -179,6 +179,20 @@ func NewFeatureBranchEnv(t *testing.T, strategyName string) *TestEnv {
 	return env
 }
 
+// NewFeatureBranchEnvWithOptions creates a TestEnv ready for session testing with custom options.
+// Similar to NewFeatureBranchEnv but allows specifying strategy options like enable_multisession_warning.
+func NewFeatureBranchEnvWithOptions(t *testing.T, strategyName string, strategyOptions map[string]any) *TestEnv {
+	t.Helper()
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntireWithOptions(strategyName, strategyOptions)
+	env.WriteFile("README.md", "# Test Repository")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+	env.GitCheckoutNewBranch("feature/test-branch")
+	return env
+}
+
 // AllStrategies returns all strategy names for parameterized tests.
 func AllStrategies() []string {
 	return []string{

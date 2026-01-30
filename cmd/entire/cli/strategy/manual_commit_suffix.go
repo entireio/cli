@@ -17,10 +17,11 @@ import (
 //
 // Decision logic:
 //  1. If no suffix yet (ShadowBranchSuffix == 0), start at suffix 1
-//  2. If worktree is clean, previous work was dismissed → new suffix
-//  3. If modified files don't overlap with shadow branch files → new suffix
-//  4. If modified files overlap but agent's lines are gone → new suffix
-//  5. Otherwise, continue on the same suffix (agent's work is preserved)
+//  2. If continuing an existing session (CheckpointCount > 0), continue on same branch
+//  3. If worktree is clean, previous work was dismissed → new suffix
+//  4. If modified files don't overlap with shadow branch files → new suffix
+//  5. If modified files overlap but agent's lines are gone → new suffix
+//  6. Otherwise, continue on the same suffix (agent's work is preserved)
 //
 // Returns (suffix, isNew, error) where isNew indicates this is a fresh suffix.
 func (s *ManualCommitStrategy) determineSuffix(repo *git.Repository, state *SessionState) (int, bool, error) {
@@ -33,6 +34,14 @@ func (s *ManualCommitStrategy) determineSuffix(repo *git.Repository, state *Sess
 	currentBranch := checkpoint.ShadowBranchNameForCommitWithSuffix(state.BaseCommit[:checkpoint.ShadowBranchHashLength], state.ShadowBranchSuffix)
 	if !shadowBranchExists(repo, currentBranch) {
 		// Branch doesn't exist yet, continue with current suffix
+		return state.ShadowBranchSuffix, false, nil
+	}
+
+	// If continuing an existing session (CheckpointCount > 0), always continue on the same branch.
+	// The "dismissal" detection logic only applies at the START of a new session when the user
+	// might have dismissed the previous session's work. Within a session, the agent is expected
+	// to modify its own work, so we should continue on the same branch.
+	if state.CheckpointCount > 0 {
 		return state.ShadowBranchSuffix, false, nil
 	}
 
@@ -123,6 +132,7 @@ func shadowBranchExists(repo *git.Repository, branchName string) bool {
 }
 
 // isWorktreeClean checks if the worktree has any changes (excluding .entire/ and .git/).
+// Includes untracked files because agent-created files appear as untracked relative to HEAD.
 func isWorktreeClean(repo *git.Repository) (bool, error) {
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -139,11 +149,12 @@ func isWorktreeClean(repo *git.Repository) (bool, error) {
 		if strings.HasPrefix(file, ".entire/") || strings.HasPrefix(file, ".git/") {
 			continue
 		}
-		// Any non-untracked change means not clean
-		if fileStatus.Worktree != git.Untracked && fileStatus.Worktree != ' ' {
+		// Any change (including untracked files) means not clean
+		// Untracked files are included because agent-created files appear as untracked
+		if fileStatus.Worktree != ' ' {
 			return false, nil
 		}
-		if fileStatus.Staging != git.Untracked && fileStatus.Staging != ' ' {
+		if fileStatus.Staging != ' ' {
 			return false, nil
 		}
 	}
@@ -201,7 +212,9 @@ func getFilesFromShadowBranch(repo *git.Repository, baseCommit, shadowBranch str
 	return files, nil
 }
 
-// getModifiedWorktreeFiles returns files that are modified in the worktree.
+// getModifiedWorktreeFiles returns files that are modified or untracked in the worktree.
+// Includes untracked files because files created by the agent but not committed to HEAD
+// appear as untracked, and we need to detect overlap with shadow branch files.
 func getModifiedWorktreeFiles(repo *git.Repository) (map[string]bool, error) {
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -219,11 +232,13 @@ func getModifiedWorktreeFiles(repo *git.Repository) (map[string]bool, error) {
 		if strings.HasPrefix(file, ".entire/") || strings.HasPrefix(file, ".git/") {
 			continue
 		}
-		// Any change counts
-		if fileStatus.Worktree != git.Untracked && fileStatus.Worktree != ' ' {
+		// Any change counts - including untracked files
+		// Untracked files (Worktree == '?') are included because files created by
+		// the agent appear as untracked relative to HEAD
+		if fileStatus.Worktree != ' ' {
 			files[file] = true
 		}
-		if fileStatus.Staging != git.Untracked && fileStatus.Staging != ' ' {
+		if fileStatus.Staging != ' ' {
 			files[file] = true
 		}
 	}

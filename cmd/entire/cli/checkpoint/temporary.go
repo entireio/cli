@@ -442,6 +442,33 @@ func (s *GitStore) ListTemporaryCheckpoints(ctx context.Context, baseCommit stri
 	return results, nil
 }
 
+// ListTemporaryCheckpointsFromSuffix lists checkpoint commits from a specific suffixed shadow branch.
+// Only queries the branch with the given suffix - does NOT search other branches.
+// Use this when you only want checkpoints from the active/current branch.
+// Returns nil slice if the branch doesn't exist (not an error).
+//
+//nolint:unparam // error return is always nil by design - branch not found is not an error
+func (s *GitStore) ListTemporaryCheckpointsFromSuffix(ctx context.Context, baseCommit string, suffix int, sessionID string, limit int) ([]TemporaryCheckpointInfo, error) {
+	_ = ctx // Reserved for future use
+
+	// Get the specific branch name for this suffix
+	var branchName string
+	if suffix > 0 {
+		branchName = ShadowBranchNameForCommitWithSuffix(baseCommit, suffix)
+	} else {
+		branchName = ShadowBranchNameForCommit(baseCommit)
+	}
+
+	refName := plumbing.NewBranchReferenceName(branchName)
+	ref, err := s.repo.Reference(refName, true)
+	if err != nil {
+		return nil, nil //nolint:nilerr // Branch not found is expected, return empty
+	}
+
+	results := s.listCheckpointsFromRef(ref, sessionID, limit)
+	return results, nil
+}
+
 // listCheckpointsFromRef lists checkpoints from a single branch reference.
 func (s *GitStore) listCheckpointsFromRef(ref *plumbing.Reference, sessionID string, limit int) []TemporaryCheckpointInfo {
 	if limit <= 0 {

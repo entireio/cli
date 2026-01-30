@@ -81,8 +81,8 @@ func TestShadow_UntrackedFilePreservation(t *testing.T) {
 		t.Fatalf("SimulateStop (checkpoint 1) failed: %v", err)
 	}
 
-	// Verify shadow branch created
-	expectedShadowBranch := "entire/" + initialHead[:7]
+	// Verify shadow branch created (new format with suffix)
+	expectedShadowBranch := "entire/" + initialHead[:7] + "-1"
 	if !env.BranchExists(expectedShadowBranch) {
 		t.Errorf("Expected shadow branch %s to exist", expectedShadowBranch)
 	}

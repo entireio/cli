@@ -469,6 +469,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 	}
 
 	// Track shadow branches to clean up after successful condensation
+	// Store the full branch name (including suffix) since branches use suffixed format
 	shadowBranchesToDelete := make(map[string]struct{})
 
 	// Condense sessions that have new content
@@ -480,8 +481,14 @@ func (s *ManualCommitStrategy) PostCommit() error {
 			continue
 		}
 
-		// Track this shadow branch for cleanup
-		shadowBranchesToDelete[state.BaseCommit] = struct{}{}
+		// Track this shadow branch for cleanup using the correct name format with suffix
+		var shadowBranchName string
+		if state.ShadowBranchSuffix > 0 {
+			shadowBranchName = checkpoint.ShadowBranchNameForCommitWithSuffix(state.BaseCommit, state.ShadowBranchSuffix)
+		} else {
+			shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit)
+		}
+		shadowBranchesToDelete[shadowBranchName] = struct{}{}
 
 		// Update session state for the new base commit
 		// After condensation, the session continues from the NEW commit (HEAD), so we:
@@ -529,8 +536,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 
 	// Clean up shadow branches after successful condensation
 	// Data is now preserved on entire/sessions, so shadow branches are no longer needed
-	for baseCommit := range shadowBranchesToDelete {
-		shadowBranchName := getShadowBranchNameForCommit(baseCommit)
+	for shadowBranchName := range shadowBranchesToDelete {
 		if err := deleteShadowBranch(repo, shadowBranchName); err != nil {
 			fmt.Fprintf(os.Stderr, "[entire] Warning: failed to clean up %s: %v\n", shadowBranchName, err)
 		} else {
@@ -571,8 +577,13 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(repo *git.Repository
 // sessionHasNewContent checks if a session has new transcript content
 // beyond what was already condensed.
 func (s *ManualCommitStrategy) sessionHasNewContent(repo *git.Repository, state *SessionState) (bool, error) {
-	// Get shadow branch
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit)
+	// Get shadow branch - use suffixed format if session has a suffix
+	var shadowBranchName string
+	if state.ShadowBranchSuffix > 0 {
+		shadowBranchName = checkpoint.ShadowBranchNameForCommitWithSuffix(state.BaseCommit, state.ShadowBranchSuffix)
+	} else {
+		shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit)
+	}
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
@@ -880,11 +891,23 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 
 			// Check if old shadow branch exists - if so, user did NOT commit (would have been deleted)
 			// This happens when user does: stash → pull → stash apply, or rebase, etc.
-			oldShadowBranch := getShadowBranchNameForCommit(oldBaseCommit)
+			// Use the correct branch name format with suffix
+			var oldShadowBranch string
+			if state.ShadowBranchSuffix > 0 {
+				oldShadowBranch = checkpoint.ShadowBranchNameForCommitWithSuffix(oldBaseCommit, state.ShadowBranchSuffix)
+			} else {
+				oldShadowBranch = getShadowBranchNameForCommit(oldBaseCommit)
+			}
 			oldRefName := plumbing.NewBranchReferenceName(oldShadowBranch)
 			if oldRef, err := repo.Reference(oldRefName, true); err == nil {
 				// Old shadow branch exists - move it to new base commit
-				newShadowBranch := getShadowBranchNameForCommit(newBaseCommit)
+				// Use the same suffix for the new branch
+				var newShadowBranch string
+				if state.ShadowBranchSuffix > 0 {
+					newShadowBranch = checkpoint.ShadowBranchNameForCommitWithSuffix(newBaseCommit, state.ShadowBranchSuffix)
+				} else {
+					newShadowBranch = getShadowBranchNameForCommit(newBaseCommit)
+				}
 				newRefName := plumbing.NewBranchReferenceName(newShadowBranch)
 
 				// Create new reference pointing to same commit
@@ -936,7 +959,13 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 			}
 
 			// Found a session from a different worktree on the same base commit
-			shadowBranch := getShadowBranchNameForCommit(head.Hash().String())
+			// Use the existing session's suffix for the branch name
+			var shadowBranch string
+			if existingState.ShadowBranchSuffix > 0 {
+				shadowBranch = checkpoint.ShadowBranchNameForCommitWithSuffix(head.Hash().String(), existingState.ShadowBranchSuffix)
+			} else {
+				shadowBranch = getShadowBranchNameForCommit(head.Hash().String())
+			}
 			return &ShadowBranchConflictError{
 				Branch:           shadowBranch,
 				ExistingSession:  existingState.SessionID,
@@ -1109,7 +1138,12 @@ func getStagedFiles(repo *git.Repository) []string {
 // getLastPrompt retrieves the most recent user prompt from a session's shadow branch.
 // Returns empty string if no prompt can be retrieved.
 func (s *ManualCommitStrategy) getLastPrompt(repo *git.Repository, state *SessionState) string {
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit)
+	var shadowBranchName string
+	if state.ShadowBranchSuffix > 0 {
+		shadowBranchName = checkpoint.ShadowBranchNameForCommitWithSuffix(state.BaseCommit, state.ShadowBranchSuffix)
+	} else {
+		shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit)
+	}
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {

@@ -57,7 +57,9 @@ func (s *ManualCommitStrategy) GetRewindPoints(limit int) ([]RewindPoint, error)
 	sessionPrompts := make(map[string]string)
 
 	for _, state := range sessions {
-		checkpoints, err := store.ListTemporaryCheckpoints(context.Background(), state.BaseCommit, state.SessionID, limit)
+		// Only query the ACTIVE branch for this session (the one with state.ShadowBranchSuffix)
+		// Old branches with lower suffixes are kept but not used for rewind
+		checkpoints, err := store.ListTemporaryCheckpointsFromSuffix(context.Background(), state.BaseCommit, state.ShadowBranchSuffix, state.SessionID, limit)
 		if err != nil {
 			continue // Error reading checkpoints, skip this session
 		}
@@ -448,7 +450,13 @@ func (s *ManualCommitStrategy) resetShadowBranchToCheckpoint(repo *git.Repositor
 	}
 
 	// Reset the shadow branch to the checkpoint commit
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit)
+	// Use suffixed shadow branch name if session has a suffix
+	var shadowBranchName string
+	if state.ShadowBranchSuffix > 0 {
+		shadowBranchName = cpkg.ShadowBranchNameForCommitWithSuffix(state.BaseCommit, state.ShadowBranchSuffix)
+	} else {
+		shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit)
+	}
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 
 	// Update the reference to point to the checkpoint commit

@@ -1827,7 +1827,6 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		metadata.InitialAttribution.AgentPercentage)
 }
 
-
 // TestExtractUserPromptsFromLines tests extraction of user prompts from JSONL format.
 func TestExtractUserPromptsFromLines(t *testing.T) {
 	tests := []struct {

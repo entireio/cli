@@ -368,8 +368,8 @@ func verifyShadowCheckpointStorage(t *testing.T, env *TestEnv, sessionID, taskTo
 	}
 	headHash := head.Hash().String()
 
-	// Shadow branch is entire/<first-7-chars-of-head>
-	shadowBranchName := "entire/" + headHash[:7]
+	// Shadow branch is entire/<first-7-chars-of-head>-N (N is the suffix)
+	shadowBranchName := "entire/" + headHash[:7] + "-1"
 
 	// Get shadow branch reference
 	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranchName), true)

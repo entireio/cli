@@ -82,8 +82,8 @@ func TestShadow_FullWorkflow(t *testing.T) {
 		t.Fatalf("SimulateStop (checkpoint 1) failed: %v", err)
 	}
 
-	// Verify shadow branch created with correct naming (entire/<base-sha[:7]>)
-	expectedShadowBranch := "entire/" + initialHead[:7]
+	// Verify shadow branch created with correct naming (entire/<base-sha[:7]>-N)
+	expectedShadowBranch := "entire/" + initialHead[:7] + "-1"
 	if !env.BranchExists(expectedShadowBranch) {
 		t.Errorf("Expected shadow branch %s to exist", expectedShadowBranch)
 	}
@@ -289,7 +289,7 @@ func TestShadow_FullWorkflow(t *testing.T) {
 	}
 
 	// Verify NEW shadow branch created (based on new HEAD)
-	expectedShadowBranch2 := "entire/" + commit1Hash[:7]
+	expectedShadowBranch2 := "entire/" + commit1Hash[:7] + "-1"
 	if !env.BranchExists(expectedShadowBranch2) {
 		t.Errorf("Expected new shadow branch %s after commit", expectedShadowBranch2)
 	}
@@ -492,7 +492,7 @@ func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
 	env.InitEntire(strategy.StrategyNameManualCommit)
 
 	originalHead := env.GetHeadHash()
-	originalShadowBranch := "entire/" + originalHead[:7]
+	originalShadowBranch := "entire/" + originalHead[:7] + "-1"
 
 	// Start session and create checkpoint
 	session := env.NewSession()
@@ -520,7 +520,7 @@ func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
 	env.GitCommit("Simulated pull commit")
 
 	newHead := env.GetHeadHash()
-	newShadowBranch := "entire/" + newHead[:7]
+	newShadowBranch := "entire/" + newHead[:7] + "-1"
 	t.Logf("After simulated pull: old=%s new=%s", originalHead[:7], newHead[:7])
 
 	// Restore the file (simulating stash apply)
@@ -598,8 +598,8 @@ func TestShadow_ShadowBranchNaming(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	// Verify shadow branch name matches entire/<base-sha[:7]>
-	expectedBranch := "entire/" + baseHead[:7]
+	// Verify shadow branch name matches entire/<base-sha[:7]>-N
+	expectedBranch := "entire/" + baseHead[:7] + "-1"
 	if !env.BranchExists(expectedBranch) {
 		t.Errorf("Shadow branch should be named %s", expectedBranch)
 	}
@@ -1454,7 +1454,7 @@ func TestShadow_RewindPreservesUntrackedFilesWithExistingShadowBranch(t *testing
 	}
 
 	// Verify shadow branch exists
-	shadowBranchName := "entire/" + env.GetHeadHash()[:7]
+	shadowBranchName := "entire/" + env.GetHeadHash()[:7] + "-1"
 	if !env.BranchExists(shadowBranchName) {
 		t.Fatalf("Shadow branch %s should exist after first session", shadowBranchName)
 	}

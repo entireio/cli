@@ -330,12 +330,12 @@ func TestShadowStrategy_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get session state: %v", err)
 	}
-	// Shadow branch uses 7-char prefix of base commit
+	// Shadow branch uses 7-char prefix of base commit with suffix
 	baseCommitPrefix := state.BaseCommit
 	if len(baseCommitPrefix) > 7 {
 		baseCommitPrefix = baseCommitPrefix[:7]
 	}
-	shadowBranchName := "entire/" + baseCommitPrefix
+	shadowBranchName := "entire/" + baseCommitPrefix + "-1"
 
 	env.WriteFile("test.txt", "test content")
 	session.CreateTranscript("Create test file", []FileChange{

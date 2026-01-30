@@ -490,7 +490,10 @@ func TestRewind_DifferentSessions(t *testing.T) {
 
 	t.Run("shadow_warns_different_sessions", func(t *testing.T) {
 		t.Parallel()
-		env := NewFeatureBranchEnv(t, "manual-commit")
+		// Enable multi-session warning to test the conflict detection flow
+		env := NewFeatureBranchEnvWithOptions(t, "manual-commit", map[string]any{
+			"enable_multisession_warning": true,
+		})
 
 		// Session 1
 		session1 := env.NewSession()
