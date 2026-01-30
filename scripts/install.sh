@@ -179,7 +179,7 @@ main() {
     local archive_path="${tmp_dir}/${archive_name}"
     info "Downloading ${archive_name}..."
     if ! download_file "$download_url" "$archive_path"; then
-        error "Failed to download from ${download_url}\nPlease check that the version exists and try again."
+        error "Failed to download from ${download_url}. Please check that the version exists and try again."
     fi
 
     # Download and verify checksums
