@@ -29,19 +29,19 @@ else
 fi
 
 info() {
-    echo -e "${BLUE}==>${NC} ${BOLD}$1${NC}"
+    printf '%b%s%b\n' "${BLUE}==>${NC} ${BOLD}" "$1" "${NC}"
 }
 
 success() {
-    echo -e "${GREEN}==>${NC} ${BOLD}$1${NC}"
+    printf '%b%s%b\n' "${GREEN}==>${NC} ${BOLD}" "$1" "${NC}"
 }
 
 warn() {
-    echo -e "${YELLOW}Warning:${NC} $1"
+    printf '%b %s\n' "${YELLOW}Warning:${NC}" "$1"
 }
 
 error() {
-    echo -e "${RED}Error:${NC} $1" >&2
+    printf '%b %s\n' "${RED}Error:${NC}" "$1" >&2
     exit 1
 }
 
