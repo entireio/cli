@@ -60,7 +60,7 @@ Examples:
     curl -fsSL https://entire.io/install.sh | bash
 
     # Install to custom directory
-    curl -fsSL https://entire.io/install.sh | ENTIRE_INSTALL_DIR=~/.local/bin bash
+    curl -fsSL https://entire.io/install.sh | ENTIRE_INSTALL_DIR=/usr/local/bin bash
 EOF
     exit 0
 }
