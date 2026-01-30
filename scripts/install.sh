@@ -142,14 +142,12 @@ verify_checksum() {
 }
 
 main() {
-    # Handle --help flag
     for arg in "$@"; do
         if [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
             show_help
         fi
     done
 
-    # Check for required dependencies
     if ! command -v curl &> /dev/null; then
         error "curl is required but not installed. Please install curl and try again."
     fi
@@ -162,7 +160,6 @@ main() {
     arch=$(detect_arch)
     info "Detected platform: ${os}/${arch}"
 
-    # Determine version
     info "Fetching latest version..."
     local version
     version=$(get_latest_version)
@@ -175,7 +172,6 @@ main() {
     local download_url="https://github.com/${GITHUB_REPO}/releases/download/v${version}/${archive_name}"
     local checksums_url="https://github.com/${GITHUB_REPO}/releases/download/v${version}/checksums.txt"
 
-    # Create temp directory
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -202,27 +198,22 @@ main() {
     verify_checksum "$archive_path" "$expected_checksum"
     success "Checksum verified"
 
-    # Extract archive
     info "Extracting..."
     tar -xzf "$archive_path" -C "$tmp_dir"
 
-    # Determine install directory
     local install_dir="${ENTIRE_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
     local binary_path="${tmp_dir}/${BINARY_NAME}"
 
-    # Check if binary exists in extracted files
+    # Find binary in extracted files
     if [[ ! -f "$binary_path" ]]; then
-        # Some GoReleaser setups put binary in a subdirectory
         binary_path=$(find "$tmp_dir" -name "$BINARY_NAME" -type f | head -n 1)
         if [[ -z "$binary_path" || ! -f "$binary_path" ]]; then
             error "Could not find ${BINARY_NAME} binary in archive"
         fi
     fi
 
-    # Make binary executable
     chmod +x "$binary_path"
 
-    # Install binary
     info "Installing to ${install_dir}..."
     local install_path="${install_dir}/${BINARY_NAME}"
 
