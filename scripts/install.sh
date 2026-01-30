@@ -233,7 +233,7 @@ main() {
     mv "$binary_path" "$install_path"
 
     # Verify installation
-    if "$install_path" --version &> /dev/null; then
+    if "$install_path" version &> /dev/null; then
         success "Entire CLI installed successfully!"
         echo ""
         echo "Run 'entire --help' to get started."
