@@ -236,28 +236,14 @@ main() {
     info "Installing to ${install_dir}..."
     local install_path="${install_dir}/${BINARY_NAME}"
 
-    # Try to install, falling back to ~/.local/bin if permission denied
-    if [[ -w "$install_dir" ]]; then
-        mv "$binary_path" "$install_path"
-    elif command -v sudo &> /dev/null; then
-        info "Requesting sudo access to install to ${install_dir}..."
-        sudo mv "$binary_path" "$install_path"
-    else
-        # Fallback to ~/.local/bin
-        install_dir="${HOME}/.local/bin"
-        install_path="${install_dir}/${BINARY_NAME}"
-        warn "Cannot write to ${DEFAULT_INSTALL_DIR}, installing to ${install_dir} instead"
-        mkdir -p "$install_dir"
-        mv "$binary_path" "$install_path"
-
-        # Check if ~/.local/bin is in PATH
-        if [[ ":$PATH:" != *":${install_dir}:"* ]]; then
-            warn "Add ${install_dir} to your PATH:"
-            echo ""
-            echo "    export PATH=\"\$PATH:${install_dir}\""
-            echo ""
-        fi
+    # Install binary
+    if [[ ! -d "$install_dir" ]]; then
+        error "Install directory does not exist: ${install_dir}"
     fi
+    if [[ ! -w "$install_dir" ]]; then
+        error "Cannot write to ${install_dir}. Run with sudo or set ENTIRE_INSTALL_DIR to a writable location."
+    fi
+    mv "$binary_path" "$install_path"
 
     # Verify installation
     if "$install_path" --version &> /dev/null; then
