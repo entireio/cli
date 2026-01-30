@@ -103,7 +103,7 @@ get_latest_version() {
     version=$(curl -fsSL "$url" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
 
     if [[ -z "$version" ]]; then
-        error "Failed to fetch latest version from GitHub. Please check your internet connection or specify ENTIRE_VERSION."
+        error "Failed to fetch latest version from GitHub. Please check your internet connection."
     fi
 
     echo "$version"
@@ -157,11 +157,9 @@ main() {
     info "Detected platform: ${os}/${arch}"
 
     # Determine version
-    local version="${ENTIRE_VERSION:-}"
-    if [[ -z "$version" ]]; then
-        info "Fetching latest version..."
-        version=$(get_latest_version)
-    fi
+    info "Fetching latest version..."
+    local version
+    version=$(get_latest_version)
     # Strip leading 'v' if present
     version="${version#v}"
     info "Installing version: ${version}"
