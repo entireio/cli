@@ -137,7 +137,7 @@ verify_checksum() {
     fi
 
     if [[ "$actual_checksum" != "$expected_checksum" ]]; then
-        error "Checksum verification failed!\nExpected: $expected_checksum\nActual: $actual_checksum"
+        error "Checksum verification failed!  Expected: $expected_checksum, actual: $actual_checksum"
     fi
 }
 
