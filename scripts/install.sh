@@ -149,6 +149,11 @@ main() {
         fi
     done
 
+    # Check for required dependencies
+    if ! command -v curl &> /dev/null; then
+        error "curl is required but not installed. Please install curl and try again."
+    fi
+
     info "Installing Entire CLI..."
 
     # Detect platform
