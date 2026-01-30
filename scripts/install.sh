@@ -4,6 +4,7 @@
 #
 # Environment variables:
 #   ENTIRE_INSTALL_DIR - Override install directory
+#   GITHUB_TOKEN       - GitHub API token to avoid rate limiting
 
 set -euo pipefail
 
@@ -54,6 +55,7 @@ Usage:
 
 Environment Variables:
     ENTIRE_INSTALL_DIR  Override install directory (default: $HOME/.local/bin)
+    GITHUB_TOKEN        GitHub API token to avoid rate limiting (optional)
 
 Examples:
     # Install latest version
@@ -100,7 +102,11 @@ detect_arch() {
 get_latest_version() {
     local url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
     local version
-    version=$(curl -fsSL "$url" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
+    local curl_opts=(-fsSL)
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        curl_opts+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    fi
+    version=$(curl "${curl_opts[@]}" "$url" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
 
     if [[ -z "$version" ]]; then
         error "Failed to fetch latest version from GitHub. Please check your internet connection."
