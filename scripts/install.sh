@@ -106,14 +106,7 @@ detect_arch() {
 get_latest_version() {
     local url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
     local version
-
-    if command -v curl &> /dev/null; then
-        version=$(curl -fsSL "$url" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
-    elif command -v wget &> /dev/null; then
-        version=$(wget -qO- "$url" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
-    else
-        error "Neither curl nor wget found. Please install one of them."
-    fi
+    version=$(curl -fsSL "$url" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
 
     if [[ -z "$version" ]]; then
         error "Failed to fetch latest version from GitHub. Please check your internet connection or specify ENTIRE_VERSION."
