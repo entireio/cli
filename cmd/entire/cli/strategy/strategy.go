@@ -508,6 +508,23 @@ type ConcurrentSessionChecker interface {
 	HasOtherActiveSessionsWithCheckpoints(currentSessionID string) (*SessionState, error)
 }
 
+// PromptHooks is an optional interface for strategies that need to perform actions
+// at the start and end of each user prompt. This is used for detecting overlap between
+// worktree and shadow branch state to determine whether to continue or reset checkpoints.
+type PromptHooks interface {
+	// OnPromptStart is called at the start of each user prompt (during UserPromptSubmit hook).
+	// This allows strategies to check worktree state before any file modifications occur.
+	// For example, manual-commit strategy uses this to detect file overlap between the
+	// worktree and shadow branch to decide whether to continue or reset the shadow branch.
+	OnPromptStart(sessionID string) error
+
+	// OnPromptEnd is called at the end of each prompt (during Stop hook).
+	// This allows strategies to clean up any flags or state set during OnPromptStart.
+	// For example, manual-commit strategy clears the ShouldResetShadowBranch flag here
+	// to ensure fresh overlap detection on the next prompt.
+	OnPromptEnd(sessionID string) error
+}
+
 // SessionSource is an optional interface for strategies that provide additional
 // sessions beyond those stored on the entire/sessions branch.
 // For example, manual-commit strategy provides active sessions from .git/entire-sessions/

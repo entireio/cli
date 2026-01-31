@@ -5,7 +5,12 @@ import (
 	"sync"
 
 	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/session"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // ManualCommitStrategy implements the manual-commit strategy for session management.
@@ -70,6 +75,7 @@ func sessionStateToStrategy(state *session.State) *SessionState {
 		UntrackedFilesAtStart:       state.UntrackedFilesAtStart,
 		FilesTouched:                state.FilesTouched,
 		ConcurrentWarningShown:      state.ConcurrentWarningShown,
+		ShouldResetShadowBranch:     state.ShouldResetShadowBranch,
 		LastCheckpointID:            state.LastCheckpointID,
 		AgentType:                   state.AgentType,
 		TokenUsage:                  state.TokenUsage,
@@ -117,6 +123,7 @@ func sessionStateFromStrategy(state *SessionState) *session.State {
 		UntrackedFilesAtStart:       state.UntrackedFilesAtStart,
 		FilesTouched:                state.FilesTouched,
 		ConcurrentWarningShown:      state.ConcurrentWarningShown,
+		ShouldResetShadowBranch:     state.ShouldResetShadowBranch,
 		LastCheckpointID:            state.LastCheckpointID,
 		AgentType:                   state.AgentType,
 		TokenUsage:                  state.TokenUsage,
@@ -243,6 +250,94 @@ func (s *ManualCommitStrategy) ListOrphanedItems() ([]CleanupItem, error) {
 	// which is strategy-agnostic (checks both shadow branches and checkpoints)
 
 	return items, nil
+}
+
+// getFilesTouchedByShadow returns the list of files modified in the shadow branch
+// compared to its base commit. Returns nil if shadow branch doesn't exist.
+func (s *ManualCommitStrategy) getFilesTouchedByShadow(
+	repo *git.Repository,
+	shadowBranch string,
+) ([]string, error) {
+	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
+	if err != nil {
+		if err == plumbing.ErrReferenceNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
+	if err != nil {
+		return nil, err
+	}
+
+	shadowTree, err := shadowCommit.Tree()
+	if err != nil {
+		return nil, err
+	}
+
+	// Get base commit for comparison
+	// If there's no parent (first checkpoint), return all files in shadow tree
+	if len(shadowCommit.ParentHashes) == 0 {
+		var files []string
+		err := shadowTree.Files().ForEach(func(f *object.File) error {
+			// Skip .entire directory
+			if paths.IsInfrastructurePath(f.Name) {
+				return nil
+			}
+			files = append(files, f.Name)
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to iterate shadow tree files: %w", err)
+		}
+		return files, nil
+	}
+
+	baseHash := shadowCommit.ParentHashes[0]
+	baseCommit, err := repo.CommitObject(baseHash)
+	if err != nil {
+		return nil, err
+	}
+	baseTree, err := baseCommit.Tree()
+	if err != nil {
+		return nil, err
+	}
+
+	// Find all files that differ between base and shadow
+	changes, err := baseTree.Diff(shadowTree)
+	if err != nil {
+		return nil, err
+	}
+
+	files := make([]string, 0, len(changes))
+	for _, change := range changes {
+		// Get file path (from either source or destination)
+		if change.To.Name != "" {
+			files = append(files, change.To.Name)
+		} else if change.From.Name != "" {
+			files = append(files, change.From.Name)
+		}
+	}
+
+	return files, nil
+}
+
+// fileSetIntersection returns files that appear in both lists.
+func fileSetIntersection(a, b []string) []string {
+	setA := make(map[string]bool, len(a))
+	for _, f := range a {
+		setA[f] = true
+	}
+
+	var result []string
+	for _, f := range b {
+		if setA[f] {
+			result = append(result, f)
+		}
+	}
+
+	return result
 }
 
 //nolint:gochecknoinits // Standard pattern for strategy registration

@@ -966,6 +966,116 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 	return nil
 }
 
+// OnPromptStart checks overlap between worktree and shadow branch at prompt start.
+// Sets ShouldResetShadowBranch flag in session state to indicate whether the shadow
+// branch should be reset on the next checkpoint.
+//
+// This is called BEFORE the prompt runs, allowing us to detect if the user dismissed
+// previous work (e.g., git restore or git stash) before starting new work.
+func (s *ManualCommitStrategy) OnPromptStart(sessionID string) error {
+	state, err := s.loadSessionState(sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to load session state: %w", err)
+	}
+
+	repo, err := OpenRepository()
+	if err != nil {
+		return err
+	}
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(state.BaseCommit)
+
+	// Check if shadow branch exists
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
+	if err != nil {
+		if err == plumbing.ErrReferenceNotFound {
+			// No shadow branch yet, nothing to check
+			state.ShouldResetShadowBranch = false
+			return s.saveSessionState(state)
+		}
+		return err
+	}
+
+	// Get current worktree status
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return err
+	}
+
+	status, err := worktree.Status()
+	if err != nil {
+		return err
+	}
+
+	// Extract modified and untracked files from status
+	// We include untracked files because they might have been created by the agent
+	// in a previous checkpoint (e.g., new files created by Claude Code)
+	var modifiedFiles []string
+	for file, st := range status {
+		// Skip .entire directory
+		if paths.IsInfrastructurePath(file) {
+			continue
+		}
+
+		// Include modified, added, deleted, and untracked files
+		if st.Worktree != git.Unmodified {
+			modifiedFiles = append(modifiedFiles, file)
+		}
+	}
+
+	// Clean worktree → reset on first checkpoint
+	if len(modifiedFiles) == 0 {
+		logging.Debug(context.Background(), "clean worktree at prompt start - will reset shadow branch on checkpoint")
+		state.ShouldResetShadowBranch = true
+		return s.saveSessionState(state)
+	}
+
+	// Check file overlap with shadow branch
+	shadowFiles, err := s.getFilesTouchedByShadow(repo, shadowBranch)
+	if err != nil {
+		// On error reading shadow, reset to be safe
+		logging.Warn(context.Background(), "failed to read shadow branch files",
+			slog.String("error", err.Error()),
+		)
+		state.ShouldResetShadowBranch = true
+		return s.saveSessionState(state)
+	}
+
+	overlap := fileSetIntersection(shadowFiles, modifiedFiles)
+	if len(overlap) == 0 {
+		logging.Debug(context.Background(), "no file overlap at prompt start - will reset shadow branch on checkpoint",
+			slog.Int("shadow_files", len(shadowFiles)),
+			slog.Int("worktree_files", len(modifiedFiles)),
+		)
+		state.ShouldResetShadowBranch = true
+	} else {
+		logging.Debug(context.Background(), "file overlap detected at prompt start - will continue on shadow branch",
+			slog.Int("overlap_count", len(overlap)),
+		)
+		state.ShouldResetShadowBranch = false
+	}
+
+	return s.saveSessionState(state)
+}
+
+// OnPromptEnd clears the ShouldResetShadowBranch flag if no checkpoint occurred during the prompt.
+// This ensures we check overlap again on the next prompt (e.g., if user stashed and then unstashed).
+func (s *ManualCommitStrategy) OnPromptEnd(sessionID string) error {
+	state, err := s.loadSessionState(sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to load session state: %w", err)
+	}
+
+	// Clear the flag - we'll check again on next prompt
+	if state.ShouldResetShadowBranch {
+		logging.Debug(context.Background(), "clearing reset flag at prompt end (no checkpoint occurred)")
+		state.ShouldResetShadowBranch = false
+		return s.saveSessionState(state)
+	}
+
+	return nil
+}
+
 // calculatePromptAttributionAtStart calculates attribution at prompt start (before agent runs).
 // This captures user changes since the last checkpoint - no filtering needed since
 // the agent hasn't made any changes yet.

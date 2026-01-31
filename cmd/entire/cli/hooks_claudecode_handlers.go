@@ -376,6 +376,14 @@ func captureInitialState() error {
 		}
 	}
 
+	// If strategy implements PromptHooks, call OnPromptStart to check overlap
+	// This happens AFTER session initialization to ensure session state exists
+	if promptHooks, ok := strat.(strategy.PromptHooks); ok {
+		if err := promptHooks.OnPromptStart(hookData.entireSessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to run prompt start hook: %v\n", err)
+		}
+	}
+
 	return nil
 }
 
@@ -628,6 +636,14 @@ func commitWithMetadata() error {
 
 	if err := strat.SaveChanges(ctx); err != nil {
 		return fmt.Errorf("failed to save changes: %w", err)
+	}
+
+	// If strategy implements PromptHooks, call OnPromptEnd to clean up state
+	// This happens AFTER SaveChanges to ensure the flag is only cleared after successful checkpoint
+	if promptHooks, ok := strat.(strategy.PromptHooks); ok {
+		if err := promptHooks.OnPromptEnd(entireSessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to run prompt end hook: %v\n", err)
+		}
 	}
 
 	// Update session state with new transcript position for strategies that create

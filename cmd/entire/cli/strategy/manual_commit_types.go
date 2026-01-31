@@ -26,6 +26,7 @@ type SessionState struct {
 	UntrackedFilesAtStart    []string        `json:"untracked_files_at_start,omitempty"`   // Files that existed at session start (to preserve during rewind)
 	FilesTouched             []string        `json:"files_touched,omitempty"`              // Files modified/created/deleted during this session
 	ConcurrentWarningShown   bool            `json:"concurrent_warning_shown,omitempty"`   // True if user was warned about concurrent sessions
+	ShouldResetShadowBranch  bool            `json:"should_reset_shadow_branch,omitempty"` // True if shadow branch should be reset on next checkpoint (set at prompt start)
 	LastCheckpointID         id.CheckpointID `json:"last_checkpoint_id,omitempty"`         // Checkpoint ID from last condensation, reused for subsequent commits without new content
 	AgentType                agent.AgentType `json:"agent_type,omitempty"`                 // Agent type identifier (e.g., "Claude Code", "Cursor")
 	TranscriptPath           string          `json:"transcript_path,omitempty"`            // Path to the live transcript file (for mid-session commit detection)

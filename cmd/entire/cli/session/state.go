@@ -51,6 +51,10 @@ type State struct {
 	// ConcurrentWarningShown is true if user was warned about concurrent sessions
 	ConcurrentWarningShown bool `json:"concurrent_warning_shown,omitempty"`
 
+	// ShouldResetShadowBranch is set by OnPromptStart when overlap check determines
+	// the shadow branch should be reset on next checkpoint (manual-commit strategy only)
+	ShouldResetShadowBranch bool `json:"should_reset_shadow_branch,omitempty"`
+
 	// LastCheckpointID is the checkpoint ID from last condensation, reused for subsequent commits without new content
 	LastCheckpointID id.CheckpointID `json:"last_checkpoint_id,omitempty"`
 

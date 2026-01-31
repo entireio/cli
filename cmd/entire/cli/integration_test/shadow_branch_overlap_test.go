@@ -76,6 +76,11 @@ func TestShadowBranchOverlap_DismissAndStartFresh(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t, strategy.StrategyNameManualCommit)
 
+	// Create file1.ts in base commit so git restore can work
+	env.WriteFile("src/file1.ts", "export const file1 = 'initial';")
+	env.GitAdd("src/file1.ts")
+	env.GitCommit("Add file1.ts")
+
 	initialHead := env.GetHeadHash()
 	expectedShadowBranch := "entire/" + initialHead[:7]
 
@@ -107,9 +112,13 @@ func TestShadowBranchOverlap_DismissAndStartFresh(t *testing.T) {
 		t.Fatalf("git restore failed: %v\nOutput: %s", err, output)
 	}
 
-	// Verify worktree is clean
-	if env.FileExists("src/file1.ts") {
-		t.Fatal("Expected src/file1.ts to be removed after git restore")
+	// Verify file was reverted to initial content
+	if !env.FileExists("src/file1.ts") {
+		t.Fatal("Expected src/file1.ts to still exist after git restore")
+	}
+	content := env.ReadFile("src/file1.ts")
+	if content != "export const file1 = 'initial';" {
+		t.Errorf("Expected file1.ts to be reverted to initial content, got: %s", content)
 	}
 
 	// Session B: Start new work on file2.ts (new prompt, same session)
@@ -128,12 +137,21 @@ func TestShadowBranchOverlap_DismissAndStartFresh(t *testing.T) {
 		t.Fatalf("SimulateStop (session 2) failed: %v", err)
 	}
 
-	// Verify shadow branch was reset: file1.ts should NOT be in shadow branch
-	if env.FileExistsInBranch(expectedShadowBranch, "src/file1.ts") {
-		t.Error("Expected src/file1.ts to NOT exist in shadow branch after reset")
+	// Verify shadow branch was reset and rebuilt from HEAD + Session B changes
+	// file1.ts should exist at its HEAD state (initial content, not Session A's v1)
+	if !env.FileExistsInBranch(expectedShadowBranch, "src/file1.ts") {
+		t.Error("Expected src/file1.ts to exist in shadow branch (from HEAD tree)")
+	}
+	// Verify file1.ts is at initial state (HEAD), not Session A's modified state
+	file1InShadow, found := env.ReadFileFromBranch(expectedShadowBranch, "src/file1.ts")
+	if !found {
+		t.Fatal("Failed to read file1.ts from shadow branch")
+	}
+	if file1InShadow != "export const file1 = 'initial';" {
+		t.Errorf("Expected file1.ts in shadow branch to be at initial state, got: %s", file1InShadow)
 	}
 
-	// Verify shadow branch has file2.ts
+	// Verify shadow branch has file2.ts from Session B
 	if !env.FileExistsInBranch(expectedShadowBranch, "src/file2.ts") {
 		t.Error("Expected src/file2.ts to exist in shadow branch after session 2")
 	}
@@ -145,6 +163,12 @@ func TestShadowBranchOverlap_DismissAndStartFresh(t *testing.T) {
 func TestShadowBranchOverlap_PartialDismiss(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t, strategy.StrategyNameManualCommit)
+
+	// Create files in base commit so git restore can work
+	env.WriteFile("src/file1.ts", "export const file1 = 'initial';")
+	env.WriteFile("src/file2.ts", "export const file2 = 'initial';")
+	env.GitAdd("src/file1.ts", "src/file2.ts")
+	env.GitCommit("Add initial files")
 
 	initialHead := env.GetHeadHash()
 	expectedShadowBranch := "entire/" + initialHead[:7]
@@ -178,16 +202,20 @@ func TestShadowBranchOverlap_PartialDismiss(t *testing.T) {
 		t.Fatal("Expected src/file2.ts to exist in shadow branch")
 	}
 
-	// User dismisses file1.ts but keeps file2.ts
+	// User dismisses file1.ts changes but keeps file2.ts changes
 	cmd := exec.Command("git", "restore", "src/file1.ts")
 	cmd.Dir = env.RepoDir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git restore failed: %v\nOutput: %s", err, output)
 	}
 
-	// Verify file1.ts is gone but file2.ts remains
-	if env.FileExists("src/file1.ts") {
-		t.Fatal("Expected src/file1.ts to be removed after git restore")
+	// Verify file1.ts is restored to initial content, file2.ts still has v1
+	if !env.FileExists("src/file1.ts") {
+		t.Fatal("Expected src/file1.ts to still exist after git restore")
+	}
+	file1Restored := env.ReadFile("src/file1.ts")
+	if file1Restored != "export const file1 = 'initial';" {
+		t.Errorf("Expected file1.ts to be restored to initial, got: %s", file1Restored)
 	}
 	if !env.FileExists("src/file2.ts") {
 		t.Fatal("Expected src/file2.ts to still exist")
@@ -237,6 +265,11 @@ func TestShadowBranchOverlap_StashAnswerQuestionsUnstash(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t, strategy.StrategyNameManualCommit)
 
+	// Create file1.ts in base commit so stash can work
+	env.WriteFile("src/file1.ts", "export const file1 = 'initial';")
+	env.GitAdd("src/file1.ts")
+	env.GitCommit("Add file1.ts")
+
 	initialHead := env.GetHeadHash()
 	expectedShadowBranch := "entire/" + initialHead[:7]
 
@@ -268,9 +301,13 @@ func TestShadowBranchOverlap_StashAnswerQuestionsUnstash(t *testing.T) {
 		t.Fatalf("git stash failed: %v\nOutput: %s", err, output)
 	}
 
-	// Verify worktree is clean
-	if env.FileExists("src/file1.ts") {
-		t.Fatal("Expected src/file1.ts to be removed after git stash")
+	// Verify worktree is clean (file1.ts reverted to initial, not removed)
+	if !env.FileExists("src/file1.ts") {
+		t.Fatal("Expected src/file1.ts to still exist after git stash")
+	}
+	file1AfterStash := env.ReadFile("src/file1.ts")
+	if file1AfterStash != "export const file1 = 'initial';" {
+		t.Errorf("Expected file1.ts to be at initial state after stash, got: %s", file1AfterStash)
 	}
 
 	// Session B: Just answer questions, no code changes (no checkpoint)
@@ -314,6 +351,11 @@ func TestShadowBranchOverlap_StashAnswerQuestionsUnstash(t *testing.T) {
 func TestShadowBranchOverlap_StashNewWorkSameFiles(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t, strategy.StrategyNameManualCommit)
+
+	// Create file1.ts in base commit so stash/restore can work
+	env.WriteFile("src/file1.ts", "export const login = () => { /* initial */ };")
+	env.GitAdd("src/file1.ts")
+	env.GitCommit("Add file1.ts")
 
 	initialHead := env.GetHeadHash()
 	expectedShadowBranch := "entire/" + initialHead[:7]
@@ -386,6 +428,11 @@ func TestShadowBranchOverlap_StashNewWorkDifferentFiles(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t, strategy.StrategyNameManualCommit)
 
+	// Create file1.ts in base commit so stash can work
+	env.WriteFile("src/file1.ts", "export const file1 = 'initial';")
+	env.GitAdd("src/file1.ts")
+	env.GitCommit("Add file1.ts")
+
 	initialHead := env.GetHeadHash()
 	expectedShadowBranch := "entire/" + initialHead[:7]
 
@@ -433,16 +480,24 @@ func TestShadowBranchOverlap_StashNewWorkDifferentFiles(t *testing.T) {
 		t.Fatalf("SimulateStop (session 2) failed: %v", err)
 	}
 
-	// Verify shadow branch was reset: file1.ts should NOT be in shadow branch
-	if env.FileExistsInBranch(expectedShadowBranch, "src/file1.ts") {
-		t.Error("Expected src/file1.ts to NOT exist in shadow branch after reset (Session A's data lost)")
+	// Verify shadow branch was reset and rebuilt from HEAD + Session B changes
+	// file1.ts should exist at HEAD state (initial), not Session A's modified state
+	if !env.FileExistsInBranch(expectedShadowBranch, "src/file1.ts") {
+		t.Error("Expected src/file1.ts to exist in shadow branch (from HEAD tree)")
+	}
+	file1InShadow, found := env.ReadFileFromBranch(expectedShadowBranch, "src/file1.ts")
+	if !found {
+		t.Fatal("Failed to read file1.ts from shadow branch")
+	}
+	if file1InShadow != "export const file1 = 'initial';" {
+		t.Errorf("Expected file1.ts in shadow branch to be at initial state (not Session A's), got: %s", file1InShadow)
 	}
 
-	// Verify shadow branch has file2.ts
+	// Verify shadow branch has file2.ts from Session B
 	if !env.FileExistsInBranch(expectedShadowBranch, "src/file2.ts") {
 		t.Error("Expected src/file2.ts to exist in shadow branch after session 2")
 	}
 
-	// This is the accepted limitation: if user unstashes file1.ts and commits,
+	// NOTE: This is the accepted limitation: if user unstashes file1.ts and commits,
 	// only Session B's transcript will be available for condensation
 }

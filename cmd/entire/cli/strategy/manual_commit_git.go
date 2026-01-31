@@ -57,6 +57,33 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 	shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit)
 	branchExisted := store.ShadowBranchExists(state.BaseCommit)
 
+	// Check if shadow branch should be reset (flag set at prompt start)
+	wasReset := false
+	if state.ShouldResetShadowBranch && branchExisted {
+		logCtx := logging.WithComponent(context.Background(), "checkpoint")
+		logging.Info(logCtx, "resetting shadow branch (no overlap at prompt start)",
+			slog.String("shadow_branch", shadowBranchName),
+		)
+
+		// Delete the shadow branch
+		branchRef := plumbing.NewBranchReferenceName(shadowBranchName)
+		if err := repo.Storer.RemoveReference(branchRef); err != nil {
+			if err != plumbing.ErrReferenceNotFound {
+				return fmt.Errorf("failed to reset shadow branch: %w", err)
+			}
+		}
+
+		// Reset session state for fresh start
+		state.CheckpointCount = 0
+		state.FilesTouched = nil
+		state.PromptAttributions = nil
+		branchExisted = false // Will be created fresh
+		wasReset = true
+
+		// Clear the flag after using it
+		state.ShouldResetShadowBranch = false
+	}
+
 	// Use the pending attribution calculated at prompt start (in InitializeSession)
 	// This was calculated BEFORE the agent made changes, so it accurately captures user edits
 	var promptAttr PromptAttribution
@@ -79,7 +106,9 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 		slog.String("session_id", sessionID))
 
 	// Use WriteTemporary to create the checkpoint
-	isFirstCheckpointOfSession := state.CheckpointCount == 0
+	// IsFirstCheckpoint should only be true for the VERY FIRST checkpoint of the session,
+	// not after a reset (which happens within an existing session)
+	isFirstCheckpointOfSession := state.CheckpointCount == 0 && !wasReset
 	result, err := store.WriteTemporary(context.Background(), checkpoint.WriteTemporaryOptions{
 		SessionID:         sessionID,
 		BaseCommit:        state.BaseCommit,
