@@ -23,7 +23,10 @@ func TestGeminiConcurrentSessionWarning_BlocksFirstPrompt(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+	// Enable multi-session warnings (opt-in feature)
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewGeminiSession()
@@ -99,7 +102,10 @@ func TestGeminiConcurrentSessionWarning_SetsWarningFlag(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+	// Enable multi-session warnings (opt-in feature)
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewGeminiSession()
@@ -143,7 +149,10 @@ func TestGeminiConcurrentSessionWarning_SubsequentPromptsSucceed(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+	// Enable multi-session warnings (opt-in feature)
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewGeminiSession()
@@ -278,7 +287,10 @@ func TestGeminiConcurrentSessionWarning_ResumeCommandFormat(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+	// Enable multi-session warnings (opt-in feature)
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewGeminiSession()
@@ -331,8 +343,10 @@ func TestCrossAgentConcurrentSession_ClaudeSessionShowsClaudeResumeInGemini(t *t
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	// Initialize with Claude Code agent first
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, agent.AgentNameClaudeCode)
+	// Initialize with Claude Code agent first and enable multi-session warnings
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, agent.AgentNameClaudeCode, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start Claude session A and create a checkpoint
 	sessionA := env.NewSession()
@@ -410,8 +424,10 @@ func TestCrossAgentConcurrentSession_GeminiSessionShowsGeminiResumeInClaude(t *t
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	// Initialize with Gemini agent first
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, agent.AgentNameGemini)
+	// Initialize with Gemini agent first and enable multi-session warnings
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, agent.AgentNameGemini, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start Gemini session A and create a checkpoint
 	sessionA := env.NewGeminiSession()
@@ -556,7 +572,10 @@ func TestGeminiConcurrentSessionWarning_ContainsSuppressHint(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+	// Enable multi-session warnings (opt-in feature)
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewGeminiSession()
@@ -584,7 +603,7 @@ func TestGeminiConcurrentSessionWarning_ContainsSuppressHint(t *testing.T) {
 	}
 
 	// Verify the warning message contains the suppression hint
-	expectedHint := "entire enable --disable-multisession-warning"
+	expectedHint := "remove enable_multisession_warning"
 	if !strings.Contains(response.Reason, expectedHint) {
 		t.Errorf("Warning message should contain suppression hint %q, got: %s", expectedHint, response.Reason)
 	}
@@ -603,7 +622,10 @@ func TestGeminiConcurrentSessions_BothCondensedOnCommit(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntireWithAgent(strategy.StrategyNameManualCommit, "gemini")
+	// Enable multi-session warnings (opt-in feature)
+	env.InitEntireWithAgentAndOptions(strategy.StrategyNameManualCommit, "gemini", map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Session A: create checkpoint
 	sessionA := env.NewGeminiSession()

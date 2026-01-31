@@ -53,8 +53,8 @@ func outputGeminiBlockingResponse(reason string) {
 // If the warning was already shown, subsequent calls proceed normally (both sessions create interleaved checkpoints).
 // Note: This function may call os.Exit(0) and not return if a blocking response is needed on first conflict.
 func checkConcurrentSessionsGemini(entireSessionID string) {
-	// Check if warnings are disabled via settings
-	if IsMultiSessionWarningDisabled() {
+	// Check if warnings are enabled via settings (opt-in feature, disabled by default)
+	if !IsMultiSessionWarningEnabled() {
 		return
 	}
 
@@ -149,7 +149,7 @@ func checkConcurrentSessionsGemini(entireSessionID string) {
 
 		// Build message - matches Claude Code format but with Gemini-specific instructions
 		var message string
-		suppressHint := "\n\nTo suppress this warning in future sessions, run:\n  entire enable --disable-multisession-warning"
+		suppressHint := "\n\nTo disable this warning, remove enable_multisession_warning from .entire/settings.json"
 		if otherPrompt != "" {
 			message = fmt.Sprintf("Another session is active: \"%s\"\n\nYou can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Gemini CLI and run: %s%s\n\nPress the up arrow key to get your prompt back.", otherPrompt, resumeCmd, suppressHint)
 		} else {

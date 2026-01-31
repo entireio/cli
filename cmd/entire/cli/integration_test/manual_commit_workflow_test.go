@@ -414,8 +414,10 @@ func TestShadow_MultipleConcurrentSessions(t *testing.T) {
 
 	env.GitCheckoutNewBranch("feature/test")
 
-	// Initialize AFTER branch switch
-	env.InitEntire(strategy.StrategyNameManualCommit)
+	// Initialize AFTER branch switch with multi-session warnings enabled (opt-in feature)
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start first session
 	session1 := env.NewSession()

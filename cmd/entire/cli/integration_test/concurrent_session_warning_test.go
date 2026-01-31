@@ -22,7 +22,10 @@ func TestConcurrentSessionWarning_BlocksFirstPrompt(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
+	// Enable multi-session warnings (opt-in feature)
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewSession()
@@ -92,7 +95,10 @@ func TestConcurrentSessionWarning_SetsWarningFlag(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
+	// Enable multi-session warnings (opt-in feature)
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewSession()
@@ -136,7 +142,10 @@ func TestConcurrentSessionWarning_SubsequentPromptsSucceed(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
+	// Enable multi-session warnings (opt-in feature)
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewSession()
@@ -268,9 +277,9 @@ func TestConcurrentSessionWarning_DisabledViaSetting(t *testing.T) {
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
 
-	// Initialize Entire with multi-session warning disabled
+	// Initialize Entire with multi-session warning disabled (default behavior, explicit for clarity)
 	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
-		"disable_multisession_warning": true,
+		"enable_multisession_warning": false,
 	})
 
 	// Start session A and create a checkpoint
@@ -335,7 +344,10 @@ func TestConcurrentSessionWarning_ContainsSuppressHint(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
+	// Enable multi-session warnings (opt-in feature)
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Start session A and create a checkpoint
 	sessionA := env.NewSession()
@@ -363,7 +375,7 @@ func TestConcurrentSessionWarning_ContainsSuppressHint(t *testing.T) {
 	}
 
 	// Verify the warning message contains the suppression hint
-	expectedHint := "entire enable --disable-multisession-warning"
+	expectedHint := "remove enable_multisession_warning"
 	if !strings.Contains(response.StopReason, expectedHint) {
 		t.Errorf("Warning message should contain suppression hint %q, got: %s", expectedHint, response.StopReason)
 	}
@@ -382,7 +394,10 @@ func TestConcurrentSessions_BothCondensedOnCommit(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
+	// Enable multi-session warnings (opt-in feature)
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	// Session A: create checkpoint
 	sessionA := env.NewSession()

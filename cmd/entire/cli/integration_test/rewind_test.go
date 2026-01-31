@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -491,6 +492,18 @@ func TestRewind_DifferentSessions(t *testing.T) {
 	t.Run("shadow_warns_different_sessions", func(t *testing.T) {
 		t.Parallel()
 		env := NewFeatureBranchEnv(t, "manual-commit")
+
+		// Enable multi-session warnings for this test by manually updating settings file
+		settingsPath := filepath.Join(env.RepoDir, ".entire", "settings.json")
+		settingsData, _ := os.ReadFile(settingsPath)
+		var settings map[string]any
+		_ = json.Unmarshal(settingsData, &settings)
+		if settings["strategy_options"] == nil {
+			settings["strategy_options"] = make(map[string]any)
+		}
+		settings["strategy_options"].(map[string]any)["enable_multisession_warning"] = true
+		updatedData, _ := json.MarshalIndent(settings, "", "  ")
+		_ = os.WriteFile(settingsPath, updatedData, 0644)
 
 		// Session 1
 		session1 := env.NewSession()

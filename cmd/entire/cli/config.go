@@ -279,18 +279,19 @@ func GetLogLevel() string {
 	return settings.LogLevel
 }
 
-// IsMultiSessionWarningDisabled checks if multi-session warnings are disabled.
-// Returns false (show warnings) by default if settings cannot be loaded or the key is missing.
-func IsMultiSessionWarningDisabled() bool {
+// IsMultiSessionWarningEnabled checks if multi-session warnings are enabled.
+// Returns false (hide warnings) by default if settings cannot be loaded or the key is missing.
+// This is an opt-in feature - users must explicitly enable it.
+func IsMultiSessionWarningEnabled() bool {
 	settings, err := LoadEntireSettings()
 	if err != nil {
-		return false // Default: show warnings
+		return false // Default: warnings disabled
 	}
 	if settings.StrategyOptions == nil {
 		return false
 	}
-	if disabled, ok := settings.StrategyOptions["disable_multisession_warning"].(bool); ok {
-		return disabled
+	if enabled, ok := settings.StrategyOptions["enable_multisession_warning"].(bool); ok {
+		return enabled
 	}
 	return false
 }

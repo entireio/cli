@@ -223,7 +223,10 @@ func TestSessionIDConflict_ExistingSessionWithState(t *testing.T) {
 	env.GitCommit("Initial commit")
 
 	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
+	// Enable multi-session warnings to test SessionIDConflictError blocking
+	env.InitEntireWithOptions(strategy.StrategyNameManualCommit, map[string]any{
+		"enable_multisession_warning": true,
+	})
 
 	baseHead := env.GetHeadHash()
 	shadowBranch := "entire/" + baseHead[:7]
