@@ -25,12 +25,12 @@ This repo contains the CLI for Entire.
 
 ## Development
 
-### Environment Setup (Web/Cloud Sessions Only)
+### Environment Setup (Claude Code Web Sessions)
 
-If `mise` is not available (e.g., in Claude Code Web sessions), run these setup steps first:
+**If `CLAUDE_CODE_REMOTE=true`** (web/cloud session), run these setup steps at the start of the session:
 
 ```bash
-# 1. Configure DNS (if network requests fail)
+# 1. Configure DNS (required in web containers)
 echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
 
 # 2. Install mise
@@ -45,7 +45,7 @@ mise trust
 mise install
 ```
 
-Skip this section if `mise --version` already works.
+**Local Claude Code sessions** (no `CLAUDE_CODE_REMOTE` env var): Skip this section.
 
 ### Running Tests
 ```bash
