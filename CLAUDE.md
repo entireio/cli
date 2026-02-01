@@ -25,6 +25,28 @@ This repo contains the CLI for Entire.
 
 ## Development
 
+### Environment Setup (Web/Cloud Sessions Only)
+
+If `mise` is not available (e.g., in Claude Code Web sessions), run these setup steps first:
+
+```bash
+# 1. Configure DNS (if network requests fail)
+echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+
+# 2. Install mise
+curl https://mise.run | sh
+
+# 3. Activate mise and trust config
+export PATH="$HOME/.local/bin:$PATH"
+eval "$(mise activate bash)"
+mise trust
+
+# 4. Install project tools (Go, golangci-lint)
+mise install
+```
+
+Skip this section if `mise --version` already works.
+
 ### Running Tests
 ```bash
 mise run test
