@@ -25,6 +25,28 @@ This repo contains the CLI for Entire.
 
 ## Development
 
+### Environment Setup (Claude Code Web Sessions)
+
+**If `CLAUDE_CODE_REMOTE=true`** (web/cloud session), run these setup steps at the start of the session:
+
+```bash
+# 1. Configure DNS (required in web containers)
+echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+
+# 2. Install mise
+curl https://mise.run | sh
+
+# 3. Activate mise and trust config
+export PATH="$HOME/.local/bin:$PATH"
+eval "$(mise activate bash)"
+mise trust
+
+# 4. Install project tools (Go, golangci-lint)
+mise install
+```
+
+**Local Claude Code sessions** (no `CLAUDE_CODE_REMOTE` env var): Skip this section.
+
 ### Running Tests
 ```bash
 mise run test
