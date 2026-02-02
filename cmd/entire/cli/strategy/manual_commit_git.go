@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -68,7 +69,7 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 		// Delete the shadow branch
 		branchRef := plumbing.NewBranchReferenceName(shadowBranchName)
 		if err := repo.Storer.RemoveReference(branchRef); err != nil {
-			if err != plumbing.ErrReferenceNotFound {
+			if !errors.Is(err, plumbing.ErrReferenceNotFound) {
 				return fmt.Errorf("failed to reset shadow branch: %w", err)
 			}
 		}

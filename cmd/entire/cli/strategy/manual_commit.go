@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -260,20 +261,20 @@ func (s *ManualCommitStrategy) getFilesTouchedByShadow(
 ) ([]string, error) {
 	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
 	if err != nil {
-		if err == plumbing.ErrReferenceNotFound {
+		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			return nil, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("failed to get shadow branch reference: %w", err)
 	}
 
 	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get shadow commit: %w", err)
 	}
 
 	shadowTree, err := shadowCommit.Tree()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get shadow tree: %w", err)
 	}
 
 	// Get base commit for comparison
@@ -297,17 +298,17 @@ func (s *ManualCommitStrategy) getFilesTouchedByShadow(
 	baseHash := shadowCommit.ParentHashes[0]
 	baseCommit, err := repo.CommitObject(baseHash)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get base commit: %w", err)
 	}
 	baseTree, err := baseCommit.Tree()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get base tree: %w", err)
 	}
 
 	// Find all files that differ between base and shadow
 	changes, err := baseTree.Diff(shadowTree)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to diff trees: %w", err)
 	}
 
 	files := make([]string, 0, len(changes))

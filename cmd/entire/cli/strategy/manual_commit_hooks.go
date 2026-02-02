@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -980,7 +981,7 @@ func (s *ManualCommitStrategy) OnPromptStart(sessionID string) error {
 
 	repo, err := OpenRepository()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open repository: %w", err)
 	}
 
 	shadowBranch := checkpoint.ShadowBranchNameForCommit(state.BaseCommit)
@@ -988,23 +989,23 @@ func (s *ManualCommitStrategy) OnPromptStart(sessionID string) error {
 	// Check if shadow branch exists
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
 	if err != nil {
-		if err == plumbing.ErrReferenceNotFound {
+		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			// No shadow branch yet, nothing to check
 			state.ShouldResetShadowBranch = false
 			return s.saveSessionState(state)
 		}
-		return err
+		return fmt.Errorf("failed to get shadow branch reference: %w", err)
 	}
 
 	// Get current worktree status
 	worktree, err := repo.Worktree()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get worktree: %w", err)
 	}
 
 	status, err := worktree.Status()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get worktree status: %w", err)
 	}
 
 	// Extract modified and untracked files from status
