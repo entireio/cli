@@ -76,6 +76,13 @@ func TestGetGitDirInPath_Worktree(t *testing.T) {
 		t.Fatalf("failed to configure git name: %v", err)
 	}
 
+	// Disable GPG signing for test commits
+	cmd = exec.CommandContext(ctx, "git", "config", "commit.gpgsign", "false")
+	cmd.Dir = mainRepo
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to disable gpg signing: %v", err)
+	}
+
 	// Create an initial commit (required for worktree)
 	testFile := filepath.Join(mainRepo, "test.txt")
 	if err := os.WriteFile(testFile, []byte("test"), 0o644); err != nil {
@@ -272,6 +279,13 @@ func TestIsGitSequenceOperation_Worktree(t *testing.T) {
 	cmd.Dir = mainRepo
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to configure git name: %v", err)
+	}
+
+	// Disable GPG signing for test commits
+	cmd = exec.CommandContext(ctx, "git", "config", "commit.gpgsign", "false")
+	cmd.Dir = mainRepo
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to disable gpg signing: %v", err)
 	}
 
 	testFile := filepath.Join(mainRepo, "test.txt")
