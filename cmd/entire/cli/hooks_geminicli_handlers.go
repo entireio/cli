@@ -4,7 +4,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,31 +20,6 @@ import (
 
 // ErrSessionSkipped is returned when a session should be skipped (e.g., due to concurrent warning).
 var ErrSessionSkipped = errors.New("session skipped")
-
-// geminiBlockingResponse represents a JSON response for Gemini CLI hooks.
-// When decision is "block", Gemini CLI will block the current operation and show the reason to the user.
-type geminiBlockingResponse struct {
-	Decision      string `json:"decision"`
-	Reason        string `json:"reason"`
-	SystemMessage string `json:"systemMessage,omitempty"`
-}
-
-// outputGeminiBlockingResponse outputs a blocking JSON response to stdout for Gemini CLI hooks
-// and exits with code 0. For BeforeAgent hooks, the JSON response with decision "block" tells
-// Gemini CLI to block the operation - exit code 0 is required for the JSON to be parsed.
-// This function does not return - it calls os.Exit(0) after outputting the response.
-func outputGeminiBlockingResponse(reason string) {
-	resp := geminiBlockingResponse{
-		Decision:      "block",
-		Reason:        reason,
-		SystemMessage: "⚠️ Session blocked: " + reason,
-	}
-	// Output to stdout (Gemini reads hook output from stdout with exit code 0)
-	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
-		fmt.Fprintf(os.Stderr, "Error encoding blocking response: %v\n", err)
-	}
-	os.Exit(0)
-}
 
 // handleGeminiSessionStart handles the SessionStart hook for Gemini CLI.
 func handleGeminiSessionStart() error {

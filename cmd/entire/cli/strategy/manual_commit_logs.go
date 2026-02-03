@@ -209,8 +209,7 @@ func (s *ManualCommitStrategy) getDescriptionFromShadowBranch(sessionID, baseCom
 		return ""
 	}
 
-	// Use SessionMetadataDirFromEntireID since sessionID is already an Entire session ID
-	// (with date prefix like "2026-01-12-abc123")
+	// Use the session ID directly as the metadata directory name
 	metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
 	return getSessionDescriptionFromTree(tree, metadataDir)
 }

@@ -318,11 +318,40 @@ func checkConcurrentSessions(ag agent.Agent, sessionID string) error {
 			resumeCmd,
 			cliCmd,
 		)
-		// Output blocking JSON response - user must resolve conflict before continuing
-		if err := outputHookResponse(message); err != nil {
+		// Output warning JSON response using agent-specific format
+		if err := outputConflictWarning(ag, message); err != nil {
 			return err
 		}
 	}
 
+	return nil
+}
+
+// outputConflictWarning outputs a conflict warning message using the appropriate format for the agent.
+func outputConflictWarning(ag agent.Agent, message string) error {
+	//nolint:exhaustive // default case handles all other agent types
+	switch ag.Type() {
+	case agent.AgentTypeGemini:
+		return outputGeminiWarningResponse(message)
+	default:
+		return outputHookResponse(message)
+	}
+}
+
+// geminiWarningResponse represents a JSON response for Gemini CLI session-start warnings.
+// Unlike blocking responses, this just injects a system message without blocking the session.
+type geminiWarningResponse struct {
+	SystemMessage string `json:"systemMessage,omitempty"`
+}
+
+// outputGeminiWarningResponse outputs a warning JSON response to stdout for Gemini CLI hooks.
+// This injects a system message into the conversation without blocking the session.
+func outputGeminiWarningResponse(message string) error {
+	resp := geminiWarningResponse{
+		SystemMessage: message,
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		return fmt.Errorf("failed to encode gemini warning response: %w", err)
+	}
 	return nil
 }
