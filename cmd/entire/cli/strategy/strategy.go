@@ -478,8 +478,7 @@ type LogsOnlyRestorer interface {
 type SessionResetter interface {
 	// Reset deletes the shadow branch and session state for the current HEAD.
 	// Returns nil if there's nothing to reset (no shadow branch).
-	// The force parameter suppresses confirmation prompts.
-	Reset(force bool) error
+	Reset() error
 }
 
 // ConcurrentSessionChecker is an optional interface for strategies that support

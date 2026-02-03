@@ -74,6 +74,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newRewindCmd())
 	cmd.AddCommand(newResumeCmd())
 	cmd.AddCommand(newCleanCmd())
+	cmd.AddCommand(newResetCmd())
 	cmd.AddCommand(newEnableCmd())
 	cmd.AddCommand(newDisableCmd())
 	cmd.AddCommand(newStatusCmd())

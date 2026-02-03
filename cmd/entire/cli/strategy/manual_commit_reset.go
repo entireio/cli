@@ -6,7 +6,6 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/paths"
 
-	"github.com/charmbracelet/huh"
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
@@ -18,7 +17,7 @@ func isAccessibleMode() bool {
 
 // Reset deletes the shadow branch and session state for the current HEAD.
 // This allows starting fresh without existing checkpoints.
-func (s *ManualCommitStrategy) Reset(force bool) error {
+func (s *ManualCommitStrategy) Reset() error {
 	repo, err := OpenRepository()
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
@@ -46,47 +45,27 @@ func (s *ManualCommitStrategy) Reset(force bool) error {
 	// Check if shadow branch exists
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		// No shadow branch exists - nothing to reset
-		fmt.Fprintf(os.Stderr, "No shadow branch found for %s\n", shadowBranchName)
-		return nil //nolint:nilerr // Not an error condition - no branch to reset
-	}
+	hasShadowBranch := err == nil
 
-	// Confirm before deleting
-	if !force {
-		confirmed := false
-		form := huh.NewForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title("Delete shadow branch?").
-					Description(fmt.Sprintf("This will delete %s and all associated session state.\nThis action cannot be undone.", shadowBranchName)).
-					Affirmative("Delete").
-					Negative("Cancel").
-					Value(&confirmed),
-			),
-		)
-		if isAccessibleMode() {
-			form = form.WithAccessible(true)
-		}
-		if err := form.Run(); err != nil {
-			return fmt.Errorf("confirmation failed: %w", err)
-		}
-		if !confirmed {
-			fmt.Fprintf(os.Stderr, "Cancelled\n")
-			return nil
-		}
-	}
-
-	// Find and clear all sessions that use this shadow branch
-	clearedSessions := make([]string, 0)
+	// Find sessions for this commit
 	sessions, err := s.findSessionsForCommit(head.Hash().String())
-	if err == nil {
-		for _, state := range sessions {
-			if err := s.clearSessionState(state.SessionID); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to clear session state for %s: %v\n", state.SessionID, err)
-			} else {
-				clearedSessions = append(clearedSessions, state.SessionID)
-			}
+	if err != nil {
+		sessions = nil // Ignore error, treat as no sessions
+	}
+
+	// If nothing to reset, return early
+	if !hasShadowBranch && len(sessions) == 0 {
+		fmt.Fprintf(os.Stderr, "Nothing to reset for %s\n", shadowBranchName)
+		return nil
+	}
+
+	// Clear all sessions for this commit
+	clearedSessions := make([]string, 0)
+	for _, state := range sessions {
+		if err := s.clearSessionState(state.SessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to clear session state for %s: %v\n", state.SessionID, err)
+		} else {
+			clearedSessions = append(clearedSessions, state.SessionID)
 		}
 	}
 
@@ -97,11 +76,13 @@ func (s *ManualCommitStrategy) Reset(force bool) error {
 		}
 	}
 
-	// Delete the shadow branch
-	if err := repo.Storer.RemoveReference(ref.Name()); err != nil {
-		return fmt.Errorf("failed to delete shadow branch: %w", err)
+	// Delete the shadow branch if it exists
+	if hasShadowBranch {
+		if err := repo.Storer.RemoveReference(ref.Name()); err != nil {
+			return fmt.Errorf("failed to delete shadow branch: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "Deleted shadow branch %s\n", shadowBranchName)
 	}
 
-	fmt.Fprintf(os.Stderr, "Deleted shadow branch %s\n", shadowBranchName)
 	return nil
 }
