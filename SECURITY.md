@@ -6,7 +6,7 @@ We take security seriously at Entire. We appreciate your efforts to responsibly 
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, please send security-related reports to **[report@entire.io](mailto:report@entire.io)**.
+Instead, please send security-related reports to **[security@entire.io](mailto:security@entire.io)**.
 
 ### What to Include
 
