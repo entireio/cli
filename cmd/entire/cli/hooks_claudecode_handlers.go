@@ -298,7 +298,7 @@ func handleSessionInitErrors(ag agent.Agent, initErr error) error {
 				"Starting a new session would orphan the existing work.\n\n"+
 				"Options:\n"+
 				"1. Commit your changes (git commit) to create a new base commit\n"+
-				"2. Run 'entire rewind reset' to discard the shadow branch and start fresh\n"+
+				"2. Run 'entire reset' to discard the shadow branch and start fresh\n"+
 				"3. Resume the existing session: %s\n\n"+
 				"To suppress this warning in future sessions, run:\n"+
 				"  entire enable --disable-multisession-warning",

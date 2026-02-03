@@ -77,6 +77,7 @@ Sessions are stored separately from your code commits on the `entire/sessions` b
 A **checkpoint** is a snapshot within a session that you can rewind to—a "save point" in your work.
 
 **When checkpoints are created:**
+
 - **Manual-commit strategy**: When you make a git commit
 - **Auto-commit strategy**: After each agent response
 
@@ -86,35 +87,37 @@ A **checkpoint** is a snapshot within a session that you can rewind to—a "save
 
 Entire offers two strategies for capturing your work:
 
-| Aspect | Manual-Commit | Auto-Commit |
-|--------|---------------|-------------|
-| Code commits | None on your branch | Created automatically after each agent response |
-| Safe on main branch | Yes | No - creates commits |
-| Rewind | Always possible, non-destructive | Full rewind on feature branches; logs-only on main |
-| Best for | Most workflows - keeps git history clean | Teams wanting automatic code commits |
+| Aspect              | Manual-Commit                            | Auto-Commit                                        |
+| ------------------- | ---------------------------------------- | -------------------------------------------------- |
+| Code commits        | None on your branch                      | Created automatically after each agent response    |
+| Safe on main branch | Yes                                      | No - creates commits                               |
+| Rewind              | Always possible, non-destructive         | Full rewind on feature branches; logs-only on main |
+| Best for            | Most workflows - keeps git history clean | Teams wanting automatic code commits               |
 
 ## Commands Reference
 
-| Command | Description |
-|---------|-------------|
-| `entire enable` | Enable Entire in your repository (uses `manual-commit` by default) |
-| `entire disable` | Remove Entire hooks from repository |
-| `entire status` | Show current session and strategy info |
-| `entire rewind` | Rewind to a previous checkpoint |
-| `entire resume` | Resume a previous session |
-| `entire explain` | Explain a session or commit |
-| `entire session` | View and manage sessions (list, show details, view logs) |
-| `entire version` | Show Entire CLI version |
+| Command          | Description                                                                   |
+| ---------------- | ----------------------------------------------------------------------------- |
+| `entire clean`   | Remove orphaned entire's data that wasn't cleaned up automatically            |
+| `entire disable` | Remove Entire hooks from repository                                           |
+| `entire enable`  | Enable Entire in your repository (uses `manual-commit` by default)            |
+| `entire explain` | Explain a session or commit                                                   |
+| `entire reset`   | Delete the shadow branch and session state for the current HEAD commit        |
+| `entire resume`  | Resume a previous session                                                     |
+| `entire rewind`  | Rewind to a previous checkpoint                                               |
+| `entire session` | View and manage sessions (list, show details, view logs)                      |
+| `entire status`  | Show current session and strategy info                                        |
+| `entire version` | Show Entire CLI version                                                       |
 
 ### `entire enable` Flags
 
-| Flag | Description |
-|------|-------------|
-| `--strategy <name>` | Strategy to use: `manual-commit` (default) or `auto-commit` |
-| `--force`, `-f` | Force reinstall hooks (removes existing Entire hooks first) |
-| `--local` | Write settings to `settings.local.json` instead of `settings.json` |
-| `--project` | Write settings to `settings.json` even if it already exists |
-| `--telemetry=false` | Disable anonymous usage analytics |
+| Flag                | Description                                                        |
+| ------------------- | ------------------------------------------------------------------ |
+| `--strategy <name>` | Strategy to use: `manual-commit` (default) or `auto-commit`        |
+| `--force`, `-f`     | Force reinstall hooks (removes existing Entire hooks first)        |
+| `--local`           | Write settings to `settings.local.json` instead of `settings.json` |
+| `--project`         | Write settings to `settings.json` even if it already exists        |
+| `--telemetry=false` | Disable anonymous usage analytics                                  |
 
 **Examples:**
 
@@ -158,13 +161,13 @@ Personal overrides, gitignored by default:
 
 ### Configuration Options
 
-| Option | Values | Description |
-|--------|--------|-------------|
-| `strategy` | `manual-commit`, `auto-commit` | Session capture strategy |
-| `enabled` | `true`, `false` | Enable/disable Entire |
-| `agent` | `claude-code`, `gemini`, etc. | AI agent to integrate with |
-| `log_level` | `debug`, `info`, `warn`, `error` | Logging verbosity |
-| `strategy_options.push_sessions` | `true`, `false` | Auto-push `entire/sessions` branch on git push |
+| Option                           | Values                           | Description                                    |
+| -------------------------------- | -------------------------------- | ---------------------------------------------- |
+| `strategy`                       | `manual-commit`, `auto-commit`   | Session capture strategy                       |
+| `enabled`                        | `true`, `false`                  | Enable/disable Entire                          |
+| `agent`                          | `claude-code`, `gemini`, etc.    | AI agent to integrate with                     |
+| `log_level`                      | `debug`, `info`, `warn`, `error` | Logging verbosity                              |
+| `strategy_options.push_sessions` | `true`, `false`                  | Auto-push `entire/sessions` branch on git push |
 
 ### Settings Priority
 
@@ -174,13 +177,13 @@ Local settings override project settings field-by-field. When you run `entire st
 
 ### Common Issues
 
-| Issue | Solution |
-|-------|----------|
-| "Not a git repository" | Navigate to a git repository first |
-| "Entire is disabled" | Run `entire enable` |
+| Issue                    | Solution                                                                                  |
+| ------------------------ | ----------------------------------------------------------------------------------------- |
+| "Not a git repository"   | Navigate to a git repository first                                                        |
+| "Entire is disabled"     | Run `entire enable`                                                                       |
 | "No rewind points found" | Work with Claude Code and commit (manual-commit) or wait for agent response (auto-commit) |
-| "shadow branch conflict" | Run `entire rewind reset --force` |
-| "session not found" | Check available sessions with `entire session list` |
+| "shadow branch conflict" | Run `entire reset --force`                                                                |
+| "session not found"      | Check available sessions with `entire session list`                                       |
 
 ### SSH Authentication Errors
 
@@ -213,7 +216,7 @@ ENTIRE_LOG_LEVEL=debug entire status
 
 ```bash
 # Reset shadow branch for current commit
-entire rewind reset --force
+entire reset --force
 
 # Disable and re-enable
 entire disable && entire enable --force
