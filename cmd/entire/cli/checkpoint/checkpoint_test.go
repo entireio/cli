@@ -1526,15 +1526,11 @@ func TestWriteTemporary_FirstCheckpoint_CapturesRenamedFiles(t *testing.T) {
 	}
 
 	// User renames the file using git mv BEFORE the session starts
-	newFile := filepath.Join(tempDir, "new-name.txt")
-	if err := os.Rename(oldFile, newFile); err != nil {
-		t.Fatalf("failed to rename file: %v", err)
-	}
-	// Stage the rename using git CLI (go-git worktree.Move has issues)
-	cmd := exec.CommandContext(context.Background(), "git", "add", "-A")
+	// Using git mv ensures git reports this as R (rename) status, not separate D+A
+	cmd := exec.CommandContext(context.Background(), "git", "mv", "old-name.txt", "new-name.txt")
 	cmd.Dir = tempDir
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to stage rename: %v", err)
+		t.Fatalf("failed to git mv: %v", err)
 	}
 
 	// Change to temp dir so paths.RepoRoot() works correctly

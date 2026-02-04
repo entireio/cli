@@ -1064,17 +1064,14 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 		wtStatus := entry[1]
 		filename := entry[3:] // No TrimSpace needed with -z format
 
-		// Skip .entire directory
-		if paths.IsInfrastructurePath(filename) {
-			continue
-		}
-
-		// Handle different status codes
-		switch {
-		case staging == 'R' || staging == 'C':
+		// Handle R/C (rename/copy) first - they have a second entry we must skip
+		// even if the new filename is an infrastructure path
+		if staging == 'R' || staging == 'C' {
 			// Renamed or copied: current entry is new name, next entry is old name
-			changedSeen[filename] = struct{}{}
-			// The old name follows as the next NUL-separated entry
+			if !paths.IsInfrastructurePath(filename) {
+				changedSeen[filename] = struct{}{}
+			}
+			// The old name follows as the next NUL-separated entry - must always skip it
 			if i+1 < len(entries) && entries[i+1] != "" {
 				oldName := entries[i+1]
 				if staging == 'R' && !paths.IsInfrastructurePath(oldName) {
@@ -1083,7 +1080,16 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 				}
 				i++ // Skip the old name entry
 			}
+			continue
+		}
 
+		// Skip .entire directory for non-R/C entries
+		if paths.IsInfrastructurePath(filename) {
+			continue
+		}
+
+		// Handle different status codes
+		switch {
 		case staging == 'D' || wtStatus == 'D':
 			// Deleted file - track separately
 			deletedSeen[filename] = struct{}{}
