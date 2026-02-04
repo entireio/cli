@@ -18,6 +18,10 @@ import (
 // Should be switched back to go-git once we upgrade to go-git v6.
 // Returns an error if the ref doesn't exist or checkout fails.
 func CheckoutBranch(ref string) error {
+	// Prevent option injection: refs starting with "-" would be interpreted as flags
+	if strings.HasPrefix(ref, "-") {
+		return fmt.Errorf("invalid ref: %q (cannot start with dash)", ref)
+	}
 	ctx := context.Background()
 	cmd := exec.CommandContext(ctx, "git", "checkout", ref)
 	if output, err := cmd.CombinedOutput(); err != nil {

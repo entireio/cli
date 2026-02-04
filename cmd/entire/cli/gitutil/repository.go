@@ -111,15 +111,36 @@ func GetMainRepoRoot() (string, error) {
 		return "", fmt.Errorf("failed to read .git file: %w", err)
 	}
 
-	gitdir := strings.TrimSpace(string(content))
-	gitdir = strings.TrimPrefix(gitdir, "gitdir: ")
-
-	// Extract main repo root: everything before "/.git/"
-	idx := strings.LastIndex(gitdir, "/.git/")
-	if idx < 0 {
-		return "", fmt.Errorf("unexpected gitdir format: %s", gitdir)
+	gitdirLine := strings.TrimSpace(string(content))
+	const gitdirPrefix = "gitdir: "
+	if !strings.HasPrefix(gitdirLine, gitdirPrefix) {
+		return "", fmt.Errorf("unexpected gitdir format: %s", gitdirLine)
 	}
-	return gitdir[:idx], nil
+	gitdir := strings.TrimPrefix(gitdirLine, gitdirPrefix)
+
+	// Resolve gitdir to an absolute, cleaned path. Per gitrepository-layout(5),
+	// this may be relative to the worktree root.
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(repoRoot, gitdir)
+	}
+	gitdirAbs := filepath.Clean(gitdir)
+
+	// Walk up from gitdir until we find the main .git directory; its parent
+	// is the main repository root.
+	dir := gitdirAbs
+	for {
+		if filepath.Base(dir) == GitDir {
+			return filepath.Dir(dir), nil
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return "", fmt.Errorf("could not find %s directory in gitdir path: %s", GitDir, gitdirAbs)
 }
 
 // GetGitCommonDir returns the path to the shared git directory.
@@ -137,10 +158,13 @@ func GetGitCommonDir() (string, error) {
 
 	commonDir := strings.TrimSpace(string(output))
 
-	// git rev-parse --git-common-dir returns relative paths from the working directory,
+	// git rev-parse --git-common-dir may return a path relative to the working directory,
 	// so we need to make it absolute if it isn't already
 	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(".", commonDir)
+		commonDir, err = filepath.Abs(commonDir)
+		if err != nil {
+			return "", fmt.Errorf("failed to make git common dir absolute: %w", err)
+		}
 	}
 
 	return filepath.Clean(commonDir), nil
