@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/agent/geminicli"
@@ -162,61 +161,6 @@ func TestSetupGeminiHooks_PreservesExistingSettings(t *testing.T) {
 	}
 	if len(settings.Hooks.BeforeAgent) == 0 {
 		t.Error("BeforeAgent hook should be added")
-	}
-}
-
-// TestGeminiHooks_SessionStartUpdatesSessionID verifies that the session-start
-// hook updates the current session ID with a date prefix and writes it to the
-// .entire/current_session file.
-func TestGeminiHooks_SessionStartUpdatesSessionID(t *testing.T) {
-	t.Parallel()
-	env := NewTestEnv(t)
-	env.InitRepo()
-	env.InitEntire("manual-commit")
-
-	// Create initial commit
-	env.WriteFile("README.md", "# Test")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-
-	// Prepare session-start hook input (JSON that Gemini CLI sends to the hook)
-	geminiSessionID := "test-gemini-session-abc123"
-
-	// Use json.Marshal to properly escape the path for cross-platform compatibility
-	cwdJSON, err := json.Marshal(env.RepoDir)
-	if err != nil {
-		t.Fatalf("failed to marshal repo dir: %v", err)
-	}
-
-	hookInput := `{
-  "session_id": "` + geminiSessionID + `",
-  "transcript_path": "/path/to/transcript.json",
-  "cwd": ` + string(cwdJSON) + `,
-  "hook_event_name": "SessionStart",
-  "timestamp": "2024-01-01T12:00:00Z",
-  "source": "startup"
-}`
-
-	// Run the session-start hook with stdin
-	output := env.RunCLIWithStdin(hookInput, "hooks", "gemini", "session-start")
-
-	// Verify output confirms session was set
-	if !strings.Contains(output, "Current session set to:") {
-		t.Errorf("expected output to confirm session was set, got: %s", output)
-	}
-
-	// Read the current_session file to verify the session ID was written
-	sessionFile := filepath.Join(env.RepoDir, ".entire", "current_session")
-	data, err := os.ReadFile(sessionFile)
-	if err != nil {
-		t.Fatalf("failed to read current_session file: %v", err)
-	}
-
-	currentSessionID := strings.TrimSpace(string(data))
-
-	// Session IDs are now used directly (no date prefix - identity function)
-	if currentSessionID != geminiSessionID {
-		t.Errorf("current session ID = %q, want %q (agent ID directly)", currentSessionID, geminiSessionID)
 	}
 }
 

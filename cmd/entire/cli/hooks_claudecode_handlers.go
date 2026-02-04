@@ -5,7 +5,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,44 +16,14 @@ import (
 	"entire.io/cli/cmd/entire/cli/agent/claudecode"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
-	"entire.io/cli/cmd/entire/cli/session"
-	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/strategy"
-	"entire.io/cli/cmd/entire/cli/validation"
 )
-
-// currentSessionIDWithFallback returns the persisted Entire session ID when available.
-// Falls back to using the model session ID directly (since agent ID = entire ID now).
-// The persisted session is checked for backwards compatibility with legacy date-prefixed IDs.
-func currentSessionIDWithFallback(modelSessionID string) string {
-	entireSessionID, err := paths.ReadCurrentSession()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to read current session: %v\n", err)
-	}
-	if entireSessionID != "" {
-		// Validate persisted session ID to fail-fast on corrupted files
-		if err := validation.ValidateSessionID(entireSessionID); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: invalid persisted session ID: %v\n", err)
-			// Fall through to fallback
-		} else if modelSessionID == "" || sessionid.ModelSessionID(entireSessionID) == modelSessionID {
-			return entireSessionID
-		} else {
-			fmt.Fprintf(os.Stderr, "Warning: persisted session ID does not match hook session ID\n")
-		}
-	}
-	if modelSessionID == "" {
-		return ""
-	}
-	// Use agent session ID directly as entire session ID (identity function)
-	return modelSessionID
-}
 
 // hookInputData contains parsed hook input and session identifiers.
 type hookInputData struct {
-	agent           agent.Agent
-	input           *agent.HookInput
-	modelSessionID  string
-	entireSessionID string
+	agent     agent.Agent
+	input     *agent.HookInput
+	sessionID string
 }
 
 // parseAndLogHookInput parses the hook input and sets up logging context.
@@ -79,245 +48,17 @@ func parseAndLogHookInput() (*hookInputData, error) {
 		slog.String("transcript_path", input.SessionRef),
 	)
 
-	modelSessionID := input.SessionID
-	if modelSessionID == "" {
-		modelSessionID = unknownSessionID
+	sessionID := input.SessionID
+	if sessionID == "" {
+		sessionID = unknownSessionID
 	}
 
 	// Get the Entire session ID, preferring the persisted value to handle midnight boundary
-	entireSessionID := currentSessionIDWithFallback(modelSessionID)
-
 	return &hookInputData{
-		agent:           ag,
-		input:           input,
-		modelSessionID:  modelSessionID,
-		entireSessionID: entireSessionID,
+		agent:     ag,
+		input:     input,
+		sessionID: sessionID,
 	}, nil
-}
-
-// checkConcurrentSessions checks for concurrent session conflicts and shows warnings if needed.
-// Returns true if the hook should be skipped due to an unresolved conflict.
-func checkConcurrentSessions(ag agent.Agent, entireSessionID string) (bool, error) {
-	// Check if warnings are disabled via settings
-	if IsMultiSessionWarningDisabled() {
-		return false, nil
-	}
-
-	strat := GetStrategy()
-
-	concurrentChecker, ok := strat.(strategy.ConcurrentSessionChecker)
-	if !ok {
-		return false, nil // Strategy doesn't support concurrent checks
-	}
-
-	// Check if this session already acknowledged the warning
-	existingState, loadErr := strategy.LoadSessionState(entireSessionID)
-	warningAlreadyShown := loadErr == nil && existingState != nil && existingState.ConcurrentWarningShown
-
-	// Check for other active sessions with checkpoints (on current HEAD)
-	otherSession, checkErr := concurrentChecker.HasOtherActiveSessionsWithCheckpoints(entireSessionID)
-	hasConflict := checkErr == nil && otherSession != nil
-
-	if warningAlreadyShown {
-		if hasConflict {
-			// Warning was shown and conflict still exists - skip hooks
-			return true, nil
-		}
-		// Warning was shown but conflict is resolved (e.g., user committed)
-		// Clear the flag and proceed normally
-		if existingState != nil {
-			existingState.ConcurrentWarningShown = false
-			if saveErr := strategy.SaveSessionState(existingState); saveErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to clear concurrent warning flag: %v\n", saveErr)
-			}
-		}
-		return false, nil
-	}
-
-	if hasConflict {
-		// First time seeing conflict - show warning
-		// Include BaseCommit and WorktreePath so session state is complete for condensation
-		repo, err := strategy.OpenRepository()
-		if err != nil {
-			// Output user-friendly error message via hook response
-			if outputErr := outputHookResponse(false, fmt.Sprintf("Failed to open git repository: %v\n\nPlease ensure you're in a git repository and try again.", err)); outputErr != nil {
-				return false, outputErr
-			}
-			return true, nil // Skip hook after outputting response
-		}
-		head, err := repo.Head()
-		if err != nil {
-			// Output user-friendly error message via hook response
-			if outputErr := outputHookResponse(false, fmt.Sprintf("Failed to get git HEAD: %v\n\nPlease ensure the repository has at least one commit.", err)); outputErr != nil {
-				return false, outputErr
-			}
-			return true, nil // Skip hook after outputting response
-		}
-		worktreePath, err := strategy.GetWorktreePath()
-		if err != nil {
-			// Non-fatal: continue without worktree path
-			worktreePath = ""
-		}
-		worktreeID, err := paths.GetWorktreeID(worktreePath)
-		if err != nil {
-			// Non-fatal: continue with empty worktree ID (main worktree)
-			worktreeID = ""
-		}
-		agentType := ag.Type()
-		newState := &strategy.SessionState{
-			SessionID:              entireSessionID,
-			BaseCommit:             head.Hash().String(),
-			WorktreePath:           worktreePath,
-			WorktreeID:             worktreeID,
-			ConcurrentWarningShown: true,
-			StartedAt:              time.Now(),
-			AgentType:              agentType,
-		}
-		if saveErr := strategy.SaveSessionState(newState); saveErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to save session state: %v\n", saveErr)
-		}
-
-		// Get resume command for the other session using the CONFLICTING session's agent type.
-		// If the conflicting session is from a different agent (e.g., Gemini when we're Claude),
-		// use that agent's resume command format. Otherwise, use our own format (backward compatible).
-		var resumeCmd string
-		if otherSession.AgentType != "" && otherSession.AgentType != agentType {
-			// Different agent type - look up the conflicting agent
-			if conflictingAgent, agentErr := agent.GetByAgentType(otherSession.AgentType); agentErr == nil {
-				resumeCmd = conflictingAgent.FormatResumeCommand(conflictingAgent.ExtractAgentSessionID(otherSession.SessionID))
-			}
-		}
-		// Fall back to current agent if same type or couldn't get the conflicting agent
-		if resumeCmd == "" {
-			resumeCmd = ag.FormatResumeCommand(ag.ExtractAgentSessionID(otherSession.SessionID))
-		}
-
-		// Try to read the other session's initial prompt
-		otherPrompt := strategy.ReadSessionPromptFromShadow(repo, otherSession.BaseCommit, otherSession.WorktreeID, otherSession.SessionID)
-
-		// Build message with other session's prompt if available
-		var message string
-		suppressHint := "\n\nTo suppress this warning in future sessions, run:\n  entire enable --disable-multisession-warning"
-		if otherPrompt != "" {
-			message = fmt.Sprintf("Another session is active: \"%s\"\n\nYou can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: %s%s\n\nPress the up arrow key to get your prompt back.", otherPrompt, resumeCmd, suppressHint)
-		} else {
-			message = "Another session is active with uncommitted changes. You can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: " + resumeCmd + suppressHint + "\n\nPress the up arrow key to get your prompt back."
-		}
-
-		// Output blocking JSON response - warn about concurrent sessions but allow continuation
-		// Both sessions will capture checkpoints, which will be interleaved on the shadow branch
-		if err := outputHookResponse(false, message); err != nil {
-			return false, err // Failed to output response
-		}
-		// Block the first prompt to show the warning, but subsequent prompts will proceed
-		return true, nil
-	}
-
-	return false, nil
-}
-
-// handleSessionStartCommon is the shared implementation for session start hooks.
-// Used by both Claude Code and Gemini CLI handlers.
-func handleSessionStartCommon() error {
-	ag, err := GetCurrentHookAgent()
-	if err != nil {
-		return fmt.Errorf("failed to get agent: %w", err)
-	}
-
-	input, err := ag.ParseHookInput(agent.HookSessionStart, os.Stdin)
-	if err != nil {
-		return fmt.Errorf("failed to parse hook input: %w", err)
-	}
-
-	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
-	logging.Info(logCtx, "session-start",
-		slog.String("hook", "session-start"),
-		slog.String("hook_type", "agent"),
-		slog.String("model_session_id", input.SessionID),
-		slog.String("transcript_path", input.SessionRef),
-	)
-
-	if input.SessionID == "" {
-		return errors.New("no session_id in input")
-	}
-
-	// Check for existing legacy session (backward compatibility with date-prefixed format)
-	// If found, preserve the old session ID to avoid orphaning state files
-	entireSessionID := session.FindLegacyEntireSessionID(input.SessionID)
-	if entireSessionID == "" {
-		// No legacy session found - use agent session ID directly (new format)
-		entireSessionID = input.SessionID
-	}
-
-	if err := paths.WriteCurrentSession(entireSessionID); err != nil {
-		return fmt.Errorf("failed to set current session: %w", err)
-	}
-
-	fmt.Printf("Current session set to: %s\n", entireSessionID)
-	return nil
-}
-
-// handleSessionInitErrors handles session initialization errors and provides user-friendly messages.
-func handleSessionInitErrors(ag agent.Agent, initErr error) error {
-	// Check for session ID conflict error (shadow branch has different session)
-	var sessionConflictErr *strategy.SessionIDConflictError
-	if errors.As(initErr, &sessionConflictErr) {
-		// If multi-session warnings are disabled, skip this error silently
-		// The user has explicitly opted to work with multiple concurrent sessions
-		if IsMultiSessionWarningDisabled() {
-			return nil
-		}
-
-		// Check if EITHER session has the concurrent warning shown
-		// If so, the user was already warned and chose to continue - allow concurrent sessions
-		existingState, loadErr := strategy.LoadSessionState(sessionConflictErr.ExistingSession)
-		newState, newLoadErr := strategy.LoadSessionState(sessionConflictErr.NewSession)
-		if (loadErr == nil && existingState != nil && existingState.ConcurrentWarningShown) ||
-			(newLoadErr == nil && newState != nil && newState.ConcurrentWarningShown) {
-			// At least one session was warned - allow concurrent operation
-			return nil
-		}
-		// Try to get the conflicting session's agent type from its state file
-		// If it's a different agent type, use that agent's resume command format
-		var resumeCmd string
-		if loadErr == nil && existingState != nil && existingState.AgentType != "" {
-			if conflictingAgent, agentErr := agent.GetByAgentType(existingState.AgentType); agentErr == nil {
-				resumeCmd = conflictingAgent.FormatResumeCommand(conflictingAgent.ExtractAgentSessionID(sessionConflictErr.ExistingSession))
-			}
-		}
-		// Fall back to current agent if we couldn't get the conflicting agent
-		if resumeCmd == "" {
-			resumeCmd = ag.FormatResumeCommand(ag.ExtractAgentSessionID(sessionConflictErr.ExistingSession))
-		}
-		message := fmt.Sprintf(
-			"Warning: Session ID conflict detected!\n\n"+
-				"Shadow branch: %s\n"+
-				"Existing session: %s\n"+
-				"New session: %s\n\n"+
-				"The shadow branch already has checkpoints from a different session.\n"+
-				"Starting a new session would orphan the existing work.\n\n"+
-				"Options:\n"+
-				"1. Commit your changes (git commit) to create a new base commit\n"+
-				"2. Run 'entire reset' to discard the shadow branch and start fresh\n"+
-				"3. Resume the existing session: %s\n\n"+
-				"To suppress this warning in future sessions, run:\n"+
-				"  entire enable --disable-multisession-warning",
-			sessionConflictErr.ShadowBranch,
-			sessionConflictErr.ExistingSession,
-			sessionConflictErr.NewSession,
-			resumeCmd,
-		)
-		// Output blocking JSON response - user must resolve conflict before continuing
-		if err := outputHookResponse(false, message); err != nil {
-			return err
-		}
-		// Return nil so hook exits cleanly (status 0), not with error status
-		return nil
-	}
-
-	// Unknown error type
-	fmt.Fprintf(os.Stderr, "Warning: failed to initialize session state: %v\n", initErr)
-	return nil
 }
 
 // captureInitialState captures the initial state on user prompt submit.
@@ -328,17 +69,8 @@ func captureInitialState() error {
 		return err
 	}
 
-	// UNLESS the situation has changed (e.g., user committed, so no more conflict).
-	skipHook, err := checkConcurrentSessions(hookData.agent, hookData.entireSessionID)
-	if err != nil {
-		return err
-	}
-	if skipHook {
-		return nil
-	}
-
 	// CLI captures state directly (including transcript position)
-	if err := CapturePrePromptState(hookData.entireSessionID, hookData.input.SessionRef); err != nil {
+	if err := CapturePrePromptState(hookData.sessionID, hookData.input.SessionRef); err != nil {
 		return err
 	}
 
@@ -346,10 +78,8 @@ func captureInitialState() error {
 	strat := GetStrategy()
 	if initializer, ok := strat.(strategy.SessionInitializer); ok {
 		agentType := hookData.agent.Type()
-		if initErr := initializer.InitializeSession(hookData.entireSessionID, agentType, hookData.input.SessionRef); initErr != nil {
-			if err := handleSessionInitErrors(hookData.agent, initErr); err != nil {
-				return err
-			}
+		if err := initializer.InitializeSession(hookData.sessionID, agentType, hookData.input.SessionRef); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to initialize session state: %v\n", err)
 		}
 	}
 
@@ -384,13 +114,10 @@ func commitWithMetadata() error {
 		slog.String("transcript_path", input.SessionRef),
 	)
 
-	modelSessionID := input.SessionID
-	if modelSessionID == "" {
-		modelSessionID = unknownSessionID
+	sessionID := input.SessionID
+	if sessionID == "" {
+		sessionID = unknownSessionID
 	}
-
-	// Get the Entire session ID, preferring the persisted value to handle midnight boundary
-	entireSessionID := currentSessionIDWithFallback(modelSessionID)
 
 	transcriptPath := input.SessionRef
 	if transcriptPath == "" || !fileExists(transcriptPath) {
@@ -399,7 +126,7 @@ func commitWithMetadata() error {
 
 	// Create session metadata folder using the entire session ID (preserves original date on resume)
 	// Use AbsPath to ensure we create at repo root, not relative to cwd
-	sessionDir := paths.SessionMetadataDirFromEntireID(entireSessionID)
+	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
 	sessionDirAbs, err := paths.AbsPath(sessionDir)
 	if err != nil {
 		sessionDirAbs = sessionDir // Fallback to relative
@@ -418,7 +145,7 @@ func commitWithMetadata() error {
 	// Load session state to get transcript offset (for strategies that track it)
 	// This is used to only parse NEW transcript lines since the last checkpoint
 	var transcriptOffset int
-	sessionState, loadErr := strategy.LoadSessionState(entireSessionID)
+	sessionState, loadErr := strategy.LoadSessionState(sessionID)
 	if loadErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load session state: %v\n", loadErr)
 	}
@@ -483,7 +210,7 @@ func commitWithMetadata() error {
 	}
 
 	// Load pre-prompt state (captured on UserPromptSubmit)
-	preState, err := LoadPrePromptState(entireSessionID)
+	preState, err := LoadPrePromptState(sessionID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load pre-prompt state: %v\n", err)
 	}
@@ -508,7 +235,7 @@ func commitWithMetadata() error {
 		fmt.Fprintf(os.Stderr, "No files were modified during this session\n")
 		fmt.Fprintf(os.Stderr, "Skipping commit\n")
 		// Clean up state even when skipping
-		if err := CleanupPrePromptState(entireSessionID); err != nil {
+		if err := CleanupPrePromptState(sessionID); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", err)
 		}
 		return nil
@@ -533,7 +260,7 @@ func commitWithMetadata() error {
 
 	// Create context file before saving changes
 	contextFile := filepath.Join(sessionDirAbs, paths.ContextFileName)
-	if err := createContextFileMinimal(contextFile, commitMessage, entireSessionID, promptFile, summaryFile, transcript); err != nil {
+	if err := createContextFileMinimal(contextFile, commitMessage, sessionID, promptFile, summaryFile, transcript); err != nil {
 		return fmt.Errorf("failed to create context file: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Created context file: %s\n", sessionDir+"/"+paths.ContextFileName)
@@ -570,7 +297,7 @@ func commitWithMetadata() error {
 	var tokenUsage *agent.TokenUsage
 	if transcriptPath != "" {
 		// Subagents are stored in a subagents/ directory next to the main transcript
-		subagentsDir := filepath.Join(filepath.Dir(transcriptPath), entireSessionID, "subagents")
+		subagentsDir := filepath.Join(filepath.Dir(transcriptPath), sessionID, "subagents")
 		usage, err := claudecode.CalculateTotalTokenUsage(transcriptPath, transcriptLinesAtStart, subagentsDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to calculate token usage: %v\n", err)
@@ -581,7 +308,7 @@ func commitWithMetadata() error {
 
 	// Build fully-populated save context and delegate to strategy
 	ctx := strategy.SaveContext{
-		SessionID:                   entireSessionID,
+		SessionID:                   sessionID,
 		ModifiedFiles:               relModifiedFiles,
 		NewFiles:                    relNewFiles,
 		DeletedFiles:                relDeletedFiles,
@@ -612,7 +339,7 @@ func commitWithMetadata() error {
 		// or if InitializeSession was never called/failed)
 		if sessionState == nil {
 			sessionState = &strategy.SessionState{
-				SessionID: entireSessionID,
+				SessionID: sessionID,
 			}
 		}
 		sessionState.CondensedTranscriptLines = totalLines
@@ -626,7 +353,7 @@ func commitWithMetadata() error {
 	}
 
 	// Clean up pre-prompt state (CLI responsibility)
-	if err := CleanupPrePromptState(entireSessionID); err != nil {
+	if err := CleanupPrePromptState(sessionID); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", err)
 	}
 
@@ -700,14 +427,13 @@ func handleClaudeCodePostTodo() error {
 	}
 
 	// Get the session ID from the transcript path or input, then transform to Entire session ID
-	sessionID := paths.ExtractSessionIDFromTranscriptPath(input.TranscriptPath)
+	sessionID := input.SessionID
 	if sessionID == "" {
-		sessionID = input.SessionID
+		sessionID = paths.ExtractSessionIDFromTranscriptPath(input.TranscriptPath)
 	}
-	entireSessionID := currentSessionIDWithFallback(sessionID)
 
 	// Get next checkpoint sequence
-	seq := GetNextCheckpointSequence(entireSessionID, taskToolUseID)
+	seq := GetNextCheckpointSequence(sessionID, taskToolUseID)
 
 	// Extract the todo content from the tool_input.
 	// PostToolUse receives the NEW todo list where the just-completed work is
@@ -733,7 +459,7 @@ func handleClaudeCodePostTodo() error {
 
 	// Build incremental checkpoint context
 	ctx := strategy.TaskCheckpointContext{
-		SessionID:           entireSessionID,
+		SessionID:           sessionID,
 		ToolUseID:           taskToolUseID,
 		ModifiedFiles:       modified,
 		NewFiles:            newFiles,
@@ -914,8 +640,6 @@ func handleClaudeCodePostTask() error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
 	}
 
-	entireSessionID := currentSessionIDWithFallback(input.SessionID)
-
 	// Get agent type from the currently executing hook agent (authoritative source)
 	var agentType agent.AgentType
 	if hookAgent, agentErr := GetCurrentHookAgent(); agentErr == nil {
@@ -926,7 +650,7 @@ func handleClaudeCodePostTask() error {
 	// Note: Incremental checkpoints are now created during task execution via handleClaudeCodePostTodo,
 	// so we don't need to collect/cleanup staging area here.
 	ctx := strategy.TaskCheckpointContext{
-		SessionID:              entireSessionID,
+		SessionID:              input.SessionID,
 		ToolUseID:              input.ToolUseID,
 		AgentID:                input.AgentID,
 		ModifiedFiles:          relModifiedFiles,
@@ -979,13 +703,12 @@ func handleClaudeCodeSessionEnd() error {
 		slog.String("model_session_id", input.SessionID),
 	)
 
-	entireSessionID := currentSessionIDWithFallback(input.SessionID)
-	if entireSessionID == "" {
+	if input.SessionID == "" {
 		return nil // No session to update
 	}
 
 	// Best-effort cleanup - don't block session closure on failure
-	if err := markSessionEnded(entireSessionID); err != nil {
+	if err := markSessionEnded(input.SessionID); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to mark session ended: %v\n", err)
 	}
 	return nil
@@ -1013,16 +736,13 @@ func markSessionEnded(sessionID string) error {
 // hookResponse represents a JSON response for Claude Code hooks.
 // Used to control whether Claude continues processing the prompt.
 type hookResponse struct {
-	Continue   bool   `json:"continue"`
-	StopReason string `json:"stopReason,omitempty"`
+	SystemMessage string `json:"systemMessage,omitempty"`
 }
 
 // outputHookResponse outputs a JSON response to stdout for Claude Code hooks.
-// When continueExec is false, Claude will block the current operation and show the reason to the user.
-func outputHookResponse(continueExec bool, reason string) error {
+func outputHookResponse(reason string) error {
 	resp := hookResponse{
-		Continue:   continueExec,
-		StopReason: reason,
+		SystemMessage: reason,
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
 		return fmt.Errorf("failed to encode hook response: %w", err)

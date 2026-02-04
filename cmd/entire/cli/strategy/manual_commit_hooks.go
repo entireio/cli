@@ -795,61 +795,10 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 		return fmt.Errorf("failed to get HEAD: %w", err)
 	}
 
-	// Get current worktree info for shadow branch naming
-	worktreePath, err := GetWorktreePath()
-	if err != nil {
-		return fmt.Errorf("failed to get worktree path: %w", err)
-	}
-	currentWorktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		return fmt.Errorf("failed to get worktree ID: %w", err)
-	}
-
 	// Check if session already exists
 	state, err := s.loadSessionState(sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to check session state: %w", err)
-	}
-
-	// Check for shadow branch conflict before proceeding
-	// This must happen even if session state exists but has no checkpoints yet
-	// (e.g., state was created by concurrent warning but conflict later resolved)
-	baseCommitHash := head.Hash().String()
-	if state == nil || state.CheckpointCount == 0 {
-		shadowBranch := getShadowBranchNameForCommit(baseCommitHash, currentWorktreeID)
-		refName := plumbing.NewBranchReferenceName(shadowBranch)
-
-		ref, refErr := repo.Reference(refName, true)
-		if refErr == nil {
-			// Shadow branch exists - check if it has commits from a different session
-			tipCommit, commitErr := repo.CommitObject(ref.Hash())
-			if commitErr == nil {
-				existingSessionID, found := trailers.ParseSession(tipCommit.Message)
-				if found && existingSessionID != sessionID {
-					// Check if the existing session has a state file
-					// existingSessionID is the full Entire session ID (YYYY-MM-DD-uuid) from the trailer
-					// We intentionally ignore load errors - treat them as "no state" (orphaned branch)
-					existingState, _ := s.loadSessionState(existingSessionID) //nolint:errcheck // error means no state
-					if existingState == nil {
-						// Orphaned shadow branch - no state file for the existing session
-						// Reset the branch so the new session can proceed
-						fmt.Fprintf(os.Stderr, "Resetting orphaned shadow branch '%s' (previous session %s has no state)\n",
-							shadowBranch, existingSessionID)
-						if err := deleteShadowBranch(repo, shadowBranch); err != nil {
-							return fmt.Errorf("failed to reset orphaned shadow branch: %w", err)
-						}
-					} else {
-						// Existing session has state - this is a real conflict
-						// (e.g., concurrent sessions in same directory)
-						return &SessionIDConflictError{
-							ExistingSession: existingSessionID,
-							NewSession:      sessionID,
-							ShadowBranch:    shadowBranch,
-						}
-					}
-				}
-			}
-		}
 	}
 
 	if state != nil && state.BaseCommit != "" {

@@ -217,25 +217,16 @@ func (s *ManualCommitStrategy) initializeSession(repo *git.Repository, sessionID
 		untrackedFiles = nil
 	}
 
-	// Check if a partial state exists (from concurrent warning)
-	// Ignore errors - we just want to preserve the warning flag if present
-	existingState, loadErr := s.loadSessionState(sessionID)
-	var concurrentWarningShown bool
-	if loadErr == nil && existingState != nil {
-		concurrentWarningShown = existingState.ConcurrentWarningShown
-	}
-
 	state := &SessionState{
-		SessionID:              sessionID,
-		BaseCommit:             head.Hash().String(),
-		WorktreePath:           worktreePath,
-		WorktreeID:             worktreeID,
-		StartedAt:              time.Now(),
-		CheckpointCount:        0,
-		UntrackedFilesAtStart:  untrackedFiles,
-		ConcurrentWarningShown: concurrentWarningShown, // Preserve the warning flag
-		AgentType:              agentType,
-		TranscriptPath:         transcriptPath,
+		SessionID:             sessionID,
+		BaseCommit:            head.Hash().String(),
+		WorktreePath:          worktreePath,
+		WorktreeID:            worktreeID,
+		StartedAt:             time.Now(),
+		CheckpointCount:       0,
+		UntrackedFilesAtStart: untrackedFiles,
+		AgentType:             agentType,
+		TranscriptPath:        transcriptPath,
 	}
 
 	if err := s.saveSessionState(state); err != nil {

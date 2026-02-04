@@ -393,6 +393,30 @@ func (env *TestEnv) SimulateUserPromptSubmitWithOutput(sessionID string) HookOut
 	return runner.SimulateUserPromptSubmitWithOutput(sessionID)
 }
 
+// SimulateSessionStartWithOutput simulates the SessionStart hook and returns the output.
+func (r *HookRunner) SimulateSessionStartWithOutput(sessionID string) HookOutput {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+	}
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return HookOutput{Err: fmt.Errorf("failed to marshal hook input: %w", err)}
+	}
+
+	return r.runHookWithOutput("session-start", inputJSON)
+}
+
+// SimulateSessionStartWithOutput is a convenience method on TestEnv.
+func (env *TestEnv) SimulateSessionStartWithOutput(sessionID string) HookOutput {
+	env.T.Helper()
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	return runner.SimulateSessionStartWithOutput(sessionID)
+}
+
 // GetSessionState reads and returns the session state for the given session ID.
 func (env *TestEnv) GetSessionState(sessionID string) (*strategy.SessionState, error) {
 	env.T.Helper()

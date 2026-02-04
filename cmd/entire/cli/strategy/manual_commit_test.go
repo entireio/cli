@@ -1460,10 +1460,9 @@ func TestSaveChanges_EmptyBaseCommit_Recovery(t *testing.T) {
 	// Create a partial session state with empty BaseCommit
 	// (simulates what checkConcurrentSessions used to create)
 	partialState := &SessionState{
-		SessionID:              sessionID,
-		BaseCommit:             "", // Empty! This is the bug scenario
-		ConcurrentWarningShown: true,
-		StartedAt:              time.Now(),
+		SessionID:  sessionID,
+		BaseCommit: "", // Empty! This is the bug scenario
+		StartedAt:  time.Now(),
 	}
 	if err := s.saveSessionState(partialState); err != nil {
 		t.Fatalf("failed to save partial state: %v", err)

@@ -192,7 +192,7 @@ func (s *ManualCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) err
 	branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
 
 	// Compute metadata paths for commit message
-	sessionMetadataDir := paths.SessionMetadataDirFromEntireID(ctx.SessionID)
+	sessionMetadataDir := paths.SessionMetadataDirFromSessionID(ctx.SessionID)
 	taskMetadataDir := TaskMetadataDir(sessionMetadataDir, ctx.ToolUseID)
 
 	// Generate commit message

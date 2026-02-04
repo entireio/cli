@@ -56,9 +56,6 @@ type State struct {
 	// FilesTouched tracks files modified/created/deleted during this session
 	FilesTouched []string `json:"files_touched,omitempty"`
 
-	// ConcurrentWarningShown is true if user was warned about concurrent sessions
-	ConcurrentWarningShown bool `json:"concurrent_warning_shown,omitempty"`
-
 	// LastCheckpointID is the checkpoint ID from last condensation, reused for subsequent commits without new content
 	LastCheckpointID id.CheckpointID `json:"last_checkpoint_id,omitempty"`
 

@@ -441,6 +441,7 @@ func TestRewind_MultipleConsecutive(t *testing.T) {
 			t.Errorf("after rewind to v1: got %q, want %q", content, "version 1")
 		}
 	})
+
 }
 
 // TestRewind_DifferentSessions tests that commit and auto-commit strategies support
@@ -485,50 +486,6 @@ func TestRewind_DifferentSessions(t *testing.T) {
 					t.Errorf("expected 2 rewind points, got %d", len(points))
 				}
 			})
-		}
-	})
-
-	t.Run("shadow_warns_different_sessions", func(t *testing.T) {
-		t.Parallel()
-		env := NewFeatureBranchEnv(t, "manual-commit")
-
-		// Session 1
-		session1 := env.NewSession()
-		if err := env.SimulateUserPromptSubmit(session1.ID); err != nil {
-			t.Fatalf("SimulateUserPromptSubmit session1 failed: %v", err)
-		}
-		env.WriteFile("file.txt", "version 1")
-		session1.CreateTranscript("Create file", []FileChange{{Path: "file.txt", Content: "version 1"}})
-		if err := env.SimulateStop(session1.ID, session1.TranscriptPath); err != nil {
-			t.Fatalf("SimulateStop session1 failed: %v", err)
-		}
-
-		// Session 2 (different session ID) triggers concurrent session warning
-		// The hook outputs JSON {"continue":false,...} but returns nil (success)
-		session2 := env.NewSession()
-		output := env.SimulateUserPromptSubmitWithOutput(session2.ID)
-		// The hook succeeds but outputs continue:false - treated as success
-		if output.Err != nil {
-			t.Logf("First prompt for session2 returned error (unexpected): %v", output.Err)
-		}
-		// Verify first prompt was blocked with continue:false
-		if !strings.Contains(string(output.Stdout), `"continue":false`) {
-			t.Errorf("Expected continue:false in first prompt response, got: %s", output.Stdout)
-		}
-
-		// Clear session1 state file - this makes the shadow branch "orphaned"
-		if err := env.ClearSessionState(session1.ID); err != nil {
-			t.Fatalf("ClearSessionState failed: %v", err)
-		}
-
-		// Session2 had ConcurrentWarningShown=true, but now the conflict is resolved
-		// (session1 state cleared), so the warning flag is cleared and hooks proceed normally.
-		// The orphaned shadow branch (from session1) is reset, allowing session2 to proceed.
-		err := env.SimulateUserPromptSubmit(session2.ID)
-		if err != nil {
-			t.Errorf("Expected success after orphaned shadow branch is reset, got: %v", err)
-		} else {
-			t.Log("Session2 proceeded after orphaned shadow branch was reset")
 		}
 	})
 }

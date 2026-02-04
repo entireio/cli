@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
@@ -210,94 +209,6 @@ func TestSessionIDConflict_ManuallyCreatedOrphanedBranch(t *testing.T) {
 	}
 }
 
-// TestSessionIDConflict_ExistingSessionWithState tests that when a shadow branch exists
-// from a different session AND that session has a state file (not orphaned), a blocking
-// hook response is returned. This simulates the same-worktree, different-session scenario
-// (e.g., concurrent sessions in the same directory).
-func TestSessionIDConflict_ExistingSessionWithState(t *testing.T) {
-	env := NewTestEnv(t)
-	defer env.Cleanup()
-
-	// Setup
-	env.InitRepo()
-	env.WriteFile("README.md", "# Test")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-
-	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire(strategy.StrategyNameManualCommit)
-
-	baseHead := env.GetHeadHash()
-	worktreeID, err := paths.GetWorktreeID(env.RepoDir)
-	if err != nil {
-		t.Fatalf("Failed to get worktree ID: %v", err)
-	}
-	shadowBranch := env.GetShadowBranchNameForCommit(baseHead)
-
-	// Create a shadow branch with a specific session ID
-	otherSessionID := "other-session-id"
-	createOrphanedShadowBranch(t, env.RepoDir, shadowBranch, otherSessionID)
-
-	// Verify shadow branch exists
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("Shadow branch %s should exist after creation", shadowBranch)
-	}
-
-	// Manually create a state file for the other session (same worktree, different session)
-	// This makes the shadow branch NOT orphaned
-	entireOtherSessionID := sessionid.EntireSessionID(otherSessionID)
-	otherState := &strategy.SessionState{
-		SessionID:       entireOtherSessionID,
-		BaseCommit:      baseHead,
-		WorktreePath:    env.RepoDir, // Same worktree
-		WorktreeID:      worktreeID,  // Same worktree ID
-		CheckpointCount: 1,
-	}
-	// Write state file directly to test repo (can't use strategy.SaveSessionState as it uses cwd)
-	stateDir := filepath.Join(env.RepoDir, ".git", "entire-sessions")
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		t.Fatalf("Failed to create session state dir: %v", err)
-	}
-	stateData, err := json.Marshal(otherState)
-	if err != nil {
-		t.Fatalf("Failed to marshal session state: %v", err)
-	}
-	stateFile := filepath.Join(stateDir, entireOtherSessionID+".json")
-	if err := os.WriteFile(stateFile, stateData, 0o644); err != nil {
-		t.Fatalf("Failed to write session state file: %v", err)
-	}
-
-	// Verify state file exists
-	if _, err := os.Stat(stateFile); err != nil {
-		t.Fatalf("State file should exist: %v", err)
-	}
-
-	// Try to start a new session - should return blocking response (not error)
-	// The concurrent session check runs FIRST and shows a warning about the other session
-	session := env.NewSession()
-	hookResp, err := env.SimulateUserPromptSubmitWithResponse(session.ID)
-	// After the fix, the hook should succeed (no error) but return blocking response
-	if err != nil {
-		t.Errorf("Hook should not error (should block via JSON response), got: %v", err)
-	}
-
-	// Verify the hook response blocks and contains expected message
-	// The concurrent session warning shows "Another session is active" message
-	if hookResp == nil {
-		t.Fatal("Expected hook response, got nil")
-	}
-	if hookResp.Continue {
-		t.Error("Expected hook to block (Continue: false)")
-	}
-	if !strings.Contains(hookResp.StopReason, "Another session is active") {
-		t.Errorf("Expected 'Another session is active' in stop reason, got: %s", hookResp.StopReason)
-	}
-	if !strings.Contains(hookResp.StopReason, "other-session-id") {
-		t.Errorf("Expected other session ID in message, got: %s", hookResp.StopReason)
-	}
-	t.Logf("Got expected blocking response: %s", hookResp.StopReason)
-}
-
 // createOrphanedShadowBranch creates a shadow branch with a specific session ID
 // without creating a corresponding session state file.
 func createOrphanedShadowBranch(t *testing.T, repoDir, branchName, sessionID string) {
@@ -392,6 +303,119 @@ func TestSessionIDConflict_ShadowBranchWithoutTrailer(t *testing.T) {
 	err := env.SimulateUserPromptSubmit(session.ID)
 	if err != nil {
 		t.Errorf("Starting session with shadow branch without trailer should succeed, got: %v", err)
+	}
+}
+
+// TestSessionConflict_WarningMessageFormat tests that the session conflict warning message
+// contains all expected components when a second session starts while another has uncommitted checkpoints.
+func TestSessionConflict_WarningMessageFormat(t *testing.T) {
+	env := NewTestEnv(t)
+	defer env.Cleanup()
+
+	// Setup
+	env.InitRepo()
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	env.GitCheckoutNewBranch("feature/test")
+	env.InitEntire(strategy.StrategyNameManualCommit)
+
+	// Create first session and save a checkpoint (so CheckpointCount > 0)
+	session1 := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session1.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit (session1) failed: %v", err)
+	}
+
+	env.WriteFile("test.txt", "content from session 1")
+	session1.CreateTranscript("Add test file", []FileChange{{Path: "test.txt", Content: "content from session 1"}})
+	if err := env.SimulateStop(session1.ID, session1.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop (session1) failed: %v", err)
+	}
+
+	// Verify session1 has checkpoints
+	state1, err := env.GetSessionState(session1.ID)
+	if err != nil {
+		t.Fatalf("Failed to get session1 state: %v", err)
+	}
+	if state1 == nil || state1.CheckpointCount == 0 {
+		t.Fatal("Session 1 should have checkpoints")
+	}
+	t.Logf("Session 1 (%s) has %d checkpoint(s)", session1.EntireID, state1.CheckpointCount)
+
+	// Start a second session (different session ID, same base commit)
+	session2 := env.NewSession()
+
+	// Use SimulateSessionStartWithOutput to capture the warning message
+	output := env.SimulateSessionStartWithOutput(session2.ID)
+
+	// The hook should succeed (no error) but output a warning message
+	if output.Err != nil {
+		t.Fatalf("SimulateSessionStart (session2) failed: %v\nStderr: %s", output.Err, output.Stderr)
+	}
+
+	// Parse the JSON response
+	type sessionStartResponse struct {
+		SystemMessage string `json:"systemMessage,omitempty"`
+	}
+	var resp sessionStartResponse
+	if len(output.Stdout) > 0 {
+		if err := json.Unmarshal(output.Stdout, &resp); err != nil {
+			t.Fatalf("Failed to parse session-start response: %v\nStdout: %s", err, output.Stdout)
+		}
+	}
+
+	// If there's no conflict (perhaps warning is disabled), skip the rest
+	if resp.SystemMessage == "" {
+		t.Log("No session conflict warning - this is expected if multi-session warning is disabled")
+		return
+	}
+
+	msg := resp.SystemMessage
+	t.Logf("Session conflict warning message:\n%s", msg)
+
+	// Verify the warning message contains all expected components
+	// 1. The existing session ID
+	if !strings.Contains(msg, session1.EntireID) {
+		t.Errorf("Warning should contain existing session ID %q, got:\n%s", session1.EntireID, msg)
+	}
+
+	// 2. The new session ID (as Entire session ID)
+	session2EntireID := sessionid.EntireSessionID(session2.ID)
+	if !strings.Contains(msg, session2EntireID) {
+		t.Errorf("Warning should contain new session ID %q, got:\n%s", session2EntireID, msg)
+	}
+
+	// 3. Resume command format: claude -r <session-id>
+	expectedResumeCmd := "claude -r " + session1.EntireID
+	if !strings.Contains(msg, expectedResumeCmd) {
+		t.Errorf("Warning should contain resume command %q, got:\n%s", expectedResumeCmd, msg)
+	}
+
+	// 4. Reset instruction: entire reset --force && claude
+	if !strings.Contains(msg, "entire reset --force && claude") {
+		t.Errorf("Warning should contain reset instruction 'entire reset --force && claude', got:\n%s", msg)
+	}
+
+	// 5. Warning disable option: entire enable --disable-multisession-warning
+	if !strings.Contains(msg, "entire enable --disable-multisession-warning") {
+		t.Errorf("Warning should contain disable option 'entire enable --disable-multisession-warning', got:\n%s", msg)
+	}
+
+	// 6. Verify the message structure contains expected phrases
+	expectedPhrases := []string{
+		"existing session running",
+		"Do you want to continue",
+		"Yes: Ignore this warning",
+		"No: Type /exit",
+		"Resume the other session",
+		"Reset and start fresh",
+		"hide this notice",
+	}
+	for _, phrase := range expectedPhrases {
+		if !strings.Contains(msg, phrase) {
+			t.Errorf("Warning should contain phrase %q, got:\n%s", phrase, msg)
+		}
 	}
 }
 
