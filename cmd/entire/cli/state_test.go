@@ -456,9 +456,6 @@ func TestComputeFileChanges_DeletedFilesWithNilPreState(t *testing.T) {
 		t.Fatalf("failed to delete tracked file: %v", err)
 	}
 
-	// Clear repo root cache so ComputeFileChanges finds our test repo
-	paths.ClearRepoRootCache()
-
 	// Call ComputeFileChanges with nil preState
 	newFiles, deletedFiles, err := ComputeFileChanges(nil)
 	if err != nil {
@@ -528,9 +525,6 @@ func TestComputeFileChanges_NewAndDeletedFiles(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("failed to commit: %v", err)
 	}
-
-	// Clear repo root cache
-	paths.ClearRepoRootCache()
 
 	// Simulate session: delete tracked1.txt and create a new file
 	if err := os.Remove(trackedFile1); err != nil {
@@ -605,9 +599,6 @@ func TestComputeFileChanges_NoChanges(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("failed to commit: %v", err)
 	}
-
-	// Clear repo root cache
-	paths.ClearRepoRootCache()
 
 	// Create preState with no untracked files
 	preState := &PrePromptState{
