@@ -178,7 +178,7 @@ func Push(remote, branchName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", remote, branchName)
+	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", "--", remote, branchName)
 	cmd.Stdin = nil // Disconnect stdin to prevent hanging in hook context
 
 	output, err := cmd.CombinedOutput()
@@ -205,7 +205,7 @@ func FetchFromRemote(remote, branchName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "fetch", remote, branchName)
+	cmd := exec.CommandContext(ctx, "git", "fetch", "--", remote, branchName)
 	cmd.Stdin = nil
 	if output, err := cmd.CombinedOutput(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {

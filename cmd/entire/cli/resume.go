@@ -355,9 +355,18 @@ func checkRemoteMetadata(repo *git.Repository, checkpointID id.CheckpointID) err
 		fmt.Fprintf(os.Stderr, "You can try manually: git fetch origin entire/sessions:entire/sessions\n")
 		return NewSilentError(errors.New("failed to fetch metadata"))
 	}
-	if err := gitutil.CreateLocalBranchFromRemote(paths.MetadataBranchName); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create local metadata branch: %v\n", err)
-		return NewSilentError(errors.New("failed to create local metadata branch"))
+	// Only create local branch if it doesn't already exist, to avoid
+	// overwriting any local-only metadata history
+	exists, err := gitutil.BranchExistsLocally(paths.MetadataBranchName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to check local metadata branch: %v\n", err)
+		return NewSilentError(errors.New("failed to check local metadata branch"))
+	}
+	if !exists {
+		if err := gitutil.CreateLocalBranchFromRemote(paths.MetadataBranchName); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create local metadata branch: %v\n", err)
+			return NewSilentError(errors.New("failed to create local metadata branch"))
+		}
 	}
 
 	// Now resume the session with the fetched metadata

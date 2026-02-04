@@ -153,7 +153,7 @@ func doPushSessionsBranch(remote, branchName string) error {
 
 // tryPushSessionsCommon attempts to push the sessions branch.
 func tryPushSessionsCommon(remote, branchName string) error {
-	return gitutil.Push(remote, branchName) //nolint:wrapcheck // Error context added by caller
+	return gitutil.Push(remote, branchName) //nolint:wrapcheck // Push errors logged or ignored by caller
 }
 
 // fetchAndMergeSessionsCommon fetches remote sessions and merges into local using go-git.

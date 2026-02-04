@@ -1,10 +1,16 @@
-// Package gitutil provides git repository utilities using native git CLI commands.
+// Package gitutil provides git repository utilities.
+//
+// The package follows a mixed strategy:
+//   - For operations that modify repository state or depend on exact git behavior,
+//     it uses native git CLI commands to avoid known go-git issues.
+//   - For read-only metadata helpers (e.g., OpenRepository, GetDefaultBranchFromRemote,
+//     GetMergeBase), it uses go-git where it is safe and more convenient.
+//
 // This package exists because go-git has known issues with certain operations:
 //   - worktree.Status() doesn't respect global gitignore (core.excludesfile)
 //   - worktree.Reset() with HardReset deletes ignored directories
 //   - worktree.Checkout() has similar issues with untracked files
 //
-// By using native git commands, we ensure full compatibility with git's behavior.
 // See: https://github.com/entireio/cli/pull/129
 package gitutil
 
