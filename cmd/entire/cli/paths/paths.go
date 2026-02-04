@@ -59,8 +59,8 @@ var (
 // The result is cached per working directory.
 // Returns an error if not inside a git repository.
 //
-// Note: This duplicates gitutil.GetWorktreePath() but is intentional to avoid
-// a circular import (gitutil imports paths for MetadataBranchName).
+// Note: This duplicates gitutil.GetWorktreePath() to keep paths package
+// independent of git-specific packages.
 func RepoRoot() (string, error) {
 	// Get current working directory to check cache validity
 	cwd, err := os.Getwd()

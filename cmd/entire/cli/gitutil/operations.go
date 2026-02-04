@@ -89,7 +89,8 @@ func GetConfigValue(key string) string {
 	return strings.TrimSpace(string(output))
 }
 
-// FetchBranch fetches a branch from origin and creates/updates the local tracking branch.
+// FetchBranch fetches a branch from origin and updates the remote tracking ref (refs/remotes/origin/<branch>).
+// It does NOT create a local branch - use CreateLocalBranchFromRemote for that.
 // Uses git CLI instead of go-git for fetch because go-git doesn't use credential helpers,
 // which breaks HTTPS URLs that require authentication.
 func FetchBranch(branchName string) error {
@@ -190,7 +191,7 @@ func Push(remote, branchName string) error {
 			strings.Contains(string(output), "rejected") {
 			return ErrNonFastForward
 		}
-		return fmt.Errorf("push failed: %s", output)
+		return fmt.Errorf("push failed: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
 }
@@ -210,7 +211,7 @@ func FetchFromRemote(remote, branchName string) error {
 		if ctx.Err() == context.DeadlineExceeded {
 			return errors.New("fetch timed out after 2 minutes")
 		}
-		return fmt.Errorf("fetch failed: %s", output)
+		return fmt.Errorf("fetch failed: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
 }
