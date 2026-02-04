@@ -194,8 +194,61 @@ func CleanupPrePromptState(sessionID string) error {
 	return nil
 }
 
+// ComputeFileChanges returns new files (created during session) and deleted files
+// (tracked files that were deleted) using a single git status call.
+// This is more efficient than calling ComputeNewFiles and ComputeDeletedFiles separately.
+func ComputeFileChanges(preState *PrePromptState) (newFiles, deletedFiles []string, err error) {
+	if preState == nil {
+		return nil, nil, nil
+	}
+
+	repo, err := openRepository()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	status, err := worktree.Status()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get status: %w", err)
+	}
+
+	// Build set of pre-existing untracked files for quick lookup
+	preExisting := make(map[string]bool, len(preState.UntrackedFiles))
+	for _, f := range preState.UntrackedFiles {
+		preExisting[f] = true
+	}
+
+	// Process all files from git status
+	for file, st := range status {
+		// Skip .entire directory
+		if paths.IsInfrastructurePath(file) {
+			continue
+		}
+
+		switch {
+		case st.Worktree == git.Untracked:
+			// New file if it wasn't untracked before the session
+			if !preExisting[file] {
+				newFiles = append(newFiles, file)
+			}
+		case st.Worktree == git.Deleted && st.Staging != git.Deleted:
+			// Deleted file (tracked file that was deleted, not yet staged)
+			deletedFiles = append(deletedFiles, file)
+		}
+	}
+
+	return newFiles, deletedFiles, nil
+}
+
 // ComputeNewFiles compares current untracked files with pre-prompt state
 // to find files that were created during the session.
+//
+// Deprecated: Use ComputeFileChanges instead for better performance.
 func ComputeNewFiles(preState *PrePromptState) ([]string, error) {
 	if preState == nil {
 		return nil, nil
@@ -211,6 +264,8 @@ func ComputeNewFiles(preState *PrePromptState) ([]string, error) {
 
 // ComputeDeletedFiles returns files that were deleted during the session
 // (tracked files that no longer exist).
+//
+// Deprecated: Use ComputeFileChanges instead for better performance.
 func ComputeDeletedFiles() ([]string, error) {
 	repo, err := openRepository()
 	if err != nil {

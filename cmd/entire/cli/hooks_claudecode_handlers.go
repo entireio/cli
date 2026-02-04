@@ -491,16 +491,10 @@ func commitWithMetadata() error {
 		fmt.Fprintf(os.Stderr, "Loaded pre-prompt state: %d pre-existing untracked files\n", len(preState.UntrackedFiles))
 	}
 
-	// Compute new files (files created during session)
-	newFiles, err := ComputeNewFiles(preState)
+	// Compute new and deleted files (single git status call)
+	newFiles, deletedFiles, err := ComputeFileChanges(preState)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to compute new files: %v\n", err)
-	}
-
-	// Compute deleted files (tracked files that were deleted)
-	deletedFiles, err := ComputeDeletedFiles()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to compute deleted files: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
 	}
 
 	// Filter and normalize all paths (CLI responsibility)

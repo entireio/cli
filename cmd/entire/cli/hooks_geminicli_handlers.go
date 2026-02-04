@@ -363,14 +363,10 @@ func commitGeminiSession(ctx *geminiSessionContext) error {
 		}
 	}
 
-	newFiles, err := ComputeNewFiles(preState)
+	// Compute new and deleted files (single git status call)
+	newFiles, deletedFiles, err := ComputeFileChanges(preState)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to compute new files: %v\n", err)
-	}
-
-	deletedFiles, err := ComputeDeletedFiles()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to compute deleted files: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
 	}
 
 	relModifiedFiles := FilterAndNormalizePaths(ctx.modifiedFiles, repoRoot)

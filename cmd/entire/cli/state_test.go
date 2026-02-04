@@ -410,3 +410,23 @@ func TestPrePromptState_WithSummaryOnlyTranscript(t *testing.T) {
 		t.Errorf("CleanupPrePromptState() error = %v", err)
 	}
 }
+
+func TestComputeFileChanges_SingleGitStatus(t *testing.T) {
+	// This test verifies that ComputeFileChanges returns both new and deleted files
+	// from a single git status call (consolidation of ComputeNewFiles + ComputeDeletedFiles)
+
+	// For now, just verify the function signature exists and returns expected types
+	// The actual git operations are tested via integration tests
+
+	// Call with nil preState should return empty slices, not error
+	newFiles, deletedFiles, err := ComputeFileChanges(nil)
+	if err != nil {
+		t.Errorf("ComputeFileChanges(nil) error = %v, want nil", err)
+	}
+	if newFiles != nil {
+		t.Errorf("ComputeFileChanges(nil) newFiles = %v, want nil", newFiles)
+	}
+	if deletedFiles != nil {
+		t.Errorf("ComputeFileChanges(nil) deletedFiles = %v, want nil", deletedFiles)
+	}
+}
