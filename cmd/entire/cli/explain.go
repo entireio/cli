@@ -13,6 +13,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/strategy"
@@ -193,7 +194,7 @@ func runExplain(w, errW io.Writer, sessionID, commitRef, checkpointID string, no
 // When rawTranscript is true, outputs only the raw transcript file (JSONL format).
 // When searchAll is true, searches all commits without branch/depth limits (used for finding associated commits).
 func runExplainCheckpoint(w, errW io.Writer, checkpointIDPrefix string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool) error {
-	repo, err := openRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
 	}
@@ -1056,7 +1057,7 @@ func convertTemporaryCheckpoint(repo *git.Repository, tc checkpoint.TemporaryChe
 // runExplainBranchWithFilter shows checkpoints on the current branch, optionally filtered by session.
 // This is strategy-agnostic - it queries checkpoints directly.
 func runExplainBranchWithFilter(w io.Writer, noPager bool, sessionFilter string) error {
-	repo, err := openRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
 	}
@@ -1112,7 +1113,7 @@ func outputExplainContent(w io.Writer, content string, noPager bool) {
 // Extracts the Entire-Checkpoint trailer and delegates to checkpoint detail view.
 // If no trailer found, shows a message indicating no associated checkpoint.
 func runExplainCommit(w io.Writer, commitRef string, noPager, verbose, full, searchAll bool) error {
-	repo, err := openRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
 	}

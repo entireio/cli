@@ -13,6 +13,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/agent/geminicli"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
@@ -246,7 +247,7 @@ func commitGeminiSession(ctx *geminiSessionContext) error {
 	}
 	fmt.Fprintf(os.Stderr, "Created context file: %s\n", ctx.sessionDir+"/"+paths.ContextFileName)
 
-	author, err := GetGitAuthor()
+	author, err := gitutil.GetGitAuthor()
 	if err != nil {
 		return fmt.Errorf("failed to get git author: %w", err)
 	}
@@ -322,7 +323,7 @@ func logFileChanges(modified, newFiles, deleted []string) {
 // commitWithMetadataGemini commits the Gemini session changes with metadata.
 // This is a Gemini-specific version that parses JSON transcripts correctly.
 func commitWithMetadataGemini() error {
-	if skip, branchName := ShouldSkipOnDefaultBranchForStrategy(); skip {
+	if skip, branchName := gitutil.ShouldSkipOnDefaultBranchForStrategy(GetStrategy().AllowsMainBranch()); skip {
 		fmt.Fprintf(os.Stderr, "Entire: skipping on branch '%s' - create a feature branch to use Entire tracking\n", branchName)
 		return nil
 	}
@@ -496,7 +497,7 @@ func handleGeminiBeforeAgent() error {
 // for checkpoint creation (not SessionEnd, which only fires on explicit exit).
 func handleGeminiAfterAgent() error {
 	// Skip on default branch for strategies that don't allow it
-	if skip, branchName := ShouldSkipOnDefaultBranchForStrategy(); skip {
+	if skip, branchName := gitutil.ShouldSkipOnDefaultBranchForStrategy(GetStrategy().AllowsMainBranch()); skip {
 		fmt.Fprintf(os.Stderr, "Entire: skipping on branch '%s' - create a feature branch to use Entire tracking\n", branchName)
 		return nil
 	}

@@ -58,6 +58,9 @@ var (
 // Uses 'git rev-parse --show-toplevel' which works from any subdirectory.
 // The result is cached per working directory.
 // Returns an error if not inside a git repository.
+//
+// Note: This duplicates gitutil.GetWorktreePath() but is intentional to avoid
+// a circular import (gitutil imports paths for MetadataBranchName).
 func RepoRoot() (string, error) {
 	// Get current working directory to check cache validity
 	cwd, err := os.Getwd()

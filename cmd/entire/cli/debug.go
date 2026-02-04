@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"entire.io/cli/cmd/entire/cli/agent"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
@@ -112,7 +113,7 @@ func printStrategyInfo(w io.Writer, strat strategy.Strategy, isAutoCommit bool) 
 	fmt.Fprintf(w, "Strategy: %s\n", strat.Name())
 	fmt.Fprintf(w, "Auto-commit strategy: %v\n", isAutoCommit)
 
-	_, branchName, err := IsOnDefaultBranch()
+	_, branchName, err := gitutil.IsOnDefaultBranch()
 	if err != nil {
 		fmt.Fprintf(w, "Branch: (unable to determine: %v)\n\n", err)
 	} else {
@@ -283,7 +284,7 @@ func printTranscriptHelp(w io.Writer) {
 // getFileChanges returns the current file changes from git status.
 // Returns (modifiedFiles, untrackedFiles, deletedFiles, stagedFiles, error)
 func getFileChanges() ([]string, []string, []string, []string, error) {
-	repo, err := openRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

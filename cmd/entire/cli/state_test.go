@@ -620,3 +620,97 @@ func TestComputeFileChanges_NoChanges(t *testing.T) {
 		t.Errorf("ComputeFileChanges(preState) deletedFiles = %v, want empty", deletedFiles)
 	}
 }
+
+func TestFindNewUntrackedFiles(t *testing.T) {
+	tests := []struct {
+		name        string
+		current     []string
+		preExisting []string
+		expected    []string
+	}{
+		{
+			name:        "finds new files not in pre-existing list",
+			current:     []string{"file1.go", "file2.go", "file3.go"},
+			preExisting: []string{"file1.go"},
+			expected:    []string{"file2.go", "file3.go"},
+		},
+		{
+			name:        "returns empty when all files pre-exist",
+			current:     []string{"file1.go", "file2.go"},
+			preExisting: []string{"file1.go", "file2.go"},
+			expected:    nil,
+		},
+		{
+			name:        "returns all files when pre-existing is empty",
+			current:     []string{"file1.go", "file2.go"},
+			preExisting: []string{},
+			expected:    []string{"file1.go", "file2.go"},
+		},
+		{
+			name:        "returns nil when current is empty",
+			current:     []string{},
+			preExisting: []string{"file1.go"},
+			expected:    nil,
+		},
+		{
+			name:        "handles nil current slice",
+			current:     nil,
+			preExisting: []string{"file1.go"},
+			expected:    nil,
+		},
+		{
+			name:        "handles nil pre-existing slice",
+			current:     []string{"file1.go", "file2.go"},
+			preExisting: nil,
+			expected:    []string{"file1.go", "file2.go"},
+		},
+		{
+			name:        "handles both nil slices",
+			current:     nil,
+			preExisting: nil,
+			expected:    nil,
+		},
+		{
+			name:        "handles files with paths",
+			current:     []string{"src/main.go", "src/utils.go", "test/main_test.go"},
+			preExisting: []string{"src/main.go"},
+			expected:    []string{"src/utils.go", "test/main_test.go"},
+		},
+		{
+			name:        "handles duplicate files in pre-existing",
+			current:     []string{"file1.go", "file2.go"},
+			preExisting: []string{"file1.go", "file1.go"},
+			expected:    []string{"file2.go"},
+		},
+		{
+			name:        "is case-sensitive",
+			current:     []string{"File.go", "file.go"},
+			preExisting: []string{"file.go"},
+			expected:    []string{"File.go"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := findNewUntrackedFiles(tt.current, tt.preExisting)
+
+			if len(result) != len(tt.expected) {
+				t.Errorf("findNewUntrackedFiles() returned %d files, want %d", len(result), len(tt.expected))
+				t.Errorf("got: %v, want: %v", result, tt.expected)
+				return
+			}
+
+			// Create a map for easy lookup
+			expectedMap := make(map[string]bool)
+			for _, f := range tt.expected {
+				expectedMap[f] = true
+			}
+
+			for _, f := range result {
+				if !expectedMap[f] {
+					t.Errorf("findNewUntrackedFiles() returned unexpected file %q", f)
+				}
+			}
+		})
+	}
+}

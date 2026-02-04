@@ -11,6 +11,7 @@ import (
 	"entire.io/cli/cmd/entire/cli/agent/claudecode"
 	cpkg "entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/settings"
@@ -127,7 +128,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 	}
 
 	// Get author info
-	authorName, authorEmail := GetGitAuthorFromRepo(repo)
+	authorName, authorEmail := gitutil.GetGitAuthorFromRepo(repo)
 
 	// Get current branch name
 	branchName := GetCurrentBranchName(repo)

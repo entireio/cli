@@ -11,6 +11,7 @@ import (
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
@@ -58,21 +59,21 @@ you'll be prompted to confirm resuming from the older checkpoint.`,
 
 func runResume(branchName string, force bool) error {
 	// Check if we're already on this branch
-	currentBranch, err := GetCurrentBranch()
+	currentBranch, err := gitutil.GetCurrentBranch()
 	if err == nil && currentBranch == branchName {
 		// Already on the branch, skip checkout
 		return resumeFromCurrentBranch(branchName, force)
 	}
 
 	// Check if branch exists locally
-	exists, err := BranchExistsLocally(branchName)
+	exists, err := gitutil.BranchExistsLocally(branchName)
 	if err != nil {
 		return fmt.Errorf("failed to check branch: %w", err)
 	}
 
 	if !exists {
 		// Branch doesn't exist locally, check if it exists on remote
-		remoteExists, err := BranchExistsOnRemote(branchName)
+		remoteExists, err := gitutil.BranchExistsOnRemote(branchName)
 		if err != nil {
 			return fmt.Errorf("failed to check remote branch: %w", err)
 		}
@@ -92,14 +93,22 @@ func runResume(branchName string, force bool) error {
 
 		// Fetch and checkout the remote branch
 		fmt.Fprintf(os.Stderr, "Fetching branch '%s' from origin...\n", branchName)
-		if err := FetchAndCheckoutRemoteBranch(branchName); err != nil {
+		if err := gitutil.FetchBranch(branchName); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to fetch branch: %v\n", err)
+			return NewSilentError(errors.New("failed to fetch branch"))
+		}
+		if err := gitutil.CreateLocalBranchFromRemote(branchName); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create local branch: %v\n", err)
+			return NewSilentError(errors.New("failed to create local branch"))
+		}
+		if err := gitutil.CheckoutBranch(branchName); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to checkout branch: %v\n", err)
 			return NewSilentError(errors.New("failed to checkout branch"))
 		}
 		fmt.Fprintf(os.Stderr, "Switched to branch '%s'\n", branchName)
 	} else {
 		// Branch exists locally, check for uncommitted changes before checkout
-		hasChanges, err := HasUncommittedChanges()
+		hasChanges, err := gitutil.HasUncommittedChanges()
 		if err != nil {
 			return fmt.Errorf("failed to check for uncommitted changes: %w", err)
 		}
@@ -108,7 +117,7 @@ func runResume(branchName string, force bool) error {
 		}
 
 		// Checkout the branch
-		if err := CheckoutBranch(branchName); err != nil {
+		if err := gitutil.CheckoutBranch(branchName); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to checkout branch: %v\n", err)
 			return NewSilentError(errors.New("failed to checkout branch"))
 		}
@@ -119,7 +128,7 @@ func runResume(branchName string, force bool) error {
 }
 
 func resumeFromCurrentBranch(branchName string, force bool) error {
-	repo, err := openRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
 	}
@@ -207,7 +216,7 @@ func findBranchCheckpoint(repo *git.Repository, branchName string) (*branchCheck
 
 	// HEAD doesn't have a checkpoint - find branch-only commits
 	// Get the default branch name
-	defaultBranch := getDefaultBranchFromRemote(repo)
+	defaultBranch := gitutil.GetDefaultBranchFromRemote(repo)
 	if defaultBranch == "" {
 		// Fallback: try common names
 		for _, name := range []string{"main", "master"} {
@@ -341,10 +350,14 @@ func checkRemoteMetadata(repo *git.Repository, checkpointID id.CheckpointID) err
 
 	// Metadata exists on remote but not locally - fetch it automatically
 	fmt.Fprintf(os.Stderr, "Fetching session metadata from origin...\n")
-	if err := FetchMetadataBranch(); err != nil {
+	if err := gitutil.FetchBranch(paths.MetadataBranchName); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to fetch metadata: %v\n", err)
 		fmt.Fprintf(os.Stderr, "You can try manually: git fetch origin entire/sessions:entire/sessions\n")
 		return NewSilentError(errors.New("failed to fetch metadata"))
+	}
+	if err := gitutil.CreateLocalBranchFromRemote(paths.MetadataBranchName); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create local metadata branch: %v\n", err)
+		return NewSilentError(errors.New("failed to create local metadata branch"))
 	}
 
 	// Now resume the session with the fetched metadata
@@ -407,7 +420,7 @@ func resumeSession(sessionID string, checkpointID id.CheckpointID, force bool) e
 		}
 
 		// Get checkpoint metadata to show all sessions
-		repo, err := openRepository()
+		repo, err := gitutil.OpenRepository()
 		if err != nil {
 			// Just show the primary session - graceful fallback
 			agentSID := ag.ExtractAgentSessionID(sessionID)

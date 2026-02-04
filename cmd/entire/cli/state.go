@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/jsonutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
@@ -201,9 +202,9 @@ func CleanupPrePromptState(sessionID string) error {
 // If preState is nil, newFiles will be nil but deletedFiles will still be computed
 // (deleted files don't depend on pre-prompt state).
 func ComputeFileChanges(preState *PrePromptState) (newFiles, deletedFiles []string, err error) {
-	repo, err := openRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 
 	worktree, err := repo.Worktree()
@@ -270,7 +271,7 @@ func ComputeNewFiles(preState *PrePromptState) ([]string, error) {
 //
 // Deprecated: Use ComputeFileChanges instead for better performance.
 func ComputeDeletedFiles() ([]string, error) {
-	repo, err := openRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +332,7 @@ func prePromptStateFile(sessionID string) string {
 // getUntrackedFilesForState returns a list of untracked files using go-git
 // Excludes .entire directory
 func getUntrackedFilesForState() ([]string, error) {
-	repo, err := openRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return nil, err
 	}
@@ -533,7 +534,7 @@ func FindActivePreTaskFile() (taskToolUseID string, found bool) {
 // Returns three slices: modified files, new (untracked) files, and deleted files.
 // Excludes .entire/ directory from all results.
 func DetectChangedFiles() (modified, newFiles, deleted []string, err error) {
-	repo, err := openRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to open repository: %w", err)
 	}
@@ -598,4 +599,20 @@ func GetNextCheckpointSequence(sessionID, taskToolUseID string) int {
 	}
 
 	return count + 1
+}
+
+// findNewUntrackedFiles finds files that are newly untracked (not in pre-existing list)
+func findNewUntrackedFiles(current, preExisting []string) []string {
+	preExistingSet := make(map[string]bool)
+	for _, file := range preExisting {
+		preExistingSet[file] = true
+	}
+
+	var newFiles []string
+	for _, file := range current {
+		if !preExistingSet[file] {
+			newFiles = append(newFiles, file)
+		}
+	}
+	return newFiles
 }

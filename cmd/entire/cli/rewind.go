@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,6 +14,7 @@ import (
 	agentpkg "entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/jsonutil"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
@@ -77,7 +77,7 @@ func newRewindCmd() *cobra.Command {
 
 func runRewindInteractive() error {
 	// Skip on default branch for strategies that don't allow it
-	if skip, _ := ShouldSkipOnDefaultBranchForStrategy(); skip {
+	if skip, _ := gitutil.ShouldSkipOnDefaultBranchForStrategy(GetStrategy().AllowsMainBranch()); skip {
 		fmt.Println("Entire tracking is disabled on the default branch for this strategy.")
 		fmt.Println("Create a feature branch to use Entire's rewind functionality.")
 		return nil
@@ -331,7 +331,7 @@ func runRewindInteractive() error {
 
 func runRewindList() error {
 	// Skip on default branch for strategies that don't allow it
-	if skip, _ := ShouldSkipOnDefaultBranchForStrategy(); skip {
+	if skip, _ := gitutil.ShouldSkipOnDefaultBranchForStrategy(GetStrategy().AllowsMainBranch()); skip {
 		// Return empty list for programmatic consumers
 		fmt.Println("[]")
 		return nil
@@ -389,7 +389,7 @@ func runRewindToWithOptions(commitID string, logsOnly bool, reset bool) error {
 
 func runRewindToInternal(commitID string, logsOnly bool, reset bool) error {
 	// Skip on default branch for strategies that don't allow it
-	if skip, _ := ShouldSkipOnDefaultBranchForStrategy(); skip {
+	if skip, _ := gitutil.ShouldSkipOnDefaultBranchForStrategy(GetStrategy().AllowsMainBranch()); skip {
 		return errors.New("entire tracking is disabled on the default branch for this strategy - create a feature branch to use rewind")
 	}
 
@@ -617,7 +617,7 @@ func handleLogsOnlyResetNonInteractive(start strategy.Strategy, point strategy.R
 	}
 
 	// Perform git reset --hard
-	if err := performGitResetHard(point.ID); err != nil {
+	if err := gitutil.HardReset(point.ID); err != nil {
 		logging.Error(ctx, "logs-only reset failed during git reset",
 			slog.String("checkpoint_id", point.ID),
 			slog.String("error", err.Error()),
@@ -977,7 +977,7 @@ func handleLogsOnlyCheckout(start strategy.Strategy, point strategy.RewindPoint,
 	}
 
 	// Perform git checkout
-	if err := CheckoutBranch(point.ID); err != nil {
+	if err := gitutil.CheckoutBranch(point.ID); err != nil {
 		logging.Error(ctx, "logs-only checkout failed during git checkout",
 			slog.String("checkpoint_id", point.ID),
 			slog.String("error", err.Error()),
@@ -1077,7 +1077,7 @@ func handleLogsOnlyReset(start strategy.Strategy, point strategy.RewindPoint, sh
 	}
 
 	// Perform git reset --hard
-	if err := performGitResetHard(point.ID); err != nil {
+	if err := gitutil.HardReset(point.ID); err != nil {
 		logging.Error(ctx, "logs-only reset failed during git reset",
 			slog.String("checkpoint_id", point.ID),
 			slog.String("error", err.Error()),
@@ -1106,7 +1106,7 @@ func handleLogsOnlyReset(start strategy.Strategy, point strategy.RewindPoint, sh
 
 // getCurrentHeadHash returns the current HEAD commit hash.
 func getCurrentHeadHash() (string, error) {
-	repo, err := openRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return "", err
 	}
@@ -1125,7 +1125,7 @@ func getCurrentHeadHash() (string, error) {
 func checkResetSafety(targetCommitHash string, uncommittedChangesWarning string) ([]string, error) {
 	var warnings []string
 
-	repo, err := openRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return nil, err
 	}
@@ -1204,18 +1204,6 @@ func countCommitsBetween(repo *git.Repository, ancestor, descendant plumbing.Has
 	}
 
 	return -1, nil
-}
-
-// performGitResetHard performs a git reset --hard to the specified commit.
-// Uses the git CLI instead of go-git because go-git's HardReset incorrectly
-// deletes untracked directories (like .entire/) even when they're in .gitignore.
-func performGitResetHard(commitHash string) error {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "reset", "--hard", commitHash)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("reset failed: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-	return nil
 }
 
 // sanitizeForTerminal removes or replaces characters that cause rendering issues

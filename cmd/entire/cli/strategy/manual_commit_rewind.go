@@ -12,6 +12,7 @@ import (
 
 	cpkg "entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/trailers"
@@ -322,7 +323,7 @@ func (s *ManualCommitStrategy) Rewind(point RewindPoint) error {
 	})
 
 	// Get repository root to walk from there
-	repoRoot, err := GetWorktreePath()
+	repoRoot, err := gitutil.GetWorktreePath()
 	if err != nil {
 		repoRoot = "." // Fallback to current directory
 	}
@@ -544,7 +545,7 @@ func (s *ManualCommitStrategy) PreviewRewind(point RewindPoint) (*RewindPreview,
 	})
 
 	// Get repository root to walk from there
-	repoRoot, err := GetWorktreePath()
+	repoRoot, err := gitutil.GetWorktreePath()
 	if err != nil {
 		repoRoot = "."
 	}

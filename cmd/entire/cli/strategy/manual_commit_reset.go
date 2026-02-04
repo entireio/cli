@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v5/plumbing"
@@ -30,7 +31,7 @@ func (s *ManualCommitStrategy) Reset() error {
 	}
 
 	// Get current worktree ID for shadow branch naming
-	worktreePath, err := GetWorktreePath()
+	worktreePath, err := gitutil.GetWorktreePath()
 	if err != nil {
 		return fmt.Errorf("failed to get worktree path: %w", err)
 	}

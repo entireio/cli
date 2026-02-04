@@ -7,6 +7,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v5"
@@ -154,7 +155,7 @@ func (s *ManualCommitStrategy) ClearSessionState(sessionID string) error {
 // in different terminals but same directory.
 // Returns the first found session with CheckpointCount > 0, or nil if none found.
 func (s *ManualCommitStrategy) HasOtherActiveSessionsWithCheckpoints(currentSessionID string) (*SessionState, error) {
-	currentWorktree, err := GetWorktreePath()
+	currentWorktree, err := gitutil.GetWorktreePath()
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +200,7 @@ func (s *ManualCommitStrategy) initializeSession(repo *git.Repository, sessionID
 		return nil, fmt.Errorf("failed to get HEAD: %w", err)
 	}
 
-	worktreePath, err := GetWorktreePath()
+	worktreePath, err := gitutil.GetWorktreePath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worktree path: %w", err)
 	}

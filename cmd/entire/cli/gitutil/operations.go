@@ -5,10 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
-
-	"entire.io/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v5/plumbing"
 )
@@ -111,12 +110,6 @@ func FetchBranch(branchName string) error {
 	return nil
 }
 
-// FetchMetadataBranch fetches the entire/sessions branch from origin.
-// This is a convenience wrapper around FetchBranch for the metadata branch.
-func FetchMetadataBranch() error {
-	return FetchBranch(paths.MetadataBranchName)
-}
-
 // CreateLocalBranchFromRemote creates a local branch pointing to the same commit as the remote branch.
 // The branch should have been fetched first using FetchBranch.
 func CreateLocalBranchFromRemote(branchName string) error {
@@ -137,5 +130,83 @@ func CreateLocalBranchFromRemote(branchName string) error {
 		return fmt.Errorf("failed to create local branch: %w", err)
 	}
 
+	return nil
+}
+
+// HardReset performs a git reset --hard to the specified commit hash string.
+// Uses the git CLI instead of go-git because go-git's HardReset incorrectly
+// deletes untracked directories (like .entire/) even when they're in .gitignore.
+func HardReset(commitHash string) error {
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "reset", "--hard", commitHash)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("reset failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
+// GetGitDirInPath returns the git directory for a repository at the given path.
+// It delegates to `git rev-parse --git-dir` to leverage git's own validation.
+func GetGitDirInPath(dir string) (string, error) {
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
+	cmd.Dir = dir
+	output, err := cmd.Output()
+	if err != nil {
+		return "", errors.New("not a git repository")
+	}
+
+	gitDir := strings.TrimSpace(string(output))
+
+	// git rev-parse --git-dir returns relative paths from the working directory,
+	// so we need to make it absolute if it isn't already
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(dir, gitDir)
+	}
+
+	return filepath.Clean(gitDir), nil
+}
+
+// Push pushes a branch to a remote.
+// Uses --no-verify to prevent recursive hook calls when used from hooks.
+func Push(remote, branchName string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", remote, branchName)
+	cmd.Stdin = nil // Disconnect stdin to prevent hanging in hook context
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return errors.New("push timed out after 2 minutes")
+		}
+		// Check if it's a non-fast-forward error
+		if strings.Contains(string(output), "non-fast-forward") ||
+			strings.Contains(string(output), "rejected") {
+			return ErrNonFastForward
+		}
+		return fmt.Errorf("push failed: %s", output)
+	}
+	return nil
+}
+
+// ErrNonFastForward is returned when a push is rejected due to non-fast-forward.
+var ErrNonFastForward = errors.New("non-fast-forward")
+
+// FetchFromRemote fetches a branch from a specified remote.
+// Unlike FetchBranch which always uses "origin", this allows specifying the remote.
+func FetchFromRemote(remote, branchName string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "fetch", remote, branchName)
+	cmd.Stdin = nil
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return errors.New("fetch timed out after 2 minutes")
+		}
+		return fmt.Errorf("fetch failed: %s", output)
+	}
 	return nil
 }

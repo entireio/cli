@@ -18,7 +18,6 @@ import (
 	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -448,14 +447,6 @@ func GetGitCommonDir() (string, error) {
 	return gitutil.GetGitCommonDir() //nolint:wrapcheck // deprecated wrapper
 }
 
-// GetWorktreePath returns the absolute path to the current worktree root.
-// This is the working directory path, not the git directory.
-//
-// Deprecated: Use gitutil.GetWorktreePath() directly.
-func GetWorktreePath() (string, error) {
-	return gitutil.GetWorktreePath() //nolint:wrapcheck // deprecated wrapper
-}
-
 // EnsureEntireGitignore ensures all required entries are in .entire/.gitignore
 // Works correctly from any subdirectory within the repository.
 func EnsureEntireGitignore() error {
@@ -624,7 +615,7 @@ func checkCanRewindWithWarning() (bool, string, error) {
 
 	var changes []fileChange
 	// Use repo root, not cwd - git status returns paths relative to repo root
-	repoRoot, err := GetWorktreePath()
+	repoRoot, err := gitutil.GetWorktreePath()
 	if err != nil {
 		return true, "", nil //nolint:nilerr // Rewind allowed even if repo root lookup fails
 	}
@@ -965,7 +956,7 @@ func HardResetWithProtection(commitHash plumbing.Hash) (shortID string, err erro
 // Works correctly from any subdirectory within the repository.
 func collectUntrackedFiles() ([]string, error) {
 	// Get repository root to walk from there
-	repoRoot, err := GetWorktreePath()
+	repoRoot, err := gitutil.GetWorktreePath()
 	if err != nil {
 		repoRoot = "." // Fallback to current directory
 	}
@@ -1144,43 +1135,6 @@ func getSessionDescriptionFromTree(tree *object.Tree, metadataDir string) string
 		return desc
 	}
 	return NoDescription
-}
-
-// GetGitAuthorFromRepo retrieves the git user.name and user.email from the repository config.
-// It checks local config first, then falls back to global config.
-// Returns ("Unknown", "unknown@local") if no user is configured - this allows
-// operations to proceed even without git user config, which is especially useful
-// for internal metadata commits on branches like entire/sessions.
-func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
-	// Get repository config (includes local settings)
-	cfg, err := repo.Config()
-	if err == nil {
-		name = cfg.User.Name
-		email = cfg.User.Email
-	}
-
-	// If not found in local config, try global config
-	if name == "" || email == "" {
-		globalCfg, err := config.LoadConfig(config.GlobalScope)
-		if err == nil {
-			if name == "" {
-				name = globalCfg.User.Name
-			}
-			if email == "" {
-				email = globalCfg.User.Email
-			}
-		}
-	}
-
-	// Provide sensible defaults if git user is not configured
-	if name == "" {
-		name = "Unknown"
-	}
-	if email == "" {
-		email = "unknown@local"
-	}
-
-	return name, email
 }
 
 // GetCurrentBranchName returns the short name of the current branch if HEAD points to a branch.

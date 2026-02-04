@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 )
 
@@ -22,7 +23,7 @@ func TestGetGitDirInPath_RegularRepo(t *testing.T) {
 		t.Fatalf("failed to init git repo: %v", err)
 	}
 
-	result, err := getGitDirInPath(tmpDir)
+	result, err := gitutil.GetGitDirInPath(tmpDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -101,8 +102,8 @@ func TestGetGitDirInPath_Worktree(t *testing.T) {
 		t.Fatalf("failed to create worktree: %v", err)
 	}
 
-	// Test that getGitDirInPath works in the worktree
-	result, err := getGitDirInPath(worktreeDir)
+	// Test that gitutil.GetGitDirInPath works in the worktree
+	result, err := gitutil.GetGitDirInPath(worktreeDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestGetGitDirInPath_Worktree(t *testing.T) {
 func TestGetGitDirInPath_NotARepo(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	_, err := getGitDirInPath(tmpDir)
+	_, err := gitutil.GetGitDirInPath(tmpDir)
 	if err == nil {
 		t.Fatal("expected error for non-repo directory, got nil")
 	}
