@@ -182,22 +182,16 @@ func printTranscriptChanges(w io.Writer, transcriptPath, currentSession, repoRoo
 		fmt.Fprintf(w, "  Found %d modified files in transcript\n", len(modifiedFromTranscript))
 	}
 
-	// Compute new files
+	// Compute new and deleted files (single git status call)
 	if currentSession != "" {
 		preState, loadErr := LoadPrePromptState(currentSession)
 		if loadErr != nil {
 			fmt.Fprintf(w, "  Error loading pre-prompt state: %v\n", loadErr)
 		}
-		newFiles, err = ComputeNewFiles(preState)
+		newFiles, deletedFiles, err = ComputeFileChanges(preState)
 		if err != nil {
-			fmt.Fprintf(w, "  Error computing new files: %v\n", err)
+			fmt.Fprintf(w, "  Error computing file changes: %v\n", err)
 		}
-	}
-
-	// Compute deleted files
-	deletedFiles, err = ComputeDeletedFiles()
-	if err != nil {
-		fmt.Fprintf(w, "  Error computing deleted files: %v\n", err)
 	}
 
 	// Filter and normalize paths
