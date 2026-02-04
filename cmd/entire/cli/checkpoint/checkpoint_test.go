@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
@@ -1962,5 +1964,297 @@ func TestWriteTemporary_FirstCheckpoint_UserAndAgentChanges(t *testing.T) {
 	}
 	if mainContent != agentModifiedContent {
 		t.Errorf("main.go should have agent's modification\ngot:\n%s\nwant:\n%s", mainContent, agentModifiedContent)
+	}
+}
+
+// TestWriteTemporary_FirstCheckpoint_CapturesUserDeletedFiles verifies that
+// the first checkpoint excludes files that the user deleted before the session started.
+func TestWriteTemporary_FirstCheckpoint_CapturesUserDeletedFiles(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create and commit two files
+	keepFile := filepath.Join(tempDir, "keep.txt")
+	if err := os.WriteFile(keepFile, []byte("keep this"), 0o644); err != nil {
+		t.Fatalf("failed to write keep.txt: %v", err)
+	}
+	deleteFile := filepath.Join(tempDir, "delete-me.txt")
+	if err := os.WriteFile(deleteFile, []byte("delete this"), 0o644); err != nil {
+		t.Fatalf("failed to write delete-me.txt: %v", err)
+	}
+
+	if _, err := worktree.Add("keep.txt"); err != nil {
+		t.Fatalf("failed to add keep.txt: %v", err)
+	}
+	if _, err := worktree.Add("delete-me.txt"); err != nil {
+		t.Fatalf("failed to add delete-me.txt: %v", err)
+	}
+
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// User deletes delete-me.txt BEFORE the session starts
+	if err := os.Remove(deleteFile); err != nil {
+		t.Fatalf("failed to delete file: %v", err)
+	}
+
+	// Change to temp dir so paths.RepoRoot() works correctly
+	t.Chdir(tempDir)
+
+	// Create metadata directory
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Create checkpoint store and write first checkpoint
+	store := NewGitStore(repo)
+	baseCommit := initialCommit.String()
+
+	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "test-session",
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{},
+		DeletedFiles:      []string{}, // No agent deletions
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "First checkpoint",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: true,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() error = %v", err)
+	}
+
+	// Verify the checkpoint tree
+	commit, err := repo.CommitObject(result.CommitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	// keep.txt should be in the tree (unchanged from HEAD)
+	if _, err := tree.File("keep.txt"); err != nil {
+		t.Errorf("keep.txt should be in checkpoint tree: %v", err)
+	}
+
+	// delete-me.txt should NOT be in the tree (user deleted it)
+	_, err = tree.File("delete-me.txt")
+	if err == nil {
+		t.Error("delete-me.txt should NOT be in checkpoint tree (user deleted it before session)")
+	} else if !errors.Is(err, object.ErrFileNotFound) && !errors.Is(err, object.ErrEntryNotFound) {
+		t.Fatalf("expected delete-me.txt to be absent (ErrFileNotFound/ErrEntryNotFound), got: %v", err)
+	}
+}
+
+// TestWriteTemporary_FirstCheckpoint_CapturesRenamedFiles verifies that
+// the first checkpoint captures renamed files correctly.
+func TestWriteTemporary_FirstCheckpoint_CapturesRenamedFiles(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create and commit a file
+	oldFile := filepath.Join(tempDir, "old-name.txt")
+	if err := os.WriteFile(oldFile, []byte("content"), 0o644); err != nil {
+		t.Fatalf("failed to write old-name.txt: %v", err)
+	}
+
+	if _, err := worktree.Add("old-name.txt"); err != nil {
+		t.Fatalf("failed to add old-name.txt: %v", err)
+	}
+
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// User renames the file using git mv BEFORE the session starts
+	newFile := filepath.Join(tempDir, "new-name.txt")
+	if err := os.Rename(oldFile, newFile); err != nil {
+		t.Fatalf("failed to rename file: %v", err)
+	}
+	// Stage the rename using git CLI (go-git worktree.Move has issues)
+	cmd := exec.CommandContext(context.Background(), "git", "add", "-A")
+	cmd.Dir = tempDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to stage rename: %v", err)
+	}
+
+	// Change to temp dir so paths.RepoRoot() works correctly
+	t.Chdir(tempDir)
+
+	// Create metadata directory
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Create checkpoint store and write first checkpoint
+	store := NewGitStore(repo)
+	baseCommit := initialCommit.String()
+
+	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "test-session",
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{},
+		DeletedFiles:      []string{},
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "First checkpoint",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: true,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() error = %v", err)
+	}
+
+	// Verify the checkpoint tree
+	commit, err := repo.CommitObject(result.CommitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	// new-name.txt should be in the tree
+	if _, err := tree.File("new-name.txt"); err != nil {
+		t.Errorf("new-name.txt should be in checkpoint tree: %v", err)
+	}
+
+	// old-name.txt should NOT be in the tree (renamed away)
+	_, err = tree.File("old-name.txt")
+	if err == nil {
+		t.Error("old-name.txt should NOT be in checkpoint tree (file was renamed)")
+	} else if !errors.Is(err, object.ErrFileNotFound) && !errors.Is(err, object.ErrEntryNotFound) {
+		t.Fatalf("expected old-name.txt to be absent (ErrFileNotFound/ErrEntryNotFound), got: %v", err)
+	}
+}
+
+// TestWriteTemporary_FirstCheckpoint_FilenamesWithSpaces verifies that
+// filenames with spaces are handled correctly.
+func TestWriteTemporary_FirstCheckpoint_FilenamesWithSpaces(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create and commit a simple file first
+	simpleFile := filepath.Join(tempDir, "simple.txt")
+	if err := os.WriteFile(simpleFile, []byte("simple"), 0o644); err != nil {
+		t.Fatalf("failed to write simple.txt: %v", err)
+	}
+
+	if _, err := worktree.Add("simple.txt"); err != nil {
+		t.Fatalf("failed to add simple.txt: %v", err)
+	}
+
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// User creates a file with spaces in the name
+	spacesFile := filepath.Join(tempDir, "file with spaces.txt")
+	if err := os.WriteFile(spacesFile, []byte("content with spaces"), 0o644); err != nil {
+		t.Fatalf("failed to write file with spaces: %v", err)
+	}
+
+	// Change to temp dir so paths.RepoRoot() works correctly
+	t.Chdir(tempDir)
+
+	// Create metadata directory
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Create checkpoint store and write first checkpoint
+	store := NewGitStore(repo)
+	baseCommit := initialCommit.String()
+
+	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "test-session",
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{},
+		DeletedFiles:      []string{},
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "First checkpoint",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: true,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() error = %v", err)
+	}
+
+	// Verify the checkpoint tree
+	commit, err := repo.CommitObject(result.CommitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	// "file with spaces.txt" should be in the tree with correct name
+	if _, err := tree.File("file with spaces.txt"); err != nil {
+		t.Errorf("'file with spaces.txt' should be in checkpoint tree: %v", err)
 	}
 }
