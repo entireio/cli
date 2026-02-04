@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -37,10 +38,6 @@ const (
 
 	// WorktreeIDHashLength is the number of hex characters used for worktree ID hash.
 	WorktreeIDHashLength = 6
-
-	// gitDir and entireDir are excluded from tree operations.
-	gitDir    = ".git"
-	entireDir = ".entire"
 )
 
 // HashWorktreeID returns a short hash of the worktree identifier.
@@ -88,11 +85,12 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 	// Collect all files to include
 	var allFiles []string
 	if opts.IsFirstCheckpoint {
-		// For the first checkpoint of this session, capture ALL files in working directory
-		// This ensures untracked files present at session start are included
-		allFiles, err = collectWorkingDirectoryFiles()
+		// For the first checkpoint, capture all changed files (modified tracked + untracked)
+		// using worktree.Status() which respects .gitignore and is much faster than filesystem walk.
+		// The base tree from HEAD already contains all unchanged tracked files.
+		allFiles, err = collectChangedFiles(s.repo)
 		if err != nil {
-			return WriteTemporaryResult{}, fmt.Errorf("failed to collect working directory files: %w", err)
+			return WriteTemporaryResult{}, fmt.Errorf("failed to collect changed files: %w", err)
 		}
 	} else {
 		// For subsequent checkpoints, only include modified/new files
@@ -996,47 +994,54 @@ func sortTreeEntries(entries []object.TreeEntry) {
 	})
 }
 
-// collectWorkingDirectoryFiles collects all files in the working directory.
-// Excludes .git/ and .entire/ directories.
-func collectWorkingDirectoryFiles() ([]string, error) {
-	// Get repository root to walk from there
-	repoRoot, err := paths.RepoRoot()
+// collectChangedFiles collects all changed files (modified tracked + untracked non-ignored)
+// using worktree.Status(). This is much faster than filesystem walk because it respects
+// .gitignore and only returns files that git knows about.
+//
+// For the first checkpoint, we need to capture:
+// - Modified tracked files (user's uncommitted changes)
+// - Untracked non-ignored files (new files not yet added to git)
+//
+// The base tree from HEAD already contains all unchanged tracked files.
+func collectChangedFiles(repo *git.Repository) ([]string, error) {
+	worktree, err := repo.Worktree()
 	if err != nil {
-		repoRoot = "." // Fallback to current directory
+		return nil, fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	status, err := worktree.Status()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worktree status: %w", err)
 	}
 
 	var files []string
-	err = filepath.Walk(repoRoot, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return nil //nolint:nilerr // Skip filesystem errors during walk
+	for file, st := range status {
+		// Skip .entire directory
+		if paths.IsInfrastructurePath(file) {
+			continue
 		}
 
-		// Get path relative to repo root
-		relPath, err := filepath.Rel(repoRoot, path)
-		if err != nil {
-			return nil //nolint:nilerr // Skip paths we can't make relative
+		// Include modified tracked files and untracked files
+		// worktree.Status() respects .gitignore, so untracked files here are not ignored
+		//nolint:exhaustive // default case handles other statuses (Unmodified, Added, Renamed, etc.)
+		switch st.Worktree {
+		case git.Modified, git.Untracked:
+			files = append(files, file)
+		case git.Deleted:
+			// Deleted files are handled separately via DeletedFiles parameter
+			continue
+		default:
+			// Other statuses are either handled by staging check below or not relevant
 		}
 
-		// Skip directories
-		if info.IsDir() {
-			// Skip .git and .entire directories
-			if relPath == gitDir || relPath == entireDir ||
-				strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
-				return filepath.SkipDir
+		// Also check staging area for modifications
+		// A file might be staged (Modified in Staging) but unchanged in worktree
+		if st.Staging == git.Modified || st.Staging == git.Added {
+			// Avoid duplicates - only add if not already in list
+			if !slices.Contains(files, file) {
+				files = append(files, file)
 			}
-			return nil
 		}
-
-		// Skip files in special directories (shouldn't reach here due to SkipDir, but safety check)
-		if strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
-			return nil
-		}
-
-		files = append(files, relPath)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to walk directory: %w", err)
 	}
 
 	return files, nil

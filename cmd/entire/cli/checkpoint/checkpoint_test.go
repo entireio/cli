@@ -968,3 +968,420 @@ func TestGetCheckpointAuthor_NoSessionsBranch(t *testing.T) {
 		t.Errorf("expected empty author when sessions branch doesn't exist, got Name=%q, Email=%q", author.Name, author.Email)
 	}
 }
+
+// TestWriteTemporary_FirstCheckpoint_CapturesModifiedTrackedFiles verifies that
+// the first checkpoint captures modifications to tracked files that existed before
+// the agent made any changes (user's uncommitted work).
+func TestWriteTemporary_FirstCheckpoint_CapturesModifiedTrackedFiles(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit containing README.md
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create and commit README.md with original content
+	readmeFile := filepath.Join(tempDir, "README.md")
+	originalContent := "# Original Content\n"
+	if err := os.WriteFile(readmeFile, []byte(originalContent), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	// Simulate user modifying README.md BEFORE agent starts (user's uncommitted work)
+	modifiedContent := "# Modified by User\n\nThis change was made before the agent started.\n"
+	if err := os.WriteFile(readmeFile, []byte(modifiedContent), 0o644); err != nil {
+		t.Fatalf("failed to modify README: %v", err)
+	}
+
+	// Change to temp dir so paths.RepoRoot() works correctly
+	t.Chdir(tempDir)
+
+	// Create metadata directory
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Create checkpoint store and write first checkpoint
+	// Note: ModifiedFiles is empty because agent hasn't touched anything yet
+	// The first checkpoint should still capture README.md because it's modified in working dir
+	store := NewGitStore(repo)
+	baseCommit := initialCommit.String()
+
+	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "test-session",
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{}, // Agent hasn't modified anything
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "First checkpoint",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: true,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() error = %v", err)
+	}
+	if result.Skipped {
+		t.Error("first checkpoint should not be skipped")
+	}
+
+	// Verify the shadow branch commit contains the MODIFIED README.md content
+	commit, err := repo.CommitObject(result.CommitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	// Find README.md in the tree
+	file, err := tree.File("README.md")
+	if err != nil {
+		t.Fatalf("README.md not found in checkpoint tree: %v", err)
+	}
+
+	content, err := file.Contents()
+	if err != nil {
+		t.Fatalf("failed to read README.md content: %v", err)
+	}
+
+	if content != modifiedContent {
+		t.Errorf("checkpoint should contain modified content\ngot:\n%s\nwant:\n%s", content, modifiedContent)
+	}
+}
+
+// TestWriteTemporary_FirstCheckpoint_CapturesUntrackedFiles verifies that
+// the first checkpoint captures untracked files that exist in the working directory.
+func TestWriteTemporary_FirstCheckpoint_CapturesUntrackedFiles(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create and commit README.md
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test\n"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	// Create an untracked file (simulating user creating a file before agent starts)
+	untrackedFile := filepath.Join(tempDir, "config.local.json")
+	untrackedContent := `{"key": "secret_value"}`
+	if err := os.WriteFile(untrackedFile, []byte(untrackedContent), 0o644); err != nil {
+		t.Fatalf("failed to write untracked file: %v", err)
+	}
+
+	// Change to temp dir so paths.RepoRoot() works correctly
+	t.Chdir(tempDir)
+
+	// Create metadata directory
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Create checkpoint store and write first checkpoint
+	store := NewGitStore(repo)
+	baseCommit := initialCommit.String()
+
+	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "test-session",
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{},
+		NewFiles:          []string{}, // NewFiles might be empty if this is truly "at session start"
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "First checkpoint",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: true,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() error = %v", err)
+	}
+
+	// Verify the shadow branch commit contains the untracked file
+	commit, err := repo.CommitObject(result.CommitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	// Find config.local.json in the tree
+	file, err := tree.File("config.local.json")
+	if err != nil {
+		t.Fatalf("untracked file config.local.json not found in checkpoint tree: %v", err)
+	}
+
+	content, err := file.Contents()
+	if err != nil {
+		t.Fatalf("failed to read config.local.json content: %v", err)
+	}
+
+	if content != untrackedContent {
+		t.Errorf("checkpoint should contain untracked file content\ngot:\n%s\nwant:\n%s", content, untrackedContent)
+	}
+}
+
+// TestWriteTemporary_FirstCheckpoint_ExcludesGitIgnoredFiles verifies that
+// the first checkpoint does NOT capture files that are in .gitignore.
+func TestWriteTemporary_FirstCheckpoint_ExcludesGitIgnoredFiles(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create .gitignore that ignores node_modules/
+	gitignoreFile := filepath.Join(tempDir, ".gitignore")
+	if err := os.WriteFile(gitignoreFile, []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .gitignore: %v", err)
+	}
+	if _, err := worktree.Add(".gitignore"); err != nil {
+		t.Fatalf("failed to add .gitignore: %v", err)
+	}
+
+	// Create and commit README.md
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test\n"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	// Create node_modules/ directory with a file (should be ignored)
+	nodeModulesDir := filepath.Join(tempDir, "node_modules")
+	if err := os.MkdirAll(nodeModulesDir, 0o755); err != nil {
+		t.Fatalf("failed to create node_modules: %v", err)
+	}
+	ignoredFile := filepath.Join(nodeModulesDir, "some-package.js")
+	if err := os.WriteFile(ignoredFile, []byte("module.exports = {}"), 0o644); err != nil {
+		t.Fatalf("failed to write ignored file: %v", err)
+	}
+
+	// Change to temp dir so paths.RepoRoot() works correctly
+	t.Chdir(tempDir)
+
+	// Create metadata directory
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Create checkpoint store and write first checkpoint
+	store := NewGitStore(repo)
+	baseCommit := initialCommit.String()
+
+	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "test-session",
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{},
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "First checkpoint",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: true,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() error = %v", err)
+	}
+
+	// Verify the shadow branch commit does NOT contain node_modules/
+	commit, err := repo.CommitObject(result.CommitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	// node_modules/some-package.js should NOT be in the tree
+	_, err = tree.File("node_modules/some-package.js")
+	if err == nil {
+		t.Error("gitignored file node_modules/some-package.js should NOT be in checkpoint tree")
+	}
+}
+
+// TestWriteTemporary_FirstCheckpoint_UserAndAgentChanges verifies that
+// the first checkpoint captures both user's pre-existing changes and agent changes.
+func TestWriteTemporary_FirstCheckpoint_UserAndAgentChanges(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create and commit README.md and main.go
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Original\n"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	mainFile := filepath.Join(tempDir, "main.go")
+	if err := os.WriteFile(mainFile, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("failed to write main.go: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := worktree.Add("main.go"); err != nil {
+		t.Fatalf("failed to add main.go: %v", err)
+	}
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	// User modifies README.md BEFORE agent starts
+	userModifiedContent := "# Modified by User\n"
+	if err := os.WriteFile(readmeFile, []byte(userModifiedContent), 0o644); err != nil {
+		t.Fatalf("failed to modify README: %v", err)
+	}
+
+	// Agent modifies main.go
+	agentModifiedContent := "package main\n\nfunc main() {\n\tprintln(\"Hello\")\n}\n"
+	if err := os.WriteFile(mainFile, []byte(agentModifiedContent), 0o644); err != nil {
+		t.Fatalf("failed to modify main.go: %v", err)
+	}
+
+	// Change to temp dir so paths.RepoRoot() works correctly
+	t.Chdir(tempDir)
+
+	// Create metadata directory
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Create checkpoint - agent reports main.go as modified (from transcript)
+	store := NewGitStore(repo)
+	baseCommit := initialCommit.String()
+
+	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "test-session",
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{"main.go"}, // Only agent-modified file in list
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "First checkpoint",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: true,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() error = %v", err)
+	}
+
+	// Verify the checkpoint contains BOTH changes
+	commit, err := repo.CommitObject(result.CommitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	// Check README.md has user's modification
+	readmeTreeFile, err := tree.File("README.md")
+	if err != nil {
+		t.Fatalf("README.md not found in tree: %v", err)
+	}
+	readmeContent, err := readmeTreeFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read README.md content: %v", err)
+	}
+	if readmeContent != userModifiedContent {
+		t.Errorf("README.md should have user's modification\ngot:\n%s\nwant:\n%s", readmeContent, userModifiedContent)
+	}
+
+	// Check main.go has agent's modification
+	mainTreeFile, err := tree.File("main.go")
+	if err != nil {
+		t.Fatalf("main.go not found in tree: %v", err)
+	}
+	mainContent, err := mainTreeFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read main.go content: %v", err)
+	}
+	if mainContent != agentModifiedContent {
+		t.Errorf("main.go should have agent's modification\ngot:\n%s\nwant:\n%s", mainContent, agentModifiedContent)
+	}
+}
