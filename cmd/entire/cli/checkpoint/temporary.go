@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -995,12 +996,12 @@ func sortTreeEntries(entries []object.TreeEntry) {
 }
 
 // collectChangedFiles collects all changed files (modified tracked + untracked non-ignored)
-// using worktree.Status(). This is much faster than filesystem walk because it respects
-// repo .gitignore files and only returns files that git knows about.
+// using git CLI. This is much faster than filesystem walk and respects all gitignore sources
+// including global gitignore (core.excludesfile).
 //
-// Note: go-git's worktree.Status() does not respect global gitignore (core.excludesfile).
-// Files ignored only via global gitignore may still appear as untracked. This is acceptable
-// for our use case since repo .gitignore covers most cases (node_modules/, build/, etc.).
+// Uses git CLI instead of go-git because go-git's worktree.Status() does not respect
+// global gitignore, which can cause globally ignored files to appear as untracked.
+// See: https://github.com/entireio/cli/pull/129
 //
 // For the first checkpoint, we need to capture:
 // - Modified tracked files (user's uncommitted changes)
@@ -1008,45 +1009,59 @@ func sortTreeEntries(entries []object.TreeEntry) {
 //
 // The base tree from HEAD already contains all unchanged tracked files.
 func collectChangedFiles(repo *git.Repository) ([]string, error) {
-	worktree, err := repo.Worktree()
+	// Get repo root directory for running git command
+	wt, err := repo.Worktree()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worktree: %w", err)
 	}
+	repoRoot := wt.Filesystem.Root()
 
-	status, err := worktree.Status()
+	ctx := context.Background()
+	// Use -uall to list individual untracked files instead of collapsed directories.
+	// This is needed because git status --porcelain without -uall shows "src/" instead of "src/main.go".
+	// Note: CLAUDE.md warns against -uall for user-facing display, but we need the full list
+	// for checkpointing. The go-git worktree.Status() we're replacing did the same thing.
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "-uall")
+	cmd.Dir = repoRoot
+	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get worktree status: %w", err)
+		return nil, fmt.Errorf("failed to get git status in %s: %w", repoRoot, err)
 	}
 
-	// Use a set for O(1) deduplication instead of O(n) slices.Contains
+	lines := strings.Split(string(output), "\n")
 	seen := make(map[string]struct{})
-	for file, st := range status {
+
+	for _, line := range lines {
+		if len(line) < 3 {
+			continue
+		}
+
+		// git status --porcelain format: XY filename
+		// X = staging status, Y = worktree status
+		staging := line[0]
+		wtStatus := line[1]
+		filename := strings.TrimSpace(line[3:])
+
 		// Skip .entire directory
-		if paths.IsInfrastructurePath(file) {
+		if paths.IsInfrastructurePath(filename) {
 			continue
 		}
 
-		// Include modified tracked files and untracked files
-		// worktree.Status() respects .gitignore, so untracked files here are not ignored
-		//nolint:exhaustive // default case handles other statuses (Unmodified, Added, Renamed, etc.)
-		switch st.Worktree {
-		case git.Modified, git.Untracked:
-			seen[file] = struct{}{}
-		case git.Deleted:
-			// Deleted files are handled separately via DeletedFiles parameter
-			continue
-		default:
-			// Other statuses are either handled by staging check below or not relevant
+		// Include if:
+		// - Modified in worktree (Y='M')
+		// - Untracked (XY='??')
+		// - Added/modified in staging (X='A' or X='M') - these need to be captured too
+		switch {
+		case wtStatus == 'M': // Modified in worktree
+			seen[filename] = struct{}{}
+		case staging == '?' && wtStatus == '?': // Untracked
+			seen[filename] = struct{}{}
+		case staging == 'A' || staging == 'M': // Staged changes
+			seen[filename] = struct{}{}
 		}
-
-		// Also check staging area for modifications
-		// A file might be staged (Modified in Staging) but unchanged in worktree
-		if st.Staging == git.Modified || st.Staging == git.Added {
-			seen[file] = struct{}{}
-		}
+		// Note: We skip deleted files (D) - those are handled via DeletedFiles parameter
 	}
 
-	// Convert set to slice
 	files := make([]string, 0, len(seen))
 	for file := range seen {
 		files = append(files, file)
