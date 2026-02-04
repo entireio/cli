@@ -161,13 +161,34 @@ Personal overrides, gitignored by default:
 
 ### Configuration Options
 
-| Option                           | Values                           | Description                                    |
-| -------------------------------- | -------------------------------- | ---------------------------------------------- |
-| `strategy`                       | `manual-commit`, `auto-commit`   | Session capture strategy                       |
-| `enabled`                        | `true`, `false`                  | Enable/disable Entire                          |
-| `agent`                          | `claude-code`, `gemini`, etc.    | AI agent to integrate with                     |
-| `log_level`                      | `debug`, `info`, `warn`, `error` | Logging verbosity                              |
-| `strategy_options.push_sessions` | `true`, `false`                  | Auto-push `entire/sessions` branch on git push |
+| Option                                 | Values                           | Description                                    |
+| -------------------------------------- | -------------------------------- | ---------------------------------------------- |
+| `strategy`                             | `manual-commit`, `auto-commit`   | Session capture strategy                       |
+| `enabled`                              | `true`, `false`                  | Enable/disable Entire                          |
+| `agent`                                | `claude-code`, `gemini`, etc.    | AI agent to integrate with                     |
+| `log_level`                            | `debug`, `info`, `warn`, `error` | Logging verbosity                              |
+| `strategy_options.push_sessions`       | `true`, `false`                  | Auto-push `entire/sessions` branch on git push |
+| `strategy_options.summarize.enabled`   | `true`, `false`                  | Auto-generate AI summaries at commit time      |
+
+### Auto-Summarization
+
+When enabled, Entire automatically generates AI summaries for checkpoints at commit time. Summaries capture intent, outcome, learnings, friction points, and open items from the session.
+
+```json
+{
+  "strategy_options": {
+    "summarize": {
+      "enabled": true
+    }
+  }
+}
+```
+
+**Requirements:**
+- Claude CLI must be installed and authenticated (`claude` command available in PATH)
+- Summary generation is non-blocking: failures are logged but don't prevent commits
+
+**Note:** Currently uses Claude CLI for summary generation. Other AI backends may be supported in future versions.
 
 ### Settings Priority
 

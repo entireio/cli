@@ -254,6 +254,14 @@ type WriteCommittedOptions struct {
 	// InitialAttribution is line-level attribution calculated at commit time
 	// comparing checkpoint tree (agent work) to committed tree (may include human edits)
 	InitialAttribution *InitialAttribution
+
+	// Summary is an optional AI-generated summary for this checkpoint.
+	// This field may be nil when:
+	//   - summarization is disabled in settings
+	//   - summary generation failed (non-blocking, logged as warning)
+	//   - the transcript was empty or too short to summarize
+	//   - the checkpoint predates the summarization feature
+	Summary *Summary
 }
 
 // ReadCommittedResult contains the result of reading a committed checkpoint.

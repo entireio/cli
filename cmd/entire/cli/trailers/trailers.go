@@ -220,3 +220,9 @@ func FormatShadowTaskCommit(message, taskMetadataDir, sessionID string) string {
 	sb.WriteString(fmt.Sprintf("%s: %s\n", StrategyTrailerKey, "manual-commit"))
 	return sb.String()
 }
+
+// FormatCheckpoint creates a commit message with a checkpoint trailer.
+// This links user commits to their checkpoint metadata on entire/sessions branch.
+func FormatCheckpoint(message string, cpID checkpointID.CheckpointID) string {
+	return fmt.Sprintf("%s\n\n%s: %s\n", message, CheckpointTrailerKey, cpID.String())
+}

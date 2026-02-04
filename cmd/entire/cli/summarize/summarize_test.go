@@ -1,7 +1,10 @@
-package summarise
+package summarize
 
 import (
+	"context"
 	"encoding/json"
+	"os/exec"
+	"strings"
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/transcript"
@@ -126,6 +129,138 @@ func TestBuildCondensedTranscript_ToolCallWithCommand(t *testing.T) {
 
 	if entries[0].ToolDetail != "go test ./..." {
 		t.Errorf("expected tool detail 'go test ./...', got %s", entries[0].ToolDetail)
+	}
+}
+
+func TestBuildCondensedTranscript_SkillToolMinimalDetail(t *testing.T) {
+	lines := []transcript.Line{
+		{
+			Type: "assistant",
+			UUID: "assistant-1",
+			Message: mustMarshal(t, transcript.AssistantMessage{
+				Content: []transcript.ContentBlock{
+					{
+						Type: "tool_use",
+						Name: "Skill",
+						Input: mustMarshal(t, transcript.ToolInput{
+							Skill: "superpowers:brainstorming",
+						}),
+					},
+				},
+			}),
+		},
+	}
+
+	entries := BuildCondensedTranscript(lines)
+
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	if entries[0].ToolName != "Skill" {
+		t.Errorf("expected tool name Skill, got %s", entries[0].ToolName)
+	}
+
+	// Should only show the skill name, not any verbose content
+	if entries[0].ToolDetail != "superpowers:brainstorming" {
+		t.Errorf("expected tool detail 'superpowers:brainstorming', got %s", entries[0].ToolDetail)
+	}
+}
+
+func TestBuildCondensedTranscript_WebFetchMinimalDetail(t *testing.T) {
+	lines := []transcript.Line{
+		{
+			Type: "assistant",
+			UUID: "assistant-1",
+			Message: mustMarshal(t, transcript.AssistantMessage{
+				Content: []transcript.ContentBlock{
+					{
+						Type: "tool_use",
+						Name: "WebFetch",
+						Input: mustMarshal(t, transcript.ToolInput{
+							URL:    "https://example.com/docs",
+							Prompt: "Extract the API documentation",
+						}),
+					},
+				},
+			}),
+		},
+	}
+
+	entries := BuildCondensedTranscript(lines)
+
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	// Should only show the URL, not the prompt
+	if entries[0].ToolDetail != "https://example.com/docs" {
+		t.Errorf("expected tool detail 'https://example.com/docs', got %s", entries[0].ToolDetail)
+	}
+}
+
+func TestBuildCondensedTranscript_SkipsSkillContentInjection(t *testing.T) {
+	skillContent := `Base directory for this skill: /Users/alex/.claude/plugins/cache/superpowers/4.1.1/skills/brainstorming
+
+# Brainstorming Ideas Into Designs
+
+## Overview
+
+This is verbose skill content that should not appear in summaries...`
+
+	lines := []transcript.Line{
+		{
+			Type: "user",
+			UUID: "user-1",
+			Message: mustMarshal(t, transcript.UserMessage{
+				Content: "Invoke the superpowers:brainstorming skill",
+			}),
+		},
+		{
+			Type: "assistant",
+			UUID: "assistant-1",
+			Message: mustMarshal(t, transcript.AssistantMessage{
+				Content: []transcript.ContentBlock{
+					{Type: "tool_use", Name: "Skill", Input: mustMarshal(t, transcript.ToolInput{Skill: "superpowers:brainstorming"})},
+				},
+			}),
+		},
+		{
+			Type: "user",
+			UUID: "user-2",
+			Message: mustMarshal(t, transcript.UserMessage{
+				Content: skillContent, // This should be filtered out
+			}),
+		},
+		{
+			Type: "user",
+			UUID: "user-3",
+			Message: mustMarshal(t, transcript.UserMessage{
+				Content: "Now help me brainstorm a feature",
+			}),
+		},
+	}
+
+	entries := BuildCondensedTranscript(lines)
+
+	// Should have: user prompt, tool call, user prompt (NOT the skill content)
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries (skill content filtered), got %d", len(entries))
+	}
+
+	// Verify the skill content was filtered
+	for _, entry := range entries {
+		if entry.Type == EntryTypeUser && strings.Contains(entry.Content, "Base directory for this skill") {
+			t.Error("skill content injection should have been filtered out")
+		}
+	}
+
+	// Verify the real user messages are present
+	if entries[0].Content != "Invoke the superpowers:brainstorming skill" {
+		t.Errorf("first user message wrong: %s", entries[0].Content)
+	}
+	if entries[2].Content != "Now help me brainstorm a feature" {
+		t.Errorf("last user message wrong: %s", entries[2].Content)
 	}
 }
 
@@ -356,6 +491,54 @@ func TestFormatCondensedTranscript_EmptyInput(t *testing.T) {
 
 	if result != "" {
 		t.Errorf("expected empty string for empty input, got: %s", result)
+	}
+}
+
+func TestGenerateFromTranscript(t *testing.T) {
+	// Test with mock generator
+	mockGenerator := &ClaudeGenerator{
+		CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+			response := `{"result":"{\"intent\":\"Test intent\",\"outcome\":\"Test outcome\",\"learnings\":{\"repo\":[],\"code\":[],\"workflow\":[]},\"friction\":[],\"open_items\":[]}"}`
+			return exec.CommandContext(ctx, "sh", "-c", "printf '%s' '"+response+"'")
+		},
+	}
+
+	transcript := []byte(`{"type":"user","message":{"content":"Hello"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hi there"}]}}`)
+
+	summary, err := GenerateFromTranscript(context.Background(), transcript, []string{"file.go"}, mockGenerator)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.Intent != "Test intent" {
+		t.Errorf("unexpected intent: %s", summary.Intent)
+	}
+}
+
+func TestGenerateFromTranscript_EmptyTranscript(t *testing.T) {
+	mockGenerator := &ClaudeGenerator{}
+
+	summary, err := GenerateFromTranscript(context.Background(), []byte{}, []string{}, mockGenerator)
+	if err == nil {
+		t.Error("expected error for empty transcript")
+	}
+	if summary != nil {
+		t.Error("expected nil summary")
+	}
+}
+
+func TestGenerateFromTranscript_NilGenerator(t *testing.T) {
+	transcript := []byte(`{"type":"user","message":{"content":"Hello"}}`)
+
+	// With nil generator, should use default ClaudeGenerator
+	// This will fail because claude CLI isn't available in test, but tests the nil handling
+	_, err := GenerateFromTranscript(context.Background(), transcript, []string{}, nil)
+	// Error is expected (claude CLI not available), but function should not panic
+	if err == nil {
+		t.Log("Unexpectedly succeeded - claude CLI must be available")
 	}
 }
 

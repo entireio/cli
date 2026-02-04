@@ -1,4 +1,4 @@
-package summarise
+package summarize
 
 import (
 	"bytes"
@@ -12,13 +12,13 @@ import (
 	"entire.io/cli/cmd/entire/cli/checkpoint"
 )
 
-// summarisationPromptTemplate is the prompt used to generate summaries via the Claude CLI.
+// summarizationPromptTemplate is the prompt used to generate summaries via the Claude CLI.
 //
 // Security note: The transcript is wrapped in <transcript> tags to provide clear boundary
 // markers. This helps contain any potentially malicious content within the transcript
 // (e.g., prompt injection attempts in user messages or file contents) by giving the LLM
 // a clear structural signal about where the untrusted content begins and ends.
-const summarisationPromptTemplate = `Analyse this development session transcript and generate a structured summary.
+const summarizationPromptTemplate = `Analyze this development session transcript and generate a structured summary.
 
 <transcript>
 %s
@@ -45,7 +45,7 @@ Guidelines:
 - Empty arrays are fine if a category doesn't apply
 - Return ONLY the JSON object, no markdown formatting or explanation`
 
-// DefaultModel is the default model used for summarisation.
+// DefaultModel is the default model used for summarization.
 // Sonnet provides a good balance of quality and cost, with 1M context window
 // to handle long transcripts without truncation.
 const DefaultModel = "sonnet"
@@ -56,7 +56,7 @@ type ClaudeGenerator struct {
 	// If empty, defaults to "claude" (expects it to be in PATH).
 	ClaudePath string
 
-	// Model is the Claude model to use for summarisation.
+	// Model is the Claude model to use for summarization.
 	// If empty, defaults to DefaultModel ("sonnet").
 	Model string
 
@@ -76,7 +76,7 @@ func (g *ClaudeGenerator) Generate(ctx context.Context, input Input) (*checkpoin
 	transcriptText := FormatCondensedTranscript(input)
 
 	// Build the prompt
-	prompt := buildSummarisationPrompt(transcriptText)
+	prompt := buildSummarizationPrompt(transcriptText)
 
 	// Execute the Claude CLI
 	runner := g.CommandRunner
@@ -142,9 +142,9 @@ func (g *ClaudeGenerator) Generate(ctx context.Context, input Input) (*checkpoin
 	return &summary, nil
 }
 
-// buildSummarisationPrompt creates the prompt for the Claude CLI.
-func buildSummarisationPrompt(transcriptText string) string {
-	return fmt.Sprintf(summarisationPromptTemplate, transcriptText)
+// buildSummarizationPrompt creates the prompt for the Claude CLI.
+func buildSummarizationPrompt(transcriptText string) string {
+	return fmt.Sprintf(summarizationPromptTemplate, transcriptText)
 }
 
 // extractJSONFromMarkdown attempts to extract JSON from markdown code blocks.

@@ -49,6 +49,20 @@ func TestNewExplainCmd(t *testing.T) {
 	}
 }
 
+func TestExplainCmd_SearchAllFlag(t *testing.T) {
+	cmd := newExplainCmd()
+
+	// Verify --search-all flag exists
+	flag := cmd.Flags().Lookup("search-all")
+	if flag == nil {
+		t.Fatal("expected --search-all flag to exist")
+	}
+
+	if flag.DefValue != "false" {
+		t.Errorf("expected default value 'false', got %q", flag.DefValue)
+	}
+}
+
 func TestExplainCmd_RejectsPositionalArgs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -83,31 +97,6 @@ func TestExplainCmd_RejectsPositionalArgs(t *testing.T) {
 	}
 }
 
-func TestExplainSession_NotFound(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo
-	if _, err := git.PlainInit(tmpDir, false); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Create .entire directory
-	if err := os.MkdirAll(".entire", 0o750); err != nil {
-		t.Fatalf("failed to create .entire dir: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	err := runExplainSession(&stdout, "nonexistent-session", false)
-
-	if err == nil {
-		t.Error("expected error for nonexistent session, got nil")
-	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected 'not found' in error, got: %v", err)
-	}
-}
-
 func TestExplainCommit_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -118,7 +107,7 @@ func TestExplainCommit_NotFound(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err := runExplainCommit(&stdout, "nonexistent")
+	err := runExplainCommit(&stdout, "nonexistent", false, false, false, false)
 
 	if err == nil {
 		t.Error("expected error for nonexistent commit, got nil")
@@ -162,27 +151,26 @@ func TestExplainCommit_NoEntireData(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err = runExplainCommit(&stdout, commitHash.String())
+	err = runExplainCommit(&stdout, commitHash.String(), false, false, false, false)
 	if err != nil {
 		t.Fatalf("runExplainCommit() should not error for non-Entire commits, got: %v", err)
 	}
 
 	output := stdout.String()
 
-	// Should show git info
+	// Should show message indicating no Entire checkpoint (new behavior)
+	if !strings.Contains(output, "No associated Entire checkpoint") {
+		t.Errorf("expected output to indicate no Entire checkpoint, got: %s", output)
+	}
+	// Should mention the commit hash
 	if !strings.Contains(output, commitHash.String()[:7]) {
 		t.Errorf("expected output to contain short commit hash, got: %s", output)
 	}
-	if !strings.Contains(output, "regular commit") {
-		t.Errorf("expected output to contain commit message, got: %s", output)
-	}
-	// Should show no Entire data message
-	if !strings.Contains(output, "No Entire session data") {
-		t.Errorf("expected output to indicate no Entire data, got: %s", output)
-	}
 }
 
-func TestExplainCommit_WithEntireData(t *testing.T) {
+func TestExplainCommit_WithMetadataTrailerButNoCheckpoint(t *testing.T) {
+	// Test that commits with Entire-Metadata trailer (but no Entire-Checkpoint)
+	// now show "no checkpoint" message (new behavior)
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
@@ -210,7 +198,7 @@ func TestExplainCommit_WithEntireData(t *testing.T) {
 		t.Fatalf("failed to create prompt file: %v", err)
 	}
 
-	// Create a commit with Entire metadata trailer
+	// Create a commit with Entire-Metadata trailer (but NO Entire-Checkpoint)
 	testFile := filepath.Join(tmpDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("feature content"), 0o644); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
@@ -219,7 +207,7 @@ func TestExplainCommit_WithEntireData(t *testing.T) {
 		t.Fatalf("failed to add test file: %v", err)
 	}
 
-	// Commit with Entire-Metadata trailer
+	// Commit with Entire-Metadata trailer (no Entire-Checkpoint)
 	metadataDir := ".entire/metadata/" + sessionID
 	commitMessage := trailers.FormatMetadata("Add new feature", metadataDir)
 	commitHash, err := w.Commit(commitMessage, &git.CommitOptions{
@@ -233,21 +221,20 @@ func TestExplainCommit_WithEntireData(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err = runExplainCommit(&stdout, commitHash.String())
+	err = runExplainCommit(&stdout, commitHash.String(), false, false, false, false)
 	if err != nil {
 		t.Fatalf("runExplainCommit() error = %v", err)
 	}
 
 	output := stdout.String()
 
-	// Should show commit info
+	// New behavior: should show "no checkpoint" message since there's no Entire-Checkpoint trailer
+	if !strings.Contains(output, "No associated Entire checkpoint") {
+		t.Errorf("expected 'No associated Entire checkpoint' message, got: %s", output)
+	}
+	// Should mention the commit hash
 	if !strings.Contains(output, commitHash.String()[:7]) {
 		t.Errorf("expected output to contain short commit hash, got: %s", output)
-	}
-	// Should show session info - the session ID is extracted from the metadata path
-	// The format is test-session-xyz789 (extracted from the full path)
-	if !strings.Contains(output, "Session:") {
-		t.Errorf("expected output to contain 'Session:', got: %s", output)
 	}
 }
 
@@ -366,7 +353,7 @@ func TestExplainDefault_NoCheckpoints_ShowsHelpfulMessage(t *testing.T) {
 func TestExplainBothFlagsError(t *testing.T) {
 	// Test that providing both --session and --commit returns an error
 	var stdout, stderr bytes.Buffer
-	err := runExplain(&stdout, &stderr, "session-id", "commit-sha", "", false, false, false, false, false, false)
+	err := runExplain(&stdout, &stderr, "session-id", "commit-sha", "", false, false, false, false, false, false, false)
 
 	if err == nil {
 		t.Error("expected error when both flags provided, got nil")
@@ -495,74 +482,6 @@ func TestFormatSessionInfo_WithSourceRef(t *testing.T) {
 	}
 	if !strings.Contains(output, sourceRef) {
 		t.Errorf("expected output to contain source ref %q, got:\n%s", sourceRef, output)
-	}
-}
-
-func TestFormatCommitInfo(t *testing.T) {
-	now := time.Now()
-	info := &commitInfo{
-		SHA:       "abc1234567890abcdef1234567890abcdef123456",
-		ShortSHA:  "abc1234",
-		Message:   "Test commit message",
-		Author:    "Test Author",
-		Email:     "test@example.com",
-		Date:      now,
-		Files:     []string{"file1.go", "file2.go"},
-		HasEntire: false,
-		SessionID: "",
-	}
-
-	output := formatCommitInfo(info)
-
-	// Verify output contains expected sections
-	if !strings.Contains(output, "Commit:") {
-		t.Error("expected output to contain 'Commit:'")
-	}
-	if !strings.Contains(output, info.ShortSHA) {
-		t.Error("expected output to contain short SHA")
-	}
-	if !strings.Contains(output, info.SHA) {
-		t.Error("expected output to contain full SHA")
-	}
-	if !strings.Contains(output, "Message:") {
-		t.Error("expected output to contain 'Message:'")
-	}
-	if !strings.Contains(output, info.Message) {
-		t.Error("expected output to contain commit message")
-	}
-	if !strings.Contains(output, "Files Modified") {
-		t.Error("expected output to contain 'Files Modified'")
-	}
-	if !strings.Contains(output, "No Entire session data") {
-		t.Error("expected output to contain no Entire data message")
-	}
-}
-
-func TestFormatCommitInfo_WithEntireData(t *testing.T) {
-	now := time.Now()
-	info := &commitInfo{
-		SHA:       "abc1234567890abcdef1234567890abcdef123456",
-		ShortSHA:  "abc1234",
-		Message:   "Test commit message",
-		Author:    "Test Author",
-		Email:     "test@example.com",
-		Date:      now,
-		Files:     []string{"file1.go"},
-		HasEntire: true,
-		SessionID: "2025-12-09-test-session",
-	}
-
-	output := formatCommitInfo(info)
-
-	// Verify output contains expected sections
-	if !strings.Contains(output, "Session:") {
-		t.Error("expected output to contain 'Session:'")
-	}
-	if !strings.Contains(output, info.SessionID) {
-		t.Error("expected output to contain session ID")
-	}
-	if strings.Contains(output, "No Entire session data") {
-		t.Error("expected output to NOT contain no Entire data message")
 	}
 }
 
@@ -894,7 +813,7 @@ func TestRunExplain_MutualExclusivityError(t *testing.T) {
 	var buf, errBuf bytes.Buffer
 
 	// Providing both --session and --checkpoint should error
-	err := runExplain(&buf, &errBuf, "session-id", "", "checkpoint-id", false, false, false, false, false, false)
+	err := runExplain(&buf, &errBuf, "session-id", "", "checkpoint-id", false, false, false, false, false, false, false)
 
 	if err == nil {
 		t.Error("expected error when multiple flags provided")
@@ -938,7 +857,7 @@ func TestRunExplainCheckpoint_NotFound(t *testing.T) {
 	}
 
 	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(&buf, &errBuf, "nonexistent123", false, false, false, false, false, false)
+	err = runExplainCheckpoint(&buf, &errBuf, "nonexistent123", false, false, false, false, false, false, false)
 
 	if err == nil {
 		t.Error("expected error for nonexistent checkpoint")
@@ -964,8 +883,8 @@ func TestFormatCheckpointOutput_Short(t *testing.T) {
 		Prompts: "Add a new feature",
 	}
 
-	// Default mode: empty commit message (not shown anyway in default mode)
-	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), "", false, false)
+	// Default mode: nil associated commits (not shown anyway in default mode)
+	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, false, false)
 
 	// Should show checkpoint ID
 	if !strings.Contains(output, "abc123def456") {
@@ -1019,7 +938,7 @@ func TestFormatCheckpointOutput_Verbose(t *testing.T) {
 		Transcript: transcriptContent,
 	}
 
-	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), "feat: implement user authentication", true, false)
+	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false)
 
 	// Should show checkpoint ID (like default)
 	if !strings.Contains(output, "abc123def456") {
@@ -1050,16 +969,9 @@ func TestFormatCheckpointOutput_Verbose(t *testing.T) {
 	if !strings.Contains(output, "Add a new feature") {
 		t.Error("verbose output should show prompts")
 	}
-	// Verbose should show commit message
-	if !strings.Contains(output, "Commit:") {
-		t.Error("verbose output should have Commit section")
-	}
-	if !strings.Contains(output, "feat: implement user authentication") {
-		t.Error("verbose output should show commit message")
-	}
 }
 
-func TestFormatCheckpointOutput_Verbose_NoCommitMessage(t *testing.T) {
+func TestFormatCheckpointOutput_Verbose_NilAssociatedCommits(t *testing.T) {
 	result := &checkpoint.ReadCommittedResult{
 		Metadata: checkpoint.CommittedMetadata{
 			CheckpointID:     "abc123def456",
@@ -1071,11 +983,11 @@ func TestFormatCheckpointOutput_Verbose_NoCommitMessage(t *testing.T) {
 		Prompts: "Add a feature",
 	}
 
-	// When commit message is empty, should not show Commit section
-	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), "", true, false)
+	// When associated commits is nil (not searched), should not show Commits section at all
+	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false)
 
-	if strings.Contains(output, "Commit:") {
-		t.Error("verbose output should not show Commit section when message is empty")
+	if strings.Contains(output, "Commits:") {
+		t.Error("verbose output should not show Commits section when nil (not searched)")
 	}
 }
 
@@ -1100,7 +1012,7 @@ func TestFormatCheckpointOutput_Full(t *testing.T) {
 		Transcript: []byte(transcriptData),
 	}
 
-	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), "feat: add user login", false, true)
+	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, false, true)
 
 	// Should show checkpoint ID (like default)
 	if !strings.Contains(output, "abc123def456") {
@@ -1120,13 +1032,6 @@ func TestFormatCheckpointOutput_Full(t *testing.T) {
 	}
 	if !strings.Contains(output, "[Assistant]") {
 		t.Error("full output should show assistant messages in parsed transcript")
-	}
-	// Full should also show commit message (since it includes verbose)
-	if !strings.Contains(output, "Commit:") {
-		t.Error("full output should include commit section")
-	}
-	if !strings.Contains(output, "feat: add user login") {
-		t.Error("full output should show commit message")
 	}
 }
 
@@ -1154,7 +1059,7 @@ func TestFormatCheckpointOutput_WithSummary(t *testing.T) {
 	}
 
 	// Test default output (non-verbose) with summary
-	output := formatCheckpointOutput(result, cpID, "", false, false)
+	output := formatCheckpointOutput(result, cpID, nil, checkpoint.Author{}, false, false)
 
 	// Should show AI-generated intent and outcome
 	if !strings.Contains(output, "Intent: Implement user authentication") {
@@ -1169,7 +1074,7 @@ func TestFormatCheckpointOutput_WithSummary(t *testing.T) {
 	}
 
 	// Test verbose output with summary
-	verboseOutput := formatCheckpointOutput(result, cpID, "", true, false)
+	verboseOutput := formatCheckpointOutput(result, cpID, nil, checkpoint.Author{}, true, false)
 
 	// Verbose should show learnings sections
 	if !strings.Contains(verboseOutput, "Learnings:") {
@@ -1290,7 +1195,7 @@ func TestFormatBranchCheckpoints_BasicOutput(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("feature/my-branch", points)
+	output := formatBranchCheckpoints("feature/my-branch", points, "")
 
 	// Should show branch name
 	if !strings.Contains(output, "feature/my-branch") {
@@ -1343,7 +1248,7 @@ func TestFormatBranchCheckpoints_GroupedByCheckpointID(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("main", points)
+	output := formatBranchCheckpoints("main", points, "")
 
 	// Should group by checkpoint ID - check for checkpoint headers
 	if !strings.Contains(output, "[chk111111111]") {
@@ -1370,7 +1275,7 @@ func TestFormatBranchCheckpoints_GroupedByCheckpointID(t *testing.T) {
 }
 
 func TestFormatBranchCheckpoints_NoCheckpoints(t *testing.T) {
-	output := formatBranchCheckpoints("feature/empty-branch", nil)
+	output := formatBranchCheckpoints("feature/empty-branch", nil, "")
 
 	// Should show branch name
 	if !strings.Contains(output, "feature/empty-branch") {
@@ -1396,7 +1301,7 @@ func TestFormatBranchCheckpoints_ShowsSessionInfo(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("main", points)
+	output := formatBranchCheckpoints("main", points, "")
 
 	// Should show session prompt
 	if !strings.Contains(output, "This is my test prompt") {
@@ -1425,7 +1330,7 @@ func TestFormatBranchCheckpoints_ShowsTemporaryIndicator(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("main", points)
+	output := formatBranchCheckpoints("main", points, "")
 
 	// Should indicate temporary (non-committed) checkpoints with [temporary]
 	if !strings.Contains(output, "[temporary]") {
@@ -1456,7 +1361,7 @@ func TestFormatBranchCheckpoints_ShowsTaskCheckpoints(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("main", points)
+	output := formatBranchCheckpoints("main", points, "")
 
 	// Should indicate task checkpoint
 	if !strings.Contains(output, "[Task]") && !strings.Contains(output, "task") {
@@ -1477,7 +1382,7 @@ func TestFormatBranchCheckpoints_TruncatesLongMessages(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("main", points)
+	output := formatBranchCheckpoints("main", points, "")
 
 	// Output should not contain the full 200 character message
 	if strings.Contains(output, longMessage) {
@@ -2165,7 +2070,7 @@ func TestFormatCheckpointOutput_UsesScopedPrompts(t *testing.T) {
 	}
 
 	// Verbose output should use scoped prompts
-	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), "", true, false)
+	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false)
 
 	// Should show ONLY the second prompt (scoped)
 	if !strings.Contains(output, "Second prompt - SHOULD appear") {
@@ -2193,7 +2098,7 @@ func TestFormatCheckpointOutput_FallsBackToStoredPrompts(t *testing.T) {
 	}
 
 	// Verbose output should fall back to stored prompts
-	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), "", true, false)
+	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false)
 
 	// Intent should use stored prompt
 	if !strings.Contains(output, "Stored prompt from older checkpoint") {
@@ -2221,7 +2126,7 @@ func TestFormatCheckpointOutput_FullShowsEntireTranscript(t *testing.T) {
 	}
 
 	// Full mode should show the ENTIRE transcript (not scoped)
-	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), "", false, true)
+	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, false, true)
 
 	// Should show the full transcript including first prompt (even though scoped prompts exclude it)
 	if !strings.Contains(output, "First prompt") {
@@ -2229,5 +2134,587 @@ func TestFormatCheckpointOutput_FullShowsEntireTranscript(t *testing.T) {
 	}
 	if !strings.Contains(output, "Second prompt") {
 		t.Errorf("expected --full to show entire transcript including second prompt, got:\n%s", output)
+	}
+}
+
+func TestRunExplainCommit_NoCheckpointTrailer(t *testing.T) {
+	// Create test repo with a commit that has no Entire-Checkpoint trailer
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, err := git.PlainInit(tmpDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create a commit without checkpoint trailer
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("content"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	hash, err := w.Commit("Regular commit without trailer", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create commit: %v", err)
+	}
+
+	var buf bytes.Buffer
+	err = runExplainCommit(&buf, hash.String()[:7], false, false, false, false)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "No associated Entire checkpoint") {
+		t.Errorf("expected 'No associated Entire checkpoint' message, got: %s", output)
+	}
+}
+
+func TestRunExplainCommit_WithCheckpointTrailer(t *testing.T) {
+	// Create test repo with a commit that has an Entire-Checkpoint trailer
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, err := git.PlainInit(tmpDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create a commit with checkpoint trailer
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("content"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+
+	// Create commit with checkpoint trailer
+	checkpointID := "abc123def456"
+	commitMsg := "Feature commit\n\nEntire-Checkpoint: " + checkpointID + "\n"
+	hash, err := w.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to create commit: %v", err)
+	}
+
+	var buf bytes.Buffer
+	// This should try to look up the checkpoint and fail (checkpoint doesn't exist in store)
+	// but it should still attempt the lookup rather than showing commit details
+	err = runExplainCommit(&buf, hash.String()[:7], false, false, false, false)
+
+	// Should error because the checkpoint doesn't exist in the store
+	if err == nil {
+		t.Fatalf("expected error for missing checkpoint in store, got nil")
+	}
+
+	// Error should mention checkpoint not found
+	if !strings.Contains(err.Error(), "checkpoint not found") && !strings.Contains(err.Error(), "abc123def456") {
+		t.Errorf("expected error about checkpoint not found, got: %v", err)
+	}
+}
+
+func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
+	now := time.Now()
+	points := []strategy.RewindPoint{
+		{
+			ID:            "abc123def456",
+			Message:       "Checkpoint from session 1",
+			Date:          now,
+			CheckpointID:  "chk111111111",
+			SessionID:     "2026-01-22-session-alpha",
+			SessionPrompt: "Task for session alpha",
+		},
+		{
+			ID:            "def456ghi789",
+			Message:       "Checkpoint from session 2",
+			Date:          now.Add(-time.Hour),
+			CheckpointID:  "chk222222222",
+			SessionID:     "2026-01-22-session-beta",
+			SessionPrompt: "Task for session beta",
+		},
+		{
+			ID:            "ghi789jkl012",
+			Message:       "Another checkpoint from session 1",
+			Date:          now.Add(-2 * time.Hour),
+			CheckpointID:  "chk333333333",
+			SessionID:     "2026-01-22-session-alpha",
+			SessionPrompt: "Another task for session alpha",
+		},
+	}
+
+	t.Run("no filter shows all checkpoints", func(t *testing.T) {
+		output := formatBranchCheckpoints("main", points, "")
+
+		// Should show all checkpoints
+		if !strings.Contains(output, "Checkpoints: 3") {
+			t.Errorf("expected 'Checkpoints: 3' in output, got:\n%s", output)
+		}
+		// Should show prompts from both sessions
+		if !strings.Contains(output, "Task for session alpha") {
+			t.Errorf("expected alpha session prompt in output, got:\n%s", output)
+		}
+		if !strings.Contains(output, "Task for session beta") {
+			t.Errorf("expected beta session prompt in output, got:\n%s", output)
+		}
+	})
+
+	t.Run("filter by exact session ID", func(t *testing.T) {
+		output := formatBranchCheckpoints("main", points, "2026-01-22-session-alpha")
+
+		// Should show only alpha checkpoints (2 of them)
+		if !strings.Contains(output, "Checkpoints: 2") {
+			t.Errorf("expected 'Checkpoints: 2' in output, got:\n%s", output)
+		}
+		if !strings.Contains(output, "Task for session alpha") {
+			t.Errorf("expected alpha session prompt in output, got:\n%s", output)
+		}
+		// Should NOT contain beta session prompt
+		if strings.Contains(output, "Task for session beta") {
+			t.Errorf("expected output to NOT contain beta session prompt, got:\n%s", output)
+		}
+		// Should show filter info
+		if !strings.Contains(output, "Filtered by session:") {
+			t.Errorf("expected 'Filtered by session:' in output, got:\n%s", output)
+		}
+	})
+
+	t.Run("filter by session ID prefix", func(t *testing.T) {
+		output := formatBranchCheckpoints("main", points, "2026-01-22-session-b")
+
+		// Should show only beta checkpoint (1)
+		if !strings.Contains(output, "Checkpoints: 1") {
+			t.Errorf("expected 'Checkpoints: 1' in output, got:\n%s", output)
+		}
+		if !strings.Contains(output, "Task for session beta") {
+			t.Errorf("expected beta session prompt in output, got:\n%s", output)
+		}
+	})
+
+	t.Run("filter with no matches", func(t *testing.T) {
+		output := formatBranchCheckpoints("main", points, "nonexistent-session")
+
+		// Should show 0 checkpoints
+		if !strings.Contains(output, "Checkpoints: 0") {
+			t.Errorf("expected 'Checkpoints: 0' in output, got:\n%s", output)
+		}
+		// Should show filter info even with no matches
+		if !strings.Contains(output, "Filtered by session:") {
+			t.Errorf("expected 'Filtered by session:' in output, got:\n%s", output)
+		}
+	})
+}
+
+func TestRunExplain_SessionFlagFiltersListView(t *testing.T) {
+	// Test that --session alone (without --checkpoint or --commit) filters the list view
+	// This is a unit test for the routing logic
+	var buf, errBuf bytes.Buffer
+
+	// When session is specified alone, it should NOT error for mutual exclusivity
+	// It should route to the list view with a filter (which may fail for other reasons
+	// like not being in a git repo, but not for mutual exclusivity)
+	err := runExplain(&buf, &errBuf, "some-session", "", "", false, false, false, false, false, false, false)
+
+	// Should NOT be a mutual exclusivity error
+	if err != nil && strings.Contains(err.Error(), "cannot specify multiple") {
+		t.Errorf("--session alone should not trigger mutual exclusivity error, got: %v", err)
+	}
+}
+
+func TestRunExplain_SessionWithCheckpointStillMutuallyExclusive(t *testing.T) {
+	// Test that --session with --checkpoint is still an error
+	var buf, errBuf bytes.Buffer
+
+	err := runExplain(&buf, &errBuf, "some-session", "", "some-checkpoint", false, false, false, false, false, false, false)
+
+	if err == nil {
+		t.Error("expected error when --session and --checkpoint both specified")
+	}
+	if !strings.Contains(err.Error(), "cannot specify multiple") {
+		t.Errorf("expected 'cannot specify multiple' error, got: %v", err)
+	}
+}
+
+func TestRunExplain_SessionWithCommitStillMutuallyExclusive(t *testing.T) {
+	// Test that --session with --commit is still an error
+	var buf, errBuf bytes.Buffer
+
+	err := runExplain(&buf, &errBuf, "some-session", "some-commit", "", false, false, false, false, false, false, false)
+
+	if err == nil {
+		t.Error("expected error when --session and --commit both specified")
+	}
+	if !strings.Contains(err.Error(), "cannot specify multiple") {
+		t.Errorf("expected 'cannot specify multiple' error, got: %v", err)
+	}
+}
+
+func TestFormatCheckpointOutput_WithAuthor(t *testing.T) {
+	result := &checkpoint.ReadCommittedResult{
+		Metadata: checkpoint.CommittedMetadata{
+			CheckpointID: "abc123def456",
+			SessionID:    "2026-01-30-test-session",
+			CreatedAt:    time.Date(2026, 1, 30, 10, 30, 0, 0, time.UTC),
+			FilesTouched: []string{"main.go"},
+		},
+		Prompts: "Add a new feature",
+	}
+
+	author := checkpoint.Author{
+		Name:  "Alice Developer",
+		Email: "alice@example.com",
+	}
+
+	// With author, should show author line
+	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), nil, author, true, false)
+
+	if !strings.Contains(output, "Author: Alice Developer <alice@example.com>") {
+		t.Errorf("expected author line in output, got:\n%s", output)
+	}
+}
+
+func TestFormatCheckpointOutput_EmptyAuthor(t *testing.T) {
+	result := &checkpoint.ReadCommittedResult{
+		Metadata: checkpoint.CommittedMetadata{
+			CheckpointID: "abc123def456",
+			SessionID:    "2026-01-30-test-session",
+			CreatedAt:    time.Date(2026, 1, 30, 10, 30, 0, 0, time.UTC),
+			FilesTouched: []string{"main.go"},
+		},
+		Prompts: "Add a new feature",
+	}
+
+	// Empty author - should not show author line
+	author := checkpoint.Author{}
+
+	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), nil, author, true, false)
+
+	if strings.Contains(output, "Author:") {
+		t.Errorf("expected no author line for empty author, got:\n%s", output)
+	}
+}
+
+func TestGetAssociatedCommits(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Initialize git repo
+	repo, err := git.PlainInit(tmpDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	checkpointID := id.MustCheckpointID("abc123def456")
+
+	// Create first commit without checkpoint trailer
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	_, err = w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@example.com",
+			When:  time.Now().Add(-2 * time.Hour),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// Create commit with matching checkpoint trailer
+	if err := os.WriteFile(testFile, []byte("with checkpoint"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	commitMsg := trailers.FormatCheckpoint("feat: add feature", checkpointID)
+	_, err = w.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Alice Developer",
+			Email: "alice@example.com",
+			When:  time.Now().Add(-1 * time.Hour),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create checkpoint commit: %v", err)
+	}
+
+	// Create another commit without checkpoint trailer
+	if err := os.WriteFile(testFile, []byte("after checkpoint"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	_, err = w.Commit("unrelated commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@example.com",
+			When:  time.Now(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create unrelated commit: %v", err)
+	}
+
+	// Test: should find the one commit with matching checkpoint
+	commits, err := getAssociatedCommits(repo, checkpointID, false)
+	if err != nil {
+		t.Fatalf("getAssociatedCommits error: %v", err)
+	}
+
+	if len(commits) != 1 {
+		t.Fatalf("expected 1 associated commit, got %d", len(commits))
+	}
+
+	commit := commits[0]
+	if commit.Author != "Alice Developer" {
+		t.Errorf("expected author 'Alice Developer', got %q", commit.Author)
+	}
+	if !strings.Contains(commit.Message, "feat: add feature") {
+		t.Errorf("expected message to contain 'feat: add feature', got %q", commit.Message)
+	}
+	if len(commit.ShortSHA) != 7 {
+		t.Errorf("expected 7-char short SHA, got %d chars: %q", len(commit.ShortSHA), commit.ShortSHA)
+	}
+	if len(commit.SHA) != 40 {
+		t.Errorf("expected 40-char full SHA, got %d chars", len(commit.SHA))
+	}
+}
+
+func TestGetAssociatedCommits_NoMatches(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Initialize git repo
+	repo, err := git.PlainInit(tmpDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create commit without checkpoint trailer
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test content"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	_, err = w.Commit("regular commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create commit: %v", err)
+	}
+
+	// Search for a checkpoint ID that doesn't exist (valid format: 12 hex chars)
+	checkpointID := id.MustCheckpointID("aaaa11112222")
+	commits, err := getAssociatedCommits(repo, checkpointID, false)
+	if err != nil {
+		t.Fatalf("getAssociatedCommits error: %v", err)
+	}
+
+	if len(commits) != 0 {
+		t.Errorf("expected 0 associated commits, got %d", len(commits))
+	}
+}
+
+func TestGetAssociatedCommits_MultipleMatches(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Initialize git repo
+	repo, err := git.PlainInit(tmpDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	checkpointID := id.MustCheckpointID("abc123def456")
+
+	// Create initial commit
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	_, err = w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@example.com",
+			When:  time.Now().Add(-3 * time.Hour),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// Create first commit with checkpoint trailer
+	if err := os.WriteFile(testFile, []byte("first"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	commitMsg := trailers.FormatCheckpoint("first checkpoint commit", checkpointID)
+	_, err = w.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@example.com",
+			When:  time.Now().Add(-2 * time.Hour),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create first checkpoint commit: %v", err)
+	}
+
+	// Create second commit with same checkpoint trailer (e.g., amend scenario)
+	if err := os.WriteFile(testFile, []byte("second"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+	commitMsg = trailers.FormatCheckpoint("second checkpoint commit", checkpointID)
+	_, err = w.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@example.com",
+			When:  time.Now().Add(-1 * time.Hour),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create second checkpoint commit: %v", err)
+	}
+
+	// Test: should find both commits with matching checkpoint
+	commits, err := getAssociatedCommits(repo, checkpointID, false)
+	if err != nil {
+		t.Fatalf("getAssociatedCommits error: %v", err)
+	}
+
+	if len(commits) != 2 {
+		t.Fatalf("expected 2 associated commits, got %d", len(commits))
+	}
+
+	// Should be in reverse chronological order (newest first)
+	if !strings.Contains(commits[0].Message, "second") {
+		t.Errorf("expected newest commit first, got %q", commits[0].Message)
+	}
+	if !strings.Contains(commits[1].Message, "first") {
+		t.Errorf("expected older commit second, got %q", commits[1].Message)
+	}
+}
+
+func TestFormatCheckpointOutput_WithAssociatedCommits(t *testing.T) {
+	result := &checkpoint.ReadCommittedResult{
+		Metadata: checkpoint.CommittedMetadata{
+			CheckpointID: "abc123def456",
+			SessionID:    "2026-02-04-test-session",
+			CreatedAt:    time.Date(2026, 2, 4, 10, 30, 0, 0, time.UTC),
+			FilesTouched: []string{"main.go"},
+		},
+		Prompts: "Add a new feature",
+	}
+
+	associatedCommits := []associatedCommit{
+		{
+			SHA:      "abc123def4567890abc123def4567890abc12345",
+			ShortSHA: "abc123d",
+			Message:  "feat: add feature",
+			Author:   "Alice Developer",
+			Date:     time.Date(2026, 2, 4, 11, 0, 0, 0, time.UTC),
+		},
+		{
+			SHA:      "def456abc7890123def456abc7890123def45678",
+			ShortSHA: "def456a",
+			Message:  "fix: update feature",
+			Author:   "Bob Developer",
+			Date:     time.Date(2026, 2, 4, 12, 0, 0, 0, time.UTC),
+		},
+	}
+
+	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), associatedCommits, checkpoint.Author{}, true, false)
+
+	// Should show commits section with count
+	if !strings.Contains(output, "Commits: (2)") {
+		t.Errorf("expected 'Commits: (2)' in output, got:\n%s", output)
+	}
+	// Should show commit details
+	if !strings.Contains(output, "abc123d") {
+		t.Errorf("expected short SHA 'abc123d' in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "def456a") {
+		t.Errorf("expected short SHA 'def456a' in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "feat: add feature") {
+		t.Errorf("expected commit message in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "fix: update feature") {
+		t.Errorf("expected commit message in output, got:\n%s", output)
+	}
+	// Should show date in format YYYY-MM-DD
+	if !strings.Contains(output, "2026-02-04") {
+		t.Errorf("expected date in output, got:\n%s", output)
+	}
+}
+
+func TestFormatCheckpointOutput_NoCommitsOnBranch(t *testing.T) {
+	result := &checkpoint.ReadCommittedResult{
+		Metadata: checkpoint.CommittedMetadata{
+			CheckpointID: "abc123def456",
+			SessionID:    "2026-02-04-test-session",
+			CreatedAt:    time.Date(2026, 2, 4, 10, 30, 0, 0, time.UTC),
+			FilesTouched: []string{"main.go"},
+		},
+		Prompts: "Add a new feature",
+	}
+
+	// No associated commits - use empty slice (not nil) to indicate "searched but found none"
+	associatedCommits := []associatedCommit{}
+
+	output := formatCheckpointOutput(result, id.MustCheckpointID("abc123def456"), associatedCommits, checkpoint.Author{}, true, false)
+
+	// Should show message indicating no commits found
+	if !strings.Contains(output, "Commits: No commits found on this branch") {
+		t.Errorf("expected 'Commits: No commits found on this branch' in output, got:\n%s", output)
 	}
 }

@@ -886,3 +886,85 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 		t.Errorf("ListCommitted() checkpoint ID = %q, want %q", checkpoints[0].CheckpointID, cpID)
 	}
 }
+
+// TestGetCheckpointAuthor verifies that GetCheckpointAuthor retrieves the
+// author of the commit that created the checkpoint on the entire/sessions branch.
+func TestGetCheckpointAuthor(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	// Create a checkpoint with specific author info
+	authorName := "Alice Developer"
+	authorEmail := "alice@example.com"
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID: checkpointID,
+		SessionID:    "test-session-author",
+		Strategy:     "manual-commit",
+		Transcript:   []byte("test transcript"),
+		FilesTouched: []string{"main.go"},
+		AuthorName:   authorName,
+		AuthorEmail:  authorEmail,
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	// Retrieve the author
+	author, err := store.GetCheckpointAuthor(context.Background(), checkpointID)
+	if err != nil {
+		t.Fatalf("GetCheckpointAuthor() error = %v", err)
+	}
+
+	if author.Name != authorName {
+		t.Errorf("author.Name = %q, want %q", author.Name, authorName)
+	}
+	if author.Email != authorEmail {
+		t.Errorf("author.Email = %q, want %q", author.Email, authorEmail)
+	}
+}
+
+// TestGetCheckpointAuthor_NotFound verifies that GetCheckpointAuthor returns
+// empty author when the checkpoint doesn't exist.
+func TestGetCheckpointAuthor_NotFound(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+
+	// Query for a non-existent checkpoint (must be valid hex)
+	checkpointID := id.MustCheckpointID("ffffffffffff")
+
+	author, err := store.GetCheckpointAuthor(context.Background(), checkpointID)
+	if err != nil {
+		t.Fatalf("GetCheckpointAuthor() error = %v", err)
+	}
+
+	// Should return empty author (no error)
+	if author.Name != "" || author.Email != "" {
+		t.Errorf("expected empty author for non-existent checkpoint, got Name=%q, Email=%q", author.Name, author.Email)
+	}
+}
+
+// TestGetCheckpointAuthor_NoSessionsBranch verifies that GetCheckpointAuthor
+// returns empty author when the entire/sessions branch doesn't exist.
+func TestGetCheckpointAuthor_NoSessionsBranch(t *testing.T) {
+	// Create a fresh repo without sessions branch
+	tempDir := t.TempDir()
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeeff")
+
+	author, err := store.GetCheckpointAuthor(context.Background(), checkpointID)
+	if err != nil {
+		t.Fatalf("GetCheckpointAuthor() error = %v", err)
+	}
+
+	// Should return empty author (no error)
+	if author.Name != "" || author.Email != "" {
+		t.Errorf("expected empty author when sessions branch doesn't exist, got Name=%q, Email=%q", author.Name, author.Email)
+	}
+}

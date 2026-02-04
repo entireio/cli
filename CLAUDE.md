@@ -121,6 +121,41 @@ return fmt.Errorf("unknown strategy: %s", name)
 - `root.go` - Sets `SilenceErrors: true` on root command
 - `main.go` - Checks for `SilentError` before printing
 
+### Settings
+
+All settings access should go through the `settings` package (`cmd/entire/cli/settings/`).
+
+**Why a separate package:**
+The `settings` package exists to avoid import cycles. The `cli` package imports `strategy`, so `strategy` cannot import `cli`. The `settings` package provides shared settings loading that both can use.
+
+**Usage:**
+```go
+import "entire.io/cli/cmd/entire/cli/settings"
+
+// Load full settings object
+s, err := settings.Load()
+if err != nil {
+    // handle error
+}
+if s.Enabled {
+    // ...
+}
+
+// Or use convenience functions
+if settings.IsSummarizeEnabled() {
+    // ...
+}
+```
+
+**Do NOT:**
+- Read `.entire/settings.json` or `.entire/settings.local.json` directly with `os.ReadFile`
+- Duplicate settings parsing logic in other packages
+- Create new settings helpers without adding them to the `settings` package
+
+**Key files:**
+- `settings/settings.go` - `EntireSettings` struct, `Load()`, and helper methods
+- `config.go` - Higher-level config functions that use settings (for `cli` package consumers)
+
 ### Logging vs User Output
 
 - **Internal/debug logging**: Use `logging.Debug/Info/Warn/Error(ctx, msg, attrs...)` from `cmd/entire/cli/logging/`. Writes to `.entire/logs/`.

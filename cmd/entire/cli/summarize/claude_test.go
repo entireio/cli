@@ -1,4 +1,4 @@
-package summarise
+package summarize
 
 import (
 	"context"
@@ -170,10 +170,10 @@ func TestClaudeGenerator_MarkdownCodeBlock(t *testing.T) {
 	}
 }
 
-func TestBuildSummarisationPrompt(t *testing.T) {
+func TestBuildSummarizationPrompt(t *testing.T) {
 	transcriptText := "[User] Hello\n\n[Assistant] Hi"
 
-	prompt := buildSummarisationPrompt(transcriptText)
+	prompt := buildSummarizationPrompt(transcriptText)
 
 	if !strings.Contains(prompt, "<transcript>") {
 		t.Error("prompt should contain <transcript> tag")

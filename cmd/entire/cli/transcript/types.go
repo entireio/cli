@@ -49,4 +49,9 @@ type ToolInput struct {
 	Description  string `json:"description,omitempty"`
 	Command      string `json:"command,omitempty"`
 	Pattern      string `json:"pattern,omitempty"`
+	// Skill tool fields
+	Skill string `json:"skill,omitempty"`
+	// WebFetch tool fields
+	URL    string `json:"url,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
 }
