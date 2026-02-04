@@ -1,12 +1,10 @@
 package strategy
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,6 +13,7 @@ import (
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/trailers"
 
@@ -409,42 +408,20 @@ func GetRemoteMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
 //
 // The function first uses 'git rev-parse --show-toplevel' to find the repository
 // root, which works correctly even when called from a subdirectory within the repo.
+//
+// Deprecated: Use gitutil.OpenRepository() directly.
 func OpenRepository() (*git.Repository, error) {
-	// First, find the repository root using git rev-parse --show-toplevel
-	// This works correctly from any subdirectory within the repository
-	repoRoot, err := GetWorktreePath()
-	if err != nil {
-		// Fallback to current directory if git command fails
-		// (e.g., if git is not installed or we're not in a repo)
-		repoRoot = "."
-	}
-
-	repo, err := git.PlainOpenWithOptions(repoRoot, &git.PlainOpenOptions{
-		EnableDotGitCommonDir: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to open repository: %w", err)
-	}
-	return repo, nil
+	return gitutil.OpenRepository() //nolint:wrapcheck // deprecated wrapper
 }
 
 // IsInsideWorktree returns true if the current directory is inside a git worktree
 // (as opposed to the main repository). Worktrees have .git as a file pointing
 // to the main repo, while the main repo has .git as a directory.
 // This function works correctly from any subdirectory within the repository.
+//
+// Deprecated: Use gitutil.IsInsideWorktree() directly.
 func IsInsideWorktree() bool {
-	// First find the repository root
-	repoRoot, err := GetWorktreePath()
-	if err != nil {
-		return false
-	}
-
-	gitPath := filepath.Join(repoRoot, gitDir)
-	gitInfo, err := os.Stat(gitPath)
-	if err != nil {
-		return false
-	}
-	return !gitInfo.IsDir()
+	return gitutil.IsInsideWorktree()
 }
 
 // GetMainRepoRoot returns the root directory of the main repository.
@@ -455,69 +432,28 @@ func IsInsideWorktree() bool {
 // Per gitrepository-layout(5), a worktree's .git file is a "gitfile" containing
 // "gitdir: <path>" pointing to $GIT_DIR/worktrees/<id> in the main repository.
 // See: https://git-scm.com/docs/gitrepository-layout
+//
+// Deprecated: Use gitutil.GetMainRepoRoot() directly.
 func GetMainRepoRoot() (string, error) {
-	// First find the worktree/repo root
-	repoRoot, err := GetWorktreePath()
-	if err != nil {
-		return "", fmt.Errorf("failed to get worktree path: %w", err)
-	}
-
-	if !IsInsideWorktree() {
-		return repoRoot, nil
-	}
-
-	// Worktree .git file contains: "gitdir: /path/to/main/.git/worktrees/<id>"
-	gitFilePath := filepath.Join(repoRoot, gitDir)
-	content, err := os.ReadFile(gitFilePath) //nolint:gosec // G304: gitFilePath is constructed from repo root, not user input
-	if err != nil {
-		return "", fmt.Errorf("failed to read .git file: %w", err)
-	}
-
-	gitdir := strings.TrimSpace(string(content))
-	gitdir = strings.TrimPrefix(gitdir, "gitdir: ")
-
-	// Extract main repo root: everything before "/.git/"
-	idx := strings.LastIndex(gitdir, "/.git/")
-	if idx < 0 {
-		return "", fmt.Errorf("unexpected gitdir format: %s", gitdir)
-	}
-	return gitdir[:idx], nil
+	return gitutil.GetMainRepoRoot() //nolint:wrapcheck // deprecated wrapper
 }
 
 // GetGitCommonDir returns the path to the shared git directory.
 // In a regular checkout, this is .git/
 // In a worktree, this is the main repo's .git/ (not .git/worktrees/<name>/)
 // Uses git rev-parse --git-common-dir for reliable handling of worktrees.
+//
+// Deprecated: Use gitutil.GetGitCommonDir() directly.
 func GetGitCommonDir() (string, error) {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
-	cmd.Dir = "."
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get git common dir: %w", err)
-	}
-
-	commonDir := strings.TrimSpace(string(output))
-
-	// git rev-parse --git-common-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(".", commonDir)
-	}
-
-	return filepath.Clean(commonDir), nil
+	return gitutil.GetGitCommonDir() //nolint:wrapcheck // deprecated wrapper
 }
 
 // GetWorktreePath returns the absolute path to the current worktree root.
 // This is the working directory path, not the git directory.
+//
+// Deprecated: Use gitutil.GetWorktreePath() directly.
 func GetWorktreePath() (string, error) {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get worktree path: %w", err)
-	}
-	return strings.TrimSpace(string(output)), nil
+	return gitutil.GetWorktreePath() //nolint:wrapcheck // deprecated wrapper
 }
 
 // EnsureEntireGitignore ensures all required entries are in .entire/.gitignore
@@ -1016,20 +952,10 @@ func getTaskTranscriptFromTree(point RewindPoint) ([]byte, error) {
 // Uses the git CLI instead of go-git because go-git's HardReset incorrectly
 // deletes untracked directories (like .entire/) even when they're in .gitignore.
 // Returns the short commit ID (7 chars) on success for display purposes.
+//
+// Deprecated: Use gitutil.HardResetWithProtection() directly.
 func HardResetWithProtection(commitHash plumbing.Hash) (shortID string, err error) {
-	ctx := context.Background()
-	hashStr := commitHash.String()
-	cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hashStr) //nolint:gosec // hashStr is a plumbing.Hash, not user input
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("reset failed: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-
-	// Return short commit ID for display
-	shortID = hashStr
-	if len(shortID) > 7 {
-		shortID = shortID[:7]
-	}
-	return shortID, nil
+	return gitutil.HardResetWithProtection(commitHash) //nolint:wrapcheck // deprecated wrapper
 }
 
 // collectUntrackedFiles collects all untracked files in the working directory.

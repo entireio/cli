@@ -1,13 +1,11 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
-	"time"
 
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
 
@@ -16,9 +14,9 @@ import (
 )
 
 // openRepository opens the git repository with linked worktree support enabled.
-// This is a convenience wrapper around strategy.OpenRepository() for use in the CLI package.
+// This is a convenience wrapper around gitutil.OpenRepository() for use in the CLI package.
 func openRepository() (*git.Repository, error) {
-	repo, err := strategy.OpenRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
@@ -66,13 +64,7 @@ func GetGitAuthor() (*GitAuthor, error) {
 // getGitConfigValue retrieves a git config value using the git command.
 // Returns empty string if the value is not set or on error.
 func getGitConfigValue(key string) string {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "config", "--get", key)
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(output))
+	return gitutil.GetConfigValue(key)
 }
 
 // IsOnDefaultBranch checks if the repository is currently on the default branch.
@@ -244,15 +236,7 @@ func GetMergeBase(branch1, branch2 string) (*plumbing.Hash, error) {
 // Uses git CLI instead of go-git because go-git doesn't respect global gitignore
 // (core.excludesfile) which can cause false positives for globally ignored files.
 func HasUncommittedChanges() (bool, error) {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
-	output, err := cmd.Output()
-	if err != nil {
-		return false, fmt.Errorf("failed to get git status: %w", err)
-	}
-
-	// If output is empty, there are no changes
-	return len(strings.TrimSpace(string(output))) > 0, nil
+	return gitutil.HasUncommittedChanges() //nolint:wrapcheck // thin wrapper for migration
 }
 
 // findNewUntrackedFiles finds files that are newly untracked (not in pre-existing list)
@@ -315,63 +299,26 @@ func BranchExistsLocally(branchName string) (bool, error) {
 // Should be switched back to go-git once we upgrade to go-git v6
 // Returns an error if the ref doesn't exist or checkout fails.
 func CheckoutBranch(ref string) error {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "checkout", ref)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("checkout failed: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-	return nil
+	return gitutil.CheckoutBranch(ref) //nolint:wrapcheck // thin wrapper for migration
 }
 
 // ValidateBranchName checks if a branch name is valid using git check-ref-format.
 // Returns an error if the name is invalid or contains unsafe characters.
 func ValidateBranchName(branchName string) error {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "check-ref-format", "--branch", branchName)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("invalid branch name %q", branchName)
-	}
-	return nil
+	return gitutil.ValidateBranchName(branchName) //nolint:wrapcheck // thin wrapper for migration
 }
 
 // FetchAndCheckoutRemoteBranch fetches a branch from origin and creates a local tracking branch.
 // Uses git CLI instead of go-git for fetch because go-git doesn't use credential helpers,
 // which breaks HTTPS URLs that require authentication.
 func FetchAndCheckoutRemoteBranch(branchName string) error {
-	// Validate branch name before using in shell command (branchName comes from user CLI input)
-	if err := ValidateBranchName(branchName); err != nil {
-		return err
+	// Fetch the branch
+	if err := gitutil.FetchBranch(branchName); err != nil {
+		return fmt.Errorf("failed to fetch branch: %w", err)
 	}
 
-	// Use git CLI for fetch (go-git's fetch can be tricky with auth)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
-	//nolint:gosec // G204: branchName validated above via git check-ref-format
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", refSpec)
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return errors.New("fetch timed out after 2 minutes")
-		}
-		return fmt.Errorf("failed to fetch branch from origin: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-
-	repo, err := openRepository()
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-
-	// Get the remote branch reference
-	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", branchName), true)
-	if err != nil {
-		return fmt.Errorf("branch '%s' not found on origin: %w", branchName, err)
-	}
-
-	// Create local branch pointing to the same commit
-	localRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(branchName), remoteRef.Hash())
-	err = repo.Storer.SetReference(localRef)
-	if err != nil {
+	// Create local branch from remote
+	if err := gitutil.CreateLocalBranchFromRemote(branchName); err != nil {
 		return fmt.Errorf("failed to create local branch: %w", err)
 	}
 
@@ -386,36 +333,14 @@ func FetchAndCheckoutRemoteBranch(branchName string) error {
 func FetchMetadataBranch() error {
 	branchName := paths.MetadataBranchName
 
-	// Use git CLI for fetch (go-git's fetch can be tricky with auth)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
-	//nolint:gosec // G204: branchName is a constant from paths package
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", refSpec)
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return errors.New("fetch timed out after 2 minutes")
-		}
-		return fmt.Errorf("failed to fetch %s from origin: %s: %w", branchName, strings.TrimSpace(string(output)), err)
+	// Fetch the branch
+	if err := gitutil.FetchBranch(branchName); err != nil {
+		return fmt.Errorf("failed to fetch metadata branch: %w", err)
 	}
 
-	repo, err := openRepository()
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
+	// Create local branch from remote
+	if err := gitutil.CreateLocalBranchFromRemote(branchName); err != nil {
+		return fmt.Errorf("failed to create local metadata branch: %w", err)
 	}
-
-	// Get the remote branch reference
-	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", branchName), true)
-	if err != nil {
-		return fmt.Errorf("branch '%s' not found on origin: %w", branchName, err)
-	}
-
-	// Create or update local branch pointing to the same commit
-	localRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(branchName), remoteRef.Hash())
-	if err := repo.Storer.SetReference(localRef); err != nil {
-		return fmt.Errorf("failed to create local %s branch: %w", branchName, err)
-	}
-
 	return nil
 }
