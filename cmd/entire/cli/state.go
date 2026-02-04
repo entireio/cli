@@ -197,11 +197,10 @@ func CleanupPrePromptState(sessionID string) error {
 // ComputeFileChanges returns new files (created during session) and deleted files
 // (tracked files that were deleted) using a single git status call.
 // This is more efficient than calling ComputeNewFiles and ComputeDeletedFiles separately.
+//
+// If preState is nil, newFiles will be nil but deletedFiles will still be computed
+// (deleted files don't depend on pre-prompt state).
 func ComputeFileChanges(preState *PrePromptState) (newFiles, deletedFiles []string, err error) {
-	if preState == nil {
-		return nil, nil, nil
-	}
-
 	repo, err := openRepository()
 	if err != nil {
 		return nil, nil, err
@@ -217,10 +216,13 @@ func ComputeFileChanges(preState *PrePromptState) (newFiles, deletedFiles []stri
 		return nil, nil, fmt.Errorf("failed to get status: %w", err)
 	}
 
-	// Build set of pre-existing untracked files for quick lookup
-	preExisting := make(map[string]bool, len(preState.UntrackedFiles))
-	for _, f := range preState.UntrackedFiles {
-		preExisting[f] = true
+	// Build set of pre-existing untracked files for quick lookup (only if preState exists)
+	var preExisting map[string]bool
+	if preState != nil {
+		preExisting = make(map[string]bool, len(preState.UntrackedFiles))
+		for _, f := range preState.UntrackedFiles {
+			preExisting[f] = true
+		}
 	}
 
 	// Process all files from git status
@@ -231,8 +233,9 @@ func ComputeFileChanges(preState *PrePromptState) (newFiles, deletedFiles []stri
 		}
 
 		switch {
-		case st.Worktree == git.Untracked:
+		case st.Worktree == git.Untracked && preState != nil:
 			// New file if it wasn't untracked before the session
+			// (only compute if we have preState to compare against)
 			if !preExisting[file] {
 				newFiles = append(newFiles, file)
 			}
