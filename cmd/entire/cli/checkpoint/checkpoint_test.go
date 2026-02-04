@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"entire.io/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -793,5 +795,94 @@ func TestUpdateSummary_NotFound(t *testing.T) {
 	}
 	if !errors.Is(err, ErrCheckpointNotFound) {
 		t.Errorf("UpdateSummary() error = %v, want ErrCheckpointNotFound", err)
+	}
+}
+
+// TestListCommitted_FallsBackToRemote verifies that ListCommitted can find
+// checkpoints when only origin/entire/sessions exists (simulating post-clone state).
+func TestListCommitted_FallsBackToRemote(t *testing.T) {
+	// Create "remote" repo (non-bare, so we can make commits)
+	remoteDir := t.TempDir()
+	remoteRepo, err := git.PlainInit(remoteDir, false)
+	if err != nil {
+		t.Fatalf("failed to init remote repo: %v", err)
+	}
+
+	// Create an initial commit on main branch (required for cloning)
+	remoteWorktree, err := remoteRepo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get remote worktree: %v", err)
+	}
+	readmeFile := filepath.Join(remoteDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := remoteWorktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := remoteWorktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// Create entire/sessions branch on the remote with a checkpoint
+	remoteStore := NewGitStore(remoteRepo)
+	cpID := id.MustCheckpointID("abcdef123456")
+	err = remoteStore.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "test-session-id",
+		Strategy:     "manual-commit",
+		Transcript:   []byte(`{"test": true}`),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})
+	if err != nil {
+		t.Fatalf("failed to write checkpoint to remote: %v", err)
+	}
+
+	// Clone the repo (this clones main, but not entire/sessions by default)
+	localDir := t.TempDir()
+	localRepo, err := git.PlainClone(localDir, false, &git.CloneOptions{
+		URL: remoteDir,
+	})
+	if err != nil {
+		t.Fatalf("failed to clone repo: %v", err)
+	}
+
+	// Fetch the entire/sessions branch to origin/entire/sessions
+	// (but don't create local branch - simulating post-clone state)
+	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", paths.MetadataBranchName, paths.MetadataBranchName)
+	err = localRepo.Fetch(&git.FetchOptions{
+		RemoteName: "origin",
+		RefSpecs:   []config.RefSpec{config.RefSpec(refSpec)},
+	})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		t.Fatalf("failed to fetch entire/sessions: %v", err)
+	}
+
+	// Verify local branch doesn't exist
+	_, err = localRepo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err == nil {
+		t.Fatal("local entire/sessions branch should not exist")
+	}
+
+	// Verify remote-tracking branch exists
+	_, err = localRepo.Reference(plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("origin/entire/sessions should exist: %v", err)
+	}
+
+	// ListCommitted should find the checkpoint by falling back to remote
+	localStore := NewGitStore(localRepo)
+	checkpoints, err := localStore.ListCommitted(context.Background())
+	if err != nil {
+		t.Fatalf("ListCommitted() error = %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Errorf("ListCommitted() returned %d checkpoints, want 1", len(checkpoints))
+	}
+	if len(checkpoints) > 0 && checkpoints[0].CheckpointID.String() != cpID.String() {
+		t.Errorf("ListCommitted() checkpoint ID = %q, want %q", checkpoints[0].CheckpointID, cpID)
 	}
 }

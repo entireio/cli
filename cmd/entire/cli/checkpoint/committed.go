@@ -895,11 +895,17 @@ func (s *GitStore) ensureSessionsBranch() error {
 }
 
 // getSessionsBranchTree returns the tree object for the entire/sessions branch.
+// Falls back to origin/entire/sessions if the local branch doesn't exist.
 func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	ref, err := s.repo.Reference(refName, true)
 	if err != nil {
-		return nil, fmt.Errorf("sessions branch not found: %w", err)
+		// Local branch doesn't exist, try remote-tracking branch
+		remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+		ref, err = s.repo.Reference(remoteRefName, true)
+		if err != nil {
+			return nil, fmt.Errorf("sessions branch not found: %w", err)
+		}
 	}
 
 	commit, err := s.repo.CommitObject(ref.Hash())
