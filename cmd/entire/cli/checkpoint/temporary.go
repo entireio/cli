@@ -85,8 +85,9 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 	var allFiles []string
 	if opts.IsFirstCheckpoint {
 		// For the first checkpoint, capture all changed files (modified tracked + untracked)
-		// using worktree.Status() which respects .gitignore and is much faster than filesystem walk.
-		// The base tree from HEAD already contains all unchanged tracked files.
+		// using worktree.Status() which respects repo .gitignore (but not global gitignore/core.excludesfile).
+		// This is much faster than filesystem walk. The base tree from HEAD already contains
+		// all unchanged tracked files.
 		allFiles, err = collectChangedFiles(s.repo)
 		if err != nil {
 			return WriteTemporaryResult{}, fmt.Errorf("failed to collect changed files: %w", err)
@@ -995,7 +996,11 @@ func sortTreeEntries(entries []object.TreeEntry) {
 
 // collectChangedFiles collects all changed files (modified tracked + untracked non-ignored)
 // using worktree.Status(). This is much faster than filesystem walk because it respects
-// .gitignore and only returns files that git knows about.
+// repo .gitignore files and only returns files that git knows about.
+//
+// Note: go-git's worktree.Status() does not respect global gitignore (core.excludesfile).
+// Files ignored only via global gitignore may still appear as untracked. This is acceptable
+// for our use case since repo .gitignore covers most cases (node_modules/, build/, etc.).
 //
 // For the first checkpoint, we need to capture:
 // - Modified tracked files (user's uncommitted changes)

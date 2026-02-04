@@ -1264,6 +1264,8 @@ func TestWriteTemporary_FirstCheckpoint_ExcludesGitIgnoredFiles(t *testing.T) {
 	_, err = tree.File("node_modules/some-package.js")
 	if err == nil {
 		t.Error("gitignored file node_modules/some-package.js should NOT be in checkpoint tree")
+	} else if !errors.Is(err, object.ErrFileNotFound) && !errors.Is(err, object.ErrEntryNotFound) {
+		t.Fatalf("expected node_modules/some-package.js to be absent (ErrFileNotFound/ErrEntryNotFound), got: %v", err)
 	}
 }
 
