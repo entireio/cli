@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -1014,7 +1013,8 @@ func collectChangedFiles(repo *git.Repository) ([]string, error) {
 		return nil, fmt.Errorf("failed to get worktree status: %w", err)
 	}
 
-	var files []string
+	// Use a set for O(1) deduplication instead of O(n) slices.Contains
+	seen := make(map[string]struct{})
 	for file, st := range status {
 		// Skip .entire directory
 		if paths.IsInfrastructurePath(file) {
@@ -1026,7 +1026,7 @@ func collectChangedFiles(repo *git.Repository) ([]string, error) {
 		//nolint:exhaustive // default case handles other statuses (Unmodified, Added, Renamed, etc.)
 		switch st.Worktree {
 		case git.Modified, git.Untracked:
-			files = append(files, file)
+			seen[file] = struct{}{}
 		case git.Deleted:
 			// Deleted files are handled separately via DeletedFiles parameter
 			continue
@@ -1037,11 +1037,14 @@ func collectChangedFiles(repo *git.Repository) ([]string, error) {
 		// Also check staging area for modifications
 		// A file might be staged (Modified in Staging) but unchanged in worktree
 		if st.Staging == git.Modified || st.Staging == git.Added {
-			// Avoid duplicates - only add if not already in list
-			if !slices.Contains(files, file) {
-				files = append(files, file)
-			}
+			seen[file] = struct{}{}
 		}
+	}
+
+	// Convert set to slice
+	files := make([]string, 0, len(seen))
+	for file := range seen {
+		files = append(files, file)
 	}
 
 	return files, nil
