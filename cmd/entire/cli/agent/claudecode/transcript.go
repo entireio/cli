@@ -388,18 +388,20 @@ func extractAgentIDFromText(text string) string {
 // It parses the main transcript from startLine, extracts spawned agent IDs,
 // and calculates their token usage from transcripts in subagentsDir.
 func CalculateTotalTokenUsage(transcriptPath string, startLine int, subagentsDir string) (*agent.TokenUsage, error) {
-	// Calculate main transcript usage
-	mainUsage, err := CalculateTokenUsageFromFile(transcriptPath, startLine)
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate main token usage: %w", err)
+	if transcriptPath == "" {
+		return &agent.TokenUsage{}, nil
 	}
 
-	// Parse the transcript to find spawned agents
+	// Parse transcript ONCE
 	transcript, err := parseTranscriptFromLine(transcriptPath, startLine)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse transcript for agent IDs: %w", err)
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
 	}
 
+	// Calculate token usage from parsed transcript
+	mainUsage := CalculateTokenUsage(transcript)
+
+	// Extract spawned agent IDs from the same parsed transcript
 	agentIDs := ExtractSpawnedAgentIDs(transcript)
 
 	// Calculate subagent token usage
