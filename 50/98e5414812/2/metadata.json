@@ -2,22 +2,21 @@
   "checkpoint_id": "5098e5414812",
   "session_id": "ac8a4f1a-1917-46bf-b8c1-0c3bab0fbc16",
   "strategy": "manual-commit",
-  "created_at": "2026-02-04T04:10:51.471892Z",
+  "created_at": "2026-02-04T03:44:04.433195Z",
   "branch": "alex/improve-explain-2",
   "checkpoints_count": 0,
   "files_touched": [
     "docs/plans/2026-02-04-explain-improvements.md"
   ],
   "agent": "Claude Code",
-  "agents": "Claude Code",
   "transcript_identifier_at_start": "39c5e4bd-a5b8-4a48-80ab-6105a5807f95",
   "transcript_lines_at_start": 193,
   "token_usage": {
-    "input_tokens": 188,
-    "cache_creation_tokens": 306186,
-    "cache_read_tokens": 5435213,
-    "output_tokens": 5082,
-    "api_call_count": 63
+    "input_tokens": 186,
+    "cache_creation_tokens": 299127,
+    "cache_read_tokens": 4087361,
+    "output_tokens": 2313,
+    "api_call_count": 53
   },
   "initial_attribution": {
     "calculated_at": "2026-02-04T03:44:04.321613Z",
