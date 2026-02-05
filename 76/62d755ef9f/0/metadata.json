@@ -1,10 +1,10 @@
 {
   "checkpoint_id": "7662d755ef9f",
-  "session_id": "2026-01-21-839b35f7-4dbd-4d93-9772-3c272cc87caa",
+  "session_id": "2026-01-21-cd3a73d3-7f7e-402a-a889-91c5404cd10e",
   "strategy": "manual-commit",
-  "created_at": "2026-01-21T13:40:08.215841+01:00",
+  "created_at": "2026-01-21T13:40:09.339443+01:00",
   "branch": "feat/gemini-cli-agent",
-  "checkpoints_count": 6,
+  "checkpoints_count": 7,
   "files_touched": [
     "ISSUE-orphaned-sessions.md",
     "cmd/entire/cli/agent/geminicli/hooks.go",
@@ -13,14 +13,16 @@
     "cmd/entire/cli/hooks_geminicli_handlers.go",
     "cmd/entire/cli/integration_test/gemini_concurrent_session_test.go",
     "cmd/entire/cli/integration_test/hooks.go",
-    "cmd/entire/cli/integration_test/testenv.go"
+    "cmd/entire/cli/integration_test/testenv.go",
+    "docs/requirements/gemini-cli-agent/review-01.md",
+    "docs/requirements/gemini-cli-agent/review-02.md"
   ],
-  "agent": "Claude Code",
+  "agent": "Gemini CLI",
   "token_usage": {
-    "input_tokens": 4359,
-    "cache_creation_tokens": 679802,
-    "cache_read_tokens": 4590193,
-    "output_tokens": 111,
-    "api_call_count": 49
+    "input_tokens": 38,
+    "cache_creation_tokens": 64170,
+    "cache_read_tokens": 27366,
+    "output_tokens": 8,
+    "api_call_count": 3
   }
 }

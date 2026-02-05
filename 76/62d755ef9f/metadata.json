@@ -2,8 +2,8 @@
   "checkpoint_id": "7662d755ef9f",
   "strategy": "manual-commit",
   "branch": "feat/gemini-cli-agent",
-  "migration_source_commit": "6355853546a2b7f1750ad48a18fcdc55962bd8ee",
-  "checkpoints_count": 6,
+  "migration_source_commit": "3f2754d54cec7ee902721ca1ca23af92edba0b7a",
+  "checkpoints_count": 13,
   "files_touched": [
     "ISSUE-orphaned-sessions.md",
     "cmd/entire/cli/agent/geminicli/hooks.go",
@@ -12,7 +12,9 @@
     "cmd/entire/cli/hooks_geminicli_handlers.go",
     "cmd/entire/cli/integration_test/gemini_concurrent_session_test.go",
     "cmd/entire/cli/integration_test/hooks.go",
-    "cmd/entire/cli/integration_test/testenv.go"
+    "cmd/entire/cli/integration_test/testenv.go",
+    "docs/requirements/gemini-cli-agent/review-01.md",
+    "docs/requirements/gemini-cli-agent/review-02.md"
   ],
   "sessions": [
     {
@@ -21,13 +23,20 @@
       "context": "/76/62d755ef9f/0/context.md",
       "content_hash": "/76/62d755ef9f/0/content_hash.txt",
       "prompt": "/76/62d755ef9f/0/prompt.txt"
+    },
+    {
+      "metadata": "/76/62d755ef9f/2/metadata.json",
+      "transcript": "/76/62d755ef9f/2/full.jsonl",
+      "context": "/76/62d755ef9f/2/context.md",
+      "content_hash": "/76/62d755ef9f/2/content_hash.txt",
+      "prompt": "/76/62d755ef9f/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 4359,
-    "cache_creation_tokens": 679802,
-    "cache_read_tokens": 4590193,
-    "output_tokens": 111,
-    "api_call_count": 49
+    "input_tokens": 4397,
+    "cache_creation_tokens": 743972,
+    "cache_read_tokens": 4617559,
+    "output_tokens": 119,
+    "api_call_count": 52
   }
 }
