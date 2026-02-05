@@ -1,7 +1,7 @@
 {
   "strategy": "manual-commit",
   "enabled": true,
-  "local_dev": true
+  "local_dev": true,
   "output_filter": ["gitleaks-filter"],
   "telemetry": false
 }
