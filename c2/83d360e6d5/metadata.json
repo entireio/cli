@@ -1,0 +1,41 @@
+{
+  "checkpoint_id": "c283d360e6d5",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "71ba699c4d78f27e76a3fc52d41ad2fdf7c18de3",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/transcript.go",
+    "cmd/entire/cli/agent/claudecode/transcript_test.go",
+    "cmd/entire/cli/agent/claudecode/types.go",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/strategy.go",
+    "cmd/entire/cli/transcript.go",
+    "cmd/entire/cli/transcript_test.go",
+    "cmd/entire/cli/types.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c2/83d360e6d5/0/metadata.json",
+      "transcript": "/c2/83d360e6d5/0/full.jsonl",
+      "context": "/c2/83d360e6d5/0/context.md",
+      "content_hash": "/c2/83d360e6d5/0/content_hash.txt",
+      "prompt": "/c2/83d360e6d5/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}
