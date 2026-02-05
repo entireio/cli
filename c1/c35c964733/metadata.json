@@ -2,7 +2,7 @@
   "checkpoint_id": "c1c35c964733",
   "strategy": "manual-commit",
   "branch": "alex/ent-109-text-output-checkpoint-flag",
-  "migration_source_commit": "ca4292ff1d22a5c9646c38150c65f3ee1b0dc15d",
+  "migration_source_commit": "05b1b76d1b3338a24cbc138c74d8697678bdb539",
   "checkpoints_count": 4,
   "files_touched": [
     "cmd/entire/cli/explain.go",
