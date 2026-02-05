@@ -56,3 +56,271 @@ Start by understanding the current project context, then ask questions one at a 
 - **Explore alternatives** - Always propose 2-3 approaches before settling
 - **Incremental validation** - Present design in sections, validate each
 - **Be flexible** - Go back and clarify when something doesn't make sense
+
+---
+
+4, but I'm assuming 2 is part of that solution? we can go back and clean up stuff in a separate task
+
+---
+
+1. from what I've observed Claude (you) take the shortest path from problem -> code to solve, and without bringing in more files you don't necessarily have the context to know what's there already
+
+---
+
+the problem with 2. is that it only applies to helpers, and helpers that are documented. often times we do things in functions which aren't even exposed as helpers!
+
+there's a even harder problem where two code chunks do the same thing functionally but aren't expressed in quite the same way, so not sure if even the heuristic detections will help.
+
+buuuuut let's do what we can...
+
+1. to do this it's an instructions thing, hey? yes if possible
+2. I think this is the weakest option and most work to keep up to date, let's skip
+3. git hooks and agent instructions? yes
+
+---
+
+could we fire off an explore agent before starting work to look for related things?
+
+---
+
+and how would the skill interact with other skills, eg. the superpowers stuff?
+
+---
+
+it feels most appropriate to do it just before the executing-plans....but that relies on that being called first.
+
+maybe the standalone skill first, then we can figure out how to wire it in?
+
+---
+
+4 seems like what I would do manually...
+
+---
+
+4
+
+---
+
+can it block on a high threshold but provide warnings for lower confidence matches?
+
+---
+
+1. - this should show the files involved yeah?
+
+---
+
+2
+
+---
+
+yes
+
+---
+
+yes
+
+---
+
+yes
+
+---
+
+yes
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/go-discover-related
+
+# Go Code Discovery
+
+Search the codebase for related code before implementing new functionality. This helps avoid duplication by surfacing existing utilities, patterns, and similar implementations.
+
+## When to Use
+
+- Before writing a new function or type
+- Before implementing logic that might already exist
+- When unsure if a helper exists for common operations
+
+## Process
+
+### 1. Extract Search Terms
+
+From context (conversation, plan, or explicit args), identify:
+- **Nouns** - entities being operated on (e.g., "checkpoint", "session", "repository")
+- **Verbs** - operations being performed (e.g., "save", "load", "validate", "open")
+- **Patterns** - common code shapes (e.g., "error handling", "file reading")
+
+### 2. Search Using LSP
+
+Use `workspaceSymbol` to find related symbols:
+
+```
+LSP workspaceSymbol for: "Checkpoint"
+LSP workspaceSymbol for: "Save"
+LSP workspaceSymbol for: "Repository"
+```
+
+Look for:
+- Functions with similar names
+- Types that might already model your concept
+- Methods on existing types
+
+### 3. Search Using Grep
+
+Search for code patterns:
+
+```
+Grep for: "OpenRepository" (if working with repos)
+Grep for: "func.*Checkpoint" (functions related to checkpoints)
+Grep for: "err != nil" patterns in similar files
+```
+
+### 4. Check File Proximity
+
+List files in the same package/directory:
+
+```
+Glob for: cmd/entire/cli/strategy/*.go
+```
+
+Scan `common.go`, `helpers.go`, or similar utility files.
+
+### 5. Report Findings
+
+Summarize:
+- **Existing functions** that might be reusable (with file:line)
+- **Similar patterns** already in the codebase
+- **Recommendations** - "consider using X" or "extract to helper"
+
+## Example Output
+
+```
+## Discovery Results for "checkpoint save"
+
+### Related Symbols (LSP)
+- `SaveChanges` in strategy/strategy.go:45 - main save interface method
+- `SaveTaskCheckpoint` in strategy/strategy.go:52 - task-specific save
+- `WriteTemporary` in checkpoint/temporary.go:23 - low-level checkpoint write
+
+### Similar Patterns (Grep)
+- Repository opening pattern in strategy/common.go:34-38
+- Error wrapping pattern used consistently: `fmt.Errorf("...: %w", err)`
+
+### Nearby Utilities
+- strategy/common.go has shared helpers for tree building, metadata extraction
+- checkpoint/store.go wraps git repository operations
+
+### Recommendations
+- Reuse `WriteTemporary` for shadow branch operations
+- Follow error wrapping pattern from common.go
+```
+
+## Key Principle
+
+**Search before you write.** The few minutes spent discovering existing code prevents duplication and maintains consistency.
+
+
+ARGUMENTS: checkpoint save
+
+---
+
+[Request interrupted by user]
+
+---
+
+retry your skill test, I had to restart you
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/go-discover-related
+
+# Go Code Discovery
+
+Search the codebase for related code before implementing new functionality. This helps avoid duplication by surfacing existing utilities, patterns, and similar implementations.
+
+## When to Use
+
+- Before writing a new function or type
+- Before implementing logic that might already exist
+- When unsure if a helper exists for common operations
+
+## Process
+
+### 1. Extract Search Terms
+
+From context (conversation, plan, or explicit args), identify:
+- **Nouns** - entities being operated on (e.g., "checkpoint", "session", "repository")
+- **Verbs** - operations being performed (e.g., "save", "load", "validate", "open")
+- **Patterns** - common code shapes (e.g., "error handling", "file reading")
+
+### 2. Search Using LSP
+
+Use `workspaceSymbol` to find related symbols:
+
+```
+LSP workspaceSymbol for: "Checkpoint"
+LSP workspaceSymbol for: "Save"
+LSP workspaceSymbol for: "Repository"
+```
+
+Look for:
+- Functions with similar names
+- Types that might already model your concept
+- Methods on existing types
+
+### 3. Search Using Grep
+
+Search for code patterns:
+
+```
+Grep for: "OpenRepository" (if working with repos)
+Grep for: "func.*Checkpoint" (functions related to checkpoints)
+Grep for: "err != nil" patterns in similar files
+```
+
+### 4. Check File Proximity
+
+List files in the same package/directory:
+
+```
+Glob for: cmd/entire/cli/strategy/*.go
+```
+
+Scan `common.go`, `helpers.go`, or similar utility files.
+
+### 5. Report Findings
+
+Summarize:
+- **Existing functions** that might be reusable (with file:line)
+- **Similar patterns** already in the codebase
+- **Recommendations** - "consider using X" or "extract to helper"
+
+## Example Output
+
+```
+## Discovery Results for "checkpoint save"
+
+### Related Symbols (LSP)
+- `SaveChanges` in strategy/strategy.go:45 - main save interface method
+- `SaveTaskCheckpoint` in strategy/strategy.go:52 - task-specific save
+- `WriteTemporary` in checkpoint/temporary.go:23 - low-level checkpoint write
+
+### Similar Patterns (Grep)
+- Repository opening pattern in strategy/common.go:34-38
+- Error wrapping pattern used consistently: `fmt.Errorf("...: %w", err)`
+
+### Nearby Utilities
+- strategy/common.go has shared helpers for tree building, metadata extraction
+- checkpoint/store.go wraps git repository operations
+
+### Recommendations
+- Reuse `WriteTemporary` for shadow branch operations
+- Follow error wrapping pattern from common.go
+```
+
+## Key Principle
+
+**Search before you write.** The few minutes spent discovering existing code prevents duplication and maintains consistency.
+
+
+ARGUMENTS: checkpoint save
