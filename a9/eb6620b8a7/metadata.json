@@ -1,0 +1,50 @@
+{
+  "checkpoint_id": "a9eb6620b8a7",
+  "strategy": "manual-commit",
+  "branch": "alex/fix-worktree-shadow-branch-collision",
+  "migration_source_commit": "cd36c581c9de38e269c40915e44ea35b84c94b17",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/last_checkpoint_id_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_untracked_files_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
+    "cmd/entire/cli/integration_test/session_conflict_test.go",
+    "cmd/entire/cli/integration_test/subagent_checkpoints_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/paths/worktree.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_logs.go",
+    "cmd/entire/cli/strategy/manual_commit_reset.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/strategy.go",
+    "docs/plans/2026-02-02-worktree-specific-shadow-branches.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a9/eb6620b8a7/0/metadata.json",
+      "transcript": "/a9/eb6620b8a7/0/full.jsonl",
+      "context": "/a9/eb6620b8a7/0/context.md",
+      "content_hash": "/a9/eb6620b8a7/0/content_hash.txt",
+      "prompt": "/a9/eb6620b8a7/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2202,
+    "cache_creation_tokens": 936476,
+    "cache_read_tokens": 36660657,
+    "output_tokens": 1099,
+    "api_call_count": 314
+  }
+}
