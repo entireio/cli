@@ -1,0 +1,5 @@
+We should add the agent name to any logging
+
+---
+
+can we add a simple tests assuming we have tests for logging?
