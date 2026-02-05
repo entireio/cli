@@ -4,29 +4,43 @@
 
 ### Prompt 1
 
-# Create a plan for a new feature or bug fix
+# Work Plan Execution Command
+
+Execute a work plan efficiently while maintaining quality and finishing features.
 
 ## Introduction
 
-**Note: The current year is 2025.** Use this when dating plans and searching for recent documentation.
+This command takes a work document (plan, specification, or todo file) and executes it systematically. The focus is on **shipping complete features** by understanding requirements quickly, following existing patterns, and maintaining quality throughout.
 
-Transform feature descriptions, bug reports, or improvement ideas into well-structured markdown files issues that follow project conventions and best practices. This command provides flexible detail levels to match your needs.
+## Input Document
 
-## Feature Description
+<input_document> #$ARGUMENTS </input_document>
 
-<feature_description> #read as a input the file posthog-cli-telemetry-implementat...
+## Execution Workflow
+
+### Phase 1: Quick Start...
 
 ### Prompt 2
 
-Have @agent-dhh-rails-reviewer @agent-kieran-rails-reviewer @agent-code-simplicity-reviewer review this plan in parallel.
+Operation stopped by hook: You have another active session with uncommitted changes. Please commit them first and then start a new Claude session. If you continue here, your prompt and resulting changes will not be captured.
 
-
-ARGUMENTS: plans/feat-posthog-telemetry.md
+To resume the active session, close Claude Code and run: claude -r 4e836284-4a0a-44a1-acb3-38c68db78007
 
 ### Prompt 3
 
-I don't care about command duration.
-I don't have users so, user machineID to track usage
-It is a posthog cloud service, not self hosted
-I don't want to track hidden commands usage
+# Work Plan Execution Command
+
+Execute a work plan efficiently while maintaining quality and finishing features.
+
+## Introduction
+
+This command takes a work document (plan, specification, or todo file) and executes it systematically. The focus is on **shipping complete features** by understanding requirements quickly, following existing patterns, and maintaining quality throughout.
+
+## Input Document
+
+<input_document> #$ARGUMENTS </input_document>
+
+## Execution Workflow
+
+### Phase 1: Quick Start...
 
