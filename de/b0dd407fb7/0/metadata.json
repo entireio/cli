@@ -22,5 +22,52 @@
     "cache_read_tokens": 6066756,
     "output_tokens": 661,
     "api_call_count": 67
+  },
+  "summary": {
+    "intent": "Implement AI-powered checkpoint summaries using Claude CLI, replacing heuristic summary extraction with structured summaries containing Intent, Outcome, Learnings, Friction, and OpenItems fields.",
+    "outcome": "Completed the core implementation: added Summary types to checkpoint package, created BuildCondensedTranscript for extracting chronological user/assistant/tool entries, implemented ClaudeCLIGenerator that shells out to claude CLI with JSON output parsing, and wrote comprehensive unit tests. The --generate and --force flags, persistence layer, and display formatting remain to be done.",
+    "learnings": {
+      "repo": [
+        "The CLI uses github.com/spf13/cobra for commands and github.com/charmbracelet/huh for interactive forms",
+        "Transcript parsing uses transcriptLine, userMessage, assistantMessage types in transcript.go with JSON unmarshaling",
+        "The codebase uses interface{} consistently for JSON parsing rather than the newer 'any' alias - maintain this for consistency",
+        "textutil.StripIDEContextTags exists for cleaning IDE context from text content"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/checkpoint/checkpoint.go",
+          "line": 1,
+          "finding": "CommittedMetadata struct is where checkpoint summary data should be stored via a new Summary *Summary field"
+        },
+        {
+          "path": "cmd/entire/cli/transcript.go",
+          "line": 1,
+          "finding": "Contains extractUserPrompts, extractAssistantResponses, extractModifiedFiles helpers that can be leveraged for building condensed transcripts"
+        },
+        {
+          "path": "cmd/entire/cli/summarize_claude.go",
+          "line": 1,
+          "finding": "Claude CLI supports --print for non-interactive output and --output-format json for structured responses"
+        }
+      ],
+      "workflow": [
+        "When implementing AI summary generation, use a configurable SummaryGenerator interface to allow swapping backends later",
+        "For large transcripts, extract condensed representation (prompts + assistant responses + tool actions) rather than sending full transcript to avoid token limits",
+        "Use CommandRunner interface pattern for testability when shelling out to external CLIs"
+      ]
+    },
+    "friction": [
+      "Claude CLI help output required verification to confirm --print and --output-format json flags exist",
+      "Linter flagged interface{} vs any style inconsistency - had to check codebase convention and maintain interface{} for consistency",
+      "Subagent renamed CheckpointSummary to Summary to avoid stutter, requiring coordination to ensure type references were correct"
+    ],
+    "open_items": [
+      "Add --generate and --force flags to explain command (Task 4)",
+      "Implement persistence layer to update summary in existing checkpoint metadata on entire/sessions branch (Task 5)",
+      "Update formatCheckpointOutput() to render summary fields when present (Task 6)",
+      "Add tests for formatCheckpointOutput with and without summary data (Task 8)",
+      "Consider refactoring summarize code to its own package (cmd/entire/cli/summarize/) once transcript types can be shared",
+      "Branch-level summary aggregation (calling claude to aggregate multiple checkpoint summaries) not yet implemented"
+    ]
   }
 }
