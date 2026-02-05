@@ -1,0 +1,36 @@
+{
+  "checkpoint_id": "26dcd5518fea",
+  "strategy": "manual-commit",
+  "branch": "alex/mark-sessions-as-closed",
+  "migration_source_commit": "3b96405a66c72663b219c7d6a6cd42551efdf666",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/hooks.go",
+    "cmd/entire/cli/agent/claudecode/types.go",
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/integration_test/agent_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/session_state_test.go",
+    "docs/plans/2026-02-03-session-end-tracking.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/26/dcd5518fea/0/metadata.json",
+      "transcript": "/26/dcd5518fea/0/full.jsonl",
+      "context": "/26/dcd5518fea/0/context.md",
+      "content_hash": "/26/dcd5518fea/0/content_hash.txt",
+      "prompt": "/26/dcd5518fea/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 212,
+    "cache_creation_tokens": 245647,
+    "cache_read_tokens": 10215274,
+    "output_tokens": 962,
+    "api_call_count": 89
+  }
+}
