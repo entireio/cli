@@ -2,22 +2,22 @@
   "checkpoint_id": "37995ebed6e4",
   "session_id": "2026-01-22-48f428f9-72d8-40b2-9594-953019809473",
   "strategy": "manual-commit",
-  "created_at": "2026-01-22T14:59:19.879798+11:00",
+  "created_at": "2026-01-22T14:38:25.455954+11:00",
   "branch": "gtrrz-victor/goreleaser-release-homebrew-tap",
-  "checkpoints_count": 5,
+  "checkpoints_count": 2,
   "files_touched": [
     ".github/workflows/release.yml",
     ".goreleaser.yaml",
     "cmd/entire/cli/hook_registry.go"
   ],
   "agent": "Claude Code",
-  "transcript_uuid_at_start": "f1cfb24b-7cb4-4603-a4b4-0c15df782a1f",
-  "transcript_lines_at_start": 161,
+  "transcript_uuid_at_start": "a7267d8a-53be-4800-af85-9aa60d43ef4b",
+  "transcript_lines_at_start": 107,
   "token_usage": {
-    "input_tokens": 88,
-    "cache_creation_tokens": 70925,
-    "cache_read_tokens": 425666,
-    "output_tokens": 22,
-    "api_call_count": 10
+    "input_tokens": 264,
+    "cache_creation_tokens": 181632,
+    "cache_read_tokens": 1438733,
+    "output_tokens": 68,
+    "api_call_count": 32
   }
 }
