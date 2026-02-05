@@ -1,0 +1,24 @@
+{
+  "checkpoint_id": "4ab2beb03279",
+  "strategy": "auto-commit",
+  "branch": "fix/gemini-savecontext-missing-fields",
+  "migration_source_commit": "53b85f6559dc7d8754a4ff91905fb6d414399e20",
+  "checkpoints_count": 0,
+  "files_touched": [],
+  "sessions": [
+    {
+      "metadata": "/4a/b2beb03279/0/metadata.json",
+      "transcript": "/4a/b2beb03279/0/full.jsonl",
+      "context": "/4a/b2beb03279/0/context.md",
+      "content_hash": "/4a/b2beb03279/0/content_hash.txt",
+      "prompt": "/4a/b2beb03279/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}
