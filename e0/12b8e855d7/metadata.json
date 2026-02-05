@@ -1,9 +1,9 @@
 {
   "checkpoint_id": "e012b8e855d7",
   "strategy": "manual-commit",
-  "branch": "soph/chunking",
-  "migration_source_commit": "edc8b2e0eb9a51f7f3f153ed358d680d0b38ad5c",
-  "checkpoints_count": 2,
+  "branch": "",
+  "migration_source_commit": "e4335e8405506c0bd5d553e26b8549c7d68bbdaf",
+  "checkpoints_count": 5,
   "files_touched": [
     "cmd/entire/cli/agent/agent.go",
     "cmd/entire/cli/agent/chunking.go",
@@ -24,9 +24,11 @@
     "cmd/entire/cli/strategy/manual_commit_hooks.go",
     "cmd/entire/cli/strategy/manual_commit_logs.go",
     "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
     "cmd/entire/cli/strategy/session.go",
     "cmd/entire/cli/strategy/session_test.go",
-    "cmd/entire/cli/strategy/strategy.go"
+    "cmd/entire/cli/strategy/strategy.go",
+    "docs/architecture/claude-hooks-integration.md"
   ],
   "sessions": [
     {
@@ -35,13 +37,20 @@
       "context": "/e0/12b8e855d7/0/context.md",
       "content_hash": "/e0/12b8e855d7/0/content_hash.txt",
       "prompt": "/e0/12b8e855d7/0/prompt.txt"
+    },
+    {
+      "metadata": "/e0/12b8e855d7/2/metadata.json",
+      "transcript": "/e0/12b8e855d7/2/full.jsonl",
+      "context": "/e0/12b8e855d7/2/context.md",
+      "content_hash": "/e0/12b8e855d7/2/content_hash.txt",
+      "prompt": "/e0/12b8e855d7/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 2764,
-    "cache_creation_tokens": 751542,
-    "cache_read_tokens": 36716399,
-    "output_tokens": 79244,
-    "api_call_count": 341
+    "input_tokens": 3064,
+    "cache_creation_tokens": 840986,
+    "cache_read_tokens": 38697234,
+    "output_tokens": 79357,
+    "api_call_count": 380
   }
 }
