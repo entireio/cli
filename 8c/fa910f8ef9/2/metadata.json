@@ -1,9 +1,9 @@
 {
   "checkpoint_id": "8cfa910f8ef9",
-  "session_id": "2026-01-15-b2273d7d-fb20-41f7-93fb-265486aae975",
+  "session_id": "2026-01-15-1664f311-d1df-4ba1-98ff-1d7be8252c72",
   "strategy": "manual-commit",
-  "created_at": "2026-01-20T14:28:42.890834+11:00",
-  "checkpoints_count": 2,
+  "created_at": "2026-01-20T14:28:42.830094+11:00",
+  "checkpoints_count": 1,
   "files_touched": [
     ".claude/.gitignore",
     ".claude/agents/dev.md",
@@ -23,7 +23,6 @@
     "cmd/entire/cli/integration_test/testenv.go",
     "cmd/entire/cli/setup.go",
     "cmd/entire/cli/setup_test.go",
-    "cmd/entire/cli/telemetry/telemetry.go",
     "plans/feat-disable-multisession-warning-option.md"
   ]
 }
