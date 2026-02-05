@@ -1,0 +1,55 @@
+{
+  "checkpoint_id": "d907fa78c5e1",
+  "strategy": "manual-commit",
+  "branch": "alex/extract-git-package",
+  "migration_source_commit": "183e77b92d67129b537946a1f6d54b3a112cf5d4",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/transcript.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/git_operations.go",
+    "cmd/entire/cli/git_operations_test.go",
+    "cmd/entire/cli/gitutil/operations.go",
+    "cmd/entire/cli/gitutil/operations_test.go",
+    "cmd/entire/cli/gitutil/repository.go",
+    "cmd/entire/cli/gitutil/repository_test.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/paths/paths.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/resume_test.go",
+    "cmd/entire/cli/rewind.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/hooks.go",
+    "cmd/entire/cli/strategy/hooks_test.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_reset.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/push_common.go",
+    "docs/plans/2026-02-04-stop-hook-performance.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d9/07fa78c5e1/0/metadata.json",
+      "transcript": "/d9/07fa78c5e1/0/full.jsonl",
+      "context": "/d9/07fa78c5e1/0/context.md",
+      "content_hash": "/d9/07fa78c5e1/0/content_hash.txt",
+      "prompt": "/d9/07fa78c5e1/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 9286,
+    "cache_creation_tokens": 2279368,
+    "cache_read_tokens": 69976167,
+    "output_tokens": 58540,
+    "api_call_count": 630
+  }
+}
