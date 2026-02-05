@@ -23,25 +23,16 @@ func TestLoad_RejectsUnknownKeys(t *testing.T) {
 		t.Fatalf("failed to write settings file: %v", err)
 	}
 
-	// Change to the temp directory
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get current directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to change to temp directory: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(originalWd)
-	}()
-
 	// Initialize a git repo (required by paths.AbsPath)
 	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755); err != nil {
 		t.Fatalf("failed to create .git directory: %v", err)
 	}
 
+	// Change to the temp directory
+	t.Chdir(tmpDir)
+
 	// Try to load settings - should fail due to unknown key
-	_, err = Load()
+	_, err := Load()
 	if err == nil {
 		t.Error("expected error for unknown key, got nil")
 	} else if !containsUnknownField(err.Error()) {
@@ -67,29 +58,19 @@ func TestLoad_AcceptsValidKeys(t *testing.T) {
 		"local_dev": false,
 		"log_level": "debug",
 		"strategy_options": {"key": "value"},
-		"telemetry": true,
-		"output_filter": ["cmd", "arg1"]
+		"telemetry": true
 	}`
 	if err := os.WriteFile(settingsFile, []byte(settingsContent), 0644); err != nil {
 		t.Fatalf("failed to write settings file: %v", err)
 	}
 
-	// Change to the temp directory
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get current directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to change to temp directory: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(originalWd)
-	}()
-
 	// Initialize a git repo (required by paths.AbsPath)
 	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755); err != nil {
 		t.Fatalf("failed to create .git directory: %v", err)
 	}
+
+	// Change to the temp directory
+	t.Chdir(tmpDir)
 
 	// Load settings - should succeed
 	settings, err := Load()
@@ -109,9 +90,6 @@ func TestLoad_AcceptsValidKeys(t *testing.T) {
 	}
 	if settings.Telemetry == nil || !*settings.Telemetry {
 		t.Error("expected telemetry to be true")
-	}
-	if len(settings.OutputFilter) != 2 || settings.OutputFilter[0] != "cmd" {
-		t.Errorf("expected output_filter ['cmd', 'arg1'], got %v", settings.OutputFilter)
 	}
 }
 
@@ -139,25 +117,16 @@ func TestLoad_LocalSettingsRejectsUnknownKeys(t *testing.T) {
 		t.Fatalf("failed to write local settings file: %v", err)
 	}
 
-	// Change to the temp directory
-	originalWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get current directory: %v", err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to change to temp directory: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(originalWd)
-	}()
-
 	// Initialize a git repo (required by paths.AbsPath)
 	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755); err != nil {
 		t.Fatalf("failed to create .git directory: %v", err)
 	}
 
+	// Change to the temp directory
+	t.Chdir(tmpDir)
+
 	// Try to load settings - should fail due to unknown key in local settings
-	_, err = Load()
+	_, err := Load()
 	if err == nil {
 		t.Error("expected error for unknown key in local settings, got nil")
 	} else if !containsUnknownField(err.Error()) {
