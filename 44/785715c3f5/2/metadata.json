@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "44785715c3f5",
+  "session_id": "2026-01-21-0cf3db51-1c73-43bb-8d05-dc02739514a5",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-21T20:46:48.297736+11:00",
+  "branch": "alex/ent-112-checkpoint-id-reuse-bug",
+  "checkpoints_count": 29,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/integration_test/explain_test.go",
+    "cmd/entire/cli/integration_test/last_checkpoint_id_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "2b9e5ab4-eb38-4595-978e-a82395fe88a2",
+  "transcript_lines_at_start": 990,
+  "token_usage": {
+    "input_tokens": 1331,
+    "cache_creation_tokens": 795334,
+    "cache_read_tokens": 16733437,
+    "output_tokens": 430,
+    "api_call_count": 149
+  }
+}
