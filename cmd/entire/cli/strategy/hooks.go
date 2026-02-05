@@ -1,15 +1,13 @@
 package strategy
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 )
 
@@ -22,38 +20,9 @@ const (
 // gitHookNames are the git hooks managed by Entire CLI
 var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "pre-push"}
 
-// GetGitDir returns the actual git directory path by delegating to git itself.
-// This handles both regular repositories and worktrees, and inherits git's
-// security validation for gitdir references.
-func GetGitDir() (string, error) {
-	return getGitDirInPath(".")
-}
-
-// getGitDirInPath returns the git directory for a repository at the given path.
-// It delegates to `git rev-parse --git-dir` to leverage git's own validation.
-func getGitDirInPath(dir string) (string, error) {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
-	cmd.Dir = dir
-	output, err := cmd.Output()
-	if err != nil {
-		return "", errors.New("not a git repository")
-	}
-
-	gitDir := strings.TrimSpace(string(output))
-
-	// git rev-parse --git-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(dir, gitDir)
-	}
-
-	return filepath.Clean(gitDir), nil
-}
-
 // IsGitHookInstalled checks if all generic Entire CLI hooks are installed.
 func IsGitHookInstalled() bool {
-	gitDir, err := GetGitDir()
+	gitDir, err := gitutil.GetGitDirInPath(".")
 	if err != nil {
 		return false
 	}
@@ -75,9 +44,9 @@ func IsGitHookInstalled() bool {
 // If silent is true, no output is printed.
 // Returns the number of hooks that were installed (0 if all already up to date).
 func InstallGitHook(silent bool) (int, error) {
-	gitDir, err := GetGitDir()
+	gitDir, err := gitutil.GetGitDirInPath(".")
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to get git dir: %w", err)
 	}
 
 	hooksDir := filepath.Join(gitDir, "hooks")
@@ -187,9 +156,9 @@ func writeHookFile(path, content string) (bool, error) {
 // RemoveGitHook removes all Entire CLI git hooks from the repository.
 // Returns the number of hooks removed.
 func RemoveGitHook() (int, error) {
-	gitDir, err := GetGitDir()
+	gitDir, err := gitutil.GetGitDirInPath(".")
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to get git dir: %w", err)
 	}
 
 	removed := 0

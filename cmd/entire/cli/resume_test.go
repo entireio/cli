@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/strategy"
@@ -116,22 +117,22 @@ func TestBranchExistsLocally(t *testing.T) {
 	setupResumeTestRepo(t, tmpDir, true)
 
 	t.Run("returns true for existing branch", func(t *testing.T) {
-		exists, err := BranchExistsLocally("feature")
+		exists, err := gitutil.BranchExistsLocally("feature")
 		if err != nil {
-			t.Fatalf("BranchExistsLocally() error = %v", err)
+			t.Fatalf("gitutil.BranchExistsLocally() error = %v", err)
 		}
 		if !exists {
-			t.Error("BranchExistsLocally() = false, want true for existing branch")
+			t.Error("gitutil.BranchExistsLocally() = false, want true for existing branch")
 		}
 	})
 
 	t.Run("returns false for nonexistent branch", func(t *testing.T) {
-		exists, err := BranchExistsLocally("nonexistent")
+		exists, err := gitutil.BranchExistsLocally("nonexistent")
 		if err != nil {
-			t.Fatalf("BranchExistsLocally() error = %v", err)
+			t.Fatalf("gitutil.BranchExistsLocally() error = %v", err)
 		}
 		if exists {
-			t.Error("BranchExistsLocally() = true, want false for nonexistent branch")
+			t.Error("gitutil.BranchExistsLocally() = true, want false for nonexistent branch")
 		}
 	})
 }
@@ -143,25 +144,25 @@ func TestCheckoutBranch(t *testing.T) {
 	setupResumeTestRepo(t, tmpDir, true)
 
 	t.Run("successfully checks out existing branch", func(t *testing.T) {
-		err := CheckoutBranch("feature")
+		err := gitutil.CheckoutBranch("feature")
 		if err != nil {
-			t.Fatalf("CheckoutBranch() error = %v", err)
+			t.Fatalf("gitutil.CheckoutBranch() error = %v", err)
 		}
 
 		// Verify we're on the feature branch
-		branch, err := GetCurrentBranch()
+		branch, err := gitutil.GetCurrentBranch()
 		if err != nil {
-			t.Fatalf("GetCurrentBranch() error = %v", err)
+			t.Fatalf("gitutil.GetCurrentBranch() error = %v", err)
 		}
 		if branch != "feature" {
-			t.Errorf("After CheckoutBranch(), current branch = %q, want %q", branch, "feature")
+			t.Errorf("After gitutil.CheckoutBranch(), current branch = %q, want %q", branch, "feature")
 		}
 	})
 
 	t.Run("returns error for nonexistent branch", func(t *testing.T) {
-		err := CheckoutBranch("nonexistent")
+		err := gitutil.CheckoutBranch("nonexistent")
 		if err == nil {
-			t.Error("CheckoutBranch() expected error for nonexistent branch, got nil")
+			t.Error("gitutil.CheckoutBranch() expected error for nonexistent branch, got nil")
 		}
 	})
 }

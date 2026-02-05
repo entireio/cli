@@ -53,7 +53,6 @@ func HashWorktreeID(worktreeID string) string {
 // If the new tree hash matches the last checkpoint's tree hash, the checkpoint
 // is skipped to avoid duplicate commits (deduplication).
 func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOptions) (WriteTemporaryResult, error) {
-
 	// Validate base commit - required for shadow branch naming
 	if opts.BaseCommit == "" {
 		return WriteTemporaryResult{}, errors.New("BaseCommit is required for temporary checkpoint")

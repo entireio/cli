@@ -14,6 +14,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/agent/claudecode"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
@@ -89,7 +90,7 @@ func captureInitialState() error {
 // commitWithMetadata commits the session changes with metadata.
 func commitWithMetadata() error {
 	// Skip on default branch for strategies that don't allow it
-	if skip, branchName := ShouldSkipOnDefaultBranchForStrategy(); skip {
+	if skip, branchName := gitutil.ShouldSkipOnDefaultBranchForStrategy(GetStrategy().AllowsMainBranch()); skip {
 		fmt.Fprintf(os.Stderr, "Entire: skipping on branch '%s' - create a feature branch to use Entire tracking\n", branchName)
 		return nil // Don't fail the hook, just skip
 	}
@@ -266,7 +267,7 @@ func commitWithMetadata() error {
 	fmt.Fprintf(os.Stderr, "Created context file: %s\n", sessionDir+"/"+paths.ContextFileName)
 
 	// Get git author from local/global config
-	author, err := GetGitAuthor()
+	author, err := gitutil.GetGitAuthor()
 	if err != nil {
 		return fmt.Errorf("failed to get git author: %w", err)
 	}
@@ -392,7 +393,7 @@ func handleClaudeCodePostTodo() error {
 	}
 
 	// Skip on default branch to avoid polluting main/master history
-	if skip, branchName := ShouldSkipOnDefaultBranch(); skip {
+	if skip, branchName := gitutil.ShouldSkipOnDefaultBranch(); skip {
 		fmt.Fprintf(os.Stderr, "Entire: skipping incremental checkpoint on branch '%s'\n", branchName)
 		return nil
 	}
@@ -411,7 +412,7 @@ func handleClaudeCodePostTodo() error {
 	}
 
 	// Get git author
-	author, err := GetGitAuthor()
+	author, err := gitutil.GetGitAuthor()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to get git author: %v\n", err)
 		return nil
@@ -489,7 +490,7 @@ func handleClaudeCodePostTodo() error {
 // handleClaudeCodePreTask handles the PreToolUse[Task] hook
 func handleClaudeCodePreTask() error {
 	// Skip on default branch for strategies that don't allow it
-	if skip, branchName := ShouldSkipOnDefaultBranchForStrategy(); skip {
+	if skip, branchName := gitutil.ShouldSkipOnDefaultBranchForStrategy(GetStrategy().AllowsMainBranch()); skip {
 		fmt.Fprintf(os.Stderr, "Entire: skipping on branch '%s' - create a feature branch to use Entire tracking\n", branchName)
 		return nil // Don't fail the hook, just skip
 	}
@@ -531,7 +532,7 @@ func handleClaudeCodePreTask() error {
 // handleClaudeCodePostTask handles the PostToolUse[Task] hook
 func handleClaudeCodePostTask() error {
 	// Skip on default branch for strategies that don't allow it
-	if skip, branchName := ShouldSkipOnDefaultBranchForStrategy(); skip {
+	if skip, branchName := gitutil.ShouldSkipOnDefaultBranchForStrategy(GetStrategy().AllowsMainBranch()); skip {
 		fmt.Fprintf(os.Stderr, "Entire: skipping on branch '%s' - create a feature branch to use Entire tracking\n", branchName)
 		return nil // Don't fail the hook, just skip
 	}
@@ -627,7 +628,7 @@ func handleClaudeCodePostTask() error {
 	checkpointUUID, _ := FindCheckpointUUID(transcript, input.ToolUseID)
 
 	// Get git author
-	author, err := GetGitAuthor()
+	author, err := gitutil.GetGitAuthor()
 	if err != nil {
 		return fmt.Errorf("failed to get git author: %w", err)
 	}

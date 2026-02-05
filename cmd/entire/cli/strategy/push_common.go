@@ -1,16 +1,13 @@
 package strategy
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"strings"
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v5"
@@ -30,7 +27,7 @@ func pushSessionsBranchCommon(remote, branchName string) error {
 		return nil
 	}
 
-	repo, err := OpenRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
@@ -156,39 +153,18 @@ func doPushSessionsBranch(remote, branchName string) error {
 
 // tryPushSessionsCommon attempts to push the sessions branch.
 func tryPushSessionsCommon(remote, branchName string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	// Use --no-verify to prevent recursive hook calls
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", remote, branchName)
-	cmd.Stdin = nil // Disconnect stdin to prevent hanging in hook context
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Check if it's a non-fast-forward error (we can try to recover)
-		if strings.Contains(string(output), "non-fast-forward") ||
-			strings.Contains(string(output), "rejected") {
-			return errors.New("non-fast-forward")
-		}
-		return fmt.Errorf("push failed: %s", output)
-	}
-	return nil
+	return gitutil.Push(remote, branchName) //nolint:wrapcheck // Push errors logged or ignored by caller
 }
 
 // fetchAndMergeSessionsCommon fetches remote sessions and merges into local using go-git.
 // Since session logs are append-only (unique cond-* directories), we just combine trees.
 func fetchAndMergeSessionsCommon(remote, branchName string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
 	// Use git CLI for fetch (go-git's fetch can be tricky with auth)
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", remote, branchName)
-	fetchCmd.Stdin = nil
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("fetch failed: %s", output)
+	if err := gitutil.FetchFromRemote(remote, branchName); err != nil {
+		return fmt.Errorf("fetch failed: %w", err)
 	}
 
-	repo, err := OpenRepository()
+	repo, err := gitutil.OpenRepository()
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
@@ -256,7 +232,7 @@ func fetchAndMergeSessionsCommon(remote, branchName string) error {
 
 // createMergeCommitCommon creates a merge commit with multiple parents.
 func createMergeCommitCommon(repo *git.Repository, treeHash plumbing.Hash, parents []plumbing.Hash, message string) (plumbing.Hash, error) {
-	authorName, authorEmail := GetGitAuthorFromRepo(repo)
+	authorName, authorEmail := gitutil.GetGitAuthorFromRepo(repo)
 	now := time.Now()
 	sig := object.Signature{
 		Name:  authorName,

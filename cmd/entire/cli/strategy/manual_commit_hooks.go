@@ -13,6 +13,7 @@ import (
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/logging"
 	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/stringutil"
@@ -148,7 +149,7 @@ func stripCheckpointTrailer(message string) string {
 //   - revert: .git/REVERT_HEAD file
 func isGitSequenceOperation() bool {
 	// Get git directory (handles worktrees and relative paths correctly)
-	gitDir, err := GetGitDir()
+	gitDir, err := gitutil.GetGitDirInPath(".")
 	if err != nil {
 		return false // Can't determine, assume not in sequence operation
 	}
@@ -213,7 +214,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(commitMsgFile string, source str
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
 
-	worktreePath, err := GetWorktreePath()
+	worktreePath, err := gitutil.GetWorktreePath()
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
@@ -427,7 +428,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		return nil
 	}
 
-	worktreePath, err := GetWorktreePath()
+	worktreePath, err := gitutil.GetWorktreePath()
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}

@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/agent"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+	"entire.io/cli/cmd/entire/cli/gitutil"
 	"entire.io/cli/cmd/entire/cli/jsonutil"
 	"entire.io/cli/cmd/entire/cli/validation"
 )
@@ -124,7 +124,7 @@ type StateStore struct {
 // NewStateStore creates a new state store.
 // Uses the git common dir to store session state (shared across worktrees).
 func NewStateStore() (*StateStore, error) {
-	commonDir, err := getGitCommonDir()
+	commonDir, err := gitutil.GetGitCommonDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get git common dir: %w", err)
 	}
@@ -298,40 +298,6 @@ func (s *StateStore) stateFilePath(sessionID string) string {
 	return filepath.Join(s.stateDir, sessionID+".json")
 }
 
-// getGitCommonDir returns the path to the shared git directory.
-// In a regular checkout, this is .git/
-// In a worktree, this is the main repo's .git/ (not .git/worktrees/<name>/)
-func getGitCommonDir() (string, error) {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
-	cmd.Dir = "."
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get git common dir: %w", err)
-	}
-
-	commonDir := strings.TrimSpace(string(output))
-
-	// git rev-parse --git-common-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(".", commonDir)
-	}
-
-	return filepath.Clean(commonDir), nil
-}
-
-// GetWorktreePath returns the absolute path to the current worktree root.
-func GetWorktreePath() (string, error) {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get worktree path: %w", err)
-	}
-	return strings.TrimSpace(string(output)), nil
-}
-
 // FindLegacyEntireSessionID checks for existing session state files with a legacy date-prefixed format.
 // Takes an agent session ID and returns the corresponding entire session ID if found
 // (e.g., "2026-01-20-abc123" for agent ID "abc123"), or empty string if no legacy session exists.
@@ -348,7 +314,7 @@ func FindLegacyEntireSessionID(agentSessionID string) string {
 		return ""
 	}
 
-	commonDir, err := getGitCommonDir()
+	commonDir, err := gitutil.GetGitCommonDir()
 	if err != nil {
 		return ""
 	}
