@@ -2,7 +2,7 @@
   "checkpoint_id": "deb0dd407fb7",
   "strategy": "manual-commit",
   "branch": "alex/ent-108-add-ai-summaries",
-  "migration_source_commit": "c424929ba7919e84559dec5ad46eef875502a7f2",
+  "migration_source_commit": "482760677241ada1caa4213534e9920d3d3a43f2",
   "checkpoints_count": 3,
   "files_touched": [
     "cmd/entire/cli/checkpoint/checkpoint.go",
