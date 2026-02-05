@@ -919,18 +919,9 @@ func getBranchCheckpoints(repo *git.Repository, limit int) ([]strategy.RewindPoi
 			ToolUseID:        cpInfo.ToolUseID,
 			Agent:            cpInfo.Agent,
 		}
-		// Read session prompt from metadata branch (best-effort)
-		result, _ := store.ReadCommitted(context.Background(), cpID) //nolint:errcheck  // Best-effort
-		if result != nil {
-			// Scope the transcript to this checkpoint's portion
-			// If TranscriptLinesAtStart > 0, we slice the transcript to only include
-			// lines from that point onwards (excluding earlier checkpoint content)
-			scopedTranscript := scopeTranscriptForCheckpoint(result.Transcript, result.Metadata.TranscriptLinesAtStart)
-			// Extract prompts from the scoped transcript (not the full session's prompts)
-			scopedPrompts := extractPromptsFromTranscript(scopedTranscript)
-			if len(scopedPrompts) > 0 && scopedPrompts[0] != "" {
-				point.SessionPrompt = scopedPrompts[0]
-			}
+		// Read first prompt from prompt.txt (lightweight - doesn't load full transcript)
+		if firstPrompt := store.ReadFirstPrompt(context.Background(), cpID); firstPrompt != "" {
+			point.SessionPrompt = firstPrompt
 		}
 
 		points = append(points, point)
