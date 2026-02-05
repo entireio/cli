@@ -1,0 +1,62 @@
+I want to invert that flag logic. Now it is no-telemetry, by default false. I want to be called just telemetry and if true means telemetry enable, by default should be true otherwise the user specify a different value.
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# Plan: Invert Telemetry Flag Logic
+
+## Goal
+Change `--no-telemetry` (default: `false`) to `--telemetry` (default: `true`).
+
+When `--telemetry=false` is passed, telemetry is disabled. When omitted or `--telemetry=true`, telemetry is enabled.
+
+## Files to Modify
+
+### 1. `cmd/entire/cli/setup.go`
+
+**Changes:**
+- Rename variable `noTelemetry` → `telemetry`
+- Change flag definition from:
+  ```go
+  cmd.Flags().BoolVar(&noTelemetry, "no-telemetry", false, "Disable anonymous usage analytics")
+  ```
+  to:
+  ```go
+  cmd.Flags().BoolVar(&telemetry, "telemetry", true, "Enable anonymous usage analytics")
+  ```
+- Update all function calls passing `noTelemetry` to pass `telemetry` instead
+- Invert the logic in places that check the flag:
+  - Line ~199: `if noTelemetry || os.Getenv(...)` → `if !telemetry || os.Getenv(...)`
+  - Line ~635: Same pattern
+  - Line ~939 (`promptTelemetryConsent`): `if noTelemetryFlag` → `if !telemetryFlag`
+
+**Functions to update signatures:**
+- `setupAgentHooksNonInteractive` (line ~72)
+- `runEnableWithStrategy` (line ~76)
+- `runEnableInteractive` (line ~78)
+- `promptTelemetryConsent` (line ~337)
+
+## Logic Summary
+
+| Old | New |
+|-----|-----|
+| `--no-telemetry` passed → telemetry disabled | `--telemetry=false` passed → telemetry disabled |
+| `--no-telemetry` omitted → prompt/default | `--telemetry` omitted → enabled by default |
+| `noTelemetry == true` → disable | `telemetry == false` → disable |
+
+## Verification
+
+1. Run `mise run fmt && mise run lint` to ensure code is properly formatted
+2. Run `mise run test` to verify existing tests pass
+3. Manual verification:
+   - `entire enable --telemetry=false` should disable telemetry
+   - `entire enable` (no flag) should enable telemetry by default
+   - `entire enable --telemetry` should enable telemetry
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-cli/e1bc91d1-2731-4b12-bf00-44f4dcddffd1.jsonl
