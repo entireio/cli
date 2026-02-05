@@ -1,0 +1,22 @@
+We should add the agent name to any logging
+
+---
+
+can we add a simple tests assuming we have tests for logging?
+
+---
+
+I can't see any usage in our code of logging.WithAgent so, means that we are not really logging the agent any where.  
+Tell me where we should add the agent into context.
+
+---
+
+Implement 1,2 and 3.
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+how can we know which agent is active ?
