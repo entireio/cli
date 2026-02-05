@@ -143,6 +143,32 @@ func TestRunFilter_MultilineContent(t *testing.T) {
 	}
 }
 
+func TestRunFilter_EchoFoo_ReplacesContent(t *testing.T) {
+	// Test that ["echo", "foo"] completely replaces input with "foo\n"
+	// This verifies the filter command's stdout becomes the output,
+	// regardless of what was passed as input
+	content := []byte("this is sensitive data with api_key=sk-12345 that should be completely replaced")
+
+	result, err := runFilter(context.Background(), content, []string{"echo", "foo"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// echo adds a newline
+	expected := []byte("foo\n")
+	if !bytes.Equal(result, expected) {
+		t.Errorf("expected %q, got %q", expected, result)
+	}
+
+	// Verify the original sensitive content is NOT in the output
+	if bytes.Contains(result, []byte("api_key")) {
+		t.Error("filtered output should not contain original sensitive content")
+	}
+	if bytes.Contains(result, []byte("sk-12345")) {
+		t.Error("filtered output should not contain original secret")
+	}
+}
+
 func TestRunFilter_ScriptFilter(t *testing.T) {
 	// Create a temporary script that acts as a filter
 	tmpDir := t.TempDir()
