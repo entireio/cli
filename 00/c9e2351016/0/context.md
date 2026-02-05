@@ -4,40 +4,30 @@
 
 ### Prompt 1
 
-[Request interrupted by user for tool use]
+fix tests
 
 ### Prompt 2
 
-Implement the following plan:
+Operation stopped by hook: Another session is active: "[Request interrupted by user for tool use]"
 
-# Implementation Plan: `entire reset` Command
+You can continue here, but checkpoints from both sessions will be interleaved.
 
-## Overview
+To resume the other session instead, exit Claude and run: claude -r 0a93878f-dc30-4a5d-882f-3cd81cd3d499
 
-Add a new top-level command `entire reset` that deletes the shadow branch and all session state files for the current base commit (HEAD).
+To suppress this warning in future sessions, run:
+  entire enable --disable-multisession-warning
 
-## Requirements
-
-The command should:
-1. Get the current HEAD commit SHA
-2. Delete the shadow branch `entire/<commit-hash[:7]>` if it exists
-3. Delete all `.git/entire-sessions/*.json` files where `base_commit` matches the HEAD commit
-4. Support `--force` / `-f` flag to ...
+Press the up arrow key to get your prompt back.
 
 ### Prompt 3
 
-it does not clear the sessions created inside .git, manual_commit_reset just checks if there are any shadow branch. Have in mind that we can have sessions at .git/entire-sessions and no shadow branches
+fix tests
 
 ### Prompt 4
 
-[Request interrupted by user]
+[Request interrupted by user for tool use]
 
 ### Prompt 5
 
-All test cases use the --force flag, which bypasses the interactive confirmation prompt. There's no test coverage for the interactive confirmation path (lines 52-83 in manual_commit_reset.go) where the user is prompted to confirm the deletion. Consider adding a test that verifies the confirmation prompt works correctly and that canceling the operation leaves the shadow branch and sessions intact.
-
-### Prompt 6
-
-eval this feedback:
-All test cases use the --force flag, which bypasses the interactive confirmation prompt. There's no test coverage for the interactive confirmation path (lines 52-83 in manual_commit_reset.go) where the user is prompted to confirm the deletion. Consider adding a test that verifies the confirmation prompt works correctly and that canceling the operation leaves the shadow branch and sessions intact.
+fix the test, the code is right
 
