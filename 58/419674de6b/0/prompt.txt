@@ -1,0 +1,17 @@
+Right now we have a pre-push hook that would ask you if you want to push the `entire/sessions` branch. We think it's a better idea to default to "yes" in this case and only allow an option for enable / disable to skip it. Can you suggest how to implement this?
+
+---
+
+Yes, do B
+
+---
+
+I'd like to add an option `--skip-push-sessions` to enable (would instead of "on" set it to off).
+
+---
+
+newSetupAgentHooksCmd() <- I wonder why we even still have that command
+
+---
+
+yes
