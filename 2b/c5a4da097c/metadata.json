@@ -2,7 +2,7 @@
   "checkpoint_id": "2bc5a4da097c",
   "strategy": "manual-commit",
   "branch": "alex/fix-worktree-shadow-branch-collision",
-  "migration_source_commit": "13448df4566e22e70f1820d145436cd107511e5b",
+  "migration_source_commit": "c3ee3963fa11aab028994ecd9312c17bffdcf0a6",
   "checkpoints_count": 0,
   "files_touched": [
     "cmd/entire/cli/paths/worktree.go",
