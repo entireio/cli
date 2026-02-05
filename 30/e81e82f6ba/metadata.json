@@ -2,9 +2,12 @@
   "checkpoint_id": "30e81e82f6ba",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "717ef39b5d37c346381267c78eb1bb5663b2b601",
+  "migration_source_commit": "eec99c380dc8a776f025b32365ddc80c5879854a",
   "checkpoints_count": 1,
   "files_touched": [
+    "cmd/entire/cli/telemetry/telemetry.go",
+    "cmd/entire/cli/telemetry/telemetry_test.go",
+    "cmd/entire/main.go",
     "plans/feat-posthog-telemetry.md"
   ],
   "sessions": [
