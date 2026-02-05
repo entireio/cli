@@ -1,0 +1,189 @@
+Implement the PostHog async analytics solution following POSTHOG_ASYNC_PLAN.md
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# PostHog Async Analytics Implementation Plan
+
+## Overview
+
+Implement detached subprocess approach for PostHog analytics to eliminate ~1 second latency on CLI commands (especially from Australia to EU endpoint).
+
+## Architecture
+
+```
+CLI Command Execution
+        │
+        └── PersistentPostRun
+                │
+                └── TrackCommandDetached()
+                        │
+                        ├── Serialize event to JSON
+                        ├── Spawn detached subprocess (same binary)
+                        └── Exit immediately (0ms latency)
+
+                        Detached Subprocess (__send_analytics)
+                                │
+                                ├── Parse JSON payload
+                                ├── Create PostHog client (no timeout rush)
+                                ├── Enqueue event
+                                └── client.Close() (blocks, but detached)
+```
+
+## Files to Create
+
+### 1. `cmd/entire/cli/telemetry/detached.go`
+
+Platform-agnostic event handling:
+- `EventPayload` struct for JSON serialization (event, distinct_id, properties, timestamp, api_key, endpoint)
+- `TrackCommandDetached()` - builds payload, spawns subprocess (non-blocking)
+- `SendEvent()` - processes payload in subprocess, creates PostHog client and sends
+- `debugLog()` - logs to stderr when `ANALYTICS_DEBUG=1`
+
+### 2. `cmd/entire/cli/telemetry/detached_unix.go`
+
+Unix-specific process detachment (`//go:build unix`):
+- `spawnDetachedAnalytics()` - uses `syscall.SysProcAttr{Setpgid: true}` for process group detachment
+- Spawns `os.Executable() __send_analytics <payload-json>`
+- Sets `cmd.Dir = "/"` to avoid holding working directory
+- Inherits environment for any needed vars
+
+### 3. `cmd/entire/cli/telemetry/detached_windows.go`
+
+Windows fallback (`//go:build windows`):
+- `spawnDetachedAnalytics()` - falls back to synchronous `SendEvent()` call
+- Windows process detachment requires different handling; sync is acceptable with existing fast timeouts
+
+### 4. `cmd/entire/cli/telemetry/detached_test.go`
+
+Tests:
+- Skip hidden commands
+- Skip nil command
+- EventPayload JSON serialization round-trip
+- Respects `ENTIRE_TELEMETRY_OPTOUT`
+- Respects `DO_NOT_TRACK=1`
+
+## Files to Modify
+
+### 5. `cmd/entire/cli/root.go`
+
+**Add hidden command:**
+```go
+func newSendAnalyticsCmd() *cobra.Command {
+    return &cobra.Command{
+        Use:    "__send_analytics",
+        Hidden: true,
+        Args:   cobra.ExactArgs(1),
+        Run: func(_ *cobra.Command, args []string) {
+            telemetry.SendEvent(args[0])
+        },
+    }
+}
+```
+
+**Register in `NewRootCmd()`:**
+```go
+cmd.AddCommand(newSendAnalyticsCmd())
+```
+
+**Update `PersistentPostRun`:**
+```go
+PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+    // Skip analytics for the analytics command itself (prevents recursion)
+    if cmd.Name() == "__send_analytics" {
+        return
+    }
+
+    var telemetryEnabled *bool
+    settings, err := LoadEntireSettings()
+    if err == nil {
+        telemetryEnabled = settings.Telemetry
+    }
+
+    // Check if telemetry is enabled
+    if telemetryEnabled == nil || !*telemetryEnabled {
+        return
+    }
+
+    // Use detached tracking (non-blocking)
+    telemetry.TrackCommandDetached(cmd, settings.Strategy, settings.Agent, settings.Enabled, Version)
+}
+```
+
+### 6. `cmd/entire/cli/telemetry/telemetry.go`
+
+Keep existing code (for Windows fallback), but:
+- Ensure `PostHogAPIKey` and `PostHogEndpoint` remain exported
+- `silentLogger` type stays (used by detached.go too)
+
+## Configuration
+
+| Environment Variable | Description |
+|---------------------|-------------|
+| `ENTIRE_TELEMETRY_OPTOUT` | Any non-empty value disables telemetry |
+| `DO_NOT_TRACK` | Standard opt-out (value "1" disables) |
+| `ANALYTICS_DEBUG` | Set to "1" to enable debug logging to stderr |
+
+## Implementation Order
+
+1. Create `detached.go` with `EventPayload`, `TrackCommandDetached()`, `SendEvent()`, `debugLog()`
+2. Create `detached_unix.go` with Unix `spawnDetachedAnalytics()`
+3. Create `detached_windows.go` with fallback `spawnDetachedAnalytics()`
+4. Update `root.go`: add hidden command, register it, update `PersistentPostRun`
+5. Create `detached_test.go` with tests
+6. Run tests: `mise run test`
+7. Run linting: `mise run fmt && mise run lint`
+
+## Verification
+
+```bash
+# Build the CLI
+go build -o entire ./cmd/entire
+
+# Test command latency (should complete without ~1s delay)
+time ./entire status
+
+# Verify hidden command doesn't appear in help
+./entire --help | grep send_analytics  # Should show nothing
+
+# Test with debug mode
+ANALYTICS_DEBUG=1 ./entire status  # Should show debug output
+
+# Test opt-out
+ENTIRE_TELEMETRY_OPTOUT=1 ./entire status  # No analytics subprocess spawned
+
+# Check for zombie processes
+ps aux | grep __send_analytics  # Should appear briefly then disappear
+```
+
+## Verification Checklist
+
+- [ ] CLI commands execute without latency delay on Unix
+- [ ] Events appear in PostHog dashboard
+- [ ] No zombie processes after CLI exits
+- [ ] Works on macOS and Linux
+- [ ] Falls back to synchronous on Windows
+- [ ] `ENTIRE_TELEMETRY_OPTOUT` disables telemetry
+- [ ] `DO_NOT_TRACK=1` disables telemetry
+- [ ] Hidden `__send_analytics` command doesn't appear in help
+- [ ] No recursion when running analytics command
+- [ ] Debug mode via `ANALYTICS_DEBUG=1` works
+- [ ] Tests pass: `mise run test`
+- [ ] Linting passes: `mise run lint`
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+
+---
+
+I'm checking the old TrackCommand implementation and we are missing:
+- flags property
+
+---
+
+are we disabling the telemetry if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") ?
