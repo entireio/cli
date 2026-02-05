@@ -1,0 +1,44 @@
+{
+  "checkpoint_id": "8cfa910f8ef9",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "f7731af44b0e1bab52cbd3765080f740ff4d14a4",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".claude/.gitignore",
+    ".claude/agents/dev.md",
+    ".claude/agents/reviewer.md",
+    ".claude/agents/test-doc.md",
+    ".claude/commands/analyst.md",
+    ".claude/commands/dev-cycle.md",
+    ".claude/commands/dev.md",
+    ".claude/commands/reviewer.md",
+    ".claude/settings.local.json",
+    ".claude/skills/test-repo/README.md",
+    ".claude/skills/test-repo/SKILL.md",
+    ".claude/skills/test-repo/test-harness.sh",
+    "cmd/entire/cli/config.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/concurrent_session_warning_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go",
+    "plans/feat-disable-multisession-warning-option.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/8c/fa910f8ef9/0/metadata.json",
+      "transcript": "/8c/fa910f8ef9/0/full.jsonl",
+      "context": "/8c/fa910f8ef9/0/context.md",
+      "content_hash": "/8c/fa910f8ef9/0/content_hash.txt",
+      "prompt": "/8c/fa910f8ef9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}
