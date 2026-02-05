@@ -1,0 +1,35 @@
+{
+  "checkpoint_id": "5c5cb639eac4",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-96-auto-summaries",
+  "migration_source_commit": "7d79a6fb616385c5e434dba8e91bf36f8c0dd924",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "README.md",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/config.go",
+    "cmd/entire/cli/config_test.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/summarise/summarise.go",
+    "cmd/entire/cli/summarise/summarise_test.go",
+    "cmd/entire/cli/transcript/types.go",
+    "docs/plans/2026-02-01-auto-summarise-design.md",
+    "docs/plans/2026-02-01-auto-summarise-impl.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/5c/5cb639eac4/0/metadata.json",
+      "transcript": "/5c/5cb639eac4/0/full.jsonl",
+      "context": "/5c/5cb639eac4/0/context.md",
+      "content_hash": "/5c/5cb639eac4/0/content_hash.txt",
+      "prompt": "/5c/5cb639eac4/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1154,
+    "cache_creation_tokens": 1438771,
+    "cache_read_tokens": 19035389,
+    "output_tokens": 1035,
+    "api_call_count": 205
+  }
+}
