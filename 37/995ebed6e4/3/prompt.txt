@@ -1,0 +1,159 @@
+I do want to use my goreleaser pro to release this go project, I do have already a goreleaser configuration which just creates a release changelog ang creates tar.gz files. If you look into /temp-external-tap is my other repo where, manually I create the corresponding brew tap release. I want goreleaser to do it for me. How would the .goreleaser be?
+
+---
+
+what are the pros and cons of using build files or compile on the fly ?
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# Plan: Configure GoReleaser Pro for Homebrew Tap
+
+## Goal
+Update `.goreleaser.yaml` and `.github/workflows/release.yml` to automatically publish to the Homebrew tap at `entirehq/homebrew-tap` using pre-built binaries and GitHub App authentication.
+
+## Files to Modify
+
+1. `.goreleaser.yaml` - Add brews section
+2. `.github/workflows/release.yml` - Add GitHub App token generation step
+
+---
+
+## Changes
+
+### 1. File: `.goreleaser.yaml`
+
+Add the `brews` section at the end of the file:
+
+```yaml
+brews:
+  - name: entire
+    repository:
+      owner: entirehq
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    folder: Formula
+    homepage: "https://github.com/entireio/cli"
+    description: "CLI for Entire"
+    license: "MIT"
+    install: |
+      bin.install "entire"
+      generate_completions_from_executable(bin/"entire", "completion")
+    test: |
+      assert_match "entire", shell_output("#{bin}/entire --help", 2)
+```
+
+### 2. File: `.github/workflows/release.yml`
+
+Add the GitHub App token generation step before GoReleaser:
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Homebrew Tap token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
+          owner: entirehq
+          repositories: homebrew-tap
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser-pro
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAP_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_ENDPOINT: ${{ vars.POSTHOG_ENDPOINT }}
+```
+
+---
+
+## Required Setup: GitHub App
+
+### 1. Create a GitHub App in your organization
+
+1. Go to **Organization Settings** → **Developer settings** → **GitHub Apps** → **New GitHub App**
+2. Fill in:
+   - **Name**: e.g., `Entire GoReleaser Bot`
+   - **Homepage URL**: `https://github.com/entireio/cli`
+   - **Webhook**: Uncheck "Active" (not needed)
+3. **Permissions** (Repository permissions):
+   - **Contents**: Read and write
+   - **Metadata**: Read-only (auto-selected)
+4. **Where can this GitHub App be installed?**: Only on this account
+5. Click **Create GitHub App**
+6. Note the **App ID** (displayed at the top)
+7. Scroll down and click **Generate a private key** - save the `.pem` file
+
+### 2. Install the App on the homebrew-tap repository
+
+1. From the App's settings page, click **Install App** in the sidebar
+2. Select `entirehq` organization
+3. Choose **Only select repositories** and select `homebrew-tap`
+4. Click **Install**
+
+### 3. Add secrets to the CLI repo
+
+Add these secrets to `entireio/cli` repository settings:
+
+- `HOMEBREW_TAP_APP_ID` - The App ID (number)
+- `HOMEBREW_TAP_APP_PRIVATE_KEY` - Contents of the `.pem` private key file
+
+---
+
+## How It Works
+
+1. On tag push (e.g., `v0.4.0`), the workflow starts
+2. `actions/create-github-app-token` generates a short-lived token from the GitHub App
+3. GoReleaser builds binaries, creates GitHub release, and pushes the formula to `homebrew-tap`
+4. The token expires after ~1 hour (GitHub App tokens are short-lived)
+
+---
+
+## Verification
+
+1. Run `goreleaser release --snapshot --clean` locally to test (tap push will be skipped without token)
+2. Check that `dist/homebrew/Formula/entire.rb` is generated
+3. Create a test tag to trigger a real release
+4. Verify the formula is pushed to `homebrew-tap` repo
+5. Test installation: `brew install entirehq/tap/entire`
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-cli/e7a4b9ab-94a8-47a4-a824-ee56e684a272.jsonl
