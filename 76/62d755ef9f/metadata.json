@@ -1,0 +1,33 @@
+{
+  "checkpoint_id": "7662d755ef9f",
+  "strategy": "manual-commit",
+  "branch": "feat/gemini-cli-agent",
+  "migration_source_commit": "6355853546a2b7f1750ad48a18fcdc55962bd8ee",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "ISSUE-orphaned-sessions.md",
+    "cmd/entire/cli/agent/geminicli/hooks.go",
+    "cmd/entire/cli/agent/geminicli/hooks_test.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/integration_test/gemini_concurrent_session_test.go",
+    "cmd/entire/cli/integration_test/hooks.go",
+    "cmd/entire/cli/integration_test/testenv.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/76/62d755ef9f/0/metadata.json",
+      "transcript": "/76/62d755ef9f/0/full.jsonl",
+      "context": "/76/62d755ef9f/0/context.md",
+      "content_hash": "/76/62d755ef9f/0/content_hash.txt",
+      "prompt": "/76/62d755ef9f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4359,
+    "cache_creation_tokens": 679802,
+    "cache_read_tokens": 4590193,
+    "output_tokens": 111,
+    "api_call_count": 49
+  }
+}
