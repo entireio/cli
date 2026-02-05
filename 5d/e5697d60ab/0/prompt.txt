@@ -1,0 +1,5 @@
+can you compare the gemini and claude code implementation for any gaps in functionality and second for any code that we could refactor so it's not duplicated
+
+---
+
+let's first fix the bug with CWD

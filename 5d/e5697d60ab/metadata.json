@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "5de5697d60ab",
+  "strategy": "manual-commit",
+  "branch": "soph/proper-repo-root",
+  "migration_source_commit": "c86c9aa1d8db05e242965e6935a233fa024d7d54",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/geminicli/gemini.go",
+    "cmd/entire/cli/agent/geminicli/hooks.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/5d/e5697d60ab/0/metadata.json",
+      "transcript": "/5d/e5697d60ab/0/full.jsonl",
+      "context": "/5d/e5697d60ab/0/context.md",
+      "content_hash": "/5d/e5697d60ab/0/content_hash.txt",
+      "prompt": "/5d/e5697d60ab/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1679,
+    "cache_creation_tokens": 111255,
+    "cache_read_tokens": 1371474,
+    "output_tokens": 7073,
+    "api_call_count": 15
+  }
+}
