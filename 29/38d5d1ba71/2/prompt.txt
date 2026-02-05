@@ -12,11 +12,3 @@ Creating agent-specific output functions and calling the appropriate one based o
 Moving the outputHookResponse to a shared location and having agent-specific implementations
 Using a common format that both agents understand
 The test TestSessionConflict_WarningMessageFormat only tests Claude Code format, but there should also be tests for Gemini CLI to ensure it works correctly with the new session-start warning.
-
----
-
-ignore this error: cmd/entire/cli/hooks.go:332:2: missing cases in switch of type agent.AgentType: agent.AgentTypeClaudeCode, agent.AgentTypeUnknown (exhaustive)
-
----
-
-add a comment into the code to ignore that lint error

@@ -2,9 +2,9 @@
   "checkpoint_id": "2938d5d1ba71",
   "session_id": "5e231473-1e70-45c5-9c18-6510ac844c99",
   "strategy": "manual-commit",
-  "created_at": "2026-02-03T05:02:05.313843Z",
+  "created_at": "2026-02-03T04:58:47.22459Z",
   "branch": "gtrrz-victor/alt-better-multi-session-flow",
-  "checkpoints_count": 3,
+  "checkpoints_count": 2,
   "files_touched": [
     "cmd/entire/cli/hooks.go",
     "cmd/entire/cli/hooks_geminicli_handlers.go",
@@ -12,15 +12,12 @@
     "cmd/entire/cli/strategy/manual_commit_logs.go"
   ],
   "agent": "Claude Code",
-  "agents": "Claude Code",
-  "transcript_identifier_at_start": "b2513843-7fef-457a-b0cf-8868bf320250",
-  "transcript_lines_at_start": 156,
   "token_usage": {
-    "input_tokens": 256,
-    "cache_creation_tokens": 62114,
-    "cache_read_tokens": 2088652,
-    "output_tokens": 78,
-    "api_call_count": 31
+    "input_tokens": 212,
+    "cache_creation_tokens": 59519,
+    "cache_read_tokens": 1656408,
+    "output_tokens": 61,
+    "api_call_count": 26
   },
   "initial_attribution": {
     "calculated_at": "2026-02-03T04:58:47.120367Z",
