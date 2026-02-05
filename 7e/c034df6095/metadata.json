@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "7ec034df6095",
+  "strategy": "manual-commit",
+  "branch": "fix/agent-test-parallel-chdir",
+  "migration_source_commit": "a3b7ce0c8651c87af27109c457970d8ed19fed09",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/agent_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7e/c034df6095/0/metadata.json",
+      "transcript": "/7e/c034df6095/0/full.jsonl",
+      "context": "/7e/c034df6095/0/context.md",
+      "content_hash": "/7e/c034df6095/0/content_hash.txt",
+      "prompt": "/7e/c034df6095/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 114,
+    "cache_creation_tokens": 64028,
+    "cache_read_tokens": 864045,
+    "output_tokens": 134,
+    "api_call_count": 14
+  }
+}
