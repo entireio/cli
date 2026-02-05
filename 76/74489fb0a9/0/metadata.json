@@ -1,0 +1,36 @@
+{
+  "checkpoint_id": "7674489fb0a9",
+  "session_id": "13da966e-44f7-4a36-8060-ca40451e4561",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-04T06:27:49.714189Z",
+  "branch": "gtrrz-victor/restructure-entire-session-files",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/integration_test/concurrent_session_warning_test.go",
+    "cmd/entire/cli/integration_test/gemini_concurrent_session_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/strategy/manual_commit_logs.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/session.go",
+    "cmd/entire/cli/strategy/session_test.go"
+  ],
+  "agent": "Agent",
+  "token_usage": {
+    "input_tokens": 8409,
+    "cache_creation_tokens": 201022,
+    "cache_read_tokens": 5882056,
+    "output_tokens": 596,
+    "api_call_count": 43
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-04T06:27:49.592Z",
+    "agent_lines": 0,
+    "human_added": 797,
+    "human_modified": 1651,
+    "human_removed": 0,
+    "total_committed": 900,
+    "agent_percentage": 0
+  }
+}
