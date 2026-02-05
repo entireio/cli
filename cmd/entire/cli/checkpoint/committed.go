@@ -16,6 +16,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/filter"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -38,8 +39,6 @@ var errStopIteration = errors.New("stop iteration")
 //   - For incremental checkpoints: checkpoints/NNN-<tool-use-id>.json
 //   - For final checkpoints: checkpoint.json and agent-<agent-id>.jsonl
 func (s *GitStore) WriteCommitted(ctx context.Context, opts WriteCommittedOptions) error {
-	_ = ctx // Reserved for future use
-
 	// Validate identifiers to prevent path traversal and malformed data
 	if opts.CheckpointID.IsEmpty() {
 		return errors.New("invalid checkpoint options: checkpoint ID is required")
@@ -73,14 +72,14 @@ func (s *GitStore) WriteCommitted(ctx context.Context, opts WriteCommittedOption
 
 	// Handle task checkpoints
 	if opts.IsTask && opts.ToolUseID != "" {
-		taskMetadataPath, err = s.writeTaskCheckpointEntries(opts, basePath, entries)
+		taskMetadataPath, err = s.writeTaskCheckpointEntries(ctx, opts, basePath, entries)
 		if err != nil {
 			return err
 		}
 	}
 
 	// Write standard checkpoint entries (transcript, prompts, context, metadata)
-	if err := s.writeStandardCheckpointEntries(opts, basePath, entries); err != nil {
+	if err := s.writeStandardCheckpointEntries(ctx, opts, basePath, entries); err != nil {
 		return err
 	}
 
@@ -132,13 +131,13 @@ func (s *GitStore) getSessionsBranchEntries() (*plumbing.Reference, map[string]o
 }
 
 // writeTaskCheckpointEntries writes task-specific checkpoint entries and returns the task metadata path.
-func (s *GitStore) writeTaskCheckpointEntries(opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry) (string, error) {
+func (s *GitStore) writeTaskCheckpointEntries(ctx context.Context, opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry) (string, error) {
 	taskPath := basePath + "tasks/" + opts.ToolUseID + "/"
 
 	if opts.IsIncremental {
 		return s.writeIncrementalTaskCheckpoint(opts, taskPath, entries)
 	}
-	return s.writeFinalTaskCheckpoint(opts, taskPath, entries)
+	return s.writeFinalTaskCheckpoint(ctx, opts, taskPath, entries)
 }
 
 // writeIncrementalTaskCheckpoint writes an incremental checkpoint file during task execution.
@@ -169,7 +168,8 @@ func (s *GitStore) writeIncrementalTaskCheckpoint(opts WriteCommittedOptions, ta
 }
 
 // writeFinalTaskCheckpoint writes the final checkpoint.json and subagent transcript.
-func (s *GitStore) writeFinalTaskCheckpoint(opts WriteCommittedOptions, taskPath string, entries map[string]object.TreeEntry) (string, error) {
+// The subagent transcript is filtered through the configured output filter.
+func (s *GitStore) writeFinalTaskCheckpoint(ctx context.Context, opts WriteCommittedOptions, taskPath string, entries map[string]object.TreeEntry) (string, error) {
 	checkpoint := taskCheckpointData{
 		SessionID:      opts.SessionID,
 		ToolUseID:      opts.ToolUseID,
@@ -192,13 +192,18 @@ func (s *GitStore) writeFinalTaskCheckpoint(opts WriteCommittedOptions, taskPath
 		Hash: blobHash,
 	}
 
-	// Write subagent transcript if available
+	// Write subagent transcript if available (filtered)
 	if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 		agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
 		if readErr == nil {
-			agentBlobHash, agentBlobErr := CreateBlobFromContent(s.repo, agentContent)
+			agentFilename := "agent-" + opts.AgentID + ".jsonl"
+			filteredContent, filterErr := filter.Content(ctx, agentContent, agentFilename)
+			if filterErr != nil {
+				return "", fmt.Errorf("failed to filter subagent transcript: %w", filterErr)
+			}
+			agentBlobHash, agentBlobErr := CreateBlobFromContent(s.repo, filteredContent)
 			if agentBlobErr == nil {
-				agentPath := taskPath + "agent-" + opts.AgentID + ".jsonl"
+				agentPath := taskPath + agentFilename
 				entries[agentPath] = object.TreeEntry{
 					Name: agentPath,
 					Mode: filemode.Regular,
@@ -227,7 +232,7 @@ func (s *GitStore) writeFinalTaskCheckpoint(opts WriteCommittedOptions, taskPath
 //	│   └── content_hash.txt
 //	├── 2/                    # Second session
 //	└── ...
-func (s *GitStore) writeStandardCheckpointEntries(opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry) error {
+func (s *GitStore) writeStandardCheckpointEntries(ctx context.Context, opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry) error {
 	// Read existing summary to get current session count
 	var existingSummary *CheckpointSummary
 	metadataPath := basePath + paths.MetadataFileName
@@ -246,14 +251,14 @@ func (s *GitStore) writeStandardCheckpointEntries(opts WriteCommittedOptions, ba
 
 	// Write session files to numbered subdirectory
 	sessionPath := fmt.Sprintf("%s%d/", basePath, sessionIndex)
-	sessionFilePaths, err := s.writeSessionToSubdirectory(opts, sessionPath, entries)
+	sessionFilePaths, err := s.writeSessionToSubdirectory(ctx, opts, sessionPath, entries)
 	if err != nil {
 		return err
 	}
 
 	// Copy additional metadata files from directory if specified (to session subdirectory)
 	if opts.MetadataDir != "" {
-		if err := s.copyMetadataDir(opts.MetadataDir, sessionPath, entries); err != nil {
+		if err := s.copyMetadataDir(ctx, opts.MetadataDir, sessionPath, entries); err != nil {
 			return fmt.Errorf("failed to copy metadata directory: %w", err)
 		}
 	}
@@ -264,20 +269,25 @@ func (s *GitStore) writeStandardCheckpointEntries(opts WriteCommittedOptions, ba
 
 // writeSessionToSubdirectory writes a single session's files to a numbered subdirectory.
 // Returns the absolute file paths from the git tree root for the sessions map.
-func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessionPath string, entries map[string]object.TreeEntry) (SessionFilePaths, error) {
+// Prompts and context are filtered through the configured output filter.
+func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCommittedOptions, sessionPath string, entries map[string]object.TreeEntry) (SessionFilePaths, error) {
 	filePaths := SessionFilePaths{}
 
-	// Write transcript
-	if err := s.writeTranscript(opts, sessionPath, entries); err != nil {
+	// Write transcript (filtering is done inside writeTranscript)
+	if err := s.writeTranscript(ctx, opts, sessionPath, entries); err != nil {
 		return filePaths, err
 	}
 	filePaths.Transcript = "/" + sessionPath + paths.TranscriptFileName
 	filePaths.ContentHash = "/" + sessionPath + paths.ContentHashFileName
 
-	// Write prompts
+	// Write prompts (filtered)
 	if len(opts.Prompts) > 0 {
 		promptContent := strings.Join(opts.Prompts, "\n\n---\n\n")
-		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
+		filteredPrompt, err := filter.Content(ctx, []byte(promptContent), paths.PromptFileName)
+		if err != nil {
+			return filePaths, fmt.Errorf("failed to filter prompts: %w", err)
+		}
+		blobHash, err := CreateBlobFromContent(s.repo, filteredPrompt)
 		if err != nil {
 			return filePaths, err
 		}
@@ -289,9 +299,13 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 		filePaths.Prompt = "/" + sessionPath + paths.PromptFileName
 	}
 
-	// Write context
+	// Write context (filtered)
 	if len(opts.Context) > 0 {
-		blobHash, err := CreateBlobFromContent(s.repo, opts.Context)
+		filteredContext, err := filter.Content(ctx, opts.Context, paths.ContextFileName)
+		if err != nil {
+			return filePaths, fmt.Errorf("failed to filter context: %w", err)
+		}
+		blobHash, err := CreateBlobFromContent(s.repo, filteredContext)
 		if err != nil {
 			return filePaths, err
 		}
@@ -431,7 +445,8 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 
 // writeTranscript writes the transcript file from in-memory content or file path.
 // If the transcript exceeds MaxChunkSize, it's split into multiple chunk files.
-func (s *GitStore) writeTranscript(opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry) error {
+// The transcript is filtered through the configured output filter before writing.
+func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry) error {
 	transcript := opts.Transcript
 	if len(transcript) == 0 && opts.TranscriptPath != "" {
 		var readErr error
@@ -445,8 +460,14 @@ func (s *GitStore) writeTranscript(opts WriteCommittedOptions, basePath string, 
 		return nil
 	}
 
-	// Chunk the transcript if it's too large
-	chunks, err := agent.ChunkTranscript(transcript, opts.Agent)
+	// Filter the transcript through configured output filter
+	filteredTranscript, err := filter.Content(ctx, transcript, paths.TranscriptFileName)
+	if err != nil {
+		return fmt.Errorf("failed to filter transcript: %w", err)
+	}
+
+	// Chunk the filtered transcript if it's too large
+	chunks, err := agent.ChunkTranscript(filteredTranscript, opts.Agent)
 	if err != nil {
 		return fmt.Errorf("failed to chunk transcript: %w", err)
 	}
@@ -465,8 +486,8 @@ func (s *GitStore) writeTranscript(opts WriteCommittedOptions, basePath string, 
 		}
 	}
 
-	// Content hash for deduplication (hash of full transcript)
-	contentHash := fmt.Sprintf("sha256:%x", sha256.Sum256(transcript))
+	// Content hash for deduplication (hash of filtered transcript)
+	contentHash := fmt.Sprintf("sha256:%x", sha256.Sum256(filteredTranscript))
 	hashBlob, err := CreateBlobFromContent(s.repo, []byte(contentHash))
 	if err != nil {
 		return err
@@ -1007,9 +1028,26 @@ func CreateBlobFromContent(repo *git.Repository, content []byte) (plumbing.Hash,
 	return hash, nil
 }
 
+// shouldFilterFile returns true if the file should be filtered through the output filter.
+// Files containing potentially sensitive user content are filtered.
+func shouldFilterFile(filename string) bool {
+	base := filepath.Base(filename)
+	// Filter transcripts, prompts, context, and agent transcripts
+	switch base {
+	case paths.TranscriptFileName, paths.PromptFileName, paths.ContextFileName:
+		return true
+	}
+	// Filter agent-*.jsonl files (subagent transcripts)
+	if strings.HasPrefix(base, "agent-") && strings.HasSuffix(base, ".jsonl") {
+		return true
+	}
+	return false
+}
+
 // copyMetadataDir copies all files from a directory to the checkpoint path.
 // Used to include additional metadata files like task checkpoints, subagent transcripts, etc.
-func (s *GitStore) copyMetadataDir(metadataDir, basePath string, entries map[string]object.TreeEntry) error {
+// Files containing potentially sensitive content are filtered through the configured output filter.
+func (s *GitStore) copyMetadataDir(ctx context.Context, metadataDir, basePath string, entries map[string]object.TreeEntry) error {
 	err := filepath.Walk(metadataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -1036,8 +1074,28 @@ func (s *GitStore) copyMetadataDir(metadataDir, basePath string, entries map[str
 			return fmt.Errorf("path traversal detected: %s", relPath)
 		}
 
-		// Create blob from file
-		blobHash, mode, err := createBlobFromFile(s.repo, path)
+		// Read file content
+		content, err := os.ReadFile(path) //nolint:gosec // path comes from walking trusted metadata directory
+		if err != nil {
+			return fmt.Errorf("failed to read file %s: %w", path, err)
+		}
+
+		// Filter content if this is a sensitive file
+		if shouldFilterFile(path) {
+			content, err = filter.Content(ctx, content, filepath.Base(path))
+			if err != nil {
+				return fmt.Errorf("failed to filter %s: %w", path, err)
+			}
+		}
+
+		// Determine file mode
+		mode := filemode.Regular
+		if info.Mode()&0o111 != 0 {
+			mode = filemode.Executable
+		}
+
+		// Create blob from filtered content
+		blobHash, err := CreateBlobFromContent(s.repo, content)
 		if err != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)
 		}

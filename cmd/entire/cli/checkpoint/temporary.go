@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/filter"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -226,8 +227,6 @@ func (s *GitStore) ListTemporary(ctx context.Context) ([]TemporaryInfo, error) {
 // Task checkpoints include both code changes and task-specific metadata.
 // Returns the commit hash of the created checkpoint.
 func (s *GitStore) WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTaskOptions) (plumbing.Hash, error) {
-	_ = ctx // Reserved for future use
-
 	// Validate base commit - required for shadow branch naming
 	if opts.BaseCommit == "" {
 		return plumbing.ZeroHash, errors.New("BaseCommit is required for task checkpoint")
@@ -264,8 +263,8 @@ func (s *GitStore) WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTa
 		return plumbing.ZeroHash, fmt.Errorf("failed to build tree: %w", err)
 	}
 
-	// Add task metadata to tree
-	newTreeHash, err = s.addTaskMetadataToTree(newTreeHash, opts)
+	// Add task metadata to tree (transcripts are filtered)
+	newTreeHash, err = s.addTaskMetadataToTree(ctx, newTreeHash, opts)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to add task metadata: %w", err)
 	}
@@ -288,7 +287,8 @@ func (s *GitStore) WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTa
 
 // addTaskMetadataToTree adds task checkpoint metadata to a git tree.
 // When IsIncremental is true, only adds the incremental checkpoint file.
-func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteTemporaryTaskOptions) (plumbing.Hash, error) {
+// Transcripts are filtered through the configured output filter.
+func (s *GitStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash plumbing.Hash, opts WriteTemporaryTaskOptions) (plumbing.Hash, error) {
 	// Get base tree and flatten it
 	baseTree, err := s.repo.TreeObject(baseTreeHash)
 	if err != nil {
@@ -340,13 +340,19 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 		// Add session transcript (with chunking support for large transcripts)
 		if opts.TranscriptPath != "" {
 			if transcriptContent, readErr := os.ReadFile(opts.TranscriptPath); readErr == nil {
+				// Filter the transcript through configured output filter
+				filteredTranscript, filterErr := filter.Content(ctx, transcriptContent, paths.TranscriptFileName)
+				if filterErr != nil {
+					return plumbing.ZeroHash, fmt.Errorf("failed to filter transcript: %w", filterErr)
+				}
+
 				// Detect agent type from content for proper chunking
-				agentType := agent.DetectAgentTypeFromContent(transcriptContent)
+				agentType := agent.DetectAgentTypeFromContent(filteredTranscript)
 
 				// Chunk if necessary
-				chunks, chunkErr := agent.ChunkTranscript(transcriptContent, agentType)
+				chunks, chunkErr := agent.ChunkTranscript(filteredTranscript, agentType)
 				if chunkErr != nil {
-					logging.Warn(context.Background(), "failed to chunk transcript, checkpoint will be saved without transcript",
+					logging.Warn(ctx, "failed to chunk transcript, checkpoint will be saved without transcript",
 						slog.String("error", chunkErr.Error()),
 						slog.String("session_id", opts.SessionID),
 					)
@@ -355,7 +361,7 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 						chunkPath := sessionMetadataDir + "/" + agent.ChunkFileName(paths.TranscriptFileName, i)
 						blobHash, blobErr := CreateBlobFromContent(s.repo, chunk)
 						if blobErr != nil {
-							logging.Warn(context.Background(), "failed to create blob for transcript chunk",
+							logging.Warn(ctx, "failed to create blob for transcript chunk",
 								slog.String("error", blobErr.Error()),
 								slog.String("session_id", opts.SessionID),
 								slog.Int("chunk_index", i),
@@ -372,11 +378,16 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 			}
 		}
 
-		// Add subagent transcript if available
+		// Add subagent transcript if available (filtered)
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 			if agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath); readErr == nil {
-				if blobHash, blobErr := CreateBlobFromContent(s.repo, agentContent); blobErr == nil {
-					agentPath := taskMetadataDir + "/agent-" + opts.AgentID + ".jsonl"
+				agentFilename := "agent-" + opts.AgentID + ".jsonl"
+				filteredContent, filterErr := filter.Content(ctx, agentContent, agentFilename)
+				if filterErr != nil {
+					return plumbing.ZeroHash, fmt.Errorf("failed to filter subagent transcript: %w", filterErr)
+				}
+				if blobHash, blobErr := CreateBlobFromContent(s.repo, filteredContent); blobErr == nil {
+					agentPath := taskMetadataDir + "/" + agentFilename
 					entries[agentPath] = object.TreeEntry{
 						Name: agentPath,
 						Mode: filemode.Regular,

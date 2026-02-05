@@ -46,6 +46,12 @@ type EntireSettings struct {
 	// Telemetry controls anonymous usage analytics.
 	// nil = not asked yet (show prompt), true = opted in, false = opted out
 	Telemetry *bool `json:"telemetry,omitempty"`
+
+	// OutputFilter specifies a command to pipe sensitive file contents through
+	// before writing to disk. Used to redact secrets from session transcripts.
+	// First element is the executable, remaining elements are arguments.
+	// Example: ["gitleaks-filter", "--redact"]
+	OutputFilter []string `json:"output_filter,omitempty"`
 }
 
 // Load loads the Entire settings from .entire/settings.json,
@@ -184,6 +190,15 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		settings.Telemetry = &t
 	}
 
+	// Override output_filter if present (array override, not merge)
+	if outputFilterRaw, ok := raw["output_filter"]; ok {
+		var of []string
+		if err := json.Unmarshal(outputFilterRaw, &of); err != nil {
+			return fmt.Errorf("parsing output_filter field: %w", err)
+		}
+		settings.OutputFilter = of
+	}
+
 	return nil
 }
 
@@ -229,4 +244,20 @@ func (s *EntireSettings) IsMultiSessionWarningDisabled() bool {
 		return disabled
 	}
 	return false
+}
+
+// GetOutputFilter returns the configured output filter command.
+// Returns nil if no filter is configured.
+func (s *EntireSettings) GetOutputFilter() []string {
+	return s.OutputFilter
+}
+
+// GetOutputFilter returns the configured output filter command from settings.
+// Returns nil if settings cannot be loaded or no filter is configured.
+func GetOutputFilter() []string {
+	settings, err := Load()
+	if err != nil {
+		return nil
+	}
+	return settings.GetOutputFilter()
 }

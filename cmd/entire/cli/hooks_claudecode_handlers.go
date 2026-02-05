@@ -175,6 +175,8 @@ func commitWithMetadata() error {
 	}
 
 	// Extract all prompts since last checkpoint for prompt file
+	// Note: Local filesystem writes are not filtered - filtering happens when content is written to git
+	// (in copyMetadataDir/writeSessionToSubdirectory). The local .entire/metadata/ dir is gitignored.
 	allPrompts := extractUserPrompts(transcript)
 	promptFile := filepath.Join(sessionDirAbs, paths.PromptFileName)
 	promptContent := strings.Join(allPrompts, "\n\n---\n\n")
