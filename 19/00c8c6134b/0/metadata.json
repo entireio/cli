@@ -19,6 +19,50 @@
     "output_tokens": 359,
     "api_call_count": 72
   },
+  "summary": {
+    "intent": "Implement auto-summarisation of checkpoints at commit time for the manual-commit strategy, controlled by configuration (strategy_options.summarise.enabled, default off), summarising only checkpoint scope (not entire transcript), with non-blocking error handling.",
+    "outcome": "Executed tasks 1-4 of 7-task implementation plan using subagent-driven development: added SummariseOptions config parser, extracted GenerateFromTranscript shared helper, refactored explain.go to use shared helper, and added Summary field to WriteCommittedOptions. Task 5 (CondenseSession integration) dispatched but not yet verified.",
+    "learnings": {
+      "repo": [
+        "The docs/plans directory is gitignored (line 52 of .gitignore) for local working references",
+        "Existing checkpoint-scoped transcript helpers in explain.go (scopeTranscriptForCheckpoint at line 468, generateCheckpointSummary at line 278) provided reusable patterns",
+        "TranscriptLinesAtStart metadata in checkpoints enables precise transcript scoping via transcript.SliceFromLine()",
+        "British spelling ('summarise') is project convention",
+        "TDD approach with test-first development is standard practice"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/config.go",
+          "line": 303,
+          "end_line": 311,
+          "finding": "GetSummariseOptions() added to parse nested strategy_options.summarise.enabled config, follows existing pattern of parsing strategy_options with viper.Sub()"
+        },
+        {
+          "path": "cmd/entire/cli/summarise/summarise.go",
+          "finding": "GenerateFromTranscript() extracted as shared helper to avoid duplication between explain.go and manual_commit_condensation.go, takes context, transcript bytes, options, and generator"
+        },
+        {
+          "path": "cmd/entire/cli/checkpoint/checkpoint.go",
+          "finding": "WriteCommittedOptions.Summary field added to wire summary through WriteCommitted function in committed.go"
+        }
+      ],
+      "workflow": [
+        "Subagent-driven development allows dispatching fresh subagent per task with review between tasks for fast iteration",
+        "Stale diagnostic errors from gopls can appear in subagent output even when actual implementation is correct - verify by running tests",
+        "Pre-existing code style suggestions (QF1012 quickfix diagnostics) are not blocking errors for the current task"
+      ]
+    },
+    "friction": [
+      "Stale compiler diagnostics showing 'undefined: GetSummariseOptions' when function actually existed and tests passed",
+      "Pre-existing code style suggestions in committed.go appeared as diagnostics during Task 4, creating noise"
+    ],
+    "open_items": [
+      "Task 5: Verify CondenseSession integration of summary generation (subagent dispatched, awaiting completion)",
+      "Task 6: Update README documentation with Configuration Options table entry and Auto-Summarisation section",
+      "Task 7: Run mise run fmt, mise run lint, mise run test, and mise run test:integration for final verification",
+      "ENT-163: Extend auto-summarisation to auto-commit strategy (deferred, tracked in Linear)"
+    ]
+  },
   "initial_attribution": {
     "calculated_at": "2026-02-02T00:00:20.767779Z",
     "agent_lines": 0,

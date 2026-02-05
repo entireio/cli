@@ -2,7 +2,7 @@
   "checkpoint_id": "1900c8c6134b",
   "strategy": "manual-commit",
   "branch": "alex/ent-96-auto-summaries",
-  "migration_source_commit": "869ea0afe90efd1f6b4bd54a250a91a8d1cbc716",
+  "migration_source_commit": "fcba57a002ed493a75e677530517c0364a81ae77",
   "checkpoints_count": 0,
   "files_touched": [
     "docs/plans/2026-02-01-auto-summarise-design.md",
