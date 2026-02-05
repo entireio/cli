@@ -672,6 +672,45 @@ func (s *GitStore) ReadCommitted(ctx context.Context, checkpointID id.Checkpoint
 	return result, nil
 }
 
+// ReadFirstPrompt reads only the first prompt from a checkpoint's prompt.txt file.
+// This is a lightweight alternative to ReadCommitted when only the prompt is needed.
+// Returns empty string if the checkpoint or prompt file doesn't exist.
+func (s *GitStore) ReadFirstPrompt(ctx context.Context, checkpointID id.CheckpointID) string {
+	_ = ctx // Reserved for future use
+
+	tree, err := s.getSessionsBranchTree()
+	if err != nil {
+		return ""
+	}
+
+	checkpointPath := checkpointID.Path()
+	checkpointTree, err := tree.Tree(checkpointPath)
+	if err != nil {
+		return ""
+	}
+
+	// Read prompt.txt
+	file, err := checkpointTree.File(paths.PromptFileName)
+	if err != nil {
+		return ""
+	}
+
+	content, err := file.Contents()
+	if err != nil {
+		return ""
+	}
+
+	// prompt.txt contains prompts separated by "---"
+	// The first segment is the initial prompt that started this checkpoint's work
+	segments := strings.Split(content, "---")
+	if len(segments) == 0 {
+		return ""
+	}
+
+	firstPrompt := strings.TrimSpace(segments[0])
+	return firstPrompt
+}
+
 // ListCommitted lists all committed checkpoints from the entire/sessions branch.
 // Scans sharded paths: <id[:2]>/<id[2:]>/ directories containing metadata.json.
 //
