@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "6a71b2542fc4",
+  "session_id": "2026-01-21-de1ed521-f8fc-44f4-b8a3-970e99616ca2",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-21T18:30:16.952885+01:00",
+  "branch": "soph/add-agent-to-logging",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/registry.go",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/hook_registry_test.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/rewind.go"
+  ],
+  "agent": "Gemini CLI",
+  "transcript_uuid_at_start": "2a5badeb-ef4d-40c8-8328-3dcdd3769401",
+  "transcript_lines_at_start": 405,
+  "token_usage": {
+    "input_tokens": 1051,
+    "cache_creation_tokens": 950880,
+    "cache_read_tokens": 10757354,
+    "output_tokens": 28483,
+    "api_call_count": 109
+  }
+}
