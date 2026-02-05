@@ -2,12 +2,14 @@
   "checkpoint_id": "30e81e82f6ba",
   "session_id": "2026-01-14-4e836284-4a0a-44a1-acb3-38c68db78007",
   "strategy": "manual-commit",
-  "created_at": "2026-01-14T11:25:10.321873+11:00",
-  "checkpoints_count": 1,
+  "created_at": "2026-01-14T11:59:39.466535+11:00",
+  "checkpoints_count": 7,
   "files_touched": [
+    "cmd/entire/cli/root.go",
     "cmd/entire/cli/telemetry/telemetry.go",
     "cmd/entire/cli/telemetry/telemetry_test.go",
     "cmd/entire/main.go",
-    "plans/feat-posthog-telemetry.md"
+    "plans/feat-posthog-telemetry.md",
+    "posthog-cli-telemetry-implementation.md"
   ]
 }
