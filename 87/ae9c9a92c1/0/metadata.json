@@ -1,0 +1,22 @@
+{
+  "checkpoint_id": "87ae9c9a92c1",
+  "session_id": "2026-01-26-5dd7775c-3161-4ad5-bf25-eb59a6ffa8e6",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-26T21:04:58.315934+01:00",
+  "branch": "soph/do-not-offer-trailers-if-rebasing",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/hooks_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "86ed8ba2-1ddd-4242-9193-ccafed3a2aa7",
+  "transcript_lines_at_start": 91,
+  "token_usage": {
+    "input_tokens": 238,
+    "cache_creation_tokens": 229980,
+    "cache_read_tokens": 1801860,
+    "output_tokens": 3674,
+    "api_call_count": 29
+  }
+}
