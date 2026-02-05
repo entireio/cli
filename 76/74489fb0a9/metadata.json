@@ -39,14 +39,21 @@
       "context": "/76/74489fb0a9/76/74489fb0a9/2/context.md",
       "content_hash": "/76/74489fb0a9/76/74489fb0a9/2/content_hash.txt",
       "prompt": "/76/74489fb0a9/76/74489fb0a9/2/prompt.txt"
+    },
+    {
+      "metadata": "/76/74489fb0a9/76/74489fb0a9/3/metadata.json",
+      "transcript": "/76/74489fb0a9/76/74489fb0a9/3/full.jsonl",
+      "context": "/76/74489fb0a9/76/74489fb0a9/3/context.md",
+      "content_hash": "/76/74489fb0a9/76/74489fb0a9/3/content_hash.txt",
+      "prompt": "/76/74489fb0a9/76/74489fb0a9/3/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 8840,
-    "cache_creation_tokens": 839136,
-    "cache_read_tokens": 37260882,
-    "output_tokens": 2789,
-    "api_call_count": 309
+    "input_tokens": 8981,
+    "cache_creation_tokens": 1027744,
+    "cache_read_tokens": 50574655,
+    "output_tokens": 4112,
+    "api_call_count": 430
   },
-  "migration_source_commit": "bd3e4da435008758d4b91dc98c798ca9a8e0a30f"
+  "migration_source_commit": "0e2945bfc258099128088a61785a15f4e02cde1e"
 }
