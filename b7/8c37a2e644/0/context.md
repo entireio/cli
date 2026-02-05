@@ -1,0 +1,13 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+When two sessions are active gemini returns this message: ⚠  Agent execution blocked: ⚠️ Session blocked: You have another active session with uncommitted changes. Please commit them first and then start a new Gemini session. If you continue
+   here, your prompt and resulting changes will not be captured.
+
+   To resume the active session, close Gemini CLI and run: gemini --resume ae4b7c68-f73a-4514-8fb2-1842ef3a21d6
+
+It differs from the one we return in claude now, can you update the gemin...
+
