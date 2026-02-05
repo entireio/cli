@@ -7,9 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -32,15 +34,33 @@ var ErrFilterTimeout = errors.New("output filter timed out")
 // The filename parameter is provided for context (e.g., logging) but is not passed
 // to the filter command. The filter receives content on stdin and writes to stdout.
 func Content(ctx context.Context, content []byte, filename string) ([]byte, error) {
-	_ = filename // Reserved for future use (logging, conditional filtering)
-
 	filterCmd := settings.GetOutputFilter()
 	if len(filterCmd) == 0 {
-		// No filter configured, return original content
+		logging.Debug(ctx, "output filter: no filter configured, passing through",
+			slog.String("filename", filename))
 		return content, nil
 	}
 
-	return runFilter(ctx, content, filterCmd)
+	logging.Debug(ctx, "output filter: applying filter",
+		slog.String("command", filterCmd[0]),
+		slog.String("filename", filename),
+		slog.Int("content_size", len(content)))
+
+	filtered, err := runFilter(ctx, content, filterCmd)
+	if err != nil {
+		logging.Warn(ctx, "output filter: filter failed",
+			slog.String("command", filterCmd[0]),
+			slog.String("filename", filename),
+			slog.String("error", err.Error()))
+		return nil, err
+	}
+
+	logging.Debug(ctx, "output filter: filter applied successfully",
+		slog.String("filename", filename),
+		slog.Int("original_size", len(content)),
+		slog.Int("filtered_size", len(filtered)))
+
+	return filtered, nil
 }
 
 // runFilter executes the filter command with the given content on stdin.

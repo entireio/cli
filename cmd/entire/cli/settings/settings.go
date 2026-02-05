@@ -254,9 +254,11 @@ func (s *EntireSettings) GetOutputFilter() []string {
 
 // GetOutputFilter returns the configured output filter command from settings.
 // Returns nil if settings cannot be loaded or no filter is configured.
+// Logs a warning to stderr if settings fail to load (helps debug hook environment issues).
 func GetOutputFilter() []string {
 	settings, err := Load()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to load settings for output_filter: %v\n", err)
 		return nil
 	}
 	return settings.GetOutputFilter()
