@@ -11,3 +11,26 @@ TrackCommandDetached unconditionally calls spawnDetachedAnalytics, but spawnDeta
 ---
 
 fix lint
+
+---
+
+I'm getting this error on GH Actions:
+  Writing patch to /tmp/tmp-2096-wwz1XP8ai9Xr/pull.patch
+  only new issues on pull_request: /tmp/tmp-2096-wwz1XP8ai9Xr/pull.patch
+  Running [/home/runner/golangci-lint-2.8.0-linux-amd64/golangci-lint config path] in [/home/runner/work/cli/cli] ...
+  Running [/home/runner/golangci-lint-2.8.0-linux-amd64/golangci-lint config verify] in [/home/runner/work/cli/cli] ...
+  Running [/home/runner/golangci-lint-2.8.0-linux-amd64/golangci-lint run --new-from-patch=/tmp/tmp-2096-wwz1XP8ai9Xr/pull.patch --new=false --new-from-rev= --new-from-merge-base=] in [/home/runner/work/cli/cli] ...
+  cmd/entire/cli/telemetry/detached_test.go:96:5: SA5011(related information): this check suggests that the pointer can be nil (staticcheck)
+      if payload == nil {
+         ^
+  cmd/entire/cli/telemetry/detached_test.go:100:23: SA5011: possible nil pointer dereference (staticcheck)
+      agent, ok := payload.Properties["agent"].(string)
+                           ^
+  cmd/entire/cli/telemetry/detached_test.go:115:5: SA5011(related information): this check suggests that the pointer can be nil (staticcheck)
+      if payload == nil {
+         ^
+  cmd/entire/cli/telemetry/detached_test.go:119:23: SA5011: possible nil pointer dereference (staticcheck)
+      agent, ok := payload.Properties["agent"].(string)
+                           ^
+  4 issues:
+  * staticcheck: 4

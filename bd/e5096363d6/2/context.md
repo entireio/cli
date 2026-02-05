@@ -18,12 +18,3 @@ TrackCommandDetached unconditionally calls spawnDetachedAnalytics, but spawnDeta
 
 fix lint
 
-### Prompt 5
-
-I'm getting this error on GH Actions:
-  Writing patch to /tmp/tmp-2096-wwz1XP8ai9Xr/pull.patch
-  only new issues on pull_request: /tmp/tmp-2096-wwz1XP8ai9Xr/pull.patch
-  Running [/home/runner/golangci-lint-2.8.0-linux-amd64/golangci-lint config path] in [/home/runner/work/cli/cli] ...
-  Running [/home/runner/golangci-lint-2.8.0-linux-amd64/golangci-lint config verify] in [/home/runner/work/cli/cli] ...
-  Running [/home/runner/golangci-lint-2.8.0-linux-amd64/golangci-lint run --new-from-patch=/tm...
-
