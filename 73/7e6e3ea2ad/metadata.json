@@ -2,8 +2,8 @@
   "checkpoint_id": "737e6e3ea2ad",
   "strategy": "manual-commit",
   "branch": "alex/ent-109-text-output-checkpoint-flag",
-  "migration_source_commit": "3bb53d486e2f2f85d1ca19494dd183bc5d40ee83",
-  "checkpoints_count": 1,
+  "migration_source_commit": "b87bfdcf3ebec303dc596d2e1986592a6ef55051",
+  "checkpoints_count": 2,
   "files_touched": [
     "cmd/entire/cli/explain.go",
     "cmd/entire/cli/explain_test.go"
@@ -15,13 +15,20 @@
       "context": "/73/7e6e3ea2ad/0/context.md",
       "content_hash": "/73/7e6e3ea2ad/0/content_hash.txt",
       "prompt": "/73/7e6e3ea2ad/0/prompt.txt"
+    },
+    {
+      "metadata": "/73/7e6e3ea2ad/2/metadata.json",
+      "transcript": "/73/7e6e3ea2ad/2/full.jsonl",
+      "context": "/73/7e6e3ea2ad/2/context.md",
+      "content_hash": "/73/7e6e3ea2ad/2/content_hash.txt",
+      "prompt": "/73/7e6e3ea2ad/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 234,
-    "cache_creation_tokens": 164082,
+    "input_tokens": 244,
+    "cache_creation_tokens": 199964,
     "cache_read_tokens": 1831131,
-    "output_tokens": 91,
-    "api_call_count": 29
+    "output_tokens": 97,
+    "api_call_count": 30
   }
 }

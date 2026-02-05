@@ -1,3 +1,1 @@
-first problem: `entire explain` is just bombing out saying `session not found: 2026-01-22-0bdbfa06-acf1-473a-b3e4-6a03313d1d0e`
-
-this is true, but there are other checkpoints and branch context we want to see
+question: what's the behaviour for the entire/sessions full.jsonl agent transcript storage through a claude compaction?
