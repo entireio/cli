@@ -1,0 +1,17 @@
+{
+  "checkpoint_id": "b8e9234b1b70",
+  "session_id": "2026-01-27-0276a600-2f22-4d2b-844c-3feb9c5aa108",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-28T11:25:27.072113+01:00",
+  "branch": "soph/test-attribution-flow-script",
+  "checkpoints_count": 0,
+  "files_touched": null,
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 1356,
+    "cache_creation_tokens": 979204,
+    "cache_read_tokens": 16569809,
+    "output_tokens": 37880,
+    "api_call_count": 165
+  }
+}
