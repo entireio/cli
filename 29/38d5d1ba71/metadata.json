@@ -2,8 +2,8 @@
   "checkpoint_id": "2938d5d1ba71",
   "strategy": "manual-commit",
   "branch": "gtrrz-victor/alt-better-multi-session-flow",
-  "migration_source_commit": "cbbf544ad558a19d27bc9ae6ebb9f3b7cdc46ee3",
-  "checkpoints_count": 2,
+  "migration_source_commit": "bcabc72f4816170369263077a6bda24f3772b5a4",
+  "checkpoints_count": 5,
   "files_touched": [
     "cmd/entire/cli/hooks.go",
     "cmd/entire/cli/hooks_geminicli_handlers.go",
@@ -17,13 +17,20 @@
       "context": "/29/38d5d1ba71/0/context.md",
       "content_hash": "/29/38d5d1ba71/0/content_hash.txt",
       "prompt": "/29/38d5d1ba71/0/prompt.txt"
+    },
+    {
+      "metadata": "/29/38d5d1ba71/2/metadata.json",
+      "transcript": "/29/38d5d1ba71/2/full.jsonl",
+      "context": "/29/38d5d1ba71/2/context.md",
+      "content_hash": "/29/38d5d1ba71/2/content_hash.txt",
+      "prompt": "/29/38d5d1ba71/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 212,
-    "cache_creation_tokens": 59519,
-    "cache_read_tokens": 1656408,
-    "output_tokens": 61,
-    "api_call_count": 26
+    "input_tokens": 468,
+    "cache_creation_tokens": 121633,
+    "cache_read_tokens": 3745060,
+    "output_tokens": 139,
+    "api_call_count": 57
   }
 }

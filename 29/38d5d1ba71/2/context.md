@@ -12,11 +12,3 @@ The outputHookResponse function is defined in hooks_claudecode_handlers.go and o
 
 Based on the deleted outputGeminiBlockingResponse function in the diff (which used decision: "block" and reason fields), Gemini CLI expects a different JSON format for blockin...
 
-### Prompt 3
-
-ignore this error: cmd/entire/cli/hooks.go:332:2: missing cases in switch of type agent.AgentType: agent.AgentTypeClaudeCode, agent.AgentTypeUnknown (exhaustive)
-
-### Prompt 4
-
-add a comment into the code to ignore that lint error
-
