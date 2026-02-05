@@ -2,8 +2,8 @@
   "checkpoint_id": "58419674de6b",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "806452855d7e5893142b15461d3b663ece35d526",
-  "checkpoints_count": 4,
+  "migration_source_commit": "e92b2e040be0a259e9aa159964fec1a38918a72a",
+  "checkpoints_count": 2,
   "files_touched": [
     "cmd/entire/cli/integration_test/setup_claude_hooks_test.go",
     "cmd/entire/cli/setup.go",

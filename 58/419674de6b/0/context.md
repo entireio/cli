@@ -4,21 +4,14 @@
 
 ### Prompt 1
 
-Right now we have a pre-push hook that would ask you if you want to push the `entire/sessions` branch. We think it's a better idea to default to "yes" in this case and only allow an option for enable / disable to skip it. Can you suggest how to implement this?
+Can you check if the tests cmd/entire/cli/integration_test/setup_claude_hooks_test.go are now not duplicated?
 
 ### Prompt 2
 
-Yes, do B
+let's use true/false and not on/off for the skip-push-sessions
 
 ### Prompt 3
 
-I'd like to add an option `--skip-push-sessions` to enable (would instead of "on" set it to off).
-
-### Prompt 4
-
-newSetupAgentHooksCmd() <- I wonder why we even still have that command
-
-### Prompt 5
-
-yes
+why can't we not just real booleans?   "enabled": true,
+  "local_dev": true,
 
