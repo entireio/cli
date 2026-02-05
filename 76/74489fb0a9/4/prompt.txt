@@ -1,0 +1,128 @@
+Implement the following plan:
+
+# Plan: Change Session Folder Indexing from 1-Based to 0-Based
+
+## Goal
+Change session folder numbering from `1/`, `2/`, `3/`... to `0/`, `1/`, `2/`...
+
+---
+
+## Files to Modify
+
+### 1. `cmd/entire/cli/checkpoint/committed.go`
+
+**Writing new sessions (lines ~238-245):**
+```go
+// Before:
+sessionIndex := 1
+if existingSummary != nil {
+    sessionIndex = len(existingSummary.Sessions) + 1
+}
+
+// After:
+sessionIndex := 0
+if existingSummary != nil {
+    sessionIndex = len(existingSummary.Sessions)
+}
+```
+
+**Reading latest session in ReadCommitted (lines ~644-648):**
+```go
+// Before:
+latestIndex := len(summary.Sessions)
+
+// After:
+latestIndex := len(summary.Sessions) - 1
+```
+
+**Reading archived sessions (lines ~697-702):**
+```go
+// Before:
+for i := 1; i < sessionCount; i++ {
+    ...
+    prompts[i-1] = ...
+
+// After:
+for i := 0; i < sessionCount-1; i++ {
+    ...
+    prompts[i] = ...
+```
+
+**Reading latest for ListCommitted (lines ~809-811):**
+```go
+// Before: latestIndex := len(summary.Sessions)
+// After:  latestIndex := len(summary.Sessions) - 1
+```
+
+**Finding latest for UpdateSummary (lines ~916-918):**
+```go
+// Before: latestIndex := len(checkpointSummary.Sessions)
+// After:  latestIndex := len(checkpointSummary.Sessions) - 1
+```
+
+### 2. `cmd/entire/cli/strategy/session.go`
+
+**Reading description (lines ~250-253):**
+```go
+// Before:
+sessionDir := "1"
+sessionDir = strconv.Itoa(len(summary.Sessions))
+
+// After:
+sessionDir := "0"
+sessionDir = strconv.Itoa(len(summary.Sessions) - 1)
+```
+
+### 3. `cmd/entire/cli/strategy/common.go`
+
+**Reading prompts (lines ~413-420):**
+```go
+// Before:
+for i := 1; i < sessionCount; i++ {
+    archivedPath := fmt.Sprintf("%s/%d", checkpointPath, i)
+    prompts[i-1] = ReadSessionPromptFromTree(tree, archivedPath)
+
+// After:
+for i := 0; i < sessionCount-1; i++ {
+    archivedPath := fmt.Sprintf("%s/%d", checkpointPath, i)
+    prompts[i] = ReadSessionPromptFromTree(tree, archivedPath)
+```
+
+### 4. Tests to Update
+
+**`cmd/entire/cli/checkpoint/checkpoint_test.go`:**
+- `Tree("1")` → `Tree("0")` for first session
+- Expected paths `/1/` → `/0/`
+- Invert "folder 0/ should NOT exist" → "folder 0/ should exist"
+
+**`cmd/entire/cli/strategy/session_test.go`:**
+- `sessionDir := "1"` → `sessionDir := "0"`
+- `strconv.Itoa(i + 1)` → `strconv.Itoa(i)`
+
+**`cmd/entire/cli/strategy/manual_commit_test.go`:**
+- `/1/metadata.json` → `/0/metadata.json`
+
+**`cmd/entire/cli/integration_test/testenv.go`:**
+- Update documentation comment
+
+---
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+---
+
+## Pattern Summary
+
+| Aspect | Before (1-based) | After (0-based) |
+|--------|------------------|-----------------|
+| First session folder | `1/` | `0/` |
+| N sessions → latest | folder `N` | folder `N-1` |
+| Archived loop | `for i := 1; i < N` | `for i := 0; i < N-1` |
+| New session index | `len(Sessions) + 1` | `len(Sessions)` |
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
