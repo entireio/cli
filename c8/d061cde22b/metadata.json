@@ -2,8 +2,8 @@
   "checkpoint_id": "c8d061cde22b",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "5073fab33196d2bebf83b9c71c4b00309da88d31",
-  "checkpoints_count": 1,
+  "migration_source_commit": "b560e47de8e798f24e4b6190e9be18fc7d1ee622",
+  "checkpoints_count": 2,
   "files_touched": [
     "cmd/entire/cli/integration_test/interactive.go",
     "cmd/entire/cli/integration_test/resume_test.go",
@@ -16,6 +16,13 @@
       "context": "/c8/d061cde22b/0/context.md",
       "content_hash": "/c8/d061cde22b/0/content_hash.txt",
       "prompt": "/c8/d061cde22b/0/prompt.txt"
+    },
+    {
+      "metadata": "/c8/d061cde22b/2/metadata.json",
+      "transcript": "/c8/d061cde22b/2/full.jsonl",
+      "context": "/c8/d061cde22b/2/context.md",
+      "content_hash": "/c8/d061cde22b/2/content_hash.txt",
+      "prompt": "/c8/d061cde22b/2/prompt.txt"
     }
   ],
   "token_usage": {
