@@ -2,14 +2,16 @@
   "checkpoint_id": "4a8cc61ef902",
   "strategy": "manual-commit",
   "branch": "alex/fix-worktree-shadow-branch-collision",
-  "migration_source_commit": "0b3e77e297cac19a32bc5435001d4f0143283529",
-  "checkpoints_count": 1,
+  "migration_source_commit": "30b6750789333b801091578f62714dfa6234b8d8",
+  "checkpoints_count": 3,
   "files_touched": [
     "CLAUDE.md",
     "cmd/entire/cli/checkpoint/checkpoint.go",
     "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/checkpoint/temporary_test.go",
     "cmd/entire/cli/explain.go",
     "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
     "cmd/entire/cli/integration_test/last_checkpoint_id_test.go",
     "cmd/entire/cli/integration_test/manual_commit_untracked_files_test.go",
     "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
@@ -18,6 +20,9 @@
     "cmd/entire/cli/integration_test/testenv.go",
     "cmd/entire/cli/paths/worktree.go",
     "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/clean_test.go",
+    "cmd/entire/cli/strategy/cleanup.go",
+    "cmd/entire/cli/strategy/common.go",
     "cmd/entire/cli/strategy/manual_commit.go",
     "cmd/entire/cli/strategy/manual_commit_condensation.go",
     "cmd/entire/cli/strategy/manual_commit_git.go",
@@ -38,13 +43,20 @@
       "context": "/4a/8cc61ef902/0/context.md",
       "content_hash": "/4a/8cc61ef902/0/content_hash.txt",
       "prompt": "/4a/8cc61ef902/0/prompt.txt"
+    },
+    {
+      "metadata": "/4a/8cc61ef902/2/metadata.json",
+      "transcript": "/4a/8cc61ef902/2/full.jsonl",
+      "context": "/4a/8cc61ef902/2/context.md",
+      "content_hash": "/4a/8cc61ef902/2/content_hash.txt",
+      "prompt": "/4a/8cc61ef902/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 2394,
-    "cache_creation_tokens": 983368,
-    "cache_read_tokens": 38592741,
-    "output_tokens": 1153,
-    "api_call_count": 337
+    "input_tokens": 5230,
+    "cache_creation_tokens": 2078658,
+    "cache_read_tokens": 82095134,
+    "output_tokens": 2439,
+    "api_call_count": 729
   }
 }
