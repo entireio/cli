@@ -2,7 +2,7 @@
   "checkpoint_id": "7674489fb0a9",
   "strategy": "manual-commit",
   "branch": "gtrrz-victor/restructure-entire-session-files",
-  "checkpoints_count": 2,
+  "checkpoints_count": 4,
   "files_touched": [
     "cmd/entire/cli/checkpoint/checkpoint.go",
     "cmd/entire/cli/checkpoint/checkpoint_test.go",
@@ -32,14 +32,21 @@
       "context": "/76/74489fb0a9/76/74489fb0a9/1/context.md",
       "content_hash": "/76/74489fb0a9/76/74489fb0a9/1/content_hash.txt",
       "prompt": "/76/74489fb0a9/76/74489fb0a9/1/prompt.txt"
+    },
+    {
+      "metadata": "/76/74489fb0a9/76/74489fb0a9/2/metadata.json",
+      "transcript": "/76/74489fb0a9/76/74489fb0a9/2/full.jsonl",
+      "context": "/76/74489fb0a9/76/74489fb0a9/2/context.md",
+      "content_hash": "/76/74489fb0a9/76/74489fb0a9/2/content_hash.txt",
+      "prompt": "/76/74489fb0a9/76/74489fb0a9/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 8682,
-    "cache_creation_tokens": 597305,
-    "cache_read_tokens": 30766585,
-    "output_tokens": 2556,
-    "api_call_count": 257
+    "input_tokens": 8840,
+    "cache_creation_tokens": 839136,
+    "cache_read_tokens": 37260882,
+    "output_tokens": 2789,
+    "api_call_count": 309
   },
-  "migration_source_commit": "6de9141016fa1bfde37db9210db4bab89682896f"
+  "migration_source_commit": "bd3e4da435008758d4b91dc98c798ca9a8e0a30f"
 }
