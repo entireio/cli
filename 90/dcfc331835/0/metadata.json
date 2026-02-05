@@ -1,0 +1,12 @@
+{
+  "checkpoint_id": "90dcfc331835",
+  "session_id": "2026-01-07-3a782158-6c7c-4d4d-9c73-eae031da5b18",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-07T17:41:26.410399+01:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/session.go"
+  ]
+}
