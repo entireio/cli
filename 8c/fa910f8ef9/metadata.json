@@ -2,8 +2,8 @@
   "checkpoint_id": "8cfa910f8ef9",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "32ee8577b7998d0377f0aac212699368ce81a2ad",
-  "checkpoints_count": 20,
+  "migration_source_commit": "58ee12f4aa708e257958bac45a8e59e0b2d83a8f",
+  "checkpoints_count": 26,
   "files_touched": [
     ".claude/.gitignore",
     ".claude/agents/dev.md",
@@ -69,6 +69,13 @@
       "context": "/8c/fa910f8ef9/5/context.md",
       "content_hash": "/8c/fa910f8ef9/5/content_hash.txt",
       "prompt": "/8c/fa910f8ef9/5/prompt.txt"
+    },
+    {
+      "metadata": "/8c/fa910f8ef9/6/metadata.json",
+      "transcript": "/8c/fa910f8ef9/6/full.jsonl",
+      "context": "/8c/fa910f8ef9/6/context.md",
+      "content_hash": "/8c/fa910f8ef9/6/content_hash.txt",
+      "prompt": "/8c/fa910f8ef9/6/prompt.txt"
     }
   ],
   "token_usage": {
