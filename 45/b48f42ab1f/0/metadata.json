@@ -1,0 +1,16 @@
+{
+  "checkpoint_id": "45b48f42ab1f",
+  "session_id": "2026-01-15-0822e04b-5551-4de8-a98a-5660c689e49b",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-15T14:43:19.976358+11:00",
+  "checkpoints_count": 15,
+  "files_touched": [
+    ".claude/settings.json",
+    "cmd/entire/cli/config.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go",
+    "cmd/entire/cli/telemetry/telemetry.go",
+    "cmd/entire/cli/telemetry/telemetry_test.go",
+    "cmd/entire/main.go"
+  ]
+}
