@@ -2,8 +2,8 @@
   "checkpoint_id": "720c20f08988",
   "strategy": "manual-commit",
   "branch": "soph/token-usage-to-agent",
-  "migration_source_commit": "5659d1afc1be57be93427cfb3ff6dd58ba717a07",
-  "checkpoints_count": 5,
+  "migration_source_commit": "23034ac8f3d1ba6c7fea591640cc7a24618a1863",
+  "checkpoints_count": 12,
   "files_touched": [
     "cmd/entire/cli/agent/agent.go",
     "cmd/entire/cli/agent/agent_test.go",
@@ -27,13 +27,20 @@
       "context": "/72/0c20f08988/0/context.md",
       "content_hash": "/72/0c20f08988/0/content_hash.txt",
       "prompt": "/72/0c20f08988/0/prompt.txt"
+    },
+    {
+      "metadata": "/72/0c20f08988/2/metadata.json",
+      "transcript": "/72/0c20f08988/2/full.jsonl",
+      "context": "/72/0c20f08988/2/context.md",
+      "content_hash": "/72/0c20f08988/2/content_hash.txt",
+      "prompt": "/72/0c20f08988/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 1864,
-    "cache_creation_tokens": 994775,
-    "cache_read_tokens": 19188001,
-    "output_tokens": 545,
-    "api_call_count": 228
+    "input_tokens": 3976,
+    "cache_creation_tokens": 2009923,
+    "cache_read_tokens": 42584104,
+    "output_tokens": 1155,
+    "api_call_count": 486
   }
 }
