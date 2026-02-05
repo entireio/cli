@@ -8,15 +8,3 @@ Let's make some more changes to explain.
 1. add a `--raw-transcript` option to the `entire explain -c {checkpoint-id}` command which just returns the raw transcript file
 2. change `--full` to _replace_ the current scoped prompt section from `entire explain -c` to a parsed full transcript (does this make sense?), and don't append the raw transcript any more
 
-### Prompt 2
-
-commit this
-
-### Prompt 3
-
-is this section duplicated with L:597?
-
-### Prompt 4
-
-force push
-
