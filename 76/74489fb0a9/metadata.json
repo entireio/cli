@@ -2,13 +2,17 @@
   "checkpoint_id": "7674489fb0a9",
   "strategy": "manual-commit",
   "branch": "gtrrz-victor/restructure-entire-session-files",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
     "cmd/entire/cli/checkpoint/checkpoint_test.go",
     "cmd/entire/cli/checkpoint/committed.go",
     "cmd/entire/cli/integration_test/concurrent_session_warning_test.go",
     "cmd/entire/cli/integration_test/gemini_concurrent_session_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
     "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/common.go",
     "cmd/entire/cli/strategy/manual_commit_logs.go",
     "cmd/entire/cli/strategy/manual_commit_test.go",
     "cmd/entire/cli/strategy/session.go",
@@ -21,14 +25,21 @@
       "context": "/76/74489fb0a9/76/74489fb0a9/0/context.md",
       "content_hash": "/76/74489fb0a9/76/74489fb0a9/0/content_hash.txt",
       "prompt": "/76/74489fb0a9/76/74489fb0a9/0/prompt.txt"
+    },
+    {
+      "metadata": "/76/74489fb0a9/76/74489fb0a9/1/metadata.json",
+      "transcript": "/76/74489fb0a9/76/74489fb0a9/1/full.jsonl",
+      "context": "/76/74489fb0a9/76/74489fb0a9/1/context.md",
+      "content_hash": "/76/74489fb0a9/76/74489fb0a9/1/content_hash.txt",
+      "prompt": "/76/74489fb0a9/76/74489fb0a9/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 8409,
-    "cache_creation_tokens": 201022,
-    "cache_read_tokens": 5882056,
-    "output_tokens": 596,
-    "api_call_count": 43
+    "input_tokens": 8682,
+    "cache_creation_tokens": 597305,
+    "cache_read_tokens": 30766585,
+    "output_tokens": 2556,
+    "api_call_count": 257
   },
-  "migration_source_commit": "c886ddf342e3d74d40e06820eeddf8aa31a49da0"
+  "migration_source_commit": "6de9141016fa1bfde37db9210db4bab89682896f"
 }
