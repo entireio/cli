@@ -3,4 +3,5 @@
   "enabled": true,
   "local_dev": true
   "output_filter": ["gitleaks-filter"],
+  "telemetry": false
 }
