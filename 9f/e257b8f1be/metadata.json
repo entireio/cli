@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "9fe257b8f1be",
+  "strategy": "manual-commit",
+  "branch": "alex/improve-explain-2",
+  "migration_source_commit": "c4be81812e21de60516f1449bf583368290631fe",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/integration_test/explain_test.go",
+    "docs/plans/2026-02-04-explain-improvements.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9f/e257b8f1be/0/metadata.json",
+      "transcript": "/9f/e257b8f1be/0/full.jsonl",
+      "context": "/9f/e257b8f1be/0/context.md",
+      "content_hash": "/9f/e257b8f1be/0/content_hash.txt",
+      "prompt": "/9f/e257b8f1be/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 193,
+    "cache_creation_tokens": 370422,
+    "cache_read_tokens": 10590578,
+    "output_tokens": 8630,
+    "api_call_count": 98
+  }
+}
