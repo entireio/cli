@@ -1,0 +1,5 @@
+I've noticed whatever command I invoke (e.g., `./entire help`) there's a few hundred millis delay before my shell prompt returns.  I'd like to add a flame graph or tracing or something to find out why.  As lightweight as possible please.
+
+---
+
+Hm, ok, nothing obvious in the trace.  Could it be a timeout failing to reach Posthog or something?  It is definitely solved when i disable telemetry with ENTIRE_TELEMETRY_OPTOUT.
