@@ -2,22 +2,21 @@
   "checkpoint_id": "51a265047d72",
   "session_id": "2026-01-24-53ea19c1-6d29-4ebf-952b-ddbb27af25bb",
   "strategy": "manual-commit",
-  "created_at": "2026-01-24T16:42:11.280843+11:00",
-  "branch": "alex/code-dup-tooling",
-  "checkpoints_count": 1,
+  "created_at": "2026-01-24T17:02:33.23213+11:00",
+  "checkpoints_count": 2,
   "files_touched": [
     ".golangci.yaml",
     "CLAUDE.md",
     "mise.toml"
   ],
   "agent": "Agent",
-  "transcript_uuid_at_start": "df161a02-6da5-4cd6-be2e-f679faa213e0",
-  "transcript_lines_at_start": 312,
+  "transcript_uuid_at_start": "35e685fe-e3c5-499f-87a9-9d8d58f1d1fe",
+  "transcript_lines_at_start": 399,
   "token_usage": {
-    "input_tokens": 3500,
-    "cache_creation_tokens": 393532,
-    "cache_read_tokens": 2301433,
-    "output_tokens": 131,
-    "api_call_count": 48
+    "input_tokens": 3924,
+    "cache_creation_tokens": 423363,
+    "cache_read_tokens": 5042942,
+    "output_tokens": 209,
+    "api_call_count": 83
   }
 }

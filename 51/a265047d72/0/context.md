@@ -138,3 +138,28 @@ Search the codebase for related code before implementing new functionality. This
 
 From context (co...
 
+### Prompt 22
+
+that looks like...it's working? can we commit our changes?
+
+### Prompt 23
+
+<bash-input>mise run dup</bash-input>
+
+### Prompt 24
+
+<bash-stdout>0 issues.
+[dup] $ golangci-lint run --enable-only dupl --new=false --max-issues-per-linte…</bash-stdout><bash-stderr></bash-stderr>
+
+### Prompt 25
+
+can we play around with the dup settings? It's returning 0 issues....or is that legit?
+
+### Prompt 26
+
+I mean, test boilerplate is also perhaps worth fixing...
+
+### Prompt 27
+
+4. however is there a way to get that summary natively?
+
