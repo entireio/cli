@@ -1,0 +1,64 @@
+what is the output if you run "entire status" ?
+
+---
+
+I do want this command to behave like:
+entire status
+  Enable (manual-commit)
+
+and
+entire status --long
+  Project, enabled (manual-commit)                                                                                                                                                                     
+  Local, disabled (auto-commit)
+
+---
+
+I do want this command to behave like:
+entire status
+  Enable (manual-commit)
+
+and
+entire status --long
+  Enable (manual-commit) 
+  
+  Project, enabled (manual-commit)                                                                                                                                                                                    Local, disabled (auto-commit)
+
+---
+
+What is the difference between LoadEntireSettings and loadSettingsFromFile
+
+---
+
+test are failing at github actions, not if I run the test locally. This is the error:
+"""
+--- FAIL: TestEnableWhenDisabled (0.00s)
+    --- FAIL: TestEnableWhenDisabled/auto-commit (0.03s)
+        setup_cmd_test.go:152: Expected status to show 'enabled' after re-enabling, got: Enabled (auto-commit)
+    --- FAIL: TestEnableWhenDisabled/manual-commit (0.03s)
+        setup_cmd_test.go:152: Expected status to show 'enabled' after re-enabling, got: Enabled (manual-commit)
+--- FAIL: TestStatusWhenDisabled (0.00s)
+    --- FAIL: TestStatusWhenDisabled/manual-commit (0.01s)
+        setup_cmd_test.go:132: Expected status to show 'disabled', got: Disabled (manual-commit)
+    --- FAIL: TestStatusWhenDisabled/auto-commit (0.01s)
+        setup_cmd_test.go:132: Expected status to show 'disabled', got: Disabled (auto-commit)
+--- FAIL: TestEnableDisable (0.00s)
+    --- FAIL: TestEnableDisable/manual-commit (0.05s)
+        setup_cmd_test.go:51: Expected status to show 'enabled', got: Enabled (manual-commit)
+        setup_cmd_test.go:63: Expected status to show 'disabled', got: Disabled (manual-commit)
+        setup_cmd_test.go:75: Expected status to show 'enabled', got: Enabled (manual-commit)
+    --- FAIL: TestEnableDisable/auto-commit (0.05s)
+        setup_cmd_test.go:51: Expected status to show 'enabled', got: Enabled (auto-commit)
+        setup_cmd_test.go:63: Expected status to show 'disabled', got: Disabled (auto-commit)
+        setup_cmd_test.go:75: Expected status to show 'enabled', got: Enabled (auto-commit)
+FAIL"""
+
+---
+
+evaluate this feedback from copilot:
+"""
+The new loadSettingsFromFile function lacks the empty strategy fallback that LoadEntireSettings has. When a settings file contains "strategy": "" (a valid scenario tested in TestLoadEntireSettings_EmptyStrategyInLocalDoesNotOverride), the --long status output displays "Local, enabled ()" with empty parentheses, which is confusing. LoadEntireSettings applies a default when strategy is empty, but loadSettingsFromFile returns the empty string as-is.
+"""
+
+---
+
+reduce duplicated code around those methods LoadEntireSettings and loadSettingsFromFile, they seem to do almost the same but totally different implementations
