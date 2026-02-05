@@ -6,129 +6,43 @@
 
 Implement the following plan:
 
-# Plan: Change Telemetry Default to Disabled When Not Set
+# Review: TokenUsage Implementation Across Strategies
 
 ## Summary
-Change the telemetry behavior so that if telemetry settings are not configured (nil), telemetry is disabled by default instead of enabled.
 
-## Target Behavior
-- `nil` (not set) = **disabled**
-- `true` = enabled
-- `false` = disabled
+The token usage tracking has been implemented across both strategies but has code duplication and a potential data loss bug.
 
-## Changes Required
+---
 
-### 1. Update `cmd/entire/cli/telemetry/telemetry.go` ✅ DONE
+## Issues Found
 
-**Lines 72-85** - Changed the condition and comment:
-- Comment: `nil means not co...
+### 1. Code Duplication: Field-by-Field Accumulation (Medium Priority)
+
+The same 5-field accumulation pattern appears in multiple places:
+
+**Location A:** `manual_commit_git.go:266-289`
+```go
+func accumulateTokenUsage(existing, additional *checkpoint.Tok...
 
 ### Prompt 2
 
-Operation stopped by hook: Another session is active: "telemetry is enabled by default, I want to change that be..."
-
-You can continue here, but checkpoints from both sessions will be interleaved.
-
-To resume the other session instead, exit Claude and run: claude -r ad64798f-0493-4cad-a94e-325ea052d103
-
-To suppress this warning in future sessions, run:
-  entire enable --disable-multisession-warning
-
-Press the up arrow key to get your prompt back.
+manual strategy is also missing the props TranscriptUUIDAtStart and TranscriptLinesAtStart inside metadata
 
 ### Prompt 3
 
-Implement the following plan:
-
-# Plan: Change Telemetry Default to Disabled When Not Set
-
-## Summary
-Change the telemetry behavior so that if telemetry settings are not configured (nil), telemetry is disabled by default instead of enabled.
-
-## Target Behavior
-- `nil` (not set) = **disabled**
-- `true` = enabled
-- `false` = disabled
-
-## Changes Required
-
-### 1. Update `cmd/entire/cli/telemetry/telemetry.go` ✅ DONE
-
-**Lines 72-85** - Changed the condition and comment:
-- Comment: `nil means not co...
+[Request interrupted by user for tool use]
 
 ### Prompt 4
 
-where else is settings.Telemetry used ?
-
-### Prompt 5
-
-yes
-
-### Prompt 6
-
-[Request interrupted by user for tool use]
-
-### Prompt 7
-
 Implement the following plan:
 
-# Plan: Change Telemetry Default to Disabled When Not Set
+# Add TranscriptUUIDAtStart and TranscriptLinesAtStart to Manual Commit Strategy
 
 ## Summary
-Change the telemetry behavior so that if telemetry settings are not configured (nil), telemetry is disabled by default instead of enabled.
 
-## Target Behavior
-- `nil` (not set) = **disabled**
-- `true` = enabled
-- `false` = disabled
+The manual commit strategy is missing `TranscriptUUIDAtStart` and `TranscriptLinesAtStart` fields in the metadata.json written during condensation. These fields track where in the transcript this checkpoint's content starts, which is needed for proper transcript slicing when viewing checkpoint history.
 
 ## Changes Required
 
-### 1. Update `cmd/entire/cli/telemetry/telemetry.go` ✅ DONE
-
-**Lines 72-85** - Changed the condition and comment:
-- Comment: `nil means not co...
-
-### Prompt 8
-
-Operation stopped by hook: Another session is active: "telemetry is enabled by default, I want to change that be..."
-
-You can continue here, but checkpoints from both sessions will be interleaved.
-
-To resume the other session instead, exit Claude and run: claude -r ad64798f-0493-4cad-a94e-325ea052d103
-
-To suppress this warning in future sessions, run:
-  entire enable --disable-multisession-warning
-
-Press the up arrow key to get your prompt back.
-
-### Prompt 9
-
-Implement the following plan:
-
-# Plan: Change Telemetry Default to Disabled When Not Set
-
-## Summary
-Change the telemetry behavior so that if telemetry settings are not configured (nil), telemetry is disabled by default instead of enabled.
-
-## Target Behavior
-- `nil` (not set) = **disabled**
-- `true` = enabled
-- `false` = disabled
-
-## Changes Required
-
-### 1. Update `cmd/entire/cli/telemetry/telemetry.go` ✅ DONE
-
-**Lines 72-85** - Changed the condition and comment:
-- Comment: `nil means not co...
-
-### Prompt 10
-
-print the time that request takes to resolve
-
-### Prompt 11
-
-create a PR description about this changes
+### 1. Add Fields to SessionState (`cmd/entire/cl...
 

@@ -2,8 +2,8 @@
   "checkpoint_id": "8cfa910f8ef9",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "4da3dd189ee90259ee1f3e106cb4a4ef6e3ba27c",
-  "checkpoints_count": 8,
+  "migration_source_commit": "3ed04f7de77f681782e98e893aedf62084393dc8",
+  "checkpoints_count": 14,
   "files_touched": [
     ".claude/.gitignore",
     ".claude/agents/dev.md",
@@ -17,12 +17,19 @@
     ".claude/skills/test-repo/README.md",
     ".claude/skills/test-repo/SKILL.md",
     ".claude/skills/test-repo/test-harness.sh",
+    "cmd/entire/cli/agent/claudecode/transcript.go",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
     "cmd/entire/cli/config.go",
     "cmd/entire/cli/hooks_claudecode_handlers.go",
     "cmd/entire/cli/integration_test/concurrent_session_warning_test.go",
     "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/session/state.go",
     "cmd/entire/cli/setup.go",
     "cmd/entire/cli/setup_test.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
     "cmd/entire/cli/telemetry/telemetry.go",
     "cmd/entire/main.go",
     "plans/feat-disable-multisession-warning-option.md"
@@ -48,6 +55,13 @@
       "context": "/8c/fa910f8ef9/3/context.md",
       "content_hash": "/8c/fa910f8ef9/3/content_hash.txt",
       "prompt": "/8c/fa910f8ef9/3/prompt.txt"
+    },
+    {
+      "metadata": "/8c/fa910f8ef9/4/metadata.json",
+      "transcript": "/8c/fa910f8ef9/4/full.jsonl",
+      "context": "/8c/fa910f8ef9/4/context.md",
+      "content_hash": "/8c/fa910f8ef9/4/content_hash.txt",
+      "prompt": "/8c/fa910f8ef9/4/prompt.txt"
     }
   ],
   "token_usage": {
