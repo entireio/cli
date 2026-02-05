@@ -1,0 +1,38 @@
+{
+  "checkpoint_id": "d87ee3bab4de",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "99a0de77ca59d6a661c4008c94c8e9661daf8f1f",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/agent/agent.go",
+    "cmd/entire/cli/agent/opencode/opencode.go",
+    "cmd/entire/cli/agent/opencode/types.go",
+    "cmd/entire/cli/agent/registry.go",
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/hooks_cmd.go",
+    "cmd/entire/cli/hooks_opencode_handlers.go",
+    "cmd/entire/cli/hooks_opencode_transcript.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "docs/README-opencode-integration.md",
+    "docs/opencode-integration-decisions.md",
+    "docs/opencode-integration-findings.md",
+    "docs/opencode-integration-plan.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d8/7ee3bab4de/0/metadata.json",
+      "transcript": "/d8/7ee3bab4de/0/full.jsonl",
+      "context": "/d8/7ee3bab4de/0/context.md",
+      "content_hash": "/d8/7ee3bab4de/0/content_hash.txt",
+      "prompt": "/d8/7ee3bab4de/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}
