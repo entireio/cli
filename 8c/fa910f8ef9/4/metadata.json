@@ -1,9 +1,9 @@
 {
   "checkpoint_id": "8cfa910f8ef9",
-  "session_id": "2026-01-19-4931d45a-d447-44b4-8475-1e6fcfcc28bf",
+  "session_id": "2026-01-19-38917d7d-9f69-4210-a3b0-eed0a9e97575",
   "strategy": "manual-commit",
-  "created_at": "2026-01-20T14:28:43.040295+11:00",
-  "checkpoints_count": 6,
+  "created_at": "2026-01-20T14:28:42.960553+11:00",
+  "checkpoints_count": 5,
   "files_touched": [
     ".claude/.gitignore",
     ".claude/agents/dev.md",
@@ -17,22 +17,15 @@
     ".claude/skills/test-repo/README.md",
     ".claude/skills/test-repo/SKILL.md",
     ".claude/skills/test-repo/test-harness.sh",
-    "cmd/entire/cli/agent/claudecode/transcript.go",
-    "cmd/entire/cli/checkpoint/checkpoint.go",
     "cmd/entire/cli/config.go",
     "cmd/entire/cli/hooks_claudecode_handlers.go",
     "cmd/entire/cli/integration_test/concurrent_session_warning_test.go",
     "cmd/entire/cli/integration_test/testenv.go",
-    "cmd/entire/cli/session/state.go",
     "cmd/entire/cli/setup.go",
     "cmd/entire/cli/setup_test.go",
-    "cmd/entire/cli/strategy/manual_commit.go",
-    "cmd/entire/cli/strategy/manual_commit_condensation.go",
-    "cmd/entire/cli/strategy/manual_commit_git.go",
-    "cmd/entire/cli/strategy/manual_commit_types.go",
     "cmd/entire/cli/telemetry/telemetry.go",
     "cmd/entire/main.go",
     "plans/feat-disable-multisession-warning-option.md"
   ],
-  "agent": "Agent"
+  "agent": "Claude Code"
 }
