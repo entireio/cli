@@ -169,6 +169,7 @@ Personal overrides, gitignored by default:
 | `log_level`                            | `debug`, `info`, `warn`, `error` | Logging verbosity                              |
 | `strategy_options.push_sessions`       | `true`, `false`                  | Auto-push `entire/sessions` branch on git push |
 | `strategy_options.summarize.enabled`   | `true`, `false`                  | Auto-generate AI summaries at commit time      |
+| `output_filter`                        | `["cmd", "args..."]`             | Filter command to redact secrets from transcripts |
 
 ### Auto-Summarization
 
@@ -189,6 +190,24 @@ When enabled, Entire automatically generates AI summaries for checkpoints at com
 - Summary generation is non-blocking: failures are logged but don't prevent commits
 
 **Note:** Currently uses Claude CLI for summary generation. Other AI backends may be supported in future versions.
+
+### Output Filtering (Secret Redaction)
+
+Session transcripts may contain sensitive data like API keys or passwords that appear in tool outputs. The `output_filter` option lets you pipe transcript content through a filter command before it's written to disk.
+
+```json
+{
+  "output_filter": ["gitleaks-filter"]
+}
+```
+
+The filter command receives content on stdin and should output the filtered content on stdout. Any secrets detected will be redacted before the transcript is saved.
+
+**Example filters:**
+- `gitleaks-filter` - Detects and redacts secrets using gitleaks patterns
+- Custom scripts that match your organization's secret patterns
+
+**Note:** The filter runs on transcript content only. It does not affect your working directory files.
 
 ### Settings Priority
 
