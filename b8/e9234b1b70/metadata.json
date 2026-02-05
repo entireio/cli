@@ -1,0 +1,24 @@
+{
+  "checkpoint_id": "b8e9234b1b70",
+  "strategy": "manual-commit",
+  "branch": "soph/test-attribution-flow-script",
+  "migration_source_commit": "95243daf2bf071a263cae4f9d5f4c4eddba82914",
+  "checkpoints_count": 0,
+  "files_touched": [],
+  "sessions": [
+    {
+      "metadata": "/b8/e9234b1b70/0/metadata.json",
+      "transcript": "/b8/e9234b1b70/0/full.jsonl",
+      "context": "/b8/e9234b1b70/0/context.md",
+      "content_hash": "/b8/e9234b1b70/0/content_hash.txt",
+      "prompt": "/b8/e9234b1b70/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1356,
+    "cache_creation_tokens": 979204,
+    "cache_read_tokens": 16569809,
+    "output_tokens": 37880,
+    "api_call_count": 165
+  }
+}
