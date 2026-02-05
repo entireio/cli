@@ -2,10 +2,10 @@
   "checkpoint_id": "513fab7adf0b",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "fe316c1ea45e3279978a1d9d422431797d08264f",
-  "checkpoints_count": 2,
+  "migration_source_commit": "1de2aa0708be71f0ca9969b54cf8d8c3e37bed9e",
+  "checkpoints_count": 1,
   "files_touched": [
-    "test-gemini.txt"
+    "test_claude.txt"
   ],
   "sessions": [
     {
