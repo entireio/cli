@@ -2,9 +2,11 @@
   "checkpoint_id": "ac3f02a3c337",
   "strategy": "manual-commit",
   "branch": "soph/chunking",
-  "migration_source_commit": "4086716d5ad6c00d38e8fd2368ac26de119551ac",
-  "checkpoints_count": 1,
+  "migration_source_commit": "c7fa215f24305ddabc8c4c0ce482dcebc381bad4",
+  "checkpoints_count": 3,
   "files_touched": [
+    "cmd/entire/cli/agent/chunking.go",
+    "cmd/entire/cli/agent/chunking_test.go",
     "cmd/entire/cli/agent/geminicli/gemini.go"
   ],
   "sessions": [
@@ -14,13 +16,20 @@
       "context": "/ac/3f02a3c337/0/context.md",
       "content_hash": "/ac/3f02a3c337/0/content_hash.txt",
       "prompt": "/ac/3f02a3c337/0/prompt.txt"
+    },
+    {
+      "metadata": "/ac/3f02a3c337/2/metadata.json",
+      "transcript": "/ac/3f02a3c337/2/full.jsonl",
+      "context": "/ac/3f02a3c337/2/context.md",
+      "content_hash": "/ac/3f02a3c337/2/content_hash.txt",
+      "prompt": "/ac/3f02a3c337/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 130,
-    "cache_creation_tokens": 31020,
-    "cache_read_tokens": 737366,
-    "output_tokens": 1190,
-    "api_call_count": 16
+    "input_tokens": 204,
+    "cache_creation_tokens": 50867,
+    "cache_read_tokens": 1140936,
+    "output_tokens": 2306,
+    "api_call_count": 25
   }
 }
