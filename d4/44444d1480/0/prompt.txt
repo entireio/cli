@@ -1,0 +1,5 @@
+run an agent that creates a color file inside docs, choose your color
+
+---
+
+delete color.md in docs
