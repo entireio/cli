@@ -1,0 +1,10 @@
+{
+  "checkpoint_id": "513fab7adf0b",
+  "session_id": "2026-01-10-15f05963-2b87-4039-b700-deb3505d7543",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-12T09:56:07.360959-08:00",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "test-gemini.txt"
+  ]
+}
