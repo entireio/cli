@@ -1,0 +1,10 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+Low Severity
+
+The error from loadSettingsFromFile() is wrapped with "reading settings file:" at line 239, then wrapped again with the same prefix at line 84 in LoadEntireSettings(). This produces duplicate error messages like "reading settings file: reading settings file: permission denied" when file read errors occur, making the output confusing for users.
+
