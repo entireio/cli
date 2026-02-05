@@ -2,12 +2,10 @@
   "checkpoint_id": "90dcfc331835",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "de54e8b6bf2ae472f3fad25f379027ac948574d4",
+  "migration_source_commit": "bf064cd74e587a2aea0fd876b9bd8e08a7ba5ca3",
   "checkpoints_count": 1,
   "files_touched": [
-    "CLAUDE.md",
-    "cmd/entire/cli/strategy/auto_commit_test.go",
-    "cmd/entire/cli/strategy/session.go"
+    "cmd/entire/cli/session.go"
   ],
   "sessions": [
     {
