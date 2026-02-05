@@ -2,9 +2,20 @@
   "checkpoint_id": "b8e9234b1b70",
   "strategy": "manual-commit",
   "branch": "soph/test-attribution-flow-script",
-  "migration_source_commit": "95243daf2bf071a263cae4f9d5f4c4eddba82914",
-  "checkpoints_count": 0,
-  "files_touched": [],
+  "migration_source_commit": "e08c0572283bc1354c1b3d4b2efc7b589cee58e0",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_attribution.go",
+    "cmd/entire/cli/strategy/manual_commit_attribution_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "docs/architecture/adr-001-attribution-line-ownership.md",
+    "docs/architecture/attribution.md",
+    "scripts/test-attribution-e2e.sh"
+  ],
   "sessions": [
     {
       "metadata": "/b8/e9234b1b70/0/metadata.json",
@@ -12,13 +23,20 @@
       "context": "/b8/e9234b1b70/0/context.md",
       "content_hash": "/b8/e9234b1b70/0/content_hash.txt",
       "prompt": "/b8/e9234b1b70/0/prompt.txt"
+    },
+    {
+      "metadata": "/b8/e9234b1b70/2/metadata.json",
+      "transcript": "/b8/e9234b1b70/2/full.jsonl",
+      "context": "/b8/e9234b1b70/2/context.md",
+      "content_hash": "/b8/e9234b1b70/2/content_hash.txt",
+      "prompt": "/b8/e9234b1b70/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 1356,
-    "cache_creation_tokens": 979204,
-    "cache_read_tokens": 16569809,
-    "output_tokens": 37880,
-    "api_call_count": 165
+    "input_tokens": 2962,
+    "cache_creation_tokens": 2189702,
+    "cache_read_tokens": 36298051,
+    "output_tokens": 81472,
+    "api_call_count": 360
   }
 }
