@@ -2,8 +2,8 @@
   "checkpoint_id": "12cbfeaa512b",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "03385ef2ca4659da45f8465e7d7a96531061edd6",
-  "checkpoints_count": 2,
+  "migration_source_commit": "f2d930ca5c2741ed1735bcbdbdd7d1eda1c93a4f",
+  "checkpoints_count": 1,
   "files_touched": [
     "test-gemini.txt"
   ],
