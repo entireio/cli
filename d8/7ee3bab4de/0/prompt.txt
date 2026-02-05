@@ -1,0 +1,5 @@
+Since we added Metadata handling now already: Can you update the README.md in the plugin repo to reflect what we have implemented and what not yet?
+
+---
+
+can you now use the simplify skill?
