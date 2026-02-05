@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "9bd0b182d20c",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "4f3f8bec82b3062686e372c68973e9b3e137a3ab",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/agent/geminicli/hooks.go",
+    "cmd/entire/cli/agent/geminicli/hooks_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9b/d0b182d20c/0/metadata.json",
+      "transcript": "/9b/d0b182d20c/0/full.jsonl",
+      "context": "/9b/d0b182d20c/0/context.md",
+      "content_hash": "/9b/d0b182d20c/0/content_hash.txt",
+      "prompt": "/9b/d0b182d20c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}
