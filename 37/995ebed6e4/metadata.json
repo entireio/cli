@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "37995ebed6e4",
+  "strategy": "manual-commit",
+  "branch": "gtrrz-victor/goreleaser-release-homebrew-tap",
+  "migration_source_commit": "b0bbf07cc10ba1828f3d332a3fb161b851597813",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hook_registry.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/37/995ebed6e4/0/metadata.json",
+      "transcript": "/37/995ebed6e4/0/full.jsonl",
+      "context": "/37/995ebed6e4/0/context.md",
+      "content_hash": "/37/995ebed6e4/0/content_hash.txt",
+      "prompt": "/37/995ebed6e4/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 346,
+    "cache_creation_tokens": 168250,
+    "cache_read_tokens": 2618979,
+    "output_tokens": 7047,
+    "api_call_count": 42
+  }
+}
