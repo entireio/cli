@@ -1,0 +1,5 @@
+What happens currently if I have an active session but the base commit changes. Like for example I realized I did not pull from remote. Flow: Session A runs a prompt, files are touched, shadow branch is created, I want to commit, realize I need to pull first, so I stash, pull, and stash apply again. At this point the relation to the shadow branch is lost or do we handle this?
+
+---
+
+if the user would have done a commit, the shadow branch would have been deleted, right? so detecting a base commit change with an active shadow branch, is a pretty good indiciation we should move the shadow branch?
