@@ -1,12 +1,14 @@
 {
   "checkpoint_id": "6beaf3327136",
   "strategy": "manual-commit",
-  "branch": "alex/investigate-stop-slowness",
-  "migration_source_commit": "20a5914f8f3683ebd7d1e3cc9e4c1337f7358923",
-  "checkpoints_count": 2,
+  "branch": "",
+  "migration_source_commit": "767ed6ec8b95cd2e121fa21fe6a587b62f524a52",
+  "checkpoints_count": 5,
   "files_touched": [
     "cmd/entire/cli/agent/claudecode/transcript.go",
     "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
     "docs/plans/2026-02-04-stop-hook-performance.md"
   ],
   "sessions": [
@@ -16,13 +18,20 @@
       "context": "/6b/eaf3327136/0/context.md",
       "content_hash": "/6b/eaf3327136/0/content_hash.txt",
       "prompt": "/6b/eaf3327136/0/prompt.txt"
+    },
+    {
+      "metadata": "/6b/eaf3327136/2/metadata.json",
+      "transcript": "/6b/eaf3327136/2/full.jsonl",
+      "context": "/6b/eaf3327136/2/context.md",
+      "content_hash": "/6b/eaf3327136/2/content_hash.txt",
+      "prompt": "/6b/eaf3327136/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 292,
-    "cache_creation_tokens": 645245,
-    "cache_read_tokens": 6489487,
-    "output_tokens": 324,
-    "api_call_count": 67
+    "input_tokens": 630,
+    "cache_creation_tokens": 1379237,
+    "cache_read_tokens": 15706881,
+    "output_tokens": 991,
+    "api_call_count": 168
   }
 }
