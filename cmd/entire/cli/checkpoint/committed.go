@@ -1032,9 +1032,9 @@ func CreateBlobFromContent(repo *git.Repository, content []byte) (plumbing.Hash,
 // Files containing potentially sensitive user content are filtered.
 func shouldFilterFile(filename string) bool {
 	base := filepath.Base(filename)
-	// Filter transcripts, prompts, context, and agent transcripts
+	// Filter transcripts, prompts, context, summaries, and agent transcripts
 	switch base {
-	case paths.TranscriptFileName, paths.PromptFileName, paths.ContextFileName:
+	case paths.TranscriptFileName, paths.PromptFileName, paths.ContextFileName, paths.SummaryFileName:
 		return true
 	}
 	// Filter agent-*.jsonl files (subagent transcripts)
