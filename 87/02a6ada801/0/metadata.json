@@ -1,0 +1,18 @@
+{
+  "checkpoint_id": "8702a6ada801",
+  "session_id": "2026-01-20-c2b51eb0-d0e9-43cf-b431-42c05d49450b",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-20T11:29:14.031022+11:00",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/summarize.go",
+    "cmd/entire/cli/summarize_test.go",
+    "docs/requirements/explain-task3/review-01.md"
+  ],
+  "agent": "Agent"
+}
