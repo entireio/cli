@@ -1,0 +1,117 @@
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# Plan: Update Multi-Session Warning Message
+
+## Goal
+Replace the technical "Session ID conflict" warning with a friendlier message (Option C).
+
+## File to Modify
+- `cmd/entire/cli/hooks.go` (lines 319-336)
+
+## Change
+
+Replace the current message:
+```go
+message := fmt.Sprintf(
+    "Warning: Session ID conflict detected!\n\n"+
+        "%s"+
+        "Existing session: %s\n"+
+        "New session: %s\n\n"+
+        "The shadow branch already has checkpoints from a different session.\n"+
+        "Starting a new session would orphan the existing work.\n\n"+
+        "Options:\n"+
+        "1. Commit your changes (git commit) to create a new base commit\n"+
+        "2. Run 'entire rewind reset' to discard the shadow branch and start fresh\n"+
+        "3. Resume the existing session: %s\n\n"+
+        "To suppress this warning in future sessions, run:\n"+
+        "  entire enable --disable-multisession-warning",
+    shadowBranchInfo,
+    existingSessionState.SessionID,
+    sessionID,
+    resumeCmd,
+)
+```
+
+With:
+```go
+message := fmt.Sprintf(
+    "Another session has uncommitted checkpoints.\n\n"+
+        "• Continue here - both sessions' work will be preserved\n"+
+        "• Resume that session: %s\n\n"+
+        "To hide this notice: entire enable --disable-multisession-warning",
+    resumeCmd,
+)
+```
+
+## Cleanup
+- Remove unused variables: `shadowBranchInfo`, `hasShadowBranch`, `shadowBranch`, and related code
+- Remove unused imports if any (`plumbing`, `checkpoint`) become orphaned
+
+## Verification
+- Run `mise run fmt && mise run lint` to ensure code compiles
+- Run `mise run test` to verify no test breakage
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/645ea3df-c4e9-44bc-b333-22c9893c32c5.jsonl
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+do not stash anything, read the files you need
+
+---
+
+add another option which is, if the user wants to discard previous sessions work on current work, run "entire reset --force"
+
+---
+
+not sure if checkpoints is a meaninful word. alternatives? session's conversation ? it is related to agent chat, claude or gemini.
+
+---
+
+instead of "Another sessions..." Print something like.
+"You are currently running a claude code session (<sessionid>).
+Do you want to keep going with this new sessions <sessionid>?
+Yes. Ignore this warning
+No.
+
+---
+
+[Request interrupted by user]
+
+---
+
+instead of "Another sessions..." Print something like.
+"You are currently running a claude code session (<sessionid>).
+Do you want to keep going with this new sessions <sessionid>?
+Yes. Ignore this warning
+No. type /exit and you can either:
+
+---
+
+[Request interrupted by user]
+
+---
+
+instead of "Another sessions..." Print something like.
+"You are currently running a claude code session (<sessionid>).
+Do you want to keep going with this new sessions <sessionid>?
+Yes. Ignore this warning
+No. type /exit and you can either:
+- continue other sessions: command to restart session
+- reset any current session work by "entire reset --force" and start a brand new session <claude or gemini>
+
+---
+
+To hide this notice in the future ...
+
+---
+
+add test that checks this new way of handling session conflicts. Which only happens at session start hook
