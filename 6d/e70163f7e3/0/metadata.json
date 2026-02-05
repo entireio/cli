@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "6de70163f7e3",
+  "session_id": "70c88cff-cb35-404f-a974-2a08bab4e4bc",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-29T22:29:52.313823Z",
+  "branch": "alex/explain-help-for-positional-args",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "review-01.md"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 150,
+    "cache_creation_tokens": 152740,
+    "cache_read_tokens": 1329665,
+    "output_tokens": 32,
+    "api_call_count": 20
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-29T22:29:52.250349Z",
+    "agent_lines": 34,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 134,
+    "total_committed": 34,
+    "agent_percentage": 100
+  }
+}
