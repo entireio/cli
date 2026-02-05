@@ -8,6 +8,7 @@ import (
 
 	"entire.io/cli/cmd/entire/cli/checkpoint"
 	"entire.io/cli/cmd/entire/cli/checkpoint/id"
+	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/strategy"
 	"entire.io/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v5"
@@ -135,7 +136,7 @@ func TestManualCommit_Attribution(t *testing.T) {
 	t.Log("Verifying attribution in metadata")
 
 	// Read metadata from entire/sessions branch
-	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName("entire/sessions"), true)
+	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("Failed to get entire/sessions branch: %v", err)
 	}
@@ -277,7 +278,7 @@ func TestManualCommit_AttributionDeletionOnly(t *testing.T) {
 	// ========================================
 	t.Log("Verifying attribution for deletion-only commit")
 
-	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName("entire/sessions"), true)
+	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("Failed to get entire/sessions branch: %v", err)
 	}
@@ -518,7 +519,7 @@ func TestManualCommit_AttributionNoDoubleCount(t *testing.T) {
 func getAttributionFromMetadata(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID) *checkpoint.InitialAttribution {
 	t.Helper()
 
-	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName("entire/sessions"), true)
+	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("Failed to get entire/sessions branch: %v", err)
 	}

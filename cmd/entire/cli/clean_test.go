@@ -93,9 +93,9 @@ func TestRunClean_PreviewMode(t *testing.T) {
 	}
 
 	// Also create entire/sessions (should NOT be listed)
-	sessionsRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("entire/sessions"), commitHash)
+	sessionsRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), commitHash)
 	if err := repo.Storer.SetReference(sessionsRef); err != nil {
-		t.Fatalf("failed to create entire/sessions: %v", err)
+		t.Fatalf("failed to create %s: %v", paths.MetadataBranchName, err)
 	}
 
 	var stdout bytes.Buffer
@@ -119,9 +119,9 @@ func TestRunClean_PreviewMode(t *testing.T) {
 		t.Errorf("Expected 'entire/def5678' in output, got: %s", output)
 	}
 
-	// Should NOT list entire/sessions
-	if strings.Contains(output, "entire/sessions") {
-		t.Errorf("Should not list 'entire/sessions', got: %s", output)
+	// Should NOT list entire/sessions/v1
+	if strings.Contains(output, paths.MetadataBranchName) {
+		t.Errorf("Should not list '%s', got: %s", paths.MetadataBranchName, output)
 	}
 
 	// Should prompt to use --force
@@ -181,7 +181,7 @@ func TestRunClean_SessionsBranchPreserved(t *testing.T) {
 		t.Fatalf("failed to create shadow branch: %v", err)
 	}
 
-	sessionsRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("entire/sessions"), commitHash)
+	sessionsRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), commitHash)
 	if err := repo.Storer.SetReference(sessionsRef); err != nil {
 		t.Fatalf("failed to create entire/sessions: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestRunClean_SessionsBranchPreserved(t *testing.T) {
 	}
 
 	// Sessions branch should still exist
-	sessionsRefName := plumbing.NewBranchReferenceName("entire/sessions")
+	sessionsRefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	if _, err := repo.Reference(sessionsRefName, true); err != nil {
 		t.Error("entire/sessions branch should be preserved")
 	}

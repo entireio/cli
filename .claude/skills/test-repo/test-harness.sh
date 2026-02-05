@@ -138,9 +138,9 @@ verify-metadata-branch)
   echo "==> Verifying metadata branch..."
   cd "$REPO_DIR"
 
-  if git branch -a | grep "entire/sessions"; then
+  if git branch -a | grep "entire/sessions/v1"; then
     echo "✓ Metadata branch exists"
-    git show entire/sessions --stat | head -20
+    git show entire/sessions/v1 --stat | head -20
   else
     echo "✗ Metadata branch not found"
     exit 1

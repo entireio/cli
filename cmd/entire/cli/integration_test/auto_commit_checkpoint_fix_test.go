@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"entire.io/cli/cmd/entire/cli/paths"
 	"entire.io/cli/cmd/entire/cli/sessionid"
 	"entire.io/cli/cmd/entire/cli/strategy"
 )
@@ -160,7 +161,7 @@ func TestDualStrategy_IncrementalPromptContent(t *testing.T) {
 	t.Logf("First checkpoint: %s (commit %s)", checkpoint1ID, commit1Hash[:7])
 
 	// Verify first checkpoint has prompt A (session files in numbered subdirectory)
-	prompt1Content, found := env.ReadFileFromBranch("entire/sessions", SessionFilePath(checkpoint1ID, "prompt.txt"))
+	prompt1Content, found := env.ReadFileFromBranch(paths.MetadataBranchName, SessionFilePath(checkpoint1ID, "prompt.txt"))
 	if !found {
 		t.Fatal("First checkpoint should have prompt.txt on entire/sessions branch")
 	}
@@ -208,7 +209,7 @@ func TestDualStrategy_IncrementalPromptContent(t *testing.T) {
 	t.Log("Phase 3: Verify second checkpoint only has prompt B (incremental)")
 
 	// Session files are now in numbered subdirectory (e.g., 0/prompt.txt)
-	prompt2Content, found := env.ReadFileFromBranch("entire/sessions", SessionFilePath(checkpoint2ID, "prompt.txt"))
+	prompt2Content, found := env.ReadFileFromBranch(paths.MetadataBranchName, SessionFilePath(checkpoint2ID, "prompt.txt"))
 	if !found {
 		t.Fatal("Second checkpoint should have prompt.txt on entire/sessions branch")
 	}

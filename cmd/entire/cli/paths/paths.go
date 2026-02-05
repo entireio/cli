@@ -35,7 +35,7 @@ const (
 )
 
 // MetadataBranchName is the orphan branch used by auto-commit and manual-commit strategies to store metadata
-const MetadataBranchName = "entire/sessions"
+const MetadataBranchName = "entire/sessions/v1"
 
 // CheckpointPath returns the sharded storage path for a checkpoint ID.
 // Uses first 2 characters as shard (256 buckets), remaining as folder name.

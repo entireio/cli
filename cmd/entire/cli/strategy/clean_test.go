@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"entire.io/cli/cmd/entire/cli/checkpoint"
+	"entire.io/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -33,7 +34,7 @@ func TestIsShadowBranch(t *testing.T) {
 		{"too short commit (6 chars)", "entire/abc123", false},
 		{"too short commit (1 char)", "entire/a", false},
 		{"non-hex chars in commit", "entire/ghijklm", false},
-		{"sessions branch", "entire/sessions", false},
+		{"sessions branch", paths.MetadataBranchName, false},
 		{"no prefix", "abc1234", false},
 		{"wrong prefix", "feature/abc1234", false},
 		{"main branch", "main", false},
@@ -91,7 +92,7 @@ func TestListShadowBranches(t *testing.T) {
 	}{
 		{"entire/abc1234", true},
 		{"entire/def5678", true},
-		{"entire/sessions", false}, // Should NOT be listed
+		{paths.MetadataBranchName, false}, // Should NOT be listed
 		{"feature/foo", false},
 		{"main", false},
 	}
@@ -126,8 +127,8 @@ func TestListShadowBranches(t *testing.T) {
 	if !shadowSet["entire/def5678"] {
 		t.Error("ListShadowBranches() missing 'entire/def5678'")
 	}
-	if shadowSet["entire/sessions"] {
-		t.Error("ListShadowBranches() should not include 'entire/sessions'")
+	if shadowSet[paths.MetadataBranchName] {
+		t.Errorf("ListShadowBranches() should not include '%s'", paths.MetadataBranchName)
 	}
 }
 

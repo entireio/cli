@@ -244,14 +244,14 @@ func TestShadow_FullWorkflow(t *testing.T) {
 	t.Logf("Checkpoint 1 ID: %s", checkpoint1ID)
 
 	// Verify entire/sessions branch exists with checkpoint folder
-	if !env.BranchExists("entire/sessions") {
+	if !env.BranchExists(paths.MetadataBranchName) {
 		t.Error("entire/sessions branch should exist after condensation")
 	}
 
 	// Verify checkpoint folder contents (check via git show)
 	// Uses sharded path: <id[:2]>/<id[2:]>/metadata.json
 	checkpointPath := ShardedCheckpointPath(checkpoint1ID) + "/metadata.json"
-	if !env.FileExistsInBranch("entire/sessions", checkpointPath) {
+	if !env.FileExistsInBranch(paths.MetadataBranchName, checkpointPath) {
 		t.Errorf("Checkpoint folder should contain metadata.json at %s", checkpointPath)
 	}
 
@@ -328,7 +328,7 @@ func TestShadow_FullWorkflow(t *testing.T) {
 
 	// Verify second checkpoint folder exists (uses sharded path)
 	checkpoint2Path := ShardedCheckpointPath(checkpoint2ID) + "/metadata.json"
-	if !env.FileExistsInBranch("entire/sessions", checkpoint2Path) {
+	if !env.FileExistsInBranch(paths.MetadataBranchName, checkpoint2Path) {
 		t.Errorf("Second checkpoint folder should exist at %s", checkpoint2Path)
 	}
 
@@ -663,19 +663,19 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 	t.Logf("Checkpoint ID: %s", checkpointID)
 
 	// Verify entire/sessions branch exists
-	if !env.BranchExists("entire/sessions") {
+	if !env.BranchExists(paths.MetadataBranchName) {
 		t.Fatal("entire/sessions branch should exist after condensation")
 	}
 
 	// Verify root metadata.json (CheckpointSummary) exists
 	summaryPath := CheckpointSummaryPath(checkpointID)
-	if !env.FileExistsInBranch("entire/sessions", summaryPath) {
+	if !env.FileExistsInBranch(paths.MetadataBranchName, summaryPath) {
 		t.Errorf("root metadata.json should exist at %s", summaryPath)
 	}
 
 	// Verify transcript file exists in session subdirectory (new format: 0/full.jsonl)
 	transcriptPath := SessionFilePath(checkpointID, paths.TranscriptFileName)
-	if !env.FileExistsInBranch("entire/sessions", transcriptPath) {
+	if !env.FileExistsInBranch(paths.MetadataBranchName, transcriptPath) {
 		t.Errorf("Transcript (%s) should exist at %s", paths.TranscriptFileName, transcriptPath)
 	} else {
 		t.Log("✓ Transcript file exists in checkpoint")
@@ -683,12 +683,12 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 
 	// Verify content_hash.txt exists in session subdirectory
 	hashPath := SessionFilePath(checkpointID, "content_hash.txt")
-	if !env.FileExistsInBranch("entire/sessions", hashPath) {
+	if !env.FileExistsInBranch(paths.MetadataBranchName, hashPath) {
 		t.Errorf("content_hash.txt should exist at %s", hashPath)
 	}
 
 	// Verify root metadata.json can be read and parsed as CheckpointSummary
-	summaryContent, found := env.ReadFileFromBranch("entire/sessions", summaryPath)
+	summaryContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, summaryPath)
 	if !found {
 		t.Fatal("root metadata.json should be readable")
 	}
@@ -706,7 +706,7 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 
 	// Verify agent field is in session-level metadata (not root summary)
 	sessionMetadataPath := SessionFilePath(checkpointID, paths.MetadataFileName)
-	sessionMetadataContent, found := env.ReadFileFromBranch("entire/sessions", sessionMetadataPath)
+	sessionMetadataContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, sessionMetadataPath)
 	if !found {
 		t.Fatal("session metadata.json should be readable")
 	}
@@ -791,7 +791,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 
 	// Verify first checkpoint has both prompts (uses session file path in numbered subdirectory)
 	promptPath1 := SessionFilePath(checkpoint1ID, "prompt.txt")
-	prompt1Content, found := env.ReadFileFromBranch("entire/sessions", promptPath1)
+	prompt1Content, found := env.ReadFileFromBranch(paths.MetadataBranchName, promptPath1)
 	if !found {
 		t.Errorf("prompt.txt should exist at %s", promptPath1)
 	} else {
@@ -806,7 +806,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	}
 
 	contextPath1 := SessionFilePath(checkpoint1ID, "context.md")
-	context1Content, found := env.ReadFileFromBranch("entire/sessions", contextPath1)
+	context1Content, found := env.ReadFileFromBranch(paths.MetadataBranchName, contextPath1)
 	if !found {
 		t.Errorf("context.md should exist at %s", contextPath1)
 	} else {
@@ -862,7 +862,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	// Verify second checkpoint has the FULL transcript (all three prompts)
 	// Session files are now in numbered subdirectories (e.g., 0/prompt.txt)
 	promptPath2 := SessionFilePath(checkpoint2ID, "prompt.txt")
-	prompt2Content, found := env.ReadFileFromBranch("entire/sessions", promptPath2)
+	prompt2Content, found := env.ReadFileFromBranch(paths.MetadataBranchName, promptPath2)
 	if !found {
 		t.Errorf("prompt.txt should exist at %s", promptPath2)
 	} else {
@@ -881,7 +881,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	}
 
 	contextPath2 := SessionFilePath(checkpoint2ID, "context.md")
-	context2Content, found := env.ReadFileFromBranch("entire/sessions", contextPath2)
+	context2Content, found := env.ReadFileFromBranch(paths.MetadataBranchName, contextPath2)
 	if !found {
 		t.Errorf("context.md should exist at %s", contextPath2)
 	} else {
@@ -1010,7 +1010,7 @@ func TestShadow_RewindAndCondensation(t *testing.T) {
 
 	// Check prompt.txt (uses session file path in numbered subdirectory)
 	promptPath := SessionFilePath(checkpointID, "prompt.txt")
-	promptContent, found := env.ReadFileFromBranch("entire/sessions", promptPath)
+	promptContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, promptPath)
 	if !found {
 		t.Errorf("prompt.txt should exist at %s", promptPath)
 	} else {
@@ -1029,7 +1029,7 @@ func TestShadow_RewindAndCondensation(t *testing.T) {
 
 	// Check context.md
 	contextPath := SessionFilePath(checkpointID, "context.md")
-	contextContent, found := env.ReadFileFromBranch("entire/sessions", contextPath)
+	contextContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, contextPath)
 	if !found {
 		t.Errorf("context.md should exist at %s", contextPath)
 	} else {
@@ -1288,7 +1288,7 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 	for _, cpID := range []string{checkpoint1ID, checkpoint3ID} {
 		shardedPath := ShardedCheckpointPath(cpID)
 		metadataPath := shardedPath + "/metadata.json"
-		if !env.FileExistsInBranch("entire/sessions", metadataPath) {
+		if !env.FileExistsInBranch(paths.MetadataBranchName, metadataPath) {
 			t.Errorf("Checkpoint %s should have metadata.json at %s", cpID, metadataPath)
 		}
 	}
@@ -1356,7 +1356,7 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 	t.Logf("First commit: %s, checkpoint: %s", commit1Hash[:7], checkpoint1ID)
 
 	// Verify first checkpoint has prompts A and B (session files in numbered subdirectory)
-	prompt1Content, found := env.ReadFileFromBranch("entire/sessions", SessionFilePath(checkpoint1ID, "prompt.txt"))
+	prompt1Content, found := env.ReadFileFromBranch(paths.MetadataBranchName, SessionFilePath(checkpoint1ID, "prompt.txt"))
 	if !found {
 		t.Fatal("First checkpoint should have prompt.txt")
 	}
@@ -1400,7 +1400,7 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 	t.Log("Phase 5: Verify second checkpoint has full transcript (A, B, and C)")
 
 	// Session files are now in numbered subdirectory (e.g., 0/prompt.txt)
-	prompt2Content, found := env.ReadFileFromBranch("entire/sessions", SessionFilePath(checkpoint2ID, "prompt.txt"))
+	prompt2Content, found := env.ReadFileFromBranch(paths.MetadataBranchName, SessionFilePath(checkpoint2ID, "prompt.txt"))
 	if !found {
 		t.Fatal("Second checkpoint should have prompt.txt")
 	}
@@ -1663,14 +1663,14 @@ func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
 	}
 
 	// Verify condensation happened for second commit
-	if !env.BranchExists("entire/sessions") {
+	if !env.BranchExists(paths.MetadataBranchName) {
 		t.Fatal("entire/sessions branch should exist after second commit with trailer")
 	}
 
 	// Verify checkpoint exists
 	shardedPath := ShardedCheckpointPath(checkpointID)
 	metadataPath := shardedPath + "/metadata.json"
-	if !env.FileExistsInBranch("entire/sessions", metadataPath) {
+	if !env.FileExistsInBranch(paths.MetadataBranchName, metadataPath) {
 		t.Errorf("Checkpoint should exist at %s", metadataPath)
 	} else {
 		t.Log("✓ Condensation happened for commit with trailer")
@@ -1711,7 +1711,7 @@ func TestShadow_SessionsBranchCommitTrailers(t *testing.T) {
 	env.GitCommitWithShadowHooks("Add main.go", "main.go")
 
 	// Get the commit message on entire/sessions branch
-	sessionsCommitMsg := env.GetLatestCommitMessageOnBranch("entire/sessions")
+	sessionsCommitMsg := env.GetLatestCommitMessageOnBranch(paths.MetadataBranchName)
 	t.Logf("entire/sessions commit message:\n%s", sessionsCommitMsg)
 
 	// Verify required trailers are present

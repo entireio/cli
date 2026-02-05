@@ -190,18 +190,18 @@ if [[ -n "$CHECKPOINT_ID" ]]; then
     METADATA_PATH="${SHARD_PREFIX}/${SHARD_SUFFIX}/metadata.json"
 
     echo ""
-    echo -e "${BLUE}=== Step 12: Inspect metadata on entire/sessions branch ===${NC}"
+    echo -e "${BLUE}=== Step 12: Inspect metadata on entire/sessions/v1 branch ===${NC}"
     echo "Looking for metadata at: $METADATA_PATH"
 
-    # Read metadata.json from entire/sessions branch
-    if git show "entire/sessions:${METADATA_PATH}" > /dev/null 2>&1; then
+    # Read metadata.json from entire/sessions/v1 branch
+    if git show "entire/sessions/v1:${METADATA_PATH}" > /dev/null 2>&1; then
         echo -e "${GREEN}Found metadata.json:${NC}"
-        git show "entire/sessions:${METADATA_PATH}" | jq .
+        git show "entire/sessions/v1:${METADATA_PATH}" | jq .
 
         # Extract and display attribution specifically
         echo ""
         echo -e "${BLUE}=== Step 13: Attribution Analysis ===${NC}"
-        ATTRIBUTION=$(git show "entire/sessions:${METADATA_PATH}" | jq -r '.initial_attribution // empty')
+        ATTRIBUTION=$(git show "entire/sessions/v1:${METADATA_PATH}" | jq -r '.initial_attribution // empty')
         if [[ -n "$ATTRIBUTION" && "$ATTRIBUTION" != "null" ]]; then
             echo -e "${GREEN}Attribution data:${NC}"
             echo "$ATTRIBUTION" | jq .
@@ -236,19 +236,19 @@ if [[ -n "$CHECKPOINT_ID" ]]; then
         # Also show files_touched
         echo ""
         echo -e "${BLUE}Files touched (agent-modified):${NC}"
-        git show "entire/sessions:${METADATA_PATH}" | jq -r '.files_touched[]?' 2>/dev/null || echo "(none)"
+        git show "entire/sessions/v1:${METADATA_PATH}" | jq -r '.files_touched[]?' 2>/dev/null || echo "(none)"
 
         # Show prompt attributions from session state if available
         echo ""
         echo -e "${BLUE}=== Step 14: Check prompt attributions ===${NC}"
         # List all files in the checkpoint directory
         echo "Files in checkpoint directory:"
-        git ls-tree -r --name-only "entire/sessions" | grep "^${SHARD_PREFIX}/${SHARD_SUFFIX}/" | head -20
+        git ls-tree -r --name-only "entire/sessions/v1" | grep "^${SHARD_PREFIX}/${SHARD_SUFFIX}/" | head -20
 
     else
         echo -e "${RED}Could not find metadata at $METADATA_PATH${NC}"
-        echo "Checking what's on entire/sessions branch:"
-        git ls-tree -r --name-only "entire/sessions" 2>/dev/null | head -20 || echo "(branch may not exist)"
+        echo "Checking what's on entire/sessions/v1 branch:"
+        git ls-tree -r --name-only "entire/sessions/v1" 2>/dev/null | head -20 || echo "(branch may not exist)"
     fi
 else
     echo -e "${YELLOW}No Entire-Checkpoint trailer found (user may have removed it)${NC}"
@@ -270,7 +270,7 @@ echo "  2. User created utils.py (non-agent file)"
 echo "  3. Agent modified utils.py (now agent-touched)"
 echo "  4. User edited main.py (agent-touched file)"
 echo "  5. Commit with attribution tracking"
-echo "  6. Metadata inspection on entire/sessions branch"
+echo "  6. Metadata inspection on entire/sessions/v1 branch"
 echo ""
 echo "Expected attribution behavior:"
 echo "  - main.py: agent added lines, user added 2 lines after"
@@ -282,6 +282,6 @@ if [[ "$KEEP_REPO" == "true" ]]; then
     echo ""
     echo "Useful inspection commands:"
     echo "  cd $TEST_DIR"
-    echo "  git log entire/sessions --oneline"
-    echo "  git show entire/sessions:<checkpoint-path>/metadata.json | jq ."
+    echo "  git log entire/sessions/v1 --oneline"
+    echo "  git show entire/sessions/v1:<checkpoint-path>/metadata.json | jq ."
 fi
