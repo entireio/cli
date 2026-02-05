@@ -2,8 +2,8 @@
   "checkpoint_id": "a4a8d7d25377",
   "strategy": "manual-commit",
   "branch": "alex/fix-worktree-shadow-branch-collision",
-  "migration_source_commit": "46d300b6138b4f349151bd15e718b8c3aa99c734",
-  "checkpoints_count": 10,
+  "migration_source_commit": "ccab9ed4e9d94500a9aaba9870352852cdb65470",
+  "checkpoints_count": 19,
   "files_touched": [
     "cmd/entire/cli/explain.go",
     "cmd/entire/cli/strategy/manual_commit_hooks.go",
@@ -23,13 +23,20 @@
       "context": "/a4/a8d7d25377/2/context.md",
       "content_hash": "/a4/a8d7d25377/2/content_hash.txt",
       "prompt": "/a4/a8d7d25377/2/prompt.txt"
+    },
+    {
+      "metadata": "/a4/a8d7d25377/3/metadata.json",
+      "transcript": "/a4/a8d7d25377/3/full.jsonl",
+      "context": "/a4/a8d7d25377/3/context.md",
+      "content_hash": "/a4/a8d7d25377/3/content_hash.txt",
+      "prompt": "/a4/a8d7d25377/3/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 454,
-    "cache_creation_tokens": 524905,
-    "cache_read_tokens": 6773656,
-    "output_tokens": 433,
-    "api_call_count": 85
+    "input_tokens": 596,
+    "cache_creation_tokens": 919148,
+    "cache_read_tokens": 10810835,
+    "output_tokens": 768,
+    "api_call_count": 133
   }
 }
