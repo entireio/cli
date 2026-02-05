@@ -1,0 +1,12 @@
+{
+  "checkpoint_id": "9bd0b182d20c",
+  "session_id": "2026-01-21-839b35f7-4dbd-4d93-9772-3c272cc87caa",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-21T09:59:11.044236+01:00",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/agent/geminicli/hooks.go",
+    "cmd/entire/cli/agent/geminicli/hooks_test.go"
+  ],
+  "agent": "Claude Code"
+}
