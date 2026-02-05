@@ -1,10 +1,9 @@
 {
   "checkpoint_id": "e012b8e855d7",
-  "session_id": "2026-01-22-c35cf82b-0486-4d17-94d7-7fa36376faff",
+  "session_id": "2026-01-23-79e9becd-0b83-42f1-8cb1-33375d080476",
   "strategy": "manual-commit",
-  "created_at": "2026-01-22T18:39:11.843919+01:00",
-  "branch": "soph/chunking",
-  "checkpoints_count": 2,
+  "created_at": "2026-01-23T12:02:28.782506+11:00",
+  "checkpoints_count": 3,
   "files_touched": [
     "cmd/entire/cli/agent/agent.go",
     "cmd/entire/cli/agent/chunking.go",
@@ -25,18 +24,20 @@
     "cmd/entire/cli/strategy/manual_commit_hooks.go",
     "cmd/entire/cli/strategy/manual_commit_logs.go",
     "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
     "cmd/entire/cli/strategy/session.go",
     "cmd/entire/cli/strategy/session_test.go",
-    "cmd/entire/cli/strategy/strategy.go"
+    "cmd/entire/cli/strategy/strategy.go",
+    "docs/architecture/claude-hooks-integration.md"
   ],
   "agent": "Claude Code",
-  "transcript_uuid_at_start": "aab7b0e5-b721-4783-af1a-0875ce8ee95d",
-  "transcript_lines_at_start": 939,
+  "transcript_uuid_at_start": "01acdae5-0194-4ec4-bc5a-11f53a2b7c66",
+  "transcript_lines_at_start": 165,
   "token_usage": {
-    "input_tokens": 2764,
-    "cache_creation_tokens": 751542,
-    "cache_read_tokens": 36716399,
-    "output_tokens": 79244,
-    "api_call_count": 341
+    "input_tokens": 300,
+    "cache_creation_tokens": 89444,
+    "cache_read_tokens": 1980835,
+    "output_tokens": 113,
+    "api_call_count": 39
   }
 }
