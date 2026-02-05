@@ -2,8 +2,8 @@
   "checkpoint_id": "a9eb6620b8a7",
   "strategy": "manual-commit",
   "branch": "alex/fix-worktree-shadow-branch-collision",
-  "migration_source_commit": "cd36c581c9de38e269c40915e44ea35b84c94b17",
-  "checkpoints_count": 2,
+  "migration_source_commit": "4bdab3ebecdd92eb2e8223e3290d568f3817dea6",
+  "checkpoints_count": 5,
   "files_touched": [
     "CLAUDE.md",
     "cmd/entire/cli/checkpoint/checkpoint.go",
@@ -38,13 +38,20 @@
       "context": "/a9/eb6620b8a7/0/context.md",
       "content_hash": "/a9/eb6620b8a7/0/content_hash.txt",
       "prompt": "/a9/eb6620b8a7/0/prompt.txt"
+    },
+    {
+      "metadata": "/a9/eb6620b8a7/2/metadata.json",
+      "transcript": "/a9/eb6620b8a7/2/full.jsonl",
+      "context": "/a9/eb6620b8a7/2/context.md",
+      "content_hash": "/a9/eb6620b8a7/2/content_hash.txt",
+      "prompt": "/a9/eb6620b8a7/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 2202,
-    "cache_creation_tokens": 936476,
-    "cache_read_tokens": 36660657,
-    "output_tokens": 1099,
-    "api_call_count": 314
+    "input_tokens": 4562,
+    "cache_creation_tokens": 1918425,
+    "cache_read_tokens": 75012290,
+    "output_tokens": 2239,
+    "api_call_count": 647
   }
 }
