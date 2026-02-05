@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "30e81e82f6ba",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "717ef39b5d37c346381267c78eb1bb5663b2b601",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "plans/feat-posthog-telemetry.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/30/e81e82f6ba/0/metadata.json",
+      "transcript": "/30/e81e82f6ba/0/full.jsonl",
+      "context": "/30/e81e82f6ba/0/context.md",
+      "content_hash": "/30/e81e82f6ba/0/content_hash.txt",
+      "prompt": "/30/e81e82f6ba/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}
