@@ -2,8 +2,8 @@
   "checkpoint_id": "c283d360e6d5",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "5114d2ac5b39f5ae30eb95db1a31162b504f462e",
-  "checkpoints_count": 9,
+  "migration_source_commit": "5d4990d53d05a61156f21da215185c3396a500f2",
+  "checkpoints_count": 16,
   "files_touched": [
     "cmd/entire/cli/agent/claudecode/transcript.go",
     "cmd/entire/cli/agent/claudecode/transcript_test.go",
@@ -38,6 +38,13 @@
       "context": "/c2/83d360e6d5/2/context.md",
       "content_hash": "/c2/83d360e6d5/2/content_hash.txt",
       "prompt": "/c2/83d360e6d5/2/prompt.txt"
+    },
+    {
+      "metadata": "/c2/83d360e6d5/3/metadata.json",
+      "transcript": "/c2/83d360e6d5/3/full.jsonl",
+      "context": "/c2/83d360e6d5/3/context.md",
+      "content_hash": "/c2/83d360e6d5/3/content_hash.txt",
+      "prompt": "/c2/83d360e6d5/3/prompt.txt"
     }
   ],
   "token_usage": {
