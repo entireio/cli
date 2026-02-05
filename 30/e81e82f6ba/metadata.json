@@ -2,8 +2,8 @@
   "checkpoint_id": "30e81e82f6ba",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "85c4b2679c4784232be8abf2c57413c3f37ceecd",
-  "checkpoints_count": 7,
+  "migration_source_commit": "2f1c6bc9d94b4e92afc6eff508f8b5a6c7a39d0a",
+  "checkpoints_count": 4,
   "files_touched": [
     "cmd/entire/cli/root.go",
     "cmd/entire/cli/telemetry/telemetry.go",
