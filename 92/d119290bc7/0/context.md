@@ -175,3 +175,32 @@ push
 
 make a draft PR please
 
+### Prompt 31
+
+check the review comments, let me know what you think
+
+### Prompt 32
+
+[Request interrupted by user for tool use]
+
+### Prompt 33
+
+continue reading the PR review comments please
+
+### Prompt 34
+
+Operation stopped by hook: Another session is active: "can we bring ourselves up to date with main please"
+
+You can continue here, but checkpoints from both sessions will be interleaved.
+
+To resume the other session instead, exit Claude and run: claude -r 53ea19c1-6d29-4ebf-952b-ddbb27af25bb
+
+To suppress this warning in future sessions, run:
+  entire enable --disable-multisession-warning
+
+Press the up arrow key to get your prompt back.
+
+### Prompt 35
+
+continue reading the PR review comments please
+
