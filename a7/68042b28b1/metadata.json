@@ -1,0 +1,51 @@
+{
+  "checkpoint_id": "a768042b28b1",
+  "strategy": "manual-commit",
+  "branch": "soph/refactor-trailer-checkpoint-id",
+  "migration_source_commit": "c6b46e45fe7ffb80b4b57392d5e1fca0650b8510",
+  "checkpoints_count": 8,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/checkpoint/id/id.go",
+    "cmd/entire/cli/checkpoint/id/id_test.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/paths/paths.go",
+    "cmd/entire/cli/paths/paths_test.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/resume_test.go",
+    "cmd/entire/cli/rewind.go",
+    "cmd/entire/cli/session.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/cleanup.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_logs.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/session.go",
+    "cmd/entire/cli/strategy/session_test.go",
+    "cmd/entire/cli/trailers/trailers.go",
+    "cmd/entire/cli/trailers/trailers_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a7/68042b28b1/0/metadata.json",
+      "transcript": "/a7/68042b28b1/0/full.jsonl",
+      "context": "/a7/68042b28b1/0/context.md",
+      "content_hash": "/a7/68042b28b1/0/content_hash.txt",
+      "prompt": "/a7/68042b28b1/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1853,
+    "cache_creation_tokens": 788048,
+    "cache_read_tokens": 24534475,
+    "output_tokens": 47440,
+    "api_call_count": 228
+  }
+}
