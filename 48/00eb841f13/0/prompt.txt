@@ -1,0 +1,5 @@
+question: shouldn't the checkpoint in `entire/sessions` now have the agent trailer? (note the hooks are calling `go run` to run always the latest code)
+
+---
+
+yes
