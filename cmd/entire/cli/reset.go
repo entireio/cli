@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/charmbracelet/huh"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 )
 
