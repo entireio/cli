@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "05fc557f7824",
+  "strategy": "manual-commit",
+  "branch": "soph/do-not-offer-trailers-if-rebasing",
+  "migration_source_commit": "00ef2c3a29f89d6a59c6e7b7c56c449ab74bb627",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/strategy/hooks_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/05/fc557f7824/0/metadata.json",
+      "transcript": "/05/fc557f7824/0/full.jsonl",
+      "context": "/05/fc557f7824/0/context.md",
+      "content_hash": "/05/fc557f7824/0/content_hash.txt",
+      "prompt": "/05/fc557f7824/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 180,
+    "cache_creation_tokens": 148274,
+    "cache_read_tokens": 1321428,
+    "output_tokens": 2995,
+    "api_call_count": 22
+  }
+}
