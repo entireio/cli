@@ -2,8 +2,8 @@
   "checkpoint_id": "8cfa910f8ef9",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "5eacf4df95f1c9fb9d6bebed084355ee32a1e9d3",
-  "checkpoints_count": 3,
+  "migration_source_commit": "4da3dd189ee90259ee1f3e106cb4a4ef6e3ba27c",
+  "checkpoints_count": 8,
   "files_touched": [
     ".claude/.gitignore",
     ".claude/agents/dev.md",
@@ -24,6 +24,7 @@
     "cmd/entire/cli/setup.go",
     "cmd/entire/cli/setup_test.go",
     "cmd/entire/cli/telemetry/telemetry.go",
+    "cmd/entire/main.go",
     "plans/feat-disable-multisession-warning-option.md"
   ],
   "sessions": [
@@ -40,6 +41,13 @@
       "context": "/8c/fa910f8ef9/2/context.md",
       "content_hash": "/8c/fa910f8ef9/2/content_hash.txt",
       "prompt": "/8c/fa910f8ef9/2/prompt.txt"
+    },
+    {
+      "metadata": "/8c/fa910f8ef9/3/metadata.json",
+      "transcript": "/8c/fa910f8ef9/3/full.jsonl",
+      "context": "/8c/fa910f8ef9/3/context.md",
+      "content_hash": "/8c/fa910f8ef9/3/content_hash.txt",
+      "prompt": "/8c/fa910f8ef9/3/prompt.txt"
     }
   ],
   "token_usage": {
