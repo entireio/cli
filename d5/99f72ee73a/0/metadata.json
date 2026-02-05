@@ -1,0 +1,19 @@
+{
+  "checkpoint_id": "d599f72ee73a",
+  "session_id": "2026-01-21-0cd9edf7-459c-4900-af40-cf2c64dea525",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-21T17:53:36.536932+11:00",
+  "branch": "alex/ent-109-text-output-checkpoint-flag",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/session/state.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 478,
+    "cache_creation_tokens": 338089,
+    "cache_read_tokens": 5118558,
+    "output_tokens": 107,
+    "api_call_count": 57
+  }
+}
