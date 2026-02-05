@@ -1,0 +1,8 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+Do you think you could write a parser/renderer for claude code session logs that would output the logs in a similar way then how it looks here in claude code?
+
