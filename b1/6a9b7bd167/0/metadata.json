@@ -1,26 +1,28 @@
 {
   "checkpoint_id": "b16a9b7bd167",
-  "session_id": "22e4cede-030b-48a4-b121-1eff4b835cfe",
+  "session_id": "a318ad73-17a2-4575-845d-8952a1e5958b",
   "strategy": "manual-commit",
-  "created_at": "2026-02-02T00:29:56.528643Z",
+  "created_at": "2026-02-02T00:29:56.884351Z",
   "branch": "soph/improved-shadow-v2",
-  "checkpoints_count": 6,
+  "checkpoints_count": 7,
   "files_touched": [
     "cmd/entire/cli/config.go",
     "cmd/entire/cli/root.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
     "cmd/entire/cli/versioncheck/types.go",
     "cmd/entire/cli/versioncheck/versioncheck.go",
     "cmd/entire/cli/versioncheck/versioncheck_test.go"
   ],
   "agent": "Claude Code",
-  "transcript_identifier_at_start": "f447323e-5810-4527-b8f5-a0d6efa1dfa3",
-  "transcript_lines_at_start": 259,
+  "agents": "Claude Code",
   "token_usage": {
-    "input_tokens": 847,
-    "cache_creation_tokens": 881724,
-    "cache_read_tokens": 15148783,
-    "output_tokens": 409,
-    "api_call_count": 174
+    "input_tokens": 1835,
+    "cache_creation_tokens": 999188,
+    "cache_read_tokens": 37712137,
+    "output_tokens": 768,
+    "api_call_count": 350
   },
   "initial_attribution": {
     "calculated_at": "2026-02-02T00:29:56.127334Z",
