@@ -2,7 +2,7 @@
   "checkpoint_id": "a4a8d7d25377",
   "strategy": "manual-commit",
   "branch": "alex/fix-worktree-shadow-branch-collision",
-  "migration_source_commit": "ccab9ed4e9d94500a9aaba9870352852cdb65470",
+  "migration_source_commit": "a3e561fb9b57f5b33dc475464249a0ee0d242d77",
   "checkpoints_count": 19,
   "files_touched": [
     "cmd/entire/cli/explain.go",
