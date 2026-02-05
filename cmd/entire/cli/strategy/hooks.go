@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,14 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
 // Hook marker used to identify Entire CLI hooks
-const (
-	entireHookMarker = "Entire CLI hooks"
-	settingsFile     = ".entire/settings.json"
-)
+const entireHookMarker = "Entire CLI hooks"
 
 // gitHookNames are the git hooks managed by Entire CLI
 var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "pre-push"}
@@ -220,19 +216,9 @@ func RemoveGitHook() (int, error) {
 // isLocalDev reads the local_dev setting from .entire/settings.json
 // Works correctly from any subdirectory within the repository.
 func isLocalDev() bool {
-	settingsFileAbs, err := paths.AbsPath(settingsFile)
-	if err != nil {
-		settingsFileAbs = settingsFile // Fallback to relative
-	}
-	data, err := os.ReadFile(settingsFileAbs) //nolint:gosec // path is from AbsPath or constant
+	s, err := settings.Load()
 	if err != nil {
 		return false
 	}
-	var settings struct {
-		LocalDev bool `json:"local_dev"`
-	}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return false
-	}
-	return settings.LocalDev
+	return s.LocalDev
 }

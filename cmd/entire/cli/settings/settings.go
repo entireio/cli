@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -86,6 +88,13 @@ func Load() (*EntireSettings, error) {
 	applyDefaults(settings)
 
 	return settings, nil
+}
+
+// LoadFromFile loads settings from a specific file path without merging local overrides.
+// Returns default settings if the file doesn't exist.
+// Use this when you need to display individual settings files separately.
+func LoadFromFile(filePath string) (*EntireSettings, error) {
+	return loadFromFile(filePath)
 }
 
 // loadFromFile loads settings from a specific file path.
@@ -228,4 +237,68 @@ func (s *EntireSettings) IsSummarizeEnabled() bool {
 		return false
 	}
 	return enabled
+}
+
+// IsMultiSessionWarningDisabled checks if multi-session warnings are disabled.
+// Returns false (show warnings) by default if the key is missing.
+func (s *EntireSettings) IsMultiSessionWarningDisabled() bool {
+	if s.StrategyOptions == nil {
+		return false
+	}
+	if disabled, ok := s.StrategyOptions["disable_multisession_warning"].(bool); ok {
+		return disabled
+	}
+	return false
+}
+
+// IsPushSessionsDisabled checks if push_sessions is disabled in settings.
+// Returns true if push_sessions is explicitly set to false.
+func (s *EntireSettings) IsPushSessionsDisabled() bool {
+	if s.StrategyOptions == nil {
+		return false
+	}
+	val, exists := s.StrategyOptions["push_sessions"]
+	if !exists {
+		return false
+	}
+	if boolVal, ok := val.(bool); ok {
+		return !boolVal // disabled = !push_sessions
+	}
+	return false
+}
+
+// Save saves the settings to .entire/settings.json.
+func Save(settings *EntireSettings) error {
+	return saveToFile(settings, EntireSettingsFile)
+}
+
+// SaveLocal saves the settings to .entire/settings.local.json.
+func SaveLocal(settings *EntireSettings) error {
+	return saveToFile(settings, EntireSettingsLocalFile)
+}
+
+// saveToFile saves settings to the specified file path.
+func saveToFile(settings *EntireSettings, filePath string) error {
+	// Get absolute path for the file
+	filePathAbs, err := paths.AbsPath(filePath)
+	if err != nil {
+		filePathAbs = filePath // Fallback to relative
+	}
+
+	// Ensure directory exists
+	dir := filepath.Dir(filePathAbs)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("creating settings directory: %w", err)
+	}
+
+	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling settings: %w", err)
+	}
+
+	//nolint:gosec // G306: settings file is config, not secrets; 0o644 is appropriate
+	if err := os.WriteFile(filePathAbs, data, 0o644); err != nil {
+		return fmt.Errorf("writing settings file: %w", err)
+	}
+	return nil
 }

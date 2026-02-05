@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/charmbracelet/huh"
@@ -479,16 +480,16 @@ func runStatus(w io.Writer, detailed bool) error {
 // runStatusDetailed shows the effective status plus detailed status for each settings file.
 func runStatusDetailed(w io.Writer, settingsPath, localSettingsPath string, projectExists, localExists bool) error {
 	// First show the effective/merged status
-	settings, err := LoadEntireSettings()
+	effectiveSettings, err := LoadEntireSettings()
 	if err != nil {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
-	fmt.Fprintln(w, formatSettingsStatusShort(settings))
+	fmt.Fprintln(w, formatSettingsStatusShort(effectiveSettings))
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
 	if projectExists {
-		projectSettings, err := loadSettingsFromFile(settingsPath)
+		projectSettings, err := settings.LoadFromFile(settingsPath)
 		if err != nil {
 			return fmt.Errorf("failed to load project settings: %w", err)
 		}
@@ -497,7 +498,7 @@ func runStatusDetailed(w io.Writer, settingsPath, localSettingsPath string, proj
 
 	// Show local settings if it exists
 	if localExists {
-		localSettings, err := loadSettingsFromFile(localSettingsPath)
+		localSettings, err := settings.LoadFromFile(localSettingsPath)
 		if err != nil {
 			return fmt.Errorf("failed to load local settings: %w", err)
 		}

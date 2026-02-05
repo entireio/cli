@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,7 +10,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -70,63 +69,12 @@ func hasUnpushedSessionsCommon(repo *git.Repository, remote string, localHash pl
 
 // isPushSessionsDisabled checks if push_sessions is disabled in settings.
 // Returns true if push_sessions is explicitly set to false.
-// Checks settings.local.json first (user preference), then settings.json (shared).
 func isPushSessionsDisabled() bool {
-	// Use repo root to find settings files when run from a subdirectory
-	localSettingsPath, err := paths.AbsPath(".entire/settings.local.json")
+	s, err := settings.Load()
 	if err != nil {
-		localSettingsPath = ".entire/settings.local.json" // Fallback
+		return false // Default: push is enabled
 	}
-	sharedSettingsPath, err := paths.AbsPath(".entire/settings.json")
-	if err != nil {
-		sharedSettingsPath = ".entire/settings.json" // Fallback
-	}
-
-	// Try local settings first (user preference, not committed)
-	if disabled, found := readPushSessionsFromFile(localSettingsPath); found {
-		return disabled
-	}
-
-	// Fall back to shared settings
-	if disabled, found := readPushSessionsFromFile(sharedSettingsPath); found {
-		return disabled
-	}
-
-	// Default: push is enabled
-	return false
-}
-
-// readPushSessionsFromFile reads push_sessions from a specific settings file.
-// Returns (isDisabled, found). If not found, returns (false, false).
-func readPushSessionsFromFile(settingsPath string) (bool, bool) {
-	//nolint:gosec // G304: settingsPath is always a hardcoded constant from this package
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		return false, false
-	}
-
-	var settings struct {
-		StrategyOptions map[string]interface{} `json:"strategy_options"`
-	}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return false, false
-	}
-
-	if settings.StrategyOptions == nil {
-		return false, false
-	}
-
-	val, exists := settings.StrategyOptions["push_sessions"]
-	if !exists {
-		return false, false
-	}
-
-	// Handle boolean value
-	if boolVal, ok := val.(bool); ok {
-		return !boolVal, true // disabled = !push_sessions
-	}
-
-	return false, false
+	return s.IsPushSessionsDisabled()
 }
 
 // doPushSessionsBranch pushes the sessions branch to the remote.
