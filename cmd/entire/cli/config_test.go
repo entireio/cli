@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -330,5 +331,44 @@ func TestLoadEntireSettings_NeitherFileExistsReturnsDefaults(t *testing.T) {
 	}
 	if !settings.Enabled {
 		t.Error("Enabled should default to true")
+	}
+}
+
+func TestLoadEntireSettings_RejectsUnknownKeysInBase(t *testing.T) {
+	setupLocalOverrideTestDir(t)
+
+	baseSettings := `{"strategy": "manual-commit", "bogus_key": true}`
+	if err := os.WriteFile(EntireSettingsFile, []byte(baseSettings), 0o644); err != nil {
+		t.Fatalf("Failed to write settings file: %v", err)
+	}
+
+	_, err := LoadEntireSettings()
+	if err == nil {
+		t.Fatal("LoadEntireSettings() should return error for unknown key")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("Error should mention 'unknown field', got: %v", err)
+	}
+}
+
+func TestLoadEntireSettings_RejectsUnknownKeysInLocal(t *testing.T) {
+	setupLocalOverrideTestDir(t)
+
+	baseSettings := `{"strategy": "manual-commit"}`
+	if err := os.WriteFile(EntireSettingsFile, []byte(baseSettings), 0o644); err != nil {
+		t.Fatalf("Failed to write settings file: %v", err)
+	}
+
+	localSettings := `{"bogus_key": "value"}`
+	if err := os.WriteFile(EntireSettingsLocalFile, []byte(localSettings), 0o644); err != nil {
+		t.Fatalf("Failed to write local settings file: %v", err)
+	}
+
+	_, err := LoadEntireSettings()
+	if err == nil {
+		t.Fatal("LoadEntireSettings() should return error for unknown key in local settings")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("Error should mention 'unknown field', got: %v", err)
 	}
 }

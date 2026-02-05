@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -94,6 +95,14 @@ func LoadEntireSettings() (*EntireSettings, error) {
 // mergeSettingsJSON merges JSON data into existing settings.
 // Only non-zero values from the JSON override existing settings.
 func mergeSettingsJSON(settings *EntireSettings, data []byte) error {
+	// First, validate that there are no unknown keys using strict decoding
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var temp EntireSettings
+	if err := dec.Decode(&temp); err != nil {
+		return fmt.Errorf("parsing JSON: %w", err)
+	}
+
 	// Parse into a map to check which fields are present
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -193,7 +202,9 @@ func loadSettingsFromFile(filePath string) (*EntireSettings, error) {
 		return nil, fmt.Errorf("%w", err)
 	}
 
-	if err := json.Unmarshal(data, settings); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(settings); err != nil {
 		return nil, fmt.Errorf("parsing settings file: %w", err)
 	}
 	applyDefaultStrategy(settings)
