@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "00c9e2351016",
+  "strategy": "manual-commit",
+  "branch": "gtrrz-victor/adds-entire-reset-command",
+  "migration_source_commit": "4170145477d230519fe892d02aed8a1296b44dd9",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/reset_test.go",
+    "cmd/entire/cli/reset.go",
+    "cmd/entire/cli/reset_test.go",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/strategy/manual_commit_reset.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/00/c9e2351016/0/metadata.json",
+      "transcript": "/00/c9e2351016/0/full.jsonl",
+      "context": "/00/c9e2351016/0/context.md",
+      "content_hash": "/00/c9e2351016/0/content_hash.txt",
+      "prompt": "/00/c9e2351016/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 485,
+    "cache_creation_tokens": 240071,
+    "cache_read_tokens": 7067722,
+    "output_tokens": 354,
+    "api_call_count": 88
+  }
+}
