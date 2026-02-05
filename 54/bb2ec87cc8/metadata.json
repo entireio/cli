@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "54bb2ec87cc8",
+  "strategy": "manual-commit",
+  "branch": "soph/improved-shadow",
+  "migration_source_commit": "e9fad356f4574feace154fff1ea94015ead47b9c",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/mid_session_rebase_test.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_migration.go",
+    "cmd/entire/cli/strategy/manual_commit_migration_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/54/bb2ec87cc8/0/metadata.json",
+      "transcript": "/54/bb2ec87cc8/0/full.jsonl",
+      "context": "/54/bb2ec87cc8/0/context.md",
+      "content_hash": "/54/bb2ec87cc8/0/content_hash.txt",
+      "prompt": "/54/bb2ec87cc8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4382,
+    "cache_creation_tokens": 318604,
+    "cache_read_tokens": 9200710,
+    "output_tokens": 239,
+    "api_call_count": 81
+  }
+}
