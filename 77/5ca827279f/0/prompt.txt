@@ -1,0 +1,9 @@
+can you review the change in this branch, I'm mostly concerned in regards to shadow branches where we use `git add` but don't change the local folder tree
+
+---
+
+but we are now using different ways of adding, in different places, right?
+
+---
+
+yes
