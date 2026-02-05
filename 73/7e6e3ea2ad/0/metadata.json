@@ -1,8 +1,8 @@
 {
   "checkpoint_id": "737e6e3ea2ad",
-  "session_id": "2026-01-22-0bdbfa06-acf1-473a-b3e4-6a03313d1d0e",
+  "session_id": "2026-01-22-0c29f7c5-19e4-4d5a-9340-ab23773711e6",
   "strategy": "manual-commit",
-  "created_at": "2026-01-22T15:59:42.506693+11:00",
+  "created_at": "2026-01-22T15:59:42.805825+11:00",
   "branch": "alex/ent-109-text-output-checkpoint-flag",
   "checkpoints_count": 1,
   "files_touched": [
@@ -11,10 +11,10 @@
   ],
   "agent": "Claude Code",
   "token_usage": {
-    "input_tokens": 234,
-    "cache_creation_tokens": 164082,
-    "cache_read_tokens": 1831131,
-    "output_tokens": 91,
-    "api_call_count": 29
+    "input_tokens": 10,
+    "cache_creation_tokens": 35882,
+    "cache_read_tokens": 0,
+    "output_tokens": 6,
+    "api_call_count": 1
   }
 }
