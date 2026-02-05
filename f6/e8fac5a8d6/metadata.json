@@ -2,9 +2,13 @@
   "checkpoint_id": "f6e8fac5a8d6",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "aff3499285da002dbe3b3961c4c3e5283c0e903b",
-  "checkpoints_count": 0,
-  "files_touched": [],
+  "migration_source_commit": "297d735396851b8558a521f3a9dac43bb6893242",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/resume_test.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/resume_test.go"
+  ],
   "sessions": [
     {
       "metadata": "/f6/e8fac5a8d6/0/metadata.json",

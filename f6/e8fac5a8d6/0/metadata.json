@@ -1,8 +1,12 @@
 {
   "checkpoint_id": "f6e8fac5a8d6",
-  "session_id": "2026-01-07-4a0c4466-30a6-43b8-a766-452435519b33",
+  "session_id": "2026-01-08-efea9d52-9e4f-4189-8bae-4e8049647900",
   "strategy": "manual-commit",
-  "created_at": "2026-01-08T15:38:43.15386+01:00",
-  "checkpoints_count": 0,
-  "files_touched": null
+  "created_at": "2026-01-08T15:38:43.189334+01:00",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/resume_test.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/resume_test.go"
+  ]
 }
