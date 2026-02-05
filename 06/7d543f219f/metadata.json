@@ -1,0 +1,24 @@
+{
+  "checkpoint_id": "067d543f219f",
+  "strategy": "auto-commit",
+  "branch": "",
+  "migration_source_commit": "964999cbafa6339ae6883bc0fd8fd9e6434cd53d",
+  "checkpoints_count": 0,
+  "files_touched": [],
+  "sessions": [
+    {
+      "metadata": "/06/7d543f219f/0/metadata.json",
+      "transcript": "/06/7d543f219f/0/full.jsonl",
+      "context": "/06/7d543f219f/0/context.md",
+      "content_hash": "/06/7d543f219f/0/content_hash.txt",
+      "prompt": "/06/7d543f219f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}
