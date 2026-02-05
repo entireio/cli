@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "e465290d9661",
+  "strategy": "manual-commit",
+  "branch": "alex/improve-explain-2",
+  "migration_source_commit": "2db757c16333cceb712e61de4a7e9916baa2958d",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/plans/2026-02-04-explain-improvements.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e4/65290d9661/0/metadata.json",
+      "transcript": "/e4/65290d9661/0/full.jsonl",
+      "context": "/e4/65290d9661/0/context.md",
+      "content_hash": "/e4/65290d9661/0/content_hash.txt",
+      "prompt": "/e4/65290d9661/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 173,
+    "cache_creation_tokens": 184935,
+    "cache_read_tokens": 2005411,
+    "output_tokens": 1801,
+    "api_call_count": 35
+  }
+}
