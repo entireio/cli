@@ -1,0 +1,9 @@
+Can you check what effort it would be to track the branch in metadata.json? Basically that we track which branch a commit was made on.
+
+---
+
+Let's implement this.
+
+---
+
+can we add a test?
