@@ -1,0 +1,13 @@
+{
+  "checkpoint_id": "5ac45bc32212",
+  "session_id": "2026-01-19-86cc3044-7515-43f1-9c25-1444738c64c9",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-19T19:57:33.653648+01:00",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/git_operations.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/resume_test.go"
+  ],
+  "agent": "Claude Code"
+}
