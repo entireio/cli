@@ -1,9 +1,9 @@
 {
   "checkpoint_id": "51a265047d72",
   "strategy": "manual-commit",
-  "branch": "alex/code-dup-tooling",
-  "migration_source_commit": "1369e4a9aaaca2e133e1f023951ebed0c264694f",
-  "checkpoints_count": 1,
+  "branch": "",
+  "migration_source_commit": "cfa11f2a0e8ee11128f8337a8cd41cc9c18dd68d",
+  "checkpoints_count": 3,
   "files_touched": [
     ".golangci.yaml",
     "CLAUDE.md",
@@ -23,13 +23,20 @@
       "context": "/51/a265047d72/2/context.md",
       "content_hash": "/51/a265047d72/2/content_hash.txt",
       "prompt": "/51/a265047d72/2/prompt.txt"
+    },
+    {
+      "metadata": "/51/a265047d72/3/metadata.json",
+      "transcript": "/51/a265047d72/3/full.jsonl",
+      "context": "/51/a265047d72/3/context.md",
+      "content_hash": "/51/a265047d72/3/content_hash.txt",
+      "prompt": "/51/a265047d72/3/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 3512,
-    "cache_creation_tokens": 451427,
-    "cache_read_tokens": 2329557,
-    "output_tokens": 133,
-    "api_call_count": 50
+    "input_tokens": 7436,
+    "cache_creation_tokens": 874790,
+    "cache_read_tokens": 7372499,
+    "output_tokens": 342,
+    "api_call_count": 133
   }
 }
