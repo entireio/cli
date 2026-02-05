@@ -184,21 +184,3 @@ or is it how the agents identify themselves?
 
 or is it just the comment which is misleading? it looks like we are genuinely using those strings to denote agent type in our metadata
 
-### Prompt 36
-
-ok do that
-
-### Prompt 37
-
-and I guess we don't always have agent/session information when we're trying to read a transcript :|
-
-types.go seems the least worst option, or we go back to the registry holds it world 😭
-
-### Prompt 38
-
-I concede defeat. let's go back
-
-### Prompt 39
-
-that double constant definition and mapping in registry is yuck :(
-
