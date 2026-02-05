@@ -1,0 +1,22 @@
+{
+  "checkpoint_id": "6af107c86703",
+  "session_id": "2026-01-23-220c8e1c-18de-4039-8d22-658ecf89acdc",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-23T11:08:58.227162+01:00",
+  "branch": "soph/token-usage-to-agent",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/agent/registry.go",
+    "cmd/entire/cli/checkpoint/backwards_compat_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "ebbbbe06-887e-4582-a03c-692ec00aa714",
+  "transcript_lines_at_start": 45,
+  "token_usage": {
+    "input_tokens": 363,
+    "cache_creation_tokens": 287227,
+    "cache_read_tokens": 2471365,
+    "output_tokens": 76,
+    "api_call_count": 36
+  }
+}
