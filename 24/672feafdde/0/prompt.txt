@@ -1,0 +1,26 @@
+on which data does "entire session list" operates?
+
+---
+
+what value is shown in the last column of session list?
+
+---
+
+Could we show the commit message instead? Like there should always be a commit matching the session, for auto-commit this is then usually also the prompt but for manual-commit it might be a more descriptive thing
+
+---
+
+Option 1 doesn't work since the commit hash can change, that's why we add the "Entire-Checkpoint" trailer to the real commits. Since that is the stable link. I wonder now if we should add this to CLAUDE.md somehow so you remember this?
+
+---
+
+In theory the commits we look at should have either nearly the same date or a newer date then the commit date the commit in entire/sessions has.
+
+---
+
+you wrote: So we can use the checkpoint's CreatedAt timestamp as an upper bound and search backwards from there. 
+what does upper bound means here? just to be sure, the date of the commit in entire/sessions never change but a user could rebase/ammend a commit containing the actual change so it is then newer then the commit in entire/sessions. I mostly meant it's not worth looking more then a few minutes older then the commit in entire/sessions but then up to now. Does this make sense?
+
+---
+
+yes, exactly, please implement this.
