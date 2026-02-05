@@ -21,6 +21,57 @@
     "output_tokens": 335,
     "api_call_count": 48
   },
+  "summary": {
+    "intent": "Debug and fix a false-positive shadow branch conflict error that occurs when starting Claude in one worktree after running a session with no file changes in another worktree at the same commit.",
+    "outcome": "Root cause identified: conflict detection triggers on any session with matching base_commit from different worktree, regardless of whether shadow branch exists or checkpoint_count > 0. Created implementation plan to make shadow branches worktree-specific using format entire/<commit>-<hash(worktree_id)>, which eliminates cross-worktree conflicts entirely. Started execution using subagent-driven-development workflow.",
+    "learnings": {
+      "repo": [
+        "Shadow branches use format entire/<commit-hash[:7]>, causing collisions when multiple worktrees are at same commit",
+        "Session state files in .git/entire-sessions/ persist even when no checkpoints are created (checkpoint_count=0)",
+        "Git's internal worktree names in .git/worktrees/<name>/ are stable across 'git worktree move' operations",
+        "Main worktree doesn't have entry in .git/worktrees/, requiring special handling",
+        "Conflict detection in InitializeSession doesn't verify shadow branch existence before erroring",
+        "Two parallel shadow branch naming implementations exist: getShadowBranchNameForCommit (strategy) and ShadowBranchNameForCommit (checkpoint)"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 926,
+          "end_line": 948,
+          "finding": "ShadowBranchConflictError is returned for any session from different worktree with same base_commit, without checking if shadow branch exists or checkpoint_count > 0"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_session.go",
+          "finding": "findSessionsForCommit finds sessions by BaseCommit match but doesn't filter by worktree or checkpoint existence"
+        },
+        {
+          "path": "cmd/entire/cli/checkpoint/temporary.go",
+          "finding": "ShadowBranchNameForCommit currently only uses commit hash, needs to incorporate worktree ID for uniqueness"
+        },
+        {
+          "path": "cmd/entire/cli/paths/paths.go",
+          "finding": "Existing paths utilities don't have worktree ID extraction functionality, needs new GetWorktreeID function"
+        }
+      ],
+      "workflow": [
+        "Used systematic-debugging skill to trace root cause instead of proposing quick fixes",
+        "Git worktree move vs filesystem mv: 'git worktree move' preserves internal references and .git/worktrees/<name>, while filesystem mv breaks the worktree",
+        "Writing-plans skill requires explicit header format with 'For Claude' instruction to use executing-plans sub-skill",
+        "Subagent-driven-development provides two-stage review (spec compliance then code quality) with fresh subagent per task"
+      ]
+    },
+    "friction": [
+      "Initial impulse to fix symptom (check if shadow branch exists) rather than address root architectural issue (shared shadow branch names)",
+      "Need to verify git worktree move behavior through manual testing in temporary repo"
+    ],
+    "open_items": [
+      "Task 1 implementation in progress: GetWorktreeID function creation",
+      "Remaining 12 tasks in implementation plan need completion",
+      "Integration tests may need updates for new shadow branch naming scheme",
+      "Documentation update needed for Session Strategies section",
+      "Consider migration strategy for existing shadow branches in old format"
+    ]
+  },
   "initial_attribution": {
     "calculated_at": "2026-02-02T07:12:46.019974Z",
     "agent_lines": 2,
