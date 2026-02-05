@@ -2,7 +2,7 @@
   "checkpoint_id": "a4a8d7d25377",
   "session_id": "4b3ddf27-d7f7-4773-b4f2-b94b999c661d",
   "strategy": "manual-commit",
-  "created_at": "2026-02-02T07:15:39.749212Z",
+  "created_at": "2026-02-02T07:12:46.260267Z",
   "branch": "alex/fix-worktree-shadow-branch-collision",
   "checkpoints_count": 9,
   "files_touched": [
@@ -15,11 +15,11 @@
   "transcript_identifier_at_start": "7949fbbc-ef4b-41f9-8aa4-86f5ce2afc25",
   "transcript_lines_at_start": 10,
   "token_usage": {
-    "input_tokens": 142,
-    "cache_creation_tokens": 394243,
-    "cache_read_tokens": 4037179,
-    "output_tokens": 335,
-    "api_call_count": 48
+    "input_tokens": 131,
+    "cache_creation_tokens": 273061,
+    "cache_read_tokens": 3369737,
+    "output_tokens": 301,
+    "api_call_count": 42
   },
   "initial_attribution": {
     "calculated_at": "2026-02-02T07:12:46.019974Z",
