@@ -1,0 +1,24 @@
+{
+  "checkpoint_id": "51a265047d72",
+  "strategy": "manual-commit",
+  "branch": "alex/code-dup-tooling",
+  "migration_source_commit": "16a7c92ad3676979be90d89f2673819f197e3644",
+  "checkpoints_count": 0,
+  "files_touched": [],
+  "sessions": [
+    {
+      "metadata": "/51/a265047d72/0/metadata.json",
+      "transcript": "/51/a265047d72/0/full.jsonl",
+      "context": "/51/a265047d72/0/context.md",
+      "content_hash": "/51/a265047d72/0/content_hash.txt",
+      "prompt": "/51/a265047d72/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 57895,
+    "cache_read_tokens": 28124,
+    "output_tokens": 2,
+    "api_call_count": 2
+  }
+}
