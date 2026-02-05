@@ -2,8 +2,8 @@
   "checkpoint_id": "8cfa910f8ef9",
   "strategy": "manual-commit",
   "branch": "",
-  "migration_source_commit": "58ee12f4aa708e257958bac45a8e59e0b2d83a8f",
-  "checkpoints_count": 26,
+  "migration_source_commit": "85386e1c920d4cfa08510110f2cfe60cf2c2d805",
+  "checkpoints_count": 33,
   "files_touched": [
     ".claude/.gitignore",
     ".claude/agents/dev.md",
@@ -20,6 +20,7 @@
     "cmd/entire/cli/agent/claudecode/transcript.go",
     "cmd/entire/cli/checkpoint/checkpoint.go",
     "cmd/entire/cli/config.go",
+    "cmd/entire/cli/git_operations.go",
     "cmd/entire/cli/hooks_claudecode_handlers.go",
     "cmd/entire/cli/integration_test/concurrent_session_warning_test.go",
     "cmd/entire/cli/integration_test/testenv.go",
@@ -76,6 +77,13 @@
       "context": "/8c/fa910f8ef9/6/context.md",
       "content_hash": "/8c/fa910f8ef9/6/content_hash.txt",
       "prompt": "/8c/fa910f8ef9/6/prompt.txt"
+    },
+    {
+      "metadata": "/8c/fa910f8ef9/7/metadata.json",
+      "transcript": "/8c/fa910f8ef9/7/full.jsonl",
+      "context": "/8c/fa910f8ef9/7/context.md",
+      "content_hash": "/8c/fa910f8ef9/7/content_hash.txt",
+      "prompt": "/8c/fa910f8ef9/7/prompt.txt"
     }
   ],
   "token_usage": {
