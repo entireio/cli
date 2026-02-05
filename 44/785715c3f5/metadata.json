@@ -1,15 +1,23 @@
 {
   "checkpoint_id": "44785715c3f5",
   "strategy": "manual-commit",
-  "branch": "alex/ent-112-checkpoint-id-reuse-bug",
-  "migration_source_commit": "6c755031f42ea342d2c8e896310c0a0fc7de89e0",
-  "checkpoints_count": 29,
+  "branch": "",
+  "migration_source_commit": "c292ddbef3865cb015972a458d4b05e2370b3ca5",
+  "checkpoints_count": 64,
   "files_touched": [
+    "cmd/entire/cli/agent/claudecode/transcript.go",
     "cmd/entire/cli/explain.go",
     "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
     "cmd/entire/cli/integration_test/explain_test.go",
     "cmd/entire/cli/integration_test/last_checkpoint_id_test.go",
-    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/strategy.go"
   ],
   "sessions": [
     {
@@ -18,13 +26,20 @@
       "context": "/44/785715c3f5/0/context.md",
       "content_hash": "/44/785715c3f5/0/content_hash.txt",
       "prompt": "/44/785715c3f5/0/prompt.txt"
+    },
+    {
+      "metadata": "/44/785715c3f5/2/metadata.json",
+      "transcript": "/44/785715c3f5/2/full.jsonl",
+      "context": "/44/785715c3f5/2/context.md",
+      "content_hash": "/44/785715c3f5/2/content_hash.txt",
+      "prompt": "/44/785715c3f5/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 1331,
-    "cache_creation_tokens": 795334,
-    "cache_read_tokens": 16733437,
-    "output_tokens": 430,
-    "api_call_count": 149
+    "input_tokens": 8520,
+    "cache_creation_tokens": 3087591,
+    "cache_read_tokens": 59641584,
+    "output_tokens": 2034,
+    "api_call_count": 598
   }
 }
