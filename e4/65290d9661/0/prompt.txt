@@ -236,3 +236,430 @@ After saving the plan, offer execution choice:
 **If Parallel Session chosen:**
 - Guide them to open new session in worktree
 - **REQUIRED SUB-SKILL:** New session uses superpowers:executing-plans
+
+---
+
+1
+
+---
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.1.1/skills/subagent-driven-development
+
+# Subagent-Driven Development
+
+Execute plan by dispatching fresh subagent per task, with two-stage review after each: spec compliance review first, then code quality review.
+
+**Core principle:** Fresh subagent per task + two-stage review (spec then quality) = high quality, fast iteration
+
+## When to Use
+
+```dot
+digraph when_to_use {
+    "Have implementation plan?" [shape=diamond];
+    "Tasks mostly independent?" [shape=diamond];
+    "Stay in this session?" [shape=diamond];
+    "subagent-driven-development" [shape=box];
+    "executing-plans" [shape=box];
+    "Manual execution or brainstorm first" [shape=box];
+
+    "Have implementation plan?" -> "Tasks mostly independent?" [label="yes"];
+    "Have implementation plan?" -> "Manual execution or brainstorm first" [label="no"];
+    "Tasks mostly independent?" -> "Stay in this session?" [label="yes"];
+    "Tasks mostly independent?" -> "Manual execution or brainstorm first" [label="no - tightly coupled"];
+    "Stay in this session?" -> "subagent-driven-development" [label="yes"];
+    "Stay in this session?" -> "executing-plans" [label="no - parallel session"];
+}
+```
+
+**vs. Executing Plans (parallel session):**
+- Same session (no context switch)
+- Fresh subagent per task (no context pollution)
+- Two-stage review after each task: spec compliance first, then code quality
+- Faster iteration (no human-in-loop between tasks)
+
+## The Process
+
+```dot
+digraph process {
+    rankdir=TB;
+
+    subgraph cluster_per_task {
+        label="Per Task";
+        "Dispatch implementer subagent (./implementer-prompt.md)" [shape=box];
+        "Implementer subagent asks questions?" [shape=diamond];
+        "Answer questions, provide context" [shape=box];
+        "Implementer subagent implements, tests, commits, self-reviews" [shape=box];
+        "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)" [shape=box];
+        "Spec reviewer subagent confirms code matches spec?" [shape=diamond];
+        "Implementer subagent fixes spec gaps" [shape=box];
+        "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" [shape=box];
+        "Code quality reviewer subagent approves?" [shape=diamond];
+        "Implementer subagent fixes quality issues" [shape=box];
+        "Mark task complete in TodoWrite" [shape=box];
+    }
+
+    "Read plan, extract all tasks with full text, note context, create TodoWrite" [shape=box];
+    "More tasks remain?" [shape=diamond];
+    "Dispatch final code reviewer subagent for entire implementation" [shape=box];
+    "Use superpowers:finishing-a-development-branch" [shape=box style=filled fillcolor=lightgreen];
+
+    "Read plan, extract all tasks with full text, note context, create TodoWrite" -> "Dispatch implementer subagent (./implementer-prompt.md)";
+    "Dispatch implementer subagent (./implementer-prompt.md)" -> "Implementer subagent asks questions?";
+    "Implementer subagent asks questions?" -> "Answer questions, provide context" [label="yes"];
+    "Answer questions, provide context" -> "Dispatch implementer subagent (./implementer-prompt.md)";
+    "Implementer subagent asks questions?" -> "Implementer subagent implements, tests, commits, self-reviews" [label="no"];
+    "Implementer subagent implements, tests, commits, self-reviews" -> "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)";
+    "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)" -> "Spec reviewer subagent confirms code matches spec?";
+    "Spec reviewer subagent confirms code matches spec?" -> "Implementer subagent fixes spec gaps" [label="no"];
+    "Implementer subagent fixes spec gaps" -> "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)" [label="re-review"];
+    "Spec reviewer subagent confirms code matches spec?" -> "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" [label="yes"];
+    "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" -> "Code quality reviewer subagent approves?";
+    "Code quality reviewer subagent approves?" -> "Implementer subagent fixes quality issues" [label="no"];
+    "Implementer subagent fixes quality issues" -> "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" [label="re-review"];
+    "Code quality reviewer subagent approves?" -> "Mark task complete in TodoWrite" [label="yes"];
+    "Mark task complete in TodoWrite" -> "More tasks remain?";
+    "More tasks remain?" -> "Dispatch implementer subagent (./implementer-prompt.md)" [label="yes"];
+    "More tasks remain?" -> "Dispatch final code reviewer subagent for entire implementation" [label="no"];
+    "Dispatch final code reviewer subagent for entire implementation" -> "Use superpowers:finishing-a-development-branch";
+}
+```
+
+## Prompt Templates
+
+- `./implementer-prompt.md` - Dispatch implementer subagent
+- `./spec-reviewer-prompt.md` - Dispatch spec compliance reviewer subagent
+- `./code-quality-reviewer-prompt.md` - Dispatch code quality reviewer subagent
+
+## Example Workflow
+
+```
+You: I'm using Subagent-Driven Development to execute this plan.
+
+[Read plan file once: docs/plans/feature-plan.md]
+[Extract all 5 tasks with full text and context]
+[Create TodoWrite with all tasks]
+
+Task 1: Hook installation script
+
+[Get Task 1 text and context (already extracted)]
+[Dispatch implementation subagent with full task text + context]
+
+Implementer: "Before I begin - should the hook be installed at user or system level?"
+
+You: "User level (~/.config/superpowers/hooks/)"
+
+Implementer: "Got it. Implementing now..."
+[Later] Implementer:
+  - Implemented install-hook command
+  - Added tests, 5/5 passing
+  - Self-review: Found I missed --force flag, added it
+  - Committed
+
+[Dispatch spec compliance reviewer]
+Spec reviewer: ✅ Spec compliant - all requirements met, nothing extra
+
+[Get git SHAs, dispatch code quality reviewer]
+Code reviewer: Strengths: Good test coverage, clean. Issues: None. Approved.
+
+[Mark Task 1 complete]
+
+Task 2: Recovery modes
+
+[Get Task 2 text and context (already extracted)]
+[Dispatch implementation subagent with full task text + context]
+
+Implementer: [No questions, proceeds]
+Implementer:
+  - Added verify/repair modes
+  - 8/8 tests passing
+  - Self-review: All good
+  - Committed
+
+[Dispatch spec compliance reviewer]
+Spec reviewer: ❌ Issues:
+  - Missing: Progress reporting (spec says "report every 100 items")
+  - Extra: Added --json flag (not requested)
+
+[Implementer fixes issues]
+Implementer: Removed --json flag, added progress reporting
+
+[Spec reviewer reviews again]
+Spec reviewer: ✅ Spec compliant now
+
+[Dispatch code quality reviewer]
+Code reviewer: Strengths: Solid. Issues (Important): Magic number (100)
+
+[Implementer fixes]
+Implementer: Extracted PROGRESS_INTERVAL constant
+
+[Code reviewer reviews again]
+Code reviewer: ✅ Approved
+
+[Mark Task 2 complete]
+
+...
+
+[After all tasks]
+[Dispatch final code-reviewer]
+Final reviewer: All requirements met, ready to merge
+
+Done!
+```
+
+## Advantages
+
+**vs. Manual execution:**
+- Subagents follow TDD naturally
+- Fresh context per task (no confusion)
+- Parallel-safe (subagents don't interfere)
+- Subagent can ask questions (before AND during work)
+
+**vs. Executing Plans:**
+- Same session (no handoff)
+- Continuous progress (no waiting)
+- Review checkpoints automatic
+
+**Efficiency gains:**
+- No file reading overhead (controller provides full text)
+- Controller curates exactly what context is needed
+- Subagent gets complete information upfront
+- Questions surfaced before work begins (not after)
+
+**Quality gates:**
+- Self-review catches issues before handoff
+- Two-stage review: spec compliance, then code quality
+- Review loops ensure fixes actually work
+- Spec compliance prevents over/under-building
+- Code quality ensures implementation is well-built
+
+**Cost:**
+- More subagent invocations (implementer + 2 reviewers per task)
+- Controller does more prep work (extracting all tasks upfront)
+- Review loops add iterations
+- But catches issues early (cheaper than debugging later)
+
+## Red Flags
+
+**Never:**
+- Skip reviews (spec compliance OR code quality)
+- Proceed with unfixed issues
+- Dispatch multiple implementation subagents in parallel (conflicts)
+- Make subagent read plan file (provide full text instead)
+- Skip scene-setting context (subagent needs to understand where task fits)
+- Ignore subagent questions (answer before letting them proceed)
+- Accept "close enough" on spec compliance (spec reviewer found issues = not done)
+- Skip review loops (reviewer found issues = implementer fixes = review again)
+- Let implementer self-review replace actual review (both are needed)
+- **Start code quality review before spec compliance is ✅** (wrong order)
+- Move to next task while either review has open issues
+
+**If subagent asks questions:**
+- Answer clearly and completely
+- Provide additional context if needed
+- Don't rush them into implementation
+
+**If reviewer finds issues:**
+- Implementer (same subagent) fixes them
+- Reviewer reviews again
+- Repeat until approved
+- Don't skip the re-review
+
+**If subagent fails task:**
+- Dispatch fix subagent with specific instructions
+- Don't try to fix manually (context pollution)
+
+## Integration
+
+**Required workflow skills:**
+- **superpowers:writing-plans** - Creates the plan this skill executes
+- **superpowers:requesting-code-review** - Code review template for reviewer subagents
+- **superpowers:finishing-a-development-branch** - Complete development after all tasks
+
+**Subagents should use:**
+- **superpowers:test-driven-development** - Subagents follow TDD for each task
+
+**Alternative workflow:**
+- **superpowers:executing-plans** - Use for parallel session instead of same-session execution
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me analyze the conversation chronologically:
+
+1. **Initial Request**: User asked to look at Linear issue ENT-212 about `entire explain` improvements.
+
+2. **Linear Issue Content**: ENT-212 contains 4 requirements:
+   - Show user associated with checkpoint (list + detail view)
+   - Show same explain output when navigating via commit-sha
+   - Change --session to filter by session
+   - Show git commits associated with checkpoint in detail view
+
+3. **Discussion Phase**: User and I discussed:
+   - Author info should come from `entire/sessions` commit (not stored in metadata currently)
+   - Created ENT-216 for storing author in metadata.json later
+   - Created ENT-217 for caching checkpoint → commit relationships
+   - Decided author only in detail view (not list) due to 1033 commits on entire/sessions being too expensive
+   - --commit should look up checkpoint via trailer, delegate to detail view
+   - --session should filter list view
+   - --search-all flag for unlimited commit search
+
+4. **Planning Phase**: Used brainstorming skill, wrote detailed plan to `docs/plans/2026-02-04-explain-improvements.md`
+
+5. **Execution Phase**: Using subagent-driven-development:
+   - Task 1: Add --search-all flag - COMPLETED
+   - Task 2: Change --commit to lookup checkpoint - COMPLETED (had to fix dead code issue)
+   - Task 3: Add --session as list filter - COMPLETED (just finished spec review)
+   - Task 4: Add author to checkpoint detail view - PENDING
+   - Task 5: Add associated commits to checkpoint detail view - PENDING
+   - Task 6: Update help text and documentation - PENDING
+   - Task 7: Final integration testing and cleanup - PENDING
+
+6. **Key Technical Details**:
+   - Working in `/Users/alex/workspace/cli/.worktrees/2`
+   - Main files: `cmd/entire/cli/explain.go`, `cmd/entire/cli/explain_test.go`, `cmd/entire/cli/integration_test/explain_test.go`
+   - Using go-git for git operations
+   - `trailers.ParseCheckpoint()` extracts `Entire-Checkpoint` trailer
+   - `formatBranchCheckpoints()` now has sessionFilter parameter
+   - `runExplainBranchWithFilter()` new function for filtered list view
+
+7. **Commits Made**:
+   - ec6e0e1: feat(explain): add --search-all flag
+   - 8842f9d: feat(explain): change --commit to lookup checkpoint by trailer
+   - 55b2682: feat(explain): change --session to filter list view
+
+8. **Errors Fixed**:
+   - Task 2: Dead code (`commitInfo`, `formatCommitInfo`) was left behind - removed it
+   - Task 2: Missing integration tests - added them
+   - Various argument count mismatches in test files after signature changes
+
+9. **Current State**: Just completed spec review for Task 3 (--session filter). Need to do code quality review then move to Task 4.
+
+Summary:
+1. Primary Request and Intent:
+   User requested implementation of Linear issue ENT-212 "entire explain improvements" with 4 requirements:
+   - Show user associated with checkpoint (in detail view only - list view deferred to ENT-216)
+   - `--commit <sha>` should look up checkpoint by Entire-Checkpoint trailer and delegate to checkpoint detail view
+   - `--session` should filter the list view by session ID (not show session details)
+   - Show associated git commits in checkpoint detail view
+   - Add `--search-all` flag to remove branch/commit scan limits (documented as slow)
+
+2. Key Technical Concepts:
+   - Go CLI built with github.com/spf13/cobra
+   - Git operations via github.com/go-git/go-git
+   - `trailers` package for parsing `Entire-Checkpoint` trailers from commit messages
+   - `entire/sessions` orphan branch stores checkpoint metadata
+   - Shadow branches `entire/<commit-hash>-<worktreeHash>` for temporary checkpoints
+   - Checkpoint ID is 12-hex-char identifier linking commits to metadata
+   - Author retrieval via path-filtered git log on `entire/sessions` branch
+   - Branch-scoped commit traversal for finding associated commits
+   - Subagent-driven development workflow with spec and code quality reviews
+
+3. Files and Code Sections:
+   - `cmd/entire/cli/explain.go` - Main explain command implementation
+     - Added `--search-all` flag (line 123)
+     - Rewrote `runExplainCommit` to extract trailer and delegate to checkpoint view
+     - Added `runExplainBranchWithFilter` for session filtering
+     - Updated `formatBranchCheckpoints` with sessionFilter parameter
+     ```go
+     func formatBranchCheckpoints(branchName string, points []strategy.RewindPoint, sessionFilter string) string {
+         // Filter by session if specified
+         if sessionFilter != "" {
+             var filtered []strategy.RewindPoint
+             for _, p := range points {
+                 if p.SessionID == sessionFilter || strings.HasPrefix(p.SessionID, sessionFilter) {
+                     filtered = append(filtered, p)
+                 }
+             }
+             points = filtered
+         }
+         // ... rest of formatting
+     }
+     ```
+     - New `runExplainCommit` function:
+     ```go
+     func runExplainCommit(w io.Writer, commitRef string, noPager, verbose, full, searchAll bool) error {
+         // ... resolve commit ...
+         checkpointID, hasCheckpoint := trailers.ParseCheckpoint(commit.Message)
+         if !hasCheckpoint {
+             fmt.Fprintln(w, "No associated Entire checkpoint")
+             // ... helpful message ...
+             return nil
+         }
+         return runExplainCheckpoint(w, nil, checkpointID.String(), noPager, verbose, full, false, false, false, searchAll)
+     }
+     ```
+
+   - `cmd/entire/cli/explain_test.go` - Unit tests
+     - Added `TestExplainCmd_SearchAllFlag`
+     - Added `TestRunExplainCommit_NoCheckpointTrailer`, `TestRunExplainCommit_WithCheckpointTrailer`
+     - Added `TestFormatBranchCheckpoints_SessionFilter` with subtests
+     - Removed dead code tests (`TestFormatCommitInfo`, `TestFormatCommitInfo_WithEntireData`)
+     - Updated all `formatBranchCheckpoints` calls with third parameter
+
+   - `cmd/entire/cli/integration_test/explain_test.go` - Integration tests
+     - Added `TestExplain_CommitWithoutCheckpoint`, `TestExplain_CommitWithCheckpointTrailer`
+     - Changed `TestExplain_SessionFilter` to expect filtered list (not error)
+
+   - `docs/plans/2026-02-04-explain-improvements.md` - Implementation plan with 7 tasks
+
+4. Errors and Fixes:
+   - **Dead code after Task 2**: `commitInfo` struct and `formatCommitInfo` function were left unused after rewriting `runExplainCommit`. Code reviewer caught this. Fixed by removing the dead code and associated tests.
+   - **Missing integration tests in Task 2**: Spec reviewer found integration tests weren't added. Fixed by adding `TestExplain_CommitWithoutCheckpoint` and `TestExplain_CommitWithCheckpointTrailer`.
+   - **Wrong helper method name**: Used `env.GetHeadCommit()` but correct name is `env.GetHeadHash()`. Fixed by updating calls.
+   - **Stale diagnostics**: Multiple times the IDE showed argument count mismatches that didn't exist when actually building. Verified by running `go build` and `go test -c`.
+
+5. Problem Solving:
+   - Solved author retrieval performance issue: With 1033 commits on entire/sessions, traversing for each checkpoint in list view would be too slow. Decision: show author only in detail view, defer list view to ENT-216 (store in metadata.json).
+   - Solved associated commits scope issue: Branch-scoped traversal with `--search-all` flag for unlimited search when needed.
+   - Created follow-up issues: ENT-216 (store author in metadata), ENT-217 (cache checkpoint→commit relationships).
+
+6. All User Messages:
+   - "have a look at linear https://linear.app/entirehq/issue/ENT-212/entire-explain-improvements - let's discuss"
+   - Clarifications about author coming from entire/sessions commit, --commit behavior, --session as filter
+   - "is the cli-runner not the same as the session creator? :| How about pulling it out of the entire/sessions commit for now?"
+   - "change the --commit behaviour; and it's related to 4. where the same view would be shown"
+   - "yes - I'd like it to show the same list view but filtered to a specific agent session"
+   - "at some future point we may want to 'cache' the `checkpoint -> commit` relationships"
+   - "also add the this-branch vs all-branches complication, ideally our cache can handle all-branches if it can be fast enough"
+   - "brainstorm for anything we've missed"
+   - Clarifications on list view performance, author display format ("Author: Alex Ong <alex@entire.io>")
+   - "we can't guarantee a list call prior to a detail call"
+   - "ok, option 2, detail view only for now"
+   - "no, write the plan"
+   - "1" (chose subagent-driven execution in this session)
+
+7. Pending Tasks:
+   - Task 4: Add author to checkpoint detail view (GetCheckpointAuthor, update formatCheckpointOutput)
+   - Task 5: Add associated commits to checkpoint detail view (getAssociatedCommits function)
+   - Task 6: Update help text and documentation
+   - Task 7: Final integration testing and cleanup
+
+8. Current Work:
+   Just completed spec compliance review for Task 3 (--session as list filter). The reviewer approved:
+   - `formatBranchCheckpoints` updated with sessionFilter parameter
+   - Filtering by exact match or prefix match
+   - "Filtered by session:" shown in output
+   - Routing updated in `runExplain`
+   - Tests added and passing
+   
+   Commit 55b2682 made: "feat(explain): change --session to filter list view instead of showing session details"
+
+9. Optional Next Step:
+   Complete the two-stage review process for Task 3 by dispatching the code quality reviewer, then mark Task 3 complete and move to Task 4 (Add author to checkpoint detail view).
+   
+   From the subagent-driven-development workflow: "Dispatch code quality reviewer subagent" → "Code quality reviewer subagent approves?" → "Mark task complete in TodoWrite"
+   
+   Task 4 involves adding `GetCheckpointAuthor` to `cmd/entire/cli/checkpoint/committed.go` and updating `formatCheckpointOutput` to display author.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-2/ac8a4f1a-1917-46bf-b8c1-0c3bab0fbc16.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+have we pushed?
+
+---
+
+yes please

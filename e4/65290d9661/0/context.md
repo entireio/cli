@@ -93,3 +93,44 @@ Write comprehensive implementation plans assuming the engineer has zero context 
 
 A...
 
+### Prompt 16
+
+1
+
+### Prompt 17
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.1.1/skills/subagent-driven-development
+
+# Subagent-Driven Development
+
+Execute plan by dispatching fresh subagent per task, with two-stage review after each: spec compliance review first, then code quality review.
+
+**Core principle:** Fresh subagent per task + two-stage review (spec then quality) = high quality, fast iteration
+
+## When to Use
+
+```dot
+digraph when_to_use {
+    "Have implementati...
+
+### Prompt 18
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me analyze the conversation chronologically:
+
+1. **Initial Request**: User asked to look at Linear issue ENT-212 about `entire explain` improvements.
+
+2. **Linear Issue Content**: ENT-212 contains 4 requirements:
+   - Show user associated with checkpoint (list + detail view)
+   - Show same explain output when navigating via commit-...
+
+### Prompt 19
+
+have we pushed?
+
+### Prompt 20
+
+yes please
+
