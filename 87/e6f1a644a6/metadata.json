@@ -1,0 +1,33 @@
+{
+  "checkpoint_id": "87e6f1a644a6",
+  "strategy": "manual-commit",
+  "branch": "fix/gemini-savecontext-missing-fields",
+  "migration_source_commit": "225577fd99a57da4015774782c2607bb7cab21c6",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_staging_test.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/87/e6f1a644a6/0/metadata.json",
+      "transcript": "/87/e6f1a644a6/0/full.jsonl",
+      "context": "/87/e6f1a644a6/0/context.md",
+      "content_hash": "/87/e6f1a644a6/0/content_hash.txt",
+      "prompt": "/87/e6f1a644a6/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 500,
+    "cache_creation_tokens": 136104,
+    "cache_read_tokens": 4179679,
+    "output_tokens": 180,
+    "api_call_count": 62
+  }
+}
