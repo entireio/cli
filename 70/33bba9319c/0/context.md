@@ -4,45 +4,21 @@
 
 ### Prompt 1
 
-do you have access to linear?
+yep let's do it
 
 ### Prompt 2
 
-I'd like to work on linear ent-95 - let's brainstorm
+yep push and PR
 
 ### Prompt 3
 
-Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.0.3/skills/brainstorming
-
-# Brainstorming Ideas Into Designs
-
-## Overview
-
-Help turn ideas into fully formed designs and specs through natural collaborative dialogue.
-
-Start by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design in small sections (200-300 words), checking after each section ...
+ent-95-add-entire-folder-readmes
 
 ### Prompt 4
 
-can we create a plan as a linear comment please
+hmm, did you run the tests?
 
 ### Prompt 5
 
-yeah let's implement please
-
-### Prompt 6
-
-<bash-input>code .</bash-input>
-
-### Prompt 7
-
-<bash-stdout></bash-stdout><bash-stderr></bash-stderr>
-
-### Prompt 8
-
-I'm considering if we want to specify what's contained in the files to that degree of detail in the readmes...
-
-### Prompt 9
-
-yes please
+run test:ci - I'm getting failures in the build
 
