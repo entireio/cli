@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -37,10 +38,6 @@ const (
 
 	// WorktreeIDHashLength is the number of hex characters used for worktree ID hash.
 	WorktreeIDHashLength = 6
-
-	// gitDir and entireDir are excluded from tree operations.
-	gitDir    = ".git"
-	entireDir = ".entire"
 )
 
 // HashWorktreeID returns a short hash of the worktree identifier.
@@ -56,7 +53,6 @@ func HashWorktreeID(worktreeID string) string {
 // If the new tree hash matches the last checkpoint's tree hash, the checkpoint
 // is skipped to avoid duplicate commits (deduplication).
 func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOptions) (WriteTemporaryResult, error) {
-	_ = ctx // Reserved for future use (e.g., cancellation)
 
 	// Validate base commit - required for shadow branch naming
 	if opts.BaseCommit == "" {
@@ -87,22 +83,30 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 
 	// Collect all files to include
 	var allFiles []string
+	var allDeletedFiles []string
 	if opts.IsFirstCheckpoint {
-		// For the first checkpoint of this session, capture ALL files in working directory
-		// This ensures untracked files present at session start are included
-		allFiles, err = collectWorkingDirectoryFiles()
+		// For the first checkpoint, capture all changed files (modified tracked + untracked)
+		// using `git status --porcelain -z` which respects both repo and global .gitignore.
+		// This is much faster than filesystem walk. The base tree from HEAD already contains
+		// all unchanged tracked files. We also capture user's pre-existing deletions.
+		result, err := collectChangedFiles(ctx, s.repo)
 		if err != nil {
-			return WriteTemporaryResult{}, fmt.Errorf("failed to collect working directory files: %w", err)
+			return WriteTemporaryResult{}, fmt.Errorf("failed to collect changed files: %w", err)
 		}
+		allFiles = result.Changed
+		// Merge user's pre-existing deletions with agent's deletions
+		allDeletedFiles = result.Deleted
+		allDeletedFiles = append(allDeletedFiles, opts.DeletedFiles...)
 	} else {
 		// For subsequent checkpoints, only include modified/new files
 		allFiles = make([]string, 0, len(opts.ModifiedFiles)+len(opts.NewFiles))
 		allFiles = append(allFiles, opts.ModifiedFiles...)
 		allFiles = append(allFiles, opts.NewFiles...)
+		allDeletedFiles = opts.DeletedFiles
 	}
 
 	// Build tree with changes
-	treeHash, err := s.buildTreeWithChanges(baseTreeHash, allFiles, opts.DeletedFiles, opts.MetadataDir, opts.MetadataDirAbs)
+	treeHash, err := s.buildTreeWithChanges(baseTreeHash, allFiles, allDeletedFiles, opts.MetadataDir, opts.MetadataDirAbs)
 	if err != nil {
 		return WriteTemporaryResult{}, fmt.Errorf("failed to build tree: %w", err)
 	}
@@ -996,48 +1000,131 @@ func sortTreeEntries(entries []object.TreeEntry) {
 	})
 }
 
-// collectWorkingDirectoryFiles collects all files in the working directory.
-// Excludes .git/ and .entire/ directories.
-func collectWorkingDirectoryFiles() ([]string, error) {
-	// Get repository root to walk from there
-	repoRoot, err := paths.RepoRoot()
+// collectChangedFiles collects all changed files (modified tracked + untracked non-ignored)
+// using git CLI. This is much faster than filesystem walk and respects all gitignore sources
+// including global gitignore (core.excludesfile).
+//
+// Uses git CLI instead of go-git because go-git's worktree.Status() does not respect
+// global gitignore, which can cause globally ignored files to appear as untracked.
+// See: https://github.com/entireio/cli/pull/129
+//
+// changedFilesResult contains both changed and deleted files from git status.
+type changedFilesResult struct {
+	Changed []string // Files to include (modified, added, untracked, renamed, etc.)
+	Deleted []string // Files that were deleted (need to be excluded from checkpoint tree)
+}
+
+// collectChangedFiles returns all changed files from git status for the first checkpoint.
+//
+// For the first checkpoint, we need to capture:
+// - Modified tracked files (user's uncommitted changes)
+// - Untracked non-ignored files (new files not yet added to git)
+// - Renamed/copied files (both source removal and destination)
+// - Deleted files (to exclude from checkpoint tree)
+//
+// The base tree from HEAD already contains all unchanged tracked files.
+//
+// Uses `git status --porcelain -z` for reliable parsing of filenames with special characters.
+func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFilesResult, error) {
+	// Get repo root directory for running git command
+	wt, err := repo.Worktree()
 	if err != nil {
-		repoRoot = "." // Fallback to current directory
+		return changedFilesResult{}, fmt.Errorf("failed to get worktree: %w", err)
+	}
+	repoRoot := wt.Filesystem.Root()
+
+	// Use -z for NUL-separated output (handles quoted filenames with spaces/special chars)
+	// Use -uall to list individual untracked files instead of collapsed directories.
+	// Note: CLAUDE.md warns against -uall for user-facing display, but we need the full list
+	// for checkpointing.
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "-z", "-uall")
+	cmd.Dir = repoRoot
+	output, err := cmd.Output()
+	if err != nil {
+		return changedFilesResult{}, fmt.Errorf("failed to get git status in %s: %w", repoRoot, err)
 	}
 
-	var files []string
-	err = filepath.Walk(repoRoot, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return nil //nolint:nilerr // Skip filesystem errors during walk
+	changedSeen := make(map[string]struct{})
+	deletedSeen := make(map[string]struct{})
+
+	// Parse NUL-separated output
+	// Format: XY filename\0 (for most entries)
+	// For renames/copies: XY newname\0oldname\0
+	entries := strings.Split(string(output), "\x00")
+
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i]
+		if len(entry) < 3 {
+			continue
 		}
 
-		// Get path relative to repo root
-		relPath, err := filepath.Rel(repoRoot, path)
-		if err != nil {
-			return nil //nolint:nilerr // Skip paths we can't make relative
-		}
+		// git status --porcelain format: XY filename
+		// X = staging status, Y = worktree status
+		staging := entry[0]
+		wtStatus := entry[1]
+		filename := entry[3:] // No TrimSpace needed with -z format
 
-		// Skip directories
-		if info.IsDir() {
-			// Skip .git and .entire directories
-			if relPath == gitDir || relPath == entireDir ||
-				strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
-				return filepath.SkipDir
+		// Handle R/C (rename/copy) first - they have a second entry we must skip
+		// even if the new filename is an infrastructure path
+		if staging == 'R' || staging == 'C' {
+			// Renamed or copied: current entry is new name, next entry is old name
+			if !paths.IsInfrastructurePath(filename) {
+				changedSeen[filename] = struct{}{}
 			}
-			return nil
+			// The old name follows as the next NUL-separated entry - must always skip it
+			if i+1 < len(entries) && entries[i+1] != "" {
+				oldName := entries[i+1]
+				if staging == 'R' && !paths.IsInfrastructurePath(oldName) {
+					// For renames, old file is effectively deleted
+					deletedSeen[oldName] = struct{}{}
+				}
+				i++ // Skip the old name entry
+			}
+			continue
 		}
 
-		// Skip files in special directories (shouldn't reach here due to SkipDir, but safety check)
-		if strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
-			return nil
+		// Skip .entire directory for non-R/C entries
+		if paths.IsInfrastructurePath(filename) {
+			continue
 		}
 
-		files = append(files, relPath)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to walk directory: %w", err)
+		// Handle different status codes
+		switch {
+		case staging == 'D' || wtStatus == 'D':
+			// Deleted file - track separately
+			deletedSeen[filename] = struct{}{}
+
+		case wtStatus == 'M' || wtStatus == 'A':
+			// Modified or added in worktree
+			changedSeen[filename] = struct{}{}
+
+		case staging == '?' && wtStatus == '?':
+			// Untracked file
+			changedSeen[filename] = struct{}{}
+
+		case staging == 'A' || staging == 'M':
+			// Staged add or modify
+			changedSeen[filename] = struct{}{}
+
+		case staging == 'T' || wtStatus == 'T':
+			// Type change (e.g., file to symlink)
+			changedSeen[filename] = struct{}{}
+
+		case staging == 'U' || wtStatus == 'U':
+			// Unmerged (conflict) - include current file state
+			changedSeen[filename] = struct{}{}
+		}
 	}
 
-	return files, nil
+	changed := make([]string, 0, len(changedSeen))
+	for file := range changedSeen {
+		changed = append(changed, file)
+	}
+
+	deleted := make([]string, 0, len(deletedSeen))
+	for file := range deletedSeen {
+		deleted = append(deleted, file)
+	}
+
+	return changedFilesResult{Changed: changed, Deleted: deleted}, nil
 }
