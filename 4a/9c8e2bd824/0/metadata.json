@@ -1,0 +1,35 @@
+{
+  "checkpoint_id": "4a9c8e2bd824",
+  "session_id": "7a3cf82d-9284-4b61-9e6b-d409226efa84",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-06T05:47:06.392497Z",
+  "branch": "alex/ent-232-track-last-interaction-for-sessions",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/status.go",
+    "cmd/entire/cli/status_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/session_state_test.go"
+  ],
+  "agent": "Agent",
+  "token_usage": {
+    "input_tokens": 57,
+    "cache_creation_tokens": 148293,
+    "cache_read_tokens": 2972291,
+    "output_tokens": 7370,
+    "api_call_count": 43
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-06T05:47:06.331622Z",
+    "agent_lines": 0,
+    "human_added": 2,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 2,
+    "agent_percentage": 0
+  }
+}
