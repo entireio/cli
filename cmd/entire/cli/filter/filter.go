@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/zricethezav/gitleaks/v8/detect"
 )
 
 // FilterTimeout is the maximum time allowed for filter command execution.
@@ -27,6 +29,9 @@ var ErrFilterFailed = errors.New("output filter failed")
 // ErrFilterTimeout is returned when the filter command exceeds the timeout.
 var ErrFilterTimeout = errors.New("output filter timed out")
 
+// Default secret replacement.
+var redactedMarker = []byte("***ENTIRELY-REDACTED***")
+
 // Content pipes content through the configured filter command.
 // Returns original content if no filter is configured.
 // Returns error if filter is configured but fails (command not found, non-zero exit, timeout).
@@ -35,21 +40,24 @@ var ErrFilterTimeout = errors.New("output filter timed out")
 // to the filter command. The filter receives content on stdin and writes to stdout.
 func Content(ctx context.Context, content []byte, filename string) ([]byte, error) {
 	filterCmd := settings.GetOutputFilter()
-	if len(filterCmd) == 0 {
-		logging.Debug(ctx, "output filter: no filter configured, passing through",
-			slog.String("filename", filename))
-		return content, nil
+
+	var filtered []byte
+	var err error
+	if len(filterCmd) > 0 {
+		logging.Debug(ctx, "output filter: using user's redaction",
+			slog.String("filename", filename),
+			slog.String("command", strings.Join(filterCmd, " ")),
+			slog.Int("content_size", len(content)))
+		filtered, err = runFilter(ctx, content, filterCmd)
+	} else {
+		logging.Debug(ctx, "output filter: using built-in entire redaction",
+			slog.String("filename", filename),
+			slog.Int("content_size", len(content)))
+		filtered, err = runDefaultFilter(content)
 	}
 
-	logging.Debug(ctx, "output filter: applying filter",
-		slog.String("command", filterCmd[0]),
-		slog.String("filename", filename),
-		slog.Int("content_size", len(content)))
-
-	filtered, err := runFilter(ctx, content, filterCmd)
 	if err != nil {
 		logging.Warn(ctx, "output filter: filter failed",
-			slog.String("command", filterCmd[0]),
 			slog.String("filename", filename),
 			slog.String("error", err.Error()))
 		return nil, err
@@ -107,6 +115,36 @@ func runFilter(ctx context.Context, content []byte, filterCmd []string) ([]byte,
 	}
 
 	return stdout.Bytes(), nil
+}
+
+// runDefaultFilter detects secrets using gitleaks default rules and replaces
+// them with ***ENTIRELY-REDACTED***. This is the built-in default filter used when no
+// external output_filter is configured.
+func runDefaultFilter(content []byte) ([]byte, error) {
+	if len(content) == 0 {
+		return content, nil
+	}
+
+	detector, err := detect.NewDetectorDefaultConfig()
+	if err != nil {
+		return nil, fmt.Errorf("creating default secrets detector: %w", err)
+	}
+
+	findings := detector.DetectBytes(content)
+
+	uniqueSecrets := make(map[string]struct{})
+	for _, f := range findings {
+		if f.Secret != "" {
+			uniqueSecrets[f.Secret] = struct{}{}
+		}
+	}
+
+	result := content
+	for secret := range uniqueSecrets {
+		result = bytes.ReplaceAll(result, []byte(secret), redactedMarker)
+	}
+
+	return result, nil
 }
 
 // Must is like Content but panics on error.

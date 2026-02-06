@@ -10,9 +10,10 @@ import (
 	"time"
 )
 
-func TestContent_NoFilter(t *testing.T) {
-	// When no filter is configured (settings return nil), content passes through unchanged
-	content := []byte("sensitive data: api_key=sk-12345")
+func TestContent_NoFilter_UsesBuiltInRedaction(t *testing.T) {
+	// When no external filter is configured, built-in gitleaks redaction is applied.
+	// Content without secrets passes through unchanged.
+	content := []byte("just some regular text with no secrets")
 
 	result, err := Content(context.Background(), content, "test.txt")
 	if err != nil {
@@ -20,7 +21,23 @@ func TestContent_NoFilter(t *testing.T) {
 	}
 
 	if !bytes.Equal(result, content) {
-		t.Errorf("expected content to pass through unchanged, got %q", result)
+		t.Errorf("expected content unchanged (no secrets), got %q", result)
+	}
+}
+
+func TestContent_NoFilter_RedactsSecrets(t *testing.T) {
+	// When no external filter is configured, built-in gitleaks redaction catches secrets.
+	// Secret is constructed at runtime to avoid triggering GitHub push protection.
+	secret := "ghp_" + "R7e2xKf9mNpLqWvBtYsAjDhGcUzXo3i4a5b6"
+	content := []byte("export GITHUB_TOKEN=" + secret)
+
+	result, err := Content(context.Background(), content, "test.txt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if bytes.Contains(result, []byte(secret)) {
+		t.Error("expected secret to be redacted, but it was still present")
 	}
 }
 
@@ -191,5 +208,65 @@ sed 's/api_key=[^[:space:]]*/api_key=REDACTED/g'
 	expected := []byte("config: api_key=REDACTED other=value")
 	if !bytes.Equal(result, expected) {
 		t.Errorf("expected %q, got %q", expected, result)
+	}
+}
+
+func TestDefaultRedact_JSONL(t *testing.T) {
+	// Secret is constructed at runtime to avoid triggering GitHub push protection.
+	secret := "sk_live_" + "1234567890abcdefghijklmn"
+	input := []byte(`{"role":"assistant","content":"Use this key: ` + secret + `"}`)
+
+	result, err := runDefaultFilter(input)
+	if err != nil {
+		t.Fatalf("defaultRedact failed: %v", err)
+	}
+
+	if bytes.Contains(result, []byte(secret)) {
+		t.Error("redacted output still contains the original secret")
+	}
+	if !bytes.Contains(result, redactedMarker) {
+		t.Error("redacted output missing ***REDACTED*** marker")
+	}
+}
+
+func TestDefaultRedact_PlainText(t *testing.T) {
+	// Secret is constructed at runtime to avoid triggering GitHub push protection.
+	secret := "ghp_" + "R7e2xKf9mNpLqWvBtYsAjDhGcUzXo3i4a5b6"
+	input := []byte("export GITHUB_TOKEN=" + secret)
+
+	result, err := runDefaultFilter(input)
+	if err != nil {
+		t.Fatalf("defaultRedact failed: %v", err)
+	}
+
+	if bytes.Contains(result, []byte(secret)) {
+		t.Error("redacted output still contains the original secret")
+	}
+	if !bytes.Contains(result, redactedMarker) {
+		t.Error("redacted output missing ***REDACTED*** marker")
+	}
+}
+
+func TestDefaultRedact_NoSecrets(t *testing.T) {
+	input := []byte("This is just regular text with no secrets at all.")
+
+	result, err := runDefaultFilter(input)
+	if err != nil {
+		t.Fatalf("defaultRedact failed: %v", err)
+	}
+
+	if !bytes.Equal(result, input) {
+		t.Errorf("expected content unchanged, got %q", result)
+	}
+}
+
+func TestDefaultRedact_EmptyContent(t *testing.T) {
+	result, err := runDefaultFilter([]byte{})
+	if err != nil {
+		t.Fatalf("defaultRedact failed: %v", err)
+	}
+
+	if len(result) != 0 {
+		t.Errorf("expected empty result, got %q", result)
 	}
 }
