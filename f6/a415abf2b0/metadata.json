@@ -1,13 +1,14 @@
 {
   "checkpoint_id": "f6a415abf2b0",
   "strategy": "manual-commit",
-  "branch": "alex/ent-232-track-last-interaction-for-sessions",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
+    "cmd/entire/cli/integration_test/last_interaction_test.go",
     "cmd/entire/cli/session/state.go",
     "cmd/entire/cli/status.go",
     "cmd/entire/cli/status_test.go",
     "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
     "cmd/entire/cli/strategy/manual_commit_hooks.go",
     "cmd/entire/cli/strategy/manual_commit_session.go",
     "cmd/entire/cli/strategy/manual_commit_types.go",
@@ -20,13 +21,20 @@
       "context": "/f6/a415abf2b0/0/context.md",
       "content_hash": "/f6/a415abf2b0/0/content_hash.txt",
       "prompt": "/f6/a415abf2b0/0/prompt.txt"
+    },
+    {
+      "metadata": "/f6/a415abf2b0/1/metadata.json",
+      "transcript": "/f6/a415abf2b0/1/full.jsonl",
+      "context": "/f6/a415abf2b0/1/context.md",
+      "content_hash": "/f6/a415abf2b0/1/content_hash.txt",
+      "prompt": "/f6/a415abf2b0/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 35,
-    "cache_creation_tokens": 78471,
-    "cache_read_tokens": 2192735,
-    "output_tokens": 5782,
-    "api_call_count": 33
+    "input_tokens": 124,
+    "cache_creation_tokens": 267290,
+    "cache_read_tokens": 8737582,
+    "output_tokens": 16857,
+    "api_call_count": 108
   }
 }
