@@ -1,0 +1,13 @@
+Please fix my unit test issue
+
+---
+
+run the tests
+
+---
+
+Alright, for every test in redact/redact_test.go i'd like to see literal expectations (either byte slices or strings) instead of strings.Contains checks.  That'll make the tests easier to understand.
+
+---
+
+Almost there.  In func [REDACTED], i'd like us to make a literal structure that we directly compare to repls and repls2.  That'll make the test easier to grok.
