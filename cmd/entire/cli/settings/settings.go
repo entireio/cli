@@ -239,18 +239,6 @@ func (s *EntireSettings) IsSummarizeEnabled() bool {
 	return enabled
 }
 
-// IsMultiSessionWarningDisabled checks if multi-session warnings are disabled.
-// Returns false (show warnings) by default if the key is missing.
-func (s *EntireSettings) IsMultiSessionWarningDisabled() bool {
-	if s.StrategyOptions == nil {
-		return false
-	}
-	if disabled, ok := s.StrategyOptions["disable_multisession_warning"].(bool); ok {
-		return disabled
-	}
-	return false
-}
-
 // IsPushSessionsDisabled checks if push_sessions is disabled in settings.
 // Returns true if push_sessions is explicitly set to false.
 func (s *EntireSettings) IsPushSessionsDisabled() bool {
