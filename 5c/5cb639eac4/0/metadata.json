@@ -1,0 +1,39 @@
+{
+  "checkpoint_id": "5c5cb639eac4",
+  "session_id": "1e0816ef-6f89-4f05-b331-dab09bb14485",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-03T05:08:27.538287Z",
+  "branch": "alex/ent-96-auto-summaries",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "README.md",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/config.go",
+    "cmd/entire/cli/config_test.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/summarise/summarise.go",
+    "cmd/entire/cli/summarise/summarise_test.go",
+    "cmd/entire/cli/transcript/types.go",
+    "docs/plans/2026-02-01-auto-summarise-design.md",
+    "docs/plans/2026-02-01-auto-summarise-impl.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "9f74da7e-9a04-446e-bbe6-2316865c3ef3",
+  "transcript_lines_at_start": 1181,
+  "token_usage": {
+    "input_tokens": 1154,
+    "cache_creation_tokens": 1438771,
+    "cache_read_tokens": 19035389,
+    "output_tokens": 1035,
+    "api_call_count": 205
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-03T05:08:27.403466Z",
+    "agent_lines": 13,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 806,
+    "total_committed": 13,
+    "agent_percentage": 100
+  }
+}

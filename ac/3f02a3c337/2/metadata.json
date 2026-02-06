@@ -1,0 +1,19 @@
+{
+  "checkpoint_id": "ac3f02a3c337",
+  "session_id": "2026-01-22-1ed1f046-f456-4f14-9c74-bb83179cf809",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-22T20:44:04.904145+01:00",
+  "branch": "soph/chunking",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/geminicli/gemini.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 130,
+    "cache_creation_tokens": 31020,
+    "cache_read_tokens": 737366,
+    "output_tokens": 1190,
+    "api_call_count": 16
+  }
+}

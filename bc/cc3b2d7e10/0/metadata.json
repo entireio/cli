@@ -1,0 +1,21 @@
+{
+  "checkpoint_id": "bccc3b2d7e10",
+  "session_id": "2026-01-07-198393f2-22db-477b-ac77-1825bea883ae",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-07T14:26:09.983712+01:00",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".claude/skills/test-repo/test-harness.sh",
+    "CLAUDE.md",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/errors.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/main.go"
+  ]
+}

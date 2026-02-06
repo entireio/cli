@@ -1,0 +1,5 @@
+Ensure that JSON parsing of .entire/settings.json is strict - fail if any unrecognised keys are present.
+
+---
+
+address the issues in `mise lint`

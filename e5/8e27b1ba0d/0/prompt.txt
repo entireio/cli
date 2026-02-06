@@ -1,0 +1,282 @@
+Can you look again, the CLAUDE.md updated and in an checkpoint commit in entire/sessions can now be multiple sessions, can you add support for that?
+
+---
+
+when is the session shown as green / active? what's the condition for that?
+
+---
+
+can you go to /Users/soph/Work/entire/test/test1234 and try to figure out why both sessions here are shown green: 
+
+Entire Checkpoints
+
+
+  v main *  [1 checkpoints]
+>   v - 05fdd18 should include two sessions (2 steps) <active>
+        * Session: 2026-01-13-7bf322a0 - can you make the output green
+        * Session: 2026-01-13-d488d465 - Archived session
+
+---
+
+yeah please check, I have one of the claude sessions still open but didn't run a prompt, so I think when doing the `git commit` with the trailer it should have still cleaned both, right?
+
+---
+
+let's go with option 1
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The conversation is summarized below:
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. **Initial Context**: This is a continuation from a previous conversation about refactoring `entire list` command to change the hierarchy from Branch → Session → Checkpoint to Branch → Checkpoint → Session.
+
+2. **Hierarchy Refactor Completion**: The conversation starts with me continuing the refactor work:
+   - Updated `list/model.go` - Changed `BranchInfo` to contain `Checkpoints` instead of `Sessions`
+   - Updated `list/data.go` - Rewrote `FetchTreeData()` to fetch checkpoints first, group by branch
+   - Updated `list/tree.go` - Updated `BuildTree()` for new hierarchy
+   - Updated `list/view.go` - Updated display labels
+   - Updated `list/actions.go` - Updated action handlers for new hierarchy
+   - Updated `cli/list.go` - Updated JSON output structure
+   - Exported `GetDescriptionForCheckpoint` in `strategy/session.go`
+
+3. **Lint Errors Fixed**:
+   - Fixed undefined `getDescriptionForCheckpoint` error by updating internal call to use exported name
+   - Fixed `branch.Sessions undefined` error by updating JSON output in `cli/list.go`
+
+4. **Multi-Session Support Request**: User asked to add support for multiple sessions per checkpoint (as per updated CLAUDE.md). Key changes:
+   - `strategy/manual_commit_types.go` - Added `SessionIDs []string`, `SessionCount int` fields and helper methods
+   - `list/model.go` - Changed `CheckpointInfo` to have `Sessions []SessionInfo` instead of single session fields
+   - `list/data.go` - Added `buildSessionsForCheckpoint()` helper
+   - `list/tree.go` - Updated to create child nodes for ALL sessions, added `formatSessionInfoLabel()`
+   - `cli/list.go` - Updated JSON to include sessions array
+
+5. **Active Session Investigation**: User asked why both sessions show as green/active. I investigated the test repo at `/Users/soph/Work/entire/test/test1234`:
+   - Both sessions have state files
+   - Both have same `base_commit: 05fdd185` (HEAD)
+   - Both have `checkpoint_count: 0` and `condensed_transcript_lines > 0`
+   - The issue: after condensation, state files are kept for resumability, but we couldn't distinguish "actively running" from "just resumable"
+
+6. **Fix for Active Session Logic**: User chose option 1 - condensed sessions without new checkpoints should only show as active if they're the current session. I updated `isSessionActive()` in `data.go`.
+
+Key files modified:
+- `strategy/manual_commit_types.go`
+- `strategy/session.go`
+- `list/model.go`
+- `list/data.go`
+- `list/tree.go`
+- `list/view.go`
+- `list/actions.go`
+- `cli/list.go`
+
+Summary:
+1. Primary Request and Intent:
+   - Refactor `entire list` command hierarchy from Branch → Session → Checkpoint to Branch → Checkpoint → Session(s)
+   - Add support for multiple sessions per checkpoint (from concurrent sessions being condensed together)
+   - Fix the active session indicator so condensed sessions without new work don't show as active
+
+2. Key Technical Concepts:
+   - **Checkpoints**: Commit-level snapshots linked via `Entire-Checkpoint` trailer - the rewindable save points
+   - **Sessions**: Agent conversations that span multiple steps/checkpoints; same session can appear in multiple checkpoints
+   - **Steps**: Small units (prompt→response cycles) tracked in `steps_count` metadata
+   - **Multi-session checkpoints**: When concurrent sessions are condensed together, they share a checkpoint with archived sessions in numbered subdirs
+   - **Session state files**: Stored in `.git/entire-sessions/<session-id>.json`, kept after condensation for resumability
+   - **Active session logic**: Session is active if it's the current session OR (has state file AND base commit in recent history AND has new work since condensation)
+
+3. Files and Code Sections:
+
+   - **`strategy/manual_commit_types.go`** - Added multi-session support to CheckpointInfo
+     ```go
+     type CheckpointInfo struct {
+         CheckpointID string    `json:"checkpoint_id"`
+         SessionID    string    `json:"session_id"`    // Current/latest session ID
+         SessionIDs   []string  `json:"session_ids"`   // All session IDs (when multiple sessions were condensed together)
+         SessionCount int       `json:"session_count"` // Number of sessions in this checkpoint
+         // ... other fields
+     }
+     
+     func (c *CheckpointInfo) GetSessionIDs() []string {
+         if len(c.SessionIDs) > 0 {
+             return c.SessionIDs
+         }
+         if c.SessionID != "" {
+             return []string{c.SessionID}
+         }
+         return nil
+     }
+     
+     func (c *CheckpointInfo) GetSessionCount() int {
+         if c.SessionCount > 0 {
+             return c.SessionCount
+         }
+         if c.SessionID != "" {
+             return 1
+         }
+         return 0
+     }
+     ```
+
+   - **`strategy/session.go`** - Exported `GetDescriptionForCheckpoint`
+     ```go
+     // GetDescriptionForCheckpoint reads the description for a checkpoint from the entire/sessions branch.
+     func GetDescriptionForCheckpoint(repo *git.Repository, checkpointID string) string {
+     ```
+
+   - **`list/model.go`** - Updated CheckpointInfo to have Sessions slice
+     ```go
+     type CheckpointInfo struct {
+         CheckpointID string
+         CommitHash   string    // Commit with Entire-Checkpoint trailer
+         CommitMsg    string    // Commit message (for display)
+         CreatedAt    time.Time
+         StepsCount   int       // Steps that led to this checkpoint
+         IsTask       bool
+         ToolUseID    string
+         // Sessions associated with this checkpoint (can be multiple from concurrent sessions)
+         Sessions []SessionInfo
+     }
+     
+     type SessionInfo struct {
+         SessionID   string
+         Description string
+         IsActive    bool
+     }
+     ```
+
+   - **`list/data.go`** - Added helper and updated active session logic
+     ```go
+     // buildSessionsForCheckpoint creates SessionInfo entries for all sessions in a checkpoint.
+     func buildSessionsForCheckpoint(repo *git.Repository, cpInfo strategy.CheckpointInfo, checkpointID string, isSessionActive func(string) bool) []SessionInfo {
+         sessionIDs := cpInfo.GetSessionIDs()
+         sessions := make([]SessionInfo, 0, len(sessionIDs))
+         for i, sessionID := range sessionIDs {
+             var description string
+             if i == 0 {
+                 description = getDescriptionForCheckpoint(repo, checkpointID)
+             } else {
+                 description = "Archived session"
+             }
+             sessions = append(sessions, SessionInfo{
+                 SessionID:   sessionID,
+                 Description: description,
+                 IsActive:    isSessionActive(sessionID),
+             })
+         }
+         return sessions
+     }
+     
+     // Updated isSessionActive logic
+     isSessionActive := func(sessionID string) bool {
+         if sessionID == currentSessionID {
+             return true
+         }
+         state, hasState := activeSessionStates[sessionID]
+         if !hasState {
+             return false
+         }
+         // If session was condensed but has no new checkpoints, it's not actively running
+         // (just resumable). Only show as active if it's the current session.
+         if state.CondensedTranscriptLines > 0 && state.CheckpointCount == 0 {
+             return false
+         }
+         // Only consider active if base commit is in recent history
+         return isCommitInRecentHistory(repo, state.BaseCommit, currentBranch, maxRecentCommits)
+     }
+     ```
+
+   - **`list/tree.go`** - Updated to handle multiple sessions per checkpoint
+     ```go
+     // formatCheckpointLabel - now shows session count if multiple
+     if len(cp.Sessions) > 1 {
+         parts = append(parts, fmt.Sprintf("[%d sessions]", len(cp.Sessions)))
+     }
+     
+     // formatSessionInfoLabel - new function for session nodes
+     func formatSessionInfoLabel(sess SessionInfo) string {
+         displayID := sess.SessionID
+         if len(displayID) > 19 {
+             displayID = displayID[:19]
+         }
+         parts := []string{"Session: " + displayID}
+         if sess.Description != "" && sess.Description != "No description" {
+             desc := sess.Description
+             if len(desc) > 40 {
+                 desc = desc[:37] + "..."
+             }
+             parts = append(parts, "- "+desc)
+         }
+         if sess.IsActive {
+             parts = append(parts, "(active)")
+         }
+         return strings.Join(parts, " ")
+     }
+     ```
+
+   - **`cli/list.go`** - Updated JSON output structure
+     ```go
+     type sessionJSON struct {
+         SessionID   string `json:"session_id"`
+         Description string `json:"description,omitempty"`
+         IsActive    bool   `json:"is_active,omitempty"`
+     }
+     
+     type checkpointJSON struct {
+         ID         string        `json:"id"`
+         CommitHash string        `json:"commit_hash,omitempty"`
+         CommitMsg  string        `json:"commit_msg,omitempty"`
+         Timestamp  string        `json:"timestamp,omitempty"`
+         StepsCount int           `json:"steps_count,omitempty"`
+         IsTask     bool          `json:"is_task,omitempty"`
+         Sessions   []sessionJSON `json:"sessions"`
+     }
+     ```
+
+4. Errors and fixes:
+   - **`undefined: getDescriptionForCheckpoint` typecheck error**: After renaming to exported `GetDescriptionForCheckpoint`, an internal call in `session.go:110` still used the old name. Fixed by updating to `GetDescriptionForCheckpoint`.
+   - **`branch.Sessions undefined` typecheck error**: After changing `BranchInfo` to have `Checkpoints` instead of `Sessions`, the JSON output in `cli/list.go` still referenced `branch.Sessions`. Fixed by rewriting the JSON output structure.
+
+5. Problem Solving:
+   - Investigated why both sessions showed as active in test repo - found both had state files with base commit in recent history
+   - Determined the issue: after condensation, state files are kept for resumability but we couldn't distinguish "actively running" from "just resumable"
+   - Solution: Check if `CondensedTranscriptLines > 0 && CheckpointCount == 0` - if so, only show as active if it's the current session
+
+6. All user messages:
+   - "Can you look again, the CLAUDE.md updated and in an checkpoint commit in entire/sessions can now be multiple sessions, can you add support for that?"
+   - "when is the session shown as green / active? what's the condition for that?"
+   - "can you go to /Users/soph/Work/entire/test/test1234 and try to figure out why both sessions here are shown green: [output showing both sessions active]"
+   - "yeah please check, I have one of the claude sessions still open but didn't run a prompt, so I think when doing the `git commit` with the trailer it should have still cleaned both, right?"
+   - "let's go with option 1"
+
+7. Pending Tasks:
+   - Run lint and tests to verify the active session fix works correctly
+
+8. Current Work:
+   Just implemented the fix for the active session logic. The user reported that both sessions in `/Users/soph/Work/entire/test/test1234` were showing as green/active. After investigation, found that:
+   - Both sessions have state files with `condensed_transcript_lines > 0` and `checkpoint_count == 0`
+   - Both have `base_commit` in recent history
+   
+   User chose "option 1" to fix this: condensed sessions without new checkpoints should only show as active if they're the current session. I updated `isSessionActive()` in `data.go`:
+   ```go
+   if state.CondensedTranscriptLines > 0 && state.CheckpointCount == 0 {
+       return false
+   }
+   ```
+
+9. Optional Next Step:
+   Run lint and tests to verify the fix compiles correctly:
+   ```bash
+   mise run lint && mise run test
+   ```
+   Then the user could test in `/Users/soph/Work/entire/test/test1234` to confirm neither session shows as active now (since neither is the current session)..
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/21a2e002-8b63-45db-8e0d-1978fe0600aa.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+which one of the two is the newer session?
+
+---
+
+Can we sort the session that the newest is on top

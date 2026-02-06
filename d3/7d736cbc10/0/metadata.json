@@ -1,0 +1,23 @@
+{
+  "checkpoint_id": "d37d736cbc10",
+  "session_id": "2026-01-13-9ff9c26d-319d-4a47-843a-3d60f73295c9",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-13T15:50:05.743191+11:00",
+  "checkpoints_count": 5,
+  "files_touched": [
+    ".claude/settings.json",
+    "README_TELEMETRY_RESEARCH.md",
+    "TELEMETRY_API_REFERENCE.md",
+    "TELEMETRY_IMPLEMENTATION_GUIDE.md",
+    "TELEMETRY_INDEX.md",
+    "TELEMETRY_QUICK_START.md",
+    "TELEMETRY_RESEARCH.md",
+    "TELEMETRY_RESEARCH_SUMMARY.md",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/telemetry.go",
+    "cmd/entire/cli/telemetry_test.go",
+    "cmd/entire/main.go",
+    "plans/posthog-telemetry-integration.md",
+    "posthog-cli-telemetry-implementation.md"
+  ]
+}

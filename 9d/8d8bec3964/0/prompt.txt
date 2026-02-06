@@ -1,0 +1,37 @@
+I got this feedback on this branch, can you check and give me your thoughts: 
+
+I will throw here my thoughts:
+We could store in the entire/<commit-sha> shadow branch all the sessions captured by our hooks.
+That is, within that branch we could see multiple:
+.entire/metadata/<date>-<session_id1>
+.entire/metadata/<date>-<session_id2>
+When the checkpoint is created, we'd save a directory structure in entire/sessions like:
+/checkpoint_id/session_id/[our current session files]
+This way, we allow multiple sessions per commit and consequently multiple sessions per checkpoint.
+Potential problem: ending up with infinite sessions on a long-lived commit.
+Short-term alternative:
+Could we check for session conflicts only in the hook responsible for creating the commit on the shadow branch? I might be wrong, but we only create commits on the shadow branch if the agent has modified files, so if the agent is read-only and doesn't modify anything, that session doesn't end up creating a commit. For the first release, we could say we don't support concurrent sessions that make changes to the repo per commit. (e
+
+---
+
+can you check the changes in the local branch again? since they should handle multi session storage already
+
+---
+
+Isn't it only giving you the message? But then the second session is fully functioning?
+
+---
+
+can you show me the code where the hard error is raised?
+
+---
+
+if we don't have a session state, but a branch then I guess we should reset that branch? without the session there is no way to recover it right? But also now wondering: If I do a branch off main and run a claude session, then don't commit but stash. Then run another branch from main, same commit, then both sessions try to write into the same shadow branch, right?
+
+---
+
+let's address 1 first, and let it reset the shadow branch
+
+---
+
+can you add an explicit test for this?

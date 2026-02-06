@@ -1,0 +1,37 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+I did use the test-repo skill yesterday and I had this before, but I now get this error when starting claude. I know it's one of the test repo sessions that did this, can you help  me figure out how to prevent this? The error: RangeError: Invalid Date
+    at toISOString (unknown)
+
+### Prompt 2
+
+Operation stopped by hook: You have another active session with uncommitted changes. Please commit them first and then start a new Claude session. If you continue here, your prompt and resulting changes will not be captured.
+
+To resume the active session, close Claude Code and run: claude -r c93f3533-0f6b-4a61-99bd-7b788208ad61
+
+### Prompt 3
+
+we setup a hook to tell the user of other active claude session, that hook now gave me the following output, but I'm pretty sure there isn't any other session active anymore, can you help me understand why this is still considered active right now:  Operation stopped by hook: You have another active session with uncommitted changes. Please commit them first and then start a new Claude session. If you continue here, your prompt and resulting changes will not be captured.
+
+To resume the active ses...
+
+### Prompt 4
+
+Yeah the test-repo skill should use it's own path then.
+
+### Prompt 5
+
+Hmm, maybe I still don't understand: How is running the test-repo skill different from any other prompt I run?
+
+### Prompt 6
+
+different question first, right now the stop hook throws this error: Error: failed to save changes: failed to write temporary checkpoint: failed to update branch reference: open /Users/soph/Work/entire/devenv/cli/.git/refs/heads/entire: is a directory
+
+### Prompt 7
+
+Option A
+

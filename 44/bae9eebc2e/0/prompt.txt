@@ -1,0 +1,5 @@
+when running mise run test:ci I get failures, can you check?
+
+---
+
+can we double check we are not having test duplication now?

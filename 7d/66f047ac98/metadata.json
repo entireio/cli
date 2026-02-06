@@ -1,0 +1,35 @@
+{
+  "checkpoint_id": "7d66f047ac98",
+  "strategy": "manual-commit",
+  "branch": "soph/improve-session-list",
+  "migration_source_commit": "bce16f8a8bb88b26d9666ac7a8fb193305cebe40",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/session.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/session.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7d/66f047ac98/0/metadata.json",
+      "transcript": "/7d/66f047ac98/0/full.jsonl",
+      "context": "/7d/66f047ac98/0/context.md",
+      "content_hash": "/7d/66f047ac98/0/content_hash.txt",
+      "prompt": "/7d/66f047ac98/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "44bae9eebc2e",
+  "strategy": "manual-commit",
+  "branch": "soph/do-not-truncate",
+  "migration_source_commit": "a527243d959325e6c48a13c512036871ead3f346",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/44/bae9eebc2e/0/metadata.json",
+      "transcript": "/44/bae9eebc2e/0/full.jsonl",
+      "context": "/44/bae9eebc2e/0/context.md",
+      "content_hash": "/44/bae9eebc2e/0/content_hash.txt",
+      "prompt": "/44/bae9eebc2e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 156,
+    "cache_creation_tokens": 37215,
+    "cache_read_tokens": 1039506,
+    "output_tokens": 6085,
+    "api_call_count": 19
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "checkpoint_id": "2a075ef186b4",
+  "session_id": "2026-01-22-375d5d79-9c13-419d-a5fd-72421f2af713",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-22T20:37:20.035573+01:00",
+  "branch": "soph/refactor-trailer-checkpoint-id",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/checkpoint/id/id.go",
+    "cmd/entire/cli/checkpoint/id/id_test.go",
+    "cmd/entire/cli/paths/paths.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/resume_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/cleanup.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_logs.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/session.go",
+    "cmd/entire/cli/strategy/session_test.go",
+    "docs/requirements/soph-chunking/review-01.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "59b28c6d-f562-46fe-8586-1f667b25087a",
+  "transcript_lines_at_start": 68,
+  "token_usage": {
+    "input_tokens": 2464,
+    "cache_creation_tokens": 176072,
+    "cache_read_tokens": 24512498,
+    "output_tokens": 41917,
+    "api_call_count": 253
+  }
+}

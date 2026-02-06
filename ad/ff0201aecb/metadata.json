@@ -1,0 +1,42 @@
+{
+  "checkpoint_id": "adff0201aecb",
+  "strategy": "manual-commit",
+  "branch": "soph/improved-shadow",
+  "migration_source_commit": "47b82d41a9fe561f6c4ce0ca2f2499f8e7871495",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/integration_test/last_checkpoint_id_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_untracked_files_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
+    "cmd/entire/cli/integration_test/rewind_test.go",
+    "cmd/entire/cli/integration_test/session_conflict_test.go",
+    "cmd/entire/cli/integration_test/subagent_checkpoints_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_logs.go",
+    "cmd/entire/cli/strategy/manual_commit_reset.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_suffix.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "scripts/test-attribution-e2e-rewind-new-prompt.sh",
+    "scripts/test-attribution-e2e-second-session.sh"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ad/ff0201aecb/0/metadata.json",
+      "transcript": "/ad/ff0201aecb/0/full.jsonl",
+      "context": "/ad/ff0201aecb/0/context.md",
+      "content_hash": "/ad/ff0201aecb/0/content_hash.txt",
+      "prompt": "/ad/ff0201aecb/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1412,
+    "cache_creation_tokens": 397538,
+    "cache_read_tokens": 19104768,
+    "output_tokens": 370,
+    "api_call_count": 175
+  }
+}

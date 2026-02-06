@@ -1,0 +1,20 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+why this method does only work on unix and not windows?
+
+### Prompt 2
+
+TestTrackCommandDetachedDefaultsAgentToAuto is intended to verify the defaulting of the agent to "auto" when an empty agent is passed, but because the test command is marked Hidden: true, TrackCommandDetached returns early and never executes the defaulting logic. This means the behavior around selectedAgent == "" is effectively untested; consider either stubbing spawnDetachedAnalytics or restructuring the test so it can assert on the constructed payload without relying on a hidden command short-...
+
+### Prompt 3
+
+TrackCommandDetached unconditionally calls spawnDetachedAnalytics, but spawnDetachedAnalytics is only implemented in detached_unix.go behind a //go:build unix tag. This will cause build failures for non-Unix targets (e.g., Windows) because spawnDetachedAnalytics is undefined there; consider adding a non-Unix implementation (even a no-op or synchronous fallback) in a separate file with the appropriate build tags so the package remains buildable across supported platforms.
+
+### Prompt 4
+
+fix lint
+

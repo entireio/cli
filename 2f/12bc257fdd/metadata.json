@@ -1,0 +1,38 @@
+{
+  "checkpoint_id": "2f12bc257fdd",
+  "strategy": "manual-commit",
+  "branch": "soph/refactor-trailer-checkpoint-id",
+  "migration_source_commit": "3ae4339c0119e078d44280a1b2eaa380ca193dd7",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/rewind.go",
+    "cmd/entire/cli/session.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_logs.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/session.go",
+    "cmd/entire/cli/strategy/session_test.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2f/12bc257fdd/0/metadata.json",
+      "transcript": "/2f/12bc257fdd/0/full.jsonl",
+      "context": "/2f/12bc257fdd/0/context.md",
+      "content_hash": "/2f/12bc257fdd/0/content_hash.txt",
+      "prompt": "/2f/12bc257fdd/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1714,
+    "cache_creation_tokens": 428801,
+    "cache_read_tokens": 21464462,
+    "output_tokens": 43894,
+    "api_call_count": 211
+  }
+}

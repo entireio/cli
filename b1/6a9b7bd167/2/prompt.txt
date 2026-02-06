@@ -1,0 +1,459 @@
+I do want want to get notify If I run any entire command to see if current version is not the latest one, and print suggestion to user to brew update entire
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# Version Check Notification Implementation Plan
+
+## Overview
+Add automatic version checking to the Entire CLI that notifies users when a new version is available and suggests running `brew upgrade entire`.
+
+## Goals
+- Check for updates once per day (cached, fast timeout)
+- Notify users after command execution if outdated
+- Simple synchronous implementation (no subprocesses)
+- Enabled by default with opt-out capability
+- Silent failures (never interrupt CLI operations)
+
+## User Experience
+
+When running any command with an outdated CLI:
+```
+$ entire status
+[normal command output]
+
+A newer version of Entire CLI is available: v1.2.3 (current: v1.1.0)
+Run 'brew upgrade entire' to update.
+```
+
+## Implementation Approach
+
+### Architecture
+Simple synchronous check with caching (no subprocesses):
+1. **Trigger**: `PersistentPostRun` in `root.go` (runs after every command)
+2. **Check decision**: Load cache from `~/.entire/`, check if >24 hours old
+3. **Synchronous fetch**: If cache stale, fetch GitHub API with fast timeout (1s)
+4. **Cache update**: Update cache with latest version in `~/.entire/version_check.json`
+5. **User notification**: Display message immediately if outdated
+
+### Version Check Flow
+```
+Command runs → Command completes → PersistentPostRun
+                                         ↓
+                            Ensure ~/.entire/ exists
+                                         ↓
+                      Load cache from ~/.entire/version_check.json
+                                         ↓
+                              Is cache > 24h old?
+                                 ↙              ↘
+                              Yes                No
+                               ↓                  ↓
+                    Fetch GitHub API        Skip fetch
+                    (1s timeout)                 ↓
+                               ↓                  ↓
+                    Update cache ←──────────────┘
+                               ↓
+                    Is current < latest?
+                               ↓ Yes
+                    Display notification
+```
+
+**Key Simplification**: No detached subprocess, no hidden command. Just a simple HTTP GET with timeout in the post-run hook.
+
+**Why Post-Run, Not Pre-Run**:
+- Doesn't interfere with interactive TUI modes (like `huh` forms)
+- Command output appears first, then notification
+- User sees their results immediately without delay
+- 1s timeout happens after command completes (non-blocking from user perspective)
+
+**Performance Note**: Since the check is synchronous, it adds up to 1 second max after command execution (only when cache is stale). This is acceptable because:
+- Only happens once per 24 hours
+- Fast timeout (1s) prevents long delays
+- Cache prevents repeated checks
+- Runs AFTER command completes, so doesn't slow down the actual command
+
+**Cache Location**: Store in `~/.entire/` (user's home directory) instead of repo-local `.entire/`. This is the first global config for the CLI. Benefits:
+- Version check works even outside git repos
+- Cache shared across all repos (check once per 24h globally, not per repo)
+- Follows standard CLI patterns (e.g., `~/.aws/`, `~/.docker/`)
+
+## Files to Create
+
+### `cmd/entire/cli/versioncheck/types.go`
+Data structures for cache and API responses:
+```go
+type VersionCache struct {
+    LastCheckTime      time.Time `json:"last_check_time"`
+    LatestVersion      string    `json:"latest_version"`
+    CurrentVersion     string    `json:"current_version"`
+}
+
+type GitHubRelease struct {
+    TagName    string `json:"tag_name"`
+    Prerelease bool   `json:"prerelease"`
+}
+```
+
+Constants:
+- `githubAPIURL = "https://api.github.com/repos/entireio/cli/releases/latest"`
+- `checkInterval = 24 * time.Hour`
+- `httpTimeout = 1 * time.Second` - Fast timeout to keep CLI responsive
+- `globalConfigDir = "~/.entire"` - Global config directory (expands to home dir)
+- `cacheFileName = "version_check.json"` - Stored in `~/.entire/version_check.json`
+
+### `cmd/entire/cli/versioncheck/versioncheck.go`
+Core version checking logic (single file, ~300 lines):
+
+**Public API**:
+- `CheckAndNotify(cmd *cobra.Command, currentVersion string)` - Main entry point, checks and notifies if outdated
+
+**Internal functions**:
+- `ensureGlobalConfigDir() error` - Creates `~/.entire/` if it doesn't exist (0755 permissions)
+- `globalConfigDirPath() (string, error)` - Returns expanded `~/.entire` path (uses `os.UserHomeDir()`)
+- `cacheFilePath() (string, error)` - Returns `~/.entire/version_check.json` path
+- `loadCache() (*VersionCache, error)` - Reads `~/.entire/version_check.json`
+- `saveCache(cache *VersionCache) error` - Writes cache atomically to `~/.entire/version_check.json`
+- `shouldFetchLatest(cache *VersionCache, currentVersion string) bool` - Decides if we need to fetch
+- `fetchLatestVersion() (string, error)` - HTTP GET to GitHub API with 2s timeout
+- `parseGitHubRelease(body []byte) (string, error)` - Parses JSON response, filters prereleases
+- `compareVersions(current, latest string) (bool, error)` - Semantic version comparison
+- `isVersionCheckDisabled() bool` - Checks env var and settings
+- `printNotification(cmd *cobra.Command, current, latest string)` - Prints upgrade message
+
+### `cmd/entire/cli/versioncheck/versioncheck_test.go`
+Unit tests:
+- `TestCompareVersions` - Version comparison logic (v1.2.3 < v1.2.4, etc.)
+- `TestShouldFetchLatest` - Cache validation (age, corruption, version mismatch)
+- `TestParseGitHubRelease` - JSON parsing, prerelease filtering
+- `TestCacheReadWrite` - File I/O with temp directories
+- `TestEnsureGlobalConfigDir` - Directory creation with proper permissions
+- `TestCheckAndNotify` - End-to-end with mock HTTP server
+
+## Files to Modify
+
+### `cmd/entire/cli/root.go`
+
+**Update existing PersistentPostRun** (after telemetry tracking, around line 65):
+```go
+PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+    // Skip for hidden commands
+    if cmd.Name() == "__send_analytics" {
+        return
+    }
+
+    // Existing telemetry code...
+    telemetry.TrackCommandDetached(...)
+
+    // Version check and notification (synchronous with 1s timeout)
+    // Runs AFTER command completes to avoid interfering with interactive modes
+    versioncheck.CheckAndNotify(cmd, Version)
+}
+```
+
+That's it! No hidden command needed, no subprocess spawning. Just one simple function call added to the existing post-run hook.
+
+### `cmd/entire/cli/config.go`
+
+**Add field to EntireSettings** (around line 25):
+```go
+type EntireSettings struct {
+    Strategy             string                 `json:"strategy,omitempty"`
+    Enabled              bool                   `json:"enabled"`
+    LocalDev             bool                   `json:"local_dev,omitempty"`
+    LogLevel             string                 `json:"log_level,omitempty"`
+    StrategyOptions      map[string]interface{} `json:"strategy_options,omitempty"`
+    Telemetry            *bool                  `json:"telemetry,omitempty"`
+    DisableVersionCheck  *bool                  `json:"disable_version_check,omitempty"`  // NEW
+}
+```
+
+No changes needed to `mergeSettingsJSON()` - it already handles all fields generically.
+
+## Key Implementation Details
+
+### Version Comparison
+Parse semantic versions (strip "v" prefix, split by ".", compare major.minor.patch as integers):
+```go
+func compareVersions(current, latest string) (bool, error) {
+    // Skip dev builds
+    if current == "dev" || current == "" {
+        return false, nil
+    }
+
+    // Strip "v" prefix
+    current = strings.TrimPrefix(current, "v")
+    latest = strings.TrimPrefix(latest, "v")
+
+    // Parse and compare
+    // Return true if current < latest
+}
+```
+
+### Cache Strategy
+**Location**: `~/.entire/version_check.json` (user's home directory - first global config!)
+
+**Directory Initialization**:
+- Create `~/.entire/` on first run if it doesn't exist
+- Use `os.MkdirAll()` with permissions `0755` (rwxr-xr-x)
+- Silently skip if directory creation fails (don't block CLI)
+- Use `os.UserHomeDir()` to get home directory path
+
+**Invalidation**:
+- Time-based: >24 hours since last check
+- Version change: CLI was upgraded (current version != cached version)
+- File corruption: JSON parse fails
+- Missing file: First-time use
+
+**Rationale**:
+- Global cache (not repo-local): Version check is CLI-wide
+- Works even outside git repos
+- Check once per 24h globally (not per repo)
+- Follows standard CLI patterns: `~/.aws/`, `~/.docker/`, `~/.kube/`
+
+### GitHub API Integration
+**Endpoint**: `https://api.github.com/repos/entireio/cli/releases/latest`
+
+**Request**:
+```go
+client := &http.Client{Timeout: 1 * time.Second}  // Fast timeout to keep CLI responsive
+req.Header.Set("Accept", "application/vnd.github+json")
+req.Header.Set("User-Agent", "entire-cli/"+version)
+```
+
+**Timeout Strategy**:
+- Use 1-second timeout to keep CLI responsive
+- Runs in `PersistentPostRun` (after command completes) so doesn't slow down interactive modes
+- If request times out, cache is NOT updated (retry on next command after 24h)
+- Silent failure - user never sees timeout errors
+
+**Error Handling**: All errors are silent (no user-visible messages). Log to debug only if logging enabled.
+
+**Rate Limiting**: 60 req/hour (unauthenticated). We check once per 24h → well within limits.
+
+**Prerelease Filtering**: Skip releases where `"prerelease": true`
+
+### User Controls
+
+**Disable via environment variable**:
+```bash
+export ENTIRE_VERSION_CHECK_OPTOUT=1
+```
+
+**Disable via settings** (`.entire/settings.json`):
+```json
+{
+  "disable_version_check": true
+}
+```
+
+**Disable temporarily**:
+```bash
+ENTIRE_VERSION_CHECK_OPTOUT=1 entire status
+```
+
+### Edge Cases Handled
+- **Dev builds**: Skip check if `Version == "dev"`
+- **Network failures**: 1s timeout, silent failure, retry on next command after 24h
+- **HTTP timeouts**: Don't update cache, happens after command completes (max 1s post-execution)
+- **Invalid versions**: Skip comparison, log to debug
+- **First-time use**: Create `~/.entire/` directory, run check immediately
+- **Home directory unavailable**: `os.UserHomeDir()` fails → skip check silently
+- **Directory creation fails**: Permissions issue → skip check silently, don't block CLI
+- **Concurrent commands**: Cache writes are atomic, last write wins (acceptable for non-critical data)
+- **CLI upgrade**: Invalidate cache if current version differs from cached version
+- **Prerelease versions**: Filter out from GitHub API response (only notify for stable releases)
+- **Slow networks**: 1s timeout ensures CLI doesn't hang waiting for GitHub API
+- **Running outside git repo**: Still works! Cache is in home directory, not repo-specific
+- **Interactive modes**: Check runs in `PersistentPostRun` (after command) so TUI forms aren't delayed
+
+## Critical Files Reference
+
+Implementation requires understanding these existing patterns:
+
+- **`cmd/entire/cli/root.go:45-67`** - `PersistentPostRun` hook (where version check integrates)
+- **`cmd/entire/cli/config.go:20-30`** - Settings structure and loading
+- **`cmd/entire/cli/paths/paths.go`** - Path constants and utilities
+- **`cmd/entire/cli/telemetry/detached.go`** - Opt-out pattern reference (similar for version check)
+
+## Verification
+
+### Unit Tests
+Run test suite:
+```bash
+mise run test
+```
+
+Verify:
+- Version comparison logic (various semver formats)
+- Cache expiration validation
+- GitHub API response parsing
+- Settings and env var opt-out
+
+### Manual Testing
+
+1. **Basic flow**:
+   ```bash
+   # First command (checks and notifies immediately if outdated)
+   entire status
+   # Notification appears at the end if newer version available
+   ```
+
+2. **Cache persistence**:
+   ```bash
+   # Check cache was created in home directory
+   cat ~/.entire/version_check.json
+   # Should show: last_check_time, latest_version, current_version
+
+   # Verify directory was created
+   ls -la ~/.entire/
+   # Should show: drwxr-xr-x (755 permissions)
+
+   # Run again immediately (should not re-check, uses cache)
+   entire status
+   ```
+
+3. **Opt-out via env var**:
+   ```bash
+   ENTIRE_VERSION_CHECK_OPTOUT=1 entire status
+   # No notification, no cache update
+   ```
+
+4. **Opt-out via settings**:
+   ```bash
+   echo '{"disable_version_check": true}' > .entire/settings.local.json
+   entire status
+   # No notification, no cache update
+   ```
+
+5. **Dev build skipping**:
+   ```bash
+   # Build dev version
+   go build -o entire-dev ./cmd/entire
+   ./entire-dev status
+   # No version check (dev builds skip)
+   ```
+
+6. **Network failure handling**:
+   ```bash
+   # Disconnect network
+   entire status
+   # Check runs, fails silently, no error shown
+   ```
+
+7. **Notification formatting**:
+   ```bash
+   # Manually edit cache to simulate outdated version
+   # Run command and verify message format
+   entire status
+   ```
+
+8. **Accessibility mode**:
+   ```bash
+   ACCESSIBLE=1 entire status
+   # Notification should still appear (uses stderr, not TUI)
+   ```
+
+9. **Directory creation**:
+   ```bash
+   # Remove directory
+   rm -rf ~/.entire
+
+   # Run command (should create directory)
+   entire status
+
+   # Verify directory exists with correct permissions
+   ls -ld ~/.entire
+   # Expected: drwxr-xr-x (755)
+   ```
+
+10. **Works outside git repos**:
+    ```bash
+    # Create temp directory outside any git repo
+    mkdir /tmp/test-entire && cd /tmp/test-entire
+
+    # Run command (should still work)
+    entire status
+    # Version check still runs using ~/.entire/ cache
+    ```
+
+### Integration Test (Optional)
+Located in `cmd/entire/cli/integration_test/versioncheck_test.go`:
+```go
+//go:build integration
+
+func TestVersionCheckFullFlow(t *testing.T) {
+    // Mock GitHub API server (httptest)
+    // Override cache path (temp directory)
+    // Call CheckAndNotify() with mocked version
+    // Verify notification appears
+    // Verify cache updated correctly
+    // Call again, verify no API call (cached)
+}
+```
+
+## Implementation Sequence
+
+1. Create `versioncheck/types.go` with structs and constants
+2. Implement `versioncheck/versioncheck.go` core logic:
+   - Start with version comparison and cache functions
+   - Add GitHub API fetching with timeout
+   - Add main `CheckAndNotify()` function
+3. Write comprehensive unit tests (`versioncheck_test.go`)
+4. Update `config.go` with new settings field
+5. Update `root.go` PersistentPostRun integration (one line!)
+6. Manual testing with real GitHub API
+7. Documentation updates
+
+**Estimated complexity**: ~400 lines total (including tests)
+
+## Rollout
+
+- **Default state**: Enabled for all users
+- **Backward compatibility**: New settings field defaults to `nil` (treated as enabled)
+- **No breaking changes**: All new code, existing functionality unchanged
+- **Gradual rollout**: Ship in next release, monitor logs for issues
+- **User feedback**: Add to help text and README
+
+## Success Criteria
+
+- ✅ Version check runs after every command (in `PersistentPostRun`)
+- ✅ Doesn't interfere with interactive TUI modes
+- ✅ Notification appears when CLI is outdated
+- ✅ Cache stored in `~/.entire/version_check.json` (home directory)
+- ✅ `~/.entire/` directory created automatically if missing (first global config)
+- ✅ Cache prevents excessive API calls (once per 24h globally)
+- ✅ Works even when running outside git repos
+- ✅ Users can opt-out via env var or settings
+- ✅ Dev builds skip checks
+- ✅ Network failures are silent (no errors shown)
+- ✅ Directory creation failures are silent (don't block CLI)
+- ✅ All tests pass (`mise run test`)
+- ✅ Max 1-second post-command delay only when cache is stale (once per 24h)
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/2d9dd00e-30ba-4902-ae08-cf7466b5442e.jsonl
+
+---
+
+do not implement DisableVersionCheck
+
+---
+
+I don't want users to optout please
+
+---
+
+why are we storing into the cached file the latest version and the current version? We only need to know when we checked so that we fetch again latest version or no
+
+---
+
+why are we storing into the cached file the latest version and the current version? We only need to know when we checked so that we fetch again latest version or no
+
+---
+
+use golang semver package instead of implememting isOutdated

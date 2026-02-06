@@ -1,0 +1,37 @@
+Right now, to disable telemetry we use: Opt-out via ENTIRE_TELEMETRY_OPTOUT=1 environment variable
+
+I would suggest we add this also to entire enable. We would like to gather some metrics, are you ok with that? something like that. I would be open about it and let people opt out. A bit like the Apple does.
+
+---
+
+All good, but, I would replace ENTIRE_TELEMETRY_OPTOUT with the preferences stored at settings files
+
+---
+
+its perfect
+
+---
+
+In terms of usability and wanting to have as many users with telemetry enabled. Which aproach you think is better?
+1. Asking only once at entire enable, update the config and if telemetry is in the config, do not ask anymore.
+2. something else?
+
+---
+
+let's implement options 2
+
+---
+
+run the test
+
+---
+
+if i run entire enable --no-telemetry, it displays options to select strategy and that stuff, but ends up not disabling telemetry. it only disables telemetry if i also specify --strategy .. , so it run fully in no interactive mode. why ?
+
+---
+
+I want to inform about telemetry only first time user calls entire enable.
+
+---
+
+it is still displaying it subsequents times

@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "fe0dc62dd084",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-109-text-output-checkpoint-flag",
+  "migration_source_commit": "b2aebf6bbbc33e6f143676aa079074bd9b30e877",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/common.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fe/0dc62dd084/0/metadata.json",
+      "transcript": "/fe/0dc62dd084/0/full.jsonl",
+      "context": "/fe/0dc62dd084/0/context.md",
+      "content_hash": "/fe/0dc62dd084/0/content_hash.txt",
+      "prompt": "/fe/0dc62dd084/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1696,
+    "cache_creation_tokens": 717923,
+    "cache_read_tokens": 19636302,
+    "output_tokens": 478,
+    "api_call_count": 203
+  }
+}

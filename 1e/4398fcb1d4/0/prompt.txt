@@ -1,0 +1,723 @@
+brainstorm:
+- automatically generate checkpoint summaries when creating checkpoints
+- must be controlled by configuration, default to 'off'
+- documented in README, note specific claude-only generation for now
+
+---
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.1.1/skills/brainstorming
+
+# Brainstorming Ideas Into Designs
+
+## Overview
+
+Help turn ideas into fully formed designs and specs through natural collaborative dialogue.
+
+Start by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design in small sections (200-300 words), checking after each section whether it looks right so far.
+
+## The Process
+
+**Understanding the idea:**
+- Check out the current project state first (files, docs, recent commits)
+- Ask questions one at a time to refine the idea
+- Prefer multiple choice questions when possible, but open-ended is fine too
+- Only one question per message - if a topic needs more exploration, break it into multiple questions
+- Focus on understanding: purpose, constraints, success criteria
+
+**Exploring approaches:**
+- Propose 2-3 different approaches with trade-offs
+- Present options conversationally with your recommendation and reasoning
+- Lead with your recommended option and explain why
+
+**Presenting the design:**
+- Once you believe you understand what you're building, present the design
+- Break it into sections of 200-300 words
+- Ask after each section whether it looks right so far
+- Cover: architecture, components, data flow, error handling, testing
+- Be ready to go back and clarify if something doesn't make sense
+
+## After the Design
+
+**Documentation:**
+- Write the validated design to `docs/plans/YYYY-MM-DD-<topic>-design.md`
+- Use elements-of-style:writing-clearly-and-concisely skill if available
+- Commit the design document to git
+
+**Implementation (if continuing):**
+- Ask: "Ready to set up for implementation?"
+- Use superpowers:using-git-worktrees to create isolated workspace
+- Use superpowers:writing-plans to create detailed implementation plan
+
+## Key Principles
+
+- **One question at a time** - Don't overwhelm with multiple questions
+- **Multiple choice preferred** - Easier to answer than open-ended when possible
+- **YAGNI ruthlessly** - Remove unnecessary features from all designs
+- **Explore alternatives** - Always propose 2-3 approaches before settling
+- **Incremental validation** - Present design in sections, validate each
+- **Be flexible** - Go back and clarify when something doesn't make sense
+
+---
+
+A.
+
+---
+
+I think B, nested in strategy options - it leaves us space to further customise later on. please use the british spelling :)
+
+---
+
+A. is fine, ensure we log
+
+---
+
+A. just manual commit for now (Can we update the linear issue ENT-96  to reflect this, and create a new one to cover auto?)
+
+---
+
+let's keep it simple for now
+
+---
+
+yes
+
+---
+
+yep, looks good
+
+---
+
+Q: we should be summarising the checkpoint scope I think, not the entire transcript log for a specific checkpoint.
+
+we _do_ need somewhere to do summarisation for the PR scope (across multiple sessions and checkpoints), which is a future enhancement
+
+---
+
+there's already checkpoint-scoped transcript helpers in explain.go
+
+---
+
+yes, write up the design doc
+
+---
+
+intentional - keep it local! let's proceed with implementation using superpowers
+
+---
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.1.1/skills/writing-plans
+
+# Writing Plans
+
+## Overview
+
+Write comprehensive implementation plans assuming the engineer has zero context for our codebase and questionable taste. Document everything they need to know: which files to touch for each task, code, testing, docs they might need to check, how to test it. Give them the whole plan as bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.
+
+Assume they are a skilled developer, but know almost nothing about our toolset or problem domain. Assume they don't know good test design very well.
+
+**Announce at start:** "I'm using the writing-plans skill to create the implementation plan."
+
+**Context:** This should be run in a dedicated worktree (created by brainstorming skill).
+
+**Save plans to:** `docs/plans/YYYY-MM-DD-<feature-name>.md`
+
+## Bite-Sized Task Granularity
+
+**Each step is one action (2-5 minutes):**
+- "Write the failing test" - step
+- "Run it to make sure it fails" - step
+- "Implement the minimal code to make the test pass" - step
+- "Run the tests and make sure they pass" - step
+- "Commit" - step
+
+## Plan Document Header
+
+**Every plan MUST start with this header:**
+
+```markdown
+# [Feature Name] Implementation Plan
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** [One sentence describing what this builds]
+
+**Architecture:** [2-3 sentences about approach]
+
+**Tech Stack:** [Key technologies/libraries]
+
+---
+```
+
+## Task Structure
+
+```markdown
+### Task N: [Component Name]
+
+**Files:**
+- Create: `exact/path/to/file.py`
+- Modify: `exact/path/to/existing.py:123-145`
+- Test: `tests/exact/path/to/test.py`
+
+**Step 1: Write the failing test**
+
+```python
+def test_specific_behavior():
+    result = function(input)
+    assert result == expected
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `pytest tests/path/test.py::test_name -v`
+Expected: FAIL with "function not defined"
+
+**Step 3: Write minimal implementation**
+
+```python
+def function(input):
+    return expected
+```
+
+**Step 4: Run test to verify it passes**
+
+Run: `pytest tests/path/test.py::test_name -v`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add tests/path/test.py src/path/file.py
+git commit -m "feat: add specific feature"
+```
+```
+
+## Remember
+- Exact file paths always
+- Complete code in plan (not "add validation")
+- Exact commands with expected output
+- Reference relevant skills with @ syntax
+- DRY, YAGNI, TDD, frequent commits
+
+## Execution Handoff
+
+After saving the plan, offer execution choice:
+
+**"Plan complete and saved to `docs/plans/<filename>.md`. Two execution options:**
+
+**1. Subagent-Driven (this session)** - I dispatch fresh subagent per task, review between tasks, fast iteration
+
+**2. Parallel Session (separate)** - Open new session with executing-plans, batch execution with checkpoints
+
+**Which approach?"**
+
+**If Subagent-Driven chosen:**
+- **REQUIRED SUB-SKILL:** Use superpowers:subagent-driven-development
+- Stay in this session
+- Fresh subagent per task + code review
+
+**If Parallel Session chosen:**
+- Guide them to open new session in worktree
+- **REQUIRED SUB-SKILL:** New session uses superpowers:executing-plans
+
+---
+
+1
+
+---
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.1.1/skills/subagent-driven-development
+
+# Subagent-Driven Development
+
+Execute plan by dispatching fresh subagent per task, with two-stage review after each: spec compliance review first, then code quality review.
+
+**Core principle:** Fresh subagent per task + two-stage review (spec then quality) = high quality, fast iteration
+
+## When to Use
+
+```dot
+digraph when_to_use {
+    "Have implementation plan?" [shape=diamond];
+    "Tasks mostly independent?" [shape=diamond];
+    "Stay in this session?" [shape=diamond];
+    "subagent-driven-development" [shape=box];
+    "executing-plans" [shape=box];
+    "Manual execution or brainstorm first" [shape=box];
+
+    "Have implementation plan?" -> "Tasks mostly independent?" [label="yes"];
+    "Have implementation plan?" -> "Manual execution or brainstorm first" [label="no"];
+    "Tasks mostly independent?" -> "Stay in this session?" [label="yes"];
+    "Tasks mostly independent?" -> "Manual execution or brainstorm first" [label="no - tightly coupled"];
+    "Stay in this session?" -> "subagent-driven-development" [label="yes"];
+    "Stay in this session?" -> "executing-plans" [label="no - parallel session"];
+}
+```
+
+**vs. Executing Plans (parallel session):**
+- Same session (no context switch)
+- Fresh subagent per task (no context pollution)
+- Two-stage review after each task: spec compliance first, then code quality
+- Faster iteration (no human-in-loop between tasks)
+
+## The Process
+
+```dot
+digraph process {
+    rankdir=TB;
+
+    subgraph cluster_per_task {
+        label="Per Task";
+        "Dispatch implementer subagent (./implementer-prompt.md)" [shape=box];
+        "Implementer subagent asks questions?" [shape=diamond];
+        "Answer questions, provide context" [shape=box];
+        "Implementer subagent implements, tests, commits, self-reviews" [shape=box];
+        "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)" [shape=box];
+        "Spec reviewer subagent confirms code matches spec?" [shape=diamond];
+        "Implementer subagent fixes spec gaps" [shape=box];
+        "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" [shape=box];
+        "Code quality reviewer subagent approves?" [shape=diamond];
+        "Implementer subagent fixes quality issues" [shape=box];
+        "Mark task complete in TodoWrite" [shape=box];
+    }
+
+    "Read plan, extract all tasks with full text, note context, create TodoWrite" [shape=box];
+    "More tasks remain?" [shape=diamond];
+    "Dispatch final code reviewer subagent for entire implementation" [shape=box];
+    "Use superpowers:finishing-a-development-branch" [shape=box style=filled fillcolor=lightgreen];
+
+    "Read plan, extract all tasks with full text, note context, create TodoWrite" -> "Dispatch implementer subagent (./implementer-prompt.md)";
+    "Dispatch implementer subagent (./implementer-prompt.md)" -> "Implementer subagent asks questions?";
+    "Implementer subagent asks questions?" -> "Answer questions, provide context" [label="yes"];
+    "Answer questions, provide context" -> "Dispatch implementer subagent (./implementer-prompt.md)";
+    "Implementer subagent asks questions?" -> "Implementer subagent implements, tests, commits, self-reviews" [label="no"];
+    "Implementer subagent implements, tests, commits, self-reviews" -> "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)";
+    "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)" -> "Spec reviewer subagent confirms code matches spec?";
+    "Spec reviewer subagent confirms code matches spec?" -> "Implementer subagent fixes spec gaps" [label="no"];
+    "Implementer subagent fixes spec gaps" -> "Dispatch spec reviewer subagent (./spec-reviewer-prompt.md)" [label="re-review"];
+    "Spec reviewer subagent confirms code matches spec?" -> "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" [label="yes"];
+    "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" -> "Code quality reviewer subagent approves?";
+    "Code quality reviewer subagent approves?" -> "Implementer subagent fixes quality issues" [label="no"];
+    "Implementer subagent fixes quality issues" -> "Dispatch code quality reviewer subagent (./code-quality-reviewer-prompt.md)" [label="re-review"];
+    "Code quality reviewer subagent approves?" -> "Mark task complete in TodoWrite" [label="yes"];
+    "Mark task complete in TodoWrite" -> "More tasks remain?";
+    "More tasks remain?" -> "Dispatch implementer subagent (./implementer-prompt.md)" [label="yes"];
+    "More tasks remain?" -> "Dispatch final code reviewer subagent for entire implementation" [label="no"];
+    "Dispatch final code reviewer subagent for entire implementation" -> "Use superpowers:finishing-a-development-branch";
+}
+```
+
+## Prompt Templates
+
+- `./implementer-prompt.md` - Dispatch implementer subagent
+- `./spec-reviewer-prompt.md` - Dispatch spec compliance reviewer subagent
+- `./code-quality-reviewer-prompt.md` - Dispatch code quality reviewer subagent
+
+## Example Workflow
+
+```
+You: I'm using Subagent-Driven Development to execute this plan.
+
+[Read plan file once: docs/plans/feature-plan.md]
+[Extract all 5 tasks with full text and context]
+[Create TodoWrite with all tasks]
+
+Task 1: Hook installation script
+
+[Get Task 1 text and context (already extracted)]
+[Dispatch implementation subagent with full task text + context]
+
+Implementer: "Before I begin - should the hook be installed at user or system level?"
+
+You: "User level (~/.config/superpowers/hooks/)"
+
+Implementer: "Got it. Implementing now..."
+[Later] Implementer:
+  - Implemented install-hook command
+  - Added tests, 5/5 passing
+  - Self-review: Found I missed --force flag, added it
+  - Committed
+
+[Dispatch spec compliance reviewer]
+Spec reviewer: ✅ Spec compliant - all requirements met, nothing extra
+
+[Get git SHAs, dispatch code quality reviewer]
+Code reviewer: Strengths: Good test coverage, clean. Issues: None. Approved.
+
+[Mark Task 1 complete]
+
+Task 2: Recovery modes
+
+[Get Task 2 text and context (already extracted)]
+[Dispatch implementation subagent with full task text + context]
+
+Implementer: [No questions, proceeds]
+Implementer:
+  - Added verify/repair modes
+  - 8/8 tests passing
+  - Self-review: All good
+  - Committed
+
+[Dispatch spec compliance reviewer]
+Spec reviewer: ❌ Issues:
+  - Missing: Progress reporting (spec says "report every 100 items")
+  - Extra: Added --json flag (not requested)
+
+[Implementer fixes issues]
+Implementer: Removed --json flag, added progress reporting
+
+[Spec reviewer reviews again]
+Spec reviewer: ✅ Spec compliant now
+
+[Dispatch code quality reviewer]
+Code reviewer: Strengths: Solid. Issues (Important): Magic number (100)
+
+[Implementer fixes]
+Implementer: Extracted PROGRESS_INTERVAL constant
+
+[Code reviewer reviews again]
+Code reviewer: ✅ Approved
+
+[Mark Task 2 complete]
+
+...
+
+[After all tasks]
+[Dispatch final code-reviewer]
+Final reviewer: All requirements met, ready to merge
+
+Done!
+```
+
+## Advantages
+
+**vs. Manual execution:**
+- Subagents follow TDD naturally
+- Fresh context per task (no confusion)
+- Parallel-safe (subagents don't interfere)
+- Subagent can ask questions (before AND during work)
+
+**vs. Executing Plans:**
+- Same session (no handoff)
+- Continuous progress (no waiting)
+- Review checkpoints automatic
+
+**Efficiency gains:**
+- No file reading overhead (controller provides full text)
+- Controller curates exactly what context is needed
+- Subagent gets complete information upfront
+- Questions surfaced before work begins (not after)
+
+**Quality gates:**
+- Self-review catches issues before handoff
+- Two-stage review: spec compliance, then code quality
+- Review loops ensure fixes actually work
+- Spec compliance prevents over/under-building
+- Code quality ensures implementation is well-built
+
+**Cost:**
+- More subagent invocations (implementer + 2 reviewers per task)
+- Controller does more prep work (extracting all tasks upfront)
+- Review loops add iterations
+- But catches issues early (cheaper than debugging later)
+
+## Red Flags
+
+**Never:**
+- Skip reviews (spec compliance OR code quality)
+- Proceed with unfixed issues
+- Dispatch multiple implementation subagents in parallel (conflicts)
+- Make subagent read plan file (provide full text instead)
+- Skip scene-setting context (subagent needs to understand where task fits)
+- Ignore subagent questions (answer before letting them proceed)
+- Accept "close enough" on spec compliance (spec reviewer found issues = not done)
+- Skip review loops (reviewer found issues = implementer fixes = review again)
+- Let implementer self-review replace actual review (both are needed)
+- **Start code quality review before spec compliance is ✅** (wrong order)
+- Move to next task while either review has open issues
+
+**If subagent asks questions:**
+- Answer clearly and completely
+- Provide additional context if needed
+- Don't rush them into implementation
+
+**If reviewer finds issues:**
+- Implementer (same subagent) fixes them
+- Reviewer reviews again
+- Repeat until approved
+- Don't skip the re-review
+
+**If subagent fails task:**
+- Dispatch fix subagent with specific instructions
+- Don't try to fix manually (context pollution)
+
+## Integration
+
+**Required workflow skills:**
+- **superpowers:writing-plans** - Creates the plan this skill executes
+- **superpowers:requesting-code-review** - Code review template for reviewer subagents
+- **superpowers:finishing-a-development-branch** - Complete development after all tasks
+
+**Subagents should use:**
+- **superpowers:test-driven-development** - Subagents follow TDD for each task
+
+**Alternative workflow:**
+- **superpowers:executing-plans** - Use for parallel session instead of same-session execution
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me analyze the conversation chronologically:
+
+1. **Initial Request**: User provided a brainstorm topic about auto-generating checkpoint summaries at commit time, controlled by configuration, default to 'off', documented in README.
+
+2. **Brainstorming Phase**: I invoked the brainstorming skill and explored:
+   - Read README.md, strategy.go, config.go, messages.go, summarise/summarise.go, summarise/claude.go
+   - Found existing `summarise` package with `ClaudeGenerator` and `checkpoint.Summary` structure
+   - Asked clarifying questions about timing (user chose: at commit time), config structure (user chose: nested `strategy_options.summarise.enabled` with British spelling), error handling (user chose: silent fallback with logging), scope (user chose: manual-commit only)
+
+3. **Linear Issue Updates**: Updated ENT-96 with refined scope and created ENT-163 for auto-commit follow-on work.
+
+4. **Important User Feedback**: 
+   - User noted we should summarise checkpoint scope, not entire transcript
+   - User pointed out existing checkpoint-scoped transcript helpers in explain.go
+   - User wanted to avoid code duplication
+
+5. **Design Document**: Created `docs/plans/2026-02-01-auto-summarise-design.md` (gitignored, kept local)
+
+6. **Implementation Plan**: Used writing-plans skill to create detailed implementation plan at `docs/plans/2026-02-01-auto-summarise-impl.md` with 7 tasks:
+   - Task 1: Add SummariseOptions to config.go
+   - Task 2: Extract shared GenerateFromTranscript helper
+   - Task 3: Refactor explain.go to use shared helper
+   - Task 4: Add Summary field to WriteCommittedOptions
+   - Task 5: Add summary generation to CondenseSession
+   - Task 6: Update README documentation
+   - Task 7: Lint and final verification
+
+7. **Subagent Execution**: User chose subagent-driven development. I created 7 tasks in TaskWrite and dispatched dev subagent for Task 1.
+
+8. **Current Issue**: The dev subagent reported success but there's a diagnostic showing `GetSummariseOptions` is undefined in `config_test.go:387`. The grep shows the function exists at `config.go:305` and is referenced in test at line 387. This suggests a potential issue with the implementation.
+
+Key files examined:
+- config.go, config_test.go (for configuration)
+- explain.go (has scopeTranscriptForCheckpoint and generateCheckpointSummary)
+- summarise/summarise.go, summarise/claude.go (existing summarisation code)
+- manual_commit_condensation.go (where CondenseSession lives)
+- checkpoint/checkpoint.go (WriteCommittedOptions, Summary struct)
+
+The current error indicates the test file references GetSummariseOptions but the compiler says it's undefined. My grep shows it exists, so I need to investigate why there's a mismatch.
+
+Summary:
+1. Primary Request and Intent:
+   User wants to implement auto-summarisation of checkpoints at commit time for the manual-commit strategy. Key requirements:
+   - Controlled by configuration (`strategy_options.summarise.enabled`), default off
+   - British spelling throughout ("summarise")
+   - Generate summary at commit time during condensation to `entire/sessions`
+   - Summarise only checkpoint scope (not entire transcript)
+   - Non-blocking: log errors but don't prevent commits
+   - Manual-commit strategy only (auto-commit tracked in ENT-163)
+   - Document in README
+
+2. Key Technical Concepts:
+   - Go CLI with Cobra framework
+   - Strategy pattern for session management (manual-commit, auto-commit)
+   - Checkpoint storage on `entire/sessions` branch
+   - Transcript scoping via `TranscriptLinesAtStart` metadata
+   - Claude CLI integration for AI summary generation
+   - TDD approach with subagent-driven development
+   - Existing `summarise` package with `ClaudeGenerator`
+
+3. Files and Code Sections:
+   - `cmd/entire/cli/config.go` - Configuration parsing, needs `GetSummariseOptions()` added after line 296
+   - `cmd/entire/cli/config_test.go` - Test file, needs `TestGetSummariseOptions` test
+   - `cmd/entire/cli/explain.go` - Has existing `scopeTranscriptForCheckpoint()` (line 468) and `generateCheckpointSummary()` (line 278) to refactor
+   - `cmd/entire/cli/summarise/summarise.go` - Needs `GenerateFromTranscript()` shared helper
+   - `cmd/entire/cli/strategy/manual_commit_condensation.go` - `CondenseSession()` function where summary generation will be integrated
+   - `cmd/entire/cli/checkpoint/checkpoint.go` - `WriteCommittedOptions` struct needs `Summary *Summary` field
+   - `cmd/entire/cli/transcript/parse.go` - Has `SliceFromLine()` for transcript scoping
+   - `docs/plans/2026-02-01-auto-summarise-impl.md` - Implementation plan (gitignored)
+
+4. Errors and fixes:
+   - **Current Error**: `config_test.go:387:12 undefined: GetSummariseOptions`
+     - Subagent claimed to implement it but compiler shows it's undefined
+     - Grep shows function exists at `config.go:305` and `config.go:303`
+     - Need to investigate why compiler can't find it
+
+5. Problem Solving:
+   - User pointed out need to avoid code duplication - plan was revised to extract `GenerateFromTranscript()` as shared helper
+   - User noted checkpoint scoping is critical - using existing `TranscriptLinesAtStart` and `transcript.SliceFromLine()`
+
+6. All user messages:
+   - "brainstorm: - automatically generate checkpoint summaries when creating checkpoints - must be controlled by configuration, default to 'off' - documented in README, note specific claude-only generation for now"
+   - "A." (chose commit-time timing)
+   - "I think B, nested in strategy options - it leaves us space to further customise later on. please use the british spelling :)"
+   - "A. is fine, ensure we log" (error handling)
+   - "A. just manual commit for now (Can we update the linear issue ENT-96 to reflect this, and create a new one to cover auto?)"
+   - "let's keep it simple for now" (multi-session: most recent only)
+   - "yes" (configuration structure approval)
+   - "yep, looks good" (integration approach approval)
+   - "yes, write up the design doc"
+   - "intentional - keep it local!" (regarding gitignored plans directory)
+   - "Q: we should be summarising the checkpoint scope I think, not the entire transcript log..."
+   - "there's already checkpoint-scoped transcript helpers in explain.go"
+   - "1" (chose subagent-driven development)
+
+7. Pending Tasks (from TaskWrite):
+   - Task 1: Add SummariseOptions to config.go (IN PROGRESS - has error)
+   - Task 2: Extract shared GenerateFromTranscript helper
+   - Task 3: Refactor explain.go to use shared helper
+   - Task 4: Add Summary field to WriteCommittedOptions
+   - Task 5: Add summary generation to CondenseSession
+   - Task 6: Update README documentation
+   - Task 7: Lint and final verification
+
+8. Current Work:
+   Task 1 was dispatched to a dev subagent. The subagent reported success but diagnostic shows:
+   ```
+   config_test.go:
+     ✘ [Line 387:12] undefined: GetSummariseOptions [UndeclaredName] (compiler)
+   ```
+   I ran grep and found `GetSummariseOptions` exists at config.go lines 303 and 305, and is referenced in config_test.go lines 336 and 387. Need to investigate why there's a compilation error.
+
+9. Optional Next Step:
+   Investigate and fix the `GetSummariseOptions` undefined error. The subagent reported adding the function but the compiler can't find it. Need to read config.go to verify the implementation was actually written correctly, then fix any issues before proceeding to Task 2.
+
+   Direct quote from task: "Task 1: Add SummariseOptions to config.go" with implementation:
+   ```go
+   // SummariseOptions contains configuration for automatic summary generation.
+   type SummariseOptions struct {
+       Enabled bool
+   }
+
+   // GetSummariseOptions returns the summarise configuration from strategy_options.
+   func GetSummariseOptions() SummariseOptions {...}
+   ```
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-test-explain-checkpoint-boundaries/1e0816ef-6f89-4f05-b331-dab09bb14485.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+create a draft PR please
+
+---
+
+<bash-input>git pull</bash-input>
+
+---
+
+<bash-stdout>Updating 30838c3..b7b88a7
+Fast-forward
+ .goreleaser.yaml          |  12 +--
+ cmd/entire/cli/explain.go |  73 ++++++++++---
+ scripts/install.sh        | 256 ++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 317 insertions(+), 24 deletions(-)
+ create mode 100644 scripts/install.sh
+From github.com:entireio/cli
+   30838c3..b7b88a7  alex/ent-96-auto-summaries -> origin/alex/ent-96-auto-summaries</bash-stdout><bash-stderr></bash-stderr>
+
+---
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.1.1/skills/requesting-code-review
+
+# Requesting Code Review
+
+Dispatch superpowers:code-reviewer subagent to catch issues before they cascade.
+
+**Core principle:** Review early, review often.
+
+## When to Request Review
+
+**Mandatory:**
+- After each task in subagent-driven development
+- After completing major feature
+- Before merge to main
+
+**Optional but valuable:**
+- When stuck (fresh perspective)
+- Before refactoring (baseline check)
+- After fixing complex bug
+
+## How to Request
+
+**1. Get git SHAs:**
+```bash
+BASE_SHA=$(git rev-parse HEAD~1)  # or origin/main
+HEAD_SHA=$(git rev-parse HEAD)
+```
+
+**2. Dispatch code-reviewer subagent:**
+
+Use Task tool with superpowers:code-reviewer type, fill template at `code-reviewer.md`
+
+**Placeholders:**
+- `{WHAT_WAS_IMPLEMENTED}` - What you just built
+- `{PLAN_OR_REQUIREMENTS}` - What it should do
+- `{BASE_SHA}` - Starting commit
+- `{HEAD_SHA}` - Ending commit
+- `{DESCRIPTION}` - Brief summary
+
+**3. Act on feedback:**
+- Fix Critical issues immediately
+- Fix Important issues before proceeding
+- Note Minor issues for later
+- Push back if reviewer is wrong (with reasoning)
+
+## Example
+
+```
+[Just completed Task 2: Add verification function]
+
+You: Let me request code review before proceeding.
+
+BASE_SHA=$(git log --oneline | grep "Task 1" | head -1 | awk '{print }')
+HEAD_SHA=$(git rev-parse HEAD)
+
+[Dispatch superpowers:code-reviewer subagent]
+  WHAT_WAS_IMPLEMENTED: Verification and repair functions for conversation index
+  PLAN_OR_REQUIREMENTS: Task 2 from docs/plans/deployment-plan.md
+  BASE_SHA: a7981ec
+  HEAD_SHA: 3df7661
+  DESCRIPTION: Added verifyIndex() and repairIndex() with 4 issue types
+
+[Subagent returns]:
+  Strengths: Clean architecture, real tests
+  Issues:
+    Important: Missing progress indicators
+    Minor: Magic number (100) for reporting interval
+  Assessment: Ready to proceed
+
+You: [Fix progress indicators]
+[Continue to Task 3]
+```
+
+## Integration with Workflows
+
+**Subagent-Driven Development:**
+- Review after EACH task
+- Catch issues before they compound
+- Fix before moving to next task
+
+**Executing Plans:**
+- Review after each batch (3 tasks)
+- Get feedback, apply, continue
+
+**Ad-Hoc Development:**
+- Review before merge
+- Review when stuck
+
+## Red Flags
+
+**Never:**
+- Skip review because "it's simple"
+- Ignore Critical issues
+- Proceed with unfixed Important issues
+- Argue with valid technical feedback
+
+**If reviewer wrong:**
+- Push back with technical reasoning
+- Show code/tests that prove it works
+- Request clarification
+
+See template at: requesting-code-review/code-reviewer.md
