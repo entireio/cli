@@ -279,22 +279,6 @@ func GetLogLevel() string {
 	return settings.LogLevel
 }
 
-// IsMultiSessionWarningDisabled checks if multi-session warnings are disabled.
-// Returns false (show warnings) by default if settings cannot be loaded or the key is missing.
-func IsMultiSessionWarningDisabled() bool {
-	settings, err := LoadEntireSettings()
-	if err != nil {
-		return false // Default: show warnings
-	}
-	if settings.StrategyOptions == nil {
-		return false
-	}
-	if disabled, ok := settings.StrategyOptions["disable_multisession_warning"].(bool); ok {
-		return disabled
-	}
-	return false
-}
-
 // GetAgentsWithHooksInstalled returns names of agents that have hooks installed.
 func GetAgentsWithHooksInstalled() []agent.AgentName {
 	var installed []agent.AgentName

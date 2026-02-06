@@ -148,45 +148,46 @@ func (s *ManualCommitStrategy) ClearSessionState(sessionID string) error {
 	return s.clearSessionState(sessionID)
 }
 
-// HasOtherActiveSessionsWithCheckpoints checks if there are other active sessions
-// from the SAME worktree (different from currentSessionID) that have created checkpoints
-// on the SAME base commit (current HEAD). This is used to detect concurrent sessions
-// in different terminals but same directory.
-// Returns the first found session with CheckpointCount > 0, or nil if none found.
-func (s *ManualCommitStrategy) HasOtherActiveSessionsWithCheckpoints(currentSessionID string) (*SessionState, error) {
+// CountOtherActiveSessionsWithCheckpoints counts how many other active sessions
+// from the SAME worktree (different from currentSessionID) have created checkpoints
+// on the SAME base commit (current HEAD). This is used to show an informational message
+// about concurrent sessions that will be included in the next commit.
+// Returns 0, nil if no such sessions exist.
+func (s *ManualCommitStrategy) CountOtherActiveSessionsWithCheckpoints(currentSessionID string) (int, error) {
 	currentWorktree, err := GetWorktreePath()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	// Get current HEAD to compare with session base commits
 	repo, err := OpenRepository()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	head, err := repo.Head()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get HEAD: %w", err)
+		return 0, fmt.Errorf("failed to get HEAD: %w", err)
 	}
 	currentHead := head.Hash().String()
 
 	allStates, err := s.listAllSessionStates()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
+	count := 0
 	for _, state := range allStates {
 		// Only consider sessions from the same worktree with checkpoints
 		// AND based on the same commit (current HEAD)
-		// Sessions from different base commits are independent and shouldn't trigger warning
+		// Sessions from different base commits are independent and shouldn't be counted
 		if state.SessionID != currentSessionID &&
 			state.WorktreePath == currentWorktree &&
 			state.CheckpointCount > 0 &&
 			state.BaseCommit == currentHead {
-			return state, nil
+			count++
 		}
 	}
-	return nil, nil //nolint:nilnil // nil,nil indicates no other session found (expected case)
+	return count, nil
 }
 
 // initializeSession creates a new session state or updates a partial one.

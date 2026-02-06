@@ -482,14 +482,14 @@ type SessionResetter interface {
 }
 
 // ConcurrentSessionChecker is an optional interface for strategies that support
-// detecting and warning about concurrent sessions with uncommitted changes.
-// This is used by the UserPromptSubmit hook to block the first prompt when
-// another session has uncommitted checkpoints on the same base commit.
+// counting concurrent sessions with uncommitted changes.
+// This is used by the SessionStart hook to show an informational message about
+// how many other active conversations will be included in the next commit.
 type ConcurrentSessionChecker interface {
-	// HasOtherActiveSessionsWithCheckpoints returns a session state if there's another
-	// active session with uncommitted checkpoints on the same base commit.
-	// Returns nil, nil if no such session exists.
-	HasOtherActiveSessionsWithCheckpoints(currentSessionID string) (*SessionState, error)
+	// CountOtherActiveSessionsWithCheckpoints returns the number of other active sessions
+	// with uncommitted checkpoints on the same base commit.
+	// Returns 0, nil if no such sessions exist.
+	CountOtherActiveSessionsWithCheckpoints(currentSessionID string) (int, error)
 }
 
 // SessionSource is an optional interface for strategies that provide additional

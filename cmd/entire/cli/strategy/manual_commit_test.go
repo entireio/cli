@@ -1458,7 +1458,7 @@ func TestSaveChanges_EmptyBaseCommit_Recovery(t *testing.T) {
 	sessionID := "2025-01-15-empty-basecommit-test"
 
 	// Create a partial session state with empty BaseCommit
-	// (simulates what checkConcurrentSessions used to create)
+	// (simulates a partial session state with empty BaseCommit)
 	partialState := &SessionState{
 		SessionID:  sessionID,
 		BaseCommit: "", // Empty! This is the bug scenario

@@ -413,7 +413,7 @@ func TestRunEnableWithStrategy_PreservesExistingSettings(t *testing.T) {
 
 	// Run enable with a different strategy
 	var stdout bytes.Buffer
-	err := runEnableWithStrategy(&stdout, "auto-commit", false, false, false, true, false, false, false, false, false)
+	err := runEnableWithStrategy(&stdout, "auto-commit", false, false, false, true, false, false, false, false)
 	if err != nil {
 		t.Fatalf("runEnableWithStrategy() error = %v", err)
 	}
@@ -457,7 +457,7 @@ func TestRunEnableWithStrategy_PreservesLocalSettings(t *testing.T) {
 
 	// Run enable with --local flag
 	var stdout bytes.Buffer
-	err := runEnableWithStrategy(&stdout, "auto-commit", false, false, true, false, false, false, false, false, false)
+	err := runEnableWithStrategy(&stdout, "auto-commit", false, false, true, false, false, false, false, false)
 	if err != nil {
 		t.Fatalf("runEnableWithStrategy() error = %v", err)
 	}

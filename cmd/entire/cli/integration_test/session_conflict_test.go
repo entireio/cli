@@ -306,9 +306,9 @@ func TestSessionIDConflict_ShadowBranchWithoutTrailer(t *testing.T) {
 	}
 }
 
-// TestSessionConflict_WarningMessageFormat tests that the session conflict warning message
-// contains all expected components when a second session starts while another has uncommitted checkpoints.
-func TestSessionConflict_WarningMessageFormat(t *testing.T) {
+// TestSessionStart_InformationalMessage tests that the session start informational message
+// contains the expected base text and concurrent session count when another session has uncommitted checkpoints.
+func TestSessionStart_InformationalMessage(t *testing.T) {
 	env := NewTestEnv(t)
 	defer env.Cleanup()
 
@@ -346,10 +346,10 @@ func TestSessionConflict_WarningMessageFormat(t *testing.T) {
 	// Start a second session (different session ID, same base commit)
 	session2 := env.NewSession()
 
-	// Use SimulateSessionStartWithOutput to capture the warning message
+	// Use SimulateSessionStartWithOutput to capture the informational message
 	output := env.SimulateSessionStartWithOutput(session2.ID)
 
-	// The hook should succeed (no error) but output a warning message
+	// The hook should succeed (no error) and output an informational message
 	if output.Err != nil {
 		t.Fatalf("SimulateSessionStart (session2) failed: %v\nStderr: %s", output.Err, output.Stderr)
 	}
@@ -365,57 +365,98 @@ func TestSessionConflict_WarningMessageFormat(t *testing.T) {
 		}
 	}
 
-	// If there's no conflict (perhaps warning is disabled), skip the rest
 	if resp.SystemMessage == "" {
-		t.Log("No session conflict warning - this is expected if multi-session warning is disabled")
-		return
+		t.Fatal("Expected informational message in systemMessage, got empty")
 	}
 
 	msg := resp.SystemMessage
-	t.Logf("Session conflict warning message:\n%s", msg)
+	t.Logf("Session start message:\n%s", msg)
 
-	// Verify the warning message contains all expected components
-	// 1. The existing session ID
-	if !strings.Contains(msg, session1.EntireID) {
-		t.Errorf("Warning should contain existing session ID %q, got:\n%s", session1.EntireID, msg)
+	// Verify base informational message is present
+	if !strings.Contains(msg, "Powered by Entire") {
+		t.Errorf("Message should contain 'Powered by Entire', got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "linked to your next commit") {
+		t.Errorf("Message should contain 'linked to your next commit', got:\n%s", msg)
 	}
 
-	// 2. The new session ID (as Entire session ID)
-	session2EntireID := sessionid.EntireSessionID(session2.ID)
-	if !strings.Contains(msg, session2EntireID) {
-		t.Errorf("Warning should contain new session ID %q, got:\n%s", session2EntireID, msg)
+	// Verify concurrent session count is shown
+	if !strings.Contains(msg, "1 other active conversation(s) in this workspace") {
+		t.Errorf("Message should contain '1 other active conversation(s) in this workspace', got:\n%s", msg)
 	}
 
-	// 3. Resume command format: claude -r <session-id>
-	expectedResumeCmd := "claude -r " + session1.EntireID
-	if !strings.Contains(msg, expectedResumeCmd) {
-		t.Errorf("Warning should contain resume command %q, got:\n%s", expectedResumeCmd, msg)
-	}
-
-	// 4. Reset instruction: entire reset --force && claude
-	if !strings.Contains(msg, "entire reset --force && claude") {
-		t.Errorf("Warning should contain reset instruction 'entire reset --force && claude', got:\n%s", msg)
-	}
-
-	// 5. Warning disable option: entire enable --disable-multisession-warning
-	if !strings.Contains(msg, "entire enable --disable-multisession-warning") {
-		t.Errorf("Warning should contain disable option 'entire enable --disable-multisession-warning', got:\n%s", msg)
-	}
-
-	// 6. Verify the message structure contains expected phrases
-	expectedPhrases := []string{
+	// Verify old warning phrases are NOT present
+	oldPhrases := []string{
 		"existing session running",
 		"Do you want to continue",
-		"Yes: Ignore this warning",
-		"No: Type /exit",
+		"Ignore this warning",
+		"/exit",
 		"Resume the other session",
 		"Reset and start fresh",
-		"hide this notice",
+		"disable-multisession-warning",
 	}
-	for _, phrase := range expectedPhrases {
-		if !strings.Contains(msg, phrase) {
-			t.Errorf("Warning should contain phrase %q, got:\n%s", phrase, msg)
+	for _, phrase := range oldPhrases {
+		if strings.Contains(msg, phrase) {
+			t.Errorf("Message should NOT contain old warning phrase %q, got:\n%s", phrase, msg)
 		}
+	}
+}
+
+// TestSessionStart_InformationalMessageNoConcurrentSessions tests that the base informational message
+// is shown even when there are no concurrent sessions.
+func TestSessionStart_InformationalMessageNoConcurrentSessions(t *testing.T) {
+	env := NewTestEnv(t)
+	defer env.Cleanup()
+
+	// Setup
+	env.InitRepo()
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	env.GitCheckoutNewBranch("feature/test")
+	env.InitEntire(strategy.StrategyNameManualCommit)
+
+	// Start a single session (no other sessions)
+	session1 := env.NewSession()
+
+	// Use SimulateSessionStartWithOutput to capture the informational message
+	output := env.SimulateSessionStartWithOutput(session1.ID)
+
+	// The hook should succeed
+	if output.Err != nil {
+		t.Fatalf("SimulateSessionStart failed: %v\nStderr: %s", output.Err, output.Stderr)
+	}
+
+	// Parse the JSON response
+	type sessionStartResponse struct {
+		SystemMessage string `json:"systemMessage,omitempty"`
+	}
+	var resp sessionStartResponse
+	if len(output.Stdout) > 0 {
+		if err := json.Unmarshal(output.Stdout, &resp); err != nil {
+			t.Fatalf("Failed to parse session-start response: %v\nStdout: %s", err, output.Stdout)
+		}
+	}
+
+	if resp.SystemMessage == "" {
+		t.Fatal("Expected informational message in systemMessage, got empty")
+	}
+
+	msg := resp.SystemMessage
+	t.Logf("Session start message:\n%s", msg)
+
+	// Verify base informational message is present
+	if !strings.Contains(msg, "Powered by Entire") {
+		t.Errorf("Message should contain 'Powered by Entire', got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "linked to your next commit") {
+		t.Errorf("Message should contain 'linked to your next commit', got:\n%s", msg)
+	}
+
+	// Verify concurrent session info is NOT shown (no other sessions)
+	if strings.Contains(msg, "other active conversation") {
+		t.Errorf("Message should NOT mention other active conversations when none exist, got:\n%s", msg)
 	}
 }
 
