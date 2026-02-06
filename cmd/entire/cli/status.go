@@ -267,7 +267,7 @@ func writeActiveSessions(w io.Writer) {
 			}
 			prompt = stringutil.TruncateRunes(prompt, 40, "...")
 
-			age := timeAgo(st.StartedAt)
+			age := "started " + timeAgo(st.StartedAt)
 
 			checkpoints := fmt.Sprintf("%d checkpoint", st.CheckpointCount)
 			if st.CheckpointCount != 1 {
