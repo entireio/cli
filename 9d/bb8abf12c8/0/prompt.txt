@@ -1,0 +1,359 @@
+Implement the following plan:
+
+# ENT-64: Status Shows Session Information
+
+## Overview
+
+Enhance `entire status` to show active sessions grouped by worktree, including first prompt, timestamp, checkpoint count, and uncheckpointed work indicator.
+
+## Target Output
+
+```
+Enabled (manual-commit)
+
+Active Sessions:
+  /Users/alex/workspace/cli (main)
+    abc-123  "Fix auth bug in login..."   2m ago   3 checkpoints
+    def-456  "Add dark mode support..."   15m ago  1 checkpoint (uncheckpointed changes)
+
+  /Users/alex/workspace/cli/.worktrees/3 (alex/ent-64-status-shows-sessions)
+    ghi-789  "Refactor status cmd..."     5m ago   0 checkpoints (uncheckpointed changes)
+```
+
+No active sessions → just show existing one-liner (`Enabled (manual-commit)`).
+
+## Implementation Steps
+
+### Step 1: Add `FirstPrompt` field to session state types
+
+Both types must stay in sync (they're independent but structurally mirrored).
+
+**Files:**
+- `cmd/entire/cli/session/state.go` — Add `FirstPrompt string` field to `State` struct (~line 73, after `TranscriptPath`)
+- `cmd/entire/cli/strategy/manual_commit_types.go` — Add `FirstPrompt string` field to `SessionState` struct (after `TranscriptPath`)
+
+### Step 2: Thread user prompt through `InitializeSession`
+
+**`cmd/entire/cli/strategy/strategy.go`** (~line 413):
+- Add `userPrompt string` parameter to `SessionInitializer.InitializeSession()` signature
+
+**`cmd/entire/cli/strategy/manual_commit_hooks.go`** (~line 786):
+- Update `ManualCommitStrategy.InitializeSession()` signature to accept `userPrompt string`
+- Pass it to `initializeSession()`
+
+**`cmd/entire/cli/strategy/manual_commit_session.go`** (~line 196):
+- Update `initializeSession()` to accept `userPrompt string`
+- Store truncated prompt (first ~100 chars) in `state.FirstPrompt`
+- Use `strategy.TruncateDescription()` (already exists in `common.go`) for truncation
+
+**`cmd/entire/cli/strategy/auto_commit.go`** (~line 906):
+- Update `AutoCommitStrategy.InitializeSession()` signature and store the prompt
+
+**`cmd/entire/cli/hooks_claudecode_handlers.go`** (~line 78-81):
+- Pass `hookData.input.UserPrompt` to `initializer.InitializeSession()`
+
+**`cmd/entire/cli/hooks_geminicli_handlers.go`** (~line 478-481):
+- Pass `input.UserPrompt` to `initializer.InitializeSession()`
+
+**Backfill on resume:** In `InitializeSession` where `state != nil` (session already exists, ~line 804), backfill `FirstPrompt` if empty (same pattern as `AgentType` backfill on line 808).
+
+### Step 3: Add relative time helper
+
+**`cmd/entire/cli/setup.go`** (or a small helper near the status code):
+- Add `timeAgo(t time.Time) string` — simple relative time formatter
+- Cases: "just now" (<1m), "Xm ago", "Xh ago", "Xd ago"
+- No external dependencies (don't import go-humanize for this)
+
+### Step 4: Enhance `entire status` to show active sessions
+
+**`cmd/entire/cli/setup.go`**:
+
+Modify `runStatus()` to call a new `writeActiveSessions(w)` function after the settings line.
+
+New function `writeActiveSessions(w io.Writer)`:
+1. Create `session.NewStateStore()`
+2. Call `store.List(ctx)` to get all session states
+3. Filter to active only (`EndedAt == nil`)
+4. Group by `WorktreePath`
+5. For each unique worktree path, resolve branch name via `git -C <path> rev-parse --abbrev-ref HEAD`
+6. Sort groups (main worktree first, then alphabetical)
+7. Sort sessions within each group by `StartedAt` (newest first)
+8. Format and write output — worktree header shows `<path> (<branch>)`
+
+Per session line: `{sessionID-short}  "{firstPrompt}..."  {timeAgo}  {N} checkpoint(s) [(uncheckpointed changes)]`
+
+- Session ID: truncate to reasonable length for display
+- First prompt: use `FirstPrompt` from state, fallback to `"(unknown)"` for old sessions
+- Uncheckpointed changes: show when `PendingPromptAttribution != nil`
+
+### Step 5: Tests
+
+- **Unit test for `timeAgo`** — verify formatting for various durations
+- **Unit test for `writeActiveSessions`** — create mock state store with test session states, verify output formatting
+- **Update existing `InitializeSession` tests** — add `userPrompt` parameter to test calls
+- **Test backfill behavior** — verify `FirstPrompt` gets populated on session resume
+
+## Files Modified (summary)
+
+| File | Change |
+|------|--------|
+| `cmd/entire/cli/session/state.go` | Add `FirstPrompt` field |
+| `cmd/entire/cli/strategy/manual_commit_types.go` | Add `FirstPrompt` field |
+| `cmd/entire/cli/strategy/strategy.go` | Update `SessionInitializer` interface |
+| `cmd/entire/cli/strategy/manual_commit_hooks.go` | Accept + store + backfill prompt |
+| `cmd/entire/cli/strategy/manual_commit_session.go` | Accept + store prompt |
+| `cmd/entire/cli/strategy/auto_commit.go` | Accept + store prompt |
+| `cmd/entire/cli/hooks_claudecode_handlers.go` | Pass prompt to InitializeSession |
+| `cmd/entire/cli/hooks_geminicli_handlers.go` | Pass prompt to InitializeSession |
+| `cmd/entire/cli/setup.go` | Enhance status output + timeAgo helper |
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+Manual test: run `entire status` in a repo with active sessions across worktrees.
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+
+---
+
+please please fix up any code quality issues you notice and don't leave them by the wayside if they are small
+
+---
+
+commit this
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. The user provided a detailed implementation plan for ENT-64: Status Shows Session Information
+2. I implemented the plan in 5 steps:
+   - Step 1: Added `FirstPrompt` field to session state types
+   - Step 2: Threaded user prompt through `InitializeSession`
+   - Step 3: Enhanced `entire status` to show active sessions
+   - Step 4: Wrote tests
+   - Step 5: Ran fmt, lint, and tests
+
+3. The user then asked me to "please please fix up any code quality issues you notice and don't leave them by the wayside if they are small"
+
+4. I found and fixed multiple code quality issues:
+   - Import ordering in setup.go
+   - Auto-commit FirstPrompt backfill on resume
+   - Guard against git -C for unknown paths
+   - Trailing blank line after last worktree group
+   - Variable shadowing (s -> st)
+   - Extracted truncatePromptForStorage helper
+   - Removed unused imports
+   - Extracted unknownPlaceholder constant
+   - Tightened test assertion
+   - Added explanatory comment
+
+5. The user then said "commit this" and I ran git status, git diff, and git log but haven't yet created the commit.
+
+Let me make sure I capture all the files, changes, errors, and fixes accurately.
+
+Errors encountered:
+1. `ineffassign` lint error on `needSave = true` in the FirstPrompt backfill - fixed by removing the redundant assignment
+2. `goconst` lint error on `"(unknown)"` string with 3 occurrences - fixed by extracting `unknownPlaceholder` constant
+3. `replace_all` accidentally replaced the string literal in the const declaration itself (`const unknownPlaceholder = unknownPlaceholder`) - fixed by manually setting it back to the string literal
+4. Various "not enough arguments" compiler errors after changing the `InitializeSession` signature - fixed by updating all call sites
+5. Unused import errors after extracting `truncatePromptForStorage` helper - fixed by removing unused `stringutil` imports
+
+The user's last message was "commit this" and the system reminder showed they opened settings.go. I ran the three pre-commit information gathering commands (git status, git diff, git log) but have not yet staged files or created the commit.
+
+Summary:
+1. Primary Request and Intent:
+   The user asked to implement a plan for ENT-64: "Status Shows Session Information" - enhancing `entire status` to show active sessions grouped by worktree, including first prompt, timestamp, checkpoint count, and uncheckpointed work indicator. After implementation, the user asked to fix code quality issues, then to commit the changes.
+
+2. Key Technical Concepts:
+   - Go CLI built with cobra and charmbracelet/huh
+   - Strategy pattern for session management (manual-commit and auto-commit strategies)
+   - Session state stored in `.git/entire-sessions/<session-id>.json`
+   - Two mirrored state types: `session.State` and `strategy.SessionState` with conversion functions
+   - `SessionInitializer` interface with `InitializeSession` method
+   - Git worktree support with worktree-specific shadow branches
+   - `stringutil.TruncateRunes` and `stringutil.CollapseWhitespace` for safe string truncation
+   - Test patterns using `t.TempDir()`, `t.Chdir()`, and `git.PlainInit`
+   - Lint compliance with golangci-lint (goconst, ineffassign, etc.)
+   - `mise run fmt && mise run lint && mise run test:ci` required before every commit
+
+3. Files and Code Sections:
+   - `cmd/entire/cli/session/state.go`
+     - Core session state type shared across packages
+     - Added `FirstPrompt string` field after `TranscriptPath`:
+     ```go
+     // FirstPrompt is the first user prompt that started this session (truncated for display)
+     FirstPrompt string `json:"first_prompt,omitempty"`
+     ```
+
+   - `cmd/entire/cli/strategy/manual_commit_types.go`
+     - Strategy-specific session state type (mirrors session.State)
+     - Added `FirstPrompt` field, `maxFirstPromptRunes` constant, `stringutil` import, and `truncatePromptForStorage` helper:
+     ```go
+     const maxFirstPromptRunes = 100
+
+     func truncatePromptForStorage(prompt string) string {
+         return stringutil.TruncateRunes(stringutil.CollapseWhitespace(prompt), maxFirstPromptRunes, "...")
+     }
+     ```
+     - Added field: `FirstPrompt string \`json:"first_prompt,omitempty"\``
+
+   - `cmd/entire/cli/strategy/strategy.go`
+     - Defines `SessionInitializer` interface
+     - Updated signature to add `userPrompt string` parameter:
+     ```go
+     InitializeSession(sessionID string, agentType agent.AgentType, transcriptPath string, userPrompt string) error
+     ```
+
+   - `cmd/entire/cli/strategy/manual_commit_hooks.go`
+     - `ManualCommitStrategy.InitializeSession` - main entry point for session initialization
+     - Updated signature to accept `userPrompt string`
+     - Added FirstPrompt backfill in the "session already exists" branch:
+     ```go
+     // Backfill FirstPrompt if empty (for sessions created before the first_prompt field was added).
+     // Note: needSave not set here — attribution calculation below unconditionally sets it.
+     if state.FirstPrompt == "" && userPrompt != "" {
+         state.FirstPrompt = truncatePromptForStorage(userPrompt)
+     }
+     ```
+     - Updated call to `s.initializeSession()` to pass `userPrompt`
+
+   - `cmd/entire/cli/strategy/manual_commit_session.go`
+     - `initializeSession` - creates new session state
+     - Updated signature to accept `userPrompt string`
+     - Added `FirstPrompt: truncatePromptForStorage(userPrompt)` to state struct
+     - Removed now-unused `stringutil` import
+
+   - `cmd/entire/cli/strategy/manual_commit.go`
+     - Conversion functions between `session.State` and `SessionState`
+     - Added `FirstPrompt: state.FirstPrompt` to both `sessionStateToStrategy()` and `sessionStateFromStrategy()`
+
+   - `cmd/entire/cli/strategy/manual_commit_git.go`
+     - Fallback session initialization in `SaveChanges` and `SaveTaskCheckpoint`
+     - Updated 2 call sites to pass empty string for userPrompt: `s.initializeSession(repo, sessionID, agentType, "", "")`
+
+   - `cmd/entire/cli/strategy/auto_commit.go`
+     - `AutoCommitStrategy.InitializeSession`
+     - Updated signature, added backfill on resume, added FirstPrompt to new state creation
+     - Removed unused `stringutil` import (now uses `truncatePromptForStorage` from types)
+     ```go
+     if existing != nil {
+         if existing.FirstPrompt == "" && userPrompt != "" {
+             existing.FirstPrompt = truncatePromptForStorage(userPrompt)
+             if err := SaveSessionState(existing); err != nil {
+                 return fmt.Errorf("failed to update session state: %w", err)
+             }
+         }
+         return nil
+     }
+     ```
+
+   - `cmd/entire/cli/hooks_claudecode_handlers.go`
+     - Claude Code hook handler call site
+     - Changed: `initializer.InitializeSession(hookData.sessionID, agentType, hookData.input.SessionRef, hookData.input.UserPrompt)`
+
+   - `cmd/entire/cli/hooks_geminicli_handlers.go`
+     - Gemini CLI hook handler call site
+     - Changed: `initializer.InitializeSession(input.SessionID, agentType, input.SessionRef, input.UserPrompt)`
+
+   - `cmd/entire/cli/setup.go`
+     - Main file for enable/disable/status commands
+     - Added imports: `os/exec`, `sort`, `time`, `stringutil`
+     - Modified `runStatus()` to call `writeActiveSessions(w)` when enabled
+     - Added `timeAgo()` helper function:
+     ```go
+     func timeAgo(t time.Time) string {
+         d := time.Since(t)
+         switch {
+         case d < time.Minute:
+             return "just now"
+         case d < time.Hour:
+             m := int(d.Minutes())
+             return fmt.Sprintf("%dm ago", m)
+         case d < 24*time.Hour:
+             h := int(d.Hours())
+             return fmt.Sprintf("%dh ago", h)
+         default:
+             days := int(d.Hours() / 24)
+             return fmt.Sprintf("%dd ago", days)
+         }
+     }
+     ```
+     - Added `worktreeGroup` struct, `unknownPlaceholder` constant
+     - Added `writeActiveSessions(w io.Writer)` - groups sessions by worktree, resolves branches, sorts, formats output
+     - Added `resolveWorktreeBranch(worktreePath string) string` - uses `git -C <path> rev-parse --abbrev-ref HEAD`
+
+   - `cmd/entire/cli/setup_test.go`
+     - Added imports: `context`, `time`, `session`
+     - Added `TestTimeAgo` - table-driven test for all duration cases
+     - Added `TestWriteActiveSessions` - creates 3 mock sessions across 2 worktrees, verifies output formatting
+     - Added `TestWriteActiveSessions_NoSessions` - verifies no output when empty
+     - Added `TestWriteActiveSessions_EndedSessionsExcluded` - verifies ended sessions filtered
+
+   - `cmd/entire/cli/strategy/auto_commit_test.go` - Updated `InitializeSession` call to 4 args
+   - `cmd/entire/cli/strategy/manual_commit_test.go` - Updated 2 `InitializeSession` calls to 4 args
+   - `cmd/entire/cli/strategy/manual_commit_staging_test.go` - Updated 7 `InitializeSession` calls to 4 args
+
+4. Errors and fixes:
+   - **`ineffassign` lint error**: `needSave = true` on the FirstPrompt backfill line was flagged because attribution calculation below unconditionally sets `needSave = true`. Fixed by removing the redundant assignment and adding a comment explaining why.
+   - **Compiler errors "not enough arguments"**: After changing `InitializeSession` signature from 3 to 4 params, all call sites broke. Fixed by updating all callers: 2 hook handlers, 2 fallback paths in manual_commit_git.go, and ~12 test files.
+   - **`goconst` lint error**: `"(unknown)"` string appeared 3 times. Fixed by extracting `unknownPlaceholder` constant.
+   - **Self-referential const**: `replace_all` on `"(unknown)"` also replaced the string literal inside the const declaration, creating `const unknownPlaceholder = unknownPlaceholder`. Fixed by manually setting it back to `const unknownPlaceholder = "(unknown)"`.
+   - **Unused imports**: After extracting `truncatePromptForStorage` helper, `stringutil` imports in `manual_commit_session.go` and `auto_commit.go` became unused. Fixed by removing them.
+   - **Import ordering**: stdlib imports in `setup.go` were split across two groups with a blank line. Fixed by merging into one sorted group.
+
+5. Problem Solving:
+   - Identified that auto-commit strategy didn't backfill `FirstPrompt` on session resume (it returned early when `existing != nil`). Added backfill logic.
+   - Identified trailing blank line issue after last worktree group in output. Fixed by using index-based check `if i < len(sortedGroups)-1`.
+   - Identified variable shadowing (`s` used as both loop var and receiver pattern). Renamed inner loop var to `st`.
+   - Identified 4 duplicated `stringutil.TruncateRunes(stringutil.CollapseWhitespace(userPrompt), 100, "...")` calls. Extracted `truncatePromptForStorage` helper with named constant `maxFirstPromptRunes`.
+   - Identified that `resolveWorktreeBranch` would be called with `"(unknown)"` path. Added guard to skip resolution for placeholder paths.
+   - Tightened test assertion from `"1 checkpoint"` to `"1 checkpoint "` to avoid false positive matching `"1 checkpoints"`.
+   - All tests (unit + integration) pass. Lint passes with 0 issues. Format is clean.
+
+6. All user messages:
+   - "Implement the following plan: [detailed ENT-64 plan for status showing session information]"
+   - "please please fix up any code quality issues you notice and don't leave them by the wayside if they are small"
+   - "commit this"
+
+7. Pending Tasks:
+   - Create the git commit with all 15 modified files
+
+8. Current Work:
+   The user said "commit this". I ran the three pre-commit information gathering commands (`git status`, `git diff`, `git log --oneline -5`) and have all the information needed. There are 15 modified files, all unstaged. The diff shows all changes for ENT-64. Recent commit style uses imperative sentences like "Fix shell injection vulnerability" and "switch ldflags in goreleaser to new package name". I need to stage the specific files and create the commit.
+
+9. Optional Next Step:
+   Stage the 15 modified files and create a commit. The user explicitly said "commit this". The files to stage are:
+   - cmd/entire/cli/hooks_claudecode_handlers.go
+   - cmd/entire/cli/hooks_geminicli_handlers.go
+   - cmd/entire/cli/session/state.go
+   - cmd/entire/cli/setup.go
+   - cmd/entire/cli/setup_test.go
+   - cmd/entire/cli/strategy/auto_commit.go
+   - cmd/entire/cli/strategy/auto_commit_test.go
+   - cmd/entire/cli/strategy/manual_commit.go
+   - cmd/entire/cli/strategy/manual_commit_git.go
+   - cmd/entire/cli/strategy/manual_commit_hooks.go
+   - cmd/entire/cli/strategy/manual_commit_session.go
+   - cmd/entire/cli/strategy/manual_commit_staging_test.go
+   - cmd/entire/cli/strategy/manual_commit_test.go
+   - cmd/entire/cli/strategy/manual_commit_types.go
+   - cmd/entire/cli/strategy/strategy.go
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+Q: should status be in its own file?
+
+---
+
+yep let's refactor. do we have tests to move too?
