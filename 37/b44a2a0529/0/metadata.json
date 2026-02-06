@@ -1,9 +1,0 @@
-{
-  "checkpoint_id": "37b44a2a0529",
-  "session_id": "2026-01-16-cde341db-b80a-44f5-b0f2-94db2ef7a164",
-  "strategy": "auto-commit",
-  "created_at": "2026-01-16T10:51:33.050246+09:30",
-  "checkpoints_count": 0,
-  "files_touched": null,
-  "agent": "Claude Code"
-}

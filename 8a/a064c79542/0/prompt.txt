@@ -1,9 +1,0 @@
-change color in color doc, choose the color.
-
----
-
-read the color in docs file, change the color.
-
----
-
-run an agent that creates a color file inside docs, choose your color
