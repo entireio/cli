@@ -1,0 +1,19 @@
+{
+  "checkpoint_id": "c37f53c3af3b",
+  "session_id": "2026-01-23-9fd328aa-ecda-4618-b1ed-047b284117c6",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-23T11:50:13.791894+01:00",
+  "branch": "soph/add-remote-tracking-to-entire-sessions",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/strategy/push_common.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 893,
+    "cache_creation_tokens": 41128,
+    "cache_read_tokens": 284922,
+    "output_tokens": 15,
+    "api_call_count": 9
+  }
+}

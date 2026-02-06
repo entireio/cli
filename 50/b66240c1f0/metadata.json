@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "50b66240c1f0",
+  "strategy": "manual-commit",
+  "branch": "soph/make-sure-https-works",
+  "migration_source_commit": "15ad72e938e23896e68f319667f34e5e40145787",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/git_operations.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/50/b66240c1f0/0/metadata.json",
+      "transcript": "/50/b66240c1f0/0/full.jsonl",
+      "context": "/50/b66240c1f0/0/context.md",
+      "content_hash": "/50/b66240c1f0/0/content_hash.txt",
+      "prompt": "/50/b66240c1f0/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 7412,
+    "cache_creation_tokens": 66181,
+    "cache_read_tokens": 3346647,
+    "output_tokens": 135,
+    "api_call_count": 46
+  }
+}

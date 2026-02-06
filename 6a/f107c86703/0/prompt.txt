@@ -1,0 +1,26 @@
+can you review the changes in the local branch?
+
+---
+
+can you explain me why we need registryMu.Lock() at all in the GetByAgentType methods?
+
+---
+
+back to the findings before, let's say we assume that the count of agents will not be more then 20, is this then really an issue: 
+1. GetByAgentType() Performance (cmd/entire/cli/agent/registry.go:388-402)
+
+---
+
+Can we add a brief comment for future reviews?
+
+---
+
+2. Add a test for backwards compatibility with old checkpoint metadata - can you propose some test her?
+
+---
+
+hmm are the first two tests really testing something?
+
+---
+
+remove the first two

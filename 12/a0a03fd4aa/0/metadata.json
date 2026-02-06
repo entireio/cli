@@ -1,0 +1,11 @@
+{
+  "checkpoint_id": "12a0a03fd4aa",
+  "session_id": "2026-01-06-cacf6cfb-e843-47af-9dc2-6a5af1137c53",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-06T13:33:39.542576+01:00",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go"
+  ]
+}

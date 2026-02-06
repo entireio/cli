@@ -1,0 +1,78 @@
+Implement the following plan:
+
+# Plan: Remove Redundant Fields from Session Metadata
+
+## Goal
+Remove these fields from `CommittedMetadata` (session-level `metadata.json`):
+
+1. **`Agents`** array - Keep only single `Agent` string
+2. **`SessionIDs`** array - Delete
+3. **`SessionCount`** int - Delete
+
+---
+
+## Files to Modify
+
+### 1. Struct Definition
+**`cmd/entire/cli/checkpoint/checkpoint.go`**
+
+Remove from `CommittedMetadata` (lines 339, 342-343):
+```go
+Agents []agent.AgentType `json:"agents,omitempty"`      // DELETE
+SessionCount int      `json:"session_count,omitempty"` // DELETE
+SessionIDs   []string `json:"session_ids,omitempty"`   // DELETE
+```
+
+### 2. Writing Logic
+**`cmd/entire/cli/checkpoint/committed.go`**
+
+In `writeSessionToSubdirectory()` - remove these assignments from `sessionMetadata`:
+- `SessionCount: 1`
+- `SessionIDs: []string{opts.SessionID}`
+
+### 3. Reading Logic
+**`cmd/entire/cli/strategy/common.go`**
+
+In `ListCheckpoints()` and `ReadCheckpointMetadata()`:
+- Remove any code reading `Agents`, `SessionCount`, `SessionIDs` from session metadata
+
+### 4. Tests
+**`cmd/entire/cli/checkpoint/checkpoint_test.go`**:
+- Remove assertions for `Agents`, `SessionCount`, `SessionIDs`
+
+---
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/a3b65315-4a3c-488d-9e35-cea56e21ffef.jsonl
+
+---
+
+do we need that? is not the code already starting from 1 ?
+
+---
+
+find unused code after all this refactor
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+great, new change. while creating sub session folders inside checkpoint root folder, we follow the next pattern:
+/1 /2 being 1 first to be created. I want to be /0  first to be created instead
+
+---
+
+[Request interrupted by user]
+
+---
+
+great, new change. while creating sub session folders inside checkpoint root folder, we follow the next pattern:
+/1 /2 being 1 first to be created. I want to be /0  first to be created instead

@@ -1,0 +1,23 @@
+okay - lint and tests are failing -> let's sort this out first, then get to the PR review comments.
+
+things have moved quite a bit since the PR was raised
+
+---
+
+commit and push please
+
+---
+
+let's look at the PR review comments
+
+---
+
+let's investigate 3 and 7 - use subagents if you need
+
+---
+
+yeah let's note both and move on for now
+
+---
+
+all four

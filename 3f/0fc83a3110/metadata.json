@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "3f0fc83a3110",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-64-status-shows-sessions",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/claude.go",
+    "cmd/entire/cli/agent/claudecode/claude_test.go",
+    "cmd/entire/cli/agent/claudecode/types.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/3f/0fc83a3110/0/metadata.json",
+      "transcript": "/3f/0fc83a3110/0/full.jsonl",
+      "context": "/3f/0fc83a3110/0/context.md",
+      "content_hash": "/3f/0fc83a3110/0/content_hash.txt",
+      "prompt": "/3f/0fc83a3110/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 32,
+    "cache_creation_tokens": 45593,
+    "cache_read_tokens": 1511518,
+    "output_tokens": 505,
+    "api_call_count": 28
+  }
+}

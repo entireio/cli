@@ -1,0 +1,38 @@
+{
+  "checkpoint_id": "7a0f7b5d6c56",
+  "session_id": "2026-01-27-0276a600-2f22-4d2b-844c-3feb9c5aa108",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-27T12:27:15.046222Z",
+  "branch": "soph/agent-attribution",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_attribution.go",
+    "cmd/entire/cli/strategy/manual_commit_attribution_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "docs/architecture/adr-001-attribution-line-ownership.md",
+    "docs/architecture/attribution.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "ee4605cf-d61c-4e56-903b-a9b5fc0e5457",
+  "transcript_lines_at_start": 253,
+  "token_usage": {
+    "input_tokens": 702,
+    "cache_creation_tokens": 308769,
+    "cache_read_tokens": 8986691,
+    "output_tokens": 24708,
+    "api_call_count": 86
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-27T12:27:14.942937Z",
+    "agent_lines": 23,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 23,
+    "agent_percentage": 100
+  }
+}

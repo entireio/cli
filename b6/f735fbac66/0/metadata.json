@@ -1,0 +1,13 @@
+{
+  "checkpoint_id": "b6f735fbac66",
+  "session_id": "2026-01-08-0442a060-edc3-4307-bddb-11a2951fd1a1",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-08T17:48:48.098463+01:00",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/state_test.go",
+    "cmd/entire/cli/strategy/common.go"
+  ]
+}

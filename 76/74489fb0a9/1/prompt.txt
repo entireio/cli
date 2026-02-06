@@ -1,0 +1,513 @@
+Implement the following plan:
+
+# Plan: Restructure Checkpoint Storage Format
+
+## Goal
+
+Change how checkpoint data is stored on `entire/sessions` branch from flat files at root to numbered session subdirectories with a summary metadata.json at root.
+
+## Current vs Desired Structure
+
+### Current:
+```
+a3/b2c4d5e6f7/
+├── metadata.json         # All data mixed together
+├── full.jsonl            # Latest session transcript
+├── prompt.txt
+├── context.md
+├── content_hash.txt
+└── 1/, 2/                # Archived sessions
+```
+
+### Desired:
+```
+a3/b2c4d5e6f7/
+├── metadata.json         # SUMMARY ONLY (aggregated stats + file paths)
+├── 0/                    # First session
+│   ├── metadata.json     # Session-specific (includes initial_attribution)
+│   ├── full.jsonl
+│   ├── prompt.txt
+│   ├── context.md
+│   └── content_hash.txt
+├── 1/                    # Second session
+└── 2/                    # Third session...
+```
+
+## Root metadata.json Schema (Checkpoint Summary)
+
+```json
+{
+  "checkpoint_id": "45529c7532a8",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-03T04:23:26Z",
+  "branch": "worktree-entirely-test",
+  "checkpoints_count": 5,
+  "files_touched": ["file1.go", "file2.go"],
+  "agents": ["Claude Code", "Gemini CLI"],
+  "session_count": 2,
+  "session_ids": ["session-1-uuid", "session-2-uuid"],
+  "sessions": {
+    "session-1-uuid": {
+      "metadata": "0/metadata.json",
+      "transcript": "0/full.jsonl",
+      "context": "0/context.md",
+      "content_hash": "0/content_hash.txt",
+      "prompt": "0/prompt.txt"
+    },
+    "session-2-uuid": {
+      "metadata": "1/metadata.json",
+      "transcript": "1/full.jsonl",
+      "context": "1/context.md",
+      "content_hash": "1/content_hash.txt",
+      "prompt": "1/prompt.txt"
+    }
+  },
+  "token_usage": {
+    "input_tokens": 100,
+    "cache_creation_tokens": 1000,
+    "cache_read_tokens": 50000,
+    "output_tokens": 200,
+    "api_call_count": 10
+  }
+}
+```
+
+**Note:** `initial_attribution` is NOT included at root level (per user request).
+
+## Aggregated Fields (merged from all sessions)
+
+| Field | Aggregation Method |
+|-------|-------------------|
+| `files_touched` | Union of all session files (deduplicated) |
+| `checkpoints_count` | Sum of all session checkpoint counts |
+| `token_usage` | Sum of all token usage fields |
+| `session_count` | Count of sessions |
+| `session_ids` | List of all session IDs |
+| `agents` | Union of all agents (deduplicated, preserving order) |
+| `created_at` | Timestamp of the **latest** session added |
+
+---
+
+## Implementation Plan
+
+### Phase 1: New Data Structures
+
+**File:** `cmd/entire/cli/checkpoint/checkpoint.go`
+
+1. Add new struct `CheckpointSummary` for root metadata.json:
+```go
+type SessionFilePaths struct {
+    Metadata    string `json:"metadata"`
+    Transcript  string `json:"transcript"`
+    Context     string `json:"context"`
+    ContentHash string `json:"content_hash"`
+    Prompt      string `json:"prompt"`
+}
+
+type CheckpointSummary struct {
+    CheckpointID     id.CheckpointID             `json:"checkpoint_id"`
+    Strategy         string                      `json:"strategy"`
+    CreatedAt        time.Time                   `json:"created_at"`
+    Branch           string                      `json:"branch,omitempty"`
+    CheckpointsCount int                         `json:"checkpoints_count"`
+    FilesTouched     []string                    `json:"files_touched"`
+    Agents           []agent.AgentType           `json:"agents,omitempty"`
+    SessionCount     int                         `json:"session_count"`
+    SessionIDs       []string                    `json:"session_ids"`
+    Sessions         map[string]SessionFilePaths `json:"sessions"`
+    TokenUsage       *agent.TokenUsage           `json:"token_usage,omitempty"`
+}
+```
+
+2. Keep `CommittedMetadata` for session-level metadata (in numbered folders `0/`, `1/`, etc.) - this includes ALL current fields:
+   - `initial_attribution`
+   - `token_usage`
+   - `files_touched`
+   - `checkpoints_count`
+   - `session_id`
+   - etc.
+
+### Phase 2: Update Write Logic
+
+**File:** `cmd/entire/cli/checkpoint/committed.go`
+
+#### 2.1 Modify `writeStandardCheckpointEntries()` (line 214)
+
+Current flow:
+1. Check for existing metadata → archive if exists
+2. Write transcript, prompts, context at root
+3. Write metadata.json at root
+
+New flow:
+1. Read existing root metadata.json (if exists) to get current session count
+2. Determine next session index (0, 1, 2, ...)
+3. Write session files to `<index>/` subdirectory:
+   - `<index>/metadata.json` (session-specific, includes initial_attribution)
+   - `<index>/full.jsonl`
+   - `<index>/prompt.txt`
+   - `<index>/context.md`
+   - `<index>/content_hash.txt`
+4. Update root metadata.json with:
+   - Aggregated stats (merge files_touched, sum checkpoints_count, sum token_usage)
+   - New session entry in `sessions` map
+   - Increment session_count
+
+#### 2.2 Create helper functions:
+
+```go
+// writeSessionToSubdirectory writes a single session's files to basePath/<index>/
+func (s *GitStore) writeSessionToSubdirectory(
+    opts WriteCommittedOptions,
+    basePath string,
+    sessionIndex int,
+    entries map[string]object.TreeEntry,
+) (SessionFilePaths, error)
+
+// updateCheckpointSummary reads existing summary (if any) and merges new session data
+func (s *GitStore) updateCheckpointSummary(
+    existing *CheckpointSummary,
+    opts WriteCommittedOptions,
+    sessionIndex int,
+    filePaths SessionFilePaths,
+) *CheckpointSummary
+
+// aggregateTokenUsage sums two TokenUsage structs
+func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage
+
+// aggregateAgents merges agent lists (deduplicated, preserving order)
+func aggregateAgents(existing []agent.AgentType, newAgent agent.AgentType) []agent.AgentType
+```
+
+#### 2.3 Remove `archiveExistingSession()`
+
+No longer needed - sessions are always written to new numbered subdirectories.
+
+### Phase 3: Update Read Logic
+
+**File:** `cmd/entire/cli/checkpoint/committed.go`
+
+#### 3.1 Modify `ReadCommitted()` (line 620)
+
+Current: Reads files from checkpoint root
+New:
+1. Read root metadata.json to get `CheckpointSummary`
+2. Use `sessions` map to locate session files
+3. Read session files from their subdirectories
+
+Read from new format directly (no backwards compatibility needed).
+
+#### 3.2 Modify `readArchivedSessions()` (line 518)
+
+Update to use the `sessions` map from summary instead of scanning numbered folders.
+
+#### 3.3 Modify `ListCommitted()` (line 675)
+
+No change needed - still scans for metadata.json at checkpoint root.
+
+### Phase 4: Update Strategy Layer
+
+**File:** `cmd/entire/cli/strategy/manual_commit_logs.go`
+
+#### 4.1 Update `GetSessionContext()` (line 98)
+
+Use sessions map to find correct path for context.md.
+
+---
+
+## Files to Modify
+
+| File | Changes |
+|------|---------|
+| `cmd/entire/cli/checkpoint/checkpoint.go` | Add `CheckpointSummary`, `SessionFilePaths` structs |
+| `cmd/entire/cli/checkpoint/committed.go` | Rewrite `writeStandardCheckpointEntries`, update `ReadCommitted`, `readArchivedSessions` |
+| `cmd/entire/cli/strategy/manual_commit_logs.go` | Update `GetSessionContext` to use sessions map |
+
+---
+
+## TDD Workflow
+
+### Step 1: Write Tests First (before implementation)
+
+**File:** `cmd/entire/cli/checkpoint/committed_test.go`
+
+Write failing tests that document the expected behavior:
+
+1. **Test `writeStandardCheckpointEntries` new format:**
+   - Verify root metadata.json contains `CheckpointSummary` structure
+   - Verify session files are written to `0/` subdirectory
+   - Verify `sessions` map has correct file paths
+
+2. **Test multi-session aggregation:**
+   - Write first session → creates `0/` folder
+   - Write second session → creates `1/` folder
+   - Verify root metadata.json aggregates:
+     - `files_touched` (union)
+     - `checkpoints_count` (sum)
+     - `token_usage` (sum)
+     - `agents` (union)
+     - `session_count` incremented
+     - `sessions` map has both entries
+
+3. **Test `ReadCommitted` new format:**
+   - Read checkpoint and verify all session data accessible
+   - Verify `sessions` map paths resolve correctly
+
+4. **Test root metadata excludes `initial_attribution`:**
+   - Write session with initial_attribution
+   - Verify root metadata.json does NOT have initial_attribution
+   - Verify session metadata.json DOES have initial_attribution
+
+### Step 2: Get feedback on tests
+
+Before implementing, ask user to review:
+- Do tests accurately reflect intended behavior?
+- Any edge cases missing?
+
+### Step 3: Implement to make tests pass
+
+---
+
+## Verification (after implementation)
+
+1. **Unit tests:** `mise run test` - verify all new tests pass
+
+2. **Integration tests:** `mise run test:integration`
+   - Verify post-commit hook still works
+   - Verify checkpoint condensation produces correct structure
+
+3. **Manual testing:**
+   ```bash
+   # Create a session, make changes, commit
+   # Check entire/sessions branch structure:
+   git show entire/sessions:a3/b2c4d5e6f7/metadata.json
+   git show entire/sessions:a3/b2c4d5e6f7/0/full.jsonl
+   ```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/22311e9b-3d73-4b7c-97d5-70ff8b2a2ccd.jsonl
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me analyze the conversation chronologically:
+
+1. Initial Request: The user provided a detailed implementation plan to restructure checkpoint storage format from flat files to numbered session subdirectories with a summary metadata.json at root.
+
+2. The plan specified:
+   - Current structure: files at root with archived sessions in numbered folders (1/, 2/)
+   - Desired structure: All sessions in numbered folders (0/, 1/, 2/) with CheckpointSummary at root
+   - Root metadata.json should NOT include initial_attribution (per user request)
+   - Session-level metadata should include all fields including initial_attribution
+
+3. My approach:
+   - Created task list for tracking progress
+   - Read existing code to understand current implementation
+   - Wrote failing tests first (TDD approach)
+   - Added new data structures (CheckpointSummary, SessionFilePaths)
+   - Updated write logic (writeStandardCheckpointEntries)
+   - Updated read logic (ReadCommitted, readArchivedSessions)
+   - Updated various helpers and tests
+
+4. Key files modified:
+   - checkpoint/checkpoint.go - Added new structs
+   - checkpoint/committed.go - Rewrote write/read logic
+   - checkpoint/checkpoint_test.go - Added new tests, updated helpers
+   - strategy/manual_commit_logs.go - Updated GetSessionContext
+   - strategy/manual_commit_test.go - Updated tests for new format
+   - strategy/session.go - Updated getDescriptionForCheckpoint
+
+5. Errors encountered:
+   - Unused parameters after refactoring
+   - Old tests expecting CommittedMetadata at root (now CheckpointSummary)
+   - Tests reading InitialAttribution from root (now in session subdirectory)
+   - Missing imports in various files
+   - getDescriptionForCheckpoint looking at wrong path for prompt.txt
+
+6. Current state: I was fixing the last failing test (TestAutoCommitStrategy_ListSessions_HasDescription) by updating getDescriptionForCheckpoint to read from session subdirectories. I just added imports to session.go.
+
+7. Tasks completed: 4 of 5 tasks done. Task 5 (Update GetSessionContext) is in progress.
+
+Summary:
+1. Primary Request and Intent:
+   The user asked to implement a detailed plan to restructure checkpoint storage format on the `entire/sessions` branch. The key changes are:
+   - Change from flat files at root with archived sessions in numbered folders (1/, 2/) to ALL sessions in numbered subdirectories (0/, 1/, 2/)
+   - Root `metadata.json` becomes a `CheckpointSummary` with aggregated stats and a sessions map
+   - Session-specific data (including `initial_attribution`) stored in session subdirectories
+   - Root metadata should NOT include `initial_attribution` (explicitly requested by user)
+
+2. Key Technical Concepts:
+   - TDD (Test-Driven Development) approach
+   - Git storage using go-git library
+   - Checkpoint storage with sharded paths: `<id[:2]>/<id[2:]>/`
+   - CheckpointSummary for aggregated root metadata
+   - SessionFilePaths for mapping session IDs to file locations
+   - Token usage aggregation across sessions
+   - Agent deduplication for multi-session checkpoints
+
+3. Files and Code Sections:
+   - `cmd/entire/cli/checkpoint/checkpoint.go`
+     - Added new structs for the storage format
+     - Key addition:
+     ```go
+     type SessionFilePaths struct {
+         Metadata    string `json:"metadata"`
+         Transcript  string `json:"transcript"`
+         Context     string `json:"context"`
+         ContentHash string `json:"content_hash"`
+         Prompt      string `json:"prompt"`
+     }
+
+     type CheckpointSummary struct {
+         CheckpointID     id.CheckpointID             `json:"checkpoint_id"`
+         Strategy         string                      `json:"strategy"`
+         CreatedAt        time.Time                   `json:"created_at"`
+         Branch           string                      `json:"branch,omitempty"`
+         CheckpointsCount int                         `json:"checkpoints_count"`
+         FilesTouched     []string                    `json:"files_touched"`
+         Agents           []agent.AgentType           `json:"agents,omitempty"`
+         SessionCount     int                         `json:"session_count"`
+         SessionIDs       []string                    `json:"session_ids"`
+         Sessions         map[string]SessionFilePaths `json:"sessions"`
+         TokenUsage       *agent.TokenUsage           `json:"token_usage,omitempty"`
+     }
+     ```
+
+   - `cmd/entire/cli/checkpoint/committed.go`
+     - Rewrote `writeStandardCheckpointEntries` to write sessions to numbered subdirectories
+     - Added `writeSessionToSubdirectory`, `writeCheckpointSummary`, `readSummaryFromBlob`, `aggregateTokenUsage`
+     - Updated `ReadCommitted` to read from new format using sessions map
+     - Added `readArchivedSessionsFromSummary` for reading archived sessions
+     - Updated `UpdateSummary` to write to session-level metadata
+     - Removed unused `writeMetadataJSON` function
+
+   - `cmd/entire/cli/checkpoint/checkpoint_test.go`
+     - Added new format tests: `TestWriteCommitted_NewFormat_SingleSession`, `TestWriteCommitted_NewFormat_MultiSession`, `TestWriteCommitted_RootMetadataExcludesInitialAttribution`, `TestReadCommitted_NewFormat`
+     - Updated `readCheckpointMetadata` helper to read CheckpointSummary
+     - Added `readLatestSessionMetadata` helper for session-level metadata
+     - Updated `TestWriteCommitted_AgentsArray_SingleSession` expectation (Agents array now always populated)
+
+   - `cmd/entire/cli/strategy/manual_commit_logs.go`
+     - Updated `GetSessionContext` to use sessions map from CheckpointSummary
+     - Added imports for `encoding/json`, `checkpoint` package
+
+   - `cmd/entire/cli/strategy/manual_commit_test.go`
+     - Updated `TestCondenseSession_IncludesInitialAttribution` to read from `0/metadata.json`
+     - Updated `TestMultiCheckpoint_UserEditsBetweenCheckpoints` to read from `0/metadata.json`
+
+   - `cmd/entire/cli/strategy/session.go`
+     - Updated `getDescriptionForCheckpoint` to read from session subdirectories
+     - Added imports for `encoding/json`, `strconv`, `checkpoint`, `paths`
+
+4. Errors and fixes:
+   - Unused `sessionIndex` parameter in `writeCheckpointSummary`: Removed parameter
+   - Unused `writeMetadataJSON` function: Removed the function
+   - Unused `latestSessionID` variable: Removed the variable
+   - Tests failing because `readCheckpointMetadata` parsed root as CommittedMetadata: Updated to parse as CheckpointSummary and convert
+   - `TestWriteCommitted_AgentsArray_SingleSession` expected empty Agents array: Updated expectation since new format always includes agents
+   - `TestUpdateSummary` reading Summary from root: Created `readLatestSessionMetadata` helper to read from session subdirectory
+   - Attribution tests reading from root metadata: Updated to read from `0/metadata.json`
+   - Missing imports in `session.go`: Added `encoding/json`, `strconv`, `checkpoint`, `paths`
+   - `getDescriptionForCheckpoint` looking at wrong path: Updated to read CheckpointSummary and navigate to session subdirectory
+
+5. Problem Solving:
+   - Successfully implemented new storage format with CheckpointSummary at root
+   - All checkpoint tests pass
+   - Most strategy tests pass
+   - Currently fixing last failing test: `TestAutoCommitStrategy_ListSessions_HasDescription`
+
+6. All user messages:
+   - User provided the full implementation plan with detailed schema, implementation steps, and verification requirements
+   - No additional user feedback during implementation
+
+7. Pending Tasks:
+   - Task #5: Update GetSessionContext to use sessions map (in progress, mostly done)
+   - Fix remaining failing test: `TestAutoCommitStrategy_ListSessions_HasDescription`
+   - Run full test suite to verify
+   - Run linting and formatting (`mise run fmt && mise run lint`)
+
+8. Current Work:
+   I was fixing the `TestAutoCommitStrategy_ListSessions_HasDescription` test failure. The test expects session descriptions to be populated, but `getDescriptionForCheckpoint` was looking at the wrong path. I updated the function in `session.go` to:
+   1. Read the CheckpointSummary from root metadata.json
+   2. Navigate to the appropriate session subdirectory
+   3. Call `getSessionDescriptionFromTree` on the session tree
+
+   I just added the required imports to `session.go`:
+   ```go
+   import (
+       "encoding/json"
+       "fmt"
+       "sort"
+       "strconv"
+       "strings"
+       "time"
+
+       "entire.io/cli/cmd/entire/cli/checkpoint"
+       "entire.io/cli/cmd/entire/cli/checkpoint/id"
+       "entire.io/cli/cmd/entire/cli/paths"
+
+       "github.com/go-git/go-git/v5"
+   )
+   ```
+
+9. Optional Next Step:
+   Run the failing test to verify the fix works:
+   ```bash
+   go test -v ./cmd/entire/cli/strategy/... -run "TestAutoCommitStrategy_ListSessions_HasDescription"
+   ```
+   
+   Then run all tests and linting as per the plan's verification section.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/5b0da9e3-42fa-42ce-a039-ad516ce23a1b.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+agents field is an array and also a aggregation of all the agents of this checkpoint
+
+---
+
+[Request interrupted by user]
+
+---
+
+perfect. Now, I want to modify a bit the root checkpoint metadata file:
+- delete session_ids, session_count, created_at
+- modify sessions map to be just an array of the sessions 
+
+it should look like:
+{
+  "checkpoint_id": "45529c7532a8",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-03T04:23:26.07449Z",
+  "branch": "worktree-entirely-test",
+  "checkpoints_count": 10,
+  "files_touched": [
+    "cities/tokyo1.md",
+    "cities/tokyo2.md",
+    "cities/tokyo3.md",
+    "cities/tokyo4.md"
+  ],
+  "sessions":[{
+      "metadata":"45/529c7532a8/0/metadata.json",
+      "transcript":"45/529c7532a8/0/full.jsonl",
+      "context":"<file path>",
+      "content_hash":"<file path>",
+      "prompt":"<file path>"
+    },{
+      "metadata":"<file path>",
+      "transcript":"<file path>",
+      "context":"<file path>",
+      "content_hash":"<file path>",
+      "prompt":"<file path>"
+    },
+  ],
+  "token_usage": {
+    "input_tokens": 44,
+    "cache_creation_tokens": 992,
+    "cache_read_tokens": 171725,
+    "output_tokens": 25,
+    "api_call_count": 5
+  },
+}

@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "3aa278c851a7",
+  "strategy": "manual-commit",
+  "branch": "soph/add-branch-to-metadata",
+  "migration_source_commit": "babd2ec913ccf70af52826da16ec1e22a3a47a69",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/3a/a278c851a7/0/metadata.json",
+      "transcript": "/3a/a278c851a7/0/full.jsonl",
+      "context": "/3a/a278c851a7/0/context.md",
+      "content_hash": "/3a/a278c851a7/0/content_hash.txt",
+      "prompt": "/3a/a278c851a7/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

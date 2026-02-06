@@ -1,0 +1,10 @@
+I just tried to make a release with the .github/workflows/release.yml through go release and did run into this issue:  • sign & notarize macOS binaries
+    • signing                                        binary=dist/cli_darwin_arm64_v8.0/entire
+    • notarizing and waiting - this might take a while binary=dist/cli_darwin_arm64_v8.0/entire
+      • took: 20m2s
+  ⨯ release failed after 22m5s                       error=notarize: macos: notarize dist/cli_darwin_arm64_v8.0/entire: Get "https://appstoreconnect.apple.com/notary/v2/submissions/9a5053ef-a36a-4436-a25e-f8604079a28e": context deadline exceeded
+Error: The process '/opt/hostedtoolcache/goreleaser-action/2.13.2/x64/goreleaser' failed with exit code 1
+
+---
+
+can you also add a single retry?

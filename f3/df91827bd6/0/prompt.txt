@@ -1,0 +1,218 @@
+Implement the following plan:
+
+# Plan: Change ReadCommitted to Return CheckpointSummary
+
+## Summary
+Change `ReadCommitted` to return `*CheckpointSummary` instead of `*ReadCommittedResult`. Add helper methods for callers that need actual content.
+
+## Approach
+- `ReadCommitted` returns only the `CheckpointSummary` (paths + aggregated stats)
+- New helper methods read actual content: `ReadSessionContent(checkpointID, sessionIndex)`
+
+## Files to Modify
+
+### 1. `cmd/entire/cli/checkpoint/checkpoint.go`
+- Update `Store` interface: `ReadCommitted` returns `(*CheckpointSummary, error)`
+- Add `ReadSessionContent` to interface (or as GitStore method)
+- Can delete `ReadCommittedResult` and `ArchivedSession` structs
+
+### 2. `cmd/entire/cli/checkpoint/committed.go`
+- Simplify `ReadCommitted` to just parse and return root `metadata.json`
+- Add `ReadSessionContent(ctx, checkpointID, sessionIndex) (*SessionContent, error)`:
+  - Returns transcript bytes, prompts, context for a specific session
+- Update `GetTranscript` and `GetSessionLog` to use new pattern
+
+### 3. `cmd/entire/cli/explain.go` (4 call sites)
+- Update to call `ReadCommitted` for summary, then `ReadSessionContent` for transcript
+
+### 4. `cmd/entire/cli/strategy/manual_commit_rewind.go` (line 640)
+- Update to work with CheckpointSummary + ReadSessionContent if content needed
+
+### 5. `cmd/entire/cli/strategy/auto_commit.go` (3 call sites)
+- Update for new return type
+
+### 6. `cmd/entire/cli/strategy/manual_commit_condensation.go` (line 88)
+- Update to work with CheckpointSummary
+
+### 7. Test files
+- `checkpoint_test.go`, `backwards_compat_test.go`
+
+## New Types
+
+```go
+// SessionContent contains the actual content for a session
+type SessionContent struct {
+    Metadata   CommittedMetadata
+    Transcript []byte
+    Prompts    string
+    Context    string
+}
+```
+
+## Implementation Order
+
+1. Add `SessionContent` struct and `ReadSessionContent` method
+2. Update `ReadCommitted` signature and implementation
+3. Update `GetTranscript`, `GetSessionLog` to use new pattern
+4. Update all other callers
+5. Delete unused types (`ReadCommittedResult`, `ArchivedSession`)
+6. Update tests
+
+## Verification
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/4621d41f-e26a-4a26-a0fb-cef7b1fe956d.jsonl
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me analyze the conversation chronologically:
+
+1. User's Request:
+The user provided a detailed plan to change `ReadCommitted` to return `*CheckpointSummary` instead of `*ReadCommittedResult`, and add helper methods for callers that need actual content.
+
+2. My Actions:
+- Read the current state of checkpoint.go and committed.go to understand the existing implementation
+- Read explain.go to understand callers
+- Searched for all ReadCommitted callers across the codebase
+- Read manual_commit_rewind.go, auto_commit.go, manual_commit_condensation.go
+- Read checkpoint_test.go and backwards_compat_test.go
+
+3. Implementation Started:
+- Created tasks to track progress (5 tasks total)
+- Task 1: Add SessionContent struct and ReadSessionContent method - COMPLETED
+- Task 2: Update ReadCommitted signature and implementation - COMPLETED
+- Task 3: Update GetTranscript and GetSessionLog to use new pattern - COMPLETED
+- Task 4: Update all callers of ReadCommitted - IN PROGRESS
+- Task 5: Delete unused types and update tests - PENDING
+
+4. Code Changes Made:
+- Added SessionContent struct to checkpoint.go
+- Updated Store interface to change ReadCommitted signature and add ReadSessionContent
+- Updated ReadCommitted implementation in committed.go to return *CheckpointSummary
+- Added ReadSessionContent method to committed.go
+- Added ReadLatestSessionContent convenience method
+- Deleted readArchivedSessionsFromSummary helper function
+- Updated GetTranscript and GetSessionLog to use new pattern
+- Started updating explain.go - updated runExplainCheckpoint and generateCheckpointSummary functions
+
+5. Current Errors:
+Multiple compilation errors remain because:
+- formatCheckpointOutput needs signature update
+- getBranchCheckpoints in explain.go still uses old patterns (line 842-850)
+- runExplainCommit uses old patterns (line 1255-1259)
+- auto_commit.go methods need updates (GetSessionContext, GetCheckpointLog, ListOrphanedItems)
+- manual_commit_rewind.go RestoreLogsOnly needs updates
+- manual_commit_condensation.go getCheckpointLog needs updates
+- Test files need updates
+
+6. Where I left off:
+I was in the middle of updating explain.go callers. I had just updated runExplainCheckpoint and generateCheckpointSummary, but need to update formatCheckpointOutput and other callers in explain.go.
+
+Summary:
+1. Primary Request and Intent:
+   The user asked to implement a plan to refactor `ReadCommitted` to return `*CheckpointSummary` instead of `*ReadCommittedResult`. The goal is to:
+   - Have `ReadCommitted` return only the `CheckpointSummary` (paths + aggregated stats)
+   - Add helper methods like `ReadSessionContent(checkpointID, sessionIndex)` for callers needing actual content
+   - Delete unused types (`ReadCommittedResult`, `ArchivedSession`)
+   - Update all callers across the codebase
+
+2. Key Technical Concepts:
+   - Go interfaces and method signatures
+   - Checkpoint storage on `entire/sessions` git branch
+   - Session-based checkpoint organization (numbered subdirectories: 0/, 1/, etc.)
+   - CheckpointSummary vs session-level CommittedMetadata separation
+   - Transcript scoping using TranscriptLinesAtStart
+
+3. Files and Code Sections:
+   - `cmd/entire/cli/checkpoint/checkpoint.go`
+      - Core checkpoint types and Store interface
+      - Added SessionContent struct:
+      ```go
+      type SessionContent struct {
+          Metadata   CommittedMetadata
+          Transcript []byte
+          Prompts    string
+          Context    string
+      }
+      ```
+      - Updated Store interface - ReadCommitted now returns `(*CheckpointSummary, error)` and added `ReadSessionContent`
+
+   - `cmd/entire/cli/checkpoint/committed.go`
+      - Implementation of checkpoint reading/writing
+      - Updated ReadCommitted to parse and return only root metadata.json as CheckpointSummary
+      - Added ReadSessionContent method to read specific session content by index
+      - Added ReadLatestSessionContent convenience method
+      - Updated GetTranscript and GetSessionLog to use new pattern
+      - Deleted readArchivedSessionsFromSummary helper
+
+   - `cmd/entire/cli/explain.go`
+      - Explain command implementation with multiple ReadCommitted call sites
+      - Partially updated - runExplainCheckpoint and generateCheckpointSummary updated, formatCheckpointOutput still needs update
+
+   - `cmd/entire/cli/strategy/manual_commit_rewind.go`
+      - RestoreLogsOnly method uses ReadCommitted - needs update
+
+   - `cmd/entire/cli/strategy/auto_commit.go`
+      - GetSessionContext, GetCheckpointLog, ListOrphanedItems use ReadCommitted - need updates
+
+   - `cmd/entire/cli/strategy/manual_commit_condensation.go`
+      - getCheckpointLog uses ReadCommitted - needs update
+
+   - `cmd/entire/cli/checkpoint/checkpoint_test.go` and `backwards_compat_test.go`
+      - Test files need updates for new API
+
+4. Errors and fixes:
+   - Compiler error after interface change: `*GitStore does not implement Store (wrong type for method ReadCommitted)` - Fixed by updating implementation
+   - Multiple `result.Transcript undefined`, `result.Metadata undefined` errors - These are expected as callers still use old API and need updating
+   - Current errors in explain.go after partial updates include wrong argument counts for formatCheckpointOutput and generateCheckpointSummary
+
+5. Problem Solving:
+   - Designed SessionContent struct to encapsulate all session-specific data
+   - Created ReadLatestSessionContent as convenience method since most callers want the latest session
+   - Callers that need archived sessions can iterate using ReadSessionContent with different indices
+
+6. All user messages:
+   - User provided a detailed implementation plan with specific files to modify, new types to add, and verification command (`mise run fmt && mise run lint && mise run test:ci`)
+
+7. Pending Tasks:
+   - Complete updating explain.go (formatCheckpointOutput function, getBranchCheckpoints, runExplainCommit)
+   - Update manual_commit_rewind.go (RestoreLogsOnly, classifySessionsForRestore)
+   - Update auto_commit.go (GetSessionContext, GetCheckpointLog, ListOrphanedItems)
+   - Update manual_commit_condensation.go (getCheckpointLog)
+   - Delete unused types (ReadCommittedResult, ArchivedSession) from checkpoint.go
+   - Update test files (checkpoint_test.go, backwards_compat_test.go)
+   - Run verification: `mise run fmt && mise run lint && mise run test:ci`
+
+8. Current Work:
+   I was in the middle of updating explain.go callers. I had successfully updated:
+   - runExplainCheckpoint (lines 232-275)
+   - generateCheckpointSummary (lines 280-316)
+   
+   But I still need to update in explain.go:
+   - formatCheckpointOutput (line 514) - needs new signature taking `*CheckpointSummary` and `*SessionContent`
+   - getBranchCheckpoints around line 842-850 - uses result.Transcript and result.Metadata
+   - runExplainCommit around line 1255-1259 - uses result.Metadata.SessionID
+
+9. Optional Next Step:
+   Continue updating explain.go by modifying formatCheckpointOutput function signature from:
+   ```go
+   func formatCheckpointOutput(result *checkpoint.ReadCommittedResult, checkpointID id.CheckpointID, commitMessage string, verbose, full bool) string
+   ```
+   to:
+   ```go
+   func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, checkpointID id.CheckpointID, commitMessage string, verbose, full bool) string
+   ```
+   And update its implementation to use content.Metadata and content.Transcript instead of result.Metadata and result.Transcript.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/24a274a3-0317-440d-b17a-41e83ee34fec.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+I do need another method like this but accepts checkpoint ID and a session Id inside the checkpoint it to read its content
