@@ -468,23 +468,52 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		return nil
 	}
 
-	// Track shadow branch names to clean up after successful condensation
-	shadowBranchesToDelete := make(map[string]struct{})
+	// Prepare all sessions first (extract data without writing)
+	// This allows us to batch write all sessions in a single commit
+	type preparedSession struct {
+		state    *SessionState
+		prepared *PreparedCondensation
+	}
+	var preparedSessions []preparedSession
+	var writeOptions []checkpoint.WriteCommittedOptions
 
-	// Condense sessions that have new content
 	for _, state := range sessionsWithContent {
-		// Compute shadow branch name BEFORE condensation modifies state.BaseCommit
-		shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-
-		result, err := s.CondenseSession(repo, checkpointID, state)
+		prepared, err := s.PrepareCondensation(repo, checkpointID, state)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[entire] Warning: condensation failed for session %s: %v\n",
+			fmt.Fprintf(os.Stderr, "[entire] Warning: condensation preparation failed for session %s: %v\n",
 				state.SessionID, err)
 			continue
 		}
+		preparedSessions = append(preparedSessions, preparedSession{state: state, prepared: prepared})
+		writeOptions = append(writeOptions, prepared.Options)
+	}
+
+	// Skip if no sessions were successfully prepared
+	if len(writeOptions) == 0 {
+		fmt.Fprintf(os.Stderr, "[entire] No sessions to condense\n")
+		return nil
+	}
+
+	// Write all sessions in a single commit using batch API
+	store, err := s.getCheckpointStore()
+	if err != nil {
+		return fmt.Errorf("failed to get checkpoint store: %w", err)
+	}
+
+	if err := store.WriteCommittedBatch(context.Background(), writeOptions); err != nil {
+		return fmt.Errorf("failed to write checkpoint metadata: %w", err)
+	}
+
+	// Track shadow branch names to clean up after successful condensation
+	shadowBranchesToDelete := make(map[string]struct{})
+
+	// Update session states after successful batch write
+	for _, ps := range preparedSessions {
+		state := ps.state
+		prepared := ps.prepared
 
 		// Track this shadow branch for cleanup
-		shadowBranchesToDelete[shadowBranchName] = struct{}{}
+		shadowBranchesToDelete[prepared.ShadowBranchName] = struct{}{}
 
 		// Update session state for the new base commit
 		// After condensation, the session continues from the NEW commit (HEAD), so we:
@@ -499,7 +528,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		// CheckpointCount = 0, the session is preserved even without a shadow branch.
 		state.BaseCommit = head.Hash().String()
 		state.CheckpointCount = 0
-		state.CondensedTranscriptLines = result.TotalTranscriptLines
+		state.CondensedTranscriptLines = prepared.TotalTranscriptLines
 
 		// Clear attribution tracking - condensation already used these values
 		// If we don't clear them, they'll be double-counted in the next condensation
@@ -518,16 +547,21 @@ func (s *ManualCommitStrategy) PostCommit() error {
 			shortID = shortID[:8]
 		}
 		fmt.Fprintf(os.Stderr, "[entire] Condensed session %s: %s (%d checkpoints)\n",
-			shortID, result.CheckpointID, result.CheckpointsCount)
+			shortID, checkpointID, state.CheckpointCount)
 
 		// Log condensation
 		logCtx := logging.WithComponent(context.Background(), "checkpoint")
 		logging.Info(logCtx, "session condensed",
 			slog.String("strategy", "manual-commit"),
-			slog.String("checkpoint_id", result.CheckpointID.String()),
-			slog.Int("checkpoints_condensed", result.CheckpointsCount),
-			slog.Int("transcript_lines", result.TotalTranscriptLines),
+			slog.String("checkpoint_id", checkpointID.String()),
+			slog.Int("checkpoints_condensed", prepared.Options.CheckpointsCount),
+			slog.Int("transcript_lines", prepared.TotalTranscriptLines),
 		)
+	}
+
+	// Log batch condensation summary
+	if len(preparedSessions) > 1 {
+		fmt.Fprintf(os.Stderr, "[entire] Batch condensed %d sessions in single commit\n", len(preparedSessions))
 	}
 
 	// Clean up shadow branches after successful condensation

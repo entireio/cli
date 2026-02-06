@@ -99,6 +99,86 @@ func (s *ManualCommitStrategy) getCheckpointLog(checkpointID id.CheckpointID) ([
 	return content.Transcript, nil
 }
 
+// PreparedCondensation contains the data needed to write a session to the checkpoint store
+// and the result info needed to update session state after writing.
+type PreparedCondensation struct {
+	Options              cpkg.WriteCommittedOptions
+	TotalTranscriptLines int
+	ShadowBranchName     string
+}
+
+// PrepareCondensation extracts session data and prepares WriteCommittedOptions without writing.
+// This is used by PostCommit to batch multiple sessions into a single WriteCommittedBatch call.
+func (s *ManualCommitStrategy) PrepareCondensation(repo *git.Repository, checkpointID id.CheckpointID, state *SessionState) (*PreparedCondensation, error) {
+	// Get shadow branch
+	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+	ref, err := repo.Reference(refName, true)
+	if err != nil {
+		return nil, fmt.Errorf("shadow branch not found: %w", err)
+	}
+
+	// Extract session data from the shadow branch
+	sessionData, err := s.extractSessionData(repo, ref.Hash(), state.SessionID, state.FilesTouched, state.AgentType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract session data: %w", err)
+	}
+
+	// Get author info
+	authorName, authorEmail := GetGitAuthorFromRepo(repo)
+	attribution := calculateSessionAttributions(repo, ref, sessionData, state)
+	// Get current branch name
+	branchName := GetCurrentBranchName(repo)
+
+	// Generate summary if enabled
+	var summary *cpkg.Summary
+	if settings.IsSummarizeEnabled() && len(sessionData.Transcript) > 0 {
+		logCtx := logging.WithComponent(context.Background(), "attribution")
+		summarizeCtx := logging.WithComponent(logCtx, "summarize")
+
+		// Scope transcript to this checkpoint's portion
+		scopedTranscript := transcript.SliceFromLine(sessionData.Transcript, state.TranscriptLinesAtStart)
+		if len(scopedTranscript) > 0 {
+			var genErr error
+			summary, genErr = summarize.GenerateFromTranscript(summarizeCtx, scopedTranscript, sessionData.FilesTouched, nil)
+			if genErr != nil {
+				logging.Warn(summarizeCtx, "summary generation failed",
+					slog.String("session_id", state.SessionID),
+					slog.String("error", genErr.Error()))
+				// Continue without summary - non-blocking
+			} else {
+				logging.Info(summarizeCtx, "summary generated",
+					slog.String("session_id", state.SessionID))
+			}
+		}
+	}
+
+	return &PreparedCondensation{
+		Options: cpkg.WriteCommittedOptions{
+			CheckpointID:                checkpointID,
+			SessionID:                   state.SessionID,
+			Strategy:                    StrategyNameManualCommit,
+			Branch:                      branchName,
+			Transcript:                  sessionData.Transcript,
+			Prompts:                     sessionData.Prompts,
+			Context:                     sessionData.Context,
+			FilesTouched:                sessionData.FilesTouched,
+			CheckpointsCount:            state.CheckpointCount,
+			EphemeralBranch:             shadowBranchName,
+			AuthorName:                  authorName,
+			AuthorEmail:                 authorEmail,
+			Agent:                       state.AgentType,
+			TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
+			TranscriptLinesAtStart:      state.TranscriptLinesAtStart,
+			TokenUsage:                  sessionData.TokenUsage,
+			InitialAttribution:          attribution,
+			Summary:                     summary,
+		},
+		TotalTranscriptLines: sessionData.FullTranscriptLines,
+		ShadowBranchName:     shadowBranchName,
+	}, nil
+}
+
 // CondenseSession condenses a session's shadow branch to permanent storage.
 // checkpointID is the 12-hex-char value from the Entire-Checkpoint trailer.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/

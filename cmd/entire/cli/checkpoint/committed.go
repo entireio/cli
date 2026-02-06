@@ -105,6 +105,179 @@ func (s *GitStore) WriteCommitted(ctx context.Context, opts WriteCommittedOption
 	return nil
 }
 
+// WriteCommittedBatch writes multiple sessions to the same checkpoint in a single commit.
+// This is used when multiple agents (e.g., Claude + Gemini) are condensed at the same time,
+// avoiding multiple commits on the entire/sessions branch.
+//
+// All options must have the same CheckpointID. Sessions are written to consecutive numbered
+// subdirectories (0/, 1/, 2/, etc.) and a combined CheckpointSummary is created.
+func (s *GitStore) WriteCommittedBatch(ctx context.Context, sessions []WriteCommittedOptions) error {
+	_ = ctx // Reserved for future use
+
+	if len(sessions) == 0 {
+		return nil
+	}
+
+	// If only one session, use the regular WriteCommitted
+	if len(sessions) == 1 {
+		return s.WriteCommitted(ctx, sessions[0])
+	}
+
+	// All sessions must have the same checkpoint ID
+	checkpointID := sessions[0].CheckpointID
+	for i, opts := range sessions {
+		if opts.CheckpointID != checkpointID {
+			return fmt.Errorf("session %d has different checkpoint ID: %s != %s", i, opts.CheckpointID, checkpointID)
+		}
+	}
+
+	// Validate all sessions
+	for i, opts := range sessions {
+		if opts.CheckpointID.IsEmpty() {
+			return fmt.Errorf("session %d: checkpoint ID is required", i)
+		}
+		if err := validation.ValidateSessionID(opts.SessionID); err != nil {
+			return fmt.Errorf("session %d: %w", i, err)
+		}
+		if err := validation.ValidateToolUseID(opts.ToolUseID); err != nil {
+			return fmt.Errorf("session %d: %w", i, err)
+		}
+		if err := validation.ValidateAgentID(opts.AgentID); err != nil {
+			return fmt.Errorf("session %d: %w", i, err)
+		}
+	}
+
+	// Ensure sessions branch exists
+	if err := s.ensureSessionsBranch(); err != nil {
+		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	}
+
+	// Get current branch tip and flatten tree (once for all sessions)
+	ref, entries, err := s.getSessionsBranchEntries()
+	if err != nil {
+		return err
+	}
+
+	basePath := checkpointID.Path() + "/"
+
+	// Read existing summary to determine starting session index
+	var existingSummary *CheckpointSummary
+	metadataPath := basePath + paths.MetadataFileName
+	if entry, exists := entries[metadataPath]; exists {
+		existing, readErr := s.readSummaryFromBlob(entry.Hash)
+		if readErr == nil {
+			existingSummary = existing
+		}
+	}
+
+	startIndex := 0
+	if existingSummary != nil {
+		startIndex = len(existingSummary.Sessions)
+	}
+
+	// Track aggregated data for the combined summary
+	var allSessionPaths []SessionFilePaths
+	var aggregatedTokenUsage *agent.TokenUsage
+	var aggregatedFilesTouched []string
+	aggregatedCheckpointsCount := 0
+
+	// Copy existing data if present
+	if existingSummary != nil {
+		allSessionPaths = existingSummary.Sessions
+		aggregatedTokenUsage = existingSummary.TokenUsage
+		aggregatedFilesTouched = existingSummary.FilesTouched
+		aggregatedCheckpointsCount = existingSummary.CheckpointsCount
+	}
+
+	// Process each session
+	var authorName, authorEmail string
+	var strategy, branch string
+	for i, opts := range sessions {
+		sessionIndex := startIndex + i
+		sessionPath := fmt.Sprintf("%s%d/", basePath, sessionIndex)
+
+		// Write session files to numbered subdirectory
+		sessionFilePaths, writeErr := s.writeSessionToSubdirectory(opts, sessionPath, entries)
+		if writeErr != nil {
+			return fmt.Errorf("session %d: %w", i, writeErr)
+		}
+		allSessionPaths = append(allSessionPaths, sessionFilePaths)
+
+		// Copy additional metadata files if specified
+		if opts.MetadataDir != "" {
+			if copyErr := s.copyMetadataDir(opts.MetadataDir, sessionPath, entries); copyErr != nil {
+				return fmt.Errorf("session %d: failed to copy metadata directory: %w", i, copyErr)
+			}
+		}
+
+		// Aggregate stats
+		aggregatedCheckpointsCount += opts.CheckpointsCount
+		aggregatedFilesTouched = mergeFilesTouched(aggregatedFilesTouched, opts.FilesTouched)
+		aggregatedTokenUsage = aggregateTokenUsage(aggregatedTokenUsage, opts.TokenUsage)
+
+		// Use values from first session for commit metadata
+		if i == 0 {
+			authorName = opts.AuthorName
+			authorEmail = opts.AuthorEmail
+			strategy = opts.Strategy
+			branch = opts.Branch
+		}
+	}
+
+	// Write combined CheckpointSummary
+	summary := CheckpointSummary{
+		CheckpointID:     checkpointID,
+		Strategy:         strategy,
+		Branch:           branch,
+		CheckpointsCount: aggregatedCheckpointsCount,
+		FilesTouched:     aggregatedFilesTouched,
+		Sessions:         allSessionPaths,
+		TokenUsage:       aggregatedTokenUsage,
+	}
+
+	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal checkpoint summary: %w", err)
+	}
+	metadataHash, err := CreateBlobFromContent(s.repo, metadataJSON)
+	if err != nil {
+		return fmt.Errorf("failed to create metadata blob: %w", err)
+	}
+	entries[basePath+paths.MetadataFileName] = object.TreeEntry{
+		Name: basePath + paths.MetadataFileName,
+		Mode: filemode.Regular,
+		Hash: metadataHash,
+	}
+
+	// Build and commit
+	newTreeHash, err := BuildTreeFromEntries(s.repo, entries)
+	if err != nil {
+		return err
+	}
+
+	// Build commit message listing all sessions
+	var commitMsg strings.Builder
+	fmt.Fprintf(&commitMsg, "Checkpoint: %s\n\n", checkpointID)
+	fmt.Fprintf(&commitMsg, "%d session(s) condensed\n\n", len(sessions))
+	for _, opts := range sessions {
+		fmt.Fprintf(&commitMsg, "%s: %s\n", trailers.SessionTrailerKey, opts.SessionID)
+	}
+	fmt.Fprintf(&commitMsg, "%s: %s\n", trailers.StrategyTrailerKey, strategy)
+
+	newCommitHash, err := s.createCommit(newTreeHash, ref.Hash(), commitMsg.String(), authorName, authorEmail)
+	if err != nil {
+		return err
+	}
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	newRef := plumbing.NewHashReference(refName, newCommitHash)
+	if err := s.repo.Storer.SetReference(newRef); err != nil {
+		return fmt.Errorf("failed to set branch reference: %w", err)
+	}
+
+	return nil
+}
+
 // getSessionsBranchEntries returns the sessions branch reference and flattened tree entries.
 func (s *GitStore) getSessionsBranchEntries() (*plumbing.Reference, map[string]object.TreeEntry, error) {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
