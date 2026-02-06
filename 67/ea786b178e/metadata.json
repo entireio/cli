@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "67ea786b178e",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "c31084c261bcef8e2833ef85098b96da44fca980",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".claude/skills/test-repo/test-harness.sh"
+  ],
+  "sessions": [
+    {
+      "metadata": "/67/ea786b178e/0/metadata.json",
+      "transcript": "/67/ea786b178e/0/full.jsonl",
+      "context": "/67/ea786b178e/0/context.md",
+      "content_hash": "/67/ea786b178e/0/content_hash.txt",
+      "prompt": "/67/ea786b178e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

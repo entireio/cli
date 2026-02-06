@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "57fe129270f7",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "9c14c883bbb40cf0b2cb4882f844b6b2baa8ddaa",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".claude/skills/test-repo/test-harness.sh",
+    "cmd/entire/cli/setup.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/57/fe129270f7/0/metadata.json",
+      "transcript": "/57/fe129270f7/0/full.jsonl",
+      "context": "/57/fe129270f7/0/context.md",
+      "content_hash": "/57/fe129270f7/0/content_hash.txt",
+      "prompt": "/57/fe129270f7/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

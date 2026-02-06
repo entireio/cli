@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "1e868c83dbb7",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "migration_source_commit": "90420b93fa088137d6adb42dde54bced0924c246",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "docs/architecture/shadow-branch-overlap.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/1e/868c83dbb7/0/metadata.json",
+      "transcript": "/1e/868c83dbb7/0/full.jsonl",
+      "context": "/1e/868c83dbb7/0/context.md",
+      "content_hash": "/1e/868c83dbb7/0/content_hash.txt",
+      "prompt": "/1e/868c83dbb7/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 202,
+    "cache_creation_tokens": 94226,
+    "cache_read_tokens": 850255,
+    "output_tokens": 50,
+    "api_call_count": 20
+  }
+}

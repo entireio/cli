@@ -1,0 +1,32 @@
+{
+  "checkpoint_id": "f4bd19c39902",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "276db0d22eace024ba87f28006e6e0edcd139c9c",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/integration_test/default_branch_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "docs/README-opencode-integration.md",
+    "docs/opencode-integration-decisions.md",
+    "docs/opencode-integration-findings.md",
+    "docs/opencode-integration-plan.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f4/bd19c39902/0/metadata.json",
+      "transcript": "/f4/bd19c39902/0/full.jsonl",
+      "context": "/f4/bd19c39902/0/context.md",
+      "content_hash": "/f4/bd19c39902/0/content_hash.txt",
+      "prompt": "/f4/bd19c39902/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

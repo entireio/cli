@@ -1,0 +1,21 @@
+{
+  "checkpoint_id": "10a740e118e0",
+  "session_id": "2026-01-27-163396cf-348b-4175-90f5-5ca0986ac0f1",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-27T11:53:56.604953+11:00",
+  "branch": "soph/fix-session-date-change-bug",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/requirements/review-01.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "cf599c82-b3a0-4872-accc-dee59ba54221",
+  "transcript_lines_at_start": 10,
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 57834,
+    "cache_read_tokens": 112682,
+    "output_tokens": 8,
+    "api_call_count": 4
+  }
+}

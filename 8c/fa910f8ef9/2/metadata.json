@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "8cfa910f8ef9",
+  "session_id": "2026-01-15-1664f311-d1df-4ba1-98ff-1d7be8252c72",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-20T14:28:42.830094+11:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".claude/.gitignore",
+    ".claude/agents/dev.md",
+    ".claude/agents/reviewer.md",
+    ".claude/agents/test-doc.md",
+    ".claude/commands/analyst.md",
+    ".claude/commands/dev-cycle.md",
+    ".claude/commands/dev.md",
+    ".claude/commands/reviewer.md",
+    ".claude/settings.local.json",
+    ".claude/skills/test-repo/README.md",
+    ".claude/skills/test-repo/SKILL.md",
+    ".claude/skills/test-repo/test-harness.sh",
+    "cmd/entire/cli/config.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/concurrent_session_warning_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go",
+    "plans/feat-disable-multisession-warning-option.md"
+  ]
+}

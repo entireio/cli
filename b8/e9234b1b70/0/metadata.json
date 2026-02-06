@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "b8e9234b1b70",
+  "session_id": "2026-01-28-0276a600-2f22-4d2b-844c-3feb9c5aa108",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-28T11:25:27.238776+01:00",
+  "branch": "soph/test-attribution-flow-script",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_attribution.go",
+    "cmd/entire/cli/strategy/manual_commit_attribution_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "docs/architecture/adr-001-attribution-line-ownership.md",
+    "docs/architecture/attribution.md",
+    "scripts/test-attribution-e2e.sh"
+  ],
+  "agent": "Claude Code",
+  "agents": "Claude Code",
+  "transcript_uuid_at_start": "b983ce31-d40f-4f8f-8495-8d3957cfb35e",
+  "transcript_lines_at_start": 675,
+  "token_usage": {
+    "input_tokens": 1606,
+    "cache_creation_tokens": 1210498,
+    "cache_read_tokens": 19728242,
+    "output_tokens": 43592,
+    "api_call_count": 195
+  }
+}

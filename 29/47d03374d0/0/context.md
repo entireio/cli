@@ -1,0 +1,12 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+when running `mise run test:ci` I get these errors: 
+
+cmd/entire/cli/integration_test/last_checkpoint_id_test.go:76:31: invalid operation: state.LastCheckpointID != firstCheckpointID (mismatched types id.CheckpointID and string)
+cmd/entire/cli/integration_test/last_checkpoint_id_test.go:102:41: cannot use firstCheckpointID (variable of type string) as id.CheckpointID value in argument to paths.CheckpointPath
+cmd/entire/cli/integration_test/last_checkpoint_id_test.go:144:31: invalid operation: st...
+

@@ -1,0 +1,40 @@
+{
+  "checkpoint_id": "3e7e38433d1c",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "bf76d1df5e3fe2434de0de310783cb22fad2a2a9",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/list.go",
+    "cmd/entire/cli/list/actions.go",
+    "cmd/entire/cli/list/data.go",
+    "cmd/entire/cli/list/model.go",
+    "cmd/entire/cli/list/tree.go",
+    "cmd/entire/cli/list/view.go",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/session.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/3e/7e38433d1c/0/metadata.json",
+      "transcript": "/3e/7e38433d1c/0/full.jsonl",
+      "context": "/3e/7e38433d1c/0/context.md",
+      "content_hash": "/3e/7e38433d1c/0/content_hash.txt",
+      "prompt": "/3e/7e38433d1c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

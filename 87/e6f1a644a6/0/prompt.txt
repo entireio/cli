@@ -1,0 +1,114 @@
+The TranscriptLinesAtStart and TranscriptIdentifierAtStart fields were added to the PromptAttribution struct but are never populated anywhere in the codebase. When PendingPromptAttribution is set in calculatePromptAttributionAtStart (manual_commit_hooks.go), these fields remain at their zero values. These fields should either be populated from the pre-prompt state when the attribution is calculated, or they should be removed if they're not needed in PromptAttribution.
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# Plan: Populate transcript position fields in PromptAttribution
+
+## Problem
+
+The `PromptAttribution` struct has `TranscriptLinesAtStart` and `TranscriptIdentifierAtStart` fields that are never populated. These fields are needed to calculate token usage per checkpoint, not just for the overall session.
+
+Currently:
+- `SessionState` only stores transcript position from the FIRST checkpoint
+- Each `PromptAttribution` should store the transcript position when that specific prompt started
+- This would enable per-checkpoint token usage calculation
+
+## Analysis
+
+**Data flow:**
+1. `CapturePrePromptState(sessionID, transcriptPath)` is called FIRST (line 322 in `hooks_claudecode_handlers.go`)
+   - Captures `LastTranscriptIdentifier` and `LastTranscriptLineCount`
+   - Saves to `.entire/tmp/pre-prompt-{sessionID}.json`
+
+2. `InitializeSession(sessionID, agentType, transcriptPath)` is called AFTER (line 330)
+   - Calls `calculatePromptAttributionAtStart()` which creates `PromptAttribution`
+   - BUT doesn't have access to the transcript position captured in step 1
+
+**Challenge:** The `strategy` package cannot import the `cli` package (would cause circular import).
+
+## Solution
+
+Modify the `SessionInitializer` interface to pass transcript position information from the caller.
+
+### Files to Modify
+
+1. **`cmd/entire/cli/strategy/strategy.go`** (~line 431)
+   - Update `SessionInitializer.InitializeSession` signature to include transcript position:
+   ```go
+   InitializeSession(sessionID string, agentType agent.AgentType, transcriptPath string, transcriptLinesAtStart int, transcriptIdentifierAtStart string) error
+   ```
+
+2. **`cmd/entire/cli/hooks_claudecode_handlers.go`** (~line 330)
+   - Load `PrePromptState` after `CapturePrePromptState`
+   - Pass transcript position to `InitializeSession`:
+   ```go
+   preState, _ := LoadPrePromptState(hookData.entireSessionID)
+   var transcriptLines int
+   var transcriptIdentifier string
+   if preState != nil {
+       transcriptLines = preState.LastTranscriptLineCount
+       transcriptIdentifier = preState.LastTranscriptIdentifier
+   }
+   initializer.InitializeSession(hookData.entireSessionID, agentType, hookData.input.SessionRef, transcriptLines, transcriptIdentifier)
+   ```
+
+3. **`cmd/entire/cli/hooks_geminicli_handlers.go`** (~line 649)
+   - Same pattern as Claude Code handlers
+
+4. **`cmd/entire/cli/strategy/manual_commit_hooks.go`**
+   - Update `InitializeSession` signature to accept transcript position (line 784)
+   - Pass transcript position to `calculatePromptAttributionAtStart` (line 872)
+   - Update `calculatePromptAttributionAtStart` to accept and use transcript position (line 977)
+
+5. **`cmd/entire/cli/strategy/auto_commit.go`** (~line 922)
+   - Update `InitializeSession` signature to accept transcript position
+   - Can ignore the values if auto-commit doesn't need per-checkpoint attribution
+
+6. **Update tests** that call `InitializeSession`:
+   - `cmd/entire/cli/strategy/manual_commit_test.go`
+   - `cmd/entire/cli/strategy/auto_commit_test.go`
+   - `cmd/entire/cli/strategy/manual_commit_staging_test.go`
+   - `cmd/entire/cli/strategy/clean_test.go`
+   - `cmd/entire/cli/integration_test/auto_commit_checkpoint_fix_test.go`
+   - `cmd/entire/cli/integration_test/manual_commit_workflow_test.go`
+
+### Implementation Details
+
+**In `calculatePromptAttributionAtStart`:**
+```go
+func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
+    repo *git.Repository,
+    state *SessionState,
+    transcriptLinesAtStart int,
+    transcriptIdentifierAtStart string,
+) PromptAttribution {
+    // ... existing logic ...
+    result := PromptAttribution{
+        CheckpointNumber:            nextCheckpointNum,
+        TranscriptLinesAtStart:      transcriptLinesAtStart,
+        TranscriptIdentifierAtStart: transcriptIdentifierAtStart,
+    }
+    // ... rest of logic ...
+}
+```
+
+**Keep `session/state.go` unchanged** - the `PromptAttribution` there doesn't need transcript fields as it's a simpler version for session state persistence.
+
+## Verification
+
+1. Run `mise run fmt && mise run lint` to ensure no lint errors
+2. Run `mise run test` to verify all tests pass
+3. Run `mise run test:integration` to verify integration tests pass
+4. Test manually by:
+   - Starting a session with Claude Code
+   - Making a few prompts/checkpoints
+   - Verifying `PendingPromptAttribution` in session state has transcript fields populated
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl

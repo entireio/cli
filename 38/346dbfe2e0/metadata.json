@@ -1,0 +1,38 @@
+{
+  "checkpoint_id": "38346dbfe2e0",
+  "strategy": "manual-commit",
+  "branch": "alex/fix-worktree-shadow-branch-collision",
+  "migration_source_commit": "85c365553d541d8bb77e17171e1feae7ae8e1b74",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/paths/worktree.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_logs.go",
+    "cmd/entire/cli/strategy/manual_commit_reset.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "docs/plans/2026-02-02-worktree-specific-shadow-branches.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/38/346dbfe2e0/0/metadata.json",
+      "transcript": "/38/346dbfe2e0/0/full.jsonl",
+      "context": "/38/346dbfe2e0/0/context.md",
+      "content_hash": "/38/346dbfe2e0/0/content_hash.txt",
+      "prompt": "/38/346dbfe2e0/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 878,
+    "cache_creation_tokens": 664903,
+    "cache_read_tokens": 15512564,
+    "output_tokens": 670,
+    "api_call_count": 150
+  }
+}

@@ -1,0 +1,16 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+The comment says stdout/stderr are sent to /dev/null, but setting cmd.Stdout and cmd.Stderr to nil actually inherits the parent's descriptors, so any unexpected output (including panics) from the telemetry subprocess could still appear in the user's terminal. To fully detach telemetry output and avoid leaking anything to the main CLI's stdout/stderr, these should be explicitly redirected to a discard sink (e.g., an opened handle to /dev/null) rather than left as nil.
+
+### Prompt 2
+
+what do io.Discard does ?
+
+### Prompt 3
+
+yes please
+

@@ -1,0 +1,13 @@
+do we have an integration test, testing the scenario with two sessions and then that the commit is created properly in entire/sessions?
+
+---
+
+does the test also verify that `session_id` in metadata.json points to the latest session_id?
+
+---
+
+why is the change in hooks_claudecode_handler needed?
+
+---
+
+why is the worktree not available when we create the partial session state?

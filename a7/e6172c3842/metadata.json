@@ -1,0 +1,32 @@
+{
+  "checkpoint_id": "a7e6172c3842",
+  "strategy": "manual-commit",
+  "branch": "soph/fix-strange-multi-session-bug",
+  "migration_source_commit": "27904895967e734b8cb0b8bf6d3ec0b0aa955cc2",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/default_branch_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/messages.go",
+    "cmd/entire/cli/strategy/messages_test.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a7/e6172c3842/0/metadata.json",
+      "transcript": "/a7/e6172c3842/0/full.jsonl",
+      "context": "/a7/e6172c3842/0/context.md",
+      "content_hash": "/a7/e6172c3842/0/content_hash.txt",
+      "prompt": "/a7/e6172c3842/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1607,
+    "cache_creation_tokens": 1066984,
+    "cache_read_tokens": 17007087,
+    "output_tokens": 22310,
+    "api_call_count": 167
+  }
+}

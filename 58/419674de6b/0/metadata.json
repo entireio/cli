@@ -1,0 +1,14 @@
+{
+  "checkpoint_id": "58419674de6b",
+  "session_id": "2026-01-12-cab865ac-8278-406e-b5c2-c73d24d7f9ad",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-12T14:34:33.316005+01:00",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/setup_claude_hooks_test.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/push_common.go"
+  ]
+}

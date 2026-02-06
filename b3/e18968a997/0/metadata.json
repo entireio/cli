@@ -1,0 +1,19 @@
+{
+  "checkpoint_id": "b3e18968a997",
+  "session_id": "2026-01-22-e557a820-4a70-4de2-9d87-7ff517e7b249",
+  "strategy": "auto-commit",
+  "created_at": "2026-01-22T12:59:26.059386-08:00",
+  "branch": "fix/gemini-savecontext-missing-fields",
+  "checkpoints_count": 0,
+  "files_touched": null,
+  "agent": "Gemini CLI",
+  "transcript_uuid_at_start": "561bad40-a638-442c-ba57-2376938b6c7a",
+  "transcript_lines_at_start": 6,
+  "token_usage": {
+    "input_tokens": 25395,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 11940,
+    "output_tokens": 80,
+    "api_call_count": 2
+  }
+}

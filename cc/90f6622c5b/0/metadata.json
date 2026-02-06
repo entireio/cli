@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "cc90f6622c5b",
+  "session_id": "419f42f0-2fa1-44cc-8b4d-babf59901513",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-06T00:59:02.254869Z",
+  "branch": "soph/bug-with-rebase-or-commit-change-during-claude-session",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_migration.go"
+  ],
+  "agent": "Agent",
+  "token_usage": {
+    "input_tokens": 15,
+    "cache_creation_tokens": 55868,
+    "cache_read_tokens": 613423,
+    "output_tokens": 70,
+    "api_call_count": 13
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-06T00:59:02.212885Z",
+    "agent_lines": 3,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 3,
+    "agent_percentage": 100
+  }
+}

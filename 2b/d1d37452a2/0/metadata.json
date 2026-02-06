@@ -1,0 +1,37 @@
+{
+  "checkpoint_id": "2bd1d37452a2",
+  "session_id": "dfbb4922-3529-4eab-a5dc-3c8d30b7c660",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-04T07:14:38.551818Z",
+  "branch": "alex/fix-shadow-branch-performance",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/transcript.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "docs/plans/2026-02-04-stop-hook-performance.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "8739d093-d5ad-42f8-9c23-5a3d5ccdf9cc",
+  "transcript_lines_at_start": 1616,
+  "token_usage": {
+    "input_tokens": 1665,
+    "cache_creation_tokens": 1446153,
+    "cache_read_tokens": 28031523,
+    "output_tokens": 16581,
+    "api_call_count": 278
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-04T07:14:38.362069Z",
+    "agent_lines": 0,
+    "human_added": 7,
+    "human_modified": 3,
+    "human_removed": 0,
+    "total_committed": 7,
+    "agent_percentage": 0
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "checkpoint_id": "4701adf9da1a",
+  "session_id": "ce99376e-9bff-467b-91ed-b5ae280c1917",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-01T02:37:56.018254Z",
+  "branch": "alex/explain-raw-transcript",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "docs/KNOWN_LIMITATIONS.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "6f2ed774-b60c-4baf-868b-38230118d649",
+  "transcript_lines_at_start": 443,
+  "token_usage": {
+    "input_tokens": 706,
+    "cache_creation_tokens": 237683,
+    "cache_read_tokens": 8760018,
+    "output_tokens": 247,
+    "api_call_count": 86
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-01T02:37:55.910496Z",
+    "agent_lines": 33,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 33,
+    "agent_percentage": 100
+  }
+}

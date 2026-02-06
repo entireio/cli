@@ -1,0 +1,33 @@
+{
+  "checkpoint_id": "649d11045222",
+  "session_id": "67d765b5-4286-4ec5-b051-950466e186f0",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-30T19:42:03.730242Z",
+  "branch": "alex/test-explain-checkpoint-boundaries",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/transcript/parse.go",
+    "cmd/entire/cli/transcript/parse_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "f05d59dc-e51b-4595-9ca6-2cc885c7391e",
+  "transcript_lines_at_start": 125,
+  "token_usage": {
+    "input_tokens": 236,
+    "cache_creation_tokens": 580915,
+    "cache_read_tokens": 6085496,
+    "output_tokens": 306,
+    "api_call_count": 61
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-30T19:42:03.634949Z",
+    "agent_lines": 302,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 302,
+    "agent_percentage": 100
+  }
+}

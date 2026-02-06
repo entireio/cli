@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "5d107d133886",
+  "session_id": "4ded0de6-8acf-40a5-ba46-7f9bb1ad903c",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-30T21:10:49.707889Z",
+  "branch": "soph/improved-shadow",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_suffix.go",
+    "docs/wip-abandoned-session-bug.md",
+    "scripts/test-attribution-e2e-abandoned-session.sh"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 526,
+    "cache_creation_tokens": 248537,
+    "cache_read_tokens": 6940441,
+    "output_tokens": 126,
+    "api_call_count": 64
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-30T21:10:49.607557Z",
+    "agent_lines": 505,
+    "human_added": 182,
+    "human_modified": 4,
+    "human_removed": 0,
+    "total_committed": 691,
+    "agent_percentage": 73.08248914616497
+  }
+}
