@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -2164,5 +2165,284 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 	if metadata.InitialAttribution.AgentPercentage >= 100 {
 		t.Errorf("AgentPercentage should be < 100%% since user contributed, got %.1f%%",
 			metadata.InitialAttribution.AgentPercentage)
+	}
+}
+
+// TestPrepareCondensation verifies that PrepareCondensation extracts session data
+// and builds WriteCommittedOptions without writing to the checkpoint store.
+func TestPrepareCondensation(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+
+	// Create initial commit with a file
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	testFile := filepath.Join(dir, "test.go")
+	originalContent := "package main\n\nfunc main() {}\n"
+	if err := os.WriteFile(testFile, []byte(originalContent), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := worktree.Add("test.go"); err != nil {
+		t.Fatalf("failed to stage file: %v", err)
+	}
+
+	_, err = worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2025-01-15-test-prepare-condensation"
+
+	// Create metadata directory with transcript
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	if err := os.MkdirAll(metadataDirAbs, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	transcript := `{"type":"human","message":{"content":"test prompt"}}
+{"type":"assistant","message":{"content":"test response"}}
+`
+	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Modify the file (agent work)
+	modifiedContent := "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n"
+	if err := os.WriteFile(testFile, []byte(modifiedContent), 0o644); err != nil {
+		t.Fatalf("failed to modify file: %v", err)
+	}
+
+	// Create checkpoint using SaveChanges
+	err = s.SaveChanges(SaveContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"test.go"},
+		NewFiles:       []string{},
+		DeletedFiles:   []string{},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	})
+	if err != nil {
+		t.Fatalf("SaveChanges() error = %v", err)
+	}
+
+	// Load session state
+	state, err := s.loadSessionState(sessionID)
+	if err != nil {
+		t.Fatalf("loadSessionState() error = %v", err)
+	}
+
+	// Call PrepareCondensation
+	checkpointID := id.MustCheckpointID("abcd12345678")
+	prepared, err := s.PrepareCondensation(repo, checkpointID, state)
+	if err != nil {
+		t.Fatalf("PrepareCondensation() error = %v", err)
+	}
+
+	// Verify prepared data
+	if prepared == nil {
+		t.Fatal("PrepareCondensation() returned nil")
+	}
+
+	// Verify Options
+	if prepared.Options.CheckpointID != checkpointID {
+		t.Errorf("Options.CheckpointID = %q, want %q", prepared.Options.CheckpointID, checkpointID)
+	}
+	if prepared.Options.SessionID != sessionID {
+		t.Errorf("Options.SessionID = %q, want %q", prepared.Options.SessionID, sessionID)
+	}
+	if prepared.Options.Strategy != StrategyNameManualCommit {
+		t.Errorf("Options.Strategy = %q, want %q", prepared.Options.Strategy, StrategyNameManualCommit)
+	}
+	if prepared.Options.CheckpointsCount != state.CheckpointCount {
+		t.Errorf("Options.CheckpointsCount = %d, want %d", prepared.Options.CheckpointsCount, state.CheckpointCount)
+	}
+
+	// Verify transcript was extracted
+	if len(prepared.Options.Transcript) == 0 {
+		t.Error("Options.Transcript should not be empty")
+	}
+
+	// Verify prompts were extracted
+	if len(prepared.Options.Prompts) == 0 {
+		t.Error("Options.Prompts should not be empty")
+	}
+	if prepared.Options.Prompts[0] != "test prompt" {
+		t.Errorf("Options.Prompts[0] = %q, want %q", prepared.Options.Prompts[0], "test prompt")
+	}
+
+	// Verify metadata fields
+	if prepared.TotalTranscriptLines == 0 {
+		t.Error("TotalTranscriptLines should not be 0")
+	}
+	if prepared.ShadowBranchName == "" {
+		t.Error("ShadowBranchName should not be empty")
+	}
+	if !strings.HasPrefix(prepared.ShadowBranchName, "entire/") {
+		t.Errorf("ShadowBranchName = %q, should start with 'entire/'", prepared.ShadowBranchName)
+	}
+
+	// Verify EphemeralBranch is set (for condensation)
+	if prepared.Options.EphemeralBranch != prepared.ShadowBranchName {
+		t.Errorf("Options.EphemeralBranch = %q, want %q", prepared.Options.EphemeralBranch, prepared.ShadowBranchName)
+	}
+
+	// Verify that nothing was written to entire/sessions yet
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err == nil {
+		t.Error("entire/sessions branch should NOT exist after PrepareCondensation (it should only prepare, not write)")
+	}
+}
+
+// TestWriteCommittedBatch verifies that WriteCommittedBatch correctly batches
+// multiple sessions into a single commit on the entire/sessions branch.
+func TestWriteCommittedBatch(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+
+	// Create initial commit
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	testFile := filepath.Join(dir, "test.go")
+	if err := os.WriteFile(testFile, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := worktree.Add("test.go"); err != nil {
+		t.Fatalf("failed to stage file: %v", err)
+	}
+
+	_, err = worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	// Create checkpoint store
+	store := checkpoint.NewGitStore(repo)
+
+	// Create two sessions with the same checkpoint ID
+	checkpointID := id.MustCheckpointID("ba1c12345678")
+
+	session1 := checkpoint.WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "2025-01-15-session-1",
+		Strategy:         StrategyNameManualCommit,
+		Branch:           "main",
+		Transcript:       []byte(`{"type":"human","message":{"content":"prompt 1"}}`),
+		Prompts:          []string{"prompt 1"},
+		FilesTouched:     []string{"file1.go"},
+		CheckpointsCount: 1,
+		AuthorName:       "Test",
+		AuthorEmail:      "test@test.com",
+		Agent:            "Claude Code",
+	}
+
+	session2 := checkpoint.WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "2025-01-15-session-2",
+		Strategy:         StrategyNameManualCommit,
+		Branch:           "main",
+		Transcript:       []byte(`{"type":"human","message":{"content":"prompt 2"}}`),
+		Prompts:          []string{"prompt 2"},
+		FilesTouched:     []string{"file2.go"},
+		CheckpointsCount: 2,
+		AuthorName:       "Test",
+		AuthorEmail:      "test@test.com",
+		Agent:            "Claude Code",
+	}
+
+	// Write both sessions in a batch
+	err = store.WriteCommittedBatch(context.Background(), []checkpoint.WriteCommittedOptions{session1, session2})
+	if err != nil {
+		t.Fatalf("WriteCommittedBatch() error = %v", err)
+	}
+
+	// Verify entire/sessions branch was created
+	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("entire/sessions branch should exist after WriteCommittedBatch: %v", err)
+	}
+
+	// Verify there's only ONE commit (batched)
+	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())
+	if err != nil {
+		t.Fatalf("failed to get sessions commit: %v", err)
+	}
+
+	// The commit message should indicate multiple sessions
+	if !strings.Contains(sessionsCommit.Message, checkpointID.String()) {
+		t.Errorf("commit message should contain checkpoint ID, got: %s", sessionsCommit.Message)
+	}
+
+	// Verify both sessions' data is in the tree
+	tree, err := sessionsCommit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	// Check session 1 metadata exists
+	session1Path := checkpointID.Path() + "/0/" + paths.MetadataFileName
+	if _, err := tree.File(session1Path); err != nil {
+		t.Errorf("session 1 metadata should exist at %s: %v", session1Path, err)
+	}
+
+	// Check session 2 metadata exists
+	session2Path := checkpointID.Path() + "/1/" + paths.MetadataFileName
+	if _, err := tree.File(session2Path); err != nil {
+		t.Errorf("session 2 metadata should exist at %s: %v", session2Path, err)
+	}
+
+	// Verify aggregated metadata at checkpoint level
+	aggregatedPath := checkpointID.Path() + "/" + paths.MetadataFileName
+	aggregatedFile, err := tree.File(aggregatedPath)
+	if err != nil {
+		t.Fatalf("aggregated metadata should exist at %s: %v", aggregatedPath, err)
+	}
+
+	content, err := aggregatedFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read aggregated metadata: %v", err)
+	}
+
+	// Verify aggregated metadata has 2 sessions
+	var aggregated struct {
+		CheckpointID string `json:"checkpoint_id"`
+		Sessions     []struct {
+			Metadata   string `json:"metadata"`
+			Transcript string `json:"transcript"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(content), &aggregated); err != nil {
+		t.Fatalf("failed to parse aggregated metadata: %v", err)
+	}
+
+	if len(aggregated.Sessions) != 2 {
+		t.Errorf("sessions length = %d, want 2", len(aggregated.Sessions))
+	}
+	if aggregated.CheckpointID != checkpointID.String() {
+		t.Errorf("checkpoint_id = %q, want %q", aggregated.CheckpointID, checkpointID.String())
 	}
 }

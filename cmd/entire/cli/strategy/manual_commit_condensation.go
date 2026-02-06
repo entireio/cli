@@ -23,6 +23,69 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
+// generateSummaryIfEnabled generates a summary from the transcript if summarization is enabled.
+// Returns nil if summarization is disabled or fails (failures are logged but not blocking).
+func generateSummaryIfEnabled(sessionID string, transcriptData []byte, filesTouched []string, transcriptLinesAtStart int) *cpkg.Summary {
+	if !settings.IsSummarizeEnabled() || len(transcriptData) == 0 {
+		return nil
+	}
+
+	logCtx := logging.WithComponent(context.Background(), "attribution")
+	summarizeCtx := logging.WithComponent(logCtx, "summarize")
+
+	// Scope transcript to this checkpoint's portion
+	scopedTranscript := transcript.SliceFromLine(transcriptData, transcriptLinesAtStart)
+	if len(scopedTranscript) == 0 {
+		return nil
+	}
+
+	summary, err := summarize.GenerateFromTranscript(summarizeCtx, scopedTranscript, filesTouched, nil)
+	if err != nil {
+		logging.Warn(summarizeCtx, "summary generation failed",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+
+	logging.Info(summarizeCtx, "summary generated",
+		slog.String("session_id", sessionID))
+	return summary
+}
+
+// buildWriteCommittedOptions creates the options struct for checkpoint.WriteCommitted.
+func buildWriteCommittedOptions(
+	checkpointID id.CheckpointID,
+	state *SessionState,
+	sessionData *ExtractedSessionData,
+	branchName string,
+	shadowBranchName string,
+	authorName string,
+	authorEmail string,
+	attribution *cpkg.InitialAttribution,
+	summary *cpkg.Summary,
+) cpkg.WriteCommittedOptions {
+	return cpkg.WriteCommittedOptions{
+		CheckpointID:                checkpointID,
+		SessionID:                   state.SessionID,
+		Strategy:                    StrategyNameManualCommit,
+		Branch:                      branchName,
+		Transcript:                  sessionData.Transcript,
+		Prompts:                     sessionData.Prompts,
+		Context:                     sessionData.Context,
+		FilesTouched:                sessionData.FilesTouched,
+		CheckpointsCount:            state.CheckpointCount,
+		EphemeralBranch:             shadowBranchName,
+		AuthorName:                  authorName,
+		AuthorEmail:                 authorEmail,
+		Agent:                       state.AgentType,
+		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
+		TranscriptLinesAtStart:      state.TranscriptLinesAtStart,
+		TokenUsage:                  sessionData.TokenUsage,
+		InitialAttribution:          attribution,
+		Summary:                     summary,
+	}
+}
+
 // listCheckpoints returns all checkpoints from the sessions branch.
 // Uses checkpoint.GitStore.ListCommitted() for reading from entire/sessions.
 func (s *ManualCommitStrategy) listCheckpoints() ([]CheckpointInfo, error) {
@@ -127,53 +190,11 @@ func (s *ManualCommitStrategy) PrepareCondensation(repo *git.Repository, checkpo
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
 	attribution := calculateSessionAttributions(repo, ref, sessionData, state)
-	// Get current branch name
 	branchName := GetCurrentBranchName(repo)
-
-	// Generate summary if enabled
-	var summary *cpkg.Summary
-	if settings.IsSummarizeEnabled() && len(sessionData.Transcript) > 0 {
-		logCtx := logging.WithComponent(context.Background(), "attribution")
-		summarizeCtx := logging.WithComponent(logCtx, "summarize")
-
-		// Scope transcript to this checkpoint's portion
-		scopedTranscript := transcript.SliceFromLine(sessionData.Transcript, state.TranscriptLinesAtStart)
-		if len(scopedTranscript) > 0 {
-			var genErr error
-			summary, genErr = summarize.GenerateFromTranscript(summarizeCtx, scopedTranscript, sessionData.FilesTouched, nil)
-			if genErr != nil {
-				logging.Warn(summarizeCtx, "summary generation failed",
-					slog.String("session_id", state.SessionID),
-					slog.String("error", genErr.Error()))
-				// Continue without summary - non-blocking
-			} else {
-				logging.Info(summarizeCtx, "summary generated",
-					slog.String("session_id", state.SessionID))
-			}
-		}
-	}
+	summary := generateSummaryIfEnabled(state.SessionID, sessionData.Transcript, sessionData.FilesTouched, state.TranscriptLinesAtStart)
 
 	return &PreparedCondensation{
-		Options: cpkg.WriteCommittedOptions{
-			CheckpointID:                checkpointID,
-			SessionID:                   state.SessionID,
-			Strategy:                    StrategyNameManualCommit,
-			Branch:                      branchName,
-			Transcript:                  sessionData.Transcript,
-			Prompts:                     sessionData.Prompts,
-			Context:                     sessionData.Context,
-			FilesTouched:                sessionData.FilesTouched,
-			CheckpointsCount:            state.CheckpointCount,
-			EphemeralBranch:             shadowBranchName,
-			AuthorName:                  authorName,
-			AuthorEmail:                 authorEmail,
-			Agent:                       state.AgentType,
-			TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
-			TranscriptLinesAtStart:      state.TranscriptLinesAtStart,
-			TokenUsage:                  sessionData.TokenUsage,
-			InitialAttribution:          attribution,
-			Summary:                     summary,
-		},
+		Options:              buildWriteCommittedOptions(checkpointID, state, sessionData, branchName, shadowBranchName, authorName, authorEmail, attribution, summary),
 		TotalTranscriptLines: sessionData.FullTranscriptLines,
 		ShadowBranchName:     shadowBranchName,
 	}, nil
@@ -209,53 +230,12 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
 	attribution := calculateSessionAttributions(repo, ref, sessionData, state)
-	// Get current branch name
 	branchName := GetCurrentBranchName(repo)
-
-	// Generate summary if enabled
-	var summary *cpkg.Summary
-	if settings.IsSummarizeEnabled() && len(sessionData.Transcript) > 0 {
-		logCtx := logging.WithComponent(context.Background(), "attribution")
-		summarizeCtx := logging.WithComponent(logCtx, "summarize")
-
-		// Scope transcript to this checkpoint's portion
-		scopedTranscript := transcript.SliceFromLine(sessionData.Transcript, state.TranscriptLinesAtStart)
-		if len(scopedTranscript) > 0 {
-			var err error
-			summary, err = summarize.GenerateFromTranscript(summarizeCtx, scopedTranscript, sessionData.FilesTouched, nil)
-			if err != nil {
-				logging.Warn(summarizeCtx, "summary generation failed",
-					slog.String("session_id", state.SessionID),
-					slog.String("error", err.Error()))
-				// Continue without summary - non-blocking
-			} else {
-				logging.Info(summarizeCtx, "summary generated",
-					slog.String("session_id", state.SessionID))
-			}
-		}
-	}
+	summary := generateSummaryIfEnabled(state.SessionID, sessionData.Transcript, sessionData.FilesTouched, state.TranscriptLinesAtStart)
 
 	// Write checkpoint metadata using the checkpoint store
-	if err := store.WriteCommitted(context.Background(), cpkg.WriteCommittedOptions{
-		CheckpointID:                checkpointID,
-		SessionID:                   state.SessionID,
-		Strategy:                    StrategyNameManualCommit,
-		Branch:                      branchName,
-		Transcript:                  sessionData.Transcript,
-		Prompts:                     sessionData.Prompts,
-		Context:                     sessionData.Context,
-		FilesTouched:                sessionData.FilesTouched,
-		CheckpointsCount:            state.CheckpointCount,
-		EphemeralBranch:             shadowBranchName,
-		AuthorName:                  authorName,
-		AuthorEmail:                 authorEmail,
-		Agent:                       state.AgentType,
-		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
-		TranscriptLinesAtStart:      state.TranscriptLinesAtStart,
-		TokenUsage:                  sessionData.TokenUsage,
-		InitialAttribution:          attribution,
-		Summary:                     summary,
-	}); err != nil {
+	opts := buildWriteCommittedOptions(checkpointID, state, sessionData, branchName, shadowBranchName, authorName, authorEmail, attribution, summary)
+	if err := store.WriteCommitted(context.Background(), opts); err != nil {
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
 	}
 

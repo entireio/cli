@@ -547,7 +547,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 			shortID = shortID[:8]
 		}
 		fmt.Fprintf(os.Stderr, "[entire] Condensed session %s: %s (%d checkpoints)\n",
-			shortID, checkpointID, state.CheckpointCount)
+			shortID, checkpointID, prepared.Options.CheckpointsCount)
 
 		// Log condensation
 		logCtx := logging.WithComponent(context.Background(), "checkpoint")
