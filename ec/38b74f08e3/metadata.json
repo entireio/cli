@@ -1,0 +1,43 @@
+{
+  "checkpoint_id": "ec38b74f08e3",
+  "strategy": "manual-commit",
+  "branch": "gtrrz-victor/alt-better-multi-session-flow",
+  "migration_source_commit": "d7520aa5df5f44ecdf4c765cf79bd31a3349fca3",
+  "checkpoints_count": 14,
+  "files_touched": [
+    "cmd/entire/cli/hooks.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/concurrent_session_warning_test.go",
+    "cmd/entire/cli/integration_test/gemini_concurrent_session_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ec/38b74f08e3/0/metadata.json",
+      "transcript": "/ec/38b74f08e3/0/full.jsonl",
+      "context": "/ec/38b74f08e3/0/context.md",
+      "content_hash": "/ec/38b74f08e3/0/content_hash.txt",
+      "prompt": "/ec/38b74f08e3/0/prompt.txt"
+    },
+    {
+      "metadata": "/ec/38b74f08e3/2/metadata.json",
+      "transcript": "/ec/38b74f08e3/2/full.jsonl",
+      "context": "/ec/38b74f08e3/2/context.md",
+      "content_hash": "/ec/38b74f08e3/2/content_hash.txt",
+      "prompt": "/ec/38b74f08e3/2/prompt.txt"
+    },
+    {
+      "metadata": "/ec/38b74f08e3/3/metadata.json",
+      "transcript": "/ec/38b74f08e3/3/full.jsonl",
+      "context": "/ec/38b74f08e3/3/context.md",
+      "content_hash": "/ec/38b74f08e3/3/content_hash.txt",
+      "prompt": "/ec/38b74f08e3/3/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 10605,
+    "cache_creation_tokens": 347796,
+    "cache_read_tokens": 2981024,
+    "output_tokens": 262,
+    "api_call_count": 48
+  }
+}

@@ -1,0 +1,60 @@
+I'm working on linear ENT-98. keep our working documentation in linear.
+
+---
+
+can we move the linear doc into its task context?
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+not as a comment, but as a document attached to the issue directly. you've attached it to the project...
+
+---
+
+hmm, I was able to do it through the UI -> https://linear.app/entirehq/document/task-list-5055e5808598
+
+it shows up in the Issue's "Resources"
+
+---
+
+Generate a PR title and description based on the work done in this session. 
+
+  Instructions:
+  1. Review the conversation history to understand:
+     - What the user asked for
+     - What was implemented
+     - Key decisions and trade-offs made
+     - Any issues encountered and how they were resolved
+
+  2. Run `git diff main...HEAD` to confirm the actual file changes
+
+  3. Generate:
+     - A concise PR title (50-72 chars, imperative mood)
+     - A PR description (use markdown) with:
+       - ## Summary (2-4 bullet points based on what was discussed and implemented)
+       - ## Test plan (how to verify the changes)
+
+  Prioritize the conversation context over just the git diff - the discussion captures the "why" and intent, not just the "what".
+
+  Format the output as markdown:
+  
+```
+  Title:
+
+  # Summary
+
+  - <bullet 1>
+  - <bullet 2>
+
+---
+
+  # Test plan
+
+  - <step 1>
+  - <step 2>
+```
+
+  Do not create any files or make any changes. Just output the PR title and description.

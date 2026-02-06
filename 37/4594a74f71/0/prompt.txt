@@ -1,0 +1,196 @@
+I do want to e2e test my entire tooling with claude code, to do so, I want to use the agent sdk library ( typescript one ) to run some prompting and then check how my git branches looks like, we are creating checkpoints at shadow branches entire/commitsha and record checkpoints at entire/sessions. I want to stimulate claude thru the agent sdk and then, run assertions to check what i have just told you.
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# E2E Testing with Claude Agent SDK
+
+## Goal
+Create true end-to-end tests that run Claude via the Agent SDK (TypeScript) and verify that the Entire CLI correctly creates checkpoints on:
+- Shadow branches: `entire/<commit-hash[:7]>`
+- Metadata branch: `entire/sessions`
+
+## Directory Structure
+
+```
+e2e/
+├── package.json
+├── tsconfig.json
+├── vitest.config.ts
+├── src/
+│   ├── setup/
+│   │   └── global-setup.ts      # Builds CLI binary before tests
+│   ├── utils/
+│   │   ├── git-repo.ts          # Git repository utilities
+│   │   ├── cli-runner.ts        # CLI binary execution
+│   │   ├── git-assertions.ts    # Git state verification
+│   │   └── test-env.ts          # Test environment setup
+│   └── tests/
+│       ├── checkpoint.test.ts   # Checkpoint creation tests
+│       ├── rewind.test.ts       # Rewind functionality tests
+│       └── commit.test.ts       # Commit + condensation tests
+```
+
+## Implementation Plan
+
+### Phase 1: Project Setup
+1. Create `e2e/package.json` with dependencies:
+   - `@anthropic-ai/claude-agent-sdk`
+   - `vitest`
+   - `typescript`
+   - `@types/node`
+   - Package manager: **npm**
+
+2. Create `e2e/tsconfig.json` (ESM, strict mode)
+
+3. Create `e2e/vitest.config.ts`:
+   - Global setup to build CLI binary
+   - 2-minute test timeout (Claude can be slow)
+   - Sequential execution (API rate limits)
+
+4. Create `e2e/.npmrc` if needed for registry configuration
+
+### Phase 2: Core Utilities
+
+**`git-repo.ts`** - Isolated git repository management:
+- `TestRepo` class with temp directory creation
+- Git operations: init, add, commit, branch checks
+- File operations: read, write, exists
+- Cleanup on test completion
+
+**`cli-runner.ts`** - CLI binary execution:
+- Run `entire enable --strategy <name>`
+- Run `entire rewind --list` and parse output
+- Run `entire rewind --to <id>`
+- Environment variable injection for test mode
+
+**`test-env.ts`** - Complete test environment:
+- Creates isolated git repo + claude project dir
+- Initializes Entire CLI with specified strategy
+- Generates `.claude/settings.json` with hooks pointing to built binary
+- `runClaude(prompt)` method using Agent SDK
+
+### Phase 3: Git Assertions
+
+**`git-assertions.ts`**:
+- `assertShadowBranchExists(repo, headHash)` - Verify `entire/<hash[:7]>` exists
+- `assertMetadataBranchExists(repo)` - Verify `entire/sessions` exists
+- `assertCheckpointMetadata(repo, checkpointId)` - Verify sharded metadata exists
+- `assertFileAtCheckpoint(repo, branch, path, content)` - Verify file content in tree
+
+### Phase 4: Test Cases
+
+**Note:** Tests will focus on **manual-commit strategy** only (the default and most commonly used).
+
+**`checkpoint.test.ts`** - Basic checkpoint creation:
+```typescript
+it('creates shadow branch after Claude session', async () => {
+  const headHash = await env.repo.getHeadHash();
+  await env.runClaude('Create hello.txt with "Hello World"');
+  await assertShadowBranchExists(env.repo, headHash);
+  const rewindPoints = await env.cli.rewindList();
+  expect(rewindPoints.length).toBeGreaterThan(0);
+});
+```
+
+**`commit.test.ts`** - Condensation to metadata branch:
+```typescript
+it('condenses to entire/sessions on user commit', async () => {
+  await env.runClaude('Create main.go with hello world');
+  await env.repo.git('add', 'main.go');
+  await env.repo.git('commit', '-m', 'Add main.go');
+  await assertMetadataBranchExists(env.repo);
+  // Extract Entire-Checkpoint trailer and verify metadata
+});
+```
+
+**`rewind.test.ts`** - Rewind functionality:
+```typescript
+it('restores files from previous checkpoint', async () => {
+  await env.runClaude('Create a.txt');
+  const checkpoint1 = (await env.cli.rewindList())[0];
+  await env.runClaude('Create b.txt');
+  await env.cli.rewind(checkpoint1.id);
+  expect(await env.repo.fileExists('a.txt')).toBe(true);
+  expect(await env.repo.fileExists('b.txt')).toBe(false);
+});
+```
+
+### Phase 5: Integration
+
+Add to `mise.toml`:
+```toml
+[tasks."test:e2e"]
+description = "Run e2e tests with Claude Agent SDK"
+run = "cd e2e && npm test"
+depends = ["build"]
+```
+
+## Key Implementation Details
+
+### Hook Configuration
+The Agent SDK loads hooks from `.claude/settings.json` when `settingSources: ['project']` is set. The test environment creates this file with hooks pointing to the built CLI binary using absolute paths.
+
+### CLI Binary Path
+Global setup builds the CLI to a temp directory and sets `ENTIRE_BIN_PATH` env var. Tests use this to find the binary.
+
+### Test Isolation
+Each test gets:
+- Fresh temp directory for git repo (`mkdtempSync`)
+- Fresh claude project directory
+- Independent session state
+
+### Agent SDK Configuration
+```typescript
+for await (const message of query({
+  prompt: "...",
+  options: {
+    cwd: repo.path,
+    settingSources: ['project'],  // Load .claude/settings.json
+    allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob'],
+    permissionMode: 'acceptEdits'  // Auto-approve for e2e
+  }
+})) { ... }
+```
+
+## Files to Create
+
+1. `e2e/package.json`
+2. `e2e/tsconfig.json`
+3. `e2e/vitest.config.ts`
+4. `e2e/src/setup/global-setup.ts`
+5. `e2e/src/utils/git-repo.ts`
+6. `e2e/src/utils/cli-runner.ts`
+7. `e2e/src/utils/git-assertions.ts`
+8. `e2e/src/utils/test-env.ts`
+9. `e2e/src/tests/checkpoint.test.ts`
+10. `e2e/src/tests/rewind.test.ts`
+11. `e2e/src/tests/commit.test.ts`
+
+## Verification
+
+After implementation:
+1. Run `cd e2e && npm install`
+2. Run `mise run test:e2e`
+3. Verify tests create real Claude sessions
+4. Verify git branches are created correctly
+5. Verify rewind works end-to-end
+
+## Notes
+
+- **Package manager:** npm (standard Node.js package manager)
+- **Strategy coverage:** Manual-commit only (default strategy)
+- **CI integration:** Not included (run manually via `mise run test:e2e`)
+- **API requirements:** Tests require valid ANTHROPIC_API_KEY environment variable
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-cli/721ef443-33a6-422c-984f-ecfd2814f422.jsonl
+
+---
+
+do i need to add any claude settings to this work ?

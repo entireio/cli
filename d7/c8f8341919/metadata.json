@@ -1,0 +1,38 @@
+{
+  "checkpoint_id": "d7c8f8341919",
+  "strategy": "manual-commit",
+  "branch": "soph/fix-session-date-change-bug",
+  "migration_source_commit": "577e703797a74360d6dc8d13e5eb71791613f3bd",
+  "checkpoints_count": 10,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/logging/logger.go",
+    "cmd/entire/cli/paths/paths.go",
+    "cmd/entire/cli/paths/paths_test.go",
+    "cmd/entire/cli/session/session_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/sessionid/sessionid.go",
+    "cmd/entire/cli/strategy/session_state.go",
+    "cmd/entire/cli/strategy/session_state_test.go",
+    "cmd/entire/cli/validation/validators.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d7/c8f8341919/0/metadata.json",
+      "transcript": "/d7/c8f8341919/0/full.jsonl",
+      "context": "/d7/c8f8341919/0/context.md",
+      "content_hash": "/d7/c8f8341919/0/content_hash.txt",
+      "prompt": "/d7/c8f8341919/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2319,
+    "cache_creation_tokens": 1269717,
+    "cache_read_tokens": 26673664,
+    "output_tokens": 715,
+    "api_call_count": 290
+  }
+}

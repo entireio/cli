@@ -1,0 +1,37 @@
+{
+  "checkpoint_id": "bccc3b2d7e10",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "d6a705069e48bfbd9c0e46bd58dfa7c7104aa468",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".claude/skills/test-repo/test-harness.sh",
+    "CLAUDE.md",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/errors.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/main.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/bc/cc3b2d7e10/0/metadata.json",
+      "transcript": "/bc/cc3b2d7e10/0/full.jsonl",
+      "context": "/bc/cc3b2d7e10/0/context.md",
+      "content_hash": "/bc/cc3b2d7e10/0/content_hash.txt",
+      "prompt": "/bc/cc3b2d7e10/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

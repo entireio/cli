@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "3dffd2ffdd52",
+  "strategy": "manual-commit",
+  "branch": "alex/extract-git-package",
+  "migration_source_commit": "90688a94c2d3005bfb8853fea10f814a3bf9eead",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/gitutil/operations.go",
+    "cmd/entire/cli/gitutil/repository.go",
+    "cmd/entire/cli/paths/paths.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/3d/ffd2ffdd52/0/metadata.json",
+      "transcript": "/3d/ffd2ffdd52/0/full.jsonl",
+      "context": "/3d/ffd2ffdd52/0/context.md",
+      "content_hash": "/3d/ffd2ffdd52/0/content_hash.txt",
+      "prompt": "/3d/ffd2ffdd52/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 499,
+    "cache_creation_tokens": 321052,
+    "cache_read_tokens": 9621317,
+    "output_tokens": 1190,
+    "api_call_count": 98
+  }
+}

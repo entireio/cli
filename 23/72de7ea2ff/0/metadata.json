@@ -1,0 +1,19 @@
+{
+  "checkpoint_id": "2372de7ea2ff",
+  "session_id": "2026-01-12-deeac353-0765-4439-9056-293619a99172",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-12T21:40:51.056216+01:00",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".golangci.yaml",
+    "CLAUDE.md",
+    "cmd/entire/cli/agent/claudecode/claude.go",
+    "cmd/entire/cli/agent/claudecode/hooks.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/rewind.go",
+    "cmd/entire/cli/session.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/push_common.go"
+  ]
+}

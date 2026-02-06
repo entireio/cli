@@ -1,0 +1,22 @@
+{
+  "checkpoint_id": "5de5697d60ab",
+  "session_id": "2026-01-21-f8e05984-93e4-45b7-b638-e6f011442db9",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-21T15:18:24.461518+01:00",
+  "branch": "soph/proper-repo-root",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/geminicli/gemini.go",
+    "cmd/entire/cli/agent/geminicli/hooks.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "589bff1b-da28-478b-a474-fe4f5f8000f9",
+  "transcript_lines_at_start": 38,
+  "token_usage": {
+    "input_tokens": 1679,
+    "cache_creation_tokens": 111255,
+    "cache_read_tokens": 1371474,
+    "output_tokens": 7073,
+    "api_call_count": 15
+  }
+}

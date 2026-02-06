@@ -1,0 +1,37 @@
+{
+  "checkpoint_id": "dc49cb8a2a42",
+  "strategy": "manual-commit",
+  "branch": "soph/refactor-trailer-checkpoint-id",
+  "migration_source_commit": "07234086459b39842df996b683f754721f574667",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/id/id.go",
+    "cmd/entire/cli/checkpoint/id/id_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "docs/requirements/soph-chunking/review-01.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/dc/49cb8a2a42/0/metadata.json",
+      "transcript": "/dc/49cb8a2a42/0/full.jsonl",
+      "context": "/dc/49cb8a2a42/0/context.md",
+      "content_hash": "/dc/49cb8a2a42/0/content_hash.txt",
+      "prompt": "/dc/49cb8a2a42/0/prompt.txt"
+    },
+    {
+      "metadata": "/dc/49cb8a2a42/2/metadata.json",
+      "transcript": "/dc/49cb8a2a42/2/full.jsonl",
+      "context": "/dc/49cb8a2a42/2/context.md",
+      "content_hash": "/dc/49cb8a2a42/2/content_hash.txt",
+      "prompt": "/dc/49cb8a2a42/2/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 865,
+    "cache_creation_tokens": 107657,
+    "cache_read_tokens": 822517,
+    "output_tokens": 3735,
+    "api_call_count": 20
+  }
+}

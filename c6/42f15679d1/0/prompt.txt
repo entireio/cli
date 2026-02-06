@@ -1,0 +1,1089 @@
+okay, so we were working on ENT-109 (linear) on this branch... I have lost track of where we're up to.
+
+---
+
+🤔 - playing around with the command - entire explain now shows checkpoints from main, I guess because I merged the branch in?
+
+How are we showing the 'branch-relevant' commits?
+
+---
+
+I'd like it to do B, and for `main` itself it can show all checkpoints in history (but let's just limit to 20 for now).
+
+---
+
+does git config have it? is that something we can get with go-git?
+
+---
+
+😭
+
+so basically we'd move git_operations into it's own package, and move any git specific things from strategy/ into that package as well?
+
+---
+
+let's do 2 for now, can you create the linear issue? make sure it's in Project: Troy
+
+---
+
+can we have a quick look to see if there are direct git things elsewhere as well?
+
+---
+
+Ideally we would see all checkpoints (and in the manual strat, the shadow-only 'steps') when we call explain - regardless of which strategy created them
+
+---
+
+yes, that makes sense. and GetRewindPoints _is_ strategy specific yes?
+
+---
+
+we didn't write or change any tests?
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+how about the changes in common?
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. **Initial Context**: User is working on ENT-109 (Linear issue) on branch `alex/ent-109-text-output-checkpoint-flag`. They've lost track of where they were.
+
+2. **Status Check**: I checked the Linear issue, git commits, tests, and lint. Found 22 commits ahead of main, all tests passing, lint clean. The feature (--checkpoint flag + tiered verbosity for `entire explain`) appeared complete.
+
+3. **User Issue**: User noticed `entire explain` was showing checkpoints from main after merging a branch. Asked how we're showing "branch-relevant" commits.
+
+4. **Investigation**: Found `GetLogsOnlyRewindPoints` in `manual_commit_rewind.go` walks ALL commit history from HEAD, so merged commits appear.
+
+5. **User Request**: User wanted:
+   - Feature branches: show only commits NOT in main/master
+   - Main branch: show all checkpoints (limit to 20)
+
+6. **Architecture Discussion**: User asked about detecting "main" branch - we found `origin/HEAD` can be checked, and go-git has `Init.DefaultBranch`. Also found existing `IsOnDefaultBranch()` in `cli/git_operations.go`.
+
+7. **Circular Dependency Issue**: `cli` imports `strategy`, so `strategy` can't import `cli`. User suggested creating a `gitutil` package.
+
+8. **Decision**: User chose option 2 - quick fix (duplicate helpers in strategy), file follow-up issue for refactor.
+
+9. **Created ENT-129**: Linear issue for refactoring git utilities into shared gitutil package.
+
+10. **User Question**: "are checkpoints now a more global, non-strategy specific concept?" - This led to realizing `explain` should be strategy-agnostic.
+
+11. **Architecture Clarification**: 
+    - `GetRewindPoints()` IS strategy-specific (for `rewind` command)
+    - `explain` should be strategy-agnostic (view all checkpoints regardless of which strategy created them)
+
+12. **Implementation**:
+    - Added `GetDefaultBranchName()` and `IsOnDefaultBranch()` to `strategy/common.go`
+    - Added `getBranchCheckpoints()` and `isAncestorOf()` to `explain.go`
+    - Modified `runExplainBranchDefault()` to use new strategy-agnostic approach
+
+13. **User Feedback**: "we didn't write or change any tests?" - Added tests for `isAncestorOf` and `getBranchCheckpoints` in `explain_test.go`
+
+14. **User Feedback**: "how about the changes in common?" - Added tests for `GetDefaultBranchName` and `IsOnDefaultBranch` in `common_test.go`
+
+15. **Final State**: Tests pass, but lint is failing with goconst warnings in test file. I just re-added the nolint comment to common.go.
+
+Key files modified:
+- `cmd/entire/cli/explain.go` - added strategy-agnostic checkpoint querying
+- `cmd/entire/cli/strategy/common.go` - added git branch helpers
+- `cmd/entire/cli/explain_test.go` - added tests
+- `cmd/entire/cli/strategy/common_test.go` - added tests
+
+Summary:
+1. Primary Request and Intent:
+   - User lost track of work on ENT-109 (Linear issue: "Text output: --checkpoint flag + tiered verbosity")
+   - User noticed `entire explain` was showing checkpoints from main after merging, wanted branch-filtering:
+     - Feature branches: only show checkpoints unique to that branch (not in main)
+     - Main branch: show all checkpoints in history (limit 20)
+   - User wanted the solution to be strategy-agnostic - `explain` should show ALL checkpoints regardless of which strategy created them
+   - User confirmed `GetRewindPoints()` IS strategy-specific (for `rewind` command)
+   - User wanted tests written for all new code
+
+2. Key Technical Concepts:
+   - Strategy-agnostic checkpoint viewing vs strategy-specific rewind operations
+   - Branch filtering using `isAncestor` checks against main/master
+   - Detecting default branch via `origin/HEAD` symbolic ref, falling back to main/master naming convention
+   - Circular dependency issue: `cli` imports `strategy`, so `strategy` cannot import `cli`
+   - go-git library for Git operations
+   - Checkpoint storage on `entire/sessions` branch (committed) and shadow branches (temporary)
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/explain.go`** - Core implementation of strategy-agnostic checkpoint viewing
+     - Added imports: `sort`, `github.com/go-git/go-git/v5/plumbing/object`
+     - Added `getBranchCheckpoints()` function that queries checkpoints directly from checkpoint store with branch filtering
+     - Added `isAncestorOf()` helper function
+     - Modified `runExplainBranchDefault()` to use `getBranchCheckpoints()` instead of `strat.GetRewindPoints()`
+     ```go
+     // branchCheckpointsLimit is the max checkpoints to show in branch view
+     const branchCheckpointsLimit = 20
+
+     // commitScanLimit is how far back to scan git history for checkpoints
+     const commitScanLimit = 500
+
+     // errStopIteration is used to stop commit iteration early
+     var errStopIteration = errors.New("stop iteration")
+
+     // getBranchCheckpoints returns checkpoints relevant to the current branch.
+     // This is strategy-agnostic - it queries checkpoints directly from the checkpoint store.
+     //
+     // Behavior:
+     //   - On feature branches: only show checkpoints unique to this branch (not in main)
+     //   - On default branch (main/master): show all checkpoints in history (up to limit)
+     //   - Includes both committed checkpoints (entire/sessions) and temporary checkpoints (shadow branches)
+     func getBranchCheckpoints(repo *git.Repository, limit int) ([]strategy.RewindPoint, error) {
+         // ... implementation
+     }
+
+     // isAncestorOf checks if commit is an ancestor of (or equal to) target.
+     func isAncestorOf(repo *git.Repository, commit, target plumbing.Hash) bool {
+         // ... implementation
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/common.go`** - Added git branch helper functions (temporary duplication, see ENT-129)
+     ```go
+     // GetDefaultBranchName returns the name of the default branch.
+     // First checks origin/HEAD, then falls back to checking if main/master exists.
+     // Returns empty string if unable to determine.
+     // NOTE: Duplicated from cli/git_operations.go - see ENT-129 for consolidation.
+     //
+     //nolint:goconst // Temporary duplication, will be cleaned up in ENT-129
+     func GetDefaultBranchName(repo *git.Repository) string {
+         // Try to get the symbolic reference for origin/HEAD
+         ref, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", "HEAD"), true)
+         if err == nil && ref != nil {
+             target := ref.Target().String()
+             if branchName, found := strings.CutPrefix(target, "refs/remotes/origin/"); found {
+                 return branchName
+             }
+         }
+         // Fallback: check if origin/main or origin/master exists
+         // ... fallback logic
+     }
+
+     // IsOnDefaultBranch checks if the repository HEAD is on the default branch.
+     // Returns (isOnDefault, currentBranchName).
+     // NOTE: Duplicated from cli/git_operations.go - see ENT-129 for consolidation.
+     func IsOnDefaultBranch(repo *git.Repository) (bool, string) {
+         // ... implementation
+     }
+     ```
+
+   - **`cmd/entire/cli/explain_test.go`** - Added tests for new explain.go functions
+     - Added `plumbing` import
+     - Added `TestIsAncestorOf` with subtests for ancestor relationships
+     - Added `TestGetBranchCheckpoints_OnFeatureBranch`
+     - Added `TestGetBranchCheckpoints_FiltersMainCommits`
+
+   - **`cmd/entire/cli/strategy/common_test.go`** - Added tests for new common.go functions
+     - Added `TestGetDefaultBranchName` with subtests for main, master, and neither
+     - Added `TestIsOnDefaultBranch` with subtests for main, master, feature branch, detached HEAD
+
+   - **Linear Issue ENT-129 Created**: "Refactor: Extract git utilities into shared gitutil package"
+     - Documents the circular dependency problem
+     - Lists files to consolidate from `cli/git_operations.go` and `strategy/common.go`
+     - Target: create `cmd/entire/cli/gitutil` package
+
+4. Errors and fixes:
+   - **Assignment mismatch error**: `IsOnDefaultBranch()` in cli returns 3 values, I only captured 2
+     - Fixed by using `isOnDefault, _, _ := IsOnDefaultBranch()`
+   - **Unused imports**: `paths`, `sort`, `object` flagged as unused initially
+     - Fixed by removing unused `paths` import, others became used when code was connected
+   - **Deprecated function**: `paths.CheckpointPath(cpID)` deprecated
+     - Fixed by using `cpID.Path()` directly
+   - **errcheck lint errors**: Not checking error returns from `IsOnDefaultBranch()`, `ListTemporaryCheckpoints()`, `iter.ForEach()`
+     - Fixed by adding `//nolint:errcheck` comments with explanations
+   - **goconst lint errors**: Repeated "main" and "master" strings
+     - Fixed by adding `//nolint:goconst` comment to `GetDefaultBranchName()`
+   - **nolint comment removed by editor**: The `//nolint:goconst` comment was removed from common.go
+     - Re-added the comment
+
+5. Problem Solving:
+   - Solved the branch filtering problem by making `explain` strategy-agnostic
+   - Solved circular dependency by temporarily duplicating code (with ENT-129 filed for proper refactor)
+   - Detected default branch using `origin/HEAD` symbolic ref with fallback to main/master convention
+
+6. All user messages:
+   - "okay, so we were working on ENT-109 (linear) on this branch... I have lost track of where we're up to."
+   - "🤔 - playing around with the command - entire explain now shows checkpoints from main, I guess because I merged the branch in? How are we showing the 'branch-relevant' commits?"
+   - "I'd like it to do B, and for `main` itself it can show all checkpoints in history (but let's just limit to 20 for now)."
+   - "😭 so basically we'd move git_operations into it's own package, and move any git specific things from strategy/ into that package as well?"
+   - "let's do 2 for now, can you create the linear issue? make sure it's in Project: Troy"
+   - "can we have a quick look to see if there are direct git things elsewhere as well?"
+   - "do you have context7?" (asking about go-git docs)
+   - "does git config have it? is that something we can get with go-git?"
+   - "should all this git stuff in common go into the cli git_operations anyway?"
+   - "Q: are checkpoints now a more global, non-strategy specific concept?"
+   - "Ideally we would see all checkpoints (and in the manual strat, the shadow-only 'steps') when we call explain - regardless of which strategy created them"
+   - "yes, that makes sense. and GetRewindPoints _is_ strategy specific yes?"
+   - "tests tests tests" (reminder to run tests)
+   - "we didn't write or change any tests?"
+   - "how about the changes in common?"
+
+7. Pending Tasks:
+   - Fix remaining goconst lint warnings in test file (`common_test.go` has "main" and "master" repeated 5 times each)
+   - Run integration tests to verify nothing is broken
+   - Commit the changes
+
+8. Current Work:
+   Just re-added the `//nolint:goconst` comment to `common.go` after it was removed by the editor. Was in the process of fixing lint errors. The last test run showed:
+   - All unit tests passing
+   - Lint failing with 2 goconst issues in `common_test.go` (lines 373 and 407)
+
+   User's last message was: "how about the changes in common?" - asking about tests for the functions added to `strategy/common.go`. I added those tests but now lint is failing.
+
+9. Optional Next Step:
+   Fix the goconst lint warnings in `common_test.go` by either adding nolint comments or defining constants for "main" and "master" in the test file. Then run full test suite and lint to confirm everything passes.
+
+   User explicitly asked for tests, and the tests are written but lint is failing. Need to make lint pass to complete the task.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-ent-109-text-output-checkpoint-flag/7f78a542-6201-447a-8277-213165356894.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+I would have expected to see more checkpoints than what ./entire explain is showing (7)
+
+---
+
+so is there some maxDepth concept we will need to go back? at some point we'll hit only commits that are on main right (back to the first commit)?
+
+---
+
+50 commits on a branch...? ehhhh....unlikely but plausible. let's go 100
+
+---
+
+if we extend that to 50 how many do we see?
+
+---
+
+maybe push it to 100
+
+---
+
+commit this
+
+---
+
+push it
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me analyze the conversation chronologically:
+
+1. **Session Start**: This is a continuation of a previous session about ENT-109 (Linear issue) - "Text output: --checkpoint flag + tiered verbosity". The summary indicates work was already done on making `entire explain` strategy-agnostic.
+
+2. **User's First Issue**: User noticed `entire explain` was only showing 7 checkpoints when more were expected.
+
+3. **Investigation**: I ran `entire explain` and checked `entire/sessions` branch. Found many checkpoints exist but only 8 were showing.
+
+4. **Root Cause Discovery**: 
+   - The `getBranchCheckpoints` function was using `return errStopIteration` when it hit a commit reachable from main
+   - With date-order traversal, commits from main appear before older feature branch commits
+   - So after merging main INTO the feature branch, we'd hit a main commit early and stop completely
+
+5. **First Fix**: Changed from `return errStopIteration` to `return nil` to skip main commits but continue scanning.
+
+6. **User Follow-up Question**: User asked about needing a maxDepth concept since eventually we'd hit only main commits.
+
+7. **Second Fix**: Added `consecutiveMainLimit` constant to stop after N consecutive commits on main.
+   - Initially set to 50
+   - User said "50 commits on a branch...? ehhhh....unlikely but plausible. let's go 100"
+   - Changed to 100
+
+8. **Testing**: Verified the fix works - now showing 20 checkpoints (the limit) spanning multiple days.
+
+9. **User Request**: Asked to extend limit to 50 to see how many total checkpoints exist.
+   - Changed `branchCheckpointsLimit` from 20 to 50
+   - Found 26 total checkpoints on the branch
+
+10. **User Request**: "maybe push it to 100" - changed limit to 100.
+
+11. **User Request**: "commit this" - I committed the changes.
+
+12. **User Request**: "push it" - I pushed the changes.
+
+Key files modified:
+- `cmd/entire/cli/explain.go` - Core logic changes
+- `cmd/entire/cli/explain_test.go` - Tests
+- `cmd/entire/cli/strategy/common.go` - Helper functions
+- `cmd/entire/cli/strategy/common_test.go` - Tests
+
+No errors during this session - all tests and lint passed.
+
+Summary:
+1. Primary Request and Intent:
+   - User noticed `entire explain` was only showing 7-8 checkpoints when more were expected
+   - After investigation, the issue was that checkpoints from before merging main were not showing
+   - User wanted branch filtering to work correctly: feature branches should show all checkpoints unique to that branch, even after merging main
+   - User requested increasing `branchCheckpointsLimit` from 20 → 50 → 100
+   - User requested changing `consecutiveMainLimit` from 50 → 100
+   - User requested committing and pushing the changes
+
+2. Key Technical Concepts:
+   - Strategy-agnostic checkpoint viewing vs strategy-specific rewind operations
+   - Git commit traversal order (`CommitterTime` order) affects which commits are seen first
+   - `isAncestorOf` checks to filter commits reachable from main
+   - After merging main INTO a feature branch, date-ordered traversal hits main commits early
+   - `consecutiveMainLimit` concept: stop scanning after N consecutive commits on main to avoid scanning entire history
+   - go-git library for Git operations
+
+3. Files and Code Sections:
+   - **`cmd/entire/cli/explain.go`** - Core fix for branch filtering
+     - Bug was: `return errStopIteration` stopped completely when hitting any main commit
+     - Fix: Changed to `return nil` to skip but continue, added `consecutiveMainLimit` tracking
+     ```go
+     // branchCheckpointsLimit is the max checkpoints to show in branch view
+     const branchCheckpointsLimit = 100
+
+     // commitScanLimit is how far back to scan git history for checkpoints
+     const commitScanLimit = 500
+
+     // consecutiveMainLimit stops scanning after this many consecutive commits on main
+     // (indicates we've likely exhausted feature branch commits)
+     const consecutiveMainLimit = 100
+
+     // In the ForEach loop:
+     var points []strategy.RewindPoint
+     count := 0
+     consecutiveMainCount := 0
+
+     err = iter.ForEach(func(c *object.Commit) error {
+         if count >= commitScanLimit {
+             return errStopIteration
+         }
+         count++
+
+         // On feature branches, skip commits that are reachable from main
+         // (but continue scanning - there may be more feature branch commits)
+         if mainBranchHash != plumbing.ZeroHash {
+             if isAncestorOf(repo, c.Hash, mainBranchHash) {
+                 consecutiveMainCount++
+                 if consecutiveMainCount >= consecutiveMainLimit {
+                     return errStopIteration // Likely exhausted feature branch commits
+                 }
+                 return nil // Skip this commit, continue scanning
+             }
+             consecutiveMainCount = 0 // Reset on feature branch commit
+         }
+         // ... rest of function
+     })
+     ```
+
+   - **`cmd/entire/cli/explain_test.go`** - Tests added in previous session (mentioned in summary)
+
+   - **`cmd/entire/cli/strategy/common.go`** - Helper functions added in previous session
+
+   - **`cmd/entire/cli/strategy/common_test.go`** - Tests added in previous session
+
+4. Errors and fixes:
+   - **Bug: Scanning stopped too early after merging main**
+     - Root cause: `return errStopIteration` on first commit reachable from main
+     - With date-order traversal, main commits appear before older feature branch commits
+     - Fix: Changed to `return nil` to skip but continue scanning
+   - **Missing depth limit concern (raised by user)**
+     - User asked: "so is there some maxDepth concept we will need to go back? at some point we'll hit only commits that are on main right"
+     - Fix: Added `consecutiveMainLimit` (initially 50, user requested 100)
+
+5. Problem Solving:
+   - Diagnosed why only 8 checkpoints showed after merging main
+   - Used `git merge-base --is-ancestor` to verify the `isAncestorOf` logic was correct
+   - Discovered the issue was iteration order, not the ancestor check
+   - Implemented two-part fix: skip-and-continue + consecutive limit
+   - Tested with limit=50 (found 26 checkpoints), settled on limit=100
+
+6. All user messages:
+   - "I would have expected to see more checkpoints than what ./entire explain is showing (7)"
+   - "it looks like we're only showing the checkpoints since the merge from main"
+   - "so is there some maxDepth concept we will need to go back? at some point we'll hit only commits that are on main right (back to the first commit)?"
+   - "50 commits on a branch...? ehhhh....unlikely but plausible. let's go 100"
+   - "if we extend that to 50 how many do we see?"
+   - "maybe push it to 100"
+   - "commit this"
+   - "push it"
+
+7. Pending Tasks:
+   - None - all requested work has been completed and pushed
+
+8. Current Work:
+   The user requested committing and pushing the changes. I:
+   1. Staged all 4 modified files
+   2. Committed with message: "feat(explain): make checkpoint viewing strategy-agnostic with branch filtering"
+   3. Pushed to origin
+   
+   Final commit: `0535c28` on branch `alex/ent-109-text-output-checkpoint-flag`
+
+9. Optional Next Step:
+   None - the task is complete. The user requested "push it", which was the final action completed successfully. All changes are committed and pushed.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-ent-109-text-output-checkpoint-flag/7f78a542-6201-447a-8277-213165356894.jsonl
+
+---
+
+okay, UX improvement time.
+explain (list)
+- [committed] I think we can just drop this, and mark the [temporary] ones instead
+- why do some checkpoints have prompt and others not? is this because the agent made multiple commits based off the originating prompt?
+- right now this is a poor git log implemenation, how do we add value to it?
+
+---
+
+hmm, also we seem to be missing checkpoints again, this explain is back to 19 instead of 26...
+
+---
+
+how about this:
+```
+--- 2026-01-21 ---
+[ba5e23ccb05b] "move the message up just before the file list?"
+  - 18:21 (aaaaaaa) style(explain): use fmt.Fprintf for string builder writes
+         
+[48cfe773289f] "in verbose mode, we should show the git commit message. (..."
+  - 18:19 (bbbbbbb) refactor(explain): move commit message before files list
+         
+[e12c3e2b3f2a] "This session is being continued from a previous conversat..."      
+  - 18:18 (a12a83d) feat(explain): show git commit message in verbose mode
+
+[e6d2bbd73e25] "Some prompt was used here"
+  - 18:10 (aaa7d7a) docs(explain): update help text for new flags and verbosity levels
+  - 18:10 (54afbbe) style: apply gofmt optimization for transcript output
+  - 18:09 (09ea3c1) feat(explain): implement full checkpoint output format
+```
+
+the only trick is if we have checkpoints from a session spanning days...
+
+so the sort would need to be something like
+- group by checkpoint
+- order by latest timestamp (of any sub-commit) desc
+
+and we'd need to move the date from te separator into the checkpoint section
+
+---
+
+yeah let's go for date on every line
+
+---
+
+- let's drop the '-' before each commit
+- we can also drop the '"' around (no prompt)
+
+---
+
+can we also add a shortform -c command for ./entire explain --checkpoint?
+
+---
+
+commit our changes in two commits please, the first for the list changes and the second for -c
+
+---
+
+hmm, given what we just did, is the explain working properly? 😅
+
+---
+
+erm...
+```
+[e932eb765b96] [temporary] (no prompt)
+  01-27 17:06 (e932eb7) Hmm, given what we just did, is the explain working properly? 😅
+
+[9d9808c0da8e] [temporary] (no prompt)
+  01-27 17:05 (9d9808c) Commit our changes in two commits please, the first for the list changes
+```
+
+should these be checkpoints? and we're showing the commits on the entire/sessions side...?
+They are shadow state reference points but we haven't actually touched any files, so I wouldn't expect even a temporary entry yet.
+
+---
+
+do we have a test for this?
+
+---
+
+commit, then let's filter them out
+
+---
+
+yeah this is confusing me, as I am prompting you now and would have expected to see that shadow branch. I actually thought it was there just before we made this last change
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me analyze the conversation chronologically:
+
+1. **Initial UX Discussion**: User started by listing UX improvements for `explain` command:
+   - Drop `[committed]` marker, only mark `[temporary]` ones
+   - Question about why some checkpoints have prompts and others don't
+   - How to add value beyond git log
+
+2. **Checkpoint Count Issue**: User noticed explain showing only 19 checkpoints instead of expected 26.
+
+3. **Format Changes**: User proposed a new format grouping commits by checkpoint ID:
+   ```
+   [checkpoint_id] "prompt text..."
+     - MM-DD HH:MM (git_sha) commit message
+   ```
+   - Sort by checkpoint, ordered by latest timestamp
+   - Move date from separator into commit line
+
+4. **Implementation of new format**:
+   - Created `checkpointGroup` and `commitEntry` structs
+   - Created `groupByCheckpointID` function
+   - Updated `formatCheckpointGroup` function
+   - Removed `[committed]` indicator, only show `[temporary]`
+   - Removed unused constants `dateGroupFormat` and `timeFormat`
+
+5. **Minor tweaks requested**:
+   - Drop the `-` before each commit line
+   - Drop quotes around `(no prompt)`
+
+6. **Added -c shorthand** for `--checkpoint` flag
+
+7. **Committed in two commits** as requested by user
+
+8. **User noticed temporary checkpoints showing incorrectly**:
+   - Checkpoints like `[e932eb765b96] [temporary] (no prompt)` were showing for prompts that hadn't changed any code
+   - Two issues identified:
+     a. Prompts showing `(no prompt)` when they should have prompts
+     b. Metadata-only checkpoints (no code changes) showing when they shouldn't
+
+9. **Fixed prompt reading for temporary checkpoints**:
+   - Bug: Reading prompts from `entire/sessions` branch instead of shadow branch commit tree
+   - Fix: Read from `shadowCommit.Tree()` instead of `GetMetadataBranchTree()`
+   - Added test `TestGetBranchCheckpoints_ReadsPromptFromShadowBranch`
+
+10. **Filter out metadata-only checkpoints**:
+    - User asked "isn't there already functionality for this somewhere?"
+    - Investigated deduplication logic in `WriteTemporary` - it skips if tree hash matches
+    - User pointed out this is similar to what we need
+    - Ultimately added `hasCodeChanges` helper function that diffs commit against parent
+
+11. **Final debugging**: 
+    - User noticed temporary checkpoint not showing
+    - Shadow branch `entire/cc86e9d` exists with commit `e366255`
+    - Issue was running old binary instead of rebuilt code
+    - After `go run`, temporary checkpoint showed correctly
+
+Files modified:
+- `cmd/entire/cli/explain.go` - Major formatting changes, hasCodeChanges function, prompt reading fix
+- `cmd/entire/cli/explain_test.go` - Updated tests for new format, added prompt reading test
+
+User feedback throughout:
+- "50 commits on a branch...? ehhhh....unlikely but plausible. let's go 100"
+- "isn't there already functionality for this somewhere?" (when I proposed hasCodeChanges)
+- "what does that save skip do exactly? Isn't what we need something similar?"
+- User stopped commit when they noticed temporary checkpoint behavior was confusing
+
+Summary:
+1. Primary Request and Intent:
+   - UX improvements for `entire explain` command:
+     - Group commits by checkpoint ID (not by date)
+     - Drop `[committed]` marker, only show `[temporary]` for uncommitted checkpoints
+     - Show prompt once per checkpoint, quoted for actual prompts, unquoted for `(no prompt)`
+     - Include date on every commit line (MM-DD HH:MM format)
+     - Add `-c` shorthand for `--checkpoint` flag
+   - Fix bug where prompts weren't showing for temporary checkpoints
+   - Filter out metadata-only temporary checkpoints (no code changes, just transcript updates)
+   - **Currently investigating**: temporary checkpoint behavior - why checkpoints appear/don't appear
+
+2. Key Technical Concepts:
+   - Shadow branches (`entire/<base-commit-short-hash>`) store temporary checkpoints
+   - `entire/sessions` branch stores committed checkpoint metadata
+   - Temporary checkpoints store prompts in shadow branch commit tree, not in `entire/sessions`
+   - Deduplication during save compares tree hashes
+   - `hasCodeChanges` function diffs commit against parent to detect metadata-only changes
+   - `ListTemporaryCheckpoints` returns `TemporaryCheckpointInfo` but doesn't include modified files info
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/explain.go`** - Core explain command logic
+     - New format implementation with checkpoint grouping
+     - `hasCodeChanges` function to filter metadata-only checkpoints
+     - Fixed prompt reading from shadow branch
+     
+     Key new structures:
+     ```go
+     type checkpointGroup struct {
+         checkpointID string
+         prompt       string
+         isTemporary  bool
+         isTask       bool
+         commits      []commitEntry
+     }
+
+     type commitEntry struct {
+         date    time.Time
+         gitSHA  string
+         message string
+     }
+     ```
+
+     Key function - filter metadata-only checkpoints:
+     ```go
+     func hasCodeChanges(commit *object.Commit) bool {
+         if commit.NumParents() == 0 {
+             return true // First commit, assume meaningful
+         }
+         parent, err := commit.Parent(0)
+         if err != nil {
+             return true
+         }
+         commitTree, err := commit.Tree()
+         if err != nil {
+             return true
+         }
+         parentTree, err := parent.Tree()
+         if err != nil {
+             return true
+         }
+         changes, err := parentTree.Diff(commitTree)
+         if err != nil {
+             return true
+         }
+         for _, change := range changes {
+             name := change.To.Name
+             if name == "" {
+                 name = change.From.Name
+             }
+             if !strings.HasPrefix(name, ".entire/") {
+                 return true
+             }
+         }
+         return false
+     }
+     ```
+
+     Temporary checkpoint handling with filtering:
+     ```go
+     tempCheckpoints, _ := store.ListTemporaryCheckpoints(context.Background(), headShort, "", limit)
+     for _, tc := range tempCheckpoints {
+         shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
+         if commitErr != nil {
+             continue
+         }
+         if !hasCodeChanges(shadowCommit) {
+             continue // Only metadata changed, not interesting for explain
+         }
+         // Read session prompt from shadow branch commit's tree
+         var sessionPrompt string
+         shadowTree, treeErr := shadowCommit.Tree()
+         if treeErr == nil {
+             sessionPrompt = strategy.ReadSessionPromptFromTree(shadowTree, tc.MetadataDir)
+         }
+         // ... append to points
+     }
+     ```
+
+   - **`cmd/entire/cli/explain_test.go`** - Tests
+     - `TestFormatBranchCheckpoints_GroupedByCheckpointID` - renamed from date grouping test
+     - `TestFormatBranchCheckpoints_ShowsTemporaryIndicator` - updated for new indicator logic
+     - `TestGetBranchCheckpoints_ReadsPromptFromShadowBranch` - new test for prompt reading fix
+
+4. Errors and fixes:
+   - **Prompts not showing for temporary checkpoints**:
+     - Bug: Reading from `GetMetadataBranchTree()` (entire/sessions) instead of shadow branch
+     - Fix: Read from `shadowCommit.Tree()` directly
+     - Test added to verify fix
+   
+   - **User feedback on hasCodeChanges**: User asked "isn't there already functionality for this somewhere?" and "what does that save skip do exactly?" - investigated deduplication logic but ultimately the helper function approach was needed since `TemporaryCheckpointInfo` doesn't track modified files
+   
+   - **Old binary vs new code**: Temporary checkpoint wasn't showing because running `./entire` (old binary) instead of `go run ./cmd/entire` (current code)
+
+5. Problem Solving:
+   - Traced why checkpoints weren't showing by checking shadow branches, git log, commit parents
+   - Investigated existing deduplication logic in `WriteTemporary` as potential reuse
+   - Verified temporary checkpoint appears correctly after rebuilding binary
+
+6. All user messages:
+   - "okay, UX improvement time... [list of improvements]"
+   - "hmm, also we seem to be missing checkpoints again, this explain is back to 19 instead of 26..."
+   - "how about this: [proposed format]"
+   - "yeah let's go for date on every line"
+   - "- let's drop the '-' before each commit, - we can also drop the '\"' around (no prompt)"
+   - "can we also add a shortform -c command for ./entire explain --checkpoint?"
+   - "commit our changes in two commits please, the first for the list changes and the second for -c"
+   - "hmm, given what we just did, is the explain working properly? 😅"
+   - "erm... should these be checkpoints? and we're showing the commits on the entire/sessions side...? They are shadow state reference points but we haven't actually touched any files"
+   - "do we have a test for this?"
+   - "commit, then let's filter them out"
+   - "isn't there already functionality for this somewhere?" (rejected my hasCodeChanges implementation)
+   - "what does that save skip do exactly? Isn't what we need something similar?"
+   - "okay, so a couple of things: 1. that branch looks like it just got recreated - how or why I don't know 2. when it's first created it takes a copy of the whole code repo state so will have heaps of 'code changes' for the first commit"
+   - "yeah this is confusing me, as I am prompting you now and would have expected to see that shadow branch. I actually thought it was there just before we made this last change"
+
+7. Pending Tasks:
+   - Commit the current changes (filtering metadata-only checkpoints) - user stopped me to investigate
+   - Continue investigating temporary checkpoint behavior per user's concern
+
+8. Current Work:
+   The user and I were investigating temporary checkpoint behavior. The shadow branch `entire/cc86e9d` exists with checkpoint `e366255`. The checkpoint was showing correctly with `go run` but not with the old binary:
+   ```
+   [e36625546aff] [temporary] "commit, then let's filter them out"
+     01-27 17:36 (e366255) Commit, then let's filter them out
+   ```
+   
+   User's concerns about temporary checkpoint behavior:
+   - "that branch looks like it just got recreated - how or why I don't know"
+   - "when it's first created it takes a copy of the whole code repo state so will have heaps of 'code changes' for the first commit"
+   - "yeah this is confusing me, as I am prompting you now and would have expected to see that shadow branch"
+
+   There are uncommitted changes in `cmd/entire/cli/explain.go` containing the `hasCodeChanges` function and filtering logic.
+
+9. Optional Next Step:
+   Continue investigating temporary checkpoint behavior as the user requested with "we are investigating temporary checkpoint behaviour". The user stopped the commit to understand why the shadow branch appeared to be recreated and how the first checkpoint behavior works. Need to understand the shadow branch lifecycle better.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-ent-109-text-output-checkpoint-flag/7f78a542-6201-447a-8277-213165356894.jsonl
+
+---
+
+so we're looking at the temporary checkpoint behaviour, we want to filter out any temporary checkpoints which have no code file changes (so exclude any of the .entire metadata).
+
+we can also test this behaviour by looking at entire explain before and after making the change.
+
+as this is the first prompt I expect us to make a shadow branch first up - but that shadow branch, whilst having a bunch of 'new' files in the first commit shouldn't count as having any changes.
+
+---
+
+okay, let's commit
+
+---
+
+let's see if this creates a shadow branch
+
+---
+
+it didn't get created, can we confirm it's the stop hook that does it?
+
+---
+
+I've just turned on debug mode, is there a log message for the actual branch creation? I can see in the logs that the stop hook ran...
+
+---
+
+okay, can you make a single file change somewhere?
+
+---
+
+ah, there we go - branch completed
+
+---
+
+[Request interrupted by user]
+
+---
+
+ah, there we go - branch created - but that has the entire lot now.
+
+right, so that captures the repo state without the working copy changes?
+
+---
+
+okay, so _really_ then we do want to show that we have a temporary checkpoint to go back to, which is that single line change.
+
+---
+
+we are using the shadow branch commit sha for the temp checkpoint id - it breaks `./entire explain -c efab217666a0`
+
+---
+
+I mean, it's nice to be able to do an explain on it directly and get the same prompt context
+
+---
+
+yeah, though can we keep the total display length the same in the list output?
+
+---
+
+um, before we continue...can I confirm that there's a bug? we've touched explain and its test a few times in this conversation, but the shadow branch has only got 2 changes, once with the initial creation efab217666a04ff91e7cc590a652ebdef8d28603 and once with the first change 34128d0a46185c6fe8d6f6522be5a7142f47e717
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me analyze this conversation chronologically:
+
+1. **Initial Context (from summary)**: The conversation started with UX improvements for `entire explain` command, including grouping commits by checkpoint ID, dropping `[committed]` marker, and fixing prompt reading for temporary checkpoints.
+
+2. **Current Session Start**: User wanted to investigate temporary checkpoint behavior and filter out metadata-only checkpoints.
+
+3. **Implementation of hasCodeChanges**: 
+   - Added `hasCodeChanges` function to filter out:
+     - First commits (no parent) - initially returned false (baseline copy)
+     - Commits that only modify `.entire/` metadata files
+   - Added tests for the function
+   - Committed as `b32b54f`
+
+4. **Shadow Branch Creation Investigation**:
+   - User wanted to verify shadow branch creation
+   - Discovered stop hook creates shadow branches via `commitWithMetadata()`
+   - No shadow branch existed initially because no modified files after commit
+
+5. **Making a File Change**:
+   - Added comment line to trigger checkpoint creation
+   - Shadow branch `entire/b32b54f` was created
+
+6. **User Feedback - First Checkpoint Should Show**:
+   - User pointed out the first checkpoint DOES have real working copy changes
+   - Changed `hasCodeChanges` to return `true` for first commits (no parent)
+   - Updated test accordingly
+
+7. **Temporary Checkpoint ID Issue**:
+   - User noticed `explain -c efab217666a0` doesn't work for temporary checkpoints
+   - Discussion about mixing checkpoint IDs and git SHAs
+   - User suggested using `~` prefix to differentiate temporary checkpoints
+
+8. **Implementing ~ Prefix**:
+   - Modified `groupByCheckpointID` to use `~` + 11 chars for temporary checkpoints (total 12 chars)
+   - Added `explainTemporaryCheckpoint` function to handle `-c ~sha` lookups
+   - Modified `runExplainCheckpoint` to check for `~` prefix
+
+9. **Current Bug Investigation**:
+   - User noticed shadow branch has 6 commits but explain only shows 2
+   - Investigation revealed:
+     - efab217: first commit (should show)
+     - 14ed4b9: metadata only (should not show)
+     - 34128d0: has code changes (should show) ✓
+     - d242924: metadata only (should not show)
+     - 953ac09: metadata only (should not show)
+     - d4defb6: has code changes (should show) - BUT NOT SHOWING
+   - Debug script showed `ListTemporaryCheckpoints` returns 0 checkpoints
+   - This is the current bug being investigated
+
+Key files modified:
+- `cmd/entire/cli/explain.go` - major changes to filtering and ~ prefix
+- `cmd/entire/cli/explain_test.go` - updated tests
+
+The bug appears to be in how `ListTemporaryCheckpoints` is finding commits - it's not returning any despite the shadow branch having 6 commits with proper trailers.
+
+Summary:
+1. Primary Request and Intent:
+   - Investigate and implement filtering for temporary checkpoints in `entire explain` output
+   - Filter out metadata-only temporary checkpoints (only `.entire/` changes)
+   - Show first checkpoint on shadow branch (captures real working copy state)
+   - Add `~` prefix to temporary checkpoint IDs to differentiate from committed checkpoint IDs
+   - Make `explain -c ~sha` work for temporary checkpoints
+   - Currently debugging: shadow branch has 6 commits but `explain` only shows 2
+
+2. Key Technical Concepts:
+   - Shadow branches (`entire/<base-commit-short>`) store temporary checkpoints
+   - `entire/sessions` branch stores committed checkpoint metadata
+   - First checkpoint on shadow branch captures HEAD + working copy changes (baseline)
+   - `hasCodeChanges` function diffs commit against parent to detect metadata-only changes
+   - Checkpoint IDs (12-hex random) vs Git SHAs (40-hex commit hashes)
+   - Stop hook triggers checkpoint saves via `commitWithMetadata()` → `strat.SaveChanges()`
+   - `ListTemporaryCheckpoints` iterates shadow branch commits looking for `Entire-Session` trailer
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/explain.go`** - Core explain command logic
+     
+     Key change - `hasCodeChanges` function (returns true for first commit now):
+     ```go
+     // hasCodeChanges returns true if the commit has changes to non-metadata files.
+     // Used by getBranchCheckpoints to filter out metadata-only temporary checkpoints.
+     // Returns false only if the commit has a parent AND only modified .entire/ metadata files.
+     //
+     // First commits (no parent) are always considered to have code changes since they
+     // capture the working copy state at session start - real uncommitted work.
+     //
+     // This filters out periodic transcript saves that don't change code.
+     func hasCodeChanges(commit *object.Commit) bool {
+     	// First commit on shadow branch captures working copy state - always meaningful
+     	if commit.NumParents() == 0 {
+     		return true
+     	}
+
+     	parent, err := commit.Parent(0)
+     	if err != nil {
+     		return true // Can't check, assume meaningful
+     	}
+
+     	commitTree, err := commit.Tree()
+     	if err != nil {
+     		return true
+     	}
+
+     	parentTree, err := parent.Tree()
+     	if err != nil {
+     		return true
+     	}
+
+     	changes, err := parentTree.Diff(commitTree)
+     	if err != nil {
+     		return true
+     	}
+
+     	// Check if any non-metadata file was changed
+     	for _, change := range changes {
+     		name := change.To.Name
+     		if name == "" {
+     			name = change.From.Name
+     		}
+     		// Skip .entire/ metadata files
+     		if !strings.HasPrefix(name, ".entire/") {
+     			return true
+     		}
+     	}
+
+     	return false
+     }
+     ```
+
+     Key change - `~` prefix for temporary checkpoint IDs in `groupByCheckpointID`:
+     ```go
+     for _, point := range points {
+     	// Determine the checkpoint ID to use
+     	cpID := point.CheckpointID.String()
+     	if cpID == "" {
+     		// Temporary checkpoints use git commit hash with ~ prefix
+     		// Use 11 chars so total length with ~ is still 12
+     		cpID = point.ID
+     		if len(cpID) > checkpointIDDisplayLength-1 {
+     			cpID = cpID[:checkpointIDDisplayLength-1]
+     		}
+     		cpID = "~" + cpID
+     	}
+     ```
+
+     Key change - `runExplainCheckpoint` handles `~` prefix:
+     ```go
+     // Check if this is a temporary checkpoint (starts with ~)
+     if strings.HasPrefix(checkpointIDPrefix, "~") {
+     	shaPrefix := strings.TrimPrefix(checkpointIDPrefix, "~")
+     	output, found := explainTemporaryCheckpoint(repo, store, shaPrefix, verbose, full)
+     	if !found {
+     		return fmt.Errorf("temporary checkpoint not found: %s", checkpointIDPrefix)
+     	}
+     	outputExplainContent(w, output, noPager)
+     	return nil
+     }
+     ```
+
+     New function - `explainTemporaryCheckpoint`:
+     ```go
+     func explainTemporaryCheckpoint(repo *git.Repository, store *checkpoint.GitStore, shaPrefix string, verbose, full bool) (string, bool) {
+     	head, err := repo.Head()
+     	if err != nil {
+     		return "", false
+     	}
+     	headShort := head.Hash().String()[:7]
+
+     	tempCheckpoints, err := store.ListTemporaryCheckpoints(context.Background(), headShort, "", branchCheckpointsLimit)
+     	if err != nil {
+     		return "", false
+     	}
+
+     	for _, tc := range tempCheckpoints {
+     		if strings.HasPrefix(tc.CommitHash.String(), shaPrefix) {
+     			// Found it - format output...
+     		}
+     	}
+     	return "", false
+     }
+     ```
+
+   - **`cmd/entire/cli/explain_test.go`** - Updated tests
+     
+     Changed test from `TestHasCodeChanges_FirstCommitReturnsFalse` to `TestHasCodeChanges_FirstCommitReturnsTrue`:
+     ```go
+     func TestHasCodeChanges_FirstCommitReturnsTrue(t *testing.T) {
+     	// First commit on a shadow branch (no parent) should return true
+     	// since it captures the working copy state - real uncommitted work
+     	// ... test body ...
+     	// First commit (no parent) captures working copy state - should return true
+     	if !hasCodeChanges(commit) {
+     		t.Error("hasCodeChanges() should return true for first commit (captures working copy)")
+     	}
+     }
+     ```
+
+   - **`cmd/entire/cli/checkpoint/temporary.go`** - `ListTemporaryCheckpoints` function (read, not modified)
+     - Function iterates shadow branch commits looking for `Entire-Session` trailer
+     - Returns `[]TemporaryCheckpointInfo` with commit hash, message, session ID, timestamp
+
+4. Errors and fixes:
+   - **First checkpoint filtered out incorrectly**: Initially `hasCodeChanges` returned `false` for first commits (no parent). User pointed out first checkpoint has real working copy changes. Fixed by changing to return `true` for commits with no parent.
+   - **Temporary checkpoint IDs break `explain -c`**: Using shadow commit SHA as checkpoint ID meant `-c` lookup failed (only searched committed checkpoints). Fixed by adding `~` prefix and `explainTemporaryCheckpoint` function.
+   - **Current bug**: `ListTemporaryCheckpoints` returns 0 checkpoints despite shadow branch having 6 commits with proper trailers. Debug script confirmed: `Found 0 checkpoints:`
+
+5. Problem Solving:
+   - Traced checkpoint save flow: Stop hook → `commitWithMetadata()` → `SaveChanges()` → `WriteTemporary()`
+   - Confirmed log messages: "checkpoint saved" with `branch_created` attribute
+   - Identified that shadow branch `entire/b32b54f` was created and has 6 commits
+   - Verified commits have proper `Entire-Session` trailers
+   - Currently debugging why `ListTemporaryCheckpoints` returns empty despite valid data
+
+6. All user messages:
+   - "so we're looking at the temporary checkpoint behaviour, we want to filter out any temporary checkpoints which have no code file changes..."
+   - "okay, let's commit"
+   - "let's see if this creates a shadow branch"
+   - "I've just turned on debug mode, is there a log message for the actual branch creation?"
+   - "okay, can you make a single file change somewhere?"
+   - "ah, there we go - branch created - but that has the entire lot now. right, so that captures the repo state without the working copy changes?"
+   - "okay, so _really_ then we do want to show that we have a temporary checkpoint to go back to, which is that single line change."
+   - "we are using the shadow branch commit sha for the temp checkpoint id - it breaks `./entire explain -c efab217666a0`"
+   - "is this a good idea? mixing checkpoint ids and git shas?"
+   - "I mean, it's nice to be able to do an explain on it directly and get the same prompt context"
+   - "yeah, though can we keep the total display length the same in the list output?"
+   - "um, before we continue...can I confirm that there's a bug? we've touched explain and its test a few times in this conversation, but the shadow branch has only got 2 changes..."
+   - "the actual commits don't show the changes"
+   - "or am I mistaken?"
+
+7. Pending Tasks:
+   - Debug why `ListTemporaryCheckpoints` returns 0 checkpoints when shadow branch has 6 valid commits
+   - Fix the bug so all temporary checkpoints with code changes show in `explain` output
+
+8. Current Work:
+   Debugging a bug where `ListTemporaryCheckpoints` returns empty despite the shadow branch `entire/b32b54f` having 6 commits with proper `Entire-Session` trailers. 
+   
+   Debug output showed:
+   ```
+   Found 0 checkpoints:
+   ```
+   
+   But `git log entire/b32b54f` shows 6 commits with proper trailers:
+   ```
+   Entire-Metadata: .entire/metadata/2026-01-27-7f78a542-6201-447a-8277-213165356894
+   Entire-Session: 2026-01-27-7f78a542-6201-447a-8277-213165356894
+   Entire-Strategy: manual-commit
+   ```
+
+   Analysis of which commits should show:
+   - efab217: first commit (should show - no parent)
+   - 14ed4b9: metadata only (should NOT show)
+   - 34128d0: has code changes (should show) ✓ currently showing
+   - d242924: metadata only (should NOT show)
+   - 953ac09: metadata only (should NOT show)  
+   - d4defb6: has code changes (should show) **NOT showing - this is the bug**
+
+9. Optional Next Step:
+   Continue debugging why `ListTemporaryCheckpoints` returns 0. The shadow branch exists, commits have proper trailers, but the function isn't finding them. Need to trace through `ListTemporaryCheckpoints` to understand why `trailers.ParseSession(c.Message)` might be failing or why commits aren't being iterated.
+
+   User's last message: "or am I mistaken?" - referring to whether there's actually a bug where temporary checkpoints aren't being captured properly.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-ent-109-text-output-checkpoint-flag/7f78a542-6201-447a-8277-213165356894.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+so what I'm questioning is if we are properly recording the changed files in the shadow branch, not the retrieval itself - I think that part is working now

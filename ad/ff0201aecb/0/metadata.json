@@ -1,0 +1,46 @@
+{
+  "checkpoint_id": "adff0201aecb",
+  "session_id": "9d7a9d52-7eb4-427d-847d-ee5451884f3d",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-30T20:05:11.008473Z",
+  "branch": "soph/improved-shadow",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/integration_test/last_checkpoint_id_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_untracked_files_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
+    "cmd/entire/cli/integration_test/rewind_test.go",
+    "cmd/entire/cli/integration_test/session_conflict_test.go",
+    "cmd/entire/cli/integration_test/subagent_checkpoints_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_logs.go",
+    "cmd/entire/cli/strategy/manual_commit_reset.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_suffix.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "scripts/test-attribution-e2e-rewind-new-prompt.sh",
+    "scripts/test-attribution-e2e-second-session.sh"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "266b25a4-7f54-416c-b394-bf0661a6f148",
+  "transcript_lines_at_start": 768,
+  "token_usage": {
+    "input_tokens": 1412,
+    "cache_creation_tokens": 397538,
+    "cache_read_tokens": 19104768,
+    "output_tokens": 370,
+    "api_call_count": 175
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-30T20:05:10.900106Z",
+    "agent_lines": 14,
+    "human_added": 94,
+    "human_modified": 622,
+    "human_removed": 0,
+    "total_committed": 172,
+    "agent_percentage": 8.13953488372093
+  }
+}

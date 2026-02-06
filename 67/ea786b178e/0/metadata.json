@@ -1,0 +1,10 @@
+{
+  "checkpoint_id": "67ea786b178e",
+  "session_id": "2026-01-07-4ec443d0-063b-4de3-8ede-e35160c2c1de",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-07T16:41:38.841724+01:00",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".claude/skills/test-repo/test-harness.sh"
+  ]
+}

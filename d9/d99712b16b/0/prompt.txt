@@ -1,0 +1,93 @@
+remove the 'choose strategy' step from entire enable
+
+document the alternative (use --strategy flag) - in README / getting started docs
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# Plan: Remove Strategy Selection from `entire enable`
+
+## Summary
+
+Remove the interactive strategy selection prompt from `entire enable` and use `manual-commit` as the default. Document the `--strategy` flag as the alternative for users who want `auto-commit`.
+
+## Changes
+
+### 1. Modify `cmd/entire/cli/setup.go`
+
+**Update command description (line 56):**
+```go
+Long: `Enable Entire with session tracking for your AI agent workflows.
+
+Uses the manual-commit strategy by default. To use a different strategy:
+
+  entire enable --strategy auto-commit
+
+Strategies: manual-commit (default), auto-commit`,
+```
+
+**Simplify `runEnableInteractive()` (lines 277-302):**
+
+Remove the huh.Select form for strategy selection and use the default strategy directly:
+
+```go
+func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProjectSettings, forceHooks, setupShell, skipPushSessions, telemetry, disableMultisessionWarning bool) error {
+	// Use the default strategy (manual-commit)
+	internalStrategy := strategy.DefaultStrategyName
+	fmt.Fprintf(w, "Using %s strategy (use --strategy to change)\n\n", internalStrategy)
+
+	// Setup Claude Code hooks (continues from existing line 304)
+	hooksInstalled, err := setupClaudeCodeHook(localDev, forceHooks)
+	// ... rest unchanged ...
+```
+
+Lines to remove: 279-302 (the strategy selection form and mapping logic)
+
+### 2. Update `README.md`
+
+**Quick Start section (after line 13):**
+Add a comment showing the `--strategy` flag option:
+```markdown
+cd your-project && entire enable
+
+# Or use a specific strategy
+entire enable --strategy auto-commit
+```
+
+**Commands Reference table (line 100):**
+Update the enable row:
+```markdown
+| `entire enable` | Enable Entire (uses `manual-commit` by default; use `--strategy` for alternatives) |
+```
+
+## Files to Modify
+
+| File | Change |
+|------|--------|
+| `cmd/entire/cli/setup.go` | Remove strategy selection form, update Long description |
+| `README.md` | Document `--strategy` flag in Quick Start and Commands Reference |
+
+## Verification
+
+1. Run `mise run fmt && mise run lint` - ensure no lint errors
+2. Run `mise run test` - ensure existing tests pass
+3. Manual test:
+   - `entire enable` should use manual-commit without prompting for strategy
+   - `entire enable --strategy auto-commit` should still work
+   - `entire enable --help` should show the updated description
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-cli/737eee5f-5d97-405c-9d66-b52ce215633a.jsonl
+
+---
+
+add an integration test that checks default value is manual-mode
+
+---
+
+I would add a specific section inside README.md with the most important flags available at entire enable command.
