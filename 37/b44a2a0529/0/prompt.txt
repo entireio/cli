@@ -1,6 +1,0 @@
-I've staged a change.  Please commit with a nice message explaining that i noticed 1s latency on every CLI invocation, and this timeout fixes it, with the risk of dropping telemetry on the floor.  But that's fine because it's best-effort.  Also mention why we have a silent logger.
-
----
-
-I see that files written this way have no trailing newline.  Is there a way to tell MarshalIndent to add a trailing newline, or perhaps by annotating the EntireSettings struct with `json:...`?
-@/Users/paul/src/entireio/cli/cmd/entire/cli/config.go:254-258

@@ -1,9 +1,0 @@
-{
-  "checkpoint_id": "e601908a48d6",
-  "session_id": "2026-01-21-cd341f28-ef30-423a-ad52-e2faa81a93ce",
-  "strategy": "auto-commit",
-  "created_at": "2026-01-21T20:15:38.09601-08:00",
-  "checkpoints_count": 0,
-  "files_touched": null,
-  "agent": "Gemini CLI"
-}
