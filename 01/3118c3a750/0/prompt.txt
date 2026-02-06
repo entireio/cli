@@ -1,0 +1,17 @@
+let's make the "entire start" command hidden
+
+---
+
+thinking again: let's completely remove the start command
+
+---
+
+"mise run test:ci" fails
+
+---
+
+can you explain why they fail now?
+
+---
+
+do we have more functions like this in tests that are duplicated?

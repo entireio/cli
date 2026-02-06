@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "1755e38d324c",
+  "strategy": "manual-commit",
+  "branch": "gtrrz-victor/alt-better-multi-session-flow",
+  "migration_source_commit": "d9601f135f93c4bff2cb7dbe47991d9fd430e18d",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/hooks.go",
+    "cmd/entire/cli/integration_test/session_conflict_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/17/55e38d324c/0/metadata.json",
+      "transcript": "/17/55e38d324c/0/full.jsonl",
+      "context": "/17/55e38d324c/0/context.md",
+      "content_hash": "/17/55e38d324c/0/content_hash.txt",
+      "prompt": "/17/55e38d324c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 24,
+    "cache_creation_tokens": 61658,
+    "cache_read_tokens": 1570984,
+    "output_tokens": 105,
+    "api_call_count": 22
+  }
+}

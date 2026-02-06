@@ -1,0 +1,39 @@
+{
+  "checkpoint_id": "d37d736cbc10",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "63e3d1fe6bf396fac8a91d25ca6d7336588b1af0",
+  "checkpoints_count": 5,
+  "files_touched": [
+    ".claude/settings.json",
+    "README_TELEMETRY_RESEARCH.md",
+    "TELEMETRY_API_REFERENCE.md",
+    "TELEMETRY_IMPLEMENTATION_GUIDE.md",
+    "TELEMETRY_INDEX.md",
+    "TELEMETRY_QUICK_START.md",
+    "TELEMETRY_RESEARCH.md",
+    "TELEMETRY_RESEARCH_SUMMARY.md",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/telemetry.go",
+    "cmd/entire/cli/telemetry_test.go",
+    "cmd/entire/main.go",
+    "plans/posthog-telemetry-integration.md",
+    "posthog-cli-telemetry-implementation.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d3/7d736cbc10/0/metadata.json",
+      "transcript": "/d3/7d736cbc10/0/full.jsonl",
+      "context": "/d3/7d736cbc10/0/context.md",
+      "content_hash": "/d3/7d736cbc10/0/content_hash.txt",
+      "prompt": "/d3/7d736cbc10/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

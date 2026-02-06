@@ -1,0 +1,9 @@
+ok, works, can you now tell me why a single prompt created three commits in the entire/56f7398 branch (again in the test repo)
+
+---
+
+Can you explain how a proper deduplication would look like?
+
+---
+
+let's do option 1 straight away

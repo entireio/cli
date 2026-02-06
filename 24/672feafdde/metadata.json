@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "24672feafdde",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "748d9c92288817453a25a203fe6d4df614b91af8",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/session.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/24/672feafdde/0/metadata.json",
+      "transcript": "/24/672feafdde/0/full.jsonl",
+      "context": "/24/672feafdde/0/context.md",
+      "content_hash": "/24/672feafdde/0/content_hash.txt",
+      "prompt": "/24/672feafdde/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}
