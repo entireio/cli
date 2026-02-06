@@ -1,0 +1,5 @@
+can you update CLAUDE.md to reflect the new multi session storage in entire/sessions?
+
+---
+
+is there also an update in the docs folder needed?

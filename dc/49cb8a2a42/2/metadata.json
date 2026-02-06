@@ -1,0 +1,23 @@
+{
+  "checkpoint_id": "dc49cb8a2a42",
+  "session_id": "2026-01-22-375d5d79-9c13-419d-a5fd-72421f2af713",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-22T20:05:44.652546+01:00",
+  "branch": "soph/refactor-trailer-checkpoint-id",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/id/id.go",
+    "cmd/entire/cli/checkpoint/id/id_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_lines_at_start": 3,
+  "token_usage": {
+    "input_tokens": 138,
+    "cache_creation_tokens": 19401,
+    "cache_read_tokens": 780131,
+    "output_tokens": 2266,
+    "api_call_count": 17
+  }
+}

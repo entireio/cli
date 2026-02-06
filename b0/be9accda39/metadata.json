@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "b0be9accda39",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "e34f1c3c5df451d87051c12ebcf98cbfdb1d6ed8",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "LICENSE"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b0/be9accda39/0/metadata.json",
+      "transcript": "/b0/be9accda39/0/full.jsonl",
+      "context": "/b0/be9accda39/0/context.md",
+      "content_hash": "/b0/be9accda39/0/content_hash.txt",
+      "prompt": "/b0/be9accda39/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

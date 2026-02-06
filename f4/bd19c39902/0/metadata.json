@@ -1,0 +1,16 @@
+{
+  "checkpoint_id": "f4bd19c39902",
+  "session_id": "2026-01-10-cef3602b-e191-46fd-aa56-68c030df67e5",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-10T22:45:31.222324+01:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/integration_test/default_branch_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "docs/README-opencode-integration.md",
+    "docs/opencode-integration-decisions.md",
+    "docs/opencode-integration-findings.md",
+    "docs/opencode-integration-plan.md"
+  ]
+}

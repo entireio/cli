@@ -1,0 +1,1 @@
+Can you fix: Fix the panic in id.Generate() - return error tuple instead

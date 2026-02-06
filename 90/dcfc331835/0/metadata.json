@@ -1,0 +1,10 @@
+{
+  "checkpoint_id": "90dcfc331835",
+  "session_id": "2026-01-07-775a7e0f-d6d5-47fe-a4c9-61f814abeae3",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-07T17:41:26.427112+01:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/session.go"
+  ]
+}

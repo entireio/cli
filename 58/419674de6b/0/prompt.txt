@@ -1,0 +1,10 @@
+Can you check if the tests cmd/entire/cli/integration_test/setup_claude_hooks_test.go are now not duplicated?
+
+---
+
+let's use true/false and not on/off for the skip-push-sessions
+
+---
+
+why can't we not just real booleans?   "enabled": true,
+  "local_dev": true,

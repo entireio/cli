@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "5c1039ad85f4",
+  "session_id": "bc3bf53b-19fe-4209-b30a-a1acffaf6703",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-28T21:54:44.01618Z",
+  "branch": "soph/go-1-25-6",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "go.mod",
+    "mise.toml"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 42,
+    "cache_creation_tokens": 27063,
+    "cache_read_tokens": 193753,
+    "output_tokens": 8,
+    "api_call_count": 5
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-28T21:54:43.76679Z",
+    "agent_lines": 2,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 2,
+    "agent_percentage": 100
+  }
+}

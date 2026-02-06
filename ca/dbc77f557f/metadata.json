@@ -1,0 +1,32 @@
+{
+  "checkpoint_id": "cadbc77f557f",
+  "strategy": "manual-commit",
+  "branch": "soph/add-agent-to-logging",
+  "migration_source_commit": "dda946e54d1827bd0c5b38cd1932f46c39ba89b4",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/registry.go",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/hook_registry_test.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/rewind.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ca/dbc77f557f/0/metadata.json",
+      "transcript": "/ca/dbc77f557f/0/full.jsonl",
+      "context": "/ca/dbc77f557f/0/context.md",
+      "content_hash": "/ca/dbc77f557f/0/content_hash.txt",
+      "prompt": "/ca/dbc77f557f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 961,
+    "cache_creation_tokens": 838439,
+    "cache_read_tokens": 9683682,
+    "output_tokens": 23504,
+    "api_call_count": 98
+  }
+}

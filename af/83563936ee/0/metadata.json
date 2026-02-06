@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "af83563936ee",
+  "session_id": "253fd5ef-38bf-4f4a-804a-98df5088a868",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-03T06:21:41.461334Z",
+  "branch": "alex/improve-explain",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/plans/2026-02-03-explain-remote-fallback.md"
+  ],
+  "agent": "Claude Code",
+  "agents": "Claude Code",
+  "transcript_identifier_at_start": "e5412d94-c709-4c32-9286-b380fc1f8520",
+  "transcript_lines_at_start": 107,
+  "token_usage": {
+    "input_tokens": 110,
+    "cache_creation_tokens": 138688,
+    "cache_read_tokens": 3001685,
+    "output_tokens": 492,
+    "api_call_count": 50
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-03T06:02:40.197904Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 7,
+    "human_removed": 177,
+    "total_committed": 7,
+    "agent_percentage": 0
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "264c3fdb7e9f",
+  "session_id": "c3afafd7-9a94-4316-80d3-ad6f8a1e4d80",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-05T12:15:17.606395Z",
+  "branch": "20260205-gitleaks",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/committed.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "08f68fe0-5fa7-4d1d-877b-4d0d7080bd18",
+  "transcript_lines_at_start": 16,
+  "token_usage": {
+    "input_tokens": 81,
+    "cache_creation_tokens": 31976,
+    "cache_read_tokens": 392030,
+    "output_tokens": 344,
+    "api_call_count": 11
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-05T12:15:16.526625Z",
+    "agent_lines": 2,
+    "human_added": 1,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 3,
+    "agent_percentage": 66.66666666666666
+  }
+}

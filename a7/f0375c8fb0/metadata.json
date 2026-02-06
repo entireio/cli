@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "a7f0375c8fb0",
+  "strategy": "manual-commit",
+  "branch": "soph/chunking",
+  "migration_source_commit": "77b46fd3ebaa20d4a1958c66e6d76c897bb9900a",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/geminicli/gemini_test.go",
+    "docs/requirements/soph-chunking/review-01.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a7/f0375c8fb0/0/metadata.json",
+      "transcript": "/a7/f0375c8fb0/0/full.jsonl",
+      "context": "/a7/f0375c8fb0/0/context.md",
+      "content_hash": "/a7/f0375c8fb0/0/content_hash.txt",
+      "prompt": "/a7/f0375c8fb0/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 114,
+    "cache_creation_tokens": 67755,
+    "cache_read_tokens": 776518,
+    "output_tokens": 6721,
+    "api_call_count": 14
+  }
+}

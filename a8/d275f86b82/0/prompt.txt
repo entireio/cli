@@ -1,0 +1,9 @@
+When a session is resumed across a date change, entireSessionID is now correctly preserved (e.g., "2026-01-22-abc123") via GetOrCreateEntireSessionID. However, the metadata directory is still computed using paths.SessionMetadataDir(modelSessionID) which generates a new date prefix (e.g., ".entire/metadata/2026-01-23-abc123"). This creates a mismatch where SaveContext.SessionID and SaveContext.MetadataDir have different date prefixes. Strategy code that uses SessionMetadataDirFromEntireID(ctx.SessionID) to look up metadata will fail to find files saved with the inconsistent path. The fix requires using paths.SessionMetadataDirFromEntireID(entireSessionID) instead of paths.SessionMetadataDir(modelSessionID) in both Claude and Gemini handlers.
+
+---
+
+is paths.SessionMetadataDir used anywhere now?
+
+---
+
+remote it completeley, no need to deprecated it
