@@ -137,7 +137,7 @@ func TestLoad_LocalSettingsRejectsUnknownKeys(t *testing.T) {
 // containsUnknownField checks if the error message indicates an unknown field
 func containsUnknownField(msg string) bool {
 	// Go's json package reports unknown fields with this message format
-	return len(msg) > 0 && (contains(msg, "unknown field") || contains(msg, "unknown"))
+	return len(msg) > 0 && contains(msg, "unknown field")
 }
 
 func contains(s, substr string) bool {
