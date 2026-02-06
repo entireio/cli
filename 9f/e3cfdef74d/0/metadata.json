@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "9fe3cfdef74d",
+  "session_id": "6da7d497-00e2-460d-a6b4-d280e0314cfd",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-06T06:44:54.539422Z",
+  "branch": "alex/test2",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/geese.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "303c19f4-dabf-46c7-8043-7ee63e3b365b",
+  "transcript_lines_at_start": 9,
+  "token_usage": {
+    "input_tokens": 8,
+    "cache_creation_tokens": 52959,
+    "cache_read_tokens": 118997,
+    "output_tokens": 443,
+    "api_call_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-06T06:44:54.446384Z",
+    "agent_lines": 22,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 22,
+    "agent_percentage": 100
+  }
+}
