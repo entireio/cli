@@ -15,20 +15,20 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 )
 
-// Re-export constants from settings package for backwards compatibility
+// Package-level aliases to avoid shadowing the settings package with local variables named "settings".
 const (
 	EntireSettingsFile      = settings.EntireSettingsFile
 	EntireSettingsLocalFile = settings.EntireSettingsLocalFile
 )
 
-// EntireSettings is an alias for settings.EntireSettings for backwards compatibility.
+// EntireSettings is an alias for settings.EntireSettings.
 type EntireSettings = settings.EntireSettings
 
 // LoadEntireSettings loads the Entire settings from .entire/settings.json,
 // then applies any overrides from .entire/settings.local.json if it exists.
 // Returns default settings if neither file exists.
 // Works correctly from any subdirectory within the repository.
-func LoadEntireSettings() (*EntireSettings, error) {
+func LoadEntireSettings() (*settings.EntireSettings, error) {
 	s, err := settings.Load()
 	if err != nil {
 		return nil, fmt.Errorf("loading settings: %w", err)
@@ -37,7 +37,7 @@ func LoadEntireSettings() (*EntireSettings, error) {
 }
 
 // SaveEntireSettings saves the Entire settings to .entire/settings.json.
-func SaveEntireSettings(s *EntireSettings) error {
+func SaveEntireSettings(s *settings.EntireSettings) error {
 	if err := settings.Save(s); err != nil {
 		return fmt.Errorf("saving settings: %w", err)
 	}
@@ -45,7 +45,7 @@ func SaveEntireSettings(s *EntireSettings) error {
 }
 
 // SaveEntireSettingsLocal saves the Entire settings to .entire/settings.local.json.
-func SaveEntireSettingsLocal(s *EntireSettings) error {
+func SaveEntireSettingsLocal(s *settings.EntireSettings) error {
 	if err := settings.SaveLocal(s); err != nil {
 		return fmt.Errorf("saving local settings: %w", err)
 	}
