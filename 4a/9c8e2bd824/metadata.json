@@ -1,0 +1,32 @@
+{
+  "checkpoint_id": "4a9c8e2bd824",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-232-track-last-interaction-for-sessions",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/status.go",
+    "cmd/entire/cli/status_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/session_state_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/4a/9c8e2bd824/0/metadata.json",
+      "transcript": "/4a/9c8e2bd824/0/full.jsonl",
+      "context": "/4a/9c8e2bd824/0/context.md",
+      "content_hash": "/4a/9c8e2bd824/0/content_hash.txt",
+      "prompt": "/4a/9c8e2bd824/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 57,
+    "cache_creation_tokens": 148293,
+    "cache_read_tokens": 2972291,
+    "output_tokens": 7370,
+    "api_call_count": 43
+  }
+}
