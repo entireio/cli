@@ -1,0 +1,39 @@
+{
+  "checkpoint_id": "90ed5b9b296e",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-64-status-shows-sessions",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_staging_test.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/90/ed5b9b296e/0/metadata.json",
+      "transcript": "/90/ed5b9b296e/0/full.jsonl",
+      "context": "/90/ed5b9b296e/0/context.md",
+      "content_hash": "/90/ed5b9b296e/0/content_hash.txt",
+      "prompt": "/90/ed5b9b296e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 112,
+    "cache_creation_tokens": 273054,
+    "cache_read_tokens": 13801338,
+    "output_tokens": 10666,
+    "api_call_count": 108
+  }
+}
