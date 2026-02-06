@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "cc90f6622c5b",
+  "strategy": "manual-commit",
+  "branch": "soph/bug-with-rebase-or-commit-change-during-claude-session",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_migration.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/cc/90f6622c5b/0/metadata.json",
+      "transcript": "/cc/90f6622c5b/0/full.jsonl",
+      "context": "/cc/90f6622c5b/0/context.md",
+      "content_hash": "/cc/90f6622c5b/0/content_hash.txt",
+      "prompt": "/cc/90f6622c5b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 15,
+    "cache_creation_tokens": 55868,
+    "cache_read_tokens": 613423,
+    "output_tokens": 70,
+    "api_call_count": 13
+  }
+}
