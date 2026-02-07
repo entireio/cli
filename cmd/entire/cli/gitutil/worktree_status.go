@@ -11,6 +11,7 @@
 package gitutil
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -25,22 +26,17 @@ import (
 // and returns the same git.Status type for drop-in compatibility with
 // callers that previously used worktree.Status().
 //
+// Uses -uall to list individual untracked files instead of collapsing
+// directories, matching go-git's worktree.Status() behavior.
+//
 // When go-git v6 fixes index corruption (ENT-242), swap to:
 //
 //	w, _ := repo.Worktree(); return w.Status()
 func WorktreeStatus(repo *git.Repository) (git.Status, error) {
-	repoRoot, err := worktreeRoot(repo)
+	output, err := runGitCmd(repo, "git status", "status", "--porcelain", "-z", "-uall")
 	if err != nil {
 		return nil, err
 	}
-
-	cmd := exec.CommandContext(context.Background(), "git", "status", "--porcelain", "-z")
-	cmd.Dir = repoRoot
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("git status failed in %s: %w", repoRoot, err)
-	}
-
 	return parsePorcelainStatus(string(output)), nil
 }
 
@@ -51,32 +47,30 @@ func WorktreeStatus(repo *git.Repository) (git.Status, error) {
 //
 //	w, _ := repo.Worktree(); s, _ := w.Status(); filter for Staging != Unmodified
 func StagedFileNames(repo *git.Repository) ([]string, error) {
+	output, err := runGitCmd(repo, "git diff --cached", "diff", "--cached", "--name-only", "-z")
+	if err != nil {
+		return nil, err
+	}
+	return parseNulDelimitedNames(string(output)), nil
+}
+
+// runGitCmd runs a git command in the worktree root, capturing stderr for
+// diagnostics on failure.
+func runGitCmd(repo *git.Repository, label string, args ...string) ([]byte, error) {
 	repoRoot, err := worktreeRoot(repo)
 	if err != nil {
 		return nil, err
 	}
 
-	cmd := exec.CommandContext(context.Background(), "git", "diff", "--cached", "--name-only", "-z")
+	cmd := exec.CommandContext(context.Background(), "git", args...)
 	cmd.Dir = repoRoot
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git diff --cached failed in %s: %w", repoRoot, err)
+		return nil, fmt.Errorf("%s failed in %s: %w: %s", label, repoRoot, err, strings.TrimSpace(stderr.String()))
 	}
-
-	raw := string(output)
-	if raw == "" {
-		return nil, nil
-	}
-
-	// NUL-delimited: split and drop the trailing empty element
-	parts := strings.Split(raw, "\x00")
-	var names []string
-	for _, p := range parts {
-		if p != "" {
-			names = append(names, p)
-		}
-	}
-	return names, nil
+	return output, nil
 }
 
 // worktreeRoot returns the filesystem root of the repo's worktree.
@@ -86,6 +80,22 @@ func worktreeRoot(repo *git.Repository) (string, error) {
 		return "", fmt.Errorf("failed to get worktree: %w", err)
 	}
 	return wt.Filesystem.Root(), nil
+}
+
+// parseNulDelimitedNames splits NUL-delimited output into a string slice,
+// dropping empty elements (e.g., trailing NUL).
+func parseNulDelimitedNames(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, "\x00")
+	var names []string
+	for _, p := range parts {
+		if p != "" {
+			names = append(names, p)
+		}
+	}
+	return names
 }
 
 // porcelainStatusCode maps a single byte from `git status --porcelain` XY output

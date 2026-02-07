@@ -150,3 +150,23 @@ func TestPorcelainStatusCode_AllCodes(t *testing.T) {
 		})
 	}
 }
+
+func TestParseNulDelimitedNames_Empty(t *testing.T) {
+	assert.Nil(t, parseNulDelimitedNames(""))
+}
+
+func TestParseNulDelimitedNames_SingleFile(t *testing.T) {
+	names := parseNulDelimitedNames("file.go\x00")
+	assert.Equal(t, []string{"file.go"}, names)
+}
+
+func TestParseNulDelimitedNames_MultipleFiles(t *testing.T) {
+	names := parseNulDelimitedNames("a.go\x00b.go\x00c.txt\x00")
+	assert.Equal(t, []string{"a.go", "b.go", "c.txt"}, names)
+}
+
+func TestParseNulDelimitedNames_NoTrailingNul(t *testing.T) {
+	// git output may or may not have a trailing NUL
+	names := parseNulDelimitedNames("a.go\x00b.go")
+	assert.Equal(t, []string{"a.go", "b.go"}, names)
+}
