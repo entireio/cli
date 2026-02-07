@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "b7bf94398dc9",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-221-type-consolidation",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/session/phase.go",
+    "cmd/entire/cli/session/phase_test.go",
+    "cmd/entire/cli/session/state_test.go",
+    "docs/plans/2026-02-06-session-phase-review-notes.md",
+    "docs/plans/2026-02-06-session-phase-state-machine-v2.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b7/bf94398dc9/0/metadata.json",
+      "transcript": "/b7/bf94398dc9/0/full.jsonl",
+      "context": "/b7/bf94398dc9/0/context.md",
+      "content_hash": "/b7/bf94398dc9/0/content_hash.txt",
+      "prompt": "/b7/bf94398dc9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 387,
+    "cache_creation_tokens": 848136,
+    "cache_read_tokens": 19878693,
+    "output_tokens": 30564,
+    "api_call_count": 190
+  }
+}
