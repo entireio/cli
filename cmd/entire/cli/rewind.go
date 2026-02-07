@@ -15,6 +15,7 @@ import (
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitutil"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1136,12 +1137,7 @@ func checkResetSafety(targetCommitHash string, uncommittedChangesWarning string)
 		warnings = append(warnings, uncommittedChangesWarning)
 	} else {
 		// Fall back to generic check
-		worktree, err := repo.Worktree()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get worktree: %w", err)
-		}
-
-		status, err := worktree.Status()
+		status, err := gitutil.WorktreeStatus(repo)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get status: %w", err)
 		}

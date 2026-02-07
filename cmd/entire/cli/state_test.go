@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -53,12 +54,11 @@ func TestPreTaskState_CaptureLoadCleanup(t *testing.T) {
 		t.Fatalf("Failed to create tmp dir: %v", err)
 	}
 
-	// Initialize git repo manually (need at least .git directory)
-	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
-		t.Fatalf("Failed to create .git: %v", err)
-	}
-	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
-		t.Fatalf("Failed to create HEAD: %v", err)
+	// Initialize git repo using CLI so git status works correctly
+	initCmd := exec.CommandContext(t.Context(), "git", "init", "-b", "main")
+	initCmd.Dir = testRepoDir
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to git init: %v\n%s", err, out)
 	}
 
 	toolUseID := "toolu_test123"
@@ -276,12 +276,11 @@ func setupTestRepoWithTranscript(t *testing.T, transcriptContent string, transcr
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Initialize git repo
-	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
-		t.Fatalf("Failed to create .git: %v", err)
-	}
-	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
-		t.Fatalf("Failed to create HEAD: %v", err)
+	// Initialize git repo using CLI so git status works correctly
+	cmd := exec.CommandContext(t.Context(), "git", "init", "-b", "main")
+	cmd.Dir = tmpDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to git init: %v\n%s", err, out)
 	}
 
 	// Clear the repo root cache to pick up the new repo

@@ -191,6 +191,29 @@ See `HardResetWithProtection()` in `common.go` and `CheckoutBranch()` in `git_op
 
 Regression tests in `hard_reset_test.go` verify this behavior - if go-git v6 fixes this issue, those tests can be used to validate switching back.
 
+**Do NOT use go-git v5's `worktree.Status()` — use `gitutil.WorktreeStatus(repo)` instead.**
+
+go-git v5's `worktree.Status()` reads **and rewrites** the index file. When called from git hooks (post-commit, prepare-commit-msg), this corrupts the index by writing stale cache-tree entries that reference objects pruned by GC (ENT-242).
+
+Use the `gitutil` package shim instead:
+```go
+import "github.com/entireio/cli/cmd/entire/cli/gitutil"
+
+// WRONG - corrupts index when called from hooks
+w, _ := repo.Worktree()
+status, err := w.Status()
+
+// CORRECT - uses git CLI, safe everywhere
+status, err := gitutil.WorktreeStatus(repo)
+
+// For staged file names only (lighter weight)
+names, err := gitutil.StagedFileNames(repo)
+```
+
+Note: `repo.Worktree()` itself is safe to call (e.g., for `wt.Filesystem.Root()`). Only `.Status()` triggers the index rewrite.
+
+Unit tests in `gitutil/worktree_status_test.go` verify the porcelain parsing. If go-git v6 fixes the index corruption, the swap-back points are documented in the shim functions.
+
 #### Repo Root vs Current Working Directory
 
 **Always use repo root (not `os.Getwd()`) when working with git-relative paths.**

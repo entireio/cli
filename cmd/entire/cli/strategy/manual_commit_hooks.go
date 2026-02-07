@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
@@ -925,22 +926,21 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 			slog.String("error", err.Error()))
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree",
-			slog.String("error", err.Error()))
-		return result
-	}
-
 	// Get worktree status to find ALL changed files
-	status, err := worktree.Status()
+	// Uses git CLI shim to avoid go-git index corruption (ENT-242).
+	status, err := gitutil.WorktreeStatus(repo)
 	if err != nil {
 		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
 			slog.String("error", err.Error()))
 		return result
 	}
 
-	worktreeRoot := worktree.Filesystem.Root()
+	worktreeRoot, err := GetWorktreePath()
+	if err != nil {
+		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree path",
+			slog.String("error", err.Error()))
+		return result
+	}
 
 	// Build map of changed files with their worktree content
 	// IMPORTANT: We read from worktree (not staging area) to match what WriteTemporary
@@ -980,24 +980,11 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 
 // getStagedFiles returns a list of files staged for commit.
 func getStagedFiles(repo *git.Repository) []string {
-	worktree, err := repo.Worktree()
+	names, err := gitutil.StagedFileNames(repo)
 	if err != nil {
 		return nil
 	}
-
-	status, err := worktree.Status()
-	if err != nil {
-		return nil
-	}
-
-	var staged []string
-	for path, fileStatus := range status {
-		// Check if file is staged (in index)
-		if fileStatus.Staging != git.Unmodified && fileStatus.Staging != git.Untracked {
-			staged = append(staged, path)
-		}
-	}
-	return staged
+	return names
 }
 
 // getLastPrompt retrieves the most recent user prompt from a session's shadow branch.

@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
@@ -659,12 +660,7 @@ func checkCanRewind() (bool, string, error) {
 		return false, "", fmt.Errorf("failed to open git repository: %w", err)
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return false, "", fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	status, err := worktree.Status()
+	status, err := gitutil.WorktreeStatus(repo)
 	if err != nil {
 		return false, "", fmt.Errorf("failed to get status: %w", err)
 	}
@@ -725,12 +721,7 @@ func checkCanRewindWithWarning() (bool, string, error) {
 		return true, "", nil //nolint:nilerr // Rewind allowed even if repo can't be opened
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if worktree can't be accessed
-	}
-
-	status, err := worktree.Status()
+	status, err := gitutil.WorktreeStatus(repo)
 	if err != nil {
 		return true, "", nil //nolint:nilerr // Rewind allowed even if status can't be retrieved
 	}

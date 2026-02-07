@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/gitutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
@@ -287,12 +288,7 @@ func getFileChanges() ([]string, []string, []string, []string, error) {
 		return nil, nil, nil, nil, err
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("getting worktree: %w", err)
-	}
-
-	status, err := worktree.Status()
+	status, err := gitutil.WorktreeStatus(repo)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("getting status: %w", err)
 	}

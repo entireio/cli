@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitutil"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -206,12 +207,7 @@ func ComputeFileChanges(preState *PrePromptState) (newFiles, deletedFiles []stri
 		return nil, nil, err
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	status, err := worktree.Status()
+	status, err := gitutil.WorktreeStatus(repo)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get status: %w", err)
 	}
@@ -275,12 +271,7 @@ func ComputeDeletedFiles() ([]string, error) {
 		return nil, err
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return nil, err
-	}
-
-	status, err := worktree.Status()
+	status, err := gitutil.WorktreeStatus(repo)
 	if err != nil {
 		return nil, err
 	}
@@ -336,12 +327,7 @@ func getUntrackedFilesForState() ([]string, error) {
 		return nil, err
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return nil, err
-	}
-
-	status, err := worktree.Status()
+	status, err := gitutil.WorktreeStatus(repo)
 	if err != nil {
 		return nil, err
 	}
@@ -538,12 +524,7 @@ func DetectChangedFiles() (modified, newFiles, deleted []string, err error) {
 		return nil, nil, nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	status, err := worktree.Status()
+	status, err := gitutil.WorktreeStatus(repo)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get status: %w", err)
 	}
