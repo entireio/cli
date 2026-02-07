@@ -154,7 +154,7 @@ func transitionFromIdle(event Event, ctx TransitionContext) TransitionResult {
 			Actions:  []Action{ActionUpdateLastInteraction},
 		}
 	case EventTurnEnd:
-		// Stop while idle is a no-op (no active turn to end).
+		// Turn end while idle is a no-op (no active turn to end).
 		return TransitionResult{NewPhase: PhaseIdle}
 	case EventGitCommit:
 		if ctx.IsRebaseInProgress {
@@ -257,7 +257,7 @@ func transitionFromEnded(event Event, ctx TransitionContext) TransitionResult {
 			Actions:  []Action{ActionClearEndedAt, ActionUpdateLastInteraction},
 		}
 	case EventTurnEnd:
-		// Stop while ended is a no-op.
+		// Turn end while ended is a no-op.
 		return TransitionResult{NewPhase: PhaseEnded}
 	case EventGitCommit:
 		if ctx.IsRebaseInProgress {
@@ -312,7 +312,7 @@ func MermaidDiagram() string {
 			var variants []contextVariant
 			if event == EventGitCommit {
 				variants = []contextVariant{
-					{"", TransitionContext{HasFilesTouched: true, IsRebaseInProgress: false}},
+					{"[files]", TransitionContext{HasFilesTouched: true, IsRebaseInProgress: false}},
 					{"[no files]", TransitionContext{HasFilesTouched: false, IsRebaseInProgress: false}},
 					{"[rebase]", TransitionContext{IsRebaseInProgress: true}},
 				}
