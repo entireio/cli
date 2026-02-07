@@ -158,7 +158,8 @@ func parsePorcelainStatus(raw string) git.Status {
 		}
 
 		// Renames and copies have a second NUL-separated entry (the old name).
-		if x == 'R' || x == 'C' {
+		// Check both X (staging) and Y (worktree) columns defensively.
+		if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
 			if i+1 < len(entries) && entries[i+1] != "" {
 				fs.Extra = entries[i+1]
 				i++ // skip old-name entry

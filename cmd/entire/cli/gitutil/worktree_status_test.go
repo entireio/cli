@@ -75,6 +75,17 @@ func TestParsePorcelainStatus_Copy(t *testing.T) {
 	assert.NotContains(t, status, "src.go")
 }
 
+func TestParsePorcelainStatus_WorktreeRename(t *testing.T) {
+	// Worktree-side rename (defensive): " R new.go\0old.go\0"
+	raw := " R new.go\x00old.go\x00"
+	status := parsePorcelainStatus(raw)
+
+	require.Contains(t, status, "new.go")
+	assert.Equal(t, git.Renamed, status["new.go"].Worktree)
+	assert.Equal(t, "old.go", status["new.go"].Extra)
+	assert.NotContains(t, status, "old.go")
+}
+
 func TestParsePorcelainStatus_MixedStagedAndWorktree(t *testing.T) {
 	// Staged modify + worktree modify: "MM file.go\0"
 	raw := "MM file.go\x00"
