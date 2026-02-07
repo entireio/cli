@@ -1,0 +1,503 @@
+You are a highly experienced developer, skilled in various developer workflows and adept in using git.
+
+let's take a critical look at the plan in docs/plans/2026-02-06-session-phase-state-machine.md
+
+how does it line up with our current implementation? what are the potential pitfalls? Are there scenarios that would break this? Is there anything else we're missing?
+
+---
+
+thank you. let's step through each one of these - but start with the TTL - do we even need it?
+
+---
+
+I think there is a chance we'd have to pick it up when a _different_ session runs.
+
+What worries me is what the codebase context is at that point and how to communicate to the user what has happened
+
+---
+
+mmm, I'm less worried about the gap between ACTIVE_COMMITTED and (StopHook) IDLE I think
+
+more what to do if we're in IDLE with shadow tracked changes and the terminal gets killed/restarted...
+
+or perhaps I'm getting mixed up with all the potential scenarios and different user intents 😅
+
+---
+
+okay, so it sounds like we're getting rid of TTL.
+
+what's the 'doctor' command we'd need to handle some of these pathological states? or is it just Scenario 4?
+
+---
+
+so I understand clearly, this scenario has:
+- ACTIVE_COMMITTED state
+- one or more code commits with trailers, pointing to a (single) checkpoint
+- but that checkpoint does not exist in entire/checkpoints/v1
+
+so we 'detect' that from a new/sibling session in this worktree, and on any operation (startSession, userPromptSubmit, Stop, SessionEnd, etc) we automatically condense that session - even though it may have nothing to do with this new session
+
+---
+
+yeah, that sounds better for now.
+
+so back to the TTL question - how do we know that that session is truly 'dead'?
+
+---
+
+manual I think will suffice - and really if last seen (and we should change this to include agent activity e.g. tool calls) is more than a few hours I think it's worth flagging it - I myself have forgotten a terminal needed follow up and that's a perfectly legit fix - just responding to a tool permission call to finish a turn
+
+---
+
+yup, capture and let's continue
+
+---
+
+what normally creates the SaveContext?
+
+---
+
+that impacts the rewind scenario I guess? but thinking aloud if there's a ctrl-C halfway through some changes we _probably_ don't need to create a rewind point there and then... we'd either exit and rewind to the previous point or get the agent to fixup the _cause_ of the bail.
+
+In the case where something else interrupted, then...yeah we might be in a weird intermediate state anyway
+
+---
+
+hmm can we discuss that TranscriptLinesAtStart behaviour? I think that isn't quite behaving right anyway...
+
+---
+
+okay, we really need to change the checkpoint language (note this also)
+
+checkpoint == things that are saved in entire/checkpoints/v1
+step == rewindable points between checkpoints
+
+we've observed the 'scope' of the checkpoint not being the "transcript portion between the last checkpoint and this checkpoint"
+
+part of it might be the fields we are capturing in metadata.json not being what we think they are or being badly named
+
+---
+
+this also all seems quite complicated and I wonder if we can simplify it with our new state machine model
+
+---
+
+yes, capture and continue
+
+---
+
+1. yup if there are open sessions they won't get fixed. this is acceptable
+2. windows will be a thing eventually...sooooooo.....sqlite or similar? defer locking for now until we migrate?
+3. yes ideally detect and skip
+4. Yes! this is currently a problem and we need to fix it
+5. auto has fallen out of favour, as the commits are often way too granular. We've found that agent-controlled (or human) commits are better for code understandability. if it's compatible then let's not spend too much time on it
+6. yes this is problematic and confusing, let's stop doing it if possible
+7. how is it possible we haven't condensed all active sessions if we've gotten to a steady state?
+8. yeah document, probably "wait until it's done" or "run doctor first" - otherwise you get what you get
+9. yes test
+
+---
+
+Q: sqlite would solve our file locks...right? 😅
+
+---
+
+uhh yes....roadmap....😅
+
+let's add a linear issue for that please Project:Troy
+
+---
+
+yes please, draft the revised plan
+
+---
+
+this thought just came to me - is it possible to build and test the state machine without wiring in all the 'actions' yet?
+
+---
+
+yes
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. **Initial Request**: User asked for a critical review of the plan in `docs/plans/2026-02-06-session-phase-state-machine.md` - how it lines up with current implementation, potential pitfalls, breaking scenarios, and missing items.
+
+2. **Research Phase**: I read the plan document and key implementation files (`session/state.go`, `strategy/strategy.go`). I launched two Explore agents to understand the current strategy implementation and hook handlers in depth.
+
+3. **Critical Review**: I presented a comprehensive review with 12 items organized by priority (High/Medium/Low), covering backward compatibility, flock portability, rebase handling, amend handling, TTL false positives, auto-commit omission, type mirroring, catch-up checkpoint complexity, shadow branch deletion, reset behavior, CondensedTranscriptLines behavior, and non-interactive commits.
+
+4. **TTL Discussion**: User wanted to step through each item, starting with TTL. We had a deep discussion about whether TTL was needed. I argued for removing it from PostCommit. User raised concern about stale sessions being picked up by different sessions (temporal locality + confusing UX). We agreed: no TTL, no auto-condensation from other sessions, instead `entire sessions fix` command + SessionStart warning. `LastInteractionTime` updated on all hook invocations.
+
+5. **Catch-Up Checkpoints**: We discussed what creates SaveContext (the Stop hook handler `commitWithMetadata`). User agreed catch-up checkpoints are unnecessary - interrupted turns should just fold into the next step. No rewind point needed for crash state.
+
+6. **Terminology**: User introduced important terminology distinction:
+   - **Checkpoint** = data on `entire/checkpoints/v1`, linked to user commit
+   - **Step** = shadow branch commit (rewind point), one per SaveChanges
+
+7. **Transcript Tracking Simplification**: Deep dive into `TranscriptLinesAtStart`, `CondensedTranscriptLines`, and `PrePromptState.LastTranscriptLineCount`. User noted these are confusingly named and the checkpoint scope isn't what they expect. We agreed to simplify to two fields: `CheckpointTranscriptStart` (session state) and `stepStart` (PrePromptState).
+
+8. **Remaining Items Rapid-Fire**: User gave decisions on all remaining items:
+   - Backward compat: accept, document
+   - Flock: defer to SQLite (ENT-238), don't implement flock
+   - Rebase: detect and skip in PostCommit
+   - Amend: current bug, needs fixing (PendingCheckpointID as source of truth)
+   - Auto-commit: don't spend time, keep compatible if easy
+   - Type mirroring: stop doing it, use embedding
+   - Shadow branch deletion: simple rule, only complex for concurrent sessions
+   - Reset during ACTIVE_COMMITTED: document, warn user
+   - Non-interactive commit: add test
+
+9. **SQLite Issue**: User asked about SQLite solving locking. I confirmed it would. User asked me to create a Linear issue (ENT-238) in Project Troy.
+
+10. **Revised Plan v2**: I drafted `docs/plans/2026-02-06-session-phase-state-machine-v2.md` incorporating all decisions.
+
+11. **Pure State Machine**: User had the insight to build and test the state machine as a pure function (state + event → new state + actions) without wiring in actual hook implementations. This would make PR 1 purely about the state machine logic with exhaustive table-driven tests, and subsequent PRs wire it in.
+
+12. **Final request**: User asked me to update the plan with the pure state machine restructuring. I read the v2 plan but had NOT yet written the update when the summary was requested.
+
+Key files:
+- `docs/plans/2026-02-06-session-phase-state-machine.md` - Original plan (v1)
+- `docs/plans/2026-02-06-session-phase-review-notes.md` - Review notes with all decisions
+- `docs/plans/2026-02-06-session-phase-state-machine-v2.md` - Revised plan (v2, needs state machine update)
+- `cmd/entire/cli/session/state.go` - Session state types and StateStore
+- `cmd/entire/cli/state.go` - PrePromptState, CapturePrePromptState
+- `cmd/entire/cli/strategy/manual_commit_hooks.go` - PrepareCommitMsg, PostCommit, InitializeSession
+- `cmd/entire/cli/strategy/manual_commit_git.go` - SaveChanges
+- `cmd/entire/cli/strategy/manual_commit_types.go` - SessionState type
+- `cmd/entire/cli/strategy/manual_commit_condensation.go` - CondenseSession
+- `cmd/entire/cli/hooks_claudecode_handlers.go` - commitWithMetadata (Stop handler), captureInitialState
+- `cmd/entire/cli/strategy/strategy.go` - Strategy interface, SaveContext
+- `docs/KNOWN_LIMITATIONS.md` - Documents amend bug
+
+The pending task is updating v2 plan with the pure state machine approach.
+
+Summary:
+1. Primary Request and Intent:
+   The user asked for a critical review of `docs/plans/2026-02-06-session-phase-state-machine.md` against the current implementation, checking for alignment issues, potential pitfalls, breaking scenarios, and missing items. This evolved into a deep collaborative design session where we systematically discussed each review item, made decisions, captured them in review notes, created a Linear issue (ENT-238), and drafted a revised plan (v2). The final request was to update the v2 plan to incorporate a **pure state machine** pattern where the state machine is built and tested as a standalone component (state + event → new state + actions) before wiring into hooks.
+
+2. Key Technical Concepts:
+   - **Session Phase State Machine**: ACTIVE → ACTIVE_COMMITTED → IDLE → ENDED lifecycle phases for tracking session state across git hooks
+   - **Checkpoint vs Step terminology**: Checkpoint = permanent data on `entire/checkpoints/v1` linked to user commit; Step = shadow branch commit per SaveChanges (rewind point), ephemeral
+   - **TTL removal**: No timeout-based detection anywhere. `entire sessions fix` command + SessionStart warning replace automated stale session detection
+   - **`LastInteractionTime`**: Updated on every hook invocation (UserPromptSubmit, Stop, PreToolUse, PostToolUse) for accurate "last seen" signal
+   - **Transcript tracking simplification**: Three overlapping fields (`TranscriptLinesAtStart`, `CondensedTranscriptLines`, `PrePromptState.LastTranscriptLineCount`) replaced by two: `CheckpointTranscriptStart` (session state) and `StepTranscriptStart` (PrePromptState)
+   - **Pure state machine pattern**: `Transition(currentPhase, event) → TransitionResult{NewPhase, Actions}` — pure function, no side effects, exhaustive table-driven tests
+   - **File locking deferred to SQLite (ENT-238)**: `syscall.Flock` rejected (POSIX-only, won't work on Windows). SQLite's `BEGIN EXCLUSIVE`/`COMMIT` provides cross-platform atomic transactions
+   - **Type consolidation**: `strategy.SessionState` should embed `session.State` instead of duplicating fields with manual converters
+   - **Amend trailer fix**: PrepareCommitMsg currently skips entirely for `source="commit"` (amend), losing trailers. Fix: use `PendingCheckpointID` from session state as source of truth
+   - **Rebase detection**: PostCommit checks for `.git/rebase-merge/` or `.git/rebase-apply/` and skips phase transitions entirely
+   - **No catch-up checkpoints**: On Ctrl-C/crash recovery (ACTIVE → ACTIVE), just continue. Interrupted turn's data folds into next step naturally
+
+3. Files and Code Sections:
+   - `docs/plans/2026-02-06-session-phase-state-machine.md` (original plan v1)
+     - Read in full to understand the proposed design
+     - Contains the state machine, 10 tasks, 4 PR structure, TTL, catch-up checkpoints, flock-based locking
+   
+   - `docs/plans/2026-02-06-session-phase-review-notes.md` (created)
+     - Captures all design decisions from the review discussion
+     - Contains sections for each decision: TTL Removal, LastInteractionTime, Session Health/Doctor Command, Drop Catch-Up Checkpoints, Terminology, Simplify Transcript Tracking, Backward Compat, Defer File Locking, Rebase Detection, Amend Fix, Auto-Commit, Type Mirroring, Shadow Branch Deletion, Reset During ACTIVE_COMMITTED, Non-interactive Commits
+   
+   - `docs/plans/2026-02-06-session-phase-state-machine-v2.md` (created, needs update)
+     - Revised plan incorporating all decisions
+     - Currently has 10 tasks, 4 PRs, but PR 1 needs restructuring for pure state machine
+     - **Pending update**: Restructure to build state machine as pure function first
+   
+   - `cmd/entire/cli/session/state.go`
+     - Current `State` struct with fields: SessionID, BaseCommit, WorktreePath, WorktreeID, StartedAt, EndedAt, CheckpointCount, CondensedTranscriptLines, FilesTouched, LastCheckpointID, AgentType, TokenUsage, TranscriptLinesAtStart, TranscriptIdentifierAtStart, TranscriptPath, PromptAttributions, PendingPromptAttribution
+     - `StateStore` with Load/Save/Clear/List/RemoveAll methods
+     - No Phase field yet — to be added
+     - No file locking — uses atomic write-then-rename
+   
+   - `cmd/entire/cli/state.go`
+     - `PrePromptState` struct with: SessionID, Timestamp, UntrackedFiles, StartMessageIndex, LastTranscriptIdentifier, LastTranscriptLineCount
+     - `CapturePrePromptState()` — captures untracked files and transcript position at UserPromptSubmit
+     - `ComputeFileChanges()` — compares pre-prompt state with current git status
+     - `LastTranscriptLineCount` to be renamed to `StepTranscriptStart`
+   
+   - `cmd/entire/cli/hooks_claudecode_handlers.go`
+     - `commitWithMetadata()` (Stop handler) — lines 140-350: loads session state, parses transcript from `CondensedTranscriptLines` offset, extracts modified files/prompts/summary, builds `SaveContext`, calls `SaveChanges()`
+     - Key issue: for manual-commit, `CondensedTranscriptLines` stays 0 between commits, causing full transcript re-parse each Stop
+     - `captureInitialState()` — calls `CapturePrePromptState()` and `InitializeSession()`
+   
+   - `cmd/entire/cli/strategy/strategy.go`
+     - `SaveContext` struct with: SessionID, ModifiedFiles, NewFiles, DeletedFiles, MetadataDir, CommitMessage, TranscriptPath, AuthorName, TranscriptIdentifierAtStart, TranscriptLinesAtStart, TokenUsage
+   
+   - `cmd/entire/cli/strategy/manual_commit_git.go`
+     - `SaveChanges()` — lines 115-140: increments CheckpointCount, stores TranscriptLinesAtStart only on first checkpoint (`isFirstCheckpointOfSession`), merges FilesTouched
+     - `isFirstCheckpointOfSession := !branchExisted || state.CheckpointCount == 0`
+   
+   - `cmd/entire/cli/strategy/manual_commit_hooks.go`
+     - `PrepareCommitMsg()` — has early return for `source="commit"` (amend) at line 204, making trailer preservation code at lines 314-322 unreachable. This is the amend bug.
+     - `PostCommit()` — currently condenses when trailer is present, regardless of session phase. This is the core bug the plan fixes.
+   
+   - `cmd/entire/cli/strategy/manual_commit_condensation.go`
+     - `CondenseSession()` — line 142: `scopedTranscript := transcript.SliceFromLine(sessionData.Transcript, state.TranscriptLinesAtStart)` — scopes transcript for checkpoint
+   
+   - `cmd/entire/cli/strategy/manual_commit_types.go`
+     - `SessionState` struct — duplicates most fields from `session.State` with manual conversion functions. To be replaced with embedding.
+
+   - `docs/KNOWN_LIMITATIONS.md`
+     - Documents "Amending Commits Loses Checkpoint Link" — to be removed once amend fix lands
+
+   - Pure state machine design (not yet written):
+     ```go
+     type Event int
+     const (
+         EventUserPromptSubmit Event = iota
+         EventStop
+         EventSessionStart
+         EventSessionStop
+         EventGitCommit
+         EventGitCommitAmend
+     )
+     
+     type Action int
+     const (
+         ActionCondense Action = iota
+         ActionCondenseIfFilesTouched
+         ActionMigrateShadowBranch
+         ActionDiscard
+         ActionWarnStaleSession
+     )
+     
+     type TransitionResult struct {
+         NewPhase Phase
+         Actions  []Action
+     }
+     
+     func Transition(current Phase, event Event) TransitionResult { ... }
+     ```
+
+4. Errors and fixes:
+   - `cmd/entire/cli/session/session.go` did not exist at the expected path — file not found error. This was not a problem, just meant the session types are in `state.go` not `session.go`.
+   - No code execution errors since this was a design/review session, not implementation.
+
+5. Problem Solving:
+   - **Core bug identified**: PostCommit condenses prematurely when agent commits mid-session because there's no phase tracking to distinguish agent commits from user commits
+   - **TTL false positive problem**: Resolved by removing TTL entirely, replacing with user-initiated `entire sessions fix` and SessionStart warnings
+   - **Stale session temporal locality**: Auto-condensing old sessions during new sessions is confusing. Solved by making cleanup explicit/user-initiated
+   - **Transcript tracking confusion**: Three overlapping fields with ambiguous names simplified to two with clear single-purpose semantics
+   - **Amend trailer loss bug**: PrepareCommitMsg's early return for amend makes trailer preservation unreachable. Fix: use PendingCheckpointID from session state
+   - **Type duplication between packages**: `session.State` and `strategy.SessionState` manual conversion is error-prone. Fix: embedding
+   - **File locking portability**: flock is POSIX-only, SQLite solves cross-platform. Created ENT-238 for future migration.
+
+6. All user messages:
+   - "let's take a critical look at the plan in docs/plans/2026-02-06-session-phase-state-machine.md - how does it line up with our current implementation? what are the potential pitfalls? Are there scenarios that would break this? Is there anything else we're missing?"
+   - "yup, capture and let's continue"
+   - "thank you. let's step through each one of these - but start with the TTL - do we even need it?"
+   - "I think there is a chance we'd have to pick it up when a _different_ session runs. What worries me is what the codebase context is at that point and how to communicate to the user what has happened"
+   - "mmm, I'm less worried about the gap between ACTIVE_COMMITTED and (StopHook) IDLE I think - more what to do if we're in IDLE with shadow tracked changes and the terminal gets killed/restarted... or perhaps I'm getting mixed up with all the potential scenarios and different user intents 😅"
+   - "yeah, that sounds better for now. so back to the TTL question - how do we know that that session is truly 'dead'?"
+   - "manual I think will suffice - and really if last seen (and we should change this to include agent activity e.g. tool calls) is more than a few hours I think it's worth flagging it - I myself have forgotten a terminal needed follow up and that's a perfectly legit fix - just responding to a tool permission call to finish a turn"
+   - "yes, capture and continue"
+   - "what normally creates the SaveContext?"
+   - "hmm can we discuss that TranscriptLinesAtStart behaviour? I think that isn't quite behaving right anyway..."
+   - "okay, we really need to change the checkpoint language (note this also) - checkpoint == things that are saved in entire/checkpoints/v1 - step == rewindable points between checkpoints - we've observed the 'scope' of the checkpoint not being the 'transcript portion between the last checkpoint and this checkpoint' - part of it might be the fields we are capturing in metadata.json not being what we think they are or being badly named"
+   - "this also all seems quite complicated and I wonder if we can simplify it with our new state machine model"
+   - "yes, capture and continue"
+   - "1. yup if there are open sessions they won't get fixed. this is acceptable / 2. windows will be a thing eventually...sooooooo.....sqlite or similar? defer locking for now until we migrate? / 3. yes ideally detect and skip / 4. Yes! this is currently a problem and we need to fix it / 5. auto has fallen out of favour... / 6. yes this is problematic and confusing, let's stop doing it if possible / 7. how is it possible we haven't condensed all active sessions if we've gotten to a steady state? / 8. yeah document... / 9. yes test"
+   - "Q: sqlite would solve our file locks...right? 😅"
+   - "uhh yes....roadmap....😅 - let's add a linear issue for that please Project:Troy"
+   - "yes please, draft the revised plan"
+   - "this thought just came to me - is it possible to build and test the state machine without wiring in all the 'actions' yet?"
+   - "yes" (to updating the plan with state machine restructuring)
+
+7. Pending Tasks:
+   - **Update v2 plan** with pure state machine restructuring — user said "yes" to updating the plan with the `Transition(currentPhase, event) → TransitionResult{NewPhase, Actions}` pattern and revised PR sequencing
+
+8. Current Work:
+   The user asked "is it possible to build and test the state machine without wiring in all the 'actions' yet?" and I proposed a pure function pattern. User said "yes" to updating the plan. I had read the v2 plan file but had NOT yet written the update when the summary was requested.
+
+   The v2 plan at `docs/plans/2026-02-06-session-phase-state-machine-v2.md` needs to be updated to:
+   - Add a new Task (or restructure Task 1) for the pure state machine as a standalone component
+   - Define Event types, Action types, and `Transition()` function
+   - Include exhaustive table-driven tests for all transitions
+   - Restructure PR sequencing to: PR 1 (pure state machine + types + transcript fields), PR 2 (wire into hooks), PR 3 (phase-aware git hooks), PR 4 (cleanup)
+
+9. Optional Next Step:
+   Update `docs/plans/2026-02-06-session-phase-state-machine-v2.md` to incorporate the pure state machine pattern. The user's last message was "yes" in response to my question "Want me to update the plan with this restructuring?" The proposed PR restructuring was:
+   ```
+   PR 1: State machine + Phase type + transcript field renames + type consolidation
+         (pure logic, fully tested, no behavior change)
+   PR 2: Wire state machine into hooks
+         (connect events to Transition(), dispatch actions)
+   PR 3: Phase-aware git hooks (PostCommit, PrepareCommitMsg, amend fix)
+         (the actual bug fix)
+   PR 4: Cleanup (current-session.txt, sessions fix, reset guards, docs)
+   ```
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/0c275b1b-9732-433e-9e70-9b7bfdb578a3.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+add it to Task 1 - I think a test to generate it is fine for now (we can manage the doc storage separately). Mermaid?
+
+---
+
+oh, the test can write to a file in docs/plans for now
+
+---
+
+can I do one last validation on the state machine states; are we missing any states? should we do the condensation as a discrete state or is it a transition?
+
+---
+
+yes please add the missing transitions.
+
+yeah so maybe let's not have CONDENSE looking like a state in the plan 😅
+
+---
+
+[Request interrupted by user]
+
+---
+
+yes please add the missing transitions.
+
+yeah so maybe let's not have CONDENSE looking like a state in the plan 😅 Did we explicitly define the set of states in the doc?
+
+---
+
+more examination 😅
+
+- How tolerant is this to future change?
+- Will this support session streaming in future? i.e. if we would like to group certain sessions together for checkpointing (e.g. large monorepo with single checkout and multiple agents working in the same repo)
+- would this survive switching git out? (more hypothetical)
+
+---
+
+and you're not just being agreeable, or 'attached' to the thing we've created? 😅
+
+---
+
+ha. but I think we can get out the other end of this reasonably quickly as well, soooooo let's give it a go.
+
+1. update this branch to origin/main
+2. let's get going with PR 1 - which superpowers to use?
+
+---
+
+let's go, use executing-plans. subagent?
+
+---
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.2.0/skills/executing-plans
+
+# Executing Plans
+
+## Overview
+
+Load plan, review critically, execute tasks in batches, report for review between batches.
+
+**Core principle:** Batch execution with checkpoints for architect review.
+
+**Announce at start:** "I'm using the executing-plans skill to implement this plan."
+
+## The Process
+
+### Step 1: Load and Review Plan
+1. Read plan file
+2. Review critically - identify any questions or concerns about the plan
+3. If concerns: Raise them with your human partner before starting
+4. If no concerns: Create TodoWrite and proceed
+
+### Step 2: Execute Batch
+**Default: First 3 tasks**
+
+For each task:
+1. Mark as in_progress
+2. Follow each step exactly (plan has bite-sized steps)
+3. Run verifications as specified
+4. Mark as completed
+
+### Step 3: Report
+When batch complete:
+- Show what was implemented
+- Show verification output
+- Say: "Ready for feedback."
+
+### Step 4: Continue
+Based on feedback:
+- Apply changes if needed
+- Execute next batch
+- Repeat until complete
+
+### Step 5: Complete Development
+
+After all tasks complete and verified:
+- Announce: "I'm using the finishing-a-development-branch skill to complete this work."
+- **REQUIRED SUB-SKILL:** Use superpowers:finishing-a-development-branch
+- Follow that skill to verify tests, present options, execute choice
+
+## When to Stop and Ask for Help
+
+**STOP executing immediately when:**
+- Hit a blocker mid-batch (missing dependency, test fails, instruction unclear)
+- Plan has critical gaps preventing starting
+- You don't understand an instruction
+- Verification fails repeatedly
+
+**Ask for clarification rather than guessing.**
+
+## When to Revisit Earlier Steps
+
+**Return to Review (Step 1) when:**
+- Partner updates the plan based on your feedback
+- Fundamental approach needs rethinking
+
+**Don't force through blockers** - stop and ask.
+
+## Remember
+- Review plan critically first
+- Follow plan steps exactly
+- Don't skip verifications
+- Reference skills when plan says to
+- Between batches: just report and wait
+- Stop when blocked, don't guess
+- Never start implementation on main/master branch without explicit user consent
+
+## Integration
+
+**Required workflow skills:**
+- **superpowers:using-git-worktrees** - REQUIRED: Set up isolated workspace before starting
+- **superpowers:writing-plans** - Creates the plan this skill executes
+- **superpowers:finishing-a-development-branch** - Complete development after all tasks
+
+
+ARGUMENTS: Plan: docs/plans/2026-02-06-session-phase-state-machine-v2.md, PR 1 only (Tasks 1-3). Use subagents for implementation.
+
+---
+
+what does github.com/stretchr/testify do?
+
+---
+
+yes please, match the existing test style - let's add a linear issue (Project: Troy) for discussion later (I would like better assert language)
+
+---
+
+[Request interrupted by user]
+
+---
+
+still reviewing. 
+
+These events - tested by TestEvent_String - are we binding too hard to Claude here? I actually prefer the gemini AfterAgent or something like 'AgentFinishesTurn' <- not this but something like it 😅
+
+---
+
+is 'Turn' a good word? I guess in the subagent case the 'user' prompt is a misnomer
+
+---
+
+yes please
+
+---
+
+can we break up the transition test? perhaps by starting state to make it easier to read?
