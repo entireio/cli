@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "48b429896bcb",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-221-phase-aware-git-hooks",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/48/b429896bcb/0/metadata.json",
+      "transcript": "/48/b429896bcb/0/full.jsonl",
+      "context": "/48/b429896bcb/0/context.md",
+      "content_hash": "/48/b429896bcb/0/content_hash.txt",
+      "prompt": "/48/b429896bcb/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 13,
+    "cache_creation_tokens": 53281,
+    "cache_read_tokens": 502296,
+    "output_tokens": 217,
+    "api_call_count": 11
+  }
+}
