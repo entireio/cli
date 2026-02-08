@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -21,11 +22,13 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/utils/binary"
 )
 
 // errStopIteration is used to stop commit iteration early in GetCheckpointAuthor.
@@ -143,11 +146,15 @@ func (s *GitStore) writeTaskCheckpointEntries(opts WriteCommittedOptions, basePa
 
 // writeIncrementalTaskCheckpoint writes an incremental checkpoint file during task execution.
 func (s *GitStore) writeIncrementalTaskCheckpoint(opts WriteCommittedOptions, taskPath string, entries map[string]object.TreeEntry) (string, error) {
+	incData, err := redact.JSONLBytes(opts.IncrementalData)
+	if err != nil {
+		return "", fmt.Errorf("failed to redact incremental checkpoint: %w", err)
+	}
 	checkpoint := incrementalCheckpointData{
 		Type:      opts.IncrementalType,
 		ToolUseID: opts.ToolUseID,
 		Timestamp: time.Now().UTC(),
-		Data:      opts.IncrementalData,
+		Data:      incData,
 	}
 	cpData, err := jsonutil.MarshalIndentWithNewline(checkpoint, "", "  ")
 	if err != nil {
@@ -195,6 +202,9 @@ func (s *GitStore) writeFinalTaskCheckpoint(opts WriteCommittedOptions, taskPath
 	// Write subagent transcript if available
 	if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 		agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
+		if readErr == nil {
+			agentContent, readErr = redact.JSONLBytes(agentContent)
+		}
 		if readErr == nil {
 			agentBlobHash, agentBlobErr := CreateBlobFromContent(s.repo, agentContent)
 			if agentBlobErr == nil {
@@ -276,7 +286,7 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 
 	// Write prompts
 	if len(opts.Prompts) > 0 {
-		promptContent := strings.Join(opts.Prompts, "\n\n---\n\n")
+		promptContent := redact.String(strings.Join(opts.Prompts, "\n\n---\n\n"))
 		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
 		if err != nil {
 			return filePaths, err
@@ -291,7 +301,7 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 
 	// Write context
 	if len(opts.Context) > 0 {
-		blobHash, err := CreateBlobFromContent(s.repo, opts.Context)
+		blobHash, err := CreateBlobFromContent(s.repo, redact.Bytes(opts.Context))
 		if err != nil {
 			return filePaths, err
 		}
@@ -443,6 +453,12 @@ func (s *GitStore) writeTranscript(opts WriteCommittedOptions, basePath string, 
 	}
 	if len(transcript) == 0 {
 		return nil
+	}
+
+	// Redact secrets before chunking so content hash reflects redacted content
+	transcript, err := redact.JSONLBytes(transcript)
+	if err != nil {
+		return fmt.Errorf("failed to redact transcript secrets: %w", err)
 	}
 
 	// Chunk the transcript if it's too large
@@ -1036,8 +1052,8 @@ func (s *GitStore) copyMetadataDir(metadataDir, basePath string, entries map[str
 			return fmt.Errorf("path traversal detected: %s", relPath)
 		}
 
-		// Create blob from file
-		blobHash, mode, err := createBlobFromFile(s.repo, path)
+		// Create blob from file with secrets redaction
+		blobHash, mode, err := createRedactedBlobFromFile(s.repo, path, relPath)
 		if err != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)
 		}
@@ -1056,6 +1072,51 @@ func (s *GitStore) copyMetadataDir(metadataDir, basePath string, entries map[str
 		return fmt.Errorf("failed to walk metadata directory: %w", err)
 	}
 	return nil
+}
+
+// createRedactedBlobFromFile reads a file, applies secrets redaction, and creates a git blob.
+// JSONL files get JSONL-aware redaction; all other files get plain string redaction.
+func createRedactedBlobFromFile(repo *git.Repository, filePath, treePath string) (plumbing.Hash, filemode.FileMode, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	mode := filemode.Regular
+	if info.Mode()&0o111 != 0 {
+		mode = filemode.Executable
+	}
+
+	content, err := os.ReadFile(filePath) //nolint:gosec // filePath comes from walking the metadata directory
+	if err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Skip redaction for binary files — they can't contain text secrets and
+	// running string replacement on them would corrupt the data.
+	isBin, binErr := binary.IsBinary(bytes.NewReader(content))
+	if binErr != nil || isBin {
+		hash, err := CreateBlobFromContent(repo, content)
+		if err != nil {
+			return plumbing.ZeroHash, 0, fmt.Errorf("failed to create blob: %w", err)
+		}
+		return hash, mode, nil
+	}
+
+	if strings.HasSuffix(treePath, ".jsonl") {
+		content, err = redact.JSONLBytes(content)
+		if err != nil {
+			return plumbing.ZeroHash, 0, fmt.Errorf("failed to redact secrets: %w", err)
+		}
+	} else {
+		content = redact.Bytes(content)
+	}
+
+	hash, err := CreateBlobFromContent(repo, content)
+	if err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to create blob: %w", err)
+	}
+	return hash, mode, nil
 }
 
 // getGitAuthorFromRepo retrieves the git user.name and user.email from the repository config.
