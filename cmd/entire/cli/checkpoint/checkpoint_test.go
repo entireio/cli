@@ -1384,6 +1384,49 @@ func TestWriteCommitted_SessionWithNoPrompts(t *testing.T) {
 	}
 }
 
+// TestWriteCommitted_SessionWithSummary verifies that a non-nil Summary
+// in WriteCommittedOptions is persisted in the session-level metadata.json.
+// Regression test for ENT-243 where Summary was omitted from the struct literal.
+func TestWriteCommitted_SessionWithSummary(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeeff")
+
+	summary := &Summary{
+		Intent:  "User wanted to fix a bug",
+		Outcome: "Bug was fixed",
+	}
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "summary-session",
+		Strategy:         "manual-commit",
+		Transcript:       []byte(`{"test": true}`),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+		Summary:          summary,
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	content, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
+	}
+
+	if content.Metadata.Summary == nil {
+		t.Fatal("Summary should not be nil")
+	}
+	if content.Metadata.Summary.Intent != "User wanted to fix a bug" {
+		t.Errorf("Summary.Intent = %q, want %q", content.Metadata.Summary.Intent, "User wanted to fix a bug")
+	}
+	if content.Metadata.Summary.Outcome != "Bug was fixed" {
+		t.Errorf("Summary.Outcome = %q, want %q", content.Metadata.Summary.Outcome, "Bug was fixed")
+	}
+}
+
 // TestWriteCommitted_SessionWithNoContext verifies that a session can be
 // written without context and still be read correctly.
 func TestWriteCommitted_SessionWithNoContext(t *testing.T) {
@@ -2252,5 +2295,171 @@ func TestWriteTemporary_FirstCheckpoint_FilenamesWithSpaces(t *testing.T) {
 	// "file with spaces.txt" should be in the tree with correct name
 	if _, err := tree.File("file with spaces.txt"); err != nil {
 		t.Errorf("'file with spaces.txt' should be in checkpoint tree: %v", err)
+	}
+}
+
+// highEntropySecret is a string with Shannon entropy > 4.5 that will trigger redaction.
+const highEntropySecret = "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
+
+func TestWriteCommitted_RedactsTranscriptSecrets(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef1")
+
+	transcript := []byte(`{"role":"assistant","content":"Here is your key: ` + highEntropySecret + `"}` + "\n")
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "redact-transcript-session",
+		Strategy:         "manual-commit",
+		Transcript:       transcript,
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	content, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
+	}
+
+	if strings.Contains(string(content.Transcript), highEntropySecret) {
+		t.Error("transcript should not contain the secret after redaction")
+	}
+	if !strings.Contains(string(content.Transcript), "REDACTED") {
+		t.Error("transcript should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteCommitted_RedactsPromptSecrets(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef2")
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "redact-prompt-session",
+		Strategy:         "manual-commit",
+		Transcript:       []byte(`{"msg":"safe"}`),
+		Prompts:          []string{"Set API_KEY=" + highEntropySecret},
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	content, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
+	}
+
+	if strings.Contains(content.Prompts, highEntropySecret) {
+		t.Error("prompts should not contain the secret after redaction")
+	}
+	if !strings.Contains(content.Prompts, "REDACTED") {
+		t.Error("prompts should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteCommitted_RedactsContextSecrets(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef3")
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "redact-context-session",
+		Strategy:         "manual-commit",
+		Transcript:       []byte(`{"msg":"safe"}`),
+		Context:          []byte("DB_PASSWORD=" + highEntropySecret),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	content, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
+	}
+
+	if strings.Contains(content.Context, highEntropySecret) {
+		t.Error("context should not contain the secret after redaction")
+	}
+	if !strings.Contains(content.Context, "REDACTED") {
+		t.Error("context should contain REDACTED placeholder")
+	}
+}
+
+func TestCopyMetadataDir_RedactsSecrets(t *testing.T) {
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	metadataDir := filepath.Join(tempDir, "metadata")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	// Write a JSONL file with a secret
+	jsonlFile := filepath.Join(metadataDir, "agent.jsonl")
+	if err := os.WriteFile(jsonlFile, []byte(`{"content":"key=`+highEntropySecret+`"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write jsonl file: %v", err)
+	}
+
+	// Write a plain text file with a secret
+	txtFile := filepath.Join(metadataDir, "notes.txt")
+	if err := os.WriteFile(txtFile, []byte("secret: "+highEntropySecret), 0o644); err != nil {
+		t.Fatalf("failed to write txt file: %v", err)
+	}
+
+	store := NewGitStore(repo)
+	entries := make(map[string]object.TreeEntry)
+
+	if err := store.copyMetadataDir(metadataDir, "cp/", entries); err != nil {
+		t.Fatalf("copyMetadataDir() error = %v", err)
+	}
+
+	// Verify both files were added
+	if _, ok := entries["cp/agent.jsonl"]; !ok {
+		t.Fatal("agent.jsonl should be in entries")
+	}
+	if _, ok := entries["cp/notes.txt"]; !ok {
+		t.Fatal("notes.txt should be in entries")
+	}
+
+	// Read back the blob content and verify redaction
+	for path, entry := range entries {
+		blob, bErr := repo.BlobObject(entry.Hash)
+		if bErr != nil {
+			t.Fatalf("failed to read blob for %s: %v", path, bErr)
+		}
+		reader, rErr := blob.Reader()
+		if rErr != nil {
+			t.Fatalf("failed to get reader for %s: %v", path, rErr)
+		}
+		buf := make([]byte, blob.Size)
+		if _, rErr = reader.Read(buf); rErr != nil && rErr.Error() != "EOF" {
+			t.Fatalf("failed to read blob content for %s: %v", path, rErr)
+		}
+		reader.Close()
+
+		content := string(buf)
+		if strings.Contains(content, highEntropySecret) {
+			t.Errorf("%s should not contain the secret after redaction", path)
+		}
+		if !strings.Contains(content, "REDACTED") {
+			t.Errorf("%s should contain REDACTED placeholder", path)
+		}
 	}
 }

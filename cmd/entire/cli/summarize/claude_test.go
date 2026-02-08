@@ -2,10 +2,87 @@ package summarize
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
 )
+
+func TestClaudeGenerator_GitIsolation(t *testing.T) {
+	var capturedCmd *exec.Cmd
+
+	response := `{"result":"{\"intent\":\"test\",\"outcome\":\"test\",\"learnings\":{\"repo\":[],\"code\":[],\"workflow\":[]},\"friction\":[],\"open_items\":[]}"}`
+
+	gen := &ClaudeGenerator{
+		CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+			// Capture the command but return something that produces valid output
+			cmd := exec.CommandContext(ctx, "sh", "-c", "printf '%s' '"+response+"'")
+			capturedCmd = cmd
+			return cmd
+		},
+	}
+
+	// Set GIT_* vars that would normally be inherited from a git hook
+	t.Setenv("GIT_DIR", "/some/repo/.git")
+	t.Setenv("GIT_WORK_TREE", "/some/repo")
+	t.Setenv("GIT_INDEX_FILE", "/some/repo/.git/index")
+
+	input := Input{
+		Transcript: []Entry{
+			{Type: EntryTypeUser, Content: "Hello"},
+		},
+	}
+
+	_, err := gen.Generate(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if capturedCmd == nil {
+		t.Fatal("command was not captured")
+	}
+
+	// Verify cmd.Dir is set to os.TempDir()
+	if capturedCmd.Dir != os.TempDir() {
+		t.Errorf("cmd.Dir = %q, want %q", capturedCmd.Dir, os.TempDir())
+	}
+
+	// Verify no GIT_* env vars in the command's environment
+	for _, env := range capturedCmd.Env {
+		if strings.HasPrefix(env, "GIT_") {
+			t.Errorf("found GIT_* env var in subprocess: %s", env)
+		}
+	}
+}
+
+func TestStripGitEnv(t *testing.T) {
+	env := []string{
+		"HOME=/Users/test",
+		"GIT_DIR=/repo/.git",
+		"PATH=/usr/bin",
+		"GIT_WORK_TREE=/repo",
+		"GIT_INDEX_FILE=/repo/.git/index",
+		"SHELL=/bin/zsh",
+	}
+
+	filtered := stripGitEnv(env)
+
+	expected := []string{
+		"HOME=/Users/test",
+		"PATH=/usr/bin",
+		"SHELL=/bin/zsh",
+	}
+
+	if len(filtered) != len(expected) {
+		t.Fatalf("got %d entries, want %d", len(filtered), len(expected))
+	}
+
+	for i, e := range filtered {
+		if e != expected[i] {
+			t.Errorf("filtered[%d] = %q, want %q", i, e, expected[i])
+		}
+	}
+}
 
 func TestClaudeGenerator_CommandNotFound(t *testing.T) {
 	gen := &ClaudeGenerator{

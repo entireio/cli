@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -94,8 +95,19 @@ func (g *ClaudeGenerator) Generate(ctx context.Context, input Input) (*checkpoin
 		model = DefaultModel
 	}
 
-	// Use --setting-sources user to avoid project hooks interfering with --print mode
-	cmd := runner(ctx, claudePath, "--print", "--output-format", "json", "--model", model, "--setting-sources", "user")
+	// Use empty --setting-sources to skip all settings (user, project, local).
+	// This avoids loading MCP servers, hooks, or other config that could interfere
+	// with a simple --print summarization call.
+	cmd := runner(ctx, claudePath, "--print", "--output-format", "json", "--model", model, "--setting-sources", "")
+
+	// Fully isolate the subprocess from the user's git repo (ENT-242).
+	// Claude Code performs internal git operations (plugin cache, context gathering)
+	// that pollute the worktree index with phantom entries from its plugin cache.
+	// We must both change the working directory AND strip GIT_* env vars, because
+	// git hooks set GIT_DIR which lets Claude Code find the repo regardless of cwd.
+	// This also prevents recursive triggering of Entire's own git hooks.
+	cmd.Dir = os.TempDir()
+	cmd.Env = stripGitEnv(os.Environ())
 
 	// Pass prompt via stdin
 	cmd.Stdin = strings.NewReader(prompt)
@@ -145,6 +157,18 @@ func (g *ClaudeGenerator) Generate(ctx context.Context, input Input) (*checkpoin
 // buildSummarizationPrompt creates the prompt for the Claude CLI.
 func buildSummarizationPrompt(transcriptText string) string {
 	return fmt.Sprintf(summarizationPromptTemplate, transcriptText)
+}
+
+// stripGitEnv returns a copy of env with all GIT_* variables removed.
+// This prevents a subprocess from discovering or modifying the parent's git repo.
+func stripGitEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, "GIT_") {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }
 
 // extractJSONFromMarkdown attempts to extract JSON from markdown code blocks.
