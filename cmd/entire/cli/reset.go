@@ -184,8 +184,7 @@ func activeSessionsOnCurrentHead() ([]*session.State, error) {
 		if state.BaseCommit != currentHead {
 			continue
 		}
-		phase := session.PhaseFromString(string(state.Phase))
-		if phase.IsActive() {
+		if state.Phase.IsActive() {
 			active = append(active, state)
 		}
 	}
