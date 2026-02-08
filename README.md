@@ -5,7 +5,7 @@ Entire hooks into your git workflow to capture AI agent sessions on every push. 
 ## Quick Start
 
 ```
-# Install via Homebrew (requires SSH access)
+# Install via Homebrew
 brew tap entireio/tap
 brew install entireio/tap/entire
 
