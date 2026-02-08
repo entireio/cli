@@ -148,7 +148,11 @@ func (s *State) NormalizeAfterLoad() {
 			s.CheckpointTranscriptStart = s.TranscriptLinesAtStart
 		}
 	}
-	// Clear deprecated fields so they aren't re-persisted
+	// Clear deprecated fields so they aren't re-persisted.
+	// Note: this is a one-way migration. If the state is re-saved, older CLI versions
+	// will see 0 for these fields and fall back to scoping from the transcript start.
+	// This is acceptable since CLI upgrades are monotonic and the worst case is
+	// redundant transcript content in a condensation, not data loss.
 	s.CondensedTranscriptLines = 0
 	s.TranscriptLinesAtStart = 0
 }

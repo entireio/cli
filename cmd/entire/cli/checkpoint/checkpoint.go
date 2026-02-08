@@ -361,7 +361,8 @@ type CommittedMetadata struct {
 }
 
 // GetTranscriptStart returns the transcript line offset at which this checkpoint's data begins.
-// Prefers CheckpointTranscriptStart; falls back to deprecated TranscriptLinesAtStart for old data.
+// Returns 0 for new checkpoints (start from beginning). For data written by older CLI versions,
+// falls back to the deprecated TranscriptLinesAtStart field.
 func (m CommittedMetadata) GetTranscriptStart() int {
 	if m.CheckpointTranscriptStart > 0 {
 		return m.CheckpointTranscriptStart
