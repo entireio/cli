@@ -1,0 +1,36 @@
+{
+  "checkpoint_id": "1701406a426c",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "00557efbe841d990d5657e5d6dd4d5aa52108c32",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gitignore",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "docs/requirements/explain-task3/review-01.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/17/01406a426c/0/metadata.json",
+      "transcript": "/17/01406a426c/0/full.jsonl",
+      "context": "/17/01406a426c/0/context.md",
+      "content_hash": "/17/01406a426c/0/content_hash.txt",
+      "prompt": "/17/01406a426c/0/prompt.txt"
+    },
+    {
+      "metadata": "/17/01406a426c/2/metadata.json",
+      "transcript": "/17/01406a426c/2/full.jsonl",
+      "context": "/17/01406a426c/2/context.md",
+      "content_hash": "/17/01406a426c/2/content_hash.txt",
+      "prompt": "/17/01406a426c/2/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

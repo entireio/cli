@@ -1,0 +1,17 @@
+{
+  "checkpoint_id": "95648a30fde0",
+  "session_id": "2026-01-21-0cf3db51-1c73-43bb-8d05-dc02739514a5",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-21T17:59:39.937683+11:00",
+  "branch": "alex/ent-109-text-output-checkpoint-flag",
+  "checkpoints_count": 0,
+  "files_touched": null,
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 2,
+    "cache_creation_tokens": 3219,
+    "cache_read_tokens": 708769,
+    "output_tokens": 31,
+    "api_call_count": 5
+  }
+}

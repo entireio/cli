@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "93416fad752b",
+  "session_id": "f022dad1-9896-4a6c-bb91-0d1efb580b70",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-05T00:34:58.937223Z",
+  "branch": "gtrrz-victor/restructure-entire-session-files",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 306,
+    "cache_creation_tokens": 76210,
+    "cache_read_tokens": 2323127,
+    "output_tokens": 4344,
+    "api_call_count": 38
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-05T00:34:58.849438Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 5,
+    "human_removed": 0,
+    "total_committed": 0,
+    "agent_percentage": 0
+  }
+}

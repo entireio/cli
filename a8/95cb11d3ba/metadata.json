@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "a895cb11d3ba",
+  "strategy": "manual-commit",
+  "branch": "20260205-gitleaks",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "test-secrets.txt"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a8/95cb11d3ba/0/metadata.json",
+      "transcript": "/a8/95cb11d3ba/0/full.jsonl",
+      "context": "/a8/95cb11d3ba/0/context.md",
+      "content_hash": "/a8/95cb11d3ba/0/content_hash.txt",
+      "prompt": "/a8/95cb11d3ba/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 50,
+    "cache_creation_tokens": 12563,
+    "cache_read_tokens": 159674,
+    "output_tokens": 217,
+    "api_call_count": 6
+  }
+}

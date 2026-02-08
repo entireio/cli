@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "6de70163f7e3",
+  "strategy": "manual-commit",
+  "branch": "alex/explain-help-for-positional-args",
+  "migration_source_commit": "23fcbd1bd4a3a646ab1d41e0eb8e7fda04ed29e6",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "review-01.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/6d/e70163f7e3/0/metadata.json",
+      "transcript": "/6d/e70163f7e3/0/full.jsonl",
+      "context": "/6d/e70163f7e3/0/context.md",
+      "content_hash": "/6d/e70163f7e3/0/content_hash.txt",
+      "prompt": "/6d/e70163f7e3/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 150,
+    "cache_creation_tokens": 152740,
+    "cache_read_tokens": 1329665,
+    "output_tokens": 32,
+    "api_call_count": 20
+  }
+}

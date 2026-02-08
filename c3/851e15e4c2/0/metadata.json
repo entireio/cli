@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "c3851e15e4c2",
+  "session_id": "2026-01-26-b42aaf1f-96ad-4f7a-9f52-783eb0847649",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-26T18:23:17.689023+01:00",
+  "branch": "soph/fix-strange-multi-session-bug",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/messages.go",
+    "cmd/entire/cli/strategy/messages_test.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "d2d96c2f-36e9-4ab7-9863-b2df2e9b17dc",
+  "transcript_lines_at_start": 461,
+  "token_usage": {
+    "input_tokens": 1549,
+    "cache_creation_tokens": 931064,
+    "cache_read_tokens": 16204472,
+    "output_tokens": 21564,
+    "api_call_count": 160
+  }
+}

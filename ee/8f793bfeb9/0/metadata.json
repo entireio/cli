@@ -1,0 +1,10 @@
+{
+  "checkpoint_id": "ee8f793bfeb9",
+  "session_id": "2026-01-06-488c5296-fc78-4fdf-8cfd-f1cae9454bd0",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-06T16:02:16.124269+01:00",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".goreleaser.yaml"
+  ]
+}

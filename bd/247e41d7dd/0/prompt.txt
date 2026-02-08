@@ -1,0 +1,87 @@
+why is lint failing on the build?
+
+---
+
+uh...you got blatted again it looks like...
+
+---
+
+is the fix not to make the local run match CI?
+
+---
+
+if we just commit and push it will it persist and not get stripped afterwards?
+
+---
+
+arrggghh that is no good.
+
+can we restructure the code in any way (call an explicit exit at each block?) to workaround?
+
+---
+
+You are an expert code reviewer. Follow these steps:
+
+      1. If no PR number is provided in the args, use Bash("gh pr list") to show open PRs
+      2. If a PR number is provided, use Bash("gh pr view <number>") to get PR details
+      3. Use Bash("gh pr diff <number>") to get the diff
+      4. Analyze the changes and provide a thorough code review that includes:
+         - Overview of what the PR does
+         - Analysis of code quality and style
+         - Specific suggestions for improvements
+         - Any potential issues or risks
+
+      Keep your review concise but thorough. Focus on:
+      - Code correctness
+      - Following project conventions
+      - Performance implications
+      - Test coverage
+      - Security considerations
+
+      Format your review with clear sections and bullet points.
+
+      PR number:
+
+---
+
+the migration creates a new branch, yes?
+
+---
+
+does this version write to the v1 branch?
+
+---
+
+that was my question
+
+1. run migration script
+2. push new v1 branch
+3. point clients at v1?
+
+Do we have the sessions branch configuration anywhere?
+
+---
+
+how do I invoke the migration script? is it documented?
+
+---
+
+I'd like to do two things:
+1. add the ability to migrate a specific checkpoint (given as an argument)
+2. add usage information at the top of the sh file
+
+---
+
+ok, let's go
+
+---
+
+Q: entire explain - where is it getting the Author from? e.g. `entire explain -c 7674489fb0a9`
+
+---
+
+how can I check that file manually?
+
+---
+
+okay, run that and find the earliest commit - the author doesn't match up 🤔

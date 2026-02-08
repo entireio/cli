@@ -1,0 +1,40 @@
+{
+  "checkpoint_id": "26dcd5518fea",
+  "session_id": "062a8bdd-4322-4ffa-bc38-3e8b8bfb5a56",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-03T01:01:41.678624Z",
+  "branch": "alex/mark-sessions-as-closed",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/hooks.go",
+    "cmd/entire/cli/agent/claudecode/types.go",
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/integration_test/agent_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/session_state_test.go",
+    "docs/plans/2026-02-03-session-end-tracking.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "dde1e0e3-0e39-40ef-bdae-ca4e44ad34f4",
+  "transcript_lines_at_start": 151,
+  "token_usage": {
+    "input_tokens": 212,
+    "cache_creation_tokens": 245647,
+    "cache_read_tokens": 10215274,
+    "output_tokens": 962,
+    "api_call_count": 89
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-03T01:01:41.53398Z",
+    "agent_lines": 179,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 225,
+    "total_committed": 179,
+    "agent_percentage": 100
+  }
+}

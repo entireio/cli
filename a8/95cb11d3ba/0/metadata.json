@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "a895cb11d3ba",
+  "session_id": "595f7a87-dd6e-4eb7-943a-b2b009259be7",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-05T11:58:05.452164Z",
+  "branch": "20260205-gitleaks",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "test-secrets.txt"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "bd5094a2-5b7b-478b-a234-f9d5e66945cd",
+  "transcript_lines_at_start": 29,
+  "token_usage": {
+    "input_tokens": 50,
+    "cache_creation_tokens": 12563,
+    "cache_read_tokens": 159674,
+    "output_tokens": 217,
+    "api_call_count": 6
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-05T11:58:04.435008Z",
+    "agent_lines": 4,
+    "human_added": 25,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 29,
+    "agent_percentage": 13.793103448275861
+  }
+}

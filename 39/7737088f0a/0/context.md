@@ -1,0 +1,13 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+I'm testing the new feature in Entire CLI that redacts secrets.  Please create a file SECRETS.md with the following contents:
+
+Here is some config:
+api_key = "[REDACTED]"
+secret_key = "[REDACTED]"
+End of config.
+

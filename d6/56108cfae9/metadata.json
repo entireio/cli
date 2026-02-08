@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "d656108cfae9",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "bc22f1ef188f750b468556062f9bf88e41abd1ab",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/architecture/claude-hooks-integration.md",
+    "docs/architecture/sessions-and-checkpoints.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d6/56108cfae9/0/metadata.json",
+      "transcript": "/d6/56108cfae9/0/full.jsonl",
+      "context": "/d6/56108cfae9/0/context.md",
+      "content_hash": "/d6/56108cfae9/0/content_hash.txt",
+      "prompt": "/d6/56108cfae9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

@@ -1,0 +1,1 @@
+mise run lint is showing errors, can you take a look?

@@ -1,0 +1,11 @@
+{
+  "checkpoint_id": "ceaea776cdb0",
+  "session_id": "2026-01-19-85cc202e-0e74-46ce-a485-e5fcd11f7a8c",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-19T15:30:57.351884+11:00",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/resume_test.go"
+  ],
+  "agent": "Claude Code"
+}
