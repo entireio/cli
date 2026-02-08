@@ -1,0 +1,53 @@
+{
+  "checkpoint_id": "1c5eb527b36d",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-221-phase-aware-git-hooks",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/hook_registry_test.go",
+    "cmd/entire/cli/hooks.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/hooks_git_cmd.go",
+    "cmd/entire/cli/hooks_git_cmd_test.go",
+    "cmd/entire/cli/integration_test/hook_logging_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
+    "cmd/entire/cli/integration_test/phase_transitions_test.go",
+    "cmd/entire/cli/paths/paths.go",
+    "cmd/entire/cli/paths/paths_test.go",
+    "cmd/entire/cli/phase_wiring_test.go",
+    "cmd/entire/cli/reset.go",
+    "cmd/entire/cli/session/phase.go",
+    "cmd/entire/cli/session/phase_test.go",
+    "cmd/entire/cli/sessions_fix.go",
+    "cmd/entire/cli/sessions_fix_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go",
+    "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go",
+    "cmd/entire/cli/strategy/phase_wiring_test.go",
+    "cmd/entire/cli/strategy/session_state.go",
+    "docs/KNOWN_LIMITATIONS.md",
+    "docs/plans/2026-02-06-session-phase-state-machine-v2.md",
+    "docs/plans/2026-02-07-ent221-review-feedback.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/1c/5eb527b36d/0/metadata.json",
+      "transcript": "/1c/5eb527b36d/0/full.jsonl",
+      "context": "/1c/5eb527b36d/0/context.md",
+      "content_hash": "/1c/5eb527b36d/0/content_hash.txt",
+      "prompt": "/1c/5eb527b36d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2241,
+    "cache_creation_tokens": 4059393,
+    "cache_read_tokens": 81899439,
+    "output_tokens": 38889,
+    "api_call_count": 701
+  }
+}
