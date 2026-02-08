@@ -1,0 +1,36 @@
+{
+  "checkpoint_id": "be9f77982406",
+  "session_id": "b82405ba-a054-4152-bc86-e9b0d4832b68",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-29T03:46:25.187379Z",
+  "branch": "alex/ent-108-add-ai-summaries",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/summarise/claude.go",
+    "cmd/entire/cli/summarise/claude_test.go",
+    "cmd/entire/cli/summarise/summarise.go",
+    "cmd/entire/cli/summarise/summarise_test.go",
+    "cmd/entire/cli/summarize.go",
+    "cmd/entire/cli/summarize_claude.go",
+    "cmd/entire/cli/summarize_test.go",
+    "docs/plans/2026-01-29-ai-summaries-design.md"
+  ],
+  "agent": "Agent",
+  "token_usage": {
+    "input_tokens": 2385,
+    "cache_creation_tokens": 474318,
+    "cache_read_tokens": 16035686,
+    "output_tokens": 846,
+    "api_call_count": 146
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-29T03:46:25.079222Z",
+    "agent_lines": 1072,
+    "human_added": 0,
+    "human_modified": 7,
+    "human_removed": 231,
+    "total_committed": 1079,
+    "agent_percentage": 99.35125115848007
+  }
+}

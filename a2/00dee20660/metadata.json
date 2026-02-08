@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "a200dee20660",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "1e1eb2013d6eb12a95b56462b6589cca1af30427",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/git_operations.go",
+    "cmd/entire/cli/resume.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a2/00dee20660/0/metadata.json",
+      "transcript": "/a2/00dee20660/0/full.jsonl",
+      "context": "/a2/00dee20660/0/context.md",
+      "content_hash": "/a2/00dee20660/0/content_hash.txt",
+      "prompt": "/a2/00dee20660/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

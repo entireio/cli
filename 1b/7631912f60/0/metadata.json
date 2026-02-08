@@ -1,0 +1,83 @@
+{
+  "checkpoint_id": "1b7631912f60",
+  "session_id": "8dab6c26-fc6b-4cc5-8263-6150b598af24",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-07T09:57:45.914316Z",
+  "branch": "alex/ent-242-fix-index-corruption",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/gitutil/",
+    "cmd/entire/cli/gitutil/worktree_status.go",
+    "cmd/entire/cli/gitutil/worktree_status_test.go",
+    "cmd/entire/cli/rewind.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/worktree_status.go",
+    "cmd/entire/cli/strategy/worktree_status_test.go",
+    "cmd/entire/cli/summarize/claude.go",
+    "testfile.txt",
+    "testfile2.txt",
+    "testfile3.txt",
+    "testfile4.txt",
+    "testfile5.txt",
+    "testfile6.txt"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "dd19ad65-f88a-4d8a-b007-7b8120561db9",
+  "transcript_lines_at_start": 3630,
+  "token_usage": {
+    "input_tokens": 635,
+    "cache_creation_tokens": 1419116,
+    "cache_read_tokens": 53415350,
+    "output_tokens": 26728,
+    "api_call_count": 483
+  },
+  "summary": {
+    "intent": "Fix two bugs: ENT-242 (index corruption from running summarize in git repo directory) and ENT-243 (missing Summary field when writing committed checkpoints). Push both fixes as separate commits in a single PR.",
+    "outcome": "Both bugs fixed and committed separately. Branch pushed and draft PR #173 created. Copilot requested tests for both changes, which became the next open item.",
+    "learnings": {
+      "repo": [
+        "The checkpoint condensation system has a race condition: user-prompt-submit hook fires immediately, but the checkpoint isn't saved to shadow branch until the stop hook completes, which can cause prepare-commit-msg to miss new content if a commit happens mid-response",
+        "Copilot reviews are enabled on this repo and will automatically comment on PRs requesting test coverage"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/summarize/claude.go",
+          "finding": "Generate() was inheriting the current git repo context when running claude-code binary, causing index corruption. Fixed by setting cmd.Dir to os.TempDir() and stripping GIT_* environment variables"
+        },
+        {
+          "path": "cmd/entire/cli/checkpoint/committed.go",
+          "finding": "writeSessionToSubdirectory was not passing opts.Summary when writing session metadata, causing summaries to be lost in committed checkpoints"
+        }
+      ],
+      "workflow": [
+        "Clean commit workflow: check full history with git log --oneline --graph, reset to main, apply fixes cleanly, run full test suite before committing",
+        "Separate commits for logically distinct fixes even when they go in the same PR"
+      ]
+    },
+    "friction": [
+      "Race condition between user-prompt-submit hook and stop hook means condensation can miss content if commit happens during agent execution",
+      "Had to manually check timing in logs to diagnose why fifth commit didn't trigger condensation"
+    ],
+    "open_items": [
+      "Add test for Generate() setting cmd.Dir and stripping GIT_* env vars (Copilot review comment #1)",
+      "Add test for WriteCommitted persisting Summary field in session metadata (Copilot review comment #2)",
+      "Race condition between hooks and condensation (separate from ENT-242, not addressed in this PR)"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-07T09:57:30.026164Z",
+    "agent_lines": 0,
+    "human_added": 120,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 120,
+    "agent_percentage": 0
+  }
+}

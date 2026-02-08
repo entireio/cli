@@ -1,0 +1,175 @@
+Implement the following plan:
+
+# Secrets Redaction for `entire/checkpoints/v1` Writes
+
+## Context
+
+The user has introduced `redact.RedactString` and `redact.RedactJSONLContent` functions in `redact/redact.go` that scan content for high-entropy strings (likely API keys/secrets) and replace them with `[REDACTED]`. These need to be applied to all content written to the `entire/checkpoints/v1` metadata branch so that secrets never persist in git history.
+
+There is also a compiler error in `redact.go:97` where `redactString` (lowercase) is called but only `RedactString` (exported) exists.
+
+## Plan
+
+### Step 0: Fix compiler error in `redact/redact.go`
+
+**File**: `redact/redact.go:97`
+
+Change `redactString(val)` to `RedactString(val)`.
+
+### Step 1: Add `RedactBytes` / `RedactJSONLBytes` helpers to `redact` package
+
+**File**: `redact/redact.go`
+
+The checkpoint package works with `[]byte`. Add convenience wrappers to avoid `string()/[]byte()` at every call site:
+
+```go
+func RedactBytes(b []byte) []byte {
+    s := string(b)
+    redacted := RedactString(s)
+    if redacted == s { return b }
+    return []byte(redacted)
+}
+
+func RedactJSONLBytes(b []byte) []byte {
+    s := string(b)
+    redacted := RedactJSONLContent(s)
+    if redacted == s { return b }
+    return []byte(redacted)
+}
+```
+
+### Step 2: Add `redact` import to `committed.go`
+
+**File**: `cmd/entire/cli/checkpoint/committed.go`
+
+Add `"github.com/entireio/cli/redact"` to imports. No cycle risk (`redact` only imports stdlib).
+
+### Step 3: Redact transcript in `writeTranscript` (line ~447)
+
+**File**: `committed.go`, function `writeTranscript` (lines 432-480)
+
+Insert `transcript = redact.RedactJSONLBytes(transcript)` **after** the early-return check for empty transcript (line 446) and **before** chunking (line 449). This ensures:
+- JSONL-aware redaction sees complete lines before chunking splits them
+- Content hash (line 469) is computed from the redacted content
+
+### Step 4: Redact prompts in `writeSessionToSubdirectory` (line ~280)
+
+**File**: `committed.go`, function `writeSessionToSubdirectory` (lines 265-340)
+
+After `promptContent := strings.Join(...)` on line 279, add:
+```go
+promptContent = redact.RedactString(promptContent)
+```
+
+### Step 5: Redact context in `writeSessionToSubdirectory` (line ~294)
+
+**File**: `committed.go`, function `writeSessionToSubdirectory` (lines 293-304)
+
+Before `CreateBlobFromContent(s.repo, opts.Context)`, redact the context bytes:
+```go
+redactedContext := redact.RedactBytes(opts.Context)
+blobHash, err := CreateBlobFromContent(s.repo, redactedContext)
+```
+
+### Step 6: Redact subagent transcript in `writeFinalTaskCheckpoint` (line ~198)
+
+**File**: `committed.go`, function `writeFinalTaskCheckpoint` (lines 172-213)
+
+After `os.ReadFile(opts.SubagentTranscriptPath)` on line 197, add:
+```go
+agentContent = redact.RedactJSONLBytes(agentContent)
+```
+
+### Step 7: Redact incremental checkpoint data in `writeIncrementalTaskCheckpoint` (line ~155)
+
+**File**: `committed.go`, function `writeIncrementalTaskCheckpoint` (lines 145-169)
+
+After marshaling the checkpoint JSON (line 152), add:
+```go
+cpData = redact.RedactBytes(cpData)
+```
+
+The `IncrementalData` field (`json.RawMessage`) can contain arbitrary tool input payloads that may hold secrets.
+
+### Step 8: Add `createRedactedBlobFromFile` helper and use in `copyMetadataDir`
+
+**File**: `committed.go`
+
+Add a new helper function that reads a file, applies the appropriate redactor based on filename, and creates a blob:
+
+```go
+// createRedactedBlobFromFile reads a file, applies secrets redaction, and creates a git blob.
+// JSONL files get JSONL-aware redaction; all other files get plain string redaction.
+func createRedactedBlobFromFile(repo *git.Repository, filePath, treePath string) (plumbing.Hash, filemode.FileMode, error) {
+    info, err := os.Stat(filePath)
+    if err != nil {
+        return plumbing.ZeroHash, 0, fmt.Errorf("failed to stat file: %w", err)
+    }
+    mode := filemode.Regular
+    if info.Mode()&0o111 != 0 {
+        mode = filemode.Executable
+    }
+
+    content, err := os.ReadFile(filePath)
+    if err != nil {
+        return plumbing.ZeroHash, 0, fmt.Errorf("failed to read file: %w", err)
+    }
+
+    if strings.HasSuffix(treePath, ".jsonl") {
+        content = redact.RedactJSONLBytes(content)
+    } else {
+        content = redact.RedactBytes(content)
+    }
+
+    hash, err := CreateBlobFromContent(repo, content)
+    if err != nil {
+        return plumbing.ZeroHash, 0, fmt.Errorf("failed to create blob: %w", err)
+    }
+    return hash, mode, nil
+}
+```
+
+Then replace the `createBlobFromFile` call in `copyMetadataDir` (line ~1040) with `createRedactedBlobFromFile`:
+
+```go
+blobHash, mode, err := createRedactedBlobFromFile(s.repo, path, relPath)
+```
+
+This helper can be reused anywhere we need to read-redact-blob from a file path, avoiding duplication.
+
+### Step 9: Tests
+
+**New file**: `redact/redact_test.go`
+- `TestRedactBytes` / `TestRedactJSONLBytes` — verify the convenience wrappers
+- Verify the `collectJSONLReplacements` fix works (was the compiler error)
+
+**Extend**: `cmd/entire/cli/checkpoint/checkpoint_test.go`
+- `TestWriteCommitted_RedactsTranscriptSecrets` — write checkpoint with a transcript containing a known high-entropy secret, read back, verify `[REDACTED]`
+- `TestWriteCommitted_RedactsPromptSecrets` — same for prompts
+
+Follow existing test patterns (e.g., `TestWriteCommitted_AgentField`).
+
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `redact/redact.go:97` | Fix `redactString` → `RedactString` |
+| `redact/redact.go` | Add `RedactBytes`, `RedactJSONLBytes` |
+| `redact/redact_test.go` (new) | Tests for helpers |
+| `cmd/entire/cli/checkpoint/committed.go` | Add import, `createRedactedBlobFromFile` helper, 6 redaction points |
+| `cmd/entire/cli/checkpoint/checkpoint_test.go` | Add redaction integration tests |
+
+## What is NOT redacted (by design)
+
+- **`metadata.json`** files (checkpoint summary + session metadata): marshaled from Go structs with operational data only (IDs, timestamps, paths, counts). No user content.
+- **Shadow branch writes** (`entire/<hash>-<worktreeHash>`): user only requested `entire/checkpoints/v1`. Shadow branches are temporary and get cleaned up.
+- **Working directory files**: user's actual source code is stored as-is.
+
+## Verification
+
+1. `mise run fmt && mise run lint` — ensure no formatting/lint issues
+2. `mise run test` — run unit tests including new redaction tests
+3. Manual: create a session with a known API key in the transcript, commit, then inspect `entire/checkpoints/v1` branch to verify the key is `[REDACTED]`
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/paul/.claude/projects/-Users-paul-src-entireio-cli/2fe241c6-d835-4dd3-9796-617c495e396e.jsonl

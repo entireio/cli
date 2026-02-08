@@ -1,0 +1,39 @@
+{
+  "checkpoint_id": "374594a74f71",
+  "strategy": "manual-commit",
+  "branch": "gtrrz-victor/e2e-poc-1",
+  "migration_source_commit": "bb7de45113218fac9aee4fd34536a2e908821d14",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".claude/settings.json",
+    "e2e/.gitignore",
+    "e2e/package.json",
+    "e2e/src/setup/global-setup.ts",
+    "e2e/src/tests/checkpoint.test.ts",
+    "e2e/src/tests/commit.test.ts",
+    "e2e/src/tests/rewind.test.ts",
+    "e2e/src/utils/cli-runner.ts",
+    "e2e/src/utils/git-assertions.ts",
+    "e2e/src/utils/git-repo.ts",
+    "e2e/src/utils/test-env.ts",
+    "e2e/tsconfig.json",
+    "e2e/vitest.config.ts",
+    "mise.toml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/37/4594a74f71/0/metadata.json",
+      "transcript": "/37/4594a74f71/0/full.jsonl",
+      "context": "/37/4594a74f71/0/context.md",
+      "content_hash": "/37/4594a74f71/0/content_hash.txt",
+      "prompt": "/37/4594a74f71/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 7451,
+    "cache_creation_tokens": 279672,
+    "cache_read_tokens": 3980495,
+    "output_tokens": 194,
+    "api_call_count": 62
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "4c06989c549b",
+  "session_id": "3de3ff10-2c78-4b94-b22f-f8ffb14305f6",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-03T00:39:31.826034Z",
+  "branch": "gtrrz-victor/adds-entire-reset-command",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/reset_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 114,
+    "cache_creation_tokens": 31432,
+    "cache_read_tokens": 688986,
+    "output_tokens": 44,
+    "api_call_count": 14
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-03T00:39:31.736297Z",
+    "agent_lines": 29,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 29,
+    "agent_percentage": 100
+  }
+}

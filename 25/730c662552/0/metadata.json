@@ -1,0 +1,33 @@
+{
+  "checkpoint_id": "25730c662552",
+  "session_id": "2026-01-28-70d782f7-b303-4e48-9512-6bec16c37abd",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-29T03:52:16.769132Z",
+  "branch": "alex/ent-109-text-output-checkpoint-flag",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/common.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "2505eb48-f679-4c96-9444-912150ad2e0c",
+  "transcript_lines_at_start": 892,
+  "token_usage": {
+    "input_tokens": 1416,
+    "cache_creation_tokens": 638459,
+    "cache_read_tokens": 15838092,
+    "output_tokens": 410,
+    "api_call_count": 169
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-29T03:52:16.649525Z",
+    "agent_lines": 0,
+    "human_added": 8,
+    "human_modified": 16,
+    "human_removed": 0,
+    "total_committed": 8,
+    "agent_percentage": 0
+  }
+}

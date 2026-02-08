@@ -1,0 +1,13 @@
+Can we unify the two ways that settings are parsed?
+
+---
+
+yes, do it
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+That's a big change.  Write a clear commit message.

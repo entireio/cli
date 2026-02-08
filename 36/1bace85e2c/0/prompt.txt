@@ -1,0 +1,33 @@
+let's review this branch/PR - https://github.com/entireio/cli/pull/88
+
+---
+
+can we sweep for any remaining checkpoint usages that don't use the new type?
+
+---
+
+<bash-input>code .</bash-input>
+
+---
+
+<bash-stdout></bash-stdout><bash-stderr></bash-stderr>
+
+---
+
+can you show me the auto_commit code?
+
+---
+
+link to open the file in vscode?
+
+---
+
+(with line number? 😂)
+
+---
+
+yeah let's add the type safety
+
+---
+
+let's do the one here as well, we always want to be passed a valid checkpointId

@@ -1,0 +1,14 @@
+{
+  "checkpoint_id": "20388d3a424a",
+  "session_id": "2026-01-09-b25a8b6e-b748-4911-bc05-dfa90cd63948",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-09T20:08:45.941952+01:00",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/utils.go"
+  ]
+}

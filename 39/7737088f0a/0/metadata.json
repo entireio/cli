@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "397737088f0a",
+  "session_id": "9b76dc0f-dc1b-4822-ac56-53cfa3fbc032",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-06T08:56:49.513055Z",
+  "branch": "20260206-farting-around-with-secrets",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "SECRETS.md"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 4,
+    "cache_creation_tokens": 8055,
+    "cache_read_tokens": 44519,
+    "output_tokens": 10,
+    "api_call_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-06T08:56:49.42794Z",
+    "agent_lines": 4,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 4,
+    "agent_percentage": 100
+  }
+}

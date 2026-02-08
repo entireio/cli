@@ -1,0 +1,20 @@
+{
+  "checkpoint_id": "7d66f047ac98",
+  "session_id": "2026-01-06-3a782158-6c7c-4d4d-9c73-eae031da5b18",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-06T21:01:56.353154+01:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/session.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/session.go"
+  ],
+  "branch": "soph/improve-session-list"
+}

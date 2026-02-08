@@ -1,0 +1,17 @@
+{
+  "checkpoint_id": "89e8867f9092",
+  "session_id": "2026-01-21-839b35f7-4dbd-4d93-9772-3c272cc87caa",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-21T11:18:19.337345+01:00",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/agent/geminicli/hooks.go",
+    "cmd/entire/cli/agent/geminicli/hooks_test.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/integration_test/gemini_concurrent_session_test.go",
+    "cmd/entire/cli/integration_test/hooks.go",
+    "cmd/entire/cli/integration_test/testenv.go"
+  ],
+  "agent": "Claude Code"
+}

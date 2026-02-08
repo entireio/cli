@@ -1,0 +1,34 @@
+{
+  "checkpoint_id": "480519e6c720",
+  "session_id": "0c275b1b-9732-433e-9e70-9b7bfdb578a3",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-07T03:46:48.557254Z",
+  "branch": "alex/ent-221-better-state-tracking-for-sessions",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/session/phase.go",
+    "cmd/entire/cli/session/phase_test.go",
+    "cmd/entire/cli/session/state_test.go",
+    "docs/plans/2026-02-06-session-phase-review-notes.md",
+    "docs/plans/2026-02-06-session-phase-state-machine-v2.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "5cb9277d-c074-4765-a262-54bd02e62a61",
+  "transcript_lines_at_start": 2322,
+  "token_usage": {
+    "input_tokens": 510,
+    "cache_creation_tokens": 1042086,
+    "cache_read_tokens": 31513389,
+    "output_tokens": 35589,
+    "api_call_count": 285
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-07T03:46:30.583757Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 58,
+    "human_removed": 929,
+    "total_committed": 26,
+    "agent_percentage": 0
+  }
+}
