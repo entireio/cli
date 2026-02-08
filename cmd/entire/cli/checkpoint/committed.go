@@ -146,19 +146,19 @@ func (s *GitStore) writeTaskCheckpointEntries(opts WriteCommittedOptions, basePa
 
 // writeIncrementalTaskCheckpoint writes an incremental checkpoint file during task execution.
 func (s *GitStore) writeIncrementalTaskCheckpoint(opts WriteCommittedOptions, taskPath string, entries map[string]object.TreeEntry) (string, error) {
+	incData, err := redact.JSONLBytes(opts.IncrementalData)
+	if err != nil {
+		return "", fmt.Errorf("failed to redact incremental checkpoint: %w", err)
+	}
 	checkpoint := incrementalCheckpointData{
 		Type:      opts.IncrementalType,
 		ToolUseID: opts.ToolUseID,
 		Timestamp: time.Now().UTC(),
-		Data:      opts.IncrementalData,
+		Data:      incData,
 	}
 	cpData, err := jsonutil.MarshalIndentWithNewline(checkpoint, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal incremental checkpoint: %w", err)
-	}
-	cpData, err = redact.JSONLBytes(cpData)
-	if err != nil {
-		return "", fmt.Errorf("failed to redact incremental checkpoint: %w", err)
 	}
 	cpBlobHash, err := CreateBlobFromContent(s.repo, cpData)
 	if err != nil {
