@@ -2,9 +2,10 @@
   "checkpoint_id": "d0161e0df1cb",
   "strategy": "manual-commit",
   "branch": "alex/ent-221-cleanup-and-sessions-fix",
-  "checkpoints_count": 3,
+  "checkpoints_count": 5,
   "files_touched": [
     "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go",
     "docs/KNOWN_LIMITATIONS.md"
   ],
   "sessions": [
@@ -14,13 +15,20 @@
       "context": "/d0/161e0df1cb/0/context.md",
       "content_hash": "/d0/161e0df1cb/0/content_hash.txt",
       "prompt": "/d0/161e0df1cb/0/prompt.txt"
+    },
+    {
+      "metadata": "/d0/161e0df1cb/1/metadata.json",
+      "transcript": "/d0/161e0df1cb/1/full.jsonl",
+      "context": "/d0/161e0df1cb/1/context.md",
+      "content_hash": "/d0/161e0df1cb/1/content_hash.txt",
+      "prompt": "/d0/161e0df1cb/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 252,
-    "cache_creation_tokens": 362980,
-    "cache_read_tokens": 17422834,
-    "output_tokens": 9054,
-    "api_call_count": 185
+    "input_tokens": 272,
+    "cache_creation_tokens": 397281,
+    "cache_read_tokens": 18151602,
+    "output_tokens": 9673,
+    "api_call_count": 201
   }
 }
