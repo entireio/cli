@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -798,6 +799,10 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 
 	if state != nil && state.BaseCommit != "" {
 		// Session is fully initialized
+
+		// Update last interaction timestamp on every prompt submit
+		now := time.Now()
+		state.LastInteractionAt = &now
 
 		// Backfill AgentType if empty or set to the generic default "Agent"
 		if !isSpecificAgentType(state.AgentType) && agentType != "" {

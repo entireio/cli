@@ -924,22 +924,29 @@ func (s *AutoCommitStrategy) InitializeSession(sessionID string, agentType agent
 		return fmt.Errorf("failed to check existing session state: %w", err)
 	}
 	if existing != nil {
-		// Session already initialized — backfill FirstPrompt if empty (for sessions
+		// Session already initialized — update last interaction time on every prompt submit
+		now := time.Now()
+		existing.LastInteractionAt = &now
+
+		// Backfill FirstPrompt if empty (for sessions
 		// created before the first_prompt field was added, or resumed sessions)
 		if existing.FirstPrompt == "" && userPrompt != "" {
 			existing.FirstPrompt = truncatePromptForStorage(userPrompt)
-			if err := SaveSessionState(existing); err != nil {
-				return fmt.Errorf("failed to update session state: %w", err)
-			}
+		}
+
+		if err := SaveSessionState(existing); err != nil {
+			return fmt.Errorf("failed to update session state: %w", err)
 		}
 		return nil
 	}
 
 	// Create new session state
+	now := time.Now()
 	state := &SessionState{
 		SessionID:                sessionID,
 		BaseCommit:               baseCommit,
-		StartedAt:                time.Now(),
+		StartedAt:                now,
+		LastInteractionAt:        &now,
 		CheckpointCount:          0,
 		CondensedTranscriptLines: 0, // Start from beginning of transcript
 		FilesTouched:             []string{},

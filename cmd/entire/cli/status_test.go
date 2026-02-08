@@ -212,15 +212,17 @@ func TestWriteActiveSessions(t *testing.T) {
 	}
 
 	now := time.Now()
+	recentInteraction := now.Add(-5 * time.Minute)
 
 	// Create active sessions
 	states := []*session.State{
 		{
-			SessionID:    "abc-1234-session",
-			WorktreePath: "/Users/test/repo",
-			StartedAt:    now.Add(-2 * time.Minute),
-			FirstPrompt:  "Fix auth bug in login flow",
-			AgentType:    agent.AgentType("Claude Code"),
+			SessionID:         "abc-1234-session",
+			WorktreePath:      "/Users/test/repo",
+			StartedAt:         now.Add(-2 * time.Hour),
+			LastInteractionAt: &recentInteraction,
+			FirstPrompt:       "Fix auth bug in login flow",
+			AgentType:         agent.AgentType("Claude Code"),
 		},
 		{
 			SessionID:    "def-5678-session",
@@ -277,14 +279,71 @@ func TestWriteActiveSessions(t *testing.T) {
 		t.Errorf("Expected truncated session ID 'abc-123', got: %s", output)
 	}
 
-	// Should contain first prompts
-	if !strings.Contains(output, "Fix auth bug in login flow") {
-		t.Errorf("Expected first prompt text, got: %s", output)
+	// Should contain first prompts on indented second line
+	if !strings.Contains(output, "\"Fix auth bug in login flow\"") {
+		t.Errorf("Expected first prompt text in quotes, got: %s", output)
 	}
 
-	// Should show "(unknown)" for session without FirstPrompt (in quotes as prompt)
-	if !strings.Contains(output, "\"(unknown)\"") {
-		t.Errorf("Expected '\"(unknown)\"' for missing first prompt, got: %s", output)
+	// Session without FirstPrompt should NOT show a prompt line
+	// (no more "(unknown)" in quotes for missing prompts)
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "ghi-901") {
+			// The line with the no-prompt session should not have a prompt
+			if strings.Contains(line, "\"") {
+				t.Errorf("Session without prompt should not show quoted text on first line, got: %s", line)
+			}
+		}
+	}
+
+	// Should show "active X ago" for session with LastInteractionAt that differs from StartedAt
+	if !strings.Contains(output, "active 5m ago") {
+		t.Errorf("Expected 'active 5m ago' for session with LastInteractionAt, got: %s", output)
+	}
+
+	// Session started 15m ago with no LastInteractionAt should NOT show "active" text
+	// Find the Cursor session line and verify no "active" in it
+	for _, line := range lines {
+		if strings.Contains(line, "[Cursor]") {
+			if strings.Contains(line, "active") {
+				t.Errorf("Session without LastInteractionAt should not show 'active', got: %s", line)
+			}
+		}
+	}
+}
+
+func TestWriteActiveSessions_ActiveTimeOmittedWhenClose(t *testing.T) {
+	setupTestRepo(t)
+
+	store, err := session.NewStateStore()
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	now := time.Now()
+	// LastInteractionAt is only 30 seconds after StartedAt — should be omitted
+	startedAt := now.Add(-10 * time.Minute)
+	lastInteraction := startedAt.Add(30 * time.Second)
+
+	state := &session.State{
+		SessionID:         "close-time-session",
+		WorktreePath:      "/Users/test/repo",
+		StartedAt:         startedAt,
+		LastInteractionAt: &lastInteraction,
+		FirstPrompt:       "test prompt",
+		AgentType:         agent.AgentType("Claude Code"),
+	}
+
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	writeActiveSessions(&buf)
+
+	output := buf.String()
+	if strings.Contains(output, "active") {
+		t.Errorf("Expected no 'active' when LastInteractionAt is close to StartedAt, got: %s", output)
 	}
 }
 

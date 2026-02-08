@@ -261,16 +261,22 @@ func writeActiveSessions(w io.Writer) {
 				shortID = shortID[:7]
 			}
 
-			prompt := st.FirstPrompt
-			if prompt == "" {
-				prompt = unknownPlaceholder
-			}
-			prompt = stringutil.TruncateRunes(prompt, 40, "...")
-
 			age := "started " + timeAgo(st.StartedAt)
 
-			fmt.Fprintf(w, "    [%s] %-9s \"%s\"  %s\n",
-				agentLabel, shortID, prompt, age)
+			// Show "active X ago" when LastInteractionAt differs meaningfully from StartedAt
+			activeStr := ""
+			if st.LastInteractionAt != nil && st.LastInteractionAt.Sub(st.StartedAt) > time.Minute {
+				activeStr = ", active " + timeAgo(*st.LastInteractionAt)
+			}
+
+			fmt.Fprintf(w, "    [%s] %-9s %s%s\n",
+				agentLabel, shortID, age, activeStr)
+
+			// Show first prompt on indented second line
+			if st.FirstPrompt != "" {
+				prompt := stringutil.TruncateRunes(st.FirstPrompt, 60, "...")
+				fmt.Fprintf(w, "      \"%s\"\n", prompt)
+			}
 		}
 
 		// Blank line between groups, but not after the last one

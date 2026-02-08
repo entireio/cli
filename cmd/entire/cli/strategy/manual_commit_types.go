@@ -32,7 +32,8 @@ type SessionState struct {
 	WorktreePath             string          `json:"worktree_path,omitempty"` // Absolute path to the worktree root
 	WorktreeID               string          `json:"worktree_id,omitempty"`   // Internal git worktree identifier (empty for main worktree)
 	StartedAt                time.Time       `json:"started_at"`
-	EndedAt                  *time.Time      `json:"ended_at,omitempty"` // When the session was explicitly closed (nil = active or unclean exit)
+	EndedAt                  *time.Time      `json:"ended_at,omitempty"`            // When the session was explicitly closed (nil = active or unclean exit)
+	LastInteractionAt        *time.Time      `json:"last_interaction_at,omitempty"` // Last user prompt submit time
 	CheckpointCount          int             `json:"checkpoint_count"`
 	CondensedTranscriptLines int             `json:"condensed_transcript_lines,omitempty"` // Lines already included in previous condensation
 	UntrackedFilesAtStart    []string        `json:"untracked_files_at_start,omitempty"`   // Files that existed at session start (to preserve during rewind)

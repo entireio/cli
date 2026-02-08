@@ -219,12 +219,14 @@ func (s *ManualCommitStrategy) initializeSession(repo *git.Repository, sessionID
 		untrackedFiles = nil
 	}
 
+	now := time.Now()
 	state := &SessionState{
 		SessionID:             sessionID,
 		BaseCommit:            head.Hash().String(),
 		WorktreePath:          worktreePath,
 		WorktreeID:            worktreeID,
-		StartedAt:             time.Now(),
+		StartedAt:             now,
+		LastInteractionAt:     &now,
 		CheckpointCount:       0,
 		UntrackedFilesAtStart: untrackedFiles,
 		AgentType:             agentType,
