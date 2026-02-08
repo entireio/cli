@@ -15,6 +15,17 @@ run = "golangci-lint run --new=false --new-from-rev= --new-from-merge-base= ./..
 description = "Run linters"
 run = "gofmt -w ."
 
+[tasks."fmt:check"]
+description = "Check gofmt formatting (no changes)"
+run = """
+unformatted=$(gofmt -l -s .)
+if [ -n "$unformatted" ]; then
+  echo "The following files need gofmt formatting:"
+  echo "$unformatted"
+  exit 1
+fi
+"""
+
 [tasks.test]
 description = "Run tests"
 run = "go test ./..."

@@ -20,19 +20,10 @@ jobs:
       - uses: jdx/mise-action@v3
 
       - name: Check gofmt formatting
-        run: |
-          unformatted=$(gofmt -l -s .)
-          if [ -n "$unformatted" ]; then
-            echo "The following files need gofmt formatting:"
-            echo "$unformatted"
-            exit 1
-          fi
+        run: mise run fmt:check
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: latest
-          only-new-issues: true
+        run: mise run lint
 
       - name: Check go.mod tidiness
         run: mise run lint:gomod
