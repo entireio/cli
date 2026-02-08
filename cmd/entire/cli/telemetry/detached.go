@@ -96,11 +96,6 @@ func TrackCommandDetached(cmd *cobra.Command, strategy, agent string, isEntireEn
 		return
 	}
 
-	// Skip hidden commands
-	if cmd.Hidden {
-		return
-	}
-
 	payload := BuildEventPayload(cmd, strategy, agent, isEntireEnabled, version)
 	if payload == nil {
 		return

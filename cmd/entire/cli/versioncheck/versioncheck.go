@@ -50,19 +50,18 @@ func CheckAndNotify(cmd *cobra.Command, currentVersion string) {
 
 	// Fetch the latest version from GitHub API
 	latestVersion, err := fetchLatestVersion()
+
+	// Always update cache to avoid retrying on every CLI invocation
+	cache.LastCheckTime = time.Now()
+	if saveErr := saveCache(cache); saveErr != nil {
+		logging.Debug(context.Background(), "version check: failed to save cache",
+			"error", saveErr.Error())
+	}
+
 	if err != nil {
-		fmt.Println("%w", err)
-		// Network error or timeout - silently skip
 		logging.Debug(context.Background(), "version check: failed to fetch latest version",
 			"error", err.Error())
 		return
-	}
-
-	// Update cache with new check time
-	cache.LastCheckTime = time.Now()
-	if err := saveCache(cache); err != nil {
-		logging.Debug(context.Background(), "version check: failed to save cache",
-			"error", err.Error())
 	}
 
 	// Show notification if outdated
@@ -191,8 +190,8 @@ func fetchLatestVersion() (string, error) {
 		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	// Read response body (limit to prevent large reads)
-	body, err := io.ReadAll(resp.Body)
+	// Read response body (limit to 1MB to prevent memory exhaustion)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", fmt.Errorf("reading response: %w", err)
 	}
@@ -246,7 +245,7 @@ func isOutdated(current, latest string) bool {
 func updateCommand() string {
 	execPath, err := os.Executable()
 	if err != nil {
-		return "curl -fsSL https://dl.entire.io/install.sh | bash"
+		return "curl -fsSL https://entire.io/install.sh | bash"
 	}
 
 	// Resolve symlinks to find the real path (Homebrew symlinks from bin/ to Cellar/)
@@ -259,7 +258,7 @@ func updateCommand() string {
 		return "brew upgrade entire"
 	}
 
-	return "curl -fsSL https://dl.entire.io/install.sh | bash"
+	return "curl -fsSL https://entire.io/install.sh | bash"
 }
 
 // printNotification prints the version update notification to the user.

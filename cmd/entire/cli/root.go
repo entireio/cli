@@ -45,7 +45,7 @@ func NewRootCmd() *cobra.Command {
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
 			// Skip for hidden commands
-			if cmd.Hidden() {
+			if cmd.Hidden {
 				return
 			}
 
@@ -64,7 +64,7 @@ func NewRootCmd() *cobra.Command {
 				telemetry.TrackCommandDetached(cmd, settings.Strategy, agentStr, settings.Enabled, Version)
 			}
 
-			// Version check and notification (synchronous with 1s timeout)
+			// Version check and notification (synchronous with 2s timeout)
 			// Runs AFTER command completes to avoid interfering with interactive modes
 			versioncheck.CheckAndNotify(cmd, Version)
 		},

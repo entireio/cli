@@ -1,13 +1,17 @@
 package versioncheck
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 func TestIsOutdated(t *testing.T) {
@@ -129,15 +133,15 @@ func TestEnsureGlobalConfigDir(t *testing.T) {
 	}
 }
 
-func TestFetchLatestVersionWithMockServer(t *testing.T) {
-	// Create a mock HTTP server
+func TestFetchLatestVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify headers
 		if r.Header.Get("Accept") != "application/vnd.github+json" {
 			t.Errorf("Accept header = %q, want application/vnd.github+json", r.Header.Get("Accept"))
 		}
+		if r.Header.Get("User-Agent") != "entire-cli" {
+			t.Errorf("User-Agent header = %q, want entire-cli", r.Header.Get("User-Agent"))
+		}
 
-		// Return a mock GitHub release
 		release := GitHubRelease{
 			TagName:    "v1.2.3",
 			Prerelease: false,
@@ -148,18 +152,81 @@ func TestFetchLatestVersionWithMockServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Mock the githubAPIURL (this would normally be done at the module level)
-	// For this test, we'll just verify the HTTP call works by creating a custom function
-	// Note: In real usage, this would use the actual GitHub API
+	original := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = original })
 
-	// For now, we'll test the parseGitHubRelease function which is the core parsing logic
-	body := []byte(`{"tag_name": "v1.2.3", "prerelease": false}`)
-	version, err := parseGitHubRelease(body)
+	version, err := fetchLatestVersion()
 	if err != nil {
-		t.Errorf("parseGitHubRelease() error = %v", err)
+		t.Fatalf("fetchLatestVersion() error = %v", err)
 	}
 	if version != "v1.2.3" {
-		t.Errorf("parseGitHubRelease() = %q, want v1.2.3", version)
+		t.Errorf("fetchLatestVersion() = %q, want v1.2.3", version)
+	}
+}
+
+func TestFetchLatestVersionPrerelease(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		release := GitHubRelease{
+			TagName:    "v2.0.0-rc1",
+			Prerelease: true,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper, encoding error is acceptable
+		json.NewEncoder(w).Encode(release)
+	}))
+	defer server.Close()
+
+	original := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = original })
+
+	_, err := fetchLatestVersion()
+	if err == nil {
+		t.Fatal("fetchLatestVersion() expected error for prerelease, got nil")
+	}
+}
+
+func TestFetchLatestVersionServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	original := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = original })
+
+	_, err := fetchLatestVersion()
+	if err == nil {
+		t.Fatal("fetchLatestVersion() expected error for 500 response, got nil")
+	}
+}
+
+func TestParseGitHubRelease(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr bool
+	}{
+		{"valid release", `{"tag_name": "v1.2.3", "prerelease": false}`, "v1.2.3", false},
+		{"prerelease", `{"tag_name": "v2.0.0-rc1", "prerelease": true}`, "", true},
+		{"empty tag", `{"tag_name": "", "prerelease": false}`, "", true},
+		{"invalid json", `not json`, "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseGitHubRelease([]byte(tt.body))
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseGitHubRelease() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("parseGitHubRelease() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -168,11 +235,152 @@ func TestUpdateCommand(t *testing.T) {
 	cmd := updateCommand()
 
 	validCommands := map[string]bool{
-		"brew upgrade entire":                              true,
-		"curl -fsSL https://dl.entire.io/install.sh | bash": true,
+		"brew upgrade entire":                            true,
+		"curl -fsSL https://entire.io/install.sh | bash": true,
 	}
 
 	if !validCommands[cmd] {
 		t.Errorf("updateCommand() = %q, want one of %v", cmd, validCommands)
+	}
+}
+
+// setupCheckAndNotifyTest sets HOME to a temp dir and overrides githubAPIURL.
+// Returns a cobra.Command with captured stdout and a cleanup function.
+func setupCheckAndNotifyTest(t *testing.T, serverURL string) (*cobra.Command, *bytes.Buffer) {
+	t.Helper()
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origURL := githubAPIURL
+	githubAPIURL = serverURL
+	t.Cleanup(func() { githubAPIURL = origURL })
+
+	var buf bytes.Buffer
+	cmd := &cobra.Command{Use: "test"}
+	cmd.SetOut(&buf)
+
+	return cmd, &buf
+}
+
+// newVersionServer returns an httptest.Server that responds with the given version.
+func newVersionServer(t *testing.T, version string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		release := GitHubRelease{TagName: version, Prerelease: false}
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
+		json.NewEncoder(w).Encode(release)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestCheckAndNotify_SkipsHiddenCommand(t *testing.T) {
+	server := newVersionServer(t, "v9.9.9")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+	cmd.Hidden = true
+
+	CheckAndNotify(cmd, "1.0.0")
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for hidden command, got %q", buf.String())
+	}
+}
+
+func TestCheckAndNotify_SkipsDevVersion(t *testing.T) {
+	server := newVersionServer(t, "v9.9.9")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+
+	CheckAndNotify(cmd, "dev")
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for dev version, got %q", buf.String())
+	}
+}
+
+func TestCheckAndNotify_SkipsEmptyVersion(t *testing.T) {
+	server := newVersionServer(t, "v9.9.9")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+
+	CheckAndNotify(cmd, "")
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for empty version, got %q", buf.String())
+	}
+}
+
+func TestCheckAndNotify_SkipsWhenCacheIsFresh(t *testing.T) {
+	server := newVersionServer(t, "v9.9.9")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+
+	// Pre-seed the cache with a recent check time
+	configDir, err := globalConfigDirPath()
+	if err != nil {
+		t.Fatalf("globalConfigDirPath() error = %v", err)
+	}
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	cache := &VersionCache{LastCheckTime: time.Now()}
+	if err := saveCache(cache); err != nil {
+		t.Fatalf("saveCache() error = %v", err)
+	}
+
+	CheckAndNotify(cmd, "1.0.0")
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no output when cache is fresh, got %q", buf.String())
+	}
+}
+
+func TestCheckAndNotify_PrintsNotificationWhenOutdated(t *testing.T) {
+	server := newVersionServer(t, "v2.0.0")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+
+	CheckAndNotify(cmd, "1.0.0")
+
+	output := buf.String()
+	if !strings.Contains(output, "v2.0.0") {
+		t.Errorf("expected notification with latest version, got %q", output)
+	}
+	if !strings.Contains(output, "1.0.0") {
+		t.Errorf("expected notification with current version, got %q", output)
+	}
+}
+
+func TestCheckAndNotify_NoNotificationWhenUpToDate(t *testing.T) {
+	server := newVersionServer(t, "v1.0.0")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+
+	CheckAndNotify(cmd, "1.0.0")
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no output when up to date, got %q", buf.String())
+	}
+}
+
+func TestCheckAndNotify_FetchFailureUpdatesCacheToPreventRetry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+
+	CheckAndNotify(cmd, "1.0.0")
+
+	// No notification on fetch failure
+	if buf.Len() != 0 {
+		t.Errorf("expected no output on fetch failure, got %q", buf.String())
+	}
+
+	// Cache should have been updated so a second call skips the fetch
+	cache, err := loadCache()
+	if err != nil {
+		t.Fatalf("loadCache() error = %v", err)
+	}
+	if time.Since(cache.LastCheckTime) > time.Minute {
+		t.Errorf("cache LastCheckTime not updated after fetch failure: %v", cache.LastCheckTime)
 	}
 }

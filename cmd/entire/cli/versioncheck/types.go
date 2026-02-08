@@ -13,15 +13,16 @@ type GitHubRelease struct {
 	Prerelease bool   `json:"prerelease"`
 }
 
-const (
-	// githubAPIURL is the GitHub API endpoint for fetching the latest release.
-	githubAPIURL = "https://api.github.com/repos/entireio/cli/releases/latest"
+// githubAPIURL is the GitHub API endpoint for fetching the latest release.
+// This is a var (not const) to allow overriding in tests.
+var githubAPIURL = "https://api.github.com/repos/entireio/cli/releases/latest"
 
+const (
 	// checkInterval is the duration between version checks.
 	checkInterval = 24 * time.Hour
 
 	// httpTimeout is the timeout for HTTP requests to the GitHub API.
-	httpTimeout = 5 * time.Second
+	httpTimeout = 2 * time.Second
 
 	// cacheFileName is the name of the cache file stored in the global config directory.
 	cacheFileName = "version_check.json"
