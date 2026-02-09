@@ -1,0 +1,33 @@
+{
+  "checkpoint_id": "8b12ecd0beb5",
+  "session_id": "2026-01-28-b35a9240-5f32-42a3-a290-ce232abf9ae1",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-28T02:29:00.715475Z",
+  "branch": "gtrrz-victor/detach-posthog-emit-event",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/telemetry/detached.go",
+    "cmd/entire/cli/telemetry/detached_test.go",
+    "cmd/entire/cli/telemetry/detached_unix.go",
+    "cmd/entire/cli/telemetry/detached_windows.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_lines_at_start": 124,
+  "token_usage": {
+    "input_tokens": 392,
+    "cache_creation_tokens": 150189,
+    "cache_read_tokens": 2784154,
+    "output_tokens": 113,
+    "api_call_count": 48
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-28T02:29:00.476112Z",
+    "agent_lines": 335,
+    "human_added": 211,
+    "human_modified": 78,
+    "human_removed": 0,
+    "total_committed": 624,
+    "agent_percentage": 53.68589743589743
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "9fe3cfdef74d",
+  "strategy": "manual-commit",
+  "branch": "alex/test2",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/geese.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9f/e3cfdef74d/0/metadata.json",
+      "transcript": "/9f/e3cfdef74d/0/full.jsonl",
+      "context": "/9f/e3cfdef74d/0/context.md",
+      "content_hash": "/9f/e3cfdef74d/0/content_hash.txt",
+      "prompt": "/9f/e3cfdef74d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 8,
+    "cache_creation_tokens": 52959,
+    "cache_read_tokens": 118997,
+    "output_tokens": 443,
+    "api_call_count": 4
+  }
+}

@@ -1,0 +1,25 @@
+our git status has broken, why?
+
+---
+
+1. this has happened twice now just fyi
+
+---
+
+yeah check what's triggering gc
+
+---
+
+or is my worktree folder choice the problem?
+
+---
+
+is it problematic, data wise?
+
+---
+
+log a linear improvement - Project:Troy
+
+---
+
+and for now can we document it in known_limitations?

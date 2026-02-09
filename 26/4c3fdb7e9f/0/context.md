@@ -1,0 +1,12 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+Let's adjust the test-secrets.txt file.  Add STRIPE_PUBLISHABLE_KEY=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX  I'm testing gitleaks
+
+### Prompt 2
+
+The shouldFilterFile function determines which files get filtered for secrets, but it omits paths.SummaryFileName (summary.txt). Summaries are extracted from transcript content via extractLastAssistantMessage and written to the metadata directory. When copyMetadataDir processes files, summaries pass through unfiltered. If the AI echoes sensitive data (e.g., "The user provided API key sk-12345..."), that data leaks into git unredacted.
+

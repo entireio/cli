@@ -1,0 +1,13 @@
+when we run `entire enable` with the `--local-dev` flag then we setup the claude hooks using `go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go` instead of the `entire` command that might be globally installed. looking at `.gemini/settings.json` we don't do the same there, can you take a look what is necessary to change this?
+
+---
+
+can you explain to me the changes in hook_tests.go you made?
+
+---
+
+how did this pass before?
+
+---
+
+but why was .gemini/settings.json then generated with `entire` and not `go run`?

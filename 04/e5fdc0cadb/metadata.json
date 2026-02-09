@@ -1,0 +1,34 @@
+{
+  "checkpoint_id": "04e5fdc0cadb",
+  "strategy": "manual-commit",
+  "branch": "soph/chunking",
+  "migration_source_commit": "52f31e77a10047d0311cb0810a07624c48ffb22a",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "cmd/entire/cli/agent/chunking.go",
+    "cmd/entire/cli/agent/geminicli/gemini.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "docs/architecture/claude-hooks-integration.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/04/e5fdc0cadb/0/metadata.json",
+      "transcript": "/04/e5fdc0cadb/0/full.jsonl",
+      "context": "/04/e5fdc0cadb/0/context.md",
+      "content_hash": "/04/e5fdc0cadb/0/content_hash.txt",
+      "prompt": "/04/e5fdc0cadb/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1314,
+    "cache_creation_tokens": 676592,
+    "cache_read_tokens": 12757495,
+    "output_tokens": 389,
+    "api_call_count": 162
+  }
+}

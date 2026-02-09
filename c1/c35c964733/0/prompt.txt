@@ -1,0 +1,13 @@
+I just tried to merge origin/main - why did it stop halfway?
+
+---
+
+we should be using the strong types instead of string wherever we can
+
+---
+
+commit the merge
+
+---
+
+we have some new changes now?

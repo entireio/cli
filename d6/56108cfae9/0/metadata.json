@@ -1,0 +1,12 @@
+{
+  "checkpoint_id": "d656108cfae9",
+  "session_id": "2026-01-16-189d8afc-493f-49af-b59e-6a1ee9676a6e",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-16T20:06:07.059566+01:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/architecture/claude-hooks-integration.md",
+    "docs/architecture/sessions-and-checkpoints.md"
+  ],
+  "agent": "Claude Code"
+}

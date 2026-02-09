@@ -1,0 +1,32 @@
+{
+  "checkpoint_id": "d9d99712b16b",
+  "session_id": "2026-01-28-4b5f20be-2d31-48ea-a71d-d1a193d458ea",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-28T00:28:55.416136Z",
+  "branch": "gtrrz-victor/make-manual-mode-default",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "README.md",
+    "cmd/entire/cli/integration_test/setup_cmd_test.go",
+    "cmd/entire/cli/setup.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "944d1c8d-6574-4c02-940c-66cdaf2d394b",
+  "transcript_lines_at_start": 314,
+  "token_usage": {
+    "input_tokens": 3262,
+    "cache_creation_tokens": 122821,
+    "cache_read_tokens": 3195531,
+    "output_tokens": 104,
+    "api_call_count": 43
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-28T00:28:55.051213Z",
+    "agent_lines": 0,
+    "human_added": 70,
+    "human_modified": 32,
+    "human_removed": 0,
+    "total_committed": 99,
+    "agent_percentage": 0
+  }
+}

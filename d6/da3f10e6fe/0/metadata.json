@@ -1,0 +1,23 @@
+{
+  "checkpoint_id": "d6da3f10e6fe",
+  "session_id": "2026-01-22-94e68429-3fb7-4f6c-9915-65ada4c33908",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-22T21:30:21.880197+01:00",
+  "branch": "soph/constanize-agents",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/chunking.go",
+    "cmd/entire/cli/agent/registry.go",
+    "docs/requirements/soph-chunking/review-01.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "8d0f75a0-02d4-4c4d-bebd-8d904da49947",
+  "transcript_lines_at_start": 17,
+  "token_usage": {
+    "input_tokens": 336,
+    "cache_creation_tokens": 34021,
+    "cache_read_tokens": 861482,
+    "output_tokens": 3640,
+    "api_call_count": 15
+  }
+}

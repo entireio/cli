@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "8ece5fc12e98",
+  "strategy": "manual-commit",
+  "branch": "gtrrz-victor/detach-posthog-emit-event",
+  "migration_source_commit": "88a0ebdd0dc12a5383f298c58b54dd2b932889ad",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/telemetry/detached.go",
+    "cmd/entire/cli/telemetry/detached_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/8e/ce5fc12e98/0/metadata.json",
+      "transcript": "/8e/ce5fc12e98/0/full.jsonl",
+      "context": "/8e/ce5fc12e98/0/context.md",
+      "content_hash": "/8e/ce5fc12e98/0/content_hash.txt",
+      "prompt": "/8e/ce5fc12e98/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 68,
+    "cache_creation_tokens": 17620,
+    "cache_read_tokens": 356227,
+    "output_tokens": 30,
+    "api_call_count": 8
+  }
+}

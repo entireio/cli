@@ -1,0 +1,19 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+I just got this during a rebase:
+
+❯ git rebase main
+Link this commit to Agent session context? [Y/n] n
+Link this commit to Agent session context? [Y/n] n
+Rebasing (23/25)
+
+I think we should somehow prevent this from happening. Basically I think the rebase had commits without a trailer, but since the session was still active the hooks tried to link them. This shouldn't be a thing.
+
+### Prompt 2
+
+can we add tests for this?
+

@@ -1,0 +1,21 @@
+{
+  "checkpoint_id": "b1c09a9195f2",
+  "session_id": "2026-01-21-3a4a4468-815f-4494-a1ad-5681a263b5d4",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-21T15:36:09.286306+01:00",
+  "branch": "soph/add-agent-to-logging",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go"
+  ],
+  "agent": "Gemini CLI",
+  "token_usage": {
+    "input_tokens": 388,
+    "cache_creation_tokens": 173663,
+    "cache_read_tokens": 4089273,
+    "output_tokens": 13107,
+    "api_call_count": 48
+  }
+}

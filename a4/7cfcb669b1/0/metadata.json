@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "a47cfcb669b1",
+  "session_id": "d19ec7f9-dfaf-4c65-a9ad-ab56240f23d8",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-07T00:29:02.250331Z",
+  "branch": "alex/ent-221-better-state-tracking-for-sessions",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/session/phase_test.go",
+    "docs/generated/.gitignore"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 16,
+    "cache_creation_tokens": 36239,
+    "cache_read_tokens": 664524,
+    "output_tokens": 139,
+    "api_call_count": 14
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-07T00:28:46.907922Z",
+    "agent_lines": 8,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 8,
+    "agent_percentage": 100
+  }
+}

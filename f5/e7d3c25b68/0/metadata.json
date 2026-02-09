@@ -1,0 +1,20 @@
+{
+  "checkpoint_id": "f5e7d3c25b68",
+  "session_id": "2026-01-05-4555072a-e039-4937-b6ea-dcb86152dd55",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-05T18:27:56.528065+01:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/config.go",
+    "cmd/entire/cli/config_test.go",
+    "cmd/entire/cli/integration_test/agent_strategy_test.go",
+    "cmd/entire/cli/integration_test/agent_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_untracked_files_test.go",
+    "cmd/entire/cli/integration_test/setup_claude_hooks_test.go",
+    "cmd/entire/cli/integration_test/start_test.go",
+    "cmd/entire/cli/integration_test/testenv_test.go",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/start.go",
+    "cmd/entire/cli/start_test.go"
+  ]
+}

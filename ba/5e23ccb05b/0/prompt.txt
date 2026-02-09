@@ -1,0 +1,5 @@
+move the message up just before the file list?
+
+---
+
+what's causing these diagnostic issues? fmt/lint issues?

@@ -1,0 +1,20 @@
+{
+  "checkpoint_id": "f3470fe8eb5e",
+  "session_id": "2026-01-27-87a7858d-3f94-4c65-a2d5-307e9337b041",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-27T09:58:01.058775+01:00",
+  "branch": "gtrrz-victor/posttool-hook-should-not-commit-if-no-files",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/subagent_checkpoints_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_lines_at_start": 2,
+  "token_usage": {
+    "input_tokens": 1708,
+    "cache_creation_tokens": 91193,
+    "cache_read_tokens": 832598,
+    "output_tokens": 3299,
+    "api_call_count": 14
+  }
+}

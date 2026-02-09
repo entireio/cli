@@ -1,0 +1,13 @@
+Additional feedback: If the prompt contains newline characters, they could break the display format and potentially confuse the interactive prompt. Newlines in the displayPrompt on line 292 would create unexpected line breaks in the context string. Consider replacing newlines with spaces or a newline indicator before display.
+
+---
+
+and then I got this one, but I'm not sure because replacing it with single quotes is then the same issue if someone is using single quotes in the prompt, any suggestions? If the prompt contains double quotes, the git comment display could be visually confusing (e.g., # Last Prompt: "add "admin" role"). While this won't break functionality, consider using single quotes around the prompt or escaping inner quotes for better readability in the commit message editor.
+
+---
+
+How about just removing quotes but making it "Prompt> " instead of "Prompt: " I feel this might better to understand?
+
+---
+
+ok let's do `Last Prompt: blah`

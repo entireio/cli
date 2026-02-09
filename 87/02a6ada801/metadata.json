@@ -1,0 +1,33 @@
+{
+  "checkpoint_id": "8702a6ada801",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "c7ece6021383d2d122ace697e0ffedb0b4fb1c96",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/summarize.go",
+    "cmd/entire/cli/summarize_test.go",
+    "docs/requirements/explain-task3/review-01.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/87/02a6ada801/0/metadata.json",
+      "transcript": "/87/02a6ada801/0/full.jsonl",
+      "context": "/87/02a6ada801/0/context.md",
+      "content_hash": "/87/02a6ada801/0/content_hash.txt",
+      "prompt": "/87/02a6ada801/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

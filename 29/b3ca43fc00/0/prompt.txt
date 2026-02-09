@@ -1,0 +1,117 @@
+Implement the following plan:
+
+# Output Filter Implementation Plan
+
+## Summary
+
+Add an `output_filter` setting that pipes sensitive file contents through an external command (like `gitleaks-filter`) before writing to disk. This filters API keys, secrets, and other sensitive data from session transcripts.
+
+## Setting Configuration
+
+Add to `.entire/settings.json` or `.entire/settings.local.json`:
+
+```json
+{
+  "output_filter": ["gitleaks-filter"]
+}
+```
+
+With arguments:
+```json
+{
+  "output_filter": ["gitleaks-filter", "--redact", "--config", "/path/to/config"]
+}
+```
+
+## Files to Filter
+
+**Filtered** (contain potentially sensitive user content):
+- `full.jsonl` - Session transcripts
+- `prompt.txt` - User prompts
+- `context.md` - Generated context
+- `agent-*.jsonl` - Subagent transcripts
+
+**Not filtered** (structural metadata only):
+- `metadata.json`, `checkpoint.json`, `content_hash.txt`, `summary.txt`
+
+## Implementation
+
+### 1. Add Setting (`settings/settings.go`)
+
+```go
+type EntireSettings struct {
+    // ... existing fields ...
+    OutputFilter []string `json:"output_filter,omitempty"`
+}
+```
+
+- Update `mergeJSON()` to handle the field (array override)
+- Add `GetOutputFilter() []string` helper method
+- Empty/nil slice means no filtering
+
+### 2. Create Filter Package (`filter/filter.go`) - NEW
+
+```go
+package filter
+
+// FilterContent pipes content through the configured filter command.
+// Returns original content if no filter configured.
+// Returns error if filter is configured but fails (command not found, non-zero exit, timeout).
+func FilterContent(ctx context.Context, content []byte, filename string) ([]byte, error)
+```
+
+Key behaviors:
+- 30-second timeout
+- No filter configured (empty slice) → return original content, nil error
+- Filter succeeds → return filtered content, nil error
+- Filter fails → return nil, descriptive error (abort write)
+- First element is executable, remaining elements are arguments
+
+### 3. Integration Points
+
+| Location | Files | Change |
+|----------|-------|--------|
+| `checkpoint/committed.go` | Git blobs on `entire/sessions` | Filter in `writeTranscript()`, prompts, context before `CreateBlobFromContent()` |
+| `checkpoint/temporary.go` | Shadow branch commits | Filter in `addTaskMetadataToTree()` |
+| `hooks_claudecode_handlers.go` | Filesystem writes | Filter before `os.WriteFile()` calls |
+| `hooks_geminicli_handlers.go` | Filesystem writes | Same as Claude handler |
+| `metadata.go` | Task metadata | Filter in `WriteTaskPrompt()`, `CopyAgentTranscript()` |
+
+### 4. Error Handling
+
+**Abort with clear error** when filter is configured but fails:
+- Filter command not found → Error: `output filter command not found: "gitleaks-filter"`
+- Filter returns non-zero exit code → Error: `output filter failed (exit 1): <stderr output>`
+- Filter times out (30s) → Error: `output filter timed out after 30s`
+- Empty array configured → treated as "no filter", not an error
+
+Rationale: If the user configured a filter, they expect secrets to be redacted. Writing unfiltered content would silently leak secrets - fail loudly instead.
+
+## Files to Modify
+
+1. `cmd/entire/cli/settings/settings.go` - Add `OutputFilter` field + merge logic
+2. `cmd/entire/cli/filter/filter.go` (new) - Core filtering logic
+3. `cmd/entire/cli/filter/filter_test.go` (new) - Unit tests
+4. `cmd/entire/cli/checkpoint/committed.go` - Filter before blob creation
+5. `cmd/entire/cli/checkpoint/temporary.go` - Filter transcripts in tree building
+6. `cmd/entire/cli/hooks_claudecode_handlers.go` - Filter filesystem writes
+7. `cmd/entire/cli/hooks_geminicli_handlers.go` - Filter filesystem writes
+8. `cmd/entire/cli/metadata.go` - Filter task prompts/transcripts
+
+## Verification
+
+1. Run `mise run test` after each file change
+2. Add unit tests for filter package (no filter, with filter, filter failure, timeout)
+3. Integration test: Configure `output_filter: "cat"` and verify files are written correctly
+4. Manual test with `gitleaks-filter` to verify secrets are redacted
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/paul/.REDACTED.jsonl
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Make a nice commit message and commit.

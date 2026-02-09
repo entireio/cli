@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "4de153fa6df6",
+  "session_id": "768de5d6-9fad-475b-8a4f-dfa7ddc01bb0",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-06T10:09:02.199863Z",
+  "branch": "20260206-secrets-redaction",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "redact/redact_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "3f9b2e1e-dcaf-4f2b-b454-5391e1d8dac9",
+  "transcript_lines_at_start": 118,
+  "token_usage": {
+    "input_tokens": 40,
+    "cache_creation_tokens": 29253,
+    "cache_read_tokens": 1151754,
+    "output_tokens": 6804,
+    "api_call_count": 30
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-06T10:09:02.105377Z",
+    "agent_lines": 0,
+    "human_added": 2,
+    "human_modified": 4,
+    "human_removed": 0,
+    "total_committed": 3,
+    "agent_percentage": 0
+  }
+}

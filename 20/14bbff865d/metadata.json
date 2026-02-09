@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "2014bbff865d",
+  "strategy": "manual-commit",
+  "branch": "soph/fix-session-date-change-bug",
+  "migration_source_commit": "f625664d4010a29d5c69a1d169c216a36f125e27",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/paths/paths.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/20/14bbff865d/0/metadata.json",
+      "transcript": "/20/14bbff865d/0/full.jsonl",
+      "context": "/20/14bbff865d/0/context.md",
+      "content_hash": "/20/14bbff865d/0/content_hash.txt",
+      "prompt": "/20/14bbff865d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 333,
+    "cache_creation_tokens": 36233,
+    "cache_read_tokens": 357554,
+    "output_tokens": 26,
+    "api_call_count": 12
+  }
+}
