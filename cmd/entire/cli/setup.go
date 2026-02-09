@@ -691,8 +691,12 @@ func shellCompletionTarget() (shellName, rcFile, completionLine string, err erro
 			"source <(entire completion zsh)",
 			nil
 	case strings.Contains(shell, "bash"):
+		bashRC := filepath.Join(home, ".bashrc")
+		if _, err := os.Stat(filepath.Join(home, ".bash_profile")); err == nil {
+			bashRC = filepath.Join(home, ".bash_profile")
+		}
 		return "Bash",
-			filepath.Join(home, ".bashrc"),
+			bashRC,
 			"source <(entire completion bash)",
 			nil
 	default:
