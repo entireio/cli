@@ -545,8 +545,8 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 	fmt.Fprintf(w, "Agent: %s\n\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	var installedHooks int
-	if installedHooks, err = hookAgent.InstallHooks(localDev, forceHooks); err != nil {
+	installedHooks, err := hookAgent.InstallHooks(localDev, forceHooks)
+	if err != nil {
 		return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
 	}
 
