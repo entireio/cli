@@ -1,0 +1,28 @@
+what is the output if you run "entire status" ?
+
+---
+
+I do want this command to behave like:
+entire status
+  Enable (manual-commit)
+
+and
+entire status --long
+  Project, enabled (manual-commit)                                                                                                                                                                     
+  Local, disabled (auto-commit)
+
+---
+
+I do want this command to behave like:
+entire status
+  Enable (manual-commit)
+
+and
+entire status --long
+  Enable (manual-commit) 
+  
+  Project, enabled (manual-commit)                                                                                                                                                                                    Local, disabled (auto-commit)
+
+---
+
+What is the difference between LoadEntireSettings and loadSettingsFromFile

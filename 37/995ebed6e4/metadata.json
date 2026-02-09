@@ -1,0 +1,42 @@
+{
+  "checkpoint_id": "37995ebed6e4",
+  "strategy": "manual-commit",
+  "branch": "gtrrz-victor/goreleaser-release-homebrew-tap",
+  "migration_source_commit": "ca3b48385f8fe4e22ea9012a00ceb2fc9bf44a2b",
+  "checkpoints_count": 8,
+  "files_touched": [
+    ".github/workflows/release.yml",
+    ".goreleaser.yaml",
+    "cmd/entire/cli/hook_registry.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/37/995ebed6e4/0/metadata.json",
+      "transcript": "/37/995ebed6e4/0/full.jsonl",
+      "context": "/37/995ebed6e4/0/context.md",
+      "content_hash": "/37/995ebed6e4/0/content_hash.txt",
+      "prompt": "/37/995ebed6e4/0/prompt.txt"
+    },
+    {
+      "metadata": "/37/995ebed6e4/2/metadata.json",
+      "transcript": "/37/995ebed6e4/2/full.jsonl",
+      "context": "/37/995ebed6e4/2/context.md",
+      "content_hash": "/37/995ebed6e4/2/content_hash.txt",
+      "prompt": "/37/995ebed6e4/2/prompt.txt"
+    },
+    {
+      "metadata": "/37/995ebed6e4/3/metadata.json",
+      "transcript": "/37/995ebed6e4/3/full.jsonl",
+      "context": "/37/995ebed6e4/3/context.md",
+      "content_hash": "/37/995ebed6e4/3/content_hash.txt",
+      "prompt": "/37/995ebed6e4/3/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 698,
+    "cache_creation_tokens": 420807,
+    "cache_read_tokens": 4483378,
+    "output_tokens": 7137,
+    "api_call_count": 84
+  }
+}

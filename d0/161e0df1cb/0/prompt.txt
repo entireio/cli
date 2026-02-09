@@ -1,0 +1,362 @@
+our git status has broken, why?
+
+---
+
+1. this has happened twice now just fyi
+
+---
+
+yeah check what's triggering gc
+
+---
+
+or is my worktree folder choice the problem?
+
+---
+
+is it problematic, data wise?
+
+---
+
+log a linear improvement - Project:Troy
+
+---
+
+and for now can we document it in known_limitations?
+
+---
+
+no don't set it, let's see if it keeps happening
+
+---
+
+is there a reason the gc is getting invoked more often now?
+
+---
+
+we did a migration from entire/sessions to entire/checkpoints/v1 - but that should have been a one-off operation
+
+---
+
+> git gc
+fatal: bad tree object 082c2c4495629bd585a0a11807b4e0ede9a99753
+fatal: failed to run repack
+
+HALP
+
+---
+
+success...?
+
+---
+
+run it
+
+---
+
+and those phantom refs, I guess were from the old sessions branch?
+
+---
+
+...sufficiently advanced technology...
+
+---
+
+learning Q: shouldn't the blobs have been reused in the new branch?
+
+---
+
+AHHHHHHHHH yes that would be it. and it wouldn't have kept it as diffs?
+
+---
+
+uh oh - it just happened again
+
+I did a git read-tree HEAD to resolve
+
+---
+
+I did a add/commit/push... then the stop hook barfed after the file copies to .entire/metadata
+
+---
+
+I mean, we _see_ it on the stop hook; it doesn't mean the stop hook caused it
+
+---
+
+are you sure?
+
+---
+
+I've only recently started seeing this happen...but I also moved to 'persistent' worktrees in the last week
+(previously had been blowing away worktrees and opening fresh ones)
+
+---
+
+can we do this in the git hooks directly or do we need to do it in code?
+
+---
+
+ooh, we caught something
+
+---
+
+can we also add which index specifically this is to the debug log?
+
+---
+
+it also always seems to be this same hash, I think? 
+> git status
+fatal: unable to read e53647ba1f1e5203bedff558b482f178db045555
+
+---
+
+it's in worktree 2 I'm seeing this issue
+
+---
+
+sorry, I didn't specify earlier but this recent error is from worktree 2, and the postcommit is also from there (it's a new operation) - so let's not jump to cross-worktree explanations just yet
+
+---
+
+and this error happened in the process of rebasing worktree 2 from its parent (we are stuck mid rebase now)
+
+---
+
+hmm, we made a change recently to shadow tracking where we replaced go-git with git status, could this be related?
+
+---
+
+which commit?
+
+---
+
+that was a little while back :|
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically trace through the conversation:
+
+1. **Initial problem**: User reports git status is broken. I investigated and found `fatal: unable to read e53647ba1f1e5203bedff558b482f178db045555` - a corrupted worktree index in `.git/worktrees/1/index`.
+
+2. **First fix**: Ran `git read-tree HEAD` to rebuild the worktree index. User noted this has happened twice.
+
+3. **GC investigation**: User asked what's triggering GC. Found:
+   - No explicit GC calls in codebase
+   - No git maintenance configured
+   - 29 pack files, with bursts: 12 on Feb 5, 7 on Feb 6, 3 on Feb 7
+   - 465 checkpoint commits created in 8 minutes on Feb 5 (migration from entire/sessions to entire/checkpoints/v1)
+   - go-git's `SetEncodedObject` creates loose objects on every checkpoint save
+   - When loose count exceeds gc.auto threshold (6700), any git operation triggers gc --auto
+
+4. **Worktree location question**: User asked if `.worktrees/1` location is problematic. I confirmed it's not - properly registered worktree, `.worktrees/` is gitignored.
+
+5. **Data implications of disabling GC**: Discussed tradeoffs - disabling gc.auto prevents corruption but causes disk bloat (502MB loose objects + 331MB packs).
+
+6. **Linear issue created**: ENT-241 "Run git gc at safe points to prevent worktree index corruption" in Troy project.
+
+7. **Known limitations documented**: Added worktree GC corruption section to `docs/KNOWN_LIMITATIONS.md`. User later modified this file (the ENT-221 section was removed, keeping only the original content through ENT-161 tracked section).
+
+8. **GC fix attempt**: User tried `git gc` from main worktree - failed with `fatal: bad tree object 082c2c44`. Found 103 missing blobs. These were phantom refs from the old `entire/sessions` branch migration. Fixed by running `git read-tree HEAD` in worktree 1 (to clear the bad cache-tree entry blocking GC), then GC succeeded. Result: 0 loose objects, 2 packs.
+
+9. **Learning questions**: User asked about blob reuse in migration (content-addressable storage) and whether git stores diffs (no - full snapshots, delta compression only in packs).
+
+10. **Second corruption**: Happened immediately after GC cleanup. User did add/commit/push, stop hook barfed. Fixed with `git read-tree HEAD`.
+
+11. **Deep investigation**: Traced entire stop hook flow through PostCommit → condensation → go-git operations. Initially suspected `worktree.Status()` in `getStagedFiles` was writing the index. User correctly pushed back - "are you sure?" and "the stop hook discovering it doesn't mean it caused it."
+
+12. **Debug instrumentation**: Added md5 checksumming to git hooks (prepare-commit-msg, post-commit, pre-push) in `.git/hooks/`. Logs to `/tmp/entire-index-debug.log`.
+
+13. **Caught the culprit**: Debug log showed post-commit hook changes the index:
+    ```
+    15:02:07 prepare-commit-msg BEFORE: 48f554e407de50ea53be22030173682f
+    15:02:07 prepare-commit-msg AFTER:  48f554e407de50ea53be22030173682f
+    15:02:08 post-commit BEFORE: 48f554e407de50ea53be22030173682f
+    15:02:27 post-commit AFTER:  bfb70aa91de94955ceda432ff3fcbaff
+    ```
+
+14. **Updated hooks to log index path**: User requested adding the specific index file path to the debug log.
+
+15. **Same hash every time**: User noted the corruption always involves `e53647ba1f1e5203bedff558b482f178db045555`.
+
+16. **Worktree 2 clarification**: User clarified the issue is in worktree 2, not worktree 1. I initially jumped to cross-worktree corruption theory but user corrected me - the post-commit was also from worktree 2.
+
+17. **Persistent worktrees**: User revealed they recently moved to persistent worktrees (previously blew them away). This explains why corruption is now visible.
+
+18. **Rebase context**: The corruption happened during a rebase in worktree 2. The rebase eventually completed successfully, showing it doesn't happen every time.
+
+19. **Root cause identified**: The call chain is:
+    PostCommit() → filterSessionsWithNewContent() → sessionHasNewContent() → sessionHasNewContentFromLiveTranscript() → getStagedFiles() → worktree.Status()
+    
+    `worktree.Status()` (go-git) reads and rewrites the index. Combined with GC having pruned objects that the cache-tree references, the rewritten index has stale cache-tree entries.
+
+20. **Originating commit**: `6d61daaa` - `feat(manual-commit): detect mid-session commits via live transcript analysis` from Jan 22. This added `sessionHasNewContentFromLiveTranscript` which introduced the PostCommit → `worktree.Status()` code path.
+
+Key files examined:
+- `.git/hooks/prepare-commit-msg`, `post-commit`, `pre-push` - instrumented with debug logging
+- `cmd/entire/cli/strategy/manual_commit_hooks.go` - contains PostCommit, PrepareCommitMsg, getStagedFiles, sessionHasNewContentFromLiveTranscript
+- `cmd/entire/cli/checkpoint/temporary.go` - WriteTemporary, buildTreeWithChanges, createBlobFromFile
+- `cmd/entire/cli/strategy/common.go` - OpenRepository with EnableDotGitCommonDir
+- `cmd/entire/cli/hooks_git_cmd.go` - git hook command dispatch
+- `cmd/entire/cli/hooks_claudecode_handlers.go` - stop hook handler
+- `docs/KNOWN_LIMITATIONS.md` - documented the issue
+
+The proposed fix is to replace `getStagedFiles` (which uses go-git's `worktree.Status()`) with a `git diff --cached --name-only` CLI call.
+
+Summary:
+1. Primary Request and Intent:
+   The user initially reported broken git status in their worktree. The investigation evolved into a deep debugging session to find the root cause of recurring worktree index corruption. The user wanted to understand WHY it was happening, not just fix the symptoms. Along the way, the user asked to: log a Linear issue (ENT-241), document the limitation in KNOWN_LIMITATIONS.md, investigate what triggers GC, and instrument git hooks to catch the culprit. The user consistently pushed back on premature conclusions, insisting on evidence-based debugging.
+
+2. Key Technical Concepts:
+   - Git worktree index corruption (cache-tree extension referencing pruned objects)
+   - Git GC auto-triggering (gc.auto threshold of 6700 loose objects, gc.autoPackLimit of 50 packs)
+   - go-git v5's `EnableDotGitCommonDir` for worktree support
+   - go-git's `worktree.Status()` reading AND rewriting the worktree index
+   - go-git's `SetEncodedObject` creating loose objects in `.git/objects/`
+   - Git's content-addressable storage (same content = same SHA = same blob)
+   - Git stores full snapshots, not diffs (delta compression only in pack files)
+   - Shadow branch checkpoint strategy (manual-commit)
+   - Condensation of session data from shadow branches to `entire/checkpoints/v1`
+   - `git read-tree HEAD` to rebuild corrupted index
+   - The two-hit combo: GC prunes objects + go-git rewrites index with stale cache-tree
+
+3. Files and Code Sections:
+
+   - **`/Users/alex/workspace/cli/.git/hooks/prepare-commit-msg`** — Instrumented with index md5 checksumming for debugging. Confirmed this hook does NOT modify the index.
+     ```sh
+     #!/bin/sh
+     # Entire CLI hooks
+     INDEX_FILE="$(git rev-parse --git-dir)/index"
+     LOG="/tmp/entire-index-debug.log"
+     echo "$(date '+%H:%M:%S') prepare-commit-msg INDEX=$INDEX_FILE BEFORE: $(md5 -q "$INDEX_FILE" 2>/dev/null || echo 'missing')" >> "$LOG"
+     entire hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true
+     echo "$(date '+%H:%M:%S') prepare-commit-msg INDEX=$INDEX_FILE AFTER:  $(md5 -q "$INDEX_FILE" 2>/dev/null || echo 'missing')" >> "$LOG"
+     ```
+
+   - **`/Users/alex/workspace/cli/.git/hooks/post-commit`** — Instrumented with index md5 checksumming. This hook was CONFIRMED to modify the index (md5 changed between BEFORE and AFTER).
+     ```sh
+     #!/bin/sh
+     # Entire CLI hooks
+     # Post-commit hook: condense session data if commit has Entire-Checkpoint trailer
+     INDEX_FILE="$(git rev-parse --git-dir)/index"
+     LOG="/tmp/entire-index-debug.log"
+     echo "$(date '+%H:%M:%S') post-commit INDEX=$INDEX_FILE BEFORE: $(md5 -q "$INDEX_FILE" 2>/dev/null || echo 'missing')" >> "$LOG"
+     entire hooks git post-commit 2>/dev/null || true
+     echo "$(date '+%H:%M:%S') post-commit INDEX=$INDEX_FILE AFTER:  $(md5 -q "$INDEX_FILE" 2>/dev/null || echo 'missing')" >> "$LOG"
+     ```
+
+   - **`/Users/alex/workspace/cli/.git/hooks/pre-push`** — Instrumented with index md5 checksumming.
+     ```sh
+     #!/bin/sh
+     # Entire CLI hooks
+     # Pre-push hook: push session logs alongside user's push
+     # $1 is the remote name (e.g., "origin")
+     INDEX_FILE="$(git rev-parse --git-dir)/index"
+     LOG="/tmp/entire-index-debug.log"
+     echo "$(date '+%H:%M:%S') pre-push INDEX=$INDEX_FILE BEFORE: $(md5 -q "$INDEX_FILE" 2>/dev/null || echo 'missing')" >> "$LOG"
+     entire hooks git pre-push "$1" || true
+     echo "$(date '+%H:%M:%S') pre-push INDEX=$INDEX_FILE AFTER:  $(md5 -q "$INDEX_FILE" 2>/dev/null || echo 'missing')" >> "$LOG"
+     ```
+
+   - **`cmd/entire/cli/strategy/manual_commit_hooks.go`** — The critical file containing the bug. Key functions:
+     - `PostCommit()` (line 401): Calls `filterSessionsWithNewContent` → `sessionHasNewContent` → `sessionHasNewContentFromLiveTranscript` → `getStagedFiles`
+     - `getStagedFiles()` (line 982): Uses go-git's `worktree.Status()` which reads AND rewrites the worktree index
+       ```go
+       func getStagedFiles(repo *git.Repository) []string {
+           worktree, err := repo.Worktree()
+           if err != nil {
+               return nil
+           }
+           status, err := worktree.Status()
+           if err != nil {
+               return nil
+           }
+           var staged []string
+           for path, fileStatus := range status {
+               if fileStatus.Staging != git.Unmodified && fileStatus.Staging != git.Untracked {
+                   staged = append(staged, path)
+               }
+           }
+           return staged
+       }
+       ```
+     - `sessionHasNewContentFromLiveTranscript()` (line 640): Calls `getStagedFiles` at line 683 with TODO comment: `// TODO: does it work? Do we have staged files if this is called at post-commit hook ?`
+     - `PrepareCommitMsg()` (line 188): Also calls `getStagedFiles` at line 284 but this doesn't modify the index (confirmed by debug log)
+
+   - **`cmd/entire/cli/checkpoint/temporary.go`** — Contains `WriteTemporary`, `buildTreeWithChanges`, `createBlobFromFile`, `BuildTreeFromEntries`. All use `SetEncodedObject` to create loose objects but do NOT touch the worktree index. Read to verify it wasn't the cause.
+
+   - **`cmd/entire/cli/strategy/common.go`** — Contains `OpenRepository()` (line 488) which uses `git.PlainOpenWithOptions` with `EnableDotGitCommonDir: true` for worktree support. Also contains `collectChangedFiles` (line 1028) which uses `git status` CLI (not go-git).
+
+   - **`cmd/entire/cli/hooks_claudecode_handlers.go`** — Contains the stop hook handler `handleClaudeCodeStop` which calls `strat.SaveChanges(ctx)`. Read to trace the stop hook flow.
+
+   - **`cmd/entire/cli/hooks_git_cmd.go`** — Git hook command dispatch. Maps git hooks to strategy handlers.
+
+   - **`docs/KNOWN_LIMITATIONS.md`** — Added worktree GC corruption section. Note: the user later modified this file (the added section was removed).
+
+4. Errors and Fixes:
+   - **`fatal: unable to read e53647ba...`**: Worktree index corruption. Fixed with `git read-tree HEAD`. This happened multiple times throughout the session.
+   - **`fatal: bad tree object 082c2c44...` / `fatal: failed to run repack`**: GC couldn't complete because worktree 1's index had a corrupted cache-tree referencing a missing object. Fixed by running `git read-tree HEAD` in worktree 1 first, then GC succeeded.
+   - **103 missing blobs**: Phantom references from the old `entire/sessions` branch migration. These were unreachable blobs that GC hadn't cleaned up yet. Resolved after successful GC run.
+   - **User correction - "are you sure?"**: I asserted that `worktree.Status()` writes the index. User pushed back. I acknowledged I wasn't sure and suggested instrumenting instead of speculating.
+   - **User correction - "I see this in worktree 2"**: I jumped to a cross-worktree corruption theory. User corrected that both the post-commit and the error were in worktree 2. I should not have made that leap.
+   - **User correction - "the stop hook discovering it doesn't mean it caused it"**: I initially blamed the stop hook. User correctly pointed out the stop hook just found the corruption, not caused it.
+
+5. Problem Solving:
+   - **Root cause identified**: Commit `6d61daaa` ("feat(manual-commit): detect mid-session commits via live transcript analysis", Jan 22) added `sessionHasNewContentFromLiveTranscript` which introduced a new code path where `PostCommit` calls `getStagedFiles` → go-git's `worktree.Status()`. This rewrites the worktree index. When combined with GC having pruned tree objects that the index's cache-tree references, the rewritten index contains stale cache-tree entries pointing to non-existent objects.
+   - **Two-hit combo**: GC prunes objects (hit 1) + go-git rewrites index preserving stale cache-tree (hit 2). Both are needed for corruption. This explains why it doesn't happen every time.
+   - **Persistent worktrees**: User recently switched from fresh worktrees to persistent ones, making the corruption visible for the first time.
+   - The `e53647ba` hash appearing consistently confirms go-git is writing a specific stale tree hash to the cache-tree.
+
+6. All User Messages:
+   - "our git status has broken, why?"
+   - "1. this has happened twice now just fyi" (chose option 1: reset index)
+   - "yeah check what's triggering gc"
+   - "we did a migration from entire/sessions to entire/checkpoints/v1 - but that should have been a one-off operation"
+   - "log a linear improvement - Project:Troy"
+   - "and for now can we document it in known_limitations?"
+   - "no don't set it, let's see if it keeps happening" (about gc.auto=0)
+   - "is there a reason the gc is getting invoked more often now?"
+   - "or is my worktree folder choice the problem?"
+   - "is it problematic, data wise?" (about disabling gc)
+   - "run it" (count-objects after GC)
+   - "and those phantom refs, I guess were from the old sessions branch?"
+   - "...sufficiently advanced technology..."
+   - "learning Q: shouldn't the blobs have been reused in the new branch?"
+   - "AHHHHHHHHH yes that would be it. and it wouldn't have kept it as diffs?"
+   - "uh oh - it just happened again" / "I did a git read-tree HEAD to resolve"
+   - "I mean, we _see_ it on the stop hook; it doesn't mean the stop hook caused it"
+   - "are you sure?" (pushing back on worktree.Status() writing claim)
+   - "I've only recently started seeing this happen...but I also moved to 'persistent' worktrees in the last week (previously had been blowing away worktrees and opening fresh ones)"
+   - "ooh, we caught something" (debug log showed post-commit changing index)
+   - "can we also add which index specifically this is to the debug log?"
+   - "it also always seems to be this same hash, I think? > git status fatal: unable to read e53647ba1f1e5203bedff558b482f178db045555"
+   - "sorry, I didn't specify earlier but this recent error is from worktree 2, and the postcommit is also from there (it's a new operation) - so let's not jump to cross-worktree explanations just yet"
+   - "I continued the rebase and it completed successfully....so this doesn't happen _all_ the time. The timing does seem to be related to gc commands as well (how does that fit with the post-commit changing the index though?)"
+   - "hmm, we made a change recently to shadow tracking where we replaced go-git with git status, could this be related?"
+   - "which commit?"
+   - "that was a little while back :|" (about the Jan 22 commit)
+
+7. Pending Tasks:
+   - Replace `getStagedFiles` in `cmd/entire/cli/strategy/manual_commit_hooks.go` (line 982) with a `git diff --cached --name-only` CLI call to prevent go-git's `worktree.Status()` from rewriting the index. This was proposed but user hasn't explicitly confirmed yet.
+   - The debug instrumentation in `.git/hooks/` should be removed after the fix is verified.
+   - Update ENT-241 Linear issue with the root cause findings.
+
+8. Current Work:
+   We traced the root cause of worktree index corruption to commit `6d61daaa` which added `sessionHasNewContentFromLiveTranscript`. This function calls `getStagedFiles` → `worktree.Status()` from the PostCommit code path, which rewrites the worktree index. Combined with GC having pruned cache-tree referenced objects, this causes corruption. The user's last substantive message was "that was a little while back :|" (about the originating commit being from Jan 22), and then they requested this summary.
+
+9. Optional Next Step:
+   Replace `getStagedFiles` with a git CLI-based implementation (`git diff --cached --name-only`) to prevent go-git from touching the worktree index. This was proposed: "The fix is still the same: replace `getStagedFiles` with a `git diff --cached --name-only` CLI call so go-git never touches the index. Want me to do that?" — but the user hasn't explicitly confirmed. Should confirm before proceeding.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+yeah close it
+
+---
+
+what are the settings I need to enable auto-summarization?

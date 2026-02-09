@@ -1,0 +1,44 @@
+{
+  "checkpoint_id": "c9321512de23",
+  "session_id": "2026-01-23-6113e919-67d3-417b-b525-c63700228d19",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-23T22:10:15.35544+01:00",
+  "branch": "soph/agent-attribution",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/integration_test/attribution_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_attribution.go",
+    "cmd/entire/cli/strategy/manual_commit_attribution_test.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_staging_test.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "511df329-9894-4896-a4b4-0c085e8f9e74",
+  "transcript_lines_at_start": 1730,
+  "token_usage": {
+    "input_tokens": 16012,
+    "cache_creation_tokens": 2098522,
+    "cache_read_tokens": 45480478,
+    "output_tokens": 88270,
+    "api_call_count": 442
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-23T22:10:15.158364+01:00",
+    "agent_lines": 23,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 23,
+    "agent_percentage": 100
+  }
+}

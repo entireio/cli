@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "2cea8e895d35",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-221-consolidate-session-logging",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hook_registry_test.go",
+    "cmd/entire/cli/hooks_git_cmd.go",
+    "cmd/entire/cli/hooks_git_cmd_test.go",
+    "cmd/entire/cli/logging/logger.go",
+    "cmd/entire/cli/logging/logger_test.go",
+    "docs/architecture/logging.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2c/ea8e895d35/0/metadata.json",
+      "transcript": "/2c/ea8e895d35/0/full.jsonl",
+      "context": "/2c/ea8e895d35/0/context.md",
+      "content_hash": "/2c/ea8e895d35/0/content_hash.txt",
+      "prompt": "/2c/ea8e895d35/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 87,
+    "cache_creation_tokens": 275442,
+    "cache_read_tokens": 7086632,
+    "output_tokens": 2342,
+    "api_call_count": 79
+  }
+}

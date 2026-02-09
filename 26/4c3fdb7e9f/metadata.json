@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "264c3fdb7e9f",
+  "strategy": "manual-commit",
+  "branch": "20260205-gitleaks",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/committed.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/26/4c3fdb7e9f/0/metadata.json",
+      "transcript": "/26/4c3fdb7e9f/0/full.jsonl",
+      "context": "/26/4c3fdb7e9f/0/context.md",
+      "content_hash": "/26/4c3fdb7e9f/0/content_hash.txt",
+      "prompt": "/26/4c3fdb7e9f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 81,
+    "cache_creation_tokens": 31976,
+    "cache_read_tokens": 392030,
+    "output_tokens": 344,
+    "api_call_count": 11
+  }
+}

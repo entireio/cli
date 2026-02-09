@@ -1,0 +1,24 @@
+{
+  "checkpoint_id": "7169f9710768",
+  "strategy": "manual-commit",
+  "branch": "soph/do-not-truncate",
+  "migration_source_commit": "f31dfd8f45b239b53e2d978648e3bf1fdd68a03a",
+  "checkpoints_count": 0,
+  "files_touched": [],
+  "sessions": [
+    {
+      "metadata": "/71/69f9710768/0/metadata.json",
+      "transcript": "/71/69f9710768/0/full.jsonl",
+      "context": "/71/69f9710768/0/context.md",
+      "content_hash": "/71/69f9710768/0/content_hash.txt",
+      "prompt": "/71/69f9710768/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 138,
+    "cache_creation_tokens": 74296,
+    "cache_read_tokens": 729219,
+    "output_tokens": 72,
+    "api_call_count": 18
+  }
+}

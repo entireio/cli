@@ -1,0 +1,151 @@
+Implement the following plan:
+
+# Plan: Versioned Stanza Manager for Shell Config Files
+
+## Context
+
+Shell completion setup in `setup.go` currently blindly appends text to rc files (`~/.bashrc`, `~/.zshrc`, `~/.config/fish/config.fish`). There's no way to surgically update or remove just the lines we added. This makes upgrades messy and uninstall incomplete (uninstall doesn't currently touch rc files at all).
+
+The goal: wrap our managed text in versioned, demarcated blocks ("stanzas") so we can find, update, or remove them cleanly.
+
+## Stanza Format
+
+```bash
+# BEGIN entire-cli (v1)
+source <(entire completion bash)
+# END entire-cli
+```
+
+- `# BEGIN <name> (v<version>)` opens the block
+- `# END <name>` closes the block
+- Version is an integer, bumped when stanza content changes
+- Name identifies the stanza (allows multiple independent stanzas in the same file in the future)
+
+## Implementation
+
+### 1. New file: `cmd/entire/cli/stanza.go`
+
+Three pure functions operating on string content (no file I/O):
+
+```go
+// FindStanza locates a named stanza in content.
+// Returns version, body, found. If not found, version=-1, body="", found=false.
+func FindStanza(content, name string) (version int, body string, found bool)
+
+// UpsertStanza inserts or replaces a named stanza. Returns new file content.
+func UpsertStanza(content string, name string, version int, body string) string
+
+// RemoveStanza removes a named stanza. Returns content unchanged if not found.
+func RemoveStanza(content, name string) string
+```
+
+Implementation uses line-by-line scanning (no regex):
+- Scan for line matching `# BEGIN <name> (v<digit+>)`
+- Scan forward for `# END <name>`
+- Extract/replace/remove everything between (inclusive of markers)
+
+### 2. New file: `cmd/entire/cli/stanza_test.go`
+
+Test cases:
+- Find stanza (present, absent, different version)
+- Upsert into empty content (append)
+- Upsert when stanza already exists (replace in-place, preserving surrounding content)
+- Upsert when no stanza exists yet (append)
+- Remove stanza (present, absent)
+- Preserve surrounding content on upsert/remove
+- Edge cases: no trailing newline, stanza at beginning/end of file, multiple stanzas
+
+### 3. Update `setup.go`
+
+**Constants:**
+```go
+const stanzaName = "entire-cli"
+const stanzaVersion = 1
+```
+
+**Replace `isCompletionConfigured()` → `completionStatus()`:**
+
+Returns a status indicating what's in the rc file:
+- `statusCurrent` — stanza exists at current version → nothing to do
+- `statusStale` — stanza exists at older version → prompt to update
+- `statusLegacy` — old non-stanza format detected (`# Entire CLI shell completion` + completion line) → prompt to migrate
+- `statusMissing` — nothing found → prompt to install
+
+**Replace `appendShellCompletion()` → `installShellCompletion()`:**
+1. Read file content (or empty string if doesn't exist)
+2. If legacy format present, remove old comment + completion line first
+3. Call `UpsertStanza(content, stanzaName, stanzaVersion, completionLine)`
+4. Write full file back (same permissions: dir 0o700, file 0o644)
+
+**New `removeShellCompletion(rcFile)` function:**
+1. Read file content
+2. Try `RemoveStanza(content, stanzaName)` for new format
+3. Also detect and remove legacy format if present
+4. Write file back if content changed
+
+**Update `promptShellCompletion()`** (called from `curl-bash-post-install`):
+1. Detect shell → get rcFile + completionLine
+2. Check `completionStatus(rcFile)`:
+   - `statusCurrent` → print "already configured", return
+   - `statusStale` / `statusLegacy` / `statusMissing` → prompt user (as currently done)
+3. If user says yes → call `installShellCompletion()`
+
+**Update `runUninstall()`:**
+- After existing cleanup steps, detect shell and call `removeShellCompletion()` to remove the stanza from the user's rc file
+- Show in the confirmation list: `"- Shell completion (<rcFile>)"`
+
+### 4. Update tests
+
+**`cmd/entire/cli/stanza_test.go`** (new) — pure function tests for Find/Upsert/Remove
+
+**`cmd/entire/cli/setup_test.go`** (modify):
+- Update/add tests for `completionStatus()` — all four statuses
+- Add tests for `installShellCompletion()` — writes stanza, migrates legacy
+- Add tests for `removeShellCompletion()` — removes stanza, removes legacy
+- Verify uninstall calls removeShellCompletion
+
+## Files
+
+| File | Action |
+|------|--------|
+| `cmd/entire/cli/stanza.go` | **New** — `FindStanza`, `UpsertStanza`, `RemoveStanza` |
+| `cmd/entire/cli/stanza_test.go` | **New** — unit tests for stanza functions |
+| `cmd/entire/cli/setup.go` | **Modify** — use stanza functions, add remove on uninstall |
+| `cmd/entire/cli/setup_test.go` | **Modify** — update/add completion tests |
+
+## Verification
+
+1. `mise run fmt && mise run lint` — passes
+2. `mise run test` — all unit tests pass
+3. `mise run test:ci` — all tests including integration pass
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/paul/.REDACTED.jsonl
+
+---
+
+done, continue
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+commit
+
+---
+
+[Request interrupted by user]
+
+---
+
+commit
+
+---
+
+[Request interrupted by user]
+
+---
+
+commit

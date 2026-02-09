@@ -1,0 +1,13 @@
+{
+  "checkpoint_id": "8e0a64736bc7",
+  "session_id": "2026-01-19-8b418ea5-895d-4ad5-abe8-4489d36e454f",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-19T13:46:24.027032+11:00",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/commands/help.go",
+    "cmd/entire/cli/help.go",
+    "cmd/entire/cli/root.go"
+  ],
+  "agent": "Claude Code"
+}

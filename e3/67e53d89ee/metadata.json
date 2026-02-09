@@ -1,0 +1,24 @@
+{
+  "checkpoint_id": "e367e53d89ee",
+  "strategy": "auto-commit",
+  "branch": "soph/improve-session-list",
+  "migration_source_commit": "63d3e9660bac5fab07b4f34ca4dd6d0488d4cfb6",
+  "checkpoints_count": 0,
+  "files_touched": [],
+  "sessions": [
+    {
+      "metadata": "/e3/67e53d89ee/0/metadata.json",
+      "transcript": "/e3/67e53d89ee/0/full.jsonl",
+      "context": "/e3/67e53d89ee/0/context.md",
+      "content_hash": "/e3/67e53d89ee/0/content_hash.txt",
+      "prompt": "/e3/67e53d89ee/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

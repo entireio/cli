@@ -1,0 +1,41 @@
+{
+  "checkpoint_id": "5098e5414812",
+  "strategy": "manual-commit",
+  "branch": "alex/improve-explain-2",
+  "migration_source_commit": "9bc3513b7b5467193765fee600e04c83dd32bf24",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/explain_test.go",
+    "docs/plans/2026-02-04-explain-improvements.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/50/98e5414812/0/metadata.json",
+      "transcript": "/50/98e5414812/0/full.jsonl",
+      "context": "/50/98e5414812/0/context.md",
+      "content_hash": "/50/98e5414812/0/content_hash.txt",
+      "prompt": "/50/98e5414812/0/prompt.txt"
+    },
+    {
+      "metadata": "/50/98e5414812/2/metadata.json",
+      "transcript": "/50/98e5414812/2/full.jsonl",
+      "context": "/50/98e5414812/2/context.md",
+      "content_hash": "/50/98e5414812/2/content_hash.txt",
+      "prompt": "/50/98e5414812/2/prompt.txt"
+    },
+    {
+      "metadata": "/50/98e5414812/3/metadata.json",
+      "transcript": "/50/98e5414812/3/full.jsonl",
+      "context": "/50/98e5414812/3/context.md",
+      "content_hash": "/50/98e5414812/3/content_hash.txt",
+      "prompt": "/50/98e5414812/3/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 562,
+    "cache_creation_tokens": 923331,
+    "cache_read_tokens": 17272321,
+    "output_tokens": 14216,
+    "api_call_count": 195
+  }
+}

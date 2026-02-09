@@ -1,0 +1,80 @@
+{
+  "checkpoint_id": "d0161e0df1cb",
+  "session_id": "03a1382e-ecd5-42c4-b3d4-5c659e165904",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-08T09:22:36.773179Z",
+  "branch": "alex/ent-221-cleanup-and-sessions-fix",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "docs/KNOWN_LIMITATIONS.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "c651b136-1e23-4ab0-8dd6-168c6af694fa",
+  "transcript_lines_at_start": 773,
+  "token_usage": {
+    "input_tokens": 252,
+    "cache_creation_tokens": 362980,
+    "cache_read_tokens": 17422834,
+    "output_tokens": 9054,
+    "api_call_count": 185
+  },
+  "summary": {
+    "intent": "Debug and fix recurring worktree index corruption that manifests as 'fatal: unable to read \u003chash\u003e' errors after git operations.",
+    "outcome": "Identified root cause as go-git's worktree.Status() rewriting the index with stale cache-tree entries after GC pruned objects. Fixed by replacing getStagedFiles() with git CLI calls. Created ENT-242 to track the fix and closed ENT-241 as unnecessary once the real culprit was found.",
+    "learnings": {
+      "repo": [
+        "go-git's SetEncodedObject creates loose objects on every checkpoint save, causing frequent gc.auto triggers when threshold (6700) is exceeded",
+        "The CLI recently moved to persistent worktrees, making index corruption visible for the first time (previously worktrees were blown away)",
+        "Migration from entire/sessions to entire/checkpoints/v1 created 465 checkpoint commits in 8 minutes, causing object accumulation burst",
+        "Commit 6d61daaa (Jan 22) introduced sessionHasNewContentFromLiveTranscript which added the PostCommit → worktree.Status() code path that causes corruption"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 982,
+          "end_line": 1000,
+          "finding": "getStagedFiles() uses go-git's worktree.Status() which reads AND rewrites the worktree index file, causing corruption when combined with GC-pruned cache-tree entries"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 640,
+          "end_line": 690,
+          "finding": "sessionHasNewContentFromLiveTranscript() calls getStagedFiles() from PostCommit hook path, creating the corruption call chain"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 936,
+          "end_line": 956,
+          "finding": "calculatePromptAttributionAtStart() also uses worktree.Status() but is called at session start (not during git hooks), so lower risk but same pattern"
+        }
+      ],
+      "workflow": [
+        "Instrumented git hooks with md5 checksumming to catch which hook modified the index - confirmed post-commit changed it",
+        "Two-hit combo required for corruption: (1) GC prunes objects referenced by cache-tree, (2) go-git rewrites index preserving stale cache-tree entries",
+        "Native git commands tolerate stale cache-tree entries and silently rebuild them - only go-git's rewrite materializes the corruption",
+        "git read-tree HEAD rebuilds corrupted index but loses staged changes",
+        "Git stores full snapshots (not diffs) with content-addressable storage (same content = same SHA = same blob), delta compression only happens in pack files"
+      ]
+    },
+    "friction": [
+      "Corruption happened intermittently (not every rebase/commit), making it hard to reproduce consistently",
+      "Initial investigation blamed wrong components (stop hook, condensation, cross-worktree corruption) before finding real culprit",
+      "Debug instrumentation required manual editing of .git/hooks/ files to add md5 checksumming"
+    ],
+    "open_items": [
+      "Remove debug instrumentation from .git/hooks/ (prepare-commit-msg, post-commit, pre-push) after fix is verified",
+      "Consider fixing calculatePromptAttributionAtStart() (line 936) which also uses worktree.Status() but is lower priority since it's not called during git hooks",
+      "Disk bloat from loose objects still accumulates but is not a corruption issue - could optionally implement controlled gc.auto timing"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-08T09:22:16.511541Z",
+    "agent_lines": 0,
+    "human_added": 5659,
+    "human_modified": 133,
+    "human_removed": 0,
+    "total_committed": 5659,
+    "agent_percentage": 0
+  }
+}

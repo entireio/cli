@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "ea217859e24e",
+  "strategy": "manual-commit",
+  "branch": "soph/agent-attribution",
+  "migration_source_commit": "c5aa1cbb313d43f37e6c6d7890451deaf01caa4c",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/attribution_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/strategy/manual_commit_attribution.go",
+    "cmd/entire/cli/strategy/manual_commit_attribution_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ea/217859e24e/0/metadata.json",
+      "transcript": "/ea/217859e24e/0/full.jsonl",
+      "context": "/ea/217859e24e/0/context.md",
+      "content_hash": "/ea/217859e24e/0/content_hash.txt",
+      "prompt": "/ea/217859e24e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 856,
+    "cache_creation_tokens": 181635,
+    "cache_read_tokens": 6743817,
+    "output_tokens": 193,
+    "api_call_count": 93
+  }
+}

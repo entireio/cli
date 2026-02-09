@@ -1,0 +1,21 @@
+print shadowBranch into message only if hasShadowBranch is trye
+
+---
+
+is there any way to not repeat the whole error?
+
+---
+
+update that user message to display when an agent sessions is opened but there is already another session.
+This used to be the warning:
+    var message string
+        suppressHint := "\n\nTo suppress this warning in future sessions, run:\n  entire enable --disable-multisession-warning"
+        if otherPrompt != "" {
+            message = fmt.Sprintf("Another session is active: \"%s\"\n\nYou can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: %s%s\n\nPress the up arrow key to get your prompt back.", otherPrompt, resumeCmd, suppressHint)
+        } else {
+            message = "Another session is active with uncommitted changes. You can continue here, but checkpoints from both sessions will be interleaved.\n\nTo resume the other session instead, exit Claude and run: " + resumeCmd + suppressHint + "\n\nPress the up arrow key to get your prompt back."
+        }
+
+Offer me an alternative.
+
+I just want to tell the user that we found another session, so he can, keep going with multi session or if the new session was opened by mistake, prompt how to resume the old one.

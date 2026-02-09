@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "1900c8c6134b",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-96-auto-summaries",
+  "migration_source_commit": "fcba57a002ed493a75e677530517c0364a81ae77",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/plans/2026-02-01-auto-summarise-design.md",
+    "docs/plans/2026-02-01-auto-summarise-impl.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/19/00c8c6134b/0/metadata.json",
+      "transcript": "/19/00c8c6134b/0/full.jsonl",
+      "context": "/19/00c8c6134b/0/context.md",
+      "content_hash": "/19/00c8c6134b/0/content_hash.txt",
+      "prompt": "/19/00c8c6134b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 282,
+    "cache_creation_tokens": 527758,
+    "cache_read_tokens": 6149248,
+    "output_tokens": 359,
+    "api_call_count": 72
+  }
+}

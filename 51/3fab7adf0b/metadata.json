@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "513fab7adf0b",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "9a7ca2f98584cd49327e3a9e12b28b115eff2cf0",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "test-gemini.txt"
+  ],
+  "sessions": [
+    {
+      "metadata": "/51/3fab7adf0b/0/metadata.json",
+      "transcript": "/51/3fab7adf0b/0/full.jsonl",
+      "context": "/51/3fab7adf0b/0/context.md",
+      "content_hash": "/51/3fab7adf0b/0/content_hash.txt",
+      "prompt": "/51/3fab7adf0b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

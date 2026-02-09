@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "42d34ec97ff8",
+  "strategy": "manual-commit",
+  "branch": "soph/refactor-trailer-checkpoint-id",
+  "migration_source_commit": "7a20b2833b658996f6a4a68b0df5620778111d50",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/id/id.go",
+    "cmd/entire/cli/trailers/trailers.go",
+    "cmd/entire/cli/trailers/trailers_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/42/d34ec97ff8/0/metadata.json",
+      "transcript": "/42/d34ec97ff8/0/full.jsonl",
+      "context": "/42/d34ec97ff8/0/context.md",
+      "content_hash": "/42/d34ec97ff8/0/content_hash.txt",
+      "prompt": "/42/d34ec97ff8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 370,
+    "cache_creation_tokens": 56155,
+    "cache_read_tokens": 1509804,
+    "output_tokens": 3113,
+    "api_call_count": 28
+  }
+}

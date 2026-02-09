@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "4454089969c1",
+  "strategy": "manual-commit",
+  "branch": "soph/allow-dogfood-local-dev",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gemini/scripts/entire-wrapper.sh",
+    "cmd/entire/cli/agent/geminicli/hooks.go",
+    "cmd/entire/cli/integration_test/setup_gemini_hooks_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/44/54089969c1/0/metadata.json",
+      "transcript": "/44/54089969c1/0/full.jsonl",
+      "context": "/44/54089969c1/0/context.md",
+      "content_hash": "/44/54089969c1/0/content_hash.txt",
+      "prompt": "/44/54089969c1/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3697,
+    "cache_creation_tokens": 58968,
+    "cache_read_tokens": 1018347,
+    "output_tokens": 50,
+    "api_call_count": 22
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "checkpoint_id": "c1c35c964733",
+  "session_id": "2026-01-27-3cd520f7-d4af-469f-97ac-bcad4933d9d4",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-27T13:44:06.301571+11:00",
+  "branch": "alex/ent-109-text-output-checkpoint-flag",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go"
+  ],
+  "agent": "Agent",
+  "token_usage": {
+    "input_tokens": 1724,
+    "cache_creation_tokens": 263502,
+    "cache_read_tokens": 3036203,
+    "output_tokens": 110,
+    "api_call_count": 46
+  },
+  "summary": {
+    "intent": "Complete a merge from origin/main that stopped due to compilation errors after conflict resolution",
+    "outcome": "Successfully resolved type compatibility issues introduced by main branch changes and completed the merge commit",
+    "learnings": {
+      "repo": [
+        "TokenUsage type was moved from checkpoint package to agent package",
+        "New id.CheckpointID strong type replaces raw strings for checkpoint IDs",
+        "ParseCheckpointTrailer was moved from paths package to trailers package",
+        "Go preserves named string types when slicing (e.g., slicing id.CheckpointID returns id.CheckpointID, not string)"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/checkpoint/id/id.go",
+          "finding": "New CheckpointID type package for strong typing of checkpoint identifiers"
+        },
+        {
+          "path": "cmd/entire/cli/trailers/trailers.go",
+          "finding": "Trailer parsing functionality now lives here, use trailers.ParseCheckpoint() which returns id.CheckpointID"
+        },
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 235,
+          "end_line": 238,
+          "finding": "CheckpointID slicing preserves the type, no conversion needed"
+        },
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "finding": "Functions findCommitMessageForCheckpoint and formatCheckpointOutput should take id.CheckpointID, use .String() and .IsEmpty() methods"
+        },
+        {
+          "path": "cmd/entire/cli/explain_test.go",
+          "finding": "Use id.MustCheckpointID() for test literals instead of raw strings"
+        }
+      ],
+      "workflow": [
+        "When merges stop after conflict resolution, check for compilation errors from type/API changes in the merged code",
+        "Prefer strong types throughout the codebase - only use strings at boundaries (CLI args, display truncation)"
+      ]
+    },
+    "friction": [
+      "Merge stopped silently due to compilation errors - had to diagnose type mismatches across multiple files",
+      "Multiple related refactors in main (type moves, new packages, API changes) required understanding several changes at once"
+    ],
+    "open_items": [
+      "CLI argument functions (runExplain, runExplainCheckpoint) still use strings for checkpoint IDs since they handle user input that could be partial prefixes"
+    ]
+  }
+}

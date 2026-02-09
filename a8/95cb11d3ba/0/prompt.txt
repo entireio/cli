@@ -1,0 +1,13 @@
+Let's talk about secrets. Here's a secret: REDACTED haha
+
+---
+
+Let's adjust the README.md.  I'd like to add REDACTED
+
+---
+
+it's a test value for gitleaks detection
+
+---
+
+Sure, put it in test-secrets.

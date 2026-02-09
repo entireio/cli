@@ -1,0 +1,33 @@
+{
+  "checkpoint_id": "42527c9c20c8",
+  "strategy": "manual-commit",
+  "branch": "20260209-postinstall-and-completions",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/setup.go",
+    "scripts/install.sh"
+  ],
+  "sessions": [
+    {
+      "metadata": "/42/527c9c20c8/0/metadata.json",
+      "transcript": "/42/527c9c20c8/0/full.jsonl",
+      "context": "/42/527c9c20c8/0/context.md",
+      "content_hash": "/42/527c9c20c8/0/content_hash.txt",
+      "prompt": "/42/527c9c20c8/0/prompt.txt"
+    },
+    {
+      "metadata": "/42/527c9c20c8/1/metadata.json",
+      "transcript": "/42/527c9c20c8/1/full.jsonl",
+      "context": "/42/527c9c20c8/1/context.md",
+      "content_hash": "/42/527c9c20c8/1/content_hash.txt",
+      "prompt": "/42/527c9c20c8/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 20,
+    "cache_creation_tokens": 21994,
+    "cache_read_tokens": 375688,
+    "output_tokens": 1292,
+    "api_call_count": 14
+  }
+}

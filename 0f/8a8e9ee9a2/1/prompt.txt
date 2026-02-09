@@ -1,0 +1,136 @@
+Implement the following plan:
+
+# Versioned Stanza Management for Shell Completion
+
+## Context
+
+The current shell completion installer appends a comment + command line to `~/.zshrc` or `~/.bashrc`, and detects existing installs via exact substring match. This has two problems:
+1. If the desired stanza changes, the old one isn't removed — a duplicate gets appended
+2. There's no way to remove the stanza on uninstall
+
+We're replacing this with a versioned, delimited block (vim fold-marker style) that can be detected, version-checked, replaced, or removed.
+
+## Stanza Format
+
+```bash
+# Entire CLI completions (v1) {{{
+autoload -Uz compinit && compinit && source <(entire completion zsh)
+# }}}
+```
+
+The version integer in the opening marker is bumped when stanza content changes, triggering an update prompt.
+
+## Files to Modify
+
+- `cmd/entire/cli/setup.go` — lines 672-764 (shell completion functions) + `runUninstall` (~line 878)
+- `cmd/entire/cli/setup_test.go` — add unit tests for pure stanza functions
+
+## Implementation Steps
+
+### 1. Replace constants and add types
+
+Remove `shellCompletionComment`. Add:
+
+```go
+const shellCompletionStanzaVersion = 1
+const shellCompletionOpenFormat = "# Entire CLI completions (v%d) {{{"
+const shellCompletionClose = "# }}}"
+const shellCompletionLegacyComment = "# Entire CLI shell completion"  // old format for migration
+
+type stanzaStatus int
+const (
+    stanzaNotFound stanzaStatus = iota
+    stanzaCurrent
+    stanzaOutdated
+    stanzaLegacy
+)
+```
+
+### 2. Add pure functions (testable, no I/O)
+
+- `findStanzaVersion(content string) int` — scan lines for opening marker, extract version via `fmt.Sscanf`
+- `checkStanzaStatus(content string, currentVersion int) stanzaStatus` — returns status enum
+- `buildStanza(version int, completionLine string) string` — constructs the full block
+- `countStanzaOpeners(content string) int` — count opening markers (for multiple-stanza detection)
+- `replaceStanza(content string, version int, completionLine string) (string, error)` — find open+close markers, replace block. Returns `errStanzaCorrupted` if open found without close, `errMultipleStanzas` if count > 1, nil error with unchanged content if no stanza found
+- `removeStanza(content string) (string, error)` — find and remove the block. Same error semantics as `replaceStanza`
+- `removeLegacyCompletion(content, completionLine string) (string, bool)` — remove old-format comment+line
+
+### 3. Refactor `promptShellCompletion`
+
+New flow:
+1. Get `rcFile, completionLine` from `shellCompletionTarget()` (unchanged)
+2. Read file, call `checkStanzaStatus(content, shellCompletionStanzaVersion)`
+3. Switch on status:
+   - `stanzaCurrent` → return nil
+   - `stanzaNotFound` → prompt "Enable shell completion?", if yes: append stanza
+   - `stanzaOutdated` → prompt "Shell completion is outdated. Update?", if yes: read file, `replaceStanza()`, write file. If `replaceStanza` returns `errStanzaCorrupted` or `errMultipleStanzas`, print a warning and skip update.
+   - `stanzaLegacy` → prompt "Shell completion uses old format. Update?", if yes: `removeLegacyCompletion()` from content, append new stanza
+
+### 4. Replace `appendShellCompletion` and remove `isCompletionConfigured`
+
+- `appendShellCompletion` → writes `"\n" + buildStanza(version, completionLine)` instead of bare comment+line
+- `isCompletionConfigured` → removed, replaced by `checkStanzaStatus`
+
+### 5. Add `removeShellCompletion() error`
+
+For uninstall. Reads rc file, tries `removeStanza()`, falls back to `removeLegacyCompletion()`, writes file if changed.
+
+### 6. Integrate into `runUninstall`
+
+Add before existing step 1 (agent hooks removal):
+```go
+if err := removeShellCompletion(); err != nil {
+    fmt.Fprintf(errW, "Warning: failed to remove shell completion: %v\n", err)
+}
+```
+
+### 7. Write tests in `setup_test.go`
+
+Table-driven tests for all pure functions:
+- `TestFindStanzaVersion` — empty, no stanza, v1, v2, legacy only, with surrounding content
+- `TestCheckStanzaStatus` — all four status values
+- `TestBuildStanza` — verify exact format
+- `TestReplaceStanza` — happy path, no stanza, corrupted (no close marker)
+- `TestRemoveStanza` — happy path, no stanza, blank line cleanup
+- `TestRemoveLegacyCompletion` — legacy present, not present, comment without matching next line
+
+## Edge Cases
+
+| Case | Handling |
+|------|----------|
+| Corrupted markers (open without close) | Print warning: "Shell completion block in ~/.zshrc appears corrupted (missing closing marker). Please fix manually." Do not modify the file. |
+| Multiple stanzas | Print warning: "Found multiple shell completion blocks in ~/.zshrc. Please remove duplicates manually." Do not modify the file. |
+| User edits content inside markers | Version marker is what matters; on update the whole block is replaced |
+| Version higher than current (CLI downgrade) | `v >= currentVersion` → `stanzaCurrent` (don't downgrade) |
+| File doesn't exist | Treated as `stanzaNotFound`; append creates the file |
+| Read-only file | Error propagates; uninstall prints warning and continues |
+
+For corrupted/multiple stanza detection, add:
+- `countStanzaOpeners(content string) int` — count how many opening markers exist
+- In `replaceStanza`/`removeStanza`, if open marker found but no close marker → return a distinct error or sentinel
+- `promptShellCompletion` and `removeShellCompletion` check for these conditions and print warnings to the user via `io.Writer` / stderr
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+Manual testing:
+1. Fresh install: run `entire curl-bash-post-install`, verify stanza is written with correct markers
+2. Re-run: verify it detects `stanzaCurrent` and does nothing
+3. Bump `shellCompletionStanzaVersion` to 2, re-run: verify it prompts to update and replaces in-place
+4. Test with old-format comment in rc file: verify legacy migration prompt
+5. Run `entire uninstall`: verify stanza is removed from rc file
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/paul/.REDACTED.jsonl
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Commit

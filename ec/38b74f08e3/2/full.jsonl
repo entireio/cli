@@ -1,0 +1,14 @@
+{
+  "sessionId": "29eb990e-c773-4302-a4e7-317f0af0001f",
+  "projectHash": "41d597d6d7729546af33d345040d55a7018cf1136e850b23d51c76d6192af7fb",
+  "startTime": "2026-02-03T04:09:57.093Z",
+  "lastUpdated": "2026-02-03T04:09:57.093Z",
+  "messages": [
+    {
+      "id": "1a4c54d6-b9dd-4584-baab-5f34000e5a24",
+      "timestamp": "2026-02-03T04:09:57.093Z",
+      "type": "warning",
+      "content": "Hook(s) [entire-session-end-exit] failed for event SessionEnd. Press F12 to see the debug drawer for more details.\n"
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+okay, so we were working on ENT-109 (linear) on this branch... I have lost track of where we're up to.
+
+### Prompt 2
+
+🤔 - playing around with the command - entire explain now shows checkpoints from main, I guess because I merged the branch in?
+
+How are we showing the 'branch-relevant' commits?
+
+### Prompt 3
+
+I'd like it to do B, and for `main` itself it can show all checkpoints in history (but let's just limit to 20 for now).
+
+### Prompt 4
+
+does git config have it? is that something we can get with go-git?
+
+### Prompt 5
+
+😭
+
+so basically we'd move git_operations into it's own package, and move any git specific things from strategy/ into that package as well?
+
+### Prompt 6
+
+let's do 2 for now, can you create the linear issue? make sure it's in Project: Troy
+
+### Prompt 7
+
+can we have a quick look to see if there are direct git things elsewhere as well?
+
+### Prompt 8
+
+Ideally we would see all checkpoints (and in the manual strat, the shadow-only 'steps') when we call explain - regardless of which strategy created them
+
+### Prompt 9
+
+yes, that makes sense. and GetRewindPoints _is_ strategy specific yes?
+
+### Prompt 10
+
+we didn't write or change any tests?
+
+### Prompt 11
+
+[Request interrupted by user for tool use]
+
+### Prompt 12
+
+how about the changes in common?
+
+### Prompt 13
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. **Initial Context**: User is working on ENT-109 (Linear issue) on branch `alex/ent-109-text-output-checkpoint-flag`. They've lost track of where they were.
+
+2. **Status Check**: I checked the Linear issue, git commits, tests, and lint. Found 22 commits ahead of main, all tests passin...
+
+### Prompt 14
+
+I would have expected to see more checkpoints than what ./entire explain is showing (7)
+
+### Prompt 15
+
+so is there some maxDepth concept we will need to go back? at some point we'll hit only commits that are on main right (back to the first commit)?
+
+### Prompt 16
+
+50 commits on a branch...? ehhhh....unlikely but plausible. let's go 100
+
+### Prompt 17
+
+if we extend that to 50 how many do we see?
+
+### Prompt 18
+
+maybe push it to 100
+

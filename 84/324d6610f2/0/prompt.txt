@@ -1,0 +1,15 @@
+yes
+
+---
+
+Some more PR comments now, do the same for these
+
+---
+
+argh, we have a test failure. can you look it up? https://github.com/entireio/cli/actions/runs/21234389076/job/61099193684?pr=85
+
+seems like a race condition in the tests
+
+---
+
+yeah do it, then update the PR description

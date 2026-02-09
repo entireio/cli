@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "9fd2fc39aa5f",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "ca33f601e132b74a76cc0cee84c7fa49d19a9d0e",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/telemetry/telemetry.go",
+    "cmd/entire/main.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9f/d2fc39aa5f/0/metadata.json",
+      "transcript": "/9f/d2fc39aa5f/0/full.jsonl",
+      "context": "/9f/d2fc39aa5f/0/context.md",
+      "content_hash": "/9f/d2fc39aa5f/0/content_hash.txt",
+      "prompt": "/9f/d2fc39aa5f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

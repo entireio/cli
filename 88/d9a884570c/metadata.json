@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "88d9a884570c",
+  "strategy": "manual-commit",
+  "branch": "alex/extract-git-package",
+  "migration_source_commit": "64629ff65d647906901e95d527161dd4bf7347cb",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/integration_test/explain_test.go",
+    "docs/plans/2026-02-04-explain-improvements.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/88/d9a884570c/0/metadata.json",
+      "transcript": "/88/d9a884570c/0/full.jsonl",
+      "context": "/88/d9a884570c/0/context.md",
+      "content_hash": "/88/d9a884570c/0/content_hash.txt",
+      "prompt": "/88/d9a884570c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 714,
+    "cache_creation_tokens": 872933,
+    "cache_read_tokens": 25123572,
+    "output_tokens": 19899,
+    "api_call_count": 239
+  }
+}
