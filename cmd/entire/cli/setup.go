@@ -56,7 +56,7 @@ func newEnableCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "enable",
-		Short: "Enable Entire",
+		Short: "Enable Entire in current project",
 		Long: `Enable Entire with session tracking for your AI agent workflows.
 
 Uses the manual-commit strategy by default. To use a different strategy:
@@ -138,10 +138,13 @@ func newDisableCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "disable",
-		Short: "Disable Entire",
-		Long: `Disable Entire temporarily. Hooks will exit silently and commands will show a disabled message.
+		Short: "Disable Entire in current project",
+		Long: `Disable Entire integrations in the current project.
 
-Use --uninstall to completely remove Entire from this repository, including:
+By default, this command will temporarily disable Entire. Hooks will exit silently and commands will
+show a disabled message.
+
+To completely remove Entire from this repository, use '--uninstall':
   - .entire/ directory (settings, logs, metadata)
   - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
   - Session state files (.git/entire-sessions/)
@@ -157,7 +160,7 @@ Use --uninstall to completely remove Entire from this repository, including:
 
 	cmd.Flags().BoolVar(&useProjectSettings, "project", false, "Update settings.json instead of settings.local.json")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "Completely remove Entire from this repository")
-	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
+	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmations (use with --uninstall)")
 
 	return cmd
 }
