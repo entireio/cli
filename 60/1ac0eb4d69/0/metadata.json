@@ -1,0 +1,35 @@
+{
+  "checkpoint_id": "601ac0eb4d69",
+  "session_id": "e5fcdc73-b9fc-4991-b532-6bf8440fd12d",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T18:52:48.85633Z",
+  "branch": "soph/remove-entire-sessions",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".claude/scripts/entire-wrapper.sh",
+    ".gemini/scripts/entire-wrapper.sh",
+    "cmd/entire/cli/agent/claudecode/hooks_test.go",
+    "cmd/entire/cli/agent/geminicli/hooks_test.go",
+    "cmd/entire/cli/integration_test/agent_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "20a7c684-4c8a-4d54-be1e-0e90e95dd4fa",
+  "checkpoint_transcript_start": 163,
+  "transcript_lines_at_start": 163,
+  "token_usage": {
+    "input_tokens": 46,
+    "cache_creation_tokens": 199095,
+    "cache_read_tokens": 3218601,
+    "output_tokens": 3207,
+    "api_call_count": 39
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T18:52:48.804939Z",
+    "agent_lines": 4,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 4,
+    "agent_percentage": 100
+  }
+}

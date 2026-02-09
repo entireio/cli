@@ -1,0 +1,34 @@
+{
+  "checkpoint_id": "de97f1e9cd68",
+  "session_id": "379ab089-c458-45de-8bb7-fcd1c607b8c7",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T15:43:47.365372Z",
+  "branch": "fix/gemini-token-usage-metadata-json",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/agent/transcript.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "75a1c1ce-a1a2-4392-a542-d3b74cdf090c",
+  "checkpoint_transcript_start": 128,
+  "transcript_lines_at_start": 128,
+  "token_usage": {
+    "input_tokens": 472,
+    "cache_creation_tokens": 188065,
+    "cache_read_tokens": 4611092,
+    "output_tokens": 174,
+    "api_call_count": 75
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T15:43:47.106208Z",
+    "agent_lines": 117,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 117,
+    "agent_percentage": 100
+  }
+}
