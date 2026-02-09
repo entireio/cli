@@ -43,7 +43,7 @@ type Session struct {
 // Checkpoints can be either session-level (on Stop) or task-level (on subagent completion).
 type Checkpoint struct {
 	// CheckpointID is the stable 12-hex-char identifier for this checkpoint.
-	// Used to look up metadata at <id[:2]>/<id[2:]>/ on entire/sessions branch.
+	// Used to look up metadata at <id[:2]>/<id[2:]>/ on entire/checkpoints/v1 branch.
 	CheckpointID id.CheckpointID
 
 	// Message is the commit message or checkpoint description
@@ -84,7 +84,7 @@ type CheckpointDetails struct {
 	Files []string
 }
 
-// ListSessions returns all sessions from the entire/sessions branch,
+// ListSessions returns all sessions from the entire/checkpoints/v1 branch,
 // plus any additional sessions from strategies implementing SessionSource.
 // It automatically discovers all registered strategies and merges their sessions.
 func ListSessions() ([]Session, error) {
@@ -93,7 +93,7 @@ func ListSessions() ([]Session, error) {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
 
-	// Get checkpoints from the entire/sessions branch
+	// Get checkpoints from the entire/checkpoints/v1 branch
 	checkpoints, err := ListCheckpoints()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list checkpoints: %w", err)
@@ -216,7 +216,7 @@ func GetSession(sessionID string) (*Session, error) {
 	return findSessionByID(sessions, sessionID)
 }
 
-// getDescriptionForCheckpoint reads the description for a checkpoint from the entire/sessions branch.
+// getDescriptionForCheckpoint reads the description for a checkpoint from the entire/checkpoints/v1 branch.
 // It reads from the latest session subdirectory in the new storage format.
 func getDescriptionForCheckpoint(repo *git.Repository, checkpointID id.CheckpointID) string {
 	tree, err := GetMetadataBranchTree(repo)

@@ -90,11 +90,11 @@ type RewindPoint struct {
 	ToolUseID string
 
 	// IsLogsOnly indicates this is a commit with session logs but no shadow branch state.
-	// The logs can be restored from entire/sessions, but file state requires git checkout.
+	// The logs can be restored from entire/checkpoints/v1, but file state requires git checkout.
 	IsLogsOnly bool
 
 	// CheckpointID is the stable 12-hex-char identifier for logs-only points.
-	// Used to retrieve logs from entire/sessions/<id[:2]>/<id[2:]>/full.jsonl
+	// Used to retrieve logs from entire/checkpoints/v1/<id[:2]>/<id[2:]>/full.jsonl
 	// Empty for shadow branch checkpoints (uncommitted).
 	CheckpointID id.CheckpointID
 
@@ -381,15 +381,15 @@ type Strategy interface {
 	EnsureSetup() error
 
 	// NOTE: ListSessions and GetSession are standalone functions in session.go.
-	// They read from entire/sessions and merge with SessionSource if implemented.
+	// They read from entire/checkpoints/v1 and merge with SessionSource if implemented.
 
 	// GetMetadataRef returns a reference to the metadata commit for the given checkpoint.
-	// Format: "<branch>@<commit-sha>" (e.g., "entire/sessions@abc123").
+	// Format: "<branch>@<commit-sha>" (e.g., "entire/checkpoints/v1@abc123").
 	// Returns empty string if not applicable (e.g., commit strategy with filesystem metadata).
 	GetMetadataRef(checkpoint Checkpoint) string
 
 	// GetSessionMetadataRef returns a reference to the most recent metadata commit for a session.
-	// Format: "<branch>@<commit-sha>" (e.g., "entire/sessions@abc123").
+	// Format: "<branch>@<commit-sha>" (e.g., "entire/checkpoints/v1@abc123").
 	// Returns empty string if not applicable or session not found.
 	GetSessionMetadataRef(sessionID string) string
 
@@ -455,7 +455,7 @@ type CommitMsgHandler interface {
 // handle the git pre-push hook.
 type PrePushHandler interface {
 	// PrePush is called by the git pre-push hook before pushing to a remote.
-	// Used to push session branches (e.g., entire/sessions) alongside user pushes.
+	// Used to push session branches (e.g., entire/checkpoints/v1) alongside user pushes.
 	// The remote parameter is the name of the remote being pushed to.
 	// Should return nil on errors to not block pushes (log warnings to stderr).
 	PrePush(remote string) error
@@ -505,7 +505,7 @@ type SessionResetter interface {
 // salvage stuck sessions by condensing their data to permanent storage.
 type SessionCondenser interface {
 	// CondenseSessionByID force-condenses a session and cleans up.
-	// Generates a new checkpoint ID, condenses to entire/sessions,
+	// Generates a new checkpoint ID, condenses to entire/checkpoints/v1,
 	// updates the session state, and removes the shadow branch
 	// if no other active sessions need it.
 	CondenseSessionByID(sessionID string) error
@@ -523,14 +523,14 @@ type ConcurrentSessionChecker interface {
 }
 
 // SessionSource is an optional interface for strategies that provide additional
-// sessions beyond those stored on the entire/sessions branch.
+// sessions beyond those stored on the entire/checkpoints/v1 branch.
 // For example, manual-commit strategy provides active sessions from .git/entire-sessions/
-// that haven't yet been condensed to entire/sessions.
+// that haven't yet been condensed to entire/checkpoints/v1.
 //
 // ListSessions() automatically discovers all registered strategies, checks if they
 // implement SessionSource, and merges their additional sessions by ID.
 type SessionSource interface {
-	// GetAdditionalSessions returns sessions not yet on entire/sessions branch.
+	// GetAdditionalSessions returns sessions not yet on entire/checkpoints/v1 branch.
 	GetAdditionalSessions() ([]*Session, error)
 }
 

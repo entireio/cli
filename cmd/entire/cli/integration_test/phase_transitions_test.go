@@ -20,7 +20,7 @@ import (
 // SimulateUserPromptSubmit and SimulateStop), the session should transition to
 // ACTIVE_COMMITTED. This defers condensation because the agent is still working.
 // When the agent finishes its turn (SimulateStop), the deferred condensation fires
-// and the session transitions to IDLE with metadata persisted to entire/sessions.
+// and the session transitions to IDLE with metadata persisted to entire/checkpoints/v1.
 //
 // State machine transitions tested:
 //   - ACTIVE + GitCommit -> ACTIVE_COMMITTED (defer condensation, migrate shadow branch)
@@ -192,13 +192,13 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 	t.Logf("Session phase after stop: %s (StepCount: %d)", state.Phase, state.StepCount)
 
 	// Deferred condensation should have fired during TurnEnd (ACTIVE_COMMITTED → IDLE).
-	// Verify StepCount was reset and metadata was persisted to entire/sessions.
+	// Verify StepCount was reset and metadata was persisted to entire/checkpoints/v1.
 	if state.StepCount != 0 {
 		t.Errorf("StepCount should be 0 after TurnEnd condensation, got %d", state.StepCount)
 	}
 
 	if !env.BranchExists(paths.MetadataBranchName) {
-		t.Fatal("entire/sessions branch should exist after TurnEnd condensation")
+		t.Fatal("entire/checkpoints/v1 branch should exist after TurnEnd condensation")
 	}
 	latestCheckpointID := env.TryGetLatestCheckpointID()
 	if latestCheckpointID != "" {
@@ -259,7 +259,7 @@ func TestShadow_AmendPreservesTrailer(t *testing.T) {
 
 	// Verify condensation happened
 	if !env.BranchExists(paths.MetadataBranchName) {
-		t.Fatal("entire/sessions branch should exist after condensation")
+		t.Fatal("entire/checkpoints/v1 branch should exist after condensation")
 	}
 
 	// Record the sessions branch state for later comparison

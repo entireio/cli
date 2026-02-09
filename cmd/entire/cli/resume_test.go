@@ -101,7 +101,7 @@ func setupResumeTestRepo(t *testing.T, tmpDir string, createFeatureBranch bool) 
 		}
 	}
 
-	// Ensure entire/sessions branch exists
+	// Ensure entire/checkpoints/v1 branch exists
 	if err := strategy.EnsureMetadataBranch(repo); err != nil {
 		t.Fatalf("Failed to create metadata branch: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestResumeFromCurrentBranch_WithEntireCheckpointTrailer(t *testing.T) {
 
 	_, _, _ = setupResumeTestRepo(t, tmpDir, false)
 
-	// Set up the auto-commit strategy and create checkpoint metadata on entire/sessions branch
+	// Set up the auto-commit strategy and create checkpoint metadata on entire/checkpoints/v1 branch
 	strat := strategy.NewAutoCommitStrategy()
 	if err := strat.EnsureSetup(); err != nil {
 		t.Fatalf("Failed to ensure setup: %v", err)
@@ -214,7 +214,7 @@ func TestResumeFromCurrentBranch_WithEntireCheckpointTrailer(t *testing.T) {
 		t.Fatalf("Failed to write test file: %v", err)
 	}
 
-	// Use SaveChanges to create a commit with checkpoint metadata on entire/sessions branch
+	// Use SaveChanges to create a commit with checkpoint metadata on entire/checkpoints/v1 branch
 	ctx := strategy.SaveContext{
 		CommitMessage:  "test commit with checkpoint",
 		MetadataDir:    filepath.Join(paths.EntireMetadataDir, sessionID),
@@ -306,7 +306,7 @@ func TestRunResume_UncommittedChanges(t *testing.T) {
 	}
 }
 
-// createCheckpointOnMetadataBranch creates a checkpoint on the entire/sessions branch.
+// createCheckpointOnMetadataBranch creates a checkpoint on the entire/checkpoints/v1 branch.
 // Returns the checkpoint ID.
 func createCheckpointOnMetadataBranch(t *testing.T, repo *git.Repository, sessionID string) id.CheckpointID {
 	t.Helper()
@@ -478,11 +478,11 @@ func TestCheckRemoteMetadata_MetadataExistsOnRemote(t *testing.T) {
 
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
 
-	// Create checkpoint metadata on local entire/sessions branch
+	// Create checkpoint metadata on local entire/checkpoints/v1 branch
 	sessionID := "2025-01-01-test-session"
 	checkpointID := createCheckpointOnMetadataBranch(t, repo, sessionID)
 
-	// Copy the local entire/sessions to origin/entire/sessions (simulate remote)
+	// Copy the local entire/checkpoints/v1 to origin/entire/checkpoints/v1 (simulate remote)
 	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("Failed to get local metadata branch: %v", err)
@@ -495,7 +495,7 @@ func TestCheckRemoteMetadata_MetadataExistsOnRemote(t *testing.T) {
 		t.Fatalf("Failed to create remote ref: %v", err)
 	}
 
-	// Delete local entire/sessions branch to simulate "not fetched yet"
+	// Delete local entire/checkpoints/v1 branch to simulate "not fetched yet"
 	if err := repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName)); err != nil {
 		t.Fatalf("Failed to remove local metadata branch: %v", err)
 	}
@@ -520,12 +520,12 @@ func TestCheckRemoteMetadata_NoRemoteMetadataBranch(t *testing.T) {
 
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
 
-	// Delete local entire/sessions branch
+	// Delete local entire/checkpoints/v1 branch
 	if err := repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName)); err != nil {
 		t.Fatalf("Failed to remove local metadata branch: %v", err)
 	}
 
-	// Don't create any remote ref - simulating no remote entire/sessions
+	// Don't create any remote ref - simulating no remote entire/checkpoints/v1
 
 	// Call checkRemoteMetadata - should handle gracefully (no remote branch)
 	err := checkRemoteMetadata(repo, "nonexistent123")
@@ -540,11 +540,11 @@ func TestCheckRemoteMetadata_CheckpointNotOnRemote(t *testing.T) {
 
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
 
-	// Create checkpoint metadata on local entire/sessions branch
+	// Create checkpoint metadata on local entire/checkpoints/v1 branch
 	sessionID := "2025-01-01-test-session"
 	_ = createCheckpointOnMetadataBranch(t, repo, sessionID)
 
-	// Copy the local entire/sessions to origin/entire/sessions (simulate remote)
+	// Copy the local entire/checkpoints/v1 to origin/entire/checkpoints/v1 (simulate remote)
 	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("Failed to get local metadata branch: %v", err)
@@ -557,7 +557,7 @@ func TestCheckRemoteMetadata_CheckpointNotOnRemote(t *testing.T) {
 		t.Fatalf("Failed to create remote ref: %v", err)
 	}
 
-	// Delete local entire/sessions branch
+	// Delete local entire/checkpoints/v1 branch
 	if err := repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName)); err != nil {
 		t.Fatalf("Failed to remove local metadata branch: %v", err)
 	}
@@ -579,11 +579,11 @@ func TestResumeFromCurrentBranch_FallsBackToRemote(t *testing.T) {
 
 	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
 
-	// Create checkpoint metadata on local entire/sessions branch
+	// Create checkpoint metadata on local entire/checkpoints/v1 branch
 	sessionID := "2025-01-01-test-session-uuid"
 	checkpointID := createCheckpointOnMetadataBranch(t, repo, sessionID)
 
-	// Copy the local entire/sessions to origin/entire/sessions (simulate remote)
+	// Copy the local entire/checkpoints/v1 to origin/entire/checkpoints/v1 (simulate remote)
 	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("Failed to get local metadata branch: %v", err)
@@ -596,7 +596,7 @@ func TestResumeFromCurrentBranch_FallsBackToRemote(t *testing.T) {
 		t.Fatalf("Failed to create remote ref: %v", err)
 	}
 
-	// Delete local entire/sessions branch to simulate "not fetched yet"
+	// Delete local entire/checkpoints/v1 branch to simulate "not fetched yet"
 	if err := repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName)); err != nil {
 		t.Fatalf("Failed to remove local metadata branch: %v", err)
 	}

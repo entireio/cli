@@ -92,7 +92,7 @@ func TestRunClean_PreviewMode(t *testing.T) {
 		}
 	}
 
-	// Also create entire/sessions (should NOT be listed)
+	// Also create entire/checkpoints/v1 (should NOT be listed)
 	sessionsRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), commitHash)
 	if err := repo.Storer.SetReference(sessionsRef); err != nil {
 		t.Fatalf("failed to create %s: %v", paths.MetadataBranchName, err)
@@ -183,7 +183,7 @@ func TestRunClean_SessionsBranchPreserved(t *testing.T) {
 
 	sessionsRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), commitHash)
 	if err := repo.Storer.SetReference(sessionsRef); err != nil {
-		t.Fatalf("failed to create entire/sessions: %v", err)
+		t.Fatalf("failed to create entire/checkpoints/v1: %v", err)
 	}
 
 	var stdout bytes.Buffer
@@ -201,7 +201,7 @@ func TestRunClean_SessionsBranchPreserved(t *testing.T) {
 	// Sessions branch should still exist
 	sessionsRefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	if _, err := repo.Reference(sessionsRefName, true); err != nil {
-		t.Error("entire/sessions branch should be preserved")
+		t.Error("entire/checkpoints/v1 branch should be preserved")
 	}
 }
 

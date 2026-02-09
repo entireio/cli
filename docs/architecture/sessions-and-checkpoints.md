@@ -49,7 +49,7 @@ type CheckpointType int
 
 const (
     Temporary CheckpointType = iota // Full state snapshot, shadow branch
-    Committed                        // Metadata + commit ref, entire/sessions
+    Committed                        // Metadata + commit ref, entire/checkpoints/v1
 )
 ```
 
@@ -96,7 +96,7 @@ type CheckpointStore interface {
     ReadTemporary(ctx context.Context, sessionID string) (*TemporaryCheckpoint, error)
     ListTemporary(ctx context.Context) ([]CheckpointInfo, error)
 
-    // Committed checkpoint operations (entire/sessions branch - metadata only)
+    // Committed checkpoint operations (entire/checkpoints/v1 branch - metadata only)
     WriteCommitted(ctx context.Context, checkpoint CommittedCheckpoint) error
     ReadCommitted(ctx context.Context, checkpointID string) (*CommittedCheckpoint, error)
     ListCommitted(ctx context.Context) ([]CheckpointInfo, error)
@@ -157,7 +157,7 @@ func (s *AutoCommitStrategy) SaveChanges(ctx context.Context, ...) error
 |------|----------|----------|
 | Session State | `.git/entire-sessions/<id>.json` | Active session tracking |
 | Temporary | `entire/<commit-hash>` branch | Full state (code + metadata) |
-| Committed | `entire/sessions` branch (sharded) | Metadata + commit reference |
+| Committed | `entire/checkpoints/v1` branch (sharded) | Metadata + commit reference |
 
 ### Session State
 
@@ -188,12 +188,12 @@ Tied to a base commit. Condensed to committed on user commit.
 **Shadow branch lifecycle:**
 - Created on first checkpoint for a base commit
 - Migrated automatically if base commit changes (stash → pull → apply scenario)
-- Deleted after condensation to `entire/sessions`
+- Deleted after condensation to `entire/checkpoints/v1`
 - Reset if orphaned (no session state file exists)
 
 ### Committed Checkpoints
 
-Branch: `entire/sessions`
+Branch: `entire/checkpoints/v1`
 
 Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkpoint**:
 
@@ -256,14 +256,14 @@ The checkpoint ID is the **stable identifier** that links user commits to metada
    - Auto-commit: Added programmatically
    - Manual-commit: Added by `prepare-commit-msg` hook (user can remove)
 
-2. **Directory sharding** on `entire/sessions`:
+2. **Directory sharding** on `entire/checkpoints/v1`:
    - Path: `<id[:2]>/<id[2:]>/` (e.g., `a3/b2c4d5e6f7/`)
    - First 2 chars = shard (256 possible shards)
    - Remaining 10 chars = directory name
 
-3. **Commit subject** on `entire/sessions`:
+3. **Commit subject** on `entire/checkpoints/v1`:
    - Format: `Checkpoint: a3b2c4d5e6f7`
-   - Makes `git log entire/sessions` readable
+   - Makes `git log entire/checkpoints/v1` readable
 
 **Bidirectional Lookup:**
 
@@ -271,8 +271,8 @@ The checkpoint ID is the **stable identifier** that links user commits to metada
 User commit → Metadata:
   1. Extract "Entire-Checkpoint: a3b2c4d5e6f7" from commit message
   2. Look up metadata:
-     - Approach A: Read entire/sessions tree at a3/b2c4d5e6f7/
-     - Approach B: Search git log entire/sessions for "Checkpoint: a3b2c4d5e6f7"
+     - Approach A: Read entire/checkpoints/v1 tree at a3/b2c4d5e6f7/
+     - Approach B: Search git log entire/checkpoints/v1 for "Checkpoint: a3b2c4d5e6f7"
 
 Metadata → User commits:
   Given checkpoint ID a3b2c4d5e6f7
@@ -295,10 +295,10 @@ Metadata → User commits:
                            ↓
                   post-commit hook runs
                            ↓
-          Condense shadow → entire/sessions
+          Condense shadow → entire/checkpoints/v1
                            ↓
 ┌──────────────────────────────────────────────────┐
-│ Commit on entire/sessions:                       │
+│ Commit on entire/checkpoints/v1:                       │
 │   Subject: "Checkpoint: a3b2c4d5e6f7"            │
 │                                                   │
 │   Tree: a3/b2c4d5e6f7/                           │

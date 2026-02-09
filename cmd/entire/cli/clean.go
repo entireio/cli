@@ -26,7 +26,7 @@ This command finds and removes orphaned data from any strategy:
     Track active sessions. Orphaned when no checkpoints or shadow branches
     reference them.
 
-  Checkpoint metadata (entire/sessions branch)
+  Checkpoint metadata (entire/checkpoints/v1 branch)
     For auto-commit checkpoints: orphaned when commits are rebased/squashed
     and no commit references the checkpoint ID anymore.
     Manual-commit checkpoints are permanent (condensed history) and are
@@ -35,7 +35,7 @@ This command finds and removes orphaned data from any strategy:
 Without --force, shows a preview of items that would be deleted.
 With --force, actually deletes the orphaned items.
 
-The entire/sessions branch itself is never deleted.`,
+The entire/checkpoints/v1 branch itself is never deleted.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClean(cmd.OutOrStdout(), forceFlag)
 		},

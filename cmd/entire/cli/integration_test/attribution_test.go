@@ -136,10 +136,10 @@ func TestManualCommit_Attribution(t *testing.T) {
 	// ========================================
 	t.Log("Verifying attribution in metadata")
 
-	// Read metadata from entire/sessions branch
+	// Read metadata from entire/checkpoints/v1 branch
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("Failed to get entire/sessions branch: %v", err)
+		t.Fatalf("Failed to get entire/checkpoints/v1 branch: %v", err)
 	}
 
 	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())
@@ -282,7 +282,7 @@ func TestManualCommit_AttributionDeletionOnly(t *testing.T) {
 
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("Failed to get entire/sessions branch: %v", err)
+		t.Fatalf("Failed to get entire/checkpoints/v1 branch: %v", err)
 	}
 
 	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())
@@ -517,14 +517,14 @@ func TestManualCommit_AttributionNoDoubleCount(t *testing.T) {
 	}
 }
 
-// getAttributionFromMetadata reads attribution from a checkpoint on entire/sessions branch.
+// getAttributionFromMetadata reads attribution from a checkpoint on entire/checkpoints/v1 branch.
 // InitialAttribution is stored in session-level metadata (0/metadata.json).
 func getAttributionFromMetadata(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID) *checkpoint.InitialAttribution {
 	t.Helper()
 
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("Failed to get entire/sessions branch: %v", err)
+		t.Fatalf("Failed to get entire/checkpoints/v1 branch: %v", err)
 	}
 
 	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())

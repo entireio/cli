@@ -56,7 +56,7 @@ func TestAutoCommitStrategy_SaveChanges_CommitHasMetadataRef(t *testing.T) {
 
 	t.Chdir(dir)
 
-	// Setup strategy and ensure entire/sessions branch exists
+	// Setup strategy and ensure entire/checkpoints/v1 branch exists
 	s := NewAutoCommitStrategy()
 	if err := s.EnsureSetup(); err != nil {
 		t.Fatalf("EnsureSetup() error = %v", err)
@@ -122,10 +122,10 @@ func TestAutoCommitStrategy_SaveChanges_CommitHasMetadataRef(t *testing.T) {
 		t.Errorf("code commit should NOT have session trailer, got message:\n%s", commit.Message)
 	}
 
-	// Verify metadata was stored on entire/sessions branch
+	// Verify metadata was stored on entire/checkpoints/v1 branch
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("entire/sessions branch not found: %v", err)
+		t.Fatalf("entire/checkpoints/v1 branch not found: %v", err)
 	}
 	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())
 	if err != nil {
@@ -229,10 +229,10 @@ func TestAutoCommitStrategy_SaveChanges_MetadataRefPointsToValidCommit(t *testin
 		t.Errorf("code commit should NOT have source-ref trailer, got:\n%s", commit.Message)
 	}
 
-	// Get the entire/sessions branch
+	// Get the entire/checkpoints/v1 branch
 	metadataBranchRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("failed to get entire/sessions branch: %v", err)
+		t.Fatalf("failed to get entire/checkpoints/v1 branch: %v", err)
 	}
 
 	metadataCommit, err := repo.CommitObject(metadataBranchRef.Hash())
@@ -341,10 +341,10 @@ func TestAutoCommitStrategy_SaveTaskCheckpoint_CommitHasMetadataRef(t *testing.T
 		t.Errorf("task checkpoint commit should NOT have strategy trailer, got message:\n%s", commit.Message)
 	}
 
-	// Verify metadata was stored on entire/sessions branch
+	// Verify metadata was stored on entire/checkpoints/v1 branch
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("entire/sessions branch not found: %v", err)
+		t.Fatalf("entire/checkpoints/v1 branch not found: %v", err)
 	}
 	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())
 	if err != nil {
@@ -436,10 +436,10 @@ func TestAutoCommitStrategy_SaveTaskCheckpoint_NoChangesSkipsCommit(t *testing.T
 		t.Error("checkpoint without file changes should have the same tree hash")
 	}
 
-	// Metadata should still be stored on entire/sessions branch
+	// Metadata should still be stored on entire/checkpoints/v1 branch
 	metadataBranch, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("failed to get entire/sessions branch: %v", err)
+		t.Fatalf("failed to get entire/checkpoints/v1 branch: %v", err)
 	}
 
 	metadataCommit, err := repo.CommitObject(metadataBranch.Hash())
@@ -449,7 +449,7 @@ func TestAutoCommitStrategy_SaveTaskCheckpoint_NoChangesSkipsCommit(t *testing.T
 
 	// Verify metadata was committed to the branch
 	if !strings.Contains(metadataCommit.Message, trailers.MetadataTaskTrailerKey) {
-		t.Error("metadata should still be committed to entire/sessions branch")
+		t.Error("metadata should still be committed to entire/checkpoints/v1 branch")
 	}
 }
 
@@ -515,7 +515,7 @@ func TestAutoCommitStrategy_GetSessionContext(t *testing.T) {
 		metadataDirAbs = metadataDir
 	}
 
-	// Save changes - this creates a checkpoint on entire/sessions
+	// Save changes - this creates a checkpoint on entire/checkpoints/v1
 	ctx := SaveContext{
 		CommitMessage:  "Test checkpoint",
 		MetadataDir:    metadataDir,
@@ -604,7 +604,7 @@ func TestAutoCommitStrategy_ListSessions_HasDescription(t *testing.T) {
 		metadataDirAbs = metadataDir
 	}
 
-	// Save changes - this creates a checkpoint on entire/sessions
+	// Save changes - this creates a checkpoint on entire/checkpoints/v1
 	ctx := SaveContext{
 		CommitMessage:  "Test checkpoint",
 		MetadataDir:    metadataDir,
@@ -877,10 +877,10 @@ func TestAutoCommitStrategy_SaveChanges_FilesAlreadyCommitted(t *testing.T) {
 		t.Fatalf("failed to commit test file: %v", err)
 	}
 
-	// Get count of commits on entire/sessions before the call
+	// Get count of commits on entire/checkpoints/v1 before the call
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("entire/sessions branch not found: %v", err)
+		t.Fatalf("entire/checkpoints/v1 branch not found: %v", err)
 	}
 	sessionsCommitBefore := sessionsRef.Hash()
 
@@ -927,13 +927,13 @@ func TestAutoCommitStrategy_SaveChanges_FilesAlreadyCommitted(t *testing.T) {
 		t.Errorf("HEAD should still be user's commit %s, got %s", userCommit, head.Hash())
 	}
 
-	// Verify entire/sessions branch has no new commits (metadata not created)
+	// Verify entire/checkpoints/v1 branch has no new commits (metadata not created)
 	sessionsRefAfter, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("entire/sessions branch not found after SaveChanges: %v", err)
+		t.Fatalf("entire/checkpoints/v1 branch not found after SaveChanges: %v", err)
 	}
 	if sessionsRefAfter.Hash() != sessionsCommitBefore {
-		t.Errorf("entire/sessions should not have new commits when files already committed, before=%s after=%s",
+		t.Errorf("entire/checkpoints/v1 should not have new commits when files already committed, before=%s after=%s",
 			sessionsCommitBefore, sessionsRefAfter.Hash())
 	}
 }
@@ -976,10 +976,10 @@ func TestAutoCommitStrategy_SaveChanges_NoChangesSkipped(t *testing.T) {
 		t.Fatalf("EnsureSetup() error = %v", err)
 	}
 
-	// Get count of commits on entire/sessions before the call
+	// Get count of commits on entire/checkpoints/v1 before the call
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("entire/sessions branch not found: %v", err)
+		t.Fatalf("entire/checkpoints/v1 branch not found: %v", err)
 	}
 	sessionsCommitBefore := sessionsRef.Hash()
 
@@ -1025,13 +1025,13 @@ func TestAutoCommitStrategy_SaveChanges_NoChangesSkipped(t *testing.T) {
 		t.Errorf("HEAD should still be initial commit %s, got %s", initialCommit, head.Hash())
 	}
 
-	// Verify entire/sessions branch has no new commits (metadata not created)
+	// Verify entire/checkpoints/v1 branch has no new commits (metadata not created)
 	sessionsRefAfter, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("entire/sessions branch not found after SaveChanges: %v", err)
+		t.Fatalf("entire/checkpoints/v1 branch not found after SaveChanges: %v", err)
 	}
 	if sessionsRefAfter.Hash() != sessionsCommitBefore {
-		t.Errorf("entire/sessions should not have new commits when no code changes, before=%s after=%s",
+		t.Errorf("entire/checkpoints/v1 should not have new commits when no code changes, before=%s after=%s",
 			sessionsCommitBefore, sessionsRefAfter.Hash())
 	}
 }

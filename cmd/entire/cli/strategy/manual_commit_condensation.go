@@ -26,7 +26,7 @@ import (
 )
 
 // listCheckpoints returns all checkpoints from the sessions branch.
-// Uses checkpoint.GitStore.ListCommitted() for reading from entire/sessions.
+// Uses checkpoint.GitStore.ListCommitted() for reading from entire/checkpoints/v1.
 func (s *ManualCommitStrategy) listCheckpoints() ([]CheckpointInfo, error) {
 	store, err := s.getCheckpointStore()
 	if err != nil {
@@ -80,7 +80,7 @@ func (s *ManualCommitStrategy) getCheckpointsForSession(sessionID string) ([]Che
 }
 
 // getCheckpointLog returns the transcript for a specific checkpoint ID.
-// Uses checkpoint.GitStore.ReadCommitted() for reading from entire/sessions.
+// Uses checkpoint.GitStore.ReadCommitted() for reading from entire/checkpoints/v1.
 func (s *ManualCommitStrategy) getCheckpointLog(checkpointID id.CheckpointID) ([]byte, error) {
 	store, err := s.getCheckpointStore()
 	if err != nil {

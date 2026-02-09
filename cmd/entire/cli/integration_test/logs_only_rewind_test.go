@@ -64,7 +64,7 @@ func TestLogsOnlyRewind_AppearsInRewindList(t *testing.T) {
 
 	env.GitCommitWithShadowHooks("Add main.go", "main.go")
 
-	// Get commit hash and condensation ID (now from entire/sessions branch, not commit trailer)
+	// Get commit hash and condensation ID (now from entire/checkpoints/v1 branch, not commit trailer)
 	commitHash := env.GetHeadHash()
 	condensationID := env.GetLatestCondensationID()
 	t.Logf("Condensation ID: %s", condensationID)

@@ -556,7 +556,7 @@ var errStop = errors.New("stop iteration")
 
 // GetTranscriptFromCommit retrieves the transcript from a specific commit's tree.
 // This is used for shadow branch checkpoints where the transcript is stored in the commit tree
-// rather than on the entire/sessions branch.
+// rather than on the entire/checkpoints/v1 branch.
 // commitHash is the commit to read from, metadataDir is the path within the tree.
 // agentType is used for reassembling chunked transcripts in the correct format.
 // Handles both chunked and non-chunked transcripts.

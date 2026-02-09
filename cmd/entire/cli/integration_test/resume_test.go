@@ -21,7 +21,7 @@ import (
 const masterBranch = "master"
 
 // Note: Resume tests only run with auto-commit strategy because:
-// - Auto-commit strategy creates commits with Entire-Checkpoint trailers and metadata on entire/sessions
+// - Auto-commit strategy creates commits with Entire-Checkpoint trailers and metadata on entire/checkpoints/v1
 //   immediately during SimulateStop
 // - Manual-commit strategy only creates this structure after user commits (via prepare-commit-msg
 //   and post-commit hooks), which requires the full workflow tested in manual_commit_workflow_test.go
@@ -344,13 +344,13 @@ func TestResume_MultipleSessionsOnBranch(t *testing.T) {
 }
 
 // TestResume_CheckpointWithoutMetadata tests resume when a commit has an Entire-Checkpoint
-// trailer but the corresponding metadata is missing from entire/sessions branch.
+// trailer but the corresponding metadata is missing from entire/checkpoints/v1 branch.
 // This can happen if the metadata branch was corrupted or reset.
 func TestResume_CheckpointWithoutMetadata(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t, strategy.StrategyNameAutoCommit)
 
-	// First create a real session so the entire/sessions branch exists
+	// First create a real session so the entire/checkpoints/v1 branch exists
 	session := env.NewSession()
 	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)

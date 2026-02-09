@@ -64,7 +64,7 @@ var shadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}(-[0-9a-fA-
 // commit hash is at least 7 hex characters and worktree hash is 6 hex characters.
 // The "entire/checkpoints/v1" branch is NOT a shadow branch.
 func IsShadowBranch(branchName string) bool {
-	// Explicitly exclude entire/sessions
+	// Explicitly exclude entire/checkpoints/v1
 	if branchName == paths.MetadataBranchName {
 		return false
 	}
@@ -152,7 +152,7 @@ func DeleteShadowBranches(branches []string) (deleted []string, failed []string,
 
 // ListOrphanedSessionStates returns session state files that are orphaned.
 // A session state is orphaned if:
-//   - No checkpoints on entire/sessions reference this session ID
+//   - No checkpoints on entire/checkpoints/v1 reference this session ID
 //   - No shadow branch exists for the session's base commit
 //
 // This is strategy-agnostic as session states are shared by all strategies.
@@ -205,7 +205,7 @@ func ListOrphanedSessionStates() ([]CleanupItem, error) {
 			continue
 		}
 
-		// Check if session has checkpoints on entire/sessions
+		// Check if session has checkpoints on entire/checkpoints/v1
 		hasCheckpoints := sessionsWithCheckpoints[state.SessionID]
 
 		// Check if shadow branch exists for this session's base commit and worktree
@@ -249,7 +249,7 @@ func DeleteOrphanedSessionStates(sessionIDs []string) (deleted []string, failed 
 	return deleted, failed, nil
 }
 
-// DeleteOrphanedCheckpoints removes checkpoint directories from the entire/sessions branch.
+// DeleteOrphanedCheckpoints removes checkpoint directories from the entire/checkpoints/v1 branch.
 func DeleteOrphanedCheckpoints(checkpointIDs []string) (deleted []string, failed []string, err error) {
 	if len(checkpointIDs) == 0 {
 		return []string{}, []string{}, nil

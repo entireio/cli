@@ -94,7 +94,7 @@ Expected results by strategy:
 | Active branch | No Entire-* trailers | Entire-Checkpoint: trailer only |
 | Session state | ✓ Exists | ✗ Not used |
 | Shadow branch | ✓ entire/{hash} | ✗ None |
-| Metadata branch | ✓ entire/sessions | ✓ entire/sessions |
+| Metadata branch | ✓ entire/checkpoints/v1 | ✓ entire/checkpoints/v1 |
 | Rewind points | ✓ At least 1 | ✓ At least 1 |
 
 #### 4. Test Rewind
@@ -147,7 +147,7 @@ go build -o /tmp/entire-bin ./cmd/entire && \
 ### Manual-Commit Strategy (default, alias: shadow)
 - Active branch commits: **NO modifications** (no commits created by Entire)
 - Shadow branches: `entire/<commit-hash[:7]>` created for checkpoints
-- Metadata: stored on both shadow branches and `entire/sessions` branch (condensed on user commits)
+- Metadata: stored on both shadow branches and `entire/checkpoints/v1` branch (condensed on user commits)
 - Rewind: restores files from shadow branch commit tree (no git reset)
   - **Shows preview warning** listing untracked files that will be deleted
   - Preserves untracked files that existed at session start
@@ -156,7 +156,7 @@ go build -o /tmp/entire-bin ./cmd/entire && \
 ### Auto-Commit Strategy (alias: dual)
 - Active branch commits: **clean commits** with only `Entire-Checkpoint: <12-hex-char>` trailer
 - Shadow branches: none
-- Metadata: stored on orphan `entire/sessions` branch at sharded paths
+- Metadata: stored on orphan `entire/checkpoints/v1` branch at sharded paths
 - Rewind: full reset allowed if commit is only on current branch
   - Uses `git reset --hard` which doesn't delete untracked files
   - **No preview warnings** (untracked files are safe)
@@ -199,8 +199,8 @@ For manual-commit, test log condensation:
 git add app.js
 git commit -m "Add greeting function"
 
-# Verify logs condensed to entire/sessions
-git show entire/sessions --stat | grep -E "^[0-9a-f]{2}/[0-9a-f]"
+# Verify logs condensed to entire/checkpoints/v1
+git show entire/checkpoints/v1 --stat | grep -E "^[0-9a-f]{2}/[0-9a-f]"
 
 # Verify shadow branch still exists
 git branch -a | grep "entire/[0-9a-f]"

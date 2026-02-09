@@ -53,7 +53,7 @@ const (
 	Temporary Type = iota
 
 	// Committed checkpoints contain metadata + commit reference and are stored
-	// on the entire/sessions branch. They are the permanent record.
+	// on the entire/checkpoints/v1 branch. They are the permanent record.
 	Committed
 )
 
@@ -80,7 +80,7 @@ type Store interface {
 	// ListTemporary lists all shadow branches with their checkpoint info.
 	ListTemporary(ctx context.Context) ([]TemporaryInfo, error)
 
-	// WriteCommitted writes a committed checkpoint to the entire/sessions branch.
+	// WriteCommitted writes a committed checkpoint to the entire/checkpoints/v1 branch.
 	// Checkpoints are stored at sharded paths: <id[:2]>/<id[2:]>/
 	WriteCommitted(ctx context.Context, opts WriteCommittedOptions) error
 
@@ -386,7 +386,7 @@ type SessionFilePaths struct {
 // to their file paths. Session-specific data (including initial_attribution)
 // is stored in the session's subdirectory metadata.json.
 //
-// Structure on entire/sessions branch:
+// Structure on entire/checkpoints/v1 branch:
 //
 //	<checkpoint-id[:2]>/<checkpoint-id[2:]>/
 //	├── metadata.json         # This CheckpointSummary

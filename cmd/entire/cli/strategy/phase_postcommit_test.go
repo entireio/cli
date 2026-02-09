@@ -95,9 +95,9 @@ func TestPostCommit_IdleSession_Condenses(t *testing.T) {
 	err = s.PostCommit()
 	require.NoError(t, err)
 
-	// Verify condensation happened: the entire/sessions branch should exist
+	// Verify condensation happened: the entire/checkpoints/v1 branch should exist
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/sessions branch should exist after condensation")
+	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensation")
 	assert.NotNil(t, sessionsRef)
 
 	// Verify shadow branch IS deleted after condensation
@@ -156,10 +156,10 @@ func TestPostCommit_RebaseDuringActive_SkipsTransition(t *testing.T) {
 	assert.Equal(t, originalStepCount, state.StepCount,
 		"StepCount should be unchanged - no condensation during rebase")
 
-	// Verify NO condensation happened (entire/sessions branch should not exist)
+	// Verify NO condensation happened (entire/checkpoints/v1 branch should not exist)
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.Error(t, err,
-		"entire/sessions branch should NOT exist - no condensation during rebase")
+		"entire/checkpoints/v1 branch should NOT exist - no condensation during rebase")
 
 	// Verify shadow branch still exists (not cleaned up during rebase)
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
@@ -225,11 +225,11 @@ func TestPostCommit_ShadowBranch_PreservedWhenActiveSessionExists(t *testing.T) 
 	assert.Equal(t, session.PhaseActiveCommitted, activeState.Phase,
 		"ACTIVE session should transition to ACTIVE_COMMITTED on GitCommit")
 
-	// Verify the IDLE session actually condensed (entire/sessions branch should exist)
+	// Verify the IDLE session actually condensed (entire/checkpoints/v1 branch should exist)
 	idleState, err = s.loadSessionState(idleSessionID)
 	require.NoError(t, err)
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/sessions branch should exist after IDLE session condensation")
+	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after IDLE session condensation")
 	require.NotNil(t, sessionsRef)
 
 	// Verify IDLE session's StepCount was reset by condensation
@@ -291,10 +291,10 @@ func TestPostCommit_CondensationFailure_PreservesShadowBranch(t *testing.T) {
 	assert.Equal(t, originalStepCount, state.StepCount,
 		"StepCount should NOT be reset when condensation fails")
 
-	// Verify entire/sessions branch does NOT exist (condensation failed)
+	// Verify entire/checkpoints/v1 branch does NOT exist (condensation failed)
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.Error(t, err,
-		"entire/sessions branch should NOT exist when condensation fails")
+		"entire/checkpoints/v1 branch should NOT exist when condensation fails")
 
 	// Phase transition still applies even when condensation fails
 	assert.Equal(t, session.PhaseIdle, state.Phase,
@@ -353,10 +353,10 @@ func TestPostCommit_IdleSession_NoNewContent_UpdatesBaseCommit(t *testing.T) {
 	require.NoError(t, err,
 		"shadow branch should still exist when no condensation happened")
 
-	// entire/sessions branch should NOT exist (no condensation)
+	// entire/checkpoints/v1 branch should NOT exist (no condensation)
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.Error(t, err,
-		"entire/sessions branch should NOT exist when no condensation happened")
+		"entire/checkpoints/v1 branch should NOT exist when no condensation happened")
 
 	// StepCount should be unchanged
 	assert.Equal(t, originalStepCount, state.StepCount,
@@ -397,9 +397,9 @@ func TestPostCommit_EndedSession_FilesTouched_Condenses(t *testing.T) {
 	err = s.PostCommit()
 	require.NoError(t, err)
 
-	// Verify entire/sessions branch exists (condensation happened)
+	// Verify entire/checkpoints/v1 branch exists (condensation happened)
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/sessions branch should exist after condensation")
+	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensation")
 	assert.NotNil(t, sessionsRef)
 
 	// Verify old shadow branch is deleted after condensation
@@ -461,10 +461,10 @@ func TestPostCommit_EndedSession_FilesTouched_NoNewContent(t *testing.T) {
 	err = s.PostCommit()
 	require.NoError(t, err)
 
-	// Verify entire/sessions branch does NOT exist (no condensation)
+	// Verify entire/checkpoints/v1 branch does NOT exist (no condensation)
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.Error(t, err,
-		"entire/sessions branch should NOT exist when no new content")
+		"entire/checkpoints/v1 branch should NOT exist when no new content")
 
 	// Shadow branch should still exist
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
@@ -522,10 +522,10 @@ func TestPostCommit_EndedSession_NoFilesTouched_Discards(t *testing.T) {
 	err = s.PostCommit()
 	require.NoError(t, err)
 
-	// Verify entire/sessions branch does NOT exist (no condensation for discard path)
+	// Verify entire/checkpoints/v1 branch does NOT exist (no condensation for discard path)
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.Error(t, err,
-		"entire/sessions branch should NOT exist for discard path")
+		"entire/checkpoints/v1 branch should NOT exist for discard path")
 
 	// BaseCommit should be updated to new HEAD
 	state, err = s.loadSessionState(sessionID)
@@ -604,10 +604,10 @@ func TestPostCommit_ActiveCommitted_MigratesShadowBranch(t *testing.T) {
 	assert.Equal(t, originalStepCount, state.StepCount,
 		"StepCount should be unchanged - no condensation for ACTIVE_COMMITTED")
 
-	// entire/sessions branch should NOT exist (no condensation)
+	// entire/checkpoints/v1 branch should NOT exist (no condensation)
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.Error(t, err,
-		"entire/sessions branch should NOT exist - no condensation for ACTIVE_COMMITTED")
+		"entire/checkpoints/v1 branch should NOT exist - no condensation for ACTIVE_COMMITTED")
 }
 
 // TestPostCommit_CondensationFailure_EndedSession_PreservesShadowBranch verifies
@@ -659,10 +659,10 @@ func TestPostCommit_CondensationFailure_EndedSession_PreservesShadowBranch(t *te
 	assert.Equal(t, originalStepCount, state.StepCount,
 		"StepCount should NOT be reset when condensation fails for ENDED session")
 
-	// Verify entire/sessions branch does NOT exist (condensation failed)
+	// Verify entire/checkpoints/v1 branch does NOT exist (condensation failed)
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.Error(t, err,
-		"entire/sessions branch should NOT exist when condensation fails")
+		"entire/checkpoints/v1 branch should NOT exist when condensation fails")
 
 	// Phase stays ENDED
 	assert.Equal(t, session.PhaseEnded, state.Phase,
@@ -836,7 +836,7 @@ func TestTurnEnd_ConcurrentSession_PreservesShadowBranch(t *testing.T) {
 
 // TestTurnEnd_ActiveCommitted_CondensesSession verifies that HandleTurnEnd
 // with ActionCondense (from ACTIVE_COMMITTED → IDLE) condenses the session
-// to entire/sessions and cleans up the shadow branch.
+// to entire/checkpoints/v1 and cleans up the shadow branch.
 func TestTurnEnd_ActiveCommitted_CondensesSession(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
@@ -881,9 +881,9 @@ func TestTurnEnd_ActiveCommitted_CondensesSession(t *testing.T) {
 	err = s.HandleTurnEnd(state, remaining)
 	require.NoError(t, err)
 
-	// Verify condensation happened: entire/sessions branch should exist
+	// Verify condensation happened: entire/checkpoints/v1 branch should exist
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/sessions branch should exist after turn-end condensation")
+	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after turn-end condensation")
 	assert.NotNil(t, sessionsRef)
 
 	// Verify shadow branch IS deleted after condensation
@@ -955,10 +955,10 @@ func TestTurnEnd_ActiveCommitted_CondensationFailure_PreservesShadowBranch(t *te
 	assert.Equal(t, originalStepCount, state.StepCount,
 		"StepCount should NOT be reset when condensation fails")
 
-	// entire/sessions branch should NOT exist (condensation failed)
+	// entire/checkpoints/v1 branch should NOT exist (condensation failed)
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	assert.Error(t, err,
-		"entire/sessions branch should NOT exist when condensation fails")
+		"entire/checkpoints/v1 branch should NOT exist when condensation fails")
 }
 
 // TestTurnEnd_Active_NoActions verifies that HandleTurnEnd with no actions

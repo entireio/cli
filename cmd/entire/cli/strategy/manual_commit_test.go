@@ -991,7 +991,7 @@ func TestSessionState_JSONRoundTrip(t *testing.T) {
 func TestShadowStrategy_GetCheckpointLog_WithCheckpointID(t *testing.T) {
 	// This test verifies that GetCheckpointLog correctly uses the checkpoint ID
 	// to look up the log. Since getCheckpointLog requires a full git setup
-	// with entire/sessions branch, we test the lookup logic by checking error behavior.
+	// with entire/checkpoints/v1 branch, we test the lookup logic by checking error behavior.
 
 	dir := t.TempDir()
 	_, err := git.PlainInit(dir, false)
@@ -1011,7 +1011,7 @@ func TestShadowStrategy_GetCheckpointLog_WithCheckpointID(t *testing.T) {
 	}
 
 	// This should attempt to call getCheckpointLog (which will fail because
-	// there's no entire/sessions branch), but the important thing is it uses
+	// there's no entire/checkpoints/v1 branch), but the important thing is it uses
 	// the checkpoint ID to look up metadata
 	_, err = s.GetCheckpointLog(checkpoint)
 	if err == nil {
@@ -1437,7 +1437,7 @@ func TestShadowStrategy_PrepareCommitMsg_ReusesLastCheckpointID(t *testing.T) {
 }
 
 // TestShadowStrategy_CondenseSession_EphemeralBranchTrailer verifies that checkpoint commits
-// on the entire/sessions branch include the Ephemeral-branch trailer indicating which shadow
+// on the entire/checkpoints/v1 branch include the Ephemeral-branch trailer indicating which shadow
 // branch the checkpoint originated from.
 func TestShadowStrategy_CondenseSession_EphemeralBranchTrailer(t *testing.T) {
 	dir := t.TempDir()
@@ -2055,7 +2055,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		t.Errorf("CheckpointID = %q, want %q", result.CheckpointID, checkpointID)
 	}
 
-	// Read metadata from entire/sessions branch and verify InitialAttribution
+	// Read metadata from entire/checkpoints/v1 branch and verify InitialAttribution
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("failed to get sessions branch: %v", err)

@@ -163,7 +163,7 @@ func TestDualStrategy_IncrementalPromptContent(t *testing.T) {
 	// Verify first checkpoint has prompt A (session files in numbered subdirectory)
 	prompt1Content, found := env.ReadFileFromBranch(paths.MetadataBranchName, SessionFilePath(checkpoint1ID, "prompt.txt"))
 	if !found {
-		t.Fatal("First checkpoint should have prompt.txt on entire/sessions branch")
+		t.Fatal("First checkpoint should have prompt.txt on entire/checkpoints/v1 branch")
 	}
 	t.Logf("First checkpoint prompt.txt:\n%s", prompt1Content)
 
@@ -211,7 +211,7 @@ func TestDualStrategy_IncrementalPromptContent(t *testing.T) {
 	// Session files are now in numbered subdirectory (e.g., 0/prompt.txt)
 	prompt2Content, found := env.ReadFileFromBranch(paths.MetadataBranchName, SessionFilePath(checkpoint2ID, "prompt.txt"))
 	if !found {
-		t.Fatal("Second checkpoint should have prompt.txt on entire/sessions branch")
+		t.Fatal("Second checkpoint should have prompt.txt on entire/checkpoints/v1 branch")
 	}
 	t.Logf("Second checkpoint prompt.txt:\n%s", prompt2Content)
 

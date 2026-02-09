@@ -99,7 +99,7 @@ func TestShadowStrategy_LastCheckpointID_ReusedAcrossCommits(t *testing.T) {
 			firstCheckpointID, secondCheckpointID)
 	}
 
-	// Verify the checkpoint exists on entire/sessions branch
+	// Verify the checkpoint exists on entire/checkpoints/v1 branch
 	checkpointPath := paths.CheckpointPath(id.MustCheckpointID(firstCheckpointID))
 	if !env.FileExistsInBranch(paths.MetadataBranchName, checkpointPath+"/"+paths.MetadataFileName) {
 		t.Errorf("Checkpoint metadata should exist at %s on %s branch",
@@ -355,11 +355,11 @@ func TestShadowStrategy_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
 		t.Errorf("Shadow branch %s should be deleted after condensation", shadowBranchName)
 	}
 
-	// Verify data exists on entire/sessions
+	// Verify data exists on entire/checkpoints/v1
 	checkpointID := env.GetLatestCheckpointID()
 	checkpointPath := paths.CheckpointPath(id.MustCheckpointID(checkpointID))
 	if !env.FileExistsInBranch(paths.MetadataBranchName, checkpointPath+"/"+paths.MetadataFileName) {
-		t.Error("Checkpoint metadata should exist on entire/sessions branch")
+		t.Error("Checkpoint metadata should exist on entire/checkpoints/v1 branch")
 	}
 }
 

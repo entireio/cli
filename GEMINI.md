@@ -159,8 +159,8 @@ All strategies implement:
 
 | Strategy | Main Branch | Metadata Storage | Use Case |
 |----------|-------------|------------------|----------|
-| **manual-commit** (default) | Unchanged (no commits) | `entire/<HEAD-hash>` branches + `entire/sessions` | Recommended for most workflows |
-| **auto-commit** | Creates clean commits | Orphan `entire/sessions` branch | Teams that want code commits from sessions |
+| **manual-commit** (default) | Unchanged (no commits) | `entire/<HEAD-hash>` branches + `entire/checkpoints/v1` | Recommended for most workflows |
+| **auto-commit** | Creates clean commits | Orphan `entire/checkpoints/v1` branch | Teams that want code commits from sessions |
 
 Legacy names `shadow` and `dual` are only recognized when reading settings or checkpoint metadata.
 
@@ -169,21 +169,21 @@ Legacy names `shadow` and `dual` are only recognized when reading settings or ch
 **Manual-Commit Strategy** (`manual_commit*.go`) - Default
 - **Does not modify** the active branch - no commits created on the working branch
 - Creates shadow branch `entire/<HEAD-commit-hash>` per base commit for checkpoints
-- Session logs are condensed to permanent `entire/sessions` branch on user commits
+- Session logs are condensed to permanent `entire/checkpoints/v1` branch on user commits
 - Builds git trees in-memory using go-git plumbing APIs
 - Rewind restores files from shadow branch commit tree (does not use `git reset`)
 - Tracks session state in `.git/entire-sessions/` (shared across worktrees)
-- PrePush hook can push `entire/sessions` branch alongside user pushes
+- PrePush hook can push `entire/checkpoints/v1` branch alongside user pushes
 - `AllowsMainBranch() = true` - safe to use on main/master since it never modifies commit history
 
 **Auto-Commit Strategy** (`auto_commit.go`)
 - Code commits to active branch with **clean history** (commits have `Entire-Checkpoint` trailer only)
-- Metadata stored on orphan `entire/sessions` branch at sharded paths: `<id[:2]>/<id[2:]>/`
+- Metadata stored on orphan `entire/checkpoints/v1` branch at sharded paths: `<id[:2]>/<id[2:]>/`
 - Uses `checkpoint.WriteCommitted()` for metadata storage
-- Checkpoint ID (12-hex-char) links code commits to metadata on `entire/sessions`
+- Checkpoint ID (12-hex-char) links code commits to metadata on `entire/checkpoints/v1`
 - Full rewind allowed if commit is only on current branch (not in main); otherwise logs-only
 - Rewind via `git reset --hard`
-- PrePush hook can push `entire/sessions` branch alongside user pushes
+- PrePush hook can push `entire/checkpoints/v1` branch alongside user pushes
 - `AllowsMainBranch() = false` - creates commits, so not recommended on main branch
 
 #### Key Files
@@ -192,11 +192,11 @@ Legacy names `shadow` and `dual` are only recognized when reading settings or ch
 - `registry.go` - Strategy registration/discovery (factory pattern with `Get()`, `List()`, `Default()`)
 - `common.go` - Shared helpers for metadata extraction, tree building, rewind validation, `ListCheckpoints()`
 - `session.go` - Session/checkpoint data structures
-- `push_common.go` - Shared PrePush logic for pushing `entire/sessions` branch
+- `push_common.go` - Shared PrePush logic for pushing `entire/checkpoints/v1` branch
 - `manual_commit.go` - Manual-commit strategy main implementation
 - `manual_commit_types.go` - Type definitions: `SessionState`, `CheckpointInfo`, `CondenseResult`
 - `manual_commit_session.go` - Session state management (load/save/list session states)
-- `manual_commit_condensation.go` - Condense logic for copying logs to `entire/sessions`
+- `manual_commit_condensation.go` - Condense logic for copying logs to `entire/checkpoints/v1`
 - `manual_commit_rewind.go` - Rewind implementation: file restoration from checkpoint trees
 - `manual_commit_git.go` - Git operations: checkpoint commits, tree building
 - `manual_commit_logs.go` - Session log retrieval and session listing
@@ -228,7 +228,7 @@ Legacy names `shadow` and `dual` are only recognized when reading settings or ch
     └── agent-<id>.jsonl     # Subagent transcript
 ```
 
-**Both Strategies** - Metadata branch (`entire/sessions`) - sharded checkpoint format:
+**Both Strategies** - Metadata branch (`entire/checkpoints/v1`) - sharded checkpoint format:
 ```
 <checkpoint-id[:2]>/<checkpoint-id[2:]>/
 ├── metadata.json            # Checkpoint info (checkpoint_id, session_id, strategy, created_at)
@@ -249,7 +249,7 @@ Legacy names `shadow` and `dual` are only recognized when reading settings or ch
 #### Commit Trailers
 
 **On active branch commits (auto-commit strategy only):**
-- `Entire-Checkpoint: <checkpoint-id>` - 12-hex-char ID linking to metadata on `entire/sessions`
+- `Entire-Checkpoint: <checkpoint-id>` - 12-hex-char ID linking to metadata on `entire/checkpoints/v1`
 
 **On shadow branch commits (`entire/<commit-hash>`):**
 - `Entire-Session: <session-id>` - Session identifier
@@ -257,12 +257,12 @@ Legacy names `shadow` and `dual` are only recognized when reading settings or ch
 - `Entire-Task-Metadata: <path>` - Path to task metadata directory
 - `Entire-Strategy: manual-commit` - Strategy that created the commit
 
-**On metadata branch commits (`entire/sessions`):**
+**On metadata branch commits (`entire/checkpoints/v1`):**
 - `Entire-Session: <session-id>` - Session identifier
 - `Entire-Strategy: <strategy>` - Strategy that created the checkpoint
 - `Commit: <short-sha>` - Code commit this checkpoint relates to (manual-commit strategy)
 
-**Note:** Both strategies keep active branch history **clean**. Manual-commit strategy never creates commits on the active branch. Auto-commit strategy creates commits with only the `Entire-Checkpoint` trailer. All detailed metadata is stored on the `entire/sessions` orphan branch or shadow branches.
+**Note:** Both strategies keep active branch history **clean**. Manual-commit strategy never creates commits on the active branch. Auto-commit strategy creates commits with only the `Entire-Checkpoint` trailer. All detailed metadata is stored on the `entire/checkpoints/v1` orphan branch or shadow branches.
 
 #### When Modifying Strategies
 - All strategies must implement the full `Strategy` interface

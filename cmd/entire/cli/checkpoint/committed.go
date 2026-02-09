@@ -34,7 +34,7 @@ import (
 // errStopIteration is used to stop commit iteration early in GetCheckpointAuthor.
 var errStopIteration = errors.New("stop iteration")
 
-// WriteCommitted writes a committed checkpoint to the entire/sessions branch.
+// WriteCommitted writes a committed checkpoint to the entire/checkpoints/v1 branch.
 // Checkpoints are stored at sharded paths: <id[:2]>/<id[2:]>/
 //
 // For task checkpoints (IsTask=true), additional files are written under tasks/<tool-use-id>/:
@@ -570,7 +570,7 @@ type taskCheckpointData struct {
 	AgentID        string `json:"agent_id,omitempty"`
 }
 
-// ReadCommitted reads a committed checkpoint's summary by ID from the entire/sessions branch.
+// ReadCommitted reads a committed checkpoint's summary by ID from the entire/checkpoints/v1 branch.
 // Returns only the CheckpointSummary (paths + aggregated stats), not actual content.
 // Use ReadSessionContent to read actual transcript/prompts/context.
 // Returns nil, nil if the checkpoint doesn't exist.
@@ -721,7 +721,7 @@ func (s *GitStore) ReadSessionContentByID(ctx context.Context, checkpointID id.C
 	return nil, fmt.Errorf("session %q not found in checkpoint %s", sessionID, checkpointID)
 }
 
-// ListCommitted lists all committed checkpoints from the entire/sessions branch.
+// ListCommitted lists all committed checkpoints from the entire/checkpoints/v1 branch.
 // Scans sharded paths: <id[:2]>/<id[2:]>/ directories containing metadata.json.
 //
 
@@ -943,7 +943,7 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 	return nil
 }
 
-// ensureSessionsBranch ensures the entire/sessions branch exists.
+// ensureSessionsBranch ensures the entire/checkpoints/v1 branch exists.
 func (s *GitStore) ensureSessionsBranch() error {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	_, err := s.repo.Reference(refName, true)
@@ -970,8 +970,8 @@ func (s *GitStore) ensureSessionsBranch() error {
 	return nil
 }
 
-// getSessionsBranchTree returns the tree object for the entire/sessions branch.
-// Falls back to origin/entire/sessions if the local branch doesn't exist.
+// getSessionsBranchTree returns the tree object for the entire/checkpoints/v1 branch.
+// Falls back to origin/entire/checkpoints/v1 if the local branch doesn't exist.
 func (s *GitStore) getSessionsBranchTree() (*object.Tree, error) {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	ref, err := s.repo.Reference(refName, true)
@@ -1227,7 +1227,7 @@ type Author struct {
 	Email string
 }
 
-// GetCheckpointAuthor retrieves the author of a checkpoint from the entire/sessions commit history.
+// GetCheckpointAuthor retrieves the author of a checkpoint from the entire/checkpoints/v1 commit history.
 // Returns the author of the commit that introduced this checkpoint's metadata.json file.
 // Returns empty Author if the checkpoint is not found or the sessions branch doesn't exist.
 func (s *GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error) {

@@ -124,11 +124,11 @@ func (s *ManualCommitStrategy) GetRewindPoints(limit int) ([]RewindPoint, error)
 }
 
 // GetLogsOnlyRewindPoints finds commits in the current branch's history that have
-// condensed session logs on the entire/sessions branch. These are commits that
+// condensed session logs on the entire/checkpoints/v1 branch. These are commits that
 // were created with session data but the shadow branch has been condensed.
 //
 // The function works by:
-// 1. Getting all checkpoints from the entire/sessions branch
+// 1. Getting all checkpoints from the entire/checkpoints/v1 branch
 // 2. Building a map of checkpoint ID -> checkpoint info
 // 3. Scanning the current branch history for commits with Entire-Checkpoint trailers
 // 4. Matching by checkpoint ID (stable across amend/rebase)
@@ -138,7 +138,7 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(limit int) ([]RewindPoint
 		return nil, err
 	}
 
-	// Get all checkpoints from entire/sessions branch
+	// Get all checkpoints from entire/checkpoints/v1 branch
 	checkpoints, err := s.listCheckpoints()
 	if err != nil {
 		// No checkpoints yet is fine
@@ -189,7 +189,7 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(limit int) ([]RewindPoint
 		if !found {
 			return nil
 		}
-		// Check if this checkpoint ID has metadata on entire/sessions
+		// Check if this checkpoint ID has metadata on entire/checkpoints/v1
 		cpInfo, found := checkpointInfoMap[cpID]
 		if !found {
 			return nil
@@ -617,7 +617,7 @@ func (s *ManualCommitStrategy) PreviewRewind(point RewindPoint) (*RewindPreview,
 }
 
 // RestoreLogsOnly restores session logs from a logs-only rewind point.
-// This fetches the transcript from entire/sessions and writes it to Claude's project directory.
+// This fetches the transcript from entire/checkpoints/v1 and writes it to Claude's project directory.
 // Does not modify the working directory.
 // When multiple sessions were condensed to the same checkpoint, ALL sessions are restored.
 // If force is false, prompts for confirmation when local logs have newer timestamps.

@@ -676,7 +676,7 @@ func TestUpdateSummary_NotFound(t *testing.T) {
 }
 
 // TestListCommitted_FallsBackToRemote verifies that ListCommitted can find
-// checkpoints when only origin/entire/sessions exists (simulating post-clone state).
+// checkpoints when only origin/entire/checkpoints/v1 exists (simulating post-clone state).
 func TestListCommitted_FallsBackToRemote(t *testing.T) {
 	// Create "remote" repo (non-bare, so we can make commits)
 	remoteDir := t.TempDir()
@@ -703,7 +703,7 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 		t.Fatalf("failed to create initial commit: %v", err)
 	}
 
-	// Create entire/sessions branch on the remote with a checkpoint
+	// Create entire/checkpoints/v1 branch on the remote with a checkpoint
 	remoteStore := NewGitStore(remoteRepo)
 	cpID := id.MustCheckpointID("abcdef123456")
 	err = remoteStore.WriteCommitted(context.Background(), WriteCommittedOptions{
@@ -718,7 +718,7 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 		t.Fatalf("failed to write checkpoint to remote: %v", err)
 	}
 
-	// Clone the repo (this clones main, but not entire/sessions by default)
+	// Clone the repo (this clones main, but not entire/checkpoints/v1 by default)
 	localDir := t.TempDir()
 	localRepo, err := git.PlainClone(localDir, false, &git.CloneOptions{
 		URL: remoteDir,
@@ -727,7 +727,7 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 		t.Fatalf("failed to clone repo: %v", err)
 	}
 
-	// Fetch the entire/sessions branch to origin/entire/sessions
+	// Fetch the entire/checkpoints/v1 branch to origin/entire/checkpoints/v1
 	// (but don't create local branch - simulating post-clone state)
 	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", paths.MetadataBranchName, paths.MetadataBranchName)
 	err = localRepo.Fetch(&git.FetchOptions{
@@ -735,19 +735,19 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 		RefSpecs:   []config.RefSpec{config.RefSpec(refSpec)},
 	})
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		t.Fatalf("failed to fetch entire/sessions: %v", err)
+		t.Fatalf("failed to fetch entire/checkpoints/v1: %v", err)
 	}
 
 	// Verify local branch doesn't exist
 	_, err = localRepo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err == nil {
-		t.Fatal("local entire/sessions branch should not exist")
+		t.Fatal("local entire/checkpoints/v1 branch should not exist")
 	}
 
 	// Verify remote-tracking branch exists
 	_, err = localRepo.Reference(plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), true)
 	if err != nil {
-		t.Fatalf("origin/entire/sessions should exist: %v", err)
+		t.Fatalf("origin/entire/checkpoints/v1 should exist: %v", err)
 	}
 
 	// ListCommitted should find the checkpoint by falling back to remote
@@ -765,7 +765,7 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 }
 
 // TestGetCheckpointAuthor verifies that GetCheckpointAuthor retrieves the
-// author of the commit that created the checkpoint on the entire/sessions branch.
+// author of the commit that created the checkpoint on the entire/checkpoints/v1 branch.
 func TestGetCheckpointAuthor(t *testing.T) {
 	repo, _ := setupBranchTestRepo(t)
 	store := NewGitStore(repo)
@@ -823,7 +823,7 @@ func TestGetCheckpointAuthor_NotFound(t *testing.T) {
 }
 
 // TestGetCheckpointAuthor_NoSessionsBranch verifies that GetCheckpointAuthor
-// returns empty author when the entire/sessions branch doesn't exist.
+// returns empty author when the entire/checkpoints/v1 branch doesn't exist.
 func TestGetCheckpointAuthor_NoSessionsBranch(t *testing.T) {
 	// Create a fresh repo without sessions branch
 	tempDir := t.TempDir()

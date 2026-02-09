@@ -70,7 +70,7 @@ A **session** represents a complete interaction with your AI agent, from start t
 
 **Session ID format:** `YYYY-MM-DD-<UUID>` (e.g., `2026-01-08-abc123de-f456-7890-abcd-ef1234567890`)
 
-Sessions are stored separately from your code commits on the `entire/sessions` branch.
+Sessions are stored separately from your code commits on the `entire/checkpoints/v1` branch.
 
 ### Checkpoints
 
@@ -167,7 +167,7 @@ Personal overrides, gitignored by default:
 | `enabled`                              | `true`, `false`                  | Enable/disable Entire                          |
 | `agent`                                | `claude-code`, `gemini`, etc.    | AI agent to integrate with                     |
 | `log_level`                            | `debug`, `info`, `warn`, `error` | Logging verbosity                              |
-| `strategy_options.push_sessions`       | `true`, `false`                  | Auto-push `entire/sessions` branch on git push |
+| `strategy_options.push_sessions`       | `true`, `false`                  | Auto-push `entire/checkpoints/v1` branch on git push |
 | `strategy_options.summarize.enabled`   | `true`, `false`                  | Auto-generate AI summaries at commit time      |
 
 ### Auto-Summarization
@@ -211,7 +211,7 @@ Local settings override project settings field-by-field. When you run `entire st
 If you see an error like this when running `entire resume`:
 
 ```
-Failed to fetch metadata: failed to fetch entire/sessions from origin: ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey], no supported methods remain
+Failed to fetch metadata: failed to fetch entire/checkpoints/v1 from origin: ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey], no supported methods remain
 ```
 
 This is a [known issue with go-git's SSH handling](https://github.com/go-git/go-git/issues/411). Fix it by adding GitHub's host keys to your known_hosts file:

@@ -568,7 +568,7 @@ func setupAgentHooksNonInteractive(w io.Writer, agentName agent.AgentName, strat
 	}
 	fmt.Fprintf(w, "✓ Project configured (%s)\n", configDisplayProject)
 
-	// Let the strategy handle its own setup requirements (creates entire/sessions branch, etc.)
+	// Let the strategy handle its own setup requirements (creates entire/checkpoints/v1 branch, etc.)
 	strat, err := strategy.Get(settings.Strategy)
 	if err != nil {
 		return fmt.Errorf("failed to get strategy: %w", err)

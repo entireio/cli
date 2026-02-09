@@ -300,9 +300,9 @@ func verifyCheckpointStorage(t *testing.T, env *TestEnv, strategyName, sessionID
 		verifyShadowCheckpointStorage(t, env, entireSessionID, taskToolUseID)
 
 	case strategy.StrategyNameAutoCommit:
-		// Dual strategy stores metadata on orphan entire/sessions branch
+		// Dual strategy stores metadata on orphan entire/checkpoints/v1 branch
 		// Verify that commits were created (incremental + final)
-		t.Logf("Note: auto-commit strategy stores checkpoints in entire/sessions branch")
+		t.Logf("Note: auto-commit strategy stores checkpoints in entire/checkpoints/v1 branch")
 	}
 }
 

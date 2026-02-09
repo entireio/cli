@@ -68,7 +68,7 @@ func IsAncestorOf(repo *git.Repository, commit, target plumbing.Hash) bool {
 	return found
 }
 
-// ListCheckpoints returns all checkpoints from the entire/sessions branch.
+// ListCheckpoints returns all checkpoints from the entire/checkpoints/v1 branch.
 // Scans sharded paths: <id[:2]>/<id[2:]>/ directories containing metadata.json.
 // Used by both manual-commit and auto-commit strategies.
 func ListCheckpoints() ([]CheckpointInfo, error) {
@@ -213,7 +213,7 @@ func resolveAgentType(ctxAgentType agent.AgentType, state *SessionState) agent.A
 	return DefaultAgentType
 }
 
-// ensureMetadataBranch creates the orphan entire/sessions branch if it doesn't exist.
+// ensureMetadataBranch creates the orphan entire/checkpoints/v1 branch if it doesn't exist.
 // This branch has no parent and starts with an empty tree.
 func EnsureMetadataBranch(repo *git.Repository) error {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
@@ -271,7 +271,7 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 	return nil
 }
 
-// readCheckpointMetadata reads metadata.json from a checkpoint path on entire/sessions.
+// readCheckpointMetadata reads metadata.json from a checkpoint path on entire/checkpoints/v1.
 // With the new format, root metadata.json is a CheckpointSummary with Agents array.
 // This function reads the summary and extracts relevant fields into CheckpointInfo,
 // also reading session-level metadata for IsTask/ToolUseID fields.
@@ -339,7 +339,7 @@ func ReadCheckpointMetadata(tree *object.Tree, checkpointPath string) (*Checkpoi
 	return &metadata, nil
 }
 
-// GetMetadataBranchTree returns the tree object for the entire/sessions branch.
+// GetMetadataBranchTree returns the tree object for the entire/checkpoints/v1 branch.
 func GetMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	ref, err := repo.Reference(refName, true)
@@ -468,7 +468,7 @@ func ReadSessionPromptFromShadow(repo *git.Repository, baseCommit, worktreeID, s
 	return ReadSessionPromptFromTree(tree, checkpointPath)
 }
 
-// GetRemoteMetadataBranchTree returns the tree object for origin/entire/sessions.
+// GetRemoteMetadataBranchTree returns the tree object for origin/entire/checkpoints/v1.
 func GetRemoteMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
 	refName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
 	ref, err := repo.Reference(refName, true)
@@ -1317,7 +1317,7 @@ func getSessionDescriptionFromTree(tree *object.Tree, metadataDir string) string
 // It checks local config first, then falls back to global config.
 // Returns ("Unknown", "unknown@local") if no user is configured - this allows
 // operations to proceed even without git user config, which is especially useful
-// for internal metadata commits on branches like entire/sessions.
+// for internal metadata commits on branches like entire/checkpoints/v1.
 func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 	// Get repository config (includes local settings)
 	cfg, err := repo.Config()

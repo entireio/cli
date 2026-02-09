@@ -1131,7 +1131,7 @@ func (env *TestEnv) ListBranchesWithPrefix(prefix string) []string {
 	return branches
 }
 
-// GetLatestCheckpointID returns the most recent checkpoint ID from the entire/sessions branch.
+// GetLatestCheckpointID returns the most recent checkpoint ID from the entire/checkpoints/v1 branch.
 // This is used by tests that previously extracted the checkpoint ID from commit message trailers.
 // Now that active branch commits are clean (no trailers), we get the ID from the sessions branch.
 // Fatals if the checkpoint ID cannot be found, with detailed context about what was found.
@@ -1143,7 +1143,7 @@ func (env *TestEnv) GetLatestCheckpointID() string {
 		env.T.Fatalf("failed to open git repo: %v", err)
 	}
 
-	// Get the entire/sessions branch
+	// Get the entire/checkpoints/v1 branch
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
@@ -1169,7 +1169,7 @@ func (env *TestEnv) GetLatestCheckpointID() string {
 	return ""
 }
 
-// TryGetLatestCheckpointID returns the most recent checkpoint ID from the entire/sessions branch.
+// TryGetLatestCheckpointID returns the most recent checkpoint ID from the entire/checkpoints/v1 branch.
 // Returns empty string if the branch doesn't exist or has no checkpoint commits yet.
 // Use this when you need to check if a checkpoint exists without failing the test.
 func (env *TestEnv) TryGetLatestCheckpointID() string {
@@ -1180,7 +1180,7 @@ func (env *TestEnv) TryGetLatestCheckpointID() string {
 		return ""
 	}
 
-	// Get the entire/sessions branch
+	// Get the entire/checkpoints/v1 branch
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {

@@ -35,13 +35,13 @@ const (
 	// Format: "<branch>@<commit-hash>" e.g. "entire/metadata@abc123def456"
 	SourceRefTrailerKey = "Entire-Source-Ref"
 
-	// CheckpointTrailerKey links commits to their checkpoint metadata on entire/sessions.
+	// CheckpointTrailerKey links commits to their checkpoint metadata on entire/checkpoints/v1.
 	// Format: 12 hex characters e.g. "a3b2c4d5e6f7"
 	// This trailer survives git amend and rebase operations.
 	CheckpointTrailerKey = "Entire-Checkpoint"
 
 	// EphemeralBranchTrailerKey identifies the shadow branch that a checkpoint originated from.
-	// Used in manual-commit strategy checkpoint commits on entire/sessions branch.
+	// Used in manual-commit strategy checkpoint commits on entire/checkpoints/v1 branch.
 	// Format: full branch name e.g. "entire/2b4c177"
 	EphemeralBranchTrailerKey = "Ephemeral-branch"
 
@@ -222,7 +222,7 @@ func FormatShadowTaskCommit(message, taskMetadataDir, sessionID string) string {
 }
 
 // FormatCheckpoint creates a commit message with a checkpoint trailer.
-// This links user commits to their checkpoint metadata on entire/sessions branch.
+// This links user commits to their checkpoint metadata on entire/checkpoints/v1 branch.
 func FormatCheckpoint(message string, cpID checkpointID.CheckpointID) string {
 	return fmt.Sprintf("%s\n\n%s: %s\n", message, CheckpointTrailerKey, cpID.String())
 }

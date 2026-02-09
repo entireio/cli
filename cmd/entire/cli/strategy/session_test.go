@@ -195,7 +195,7 @@ func TestListSessionsEmptyRepo(t *testing.T) {
 	initTestRepo(t, tmpDir)
 	t.Chdir(tmpDir)
 
-	// No entire/sessions branch exists yet
+	// No entire/checkpoints/v1 branch exists yet
 	sessions, err := ListSessions()
 	if err != nil {
 		t.Fatalf("ListSessions() error = %v, want nil", err)
@@ -222,7 +222,7 @@ func TestListSessionsWithCheckpoints(t *testing.T) {
 		t.Fatalf("OpenRepository() failed: %v", err)
 	}
 
-	// Create entire/sessions branch with test checkpoints
+	// Create entire/checkpoints/v1 branch with test checkpoints
 	createTestMetadataBranch(t, repo, testSessionID)
 
 	sessions, err := ListSessions()
@@ -262,7 +262,7 @@ func TestListSessionsWithDescription(t *testing.T) {
 		t.Fatalf("OpenRepository() failed: %v", err)
 	}
 
-	// Create entire/sessions branch with test checkpoint including prompt.txt
+	// Create entire/checkpoints/v1 branch with test checkpoint including prompt.txt
 	expectedDesc := "Fix the bug in the login form"
 	createTestMetadataBranchWithPrompt(t, repo, testSessionID, testCheckpointID, expectedDesc)
 

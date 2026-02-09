@@ -77,11 +77,11 @@ func (s *ManualCommitStrategy) Name() string {
 
 // Description returns the strategy description.
 func (s *ManualCommitStrategy) Description() string {
-	return "Manual commit checkpoints with session logs on entire/sessions"
+	return "Manual commit checkpoints with session logs on entire/checkpoints/v1"
 }
 
 // AllowsMainBranch returns true because manual-commit strategy only writes to shadow
-// branches (entire/<hash>) and entire/sessions, never modifying the working branch's
+// branches (entire/<hash>) and entire/checkpoints/v1, never modifying the working branch's
 // commit history.
 func (s *ManualCommitStrategy) AllowsMainBranch() bool {
 	return true
@@ -108,7 +108,7 @@ func (s *ManualCommitStrategy) EnsureSetup() error {
 		return err
 	}
 
-	// Ensure the entire/sessions orphan branch exists for permanent session storage
+	// Ensure the entire/checkpoints/v1 orphan branch exists for permanent session storage
 	repo, err := OpenRepository()
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)

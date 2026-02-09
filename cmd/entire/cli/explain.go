@@ -799,7 +799,7 @@ var errStopIteration = errors.New("stop iteration")
 // Behavior:
 //   - On feature branches: only show checkpoints unique to this branch (not in main)
 //   - On default branch (main/master): show all checkpoints in history (up to limit)
-//   - Includes both committed checkpoints (entire/sessions) and temporary checkpoints (shadow branches)
+//   - Includes both committed checkpoints (entire/checkpoints/v1) and temporary checkpoints (shadow branches)
 func getBranchCheckpoints(repo *git.Repository, limit int) ([]strategy.RewindPoint, error) {
 	store := checkpoint.NewGitStore(repo)
 
@@ -1039,8 +1039,8 @@ func convertTemporaryCheckpoint(repo *git.Repository, tc checkpoint.TemporaryChe
 		return nil
 	}
 
-	// Read session prompt from the shadow branch commit's tree (not from entire/sessions)
-	// Temporary checkpoints store their metadata in the shadow branch, not in entire/sessions
+	// Read session prompt from the shadow branch commit's tree (not from entire/checkpoints/v1)
+	// Temporary checkpoints store their metadata in the shadow branch, not in entire/checkpoints/v1
 	var sessionPrompt string
 	shadowTree, treeErr := shadowCommit.Tree()
 	if treeErr == nil {

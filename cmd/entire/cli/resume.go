@@ -321,14 +321,14 @@ func promptResumeFromOlderCheckpoint() (bool, error) {
 	return confirmed, nil
 }
 
-// checkRemoteMetadata checks if checkpoint metadata exists on origin/entire/sessions
+// checkRemoteMetadata checks if checkpoint metadata exists on origin/entire/checkpoints/v1
 // and automatically fetches it if available.
 func checkRemoteMetadata(repo *git.Repository, checkpointID id.CheckpointID) error {
 	// Try to get remote metadata branch tree
 	remoteTree, err := strategy.GetRemoteMetadataBranchTree(repo)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Checkpoint '%s' found in commit but session metadata not available\n", checkpointID)
-		fmt.Fprintf(os.Stderr, "The entire/sessions branch may not exist locally or on the remote.\n")
+		fmt.Fprintf(os.Stderr, "The entire/checkpoints/v1 branch may not exist locally or on the remote.\n")
 		return nil //nolint:nilerr // Informational message, not a fatal error
 	}
 
@@ -343,7 +343,7 @@ func checkRemoteMetadata(repo *git.Repository, checkpointID id.CheckpointID) err
 	fmt.Fprintf(os.Stderr, "Fetching session metadata from origin...\n")
 	if err := FetchMetadataBranch(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to fetch metadata: %v\n", err)
-		fmt.Fprintf(os.Stderr, "You can try manually: git fetch origin entire/sessions:entire/sessions\n")
+		fmt.Fprintf(os.Stderr, "You can try manually: git fetch origin entire/checkpoints/v1:entire/checkpoints/v1\n")
 		return NewSilentError(errors.New("failed to fetch metadata"))
 	}
 

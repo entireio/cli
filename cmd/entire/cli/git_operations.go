@@ -379,7 +379,7 @@ func FetchAndCheckoutRemoteBranch(branchName string) error {
 	return CheckoutBranch(branchName)
 }
 
-// FetchMetadataBranch fetches the entire/sessions branch from origin and creates/updates the local branch.
+// FetchMetadataBranch fetches the entire/checkpoints/v1 branch from origin and creates/updates the local branch.
 // This is used when the metadata branch exists on remote but not locally.
 // Uses git CLI instead of go-git for fetch because go-git doesn't use credential helpers,
 // which breaks HTTPS URLs that require authentication.

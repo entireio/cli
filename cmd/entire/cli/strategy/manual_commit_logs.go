@@ -67,7 +67,7 @@ func (s *ManualCommitStrategy) GetSessionInfo() (*SessionInfo, error) {
 }
 
 // GetMetadataRef returns a reference to the metadata for the given checkpoint.
-// For manual-commit strategy, returns the sharded path on entire/sessions branch.
+// For manual-commit strategy, returns the sharded path on entire/checkpoints/v1 branch.
 func (s *ManualCommitStrategy) GetMetadataRef(checkpoint Checkpoint) string {
 	if checkpoint.CheckpointID.IsEmpty() {
 		return ""
@@ -76,7 +76,7 @@ func (s *ManualCommitStrategy) GetMetadataRef(checkpoint Checkpoint) string {
 }
 
 // GetSessionMetadataRef returns a reference to the most recent metadata commit for a session.
-// For manual-commit strategy, metadata lives on the entire/sessions branch.
+// For manual-commit strategy, metadata lives on the entire/checkpoints/v1 branch.
 func (s *ManualCommitStrategy) GetSessionMetadataRef(_ string) string {
 	repo, err := OpenRepository()
 	if err != nil {
@@ -90,13 +90,13 @@ func (s *ManualCommitStrategy) GetSessionMetadataRef(_ string) string {
 		return ""
 	}
 
-	// The tip of entire/sessions contains all condensed sessions
+	// The tip of entire/checkpoints/v1 contains all condensed sessions
 	// Return a reference to it (sessionID is not used as all sessions are on the same branch)
 	return trailers.FormatSourceRef(paths.MetadataBranchName, ref.Hash().String())
 }
 
 // GetSessionContext returns the context.md content for a session.
-// For manual-commit strategy, reads from the entire/sessions branch using the sessions map.
+// For manual-commit strategy, reads from the entire/checkpoints/v1 branch using the sessions map.
 func (s *ManualCommitStrategy) GetSessionContext(sessionID string) string {
 	// Find a checkpoint for this session
 	checkpoints, err := s.getCheckpointsForSession(sessionID)
@@ -184,7 +184,7 @@ func (s *ManualCommitStrategy) GetSessionContext(sessionID string) string {
 }
 
 // GetCheckpointLog returns the session transcript for a specific checkpoint.
-// For manual-commit strategy, metadata is stored at sharded paths on entire/sessions branch.
+// For manual-commit strategy, metadata is stored at sharded paths on entire/checkpoints/v1 branch.
 func (s *ManualCommitStrategy) GetCheckpointLog(checkpoint Checkpoint) ([]byte, error) {
 	if checkpoint.CheckpointID.IsEmpty() {
 		return nil, ErrNoMetadata

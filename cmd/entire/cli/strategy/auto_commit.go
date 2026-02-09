@@ -58,7 +58,7 @@ func commitOrHead(repo *git.Repository, worktree *git.Worktree, msg string, auth
 // - Session logs are committed to a shadow branch (like manual-commit strategy)
 // - Code commits can reference the shadow branch via trailers
 type AutoCommitStrategy struct {
-	// checkpointStore manages checkpoint data on entire/sessions branch
+	// checkpointStore manages checkpoint data on entire/checkpoints/v1 branch
 	checkpointStore *checkpoint.GitStore
 	// checkpointStoreOnce ensures thread-safe lazy initialization
 	checkpointStoreOnce sync.Once
@@ -92,12 +92,12 @@ func (s *AutoCommitStrategy) Name() string {
 }
 
 func (s *AutoCommitStrategy) Description() string {
-	return "Auto-commits code to active branch with metadata on entire/sessions"
+	return "Auto-commits code to active branch with metadata on entire/checkpoints/v1"
 }
 
 // AllowsMainBranch returns true to allow auto-commit strategy on main branch.
 // The strategy creates clean commits with Entire-Checkpoint trailers, and detailed
-// metadata is stored on the separate entire/sessions orphan branch.
+// metadata is stored on the separate entire/checkpoints/v1 orphan branch.
 func (s *AutoCommitStrategy) AllowsMainBranch() bool {
 	return true
 }
@@ -117,7 +117,7 @@ func (s *AutoCommitStrategy) ValidateRepository() error {
 }
 
 // PrePush is called by the git pre-push hook before pushing to a remote.
-// It pushes the entire/sessions branch alongside the user's push.
+// It pushes the entire/checkpoints/v1 branch alongside the user's push.
 // Configuration options (stored in .entire/settings.json under strategy_options.push_sessions):
 //   - "auto": always push automatically
 //   - "prompt" (default): ask user with option to enable auto
@@ -158,11 +158,11 @@ func (s *AutoCommitStrategy) SaveChanges(ctx SaveContext) error {
 		return nil
 	}
 
-	// Step 2: Commit metadata to entire/sessions branch using sharded path
+	// Step 2: Commit metadata to entire/checkpoints/v1 branch using sharded path
 	// Path is <checkpointID[:2]>/<checkpointID[2:]>/ for direct lookup
 	_, err = s.commitMetadataToMetadataBranch(repo, ctx, cpID)
 	if err != nil {
-		return fmt.Errorf("failed to commit metadata to entire/sessions branch: %w", err)
+		return fmt.Errorf("failed to commit metadata to entire/checkpoints/v1 branch: %w", err)
 	}
 
 	// Log checkpoint creation
@@ -236,7 +236,7 @@ func (s *AutoCommitStrategy) commitCodeToActive(repo *git.Repository, ctx SaveCo
 	return commitCodeResult{CommitHash: commitHash, Created: created}, nil
 }
 
-// commitMetadataToMetadataBranch commits session metadata to the entire/sessions branch.
+// commitMetadataToMetadataBranch commits session metadata to the entire/checkpoints/v1 branch.
 // Metadata is stored at sharded path: <checkpointID[:2]>/<checkpointID[2:]>/
 // This allows direct lookup from the checkpoint ID trailer on the code commit.
 // Uses checkpoint.WriteCommitted for git operations.
@@ -282,7 +282,7 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository
 func (s *AutoCommitStrategy) GetRewindPoints(limit int) ([]RewindPoint, error) {
 	// For auto-commit strategy, rewind points are found by looking for Entire-Checkpoint trailers
 	// in the current branch's commit history. The checkpoint ID provides direct lookup
-	// to metadata on entire/sessions branch.
+	// to metadata on entire/checkpoints/v1 branch.
 	repo, err := OpenRepository()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
@@ -380,10 +380,10 @@ func (s *AutoCommitStrategy) GetRewindPoints(limit int) ([]RewindPoint, error) {
 }
 
 // findTaskMetadataPathForCommit looks up the task metadata path for a task checkpoint commit
-// by searching the entire/sessions branch commit history for the checkpoint directory.
+// by searching the entire/checkpoints/v1 branch commit history for the checkpoint directory.
 // Returns ("", nil) if metadata is not found - this is expected for commits without metadata.
 func (s *AutoCommitStrategy) findTaskMetadataPathForCommit(repo *git.Repository, commitSHA, toolUseID string) (string, error) {
-	// Get the entire/sessions branch
+	// Get the entire/checkpoints/v1 branch
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
@@ -453,7 +453,7 @@ func (s *AutoCommitStrategy) PreviewRewind(_ RewindPoint) (*RewindPreview, error
 // EnsureSetup ensures the strategy's required setup is in place.
 // For auto-commit strategy:
 // - Ensure .entire/.gitignore has all required entries
-// - Create orphan entire/sessions branch if it doesn't exist
+// - Create orphan entire/checkpoints/v1 branch if it doesn't exist
 func (s *AutoCommitStrategy) EnsureSetup() error {
 	if err := EnsureEntireGitignore(); err != nil {
 		return err
@@ -464,7 +464,7 @@ func (s *AutoCommitStrategy) EnsureSetup() error {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
 
-	// Ensure the entire/sessions orphan branch exists
+	// Ensure the entire/checkpoints/v1 orphan branch exists
 	if err := EnsureMetadataBranch(repo); err != nil {
 		return fmt.Errorf("failed to ensure metadata branch: %w", err)
 	}
@@ -474,12 +474,12 @@ func (s *AutoCommitStrategy) EnsureSetup() error {
 
 // GetSessionInfo returns session information for linking commits.
 // For auto-commit strategy, we don't track active sessions - metadata is stored on
-// entire/sessions branch when SaveChanges is called. Active branch commits
+// entire/checkpoints/v1 branch when SaveChanges is called. Active branch commits
 // are kept clean (no trailers), so this returns ErrNoSession.
 // Use ListSessions() or GetSession() to retrieve session info from the metadata branch.
 func (s *AutoCommitStrategy) GetSessionInfo() (*SessionInfo, error) {
 	// Dual strategy doesn't track active sessions like shadow does.
-	// Session metadata is stored on entire/sessions branch and can be
+	// Session metadata is stored on entire/checkpoints/v1 branch and can be
 	// retrieved via ListSessions() or GetSession().
 	return nil, ErrNoSession
 }
@@ -487,14 +487,14 @@ func (s *AutoCommitStrategy) GetSessionInfo() (*SessionInfo, error) {
 // SaveTaskCheckpoint creates a checkpoint commit for a completed task.
 // For auto-commit strategy:
 // 1. Commit code changes to active branch (no trailers - clean history)
-// 2. Commit task metadata to entire/sessions branch with checkpoint format
+// 2. Commit task metadata to entire/checkpoints/v1 branch with checkpoint format
 func (s *AutoCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) error {
 	repo, err := OpenRepository()
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
 
-	// Ensure entire/sessions branch exists
+	// Ensure entire/checkpoints/v1 branch exists
 	if err := EnsureMetadataBranch(repo); err != nil {
 		return fmt.Errorf("failed to ensure metadata branch: %w", err)
 	}
@@ -512,10 +512,10 @@ func (s *AutoCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) error
 		return fmt.Errorf("failed to commit task code to active branch: %w", err)
 	}
 
-	// Step 2: Commit task metadata to entire/sessions branch at sharded path
+	// Step 2: Commit task metadata to entire/checkpoints/v1 branch at sharded path
 	_, err = s.commitTaskMetadataToMetadataBranch(repo, ctx, cpID)
 	if err != nil {
-		return fmt.Errorf("failed to commit task metadata to entire/sessions branch: %w", err)
+		return fmt.Errorf("failed to commit task metadata to entire/checkpoints/v1 branch: %w", err)
 	}
 
 	// Log task checkpoint creation
@@ -610,7 +610,7 @@ func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx Ta
 	return commitHash, nil
 }
 
-// commitTaskMetadataToMetadataBranch commits task metadata to the entire/sessions branch.
+// commitTaskMetadataToMetadataBranch commits task metadata to the entire/checkpoints/v1 branch.
 // Uses sharded path: <checkpointID[:2]>/<checkpointID[2:]>/tasks/<tool-use-id>/
 // Returns the metadata commit hash.
 // When IsIncremental is true, only writes the incremental checkpoint file, skipping transcripts.
@@ -678,7 +678,7 @@ func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(repo *git.Reposi
 }
 
 // GetTaskCheckpoint returns the task checkpoint for a given rewind point.
-// For auto-commit strategy, checkpoints are stored on the entire/sessions branch in checkpoint directories.
+// For auto-commit strategy, checkpoints are stored on the entire/checkpoints/v1 branch in checkpoint directories.
 // Returns ErrNotTaskCheckpoint if the point is not a task checkpoint.
 func (s *AutoCommitStrategy) GetTaskCheckpoint(point RewindPoint) (*TaskCheckpoint, error) {
 	if !point.IsTaskCheckpoint {
@@ -690,7 +690,7 @@ func (s *AutoCommitStrategy) GetTaskCheckpoint(point RewindPoint) (*TaskCheckpoi
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 
-	// Get the entire/sessions branch
+	// Get the entire/checkpoints/v1 branch
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
@@ -737,7 +737,7 @@ func (s *AutoCommitStrategy) GetTaskCheckpoint(point RewindPoint) (*TaskCheckpoi
 }
 
 // GetTaskCheckpointTranscript returns the session transcript for a task checkpoint.
-// For auto-commit strategy, transcripts are stored on the entire/sessions branch in checkpoint directories.
+// For auto-commit strategy, transcripts are stored on the entire/checkpoints/v1 branch in checkpoint directories.
 // Returns ErrNotTaskCheckpoint if the point is not a task checkpoint.
 func (s *AutoCommitStrategy) GetTaskCheckpointTranscript(point RewindPoint) ([]byte, error) {
 	if !point.IsTaskCheckpoint {
@@ -749,7 +749,7 @@ func (s *AutoCommitStrategy) GetTaskCheckpointTranscript(point RewindPoint) ([]b
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 
-	// Get the entire/sessions branch
+	// Get the entire/checkpoints/v1 branch
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
@@ -809,7 +809,7 @@ func (s *AutoCommitStrategy) GetTaskCheckpointTranscript(point RewindPoint) ([]b
 	return nil, fmt.Errorf("invalid metadata path format: %s", metadataDir)
 }
 
-// findTaskCheckpointPath finds the full path to a task checkpoint on the entire/sessions branch.
+// findTaskCheckpointPath finds the full path to a task checkpoint on the entire/checkpoints/v1 branch.
 // Searches checkpoint directories for the task checkpoint matching the commit SHA and tool use ID.
 func (s *AutoCommitStrategy) findTaskCheckpointPath(repo *git.Repository, commitSHA, toolUseID string) (string, error) {
 	// Use findTaskMetadataPathForCommit which searches commit history
@@ -829,7 +829,7 @@ func (s *AutoCommitStrategy) findTaskCheckpointPath(repo *git.Repository, commit
 }
 
 // GetMetadataRef returns a reference to the metadata for the given checkpoint.
-// For auto-commit strategy, returns the checkpoint path on entire/sessions branch.
+// For auto-commit strategy, returns the checkpoint path on entire/checkpoints/v1 branch.
 func (s *AutoCommitStrategy) GetMetadataRef(checkpoint Checkpoint) string {
 	if checkpoint.CheckpointID.IsEmpty() {
 		return ""
@@ -848,7 +848,7 @@ func (s *AutoCommitStrategy) GetSessionMetadataRef(sessionID string) string {
 }
 
 // GetSessionContext returns the context.md content for a session.
-// For auto-commit strategy, reads from the entire/sessions branch using the checkpoint store.
+// For auto-commit strategy, reads from the entire/checkpoints/v1 branch using the checkpoint store.
 func (s *AutoCommitStrategy) GetSessionContext(sessionID string) string {
 	session, err := GetSession(sessionID)
 	if err != nil || len(session.Checkpoints) == 0 {
@@ -875,7 +875,7 @@ func (s *AutoCommitStrategy) GetSessionContext(sessionID string) string {
 }
 
 // GetCheckpointLog returns the session transcript for a specific checkpoint.
-// For auto-commit strategy, looks up checkpoint by ID on the entire/sessions branch using the checkpoint store.
+// For auto-commit strategy, looks up checkpoint by ID on the entire/checkpoints/v1 branch using the checkpoint store.
 func (s *AutoCommitStrategy) GetCheckpointLog(cp Checkpoint) ([]byte, error) {
 	if cp.CheckpointID.IsEmpty() {
 		return nil, ErrNoMetadata
@@ -977,7 +977,7 @@ func (s *AutoCommitStrategy) ListOrphanedItems() ([]CleanupItem, error) {
 		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
 	}
 
-	// Get all checkpoints from entire/sessions branch
+	// Get all checkpoints from entire/checkpoints/v1 branch
 	checkpoints, err := cpStore.ListCommitted(context.Background())
 	if err != nil {
 		return []CleanupItem{}, nil //nolint:nilerr // No checkpoints is not an error for cleanup

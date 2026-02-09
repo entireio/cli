@@ -11,7 +11,7 @@ import (
 )
 
 // CheckpointID is a 12-character hex identifier for checkpoints.
-// It's used to link code commits to metadata on the entire/sessions branch.
+// It's used to link code commits to metadata on the entire/checkpoints/v1 branch.
 //
 //nolint:recvcheck // UnmarshalJSON requires pointer receiver, others use value receiver - standard pattern
 type CheckpointID string
@@ -73,7 +73,7 @@ func (id CheckpointID) IsEmpty() bool {
 	return id == EmptyCheckpointID
 }
 
-// Path returns the sharded path for this checkpoint ID on entire/sessions.
+// Path returns the sharded path for this checkpoint ID on entire/checkpoints/v1.
 // Uses first 2 characters as shard (256 buckets), remaining as folder name.
 // Example: "a3b2c4d5e6f7" -> "a3/b2c4d5e6f7"
 func (id CheckpointID) Path() string {
