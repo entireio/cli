@@ -232,6 +232,7 @@ main() {
         echo -e "${YELLOW}!${NC}   1. Remove the old binary: rm ${path_binary}"
         echo -e "${YELLOW}!${NC}   2. Or adjust your PATH to prioritize ${install_dir}"
         echo ""
+        error "Installation completed but PATH isn't correct. Please check then restart the installation."
     elif [[ -z "$path_binary" ]]; then
         echo ""
         echo -e "${YELLOW}!${NC} ${BOLD}WARNING: '${BINARY_NAME}' not found in PATH${NC}"
@@ -242,6 +243,7 @@ main() {
         echo -e "${YELLOW}!${NC} Add to your shell config (.bashrc, .zshrc, etc.):"
         echo -e "${YELLOW}!${NC}   export PATH=\"\$PATH:${install_dir}\""
         echo ""
+        error "Installation completed but PATH isn't correct. Please check then restart the installation."
     fi
 
     info "Running post-install actions..."
