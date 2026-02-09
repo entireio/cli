@@ -2,7 +2,7 @@
   "checkpoint_id": "cff7f96ad60a",
   "strategy": "manual-commit",
   "branch": "alex/ent-258-mid-turn-commits",
-  "checkpoints_count": 0,
+  "checkpoints_count": 1,
   "files_touched": [
     "cmd/entire/cli/hooks.go",
     "cmd/entire/cli/hooks_claudecode_handlers.go",
@@ -11,9 +11,11 @@
     "cmd/entire/cli/logging/logger.go",
     "cmd/entire/cli/reset.go",
     "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
     "cmd/entire/cli/strategy/manual_commit_hooks.go",
     "cmd/entire/cli/strategy/manual_commit_session.go",
     "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/mid_turn_commit_test.go",
     "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go",
     "cmd/entire/cli/strategy/session_state.go",
     "cmd/entire/cli/strategy/session_state_test.go"
@@ -25,13 +27,20 @@
       "context": "/cf/f7f96ad60a/0/context.md",
       "content_hash": "/cf/f7f96ad60a/0/content_hash.txt",
       "prompt": "/cf/f7f96ad60a/0/prompt.txt"
+    },
+    {
+      "metadata": "/cf/f7f96ad60a/1/metadata.json",
+      "transcript": "/cf/f7f96ad60a/1/full.jsonl",
+      "context": "/cf/f7f96ad60a/1/context.md",
+      "content_hash": "/cf/f7f96ad60a/1/content_hash.txt",
+      "prompt": "/cf/f7f96ad60a/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 822,
-    "cache_creation_tokens": 1551874,
-    "cache_read_tokens": 50398424,
-    "output_tokens": 27610,
-    "api_call_count": 467
+    "input_tokens": 2250,
+    "cache_creation_tokens": 1852033,
+    "cache_read_tokens": 60825181,
+    "output_tokens": 30785,
+    "api_call_count": 557
   }
 }
