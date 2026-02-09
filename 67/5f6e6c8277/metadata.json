@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "675f6e6c8277",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-108-add-ai-summaries",
+  "migration_source_commit": "fa634d8b441c1ad794c7b998b2ca50dfbcb87b49",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/summarize.go",
+    "cmd/entire/cli/summarize_claude.go",
+    "cmd/entire/cli/summarize_claude_test.go",
+    "cmd/entire/cli/summarize_test.go",
+    "docs/plans/2026-01-29-ai-summaries-design.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/67/5f6e6c8277/0/metadata.json",
+      "transcript": "/67/5f6e6c8277/0/full.jsonl",
+      "context": "/67/5f6e6c8277/0/context.md",
+      "content_hash": "/67/5f6e6c8277/0/content_hash.txt",
+      "prompt": "/67/5f6e6c8277/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1817,
+    "cache_creation_tokens": 276430,
+    "cache_read_tokens": 7190709,
+    "output_tokens": 693,
+    "api_call_count": 77
+  }
+}

@@ -1,0 +1,153 @@
+Implement the following plan:
+
+# Fix: output_filter not being applied when writing to entire/sessions
+
+## Problem
+
+The `output_filter` setting (e.g., `["gitleaks-filter"]`) is configured in `.entire/settings.json`, but secrets appear in plaintext when viewing `git show entire/sessions/v1:XX/XXXXXXXX/0/full.jsonl`.
+
+## Analysis
+
+### Code Paths Traced
+
+**Shadow Branch Write (`WriteTemporary` in `temporary.go`):**
+1. `buildTreeWithChanges()` is called (line 110)
+2. `addDirectoryToEntriesWithAbsPath()` copies metadata directory files (line 747)
+3. **NO FILTERING** - files are copied directly via `createBlobFromFile()`
+
+**Condensation to entire/sessions (`WriteCommitted` in `committed.go`):**
+1. `writeStandardCheckpointEntries()` is called (line 82)
+2. `writeSessionToSubdirectory()` calls `writeTranscript()` (line 277)
+3. `writeTranscript()` calls `filter.Content()` (line 464) - **SHOULD FILTER**
+
+### Root Cause Hypothesis
+
+The filter IS called in `writeTranscript()` at line 464:
+```go
+filteredTranscript, err := filter.Content(ctx, transcript, paths.TranscriptFileName)
+```
+
+But `filter.Content()` silently returns the original content if settings fail to load:
+```go
+func Content(ctx context.Context, content []byte, filename string) ([]byte, error) {
+    filterCmd := settings.GetOutputFilter()
+    if len(filterCmd) == 0 {
+        return content, nil  // Silent pass-through if no filter configured
+    }
+    return runFilter(ctx, content, filterCmd)
+}
+```
+
+And `settings.GetOutputFilter()` silently returns nil on any settings load failure:
+```go
+func GetOutputFilter() []string {
+    settings, err := Load()
+    if err != nil {
+        return nil  // Silent failure!
+    }
+    return settings.GetOutputFilter()
+}
+```
+
+### Possible Causes
+
+1. **Settings not loading** - `settings.Load()` fails silently (working directory issue, file not found, JSON parse error)
+2. **gitleaks-filter not in PATH** - when hooks run, PATH may differ from interactive shell
+3. **Race condition** - settings cached or stale
+
+## Confirmed Information
+
+- Session was created AFTER output_filter was configured
+- `gitleaks-filter` is in user's PATH (verified with `which`)
+- Manual piping through gitleaks-filter works
+
+## Root Cause
+
+**Git hooks run with a minimal environment that doesn't include the user's full PATH.** When the prepare-commit-msg hook runs (which triggers condensation), the `gitleaks-filter` command may not be found because:
+1. Git hooks don't source `.bashrc`/`.zshrc`
+2. The PATH is minimal (often just `/usr/bin:/bin`)
+
+Additionally, **the filter package has NO LOGGING** - all failures are silent, making this impossible to debug.
+
+## Solution
+
+### 1. Add logging to filter package (`cmd/entire/cli/filter/filter.go`)
+
+Add debug logging so we can see what's happening:
+
+```go
+import (
+    "log/slog"
+    "github.com/entireio/cli/cmd/entire/cli/logging"
+)
+
+func Content(ctx context.Context, content []byte, filename string) ([]byte, error) {
+    filterCmd := settings.GetOutputFilter()
+    if len(filterCmd) == 0 {
+        logging.Debug(ctx, "output filter: no filter configured, passing through")
+        return content, nil
+    }
+
+    logging.Debug(ctx, "output filter: applying filter",
+        slog.String("command", filterCmd[0]),
+        slog.Int("content_size", len(content)))
+
+    filtered, err := runFilter(ctx, content, filterCmd)
+    if err != nil {
+        logging.Warn(ctx, "output filter: filter failed",
+            slog.String("command", filterCmd[0]),
+            slog.String("error", err.Error()))
+        return nil, err
+    }
+
+    logging.Debug(ctx, "output filter: filter applied successfully",
+        slog.Int("original_size", len(content)),
+        slog.Int("filtered_size", len(filtered)))
+
+    return filtered, nil
+}
+```
+
+### 2. Log settings load failures (`cmd/entire/cli/settings/settings.go`)
+
+Change `GetOutputFilter()` to log when settings fail to load:
+
+```go
+func GetOutputFilter() []string {
+    settings, err := Load()
+    if err != nil {
+        // Log the error so we can debug hook environment issues
+        fmt.Fprintf(os.Stderr, "Warning: failed to load settings for output_filter: %v\n", err)
+        return nil
+    }
+    return settings.GetOutputFilter()
+}
+```
+
+### 3. Use absolute path for filter command
+
+When the user specifies a filter command, resolve it to an absolute path at settings load time (or document that users should use absolute paths in output_filter for hook compatibility).
+
+## Files to Modify
+
+1. **`cmd/entire/cli/filter/filter.go`** - Add logging
+2. **`cmd/entire/cli/settings/settings.go`** - Log settings load failures
+
+## Verification
+
+1. After changes, create a new session with a secret
+2. Make a commit to trigger condensation
+3. Check `.entire/logs/` for filter-related log messages
+4. Verify `git show entire/sessions/v1:XX/XXXXXXXX/0/full.jsonl` has redacted secrets
+
+## Workaround for User
+
+Until fixed, user can use absolute path in settings:
+```json
+{
+  "output_filter": ["/absolute/path/to/gitleaks-filter"]
+}
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/paul/.REDACTED.jsonl

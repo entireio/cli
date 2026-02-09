@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "818cdec7d352",
+  "strategy": "manual-commit",
+  "branch": "20260209-postinstall-and-completions",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/81/8cdec7d352/0/metadata.json",
+      "transcript": "/81/8cdec7d352/0/full.jsonl",
+      "context": "/81/8cdec7d352/0/context.md",
+      "content_hash": "/81/8cdec7d352/0/content_hash.txt",
+      "prompt": "/81/8cdec7d352/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1584,
+    "cache_creation_tokens": 110912,
+    "cache_read_tokens": 1817670,
+    "output_tokens": 4353,
+    "api_call_count": 35
+  }
+}

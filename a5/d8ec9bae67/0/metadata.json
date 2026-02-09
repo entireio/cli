@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "a5d8ec9bae67",
+  "session_id": "2026-01-15-43b2bd6e-ccc5-4d83-bbe5-9cd1cd19cc82",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-15T23:41:35.753643+01:00",
+  "files_touched": [
+    "cmd/entire/cli/commit_message.go",
+    "cmd/entire/cli/commit_message_test.go",
+    "cmd/entire/cli/git_operations.go",
+    "cmd/entire/cli/list.go",
+    "cmd/entire/cli/list/actions.go",
+    "cmd/entire/cli/list/data.go",
+    "cmd/entire/cli/list/model.go",
+    "cmd/entire/cli/list/tree.go",
+    "cmd/entire/cli/list/view.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/rewind.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/session_restore.go"
+  ],
+  "steps_count": 14,
+  "agent": "Claude Code"
+}

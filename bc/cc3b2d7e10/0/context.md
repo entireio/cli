@@ -1,0 +1,23 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+I tried now `entire enable` in an empty directory and I get: "Error: failed to install git hooks: not a git repository" and then it outputs the usage of the cli for enable (which isn't helpful) so let's have a similar messaging and don't show how to use `entire enable` help
+
+### Prompt 2
+
+❯ entire enable
+Please run 'entire enable' from within a git repository.
+Error: not a git repository
+not a git repository
+
+### Prompt 3
+
+I wonder if this is maintainable, I'm pretty sure we silenced now other errors that were depending on the fmt.Fprintln in main.go. Maybe it's a better idea to print unique error messages in main.go depending on what the error raised is?
+
+### Prompt 4
+
+can you add something to CLAUDE.md about this?
+

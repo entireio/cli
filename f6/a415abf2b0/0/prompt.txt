@@ -1,0 +1,77 @@
+Implement the following plan:
+
+# ENT-232: Track Last Interaction Time for Sessions
+
+## Summary
+
+Add a `LastInteractionAt` timestamp to session state, updated on every user prompt submit (via `InitializeSession`), and display it in `entire status`.
+
+## Key Insight
+
+Both agents (Claude Code and Gemini CLI) already call `InitializeSession` on every user prompt submit:
+- Claude Code: `captureInitialState()` → `initializer.InitializeSession(...)`
+- Gemini CLI: `handleGeminiBeforeAgent()` → `initializer.InitializeSession(...)`
+
+So updating `InitializeSession` in both strategies covers all agents without any hook changes.
+
+## Changes
+
+### 1. Add `LastInteractionAt` field to both state types
+
+**`cmd/entire/cli/strategy/manual_commit_types.go:35`** — `SessionState` struct:
+```go
+LastInteractionAt *time.Time `json:"last_interaction_at,omitempty"` // Last user prompt submit time
+```
+Add after `EndedAt` field (line 35).
+
+**`cmd/entire/cli/session/state.go:45`** — `State` struct:
+```go
+LastInteractionAt *time.Time `json:"last_interaction_at,omitempty"` // Last user prompt submit time
+```
+Add after `EndedAt` field (line 45). Both types must stay in sync (same JSON files).
+
+### 2. Set timestamp in manual-commit `InitializeSession`
+
+**`cmd/entire/cli/strategy/manual_commit_hooks.go`**:
+- Existing session branch (~line 799): add `now := time.Now(); state.LastInteractionAt = &now` (already saves at end)
+- New session branch: set in `initializeSession()` helper at `manual_commit_session.go:222` alongside `StartedAt`
+
+### 3. Set timestamp in auto-commit `InitializeSession`
+
+**`cmd/entire/cli/strategy/auto_commit.go`**:
+- Existing session branch (~line 926): set `existing.LastInteractionAt = &now` (ensure save happens — currently only saves when backfilling FirstPrompt, need to always save)
+- New session branch (~line 939): set `LastInteractionAt` in initial state struct
+
+### 4. Redesign status session output
+
+**`cmd/entire/cli/status.go:252-272`** — `writeActiveSessions`:
+
+Current format (single line):
+```
+    [Claude Code] abc1234 "first prompt text..." started 5m ago
+```
+
+New format (two lines, prompt on second line indented):
+```
+    [Claude Code] abc1234  started 2h ago, active 5m ago
+      "first prompt text..."
+```
+
+- Line 1: agent label, short ID, started time, and last-active time
+- Line 2: first prompt (indented further), only shown if prompt is non-empty
+- Show "active X ago" only when `LastInteractionAt` is set and differs from `StartedAt` by more than ~1 minute (skip for first prompt where they'd be nearly identical)
+
+## Tests
+
+- `strategy/session_state_test.go`: Verify `LastInteractionAt` round-trips through JSON
+- `strategy/auto_commit_test.go`: Verify `InitializeSession` sets `LastInteractionAt` on both new and existing sessions
+- `cmd/entire/cli/status_test.go`: Verify status output includes last-active time (if test file exists)
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl

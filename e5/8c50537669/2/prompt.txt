@@ -1,0 +1,43 @@
+TestResume_LocalLogNewerTimestamp <- I think there's a problem with this integration test where it expects some input from the command line to continue - it's in `cmd/entire/cli/integration_test/resume_test.go`
+
+---
+
+when you run it, are you in non-interactive mode?
+
+when I run it via `go test -v --tags=integration ./cmd/entire/cli/integration_test -run TestResume_LocalLogNewerTimestamp` it seems to hang until I hit enter
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+let's break out a new branch first please
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+can we talk about what we're doing first?
+
+---
+
+which line in the code is prompting the user interactively?
+
+---
+
+so...if we're reading this correctly, the `env.RunResume` does nothing right now, yeah?
+
+---
+
+if there were a way to test the interactive form, then in theory we could split this test yeah?
+
+---
+
+but we are missing 'we show the user an interactive prompt to proceed' (both yes and no cases)?
+
+---
+
+okay, let's do the split as you've detailed above first

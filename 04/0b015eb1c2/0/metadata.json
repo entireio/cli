@@ -1,0 +1,19 @@
+{
+  "checkpoint_id": "040b015eb1c2",
+  "session_id": "2026-01-10-559081d6-534c-40b9-afeb-5eb72cd84309",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-10T22:38:02.958999+01:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/opencode/opencode.go",
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_opencode_handlers.go",
+    "cmd/entire/cli/hooks_opencode_transcript.go",
+    "cmd/entire/cli/utils.go",
+    "docs/README-opencode-integration.md",
+    "docs/opencode-integration-decisions.md",
+    "docs/opencode-integration-findings.md",
+    "docs/opencode-integration-plan.md"
+  ]
+}

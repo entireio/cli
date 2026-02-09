@@ -1,0 +1,23 @@
+{
+  "checkpoint_id": "7021395bfde9",
+  "session_id": "2026-01-25-f736da47-b2ca-4f86-bb32-a1bbe582e464",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-25T12:29:02.861769+01:00",
+  "branch": "soph/fix-session-date-change-bug",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/paths/paths.go",
+    "cmd/entire/cli/sessionid/sessionid_test.go",
+    "cmd/entire/cli/validation/validators_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "77a945a3-c68c-4802-a5a3-e199de088087",
+  "transcript_lines_at_start": 149,
+  "token_usage": {
+    "input_tokens": 784,
+    "cache_creation_tokens": 213017,
+    "cache_read_tokens": 2416586,
+    "output_tokens": 98,
+    "api_call_count": 47
+  }
+}

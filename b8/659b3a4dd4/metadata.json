@@ -1,0 +1,46 @@
+{
+  "checkpoint_id": "b8659b3a4dd4",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-112-checkpoint-id-reuse-bug",
+  "migration_source_commit": "de390c1a41aaadb850af490bac33b4d81b96cc9a",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/agent.go",
+    "cmd/entire/cli/agent/claudecode/claude.go",
+    "cmd/entire/cli/agent/claudecode/transcript.go",
+    "cmd/entire/cli/agent/geminicli/gemini.go",
+    "cmd/entire/cli/agent/geminicli/transcript.go",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/integration_test/explain_test.go",
+    "cmd/entire/cli/integration_test/last_checkpoint_id_test.go",
+    "cmd/entire/cli/integration_test/mid_session_commit_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b8/659b3a4dd4/0/metadata.json",
+      "transcript": "/b8/659b3a4dd4/0/full.jsonl",
+      "context": "/b8/659b3a4dd4/0/context.md",
+      "content_hash": "/b8/659b3a4dd4/0/content_hash.txt",
+      "prompt": "/b8/659b3a4dd4/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1360,
+    "cache_creation_tokens": 683292,
+    "cache_read_tokens": 18290406,
+    "output_tokens": 372,
+    "api_call_count": 169
+  }
+}

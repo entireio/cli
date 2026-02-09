@@ -1,0 +1,98 @@
+Implement the following plan:
+
+# ENT-259: Fix attribution in deferred condensation
+
+## Context
+
+When the agent commits mid-turn (ACTIVE → ACTIVE_COMMITTED), PostCommit migration updates `state.BaseCommit` to the new HEAD. Later when `handleTurnEndCondense` runs at Stop, `calculateSessionAttributions` uses `state.BaseCommit` for the base tree. Since `state.BaseCommit` now equals HEAD, `baseTree == headTree` and the diff is zero — attribution shows no changes.
+
+The root cause: `BaseCommit` serves two purposes (shadow branch naming + attribution reference) but they diverge during deferred condensation. Migration must update it for shadow branch lookup, but attribution needs the original value.
+
+## Plan
+
+### 1. Add `AttributionBaseCommit` field to `session.State`
+
+**File:** `cmd/entire/cli/session/state.go`
+
+Add after `BaseCommit`:
+```go
+// AttributionBaseCommit is the commit used as the reference point for attribution calculations.
+// Unlike BaseCommit (which tracks the shadow branch and moves with migration), this field
+// preserves the original base commit so deferred condensation can correctly calculate
+// agent vs human line attribution. Updated only after successful condensation.
+AttributionBaseCommit string `json:"attribution_base_commit,omitempty"`
+```
+
+### 2. Set `AttributionBaseCommit` at session initialization
+
+**File:** `cmd/entire/cli/strategy/manual_commit_session.go:220`
+
+In `initializeSession`, set `AttributionBaseCommit` alongside `BaseCommit`:
+```go
+state := &SessionState{
+    ...
+    BaseCommit:            head.Hash().String(),
+    AttributionBaseCommit: head.Hash().String(), // NEW
+    ...
+}
+```
+
+### 3. Update `AttributionBaseCommit` after successful condensation
+
+**File:** `cmd/entire/cli/strategy/manual_commit_hooks.go` — `condenseAndUpdateState()`
+
+After the existing `state.BaseCommit = head.Hash().String()` (line ~720), add:
+```go
+state.AttributionBaseCommit = head.Hash().String()
+```
+
+This ensures the attribution base moves forward only after condensation captures the data.
+
+### 4. Use `AttributionBaseCommit` in `calculateSessionAttributions`
+
+**File:** `cmd/entire/cli/strategy/manual_commit_condensation.go` — `calculateSessionAttributions()`
+
+Change line ~231 from:
+```go
+if baseCommit, baseErr := repo.CommitObject(plumbing.NewHash(state.BaseCommit)); baseErr == nil {
+```
+to:
+```go
+attrBase := state.AttributionBaseCommit
+if attrBase == "" {
+    attrBase = state.BaseCommit // backward compat
+}
+if baseCommit, baseErr := repo.CommitObject(plumbing.NewHash(attrBase)); baseErr == nil {
+```
+
+### 5. Write a test for deferred condensation attribution
+
+**File:** `cmd/entire/cli/strategy/phase_postcommit_test.go`
+
+Extend `TestTurnEnd_ActiveCommitted_CondensesSession` (or add a new test) to verify:
+- After PostCommit migration, `state.BaseCommit != state.AttributionBaseCommit`
+- After deferred condensation, the attribution in the checkpoint metadata has non-zero agent lines
+- After condensation completes, `state.AttributionBaseCommit` is updated to match `state.BaseCommit`
+
+## Key files to modify
+
+1. `cmd/entire/cli/session/state.go` — Add field
+2. `cmd/entire/cli/strategy/manual_commit_session.go` — Set at init
+3. `cmd/entire/cli/strategy/manual_commit_hooks.go` — Update after condensation
+4. `cmd/entire/cli/strategy/manual_commit_condensation.go` — Use for attribution
+5. `cmd/entire/cli/strategy/phase_postcommit_test.go` — Test
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+Also verify `TestTurnEnd_ActiveCommitted_CondensesSession` specifically passes with attribution verification.
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+
+---
+
+commit this

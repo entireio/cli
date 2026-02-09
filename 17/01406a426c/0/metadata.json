@@ -1,0 +1,14 @@
+{
+  "checkpoint_id": "1701406a426c",
+  "session_id": "2026-01-20-c2b51eb0-d0e9-43cf-b431-42c05d49450b",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-20T10:58:02.074533+11:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gitignore",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "docs/requirements/explain-task3/review-01.md"
+  ],
+  "agent": "Agent"
+}

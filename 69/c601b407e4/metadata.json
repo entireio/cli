@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "69c601b407e4",
+  "strategy": "manual-commit",
+  "branch": "claude/setup-dns-mise-xqmU7",
+  "migration_source_commit": "67efb660420562bc9e33f3828e5e1853cbe8647e",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".claude/scripts/remote-setup.sh",
+    ".claude/settings.json",
+    "CLAUDE.md",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/strategy/hooks_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/69/c601b407e4/0/metadata.json",
+      "transcript": "/69/c601b407e4/0/full.jsonl",
+      "context": "/69/c601b407e4/0/context.md",
+      "content_hash": "/69/c601b407e4/0/content_hash.txt",
+      "prompt": "/69/c601b407e4/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2555,
+    "cache_creation_tokens": 537880,
+    "cache_read_tokens": 4289124,
+    "output_tokens": 191,
+    "api_call_count": 75
+  }
+}

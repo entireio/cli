@@ -1,0 +1,11 @@
+{
+  "checkpoint_id": "0eb1f888e8b8",
+  "session_id": "2026-01-10-b9bdbf44-cc66-4b63-bf50-e2ace00d58e7",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-10T22:25:32.186014+01:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_opencode_handlers.go",
+    "cmd/entire/cli/hooks_opencode_transcript.go"
+  ]
+}

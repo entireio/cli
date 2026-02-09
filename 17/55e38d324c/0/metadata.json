@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "1755e38d324c",
+  "session_id": "47a78253-7d91-4be2-bfd3-f5ac53c9195b",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-03T04:33:22.414149Z",
+  "branch": "gtrrz-victor/alt-better-multi-session-flow",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/hooks.go",
+    "cmd/entire/cli/integration_test/session_conflict_test.go"
+  ],
+  "agent": "Agent",
+  "token_usage": {
+    "input_tokens": 24,
+    "cache_creation_tokens": 61658,
+    "cache_read_tokens": 1570984,
+    "output_tokens": 105,
+    "api_call_count": 22
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-03T04:33:22.335615Z",
+    "agent_lines": 138,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 138,
+    "agent_percentage": 100
+  }
+}

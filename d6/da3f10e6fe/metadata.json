@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "d6da3f10e6fe",
+  "strategy": "manual-commit",
+  "branch": "soph/constanize-agents",
+  "migration_source_commit": "d48fc12ff5fc3c23abb8a9eae2db211f5da99193",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/chunking.go",
+    "cmd/entire/cli/agent/registry.go",
+    "docs/requirements/soph-chunking/review-01.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d6/da3f10e6fe/0/metadata.json",
+      "transcript": "/d6/da3f10e6fe/0/full.jsonl",
+      "context": "/d6/da3f10e6fe/0/context.md",
+      "content_hash": "/d6/da3f10e6fe/0/content_hash.txt",
+      "prompt": "/d6/da3f10e6fe/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 336,
+    "cache_creation_tokens": 34021,
+    "cache_read_tokens": 861482,
+    "output_tokens": 3640,
+    "api_call_count": 15
+  }
+}

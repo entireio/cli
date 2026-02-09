@@ -1,0 +1,8 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+Replace the custom string contains implementation with the standard library's strings.Contains function. The contains and containsSubstring functions are unnecessarily complex reimplementations of functionality that already exists in the standard library. Import strings and use strings.Contains(msg, "unknown field") directly.
+

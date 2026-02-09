@@ -1,0 +1,35 @@
+{
+  "checkpoint_id": "f9e69d99c484",
+  "session_id": "dfbb4922-3529-4eab-a5dc-3c8d30b7c660",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-04T01:06:58.325313Z",
+  "branch": "alex/investigate-stop-slowness",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/transcript.go",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "docs/plans/2026-02-04-stop-hook-performance.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "e0c1a02b-62da-4318-b542-75f847e17d49",
+  "transcript_lines_at_start": 693,
+  "token_usage": {
+    "input_tokens": 348,
+    "cache_creation_tokens": 800929,
+    "cache_read_tokens": 9635421,
+    "output_tokens": 703,
+    "api_call_count": 108
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-04T01:06:58.175357Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 210,
+    "human_removed": 213,
+    "total_committed": 207,
+    "agent_percentage": 0
+  }
+}

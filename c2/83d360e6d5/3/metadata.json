@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "c283d360e6d5",
+  "session_id": "2026-01-20-250f24a9-9cb5-4265-b13e-a9d193df03b8",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-20T11:05:51.107944+01:00",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/transcript.go",
+    "cmd/entire/cli/agent/claudecode/transcript_test.go",
+    "cmd/entire/cli/agent/claudecode/types.go",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/hooks.go",
+    "cmd/entire/cli/integration_test/session_conflict_test.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/strategy.go",
+    "cmd/entire/cli/transcript.go",
+    "cmd/entire/cli/transcript_test.go",
+    "cmd/entire/cli/types.go"
+  ],
+  "agent": "Claude Code"
+}
