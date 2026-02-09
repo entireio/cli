@@ -55,6 +55,7 @@ func (c *ClaudeCodeAgent) GetHookNames() []string {
 var entireHookPrefixes = []string{
 	"entire ",
 	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go ",
+	"bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh ",
 }
 
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
@@ -344,6 +345,7 @@ func (c *ClaudeCodeAgent) AreHooksInstalled() bool {
 	// Check for at least one of our hooks (new or old format)
 	return hookCommandExists(settings.Hooks.Stop, "entire hooks claude-code stop") ||
 		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code stop") ||
+		hookCommandExists(settings.Hooks.Stop, "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code stop") ||
 		// Backwards compatibility: check for old hook formats
 		hookCommandExists(settings.Hooks.Stop, "entire hooks claudecode stop") ||
 		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claudecode stop") ||
