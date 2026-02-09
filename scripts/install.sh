@@ -209,17 +209,43 @@ main() {
         echo ""
         error "Installation completed but PATH needs adjustment. Then, rerun the installation."
     elif [[ -z "$path_binary" ]]; then
-        # This case is kind of benign - a first-time user might not have ~/.local/bin on their
-        # $PATH.  Be nice to them.
+        # First-time install: ~/.local/bin likely isn't on their PATH yet.
+        # Detect their shell and show the right config file.
+        local shell_name shell_config
+        shell_name="$(basename "${SHELL:-}")"
+        case "$shell_name" in
+            zsh)  shell_config="~/.zshrc" ;;
+            bash)
+                if [[ -f "$HOME/.bash_profile" ]]; then
+                    shell_config="~/.bash_profile"
+                else
+                    shell_config="~/.bashrc"
+                fi
+                ;;
+            fish) shell_config="~/.config/fish/config.fish" ;;
+            *)    shell_config="" ;;
+        esac
+
         echo ""
-        echo -e "${YELLOW}!${NC} ${BOLD}WARNING: 'entire' not found in PATH${NC}"
-        echo -e "${YELLOW}!${NC}"
-        echo -e "${YELLOW}!${NC} Installed to: ${install_path}"
-        echo -e "${YELLOW}!${NC} But this directory is not in your PATH."
-        echo -e "${YELLOW}!${NC}"
-        echo -e "${YELLOW}!${NC}   echo 'export PATH=\"${install_dir}:\$PATH\"' >> ~/.zshrc"
+        success "Entire CLI installed to ${install_path}"
         echo ""
-        echo "Once you have adjusted your PATH config, rerun installation to complete."
+        echo -e "  ${YELLOW}Almost there!${NC} Add it to your PATH so you can run ${BOLD}entire${NC} from anywhere."
+        echo ""
+        if [[ "$shell_name" == "fish" ]]; then
+            echo -e "  Run this, then restart your terminal:"
+            echo ""
+            echo -e "    ${BOLD}fish_add_path ${install_dir}${NC}"
+        elif [[ -n "$shell_config" ]]; then
+            echo -e "  Run this, then restart your terminal:"
+            echo ""
+            echo -e "    ${BOLD}echo 'export PATH=\"${install_dir}:\$PATH\"' >> ${shell_config}${NC}"
+        else
+            echo -e "  Add this to your shell config, then restart your terminal:"
+            echo ""
+            echo -e "    ${BOLD}export PATH=\"${install_dir}:\$PATH\"${NC}"
+        fi
+        echo ""
+        echo -e "  Then run ${BOLD}entire${NC} to get started."
         exit 0
     fi
 
