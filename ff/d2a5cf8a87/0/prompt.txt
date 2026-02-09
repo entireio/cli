@@ -1,0 +1,65 @@
+Implement the following plan:
+
+# Move shell completion prompt from `enable` to new `curl-bash-post-install` command
+
+## Context
+
+The CLI's `enable` command currently includes an optional shell-completion installation prompt. Now that we have an `install.sh` script (curl|bash installer) that calls `entire curl-bash-post-install` after installing the binary, we need a dedicated hidden command for that post-install step. For now it should just do the interactive completion prompt. We'll remove the completion logic from `enable`.
+
+## Changes
+
+### 1. Create `newCurlBashPostInstallCmd()` in `cmd/entire/cli/setup.go`
+
+Add a new hidden cobra command:
+- `Use: "curl-bash-post-install"`
+- `Hidden: true`
+- `RunE` calls `promptShellCompletion(cmd.OutOrStdout())`
+- Errors from `promptShellCompletion` are non-fatal (print note, return nil) — same pattern used today in `runEnableInteractive`
+
+### 2. Register the command in `cmd/entire/cli/root.go`
+
+Add `cmd.AddCommand(newCurlBashPostInstallCmd())` alongside the other commands.
+
+### 3. Remove shell completion logic from `enable`
+
+In `setup.go`:
+- **`runEnableWithStrategy`**: Remove the `if setupShell { ... }` block (lines 243-249)
+- **`runEnableInteractive`**: Remove the entire completion block (lines 353-365)
+- **`newEnableCmd`**: Remove the `setupShell` variable, the `--setup-shell` flag registration (line 96), and the `setupShell` parameter from calls to `runEnableWithStrategy` and `runEnableInteractive`
+- Update function signatures of `runEnableWithStrategy` and `runEnableInteractive` to drop the `setupShell` parameter
+
+### 4. Keep shared helpers in place
+
+These functions are used by both the old and new code and stay where they are in `setup.go`:
+- `promptShellCompletion` — used by the new command
+- `setupShellCompletionNonInteractive` — keep for now (could be useful later)
+- `isCompletionConfigured`
+- `appendShellCompletion`
+- `shellCompletionComment`
+
+## Files to modify
+
+- `cmd/entire/cli/setup.go` — add new command function, remove completion from enable flows
+- `cmd/entire/cli/root.go` — register new command
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+Then manually test:
+- `entire curl-bash-post-install` prompts for shell completion
+- `entire enable` no longer prompts for or mentions shell completion
+- `entire help` does not show `curl-bash-post-install`
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/paul/.REDACTED.jsonl
+
+---
+
+commit.
+
+---
+
+One more thing, when installing Zsh completions, let's also add `autoload -Uz compinit && compinit` before our `source ...`
