@@ -1,0 +1,40 @@
+{
+  "checkpoint_id": "13db96e5c261",
+  "session_id": "e4599950-b028-44fb-a2d5-ca8caffa2c3d",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T12:35:34.562672Z",
+  "branch": "soph/allow-dogfood-local-dev",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".claude/scripts/README.md",
+    ".claude/scripts/entire-wrapper.sh",
+    ".claude/scripts/test-hook-duplicate.sh",
+    ".claude/settings.json",
+    ".claude/settings.local.json.example",
+    ".claude/test-settings.json",
+    ".claude/test-settings.local.json",
+    ".env.example",
+    "cmd/entire/cli/agent/claudecode/hooks.go",
+    "docs/SETUP-LOCAL-DEV.md",
+    "docs/hook-wrapper-migration.md",
+    "docs/local-development.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "1eca14e3-86bc-4737-88e1-1b8813ab80e4",
+  "token_usage": {
+    "input_tokens": 6109,
+    "cache_creation_tokens": 675629,
+    "cache_read_tokens": 4819079,
+    "output_tokens": 163,
+    "api_call_count": 74
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T12:35:34.356818Z",
+    "agent_lines": 3,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 3,
+    "agent_percentage": 100
+  }
+}

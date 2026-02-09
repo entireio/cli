@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "02d49af5bfe0",
+  "session_id": "27cea022-4cdb-4ef6-b69f-7c858dc48c41",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T13:49:30.993527Z",
+  "branch": "soph/fix-midsession-commit",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/mid_session_commit_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "b42da9ee-d4c0-46bf-ab4d-7f0303ac1541",
+  "token_usage": {
+    "input_tokens": 2967,
+    "cache_creation_tokens": 357890,
+    "cache_read_tokens": 12102546,
+    "output_tokens": 6357,
+    "api_call_count": 113
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T13:49:30.74613Z",
+    "agent_lines": 0,
+    "human_added": 214,
+    "human_modified": 21,
+    "human_removed": 0,
+    "total_committed": 214,
+    "agent_percentage": 0
+  }
+}
