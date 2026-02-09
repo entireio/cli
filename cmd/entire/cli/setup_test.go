@@ -671,36 +671,55 @@ func TestShellCompletionTarget(t *testing.T) {
 
 func TestInstallShellCompletion(t *testing.T) {
 	tests := []struct {
-		name           string
-		rcFileRelPath  string
-		completionLine string
-		preExisting    string // existing content in rc file; empty means file doesn't exist
-		createParent   bool   // whether parent dir already exists
+		name          string
+		rcFileRelPath string
+		completion    string
+		preExisting   string // existing content in rc file; empty means file doesn't exist
+		createParent  bool   // whether parent dir already exists
+		want          string
 	}{
 		{
-			name:           "zsh_new_file",
-			rcFileRelPath:  ".zshrc",
-			completionLine: "source <(entire completion zsh)",
-			createParent:   true,
+			name:         "zsh_new_file",
+			rcFileRelPath: ".zshrc",
+			completion:   "source <(entire completion zsh)",
+			createParent: true,
+			want: `# BEGIN entire-cli (v1)
+source <(entire completion zsh)
+# END entire-cli
+`,
 		},
 		{
-			name:           "zsh_existing_file",
-			rcFileRelPath:  ".zshrc",
-			completionLine: "source <(entire completion zsh)",
-			preExisting:    "# existing zshrc content\n",
-			createParent:   true,
+			name:         "zsh_existing_file",
+			rcFileRelPath: ".zshrc",
+			completion:   "source <(entire completion zsh)",
+			preExisting:  "# existing zshrc content\n",
+			createParent: true,
+			want: `# existing zshrc content
+
+# BEGIN entire-cli (v1)
+source <(entire completion zsh)
+# END entire-cli
+`,
 		},
 		{
-			name:           "fish_no_parent_dir",
-			rcFileRelPath:  filepath.Join(".config", "fish", "config.fish"),
-			completionLine: "entire completion fish | source",
-			createParent:   false,
+			name:         "fish_no_parent_dir",
+			rcFileRelPath: filepath.Join(".config", "fish", "config.fish"),
+			completion:   "entire completion fish | source",
+			createParent: false,
+			want: `# BEGIN entire-cli (v1)
+entire completion fish | source
+# END entire-cli
+`,
 		},
 		{
-			name:           "fish_existing_dir",
-			rcFileRelPath:  filepath.Join(".config", "fish", "config.fish"),
-			completionLine: "entire completion fish | source",
-			createParent:   true,
+			name:         "fish_existing_dir",
+			rcFileRelPath: filepath.Join(".config", "fish", "config.fish"),
+			completion:   "entire completion fish | source",
+			createParent: true,
+			want: `# BEGIN entire-cli (v1)
+entire completion fish | source
+# END entire-cli
+`,
 		},
 	}
 
@@ -720,46 +739,19 @@ func TestInstallShellCompletion(t *testing.T) {
 				}
 			}
 
-			if err := installShellCompletion(rcFile, tt.completionLine); err != nil {
+			if err := installShellCompletion(rcFile, tt.completion); err != nil {
 				t.Fatalf("installShellCompletion() error: %v", err)
 			}
 
-			// Verify the file was created and contains the stanza.
 			data, err := os.ReadFile(rcFile)
 			if err != nil {
 				t.Fatalf("reading rc file: %v", err)
 			}
-			content := string(data)
-
-			// Verify stanza markers are present
-			if !strings.Contains(content, "# BEGIN "+stanzaName) {
-				t.Error("rc file missing stanza BEGIN marker")
-			}
-			if !strings.Contains(content, "# END "+stanzaName) {
-				t.Error("rc file missing stanza END marker")
-			}
-			if !strings.Contains(content, tt.completionLine) {
-				t.Errorf("rc file missing completion line %q", tt.completionLine)
+			if got := string(data); got != tt.want {
+				t.Errorf("rc file content:\ngot:\n%s\nwant:\n%s", got, tt.want)
 			}
 
-			// Verify stanza can be found
-			version, body, found := FindStanza(content, stanzaName)
-			if !found {
-				t.Fatal("stanza not found after install")
-			}
-			if version != stanzaVersion {
-				t.Errorf("stanza version = %d, want %d", version, stanzaVersion)
-			}
-			if body != tt.completionLine {
-				t.Errorf("stanza body = %q, want %q", body, tt.completionLine)
-			}
-
-			// Verify pre-existing content is preserved
-			if tt.preExisting != "" && !strings.Contains(content, strings.TrimRight(tt.preExisting, "\n")) {
-				t.Error("pre-existing content was overwritten")
-			}
-
-			// Verify parent directory exists.
+			// Verify parent directory was created.
 			info, err := os.Stat(filepath.Dir(rcFile))
 			if err != nil {
 				t.Fatalf("stat parent dir: %v", err)
@@ -774,12 +766,12 @@ func TestInstallShellCompletion(t *testing.T) {
 func TestInstallShellCompletion_MigratesLegacy(t *testing.T) {
 	home := t.TempDir()
 	rcFile := filepath.Join(home, ".zshrc")
-	legacy := `export PATH=/usr/bin
+	initial := `export PATH=/usr/bin
 
 # Entire CLI shell completion
 source <(entire completion zsh)
 `
-	if err := os.WriteFile(rcFile, []byte(legacy), 0o644); err != nil {
+	if err := os.WriteFile(rcFile, []byte(initial), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -791,25 +783,14 @@ source <(entire completion zsh)
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := string(data)
+	want := `export PATH=/usr/bin
 
-	// Legacy comment should be gone
-	if strings.Contains(content, legacyCompletionComment) {
-		t.Error("legacy comment should be removed after migration")
-	}
-
-	// Stanza should be present
-	version, _, found := FindStanza(content, stanzaName)
-	if !found {
-		t.Fatal("stanza should be present after migration")
-	}
-	if version != stanzaVersion {
-		t.Errorf("stanza version = %d, want %d", version, stanzaVersion)
-	}
-
-	// Pre-existing content preserved
-	if !strings.Contains(content, "export PATH=/usr/bin") {
-		t.Error("pre-existing content should be preserved")
+# BEGIN entire-cli (v1)
+source <(entire completion zsh)
+# END entire-cli
+`
+	if got := string(data); got != want {
+		t.Errorf("rc file content:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 }
 
@@ -880,13 +861,12 @@ func TestRemoveShellCompletion(t *testing.T) {
 	}
 
 	// Remove stanza format
-	stanza := `export A=1
+	if err := os.WriteFile(rcFile, []byte(`export A=1
 
 # BEGIN entire-cli (v1)
 source <(entire completion zsh)
 # END entire-cli
-`
-	if err := os.WriteFile(rcFile, []byte(stanza), 0o644); err != nil {
+`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	modified, err = removeShellCompletion(rcFile)
@@ -900,20 +880,16 @@ source <(entire completion zsh)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "# BEGIN entire-cli") {
-		t.Error("stanza should be removed from file")
-	}
-	if !strings.Contains(string(data), "export A=1") {
-		t.Error("other content should be preserved")
+	if got, want := string(data), "export A=1\n"; got != want {
+		t.Errorf("after removing stanza:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 
 	// Remove legacy format
-	legacy := `export B=2
+	if err := os.WriteFile(rcFile, []byte(`export B=2
 
 # Entire CLI shell completion
 source <(entire completion zsh)
-`
-	if err := os.WriteFile(rcFile, []byte(legacy), 0o644); err != nil {
+`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	modified, err = removeShellCompletion(rcFile)
@@ -927,11 +903,8 @@ source <(entire completion zsh)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), legacyCompletionComment) {
-		t.Error("legacy comment should be removed")
-	}
-	if !strings.Contains(string(data), "export B=2") {
-		t.Error("other content should be preserved")
+	if got, want := string(data), "export B=2\n"; got != want {
+		t.Errorf("after removing legacy:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 
 	// No completion present — not modified
