@@ -1,0 +1,5 @@
+I'd like to word the Gemini Preview section in README.md a bit better, can you write something in the line of: 
+
+- Is currently in Preview
+- can work instead of claude but also parallel to claude (you can have both hooks enabled)
+- If you find something isn't working with Gemini please open an issue

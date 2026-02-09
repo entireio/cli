@@ -1,0 +1,106 @@
+Implement the following plan:
+
+# Plan: Simplify `entire enable` Onboarding Flow
+
+## Context
+
+The current `entire enable` flow is verbose and implementation-focused (mentions strategies, individual hook types, directory creation). The goal is to make it clean and user-friendly:
+
+- **First run**: Shows agent, installs everything, asks telemetry, says "Ready."
+- **Second run**: Detects already-enabled state and shows a brief summary instead of re-running setup.
+
+## Target Output
+
+**First run:**
+```
+entire enable
+Agent: Claude Code (use --agent to change)
+
+✓ Hooks installed
+✓ Project configured (.entire/settings.json)
+
+  Help improve Entire CLI?
+  Share anonymous usage data. No code or personal info collected.
+  [Yes] [No]
+
+Ready.
+```
+
+**Second run (already fully enabled):**
+```
+entire enable
+Already enabled. Everything looks good.
+
+  Agent: Claude Code
+  Config: .entire/settings.json
+```
+
+## Changes
+
+### File: `cmd/entire/cli/setup.go`
+
+#### 1. Add `isFullyEnabled()` helper function
+
+Checks whether Entire is already fully set up:
+- Settings exist and `Enabled == true`
+- Agent hooks installed (`checkClaudeCodeHooksInstalled()` — already exists)
+- Git hooks installed (`strategy.IsGitHookInstalled()` — already exists)
+- `.entire` directory exists (`checkEntireDirExists()` — already exists)
+
+Returns `(isEnabled bool, agentDescription string, configPath string)`.
+
+#### 2. Rewrite `runEnableInteractive()`
+
+New flow:
+1. Check `isFullyEnabled()` — if true, print the "already enabled" summary and return early
+2. Print `Agent: Claude Code (use --agent to change)` (detect agent via `agent.Default()`)
+3. Print blank line
+4. Install Claude Code hooks + git hooks → print `✓ Hooks installed` (single combined line)
+5. Setup `.entire` directory + save settings → print `✓ Project configured (.entire/settings.json)` (or `settings.local.json`)
+6. Print blank line
+7. Ask telemetry consent (existing `promptTelemetryConsent`)
+8. Print blank line + `Ready.`
+
+Key simplifications:
+- No mention of strategy in output (still uses default internally)
+- Combined "hooks installed" message (agent hooks + git hooks)
+- Combined "project configured" message (directory + settings)
+- No settings target prompt on first run (first run always creates `settings.json`)
+- End with "Ready." instead of strategy name
+
+#### 3. Update `runEnableWithStrategy()` to match
+
+Apply similar output simplifications for the `--strategy` flag path — same structure but skip "already enabled" check since the user is explicitly requesting a strategy change.
+
+#### 4. Update `setupAgentHooksNonInteractive()` output
+
+When `--agent` flag is used, keep it as non-interactive but update messages to be consistent.
+
+### File: `cmd/entire/cli/setup_test.go`
+
+- Update `TestRunEnable_AlreadyEnabled` — now expects the "Already enabled" summary output
+- Add `TestIsFullyEnabled` for the new helper
+- Update any tests checking for "strategy enabled" in output
+
+### File: `cmd/entire/cli/integration_test/setup_cmd_test.go`
+
+- Update `TestEnableDisable` — re-enable output assertion changes from "strategy enabled" to "Ready"
+- Update `TestEnableWhenDisabled` — same
+- Update `TestEnableDefaultStrategy` — expected output changes from mentioning "manual-commit" to "Ready"
+- Update `RunEnableWithAccessibleMode` — may need to adjust stdin inputs
+
+## Verification
+
+1. `mise run fmt && mise run lint && mise run test:ci` — all tests pass
+2. Manual test in a git repo:
+   - `entire enable` (first run) → shows agent, hooks, config, telemetry prompt, "Ready."
+   - `entire enable` (second run) → shows "Already enabled" summary
+   - `entire enable --strategy auto-commit` → forces re-setup even if already enabled
+   - `entire enable --agent claude-code` → non-interactive mode still works
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/dip/.REDACTED.jsonl
+
+---
+
+Create a new branch, commit the changes and review them again carefully.

@@ -1,0 +1,169 @@
+Implement the following plan:
+
+# Plan: Fix Deferred Condensation (ACTIVE_COMMITTED → IDLE via TurnEnd)
+
+## Context
+
+PR #172 comment from khaong identified a critical bug: when a session in ACTIVE_COMMITTED phase receives `EventTurnEnd` (agent finishes its turn), the state machine emits `ActionCondense` but `transitionSessionTurnEnd()` in `hooks_claudecode_handlers.go:751` ignores the return value of `ApplyCommonActions()`. The condensation never fires. Session data from in-turn commits stays stuck on the shadow branch and never reaches `entire/sessions`.
+
+This is the same class of silent-drop bug that ENT-250 (ActionHandler interface) would prevent at compile time.
+
+## Bug Location
+
+`hooks_claudecode_handlers.go:741-755`:
+```go
+func transitionSessionTurnEnd(sessionID string) {
+    // ...
+    result := session.Transition(turnState.Phase, session.EventTurnEnd, session.TransitionContext{})
+    session.ApplyCommonActions(turnState, result)  // ← return value IGNORED
+    // ...
+}
+```
+
+State machine transition (phase.go:227-231):
+```
+ACTIVE_COMMITTED + EventTurnEnd → PhaseIdle, [ActionCondense, ActionUpdateLastInteraction]
+```
+
+`ActionCondense` is in `remaining` but never dispatched.
+
+## Fix Approach: TurnEndHandler Optional Interface
+
+Follow the established pattern for optional strategy interfaces (`PostCommitHandler`, `PrepareCommitMsgHandler`, `PrePushHandler`):
+
+1. **New interface** `TurnEndHandler` in `strategy.go`:
+   ```go
+   type TurnEndHandler interface {
+       HandleTurnEnd(state *session.State, actions []session.Action) error
+   }
+   ```
+   The interface receives the state (already transitioned by `ApplyCommonActions`) and the `remaining` actions to dispatch. This keeps the interface general — the strategy decides what to do with each action.
+
+2. **Implement on ManualCommitStrategy** in `manual_commit_hooks.go`:
+   - For `ActionCondense`: open repo, derive checkpointID from `state.PendingCheckpointID`, check `hasNew`, call `condenseAndUpdateState` (reuse existing helper)
+   - For other actions: log warning (unexpected at turn-end)
+   - Shadow branch cleanup after condensation
+   - State is saved by the caller (`transitionSessionTurnEnd`) after the handler returns
+
+3. **Auto-commit strategy**: no-op (doesn't implement `TurnEndHandler`)
+
+4. **Update `transitionSessionTurnEnd`** in `hooks_claudecode_handlers.go`:
+   - Capture `remaining` from `ApplyCommonActions`
+   - If `remaining` is non-empty, get strategy via `GetStrategy()`
+   - Type-assert to `TurnEndHandler`, call `HandleTurnEnd`
+   - Save state after handler returns
+
+## Step-by-Step
+
+### Step 1: Write failing test for ACTIVE_COMMITTED → IDLE condensation
+
+New test in `cmd/entire/cli/strategy/phase_postcommit_test.go` (where all the helpers already live):
+
+**`TestTurnEnd_ActiveCommitted_CondensesSession`**
+- Setup: git repo, session in ACTIVE_COMMITTED with checkpoint on shadow branch, `PendingCheckpointID` set
+- Action: call `HandleTurnEnd` with `[ActionCondense]`
+- Assert: `entire/sessions` branch exists, shadow branch deleted, `StepCount` reset, `BaseCommit` updated
+
+**`TestTurnEnd_ActiveCommitted_CondensationFailure_PreservesShadowBranch`**
+- Setup: same but corrupt shadow branch to ZeroHash
+- Action: call `HandleTurnEnd` with `[ActionCondense]`
+- Assert: `BaseCommit` NOT updated, shadow branch preserved
+
+**`TestTurnEnd_Active_NoActions`**
+- Setup: session in ACTIVE phase (normal turn end)
+- Action: call `HandleTurnEnd` with empty actions
+- Assert: no-op, state unchanged
+
+### Step 2: Run tests — verify they fail (HandleTurnEnd doesn't exist yet)
+
+### Step 3: Add `TurnEndHandler` interface to `strategy.go`
+
+### Step 4: Implement `HandleTurnEnd` on `ManualCommitStrategy`
+
+In `manual_commit_hooks.go`:
+
+```go
+func (s *ManualCommitStrategy) HandleTurnEnd(state *SessionState, actions []session.Action) error {
+    logCtx := logging.WithComponent(context.Background(), "checkpoint")
+
+    for _, action := range actions {
+        switch action {
+        case session.ActionCondense:
+            // Open repo, derive params from state, condense
+            repo, err := OpenRepository()
+            if err != nil { return nil /* silent */ }
+
+            head, err := repo.Head()
+            if err != nil { return nil }
+
+            checkpointID := id.CheckpointID(state.PendingCheckpointID)
+            if checkpointID == "" {
+                // No pending checkpoint — generate one
+                checkpointID = id.NewCheckpointID()
+            }
+
+            hasNew, _ := s.sessionHasNewContent(repo, state)
+            // Fail-open not needed here — if no content, skip condensation
+
+            if hasNew {
+                shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+                shadowBranches := map[string]struct{}{}
+                s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranches)
+                // Delete shadow branches
+                for branchName := range shadowBranches {
+                    deleteBranch(repo, branchName)
+                }
+            }
+        }
+    }
+    return nil
+}
+```
+
+### Step 5: Update `transitionSessionTurnEnd` in `hooks_claudecode_handlers.go`
+
+```go
+func transitionSessionTurnEnd(sessionID string) {
+    // ... existing load/nil checks ...
+    result := session.Transition(turnState.Phase, session.EventTurnEnd, session.TransitionContext{})
+    remaining := session.ApplyCommonActions(turnState, result)
+
+    // Dispatch strategy-specific actions (e.g., ActionCondense for ACTIVE_COMMITTED → IDLE)
+    if len(remaining) > 0 {
+        strat := GetStrategy()
+        if handler, ok := strat.(strategy.TurnEndHandler); ok {
+            if err := handler.HandleTurnEnd(turnState, remaining); err != nil {
+                fmt.Fprintf(os.Stderr, "Warning: turn-end action dispatch failed: %v\n", err)
+            }
+        }
+    }
+
+    if updateErr := strategy.SaveSessionState(turnState); updateErr != nil {
+        fmt.Fprintf(os.Stderr, "Warning: failed to update session phase on turn end: %v\n", updateErr)
+    }
+}
+```
+
+### Step 6: Run tests — all pass
+
+### Step 7: `mise run fmt && mise run lint && mise run test:ci`
+
+### Step 8: Reply to khaong's PR comment with fix commit SHA
+
+## Files Modified
+
+- `cmd/entire/cli/strategy/strategy.go` — new `TurnEndHandler` optional interface
+- `cmd/entire/cli/strategy/manual_commit_hooks.go` — `HandleTurnEnd` implementation
+- `cmd/entire/cli/strategy/phase_postcommit_test.go` — 3 new test functions
+- `cmd/entire/cli/hooks_claudecode_handlers.go` — update `transitionSessionTurnEnd` to dispatch remaining actions
+
+## Key Design Decisions
+
+- **Optional interface** (not on core `Strategy`): follows established pattern, auto-commit doesn't need it
+- **Handler receives `[]Action`**: caller doesn't need to know which actions are strategy-specific
+- **State saved by caller**: handler mutates state in-place, caller saves — same pattern as PostCommit
+- **Shadow branch deletion inside handler**: handler owns the full lifecycle since it knows which branches to clean up
+- **`PendingCheckpointID` from state**: set by PostCommit when the commit was made, available for turn-end condensation
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-3/b6b20c21-d3cb-42a4-9a55-bb2dbb2212e4.jsonl

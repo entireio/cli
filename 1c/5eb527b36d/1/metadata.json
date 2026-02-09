@@ -1,0 +1,75 @@
+{
+  "checkpoint_id": "1c5eb527b36d",
+  "session_id": "b6b20c21-d3cb-42a4-9a55-bb2dbb2212e4",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-08T09:12:59.43099Z",
+  "branch": "alex/ent-221-phase-aware-git-hooks",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "0a07cd8b-80ff-4697-bed9-4806723fe6f9",
+  "token_usage": {
+    "input_tokens": 2475,
+    "cache_creation_tokens": 283836,
+    "cache_read_tokens": 6763134,
+    "output_tokens": 7640,
+    "api_call_count": 70
+  },
+  "summary": {
+    "intent": "Address a PR review comment from cursor[bot] about a condensation failure bug that orphans shadow branches by incorrectly updating BaseCommit. User wanted comprehensive test coverage and code simplification before fixing.",
+    "outcome": "Added 7 test cases covering all PostCommit branches (2 demonstrating the bug), removed cyclomatic complexity by eliminating boolean flags and fallthrough logic, fixed the bug by making each branch handle BaseCommit updates explicitly. All tests and CI checks pass.",
+    "learnings": {
+      "repo": [
+        "PostCommit hook has 6 action branches (ActionCondense, ActionCondenseIfFilesTouched, ActionDiscardIfNoFiles, ActionMigrateShadowBranch) with different behaviors based on session phase (IDLE, ACTIVE_COMMITTED, ENDED)",
+        "Shadow branches are named 'entire/\u003cBaseCommit\u003e-\u003cworktreeHash\u003e' - if BaseCommit changes while the old shadow branch still exists, the branch becomes orphaned",
+        "sessionHasNewContent determines hasNew via shadow branch (CheckpointTranscriptStart \u003c transcriptLines) or live transcript (TranscriptPath + AgentType), with fail-open behavior when shadow branch is missing",
+        "condenseAndUpdateState already handles BaseCommit update internally on success (line 694), making the boolean return value and fallthrough logic redundant",
+        "Project uses testifylint rule requiring 'require.Error/NoError' instead of 'assert.Error/NoError' for error assertions"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 621,
+          "end_line": 623,
+          "finding": "Fallthrough pattern with 'if !condensed \u0026\u0026 !hasPendingMigration' was causing bug - when condensation failed, condensed=false led to BaseCommit update despite shadow branch still existing"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 585,
+          "end_line": 602,
+          "finding": "ActionCondenseIfFilesTouched and ActionDiscardIfNoFiles branches were missing explicit BaseCommit updates, relying on fallthrough instead - made implicit control flow hard to reason about"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/phase_postcommit_test.go",
+          "line": 1,
+          "finding": "Condensation failure can be injected by creating shadow branch ref pointing to plumbing.ZeroHash - repo.Reference succeeds but repo.CommitObject fails, triggering fail-open in sessionHasNewContent"
+        }
+      ],
+      "workflow": [
+        "TDD approach worked well: wrote bug-demonstrating tests first (which failed), then applied fix (tests passed)",
+        "Simplification that also fixes a bug is better than adding defensive booleans - removing condensed/hasPendingMigration made code clearer AND fixed the issue",
+        "Full CI suite (fmt + lint + test:ci) catches issues early - testifylint and unparam caught code smell issues before review"
+      ]
+    },
+    "friction": [
+      "Initial plan proposed adding 'condensationAttempted' boolean which would have increased complexity - user correctly pushed back requiring rethink",
+      "Multiple lint fixes needed after initial implementation (10 testifylint assert→require changes, 1 unparam unused return value)"
+    ],
+    "open_items": [
+      "Need to commit changes and reply to cursor[bot]'s PR review thread with fix commit SHA and explanation",
+      "May want to consider broader simplification of PostCommit state machine - current action dispatch pattern could potentially be refactored further"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-08T09:12:37.616993Z",
+    "agent_lines": 445,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 445,
+    "agent_percentage": 100
+  }
+}

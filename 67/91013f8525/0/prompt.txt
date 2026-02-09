@@ -1,0 +1,50 @@
+Until recently we used `go run` in .claude/settings.json for the claude hooks. This is setup by running `entire enable --local-dev`. The team changed this to use the entire cli in the path. Can you help me change it so I can have an environment variable or not commited file in the repo that can tooggle this? So I don't need to make sure I don't commit .claude/settings.json or have it with changes all the time?
+
+---
+
+- entire enable now installs hooks using the wrapper script by default
+
+This should not be chnged, only the `--local-dev` flag should install the version with the wrapper script
+
+---
+
+but this means both hooks run?
+
+---
+
+[Request interrupted by user]
+
+---
+
+but this means hooks run twice or is the settings.local.json overwriting all hooks from the none local one?
+
+---
+
+can we double check that hooks are not firing twice if the same hook is defined in both files?
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Let's pause, if the settings.local.json overwrites all hooks reliable I think we can just change `--local-dev` to write a `settings.local.json` with `go run` without any wrapper script or env variables. But I'm not sold this works really. So can you do a test repo, setup both with a test hook that writes to a unique file and then run a simple claude prompt like "create a ruby script that returns a random number" and check if both fired or just the one in settings.local.json
+
+---
+
+❯ cat /tmp/hook-from-settings*.txt 2>/dev/null
+Hook from settings.local.json fired at Mon Feb  9 09:39:51 CET 2026
+Hook from settings.json fired at Mon Feb  9 09:39:51 CET 2026
+
+---
+
+I like Option 1, from a enabling perspective: 
+
+entire enable -> just works as before, entire from path
+entire enable --local-dev -> creates the wrapper script, using ENTIRE_LOCAL_DEV
+
+in this repo we want to commit `entire enable --local-dev` state
+
+---
+
+I removed the new docs files, but wondering now would `.env` actually just work?

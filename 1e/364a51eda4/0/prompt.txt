@@ -1,0 +1,526 @@
+Implement the following plan:
+
+# Plan: Fix Deferred Condensation (ACTIVE_COMMITTED → IDLE via TurnEnd)
+
+## Context
+
+PR #172 comment from khaong identified a critical bug: when a session in ACTIVE_COMMITTED phase receives `EventTurnEnd` (agent finishes its turn), the state machine emits `ActionCondense` but `transitionSessionTurnEnd()` in `hooks_claudecode_handlers.go:751` ignores the return value of `ApplyCommonActions()`. The condensation never fires. Session data from in-turn commits stays stuck on the shadow branch and never reaches `entire/sessions`.
+
+This is the same class of silent-drop bug that ENT-250 (ActionHandler interface) would prevent at compile time.
+
+## Bug Location
+
+`hooks_claudecode_handlers.go:741-755`:
+```go
+func transitionSessionTurnEnd(sessionID string) {
+    // ...
+    result := session.Transition(turnState.Phase, session.EventTurnEnd, session.TransitionContext{})
+    session.ApplyCommonActions(turnState, result)  // ← return value IGNORED
+    // ...
+}
+```
+
+State machine transition (phase.go:227-231):
+```
+ACTIVE_COMMITTED + EventTurnEnd → PhaseIdle, [ActionCondense, ActionUpdateLastInteraction]
+```
+
+`ActionCondense` is in `remaining` but never dispatched.
+
+## Fix Approach: TurnEndHandler Optional Interface
+
+Follow the established pattern for optional strategy interfaces (`PostCommitHandler`, `PrepareCommitMsgHandler`, `PrePushHandler`):
+
+1. **New interface** `TurnEndHandler` in `strategy.go`:
+   ```go
+   type TurnEndHandler interface {
+       HandleTurnEnd(state *session.State, actions []session.Action) error
+   }
+   ```
+   The interface receives the state (already transitioned by `ApplyCommonActions`) and the `remaining` actions to dispatch. This keeps the interface general — the strategy decides what to do with each action.
+
+2. **Implement on ManualCommitStrategy** in `manual_commit_hooks.go`:
+   - For `ActionCondense`: open repo, derive checkpointID from `state.PendingCheckpointID`, check `hasNew`, call `condenseAndUpdateState` (reuse existing helper)
+   - For other actions: log warning (unexpected at turn-end)
+   - Shadow branch cleanup after condensation
+   - State is saved by the caller (`transitionSessionTurnEnd`) after the handler returns
+
+3. **Auto-commit strategy**: no-op (doesn't implement `TurnEndHandler`)
+
+4. **Update `transitionSessionTurnEnd`** in `hooks_claudecode_handlers.go`:
+   - Capture `remaining` from `ApplyCommonActions`
+   - If `remaining` is non-empty, get strategy via `GetStrategy()`
+   - Type-assert to `TurnEndHandler`, call `HandleTurnEnd`
+   - Save state after handler returns
+
+## Step-by-Step
+
+### Step 1: Write failing test for ACTIVE_COMMITTED → IDLE condensation
+
+New test in `cmd/entire/cli/strategy/phase_postcommit_test.go` (where all the helpers already live):
+
+**`TestTurnEnd_ActiveCommitted_CondensesSession`**
+- Setup: git repo, session in ACTIVE_COMMITTED with checkpoint on shadow branch, `PendingCheckpointID` set
+- Action: call `HandleTurnEnd` with `[ActionCondense]`
+- Assert: `entire/sessions` branch exists, shadow branch deleted, `StepCount` reset, `BaseCommit` updated
+
+**`TestTurnEnd_ActiveCommitted_CondensationFailure_PreservesShadowBranch`**
+- Setup: same but corrupt shadow branch to ZeroHash
+- Action: call `HandleTurnEnd` with `[ActionCondense]`
+- Assert: `BaseCommit` NOT updated, shadow branch preserved
+
+**`TestTurnEnd_Active_NoActions`**
+- Setup: session in ACTIVE phase (normal turn end)
+- Action: call `HandleTurnEnd` with empty actions
+- Assert: no-op, state unchanged
+
+### Step 2: Run tests — verify they fail (HandleTurnEnd doesn't exist yet)
+
+### Step 3: Add `TurnEndHandler` interface to `strategy.go`
+
+### Step 4: Implement `HandleTurnEnd` on `ManualCommitStrategy`
+
+In `manual_commit_hooks.go`:
+
+```go
+func (s *ManualCommitStrategy) HandleTurnEnd(state *SessionState, actions []session.Action) error {
+    logCtx := logging.WithComponent(context.Background(), "checkpoint")
+
+    for _, action := range actions {
+        switch action {
+        case session.ActionCondense:
+            // Open repo, derive params from state, condense
+            repo, err := OpenRepository()
+            if err != nil { return nil /* silent */ }
+
+            head, err := repo.Head()
+            if err != nil { return nil }
+
+            checkpointID := id.CheckpointID(state.PendingCheckpointID)
+            if checkpointID == "" {
+                // No pending checkpoint — generate one
+                checkpointID = id.NewCheckpointID()
+            }
+
+            hasNew, _ := s.sessionHasNewContent(repo, state)
+            // Fail-open not needed here — if no content, skip condensation
+
+            if hasNew {
+                shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+                shadowBranches := map[string]struct{}{}
+                s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranches)
+                // Delete shadow branches
+                for branchName := range shadowBranches {
+                    deleteBranch(repo, branchName)
+                }
+            }
+        }
+    }
+    return nil
+}
+```
+
+### Step 5: Update `transitionSessionTurnEnd` in `hooks_claudecode_handlers.go`
+
+```go
+func transitionSessionTurnEnd(sessionID string) {
+    // ... existing load/nil checks ...
+    result := session.Transition(turnState.Phase, session.EventTurnEnd, session.TransitionContext{})
+    remaining := session.ApplyCommonActions(turnState, result)
+
+    // Dispatch strategy-specific actions (e.g., ActionCondense for ACTIVE_COMMITTED → IDLE)
+    if len(remaining) > 0 {
+        strat := GetStrategy()
+        if handler, ok := strat.(strategy.TurnEndHandler); ok {
+            if err := handler.HandleTurnEnd(turnState, remaining); err != nil {
+                fmt.Fprintf(os.Stderr, "Warning: turn-end action dispatch failed: %v\n", err)
+            }
+        }
+    }
+
+    if updateErr := strategy.SaveSessionState(turnState); updateErr != nil {
+        fmt.Fprintf(os.Stderr, "Warning: failed to update session phase on turn end: %v\n", updateErr)
+    }
+}
+```
+
+### Step 6: Run tests — all pass
+
+### Step 7: `mise run fmt && mise run lint && mise run test:ci`
+
+### Step 8: Reply to khaong's PR comment with fix commit SHA
+
+## Files Modified
+
+- `cmd/entire/cli/strategy/strategy.go` — new `TurnEndHandler` optional interface
+- `cmd/entire/cli/strategy/manual_commit_hooks.go` — `HandleTurnEnd` implementation
+- `cmd/entire/cli/strategy/phase_postcommit_test.go` — 3 new test functions
+- `cmd/entire/cli/hooks_claudecode_handlers.go` — update `transitionSessionTurnEnd` to dispatch remaining actions
+
+## Key Design Decisions
+
+- **Optional interface** (not on core `Strategy`): follows established pattern, auto-commit doesn't need it
+- **Handler receives `[]Action`**: caller doesn't need to know which actions are strategy-specific
+- **State saved by caller**: handler mutates state in-place, caller saves — same pattern as PostCommit
+- **Shadow branch deletion inside handler**: handler owns the full lifecycle since it knows which branches to clean up
+- **`PendingCheckpointID` from state**: set by PostCommit when the commit was made, available for turn-end condensation
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-3/b6b20c21-d3cb-42a4-9a55-bb2dbb2212e4.jsonl
+
+---
+
+commit, push.
+
+How did we miss this btw?
+
+---
+
+but didn't we have a requirement to fix this specific scenario?
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
+
+---
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.2.0/skills/receiving-code-review
+
+# Code Review Reception
+
+## Overview
+
+Code review requires technical evaluation, not emotional performance.
+
+**Core principle:** Verify before implementing. Ask before assuming. Technical correctness over social comfort.
+
+## The Response Pattern
+
+```
+WHEN receiving code review feedback:
+
+1. READ: Complete feedback without reacting
+2. UNDERSTAND: Restate requirement in own words (or ask)
+3. VERIFY: Check against codebase reality
+4. EVALUATE: Technically sound for THIS codebase?
+5. RESPOND: Technical acknowledgment or reasoned pushback
+6. IMPLEMENT: One item at a time, test each
+```
+
+## Forbidden Responses
+
+**NEVER:**
+- "You're absolutely right!" (explicit CLAUDE.md violation)
+- "Great point!" / "Excellent feedback!" (performative)
+- "Let me implement that now" (before verification)
+
+**INSTEAD:**
+- Restate the technical requirement
+- Ask clarifying questions
+- Push back with technical reasoning if wrong
+- Just start working (actions > words)
+
+## Handling Unclear Feedback
+
+```
+IF any item is unclear:
+  STOP - do not implement anything yet
+  ASK for clarification on unclear items
+
+WHY: Items may be related. Partial understanding = wrong implementation.
+```
+
+**Example:**
+```
+your human partner: "Fix 1-6"
+You understand 1,2,3,6. Unclear on 4,5.
+
+❌ WRONG: Implement 1,2,3,6 now, ask about 4,5 later
+✅ RIGHT: "I understand items 1,2,3,6. Need clarification on 4 and 5 before proceeding."
+```
+
+## Source-Specific Handling
+
+### From your human partner
+- **Trusted** - implement after understanding
+- **Still ask** if scope unclear
+- **No performative agreement**
+- **Skip to action** or technical acknowledgment
+
+### From External Reviewers
+```
+BEFORE implementing:
+  1. Check: Technically correct for THIS codebase?
+  2. Check: Breaks existing functionality?
+  3. Check: Reason for current implementation?
+  4. Check: Works on all platforms/versions?
+  5. Check: Does reviewer understand full context?
+
+IF suggestion seems wrong:
+  Push back with technical reasoning
+
+IF can't easily verify:
+  Say so: "I can't verify this without [X]. Should I [investigate/ask/proceed]?"
+
+IF conflicts with your human partner's prior decisions:
+  Stop and discuss with your human partner first
+```
+
+**your human partner's rule:** "External feedback - be skeptical, but check carefully"
+
+## YAGNI Check for "Professional" Features
+
+```
+IF reviewer suggests "implementing properly":
+  grep codebase for actual usage
+
+  IF unused: "This endpoint isn't called. Remove it (YAGNI)?"
+  IF used: Then implement properly
+```
+
+**your human partner's rule:** "You and reviewer both report to me. If we don't need this feature, don't add it."
+
+## Implementation Order
+
+```
+FOR multi-item feedback:
+  1. Clarify anything unclear FIRST
+  2. Then implement in this order:
+     - Blocking issues (breaks, security)
+     - Simple fixes (typos, imports)
+     - Complex fixes (refactoring, logic)
+  3. Test each fix individually
+  4. Verify no regressions
+```
+
+## When To Push Back
+
+Push back when:
+- Suggestion breaks existing functionality
+- Reviewer lacks full context
+- Violates YAGNI (unused feature)
+- Technically incorrect for this stack
+- Legacy/compatibility reasons exist
+- Conflicts with your human partner's architectural decisions
+
+**How to push back:**
+- Use technical reasoning, not defensiveness
+- Ask specific questions
+- Reference working tests/code
+- Involve your human partner if architectural
+
+**Signal if uncomfortable pushing back out loud:** "Strange things are afoot at the Circle K"
+
+## Acknowledging Correct Feedback
+
+When feedback IS correct:
+```
+✅ "Fixed. [Brief description of what changed]"
+✅ "Good catch - [specific issue]. Fixed in [location]."
+✅ [Just fix it and show in the code]
+
+❌ "You're absolutely right!"
+❌ "Great point!"
+❌ "Thanks for catching that!"
+❌ "Thanks for [anything]"
+❌ ANY gratitude expression
+```
+
+**Why no thanks:** Actions speak. Just fix it. The code itself shows you heard the feedback.
+
+**If you catch yourself about to write "Thanks":** DELETE IT. State the fix instead.
+
+## Gracefully Correcting Your Pushback
+
+If you pushed back and were wrong:
+```
+✅ "You were right - I checked [X] and it does [Y]. Implementing now."
+✅ "Verified this and you're correct. My initial understanding was wrong because [reason]. Fixing."
+
+❌ Long apology
+❌ Defending why you pushed back
+❌ Over-explaining
+```
+
+State the correction factually and move on.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Performative agreement | State requirement or just act |
+| Blind implementation | Verify against codebase first |
+| Batch without testing | One at a time, test each |
+| Assuming reviewer is right | Check if breaks things |
+| Avoiding pushback | Technical correctness > comfort |
+| Partial implementation | Clarify all items first |
+| Can't verify, proceed anyway | State limitation, ask for direction |
+
+## Real Examples
+
+**Performative Agreement (Bad):**
+```
+Reviewer: "Remove legacy code"
+❌ "You're absolutely right! Let me remove that..."
+```
+
+**Technical Verification (Good):**
+```
+Reviewer: "Remove legacy code"
+✅ "Checking... build target is 10.15+, this API needs 13+. Need legacy for backward compat. Current impl has wrong bundle ID - fix it or drop pre-13 support?"
+```
+
+**YAGNI (Good):**
+```
+Reviewer: "Implement proper metrics tracking with database, date filters, CSV export"
+✅ "Grepped codebase - nothing calls this endpoint. Remove it (YAGNI)? Or is there usage I'm missing?"
+```
+
+**Unclear Item (Good):**
+```
+your human partner: "Fix items 1-6"
+You understand 1,2,3,6. Unclear on 4,5.
+✅ "Understand 1,2,3,6. Need clarification on 4 and 5 before implementing."
+```
+
+## GitHub Thread Replies
+
+When replying to inline review comments on GitHub, reply in the comment thread (`gh api repos/{owner}/{repo}/pulls/{pr}/comments/{id}/replies`), not as a top-level PR comment.
+
+## The Bottom Line
+
+**External feedback = suggestions to evaluate, not orders to follow.**
+
+Verify. Question. Then implement.
+
+No performative agreement. Technical rigor always.

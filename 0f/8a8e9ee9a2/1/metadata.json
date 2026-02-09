@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "0f8a8e9ee9a2",
+  "session_id": "d50aed65-f324-43f2-8c95-9edd32b25b32",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T07:23:18.689286Z",
+  "branch": "cli-completion-updater",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "2b1e3cb5-707a-430b-a914-44f09e70bcce",
+  "transcript_lines_at_start": 220,
+  "token_usage": {
+    "input_tokens": 52,
+    "cache_creation_tokens": 101721,
+    "cache_read_tokens": 2464914,
+    "output_tokens": 10187,
+    "api_call_count": 48
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T07:23:18.598747Z",
+    "agent_lines": 0,
+    "human_added": 667,
+    "human_modified": 48,
+    "human_removed": 0,
+    "total_committed": 667,
+    "agent_percentage": 0
+  }
+}
