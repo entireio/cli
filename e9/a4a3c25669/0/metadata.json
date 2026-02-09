@@ -1,0 +1,69 @@
+{
+  "checkpoint_id": "e9a4a3c25669",
+  "session_id": "1c341e47-b281-4cb7-82da-3ad6d3013b7f",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T10:33:55.781623Z",
+  "branch": "alex/ent-259-fix-deferred-condense-attribution",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_git.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 55,
+    "cache_creation_tokens": 144990,
+    "cache_read_tokens": 5383272,
+    "output_tokens": 2728,
+    "api_call_count": 45
+  },
+  "summary": {
+    "intent": "Debug and fix two Linear issues: ENT-260 (checkpoint ID mismatch in commit trailers) and ENT-259 (broken code attribution in deferred condensation at stop hook).",
+    "outcome": "ENT-260 was identified as a duplicate of ENT-258 (already fixed in PR #184). ENT-259 root cause was identified and a fix was planned but not implemented (user interrupted during plan mode).",
+    "learnings": {
+      "repo": [
+        "The codebase uses a 'deferred condensation' pattern where checkpoint IDs are generated during PrepareCommitMsg but condensation happens later at turn end via HandleTurnEnd",
+        "PendingCheckpointID and LastCheckpointID serve different purposes in the dual-ID system, with PendingCheckpointID tracking IDs for deferred condensation",
+        "Session state machine transitions: ACTIVE → ACTIVE_COMMITTED (on agent commit) → IDLE (at turn end)",
+        "The parallelize-integration-tests branch was missing the ENT-258 fix (dfba5083) that was already on alex/ent-258-mid-turn-commits"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_git.go",
+          "line": 120,
+          "finding": "SaveChanges clears PendingCheckpointID, breaking the link between commit trailers and deferred condensation when agents commit mid-turn"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 889,
+          "finding": "TODO comment flags concern about staged files at post-commit hook time (related but not the primary cause of ENT-260)"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_attribution.go",
+          "finding": "CalculateAttributionWithAccumulated compares baseTree to headTree, but in deferred condense path both point to the same commit (state.BaseCommit was already updated), causing zero diff and invisible agent work"
+        }
+      ],
+      "workflow": [
+        "Using git log with grep and pickaxe (-S) to trace when specific code was added or modified",
+        "Checking which branches contain fixes using git branch --contains and git show"
+      ]
+    },
+    "friction": [
+      "Working across multiple worktrees required careful branch management when checking out new branches",
+      "The dual PendingCheckpointID/LastCheckpointID system is confusing with clearing logic scattered across call sites"
+    ],
+    "open_items": [
+      "ENT-259 fix needs to be implemented: add a field to preserve original base commit for attribution separate from BaseCommit",
+      "Plan was written at /Users/alex/.claude/plans/mellow-enchanting-swan.md but implementation was interrupted",
+      "Need to implement the fix on branch alex/ent-259-fix-deferred-condense-attribution"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T10:33:39.72533Z",
+    "agent_lines": 0,
+    "human_added": 149,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 149,
+    "agent_percentage": 0
+  }
+}

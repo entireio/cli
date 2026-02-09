@@ -1,0 +1,36 @@
+{
+  "checkpoint_id": "6791013f8525",
+  "strategy": "manual-commit",
+  "branch": "soph/allow-dogfood-local-dev",
+  "checkpoints_count": 7,
+  "files_touched": [
+    ".claude/scripts/README.md",
+    ".claude/scripts/entire-wrapper.sh",
+    ".claude/scripts/test-hook-duplicate.sh",
+    ".claude/settings.json",
+    ".claude/settings.local.json.example",
+    ".claude/test-settings.json",
+    ".claude/test-settings.local.json",
+    ".env.example",
+    "cmd/entire/cli/agent/claudecode/hooks.go",
+    "docs/SETUP-LOCAL-DEV.md",
+    "docs/hook-wrapper-migration.md",
+    "docs/local-development.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/67/91013f8525/0/metadata.json",
+      "transcript": "/67/91013f8525/0/full.jsonl",
+      "context": "/67/91013f8525/0/context.md",
+      "content_hash": "/67/91013f8525/0/content_hash.txt",
+      "prompt": "/67/91013f8525/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 5920,
+    "cache_creation_tokens": 508473,
+    "cache_read_tokens": 3672444,
+    "output_tokens": 123,
+    "api_call_count": 58
+  }
+}

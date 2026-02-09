@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "c5e2f1146dfe",
+  "strategy": "manual-commit",
+  "branch": "fix/enable-agent-flag-missing-value",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c5/e2f1146dfe/0/metadata.json",
+      "transcript": "/c5/e2f1146dfe/0/full.jsonl",
+      "context": "/c5/e2f1146dfe/0/context.md",
+      "content_hash": "/c5/e2f1146dfe/0/content_hash.txt",
+      "prompt": "/c5/e2f1146dfe/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 54,
+    "cache_creation_tokens": 65807,
+    "cache_read_tokens": 2215183,
+    "output_tokens": 839,
+    "api_call_count": 48
+  }
+}

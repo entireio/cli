@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "c639a44ea03d",
+  "session_id": "fe0cdcc5-cd91-4041-8742-e375aca7f56e",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T19:03:57.837491Z",
+  "branch": "soph/gemini-preview",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "README.md",
+    "cmd/entire/cli/setup.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 24,
+    "cache_creation_tokens": 46052,
+    "cache_read_tokens": 1054902,
+    "output_tokens": 349,
+    "api_call_count": 20
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T19:03:57.811632Z",
+    "agent_lines": 15,
+    "human_added": 2,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 17,
+    "agent_percentage": 88.23529411764706
+  }
+}

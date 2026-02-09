@@ -1,0 +1,89 @@
+{
+  "checkpoint_id": "cff7f96ad60a",
+  "session_id": "9e2434f3-c800-4ed9-b78e-e494ef59bd78",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T06:29:08.52584Z",
+  "branch": "alex/ent-258-mid-turn-commits",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/mid_turn_commit_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 1428,
+    "cache_creation_tokens": 300159,
+    "cache_read_tokens": 10426757,
+    "output_tokens": 3175,
+    "api_call_count": 90
+  },
+  "summary": {
+    "intent": "Implement fixes for ENT-258: mid-turn git commits from Claude not receiving Entire-Checkpoint trailers due to three compounding bugs (path mismatch, BaseCommit not updating, PendingCheckpointID cleared prematurely).",
+    "outcome": "Successfully implemented all three bug fixes using TDD (write failing tests, fix code, verify). Fixed an additional integration test failure caused by checkpoint ID reuse. Created draft PR #184 with all tests passing.",
+    "learnings": {
+      "repo": [
+        "Strategy tests cannot use t.Parallel() because they rely on t.Chdir() which mutates process-wide working directory state",
+        "PendingCheckpointID serves dual purposes: deferred condensation coordination (ACTIVE_COMMITTED → TurnEnd) and amend trailer restoration",
+        "Claude Code transcript stores absolute file paths in tool_use blocks, while git status returns repo-relative paths",
+        "condenseAndUpdateState must clear PendingCheckpointID after condensation to prevent checkpoint ID reuse across subsequent commits",
+        "Agent registry uses init() functions for registration; tests need blank imports like `_ \"agent/claudecode\"` to register agents"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 213,
+          "end_line": 228,
+          "finding": "sessionHasNewContentFromLiveTranscript compares transcript paths (absolute) with getStagedFiles output (repo-relative). Must normalize using GetWorktreePath() + paths.ToRelativePath() before hasOverlappingFiles comparison."
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 530,
+          "end_line": 536,
+          "finding": "PostCommit early-returned when no trailer found, leaving BaseCommit stale. Subsequent commits fail BaseCommit == currentHeadHash filter. Must still update BaseCommit via postCommitUpdateBaseCommitOnly helper without firing EventGitCommit."
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_git.go",
+          "line": 118,
+          "end_line": 120,
+          "finding": "SaveChanges cleared PendingCheckpointID causing mismatch between commit trailer ID and condensed metadata ID. PendingCheckpointID is set by PostCommit (ACTIVE→ACTIVE_COMMITTED) and consumed by handleTurnEndCondense—must not be cleared."
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 732,
+          "end_line": 732,
+          "finding": "condenseAndUpdateState was setting PendingCheckpointID=checkpointID.String() causing reuse across commits. Must clear it after condensation; handleAmendCommitMsg falls back to LastCheckpointID for amend restoration."
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 432,
+          "end_line": 445,
+          "finding": "handleAmendCommitMsg only checked PendingCheckpointID for trailer restoration. After clearing PendingCheckpointID in condenseAndUpdateState, must fall back to LastCheckpointID when PendingCheckpointID is empty."
+        }
+      ],
+      "workflow": [
+        "macOS has /var → /private/var symlink; t.TempDir() returns unresolved path but git rev-parse --show-toplevel resolves symlinks. Tests must use resolved worktreePath when constructing absolute paths.",
+        "TDD red-green-refactor cycle: write failing tests first, verify they fail for the right reasons, then implement fixes and verify they pass",
+        "Integration test failures can reveal cascading effects of fixes—Bug 3 fix exposed that condenseAndUpdateState was perpetuating PendingCheckpointID incorrectly"
+      ]
+    },
+    "friction": [
+      "macOS /var → /private/var symlink resolution caused initial Bug 1 test failure; required using GetWorktreePath() resolved path in test transcript",
+      "Bug 3 fix had cascading effect on condenseAndUpdateState behavior, causing integration test failure that required additional fix",
+      "Strategy tests use t.Chdir() making them inherently sequential; 177 tests take ~14s but cannot be parallelized without major refactoring"
+    ],
+    "open_items": [
+      "Integration tests runtime has crept up to 217s—user deferred investigation for later",
+      "Strategy package could be refactored to accept explicit paths instead of os.Getwd() to enable t.Parallel() and faster test execution (pre-existing, not caused by this PR)"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T06:28:41.964629Z",
+    "agent_lines": 0,
+    "human_added": 705,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 705,
+    "agent_percentage": 0
+  }
+}
