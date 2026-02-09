@@ -661,12 +661,12 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			w := cmd.OutOrStdout()
-			rcFile, completionLine := shellCompletionTarget()
+			rcFile, _ := shellCompletionTarget()
 			if rcFile == "" {
 				fmt.Fprintf(w, "Note: Shell completion not available for your shell (%s). Supported: zsh, bash.\n", os.Getenv("SHELL"))
 				return nil
 			}
-			if isCompletionConfigured(rcFile, completionLine) {
+			if isCompletionConfigured(rcFile) {
 				fmt.Fprintf(w, "✓ Shell completion already configured in %s\n", rcFile)
 				return nil
 			}
