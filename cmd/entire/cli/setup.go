@@ -663,7 +663,7 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 			w := cmd.OutOrStdout()
 			rcFile, completionLine := shellCompletionTarget()
 			if rcFile == "" {
-				fmt.Fprintf(w, "Note: Shell completion not available for your shell (%s). Supported: zsh, bash.\n", os.Getenv("SHELL"))
+				fmt.Fprintf(w, "Note: Shell completion not available for your shell (%s). Supported: zsh, bash, fish.\n", os.Getenv("SHELL"))
 				return nil
 			}
 			if isCompletionConfigured(rcFile, completionLine) {
@@ -697,6 +697,9 @@ func shellCompletionTarget() (rcFile, completionLine string) {
 	case strings.Contains(shell, "bash"):
 		return filepath.Join(home, ".bashrc"),
 			"source <(entire completion bash)"
+	case strings.Contains(shell, "fish"):
+		return filepath.Join(home, ".config", "fish", "config.fish"),
+			"entire completion fish | source"
 	default:
 		return "", ""
 	}
