@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "42527c9c20c8",
+  "strategy": "manual-commit",
+  "branch": "20260209-postinstall-and-completions",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "scripts/install.sh"
+  ],
+  "sessions": [
+    {
+      "metadata": "/42/527c9c20c8/0/metadata.json",
+      "transcript": "/42/527c9c20c8/0/full.jsonl",
+      "context": "/42/527c9c20c8/0/context.md",
+      "content_hash": "/42/527c9c20c8/0/content_hash.txt",
+      "prompt": "/42/527c9c20c8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 8,
+    "cache_creation_tokens": 9728,
+    "cache_read_tokens": 101576,
+    "output_tokens": 831,
+    "api_call_count": 4
+  }
+}
