@@ -674,29 +674,31 @@ const shellCompletionComment = "# Entire CLI shell completion"
 
 // shellCompletionTarget returns the rc file path and completion lines for the
 // user's current shell. Returns empty strings for unsupported shells.
-func shellCompletionTarget() (rcFile, completionLine string) {
+func shellCompletionTarget() (shellName, rcFile, completionLine string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 
 	shell := os.Getenv("SHELL")
 	switch {
 	case strings.Contains(shell, "zsh"):
-		return filepath.Join(home, ".zshrc"),
+		return "Zsh",
+			filepath.Join(home, ".zshrc"),
 			"autoload -Uz compinit && compinit && source <(entire completion zsh)"
 	case strings.Contains(shell, "bash"):
-		return filepath.Join(home, ".bashrc"),
+		return "Bash",
+			filepath.Join(home, ".bashrc"),
 			"source <(entire completion bash)"
 	default:
-		return "", ""
+		return "", "", ""
 	}
 }
 
 // promptShellCompletion offers to add shell completion to the user's rc file.
 // Only prompts if completion is not already configured.
 func promptShellCompletion(w io.Writer) error {
-	rcFile, completionLine := shellCompletionTarget()
+	shellName, rcFile, completionLine := shellCompletionTarget()
 	if rcFile == "" {
 		fmt.Fprintf(w, "Note: Shell completion not available for your shell (%s). Supported: zsh, bash.\n", os.Getenv("SHELL"))
 		return nil
@@ -711,7 +713,7 @@ func promptShellCompletion(w io.Writer) error {
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Enable shell completion?").
+				Title(fmt.Sprintf("Enable shell completion? (detected: %s)", shellName)).
 				Options(
 					huh.NewOption("Yes", "yes"),
 					huh.NewOption("No", "no"),
