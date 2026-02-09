@@ -695,6 +695,11 @@ func shellCompletionTarget() (shellName, rcFile, completionLine string, err erro
 			filepath.Join(home, ".bashrc"),
 			"source <(entire completion bash)",
 			nil
+	case strings.Contains(shell, "fish"):
+		return "Fish",
+			filepath.Join(home, ".config", "fish", "config.fish"),
+			"entire completion fish | source",
+			nil
 	default:
 		return "", "", "", errUnsupportedShell
 	}
@@ -706,7 +711,7 @@ func promptShellCompletion(w io.Writer) error {
 	shellName, rcFile, completionLine, err := shellCompletionTarget()
 	if err != nil {
 		if errors.Is(err, errUnsupportedShell) {
-			fmt.Fprintf(w, "Note: Shell completion not available for your shell. Supported: zsh, bash.\n")
+			fmt.Fprintf(w, "Note: Shell completion not available for your shell. Supported: zsh, bash, fish.\n")
 			return nil
 		}
 		return fmt.Errorf("shell completion: %w", err)
