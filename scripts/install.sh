@@ -112,8 +112,9 @@ get_latest_version() {
 download_file() {
     local url="$1"
     local output="$2"
+    local curl_opts=(-fsSL)
 
-    curl -fsSL "$url" -o "$output"
+    curl "${curl_opts[@]}" "$url" -o "$output"
 }
 
 verify_checksum() {
