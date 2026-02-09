@@ -169,7 +169,7 @@ main() {
     info "Extracting..."
     tar -xzf "$archive_path" -C "$tmp_dir"
 
-    local install_dir="${ENTIRE_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+    local install_dir="${DEFAULT_INSTALL_DIR}"
     local binary_path="${tmp_dir}/${BINARY_NAME}"
 
     chmod +x "$binary_path"
@@ -180,7 +180,7 @@ main() {
     mkdir -p "${install_dir}"
 
     if [[ ! -w "$install_dir" ]]; then
-        error "Cannot write to ${install_dir}. Run with sudo or set ENTIRE_INSTALL_DIR to a writable location."
+        error "Cannot write to ${install_dir}."
     fi
     mv "$binary_path" "$install_path"
 
