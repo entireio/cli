@@ -40,27 +40,6 @@ error() {
     exit 1
 }
 
-show_help() {
-    cat << EOF
-Entire CLI Installer
-
-Usage:
-    curl -fsSL https://entire.io/install.sh | bash
-
-Environment Variables:
-    ENTIRE_INSTALL_DIR  Override install directory (default: $HOME/.local/bin)
-    GITHUB_TOKEN        GitHub API token to avoid rate limiting (optional)
-
-Examples:
-    # Install latest version
-    curl -fsSL https://entire.io/install.sh | bash
-
-    # Install to custom directory
-    curl -fsSL https://entire.io/install.sh | ENTIRE_INSTALL_DIR=/usr/local/bin bash
-EOF
-    exit 0
-}
-
 detect_os() {
     local os
     os="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -137,12 +116,6 @@ verify_checksum() {
 }
 
 main() {
-    for arg in "$@"; do
-        if [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
-            show_help
-        fi
-    done
-
     if ! command -v curl &> /dev/null; then
         error "curl is required but not installed. Please install curl and try again."
     fi
