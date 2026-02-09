@@ -1,0 +1,35 @@
+{
+  "checkpoint_id": "91b42542f24f",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-221-consolidate-session-logging",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/last_interaction_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/status.go",
+    "cmd/entire/cli/status_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/session_state_test.go",
+    "docs/generated/session-phase-state-machine.mmd"
+  ],
+  "sessions": [
+    {
+      "metadata": "/91/b42542f24f/0/metadata.json",
+      "transcript": "/91/b42542f24f/0/full.jsonl",
+      "context": "/91/b42542f24f/0/context.md",
+      "content_hash": "/91/b42542f24f/0/content_hash.txt",
+      "prompt": "/91/b42542f24f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 58,
+    "cache_creation_tokens": 342346,
+    "cache_read_tokens": 4251079,
+    "output_tokens": 2413,
+    "api_call_count": 51
+  }
+}
