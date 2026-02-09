@@ -700,7 +700,7 @@ func shellCompletionTarget() (shellName, rcFile, completionLine string) {
 func promptShellCompletion(w io.Writer) error {
 	shellName, rcFile, completionLine := shellCompletionTarget()
 	if rcFile == "" {
-		fmt.Fprintf(w, "Note: Shell completion not available for your shell (%s). Supported: zsh, bash.\n", os.Getenv("SHELL"))
+		fmt.Fprintf(w, "Note: Shell completion not available for your shell. Supported: zsh, bash.\n")
 		return nil
 	}
 
