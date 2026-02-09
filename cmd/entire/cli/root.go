@@ -98,7 +98,7 @@ func NewRootCmd() *cobra.Command {
 func newVersionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "Show version information",
+		Short: "Show build information",
 		Run: func(_ *cobra.Command, _ []string) {
 			fmt.Printf("Entire CLI %s (%s)\n", Version, Commit)
 			fmt.Printf("Go version: %s\n", runtime.Version())
