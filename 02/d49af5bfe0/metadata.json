@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "02d49af5bfe0",
+  "strategy": "manual-commit",
+  "branch": "soph/fix-midsession-commit",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/mid_session_commit_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/02/d49af5bfe0/0/metadata.json",
+      "transcript": "/02/d49af5bfe0/0/full.jsonl",
+      "context": "/02/d49af5bfe0/0/context.md",
+      "content_hash": "/02/d49af5bfe0/0/content_hash.txt",
+      "prompt": "/02/d49af5bfe0/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2967,
+    "cache_creation_tokens": 357890,
+    "cache_read_tokens": 12102546,
+    "output_tokens": 6357,
+    "api_call_count": 113
+  }
+}
