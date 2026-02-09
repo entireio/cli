@@ -177,7 +177,7 @@ main() {
     local install_path="${install_dir}/entire"
 
     mkdir -p "${install_dir}"
-    success "Directory ready"
+    info "Directory ready"
 
     if [[ ! -w "$install_dir" ]]; then
         error "Cannot write to ${install_dir}."
