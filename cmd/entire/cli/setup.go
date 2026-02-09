@@ -734,7 +734,7 @@ func promptShellCompletion(w io.Writer) error {
 	}
 
 	fmt.Fprintf(w, "✓ Shell completion added to %s\n", rcFile)
-	fmt.Fprintln(w, "  Run `source "+rcFile+"` or restart your shell to activate")
+	fmt.Fprintln(w, "  Restart your shell to activate")
 
 	return nil
 }
