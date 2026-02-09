@@ -1,0 +1,75 @@
+{
+  "checkpoint_id": "0e86820a38c3",
+  "session_id": "9e2434f3-c800-4ed9-b78e-e494ef59bd78",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T07:09:36.127401Z",
+  "branch": "alex/ent-258-mid-turn-commits",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/mid_turn_commit_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "956069ed-1eb2-4cf5-a270-29f7d1a651cb",
+  "checkpoint_transcript_start": 1970,
+  "transcript_lines_at_start": 1970,
+  "token_usage": {
+    "input_tokens": 1482,
+    "cache_creation_tokens": 501124,
+    "cache_read_tokens": 15430566,
+    "output_tokens": 4097,
+    "api_call_count": 138
+  },
+  "summary": {
+    "intent": "Review PR feedback questioning whether two checkpoint ID fields (PendingCheckpointID and LastCheckpointID) are both necessary, and address a bug where CondenseSessionByID incorrectly sets PendingCheckpointID.",
+    "outcome": "Fixed the bug in CondenseSessionByID to only set LastCheckpointID. Documented the semantic distinction between the two fields: PendingCheckpointID represents a promise for future condensation, while LastCheckpointID represents completed condensation. Determined both fields should be kept for now due to their different lifecycle meanings.",
+    "learnings": {
+      "repo": [
+        "PendingCheckpointID lifecycle: set by PostCommit ActionMigrateShadowBranch (ACTIVE→ACTIVE_COMMITTED), consumed by handleTurnEndCondense at TurnEnd, cleared after condensation completes",
+        "LastCheckpointID lifecycle: set after successful condensation, used by PrepareCommitMsg to reuse IDs on no-new-content commits, represents verified data existence",
+        "The distinction between 'pending' and 'last' checkpoint IDs matters for failure cases: if condensation fails, PendingCheckpointID represents an orphaned trailer while LastCheckpointID correctly remains empty"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_condensation.go",
+          "line": 568,
+          "finding": "CondenseSessionByID was incorrectly setting PendingCheckpointID instead of only LastCheckpointID, creating inconsistency with the deferred condensation path"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 665,
+          "finding": "PostCommit's ActionMigrateShadowBranch sets PendingCheckpointID from commit trailer for deferred condensation in ACTIVE_COMMITTED state"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 1410,
+          "finding": "handleTurnEndCondense uses PendingCheckpointID to match already-committed trailer before LastCheckpointID is updated"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 760,
+          "finding": "condenseAndUpdateState sets LastCheckpointID and clears PendingCheckpointID after successful condensation"
+        }
+      ],
+      "workflow": [
+        "When deciding whether to merge similar fields, consider the semantic difference between 'promise' (future action) vs 'completed state' (verified data)",
+        "Edge cases like failure scenarios can justify field separation even when fields converge in the happy path"
+      ]
+    },
+    "friction": [],
+    "open_items": [
+      "Potential future simplification: unify PendingCheckpointID and LastCheckpointID into a single field set eagerly with failure handling, though this changes semantics and is low priority given condensation rarely fails"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T07:09:20.853034Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 0,
+    "agent_percentage": 0
+  }
+}
