@@ -3,6 +3,7 @@ version: 2
 before:
   hooks:
     - go mod tidy
+    - mise run completions
 
 builds:
   - main: ./cmd/entire
@@ -38,6 +39,11 @@ archives:
       - tar.gz
     name_template: "entire_{{ .Os }}_{{ .Arch }}"
     files:
+      - src: completions/*
+        info:
+          owner: root
+          group: root
+          mtime: "{{ .CommitDate }}"
       - src: LICENSE
         info:
           owner: root
@@ -109,3 +115,7 @@ homebrew_casks:
         - "X-GitHub-Api-Version: 2022-11-28"
     binaries:
       - entire
+    completions:
+      bash: "completions/entire.bash"
+      zsh: "completions/entire.zsh"
+      fish: "completions/entire.fish"
