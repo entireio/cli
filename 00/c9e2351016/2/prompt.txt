@@ -1,0 +1,326 @@
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# Implementation Plan: `entire reset` Command
+
+## Overview
+
+Add a new top-level command `entire reset` that deletes the shadow branch and all session state files for the current base commit (HEAD).
+
+## Requirements
+
+The command should:
+1. Get the current HEAD commit SHA
+2. Delete the shadow branch `entire/<commit-hash[:7]>` if it exists
+3. Delete all `.git/entire-sessions/*.json` files where `base_commit` matches the HEAD commit
+4. Support `--force` / `-f` flag to skip confirmation prompts
+5. Provide helpful messages for strategies that don't support reset
+
+## Key Insight
+
+**The functionality already exists!** The `ManualCommitStrategy.Reset(force bool)` method in `cmd/entire/cli/strategy/manual_commit_reset.go` (lines 19-95) implements exactly what we need:
+- Gets current HEAD commit hash
+- Finds shadow branch `entire/<commit-hash[:7]>`
+- **Finds ALL sessions with matching base commit** using `findSessionsForCommit()` (line 70)
+- **Clears each session state file** using `clearSessionState()` which calls `store.Clear()` to delete `.git/entire-sessions/<session-id>.json` (lines 72-78)
+- Deletes shadow branch
+- Supports confirmation prompts with accessibility
+- Returns nil (not error) if no shadow branch exists
+
+The session state cleanup is handled by:
+- `findSessionsForCommit(baseCommitSHA)` in `manual_commit_session.go:122-136` - finds all sessions where `state.BaseCommit == baseCommitSHA`
+- `clearSessionState(sessionID)` in `manual_commit_session.go:44-53` - calls `store.Clear()` to delete the JSON file
+- `store.Clear()` in `session/state.go` - removes the `.git/entire-sessions/<session-id>.json` file
+
+**All we need is a thin CLI wrapper** that calls this existing method.
+
+## Implementation Steps
+
+### 1. Create Command File: `cmd/entire/cli/reset.go`
+
+Create a new command file following the pattern from `clean.go`:
+
+```go
+package cli
+
+import (
+	"errors"
+	"fmt"
+
+	"entire.io/cli/cmd/entire/cli/paths"
+	"entire.io/cli/cmd/entire/cli/strategy"
+	"github.com/spf13/cobra"
+)
+
+func newResetCmd() *cobra.Command {
+	var forceFlag bool
+
+	cmd := &cobra.Command{
+		Use:   "reset",
+		Short: "Reset the shadow branch and session state for current HEAD",
+		Long: `Reset deletes the shadow branch and session state for the current HEAD commit.
+
+This allows starting fresh without existing checkpoints on your current commit.
+
+Only works with the manual-commit strategy. For auto-commit strategy,
+use Git directly: git reset --hard <commit>
+
+The command will:
+  - Find all sessions where base_commit matches the current HEAD
+  - Delete each session state file (.git/entire-sessions/<session-id>.json)
+  - Delete the shadow branch (entire/<commit-hash>)
+
+Example: If HEAD is at commit abc1234567890, the command will:
+  1. Find all .json files in .git/entire-sessions/ with "base_commit": "abc1234567890"
+  2. Delete those session files (e.g., 2026-02-02-xyz123.json, 2026-02-02-abc456.json)
+  3. Delete the shadow branch entire/abc1234
+
+Without --force, prompts for confirmation before deleting.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Check if in git repository
+			if _, err := paths.RepoRoot(); err != nil {
+				cmd.SilenceUsage = true
+				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository.")
+				return NewSilentError(errors.New("not a git repository"))
+			}
+
+			// Get current strategy
+			strat := GetStrategy()
+
+			// Check if strategy supports reset
+			resetter, ok := strat.(strategy.SessionResetter)
+			if !ok {
+				cmd.SilenceUsage = true
+				return handleStrategyDoesNotSupportReset(cmd.ErrOrStderr(), strat.Name())
+			}
+
+			// Call strategy's Reset method
+			if err := resetter.Reset(forceFlag); err != nil {
+				return fmt.Errorf("reset failed: %w", err)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Skip confirmation prompt")
+
+	return cmd
+}
+
+func handleStrategyDoesNotSupportReset(w io.Writer, strategyName string) error {
+	switch strategyName {
+	case strategy.StrategyNameAutoCommit:
+		fmt.Fprintln(w, "The auto-commit strategy doesn't use shadow branches.")
+		fmt.Fprintln(w, "To reset your branch, use Git directly:")
+		fmt.Fprintln(w, "  git reset --hard <commit>")
+		return NewSilentError(errors.New("auto-commit strategy does not support reset"))
+	default:
+		fmt.Fprintf(w, "The %s strategy does not support reset.\n", strategyName)
+		return NewSilentError(fmt.Errorf("strategy %s does not support reset", strategyName))
+	}
+}
+```
+
+**Key design decisions:**
+- **No `checkDisabledGuard()`**: Unlike interactive commands, reset is a maintenance operation that should work regardless of Entire's enabled state (similar to `clean`)
+- **Strategy check via type assertion**: Gracefully handle strategies that don't implement `SessionResetter`
+- **Helpful error messages**: Guide users to alternatives when strategy doesn't support reset
+- **Use `SilentError`**: When we print custom messages (not git repo, strategy not supported)
+
+### 2. Register Command: `cmd/entire/cli/root.go`
+
+Add the command registration around line 76 (after `newCleanCmd()`):
+
+```go
+// Line 73-77 (existing)
+cmd.AddCommand(newRewindCmd())
+cmd.AddCommand(newResumeCmd())
+cmd.AddCommand(newCleanCmd())
+cmd.AddCommand(newResetCmd())  // <-- ADD THIS LINE
+cmd.AddCommand(newEnableCmd())
+```
+
+### 3. Create Unit Tests: `cmd/entire/cli/reset_test.go`
+
+Following the pattern from `clean_test.go`:
+
+```go
+package cli
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
+
+func TestResetCmd_NoShadowBranch(t *testing.T) {
+	// Setup test repo without shadow branch
+	// Run reset command
+	// Verify "No shadow branch found" message
+}
+
+func TestResetCmd_WithForce(t *testing.T) {
+	// Setup test repo with shadow branch and sessions
+	// Run reset with --force
+	// Verify shadow branch deleted
+	// Verify session states cleared
+}
+
+func TestResetCmd_NotGitRepo(t *testing.T) {
+	// Create temp dir (not git repo)
+	// Run reset
+	// Verify "Not a git repository" message
+}
+
+func TestResetCmd_AutoCommitStrategy(t *testing.T) {
+	// Configure auto-commit strategy
+	// Run reset
+	// Verify helpful error message about using git directly
+}
+```
+
+Note: The core reset logic is already tested in `cmd/entire/cli/strategy/manual_commit_reset_test.go`. These tests only need to verify the command wrapper (prerequisite checks, strategy routing, error handling).
+
+## Critical Files
+
+### Files to Create
+- `cmd/entire/cli/reset.go` - New command implementation (~80 lines)
+- `cmd/entire/cli/reset_test.go` - Unit tests (~150 lines)
+
+### Files to Modify
+- `cmd/entire/cli/root.go:76` - Add `cmd.AddCommand(newResetCmd())`
+
+### Files Referenced (No Changes)
+- `cmd/entire/cli/strategy/manual_commit_reset.go` - Existing Reset() implementation
+- `cmd/entire/cli/strategy/strategy.go` - SessionResetter interface definition
+
+## Expected Behavior
+
+### Success Cases
+
+**No shadow branch:**
+```bash
+$ entire reset
+No shadow branch found for entire/abc1234
+```
+
+**With shadow branch (prompted):**
+```bash
+$ entire reset
+? Delete shadow branch? This will delete entire/abc1234 and all associated session state.
+  This action cannot be undone.
+  › Delete / Cancel
+
+Cleared session state for 2026-02-02-abc123
+Deleted shadow branch entire/abc1234
+```
+
+**With --force flag:**
+```bash
+$ entire reset --force
+Cleared session state for 2026-02-02-abc123
+Cleared session state for 2026-02-02-def456
+Deleted shadow branch entire/abc1234
+```
+
+### Error Cases
+
+**Not a git repository:**
+```bash
+$ entire reset
+Not a git repository.
+```
+
+**Auto-commit strategy:**
+```bash
+$ entire reset
+The auto-commit strategy doesn't use shadow branches.
+To reset your branch, use Git directly:
+  git reset --hard <commit>
+```
+
+## Verification Steps
+
+After implementation:
+
+1. **Run tests:**
+   ```bash
+   mise run test
+   mise run test:integration
+   ```
+
+2. **Manual testing with manual-commit strategy:**
+   ```bash
+   # Setup: Create a session with checkpoints
+   entire resume feature-branch
+   # ... make some changes, Claude creates checkpoints
+
+   # Test 1: Reset without force (should prompt)
+   entire reset
+
+   # Test 2: Reset with force
+   entire reset --force
+
+   # Test 3: Reset when nothing to reset
+   entire reset
+   # Should show: "No shadow branch found"
+   ```
+
+3. **Manual testing with auto-commit strategy:**
+   ```bash
+   # Switch to auto-commit
+   git config entire.strategy auto-commit
+
+   # Try reset
+   entire reset
+   # Should show helpful message about using git directly
+   ```
+
+4. **Code quality checks:**
+   ```bash
+   mise run fmt
+   mise run lint
+   mise run dup
+   ```
+
+## Edge Cases Handled
+
+All handled by existing `Reset()` method:
+- ✅ Shadow branch doesn't exist (returns nil with message)
+- ✅ User cancels confirmation (returns nil with "Cancelled")
+- ✅ Multiple sessions on same commit (clears all)
+- ✅ Failed to delete shadow branch (returns error)
+- ✅ Partial failures (prints warnings, continues)
+- ✅ Accessibility mode (uses accessible forms)
+- ✅ Running from subdirectory (uses repo root, not cwd)
+
+## Notes
+
+- The `SessionResetter` interface comment mentions "rewind reset" command, but this new command is a top-level `entire reset` for better UX
+- The command intentionally does NOT use `checkDisabledGuard()` - reset is a maintenance operation that should work regardless of Entire's enabled state
+- All output goes to stderr (via `os.Stderr` in Reset method), which is appropriate for status messages
+- The `--force` flag skips confirmation but still shows what was deleted
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+
+---
+
+it does not clear the sessions created inside .git, manual_commit_reset just checks if there are any shadow branch. Have in mind that we can have sessions at .git/entire-sessions and no shadow branches
+
+---
+
+[Request interrupted by user]
+
+---
+
+All test cases use the --force flag, which bypasses the interactive confirmation prompt. There's no test coverage for the interactive confirmation path (lines 52-83 in manual_commit_reset.go) where the user is prompted to confirm the deletion. Consider adding a test that verifies the confirmation prompt works correctly and that canceling the operation leaves the shadow branch and sessions intact.
+
+---
+
+eval this feedback:
+All test cases use the --force flag, which bypasses the interactive confirmation prompt. There's no test coverage for the interactive confirmation path (lines 52-83 in manual_commit_reset.go) where the user is prompted to confirm the deletion. Consider adding a test that verifies the confirmation prompt works correctly and that canceling the operation leaves the shadow branch and sessions intact.

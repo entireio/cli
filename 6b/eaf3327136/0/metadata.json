@@ -1,0 +1,34 @@
+{
+  "checkpoint_id": "6beaf3327136",
+  "session_id": "42845d94-59b3-4717-95f6-765405cfabe1",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-04T12:15:47.931901Z",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/transcript.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "docs/plans/2026-02-04-stop-hook-performance.md"
+  ],
+  "agent": "Claude Code",
+  "agents": "Claude Code",
+  "token_usage": {
+    "input_tokens": 96,
+    "cache_creation_tokens": 198439,
+    "cache_read_tokens": 4517946,
+    "output_tokens": 7374,
+    "api_call_count": 61
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-04T00:23:41.757737Z",
+    "agent_lines": 3,
+    "human_added": 0,
+    "human_modified": 87,
+    "human_removed": 332,
+    "total_committed": 90,
+    "agent_percentage": 3.3333333333333335
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "checkpoint_id": "f5c0586f2fba",
+  "session_id": "15f99783-ab13-4526-902c-0ca770a5d70e",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-28T21:42:41.179707Z",
+  "branch": "soph/bug-with-rebase-or-commit-change-during-claude-session",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/mid_session_rebase_test.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_migration.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "1b4903bc-6c49-4aa1-b678-63510130effd",
+  "transcript_lines_at_start": 244,
+  "token_usage": {
+    "input_tokens": 4132,
+    "cache_creation_tokens": 195613,
+    "cache_read_tokens": 5250576,
+    "output_tokens": 152,
+    "api_call_count": 50
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-28T21:42:41.035237Z",
+    "agent_lines": 512,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 512,
+    "agent_percentage": 100
+  }
+}

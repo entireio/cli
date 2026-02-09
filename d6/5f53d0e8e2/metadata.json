@@ -1,0 +1,44 @@
+{
+  "checkpoint_id": "d65f53d0e8e2",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-221-type-consolidation",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/integration_test/last_interaction_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/status.go",
+    "cmd/entire/cli/status_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/session_state_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d6/5f53d0e8e2/0/metadata.json",
+      "transcript": "/d6/5f53d0e8e2/0/full.jsonl",
+      "context": "/d6/5f53d0e8e2/0/context.md",
+      "content_hash": "/d6/5f53d0e8e2/0/content_hash.txt",
+      "prompt": "/d6/5f53d0e8e2/0/prompt.txt"
+    },
+    {
+      "metadata": "/d6/5f53d0e8e2/1/metadata.json",
+      "transcript": "/d6/5f53d0e8e2/1/full.jsonl",
+      "context": "/d6/5f53d0e8e2/1/context.md",
+      "content_hash": "/d6/5f53d0e8e2/1/content_hash.txt",
+      "prompt": "/d6/5f53d0e8e2/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 324,
+    "cache_creation_tokens": 154581,
+    "cache_read_tokens": 5036447,
+    "output_tokens": 3266,
+    "api_call_count": 74
+  }
+}

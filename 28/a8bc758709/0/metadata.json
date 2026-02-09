@@ -1,0 +1,20 @@
+{
+  "checkpoint_id": "28a8bc758709",
+  "session_id": "2026-01-27-3de15637-3629-4423-bfe4-8b85e135c885",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-27T15:41:50.495779+11:00",
+  "branch": "gtrrz-victor/improve-status-cmd-output",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/config.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_lines_at_start": 1,
+  "token_usage": {
+    "input_tokens": 74,
+    "cache_creation_tokens": 19586,
+    "cache_read_tokens": 344290,
+    "output_tokens": 27,
+    "api_call_count": 9
+  }
+}

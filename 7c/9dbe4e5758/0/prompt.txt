@@ -1,0 +1,5 @@
+can you check if there would be issues doing "entire resume" in a repo that uses a https url instead of a git url?
+
+---
+
+yes

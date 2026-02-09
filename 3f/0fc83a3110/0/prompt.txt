@@ -1,0 +1,5 @@
+can we check when we fill the first prompt field in sessionState?
+
+---
+
+you are not correct: "In addition to the common input fields, UserPromptSubmit hooks receive the prompt field containing the text the user submitted." -> https://code.claude.com/docs/en/hooks#userpromptsubmit-input

@@ -1,0 +1,33 @@
+{
+  "checkpoint_id": "3dffd2ffdd52",
+  "session_id": "58e50d6c-eec7-4ae4-a366-a1aa111d2a6b",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-04T12:39:54.776582Z",
+  "branch": "alex/extract-git-package",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/gitutil/operations.go",
+    "cmd/entire/cli/gitutil/repository.go",
+    "cmd/entire/cli/paths/paths.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "6877c4dc-35e8-48ae-89a9-2ecdcc7a8566",
+  "transcript_lines_at_start": 189,
+  "token_usage": {
+    "input_tokens": 499,
+    "cache_creation_tokens": 321052,
+    "cache_read_tokens": 9621317,
+    "output_tokens": 1190,
+    "api_call_count": 98
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-04T12:39:54.703801Z",
+    "agent_lines": 0,
+    "human_added": 19,
+    "human_modified": 4,
+    "human_removed": 0,
+    "total_committed": 19,
+    "agent_percentage": 0
+  }
+}

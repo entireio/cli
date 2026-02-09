@@ -1,0 +1,47 @@
+{
+  "checkpoint_id": "80e94f3d953a",
+  "session_id": "a318ad73-17a2-4575-845d-8952a1e5958b",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-31T09:32:12.914762Z",
+  "branch": "soph/improved-shadow-v2",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/config.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/integration_test/concurrent_session_warning_test.go",
+    "cmd/entire/cli/integration_test/gemini_concurrent_session_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
+    "cmd/entire/cli/integration_test/multi_session_warning_test.go",
+    "cmd/entire/cli/integration_test/rewind_test.go",
+    "cmd/entire/cli/integration_test/session_conflict_test.go",
+    "cmd/entire/cli/integration_test/shadow_branch_overlap_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/strategy.go",
+    "docs/testing/shadow-branch-overlap-tests.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "72a8f9d6-42e2-4171-9318-5b04f3c10e30",
+  "transcript_lines_at_start": 971,
+  "token_usage": {
+    "input_tokens": 1759,
+    "cache_creation_tokens": 809941,
+    "cache_read_tokens": 37347887,
+    "output_tokens": 752,
+    "api_call_count": 341
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-31T09:32:12.717677Z",
+    "agent_lines": 114,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 114,
+    "agent_percentage": 100
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "60fd31fcf44f",
+  "session_id": "61cb3ba8-484b-4a21-bf99-34f7dc361170",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T07:42:18.457779Z",
+  "branch": "20260209-fish-completions",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/setup_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "49e836ea-b530-45d9-8b45-a69fb7b7bb1e",
+  "checkpoint_transcript_start": 6,
+  "transcript_lines_at_start": 6,
+  "token_usage": {
+    "input_tokens": 17,
+    "cache_creation_tokens": 19056,
+    "cache_read_tokens": 441175,
+    "output_tokens": 2075,
+    "api_call_count": 14
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T07:42:18.329245Z",
+    "agent_lines": 89,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 89,
+    "agent_percentage": 100
+  }
+}

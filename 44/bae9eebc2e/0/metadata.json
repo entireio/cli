@@ -1,0 +1,19 @@
+{
+  "checkpoint_id": "44bae9eebc2e",
+  "session_id": "2026-01-22-8ee504de-7ee5-43bc-9e8c-db2d5ec5a9e6",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-22T20:54:53.72184+01:00",
+  "branch": "soph/do-not-truncate",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 156,
+    "cache_creation_tokens": 37215,
+    "cache_read_tokens": 1039506,
+    "output_tokens": 6085,
+    "api_call_count": 19
+  }
+}

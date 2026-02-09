@@ -1,0 +1,9 @@
+I think the checkpoint id is less important in the list view. Also what description are we currently using?
+
+---
+
+how are the checkpoints sorted?
+
+---
+
+I think we should sort by commit tree in the branch

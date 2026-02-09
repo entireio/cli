@@ -1,0 +1,17 @@
+{
+  "checkpoint_id": "94de498254e2",
+  "session_id": "2026-01-05-0bb9a2d9-a51e-4d5a-8275-566c766a0ff2",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-05T14:49:43.988316+01:00",
+  "checkpoints_count": 12,
+  "files_touched": [
+    "cmd/entire/cli/clean.go",
+    "cmd/entire/cli/clean_test.go",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/session.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/clean.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ]
+}

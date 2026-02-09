@@ -1,0 +1,59 @@
+can you take a look at this? I would have expected that the UserPromptSubmit would have surfaced this in claude (blocking the prompt) as usual and not dump an error including tool usage help: 
+
+  If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at:
+  /Users/alex/.claude/projects/-Users-alex-workspace-cli/c2b51eb0-d0e9-43cf-b431-42c05d49450b.jsonl
+  ⎿  UserPromptSubmit hook error: Failed with non-blocking status code: Captured state before prompt: 0 untracked files
+
+     Warning: Session ID conflict detected!
+
+        Shadow branch: entire/aa7be8c
+        Existing session: 2026-01-20-c2b51eb0-d0e9-43cf-b431-42c05d49450b
+        New session: 2026-01-20-9de86e4e-9df7-46f3-abb7-09b836f8dc9b
+
+        The shadow branch already has checkpoints from a different session.
+        Starting a new session would orphan the existing work.
+
+        Options:
+        1. Commit your changes (git commit) to create a new base commit
+        2. Run 'entire rewind reset' to discard the shadow branch and start fresh
+        3. Resume the existing session: claude -r c2b51eb0-d0e9-43cf-b431-42c05d49450b
+
+        To suppress this warning in future sessions, run:
+          entire enable --disable-multisession-warning
+
+     Usage:
+       entire hooks claude-code user-prompt-submit [flags]
+
+     Flags:
+       -h, --help   help for user-prompt-submit
+
+     session ID conflict: session ID conflict: shadow branch has commits from a different session
+     exit status 1
+
+---
+
+how does a concurent session differ from the session id conflict?
+
+---
+
+ah the different is that we got the hook from the first session being stopped?
+
+---
+
+[Request interrupted by user]
+
+---
+
+ah the different is that we got the hook from the first claude being closed?
+
+---
+
+can you do the fix?
+
+---
+
+can you explain me the difference between ShadowBranchConflictError and SessionIDConflictError
+
+---
+
+can we add a test for each to at least check it's returning the blocking (but not error) response?

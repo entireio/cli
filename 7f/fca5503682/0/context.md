@@ -1,0 +1,18 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+fix lint errors:
+  cmd/entire/cli/strategy/common.go:1279:10: string `main` has 5 occurrences, make it a constant (goconst)
+          return "main"
+                 ^
+  cmd/entire/cli/strategy/common.go:1282:10: string `master` has 5 occurrences, make it a constant (goconst)
+          return "master"
+                 ^
+  cmd/entire/cli/explain_test.go:820:5: SA5011(related information): this check suggests that the pointer can be nil (staticcheck)
+      if flag == nil {
+         ^
+  cmd/entire/c...
+

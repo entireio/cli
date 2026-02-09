@@ -1,0 +1,331 @@
+got merge conflicts from parent alex/ent-221-phase-aware-git-hooks
+
+---
+
+technically the third argument here is the transcriptPath...
+
+---
+
+continue merge, then push
+
+---
+
+and /github-pr-review
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+ah crap we still have merge issues? parent alex/ent-221-phase-aware-git-hooks
+
+---
+
+okay, now /github-pr-review
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
+
+---
+
+ehh, in this _specific_ gemini case, can we not get the sessionId off the hook payload?
+
+(also I thought we'd removed the concept of entireSessionId?)
+
+also have a look at some of the open PRs, there are some gemini specific ones that may be related to this...
+
+---
+
+hmm, I feel like this stdin consumption is limiting. let's check the other PRs first
+
+---
+
+I mean this is already the "everything else PR" so why the heck not.
+
+Is there any reason we don't parse the stdin on entry? is there some streaming aspect?
+
+---
+
+where are all the callers of commitWithMetadataGemini?
+
+---
+
+...why does the method exist at all?
+
+---
+
+if we did that do we stuff up the other PRs?
+
+---
+
+hmm, 162 is already generally affected by our state machine stuff no?
+
+---
+
+yeah let's do it

@@ -1,0 +1,70 @@
+{
+  "checkpoint_id": "e12c3e2b3f2a",
+  "session_id": "2026-01-21-0cf3db51-1c73-43bb-8d05-dc02739514a5",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-21T18:18:16.066345+11:00",
+  "branch": "alex/ent-109-text-output-checkpoint-flag",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/integration_test/explain_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "744dedb1-60bd-48f8-9c7a-4a700bff88cd",
+  "transcript_lines_at_start": 377,
+  "token_usage": {
+    "input_tokens": 50,
+    "cache_creation_tokens": 60597,
+    "cache_read_tokens": 3466970,
+    "output_tokens": 265,
+    "api_call_count": 47
+  },
+  "summary": {
+    "intent": "Implement ENT-109: Add --checkpoint flag with tiered verbosity (--verbose, --full) to the entire explain command, following strict TDD methodology.",
+    "outcome": "Successfully implemented the --checkpoint flag with three output tiers (default, verbose, full), mutual exclusivity checks, checkpoint lookup by prefix, and integration tests across 12 commits.",
+    "learnings": {
+      "repo": [
+        "The explain command uses a pager (like git) for output display via runPager() helper",
+        "Checkpoint store uses GitStore with ListCommitted() and ReadCommitted() for accessing checkpoint data",
+        "TokenUsage struct has four fields: InputTokens, CacheCreationTokens, CacheReadTokens, OutputTokens",
+        "Integration tests live in cmd/entire/cli/integration_test/ as a separate package"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 142,
+          "end_line": 180,
+          "finding": "formatCheckpointOutput uses tiered output: default shows summary, verbose adds files/prompts, full adds transcript"
+        },
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 100,
+          "end_line": 115,
+          "finding": "runExplainCheckpoint implements prefix matching for checkpoint IDs via ListCommitted iteration"
+        },
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 76,
+          "end_line": 82,
+          "finding": "Mutual exclusivity enforced by counting non-empty selector flags and erroring if > 1"
+        }
+      ],
+      "workflow": [
+        "golangci-lint typecheck errors when running on single file are expected - use full package build to verify compilation",
+        "gofmt may optimize code patterns like WriteString(string(bytes)) to Write(bytes) directly"
+      ]
+    },
+    "friction": [
+      "Previous subagent in Task 4 reported completion but didn't commit - had to manually commit",
+      "Stale IDE diagnostics showed compile errors that didn't exist (code compiled fine)",
+      "golangci-lint on single file shows false positive undefined identifier errors for functions in other package files"
+    ],
+    "open_items": [
+      "ENT-110: Domain model cleanup for Step vs Checkpoint types",
+      "ENT-111: TUI unified list view with accordion details (merge explain TUI into list command)",
+      "ENT-108: AI summary generation for checkpoints (Intent/Outcome currently show placeholder text)",
+      "PR #37 (Soph's work) needs integration for unified TUI approach"
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "checkpoint_id": "2002395c1048",
+  "session_id": "2026-01-21-7744721d-0ad2-4529-8b08-3b18561c6c36",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-21T21:20:52.081798+01:00",
+  "branch": "soph/align-all-multi-session-issues",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go"
+  ],
+  "agent": "Agent",
+  "token_usage": {
+    "input_tokens": 106,
+    "cache_creation_tokens": 52763,
+    "cache_read_tokens": 580415,
+    "output_tokens": 1978,
+    "api_call_count": 13
+  }
+}

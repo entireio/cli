@@ -1,0 +1,19 @@
+{
+  "checkpoint_id": "7033bba9319c",
+  "session_id": "2026-01-20-04cd0da1-dee3-4738-8139-524dfe55de83",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-20T10:05:21.841844+11:00",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/integration_test/hooks.go",
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
+    "cmd/entire/cli/integration_test/rewind_reset_test.go",
+    "cmd/entire/cli/paths/paths.go",
+    "cmd/entire/cli/paths/paths_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/session/state_test.go"
+  ],
+  "agent": "Agent"
+}

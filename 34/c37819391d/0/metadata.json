@@ -1,0 +1,16 @@
+{
+  "checkpoint_id": "34c37819391d",
+  "session_id": "2026-01-12-21a2e002-8b63-45db-8e0d-1978fe0600aa",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-12T21:08:18.462878+01:00",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/list.go",
+    "cmd/entire/cli/list/actions.go",
+    "cmd/entire/cli/list/data.go",
+    "cmd/entire/cli/list/model.go",
+    "cmd/entire/cli/list/tree.go",
+    "cmd/entire/cli/list/view.go",
+    "cmd/entire/cli/root.go"
+  ]
+}

@@ -1,0 +1,54 @@
+Implement the following plan:
+
+# Consolidate logging to single file per worktree
+
+## Context
+
+Currently `logging.Init(sessionID)` creates a separate log file per session at `.entire/logs/{session-id}.log`. This makes debugging harder because:
+- You can't `tail -f` before a session starts (file doesn't exist yet)
+- Concurrent sessions produce separate files you'd need to watch in parallel
+- Git hooks need to look up the session ID just to find the right log file
+
+## Change
+
+Write all logs to a single fixed file: `.entire/logs/entire.log`
+
+The `session_id` slog attribute already appears on every log line, so filtering by session is still possible with `jq`.
+
+## Files to modify
+
+### 1. `cmd/entire/cli/logging/logger.go`
+- Change `Init()` to use fixed filename `"entire.log"` instead of `sessionID+".log"` (line 124)
+- Update doc comment (line 74-75)
+- Session ID validation is no longer needed for the file path, but keep it since it's used for the `currentSessionID` attribute — actually, `Init()` should still accept a session ID for the slog attribute. But the validation was only there to prevent path traversal in the filename. Since the filename is now fixed, the validation can be relaxed. However, keeping it is harmless and protects against misuse of `currentSessionID`. Leave it.
+
+### 2. `cmd/entire/cli/logging/logger_test.go`
+- `TestInit_CreatesLogFile` (line 72): expect `entire.log` not `{sessionID}.log`
+- `TestInit_WritesJSONLogs` (line 90): read from `entire.log`
+- `TestInit_RespectsLogLevel` (line 136): read from `entire.log`
+- `TestInit_FallsBackToStderrOnError` (line 219): block `entire.log` not `{sessionID}.log`
+- `TestLogging_IncludesContextValues` (line 301): read from `entire.log`
+- `TestLogging_ParentSessionID` (line 354): read from `entire.log`
+- `TestLogging_AdditionalAttrs` (line 399): read from `entire.log`
+- `TestLogDuration` (line 450): read from `entire.log`
+- Extract a `logFilePath(tmpDir)` test helper to DRY up the repeated path construction
+
+### 3. `cmd/entire/cli/hooks_git_cmd.go` (line 63-77)
+- `initHookLogging()` currently reads session ID from `paths.ReadCurrentSession()` and passes it to `Init()`. It can still do this (session ID is used for the slog attribute), but it should no longer bail out when there's no session — the log file is fixed, so we can always initialize logging. Pass empty string for session ID when unknown.
+
+### 4. `docs/architecture/logging.md`
+- Update the file path description from `.entire/logs/<session-id>.log` to `.entire/logs/entire.log`
+- Update jq examples to use `entire.log` instead of `*.log`
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-2/7aa4110c-2d3c-4ebc-ab8d-3171d3469440.jsonl
+
+---
+
+commit this, push, open draft PR

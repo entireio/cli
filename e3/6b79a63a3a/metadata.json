@@ -1,0 +1,39 @@
+{
+  "checkpoint_id": "e36b79a63a3a",
+  "strategy": "manual-commit",
+  "branch": "gtrrz-victor/alt-date-prefix-session-id",
+  "migration_source_commit": "3d9ade5dd4d639c401c521cb9bbe27a22cb05e6b",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/claude.go",
+    "cmd/entire/cli/agent/geminicli/gemini.go",
+    "cmd/entire/cli/agent/geminicli/gemini_test.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/hooks_handlers_test.go",
+    "cmd/entire/cli/integration_test/agent_test.go",
+    "cmd/entire/cli/integration_test/concurrent_session_warning_test.go",
+    "cmd/entire/cli/integration_test/setup_gemini_hooks_test.go",
+    "cmd/entire/cli/paths/paths_test.go",
+    "cmd/entire/cli/session/session_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/sessionid/sessionid.go",
+    "cmd/entire/cli/sessionid/sessionid_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e3/6b79a63a3a/0/metadata.json",
+      "transcript": "/e3/6b79a63a3a/0/full.jsonl",
+      "context": "/e3/6b79a63a3a/0/context.md",
+      "content_hash": "/e3/6b79a63a3a/0/content_hash.txt",
+      "prompt": "/e3/6b79a63a3a/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 7051,
+    "cache_creation_tokens": 167638,
+    "cache_read_tokens": 7955327,
+    "output_tokens": 201,
+    "api_call_count": 75
+  }
+}

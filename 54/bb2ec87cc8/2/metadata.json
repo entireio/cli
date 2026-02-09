@@ -1,0 +1,34 @@
+{
+  "checkpoint_id": "54bb2ec87cc8",
+  "session_id": "15f99783-ab13-4526-902c-0ca770a5d70e",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-29T17:07:08.394855Z",
+  "branch": "soph/improved-shadow",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/mid_session_rebase_test.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_migration.go",
+    "cmd/entire/cli/strategy/manual_commit_migration_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "18dbf759-5629-4bc1-b6cb-f4eced5fd434",
+  "transcript_lines_at_start": 614,
+  "token_usage": {
+    "input_tokens": 4382,
+    "cache_creation_tokens": 318604,
+    "cache_read_tokens": 9200710,
+    "output_tokens": 239,
+    "api_call_count": 81
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-29T17:07:08.287848Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 634,
+    "human_removed": 319,
+    "total_committed": 134,
+    "agent_percentage": 0
+  }
+}

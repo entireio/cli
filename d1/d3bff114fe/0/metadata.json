@@ -1,0 +1,19 @@
+{
+  "checkpoint_id": "d1d3bff114fe",
+  "session_id": "2026-01-12-d1423492-e4f5-4a86-a997-1f1c8d09a940",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-12T16:56:53.021168+01:00",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/paths/paths.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ]
+}

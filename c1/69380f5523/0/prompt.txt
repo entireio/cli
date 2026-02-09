@@ -1,0 +1,2573 @@
+brainstorm: how do we add tooling in this codebase to detect code duplication?
+
+follow up: then how do we guard against more being added?
+follow up: what strategies can we use in claude code (LSP usage?) to get it right the first time?
+
+---
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.0.3/skills/brainstorming
+
+# Brainstorming Ideas Into Designs
+
+## Overview
+
+Help turn ideas into fully formed designs and specs through natural collaborative dialogue.
+
+Start by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design in small sections (200-300 words), checking after each section whether it looks right so far.
+
+## The Process
+
+**Understanding the idea:**
+- Check out the current project state first (files, docs, recent commits)
+- Ask questions one at a time to refine the idea
+- Prefer multiple choice questions when possible, but open-ended is fine too
+- Only one question per message - if a topic needs more exploration, break it into multiple questions
+- Focus on understanding: purpose, constraints, success criteria
+
+**Exploring approaches:**
+- Propose 2-3 different approaches with trade-offs
+- Present options conversationally with your recommendation and reasoning
+- Lead with your recommended option and explain why
+
+**Presenting the design:**
+- Once you believe you understand what you're building, present the design
+- Break it into sections of 200-300 words
+- Ask after each section whether it looks right so far
+- Cover: architecture, components, data flow, error handling, testing
+- Be ready to go back and clarify if something doesn't make sense
+
+## After the Design
+
+**Documentation:**
+- Write the validated design to `docs/plans/YYYY-MM-DD-<topic>-design.md`
+- Use elements-of-style:writing-clearly-and-concisely skill if available
+- Commit the design document to git
+
+**Implementation (if continuing):**
+- Ask: "Ready to set up for implementation?"
+- Use superpowers:using-git-worktrees to create isolated workspace
+- Use superpowers:writing-plans to create detailed implementation plan
+
+## Key Principles
+
+- **One question at a time** - Don't overwhelm with multiple questions
+- **Multiple choice preferred** - Easier to answer than open-ended when possible
+- **YAGNI ruthlessly** - Remove unnecessary features from all designs
+- **Explore alternatives** - Always propose 2-3 approaches before settling
+- **Incremental validation** - Present design in sections, validate each
+- **Be flexible** - Go back and clarify when something doesn't make sense
+
+---
+
+4, but I'm assuming 2 is part of that solution? we can go back and clean up stuff in a separate task
+
+---
+
+1. from what I've observed Claude (you) take the shortest path from problem -> code to solve, and without bringing in more files you don't necessarily have the context to know what's there already
+
+---
+
+the problem with 2. is that it only applies to helpers, and helpers that are documented. often times we do things in functions which aren't even exposed as helpers!
+
+there's a even harder problem where two code chunks do the same thing functionally but aren't expressed in quite the same way, so not sure if even the heuristic detections will help.
+
+buuuuut let's do what we can...
+
+1. to do this it's an instructions thing, hey? yes if possible
+2. I think this is the weakest option and most work to keep up to date, let's skip
+3. git hooks and agent instructions? yes
+
+---
+
+could we fire off an explore agent before starting work to look for related things?
+
+---
+
+and how would the skill interact with other skills, eg. the superpowers stuff?
+
+---
+
+it feels most appropriate to do it just before the executing-plans....but that relies on that being called first.
+
+maybe the standalone skill first, then we can figure out how to wire it in?
+
+---
+
+4 seems like what I would do manually...
+
+---
+
+4
+
+---
+
+can it block on a high threshold but provide warnings for lower confidence matches?
+
+---
+
+1. - this should show the files involved yeah?
+
+---
+
+2
+
+---
+
+yes
+
+---
+
+yes
+
+---
+
+yes
+
+---
+
+yes
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/go-discover-related
+
+# Go Code Discovery
+
+Search the codebase for related code before implementing new functionality. This helps avoid duplication by surfacing existing utilities, patterns, and similar implementations.
+
+## When to Use
+
+- Before writing a new function or type
+- Before implementing logic that might already exist
+- When unsure if a helper exists for common operations
+
+## Process
+
+### 1. Extract Search Terms
+
+From context (conversation, plan, or explicit args), identify:
+- **Nouns** - entities being operated on (e.g., "checkpoint", "session", "repository")
+- **Verbs** - operations being performed (e.g., "save", "load", "validate", "open")
+- **Patterns** - common code shapes (e.g., "error handling", "file reading")
+
+### 2. Search Using LSP
+
+Use `workspaceSymbol` to find related symbols:
+
+```
+LSP workspaceSymbol for: "Checkpoint"
+LSP workspaceSymbol for: "Save"
+LSP workspaceSymbol for: "Repository"
+```
+
+Look for:
+- Functions with similar names
+- Types that might already model your concept
+- Methods on existing types
+
+### 3. Search Using Grep
+
+Search for code patterns:
+
+```
+Grep for: "OpenRepository" (if working with repos)
+Grep for: "func.*Checkpoint" (functions related to checkpoints)
+Grep for: "err != nil" patterns in similar files
+```
+
+### 4. Check File Proximity
+
+List files in the same package/directory:
+
+```
+Glob for: cmd/entire/cli/strategy/*.go
+```
+
+Scan `common.go`, `helpers.go`, or similar utility files.
+
+### 5. Report Findings
+
+Summarize:
+- **Existing functions** that might be reusable (with file:line)
+- **Similar patterns** already in the codebase
+- **Recommendations** - "consider using X" or "extract to helper"
+
+## Example Output
+
+```
+## Discovery Results for "checkpoint save"
+
+### Related Symbols (LSP)
+- `SaveChanges` in strategy/strategy.go:45 - main save interface method
+- `SaveTaskCheckpoint` in strategy/strategy.go:52 - task-specific save
+- `WriteTemporary` in checkpoint/temporary.go:23 - low-level checkpoint write
+
+### Similar Patterns (Grep)
+- Repository opening pattern in strategy/common.go:34-38
+- Error wrapping pattern used consistently: `fmt.Errorf("...: %w", err)`
+
+### Nearby Utilities
+- strategy/common.go has shared helpers for tree building, metadata extraction
+- checkpoint/store.go wraps git repository operations
+
+### Recommendations
+- Reuse `WriteTemporary` for shadow branch operations
+- Follow error wrapping pattern from common.go
+```
+
+## Key Principle
+
+**Search before you write.** The few minutes spent discovering existing code prevents duplication and maintains consistency.
+
+
+ARGUMENTS: checkpoint save
+
+---
+
+[Request interrupted by user]
+
+---
+
+retry your skill test, I had to restart you
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/go-discover-related
+
+# Go Code Discovery
+
+Search the codebase for related code before implementing new functionality. This helps avoid duplication by surfacing existing utilities, patterns, and similar implementations.
+
+## When to Use
+
+- Before writing a new function or type
+- Before implementing logic that might already exist
+- When unsure if a helper exists for common operations
+
+## Process
+
+### 1. Extract Search Terms
+
+From context (conversation, plan, or explicit args), identify:
+- **Nouns** - entities being operated on (e.g., "checkpoint", "session", "repository")
+- **Verbs** - operations being performed (e.g., "save", "load", "validate", "open")
+- **Patterns** - common code shapes (e.g., "error handling", "file reading")
+
+### 2. Search Using LSP
+
+Use `workspaceSymbol` to find related symbols:
+
+```
+LSP workspaceSymbol for: "Checkpoint"
+LSP workspaceSymbol for: "Save"
+LSP workspaceSymbol for: "Repository"
+```
+
+Look for:
+- Functions with similar names
+- Types that might already model your concept
+- Methods on existing types
+
+### 3. Search Using Grep
+
+Search for code patterns:
+
+```
+Grep for: "OpenRepository" (if working with repos)
+Grep for: "func.*Checkpoint" (functions related to checkpoints)
+Grep for: "err != nil" patterns in similar files
+```
+
+### 4. Check File Proximity
+
+List files in the same package/directory:
+
+```
+Glob for: cmd/entire/cli/strategy/*.go
+```
+
+Scan `common.go`, `helpers.go`, or similar utility files.
+
+### 5. Report Findings
+
+Summarize:
+- **Existing functions** that might be reusable (with file:line)
+- **Similar patterns** already in the codebase
+- **Recommendations** - "consider using X" or "extract to helper"
+
+## Example Output
+
+```
+## Discovery Results for "checkpoint save"
+
+### Related Symbols (LSP)
+- `SaveChanges` in strategy/strategy.go:45 - main save interface method
+- `SaveTaskCheckpoint` in strategy/strategy.go:52 - task-specific save
+- `WriteTemporary` in checkpoint/temporary.go:23 - low-level checkpoint write
+
+### Similar Patterns (Grep)
+- Repository opening pattern in strategy/common.go:34-38
+- Error wrapping pattern used consistently: `fmt.Errorf("...: %w", err)`
+
+### Nearby Utilities
+- strategy/common.go has shared helpers for tree building, metadata extraction
+- checkpoint/store.go wraps git repository operations
+
+### Recommendations
+- Reuse `WriteTemporary` for shadow branch operations
+- Follow error wrapping pattern from common.go
+```
+
+## Key Principle
+
+**Search before you write.** The few minutes spent discovering existing code prevents duplication and maintains consistency.
+
+
+ARGUMENTS: checkpoint save
+
+---
+
+that looks like...it's working? can we commit our changes?
+
+---
+
+<bash-input>mise run dup</bash-input>
+
+---
+
+<bash-stdout>0 issues.
+[dup] $ golangci-lint run --enable-only dupl --new=false --max-issues-per-linte…</bash-stdout><bash-stderr></bash-stderr>
+
+---
+
+can we play around with the dup settings? It's returning 0 issues....or is that legit?
+
+---
+
+I mean, test boilerplate is also perhaps worth fixing...
+
+---
+
+4. however is there a way to get that summary natively?
+
+---
+
+can we bring ourselves up to date with main please
+
+---
+
+push
+
+---
+
+make a draft PR please
+
+---
+
+check the review comments, let me know what you think
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+continue reading the PR review comments please
+
+---
+
+Operation stopped by hook: Another session is active: "can we bring ourselves up to date with main please"
+
+You can continue here, but checkpoints from both sessions will be interleaved.
+
+To resume the other session instead, exit Claude and run: claude -r 53ea19c1-6d29-4ebf-952b-ddbb27af25bb
+
+To suppress this warning in future sessions, run:
+  entire enable --disable-multisession-warning
+
+Press the up arrow key to get your prompt back.
+
+---
+
+continue reading the PR review comments please
+
+---
+
+yes let's address these
+
+---
+
+Operation stopped by hook: Another session is active: "can we bring ourselves up to date with main please"
+
+You can continue here, but checkpoints from both sessions will be interleaved.
+
+To resume the other session instead, exit Claude and run: claude -r 53ea19c1-6d29-4ebf-952b-ddbb27af25bb
+
+To suppress this warning in future sessions, run:
+  entire enable --disable-multisession-warning
+
+Press the up arrow key to get your prompt back.
+
+---
+
+yes let's address these
+
+---
+
+reply to the specific PR review comments please
+
+---
+
+<bash-input>mise run dup</bash-input>
+
+---
+
+<bash-stdout>../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/agent_test.go:101: 101-107 lines are duplicate of `cmd/entire/cli/agent/agent_test.go:121-127` (dupl)
+	for _, tt := range tests {
+		t.Run(string(tt.hookType), func(t *testing.T) {
+			if string(tt.hookType) != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, string(tt.hookType))
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/agent_test.go:121: 121-127 lines are duplicate of `cmd/entire/cli/agent/agent_test.go:101-107` (dupl)
+	for _, tt := range tests {
+		t.Run(string(tt.entryType), func(t *testing.T) {
+			if string(tt.entryType) != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, string(tt.entryType))
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/claudecode/transcript_test.go:393: 393-409 lines are duplicate of `cmd/entire/cli/agent/claudecode/transcript_test.go:472-488` (dupl)
+	transcript := []TranscriptLine{
+		{
+			Type: "user",
+			UUID: "user-1",
+			Message: mustMarshal(t, map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_abc123",
+						"content": []map[string]string{
+							{"type": "text", "text": "Result from agent\n\nagentId: ac66d4b (for resuming)"},
+						},
+					},
+				},
+			}),
+		},
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/claudecode/transcript_test.go:472: 472-488 lines are duplicate of `cmd/entire/cli/agent/claudecode/transcript_test.go:393-409` (dupl)
+	transcript := []TranscriptLine{
+		{
+			Type: "user",
+			UUID: "user-1",
+			Message: mustMarshal(t, map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_001",
+						"content": []map[string]string{
+							{"type": "text", "text": "Some result without agent ID"},
+						},
+					},
+				},
+			}),
+		},
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/geminicli/gemini.go:334: 334-362 lines are duplicate of `cmd/entire/cli/agent/geminicli/transcript.go:71-99` (dupl)
+		for _, toolCall := range msg.ToolCalls {
+			// Check if it's a file modification tool
+			isModifyTool := false
+			for _, name := range FileModificationTools {
+				if toolCall.Name == name {
+					isModifyTool = true
+					break
+				}
+			}
+
+			if !isModifyTool {
+				continue
+			}
+
+			// Extract file path from args map
+			var file string
+			if fp, ok := toolCall.Args["file_path"].(string); ok && fp != "" {
+				file = fp
+			} else if p, ok := toolCall.Args["path"].(string); ok && p != "" {
+				file = p
+			} else if fn, ok := toolCall.Args["filename"].(string); ok && fn != "" {
+				file = fn
+			}
+
+			if file != "" && !fileSet[file] {
+				fileSet[file] = true
+				files = append(files, file)
+			}
+		}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/geminicli/gemini_test.go:149: 149-172 lines are duplicate of `cmd/entire/cli/agent/geminicli/gemini_test.go:174-198` (dupl)
+func TestParseHookInput_PreToolUse(t *testing.T) {
+	ag := &GeminiCLIAgent{}
+
+	input := `{
+		"session_id": "` + testSessionID + `",
+		"transcript_path": "/path/to/transcript.json",
+		"cwd": "/project",
+		"hook_event_name": "before_tool",
+		"tool_name": "write_file",
+		"tool_input": {"file_path": "test.go", "content": "package main"}
+	}`
+
+	hookInput, err := ag.ParseHookInput(agent.HookPreToolUse, bytes.NewReader([]byte(input)))
+	if err != nil {
+		t.Fatalf("ParseHookInput() error = %v", err)
+	}
+
+	if hookInput.ToolName != "write_file" {
+		t.Errorf("ToolName = %q, want write_file", hookInput.ToolName)
+	}
+	if hookInput.ToolInput == nil {
+		t.Error("ToolInput is nil")
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/geminicli/gemini_test.go:174: 174-198 lines are duplicate of `cmd/entire/cli/agent/geminicli/gemini_test.go:149-172` (dupl)
+func TestParseHookInput_PostToolUse(t *testing.T) {
+	ag := &GeminiCLIAgent{}
+
+	input := `{
+		"session_id": "` + testSessionID + `",
+		"transcript_path": "/path/to/transcript.json",
+		"cwd": "/project",
+		"hook_event_name": "after_tool",
+		"tool_name": "write_file",
+		"tool_input": {"file_path": "test.go"},
+		"tool_response": {"success": true}
+	}`
+
+	hookInput, err := ag.ParseHookInput(agent.HookPostToolUse, bytes.NewReader([]byte(input)))
+	if err != nil {
+		t.Fatalf("ParseHookInput() error = %v", err)
+	}
+
+	if hookInput.ToolName != "write_file" {
+		t.Errorf("ToolName = %q, want write_file", hookInput.ToolName)
+	}
+	if hookInput.ToolResponse == nil {
+		t.Error("ToolResponse is nil")
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/geminicli/gemini_test.go:480: 480-492 lines are duplicate of `cmd/entire/cli/agent/geminicli/gemini_test.go:567-582` (dupl)
+func TestChunkTranscript_SmallContent(t *testing.T) {
+	ag := &GeminiCLIAgent{}
+
+	content := []byte(`{"messages":[{"type":"user","content":"hello"},{"type":"gemini","content":"hi there"}]}`)
+
+	chunks, err := ag.ChunkTranscript(content, agent.MaxChunkSize)
+	if err != nil {
+		t.Fatalf("ChunkTranscript() error = %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Errorf("Expected 1 chunk, got %d", len(chunks))
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/geminicli/gemini_test.go:567: 567-582 lines are duplicate of `cmd/entire/cli/agent/geminicli/gemini_test.go:480-492` (dupl)
+func REDACTED(t *testing.T) {
+	ag := &GeminiCLIAgent{}
+
+	// Invalid JSON that looks like JSONL
+	content := []byte(`{"type":"user","content":"hello"}
+{"type":"gemini","content":"hi"}`)
+
+	chunks, err := ag.ChunkTranscript(content, agent.MaxChunkSize)
+	if err != nil {
+		t.Fatalf("ChunkTranscript() error = %v", err)
+	}
+	// Should fall back to JSONL chunking and return 1 chunk for small content
+	if len(chunks) != 1 {
+		t.Errorf("Expected 1 chunk (JSONL fallback), got %d", len(chunks))
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/geminicli/transcript.go:71: 71-99 lines are duplicate of `cmd/entire/cli/agent/geminicli/gemini.go:334-362` (dupl)
+		for _, toolCall := range msg.ToolCalls {
+			// Check if it's a file modification tool
+			isModifyTool := false
+			for _, name := range FileModificationTools {
+				if toolCall.Name == name {
+					isModifyTool = true
+					break
+				}
+			}
+
+			if !isModifyTool {
+				continue
+			}
+
+			// Extract file path from args map
+			var file string
+			if fp, ok := toolCall.Args["file_path"].(string); ok && fp != "" {
+				file = fp
+			} else if p, ok := toolCall.Args["path"].(string); ok && p != "" {
+				file = p
+			} else if fn, ok := toolCall.Args["filename"].(string); ok && fn != "" {
+				file = fn
+			}
+
+			if file != "" && !fileSet[file] {
+				fileSet[file] = true
+				files = append(files, file)
+			}
+		}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/geminicli/transcript_test.go:59: 59-98 lines are duplicate of `cmd/entire/cli/agent/geminicli/transcript_test.go:100-135` (dupl)
+func TestExtractModifiedFiles(t *testing.T) {
+	t.Parallel()
+
+	// Gemini transcript with tool calls in ToolCalls array
+	data := []byte(`{
+  "messages": [
+    {"type": "user", "content": "create a file"},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "foo.go"}}]},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "edit_file", "args": {"file_path": "bar.go"}}]},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "read_file", "args": {"file_path": "other.go"}}]},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "foo.go"}}]}
+  ]
+}`)
+
+	files, err := ExtractModifiedFiles(data)
+	if err != nil {
+		t.Fatalf("ExtractModifiedFiles() error = %v", err)
+	}
+
+	// Should have foo.go and bar.go (deduplicated, read_file not included)
+	if len(files) != 2 {
+		t.Errorf("ExtractModifiedFiles() got %d files, want 2", len(files))
+	}
+
+	hasFile := func(name string) bool {
+		for _, f := range files {
+			if f == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasFile("foo.go") {
+		t.Error("ExtractModifiedFiles() missing foo.go")
+	}
+	if !hasFile("bar.go") {
+		t.Error("ExtractModifiedFiles() missing bar.go")
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/geminicli/transcript_test.go:100: 100-135 lines are duplicate of `cmd/entire/cli/agent/geminicli/transcript_test.go:59-98` (dupl)
+func TestExtractModifiedFiles_AlternativeFieldNames(t *testing.T) {
+	t.Parallel()
+
+	// Test different field names for file path (path, filename)
+	data := []byte(`{
+  "messages": [
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"path": "via_path.go"}}]},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "save_file", "args": {"filename": "via_filename.go"}}]}
+  ]
+}`)
+
+	files, err := ExtractModifiedFiles(data)
+	if err != nil {
+		t.Fatalf("ExtractModifiedFiles() error = %v", err)
+	}
+
+	if len(files) != 2 {
+		t.Errorf("ExtractModifiedFiles() got %d files, want 2", len(files))
+	}
+
+	hasFile := func(name string) bool {
+		for _, f := range files {
+			if f == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasFile("via_path.go") {
+		t.Error("ExtractModifiedFiles() missing via_path.go")
+	}
+	if !hasFile("via_filename.go") {
+		t.Error("ExtractModifiedFiles() missing via_filename.go")
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/session.go:64: 64-71 lines are duplicate of `cmd/entire/cli/agent/session.go:74-81` (dupl)
+func (s *AgentSession) GetLastUserPrompt() string {
+	for i := len(s.Entries) - 1; i >= 0; i-- {
+		if s.Entries[i].Type == EntryUser {
+			return s.Entries[i].Content
+		}
+	}
+	return ""
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/session.go:74: 74-81 lines are duplicate of `cmd/entire/cli/agent/session.go:64-71` (dupl)
+func (s *AgentSession) GetLastAssistantResponse() string {
+	for i := len(s.Entries) - 1; i >= 0; i-- {
+		if s.Entries[i].Type == EntryAssistant {
+			return s.Entries[i].Content
+		}
+	}
+	return ""
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/session_test.go:95: 95-103 lines are duplicate of `cmd/entire/cli/agent/session_test.go:151-159` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := &AgentSession{Entries: tt.entries}
+			result := session.GetLastUserPrompt()
+			if result != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/session_test.go:151: 151-159 lines are duplicate of `cmd/entire/cli/agent/session_test.go:95-103` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := &AgentSession{Entries: tt.entries}
+			result := session.GetLastAssistantResponse()
+			if result != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/commit_message_test.go:176: 176-183 lines are duplicate of `cmd/entire/cli/commit_message_test.go:224-231` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := cleanPromptForCommit(tt.input)
+			if result != tt.expected {
+				t.Errorf("cleanPromptForCommit(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/commit_message_test.go:187: 187-222 lines are duplicate of `cmd/entire/cli/hooks_test.go:438-473` (dupl)
+	tests := []struct {
+		name     string
+		prompt   string
+		expected string
+	}{
+		{
+			name:     "returns cleaned prompt",
+			prompt:   "Can you fix the login bug?",
+			expected: "Fix the login bug",
+		},
+		{
+			name:     "returns default for empty prompt",
+			prompt:   "",
+			expected: "Claude Code session updates",
+		},
+		{
+			name:     "returns default when cleaned prompt is empty",
+			prompt:   "Can you ?",
+			expected: "Claude Code session updates",
+		},
+		{
+			name:     "returns default for whitespace only prompt",
+			prompt:   "   ",
+			expected: "Claude Code session updates",
+		},
+		{
+			name:     "handles direct command prompt",
+			prompt:   "Add unit tests for the auth module",
+			expected: "Add unit tests for the auth module",
+		},
+		{
+			name:     "handles polite request",
+			prompt:   "Please refactor the database connection handling",
+			expected: "Refactor the database connection handling",
+		},
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/commit_message_test.go:224: 224-231 lines are duplicate of `cmd/entire/cli/resume_test.go:53-60` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := generateCommitMessage(tt.prompt)
+			if result != tt.expected {
+				t.Errorf("generateCommitMessage(%q) = %q, want %q", tt.prompt, result, tt.expected)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/config.go:171: 171-183 lines are duplicate of `cmd/entire/cli/config.go:206-218` (dupl)
+	if optionsRaw, ok := raw["strategy_options"]; ok {
+		var opts map[string]interface{}
+		if err := json.Unmarshal(optionsRaw, &opts); err != nil {
+			return fmt.Errorf("parsing strategy_options field: %w", err)
+		}
+		if settings.StrategyOptions == nil {
+			settings.StrategyOptions = opts
+		} else {
+			for k, v := range opts {
+				settings.StrategyOptions[k] = v
+			}
+		}
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/config.go:206: 206-218 lines are duplicate of `cmd/entire/cli/config.go:171-183` (dupl)
+	if agentOptsRaw, ok := raw["agent_options"]; ok {
+		var opts map[string]interface{}
+		if err := json.Unmarshal(agentOptsRaw, &opts); err != nil {
+			return fmt.Errorf("parsing agent_options field: %w", err)
+		}
+		if settings.AgentOptions == nil {
+			settings.AgentOptions = opts
+		} else {
+			for k, v := range opts {
+				settings.AgentOptions[k] = v
+			}
+		}
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks.go:40: 40-56 lines are duplicate of `cmd/entire/cli/hooks.go:105-121` (dupl)
+func parseTaskHookInput(r io.Reader) (*TaskHookInput, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read input: %w", err)
+	}
+
+	if len(data) == 0 {
+		return nil, errors.New("empty input")
+	}
+
+	var input TaskHookInput
+	if err := json.Unmarshal(data, &input); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+
+	return &input, nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks.go:105: 105-121 lines are duplicate of `cmd/entire/cli/hooks.go:40-56` (dupl)
+func parseSubagentCheckpointHookInput(r io.Reader) (*SubagentCheckpointHookInput, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read input: %w", err)
+	}
+
+	if len(data) == 0 {
+		return nil, errors.New("empty input")
+	}
+
+	var input SubagentCheckpointHookInput
+	if err := json.Unmarshal(data, &input); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+
+	return &input, nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks.go:157: 157-170 lines are duplicate of `cmd/entire/cli/hooks.go:178-191` (dupl)
+func ExtractTodoContentFromToolInput(toolInput json.RawMessage) string {
+	if len(toolInput) == 0 {
+		return ""
+	}
+
+	// First extract the todos array from tool_input
+	var input todoWriteToolInput
+	if err := json.Unmarshal(toolInput, &input); err != nil {
+		return ""
+	}
+
+	// Delegate to strategy package for the actual extraction logic
+	return strategy.ExtractInProgressTodo(input.Todos)
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks.go:178: 178-191 lines are duplicate of `cmd/entire/cli/hooks.go:198-211` (dupl)
+func ExtractLastCompletedTodoFromToolInput(toolInput json.RawMessage) string {
+	if len(toolInput) == 0 {
+		return ""
+	}
+
+	// First extract the todos array from tool_input
+	var input todoWriteToolInput
+	if err := json.Unmarshal(toolInput, &input); err != nil {
+		return ""
+	}
+
+	// Delegate to strategy package for the actual extraction logic
+	return strategy.ExtractLastCompletedTodo(input.Todos)
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks.go:198: 198-211 lines are duplicate of `cmd/entire/cli/hooks.go:157-170` (dupl)
+func CountTodosFromToolInput(toolInput json.RawMessage) int {
+	if len(toolInput) == 0 {
+		return 0
+	}
+
+	// First extract the todos array from tool_input
+	var input todoWriteToolInput
+	if err := json.Unmarshal(toolInput, &input); err != nil {
+		return 0
+	}
+
+	// Delegate to strategy package for the actual count
+	return strategy.CountTodos(input.Todos)
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_claudecode_handlers.go:999: 999-1034 lines are duplicate of `cmd/entire/cli/hooks_geminicli_handlers.go:167-202` (dupl)
+func handleSessionStart() error {
+	// Get the agent for session ID transformation
+	ag, err := GetCurrentHookAgent()
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	// Parse hook input using agent interface
+	input, err := ag.ParseHookInput(agent.HookSessionStart, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Info(logCtx, "session-start",
+		slog.String("hook", "session-start"),
+		slog.String("hook_type", "agent"),
+		slog.String("model_session_id", input.SessionID),
+		slog.String("transcript_path", input.SessionRef),
+	)
+
+	if input.SessionID == "" {
+		return errors.New("no session_id in input")
+	}
+
+	// Generate the full Entire session ID (with date prefix) from the agent's session ID
+	entireSessionID := paths.EntireSessionID(input.SessionID)
+
+	// Write session ID to current_session file
+	if err := paths.WriteCurrentSession(entireSessionID); err != nil {
+		return fmt.Errorf("failed to set current session: %w", err)
+	}
+
+	fmt.Printf("Current session set to: %s\n", entireSessionID)
+	return nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_geminicli_handlers.go:167: 167-202 lines are duplicate of `cmd/entire/cli/hooks_claudecode_handlers.go:999-1034` (dupl)
+func handleGeminiSessionStart() error {
+	// Get the agent for session ID transformation
+	ag, err := GetCurrentHookAgent()
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	// Parse hook input using agent interface
+	input, err := ag.ParseHookInput(agent.HookSessionStart, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Info(logCtx, "gemini-session-start",
+		slog.String("hook", "session-start"),
+		slog.String("hook_type", "agent"),
+		slog.String("model_session_id", input.SessionID),
+		slog.String("transcript_path", input.SessionRef),
+	)
+
+	if input.SessionID == "" {
+		return errors.New("no session_id in input")
+	}
+
+	// Generate the full Entire session ID (with date prefix) from the agent's session ID
+	entireSessionID := paths.EntireSessionID(input.SessionID)
+
+	// Write session ID to current_session file
+	if err := paths.WriteCurrentSession(entireSessionID); err != nil {
+		return fmt.Errorf("failed to set current session: %w", err)
+	}
+
+	fmt.Printf("Current session set to: %s\n", entireSessionID)
+	return nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_geminicli_handlers.go:512: 512-536 lines are duplicate of `cmd/entire/cli/hooks_geminicli_handlers.go:540-564` (dupl)
+func handleGeminiBeforeTool() error {
+	// Get the agent for hook input parsing
+	ag, err := GetCurrentHookAgent()
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	// Parse hook input
+	input, err := ag.ParseHookInput(agent.HookPreToolUse, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Debug(logCtx, "gemini-before-tool",
+		slog.String("hook", "before-tool"),
+		slog.String("hook_type", "tool"),
+		slog.String("model_session_id", input.SessionID),
+		slog.String("tool_name", input.ToolName),
+	)
+
+	// For now, BeforeTool is mainly for logging and potential future use
+	// We don't need to do anything special before tool execution
+	return nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_geminicli_handlers.go:540: 540-564 lines are duplicate of `cmd/entire/cli/hooks_geminicli_handlers.go:784-809` (dupl)
+func handleGeminiAfterTool() error {
+	// Get the agent for hook input parsing
+	ag, err := GetCurrentHookAgent()
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	// Parse hook input
+	input, err := ag.ParseHookInput(agent.HookPostToolUse, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Debug(logCtx, "gemini-after-tool",
+		slog.String("hook", "after-tool"),
+		slog.String("hook_type", "tool"),
+		slog.String("model_session_id", input.SessionID),
+		slog.String("tool_name", input.ToolName),
+	)
+
+	// For now, AfterTool is mainly for logging
+	// Future: Could be used for incremental checkpoints similar to Claude's PostTodo
+	return nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_geminicli_handlers.go:702: 702-725 lines are duplicate of `cmd/entire/cli/hooks_geminicli_handlers.go:730-753` (dupl)
+func handleGeminiBeforeModel() error {
+	// Get the agent for hook input parsing
+	ag, err := GetCurrentHookAgent()
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	// Parse hook input - use HookPreToolUse as a generic hook type for now
+	input, err := ag.ParseHookInput(agent.HookPreToolUse, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Debug(logCtx, "gemini-before-model",
+		slog.String("hook", "before-model"),
+		slog.String("hook_type", "model"),
+		slog.String("model_session_id", input.SessionID),
+	)
+
+	// For now, BeforeModel is mainly for logging
+	// Future: Could be used for request interception/modification
+	return nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_geminicli_handlers.go:730: 730-753 lines are duplicate of `cmd/entire/cli/hooks_geminicli_handlers.go:757-780` (dupl)
+func handleGeminiAfterModel() error {
+	// Get the agent for hook input parsing
+	ag, err := GetCurrentHookAgent()
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	// Parse hook input
+	input, err := ag.ParseHookInput(agent.HookPostToolUse, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Debug(logCtx, "gemini-after-model",
+		slog.String("hook", "after-model"),
+		slog.String("hook_type", "model"),
+		slog.String("model_session_id", input.SessionID),
+	)
+
+	// For now, AfterModel is mainly for logging
+	// Future: Could be used for response processing/analysis
+	return nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_geminicli_handlers.go:757: 757-780 lines are duplicate of `cmd/entire/cli/hooks_geminicli_handlers.go:813-836` (dupl)
+func handleGeminiBeforeToolSelection() error {
+	// Get the agent for hook input parsing
+	ag, err := GetCurrentHookAgent()
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	// Parse hook input
+	input, err := ag.ParseHookInput(agent.HookPreToolUse, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Debug(logCtx, "gemini-before-tool-selection",
+		slog.String("hook", "before-tool-selection"),
+		slog.String("hook_type", "model"),
+		slog.String("model_session_id", input.SessionID),
+	)
+
+	// For now, BeforeToolSelection is mainly for logging
+	// Future: Could be used to modify tool availability
+	return nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_geminicli_handlers.go:784: 784-809 lines are duplicate of `cmd/entire/cli/hooks_geminicli_handlers.go:512-536` (dupl)
+func handleGeminiPreCompress() error {
+	// Get the agent for hook input parsing
+	ag, err := GetCurrentHookAgent()
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	// Parse hook input
+	input, err := ag.ParseHookInput(agent.HookSessionStart, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Info(logCtx, "gemini-pre-compress",
+		slog.String("hook", "pre-compress"),
+		slog.String("hook_type", "session"),
+		slog.String("model_session_id", input.SessionID),
+		slog.String("transcript_path", input.SessionRef),
+	)
+
+	// PreCompress is important for ensuring we capture the transcript before compression
+	// The transcript_path gives us access to the full conversation before it's compressed
+	// Future: Could automatically backup/checkpoint the transcript here
+	return nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_geminicli_handlers.go:813: 813-836 lines are duplicate of `cmd/entire/cli/hooks_geminicli_handlers.go:702-725` (dupl)
+func handleGeminiNotification() error {
+	// Get the agent for hook input parsing
+	ag, err := GetCurrentHookAgent()
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	// Parse hook input
+	input, err := ag.ParseHookInput(agent.HookSessionStart, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Debug(logCtx, "gemini-notification",
+		slog.String("hook", "notification"),
+		slog.String("hook_type", "notification"),
+		slog.String("model_session_id", input.SessionID),
+	)
+
+	// For now, Notification is mainly for logging
+	// Future: Could be used for error tracking/alerting
+	return nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_test.go:389: 389-396 lines are duplicate of `cmd/entire/cli/hooks_test.go:427-434` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractTodoContentFromToolInput([]byte(tt.toolInput))
+			if got != tt.want {
+				t.Errorf("ExtractTodoContentFromToolInput() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_test.go:427: 427-434 lines are duplicate of `cmd/entire/cli/hooks_test.go:475-482` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractLastCompletedTodoFromToolInput([]byte(tt.toolInput))
+			if got != tt.want {
+				t.Errorf("ExtractLastCompletedTodoFromToolInput() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_test.go:438: 438-473 lines are duplicate of `cmd/entire/cli/commit_message_test.go:187-222` (dupl)
+	tests := []struct {
+		name      string
+		toolInput string
+		want      int
+	}{
+		{
+			name:      "typical list with multiple items",
+			toolInput: `{"todos": [{"content": "First task", "status": "completed"}, {"content": "Second task", "status": "in_progress"}, {"content": "Third task", "status": "pending"}]}`,
+			want:      3,
+		},
+		{
+			name:      "six items - planning scenario",
+			toolInput: `{"todos": [{"content": "Task 1", "status": "pending"}, {"content": "Task 2", "status": "pending"}, {"content": "Task 3", "status": "pending"}, {"content": "Task 4", "status": "pending"}, {"content": "Task 5", "status": "pending"}, {"content": "Task 6", "status": "in_progress"}]}`,
+			want:      6,
+		},
+		{
+			name:      "empty todos array",
+			toolInput: `{"todos": []}`,
+			want:      0,
+		},
+		{
+			name:      "no todos field",
+			toolInput: `{"other_field": "value"}`,
+			want:      0,
+		},
+		{
+			name:      "empty input",
+			toolInput: ``,
+			want:      0,
+		},
+		{
+			name:      "invalid json",
+			toolInput: `not valid json`,
+			want:      0,
+		},
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/hooks_test.go:475: 475-482 lines are duplicate of `cmd/entire/cli/hooks_test.go:389-396` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CountTodosFromToolInput([]byte(tt.toolInput))
+			if got != tt.want {
+				t.Errorf("CountTodosFromToolInput() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/paths/paths_test.go:21: 21-28 lines are duplicate of `cmd/entire/cli/paths/paths_test.go:43-50` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := IsInfrastructurePath(tt.path)
+			if got != tt.want {
+				t.Errorf("IsInfrastructurePath(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/paths/paths_test.go:43: 43-50 lines are duplicate of `cmd/entire/cli/paths/paths_test.go:21-28` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := SanitizePathForClaude(tt.input)
+			if got != tt.want {
+				t.Errorf("SanitizePathForClaude(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/paths/paths_test.go:166: 166-180 lines are duplicate of `cmd/entire/cli/paths/paths_test.go:210-224` (dupl)
+func TestEntireSessionID(t *testing.T) {
+	claudeSessionID := "8f76b0e8-b8f1-4a87-9186-848bdd83d62e"
+
+	result := EntireSessionID(claudeSessionID)
+
+	// Should match format: YYYY-MM-DD-<claude-session-id>
+	pattern := `^\d{4}-\d{2}-\d{2}-` + regexp.QuoteMeta(claudeSessionID) + `$`
+	matched, err := regexp.MatchString(pattern, result)
+	if err != nil {
+		t.Fatalf("regex error: %v", err)
+	}
+	if !matched {
+		t.Errorf("EntireSessionID() = %q, want format YYYY-MM-DD-%s", result, claudeSessionID)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/paths/paths_test.go:210: 210-224 lines are duplicate of `cmd/entire/cli/paths/paths_test.go:166-180` (dupl)
+func TestSessionMetadataDir(t *testing.T) {
+	claudeSessionID := "abc123"
+
+	result := SessionMetadataDir(claudeSessionID)
+
+	// Should match format: .entire/metadata/YYYY-MM-DD-<claude-session-id>
+	pattern := `^\.entire/metadata/\d{4}-\d{2}-\d{2}-` + regexp.QuoteMeta(claudeSessionID) + `$`
+	matched, err := regexp.MatchString(pattern, result)
+	if err != nil {
+		t.Fatalf("regex error: %v", err)
+	}
+	if !matched {
+		t.Errorf("SessionMetadataDir() = %q, want format .entire/metadata/YYYY-MM-DD-%s", result, claudeSessionID)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/resume_test.go:53: 53-60 lines are duplicate of `cmd/entire/cli/commit_message_test.go:176-183` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := firstLine(tt.input)
+			if result != tt.expected {
+				t.Errorf("firstLine(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/rewind.go:209: 209-215 lines are duplicate of `cmd/entire/cli/rewind.go:441-447` (dupl)
+	if previewErr == nil && preview != nil && len(preview.FilesToDelete) > 0 {
+		fmt.Fprintf(os.Stderr, "\nWarning: The following untracked files will be DELETED:\n")
+		for _, f := range preview.FilesToDelete {
+			fmt.Fprintf(os.Stderr, "  - %s\n", f)
+		}
+		fmt.Fprintf(os.Stderr, "\n")
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/rewind.go:271: 271-294 lines are duplicate of `cmd/entire/cli/rewind.go:482-503` (dupl)
+	if selectedPoint.IsTaskCheckpoint {
+		// For task checkpoint: read checkpoint.json to get UUID and truncate transcript
+		checkpoint, err := start.GetTaskCheckpoint(*selectedPoint)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to read task checkpoint: %v\n", err)
+			return nil
+		}
+
+		sessionID = checkpoint.SessionID
+
+		if checkpoint.CheckpointUUID != "" {
+			// Truncate transcript at checkpoint UUID
+			if err := restoreTaskCheckpointTranscript(start, *selectedPoint, sessionID, checkpoint.CheckpointUUID, agent); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to restore truncated session transcript: %v\n", err)
+			} else {
+				fmt.Printf("Rewound to task checkpoint. %s\n", formatResumeCommand(sessionID, agent))
+			}
+			return nil
+		}
+	} else {
+		// For session checkpoint: restore full transcript
+		sessionID = extractSessionIDFromMetadata(selectedPoint.MetadataDir)
+		transcriptFile = filepath.Join(selectedPoint.MetadataDir, paths.TranscriptFileNameLegacy)
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/rewind.go:441: 441-447 lines are duplicate of `cmd/entire/cli/rewind.go:209-215` (dupl)
+	if previewErr == nil && preview != nil && len(preview.FilesToDelete) > 0 {
+		fmt.Fprintf(os.Stderr, "\nWarning: The following untracked files will be DELETED:\n")
+		for _, f := range preview.FilesToDelete {
+			fmt.Fprintf(os.Stderr, "  - %s\n", f)
+		}
+		fmt.Fprintf(os.Stderr, "\n")
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/rewind.go:482: 482-503 lines are duplicate of `cmd/entire/cli/rewind.go:271-294` (dupl)
+	if selectedPoint.IsTaskCheckpoint {
+		checkpoint, err := start.GetTaskCheckpoint(*selectedPoint)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to read task checkpoint: %v\n", err)
+			return nil
+		}
+
+		sessionID = checkpoint.SessionID
+
+		if checkpoint.CheckpointUUID != "" {
+			// Use strategy-based transcript restoration for task checkpoints
+			if err := restoreTaskCheckpointTranscript(start, *selectedPoint, sessionID, checkpoint.CheckpointUUID, agent); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to restore truncated session transcript: %v\n", err)
+			} else {
+				fmt.Printf("Rewound to task checkpoint. %s\n", formatResumeCommand(sessionID, agent))
+			}
+			return nil
+		}
+	} else {
+		sessionID = extractSessionIDFromMetadata(selectedPoint.MetadataDir)
+		transcriptFile = filepath.Join(selectedPoint.MetadataDir, paths.TranscriptFileNameLegacy)
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/session/state.go:216: 216-229 lines are duplicate of `cmd/entire/cli/session/state.go:232-245` (dupl)
+func (s *StateStore) FindByBaseCommit(ctx context.Context, baseCommit string) ([]*State, error) {
+	allStates, err := s.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var matching []*State
+	for _, state := range allStates {
+		if state.BaseCommit == baseCommit {
+			matching = append(matching, state)
+		}
+	}
+	return matching, nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/session/state.go:232: 232-245 lines are duplicate of `cmd/entire/cli/session/state.go:216-229` (dupl)
+func (s *StateStore) FindByWorktree(ctx context.Context, worktreePath string) ([]*State, error) {
+	allStates, err := s.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var matching []*State
+	for _, state := range allStates {
+		if state.WorktreePath == worktreePath {
+			matching = append(matching, state)
+		}
+	}
+	return matching, nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/setup.go:215: 215-225 lines are duplicate of `cmd/entire/cli/setup.go:350-360` (dupl)
+	if shouldUseLocal {
+		if err := SaveEntireSettingsLocal(settings); err != nil {
+			return fmt.Errorf("failed to save local settings: %w", err)
+		}
+		fmt.Fprintln(w, "✓ Local settings saved (.entire/settings.local.json)")
+	} else {
+		if err := SaveEntireSettings(settings); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+		fmt.Fprintln(w, "✓ Project settings saved (.entire/settings.json)")
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/setup.go:350: 350-360 lines are duplicate of `cmd/entire/cli/setup.go:215-225` (dupl)
+	if shouldUseLocal {
+		if err := SaveEntireSettingsLocal(settings); err != nil {
+			return fmt.Errorf("failed to save local settings: %w", err)
+		}
+		fmt.Fprintln(w, "✓ Local settings saved (.entire/settings.local.json)")
+	} else {
+		if err := SaveEntireSettings(settings); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+		fmt.Fprintln(w, "✓ Project settings saved (.entire/settings.json)")
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/setup_test.go:38: 38-47 lines are duplicate of `cmd/entire/cli/setup_test.go:214-223` (dupl)
+func writeSettings(t *testing.T, content string) {
+	t.Helper()
+	settingsDir := filepath.Dir(EntireSettingsFile)
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("Failed to create settings dir: %v", err)
+	}
+	if err := os.WriteFile(EntireSettingsFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("Failed to write settings file: %v", err)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/setup_test.go:71: 71-83 lines are duplicate of `cmd/entire/cli/setup_test.go:121-133` (dupl)
+func TestRunEnable_AlreadyEnabled(t *testing.T) {
+	setupTestDir(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runEnable(&stdout); err != nil {
+		t.Fatalf("runEnable() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "enabled") {
+		t.Errorf("Expected output to mention enabled state, got: %s", stdout.String())
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/setup_test.go:121: 121-133 lines are duplicate of `cmd/entire/cli/setup_test.go:135-147` (dupl)
+func TestRunStatus_Enabled(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(&stdout); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Project, enabled") {
+		t.Errorf("Expected output to show 'Project, enabled', got: %s", stdout.String())
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/setup_test.go:135: 135-147 lines are duplicate of `cmd/entire/cli/setup_test.go:71-83` (dupl)
+func TestRunStatus_Disabled(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(&stdout); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Project, disabled") {
+		t.Errorf("Expected output to show 'Project, disabled', got: %s", stdout.String())
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/setup_test.go:214: 214-223 lines are duplicate of `cmd/entire/cli/setup_test.go:38-47` (dupl)
+func writeLocalSettings(t *testing.T, content string) {
+	t.Helper()
+	settingsDir := filepath.Dir(EntireSettingsLocalFile)
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("Failed to create settings dir: %v", err)
+	}
+	if err := os.WriteFile(EntireSettingsLocalFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("Failed to write local settings file: %v", err)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/setup_test.go:539: 539-552 lines are duplicate of `cmd/entire/cli/setup_test.go:554-567` (dupl)
+func TestRunStatus_ShowsStrategy(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, `{"strategy": "auto-commit", "enabled": true}`)
+
+	var stdout bytes.Buffer
+	if err := runStatus(&stdout); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "(auto-commit)") {
+		t.Errorf("Expected output to show strategy '(auto-commit)', got: %s", output)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/setup_test.go:554: 554-567 lines are duplicate of `cmd/entire/cli/setup_test.go:539-552` (dupl)
+func TestRunStatus_ShowsManualCommitStrategy(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, `{"strategy": "manual-commit", "enabled": false}`)
+
+	var stdout bytes.Buffer
+	if err := runStatus(&stdout); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Project, disabled (manual-commit)") {
+		t.Errorf("Expected output to show 'Project, disabled (manual-commit)', got: %s", output)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/state.go:160: 160-178 lines are duplicate of `cmd/entire/cli/state.go:351-369` (dupl)
+func LoadPrePromptState(sessionID string) (*PrePromptState, error) {
+	stateFile := prePromptStateFile(sessionID)
+
+	if !fileExists(stateFile) {
+		return nil, nil
+	}
+
+	data, err := os.ReadFile(stateFile) //nolint:gosec // Reading from controlled git metadata path
+	if err != nil {
+		return nil, fmt.Errorf("failed to read state file: %w", err)
+	}
+
+	var state PrePromptState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
+	}
+
+	return &state, nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/state.go:351: 351-369 lines are duplicate of `cmd/entire/cli/state.go:160-178` (dupl)
+func LoadPreTaskState(toolUseID string) (*PreTaskState, error) {
+	stateFile := preTaskStateFile(toolUseID)
+
+	if !fileExists(stateFile) {
+		return nil, nil
+	}
+
+	data, err := os.ReadFile(stateFile) //nolint:gosec // Reading from controlled git metadata path
+	if err != nil {
+		return nil, fmt.Errorf("failed to read state file: %w", err)
+	}
+
+	var state PreTaskState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
+	}
+
+	return &state, nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/auto_commit.go:71: 71-81 lines are duplicate of `cmd/entire/cli/strategy/manual_commit.go:46-56` (dupl)
+func (s *AutoCommitStrategy) getCheckpointStore() (*checkpoint.GitStore, error) {
+	s.checkpointStoreOnce.Do(func() {
+		repo, err := OpenRepository()
+		if err != nil {
+			s.checkpointStoreErr = fmt.Errorf("failed to open repository: %w", err)
+			return
+		}
+		s.checkpointStore = checkpoint.NewGitStore(repo)
+	})
+	return s.checkpointStore, s.checkpointStoreErr
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/auto_commit.go:113: 113-125 lines are duplicate of `cmd/entire/cli/strategy/manual_commit.go:139-151` (dupl)
+func (s *AutoCommitStrategy) ValidateRepository() error {
+	repo, err := OpenRepository()
+	if err != nil {
+		return fmt.Errorf("not a git repository: %w", err)
+	}
+
+	_, err = repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("failed to access worktree: %w", err)
+	}
+
+	return nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/auto_commit_test.go:17: 17-28 lines are duplicate of `cmd/entire/cli/strategy/manual_commit_test.go:23-34` (dupl)
+func TestAutoCommitStrategy_Registration(t *testing.T) {
+	s, err := Get(StrategyNameAutoCommit)
+	if err != nil {
+		t.Fatalf("Get(%q) error = %v", StrategyNameAutoCommit, err)
+	}
+	if s == nil {
+		t.Fatal("Get() returned nil strategy")
+	}
+	if s.Name() != StrategyNameAutoCommit {
+		t.Errorf("Name() = %q, want %q", s.Name(), StrategyNameAutoCommit)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/clean_test.go:38: 38-45 lines are duplicate of `cmd/entire/cli/strategy/manual_commit_test.go:628-635` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsShadowBranch(tt.branchName)
+			if got != tt.want {
+				t.Errorf("IsShadowBranch(%q) = %v, want %v", tt.branchName, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/cleanup.go:429: 429-480 lines are duplicate of `cmd/entire/cli/strategy/cleanup.go:456-507` (dupl)
+	if len(branches) > 0 {
+		deleted, failed, err := DeleteShadowBranches(branches)
+		if err != nil {
+			return result, err
+		}
+		result.ShadowBranches = deleted
+		result.FailedBranches = failed
+
+		// Log deleted branches
+		for _, id := range deleted {
+			logging.Info(logCtx, "deleted orphaned shadow branch",
+				slog.String("type", string(CleanupTypeShadowBranch)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+		// Log failed branches
+		for _, id := range failed {
+			logging.Warn(logCtx, "failed to delete orphaned shadow branch",
+				slog.String("type", string(CleanupTypeShadowBranch)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+	}
+
+	// Delete session states
+	if len(states) > 0 {
+		deleted, failed, err := DeleteOrphanedSessionStates(states)
+		if err != nil {
+			return result, err
+		}
+		result.SessionStates = deleted
+		result.FailedStates = failed
+
+		// Log deleted session states
+		for _, id := range deleted {
+			logging.Info(logCtx, "deleted orphaned session state",
+				slog.String("type", string(CleanupTypeSessionState)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+		// Log failed session states
+		for _, id := range failed {
+			logging.Warn(logCtx, "failed to delete orphaned session state",
+				slog.String("type", string(CleanupTypeSessionState)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/cleanup.go:456: 456-507 lines are duplicate of `cmd/entire/cli/strategy/cleanup.go:429-480` (dupl)
+	if len(states) > 0 {
+		deleted, failed, err := DeleteOrphanedSessionStates(states)
+		if err != nil {
+			return result, err
+		}
+		result.SessionStates = deleted
+		result.FailedStates = failed
+
+		// Log deleted session states
+		for _, id := range deleted {
+			logging.Info(logCtx, "deleted orphaned session state",
+				slog.String("type", string(CleanupTypeSessionState)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+		// Log failed session states
+		for _, id := range failed {
+			logging.Warn(logCtx, "failed to delete orphaned session state",
+				slog.String("type", string(CleanupTypeSessionState)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+	}
+
+	// Delete checkpoints
+	if len(checkpoints) > 0 {
+		deleted, failed, err := DeleteOrphanedCheckpoints(checkpoints)
+		if err != nil {
+			return result, err
+		}
+		result.Checkpoints = deleted
+		result.FailedCheckpoints = failed
+
+		// Log deleted checkpoints
+		for _, id := range deleted {
+			logging.Info(logCtx, "deleted orphaned checkpoint",
+				slog.String("type", string(CleanupTypeCheckpoint)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+		// Log failed checkpoints
+		for _, id := range failed {
+			logging.Warn(logCtx, "failed to delete orphaned checkpoint",
+				slog.String("type", string(CleanupTypeCheckpoint)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/cleanup.go:483: 483-507 lines are duplicate of `cmd/entire/cli/strategy/cleanup.go:429-453` (dupl)
+	if len(checkpoints) > 0 {
+		deleted, failed, err := DeleteOrphanedCheckpoints(checkpoints)
+		if err != nil {
+			return result, err
+		}
+		result.Checkpoints = deleted
+		result.FailedCheckpoints = failed
+
+		// Log deleted checkpoints
+		for _, id := range deleted {
+			logging.Info(logCtx, "deleted orphaned checkpoint",
+				slog.String("type", string(CleanupTypeCheckpoint)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+		// Log failed checkpoints
+		for _, id := range failed {
+			logging.Warn(logCtx, "failed to delete orphaned checkpoint",
+				slog.String("type", string(CleanupTypeCheckpoint)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/common.go:1031: 1031-1038 lines are duplicate of `cmd/entire/cli/strategy/manual_commit_rewind.go:342-347` (dupl)
+		if info.IsDir() {
+			// Skip .git, .claude, and .entire directories
+			if relPath == gitDir || relPath == claudeDir || relPath == entireDir ||
+				strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, claudeDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit.go:46: 46-56 lines are duplicate of `cmd/entire/cli/strategy/auto_commit.go:71-81` (dupl)
+func (s *ManualCommitStrategy) getCheckpointStore() (*checkpoint.GitStore, error) {
+	s.checkpointStoreOnce.Do(func() {
+		repo, err := OpenRepository()
+		if err != nil {
+			s.checkpointStoreErr = fmt.Errorf("failed to open repository: %w", err)
+			return
+		}
+		s.checkpointStore = checkpoint.NewGitStore(repo)
+	})
+	return s.checkpointStore, s.checkpointStoreErr
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit.go:139: 139-151 lines are duplicate of `cmd/entire/cli/strategy/auto_commit.go:113-125` (dupl)
+func (s *ManualCommitStrategy) ValidateRepository() error {
+	repo, err := OpenRepository()
+	if err != nil {
+		return fmt.Errorf("not a git repository: %w", err)
+	}
+
+	_, err = repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("failed to access worktree: %w", err)
+	}
+
+	return nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit_rewind.go:342: 342-347 lines are duplicate of `cmd/entire/cli/strategy/manual_commit_rewind.go:563-571` (dupl)
+		if info.IsDir() {
+			if relPath == gitDir || relPath == claudeDir || relPath == entireDir || strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, claudeDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit_rewind.go:563: 563-571 lines are duplicate of `cmd/entire/cli/strategy/common.go:1031-1038` (dupl)
+		if info.IsDir() {
+			if relPath == gitDir || relPath == claudeDir || relPath == entireDir ||
+				strings.HasPrefix(relPath, gitDir+"/") ||
+				strings.HasPrefix(relPath, claudeDir+"/") ||
+				strings.HasPrefix(relPath, entireDir+"/") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit_session.go:107: 107-120 lines are duplicate of `cmd/entire/cli/strategy/manual_commit_session.go:123-136` (dupl)
+func (s *ManualCommitStrategy) findSessionsForWorktree(worktreePath string) ([]*SessionState, error) {
+	allStates, err := s.listAllSessionStates()
+	if err != nil {
+		return nil, err
+	}
+
+	var matching []*SessionState
+	for _, state := range allStates {
+		if state.WorktreePath == worktreePath {
+			matching = append(matching, state)
+		}
+	}
+	return matching, nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit_session.go:123: 123-136 lines are duplicate of `cmd/entire/cli/strategy/manual_commit_session.go:107-120` (dupl)
+func (s *ManualCommitStrategy) findSessionsForCommit(baseCommitSHA string) ([]*SessionState, error) {
+	allStates, err := s.listAllSessionStates()
+	if err != nil {
+		return nil, err
+	}
+
+	var matching []*SessionState
+	for _, state := range allStates {
+		if state.BaseCommit == baseCommitSHA {
+			matching = append(matching, state)
+		}
+	}
+	return matching, nil
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit_test.go:23: 23-34 lines are duplicate of `cmd/entire/cli/strategy/auto_commit_test.go:17-28` (dupl)
+func TestShadowStrategy_Registration(t *testing.T) {
+	s, err := Get(StrategyNameManualCommit)
+	if err != nil {
+		t.Fatalf("Get(%q) error = %v", StrategyNameManualCommit, err)
+	}
+	if s == nil {
+		t.Fatal("Get() returned nil strategy")
+	}
+	if s.Name() != StrategyNameManualCommit {
+		t.Errorf("Name() = %q, want %q", s.Name(), StrategyNameManualCommit)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit_test.go:561: 561-581 lines are duplicate of `cmd/entire/cli/strategy/manual_commit_test.go:583-603` (dupl)
+func TestShadowStrategy_GetTaskCheckpoint_NotTaskCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	s := NewManualCommitStrategy()
+
+	point := RewindPoint{
+		ID:               "abc123",
+		IsTaskCheckpoint: false,
+	}
+
+	_, err = s.GetTaskCheckpoint(point)
+	if !errors.Is(err, ErrNotTaskCheckpoint) {
+		t.Errorf("GetTaskCheckpoint() error = %v, want ErrNotTaskCheckpoint", err)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit_test.go:583: 583-603 lines are duplicate of `cmd/entire/cli/strategy/manual_commit_test.go:561-581` (dupl)
+func TestShadowStrategy_GetTaskCheckpointTranscript_NotTaskCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	s := NewManualCommitStrategy()
+
+	point := RewindPoint{
+		ID:               "abc123",
+		IsTaskCheckpoint: false,
+	}
+
+	_, err = s.GetTaskCheckpointTranscript(point)
+	if !errors.Is(err, ErrNotTaskCheckpoint) {
+		t.Errorf("GetTaskCheckpointTranscript() error = %v, want ErrNotTaskCheckpoint", err)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit_test.go:628: 628-635 lines are duplicate of `cmd/entire/cli/strategy/clean_test.go:38-45` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getShadowBranchNameForCommit(tt.baseCommit)
+			if got != tt.want {
+				t.Errorf("getShadowBranchNameForCommit(%q) = %q, want %q", tt.baseCommit, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit_test.go:1622: 1622-1635 lines are duplicate of `cmd/entire/cli/strategy/manual_commit_test.go:1694-1707` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractUserPromptsFromGeminiJSON(tt.content)
+			if len(result) != len(tt.expected) {
+				t.Errorf("extractUserPromptsFromGeminiJSON() returned %d prompts, want %d", len(result), len(tt.expected))
+				return
+			}
+			for i, prompt := range result {
+				if prompt != tt.expected[i] {
+					t.Errorf("prompt[%d] = %q, want %q", i, prompt, tt.expected[i])
+				}
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/manual_commit_test.go:1694: 1694-1707 lines are duplicate of `cmd/entire/cli/strategy/manual_commit_test.go:1622-1635` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractUserPromptsFromLines(tt.lines)
+			if len(result) != len(tt.expected) {
+				t.Errorf("extractUserPromptsFromLines() returned %d prompts, want %d", len(result), len(tt.expected))
+				return
+			}
+			for i, prompt := range result {
+				if prompt != tt.expected[i] {
+					t.Errorf("prompt[%d] = %q, want %q", i, prompt, tt.expected[i])
+				}
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/messages_test.go:99: 99-107 lines are duplicate of `cmd/entire/cli/strategy/messages_test.go:148-156` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatSubagentStartMessage(tt.agentType, tt.description, tt.toolUseID)
+			if got != tt.want {
+				t.Errorf("FormatSubagentStartMessage(%q, %q, %q) = %q, want %q",
+					tt.agentType, tt.description, tt.toolUseID, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/messages_test.go:148: 148-156 lines are duplicate of `cmd/entire/cli/strategy/messages_test.go:190-198` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatSubagentEndMessage(tt.agentType, tt.description, tt.toolUseID)
+			if got != tt.want {
+				t.Errorf("FormatSubagentEndMessage(%q, %q, %q) = %q, want %q",
+					tt.agentType, tt.description, tt.toolUseID, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/messages_test.go:190: 190-198 lines are duplicate of `cmd/entire/cli/strategy/messages_test.go:99-107` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatIncrementalMessage(tt.todoContent, tt.sequence, tt.toolUseID)
+			if got != tt.want {
+				t.Errorf("FormatIncrementalMessage(%q, %d, %q) = %q, want %q",
+					tt.todoContent, tt.sequence, tt.toolUseID, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/messages_test.go:249: 249-256 lines are duplicate of `cmd/entire/cli/strategy/messages_test.go:297-304` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractLastCompletedTodo([]byte(tt.todosJSON))
+			if got != tt.want {
+				t.Errorf("ExtractLastCompletedTodo(%s) = %q, want %q", tt.todosJSON, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/messages_test.go:297: 297-304 lines are duplicate of `cmd/entire/cli/strategy/messages_test.go:427-434` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CountTodos([]byte(tt.todosJSON))
+			if got != tt.want {
+				t.Errorf("CountTodos(%s) = %d, want %d", tt.todosJSON, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/strategy/messages_test.go:427: 427-434 lines are duplicate of `cmd/entire/cli/strategy/messages_test.go:249-256` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractInProgressTodo([]byte(tt.todosJSON))
+			if got != tt.want {
+				t.Errorf("ExtractInProgressTodo(%s) = %q, want %q", tt.todosJSON, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/stringutil/stringutil_test.go:63: 63-70 lines are duplicate of `cmd/entire/cli/stringutil/stringutil_test.go:212-219` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CollapseWhitespace(tt.input)
+			if got != tt.want {
+				t.Errorf("CollapseWhitespace(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/stringutil/stringutil_test.go:212: 212-219 lines are duplicate of `cmd/entire/cli/stringutil/stringutil_test.go:63-70` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CapitalizeFirst(tt.input)
+			if got != tt.want {
+				t.Errorf("CapitalizeFirst(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/trailers/trailers.go:216: 216-224 lines are duplicate of `cmd/entire/cli/trailers/trailers.go:228-236` (dupl)
+func FormatShadowCommit(message, metadataDir, sessionID string) string {
+	var sb strings.Builder
+	sb.WriteString(message)
+	sb.WriteString("\n\n")
+	sb.WriteString(fmt.Sprintf("%s: %s\n", MetadataTrailerKey, metadataDir))
+	sb.WriteString(fmt.Sprintf("%s: %s\n", SessionTrailerKey, sessionID))
+	sb.WriteString(fmt.Sprintf("%s: %s\n", StrategyTrailerKey, "manual-commit"))
+	return sb.String()
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/trailers/trailers.go:228: 228-236 lines are duplicate of `cmd/entire/cli/trailers/trailers.go:216-224` (dupl)
+func FormatShadowTaskCommit(message, taskMetadataDir, sessionID string) string {
+	var sb strings.Builder
+	sb.WriteString(message)
+	sb.WriteString("\n\n")
+	sb.WriteString(fmt.Sprintf("%s: %s\n", MetadataTaskTrailerKey, taskMetadataDir))
+	sb.WriteString(fmt.Sprintf("%s: %s\n", SessionTrailerKey, sessionID))
+	sb.WriteString(fmt.Sprintf("%s: %s\n", StrategyTrailerKey, "manual-commit"))
+	return sb.String()
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/trailers/trailers_test.go:19: 19-57 lines are duplicate of `cmd/entire/cli/trailers/trailers_test.go:71-109` (dupl)
+func TestParseMetadata(t *testing.T) {
+	tests := []struct {
+		name      string
+		message   string
+		wantDir   string
+		wantFound bool
+	}{
+		{
+			name:      "standard commit message",
+			message:   "Update logic\n\nEntire-Metadata: .entire/metadata/2025-01-28-abc123\n",
+			wantDir:   ".entire/metadata/2025-01-28-abc123",
+			wantFound: true,
+		},
+		{
+			name:      "no trailer",
+			message:   "Simple commit message",
+			wantDir:   "",
+			wantFound: false,
+		},
+		{
+			name:      "trailer with extra spaces",
+			message:   "Message\n\nEntire-Metadata:   .entire/metadata/xyz   \n",
+			wantDir:   ".entire/metadata/xyz",
+			wantFound: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotDir, gotFound := ParseMetadata(tt.message)
+			if gotFound != tt.wantFound {
+				t.Errorf("ParseMetadata() found = %v, want %v", gotFound, tt.wantFound)
+			}
+			if gotDir != tt.wantDir {
+				t.Errorf("ParseMetadata() dir = %v, want %v", gotDir, tt.wantDir)
+			}
+		})
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/trailers/trailers_test.go:46: 46-56 lines are duplicate of `cmd/entire/cli/trailers/trailers_test.go:98-108` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotDir, gotFound := ParseMetadata(tt.message)
+			if gotFound != tt.wantFound {
+				t.Errorf("ParseMetadata() found = %v, want %v", gotFound, tt.wantFound)
+			}
+			if gotDir != tt.wantDir {
+				t.Errorf("ParseMetadata() dir = %v, want %v", gotDir, tt.wantDir)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/trailers/trailers_test.go:71: 71-109 lines are duplicate of `cmd/entire/cli/trailers/trailers_test.go:19-57` (dupl)
+func TestParseTaskMetadata(t *testing.T) {
+	tests := []struct {
+		name      string
+		message   string
+		wantDir   string
+		wantFound bool
+	}{
+		{
+			name:      "task commit message",
+			message:   "Task: Feature\n\nEntire-Metadata-Task: .entire/metadata/2025-01-28-abc/tasks/toolu_123\n",
+			wantDir:   ".entire/metadata/2025-01-28-abc/tasks/toolu_123",
+			wantFound: true,
+		},
+		{
+			name:      "no task trailer",
+			message:   "Simple commit message",
+			wantDir:   "",
+			wantFound: false,
+		},
+		{
+			name:      "regular metadata trailer not matched",
+			message:   "Message\n\nEntire-Metadata: .entire/metadata/xyz\n",
+			wantDir:   "",
+			wantFound: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotDir, gotFound := ParseTaskMetadata(tt.message)
+			if gotFound != tt.wantFound {
+				t.Errorf("ParseTaskMetadata() found = %v, want %v", gotFound, tt.wantFound)
+			}
+			if gotDir != tt.wantDir {
+				t.Errorf("ParseTaskMetadata() dir = %v, want %v", gotDir, tt.wantDir)
+			}
+		})
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/trailers/trailers_test.go:98: 98-155 lines are duplicate of `cmd/entire/cli/trailers/trailers_test.go:144-201` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotDir, gotFound := ParseTaskMetadata(tt.message)
+			if gotFound != tt.wantFound {
+				t.Errorf("ParseTaskMetadata() found = %v, want %v", gotFound, tt.wantFound)
+			}
+			if gotDir != tt.wantDir {
+				t.Errorf("ParseTaskMetadata() dir = %v, want %v", gotDir, tt.wantDir)
+			}
+		})
+	}
+}
+
+func TestParseBaseCommit(t *testing.T) {
+	tests := []struct {
+		name      string
+		message   string
+		wantSHA   string
+		wantFound bool
+	}{
+		{
+			name:      "valid 40-char SHA",
+			message:   "Checkpoint\n\nBase-Commit: abc123def456789012345678901234567890abcd\n",
+			wantSHA:   "abc123def456789012345678901234567890abcd",
+			wantFound: true,
+		},
+		{
+			name:      "no trailer",
+			message:   "Simple commit message",
+			wantSHA:   "",
+			wantFound: false,
+		},
+		{
+			name:      "short hash rejected",
+			message:   "Message\n\nBase-Commit: abc123\n",
+			wantSHA:   "",
+			wantFound: false,
+		},
+		{
+			name:      "with multiple trailers",
+			message:   "Session\n\nBase-Commit: 0123456789abcdef0123456789abcdef01234567\nEntire-Strategy: linear-shadow\n",
+			wantSHA:   "0123456789abcdef0123456789abcdef01234567",
+			wantFound: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotSHA, gotFound := ParseBaseCommit(tt.message)
+			if gotFound != tt.wantFound {
+				t.Errorf("ParseBaseCommit() found = %v, want %v", gotFound, tt.wantFound)
+			}
+			if gotSHA != tt.wantSHA {
+				t.Errorf("ParseBaseCommit() sha = %v, want %v", gotSHA, tt.wantSHA)
+			}
+		})
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/trailers/trailers_test.go:144: 144-201 lines are duplicate of `cmd/entire/cli/trailers/trailers_test.go:98-155` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotSHA, gotFound := ParseBaseCommit(tt.message)
+			if gotFound != tt.wantFound {
+				t.Errorf("ParseBaseCommit() found = %v, want %v", gotFound, tt.wantFound)
+			}
+			if gotSHA != tt.wantSHA {
+				t.Errorf("ParseBaseCommit() sha = %v, want %v", gotSHA, tt.wantSHA)
+			}
+		})
+	}
+}
+
+func TestParseSession(t *testing.T) {
+	tests := []struct {
+		name      string
+		message   string
+		wantID    string
+		wantFound bool
+	}{
+		{
+			name:      "single session trailer",
+			message:   "Update logic\n\nEntire-Session: 2025-12-10-abc123def\n",
+			wantID:    "2025-12-10-abc123def",
+			wantFound: true,
+		},
+		{
+			name:      "no trailer",
+			message:   "Simple commit message",
+			wantID:    "",
+			wantFound: false,
+		},
+		{
+			name:      "trailer with extra spaces",
+			message:   "Message\n\nEntire-Session:   2025-12-10-xyz789   \n",
+			wantID:    "2025-12-10-xyz789",
+			wantFound: true,
+		},
+		{
+			name:      "multiple trailers returns first",
+			message:   "Merge\n\nEntire-Session: session-1\nEntire-Session: session-2\n",
+			wantID:    "session-1",
+			wantFound: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotID, gotFound := ParseSession(tt.message)
+			if gotFound != tt.wantFound {
+				t.Errorf("ParseSession() found = %v, want %v", gotFound, tt.wantFound)
+			}
+			if gotID != tt.wantID {
+				t.Errorf("ParseSession() id = %v, want %v", gotID, tt.wantID)
+			}
+		})
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/trailers/trailers_test.go:190: 190-200 lines are duplicate of `cmd/entire/cli/trailers/trailers_test.go:46-56` (dupl)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotID, gotFound := ParseSession(tt.message)
+			if gotFound != tt.wantFound {
+				t.Errorf("ParseSession() found = %v, want %v", gotFound, tt.wantFound)
+			}
+			if gotID != tt.wantID {
+				t.Errorf("ParseSession() id = %v, want %v", gotID, tt.wantID)
+			}
+		})
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript.go:36: 36-58 lines are duplicate of `cmd/entire/cli/transcript.go:120-142` (dupl)
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("failed to read transcript: %w", err)
+		}
+
+		// Handle empty line or EOF without content
+		if len(lineBytes) == 0 {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+
+		var line transcriptLine
+		if err := json.Unmarshal(lineBytes, &line); err == nil {
+			lines = append(lines, line)
+		}
+
+		if err == io.EOF {
+			break
+		}
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript.go:120: 120-142 lines are duplicate of `cmd/entire/cli/transcript.go:36-58` (dupl)
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("failed to read transcript: %w", err)
+		}
+
+		// Handle empty line or EOF without content
+		if len(lineBytes) == 0 {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+
+		var line transcriptLine
+		if err := json.Unmarshal(lineBytes, &line); err == nil {
+			lines = append(lines, line)
+		}
+
+		if err == io.EOF {
+			break
+		}
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:114: 114-120 lines are duplicate of `cmd/entire/cli/transcript_test.go:330-336` (dupl)
+	transcript := []transcriptLine{
+		{Type: "user", UUID: "u1", Message: []byte(`{"content":"First prompt"}`)},
+		{Type: "assistant", UUID: "a1", Message: []byte(`{"content":[{"type":"text","text":"Response 1"}]}`)},
+		{Type: "user", UUID: "u2", Message: []byte(`{"content":"Second prompt"}`)},
+		{Type: "assistant", UUID: "a2", Message: []byte(`{"content":[{"type":"text","text":"Response 2"}]}`)},
+		{Type: "user", UUID: "u3", Message: []byte(`{"content":"Last prompt"}`)},
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:330: 330-336 lines are duplicate of `cmd/entire/cli/transcript_test.go:114-120` (dupl)
+	transcript := []transcriptLine{
+		{Type: "user", UUID: "u1", Message: []byte(`{"content":"First"}`)},
+		{Type: "assistant", UUID: "a1", Message: []byte(`{"content":[]}`)},
+		{Type: "user", UUID: "u2", Message: []byte(`{"content":"Second"}`)},
+		{Type: "assistant", UUID: "a2", Message: []byte(`{"content":[]}`)},
+		{Type: "user", UUID: "u3", Message: []byte(`{"content":"Third"}`)},
+	}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:389: 389-400 lines are duplicate of `cmd/entire/cli/transcript_test.go:402-413` (dupl)
+func TestExtractLastUserPrompt_StripsIDETags(t *testing.T) {
+	// Test that IDE tags are stripped from array content (VSCode format)
+	transcript := []transcriptLine{
+		{Type: "user", UUID: "u1", Message: []byte(`{"content":[{"type":"text","text":""},{"type":"text","text":"make the returned number red"}]}`)},
+	}
+
+	prompt := extractLastUserPrompt(transcript)
+	expected := "make the returned number red"
+	if prompt != expected {
+		t.Errorf("expected %q, got %q", expected, prompt)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:402: 402-413 lines are duplicate of `cmd/entire/cli/transcript_test.go:389-400` (dupl)
+func TestExtractLastUserPrompt_StripsIDETagsFromStringContent(t *testing.T) {
+	// Test that IDE tags are stripped from string content
+	transcript := []transcriptLine{
+		{Type: "user", UUID: "u1", Message: []byte(`{"content":"\n\nfix this bug"}`)},
+	}
+
+	prompt := extractLastUserPrompt(transcript)
+	expected := "fix this bug"
+	if prompt != expected {
+		t.Errorf("expected %q, got %q", expected, prompt)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:415: 415-434 lines are duplicate of `cmd/entire/cli/transcript_test.go:466-484` (dupl)
+func TestParseTranscriptFromLine_EntireFile(t *testing.T) {
+	content := `{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
+{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}
+{"type":"user","uuid":"user-2","message":{"content":"Bye"}}`
+
+	tmpFile := createTempTranscript(t, content)
+
+	// Parse from start (line 0)
+	lines, totalLines, err := parseTranscriptFromLine(tmpFile, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if totalLines != 3 {
+		t.Errorf("totalLines = %d, want 3", totalLines)
+	}
+	if len(lines) != 3 {
+		t.Errorf("len(lines) = %d, want 3", len(lines))
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:466: 466-484 lines are duplicate of `cmd/entire/cli/transcript_test.go:486-508` (dupl)
+func TestParseTranscriptFromLine_OffsetBeyondEnd(t *testing.T) {
+	content := `{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
+{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}`
+
+	tmpFile := createTempTranscript(t, content)
+
+	// Parse from line 10 (beyond end of file)
+	lines, totalLines, err := parseTranscriptFromLine(tmpFile, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if totalLines != 2 {
+		t.Errorf("totalLines = %d, want 2", totalLines)
+	}
+	if len(lines) != 0 {
+		t.Errorf("len(lines) = %d, want 0 (no lines after offset)", len(lines))
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:486: 486-508 lines are duplicate of `cmd/entire/cli/transcript_test.go:415-434` (dupl)
+func TestParseTranscriptFromLine_SkipsMalformedLines(t *testing.T) {
+	content := `{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
+invalid json line
+{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}
+{"type":"user","uuid":"user-2","message":{"content":"Bye"}}`
+
+	tmpFile := createTempTranscript(t, content)
+
+	// Parse from line 1 (skip first valid line)
+	lines, totalLines, err := parseTranscriptFromLine(tmpFile, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Total lines counts ALL lines including malformed (they're still lines in the file)
+	if totalLines != 4 {
+		t.Errorf("totalLines = %d, want 4", totalLines)
+	}
+	// But parsed lines excludes malformed
+	if len(lines) != 2 {
+		t.Errorf("len(lines) = %d, want 2 (valid lines after offset)", len(lines))
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:510: 510-551 lines are duplicate of `cmd/entire/cli/transcript_test.go:598-641` (dupl)
+func TestGetTranscriptPosition_BasicMessages(t *testing.T) {
+	content := `{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
+{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}
+{"type":"user","uuid":"user-2","message":{"content":"Bye"}}`
+
+	tmpFile := createTempTranscript(t, content)
+
+	pos, err := GetTranscriptPosition(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if pos.LineCount != 3 {
+		t.Errorf("LineCount = %d, want 3", pos.LineCount)
+	}
+	if pos.LastUUID != "user-2" {
+		t.Errorf("LastUUID = %q, want 'user-2'", pos.LastUUID)
+	}
+}
+
+func TestGetTranscriptPosition_WithSummaryRows(t *testing.T) {
+	// Summary rows have leafUuid but no uuid field - they should not be tracked
+	content := `{"type":"summary","leafUuid":"leaf-1","summary":"Previous context"}
+{"type":"summary","leafUuid":"leaf-2","summary":"More context"}
+{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
+{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}`
+
+	tmpFile := createTempTranscript(t, content)
+
+	pos, err := GetTranscriptPosition(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if pos.LineCount != 4 {
+		t.Errorf("LineCount = %d, want 4", pos.LineCount)
+	}
+	// LastUUID should be from user/assistant messages, not summary rows
+	if pos.LastUUID != "asst-1" {
+		t.Errorf("LastUUID = %q, want 'asst-1'", pos.LastUUID)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:530: 530-551 lines are duplicate of `cmd/entire/cli/transcript_test.go:598-617` (dupl)
+func TestGetTranscriptPosition_WithSummaryRows(t *testing.T) {
+	// Summary rows have leafUuid but no uuid field - they should not be tracked
+	content := `{"type":"summary","leafUuid":"leaf-1","summary":"Previous context"}
+{"type":"summary","leafUuid":"leaf-2","summary":"More context"}
+{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
+{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}`
+
+	tmpFile := createTempTranscript(t, content)
+
+	pos, err := GetTranscriptPosition(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if pos.LineCount != 4 {
+		t.Errorf("LineCount = %d, want 4", pos.LineCount)
+	}
+	// LastUUID should be from user/assistant messages, not summary rows
+	if pos.LastUUID != "asst-1" {
+		t.Errorf("LastUUID = %q, want 'asst-1'", pos.LastUUID)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:569: 569-582 lines are duplicate of `cmd/entire/cli/transcript_test.go:584-596` (dupl)
+func TestGetTranscriptPosition_NonExistentFile(t *testing.T) {
+	pos, err := GetTranscriptPosition("/nonexistent/path/transcript.jsonl")
+	if err != nil {
+		t.Fatalf("unexpected error for non-existent file: %v", err)
+	}
+
+	// Should return empty position for non-existent file
+	if pos.LineCount != 0 {
+		t.Errorf("LineCount = %d, want 0", pos.LineCount)
+	}
+	if pos.LastUUID != "" {
+		t.Errorf("LastUUID = %q, want empty", pos.LastUUID)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:584: 584-596 lines are duplicate of `cmd/entire/cli/transcript_test.go:569-582` (dupl)
+func TestGetTranscriptPosition_EmptyPath(t *testing.T) {
+	pos, err := GetTranscriptPosition("")
+	if err != nil {
+		t.Fatalf("unexpected error for empty path: %v", err)
+	}
+
+	if pos.LineCount != 0 {
+		t.Errorf("LineCount = %d, want 0", pos.LineCount)
+	}
+	if pos.LastUUID != "" {
+		t.Errorf("LastUUID = %q, want empty", pos.LastUUID)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:598: 598-641 lines are duplicate of `cmd/entire/cli/transcript_test.go:510-551` (dupl)
+func TestGetTranscriptPosition_OnlySummaryRows(t *testing.T) {
+	// File with only summary rows (no uuid field, only leafUuid)
+	content := `{"type":"summary","leafUuid":"leaf-1","summary":"Context 1"}
+{"type":"summary","leafUuid":"leaf-2","summary":"Context 2"}`
+
+	tmpFile := createTempTranscript(t, content)
+
+	pos, err := GetTranscriptPosition(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if pos.LineCount != 2 {
+		t.Errorf("LineCount = %d, want 2", pos.LineCount)
+	}
+	// No uuid field in summary rows, so LastUUID should be empty
+	if pos.LastUUID != "" {
+		t.Errorf("LastUUID = %q, want empty (summary rows don't have uuid)", pos.LastUUID)
+	}
+}
+
+func TestGetTranscriptPosition_MixedWithMalformedLines(t *testing.T) {
+	content := `{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
+not valid json
+{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}
+{broken json
+{"type":"user","uuid":"user-2","message":{"content":"Final"}}`
+
+	tmpFile := createTempTranscript(t, content)
+
+	pos, err := GetTranscriptPosition(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// All lines count, including malformed
+	if pos.LineCount != 5 {
+		t.Errorf("LineCount = %d, want 5", pos.LineCount)
+	}
+	// But LastUUID should be from last valid line with uuid
+	if pos.LastUUID != "user-2" {
+		t.Errorf("LastUUID = %q, want 'user-2'", pos.LastUUID)
+	}
+}
+../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/transcript_test.go:619: 619-641 lines are duplicate of `cmd/entire/cli/transcript_test.go:510-528` (dupl)
+func TestGetTranscriptPosition_MixedWithMalformedLines(t *testing.T) {
+	content := `{"type":"user","uuid":"user-1","message":{"content":"Hello"}}
+not valid json
+{"type":"assistant","uuid":"asst-1","message":{"content":[{"type":"text","text":"Hi"}]}}
+{broken json
+{"type":"user","uuid":"user-2","message":{"content":"Final"}}`
+
+	tmpFile := createTempTranscript(t, content)
+
+	pos, err := GetTranscriptPosition(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// All lines count, including malformed
+	if pos.LineCount != 5 {
+		t.Errorf("LineCount = %d, want 5", pos.LineCount)
+	}
+	// But LastUUID should be from last valid line with uuid
+	if pos.LastUUID != "user-2" {
+		t.Errorf("LastUUID = %q, want 'user-2'", pos.LastUUID)
+	}
+}
+112 issues:
+* dupl: 112
+
+=== Duplication Summary (by file) ===
+  13 transcript_test.go
+  8 hooks_geminicli_handlers.go
+  7 setup_test.go
+  6 manual_commit_test.go
+  6 messages_test.go
+  6 trailers_test.go
+  5 hooks.go
+  4 gemini_test.go
+  4 hooks_test.go
+  4 paths_test.go
+  4 rewind.go
+  3 commit_message_test.go
+  3 cleanup.go
+  2 agent_test.go
+  2 transcript_test.go
+  2 transcript_test.go
+  2 session.go
+  2 session_test.go
+  2 config.go
+  2 state.go
+  2 setup.go
+  2 state.go
+  2 auto_commit.go
+  2 manual_commit.go
+  2 manual_commit_rewind.go
+  2 manual_commit_session.go
+  2 stringutil_test.go
+  2 trailers.go
+  2 transcript.go
+  1 gemini.go
+  1 transcript.go
+  1 hooks_claudecode_handlers.go
+  1 resume_test.go
+  1 auto_commit_test.go
+  1 clean_test.go
+  1 common.go
+[dup] $ #!/usr/bin/env bash</bash-stdout><bash-stderr></bash-stderr>
+
+---
+
+sigh. more PR comments - please validate if they are actually worth actioning?
+
+---
+
+yes
+
+---
+
+bugbot got comments for us...
