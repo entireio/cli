@@ -35,7 +35,7 @@ func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "entire",
 		Short: "Entire CLI",
-		Long:  "A command-line interface for Entire" + gettingStarted + accessibilityHelp,
+		Long:  "The command-line interface for Entire" + gettingStarted + accessibilityHelp,
 		// Let main.go handle error printing to avoid duplication
 		SilenceErrors: true,
 		SilenceUsage:  true,
