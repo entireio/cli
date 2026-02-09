@@ -10,7 +10,7 @@
           },
           {
             "type": "command",
-            "command": "entire hooks claude-code session-start"
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code session-start"
           }
         ]
       }
@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "entire hooks claude-code session-end"
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code session-end"
           }
         ]
       }
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "entire hooks claude-code user-prompt-submit"
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code user-prompt-submit"
           }
         ]
       }
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "entire hooks claude-code stop"
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code stop"
           }
         ]
       }
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "entire hooks claude-code pre-task"
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code pre-task"
           }
         ]
       }
@@ -65,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "entire hooks claude-code post-task"
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code post-task"
           }
         ]
       },
@@ -74,7 +74,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "entire hooks claude-code post-todo"
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code post-todo"
           }
         ]
       }

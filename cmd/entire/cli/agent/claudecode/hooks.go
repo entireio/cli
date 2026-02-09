@@ -58,6 +58,7 @@ var entireHookPrefixes = []string{
 }
 
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
+// If localDev is true, installs wrapper script hooks that check ENTIRE_LOCAL_DEV env var.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
@@ -72,6 +73,7 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		}
 	}
 
+	// Always write to settings.json (the single source of truth)
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
 
 	// Read existing settings if they exist
@@ -114,17 +116,25 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		settings.Hooks.PostToolUse = removeEntireHooksFromMatchers(settings.Hooks.PostToolUse)
 	}
 
-	// Define hook commands
+	// Define hook commands based on localDev flag
+	// localDev=false (default): Direct "entire" commands for production use
+	// localDev=true: Wrapper script that checks ENTIRE_LOCAL_DEV env var
+	//   - ENTIRE_LOCAL_DEV=1 uses "go run" for development
+	//   - Otherwise uses "entire" from PATH
 	var sessionStartCmd, sessionEndCmd, stopCmd, userPromptSubmitCmd, preTaskCmd, postTaskCmd, postTodoCmd string
 	if localDev {
-		sessionStartCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code session-start"
-		sessionEndCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code session-end"
-		stopCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code stop"
-		userPromptSubmitCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code user-prompt-submit"
-		preTaskCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code pre-task"
-		postTaskCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-task"
-		postTodoCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-todo"
+		// Development mode: use wrapper script that respects ENTIRE_LOCAL_DEV env var
+		// This is for the CLI repo itself and other development scenarios
+		sessionStartCmd = "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code session-start"
+		sessionEndCmd = "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code session-end"
+		stopCmd = "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code stop"
+		userPromptSubmitCmd = "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code user-prompt-submit"
+		preTaskCmd = "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code pre-task"
+		postTaskCmd = "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code post-task"
+		postTodoCmd = "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code post-todo"
 	} else {
+		// Production mode: use entire binary directly from PATH
+		// This is the default for most users and projects
 		sessionStartCmd = "entire hooks claude-code session-start"
 		sessionEndCmd = "entire hooks claude-code session-end"
 		stopCmd = "entire hooks claude-code stop"
