@@ -32,7 +32,7 @@ This command finds and removes orphaned data from any strategy:
     Manual-commit checkpoints are permanent (condensed history) and are
     never considered orphaned.
 
-Without --force, shows a preview of items that would be deleted.
+Default: shows a preview of items that would be deleted.
 With --force, actually deletes the orphaned items.
 
 The entire/checkpoints/v1 branch itself is never deleted.`,
@@ -41,7 +41,7 @@ The entire/checkpoints/v1 branch itself is never deleted.`,
 		},
 	}
 
-	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Actually delete items (otherwise just preview)")
+	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Actually delete items (default: dry run)")
 
 	return cmd
 }
