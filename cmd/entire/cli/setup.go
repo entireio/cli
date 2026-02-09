@@ -672,38 +672,39 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 // shellCompletionComment is the comment preceding the completion line
 const shellCompletionComment = "# Entire CLI shell completion"
 
+// shellCompletionTarget returns the rc file path and completion lines for the
+// user's current shell. Returns empty strings for unsupported shells.
+func shellCompletionTarget() (rcFile, completionLine string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", ""
+	}
+
+	shell := os.Getenv("SHELL")
+	switch {
+	case strings.Contains(shell, "zsh"):
+		return filepath.Join(home, ".zshrc"),
+			"autoload -Uz compinit && compinit\nsource <(entire completion zsh)"
+	case strings.Contains(shell, "bash"):
+		return filepath.Join(home, ".bashrc"),
+			"source <(entire completion bash)"
+	default:
+		return "", ""
+	}
+}
+
 // promptShellCompletion offers to add shell completion to the user's rc file.
 // Only prompts if completion is not already configured.
 func promptShellCompletion(w io.Writer) error {
-	// Get user's home directory
-	home, err := os.UserHomeDir()
-	if err != nil {
-		//nolint:nilerr // Skip silently if we can't determine home - not a fatal error
+	rcFile, completionLine := shellCompletionTarget()
+	if rcFile == "" {
+		return nil // Unsupported shell or no home dir, skip silently
+	}
+
+	if isCompletionConfigured(rcFile) {
 		return nil
 	}
 
-	// Determine shell and rc file
-	shell := os.Getenv("SHELL")
-	var rcFile string
-	var completionLine string
-
-	switch {
-	case strings.Contains(shell, "zsh"):
-		rcFile = filepath.Join(home, ".zshrc")
-		completionLine = "source <(entire completion zsh)"
-	case strings.Contains(shell, "bash"):
-		rcFile = filepath.Join(home, ".bashrc")
-		completionLine = "source <(entire completion bash)"
-	default:
-		return nil // Unsupported shell, skip silently
-	}
-
-	// Check if completion is already configured
-	if isCompletionConfigured(rcFile) {
-		return nil // Already configured, skip silently
-	}
-
-	// Prompt user with select-style picker (matching other prompts)
 	var selected string
 	form := NewAccessibleForm(
 		huh.NewGroup(
@@ -726,7 +727,6 @@ func promptShellCompletion(w io.Writer) error {
 		return nil
 	}
 
-	// Append completion to rc file
 	if err := appendShellCompletion(rcFile, completionLine); err != nil {
 		return fmt.Errorf("failed to update %s: %w", rcFile, err)
 	}
@@ -756,53 +756,10 @@ func appendShellCompletion(rcFile, completionLine string) error {
 	}
 	defer f.Close()
 
-	// Add newline, comment, and completion line
 	_, err = f.WriteString("\n" + shellCompletionComment + "\n" + completionLine + "\n")
 	if err != nil {
 		return fmt.Errorf("writing completion: %w", err)
 	}
-	return nil
-}
-
-// setupShellCompletionNonInteractive adds shell completion without prompting.
-// Used when --setup-shell flag is provided.
-func setupShellCompletionNonInteractive(w io.Writer) error {
-	// Get user's home directory
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("cannot determine home directory: %w", err)
-	}
-
-	// Determine shell and rc file
-	shell := os.Getenv("SHELL")
-	var rcFile string
-	var completionLine string
-
-	switch {
-	case strings.Contains(shell, "zsh"):
-		rcFile = filepath.Join(home, ".zshrc")
-		completionLine = "source <(entire completion zsh)"
-	case strings.Contains(shell, "bash"):
-		rcFile = filepath.Join(home, ".bashrc")
-		completionLine = "source <(entire completion bash)"
-	default:
-		return fmt.Errorf("unsupported shell: %s (supported: zsh, bash)", shell)
-	}
-
-	// Check if completion is already configured
-	if isCompletionConfigured(rcFile) {
-		fmt.Fprintf(w, "✓ Shell completion already configured in %s\n", rcFile)
-		return nil
-	}
-
-	// Append completion to rc file
-	if err := appendShellCompletion(rcFile, completionLine); err != nil {
-		return fmt.Errorf("failed to update %s: %w", rcFile, err)
-	}
-
-	fmt.Fprintf(w, "✓ Shell completion added to %s\n", rcFile)
-	fmt.Fprintln(w, "  Run `source "+rcFile+"` or restart your shell to activate")
-
 	return nil
 }
 
