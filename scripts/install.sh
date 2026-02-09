@@ -241,7 +241,8 @@ main() {
         if [[ "$shell_name" == "fish" ]]; then
             echo -e "  Run this, then restart your terminal:"
             echo ""
-            echo -e "    ${BOLD}fish_add_path ${install_dir}${NC}"
+            echo -e "    ${BOLD}mkdir -p ~/.config/fish${NC}"
+            echo -e "    ${BOLD}echo 'fish_add_path ${install_dir}' >> \$HOME/.config/fish/config.fish${NC}"
         elif [[ -n "$shell_config" ]]; then
             echo -e "  Run this, then restart your terminal:"
             echo ""
