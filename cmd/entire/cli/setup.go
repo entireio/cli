@@ -669,8 +669,24 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 	}
 }
 
-// shellCompletionComment is the comment preceding the completion line
-const shellCompletionComment = "# Entire CLI shell completion"
+// Stanza constants for shell completion management.
+const (
+	stanzaName    = "entire-cli"
+	stanzaVersion = 1
+)
+
+// completionStatusKind represents the state of shell completion in an rc file.
+type completionStatusKind int
+
+const (
+	statusCurrent completionStatusKind = iota // stanza exists at current version
+	statusStale                               // stanza exists at older version
+	statusLegacy                              // old non-stanza format detected
+	statusMissing                             // nothing found
+)
+
+// legacyCompletionComment is the comment from the old non-stanza format.
+const legacyCompletionComment = "# Entire CLI shell completion"
 
 // errUnsupportedShell is returned when the user's shell is not supported for completion.
 var errUnsupportedShell = errors.New("unsupported shell")
@@ -721,16 +737,27 @@ func promptShellCompletion(w io.Writer) error {
 		return fmt.Errorf("shell completion: %w", err)
 	}
 
-	if isCompletionConfigured(rcFile) {
+	status := completionStatus(rcFile)
+	if status == statusCurrent {
 		fmt.Fprintf(w, "✓ Shell completion already configured in %s\n", rcFile)
 		return nil
+	}
+
+	var promptTitle string
+	switch status {
+	case statusStale:
+		promptTitle = fmt.Sprintf("Update shell completion? (detected: %s, newer version available)", shellName)
+	case statusLegacy:
+		promptTitle = fmt.Sprintf("Migrate shell completion to managed format? (detected: %s)", shellName)
+	case statusMissing, statusCurrent:
+		promptTitle = fmt.Sprintf("Enable shell completion? (detected: %s)", shellName)
 	}
 
 	var selected string
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title(fmt.Sprintf("Enable shell completion? (detected: %s)", shellName)).
+				Title(promptTitle).
 				Options(
 					huh.NewOption("Yes", "yes"),
 					huh.NewOption("No", "no"),
@@ -748,7 +775,7 @@ func promptShellCompletion(w io.Writer) error {
 		return nil
 	}
 
-	if err := appendShellCompletion(rcFile, completionLine); err != nil {
+	if err := installShellCompletion(rcFile, completionLine); err != nil {
 		return fmt.Errorf("failed to update %s: %w", rcFile, err)
 	}
 
@@ -758,33 +785,124 @@ func promptShellCompletion(w io.Writer) error {
 	return nil
 }
 
-// isCompletionConfigured checks if shell completion is already in the rc file.
-func isCompletionConfigured(rcFile string) bool {
+// completionStatus checks the state of shell completion in the rc file.
+func completionStatus(rcFile string) completionStatusKind {
 	//nolint:gosec // G304: rcFile is constructed from home dir + known filename, not user input
-	content, err := os.ReadFile(rcFile)
+	data, err := os.ReadFile(rcFile)
 	if err != nil {
-		return false // File doesn't exist or can't read, treat as not configured
+		return statusMissing
 	}
-	return strings.Contains(string(content), "entire completion")
+	content := string(data)
+
+	// Check for stanza format first
+	version, _, found := FindStanza(content, stanzaName)
+	if found {
+		if version >= stanzaVersion {
+			return statusCurrent
+		}
+		return statusStale
+	}
+
+	// Check for legacy format (comment + completion line without stanza markers)
+	if strings.Contains(content, legacyCompletionComment) && strings.Contains(content, "entire completion") {
+		return statusLegacy
+	}
+
+	return statusMissing
 }
 
-// appendShellCompletion adds the completion line to the rc file.
-func appendShellCompletion(rcFile, completionLine string) error {
+// installShellCompletion adds or updates the completion stanza in the rc file.
+// If legacy format is present, it is migrated to the stanza format.
+func installShellCompletion(rcFile, completionLine string) error {
 	if err := os.MkdirAll(filepath.Dir(rcFile), 0o700); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
 	}
-	//nolint:gosec // G302: Shell rc files need 0644 for user readability
-	f, err := os.OpenFile(rcFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("opening file: %w", err)
-	}
-	defer f.Close()
 
-	_, err = f.WriteString("\n" + shellCompletionComment + "\n" + completionLine + "\n")
-	if err != nil {
-		return fmt.Errorf("writing completion: %w", err)
+	//nolint:gosec // G304: rcFile is constructed from home dir + known filename, not user input
+	data, err := os.ReadFile(rcFile)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading file: %w", err)
+	}
+	content := string(data)
+
+	// Remove legacy format if present
+	content = removeLegacyCompletion(content)
+
+	// Upsert the stanza
+	content = UpsertStanza(content, stanzaName, stanzaVersion, completionLine)
+
+	//nolint:gosec // G306: Shell rc files need 0644 for user readability
+	if err := os.WriteFile(rcFile, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("writing file: %w", err)
 	}
 	return nil
+}
+
+// removeShellCompletion removes the completion stanza and any legacy format from the rc file.
+// Returns true if the file was modified.
+func removeShellCompletion(rcFile string) (bool, error) {
+	//nolint:gosec // G304: rcFile is constructed from home dir + known filename, not user input
+	data, err := os.ReadFile(rcFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading file: %w", err)
+	}
+	original := string(data)
+	content := original
+
+	// Remove stanza format
+	content = RemoveStanza(content, stanzaName)
+
+	// Remove legacy format
+	content = removeLegacyCompletion(content)
+
+	if content == original {
+		return false, nil
+	}
+
+	//nolint:gosec // G306: Shell rc files need 0644 for user readability
+	if err := os.WriteFile(rcFile, []byte(content), 0o644); err != nil {
+		return false, fmt.Errorf("writing file: %w", err)
+	}
+	return true, nil
+}
+
+// removeLegacyCompletion removes the old non-stanza format
+// ("# Entire CLI shell completion" comment + following completion line).
+func removeLegacyCompletion(content string) string {
+	if !strings.Contains(content, legacyCompletionComment) {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	var result []string
+	i := 0
+	for i < len(lines) {
+		if strings.TrimSpace(lines[i]) == legacyCompletionComment {
+			// Skip the comment line
+			i++
+			// Skip the completion line that follows if it contains "entire completion"
+			if i < len(lines) && strings.Contains(lines[i], "entire completion") {
+				i++
+			}
+			// Skip a trailing blank line
+			if i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+				i++
+			}
+			continue
+		}
+		result = append(result, lines[i])
+		i++
+	}
+
+	output := strings.Join(result, "\n")
+	output = strings.TrimRight(output, "\n")
+	if output != "" {
+		output += "\n"
+	}
+	return output
 }
 
 // promptTelemetryConsent asks the user if they want to enable telemetry.
@@ -846,9 +964,17 @@ func runUninstall(w, errW io.Writer, force bool) error {
 	geminiHooksInstalled := checkGeminiCLIHooksInstalled()
 	entireDirExists := checkEntireDirExists()
 
+	// Check shell completion status
+	_, completionRCFile, _, shellErr := shellCompletionTarget()
+	hasShellCompletion := false
+	if shellErr == nil {
+		status := completionStatus(completionRCFile)
+		hasShellCompletion = status != statusMissing
+	}
+
 	// Check if there's anything to uninstall
 	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
-		shadowBranchCount == 0 && !claudeHooksInstalled && !geminiHooksInstalled {
+		shadowBranchCount == 0 && !claudeHooksInstalled && !geminiHooksInstalled && !hasShellCompletion {
 		fmt.Fprintln(w, "Entire is not installed in this repository.")
 		return nil
 	}
@@ -875,6 +1001,9 @@ func runUninstall(w, errW io.Writer, force bool) error {
 			fmt.Fprintln(w, "  - Agent hooks (Claude Code)")
 		case geminiHooksInstalled:
 			fmt.Fprintln(w, "  - Agent hooks (Gemini CLI)")
+		}
+		if hasShellCompletion {
+			fmt.Fprintf(w, "  - Shell completion (%s)\n", completionRCFile)
 		}
 		fmt.Fprintln(w)
 
@@ -935,6 +1064,16 @@ func runUninstall(w, errW io.Writer, force bool) error {
 		fmt.Fprintf(errW, "Warning: failed to remove shadow branches: %v\n", err)
 	} else if branchesRemoved > 0 {
 		fmt.Fprintf(w, "  Removed %d shadow branches\n", branchesRemoved)
+	}
+
+	// 6. Remove shell completion from rc file
+	if hasShellCompletion {
+		modified, removeErr := removeShellCompletion(completionRCFile)
+		if removeErr != nil {
+			fmt.Fprintf(errW, "Warning: failed to remove shell completion: %v\n", removeErr)
+		} else if modified {
+			fmt.Fprintf(w, "  Removed shell completion from %s\n", completionRCFile)
+		}
 	}
 
 	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")

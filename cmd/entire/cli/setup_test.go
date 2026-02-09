@@ -669,7 +669,7 @@ func TestShellCompletionTarget(t *testing.T) {
 	}
 }
 
-func TestAppendShellCompletion(t *testing.T) {
+func TestInstallShellCompletion(t *testing.T) {
 	tests := []struct {
 		name           string
 		rcFileRelPath  string
@@ -720,28 +720,46 @@ func TestAppendShellCompletion(t *testing.T) {
 				}
 			}
 
-			if err := appendShellCompletion(rcFile, tt.completionLine); err != nil {
-				t.Fatalf("appendShellCompletion() error: %v", err)
+			if err := installShellCompletion(rcFile, tt.completionLine); err != nil {
+				t.Fatalf("installShellCompletion() error: %v", err)
 			}
 
-			// Verify the file was created and contains the completion line.
+			// Verify the file was created and contains the stanza.
 			data, err := os.ReadFile(rcFile)
 			if err != nil {
 				t.Fatalf("reading rc file: %v", err)
 			}
 			content := string(data)
 
-			if !strings.Contains(content, shellCompletionComment) {
-				t.Errorf("rc file missing comment %q", shellCompletionComment)
+			// Verify stanza markers are present
+			if !strings.Contains(content, "# BEGIN "+stanzaName) {
+				t.Error("rc file missing stanza BEGIN marker")
+			}
+			if !strings.Contains(content, "# END "+stanzaName) {
+				t.Error("rc file missing stanza END marker")
 			}
 			if !strings.Contains(content, tt.completionLine) {
 				t.Errorf("rc file missing completion line %q", tt.completionLine)
 			}
-			if tt.preExisting != "" && !strings.HasPrefix(content, tt.preExisting) {
-				t.Errorf("pre-existing content was overwritten")
+
+			// Verify stanza can be found
+			version, body, found := FindStanza(content, stanzaName)
+			if !found {
+				t.Fatal("stanza not found after install")
+			}
+			if version != stanzaVersion {
+				t.Errorf("stanza version = %d, want %d", version, stanzaVersion)
+			}
+			if body != tt.completionLine {
+				t.Errorf("stanza body = %q, want %q", body, tt.completionLine)
 			}
 
-			// Verify parent directory permissions.
+			// Verify pre-existing content is preserved
+			if tt.preExisting != "" && !strings.Contains(content, strings.TrimRight(tt.preExisting, "\n")) {
+				t.Error("pre-existing content was overwritten")
+			}
+
+			// Verify parent directory exists.
 			info, err := os.Stat(filepath.Dir(rcFile))
 			if err != nil {
 				t.Fatalf("stat parent dir: %v", err)
@@ -750,6 +768,161 @@ func TestAppendShellCompletion(t *testing.T) {
 				t.Fatal("parent path is not a directory")
 			}
 		})
+	}
+}
+
+func TestInstallShellCompletion_MigratesLegacy(t *testing.T) {
+	home := t.TempDir()
+	rcFile := filepath.Join(home, ".zshrc")
+	legacy := "export PATH=/usr/bin\n\n" + legacyCompletionComment + "\nsource <(entire completion zsh)\n"
+	if err := os.WriteFile(rcFile, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installShellCompletion(rcFile, "source <(entire completion zsh)"); err != nil {
+		t.Fatalf("installShellCompletion() error: %v", err)
+	}
+
+	data, err := os.ReadFile(rcFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Legacy comment should be gone
+	if strings.Contains(content, legacyCompletionComment) {
+		t.Error("legacy comment should be removed after migration")
+	}
+
+	// Stanza should be present
+	version, _, found := FindStanza(content, stanzaName)
+	if !found {
+		t.Fatal("stanza should be present after migration")
+	}
+	if version != stanzaVersion {
+		t.Errorf("stanza version = %d, want %d", version, stanzaVersion)
+	}
+
+	// Pre-existing content preserved
+	if !strings.Contains(content, "export PATH=/usr/bin") {
+		t.Error("pre-existing content should be preserved")
+	}
+}
+
+func TestCompletionStatus(t *testing.T) {
+	home := t.TempDir()
+
+	// Missing file
+	rcFile := filepath.Join(home, ".zshrc")
+	if status := completionStatus(rcFile); status != statusMissing {
+		t.Errorf("missing file: got %d, want statusMissing", status)
+	}
+
+	// Empty file
+	if err := os.WriteFile(rcFile, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if status := completionStatus(rcFile); status != statusMissing {
+		t.Errorf("empty file: got %d, want statusMissing", status)
+	}
+
+	// Legacy format
+	legacy := legacyCompletionComment + "\nsource <(entire completion zsh)\n"
+	if err := os.WriteFile(rcFile, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if status := completionStatus(rcFile); status != statusLegacy {
+		t.Errorf("legacy format: got %d, want statusLegacy", status)
+	}
+
+	// Current stanza
+	current := "# BEGIN entire-cli (v1)\nsource <(entire completion zsh)\n# END entire-cli\n"
+	if err := os.WriteFile(rcFile, []byte(current), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if status := completionStatus(rcFile); status != statusCurrent {
+		t.Errorf("current stanza: got %d, want statusCurrent", status)
+	}
+
+	// Stale stanza (older version)
+	stale := "# BEGIN entire-cli (v0)\nsource <(entire completion zsh)\n# END entire-cli\n"
+	if err := os.WriteFile(rcFile, []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if status := completionStatus(rcFile); status != statusStale {
+		t.Errorf("stale stanza: got %d, want statusStale", status)
+	}
+}
+
+func TestRemoveShellCompletion(t *testing.T) {
+	home := t.TempDir()
+	rcFile := filepath.Join(home, ".zshrc")
+
+	// Remove from missing file — no error, not modified
+	modified, err := removeShellCompletion(rcFile)
+	if err != nil {
+		t.Fatalf("removeShellCompletion on missing file: %v", err)
+	}
+	if modified {
+		t.Error("should not be modified when file doesn't exist")
+	}
+
+	// Remove stanza format
+	stanza := "export A=1\n\n# BEGIN entire-cli (v1)\nsource <(entire completion zsh)\n# END entire-cli\n"
+	if err := os.WriteFile(rcFile, []byte(stanza), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	modified, err = removeShellCompletion(rcFile)
+	if err != nil {
+		t.Fatalf("removeShellCompletion: %v", err)
+	}
+	if !modified {
+		t.Error("should be modified when stanza is removed")
+	}
+	data, err := os.ReadFile(rcFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "# BEGIN entire-cli") {
+		t.Error("stanza should be removed from file")
+	}
+	if !strings.Contains(string(data), "export A=1") {
+		t.Error("other content should be preserved")
+	}
+
+	// Remove legacy format
+	legacy := "export B=2\n\n" + legacyCompletionComment + "\nsource <(entire completion zsh)\n"
+	if err := os.WriteFile(rcFile, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	modified, err = removeShellCompletion(rcFile)
+	if err != nil {
+		t.Fatalf("removeShellCompletion legacy: %v", err)
+	}
+	if !modified {
+		t.Error("should be modified when legacy is removed")
+	}
+	data, err = os.ReadFile(rcFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), legacyCompletionComment) {
+		t.Error("legacy comment should be removed")
+	}
+	if !strings.Contains(string(data), "export B=2") {
+		t.Error("other content should be preserved")
+	}
+
+	// No completion present — not modified
+	if err := os.WriteFile(rcFile, []byte("export C=3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	modified, err = removeShellCompletion(rcFile)
+	if err != nil {
+		t.Fatalf("removeShellCompletion no-op: %v", err)
+	}
+	if modified {
+		t.Error("should not be modified when no completion present")
 	}
 }
 
