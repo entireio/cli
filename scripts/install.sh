@@ -178,6 +178,7 @@ main() {
     local install_path="${install_dir}/${BINARY_NAME}"
 
     mkdir -p "${install_dir}"
+    success "Directory ready"
 
     if [[ ! -w "$install_dir" ]]; then
         error "Cannot write to ${install_dir}."
