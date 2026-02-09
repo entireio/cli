@@ -44,7 +44,6 @@ func newEnableCmd() *cobra.Command {
 	var agentName string
 	var strategyFlag string
 	var forceHooks bool
-	var setupShell bool
 	var skipPushSessions bool
 	var telemetry bool
 
@@ -78,9 +77,9 @@ Strategies: manual-commit (default), auto-commit`,
 			}
 			// If strategy is specified via flag, skip interactive selection
 			if strategyFlag != "" {
-				return runEnableWithStrategy(cmd.OutOrStdout(), strategyFlag, localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, setupShell, skipPushSessions, telemetry)
+				return runEnableWithStrategy(cmd.OutOrStdout(), strategyFlag, localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
 			}
-			return runEnableInteractive(cmd.OutOrStdout(), localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, setupShell, skipPushSessions, telemetry)
+			return runEnableInteractive(cmd.OutOrStdout(), localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
 		},
 	}
 
@@ -93,7 +92,6 @@ Strategies: manual-commit (default), auto-commit`,
 	cmd.Flags().StringVar(&agentName, "agent", "", "Agent to setup hooks for (e.g., claude-code). Enables non-interactive mode.")
 	cmd.Flags().StringVar(&strategyFlag, "strategy", "", "Strategy to use (manual-commit or auto-commit)")
 	cmd.Flags().BoolVarP(&forceHooks, "force", "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
-	cmd.Flags().BoolVar(&setupShell, "setup-shell", false, "Add shell completion to your rc file (non-interactive)")
 	cmd.Flags().BoolVar(&skipPushSessions, "skip-push-sessions", false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().BoolVar(&telemetry, "telemetry", true, "Enable anonymous usage analytics")
 	//nolint:errcheck,gosec // completion is optional, flag is defined above
@@ -141,7 +139,7 @@ Use --uninstall to completely remove Entire from this repository, including:
 // runEnableWithStrategy enables Entire with a specified strategy (non-interactive).
 // The selectedStrategy can be either a display name (manual-commit, auto-commit)
 // or an internal name (manual-commit, auto-commit).
-func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, useLocalSettings, useProjectSettings, forceHooks, setupShell, skipPushSessions, telemetry bool) error {
+func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
 	// Map the strategy to internal name if it's a display name
 	internalStrategy := selectedStrategy
 	if mapped, ok := strategyDisplayToInternal[selectedStrategy]; ok {
@@ -240,14 +238,6 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
 
-	// Setup shell completion if --setup-shell flag was provided
-	if setupShell {
-		if err := setupShellCompletionNonInteractive(w); err != nil {
-			// Non-fatal - just log and continue
-			fmt.Fprintf(w, "Note: Shell completion setup skipped: %v\n", err)
-		}
-	}
-
 	// Show success message with display name
 	displayName := selectedStrategy
 	if dn, ok := strategyInternalToDisplay[internalStrategy]; ok {
@@ -259,7 +249,7 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 }
 
 // runEnableInteractive runs the interactive enable flow.
-func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProjectSettings, forceHooks, setupShell, skipPushSessions, telemetry bool) error {
+func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
 	// Use the default strategy (manual-commit)
 	internalStrategy := strategy.DefaultStrategyName
 	fmt.Fprintf(w, "Using %s strategy (use --strategy to change)\n\n", strategyInternalToDisplay[internalStrategy])
@@ -348,20 +338,6 @@ func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProject
 	}
 	if err := strat.EnsureSetup(); err != nil {
 		return fmt.Errorf("failed to setup strategy: %w", err)
-	}
-
-	// Setup shell completion - either non-interactively (if --setup-shell) or prompt
-	if setupShell {
-		if err := setupShellCompletionNonInteractive(w); err != nil {
-			// Non-fatal - just log and continue
-			fmt.Fprintf(w, "Note: Shell completion setup skipped: %v\n", err)
-		}
-	} else {
-		// Offer to setup shell completion (only if not already configured)
-		if err := promptShellCompletion(w); err != nil {
-			// Non-fatal - just log and continue
-			fmt.Fprintf(w, "Note: Shell completion setup skipped: %v\n", err)
-		}
 	}
 
 	// Show success message with display name
@@ -676,6 +652,21 @@ func newSetupGitHookCmd() *cobra.Command {
 	}
 
 	return cmd
+}
+
+func newCurlBashPostInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "curl-bash-post-install",
+		Short:  "Post-install tasks for curl|bash installer",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := promptShellCompletion(cmd.OutOrStdout()); err != nil {
+				// Non-fatal - just log and continue
+				fmt.Fprintf(cmd.OutOrStdout(), "Note: Shell completion setup skipped: %v\n", err)
+			}
+			return nil
+		},
+	}
 }
 
 // shellCompletionComment is the comment preceding the completion line
