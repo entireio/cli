@@ -218,9 +218,6 @@ main() {
         error "Installation completed but the binary failed to execute. Please check the installation."
     fi
 
-    info "Running post-install actions..."
-    "$install_path" curl-bash-post-install
-
     # Check if the installed binary is the one that will be found in PATH
     local path_binary
     path_binary=$(command -v "$BINARY_NAME" 2>/dev/null || true)
@@ -246,6 +243,9 @@ main() {
         echo -e "${YELLOW}!${NC}   export PATH=\"\$PATH:${install_dir}\""
         echo ""
     fi
+
+    info "Running post-install actions..."
+    "$install_path" curl-bash-post-install
 }
 
 main "$@"
