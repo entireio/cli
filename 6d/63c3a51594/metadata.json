@@ -1,0 +1,32 @@
+{
+  "checkpoint_id": "6d63c3a51594",
+  "strategy": "manual-commit",
+  "branch": "alex/parallelize-integration-tests",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/integration_test/auto_commit_checkpoint_fix_test.go",
+    "cmd/entire/cli/integration_test/logs_only_rewind_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_untracked_files_test.go",
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
+    "cmd/entire/cli/integration_test/session_conflict_test.go",
+    "cmd/entire/cli/integration_test/transcript_test.go",
+    "cmd/entire/cli/integration_test/worktree_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/6d/63c3a51594/0/metadata.json",
+      "transcript": "/6d/63c3a51594/0/full.jsonl",
+      "context": "/6d/63c3a51594/0/context.md",
+      "content_hash": "/6d/63c3a51594/0/content_hash.txt",
+      "prompt": "/6d/63c3a51594/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 238,
+    "cache_creation_tokens": 191112,
+    "cache_read_tokens": 9875939,
+    "output_tokens": 3272,
+    "api_call_count": 102
+  }
+}
