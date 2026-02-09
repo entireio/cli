@@ -745,12 +745,11 @@ func promptShellCompletion(w io.Writer) error {
 
 	var promptTitle string
 	switch status {
-	case statusStale:
+	case statusStale, statusLegacy:
 		promptTitle = fmt.Sprintf("Update shell completion? (detected: %s, newer version available)", shellName)
-	case statusLegacy:
-		promptTitle = fmt.Sprintf("Migrate shell completion to managed format? (detected: %s)", shellName)
-	case statusMissing, statusCurrent:
+	case statusMissing:
 		promptTitle = fmt.Sprintf("Enable shell completion? (detected: %s)", shellName)
+	case statusCurrent: // impossible
 	}
 
 	var selected string
