@@ -685,7 +685,7 @@ func shellCompletionTarget() (shellName, rcFile, completionLine string) {
 	case strings.Contains(shell, "zsh"):
 		return "Zsh",
 			filepath.Join(home, ".zshrc"),
-			"autoload -Uz compinit && compinit && source <(entire completion zsh)"
+			"source <(entire completion zsh)"
 	case strings.Contains(shell, "bash"):
 		return "Bash",
 			filepath.Join(home, ".bashrc"),
