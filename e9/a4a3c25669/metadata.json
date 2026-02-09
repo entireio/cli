@@ -2,9 +2,14 @@
   "checkpoint_id": "e9a4a3c25669",
   "strategy": "manual-commit",
   "branch": "alex/ent-259-fix-deferred-condense-attribution",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
-    "cmd/entire/cli/strategy/manual_commit_git.go"
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go"
   ],
   "sessions": [
     {
@@ -13,13 +18,20 @@
       "context": "/e9/a4a3c25669/0/context.md",
       "content_hash": "/e9/a4a3c25669/0/content_hash.txt",
       "prompt": "/e9/a4a3c25669/0/prompt.txt"
+    },
+    {
+      "metadata": "/e9/a4a3c25669/1/metadata.json",
+      "transcript": "/e9/a4a3c25669/1/full.jsonl",
+      "context": "/e9/a4a3c25669/1/context.md",
+      "content_hash": "/e9/a4a3c25669/1/content_hash.txt",
+      "prompt": "/e9/a4a3c25669/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 55,
-    "cache_creation_tokens": 144990,
-    "cache_read_tokens": 5383272,
-    "output_tokens": 2728,
-    "api_call_count": 45
+    "input_tokens": 115,
+    "cache_creation_tokens": 380430,
+    "cache_read_tokens": 11262674,
+    "output_tokens": 4255,
+    "api_call_count": 101
   }
 }

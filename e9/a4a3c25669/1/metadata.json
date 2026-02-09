@@ -1,0 +1,73 @@
+{
+  "checkpoint_id": "e9a4a3c25669",
+  "session_id": "69847031-200c-4c30-baad-1ab1aab0c8ab",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T10:34:17.251935Z",
+  "branch": "alex/ent-259-fix-deferred-condense-attribution",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 60,
+    "cache_creation_tokens": 235440,
+    "cache_read_tokens": 5879402,
+    "output_tokens": 1527,
+    "api_call_count": 56
+  },
+  "summary": {
+    "intent": "Fix a bug (ENT-259) where attribution incorrectly showed zero changes during deferred condensation because BaseCommit was updated during PostCommit migration, causing the base tree to equal HEAD tree.",
+    "outcome": "Successfully implemented a fix by adding AttributionBaseCommit field that preserves the original base commit for attribution calculations while BaseCommit continues to track shadow branch state. All tests pass including a new test verifying the fix.",
+    "learnings": {
+      "repo": [
+        "BaseCommit serves dual purposes: shadow branch naming AND attribution reference, which diverge during deferred condensation",
+        "PostCommit migration updates BaseCommit to new HEAD for shadow branch lookup, but attribution needs the pre-migration value",
+        "Attribution calculation compares three trees: baseTree (original), shadowTree (agent work), and headTree (committed changes)",
+        "CheckpointStore saves CommittedMetadata with InitialAttribution to per-session metadata.json files",
+        "Session state transitions: ACTIVE → ACTIVE_COMMITTED (on user commit) → deferred condensation runs at TurnEnd"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/session/state.go",
+          "line": 28,
+          "end_line": 33,
+          "finding": "Added AttributionBaseCommit field after BaseCommit to preserve original base for attribution while BaseCommit tracks shadow branch state"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_condensation.go",
+          "line": 231,
+          "end_line": 235,
+          "finding": "Attribution calculation uses AttributionBaseCommit with backward-compat fallback to BaseCommit for old sessions"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 720,
+          "end_line": 721,
+          "finding": "condenseAndUpdateState updates AttributionBaseCommit after successful condensation to keep it in sync with BaseCommit"
+        }
+      ],
+      "workflow": [
+        "Reading all affected files before making changes helps understand the full context and dependencies",
+        "Parallel tool calls for independent file reads significantly speeds up exploration",
+        "Running a single test first validates logic before running full test suite",
+        "The linter automatically suggests better assertions (assert.Positive vs assert.Greater with 0)"
+      ]
+    },
+    "friction": [],
+    "open_items": []
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T10:34:03.034689Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 0,
+    "agent_percentage": 0
+  }
+}
