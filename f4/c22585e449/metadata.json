@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "f4c22585e449",
+  "strategy": "manual-commit",
+  "branch": "gtrrz-victor/alt-date-prefix-session-id",
+  "migration_source_commit": "ffa221cee6f4f655f64d38ec1232f3a469fdfed3",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/session/session_test.go",
+    "cmd/entire/cli/session/state.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f4/c22585e449/0/metadata.json",
+      "transcript": "/f4/c22585e449/0/full.jsonl",
+      "context": "/f4/c22585e449/0/context.md",
+      "content_hash": "/f4/c22585e449/0/content_hash.txt",
+      "prompt": "/f4/c22585e449/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 5297,
+    "cache_creation_tokens": 125565,
+    "cache_read_tokens": 7361010,
+    "output_tokens": 196,
+    "api_call_count": 77
+  }
+}

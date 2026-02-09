@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "1a8a83a35a9b",
+  "session_id": "03a1382e-ecd5-42c4-b3d4-5c659e165904",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-07T00:32:23.416348Z",
+  "branch": "alex/ent-221-type-consolidation",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/KNOWN_LIMITATIONS.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "51906009-3b28-466f-9d00-581076b069f8",
+  "token_usage": {
+    "input_tokens": 53,
+    "cache_creation_tokens": 58001,
+    "cache_read_tokens": 2237581,
+    "output_tokens": 2933,
+    "api_call_count": 39
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-07T00:32:06.424211Z",
+    "agent_lines": 29,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 29,
+    "agent_percentage": 100
+  }
+}

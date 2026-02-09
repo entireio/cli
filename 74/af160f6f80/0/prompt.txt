@@ -1,0 +1,25 @@
+can you generate me a summary for the PR with the output when running `entire enable` before and after the changes in this branch?
+
+---
+
+we should update "Created orphan branch 'entire/sessions' for session metadata" to also have a check mark in front
+
+---
+
+when does this happen with the manual commit strategy? it also uses that branch, right but we currently have no message about it there?
+
+---
+
+yes
+
+---
+
+can you again summarize the before / after messaging for the PR body?
+
+---
+
+why are the errors changed to return "" in /cmd/entire/cli/integration_test/testenv.go
+
+---
+
+but all the context of why there was no checkpoint id is lost now, right?

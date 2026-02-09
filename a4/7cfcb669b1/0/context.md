@@ -1,0 +1,8 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+gah our mermaid shenanigans in the new phase test is blowing up on CI - we'll need to create a proper output directory for it - for now can we create the directory but not commit its contents?
+

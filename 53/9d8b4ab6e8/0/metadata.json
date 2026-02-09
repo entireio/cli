@@ -1,0 +1,41 @@
+{
+  "checkpoint_id": "539d8b4ab6e8",
+  "session_id": "8dab6c26-fc6b-4cc5-8263-6150b598af24",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-07T06:18:11.544642Z",
+  "branch": "alex/ent-242-worktree-status-shim",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/gitutil/",
+    "cmd/entire/cli/gitutil/worktree_status.go",
+    "cmd/entire/cli/gitutil/worktree_status_test.go",
+    "cmd/entire/cli/rewind.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/worktree_status.go",
+    "cmd/entire/cli/strategy/worktree_status_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "1ac1d0a7-103a-4b53-af3d-79bdef44f183",
+  "transcript_lines_at_start": 965,
+  "token_usage": {
+    "input_tokens": 192,
+    "cache_creation_tokens": 408115,
+    "cache_read_tokens": 16637691,
+    "output_tokens": 6827,
+    "api_call_count": 177
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-07T06:17:54.235678Z",
+    "agent_lines": 0,
+    "human_added": 12,
+    "human_modified": 1,
+    "human_removed": 0,
+    "total_committed": 12,
+    "agent_percentage": 0
+  }
+}

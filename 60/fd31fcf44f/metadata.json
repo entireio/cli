@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "60fd31fcf44f",
+  "strategy": "manual-commit",
+  "branch": "20260209-fish-completions",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/setup_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/60/fd31fcf44f/0/metadata.json",
+      "transcript": "/60/fd31fcf44f/0/full.jsonl",
+      "context": "/60/fd31fcf44f/0/context.md",
+      "content_hash": "/60/fd31fcf44f/0/content_hash.txt",
+      "prompt": "/60/fd31fcf44f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 17,
+    "cache_creation_tokens": 19056,
+    "cache_read_tokens": 441175,
+    "output_tokens": 2075,
+    "api_call_count": 14
+  }
+}

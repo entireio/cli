@@ -1,0 +1,43 @@
+{
+  "checkpoint_id": "48b429896bcb",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-221-phase-aware-git-hooks",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/last_interaction_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/status.go",
+    "cmd/entire/cli/status_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go",
+    "cmd/entire/cli/strategy/session_state_test.go",
+    "docs/generated/session-phase-state-machine.mmd"
+  ],
+  "sessions": [
+    {
+      "metadata": "/48/b429896bcb/0/metadata.json",
+      "transcript": "/48/b429896bcb/0/full.jsonl",
+      "context": "/48/b429896bcb/0/context.md",
+      "content_hash": "/48/b429896bcb/0/content_hash.txt",
+      "prompt": "/48/b429896bcb/0/prompt.txt"
+    },
+    {
+      "metadata": "/48/b429896bcb/1/metadata.json",
+      "transcript": "/48/b429896bcb/1/full.jsonl",
+      "context": "/48/b429896bcb/1/context.md",
+      "content_hash": "/48/b429896bcb/1/content_hash.txt",
+      "prompt": "/48/b429896bcb/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 45,
+    "cache_creation_tokens": 180861,
+    "cache_read_tokens": 3104029,
+    "output_tokens": 1297,
+    "api_call_count": 41
+  }
+}

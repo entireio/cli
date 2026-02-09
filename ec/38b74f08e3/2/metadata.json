@@ -1,0 +1,22 @@
+{
+  "checkpoint_id": "ec38b74f08e3",
+  "session_id": "29eb990e-c773-4302-a4e7-317f0af0001f",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-03T04:30:00.955942Z",
+  "branch": "gtrrz-victor/alt-better-multi-session-flow",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/concurrent_session_warning_test.go",
+    "cmd/entire/cli/integration_test/gemini_concurrent_session_test.go"
+  ],
+  "agent": "Agent",
+  "initial_attribution": {
+    "calculated_at": "2026-02-03T04:30:00.869311Z",
+    "agent_lines": 0,
+    "human_added": 116,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 116,
+    "agent_percentage": 0
+  }
+}

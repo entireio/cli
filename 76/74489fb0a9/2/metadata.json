@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "7674489fb0a9",
+  "session_id": "bba6327a-2899-4c9a-978a-2675b8b597a2",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-04T06:27:50.30867Z",
+  "branch": "gtrrz-victor/restructure-entire-session-files",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go"
+  ],
+  "agent": "Agent",
+  "token_usage": {
+    "input_tokens": 158,
+    "cache_creation_tokens": 241831,
+    "cache_read_tokens": 6494297,
+    "output_tokens": 233,
+    "api_call_count": 52
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-04T06:27:50.257977Z",
+    "agent_lines": 46,
+    "human_added": 1897,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1943,
+    "agent_percentage": 2.3674729799279466
+  }
+}

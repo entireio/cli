@@ -1,0 +1,12 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+can it be that running "entire enable" and then writing to the settings.local.json will reset the whole file? I just lost my push setting I had enabled before
+
+### Prompt 2
+
+can you add a tests so we don't break this in the future again?
+

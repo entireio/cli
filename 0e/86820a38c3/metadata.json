@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "0e86820a38c3",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-258-mid-turn-commits",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/mid_turn_commit_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0e/86820a38c3/0/metadata.json",
+      "transcript": "/0e/86820a38c3/0/full.jsonl",
+      "context": "/0e/86820a38c3/0/context.md",
+      "content_hash": "/0e/86820a38c3/0/content_hash.txt",
+      "prompt": "/0e/86820a38c3/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1482,
+    "cache_creation_tokens": 501124,
+    "cache_read_tokens": 15430566,
+    "output_tokens": 4097,
+    "api_call_count": 138
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "2002395c1048",
+  "strategy": "manual-commit",
+  "branch": "soph/align-all-multi-session-issues",
+  "migration_source_commit": "1ae5765afad2257c3a1058e72ba8030e5997e24d",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/20/02395c1048/0/metadata.json",
+      "transcript": "/20/02395c1048/0/full.jsonl",
+      "context": "/20/02395c1048/0/context.md",
+      "content_hash": "/20/02395c1048/0/content_hash.txt",
+      "prompt": "/20/02395c1048/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 106,
+    "cache_creation_tokens": 52763,
+    "cache_read_tokens": 580415,
+    "output_tokens": 1978,
+    "api_call_count": 13
+  }
+}

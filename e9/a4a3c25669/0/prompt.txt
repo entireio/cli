@@ -1,0 +1,23 @@
+have a look at linear ENT-260
+
+let's debug this
+
+---
+
+when was the saveChanges clear Pending added?
+
+---
+
+next one: https://linear.app/entirehq/issue/ENT-259/code-attribution-is-broken-on-the-deferred-condense-at-stop
+
+---
+
+[Request interrupted by user]
+
+---
+
+open up an appropriate branch off main (but main is checked out in a different worktree)
+
+---
+
+[Request interrupted by user for tool use]

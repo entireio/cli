@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "de1b4494d570",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-207-fix-agent-name-misattribution",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/de/1b4494d570/0/metadata.json",
+      "transcript": "/de/1b4494d570/0/full.jsonl",
+      "context": "/de/1b4494d570/0/context.md",
+      "content_hash": "/de/1b4494d570/0/content_hash.txt",
+      "prompt": "/de/1b4494d570/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 36,
+    "cache_creation_tokens": 51268,
+    "cache_read_tokens": 1167666,
+    "output_tokens": 370,
+    "api_call_count": 26
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "checkpoint_id": "098ae39bb725",
+  "session_id": "2026-01-29-b82405ba-a054-4152-bc86-e9b0d4832b68",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-29T06:59:05.586358Z",
+  "branch": "alex/ent-108-add-ai-summaries",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/summarise/claude.go",
+    "cmd/entire/cli/summarise/summarise.go",
+    "cmd/entire/cli/summarise/summarise_test.go",
+    "cmd/entire/cli/summarize.go",
+    "cmd/entire/cli/summarize_claude.go",
+    "cmd/entire/cli/summarize_claude_test.go",
+    "cmd/entire/cli/summarize_test.go",
+    "cmd/entire/cli/transcript.go",
+    "cmd/entire/cli/transcript/parse.go",
+    "cmd/entire/cli/transcript/parse_test.go",
+    "docs/plans/2026-01-29-ai-summaries-design.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "d601a1e5-77e8-4f60-92b4-57c4e3e502e1",
+  "transcript_lines_at_start": 1785,
+  "token_usage": {
+    "input_tokens": 3600,
+    "cache_creation_tokens": 686265,
+    "cache_read_tokens": 31546535,
+    "output_tokens": 1169,
+    "api_call_count": 278
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-29T06:59:05.433251Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 4,
+    "human_removed": 237,
+    "total_committed": 1,
+    "agent_percentage": 0
+  }
+}
