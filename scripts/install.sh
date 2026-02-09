@@ -1,10 +1,4 @@
 #!/bin/bash
-# Entire CLI installer
-# Usage: curl -fsSL https://entire.io/install.sh | bash
-#
-# Environment variables:
-#   ENTIRE_INSTALL_DIR - Override install directory
-#   GITHUB_TOKEN       - GitHub API token to avoid rate limiting
 
 set -euo pipefail
 
