@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "de97f1e9cd68",
+  "strategy": "manual-commit",
+  "branch": "fix/gemini-token-usage-metadata-json",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/agent/transcript.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/de/97f1e9cd68/0/metadata.json",
+      "transcript": "/de/97f1e9cd68/0/full.jsonl",
+      "context": "/de/97f1e9cd68/0/context.md",
+      "content_hash": "/de/97f1e9cd68/0/content_hash.txt",
+      "prompt": "/de/97f1e9cd68/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 472,
+    "cache_creation_tokens": 188065,
+    "cache_read_tokens": 4611092,
+    "output_tokens": 174,
+    "api_call_count": 75
+  }
+}
