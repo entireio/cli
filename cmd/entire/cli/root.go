@@ -13,7 +13,7 @@ const gettingStarted = `
 
 Getting Started:
   To get started with Entire CLI, run 'entire enable' to configure
-  your environment. For more information, visit:
+  your project's environment. For more information, visit:
   https://docs.entire.io/getting-started
 
 `
