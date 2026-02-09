@@ -14,8 +14,8 @@ func NewHelpCmd(rootCmd *cobra.Command) *cobra.Command {
 	helpCmd := &cobra.Command{
 		Use:   "help [command]",
 		Short: "Help about any command",
-		Long: `Help provides help for any command in the application.
-Simply type ` + rootCmd.Name() + ` help [path to command] for full details.`,
+		Long: `Provides help for any Entire CLI subcommand.
+Simply type '` + rootCmd.Name() + ` help [command]' for full details.`,
 		Run: func(_ *cobra.Command, args []string) {
 			if showTree {
 				printCommandTree(rootCmd)
@@ -31,7 +31,7 @@ Simply type ` + rootCmd.Name() + ` help [path to command] for full details.`,
 		},
 	}
 
-	helpCmd.Flags().BoolVarP(&showTree, "tree", "t", false, "Show the entire command tree")
+	helpCmd.Flags().BoolVarP(&showTree, "tree", "t", false, "Show full command tree")
 	helpCmd.Flags().MarkHidden("tree") //nolint:errcheck,gosec // flag is defined above
 
 	return helpCmd
