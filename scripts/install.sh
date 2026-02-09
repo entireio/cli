@@ -214,16 +214,23 @@ main() {
         local shell_name shell_config
         shell_name="$(basename "${SHELL:-}")"
         case "$shell_name" in
-            zsh)  shell_config="~/.zshrc" ;;
+            zsh)
+                # shellcheck disable=SC2088
+                shell_config="~/.zshrc" ;;
             bash)
                 if [[ -f "$HOME/.bash_profile" ]]; then
+                    # shellcheck disable=SC2088
                     shell_config="~/.bash_profile"
                 else
+                    # shellcheck disable=SC2088
                     shell_config="~/.bashrc"
                 fi
                 ;;
-            fish) shell_config="~/.config/fish/config.fish" ;;
-            *)    shell_config="" ;;
+            fish)
+                # shellcheck disable=SC2088
+                shell_config="~/.config/fish/config.fish" ;;
+            *)
+                shell_config="" ;;
         esac
 
         echo ""
