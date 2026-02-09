@@ -661,15 +661,6 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			w := cmd.OutOrStdout()
-			rcFile, _ := shellCompletionTarget()
-			if rcFile == "" {
-				fmt.Fprintf(w, "Note: Shell completion not available for your shell (%s). Supported: zsh, bash.\n", os.Getenv("SHELL"))
-				return nil
-			}
-			if isCompletionConfigured(rcFile) {
-				fmt.Fprintf(w, "✓ Shell completion already configured in %s\n", rcFile)
-				return nil
-			}
 			if err := promptShellCompletion(w); err != nil {
 				fmt.Fprintf(w, "Note: Shell completion setup skipped: %v\n", err)
 			}
@@ -707,10 +698,12 @@ func shellCompletionTarget() (rcFile, completionLine string) {
 func promptShellCompletion(w io.Writer) error {
 	rcFile, completionLine := shellCompletionTarget()
 	if rcFile == "" {
-		return nil // Unsupported shell or no home dir, skip silently
+		fmt.Fprintf(w, "Note: Shell completion not available for your shell (%s). Supported: zsh, bash.\n", os.Getenv("SHELL"))
+		return nil
 	}
 
 	if isCompletionConfigured(rcFile) {
+		fmt.Fprintf(w, "✓ Shell completion already configured in %s\n", rcFile)
 		return nil
 	}
 
