@@ -6,4 +6,7 @@ set -eu
 export GOBIN=${GOPATH:-$HOME/go}/bin
 echo "NOTE: we're overriding \$GOBIN: $GOBIN" 1>&2
 
-go install ./cmd/entire
+VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+go install -ldflags "-X github.com/entireio/cli/cmd/entire/cli.Version=${VERSION} -X github.com/entireio/cli/cmd/entire/cli.Commit=${COMMIT}" ./cmd/entire
