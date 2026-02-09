@@ -713,7 +713,7 @@ func promptShellCompletion(w io.Writer) error {
 		return nil // Unsupported shell or no home dir, skip silently
 	}
 
-	if isCompletionConfigured(rcFile, completionLine) {
+	if isCompletionConfigured(rcFile) {
 		return nil
 	}
 
@@ -750,13 +750,13 @@ func promptShellCompletion(w io.Writer) error {
 }
 
 // isCompletionConfigured checks if shell completion is already in the rc file.
-func isCompletionConfigured(rcFile string, completionLine string) bool {
+func isCompletionConfigured(rcFile string) bool {
 	//nolint:gosec // G304: rcFile is constructed from home dir + known filename, not user input
 	content, err := os.ReadFile(rcFile)
 	if err != nil {
 		return false // File doesn't exist or can't read, treat as not configured
 	}
-	return strings.Contains(string(content), completionLine)
+	return strings.Contains(string(content), "entire completion")
 }
 
 // appendShellCompletion adds the completion line to the rc file.
