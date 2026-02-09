@@ -195,6 +195,7 @@ main() {
     local path_binary
     path_binary=$(command -v "entire" 2>/dev/null || true)
     if [[ -n "$path_binary" && "$path_binary" != "$install_path" ]]; then
+        # This case is a bit weird, because some other 'entire' is found on PATH.  Warn user.
         echo ""
         echo -e "${YELLOW}!${NC} ${BOLD}WARNING: PATH conflict detected${NC}"
         echo -e "${YELLOW}!${NC}"
@@ -208,6 +209,8 @@ main() {
         echo ""
         error "Installation completed but PATH needs adjustment. Then, rerun the installation."
     elif [[ -z "$path_binary" ]]; then
+        # This case is kind of benign - a first-time user might not have ~/.local/bin on their
+        # $PATH.  Be nice to them.
         echo ""
         echo -e "${YELLOW}!${NC} ${BOLD}WARNING: 'entire' not found in PATH${NC}"
         echo -e "${YELLOW}!${NC}"
