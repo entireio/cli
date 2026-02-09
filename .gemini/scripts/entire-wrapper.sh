@@ -8,18 +8,23 @@
 #
 # You can set ENTIRE_LOCAL_DEV via:
 #   1. Shell profile: export ENTIRE_LOCAL_DEV=1
-#   2. .env file in project root (will be sourced automatically)
+#   2. .env file in project root (variable will be extracted automatically)
 
 set -euo pipefail
 
 # Determine project directory
 PROJECT_DIR="${GEMINI_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
-# Source .env file if it exists (allows ENTIRE_LOCAL_DEV=1 in .env)
+# Extract ENTIRE_LOCAL_DEV from .env file if it exists
+# We only extract this specific variable to avoid issues with undefined variables
+# in .env files (e.g., ${DB_USER} expansions that might fail with set -u)
 if [ -f "${PROJECT_DIR}/.env" ]; then
-    set -a  # Export all variables
-    source "${PROJECT_DIR}/.env"
-    set +a
+    # Use grep to find the line, then extract the value
+    # Format: ENTIRE_LOCAL_DEV=1 or ENTIRE_LOCAL_DEV="1"
+    ENTIRE_LOCAL_DEV_FROM_FILE=$(grep -E "^ENTIRE_LOCAL_DEV=" "${PROJECT_DIR}/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"' || echo "")
+    if [ -n "${ENTIRE_LOCAL_DEV_FROM_FILE}" ]; then
+        export ENTIRE_LOCAL_DEV="${ENTIRE_LOCAL_DEV_FROM_FILE}"
+    fi
 fi
 
 if [ "${ENTIRE_LOCAL_DEV:-}" = "1" ]; then
