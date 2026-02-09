@@ -3,7 +3,6 @@
 set -euo pipefail
 
 GITHUB_REPO="entireio/cli"
-BINARY_NAME="entire"
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 
 # Colors (disabled in non-interactive mode)
@@ -136,7 +135,7 @@ main() {
     info "Installing version: ${version}"
 
     # Construct download URL
-    local archive_name="${BINARY_NAME}_${os}_${arch}.tar.gz"
+    local archive_name="entire_${os}_${arch}.tar.gz"
     local download_url="https://github.com/${GITHUB_REPO}/releases/download/v${version}/${archive_name}"
     local checksums_url="https://github.com/${GITHUB_REPO}/releases/download/v${version}/checksums.txt"
 
@@ -170,12 +169,12 @@ main() {
     tar -xzf "$archive_path" -C "$tmp_dir"
 
     local install_dir="${DEFAULT_INSTALL_DIR}"
-    local binary_path="${tmp_dir}/${BINARY_NAME}"
+    local binary_path="${tmp_dir}/entire"
 
     chmod +x "$binary_path"
 
     info "Installing to ${install_dir}..."
-    local install_path="${install_dir}/${BINARY_NAME}"
+    local install_path="${install_dir}/entire"
 
     mkdir -p "${install_dir}"
     success "Directory ready"
@@ -194,13 +193,13 @@ main() {
 
     # Check if the installed binary is the one that will be found in PATH
     local path_binary
-    path_binary=$(command -v "$BINARY_NAME" 2>/dev/null || true)
+    path_binary=$(command -v "entire" 2>/dev/null || true)
     if [[ -n "$path_binary" && "$path_binary" != "$install_path" ]]; then
         echo ""
         echo -e "${YELLOW}!${NC} ${BOLD}WARNING: PATH conflict detected${NC}"
         echo -e "${YELLOW}!${NC}"
         echo -e "${YELLOW}!${NC} Installed to: ${install_path}"
-        echo -e "${YELLOW}!${NC} But '${BINARY_NAME}' resolves to: ${path_binary}"
+        echo -e "${YELLOW}!${NC} But 'entire' resolves to: ${path_binary}"
         echo -e "${YELLOW}!${NC}"
         echo -e "${YELLOW}!${NC} Your PATH may have another version of Entire CLI. To fix:"
         echo -e "${YELLOW}!${NC}   1. Remove the old binary: rm ${path_binary}"
@@ -210,7 +209,7 @@ main() {
         error "Installation completed but PATH needs adjustment. Then, rerun the installation."
     elif [[ -z "$path_binary" ]]; then
         echo ""
-        echo -e "${YELLOW}!${NC} ${BOLD}WARNING: '${BINARY_NAME}' not found in PATH${NC}"
+        echo -e "${YELLOW}!${NC} ${BOLD}WARNING: 'entire' not found in PATH${NC}"
         echo -e "${YELLOW}!${NC}"
         echo -e "${YELLOW}!${NC} Installed to: ${install_path}"
         echo -e "${YELLOW}!${NC} But this directory is not in your PATH."
