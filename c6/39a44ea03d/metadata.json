@@ -2,9 +2,10 @@
   "checkpoint_id": "c639a44ea03d",
   "strategy": "manual-commit",
   "branch": "soph/gemini-preview",
-  "checkpoints_count": 1,
+  "checkpoints_count": 3,
   "files_touched": [
-    "README.md"
+    "README.md",
+    "cmd/entire/cli/setup.go"
   ],
   "sessions": [
     {
@@ -13,13 +14,20 @@
       "context": "/c6/39a44ea03d/0/context.md",
       "content_hash": "/c6/39a44ea03d/0/content_hash.txt",
       "prompt": "/c6/39a44ea03d/0/prompt.txt"
+    },
+    {
+      "metadata": "/c6/39a44ea03d/1/metadata.json",
+      "transcript": "/c6/39a44ea03d/1/full.jsonl",
+      "context": "/c6/39a44ea03d/1/context.md",
+      "content_hash": "/c6/39a44ea03d/1/content_hash.txt",
+      "prompt": "/c6/39a44ea03d/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 6,
-    "cache_creation_tokens": 20667,
-    "cache_read_tokens": 159260,
-    "output_tokens": 53,
-    "api_call_count": 4
+    "input_tokens": 30,
+    "cache_creation_tokens": 66719,
+    "cache_read_tokens": 1214162,
+    "output_tokens": 402,
+    "api_call_count": 24
   }
 }
