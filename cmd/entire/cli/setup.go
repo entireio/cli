@@ -672,12 +672,15 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 // shellCompletionComment is the comment preceding the completion line
 const shellCompletionComment = "# Entire CLI shell completion"
 
+// errUnsupportedShell is returned when the user's shell is not supported for completion.
+var errUnsupportedShell = errors.New("unsupported shell")
+
 // shellCompletionTarget returns the rc file path and completion lines for the
-// user's current shell. Returns empty strings for unsupported shells.
-func shellCompletionTarget() (shellName, rcFile, completionLine string) {
+// user's current shell.
+func shellCompletionTarget() (shellName, rcFile, completionLine string, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", "", ""
+		return "", "", "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
 
 	shell := os.Getenv("SHELL")
@@ -685,23 +688,28 @@ func shellCompletionTarget() (shellName, rcFile, completionLine string) {
 	case strings.Contains(shell, "zsh"):
 		return "Zsh",
 			filepath.Join(home, ".zshrc"),
-			"source <(entire completion zsh)"
+			"source <(entire completion zsh)",
+			nil
 	case strings.Contains(shell, "bash"):
 		return "Bash",
 			filepath.Join(home, ".bashrc"),
-			"source <(entire completion bash)"
+			"source <(entire completion bash)",
+			nil
 	default:
-		return "", "", ""
+		return "", "", "", errUnsupportedShell
 	}
 }
 
 // promptShellCompletion offers to add shell completion to the user's rc file.
 // Only prompts if completion is not already configured.
 func promptShellCompletion(w io.Writer) error {
-	shellName, rcFile, completionLine := shellCompletionTarget()
-	if rcFile == "" {
-		fmt.Fprintf(w, "Note: Shell completion not available for your shell. Supported: zsh, bash.\n")
-		return nil
+	shellName, rcFile, completionLine, err := shellCompletionTarget()
+	if err != nil {
+		if errors.Is(err, errUnsupportedShell) {
+			fmt.Fprintf(w, "Note: Shell completion not available for your shell. Supported: zsh, bash.\n")
+			return nil
+		}
+		return fmt.Errorf("shell completion: %w", err)
 	}
 
 	if isCompletionConfigured(rcFile) {
