@@ -660,9 +660,18 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 		Short:  "Post-install tasks for curl|bash installer",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := promptShellCompletion(cmd.OutOrStdout()); err != nil {
-				// Non-fatal - just log and continue
-				fmt.Fprintf(cmd.OutOrStdout(), "Note: Shell completion setup skipped: %v\n", err)
+			w := cmd.OutOrStdout()
+			rcFile, completionLine := shellCompletionTarget()
+			if rcFile == "" {
+				fmt.Fprintf(w, "Note: Shell completion not available for your shell (%s). Supported: zsh, bash.\n", os.Getenv("SHELL"))
+				return nil
+			}
+			if isCompletionConfigured(rcFile, completionLine) {
+				fmt.Fprintf(w, "✓ Shell completion already configured in %s\n", rcFile)
+				return nil
+			}
+			if err := promptShellCompletion(w); err != nil {
+				fmt.Fprintf(w, "Note: Shell completion setup skipped: %v\n", err)
 			}
 			return nil
 		},
