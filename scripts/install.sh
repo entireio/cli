@@ -241,10 +241,10 @@ main() {
         echo -e "${YELLOW}!${NC} Installed to: ${install_path}"
         echo -e "${YELLOW}!${NC} But this directory is not in your PATH."
         echo -e "${YELLOW}!${NC}"
-        echo -e "${YELLOW}!${NC} Add to your shell config (.bashrc, .zshrc, etc.):"
-        echo -e "${YELLOW}!${NC}   export PATH=\"\$PATH:${install_dir}\""
+        echo -e "${YELLOW}!${NC}   echo 'export PATH=\"${install_dir}:\$PATH\"' >> ~/.zshrc"
         echo ""
-        error "Installation completed but PATH isn't correct. Please check then restart the installation."
+        echo "Once you have adjusted your PATH config, rerun installation to complete."
+        exit 0
     fi
 
     info "Running post-install actions..."
