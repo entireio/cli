@@ -516,7 +516,7 @@ func setupAgentHooksNonInteractive(w io.Writer, agentName agent.AgentName, strat
 	settings, err := LoadEntireSettings()
 	if err != nil {
 		// If we can't load, start with defaults
-		settings = &EntireSettings{}
+		settings = &EntireSettings{Strategy: strategy.DefaultStrategyName}
 	}
 	settings.Enabled = true
 	if localDev {
