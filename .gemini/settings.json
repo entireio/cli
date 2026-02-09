@@ -1,13 +1,12 @@
 {
   "hooks": {
-    "enabled": true,
     "SessionStart": [
       {
         "hooks": [
           {
             "name": "entire-session-start",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini session-start"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini session-start"
           }
         ]
       }
@@ -19,7 +18,7 @@
           {
             "name": "entire-session-end-exit",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini session-end"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini session-end"
           }
         ]
       },
@@ -29,7 +28,7 @@
           {
             "name": "entire-session-end-logout",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini session-end"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini session-end"
           }
         ]
       }
@@ -40,7 +39,7 @@
           {
             "name": "entire-before-agent",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini before-agent"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini before-agent"
           }
         ]
       }
@@ -51,7 +50,7 @@
           {
             "name": "entire-after-agent",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini after-agent"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini after-agent"
           }
         ]
       }
@@ -62,7 +61,7 @@
           {
             "name": "entire-before-model",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini before-model"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini before-model"
           }
         ]
       }
@@ -73,7 +72,7 @@
           {
             "name": "entire-after-model",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini after-model"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini after-model"
           }
         ]
       }
@@ -84,7 +83,7 @@
           {
             "name": "entire-before-tool-selection",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini before-tool-selection"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini before-tool-selection"
           }
         ]
       }
@@ -96,7 +95,7 @@
           {
             "name": "entire-before-tool",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini before-tool"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini before-tool"
           }
         ]
       }
@@ -108,7 +107,7 @@
           {
             "name": "entire-after-tool",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini after-tool"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini after-tool"
           }
         ]
       }
@@ -119,7 +118,7 @@
           {
             "name": "entire-pre-compress",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini pre-compress"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini pre-compress"
           }
         ]
       }
@@ -130,11 +129,14 @@
           {
             "name": "entire-notification",
             "type": "command",
-            "command": "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini notification"
+            "command": "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini notification"
           }
         ]
       }
     ]
+  },
+  "hooksConfig": {
+    "enabled": true
   },
   "tools": {
     "enableHooks": true

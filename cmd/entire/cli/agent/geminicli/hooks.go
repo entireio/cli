@@ -39,6 +39,7 @@ const GeminiSettingsFileName = "settings.json"
 var entireHookPrefixes = []string{
 	"entire ",
 	"go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go ",
+	"bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh ",
 }
 
 // GetHookNames returns the hook verbs Gemini CLI supports.
@@ -60,6 +61,7 @@ func (g *GeminiCLIAgent) GetHookNames() []string {
 }
 
 // InstallHooks installs Gemini CLI hooks in .gemini/settings.json.
+// If localDev is true, installs wrapper script hooks that check ENTIRE_LOCAL_DEV env var.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 func (g *GeminiCLIAgent) InstallHooks(localDev bool, force bool) (int, error) {
@@ -104,10 +106,18 @@ func (g *GeminiCLIAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	settings.HooksConfig.Enabled = true
 
 	// Define hook commands based on localDev mode
+	// localDev=false (default): Direct "entire" commands for production use
+	// localDev=true: Wrapper script that checks ENTIRE_LOCAL_DEV env var
+	//   - ENTIRE_LOCAL_DEV=1 uses "go run" for development
+	//   - Otherwise uses "entire" from PATH
 	var cmdPrefix string
 	if localDev {
-		cmdPrefix = "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini "
+		// Development mode: use wrapper script that respects ENTIRE_LOCAL_DEV env var
+		// This is for the CLI repo itself and other development scenarios
+		cmdPrefix = "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini "
 	} else {
+		// Production mode: use entire binary directly from PATH
+		// This is the default for most users and projects
 		cmdPrefix = "entire hooks gemini "
 	}
 

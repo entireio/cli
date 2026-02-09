@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
@@ -74,6 +75,47 @@ func TestSetupGeminiHooks_AddsAllRequiredHooks(t *testing.T) {
 	}
 	if len(settings.Hooks.Notification) == 0 {
 		t.Error("Notification hook should exist")
+	}
+}
+
+// TestSetupGeminiHooks_LocalDevMode verifies that localDev mode uses wrapper script.
+func TestSetupGeminiHooks_LocalDevMode(t *testing.T) {
+	// Not parallel - uses os.Chdir
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire("manual-commit")
+
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(env.RepoDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// Manually install hooks with localDev=true
+	gemini := geminicli.NewGeminiCLIAgent()
+	hookAgent := gemini.(interface {
+		InstallHooks(localDev bool, force bool) (int, error)
+	})
+
+	_, err := hookAgent.InstallHooks(true, false) // localDev = true
+	if err != nil {
+		t.Fatalf("InstallHooks(localDev=true) error = %v", err)
+	}
+
+	// Read settings and verify commands use wrapper script
+	settingsPath := filepath.Join(env.RepoDir, ".gemini", geminicli.GeminiSettingsFileName)
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "entire-wrapper.sh") {
+		t.Error("localDev hooks should use wrapper script, but settings.json doesn't contain 'entire-wrapper.sh'")
 	}
 }
 
