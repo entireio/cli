@@ -94,17 +94,70 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 
 	settings := readGeminiSettings(t, tempDir)
 
-	// Verify local dev commands use go run
-	verifyHookCommand(t, settings.Hooks.SessionStart, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini session-start")
-	verifyHookCommand(t, settings.Hooks.SessionEnd, "exit", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini session-end")
-	verifyHookCommand(t, settings.Hooks.SessionEnd, "logout", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini session-end")
-	verifyHookCommand(t, settings.Hooks.BeforeAgent, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini before-agent")
-	verifyHookCommand(t, settings.Hooks.AfterAgent, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini after-agent")
-	verifyHookCommand(t, settings.Hooks.BeforeModel, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini before-model")
-	verifyHookCommand(t, settings.Hooks.AfterModel, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini after-model")
-	verifyHookCommand(t, settings.Hooks.BeforeToolSelection, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini before-tool-selection")
-	verifyHookCommand(t, settings.Hooks.PreCompress, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini pre-compress")
-	verifyHookCommand(t, settings.Hooks.Notification, "", "go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini notification")
+	// Verify local dev commands use wrapper script
+	verifyHookCommand(t, settings.Hooks.SessionStart, "", "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini session-start")
+	verifyHookCommand(t, settings.Hooks.SessionEnd, "exit", "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini session-end")
+	verifyHookCommand(t, settings.Hooks.SessionEnd, "logout", "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini session-end")
+	verifyHookCommand(t, settings.Hooks.BeforeAgent, "", "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini before-agent")
+	verifyHookCommand(t, settings.Hooks.AfterAgent, "", "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini after-agent")
+	verifyHookCommand(t, settings.Hooks.BeforeModel, "", "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini before-model")
+	verifyHookCommand(t, settings.Hooks.AfterModel, "", "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini after-model")
+	verifyHookCommand(t, settings.Hooks.BeforeToolSelection, "", "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini before-tool-selection")
+	verifyHookCommand(t, settings.Hooks.PreCompress, "", "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini pre-compress")
+	verifyHookCommand(t, settings.Hooks.Notification, "", "bash ${GEMINI_PROJECT_DIR}/.gemini/scripts/entire-wrapper.sh hooks gemini notification")
+}
+
+func TestInstallHooks_LocalDev_Idempotent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	agent := &GeminiCLIAgent{}
+
+	// First install
+	count1, err := agent.InstallHooks(true, false)
+	if err != nil {
+		t.Fatalf("first InstallHooks() error = %v", err)
+	}
+	if count1 != 12 {
+		t.Errorf("first InstallHooks() count = %d, want 12", count1)
+	}
+
+	// Second install should add 0 hooks
+	count2, err := agent.InstallHooks(true, false)
+	if err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+	if count2 != 0 {
+		t.Errorf("second InstallHooks() count = %d, want 0 (idempotent)", count2)
+	}
+}
+
+func TestInstallHooks_LocalDev_UninstallRemovesWrapperHooks(t *testing.T) { //nolint:dupl // tests different install mode than TestUninstallHooks
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	agent := &GeminiCLIAgent{}
+
+	// Install with localDev mode
+	_, err := agent.InstallHooks(true, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	// Verify hooks are detected
+	if !agent.AreHooksInstalled() {
+		t.Error("wrapper hooks should be detected as installed")
+	}
+
+	// Uninstall should remove wrapper hooks
+	err = agent.UninstallHooks()
+	if err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+
+	if agent.AreHooksInstalled() {
+		t.Error("wrapper hooks should be removed after uninstall")
+	}
 }
 
 func TestInstallHooks_Idempotent(t *testing.T) {

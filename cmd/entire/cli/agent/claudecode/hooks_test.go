@@ -276,6 +276,131 @@ func getKeys(m map[string]json.RawMessage) []string {
 	return keys
 }
 
+func TestInstallHooks_LocalDev(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	agent := &ClaudeCodeAgent{}
+	count, err := agent.InstallHooks(true, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	if count != 7 {
+		t.Errorf("InstallHooks() count = %d, want 7", count)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+
+	// Verify local dev commands use wrapper script
+	wrapperPrefix := "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code "
+	verifyClaudeHookCommand(t, settings.Hooks.SessionStart, wrapperPrefix+"session-start")
+	verifyClaudeHookCommand(t, settings.Hooks.SessionEnd, wrapperPrefix+"session-end")
+	verifyClaudeHookCommand(t, settings.Hooks.Stop, wrapperPrefix+"stop")
+	verifyClaudeHookCommand(t, settings.Hooks.UserPromptSubmit, wrapperPrefix+"user-prompt-submit")
+}
+
+func TestInstallHooks_LocalDev_Idempotent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	agent := &ClaudeCodeAgent{}
+
+	// First install
+	count1, err := agent.InstallHooks(true, false)
+	if err != nil {
+		t.Fatalf("first InstallHooks() error = %v", err)
+	}
+	if count1 != 7 {
+		t.Errorf("first InstallHooks() count = %d, want 7", count1)
+	}
+
+	// Second install should add 0 hooks
+	count2, err := agent.InstallHooks(true, false)
+	if err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+	if count2 != 0 {
+		t.Errorf("second InstallHooks() count = %d, want 0 (idempotent)", count2)
+	}
+}
+
+func TestInstallHooks_LocalDev_UninstallRemovesWrapperHooks(t *testing.T) { //nolint:dupl // tests different install mode than TestUninstallHooks
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	agent := &ClaudeCodeAgent{}
+
+	// Install with localDev mode
+	_, err := agent.InstallHooks(true, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	// Verify hooks are detected
+	if !agent.AreHooksInstalled() {
+		t.Error("wrapper hooks should be detected as installed")
+	}
+
+	// Uninstall should remove wrapper hooks
+	err = agent.UninstallHooks()
+	if err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+
+	if agent.AreHooksInstalled() {
+		t.Error("wrapper hooks should be removed after uninstall")
+	}
+}
+
+func TestInstallHooks_LocalDev_ForceReinstall(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	agent := &ClaudeCodeAgent{}
+
+	// Install with localDev mode
+	_, err := agent.InstallHooks(true, false)
+	if err != nil {
+		t.Fatalf("first InstallHooks() error = %v", err)
+	}
+
+	// Force reinstall with production mode should replace wrapper hooks
+	count, err := agent.InstallHooks(false, true)
+	if err != nil {
+		t.Fatalf("force InstallHooks() error = %v", err)
+	}
+	if count != 7 {
+		t.Errorf("force InstallHooks() count = %d, want 7", count)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+
+	// Verify production commands (not wrapper)
+	verifyClaudeHookCommand(t, settings.Hooks.Stop, "entire hooks claude-code stop")
+
+	// Verify no wrapper hooks remain
+	for _, matcher := range settings.Hooks.Stop {
+		for _, hook := range matcher.Hooks {
+			if hook.Command == "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/entire-wrapper.sh hooks claude-code stop" {
+				t.Error("wrapper hook should have been removed by force reinstall")
+			}
+		}
+	}
+}
+
+func verifyClaudeHookCommand(t *testing.T, matchers []ClaudeHookMatcher, expectedCommand string) {
+	t.Helper()
+	for _, matcher := range matchers {
+		for _, hook := range matcher.Hooks {
+			if hook.Command == expectedCommand {
+				return
+			}
+		}
+	}
+	t.Errorf("hook with command=%q not found", expectedCommand)
+}
+
 func TestUninstallHooks(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
