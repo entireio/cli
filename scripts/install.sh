@@ -186,7 +186,7 @@ main() {
 
     # Verify installation
     if "$install_path" version &> /dev/null; then
-        success "Entire CLI installed successfully!"
+        success "Entire CLI installed to ${install_path}"
     else
         error "Installation completed but the binary failed to execute. Please check the installation."
     fi
@@ -233,8 +233,6 @@ main() {
                 shell_config="" ;;
         esac
 
-        echo ""
-        success "Entire CLI installed to ${install_path}"
         echo ""
         echo -e "  ${YELLOW}Almost there!${NC} Add it to your PATH so you can run ${BOLD}entire${NC} from anywhere."
         echo ""
