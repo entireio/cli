@@ -766,6 +766,9 @@ func isCompletionConfigured(rcFile string) bool {
 
 // appendShellCompletion adds the completion line to the rc file.
 func appendShellCompletion(rcFile, completionLine string) error {
+	if err := os.MkdirAll(filepath.Dir(rcFile), 0o755); err != nil {
+		return fmt.Errorf("creating directory: %w", err)
+	}
 	//nolint:gosec // G302: Shell rc files need 0644 for user readability
 	f, err := os.OpenFile(rcFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
