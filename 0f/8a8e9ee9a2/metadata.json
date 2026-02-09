@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "0f8a8e9ee9a2",
+  "strategy": "manual-commit",
+  "branch": "cli-completion-updater",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/setup.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0f/8a8e9ee9a2/0/metadata.json",
+      "transcript": "/0f/8a8e9ee9a2/0/full.jsonl",
+      "context": "/0f/8a8e9ee9a2/0/context.md",
+      "content_hash": "/0f/8a8e9ee9a2/0/content_hash.txt",
+      "prompt": "/0f/8a8e9ee9a2/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 18,
+    "cache_creation_tokens": 35676,
+    "cache_read_tokens": 764264,
+    "output_tokens": 1051,
+    "api_call_count": 16
+  }
+}
