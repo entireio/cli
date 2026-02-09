@@ -21,7 +21,7 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." &
 if [ -f "${PROJECT_DIR}/.env" ]; then
     # Use grep to find the line, then extract the value
     # Format: ENTIRE_LOCAL_DEV=1 or ENTIRE_LOCAL_DEV="1"
-    ENTIRE_LOCAL_DEV_FROM_FILE=$(grep -E "^ENTIRE_LOCAL_DEV=" "${PROJECT_DIR}/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"' || echo "")
+    ENTIRE_LOCAL_DEV_FROM_FILE=$(grep -E "^ENTIRE_LOCAL_DEV=" "${PROJECT_DIR}/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' || echo "")
     if [ -z "${ENTIRE_LOCAL_DEV:-}" ] && [ -n "${ENTIRE_LOCAL_DEV_FROM_FILE}" ]; then
         export ENTIRE_LOCAL_DEV="${ENTIRE_LOCAL_DEV_FROM_FILE}"
     fi
