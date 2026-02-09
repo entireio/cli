@@ -1,0 +1,19 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+"entire enable --agent" currently returns "flag needs an argument: --agent" but expecation is something like: entire enable --agent
+
+Missing agent name. Available agents:
+
+  claude-code    (default)
+  gemini
+
+Usage: entire enable --agent claude-code
+
+### Prompt 2
+
+Create a new branch, then commit the changes, review them one more time, be critical, if it's all fine, create a PR.
+

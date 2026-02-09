@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "7b11e1056673",
+  "session_id": "562589bd-5a9f-4bdf-8aed-cbfce44490ba",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T19:40:44.615733Z",
+  "branch": "soph/allow-dogfood-local-dev",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".claude/scripts/entire-wrapper.sh",
+    ".gemini/scripts/entire-wrapper.sh",
+    "cmd/entire/cli/agent/claudecode/hooks_test.go",
+    "cmd/entire/cli/agent/geminicli/hooks_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 14,
+    "cache_creation_tokens": 68884,
+    "cache_read_tokens": 917854,
+    "output_tokens": 102,
+    "api_call_count": 12
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T19:40:44.443027Z",
+    "agent_lines": 191,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 191,
+    "agent_percentage": 100
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "53ec1f81a59f",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-259-fix-deferred-condense-attribution",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/53/ec1f81a59f/0/metadata.json",
+      "transcript": "/53/ec1f81a59f/0/full.jsonl",
+      "context": "/53/ec1f81a59f/0/context.md",
+      "content_hash": "/53/ec1f81a59f/0/content_hash.txt",
+      "prompt": "/53/ec1f81a59f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 93,
+    "cache_creation_tokens": 370258,
+    "cache_read_tokens": 9585302,
+    "output_tokens": 2132,
+    "api_call_count": 83
+  }
+}
