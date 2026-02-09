@@ -774,7 +774,11 @@ func TestInstallShellCompletion(t *testing.T) {
 func TestInstallShellCompletion_MigratesLegacy(t *testing.T) {
 	home := t.TempDir()
 	rcFile := filepath.Join(home, ".zshrc")
-	legacy := "export PATH=/usr/bin\n\n" + legacyCompletionComment + "\nsource <(entire completion zsh)\n"
+	legacy := `export PATH=/usr/bin
+
+# Entire CLI shell completion
+source <(entire completion zsh)
+`
 	if err := os.WriteFile(rcFile, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -827,7 +831,9 @@ func TestCompletionStatus(t *testing.T) {
 	}
 
 	// Legacy format
-	legacy := legacyCompletionComment + "\nsource <(entire completion zsh)\n"
+	legacy := `# Entire CLI shell completion
+source <(entire completion zsh)
+`
 	if err := os.WriteFile(rcFile, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -836,7 +842,10 @@ func TestCompletionStatus(t *testing.T) {
 	}
 
 	// Current stanza
-	current := "# BEGIN entire-cli (v1)\nsource <(entire completion zsh)\n# END entire-cli\n"
+	current := `# BEGIN entire-cli (v1)
+source <(entire completion zsh)
+# END entire-cli
+`
 	if err := os.WriteFile(rcFile, []byte(current), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -845,7 +854,10 @@ func TestCompletionStatus(t *testing.T) {
 	}
 
 	// Stale stanza (older version)
-	stale := "# BEGIN entire-cli (v0)\nsource <(entire completion zsh)\n# END entire-cli\n"
+	stale := `# BEGIN entire-cli (v0)
+source <(entire completion zsh)
+# END entire-cli
+`
 	if err := os.WriteFile(rcFile, []byte(stale), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -868,7 +880,12 @@ func TestRemoveShellCompletion(t *testing.T) {
 	}
 
 	// Remove stanza format
-	stanza := "export A=1\n\n# BEGIN entire-cli (v1)\nsource <(entire completion zsh)\n# END entire-cli\n"
+	stanza := `export A=1
+
+# BEGIN entire-cli (v1)
+source <(entire completion zsh)
+# END entire-cli
+`
 	if err := os.WriteFile(rcFile, []byte(stanza), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -891,7 +908,11 @@ func TestRemoveShellCompletion(t *testing.T) {
 	}
 
 	// Remove legacy format
-	legacy := "export B=2\n\n" + legacyCompletionComment + "\nsource <(entire completion zsh)\n"
+	legacy := `export B=2
+
+# Entire CLI shell completion
+source <(entire completion zsh)
+`
 	if err := os.WriteFile(rcFile, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
