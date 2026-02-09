@@ -214,11 +214,12 @@ main() {
     # Verify installation
     if "$install_path" version &> /dev/null; then
         success "Entire CLI installed successfully!"
-        echo ""
-        echo "Run 'entire --help' to get started."
     else
         error "Installation completed but the binary failed to execute. Please check the installation."
     fi
+
+    info "Running post-install actions..."
+    "$install_path" curl-bash-post-install
 
     # Check if the installed binary is the one that will be found in PATH
     local path_binary
