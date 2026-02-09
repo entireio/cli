@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,226 @@ import (
 // Note: Tests for hook manipulation functions (addHookToMatcher, hookCommandExists, etc.)
 // have been moved to the agent/claudecode package where these functions now reside.
 // See cmd/entire/cli/agent/claudecode/hooks_test.go for those tests.
+
+func TestFindStanzaVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{"empty", "", 0},
+		{"no stanza", "some random content\nmore lines\n", 0},
+		{"v1", "# Entire CLI completions (v1) {{{\nsome line\n# }}}", 1},
+		{"v2", "# Entire CLI completions (v2) {{{\nsome line\n# }}}", 2},
+		{"legacy only", "# Entire CLI shell completion\nsource <(entire completion zsh)\n", 0},
+		{"with surrounding content", "export PATH=/usr/bin\n# Entire CLI completions (v1) {{{\nautoload\n# }}}\nalias ls=ll\n", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := findStanzaVersion(tt.content); got != tt.want {
+				t.Errorf("findStanzaVersion() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckStanzaStatus(t *testing.T) {
+	tests := []struct {
+		name           string
+		content        string
+		currentVersion int
+		want           stanzaStatus
+	}{
+		{"not found", "some content\n", 1, stanzaNotFound},
+		{"current exact", "# Entire CLI completions (v1) {{{\nline\n# }}}", 1, stanzaCurrent},
+		{"current higher version", "# Entire CLI completions (v3) {{{\nline\n# }}}", 2, stanzaCurrent},
+		{"outdated", "# Entire CLI completions (v1) {{{\nline\n# }}}", 2, stanzaOutdated},
+		{"legacy", "# Entire CLI shell completion\nsource <(entire completion zsh)\n", 1, stanzaLegacy},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := checkStanzaStatus(tt.content, tt.currentVersion); got != tt.want {
+				t.Errorf("checkStanzaStatus() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildStanza(t *testing.T) {
+	got := buildStanza(1, "autoload -Uz compinit && compinit && source <(entire completion zsh)")
+	want := "# Entire CLI completions (v1) {{{\nautoload -Uz compinit && compinit && source <(entire completion zsh)\n# }}}"
+	if got != want {
+		t.Errorf("buildStanza() =\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestCountStanzaOpeners(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{"none", "some content\n", 0},
+		{"one", "# Entire CLI completions (v1) {{{\nline\n# }}}", 1},
+		{"two", "# Entire CLI completions (v1) {{{\nline\n# }}}\n# Entire CLI completions (v1) {{{\nline\n# }}}", 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := countStanzaOpeners(tt.content); got != tt.want {
+				t.Errorf("countStanzaOpeners() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplaceStanza(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		version int
+		line    string
+		want    string
+		wantErr error
+	}{
+		{
+			name:    "happy path",
+			content: "before\n# Entire CLI completions (v1) {{{\nold line\n# }}}\nafter",
+			version: 2,
+			line:    "new line",
+			want:    "before\n# Entire CLI completions (v2) {{{\nnew line\n# }}}\nafter",
+		},
+		{
+			name:    "no stanza",
+			content: "just some content\n",
+			version: 1,
+			line:    "line",
+			want:    "just some content\n",
+		},
+		{
+			name:    "corrupted no close",
+			content: "# Entire CLI completions (v1) {{{\nsome line\nno close marker",
+			version: 2,
+			line:    "line",
+			wantErr: errStanzaCorrupted,
+		},
+		{
+			name:    "multiple stanzas",
+			content: "# Entire CLI completions (v1) {{{\nline\n# }}}\n# Entire CLI completions (v1) {{{\nline\n# }}}",
+			version: 2,
+			line:    "line",
+			wantErr: errMultipleStanzas,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := replaceStanza(tt.content, tt.version, tt.line)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("replaceStanza() error = %v, wantErr %v", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("replaceStanza() unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("replaceStanza() =\n%s\nwant:\n%s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRemoveStanza(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+		wantErr error
+	}{
+		{
+			name:    "happy path",
+			content: "before\n# Entire CLI completions (v1) {{{\nold line\n# }}}\nafter",
+			want:    "before\nafter",
+		},
+		{
+			name:    "with blank line after",
+			content: "before\n# Entire CLI completions (v1) {{{\nold line\n# }}}\n\nafter",
+			want:    "before\nafter",
+		},
+		{
+			name:    "no stanza",
+			content: "just some content\n",
+			want:    "just some content\n",
+		},
+		{
+			name:    "corrupted",
+			content: "# Entire CLI completions (v1) {{{\nno close",
+			wantErr: errStanzaCorrupted,
+		},
+		{
+			name:    "multiple stanzas",
+			content: "# Entire CLI completions (v1) {{{\na\n# }}}\n# Entire CLI completions (v1) {{{\nb\n# }}}",
+			wantErr: errMultipleStanzas,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := removeStanza(tt.content)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("removeStanza() error = %v, wantErr %v", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("removeStanza() unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("removeStanza() =\n%q\nwant:\n%q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRemoveLegacyCompletion(t *testing.T) {
+	completionLine := "source <(entire completion bash)"
+	tests := []struct {
+		name        string
+		content     string
+		wantContent string
+		wantRemoved bool
+	}{
+		{
+			name:        "legacy present",
+			content:     "before\n# Entire CLI shell completion\nsource <(entire completion bash)\nafter",
+			wantContent: "before\nafter",
+			wantRemoved: true,
+		},
+		{
+			name:        "not present",
+			content:     "before\nafter",
+			wantContent: "before\nafter",
+			wantRemoved: false,
+		},
+		{
+			name:        "comment without matching next line",
+			content:     "before\n# Entire CLI shell completion\nsome other line\nafter",
+			wantContent: "before\nsome other line\nafter",
+			wantRemoved: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, removed := removeLegacyCompletion(tt.content, completionLine)
+			if removed != tt.wantRemoved {
+				t.Errorf("removeLegacyCompletion() removed = %v, want %v", removed, tt.wantRemoved)
+			}
+			if got != tt.wantContent {
+				t.Errorf("removeLegacyCompletion() =\n%q\nwant:\n%q", got, tt.wantContent)
+			}
+		})
+	}
+}
 
 // setupTestDir creates a temp directory, changes to it, and returns it.
 // It also registers cleanup to restore the original directory.

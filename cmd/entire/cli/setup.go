@@ -669,8 +669,185 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 	}
 }
 
-// shellCompletionComment is the comment preceding the completion line
-const shellCompletionComment = "# Entire CLI shell completion"
+// Shell completion stanza management.
+// The stanza is a versioned, delimited block written to ~/.zshrc or ~/.bashrc:
+//
+//	# Entire CLI completions (v1) {{{
+//	autoload -Uz compinit && compinit && source <(entire completion zsh)
+//	# }}}
+const (
+	shellCompletionStanzaVersion = 1
+	shellCompletionOpenFormat    = "# Entire CLI completions (v%d) {{{"
+	shellCompletionClose         = "# }}}"
+	shellCompletionLegacyComment = "# Entire CLI shell completion" // old format for migration
+)
+
+type stanzaStatus int
+
+const (
+	stanzaNotFound stanzaStatus = iota
+	stanzaCurrent
+	stanzaOutdated
+	stanzaLegacy
+)
+
+var (
+	errStanzaCorrupted = errors.New("shell completion block is corrupted (missing closing marker)")
+	errMultipleStanzas = errors.New("found multiple shell completion blocks")
+)
+
+// findStanzaVersion scans content for the opening stanza marker and returns
+// the version number. Returns 0 if no stanza is found.
+func findStanzaVersion(content string) int {
+	for line := range strings.SplitSeq(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		var version int
+		if _, err := fmt.Sscanf(trimmed, shellCompletionOpenFormat, &version); err == nil {
+			return version
+		}
+	}
+	return 0
+}
+
+// checkStanzaStatus determines the status of the shell completion stanza in content.
+func checkStanzaStatus(content string, currentVersion int) stanzaStatus {
+	version := findStanzaVersion(content)
+	if version > 0 {
+		if version >= currentVersion {
+			return stanzaCurrent
+		}
+		return stanzaOutdated
+	}
+	if strings.Contains(content, shellCompletionLegacyComment) {
+		return stanzaLegacy
+	}
+	return stanzaNotFound
+}
+
+// buildStanza constructs the full stanza block for the given version and completion line.
+func buildStanza(version int, completionLine string) string {
+	return fmt.Sprintf(shellCompletionOpenFormat, version) + "\n" + completionLine + "\n" + shellCompletionClose
+}
+
+// countStanzaOpeners counts how many opening stanza markers exist in content.
+func countStanzaOpeners(content string) int {
+	count := 0
+	for line := range strings.SplitSeq(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		var version int
+		if _, err := fmt.Sscanf(trimmed, shellCompletionOpenFormat, &version); err == nil {
+			count++
+		}
+	}
+	return count
+}
+
+// replaceStanza finds the open+close markers in content and replaces the block
+// with a new stanza. Returns errStanzaCorrupted if open found without close,
+// errMultipleStanzas if count > 1. Returns unchanged content with nil error if
+// no stanza found.
+func replaceStanza(content string, version int, completionLine string) (string, error) {
+	openerCount := countStanzaOpeners(content)
+	if openerCount == 0 {
+		return content, nil
+	}
+	if openerCount > 1 {
+		return content, errMultipleStanzas
+	}
+
+	lines := strings.Split(content, "\n")
+	openIdx := -1
+	closeIdx := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		var v int
+		if _, err := fmt.Sscanf(trimmed, shellCompletionOpenFormat, &v); err == nil {
+			openIdx = i
+		}
+		if openIdx >= 0 && trimmed == shellCompletionClose {
+			closeIdx = i
+			break
+		}
+	}
+
+	if openIdx >= 0 && closeIdx < 0 {
+		return content, errStanzaCorrupted
+	}
+
+	newStanza := buildStanza(version, completionLine)
+	var result []string
+	result = append(result, lines[:openIdx]...)
+	result = append(result, newStanza)
+	result = append(result, lines[closeIdx+1:]...)
+	return strings.Join(result, "\n"), nil
+}
+
+// removeStanza finds and removes the stanza block from content.
+// Returns errStanzaCorrupted if open found without close,
+// errMultipleStanzas if count > 1. Returns unchanged content with nil error if
+// no stanza found.
+func removeStanza(content string) (string, error) {
+	openerCount := countStanzaOpeners(content)
+	if openerCount == 0 {
+		return content, nil
+	}
+	if openerCount > 1 {
+		return content, errMultipleStanzas
+	}
+
+	lines := strings.Split(content, "\n")
+	openIdx := -1
+	closeIdx := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		var v int
+		if _, err := fmt.Sscanf(trimmed, shellCompletionOpenFormat, &v); err == nil {
+			openIdx = i
+		}
+		if openIdx >= 0 && trimmed == shellCompletionClose {
+			closeIdx = i
+			break
+		}
+	}
+
+	if openIdx >= 0 && closeIdx < 0 {
+		return content, errStanzaCorrupted
+	}
+
+	var result []string
+	result = append(result, lines[:openIdx]...)
+	// Skip blank line immediately after stanza if present
+	tail := lines[closeIdx+1:]
+	if len(tail) > 0 && strings.TrimSpace(tail[0]) == "" {
+		tail = tail[1:]
+	}
+	result = append(result, tail...)
+	return strings.Join(result, "\n"), nil
+}
+
+// removeLegacyCompletion removes the old-format comment and its following
+// completion line from content. Returns the modified content and whether
+// anything was removed.
+func removeLegacyCompletion(content, completionLine string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	var result []string
+	removed := false
+	for i := 0; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == shellCompletionLegacyComment {
+			// Remove the comment line and the next line if it matches the completion line
+			if i+1 < len(lines) && strings.TrimSpace(lines[i+1]) == completionLine {
+				i++ // skip next line too
+			}
+			removed = true
+			continue
+		}
+		result = append(result, lines[i])
+	}
+	if !removed {
+		return content, false
+	}
+	return strings.Join(result, "\n"), true
+}
 
 // errUnsupportedShell is returned when the user's shell is not supported for completion.
 var errUnsupportedShell = errors.New("unsupported shell")
@@ -706,7 +883,7 @@ func shellCompletionTarget() (shellName, rcFile, completionLine string, err erro
 }
 
 // promptShellCompletion offers to add shell completion to the user's rc file.
-// Only prompts if completion is not already configured.
+// Handles versioned stanza detection, updates, and legacy migration.
 func promptShellCompletion(w io.Writer) error {
 	shellName, rcFile, completionLine, err := shellCompletionTarget()
 	if err != nil {
@@ -717,16 +894,81 @@ func promptShellCompletion(w io.Writer) error {
 		return fmt.Errorf("shell completion: %w", err)
 	}
 
-	if isCompletionConfigured(rcFile) {
-		fmt.Fprintf(w, "✓ Shell completion already configured in %s\n", rcFile)
-		return nil
+	//nolint:gosec // G304: rcFile is constructed from home dir + known filename, not user input
+	content, err := os.ReadFile(rcFile)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading %s: %w", rcFile, err)
 	}
 
+	status := checkStanzaStatus(string(content), shellCompletionStanzaVersion)
+	switch status {
+	case stanzaCurrent:
+		fmt.Fprintf(w, "✓ Shell completion already configured in %s\n", rcFile)
+		return nil
+
+	case stanzaOutdated:
+		if !promptYesNo("Shell completion is outdated. Update?") {
+			return nil
+		}
+		// Re-read in case file changed
+		//nolint:gosec // G304: rcFile is constructed from home dir + known filename
+		content, err = os.ReadFile(rcFile)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", rcFile, err)
+		}
+		updated, replaceErr := replaceStanza(string(content), shellCompletionStanzaVersion, completionLine)
+		if replaceErr != nil {
+			fmt.Fprintf(w, "Warning: %v in %s. Please fix manually.\n", replaceErr, rcFile)
+			return nil
+		}
+		//nolint:gosec // G306: Shell rc files need 0644 for user readability
+		if err := os.WriteFile(rcFile, []byte(updated), 0o644); err != nil {
+			return fmt.Errorf("writing %s: %w", rcFile, err)
+		}
+		fmt.Fprintf(w, "✓ Shell completion updated in %s\n", rcFile)
+		fmt.Fprintln(w, "  Run `source "+rcFile+"` or restart your shell to activate")
+		return nil
+
+	case stanzaLegacy:
+		if !promptYesNo("Shell completion uses old format. Update?") {
+			return nil
+		}
+		//nolint:gosec // G304: rcFile is constructed from home dir + known filename
+		content, err = os.ReadFile(rcFile)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", rcFile, err)
+		}
+		updated, _ := removeLegacyCompletion(string(content), completionLine)
+		updated = updated + "\n" + buildStanza(shellCompletionStanzaVersion, completionLine) + "\n"
+		//nolint:gosec // G306: Shell rc files need 0644 for user readability
+		if err := os.WriteFile(rcFile, []byte(updated), 0o644); err != nil {
+			return fmt.Errorf("writing %s: %w", rcFile, err)
+		}
+		fmt.Fprintf(w, "✓ Shell completion updated in %s\n", rcFile)
+		fmt.Fprintln(w, "  Run `source "+rcFile+"` or restart your shell to activate")
+		return nil
+
+	case stanzaNotFound:
+		if !promptYesNo(fmt.Sprintf("Enable shell completion? (detected: %s)", shellName)) {
+			return nil
+		}
+		if err := appendShellCompletion(rcFile, completionLine); err != nil {
+			return fmt.Errorf("failed to update %s: %w", rcFile, err)
+		}
+		fmt.Fprintf(w, "✓ Shell completion added to %s\n", rcFile)
+		fmt.Fprintln(w, "  Run `source "+rcFile+"` or restart your shell to activate")
+	}
+
+	return nil
+}
+
+// promptYesNo shows a yes/no selection prompt and returns whether the user chose yes.
+func promptYesNo(title string) bool {
 	var selected string
 	form := NewAccessibleForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title(fmt.Sprintf("Enable shell completion? (detected: %s)", shellName)).
+				Title(title).
 				Options(
 					huh.NewOption("Yes", "yes"),
 					huh.NewOption("No", "no"),
@@ -736,35 +978,12 @@ func promptShellCompletion(w io.Writer) error {
 	)
 
 	if err := form.Run(); err != nil {
-		//nolint:nilerr // User cancelled - not a fatal error, just skip
-		return nil
+		return false // User cancelled
 	}
-
-	if selected != "yes" {
-		return nil
-	}
-
-	if err := appendShellCompletion(rcFile, completionLine); err != nil {
-		return fmt.Errorf("failed to update %s: %w", rcFile, err)
-	}
-
-	fmt.Fprintf(w, "✓ Shell completion added to %s\n", rcFile)
-	fmt.Fprintln(w, "  Restart your shell to activate")
-
-	return nil
+	return selected == "yes"
 }
 
-// isCompletionConfigured checks if shell completion is already in the rc file.
-func isCompletionConfigured(rcFile string) bool {
-	//nolint:gosec // G304: rcFile is constructed from home dir + known filename, not user input
-	content, err := os.ReadFile(rcFile)
-	if err != nil {
-		return false // File doesn't exist or can't read, treat as not configured
-	}
-	return strings.Contains(string(content), "entire completion")
-}
-
-// appendShellCompletion adds the completion line to the rc file.
+// appendShellCompletion adds the completion stanza to the rc file.
 func appendShellCompletion(rcFile, completionLine string) error {
 	if err := os.MkdirAll(filepath.Dir(rcFile), 0o755); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
@@ -776,10 +995,53 @@ func appendShellCompletion(rcFile, completionLine string) error {
 	}
 	defer f.Close()
 
-	_, err = f.WriteString("\n" + shellCompletionComment + "\n" + completionLine + "\n")
+	_, err = f.WriteString("\n" + buildStanza(shellCompletionStanzaVersion, completionLine) + "\n")
 	if err != nil {
 		return fmt.Errorf("writing completion: %w", err)
 	}
+	return nil
+}
+
+// removeShellCompletion removes the shell completion stanza (or legacy format)
+// from the user's rc file. Used during uninstall.
+func removeShellCompletion() error {
+	_, rcFile, completionLine, err := shellCompletionTarget()
+	if err != nil {
+		return nil // unsupported shell or no home dir - nothing to remove
+	}
+
+	//nolint:gosec // G304: rcFile is constructed from home dir + known filename, not user input
+	content, err := os.ReadFile(rcFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading %s: %w", rcFile, err)
+	}
+
+	text := string(content)
+	updated, removeErr := removeStanza(text)
+	if removeErr != nil {
+		return fmt.Errorf("%w in %s", removeErr, rcFile)
+	}
+
+	if updated != text {
+		//nolint:gosec // G306: Shell rc files need 0644 for user readability
+		if err := os.WriteFile(rcFile, []byte(updated), 0o644); err != nil {
+			return fmt.Errorf("writing %s: %w", rcFile, err)
+		}
+		return nil
+	}
+
+	// Fall back to legacy format removal
+	updated, removed := removeLegacyCompletion(text, completionLine)
+	if removed {
+		//nolint:gosec // G306: Shell rc files need 0644 for user readability
+		if err := os.WriteFile(rcFile, []byte(updated), 0o644); err != nil {
+			return fmt.Errorf("writing %s: %w", rcFile, err)
+		}
+	}
+
 	return nil
 }
 
@@ -896,6 +1158,13 @@ func runUninstall(w, errW io.Writer, force bool) error {
 	}
 
 	fmt.Fprintln(w, "\nUninstalling Entire CLI...")
+
+	// 0. Remove shell completion from rc file
+	if err := removeShellCompletion(); err != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove shell completion: %v\n", err)
+	} else {
+		fmt.Fprintln(w, "  Removed shell completion")
+	}
 
 	// 1. Remove agent hooks (lowest risk)
 	if err := removeAgentHooks(w); err != nil {
