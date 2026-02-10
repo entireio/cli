@@ -228,7 +228,11 @@ func calculateSessionAttributions(repo *git.Repository, shadowRef *plumbing.Refe
 					} else {
 						// Get base tree (state before session started)
 						var baseTree *object.Tree
-						if baseCommit, baseErr := repo.CommitObject(plumbing.NewHash(state.BaseCommit)); baseErr == nil {
+						attrBase := state.AttributionBaseCommit
+						if attrBase == "" {
+							attrBase = state.BaseCommit // backward compat
+						}
+						if baseCommit, baseErr := repo.CommitObject(plumbing.NewHash(attrBase)); baseErr == nil {
 							if tree, baseTErr := baseCommit.Tree(); baseTErr == nil {
 								baseTree = tree
 							} else {
@@ -238,7 +242,7 @@ func calculateSessionAttributions(repo *git.Repository, shadowRef *plumbing.Refe
 						} else {
 							logging.Debug(logCtx, "attribution: base commit unavailable",
 								slog.String("error", baseErr.Error()),
-								slog.String("base_commit", state.BaseCommit))
+								slog.String("attribution_base", attrBase))
 						}
 
 						// Log accumulated prompt attributions for debugging
@@ -567,6 +571,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(sessionID string) error {
 	state.Phase = session.PhaseIdle
 	state.LastCheckpointID = checkpointID
 	state.PendingCheckpointID = "" // Clear after condensation (amend handler uses LastCheckpointID)
+	state.AttributionBaseCommit = state.BaseCommit
 	state.PromptAttributions = nil
 	state.PendingPromptAttribution = nil
 

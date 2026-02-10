@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/go-git/go-git/v5"
@@ -779,5 +782,98 @@ func TestRemoveEntireDirectory_NotExists(t *testing.T) {
 	// Should not error when directory doesn't exist
 	if err := removeEntireDirectory(); err != nil {
 		t.Fatalf("removeEntireDirectory() should not error when directory doesn't exist: %v", err)
+	}
+}
+
+func TestPrintMissingAgentError(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	printMissingAgentError(&buf)
+	output := buf.String()
+
+	if !strings.Contains(output, "Missing agent name") {
+		t.Error("expected 'Missing agent name' in output")
+	}
+	for _, a := range agent.List() {
+		if !strings.Contains(output, string(a)) {
+			t.Errorf("expected agent %q listed in output", a)
+		}
+	}
+	if !strings.Contains(output, "(default)") {
+		t.Error("expected default annotation in output")
+	}
+	if !strings.Contains(output, "Usage: entire enable --agent") {
+		t.Error("expected usage line in output")
+	}
+}
+
+func TestPrintWrongAgentError(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	printWrongAgentError(&buf, "not-an-agent")
+	output := buf.String()
+
+	if !strings.Contains(output, `Unknown agent "not-an-agent"`) {
+		t.Error("expected unknown agent name in output")
+	}
+	for _, a := range agent.List() {
+		if !strings.Contains(output, string(a)) {
+			t.Errorf("expected agent %q listed in output", a)
+		}
+	}
+	if !strings.Contains(output, "(default)") {
+		t.Error("expected default annotation in output")
+	}
+	if !strings.Contains(output, "Usage: entire enable --agent") {
+		t.Error("expected usage line in output")
+	}
+}
+
+func TestEnableCmd_AgentFlagNoValue(t *testing.T) {
+	setupTestRepo(t)
+
+	cmd := newEnableCmd()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--agent"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when --agent is used without a value")
+	}
+
+	output := stderr.String()
+	if !strings.Contains(output, "Missing agent name") {
+		t.Errorf("expected helpful error message, got: %s", output)
+	}
+	if !strings.Contains(output, string(agent.DefaultAgentName)) {
+		t.Errorf("expected default agent listed, got: %s", output)
+	}
+	if strings.Contains(output, "flag needs an argument") {
+		t.Error("should not contain default cobra/pflag error message")
+	}
+}
+
+func TestEnableCmd_AgentFlagEmptyValue(t *testing.T) {
+	setupTestRepo(t)
+
+	cmd := newEnableCmd()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--agent="})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when --agent= is used with empty value")
+	}
+
+	output := stderr.String()
+	if !strings.Contains(output, "Missing agent name") {
+		t.Errorf("expected helpful error message, got: %s", output)
+	}
+	if strings.Contains(output, "flag needs an argument") {
+		t.Error("should not contain default cobra/pflag error message")
 	}
 }

@@ -5,9 +5,9 @@ Entire hooks into your git workflow to capture AI agent sessions on every push. 
 ## Quick Start
 
 ```
-# Install via Homebrew (requires SSH access)
-brew tap entirehq/tap git@github.com:entirehq/homebrew-entire.git
-brew install entirehq/tap/entire
+# Install via Homebrew
+brew tap entireio/tap
+brew install entireio/tap/entire
 
 # Enable in your project
 cd your-project && entire enable
@@ -113,6 +113,7 @@ Entire offers two strategies for capturing your work:
 
 | Flag                | Description                                                        |
 | ------------------- | ------------------------------------------------------------------ |
+| `--agent <name>`    | AI agent to integrate with: `claude-code` (default) or `gemini`    |
 | `--strategy <name>` | Strategy to use: `manual-commit` (default) or `auto-commit`        |
 | `--force`, `-f`     | Force reinstall hooks (removes existing Entire hooks first)        |
 | `--local`           | Write settings to `settings.local.json` instead of `settings.json` |
@@ -193,6 +194,20 @@ When enabled, Entire automatically generates AI summaries for checkpoints at com
 ### Settings Priority
 
 Local settings override project settings field-by-field. When you run `entire status`, it shows both project and local (effective) settings.
+
+### Gemini CLI (Preview)
+
+Gemini CLI support is currently in preview. Entire can work with [Gemini CLI](https://github.com/google-gemini/gemini-cli) as an alternative to Claude Code, or alongside it — you can have both agents' hooks enabled at the same time.
+
+To enable:
+
+```bash
+entire enable --agent gemini
+```
+
+All commands (`rewind`, `status`, `session`, etc.) work the same regardless of which agent is configured.
+
+If you run into any issues with Gemini CLI integration, please [open an issue](https://github.com/entireio/cli/issues).
 
 ## Troubleshooting
 

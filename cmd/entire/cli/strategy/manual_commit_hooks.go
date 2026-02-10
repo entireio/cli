@@ -744,7 +744,9 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	shadowBranchesToDelete[shadowBranchName] = struct{}{}
 
 	// Update session state for the new base commit
-	state.BaseCommit = head.Hash().String()
+	newHead := head.Hash().String()
+	state.BaseCommit = newHead
+	state.AttributionBaseCommit = newHead
 	state.StepCount = 0
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
 

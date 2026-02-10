@@ -16,6 +16,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // Strategy display names for user-friendly selection
@@ -68,8 +69,6 @@ Strategies: manual-commit (default), auto-commit`,
 			// not a usage error, so we silence Cobra's output and use SilentError
 			// to prevent duplicate error output in main.go
 			if _, err := paths.RepoRoot(); err != nil {
-				cmd.SilenceUsage = true
-				cmd.SilenceErrors = true
 				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run 'entire enable' from within a git repository.")
 				return NewSilentError(errors.New("not a git repository"))
 			}
@@ -78,8 +77,18 @@ Strategies: manual-commit (default), auto-commit`,
 				return err
 			}
 			// Non-interactive mode if --agent flag is provided
+			if cmd.Flags().Changed("agent") && agentName == "" {
+				printMissingAgentError(cmd.ErrOrStderr())
+				return NewSilentError(errors.New("missing agent name"))
+			}
+
 			if agentName != "" {
-				return setupAgentHooksNonInteractive(cmd.OutOrStdout(), agent.AgentName(agentName), strategyFlag, localDev, forceHooks, skipPushSessions, telemetry)
+				ag, err := agent.Get(agent.AgentName(agentName))
+				if err != nil {
+					printWrongAgentError(cmd.ErrOrStderr(), agentName)
+					return NewSilentError(errors.New("wrong agent name"))
+				}
+				return setupAgentHooksNonInteractive(cmd.OutOrStdout(), ag, strategyFlag, localDev, forceHooks, skipPushSessions, telemetry)
 			}
 			// If strategy is specified via flag, skip interactive selection
 			if strategyFlag != "" {
@@ -103,6 +112,17 @@ Strategies: manual-commit (default), auto-commit`,
 	//nolint:errcheck,gosec // completion is optional, flag is defined above
 	cmd.RegisterFlagCompletionFunc("strategy", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return []string{strategyDisplayManualCommit, strategyDisplayAutoCommit}, cobra.ShellCompDirectiveNoFileComp
+	})
+
+	// Provide a helpful error when --agent is used without a value
+	defaultFlagErr := cmd.FlagErrorFunc()
+	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		var valErr *pflag.ValueRequiredError
+		if errors.As(err, &valErr) && valErr.GetSpecifiedName() == "agent" {
+			printMissingAgentError(c.ErrOrStderr())
+			return NewSilentError(errors.New("missing agent name"))
+		}
+		return defaultFlagErr(c, err)
 	})
 
 	// Add subcommands for automation/testing
@@ -486,14 +506,36 @@ func setupClaudeCodeHook(localDev, forceHooks bool) (int, error) {
 	return count, nil
 }
 
+// printAgentError writes an error message followed by available agents and usage.
+func printAgentError(w io.Writer, message string) {
+	agents := agent.List()
+	fmt.Fprintf(w, "%s Available agents:\n", message)
+	fmt.Fprintln(w)
+	for _, a := range agents {
+		suffix := ""
+		if a == agent.DefaultAgentName {
+			suffix = "    (default)"
+		}
+		fmt.Fprintf(w, "  %s%s\n", a, suffix)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Usage: entire enable --agent <agent-name>")
+}
+
+// printMissingAgentError writes a helpful error listing available agents.
+func printMissingAgentError(w io.Writer) {
+	printAgentError(w, "Missing agent name.")
+}
+
+// printWrongAgentError writes a helpful error when an unknown agent name is provided.
+func printWrongAgentError(w io.Writer, name string) {
+	printAgentError(w, fmt.Sprintf("Unknown agent %q.", name))
+}
+
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.
 // If strategyName is provided, it sets the strategy; otherwise uses default.
-func setupAgentHooksNonInteractive(w io.Writer, agentName agent.AgentName, strategyName string, localDev, forceHooks, skipPushSessions, telemetry bool) error {
-	ag, err := agent.Get(agentName)
-	if err != nil {
-		return fmt.Errorf("unknown agent: %s", agentName)
-	}
-
+func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName string, localDev, forceHooks, skipPushSessions, telemetry bool) error {
+	agentName := ag.Name()
 	// Check if agent supports hooks
 	hookAgent, ok := ag.(agent.HookSupport)
 	if !ok {
@@ -503,7 +545,8 @@ func setupAgentHooksNonInteractive(w io.Writer, agentName agent.AgentName, strat
 	fmt.Fprintf(w, "Agent: %s\n\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	if _, err := hookAgent.InstallHooks(localDev, forceHooks); err != nil {
+	installedHooks, err := hookAgent.InstallHooks(localDev, forceHooks)
+	if err != nil {
 		return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
 	}
 
@@ -561,11 +604,20 @@ func setupAgentHooksNonInteractive(w io.Writer, agentName agent.AgentName, strat
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
 
-	if agentName == agent.AgentNameGemini {
-		fmt.Fprintln(w, "✓ Hooks installed - This is a work in progress")
+	if installedHooks == 0 {
+		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
+		if agentName == agent.AgentNameGemini {
+			msg += " (Preview)"
+		}
+		fmt.Fprintf(w, "%s\n", msg)
 	} else {
-		fmt.Fprintln(w, "✓ Hooks installed")
+		msg := fmt.Sprintf("Installed %d hooks for %s", installedHooks, ag.Description())
+		if agentName == agent.AgentNameGemini {
+			msg += " (Preview)"
+		}
+		fmt.Fprintf(w, "%s\n", msg)
 	}
+
 	fmt.Fprintf(w, "✓ Project configured (%s)\n", configDisplayProject)
 
 	// Let the strategy handle its own setup requirements (creates entire/checkpoints/v1 branch, etc.)
