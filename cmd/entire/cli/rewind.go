@@ -756,6 +756,12 @@ func writeTranscriptToAgentSession(content []byte, sessionID string, agent agent
 
 // restoreTaskCheckpointTranscript restores a truncated transcript for a task checkpoint.
 // Uses GetTaskCheckpointTranscript to fetch the transcript from the strategy.
+//
+// NOTE: The transcript parsing/truncation/writing pipeline (parseTranscriptFromBytes,
+// TruncateTranscriptAtUUID, writeTranscript) assumes Claude's JSONL format.
+// This is acceptable because task checkpoints are currently only created by Claude Code's
+// PostToolUse hook. If other agents gain sub-agent support, this will need a
+// format-aware refactor (agent-specific parsing, truncation, and serialization).
 func restoreTaskCheckpointTranscript(strat strategy.Strategy, point strategy.RewindPoint, sessionID, checkpointUUID string, agent agentpkg.Agent) error {
 	// Get transcript content from strategy
 	content, err := strat.GetTaskCheckpointTranscript(point)

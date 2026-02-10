@@ -248,7 +248,7 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(limit int) ([]RewindPoint
 
 // Rewind restores the working directory to a checkpoint.
 //
-//nolint:maintidx // Complex rewind flow spans multiple recovery modes.
+
 func (s *ManualCommitStrategy) Rewind(point RewindPoint) error {
 	repo, err := OpenRepository()
 	if err != nil {
@@ -743,7 +743,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 // resolveAgentForRewind resolves the agent from checkpoint metadata.
 // Falls back to the default agent (Claude) for old checkpoints that lack agent info.
 //
-//nolint:ireturn // Factory pattern returns interface - agent type determined at runtime
+
 func resolveAgentForRewind(agentType agent.AgentType) (agent.Agent, error) {
 	if !isSpecificAgentType(agentType) {
 		ag := agent.Default()
