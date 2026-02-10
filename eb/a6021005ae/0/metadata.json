@@ -1,0 +1,72 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "eba6021005ae",
+  "session_id": "36ba8a60-f1f6-4e5d-b689-9eca8194aa74",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-10T05:06:51.052445Z",
+  "branch": "fix/gemini-token-usage-metadata-json",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "866f1887-3ff3-4e7f-a9ed-404f0cf0061e",
+  "token_usage": {
+    "input_tokens": 55,
+    "cache_creation_tokens": 157188,
+    "cache_read_tokens": 4302523,
+    "output_tokens": 1576,
+    "api_call_count": 45
+  },
+  "summary": {
+    "intent": "Review PR #158 fixing Gemini token usage in metadata.json, then bring the feature branch up to date with main after GitHub flagged merge conflicts.",
+    "outcome": "Completed code review identifying 4 issues (double-parsing being most notable). Successfully rebased branch onto main, resolved 3 conflicts across 2 files, fixed post-rebase build breakage from deleted functions, and pushed all changes with tests passing.",
+    "learnings": {
+      "repo": [
+        "Project uses `t.Chdir()` in tests without `t.Parallel()` as a convention, though commenting why would help future contributors",
+        "The codebase has format-specific transcript handling split between Claude JSONL (line-based) and Gemini JSON (message-based)",
+        "Gemini transcripts cannot use `SliceFromLine` because it would produce malformed JSON; full transcripts must be passed to summarizer",
+        "The manual commit strategy uses `CheckpointTranscriptStart` as a message index for Gemini but line offset for Claude"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_condensation.go",
+          "line": 432,
+          "end_line": 437,
+          "finding": "Double-parsing inefficiency: `calculateTokenUsage` parses Gemini transcript for validation, then `geminicli.CalculateTokenUsage` parses it again internally. Same pattern in `countTranscriptItems` (line 372) and `extractUserPrompts` (line 401) means up to 6 parses per condensation call"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 1353,
+          "finding": "`getLastPrompt` always passes startOffset=0 to `calculateTokenUsage`, computing tokens for entire transcript rather than current checkpoint. Not a bug today since only `Prompts` field is used, but risky if someone later reads `TokenUsage`"
+        }
+      ],
+      "workflow": [
+        "When rebasing introduces conflicts in intermediate commits that get refactored in later commits, take the branch version to let subsequent commits apply cleanly",
+        "After rebasing, check for references to deleted functions that may have been added on main independently",
+        "Force-push after rebase requires explicit user confirmation even when clearly necessary",
+        "Post-rebase fixups that aren't part of conflict resolution need to be committed separately, not left in working tree"
+      ]
+    },
+    "friction": [
+      "Main had independently added `countTranscriptLines` function that duplicated the PR's `countTranscriptItems` and referenced deleted `isGeminiJSONTranscript`, requiring post-rebase cleanup",
+      "Post-rebase fixups were left uncommitted in working tree instead of being included in the rebase, requiring an additional commit and push cycle"
+    ],
+    "open_items": [
+      "Double-parsing overhead in `calculateTokenUsage`, `countTranscriptItems`, and `extractUserPrompts` could be optimized by passing parsed structs instead of raw data",
+      "Test coverage for edge cases (empty content, invalid JSON, mixed message types with toolCalls/sessionId) was removed during refactoring and may not be covered by delegated `geminicli` functions",
+      "Gemini summaries won't be scoped per-checkpoint due to inability to slice JSON transcripts - acceptable tradeoff but worth noting for future"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-10T05:06:30.848557Z",
+    "agent_lines": 143,
+    "human_added": 3234,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 3377,
+    "agent_percentage": 4.234527687296417
+  }
+}
