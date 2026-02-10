@@ -1,0 +1,67 @@
+{
+  "checkpoint_id": "d0b269503005",
+  "session_id": "a0927dd5-61a3-4802-a716-4480286f16d4",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-10T03:15:05.325534Z",
+  "branch": "alex/entire-explain-fixes",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "7f087e82-798c-4951-91e4-5d39e41e12b3",
+  "checkpoint_transcript_start": 428,
+  "transcript_lines_at_start": 428,
+  "token_usage": {
+    "input_tokens": 120,
+    "cache_creation_tokens": 245033,
+    "cache_read_tokens": 12763080,
+    "output_tokens": 7075,
+    "api_call_count": 108
+  },
+  "summary": {
+    "intent": "Determine if temporary shadow branches listed in the workspace are relevant to the current worktree, and if not, add filtering to exclude branches from other worktrees.",
+    "outcome": "Added worktree hash filtering to getReachableTemporaryCheckpoints so it only shows shadow branches belonging to the current worktree. The fix parses the worktree hash from shadow branch names and compares it against the current worktree's hash.",
+    "learnings": {
+      "repo": [
+        "Shadow branches are namespaced by worktree hash using pattern entire/\u003ccommit[:7]\u003e-\u003cworktreeHash[:6]\u003e",
+        "Main worktree (where .git is a directory) has hash e3b0c4 (hash of empty string)",
+        "Worktree 4 has hash 4b2277 computed from its .git file path",
+        "getReachableTemporaryCheckpoints was already filtering by reachability (base commit in HEAD's history) but not by worktree hash"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/checkpoint/temporary.go",
+          "finding": "ParseShadowBranchName extracts the worktree hash from shadow branch names"
+        },
+        {
+          "path": "cmd/entire/cli/paths/worktree.go",
+          "finding": "GetWorktreeID reads the .git file/directory to determine worktree path, HashWorktreeID computes the 6-char hash"
+        },
+        {
+          "path": "cmd/entire/cli/checkpoint/temporary.go",
+          "finding": "WriteTemporary uses opts.WorktreeID in ShadowBranchNameForCommit to namespace shadow branches"
+        }
+      ],
+      "workflow": [
+        "Worktree hash filtering is a cross-cutting concern - shadow branches from other worktrees can be reachable but should be filtered out",
+        "Tests running in temp dirs have main worktree hash (e3b0c4) which enables testing worktree filtering by creating branches with different hashes"
+      ]
+    },
+    "friction": [
+      "TemporaryInfo struct doesn't expose WorktreeHash field, requiring re-parsing from BranchName",
+      "getCurrentWorktreeHash depends on filesystem state making pure unit testing harder"
+    ],
+    "open_items": []
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-10T03:14:50.535783Z",
+    "agent_lines": 144,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 144,
+    "agent_percentage": 100
+  }
+}

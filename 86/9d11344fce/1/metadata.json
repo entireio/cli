@@ -1,0 +1,39 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "869d11344fce",
+  "session_id": "3ae3ab59-52bc-413d-ad30-02b165c91785",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-10T03:33:16.333585Z",
+  "branch": "gtrrz-victor/add-cli-version-metadatajsons",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".goreleaser.yaml",
+    "cmd/entire/cli/buildinfo/buildinfo.go",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/integration_test/cli_version_metadata_test.go",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "mise-tasks/dev/publish",
+    "mise.toml"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 88,
+    "cache_creation_tokens": 295736,
+    "cache_read_tokens": 8269415,
+    "output_tokens": 3092,
+    "api_call_count": 76
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-10T03:33:16.188333Z",
+    "agent_lines": 27,
+    "human_added": 136,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 163,
+    "agent_percentage": 16.56441717791411
+  }
+}

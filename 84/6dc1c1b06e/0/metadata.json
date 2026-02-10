@@ -1,0 +1,75 @@
+{
+  "checkpoint_id": "846dc1c1b06e",
+  "session_id": "0d3f9b14-1f89-4bc8-b69c-2396e3aa6d50",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-10T02:21:38.812629Z",
+  "branch": "fix/gemini-transcript-position-tracking",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "7d290512-01cd-43f7-9d63-b3b775b4dbaa",
+  "token_usage": {
+    "input_tokens": 52,
+    "cache_creation_tokens": 152959,
+    "cache_read_tokens": 2450067,
+    "output_tokens": 2410,
+    "api_call_count": 41
+  },
+  "summary": {
+    "intent": "Review PR #167 for Gemini transcript position tracking bug fix, address code review feedback by adding t.Parallel() calls and malformed JSON test coverage, then commit and push the changes.",
+    "outcome": "Successfully reviewed PR #167, identified missing t.Parallel() calls and test coverage gap, added both improvements, committed changes, filed issue ENT-263 for triple-parsing optimization, resolved merge conflict with main, and fixed dupl linter false positive.",
+    "learnings": {
+      "repo": [
+        "CLAUDE.md requires t.Parallel() in all tests and subtests for this codebase",
+        "The dupl linter flags structurally similar table-driven tests as duplicates even when testing different functions - use //nolint:dupl to suppress false positives",
+        "Gemini transcript counting must match between GetTranscriptPosition() (message count) and countTranscriptLines() to avoid sessionHasNewContent() false positives",
+        "Project uses Linear for issue tracking with Project:Troy for categorization"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit.go",
+          "line": 320,
+          "end_line": 323,
+          "finding": "extractSessionData() parses Gemini transcripts multiple times: isGeminiJSONTranscript() for detection, geminicli.ParseTranscript() for counting, and extractUserPromptsFromGeminiJSON() for extraction - filed as tech debt ENT-263"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit.go",
+          "line": 285,
+          "end_line": 285,
+          "finding": "isGeminiJSONTranscript check changed from len(transcript.Messages) \u003e 0 to transcript.Messages != nil to distinguish nil vs empty array, broadening detection but safe due to agentType guard"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_test.go",
+          "line": 2170,
+          "end_line": 2280,
+          "finding": "Testing the fallback path for malformed Gemini JSON requires data that passes isGeminiJSONTranscript (valid JSON array) but fails ParseTranscript (non-object elements) - used [1,2,3] to trigger fallback to count=1"
+        }
+      ],
+      "workflow": [
+        "json.Unmarshal into []json.RawMessage is more lenient than unmarshaling into typed structs, creating a gap where format detection succeeds but parsing fails",
+        "Go's json.Unmarshal is lenient about extra/missing fields in structs, so testing parser error paths requires type mismatches not just missing fields",
+        "When resolving merge conflicts in test files, nolint comments can be lost and need to be reapplied after conflict resolution"
+      ]
+    },
+    "friction": [
+      "Merge conflict required manual resolution when TestCountTranscriptLines landed at same line as TestCondenseSession_PrefersLiveTranscript from main",
+      "Dupl linter false positive flagged structurally similar table-driven tests as duplicates despite testing different functions",
+      "The //nolint:dupl comment was lost during merge conflict resolution and needed to be reapplied",
+      "Initial attempt at malformed JSON test case used wrong data type that would fail isGeminiJSONTranscript too, required understanding the difference between []json.RawMessage and []GeminiMessage unmarshaling"
+    ],
+    "open_items": [
+      "ENT-263: Refactor extractSessionData() and countTranscriptLines() to parse Gemini transcripts once instead of 2-3 times per call (Medium priority, Project:Troy)"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-10T02:21:18.531599Z",
+    "agent_lines": 1,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1,
+    "agent_percentage": 100
+  }
+}

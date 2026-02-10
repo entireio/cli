@@ -1,0 +1,63 @@
+Implement the following plan:
+
+# Fix `entire clean` logging and branch deletion bugs
+
+## Context
+
+Two bugs in `entire clean`:
+1. Structured logs (`2026/02/10 12:43:25 INFO deleted orphaned shadow branch...`) leak to the terminal instead of going to `.entire/logs/entire.log`
+2. `--force` reports branches as deleted but they remain — go-git v5's `RemoveReference()` doesn't work with packed refs/worktrees
+
+## Bug 1: Logging to stdio
+
+**Root cause**: `logging.Init()` is never called for the `clean` command. `getLogger()` falls back to `slog.Default()` which writes text-format logs to stderr.
+
+**Fix**: Call `logging.Init("")` (empty session ID) at the start of `runClean()` and defer `logging.Close()`.
+
+**File**: `cmd/entire/cli/clean.go:49` — `runClean()`
+
+## Bug 2: Shadow branches not deleted
+
+**Root cause**: `repo.Storer.RemoveReference()` doesn't properly persist deletions when refs are packed (`.git/packed-refs`) or in a worktree context. This is the same class of go-git v5 bug documented in CLAUDE.md for `reset --hard` and `checkout`.
+
+Tests pass because they use `git.PlainInit` which creates loose refs — `RemoveReference` works for those.
+
+**Fix**: Use `git branch -D <branch>` via CLI, consistent with how `HardResetWithProtection()` and `CheckoutBranch()` bypass go-git.
+
+### Changes
+
+1. **Add `DeleteBranchCLI()` helper** in `cmd/entire/cli/strategy/common.go`
+   - `func DeleteBranchCLI(branchName string) error` — runs `git branch -D <branch>`
+   - Pattern matches `HardResetWithProtection()` at line 1112
+
+2. **Update all non-test `RemoveReference` call sites** to use the new helper:
+
+   | File | Line | Function | Notes |
+   |------|------|----------|-------|
+   | `strategy/cleanup.go` | 142 | `DeleteShadowBranches()` | Used by `entire clean` |
+   | `strategy/manual_commit_git.go` | 362 | `deleteShadowBranch()` | Used by condensation |
+   | `strategy/manual_commit_reset.go` | 81 | `Reset()` | Used by `entire reset` |
+   | `strategy/manual_commit_condensation.go` | 620 | `cleanupShadowBranchIfUnused()` | Post-commit cleanup |
+   | `strategy/manual_commit_migration.go` | 67 | shadow branch rename | Delete old after creating new |
+   | `cli/sessions_fix.go` | 291 | `fixOrphanedSession()` | Session fix command |
+   | `checkpoint/temporary.go` | 618 | `GitStore.DeleteShadowBranch()` | Dead code (no callers), fix for correctness |
+
+3. **Update test for `DeleteShadowBranches`** in `strategy/clean_test.go` — verify deletion via `git branch --list` CLI instead of go-git `repo.Reference()` to test the real code path.
+
+### Scope note
+`sessions_fix.go` is in the `cli` package, not `strategy`. It can call `strategy.DeleteBranchCLI()` since `cli` imports `strategy`. For `checkpoint/temporary.go`, it's in the `checkpoint` package — either add a similar helper there or make it call out to git CLI directly (it's dead code anyway).
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+Then manual test: create a repo with packed refs + shadow branches, run `entire clean -f`, verify branches are actually gone with `git branch -l 'entire/*'`.
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-3/9ebafbbe-fc3e-4094-b197-ec99c77392c6.jsonl
+
+---
+
+commit this
