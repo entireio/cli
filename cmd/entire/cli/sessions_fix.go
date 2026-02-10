@@ -20,17 +20,26 @@ import (
 const stalenessThreshold = 1 * time.Hour
 
 func newSessionsCmd() *cobra.Command {
+	fixCmd := newSessionsFixCmd()
 	cmd := &cobra.Command{
 		Use:   "sessions",
 		Short: "Session management commands",
 		Long:  "Commands for managing and fixing Entire sessions.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
+			// This is a bit hacky, but for now 'fix' is the only verb we have.  Otherwise, we send
+			// the user on a wild goose chase having to go "entire sessions", oh that only has one
+			// subcommand, "entire sessions fix" oh whoops that ran away and did things.  Rather be
+			// intuitive and just show what you can do if "entire sessions" is invoked with no
+			// verbs.  fixCmd.Help() prints usage of the 'fix' subcommand.
+			fmt.Printf(`Usage:
+  entire sessions fix [flags]
+
+`)
+			return fixCmd.Help()
 		},
 	}
 
-	cmd.AddCommand(newSessionsFixCmd())
-
+	cmd.AddCommand(fixCmd)
 	return cmd
 }
 
