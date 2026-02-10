@@ -95,6 +95,9 @@ Please answer these questions in your bug report:
 git clone https://github.com/entireio/cli.git
 cd cli
 
+# Trust the mise configuration (required on first setup)
+mise trust
+
 # Install dependencies (mise will install the correct Go version)
 mise install
 
