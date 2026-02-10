@@ -1824,7 +1824,7 @@ func TestIsGeminiJSONTranscript(t *testing.T) {
 		{
 			name:     "empty messages array",
 			content:  `{"messages": []}`,
-			expected: false,
+			expected: true, // Empty array is still Gemini format
 		},
 		{
 			name: "JSONL format (Claude Code)",
@@ -2460,6 +2460,70 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 	if metadata.InitialAttribution.AgentPercentage >= 100 {
 		t.Errorf("AgentPercentage should be < 100%% since user contributed, got %.1f%%",
 			metadata.InitialAttribution.AgentPercentage)
+	}
+}
+
+func TestCountTranscriptLines(t *testing.T) {
+	t.Parallel()
+	tests := []struct { //nolint:dupl // table-driven test structure, not logic duplication
+		name     string
+		content  string
+		expected int
+	}{
+		{
+			name:     "Claude JSONL - single line",
+			content:  `{"type":"user","message":{"content":"hello"}}`,
+			expected: 1,
+		},
+		{
+			name: "Claude JSONL - multiple lines",
+			content: `{"type":"user","message":{"content":"hello"}}
+{"type":"assistant","message":{"content":"hi"}}
+{"type":"user","message":{"content":"bye"}}`,
+			expected: 3,
+		},
+		{
+			name: "Claude JSONL - with trailing newline",
+			content: `{"type":"user","message":{"content":"hello"}}
+{"type":"assistant","message":{"content":"hi"}}
+`,
+			expected: 2,
+		},
+		{
+			name:     "Gemini JSON - single message",
+			content:  `{"messages":[{"type":"user","content":"hello"}]}`,
+			expected: 1,
+		},
+		{
+			name:     "Gemini JSON - multiple messages",
+			content:  `{"messages":[{"type":"user","content":"hello"},{"type":"gemini","content":"hi"},{"type":"user","content":"bye"}]}`,
+			expected: 3,
+		},
+		{
+			name:     "Gemini JSON - empty messages",
+			content:  `{"messages":[]}`,
+			expected: 0,
+		},
+		{
+			name:     "Gemini JSON - malformed messages (fallback to 1)",
+			content:  `{"messages": [1, 2, 3]}`,
+			expected: 1,
+		},
+		{
+			name:     "empty string",
+			content:  "",
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := countTranscriptLines(tt.content)
+			if result != tt.expected {
+				t.Errorf("countTranscriptLines() = %d, want %d", result, tt.expected)
+			}
+		})
 	}
 }
 

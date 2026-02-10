@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -338,7 +339,13 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 		if isGeminiFormat {
 			// Gemini uses JSON format with a "messages" array
 			data.Transcript = []byte(fullTranscript)
-			data.FullTranscriptLines = 1 // JSON is a single "line"
+			// Count messages in Gemini JSON for consistent position tracking
+			// This must match GetTranscriptPosition() which returns message count
+			if geminiTranscript, err := geminicli.ParseTranscript([]byte(fullTranscript)); err == nil {
+				data.FullTranscriptLines = len(geminiTranscript.Messages)
+			} else {
+				data.FullTranscriptLines = 1 // Fallback if parsing fails
+			}
 			data.Prompts = extractUserPromptsFromGeminiJSON(fullTranscript)
 			data.Context = generateContextFromPrompts(data.Prompts)
 		} else {
@@ -380,21 +387,22 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 }
 
 // isGeminiJSONTranscript detects if the transcript is in Gemini's JSON format.
-// Gemini transcripts start with a JSON object containing a "messages" array.
+// Gemini transcripts are JSON objects containing a "messages" array.
+// Returns true if the content has a valid "messages" field, even if empty.
 func isGeminiJSONTranscript(content string) bool {
 	content = strings.TrimSpace(content)
-	// Quick check: Gemini JSON starts with { and contains "messages"
+	// Quick check: Gemini JSON starts with {
 	if !strings.HasPrefix(content, "{") {
 		return false
 	}
-	// Try to parse as Gemini format
+	// Try to parse as Gemini format - check for messages field existence
 	var transcript struct {
 		Messages []json.RawMessage `json:"messages"`
 	}
 	if err := json.Unmarshal([]byte(content), &transcript); err != nil {
 		return false
 	}
-	return len(transcript.Messages) > 0
+	return transcript.Messages != nil
 }
 
 // extractUserPromptsFromGeminiJSON extracts user prompts from Gemini's JSON transcript format.

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -934,10 +935,22 @@ func (s *ManualCommitStrategy) sessionHasNewContent(repo *git.Repository, state 
 	return transcriptLines > state.CheckpointTranscriptStart, nil
 }
 
-// countTranscriptLines counts lines in a transcript, matching the counting method used
-// in extractSessionData for consistency. This trims trailing empty lines (from final \n
-// in JSONL) but includes empty lines in the middle of the file.
+// countTranscriptLines counts lines/messages in a transcript, matching the counting
+// method used in extractSessionData for consistency.
+// For Gemini (JSON format): returns message count
+// For Claude (JSONL format): returns line count (trimming trailing empty lines)
 func countTranscriptLines(content string) int {
+	// Use isGeminiJSONTranscript for format detection (same as extractSessionData)
+	if isGeminiJSONTranscript(content) {
+		// Parse with geminicli for consistent counting with extractSessionData
+		if transcript, err := geminicli.ParseTranscript([]byte(content)); err == nil {
+			return len(transcript.Messages)
+		}
+		// Fallback if parsing fails - matches extractSessionData behavior
+		return 1
+	}
+
+	// Claude JSONL format - count lines
 	lines := strings.Split(content, "\n")
 	// Trim trailing empty lines (from final \n in JSONL)
 	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
