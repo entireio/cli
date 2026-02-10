@@ -1,0 +1,74 @@
+{
+  "checkpoint_id": "53ec1f81a59f",
+  "session_id": "69847031-200c-4c30-baad-1ab1aab0c8ab",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T10:54:19.512579Z",
+  "branch": "alex/ent-259-fix-deferred-condense-attribution",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "3cb00a86-ff95-4b93-b927-e45972b481eb",
+  "checkpoint_transcript_start": 441,
+  "transcript_lines_at_start": 441,
+  "token_usage": {
+    "input_tokens": 93,
+    "cache_creation_tokens": 370258,
+    "cache_read_tokens": 9585302,
+    "output_tokens": 2132,
+    "api_call_count": 83
+  },
+  "summary": {
+    "intent": "Create a draft PR for attribution bug fix (ENT-259), perform thorough code review, address review feedback from Copilot, and ensure all changes are complete and tested.",
+    "outcome": "Successfully created PR #189, conducted comprehensive code review identifying 4 issues, addressed 2 Copilot review comments plus 1 self-identified gap in CondenseSessionByID, committed fixes in a4c2bdd3, replied to review threads, all tests passing.",
+    "learnings": {
+      "repo": [
+        "Attribution system uses two separate commit references: BaseCommit (tracks shadow branch, migrates with PostCommit) and AttributionBaseCommit (stays pinned until condensation completes)",
+        "Multiple condensation paths exist: deferred condensation (TurnEnd), force condensation (CondenseSessionByID via 'entire sessions fix'), and normal flow - all must maintain consistent state updates",
+        "NormalizeAfterLoad is the designated location for backward-compatible state migrations when adding new fields to session state"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_condensation.go",
+          "line": 568,
+          "end_line": 575,
+          "finding": "CondenseSessionByID (force-condense path) was missing AttributionBaseCommit sync after condensation, causing stale attribution base if session continued being used"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 1125,
+          "end_line": 1125,
+          "finding": "calculatePromptAttributionAtStart uses state.BaseCommit for prompt-start attribution - negligible impact since agent hasn't produced changes yet at prompt start"
+        },
+        {
+          "path": "cmd/entire/cli/session/state.go",
+          "finding": "Using omitempty JSON tag allows backward compatibility for new fields - deserialization handles missing fields gracefully, NormalizeAfterLoad backfills them"
+        }
+      ],
+      "workflow": [
+        "gh pr view/diff commands provide efficient PR review workflow without leaving terminal",
+        "Systematic review approach: check all callers of affected state fields (state.BaseCommit, AttributionBaseCommit) to find related code paths",
+        "Review comments can be addressed via gh api with inline replies tied to specific commits"
+      ]
+    },
+    "friction": [],
+    "open_items": [
+      "Backward compatibility test gap: no explicit test verifying omitempty + fallback path for sessions without AttributionBaseCommit field (noted as low priority, trivial logic)",
+      "calculatePromptAttributionAtStart still uses state.BaseCommit instead of AttributionBaseCommit (noted as negligible impact, prompt-start timing means no agent changes yet)"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T10:54:02.66948Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 0,
+    "agent_percentage": 0
+  }
+}
