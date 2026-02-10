@@ -62,9 +62,9 @@ func formatSubagentMessage(verb, agentType, description, toolUseID string) strin
 // API compatibility but are not currently used. They may be used in the future for
 // different checkpoint types.
 func FormatIncrementalSubject(
-	incrementalType string,
-	subagentType string,
-	taskDescription string,
+	incrementalType string, //nolint:unparam // kept for API compatibility
+	subagentType string, //nolint:unparam // kept for API compatibility
+	taskDescription string, //nolint:unparam // kept for API compatibility
 	todoContent string,
 	incrementalSequence int,
 	shortToolUseID string,
