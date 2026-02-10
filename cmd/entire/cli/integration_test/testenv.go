@@ -334,6 +334,20 @@ func (env *TestEnv) initEntireInternal(strategyName string, agentName agent.Agen
 	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
 		env.T.Fatalf("failed to write %s: %v", paths.SettingsFileName, err)
 	}
+
+	// Add .entire/ to .git/info/exclude so it doesn't appear as untracked files.
+	// In real usage, .entire/settings.json and .entire/.gitignore are committed to the repo.
+	// The test environment doesn't commit them, so we exclude them locally instead.
+	// This became necessary after go-git v5.16.5 fixed the bug where worktree.Checkout()
+	// incorrectly deleted untracked directories — .entire/ now survives checkout as expected.
+	excludeDir := filepath.Join(env.RepoDir, ".git", "info")
+	if err := os.MkdirAll(excludeDir, 0o755); err != nil {
+		env.T.Fatalf("failed to create .git/info directory: %v", err)
+	}
+	excludeFile := filepath.Join(excludeDir, "exclude")
+	if err := os.WriteFile(excludeFile, []byte(".entire/\n"), 0o644); err != nil {
+		env.T.Fatalf("failed to write .git/info/exclude: %v", err)
+	}
 }
 
 // WriteFile creates a file with the given content in the test repo.
