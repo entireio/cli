@@ -80,12 +80,14 @@ type AgentType string
 const (
 	AgentNameClaudeCode AgentName = "claude-code"
 	AgentNameGemini     AgentName = "gemini"
+	AgentNamePi         AgentName = "pi"
 )
 
 // Agent type constants (type identifiers stored in metadata/trailers)
 const (
 	AgentTypeClaudeCode AgentType = "Claude Code"
 	AgentTypeGemini     AgentType = "Gemini CLI"
+	AgentTypePi         AgentType = "Pi Coding Agent"
 	AgentTypeUnknown    AgentType = "Agent" // Fallback for backwards compatibility
 )
 
