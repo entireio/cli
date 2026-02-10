@@ -160,7 +160,7 @@ To completely remove Entire from this repository, use --uninstall:
 
 	cmd.Flags().BoolVar(&useProjectSettings, "project", false, "Update settings.json instead of settings.local.json")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "Completely remove Entire from this repository")
-	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmations (use with --uninstall)")
+	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
 
 	return cmd
 }
