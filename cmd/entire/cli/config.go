@@ -11,10 +11,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
-	// Import agents to register them
+	// Import claudecode to register the agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 )
 
 // Package-level aliases to avoid shadowing the settings package with local variables named "settings".
