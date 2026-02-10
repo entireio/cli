@@ -69,6 +69,19 @@ func (o *OpenClawAgent) DetectPresence() (bool, error) {
 	return false, nil
 }
 
+// HookNameSaveSession is the hook verb for saving session data to the shadow branch.
+// Called before committing to persist the transcript: `entire hooks openclaw save-session`
+const HookNameSaveSession = "save-session"
+
+// Ensure OpenClawAgent implements HookHandler
+var _ agent.HookHandler = (*OpenClawAgent)(nil)
+
+// GetHookNames returns the hook verbs OpenClaw supports.
+// These become subcommands: entire hooks openclaw <verb>
+func (o *OpenClawAgent) GetHookNames() []string {
+	return []string{HookNameSaveSession}
+}
+
 // GetHookConfigPath returns empty since OpenClaw uses git hooks, not agent-side hooks.
 func (o *OpenClawAgent) GetHookConfigPath() string {
 	return ""
@@ -76,7 +89,8 @@ func (o *OpenClawAgent) GetHookConfigPath() string {
 
 // SupportsHooks returns false as OpenClaw uses git hooks exclusively.
 // OpenClaw sessions are captured via prepare-commit-msg, post-commit, and pre-push
-// hooks that `entire enable` already installs.
+// hooks that `entire enable` already installs. The save-session hook is called
+// explicitly by the agent before committing.
 func (o *OpenClawAgent) SupportsHooks() bool {
 	return false
 }
