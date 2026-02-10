@@ -8,127 +8,125 @@ Entire CLI creates checkpoints for AI coding sessions. The system is agent-agnos
 
 ### Session
 
-A **Session** is a unit of work. Sessions can be nested - when a subagent runs, it creates a sub-session.
+A **Session** is a unit of work. Defined in `strategy/session.go`:
 
 ```go
 type Session struct {
-    ID             string
-    FirstPrompt    string       // Raw first user prompt (immutable)
-    Description    string       // Display text (derived or editable)
-    StartTime      time.Time
-    AgentType      string       // "claude-code", "cursor", etc.
-    AgentSessionID string       // The agent's session identifier
-
-    Checkpoints    []Checkpoint
-    SubSessions    []Session    // Nested sessions (subagent work)
-
-    // Empty for top-level sessions
-    ParentID       string       // Parent session ID
-    ToolUseID      string       // Tool invocation that spawned this
-}
-
-func (s *Session) IsSubSession() bool {
-    return s.ParentID != ""
+    ID          string       // e.g., "2025-12-01-8f76b0e8-b8f1-4a87-9186-848bdd83d62e"
+    Description string       // Human-readable summary (first prompt or derived)
+    Strategy    string       // Strategy that created this session
+    StartTime   time.Time
+    Checkpoints []Checkpoint
 }
 ```
 
 ### Checkpoint
 
-A **Checkpoint** captures a point-in-time within a session.
+A **Checkpoint** captures a point-in-time within a session. Defined in `strategy/session.go`:
 
 ```go
 type Checkpoint struct {
-    ID        string
-    SessionID string
-    Timestamp time.Time
-    Type      CheckpointType
-    Message   string
+    CheckpointID     id.CheckpointID // Stable 12-hex-char identifier
+    Message          string          // Commit message or checkpoint description
+    Timestamp        time.Time
+    IsTaskCheckpoint bool            // Task checkpoint (subagent) vs session checkpoint
+    ToolUseID        string          // Tool use ID for task checkpoints (empty for session)
 }
-
-type CheckpointType int
-
-const (
-    Temporary CheckpointType = iota // Full state snapshot, shadow branch
-    Committed                        // Metadata + commit ref, entire/checkpoints/v1
-)
 ```
 
 ### Checkpoint Types
+
+The low-level `checkpoint.Type` (from `checkpoint/checkpoint.go`) indicates storage location:
+
+```go
+type Type int
+
+const (
+    Temporary Type = iota // Full state snapshot, shadow branch
+    Committed             // Metadata + commit ref, entire/checkpoints/v1
+)
+```
 
 | Type | Contents | Use Case |
 |------|----------|----------|
 | Temporary | Full state (code + metadata) | Intra-session rewind, pre-commit |
 | Committed | Metadata + commit reference | Permanent record, post-commit rewind |
 
-### Session Nesting
-
-```
-Session (top-level, ParentID="")
-├── Checkpoints: [c1, c2, c3]
-└── SubSessions:
-    └── Session (ParentID=<parent>, ToolUseID="toolu_abc")
-        ├── Checkpoints: [c4, c5]
-        └── SubSessions: [...] (can nest further)
-```
-
-Each session - top-level or nested - has its own FirstPrompt, Description, and Checkpoints.
-
 ## Interface
 
 ### Session Operations
 
+Sessions are accessed via standalone functions in `strategy/session.go`:
+
 ```go
-type Sessions interface {
-    Create(ctx context.Context, opts CreateSessionOptions) (*Session, error)
-    Get(ctx context.Context, sessionID string) (*Session, error)
-    List(ctx context.Context) ([]Session, error) // Top-level sessions only
-}
+// ListSessions returns all sessions from entire/checkpoints/v1,
+// plus additional sessions from strategies implementing SessionSource.
+func ListSessions() ([]Session, error)
+
+// GetSession finds a session by ID (supports prefix matching).
+func GetSession(sessionID string) (*Session, error)
 ```
 
 ### Checkpoint Storage (Low-Level)
 
-Primitives for reading/writing checkpoints. Used by strategies.
+The `checkpoint.Store` interface (from `checkpoint/checkpoint.go`) provides primitives for reading/writing checkpoints. Used by strategies.
 
 ```go
-type CheckpointStore interface {
+type Store interface {
     // Temporary checkpoint operations (shadow branches - full state)
-    WriteTemporary(ctx context.Context, sessionID string, snapshot TemporaryCheckpoint) error
-    ReadTemporary(ctx context.Context, sessionID string) (*TemporaryCheckpoint, error)
-    ListTemporary(ctx context.Context) ([]CheckpointInfo, error)
+    WriteTemporary(ctx context.Context, opts WriteTemporaryOptions) (WriteTemporaryResult, error)
+    ReadTemporary(ctx context.Context, baseCommit, worktreeID string) (*ReadTemporaryResult, error)
+    ListTemporary(ctx context.Context) ([]TemporaryInfo, error)
 
     // Committed checkpoint operations (entire/checkpoints/v1 branch - metadata only)
-    WriteCommitted(ctx context.Context, checkpoint CommittedCheckpoint) error
-    ReadCommitted(ctx context.Context, checkpointID string) (*CommittedCheckpoint, error)
-    ListCommitted(ctx context.Context) ([]CheckpointInfo, error)
+    WriteCommitted(ctx context.Context, opts WriteCommittedOptions) error
+    ReadCommitted(ctx context.Context, checkpointID id.CheckpointID) (*CheckpointSummary, error)
+    ReadSessionContent(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*SessionContent, error)
+    ReadSessionContentByID(ctx context.Context, checkpointID id.CheckpointID, sessionID string) (*SessionContent, error)
+    ListCommitted(ctx context.Context) ([]CommittedInfo, error)
+}
+```
+
+Key option types (abbreviated):
+
+```go
+type WriteTemporaryOptions struct {
+    SessionID      string
+    BaseCommit     string
+    WorktreeID     string   // Internal git worktree identifier (empty for main)
+    ModifiedFiles  []string
+    NewFiles       []string
+    DeletedFiles   []string
+    MetadataDir    string   // Relative path to metadata directory
+    MetadataDirAbs string   // Absolute path
+    CommitMessage  string
+    // ...
 }
 
-type TemporaryCheckpoint struct {
-    SessionID  string
-    CodeTree   plumbing.Hash // Full worktree snapshot
-    Transcript []byte
-    Prompts    []string
-    Context    []byte
+type WriteCommittedOptions struct {
+    CheckpointID id.CheckpointID
+    SessionID    string
+    Strategy     string
+    Branch       string
+    Transcript   []byte
+    Prompts      []string
+    Context      []byte
+    FilesTouched []string
+    TokenUsage   *agent.TokenUsage
+    // ...
 }
+```
 
-type CommittedCheckpoint struct {
-    ID         string
-    SessionID  string
-    CommitRef  plumbing.Hash // Reference to user's/auto-commit's code commit
-    Transcript []byte
-    Prompts    []string
-    Context    []byte
-    CreatedAt  time.Time
-    TokenUsage *TokenUsage   // Token usage for this checkpoint
-}
+Token usage is defined in `agent/types.go`:
 
-// TokenUsage represents aggregated token usage for a checkpoint
+```go
 type TokenUsage struct {
-    InputTokens         int         // Fresh input tokens (not from cache)
-    CacheCreationTokens int         // Tokens written to cache
-    CacheReadTokens     int         // Tokens read from cache
-    OutputTokens        int         // Output tokens generated
-    APICallCount        int         // Number of API calls made
-    SubagentTokens      *TokenUsage // Nested usage from spawned subagents
+    InputTokens         int         `json:"input_tokens"`
+    CacheCreationTokens int         `json:"cache_creation_tokens"`
+    CacheReadTokens     int         `json:"cache_read_tokens"`
+    OutputTokens        int         `json:"output_tokens"`
+    APICallCount        int         `json:"api_call_count"`
+    SubagentTokens      *TokenUsage `json:"subagent_tokens,omitempty"`
 }
 ```
 
@@ -139,16 +137,19 @@ Strategies compose low-level primitives into higher-level workflows.
 **Manual-commit** has condensation logic:
 
 ```go
-// Condense reads accumulated temporary state and writes a committed checkpoint.
-// Handles incremental extraction (since last condense) and derived data generation.
-func (s *ManualCommitStrategy) Condense(ctx context.Context, sessionID string, commitRef plumbing.Hash) (*Checkpoint, error)
+// CondenseSession reads accumulated temporary state and writes a committed checkpoint.
+func (s *ManualCommitStrategy) CondenseSession(
+    repo *git.Repository,
+    checkpointID id.CheckpointID,
+    state *SessionState,
+) (*CondenseResult, error)
 ```
 
 **Auto-commit** writes committed checkpoints directly:
 
 ```go
-// SaveChanges writes directly to committed storage (no temporary phase).
-func (s *AutoCommitStrategy) SaveChanges(ctx context.Context, ...) error
+// SaveChanges creates a commit on the active branch and writes metadata.
+func (s *AutoCommitStrategy) SaveChanges(ctx SaveContext) error
 ```
 
 ## Storage
@@ -156,7 +157,7 @@ func (s *AutoCommitStrategy) SaveChanges(ctx context.Context, ...) error
 | Type | Location | Contents |
 |------|----------|----------|
 | Session State | `.git/entire-sessions/<id>.json` | Active session tracking |
-| Temporary | `entire/<commit-hash>` branch | Full state (code + metadata) |
+| Temporary | `entire/<commit[:7]>-<worktreeHash[:6]>` branch | Full state (code + metadata) |
 | Committed | `entire/checkpoints/v1` branch (sharded) | Metadata + commit reference |
 
 ### Session State
@@ -167,7 +168,7 @@ Stored in git common dir (shared across worktrees). Tracks active session info.
 
 ### Temporary Checkpoints
 
-Branch: `entire/<base-commit-hash[:7]>`
+Branch: `entire/<commit[:7]>-<worktreeHash[:6]>`
 
 Contains full worktree snapshot plus metadata overlay. **Multiple concurrent sessions** can share the same shadow branch - their checkpoints interleave:
 
@@ -199,45 +200,53 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 
 ```
 <id[:2]>/<id[2:]>/
-├── metadata.json        # Checkpoint info (see below)
-├── full.jsonl           # Current/latest session transcript
-├── prompt.txt
-├── context.md
-├── tasks/<tool-use-id>/ # Task checkpoints
-└── 1/                   # Archived session (if multiple)
-    ├── metadata.json
-    ├── full.jsonl
-    └── ...
+├── metadata.json        # CheckpointSummary (aggregated stats)
+├── 0/                   # First session (0-based indexing)
+│   ├── metadata.json    # Session-specific CommittedMetadata
+│   ├── full.jsonl
+│   ├── prompt.txt
+│   ├── context.md
+│   └── content_hash.txt
+├── 1/                   # Second session
+│   ├── metadata.json
+│   ├── full.jsonl
+│   └── ...
+└── 2/                   # Third session...
 ```
 
-**Multi-session metadata.json:**
+**Root-level metadata.json (`CheckpointSummary`):**
 ```json
 {
   "checkpoint_id": "abc123def456",
-  "session_id": "2026-01-13-uuid",
-  "session_ids": ["...", "..."],  // All sessions in this checkpoint
-  "session_count": 2,
   "strategy": "manual-commit",
-  "files_touched": ["file1.txt"],  // Merged from all sessions
-  "token_usage": {                 // Token usage for this checkpoint
+  "branch": "main",
+  "checkpoints_count": 3,
+  "files_touched": ["file1.txt", "file2.txt"],
+  "sessions": [
+    {
+      "metadata": "/ab/c123def456/0/metadata.json",
+      "transcript": "/ab/c123def456/0/full.jsonl",
+      "context": "/ab/c123def456/0/context.md",
+      "content_hash": "/ab/c123def456/0/content_hash.txt",
+      "prompt": "/ab/c123def456/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
     "input_tokens": 1500,
     "cache_creation_tokens": 200,
     "cache_read_tokens": 800,
     "output_tokens": 500,
-    "api_call_count": 3,
-    "subagent_tokens": {           // Optional: usage from spawned agents
-      "input_tokens": 1000,
-      "output_tokens": 300,
-      "api_call_count": 2
-    }
+    "api_call_count": 3
   }
 }
 ```
 
 When condensing multiple concurrent sessions:
-- Latest session files at root level
-- Previous sessions archived to numbered subfolders (`1/`, `2/`, etc.)
-- `session_ids` and `files_touched` are merged
+- All sessions are stored in numbered subdirectories using 0-based indexing (`0/`, `1/`, `2/`, ...)
+- Each `session_id` is assigned a stable index; subsequent writes for the same session reuse the same numbered folder
+- New `session_id` values are appended at the next index, so higher-numbered folders correspond to more recently introduced sessions, not necessarily the chronologically latest activity
+- `sessions` array in `CheckpointSummary` maps each session to its file paths
+- `files_touched` is merged from all sessions
 
 ### Checkpoint ID Linking
 
@@ -298,15 +307,17 @@ Metadata → User commits:
           Condense shadow → entire/checkpoints/v1
                            ↓
 ┌──────────────────────────────────────────────────┐
-│ Commit on entire/checkpoints/v1:                       │
+│ Commit on entire/checkpoints/v1:                 │
 │   Subject: "Checkpoint: a3b2c4d5e6f7"            │
 │                                                   │
 │   Tree: a3/b2c4d5e6f7/                           │
 │     ├── metadata.json                            │
 │     │   (checkpoint_id: "a3b2c4d5e6f7")          │
-│     ├── full.jsonl                               │
-│     ├── prompt.txt                               │
-│     └── context.md                               │
+│     ├── 0/                                       │
+│     │   ├── full.jsonl                           │
+│     │   ├── prompt.txt                           │
+│     │   └── context.md                           │
+│     └── ...                                      │
 │                                                   │
 │   Trailers:                                      │
 │     Entire-Session: 2026-01-20-uuid              │
@@ -319,31 +330,34 @@ The checkpoint ID creates a **bidirectional link**: user commits can find their 
 ### Package Structure
 
 ```
+strategy/
+├── session.go           # Session and Checkpoint types, ListSessions(), GetSession()
+
 session/
-├── session.go           # Session type
-├── state.go             # Active session state
+├── state.go             # Active session state (StateStore, .git/entire-sessions/)
+├── phase.go             # Session phase state machine (ACTIVE, IDLE, ENDED, etc.)
 
 checkpoint/
-├── checkpoint.go        # Checkpoint type
-├── store.go             # CheckpointStore interface
+├── checkpoint.go        # checkpoint.Type, checkpoint.Store interface, CheckpointSummary, etc.
+├── store.go             # GitStore implementation
 ├── temporary.go         # Shadow branch storage
 ├── committed.go         # Metadata branch storage
+├── id/                  # CheckpointID type and generation
+│   └── id.go
 ```
 
-Strategies use `CheckpointStore` primitives - storage details are encapsulated.
+Strategies use `checkpoint.Store` primitives - storage details are encapsulated.
 
 ## Strategy Role
 
 Strategies determine checkpoint timing and type:
 
-| Strategy | On Save | On SubSession Complete | On User Commit |
-|----------|---------|------------------------|----------------|
+| Strategy | On Save | On Task Complete | On User Commit |
+|----------|---------|------------------|----------------|
 | Manual-commit | Temporary | Temporary | Condense → Committed |
 | Auto-commit | Committed | Committed | — |
 
 ## Rewind
-
-Rewind is limited to top-level sessions for simplicity. Subsession rewind out of scope for now.
 
 Each `RewindPoint` includes `SessionID` and `SessionPrompt` to help identify which checkpoint belongs to which session when multiple sessions are interleaved.
 
@@ -368,7 +382,7 @@ Multiple AI sessions can run concurrently on the same base commit:
 
 If user does stash → pull → apply (HEAD changes without commit):
 - Detection: base commit changed AND old shadow branch still exists
-- Action: branch renamed from `entire/<old>` to `entire/<new>`
+- Action: branch renamed from `entire/<old-commit[:7]>-<worktreeHash[:6]>` to `entire/<new-commit[:7]>-<worktreeHash[:6]>`
 - Result: session continues with checkpoints preserved
 
 ---
