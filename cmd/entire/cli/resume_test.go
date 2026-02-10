@@ -174,7 +174,7 @@ func TestResumeFromCurrentBranch_NoCheckpoint(t *testing.T) {
 	setupResumeTestRepo(t, tmpDir, false)
 
 	// Run resumeFromCurrentBranch - should not error, just report no checkpoint found
-	err := resumeFromCurrentBranch("master", false)
+	err := resumeFromCurrentBranch("master", false, false)
 	if err != nil {
 		t.Errorf("resumeFromCurrentBranch() returned error for commit without checkpoint: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestResumeFromCurrentBranch_WithEntireCheckpointTrailer(t *testing.T) {
 	}
 
 	// Run resumeFromCurrentBranch
-	err := resumeFromCurrentBranch("master", false)
+	err := resumeFromCurrentBranch("master", false, false)
 	if err != nil {
 		t.Errorf("resumeFromCurrentBranch() returned error: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestRunResume_AlreadyOnBranch(t *testing.T) {
 	}
 
 	// Run resume on the branch we're already on - should skip checkout
-	err := runResume("feature", false)
+	err := runResume("feature", false, false)
 	// Should not error (no session, but shouldn't error)
 	if err != nil {
 		t.Errorf("runResume() returned error when already on branch: %v", err)
@@ -281,7 +281,7 @@ func TestRunResume_BranchDoesNotExist(t *testing.T) {
 	setupResumeTestRepo(t, tmpDir, false)
 
 	// Run resume on a branch that doesn't exist
-	err := runResume("nonexistent", false)
+	err := runResume("nonexistent", false, false)
 	if err == nil {
 		t.Error("runResume() expected error for nonexistent branch, got nil")
 	}
@@ -300,7 +300,7 @@ func TestRunResume_UncommittedChanges(t *testing.T) {
 	}
 
 	// Run resume - should fail due to uncommitted changes
-	err := runResume("feature", false)
+	err := runResume("feature", false, false)
 	if err == nil {
 		t.Error("runResume() expected error for uncommitted changes, got nil")
 	}
@@ -503,7 +503,7 @@ func TestCheckRemoteMetadata_MetadataExistsOnRemote(t *testing.T) {
 	// Call checkRemoteMetadata - should find it on remote and attempt to fetch
 	// In this test environment without a real origin remote, the fetch will fail
 	// but it should return a SilentError (user-friendly error message already printed)
-	err = checkRemoteMetadata(repo, checkpointID)
+	err = checkRemoteMetadata(repo, checkpointID, false, false)
 	if err == nil {
 		t.Error("checkRemoteMetadata() should return SilentError when fetch fails")
 	} else {
@@ -528,7 +528,7 @@ func TestCheckRemoteMetadata_NoRemoteMetadataBranch(t *testing.T) {
 	// Don't create any remote ref - simulating no remote entire/checkpoints/v1
 
 	// Call checkRemoteMetadata - should handle gracefully (no remote branch)
-	err := checkRemoteMetadata(repo, "nonexistent123")
+	err := checkRemoteMetadata(repo, "nonexistent123", false, false)
 	if err != nil {
 		t.Errorf("checkRemoteMetadata() returned error when no remote branch: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestCheckRemoteMetadata_CheckpointNotOnRemote(t *testing.T) {
 	}
 
 	// Call checkRemoteMetadata with a DIFFERENT checkpoint ID (not on remote)
-	err = checkRemoteMetadata(repo, "abcd12345678")
+	err = checkRemoteMetadata(repo, "abcd12345678", false, false)
 	if err != nil {
 		t.Errorf("checkRemoteMetadata() returned error for missing checkpoint: %v", err)
 	}
@@ -624,7 +624,7 @@ func TestResumeFromCurrentBranch_FallsBackToRemote(t *testing.T) {
 	// Run resumeFromCurrentBranch - should fall back to remote and attempt fetch
 	// In this test environment without a real origin remote, the fetch will fail
 	// but it should return a SilentError (user-friendly error message already printed)
-	err = resumeFromCurrentBranch("master", false)
+	err = resumeFromCurrentBranch("master", false, false)
 	if err == nil {
 		t.Error("resumeFromCurrentBranch() should return SilentError when fetch fails")
 	} else {
@@ -633,4 +633,32 @@ func TestResumeFromCurrentBranch_FallsBackToRemote(t *testing.T) {
 			t.Errorf("resumeFromCurrentBranch() should return SilentError, got: %v", err)
 		}
 	}
+}
+
+func TestNewResumeCmd_HasAutoResumeFlag(t *testing.T) {
+	cmd := newResumeCmd()
+
+	flag := cmd.Flags().Lookup("run")
+	if flag == nil {
+		t.Fatal("expected --run flag to be defined")
+	}
+	if flag.Shorthand != "r" {
+		t.Fatalf("expected --run shorthand to be -r, got -%s", flag.Shorthand)
+	}
+}
+
+func TestRunResumeCommand(t *testing.T) {
+	t.Run("empty command", func(t *testing.T) {
+		err := runResumeCommand("")
+		if err == nil {
+			t.Fatal("expected error for empty command")
+		}
+	})
+
+	t.Run("valid command", func(t *testing.T) {
+		err := runResumeCommand("git --version")
+		if err != nil {
+			t.Fatalf("expected git --version to run successfully, got %v", err)
+		}
+	})
 }

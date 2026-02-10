@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -25,6 +27,7 @@ import (
 
 func newResumeCmd() *cobra.Command {
 	var force bool
+	var autoRun bool
 
 	cmd := &cobra.Command{
 		Use:   "resume <branch>",
@@ -35,7 +38,7 @@ This command:
 1. Checks out the specified branch
 2. Finds the session ID from commits unique to this branch (not on main)
 3. Restores the session log if it doesn't exist locally
-4. Shows the command to resume the session
+4. Shows the command to resume the session (or starts it with --run)
 
 If the branch doesn't exist locally but exists on origin, you'll be prompted
 to fetch it.
@@ -48,21 +51,22 @@ most recent commit with a checkpoint.  You'll be prompted to confirm resuming in
 			if checkDisabledGuard(cmd.OutOrStdout()) {
 				return nil
 			}
-			return runResume(args[0], force)
+			return runResume(args[0], force, autoRun)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Resume from older checkpoint without confirmation")
+	cmd.Flags().BoolVarP(&autoRun, "run", "r", false, "Start the restored session immediately")
 
 	return cmd
 }
 
-func runResume(branchName string, force bool) error {
+func runResume(branchName string, force, autoRun bool) error {
 	// Check if we're already on this branch
 	currentBranch, err := GetCurrentBranch()
 	if err == nil && currentBranch == branchName {
 		// Already on the branch, skip checkout
-		return resumeFromCurrentBranch(branchName, force)
+		return resumeFromCurrentBranch(branchName, force, autoRun)
 	}
 
 	// Check if branch exists locally
@@ -116,10 +120,10 @@ func runResume(branchName string, force bool) error {
 		fmt.Fprintf(os.Stderr, "Switched to branch '%s'\n", branchName)
 	}
 
-	return resumeFromCurrentBranch(branchName, force)
+	return resumeFromCurrentBranch(branchName, force, autoRun)
 }
 
-func resumeFromCurrentBranch(branchName string, force bool) error {
+func resumeFromCurrentBranch(branchName string, force, autoRun bool) error {
 	repo, err := openRepository()
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
@@ -158,17 +162,17 @@ func resumeFromCurrentBranch(branchName string, force bool) error {
 	metadataTree, err := strategy.GetMetadataBranchTree(repo)
 	if err != nil {
 		// No local metadata branch, check if remote has it
-		return checkRemoteMetadata(repo, checkpointID)
+		return checkRemoteMetadata(repo, checkpointID, force, autoRun)
 	}
 
 	// Look up metadata from sharded path
 	metadata, err := strategy.ReadCheckpointMetadata(metadataTree, checkpointID.Path())
 	if err != nil {
 		// Checkpoint exists in commit but no local metadata - check remote
-		return checkRemoteMetadata(repo, checkpointID)
+		return checkRemoteMetadata(repo, checkpointID, force, autoRun)
 	}
 
-	return resumeSession(metadata.SessionID, checkpointID, force)
+	return resumeSession(metadata.SessionID, checkpointID, force, autoRun)
 }
 
 // branchCheckpointResult contains the result of searching for a checkpoint on a branch.
@@ -324,7 +328,7 @@ func promptResumeFromOlderCheckpoint() (bool, error) {
 
 // checkRemoteMetadata checks if checkpoint metadata exists on origin/entire/checkpoints/v1
 // and automatically fetches it if available.
-func checkRemoteMetadata(repo *git.Repository, checkpointID id.CheckpointID) error {
+func checkRemoteMetadata(repo *git.Repository, checkpointID id.CheckpointID, force, autoRun bool) error {
 	// Try to get remote metadata branch tree
 	remoteTree, err := strategy.GetRemoteMetadataBranchTree(repo)
 	if err != nil {
@@ -349,13 +353,13 @@ func checkRemoteMetadata(repo *git.Repository, checkpointID id.CheckpointID) err
 	}
 
 	// Now resume the session with the fetched metadata
-	return resumeSession(metadata.SessionID, checkpointID, false)
+	return resumeSession(metadata.SessionID, checkpointID, force, autoRun)
 }
 
 // resumeSession restores and displays the resume command for a specific session.
 // For multi-session checkpoints, restores ALL sessions and shows commands for each.
 // If force is false, prompts for confirmation when local logs have newer timestamps.
-func resumeSession(sessionID string, checkpointID id.CheckpointID, force bool) error {
+func resumeSession(sessionID string, checkpointID id.CheckpointID, force, autoRun bool) error {
 	// Get the current agent (auto-detect or use default)
 	ag, err := agent.Detect()
 	if err != nil {
@@ -404,7 +408,7 @@ func resumeSession(sessionID string, checkpointID id.CheckpointID, force bool) e
 
 		if err := restorer.RestoreLogsOnly(point, force); err != nil {
 			// Fall back to single-session restore
-			return resumeSingleSession(ctx, ag, sessionID, checkpointID, sessionDir, repoRoot, force)
+			return resumeSingleSession(ctx, ag, sessionID, checkpointID, sessionDir, repoRoot, force, autoRun)
 		}
 
 		// Get checkpoint metadata to show all sessions
@@ -413,18 +417,14 @@ func resumeSession(sessionID string, checkpointID id.CheckpointID, force bool) e
 			// Just show the primary session - graceful fallback
 			agentSID := ag.ExtractAgentSessionID(sessionID)
 			fmt.Fprintf(os.Stderr, "Session: %s\n", sessionID)
-			fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
-			fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(agentSID))
-			return nil //nolint:nilerr // Graceful fallback to single session
+			return showOrLaunchResumeCommand(ag.FormatResumeCommand(agentSID), autoRun) //nolint:nilerr // Graceful fallback to single session
 		}
 
 		metadataTree, err := strategy.GetMetadataBranchTree(repo)
 		if err != nil {
 			agentSID := ag.ExtractAgentSessionID(sessionID)
 			fmt.Fprintf(os.Stderr, "Session: %s\n", sessionID)
-			fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
-			fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(agentSID))
-			return nil //nolint:nilerr // Graceful fallback to single session
+			return showOrLaunchResumeCommand(ag.FormatResumeCommand(agentSID), autoRun) //nolint:nilerr // Graceful fallback to single session
 		}
 
 		metadata, err := strategy.ReadCheckpointMetadata(metadataTree, checkpointID.Path())
@@ -432,9 +432,7 @@ func resumeSession(sessionID string, checkpointID id.CheckpointID, force bool) e
 			// Single session or can't read metadata - show standard single session output
 			agentSID := ag.ExtractAgentSessionID(sessionID)
 			fmt.Fprintf(os.Stderr, "Session: %s\n", sessionID)
-			fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
-			fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(agentSID))
-			return nil //nolint:nilerr // Graceful fallback to single session
+			return showOrLaunchResumeCommand(ag.FormatResumeCommand(agentSID), autoRun) //nolint:nilerr // Graceful fallback to single session
 		}
 
 		// Multi-session: show all resume commands with prompts
@@ -471,17 +469,26 @@ func resumeSession(sessionID string, checkpointID id.CheckpointID, force bool) e
 			}
 		}
 
+		if autoRun {
+			mostRecentSession := metadata.SessionIDs[len(metadata.SessionIDs)-1]
+			mostRecentAgentSID := ag.ExtractAgentSessionID(mostRecentSession)
+			mostRecentCmd := ag.FormatResumeCommand(mostRecentAgentSID)
+			fmt.Fprintf(os.Stderr, "\nStarting most recent session automatically:\n")
+			fmt.Fprintf(os.Stderr, "  %s\n", mostRecentCmd)
+			return runResumeCommand(mostRecentCmd)
+		}
+
 		return nil
 	}
 
 	// Strategy doesn't support LogsOnlyRestorer, fall back to single session
-	return resumeSingleSession(ctx, ag, sessionID, checkpointID, sessionDir, repoRoot, force)
+	return resumeSingleSession(ctx, ag, sessionID, checkpointID, sessionDir, repoRoot, force, autoRun)
 }
 
 // resumeSingleSession restores a single session (fallback when multi-session restore fails).
 // Always overwrites existing session logs to ensure consistency with checkpoint state.
 // If force is false, prompts for confirmation when local log has newer timestamps.
-func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, checkpointID id.CheckpointID, sessionDir, repoRoot string, force bool) error {
+func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, checkpointID id.CheckpointID, sessionDir, repoRoot string, force, autoRun bool) error {
 	agentSessionID := ag.ExtractAgentSessionID(sessionID)
 	sessionLogPath := filepath.Join(sessionDir, agentSessionID+".jsonl")
 
@@ -490,9 +497,7 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, 
 			slog.String("checkpoint_id", checkpointID.String()),
 		)
 		fmt.Fprintf(os.Stderr, "Session '%s' found in commit trailer but session log not available\n", sessionID)
-		fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
-		fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(agentSessionID))
-		return nil
+		return showOrLaunchResumeCommand(ag.FormatResumeCommand(agentSessionID), autoRun)
 	}
 
 	logContent, _, err := checkpoint.LookupSessionLog(checkpointID)
@@ -503,9 +508,7 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, 
 				slog.String("session_id", sessionID),
 			)
 			fmt.Fprintf(os.Stderr, "Session '%s' found in commit trailer but session log not available\n", sessionID)
-			fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
-			fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(agentSessionID))
-			return nil
+			return showOrLaunchResumeCommand(ag.FormatResumeCommand(agentSessionID), autoRun)
 		}
 		logging.Error(ctx, "resume session failed",
 			slog.String("checkpoint_id", checkpointID.String()),
@@ -565,9 +568,35 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, 
 
 	fmt.Fprintf(os.Stderr, "Session restored to: %s\n", sessionLogPath)
 	fmt.Fprintf(os.Stderr, "Session: %s\n", sessionID)
-	fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
-	fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(agentSessionID))
+	return showOrLaunchResumeCommand(ag.FormatResumeCommand(agentSessionID), autoRun)
+}
 
+func showOrLaunchResumeCommand(resumeCmd string, autoRun bool) error {
+	fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
+	fmt.Fprintf(os.Stderr, "  %s\n", resumeCmd)
+	if !autoRun {
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "\nStarting session automatically:\n")
+	fmt.Fprintf(os.Stderr, "  %s\n", resumeCmd)
+	return runResumeCommand(resumeCmd)
+}
+
+func runResumeCommand(resumeCmd string) error {
+	args := strings.Fields(resumeCmd)
+	if len(args) == 0 {
+		return errors.New("resume command is empty")
+	}
+
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to run resume command %q: %w", resumeCmd, err)
+	}
 	return nil
 }
 
