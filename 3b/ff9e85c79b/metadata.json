@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "3bff9e85c79b",
+  "strategy": "manual-commit",
+  "branch": "dependabot/go_modules/go-dependencies-8020cebb01",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/testenv.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/3b/ff9e85c79b/0/metadata.json",
+      "transcript": "/3b/ff9e85c79b/0/full.jsonl",
+      "context": "/3b/ff9e85c79b/0/context.md",
+      "content_hash": "/3b/ff9e85c79b/0/content_hash.txt",
+      "prompt": "/3b/ff9e85c79b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 67,
+    "cache_creation_tokens": 78444,
+    "cache_read_tokens": 4430830,
+    "output_tokens": 1173,
+    "api_call_count": 63
+  }
+}
