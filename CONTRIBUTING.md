@@ -78,13 +78,6 @@ Please answer these questions in your bug report:
 4. **Can you reproduce it?** - Does it happen every time or intermittently?
 5. **Any additional context?** - Logs, screenshots, or related issues
 
-### Before Submitting
-
-1. **Install and enable Entire** - Install the latest version of the Entire CLI (see [installation docs](https://docs.entire.io/cli/installation)), verify with `entire version`, then run `entire enable` in the repository
-3. **Run tests** - Verify your changes don't break existing functionality (see [Testing](#testing))
-4. **Include checkpoint trailers** - Commits should include Entire checkpoint trailers from your sessions
-
-
 ---
 
 ## Local Setup
