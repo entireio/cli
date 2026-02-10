@@ -15,12 +15,11 @@ mise run fmt           # Format with gofmt (required - CI will fail otherwise)
 mise run lint          # Lint with golangci-lint (only new issues)
 mise run test          # Unit tests
 mise run test:ci       # Full tests with race detection (same as CI)
-mise run lint:gomod    # Verify go.mod is tidy
 ```
 
 **CI runs these checks on every PR** (see `.github/workflows/`):
 1. gofmt formatting check (must pass - no unformatted files)
-2. golangci-lint with `only-new-issues: true`
+2. golangci-lint
 3. go.mod tidy check
 4. All tests with race detection (`mise run test:ci`)
 
