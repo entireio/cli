@@ -34,3 +34,9 @@ so _I_ would have expected a single checkpoint...
 
 whoops! yeah let's put the reachableFromMain back...
 
+### Prompt 6
+
+okay...now for these temporary ones....
+
+can we tell if they're relevant to this workspace?
+
