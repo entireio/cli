@@ -1,0 +1,42 @@
+Implement the following plan:
+
+# Plan: Add Unit Tests for CLIVersion in Metadata
+
+All implementation is already complete. This plan covers adding **unit tests** to verify `buildinfo.Version` is persisted in metadata files.
+
+## Tests to Add
+
+### 1. `cmd/entire/cli/checkpoint/checkpoint_test.go` — `TestWriteCommitted_CLIVersionField`
+
+Follow the `TestWriteCommitted_AgentField` pattern (line 101):
+
+- Init temp git repo with initial commit
+- Create `NewGitStore(repo)`, call `store.WriteCommitted(...)`
+- Read back `CheckpointSummary` from root `metadata.json` → assert `summary.CLIVersion == buildinfo.Version`
+- Read back `CommittedMetadata` from `0/metadata.json` (session subdirectory) → assert `sessionMetadata.CLIVersion == buildinfo.Version`
+
+Uses the existing tree-navigation pattern: `repo.Reference` → `CommitObject` → `Tree` → `checkpointTree.Tree(checkpointID.Path())` → `File("metadata.json")`.
+
+### 2. `cmd/entire/cli/strategy/phase_wiring_test.go` — `TestInitializeSession_SetsCLIVersion`
+
+Follow the `TestInitializeSession_SetsPhaseActive` pattern (line 18):
+
+- `setupGitRepo(t)`, `t.Chdir(dir)`
+- Create `ManualCommitStrategy{}`, call `s.InitializeSession(...)`
+- `s.loadSessionState(sessionID)` → assert `state.CLIVersion == buildinfo.Version`
+
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `cmd/entire/cli/checkpoint/checkpoint_test.go` | Add `TestWriteCommitted_CLIVersionField` |
+| `cmd/entire/cli/strategy/phase_wiring_test.go` | Add `TestInitializeSession_SetsCLIVersion` |
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
