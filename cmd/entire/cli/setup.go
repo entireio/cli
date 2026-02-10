@@ -498,18 +498,27 @@ func checkDisabledGuard(w io.Writer) bool {
 	return false
 }
 
+// agentHasHooksAndInstalled returns true if the agent is installed (binary in PATH)
+// and implements HookSupport, so we can install hooks for it.
+func agentHasHooksAndInstalled(ag agent.Agent) bool {
+	if _, ok := ag.(agent.HookSupport); !ok {
+		return false
+	}
+	installed, err := ag.IsInstalled()
+	return err == nil && installed
+}
+
 // findInstalledAgent returns the first installed agent that supports hooks.
 // It tries the default agent first, then checks all registered agents.
+// Only agents that are both installed (binary in PATH) and implement HookSupport
+// are returned, so the enable flow can always install hooks.
 // Returns the agent and nil error if found, or nil agent and an error with
-// helpful install instructions if no agents are installed.
+// helpful install instructions if no such agents are installed.
 func findInstalledAgent(w io.Writer) (agent.Agent, error) {
 	// Try the default agent first
 	ag := agent.Default()
-	if ag != nil {
-		installed, err := ag.IsInstalled()
-		if err == nil && installed {
-			return ag, nil
-		}
+	if ag != nil && agentHasHooksAndInstalled(ag) {
+		return ag, nil
 	}
 
 	// Check all registered agents
@@ -518,14 +527,13 @@ func findInstalledAgent(w io.Writer) (agent.Agent, error) {
 		if err != nil {
 			continue
 		}
-		installed, err := a.IsInstalled()
-		if err == nil && installed {
+		if agentHasHooksAndInstalled(a) {
 			return a, nil
 		}
 	}
 
-	// No agents found - provide helpful error
-	fmt.Fprintln(w, "No AI agents found in PATH.")
+	// No hook-supporting agents found - provide helpful error
+	fmt.Fprintln(w, "No AI agents with hook support found in PATH.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Please install one of the following:")
 	for _, name := range agent.List() {
