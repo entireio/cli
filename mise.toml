@@ -6,7 +6,7 @@ shellcheck = 'latest'
 
 [tasks.fmt]
 description = "Run gofmt"
-run = "gofmt -w ."
+run = "gofmt -s -w ."
 
 [tasks.test]
 description = "Run tests"
