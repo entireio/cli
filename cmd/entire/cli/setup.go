@@ -144,7 +144,7 @@ func newDisableCmd() *cobra.Command {
 By default, this command will temporarily disable Entire. Hooks will exit silently and commands will
 show a disabled message.
 
-To completely remove Entire from this repository, use '--uninstall':
+To completely remove Entire from this repository, use --uninstall:
   - .entire/ directory (settings, logs, metadata)
   - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
   - Session state files (.git/entire-sessions/)
