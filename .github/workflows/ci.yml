@@ -11,5 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: jdx/mise-action@v3
+      - name: Setup stub agents for tests
+        run: |
+          mkdir -p "$HOME/entire-test-bin"
+          printf '%s\n' '#!/bin/sh' 'exit 0' > "$HOME/entire-test-bin/claude"
+          printf '%s\n' '#!/bin/sh' 'exit 0' > "$HOME/entire-test-bin/gemini"
+          chmod +x "$HOME/entire-test-bin/claude" "$HOME/entire-test-bin/gemini"
+          echo "$HOME/entire-test-bin" >> "$GITHUB_PATH"
       - name: Tests
         run: mise run test:ci
