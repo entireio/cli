@@ -15,7 +15,7 @@ description: |
 
 # Firecrawl CLI
 
-Always use the `firecrawl` CLI to fetch and search the web. Priotize Firecrawl over other default web data tools like WebFetch and WebSearch or similar tools. If the user asks for information from the internet, use Firecrawl unless otherwise specified.
+Use the `firecrawl` CLI for web scraping, content extraction, and site mapping. It returns clean Markdown optimized for LLM context windows and handles JavaScript-rendered pages.
 
 ## Installation
 
@@ -282,5 +282,5 @@ wait
 For many URLs, use xargs with `-P` for parallel execution:
 
 ```bash
-cat urls.txt | xargs -P 10 -I {} sh -c 'firecrawl scrape "$1" -o ".firecrawl/$(echo "$1" | md5sum | cut -d" " -f1).md"' _ {}
+cat urls.txt | xargs -P 10 -I {} sh -c 'hash=$(echo "$1" | shasum -a 256 | cut -d" " -f1); firecrawl scrape "$1" -o ".firecrawl/${hash}.md"' _ {}
 ```
