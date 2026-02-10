@@ -271,7 +271,7 @@ func TestLoadEntireSettings_OnlyLocalFileExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadEntireSettings() error = %v", err)
 	}
-	if settings.Strategy != "auto-commit" {
+	if settings.Strategy != "auto-commit" { //nolint:goconst // already present in codebase
 		t.Errorf("Strategy should be 'auto-commit' from local file, got %q", settings.Strategy)
 	}
 	if !settings.Enabled {

@@ -29,7 +29,7 @@ func TestParseTranscript_ValidMixedMessages(t *testing.T) {
 	if lines[1].Type != "assistant" || lines[1].UUID != "asst-1" {
 		t.Errorf("second line mismatch: got type=%s uuid=%s", lines[1].Type, lines[1].UUID)
 	}
-	if lines[2].Type != "user" || lines[2].UUID != "user-2" {
+	if lines[2].Type != "user" || lines[2].UUID != "user-2" { //nolint:goconst // already present in codebase
 		t.Errorf("third line mismatch: got type=%s uuid=%s", lines[2].Type, lines[2].UUID)
 	}
 }

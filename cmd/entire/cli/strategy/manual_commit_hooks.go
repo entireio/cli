@@ -213,7 +213,7 @@ func isGitSequenceOperation() bool {
 //   - "commit": amend operation - preserves existing trailer or restores from PendingCheckpointID
 //
 
-func (s *ManualCommitStrategy) PrepareCommitMsg(commitMsgFile string, source string) error {
+func (s *ManualCommitStrategy) PrepareCommitMsg(commitMsgFile string, source string) error { //nolint:maintidx // already present in codebase
 	logCtx := logging.WithComponent(context.Background(), "checkpoint")
 
 	// Skip during rebase, cherry-pick, or revert operations

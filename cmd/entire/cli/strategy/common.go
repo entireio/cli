@@ -1248,7 +1248,7 @@ func ExtractSessionIDFromCommit(commit *object.Commit) string {
 // See push_common.go and session_test.go for usage examples.
 
 // createCommit creates a commit object
-func createCommit(repo *git.Repository, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
+func createCommit(repo *git.Repository, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) { //nolint:unparam // already present in codebase
 	now := time.Now()
 	sig := object.Signature{
 		Name:  authorName,

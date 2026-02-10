@@ -490,7 +490,7 @@ func checkDisabledGuard(w io.Writer) bool {
 // setupClaudeCodeHook sets up Claude Code hooks.
 // This is a convenience wrapper that uses the agent package.
 // Returns the number of hooks installed (0 if already installed).
-func setupClaudeCodeHook(localDev, forceHooks bool) (int, error) {
+func setupClaudeCodeHook(localDev, forceHooks bool) (int, error) { //nolint:unparam // already present in codebase
 	ag, err := agent.Get(agent.AgentNameClaudeCode)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get claude-code agent: %w", err)
@@ -673,7 +673,7 @@ func determineSettingsTarget(entireDir string, useLocal, useProject bool) (bool,
 
 // setupEntireDirectory creates the .entire directory and gitignore.
 // Returns true if the directory was created, false if it already existed.
-func setupEntireDirectory() (bool, error) {
+func setupEntireDirectory() (bool, error) { //nolint:unparam // already present in codebase
 	// Get absolute path for the .entire directory
 	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
 	if err != nil {

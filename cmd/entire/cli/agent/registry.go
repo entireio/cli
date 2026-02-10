@@ -119,7 +119,7 @@ func GetByAgentType(agentType AgentType) (Agent, error) {
 // Default returns the default agent.
 // Returns nil if the default agent is not registered.
 //
-//nolint:ireturn,errcheck // Factory pattern returns interface; error is acceptable to ignore for default
+//nolint:errcheck // Factory pattern returns interface; error is acceptable to ignore for default
 func Default() Agent {
 	a, _ := Get(DefaultAgentName)
 	return a

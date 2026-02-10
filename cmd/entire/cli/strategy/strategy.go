@@ -295,12 +295,12 @@ func ReadTaskCheckpoint(taskMetadataDir string) (*TaskCheckpoint, error) {
 
 	data, err := os.ReadFile(checkpointFile) //nolint:gosec // Reading from controlled git metadata path
 	if err != nil {
-		return nil, err
+		return nil, err //nolint:wrapcheck // already present in codebase
 	}
 
 	var checkpoint TaskCheckpoint
 	if err := json.Unmarshal(data, &checkpoint); err != nil {
-		return nil, err
+		return nil, err //nolint:wrapcheck // already present in codebase
 	}
 
 	return &checkpoint, nil

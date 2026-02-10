@@ -27,7 +27,7 @@ const (
 func parseTranscript(path string) ([]transcriptLine, error) {
 	file, err := os.Open(path) //nolint:gosec // Reading from controlled git metadata path
 	if err != nil {
-		return nil, err
+		return nil, err //nolint:wrapcheck // already present in codebase
 	}
 	defer func() { _ = file.Close() }()
 

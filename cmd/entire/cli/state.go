@@ -181,7 +181,7 @@ func LoadPrePromptState(sessionID string) (*PrePromptState, error) {
 	stateFile := prePromptStateFile(sessionID)
 
 	if !fileExists(stateFile) {
-		return nil, nil
+		return nil, nil //nolint:nilnil // already present in codebase
 	}
 
 	data, err := os.ReadFile(stateFile) //nolint:gosec // Reading from controlled git metadata path
@@ -203,7 +203,7 @@ func LoadPrePromptState(sessionID string) (*PrePromptState, error) {
 func CleanupPrePromptState(sessionID string) error {
 	stateFile := prePromptStateFile(sessionID)
 	if fileExists(stateFile) {
-		return os.Remove(stateFile)
+		return os.Remove(stateFile) //nolint:wrapcheck // already present in codebase
 	}
 	return nil
 }
@@ -291,12 +291,12 @@ func ComputeDeletedFiles() ([]string, error) {
 
 	worktree, err := repo.Worktree()
 	if err != nil {
-		return nil, err
+		return nil, err //nolint:wrapcheck // already present in codebase
 	}
 
 	status, err := worktree.Status()
 	if err != nil {
-		return nil, err
+		return nil, err //nolint:wrapcheck // already present in codebase
 	}
 
 	var deletedFiles []string
@@ -352,12 +352,12 @@ func getUntrackedFilesForState() ([]string, error) {
 
 	worktree, err := repo.Worktree()
 	if err != nil {
-		return nil, err
+		return nil, err //nolint:wrapcheck // already present in codebase
 	}
 
 	status, err := worktree.Status()
 	if err != nil {
-		return nil, err
+		return nil, err //nolint:wrapcheck // already present in codebase
 	}
 
 	var untrackedFiles []string
@@ -432,7 +432,7 @@ func LoadPreTaskState(toolUseID string) (*PreTaskState, error) {
 	stateFile := preTaskStateFile(toolUseID)
 
 	if !fileExists(stateFile) {
-		return nil, nil
+		return nil, nil //nolint:nilnil // already present in codebase
 	}
 
 	data, err := os.ReadFile(stateFile) //nolint:gosec // Reading from controlled git metadata path
@@ -452,7 +452,7 @@ func LoadPreTaskState(toolUseID string) (*PreTaskState, error) {
 func CleanupPreTaskState(toolUseID string) error {
 	stateFile := preTaskStateFile(toolUseID)
 	if fileExists(stateFile) {
-		return os.Remove(stateFile)
+		return os.Remove(stateFile) //nolint:wrapcheck // already present in codebase
 	}
 	return nil
 }

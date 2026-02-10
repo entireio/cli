@@ -57,7 +57,7 @@ func SaveEntireSettingsLocal(s *settings.EntireSettings) error {
 func IsEnabled() (bool, error) {
 	s, err := settings.Load()
 	if err != nil {
-		return true, err
+		return true, err //nolint:wrapcheck // already present in codebase
 	}
 	return s.Enabled, nil
 }

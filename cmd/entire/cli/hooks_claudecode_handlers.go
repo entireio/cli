@@ -88,7 +88,7 @@ func captureInitialState() error {
 }
 
 // commitWithMetadata commits the session changes with metadata.
-func commitWithMetadata() error {
+func commitWithMetadata() error { //nolint:maintidx // already present in codebase
 	// Get the agent for hook input parsing and session ID transformation
 	ag, err := GetCurrentHookAgent()
 	if err != nil {

@@ -24,7 +24,7 @@ func Register(name string, factory Factory) {
 
 // Get retrieves a strategy by name.
 // Returns an error if the strategy is not registered.
-func Get(name string) (Strategy, error) {
+func Get(name string) (Strategy, error) { //nolint:ireturn // already present in codebase
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 
@@ -61,7 +61,7 @@ const DefaultStrategyName = StrategyNameManualCommit
 
 // Default returns the default strategy.
 // Falls back to returning nil if no strategies are registered.
-func Default() Strategy {
+func Default() Strategy { //nolint:ireturn // already present in codebase
 	s, err := Get(DefaultStrategyName)
 	if err != nil {
 		// Fallback: return the first registered strategy

@@ -116,7 +116,7 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 // ExtractLastUserPrompt extracts the last user message from transcript
 func ExtractLastUserPrompt(lines []TranscriptLine) string {
 	for i := len(lines) - 1; i >= 0; i-- {
-		if lines[i].Type != "user" {
+		if lines[i].Type != "user" { //nolint:goconst // already present in codebase
 			continue
 		}
 

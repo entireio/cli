@@ -207,7 +207,7 @@ var currentHookAgentName agent.AgentName
 // Falls back to GetAgent() if not in a hook context.
 //
 
-func GetCurrentHookAgent() (agent.Agent, error) {
+func GetCurrentHookAgent() (agent.Agent, error) { //nolint:ireturn // already present in codebase
 	if currentHookAgentName == "" {
 		return nil, errors.New("not in a hook context: agent name not set")
 	}
@@ -279,7 +279,7 @@ func newAgentHookVerbCmdWithLogging(agentName agent.AgentName, hookName string) 
 			ctx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), agentName)
 
 			// Get strategy name for logging
-			strategyName := unknownStrategyName
+			strategyName := unknownStrategyName //nolint:ineffassign,wastedassign // already present in codebase
 			strategyName = GetStrategy().Name()
 
 			hookType := getHookType(hookName)

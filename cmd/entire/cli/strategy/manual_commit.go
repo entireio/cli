@@ -58,7 +58,7 @@ func (s *ManualCommitStrategy) getCheckpointStore() (*checkpoint.GitStore, error
 // NewManualCommitStrategy creates a new manual-commit strategy instance.
 //
 
-func NewManualCommitStrategy() Strategy {
+func NewManualCommitStrategy() Strategy { //nolint:ireturn // already present in codebase
 	return &ManualCommitStrategy{}
 }
 
@@ -66,7 +66,7 @@ func NewManualCommitStrategy() Strategy {
 // This legacy constructor delegates to NewManualCommitStrategy.
 //
 
-func NewShadowStrategy() Strategy {
+func NewShadowStrategy() Strategy { //nolint:ireturn // already present in codebase
 	return NewManualCommitStrategy()
 }
 

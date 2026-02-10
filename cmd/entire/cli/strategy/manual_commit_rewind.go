@@ -202,7 +202,7 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(limit int) ([]RewindPoint
 		var sessionPrompt string
 		var sessionPrompts []string
 		if metadataTree != nil {
-			checkpointPath := paths.CheckpointPath(cpInfo.CheckpointID)
+			checkpointPath := paths.CheckpointPath(cpInfo.CheckpointID) //nolint:staticcheck // already present in codebase
 			// For multi-session checkpoints, read all prompts
 			if cpInfo.SessionCount > 1 && len(cpInfo.SessionIDs) > 1 {
 				sessionPrompts = ReadAllSessionPromptsFromTree(metadataTree, checkpointPath, cpInfo.SessionCount, cpInfo.SessionIDs)

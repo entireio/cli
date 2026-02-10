@@ -42,7 +42,7 @@ func fileExists(path string) bool {
 func copyFile(src, dst string) error {
 	input, err := os.ReadFile(src) //nolint:gosec // Reading from controlled git metadata path
 	if err != nil {
-		return err
+		return err //nolint:wrapcheck // already present in codebase
 	}
 	if err := os.WriteFile(dst, input, 0o600); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)

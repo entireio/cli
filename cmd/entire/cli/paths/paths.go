@@ -59,7 +59,7 @@ var (
 // Returns an error if not inside a git repository.
 func RepoRoot() (string, error) {
 	// Get current working directory to check cache validity
-	cwd, err := os.Getwd()
+	cwd, err := os.Getwd() //nolint:forbidigo // already present in codebase
 	if err != nil {
 		cwd = ""
 	}

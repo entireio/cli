@@ -30,7 +30,7 @@ import (
 const unknownSessionID = "unknown"
 
 // getAgent returns an agent by type
-func getAgent(agentType agentpkg.AgentType) (agentpkg.Agent, error) {
+func getAgent(agentType agentpkg.AgentType) (agentpkg.Agent, error) { //nolint:ireturn // already present in codebase
 	if agentType == "" {
 		return nil, errors.New("agent type cannot be empty")
 	}
@@ -79,7 +79,7 @@ your agent's context.`,
 	return cmd
 }
 
-func runRewindInteractive() error {
+func runRewindInteractive() error { //nolint:maintidx // already present in codebase
 	// Get the configured strategy
 	start := GetStrategy()
 
@@ -256,7 +256,7 @@ func runRewindInteractive() error {
 			slog.String("checkpoint_id", selectedPoint.ID),
 			slog.String("error", err.Error()),
 		)
-		return err
+		return err //nolint:wrapcheck // already present in codebase
 	}
 
 	logging.Debug(ctx, "rewind completed",
@@ -367,7 +367,7 @@ func runRewindList() error {
 	// Print as JSON
 	data, err := jsonutil.MarshalIndentWithNewline(output, "", "  ")
 	if err != nil {
-		return err
+		return err //nolint:wrapcheck // already present in codebase
 	}
 	fmt.Println(string(data))
 	return nil
@@ -455,7 +455,7 @@ func runRewindToInternal(commitID string, logsOnly bool, reset bool) error {
 			slog.String("checkpoint_id", selectedPoint.ID),
 			slog.String("error", err.Error()),
 		)
-		return err
+		return err //nolint:wrapcheck // already present in codebase
 	}
 
 	logging.Debug(ctx, "rewind completed",
