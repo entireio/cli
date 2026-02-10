@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -670,7 +671,7 @@ func TestShellCompletionTarget(t *testing.T) {
 			shellName, rcFile, completion, err := shellCompletionTarget()
 
 			if tt.wantErrUnsupport {
-				if err != errUnsupportedShell {
+				if !errors.Is(err, errUnsupportedShell) {
 					t.Fatalf("got err=%v, want errUnsupportedShell", err)
 				}
 				return
