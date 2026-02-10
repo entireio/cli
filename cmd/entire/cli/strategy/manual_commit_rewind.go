@@ -708,8 +708,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 			continue
 		}
 
-		agentSessionID := ag.ExtractAgentSessionID(sessionID)
-		sessionFile := ag.ResolveSessionFile(sessionDir, agentSessionID)
+		sessionFile := resolveSessionFilePath(sessionID, ag, sessionDir)
 
 		// Get first prompt for display
 		promptPreview := ExtractFirstPrompt(content.Prompts)
@@ -726,6 +725,12 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 			fmt.Fprintf(os.Stderr, "    Writing to: %s\n", sessionFile)
 		} else {
 			fmt.Fprintf(os.Stderr, "Writing transcript to: %s\n", sessionFile)
+		}
+
+		// Ensure parent directory exists (session file may be in a different dir than sessionDir)
+		if mkdirErr := os.MkdirAll(filepath.Dir(sessionFile), 0o750); mkdirErr != nil {
+			fmt.Fprintf(os.Stderr, "    Warning: failed to create directory: %v\n", mkdirErr)
+			continue
 		}
 
 		if writeErr := os.WriteFile(sessionFile, content.Transcript, 0o600); writeErr != nil {
@@ -757,6 +762,20 @@ func resolveAgentForRewind(agentType agent.AgentType) (agent.Agent, error) {
 		return nil, fmt.Errorf("resolving agent %q: %w", agentType, err)
 	}
 	return ag, nil
+}
+
+// resolveSessionFilePath determines the correct file path for writing an agent's session transcript.
+// Checks session state for transcript_path first (needed for agents like Gemini that store
+// transcripts at paths that GetSessionDir can't reconstruct, e.g. SHA-256 hashed directories).
+// Falls back to the agent's GetSessionDir + ResolveSessionFile.
+func resolveSessionFilePath(sessionID string, ag agent.Agent, fallbackSessionDir string) string {
+	state, err := LoadSessionState(sessionID)
+	if err == nil && state != nil && state.TranscriptPath != "" {
+		return state.TranscriptPath
+	}
+
+	agentSessionID := ag.ExtractAgentSessionID(sessionID)
+	return ag.ResolveSessionFile(fallbackSessionDir, agentSessionID)
 }
 
 // readSessionPrompt reads the first prompt from the session's prompt.txt file stored in git.
@@ -825,8 +844,7 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, s
 			continue
 		}
 
-		agentSessionID := ag.ExtractAgentSessionID(sessionID)
-		localPath := ag.ResolveSessionFile(sessionDir, agentSessionID)
+		localPath := resolveSessionFilePath(sessionID, ag, sessionDir)
 
 		localTime := paths.GetLastTimestampFromFile(localPath)
 		checkpointTime := paths.GetLastTimestampFromBytes(content.Transcript)

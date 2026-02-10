@@ -655,28 +655,16 @@ func extractSessionIDFromMetadata(metadataDir string) string {
 }
 
 func restoreSessionTranscript(transcriptFile, sessionID string, agent agentpkg.Agent) error {
-	// Get repo root for agent's session directory lookup
-	// Use repo root instead of CWD because agents store sessions per-repo,
-	// and running from a subdirectory would look up the wrong session directory
-	repoRoot, err := paths.RepoRoot()
+	sessionFile, err := resolveTranscriptPath(sessionID, agent)
 	if err != nil {
-		return fmt.Errorf("failed to get repository root: %w", err)
+		return err
 	}
 
-	// Get agent's session storage directory
-	sessionDir, err := agent.GetSessionDir(repoRoot)
-	if err != nil {
-		return fmt.Errorf("failed to get agent session directory: %w", err)
-	}
-
-	// Ensure session directory exists
-	if err := os.MkdirAll(sessionDir, 0o750); err != nil {
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
 		return fmt.Errorf("failed to create agent session directory: %w", err)
 	}
 
-	// Resolve the agent's session file path (agent-specific naming conventions)
-	agentSessionID := agent.ExtractAgentSessionID(sessionID)
-	sessionFile := agent.ResolveSessionFile(sessionDir, agentSessionID)
 	fmt.Fprintf(os.Stderr, "Copying transcript:\n  From: %s\n  To: %s\n", transcriptFile, sessionFile)
 	if err := copyFile(transcriptFile, sessionFile); err != nil {
 		return fmt.Errorf("failed to copy transcript: %w", err)
@@ -731,32 +719,48 @@ func restoreSessionTranscriptFromShadow(commitHash, metadataDir, sessionID strin
 
 // writeTranscriptToAgentSession writes transcript content to the agent's session storage.
 func writeTranscriptToAgentSession(content []byte, sessionID string, agent agentpkg.Agent) (string, error) {
-	// Get repo root for agent's session directory lookup
-	repoRoot, err := paths.RepoRoot()
+	sessionFile, err := resolveTranscriptPath(sessionID, agent)
 	if err != nil {
-		return "", fmt.Errorf("failed to get repository root: %w", err)
+		return "", err
 	}
 
-	// Get agent's session storage directory
-	agentSessionDir, err := agent.GetSessionDir(repoRoot)
-	if err != nil {
-		return "", fmt.Errorf("failed to get agent session directory: %w", err)
-	}
-
-	// Ensure session directory exists
-	if err := os.MkdirAll(agentSessionDir, 0o750); err != nil {
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
 		return "", fmt.Errorf("failed to create agent session directory: %w", err)
 	}
 
-	// Resolve the agent's session file path (agent-specific naming conventions)
-	agentSessionID := agent.ExtractAgentSessionID(sessionID)
-	sessionFile := agent.ResolveSessionFile(agentSessionDir, agentSessionID)
 	fmt.Fprintf(os.Stderr, "Writing transcript to: %s\n", sessionFile)
 	if err := os.WriteFile(sessionFile, content, 0o600); err != nil {
 		return "", fmt.Errorf("failed to write transcript: %w", err)
 	}
 
 	return sessionID, nil
+}
+
+// resolveTranscriptPath determines the correct file path for an agent's session transcript.
+// It first checks the session state for a transcript_path (set by the agent's hook data,
+// e.g. Gemini stores files at a hashed path that GetSessionDir can't reconstruct).
+// Falls back to GetSessionDir + ResolveSessionFile if no session state is available.
+func resolveTranscriptPath(sessionID string, agent agentpkg.Agent) (string, error) {
+	// Try session state first - it has the exact transcript path from hook data
+	state, err := strategy.LoadSessionState(sessionID)
+	if err == nil && state != nil && state.TranscriptPath != "" {
+		return state.TranscriptPath, nil
+	}
+
+	// Fall back to agent's directory + file resolution
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		return "", fmt.Errorf("failed to get repository root: %w", err)
+	}
+
+	agentSessionDir, err := agent.GetSessionDir(repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("failed to get agent session directory: %w", err)
+	}
+
+	agentSessionID := agent.ExtractAgentSessionID(sessionID)
+	return agent.ResolveSessionFile(agentSessionDir, agentSessionID), nil
 }
 
 // restoreTaskCheckpointTranscript restores a truncated transcript for a task checkpoint.
@@ -783,28 +787,16 @@ func restoreTaskCheckpointTranscript(strat strategy.Strategy, point strategy.Rew
 	// Truncate at checkpoint UUID
 	truncated := TruncateTranscriptAtUUID(transcript, checkpointUUID)
 
-	// Get repo root for agent's session directory lookup
-	// Use repo root instead of CWD because agents store sessions per-repo,
-	// and running from a subdirectory would look up the wrong session directory
-	repoRoot, err := paths.RepoRoot()
+	sessionFile, err := resolveTranscriptPath(sessionID, agent)
 	if err != nil {
-		return fmt.Errorf("failed to get repository root: %w", err)
+		return err
 	}
 
-	// Get agent's session storage directory
-	agentSessionDir, err := agent.GetSessionDir(repoRoot)
-	if err != nil {
-		return fmt.Errorf("failed to get agent session directory: %w", err)
-	}
-
-	// Ensure session directory exists
-	if err := os.MkdirAll(agentSessionDir, 0o750); err != nil {
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
 		return fmt.Errorf("failed to create agent session directory: %w", err)
 	}
 
-	// Resolve the agent's session file path (agent-specific naming conventions)
-	agentSessionID := agent.ExtractAgentSessionID(sessionID)
-	sessionFile := agent.ResolveSessionFile(agentSessionDir, agentSessionID)
 	fmt.Fprintf(os.Stderr, "Writing truncated transcript to: %s\n", sessionFile)
 
 	if err := writeTranscript(sessionFile, truncated); err != nil {

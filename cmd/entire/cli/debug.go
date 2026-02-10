@@ -336,7 +336,7 @@ func getFileChanges() ([]string, []string, []string, []string, error) {
 
 // findTranscriptForSession attempts to find the transcript file for a session.
 // Returns the path if found, empty string if not found, or error on failure.
-func findTranscriptForSession(sessionID, repoRoot string) (string, error) {
+func findTranscriptForSession(sessionID, _ string) (string, error) {
 	// Try to get agent type from session state
 	sessionState, err := strategy.LoadSessionState(sessionID)
 	if err != nil {
@@ -353,17 +353,12 @@ func findTranscriptForSession(sessionID, repoRoot string) (string, error) {
 		return "", fmt.Errorf("failed to get agent from sessionID: %s", sessionID)
 	}
 
-	// Get the session directory for this agent
-	sessionDir, err := ag.GetSessionDir(repoRoot)
+	// Resolve transcript path (checks session state's transcript_path first,
+	// falls back to agent's GetSessionDir + ResolveSessionFile)
+	transcriptPath, err := resolveTranscriptPath(sessionID, ag)
 	if err != nil {
-		return "", fmt.Errorf("failed to get session dir: %w", err)
+		return "", fmt.Errorf("failed to resolve transcript path: %w", err)
 	}
-
-	// Extract the agent-specific session ID (removes date prefix)
-	agentSessionID := ag.ExtractAgentSessionID(sessionID)
-
-	// Resolve the transcript path using agent-specific naming conventions
-	transcriptPath := ag.ResolveSessionFile(sessionDir, agentSessionID)
 
 	// Check if it exists
 	if _, err := os.Stat(transcriptPath); err != nil {

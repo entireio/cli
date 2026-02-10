@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -480,9 +481,12 @@ func resumeSession(sessionID string, checkpointID id.CheckpointID, force bool) e
 // resumeSingleSession restores a single session (fallback when multi-session restore fails).
 // Always overwrites existing session logs to ensure consistency with checkpoint state.
 // If force is false, prompts for confirmation when local log has newer timestamps.
-func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, checkpointID id.CheckpointID, sessionDir, repoRoot string, force bool) error {
+func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, checkpointID id.CheckpointID, _, repoRoot string, force bool) error {
 	agentSessionID := ag.ExtractAgentSessionID(sessionID)
-	sessionLogPath := ag.ResolveSessionFile(sessionDir, agentSessionID)
+	sessionLogPath, err := resolveTranscriptPath(sessionID, ag)
+	if err != nil {
+		return fmt.Errorf("failed to resolve transcript path: %w", err)
+	}
 
 	if checkpointID.IsEmpty() {
 		logging.Debug(ctx, "resume session: empty checkpoint ID",
@@ -536,6 +540,11 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, 
 				return nil
 			}
 		}
+	}
+
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(sessionLogPath), 0o750); err != nil {
+		return fmt.Errorf("failed to create session directory: %w", err)
 	}
 
 	// Create an AgentSession with the native data
