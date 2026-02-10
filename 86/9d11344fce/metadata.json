@@ -3,7 +3,7 @@
   "checkpoint_id": "869d11344fce",
   "strategy": "manual-commit",
   "branch": "gtrrz-victor/add-cli-version-metadatajsons",
-  "checkpoints_count": 10,
+  "checkpoints_count": 13,
   "files_touched": [
     ".goreleaser.yaml",
     "cmd/entire/cli/buildinfo/buildinfo.go",
@@ -12,6 +12,8 @@
     "cmd/entire/cli/integration_test/cli_version_metadata_test.go",
     "cmd/entire/cli/root.go",
     "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go",
     "cmd/entire/cli/strategy/auto_commit.go",
     "cmd/entire/cli/strategy/manual_commit_session.go",
     "cmd/entire/cli/versioncheck/versioncheck.go",
@@ -33,13 +35,20 @@
       "context": "/86/9d11344fce/1/context.md",
       "content_hash": "/86/9d11344fce/1/content_hash.txt",
       "prompt": "/86/9d11344fce/1/prompt.txt"
+    },
+    {
+      "metadata": "/86/9d11344fce/2/metadata.json",
+      "transcript": "/86/9d11344fce/2/full.jsonl",
+      "context": "/86/9d11344fce/2/context.md",
+      "content_hash": "/86/9d11344fce/2/content_hash.txt",
+      "prompt": "/86/9d11344fce/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 126,
-    "cache_creation_tokens": 389486,
-    "cache_read_tokens": 9836454,
-    "output_tokens": 6284,
-    "api_call_count": 104
+    "input_tokens": 147,
+    "cache_creation_tokens": 454060,
+    "cache_read_tokens": 10683891,
+    "output_tokens": 7793,
+    "api_call_count": 119
   }
 }
