@@ -411,7 +411,15 @@ func (s *GitStore) findSessionIndex(basePath string, existingSummary *Checkpoint
 		path := fmt.Sprintf("%s%d/%s", basePath, i, paths.MetadataFileName)
 		if entry, exists := entries[path]; exists {
 			meta, err := s.readMetadataFromBlob(entry.Hash)
-			if err == nil && meta.SessionID == sessionID {
+			if err != nil {
+				logging.Warn(context.Background(), "failed to read session metadata during dedup check",
+					slog.Int("session_index", i),
+					slog.String("session_id", sessionID),
+					slog.String("error", err.Error()),
+				)
+				continue
+			}
+			if meta.SessionID == sessionID {
 				return i
 			}
 		}
