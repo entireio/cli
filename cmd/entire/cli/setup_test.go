@@ -935,7 +935,7 @@ func TestFindInstalledAgent_ReturnsAgent(t *testing.T) {
 			t.Error("findInstalledAgent() returned nil agent and nil error")
 		}
 		output := buf.String()
-		if !strings.Contains(output, "No AI agents found") {
+		if !strings.Contains(output, "No AI agents with hook support found in PATH") {
 			t.Errorf("expected helpful error message, got: %s", output)
 		}
 	}
