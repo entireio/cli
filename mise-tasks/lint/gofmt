@@ -1,4 +1,4 @@
 #!/bin/sh
 #MISE description="Lint gofmt"
 
-gofmt -l -s -w .
+gofmt -d -s .
