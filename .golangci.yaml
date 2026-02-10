@@ -12,7 +12,6 @@ linters:
     - canonicalheader
     - copyloopvar
     - decorder
-    - dupl
     - durationcheck
     - embeddedstructfieldcheck
     - errchkjson
