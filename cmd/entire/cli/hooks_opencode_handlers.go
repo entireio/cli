@@ -26,21 +26,26 @@ func handleOpenCodePromptSubmit() error {
 		return fmt.Errorf("failed to parse hook input: %w", err)
 	}
 
+	sessionID := input.SessionID
+	if sessionID == "" {
+		sessionID = unknownSessionID
+	}
+
 	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
 	logging.Info(logCtx, "prompt-submit",
 		slog.String("hook", "prompt-submit"),
 		slog.String("hook_type", "agent"),
-		slog.String("model_session_id", input.SessionID),
+		slog.String("model_session_id", sessionID),
 	)
 
-	if err := CapturePrePromptState(input.SessionID, input.SessionRef); err != nil {
+	if err := CapturePrePromptState(sessionID, input.SessionRef); err != nil {
 		return err
 	}
 
 	strat := GetStrategy()
 	if initializer, ok := strat.(strategy.SessionInitializer); ok {
 		agentType := ag.Type()
-		if err := initializer.InitializeSession(input.SessionID, agentType, input.SessionRef, input.UserPrompt); err != nil {
+		if err := initializer.InitializeSession(sessionID, agentType, input.SessionRef, input.UserPrompt); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to initialize session state: %v\n", err)
 		}
 	}
@@ -152,6 +157,17 @@ func handleOpenCodeStop() error { //nolint:maintidx // mirrors Claude/Gemini han
 	relNewFiles := FilterAndNormalizePaths(newFiles, repoRoot)
 	relDeletedFiles := FilterAndNormalizePaths(deletedFiles, repoRoot)
 
+	// Get git author for commit authorship
+	author, err := GetGitAuthor()
+	if err != nil {
+		return fmt.Errorf("failed to get git author: %w", err)
+	}
+
+	strat := GetStrategy()
+	if err := strat.EnsureSetup(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
+	}
+
 	ctx := strategy.SaveContext{
 		SessionID:      sessionID,
 		ModifiedFiles:  relModifiedFiles,
@@ -160,6 +176,8 @@ func handleOpenCodeStop() error { //nolint:maintidx // mirrors Claude/Gemini han
 		MetadataDir:    sessionDir,
 		MetadataDirAbs: sessionDirAbs,
 		CommitMessage:  commitMessage,
+		AuthorName:     author.Name,
+		AuthorEmail:    author.Email,
 		AgentType:      ag.Type(),
 	}
 
@@ -168,13 +186,17 @@ func handleOpenCodeStop() error { //nolint:maintidx // mirrors Claude/Gemini han
 		ctx.StepTranscriptStart = preState.StepTranscriptStart
 	}
 
-	strat := GetStrategy()
 	if err := strat.SaveChanges(ctx); err != nil {
 		return fmt.Errorf("failed to save changes: %w", err)
 	}
 
 	// Transition session phase: ACTIVE → IDLE (or ACTIVE_COMMITTED → IDLE with condensation)
 	transitionSessionTurnEnd(sessionID)
+
+	// Clean up pre-prompt state
+	if err := CleanupPrePromptState(sessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", err)
+	}
 
 	return nil
 }

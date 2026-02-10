@@ -123,6 +123,10 @@ func (o *OpenCodeAgent) ParseHookInput(hookType agent.HookType, reader io.Reader
 	}
 
 	if v, ok := raw["session_id"].(string); ok {
+		// Validate session ID to prevent path traversal
+		if err := validateSessionID(v); err != nil {
+			return nil, fmt.Errorf("invalid session_id: %w", err)
+		}
 		input.SessionID = v
 	}
 	if v, ok := raw["session_ref"].(string); ok {
@@ -133,6 +137,22 @@ func (o *OpenCodeAgent) ParseHookInput(hookType agent.HookType, reader io.Reader
 	}
 
 	return input, nil
+}
+
+// validateSessionID validates that the session ID is safe for use in file paths.
+// It rejects IDs containing path separators or traversal sequences.
+func validateSessionID(sessionID string) error {
+	if sessionID == "" {
+		return nil // Empty is allowed (will fall back to unknownSessionID later)
+	}
+	// Reject path separators and traversal attempts
+	if strings.Contains(sessionID, "/") || strings.Contains(sessionID, "\\") {
+		return errors.New("session ID contains path separator")
+	}
+	if strings.Contains(sessionID, "..") {
+		return errors.New("session ID contains path traversal sequence")
+	}
+	return nil
 }
 
 // GetSessionID returns SessionID from input.
@@ -258,13 +278,13 @@ export default async function() {
       try {
         if (e?.type === 'chat.message' && e.sessionID) {
           const p = Bun.spawn(['entire', 'hooks', 'opencode', 'prompt-submit'], {
-            stdin: JSON.stringify({ session_id: e.sessionID, prompt: e.properties?.message?.content || '' })
+            stdin: new Blob([JSON.stringify({ session_id: e.sessionID, prompt: e.properties?.message?.content || '' })])
           });
           await p.exited;
         }
         if (e?.type === 'session.status' && e.properties?.status?.type === 'idle' && e.sessionID) {
           const p = Bun.spawn(['entire', 'hooks', 'opencode', 'stop'], {
-            stdin: JSON.stringify({ session_id: e.sessionID })
+            stdin: new Blob([JSON.stringify({ session_id: e.sessionID })])
           });
           await p.exited;
         }

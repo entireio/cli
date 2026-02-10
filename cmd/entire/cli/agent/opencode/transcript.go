@@ -26,8 +26,12 @@ type exportData struct {
 
 type exportMessage struct {
 	Info struct {
-		ID     string `json:"id"`
-		Role   string `json:"role"`
+		ID   string `json:"id"`
+		Role string `json:"role"`
+		Time struct {
+			Created   int64 `json:"created"`
+			Completed int64 `json:"completed,omitempty"`
+		} `json:"time"`
 		Tokens struct {
 			Input     int `json:"input"`
 			Output    int `json:"output"`
@@ -74,6 +78,12 @@ func ExportSession(sessionID string) ([]byte, error) {
 	return output, nil
 }
 
+// TranscriptLineWithTime represents a transcript line with its creation timestamp.
+type TranscriptLineWithTime struct {
+	Line      TranscriptLine
+	CreatedAt time.Time
+}
+
 // ConvertExportToJSONL converts OpenCode export JSON to JSONL format compatible with Entire.
 func ConvertExportToJSONL(exportJSON []byte) ([]byte, error) {
 	var data exportData
@@ -81,16 +91,23 @@ func ConvertExportToJSONL(exportJSON []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse export data: %w", err)
 	}
 
-	var lines []TranscriptLine
+	var lines []TranscriptLineWithTime
 	for _, msg := range data.Messages {
 		line, err := convertMessageToLine(msg)
 		if err != nil {
 			continue // Skip malformed messages
 		}
-		lines = append(lines, line)
+		createdAt := time.Now()
+		if msg.Info.Time.Created > 0 {
+			createdAt = time.Unix(msg.Info.Time.Created, 0)
+		}
+		lines = append(lines, TranscriptLineWithTime{
+			Line:      line,
+			CreatedAt: createdAt,
+		})
 	}
 
-	return SerializeTranscript(lines)
+	return SerializeTranscriptWithTime(lines)
 }
 
 // convertMessageToLine converts an OpenCode export message to a transcript line.
@@ -125,7 +142,11 @@ func convertMessageToLine(msg exportMessage) (TranscriptLine, error) {
 				}
 			case "tool":
 				if part.Tool != "" && part.State != nil {
-					inputJSON, _ := json.Marshal(part.State.Input)
+					inputJSON, err := json.Marshal(part.State.Input)
+					if err != nil {
+						// Skip tool calls with non-serializable input
+						continue
+					}
 					contentBlocks = append(contentBlocks, transcript.ContentBlock{
 						Type:  "tool_use",
 						Name:  part.Tool,
@@ -146,6 +167,10 @@ func convertMessageToLine(msg exportMessage) (TranscriptLine, error) {
 				"cache_read_input_tokens":     msg.Info.Tokens.Cache.Read,
 			},
 		}
+
+	default:
+		// Skip unknown roles (system, tool, etc.)
+		return TranscriptLine{}, fmt.Errorf("unknown message role: %s", msg.Info.Role)
 	}
 
 	msgJSON, err := json.Marshal(messageContent)
@@ -171,6 +196,18 @@ func ReconstructTranscript(sessionID string) ([]byte, error) {
 
 // SerializeTranscript converts transcript lines to JSONL bytes.
 func SerializeTranscript(lines []TranscriptLine) ([]byte, error) {
+	var linesWithTime []TranscriptLineWithTime
+	for _, line := range lines {
+		linesWithTime = append(linesWithTime, TranscriptLineWithTime{
+			Line:      line,
+			CreatedAt: time.Now(),
+		})
+	}
+	return SerializeTranscriptWithTime(linesWithTime)
+}
+
+// SerializeTranscriptWithTime converts transcript lines with timestamps to JSONL bytes.
+func SerializeTranscriptWithTime(lines []TranscriptLineWithTime) ([]byte, error) {
 	var buf bytes.Buffer
 	for _, line := range lines {
 		lineWithTimestamp := struct {
@@ -179,10 +216,10 @@ func SerializeTranscript(lines []TranscriptLine) ([]byte, error) {
 			Message   json.RawMessage `json:"message"`
 			Timestamp string          `json:"timestamp"`
 		}{
-			Type:      line.Type,
-			UUID:      line.UUID,
-			Message:   line.Message,
-			Timestamp: time.Now().Format(time.RFC3339),
+			Type:      line.Line.Type,
+			UUID:      line.Line.UUID,
+			Message:   line.Line.Message,
+			Timestamp: line.CreatedAt.Format(time.RFC3339),
 		}
 
 		data, err := json.Marshal(lineWithTimestamp)
