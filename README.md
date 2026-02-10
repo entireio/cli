@@ -100,25 +100,26 @@ Entire offers two strategies for capturing your work:
 | ---------------- | ----------------------------------------------------------------------------- |
 | `entire clean`   | Remove orphaned entire's data that wasn't cleaned up automatically            |
 | `entire disable` | Remove Entire hooks from repository                                           |
+| `entire doctor`  | Fix or clean up stuck sessions                                                |
 | `entire enable`  | Enable Entire in your repository (uses `manual-commit` by default)            |
 | `entire explain` | Explain a session or commit                                                   |
 | `entire reset`   | Delete the shadow branch and session state for the current HEAD commit        |
 | `entire resume`  | Resume a previous session                                                     |
 | `entire rewind`  | Rewind to a previous checkpoint                                               |
-| `entire session` | View and manage sessions (list, show details, view logs)                      |
 | `entire status`  | Show current session and strategy info                                        |
 | `entire version` | Show Entire CLI version                                                       |
 
 ### `entire enable` Flags
 
-| Flag                | Description                                                        |
-| ------------------- | ------------------------------------------------------------------ |
-| `--agent <name>`    | AI agent to integrate with: `claude-code` (default) or `gemini`    |
-| `--strategy <name>` | Strategy to use: `manual-commit` (default) or `auto-commit`        |
-| `--force`, `-f`     | Force reinstall hooks (removes existing Entire hooks first)        |
-| `--local`           | Write settings to `settings.local.json` instead of `settings.json` |
-| `--project`         | Write settings to `settings.json` even if it already exists        |
-| `--telemetry=false` | Disable anonymous usage analytics                                  |
+| Flag                   | Description                                                        |
+|------------------------|--------------------------------------------------------------------|
+| `--agent <name>`       | AI agent to setup hooks for: `claude-code` (default) or `gemini`   |
+| `--force`, `-f`        | Force reinstall hooks (removes existing Entire hooks first)        |
+| `--local`              | Write settings to `settings.local.json` instead of `settings.json` |
+| `--project`            | Write settings to `settings.json` even if it already exists        |
+| `--skip-push-sessions` | Disable automatic pushing of session logs on git push              |
+| `--strategy <name>`    | Strategy to use: `manual-commit` (default) or `auto-commit`        |
+| `--telemetry=false`    | Disable anonymous usage analytics                                  |
 
 **Examples:**
 
@@ -162,14 +163,14 @@ Personal overrides, gitignored by default:
 
 ### Configuration Options
 
-| Option                                 | Values                           | Description                                    |
-| -------------------------------------- | -------------------------------- | ---------------------------------------------- |
-| `strategy`                             | `manual-commit`, `auto-commit`   | Session capture strategy                       |
-| `enabled`                              | `true`, `false`                  | Enable/disable Entire                          |
-| `agent`                                | `claude-code`, `gemini`, etc.    | AI agent to integrate with                     |
-| `log_level`                            | `debug`, `info`, `warn`, `error` | Logging verbosity                              |
-| `strategy_options.push_sessions`       | `true`, `false`                  | Auto-push `entire/checkpoints/v1` branch on git push |
-| `strategy_options.summarize.enabled`   | `true`, `false`                  | Auto-generate AI summaries at commit time      |
+| Option                               | Values                           | Description                                          |
+|--------------------------------------|----------------------------------|------------------------------------------------------|
+| `enabled`                            | `true`, `false`                  | Enable/disable Entire                                |
+| `log_level`                          | `debug`, `info`, `warn`, `error` | Logging verbosity                                    |
+| `strategy`                           | `manual-commit`, `auto-commit`   | Session capture strategy                             |
+| `strategy_options.push_sessions`     | `true`, `false`                  | Auto-push `entire/checkpoints/v1` branch on git push |
+| `strategy_options.summarize.enabled` | `true`, `false`                  | Auto-generate AI summaries at commit time            |
+| `telemetry`                          | `true`, `false`                  | Send anonymous usage statistics to Posthog           |
 
 ### Auto-Summarization
 
@@ -205,7 +206,7 @@ To enable:
 entire enable --agent gemini
 ```
 
-All commands (`rewind`, `status`, `session`, etc.) work the same regardless of which agent is configured.
+All commands (`rewind`, `status`, `doctor`, etc.) work the same regardless of which agent is configured.
 
 If you run into any issues with Gemini CLI integration, please [open an issue](https://github.com/entireio/cli/issues).
 
@@ -214,12 +215,11 @@ If you run into any issues with Gemini CLI integration, please [open an issue](h
 ### Common Issues
 
 | Issue                    | Solution                                                                                  |
-| ------------------------ | ----------------------------------------------------------------------------------------- |
-| "Not a git repository"   | Navigate to a git repository first                                                        |
+|--------------------------|-------------------------------------------------------------------------------------------|
+| "Not a git repository"   | Navigate to a Git repository first                                                        |
 | "Entire is disabled"     | Run `entire enable`                                                                       |
 | "No rewind points found" | Work with Claude Code and commit (manual-commit) or wait for agent response (auto-commit) |
 | "shadow branch conflict" | Run `entire reset --force`                                                                |
-| "session not found"      | Check available sessions with `entire session list`                                       |
 
 ### SSH Authentication Errors
 
@@ -232,7 +232,7 @@ Failed to fetch metadata: failed to fetch entire/checkpoints/v1 from origin: ssh
 This is a [known issue with go-git's SSH handling](https://github.com/go-git/go-git/issues/411). Fix it by adding GitHub's host keys to your known_hosts file:
 
 ```
-ssh-keyscan -t rsa github.com > ~/.ssh/known_hosts
+ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
 ssh-keyscan -t ecdsa github.com >> ~/.ssh/known_hosts
 ```
 
@@ -314,7 +314,6 @@ mise run fmt
 
 - `cmd/entire/` - Main CLI entry point
 - `cmd/entire/cli/` - CLI utilities and helpers
-- `cmd/entire/cli/commands/` - Command implementations
 - `cmd/entire/cli/strategy/` - Session checkpoint strategies
 - `cmd/entire/cli/checkpoint/` - Checkpoint storage abstractions
 - `cmd/entire/cli/session/` - Session state management
