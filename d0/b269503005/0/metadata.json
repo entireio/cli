@@ -1,0 +1,71 @@
+{
+  "checkpoint_id": "d0b269503005",
+  "session_id": "a0927dd5-61a3-4802-a716-4480286f16d4",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-10T02:50:22.766329Z",
+  "branch": "alex/entire-explain-fixes",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 59,
+    "cache_creation_tokens": 209078,
+    "cache_read_tokens": 5118184,
+    "output_tokens": 4284,
+    "api_call_count": 55
+  },
+  "summary": {
+    "intent": "Fix a bug in `entire explain` where branch filtering breaks when a feature branch has merge commits from main, causing the commit walker to enter main's full history and silently drop older feature branch checkpoints.",
+    "outcome": "Successfully implemented first-parent commit traversal by adding a `walkFirstParentCommits` helper and replacing all `repo.Log()` calls in `getBranchCheckpoints`, `getAssociatedCommits`, and `isShadowBranchReachable`. Added three regression tests to verify checkpoints are found even after merging main into feature branches. All tests pass.",
+    "learnings": {
+      "repo": [
+        "go-git v5's LogOptions lacks a FirstParent option, requiring manual first-parent traversal",
+        "The `consecutiveMainLimit` constant (100) was a workaround for DAG traversal entering main's history after merge commits",
+        "Checkpoint trailers use `trailers.FormatCheckpoint()` to embed checkpoint IDs in commit messages",
+        "The commit walker previously used `git.LogOrderCommitterTime` which traverses ALL parents of merge commits"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 754,
+          "end_line": 787,
+          "finding": "Created `walkFirstParentCommits` helper that walks only the first-parent chain using `commit.Parent(0)`, stopping at `plumbing.ErrObjectNotFound` (root commit) or the limit"
+        },
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 803,
+          "end_line": 950,
+          "finding": "Removed `reachableFromMain` precomputation and `consecutiveMainLimit` tracking from `getBranchCheckpoints` - no longer needed with first-parent traversal"
+        },
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 777,
+          "end_line": 782,
+          "finding": "Had to restructure error handling to appease `nilerr` linter - returning nil when `Parent(0)` fails is valid (root commit reached) but required explicit handling of `plumbing.ErrObjectNotFound`"
+        }
+      ],
+      "workflow": [
+        "Use `mise run fmt \u0026\u0026 mise run lint \u0026\u0026 mise run test:ci` for full validation",
+        "The `nilerr` linter flags code paths that ignore non-nil errors, even when returning nil is semantically correct",
+        "Creating merge commits in tests requires using go-git's plumbing API with multiple ParentHashes"
+      ]
+    },
+    "friction": [
+      "Had to restructure `walkFirstParentCommits` error handling to satisfy the `nilerr` linter, even though returning nil on `Parent(0)` failure was semantically correct",
+      "Initial test implementation had unchecked error returns caught by `errcheck` linter"
+    ],
+    "open_items": []
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-10T02:50:05.715333Z",
+    "agent_lines": 460,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 460,
+    "agent_percentage": 100
+  }
+}
