@@ -89,9 +89,9 @@ Viewing specific items:
 
 Output verbosity levels (for --checkpoint):
   Default:         Detailed view with scoped prompts (ID, session, tokens, intent, prompts, files)
-  --short:         Summary only (ID, session, timestamp, tokens, intent)
-  --full:          Parsed full transcript (all prompts/responses from entire session)
-  --raw-transcript: Raw transcript file (JSONL format)
+  --short          Summary only (ID, session, timestamp, tokens, intent)
+  --full           Parsed full transcript (all prompts/responses from entire session)
+  --raw-transcript Raw transcript file (JSONL format)
 
 Summary generation (for --checkpoint):
   --generate    Generate an AI summary for the checkpoint
