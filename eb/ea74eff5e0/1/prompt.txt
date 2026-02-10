@@ -132,3 +132,19 @@ Fixes the inconsistency where `getAgent("")` errors but `ResolveAgentForRewind("
 
 
 If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+
+---
+
+Do not fallback, if session metadata does not have agent, print a warning like the session can not be restored agent is unknown
+
+---
+
+we should at least log that sessions that are skipped
+
+---
+
+that warn does not sound rigth, we are finding the sessions we will restore.
+
+---
+
+fix test

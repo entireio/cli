@@ -3,30 +3,31 @@
   "checkpoint_id": "ebea74eff5e0",
   "session_id": "aa4038a5-34b6-41e4-8541-9cca654dcbc5",
   "strategy": "manual-commit",
-  "created_at": "2026-02-10T23:33:32.245097Z",
+  "created_at": "2026-02-10T23:52:11.726307Z",
   "branch": "soph/gemini-rewind",
-  "checkpoints_count": 1,
+  "checkpoints_count": 7,
   "files_touched": [
     "cmd/entire/cli/resume.go",
-    "cmd/entire/cli/rewind.go",
-    "cmd/entire/cli/strategy/manual_commit_rewind.go",
-    "cmd/entire/cli/strategy/strategy.go"
+    "cmd/entire/cli/strategy/manual_commit_rewind.go"
   ],
   "agent": "Claude Code",
+  "transcript_identifier_at_start": "46cc7194-816d-4643-b5cd-b130b2de5501",
+  "checkpoint_transcript_start": 421,
+  "transcript_lines_at_start": 421,
   "token_usage": {
-    "input_tokens": 64,
-    "cache_creation_tokens": 109062,
-    "cache_read_tokens": 6941265,
-    "output_tokens": 5248,
-    "api_call_count": 62
+    "input_tokens": 41,
+    "cache_creation_tokens": 24212,
+    "cache_read_tokens": 4911217,
+    "output_tokens": 2620,
+    "api_call_count": 33
   },
   "initial_attribution": {
-    "calculated_at": "2026-02-10T23:33:32.126201Z",
-    "agent_lines": 145,
+    "calculated_at": "2026-02-10T23:52:11.34369Z",
+    "agent_lines": 9,
     "human_added": 0,
-    "human_modified": 0,
-    "human_removed": 0,
-    "total_committed": 145,
-    "agent_percentage": 100
+    "human_modified": 1,
+    "human_removed": 7,
+    "total_committed": 10,
+    "agent_percentage": 90
   }
 }
