@@ -141,10 +141,10 @@ func newDisableCmd() *cobra.Command {
 		Short: "Disable Entire in current project",
 		Long: `Disable Entire integrations in the current project.
 
-By default, this command will temporarily disable Entire. Hooks will exit silently and commands will
+By default, this command will disable Entire. Hooks will exit silently and commands will
 show a disabled message.
 
-To completely remove Entire from this repository, use --uninstall:
+To completely remove Entire integrations from this repository, use --uninstall:
   - .entire/ directory (settings, logs, metadata)
   - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
   - Session state files (.git/entire-sessions/)
