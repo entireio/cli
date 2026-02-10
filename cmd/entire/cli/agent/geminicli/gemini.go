@@ -173,6 +173,9 @@ func (g *GeminiCLIAgent) ExtractAgentSessionID(entireSessionID string) string {
 // SessionFileExtension returns ".json" - Gemini stores transcripts as JSON.
 func (g *GeminiCLIAgent) SessionFileExtension() string { return ".json" }
 
+// ProtectedDirs returns directories that Gemini uses for config/state.
+func (g *GeminiCLIAgent) ProtectedDirs() []string { return []string{".gemini"} }
+
 // GetSessionDir returns the directory where Gemini stores session transcripts.
 // Gemini stores sessions in ~/.gemini/tmp/<project-hash>/chats/
 func (g *GeminiCLIAgent) GetSessionDir(repoPath string) (string, error) {

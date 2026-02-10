@@ -165,6 +165,9 @@ func (c *ClaudeCodeAgent) ExtractAgentSessionID(entireSessionID string) string {
 // SessionFileExtension returns ".jsonl" - Claude stores transcripts as JSONL.
 func (c *ClaudeCodeAgent) SessionFileExtension() string { return ".jsonl" }
 
+// ProtectedDirs returns directories that Claude uses for config/state.
+func (c *ClaudeCodeAgent) ProtectedDirs() []string { return []string{".claude"} }
+
 // GetSessionDir returns the directory where Claude stores session transcripts.
 func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
 	// Check for test environment override

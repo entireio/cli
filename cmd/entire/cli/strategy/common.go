@@ -194,19 +194,24 @@ const (
 	DefaultAgentType = agent.AgentTypeUnknown
 )
 
-// protectedDirs are directories that should never be modified or deleted during
-// rewind, file collection, or other destructive operations. These include git
-// internals, the entire metadata directory, and agent config directories.
-var protectedDirs = []string{gitDir, entireDir, ".claude", ".gemini"}
-
-// isProtectedPath returns true if relPath is inside a protected directory.
+// isProtectedPath returns true if relPath is inside a directory that should
+// never be modified or deleted during rewind or other destructive operations.
+// Protected directories include git internals, entire metadata, and all
+// registered agent config directories.
 func isProtectedPath(relPath string) bool {
-	for _, dir := range protectedDirs {
+	for _, dir := range protectedDirs() {
 		if relPath == dir || strings.HasPrefix(relPath, dir+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+// protectedDirs returns the list of directories to protect. This combines
+// static infrastructure dirs with agent-reported dirs from the registry.
+func protectedDirs() []string {
+	dirs := []string{gitDir, entireDir}
+	return append(dirs, agent.AllProtectedDirs()...)
 }
 
 // isSpecificAgentType returns true if the agent type is a known, specific value

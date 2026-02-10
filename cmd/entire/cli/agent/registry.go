@@ -116,6 +116,25 @@ func GetByAgentType(agentType AgentType) (Agent, error) {
 	return nil, fmt.Errorf("unknown agent type: %s", agentType)
 }
 
+// AllProtectedDirs returns the union of ProtectedDirs from all registered agents.
+func AllProtectedDirs() []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	seen := make(map[string]struct{})
+	var dirs []string
+	for _, factory := range registry {
+		for _, d := range factory().ProtectedDirs() {
+			if _, ok := seen[d]; !ok {
+				seen[d] = struct{}{}
+				dirs = append(dirs, d)
+			}
+		}
+	}
+	slices.Sort(dirs)
+	return dirs
+}
+
 // Default returns the default agent.
 // Returns nil if the default agent is not registered.
 //

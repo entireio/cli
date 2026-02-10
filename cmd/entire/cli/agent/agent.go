@@ -42,6 +42,11 @@ type Agent interface {
 	// ExtractAgentSessionID extracts agent session ID from Entire ID
 	ExtractAgentSessionID(entireSessionID string) string
 
+	// ProtectedDirs returns repo-root-relative directories that should never be
+	// modified or deleted during rewind or other destructive operations.
+	// Examples: [".claude"] for Claude, [".gemini"] for Gemini.
+	ProtectedDirs() []string
+
 	// GetSessionDir returns where agent stores session data for this repo.
 	// Examples:
 	//   Claude: ~/.claude/projects/<sanitized-repo-path>/
