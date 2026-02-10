@@ -207,7 +207,7 @@ var currentHookAgentName agent.AgentName
 // Falls back to GetAgent() if not in a hook context.
 //
 
-func GetCurrentHookAgent() (agent.Agent, error) { //nolint:ireturn // already present in codebase
+func GetCurrentHookAgent() (agent.Agent, error) {
 	if currentHookAgentName == "" {
 		return nil, errors.New("not in a hook context: agent name not set")
 	}

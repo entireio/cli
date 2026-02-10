@@ -30,7 +30,7 @@ import (
 const unknownSessionID = "unknown"
 
 // getAgent returns an agent by type
-func getAgent(agentType agentpkg.AgentType) (agentpkg.Agent, error) { //nolint:ireturn // already present in codebase
+func getAgent(agentType agentpkg.AgentType) (agentpkg.Agent, error) {
 	if agentType == "" {
 		return nil, errors.New("agent type cannot be empty")
 	}
