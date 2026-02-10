@@ -1,0 +1,15 @@
+{
+  "checkpoint_id": "de22551397e1",
+  "session_id": "2026-01-20-20b81bf8-77cd-4205-8ac9-727b573a70e4",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-20T17:11:34.105691+01:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/geminicli/transcript_test.go",
+    "cmd/entire/cli/agent/geminicli/types.go",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go"
+  ],
+  "agent": "Claude Code"
+}

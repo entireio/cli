@@ -1,0 +1,27 @@
+{
+  "checkpoint_id": "7be20d70c73b",
+  "strategy": "manual-commit",
+  "branch": "alex/entire-clean-fixes",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/clean.go",
+    "cmd/entire/cli/sessions_fix.go",
+    "cmd/entire/cli/strategy/cleanup.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7b/e20d70c73b/0/metadata.json",
+      "transcript": "/7b/e20d70c73b/0/full.jsonl",
+      "context": "/7b/e20d70c73b/0/context.md",
+      "content_hash": "/7b/e20d70c73b/0/content_hash.txt",
+      "prompt": "/7b/e20d70c73b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 5613,
+    "cache_creation_tokens": 350425,
+    "cache_read_tokens": 10296710,
+    "output_tokens": 5870,
+    "api_call_count": 94
+  }
+}

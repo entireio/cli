@@ -1,0 +1,112 @@
+Right now, we are prefixing the entire session id with date+agent session. I think this is unstable so there is no way to know the entire session id with just agent session id.
+What alternatives do you propose me ?
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# Session ID Simplification: Use Agent Session ID Directly
+
+## Problem
+
+**Current format**: `YYYY-MM-DD-<agent-session-uuid>`
+Example: `2026-01-28-f736da47-b2ca-4f86-bb32-a1bbe582e464`
+
+**Issue**: Given only the agent session ID, you cannot deterministically derive the entire session ID because the date prefix is generated at runtime with `time.Now()`.
+
+## Solution
+
+**Use the agent session ID directly as the entire session ID** (identity function).
+
+```go
+// Before
+func EntireSessionID(agentSessionUUID string) string {
+    return time.Now().Format("2006-01-02") + "-" + agentSessionUUID
+}
+
+// After
+func EntireSessionID(agentSessionUUID string) string {
+    return agentSessionUUID
+}
+```
+
+**Benefits**:
+- Fully deterministic: agent ID = entire ID
+- Simplifies codebase significantly
+- No file lookups required to find session ID
+
+---
+
+## Implementation Plan
+
+### Step 1: Simplify `sessionid` package
+**File**: `cmd/entire/cli/sessionid/sessionid.go`
+
+- `EntireSessionID()` → return input unchanged
+- `ModelSessionID()` → return input unchanged (no conversion needed)
+
+### Step 2: Delete `GetOrCreateEntireSessionID`
+**File**: `cmd/entire/cli/session/state.go`
+
+- Remove `GetOrCreateEntireSessionID()` function entirely
+- Callers will use agent session ID directly
+
+### Step 3: Simplify hook handlers
+**File**: `cmd/entire/cli/hooks_claudecode_handlers.go`
+
+- `handleSessionStart()`: use agent session ID directly
+- Remove `currentSessionIDWithFallback()` complexity
+
+### Step 4: Update agent implementations
+**Files**:
+- `cmd/entire/cli/agent/claudecode/claude.go`
+- `cmd/entire/cli/agent/gemini/gemini.go`
+- `cmd/entire/cli/agent/cursor/cursor.go`
+
+- `TransformSessionID()` → return input unchanged
+- `ExtractAgentSessionID()` → return input unchanged
+
+### Step 5: Update validation
+**File**: `cmd/entire/cli/validation/validation.go`
+
+- `ValidateSessionID()` → validate UUID format only
+
+### Step 6: Update tests
+**Files**: `*_test.go` in affected packages
+
+- Update test expectations for new format
+- Remove old date-prefix test cases
+
+---
+
+## Files to Modify
+
+| File | Change |
+|------|--------|
+| `cmd/entire/cli/sessionid/sessionid.go` | Return input unchanged |
+| `cmd/entire/cli/sessionid/sessionid_test.go` | Update tests |
+| `cmd/entire/cli/session/state.go` | Delete `GetOrCreateEntireSessionID` |
+| `cmd/entire/cli/session/state_test.go` | Remove related tests |
+| `cmd/entire/cli/hooks_claudecode_handlers.go` | Simplify to use agent ID directly |
+| `cmd/entire/cli/agent/claudecode/claude.go` | Return input unchanged |
+| `cmd/entire/cli/agent/gemini/gemini.go` | Return input unchanged |
+| `cmd/entire/cli/agent/cursor/cursor.go` | Return input unchanged |
+| `cmd/entire/cli/validation/validation.go` | Validate UUID format only |
+
+---
+
+## Verification
+
+1. Run tests: `mise run test`
+2. Run integration tests: `mise run test:integration`
+3. Manual test:
+   - Start a new session → verify session ID = agent UUID
+   - Rewind/resume old session with date prefix → verify backwards compat
+   - Create checkpoint → verify storage paths use new format
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl

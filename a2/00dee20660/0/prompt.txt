@@ -1,0 +1,5 @@
+when doing `entire resume` we might flag to the user he should also pull `entire/sessions` can we just do this automatically instead?
+
+---
+
+can you check, I think this might be duplicated now in the code base: Added FetchMetadataBranch() function

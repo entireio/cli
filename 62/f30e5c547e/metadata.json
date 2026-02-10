@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "62f30e5c547e",
+  "strategy": "manual-commit",
+  "branch": "soph/update-sessions-and-checkpoints-doc",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/architecture/sessions-and-checkpoints.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/62/f30e5c547e/0/metadata.json",
+      "transcript": "/62/f30e5c547e/0/full.jsonl",
+      "context": "/62/f30e5c547e/0/context.md",
+      "content_hash": "/62/f30e5c547e/0/content_hash.txt",
+      "prompt": "/62/f30e5c547e/0/prompt.txt"
+    },
+    {
+      "metadata": "/62/f30e5c547e/1/metadata.json",
+      "transcript": "/62/f30e5c547e/1/full.jsonl",
+      "context": "/62/f30e5c547e/1/context.md",
+      "content_hash": "/62/f30e5c547e/1/content_hash.txt",
+      "prompt": "/62/f30e5c547e/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 29,
+    "cache_creation_tokens": 150480,
+    "cache_read_tokens": 1620376,
+    "output_tokens": 556,
+    "api_call_count": 23
+  }
+}

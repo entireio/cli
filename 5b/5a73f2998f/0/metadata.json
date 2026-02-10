@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "5b5a73f2998f",
+  "session_id": "1e0816ef-6f89-4f05-b331-dab09bb14485",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-01T03:58:04.79344Z",
+  "branch": "alex/ent-96-auto-summaries",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/plans/2026-02-01-auto-summarise-design.md",
+    "docs/plans/2026-02-01-auto-summarise-impl.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "8db327f7-3e22-403e-bfbd-d2b70655968d",
+  "transcript_lines_at_start": 147,
+  "token_usage": {
+    "input_tokens": 266,
+    "cache_creation_tokens": 512112,
+    "cache_read_tokens": 5255273,
+    "output_tokens": 297,
+    "api_call_count": 60
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-01T03:58:04.665709Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 2,
+    "human_removed": 804,
+    "total_committed": 2,
+    "agent_percentage": 0
+  }
+}

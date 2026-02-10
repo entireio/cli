@@ -1,0 +1,71 @@
+{
+  "checkpoint_id": "1e364a51eda4",
+  "session_id": "e0cf01c8-a5c1-4d96-8137-81b8c2be9359",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-08T11:59:32.377242Z",
+  "branch": "alex/ent-221-phase-aware-git-hooks",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "fbff6382-1aca-4552-bf45-e3a85ade5443",
+  "checkpoint_transcript_start": 224,
+  "transcript_lines_at_start": 224,
+  "token_usage": {
+    "input_tokens": 102,
+    "cache_creation_tokens": 352438,
+    "cache_read_tokens": 10399365,
+    "output_tokens": 3397,
+    "api_call_count": 93
+  },
+  "summary": {
+    "intent": "Commit and push bug fixes, then respond to PR review comments from cursor[bot] about issues in the PostCommit/TurnEnd condensation logic.",
+    "outcome": "Successfully committed initial fix (97ce79e9), then addressed two legitimate bugs identified in review: PendingCheckpointID not being preserved during ActionMigrateShadowBranch, and unsafe shadow branch deletion in handleTurnEndCondense. Fixed both issues with tests and pushed (b5e924cd).",
+    "learnings": {
+      "repo": [
+        "The state machine test suite verified transition correctness but missed integration-layer wiring - the state machine emitted ActionCondense correctly but transitionSessionTurnEnd didn't dispatch it",
+        "PostCommit and TurnEnd have parallel condensation paths that must maintain consistent safety checks (hasOtherActiveSessionsOnBranch) and state management (PendingCheckpointID)",
+        "Shadow branch lifecycle requires checking for concurrent sessions sharing the same BaseCommit before deletion to avoid deleting branches out from under active sessions"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 230,
+          "finding": "ActionMigrateShadowBranch defers condensation but must store checkpointID into state.PendingCheckpointID so handleTurnEndCondense reuses it instead of generating a new ID that mismatches the commit trailer"
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 280,
+          "finding": "handleTurnEndCondense must check hasOtherActiveSessionsOnBranch() before deleting shadow branches, matching the safety pattern used in PostCommit's condensation path"
+        }
+      ],
+      "workflow": [
+        "Testing at the wrong layer can give false confidence - unit tests on state machine transitions don't guarantee the caller dispatches the returned actions",
+        "Bot review comments flagged two real bugs that would cause checkpoint ID mismatches and unsafe concurrent session handling",
+        "Parallel code paths (PostCommit vs TurnEnd condensation) need consistent safety invariants even when implemented separately"
+      ]
+    },
+    "friction": [
+      "Initial confusion about why existing test TurnEnd_transitions_to_IDLE_with_condense didn't catch the bug - test was at state machine layer, not integration layer",
+      "Tab/space indentation issues required re-attempting edits to match exact whitespace",
+      "Test cleanup needed extra iteration to address linter warnings about unused error variables"
+    ],
+    "open_items": [
+      "Compile-time interface checks (ENT-250) would catch missing action dispatch patterns like the transitionSessionTurnEnd bug",
+      "Comment 1 (amend handler fires for -c/-C) acknowledged as pre-existing, deferred as out of scope for current PR"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-08T11:59:16.323368Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 0,
+    "agent_percentage": 0
+  }
+}

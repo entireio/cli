@@ -1,0 +1,17 @@
+if my api key is "REDACTED" give me the build command to have a binary ready to send events
+
+---
+
+the command string send to posthog only contains the last command of cobra. if "entire session list" is sending "list" it should send "entire session list"
+
+---
+
+i do also want to send the command flags and arguments, in other words, the whole thing executed by the user
+
+---
+
+give me a build command that sets also the cli version
+
+---
+
+add a test that checks we are sending the full command

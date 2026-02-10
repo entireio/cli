@@ -1,0 +1,21 @@
+{
+  "checkpoint_id": "225c61dec745",
+  "session_id": "2026-01-28-7f78a542-6201-447a-8277-213165356894",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-28T16:05:56.754455+11:00",
+  "branch": "alex/ent-109-text-output-checkpoint-flag",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/explain.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "a3f71805-bc66-4f83-9003-48b18b6a49fb",
+  "transcript_lines_at_start": 2115,
+  "token_usage": {
+    "input_tokens": 5107,
+    "cache_creation_tokens": 2140563,
+    "cache_read_tokens": 45901093,
+    "output_tokens": 972,
+    "api_call_count": 440
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "checkpoint_id": "0ad657d807d5",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-242-worktree-status-shim",
+  "checkpoints_count": 8,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/gitutil/",
+    "cmd/entire/cli/gitutil/worktree_status.go",
+    "cmd/entire/cli/gitutil/worktree_status_test.go",
+    "cmd/entire/cli/rewind.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/worktree_status.go",
+    "cmd/entire/cli/strategy/worktree_status_test.go",
+    "cmd/entire/cli/summarize/claude.go",
+    "testfile.txt"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0a/d657d807d5/0/metadata.json",
+      "transcript": "/0a/d657d807d5/0/full.jsonl",
+      "context": "/0a/d657d807d5/0/context.md",
+      "content_hash": "/0a/d657d807d5/0/content_hash.txt",
+      "prompt": "/0a/d657d807d5/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 476,
+    "cache_creation_tokens": 1055171,
+    "cache_read_tokens": 40255596,
+    "output_tokens": 20144,
+    "api_call_count": 380
+  }
+}

@@ -1,0 +1,1060 @@
+Implement the following plan:
+
+# ENT-242: Replace go-git worktree.Status() with git CLI shim
+
+## Context
+
+go-git v5's `worktree.Status()` reads **and rewrites** the worktree index file. When called from git hook paths (post-commit, prepare-commit-msg), this rewrites the index with stale cache-tree entries that reference objects pruned by GC, causing index corruption (`fatal: unable to read <sha>`). Confirmed via instrumentation showing post-commit hook changes the index checksum.
+
+The fix: route all `worktree.Status()` calls through a shim that uses git CLI (`git status --porcelain`), which reads the index without rewriting it. The shim provides a single swap point for when go-git v6 fixes the bug.
+
+## Approach
+
+Create a new file `strategy/worktree_status.go` with two shim functions that return go-git types. All 10 call sites switch to use these shims.
+
+### New file: `cmd/entire/cli/strategy/worktree_status.go`
+
+Two exported functions:
+
+1. **`WorktreeStatus(repo *git.Repository) (git.Status, error)`**
+   - Parses `git status --porcelain -z` (NUL-delimited, handles special chars)
+   - Returns `git.Status` (= `map[string]*git.FileStatus`) with `Staging` and `Worktree` fields populated
+   - Maps porcelain XY codes to `git.StatusCode` values
+   - Handles renames/copies (R/C have two NUL-separated entries)
+   - `repo` param used to get worktree root for `cmd.Dir`; also makes future swap-back trivial
+   - Status code mapping: `' '→Unmodified, M→Modified, A→Added, D→Deleted, R→Renamed, C→Copied, ?→Untracked, U→UpdatedButUnmerged, T→Modified`
+
+2. **`StagedFileNames(repo *git.Repository) ([]string, error)`**
+   - Uses `git diff --cached --name-only -z` (lightweight, staging-only query)
+   - Returns just file names, no status parsing
+   - Used by `getStagedFiles()` which only needs names
+
+Both functions include a swap-back comment:
+```go
+// When go-git v6 fixes index corruption (ENT-242), swap to:
+//   w, _ := repo.Worktree(); return w.Status()
+```
+
+### New file: `cmd/entire/cli/strategy/worktree_status_test.go`
+
+Test the porcelain parsing logic:
+- Standard modified/added/deleted/untracked entries
+- Rename entries (two NUL-separated paths)
+- Mixed staged + worktree changes
+- Empty output (clean worktree)
+
+### Call site updates (10 sites)
+
+**`strategy/` package (4 sites) — use directly:**
+
+| File | Line | Function | Change |
+|------|------|----------|--------|
+| `manual_commit_hooks.go` | 982 | `getStagedFiles()` | Replace body with `StagedFileNames(repo)` |
+| `manual_commit_hooks.go` | 936 | `calculatePromptAttributionAtStart()` | `worktree.Status()` → `WorktreeStatus(repo)` |
+| `common.go` | 667 | `checkCanRewind()` | `worktree.Status()` → `WorktreeStatus(repo)` |
+| `common.go` | 733 | `checkCanRewindWithWarning()` | `worktree.Status()` → `WorktreeStatus(repo)` |
+
+**`cli/` package (6 sites) — call via `strategy.WorktreeStatus()`:**
+
+| File | Line | Function | Change |
+|------|------|----------|--------|
+| `state.go` | 214 | `ComputeFileChanges()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+| `state.go` | 283 | `ComputeDeletedFiles()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+| `state.go` | 344 | `getUntrackedFilesForState()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+| `state.go` | 546 | `DetectChangedFiles()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+| `rewind.go` | 1144 | `checkResetSafety()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+| `debug.go` | 295 | `getFileChanges()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+
+**Note:** Callers that still need `repo.Worktree()` for other purposes (e.g., `calculatePromptAttributionAtStart` reads `worktree.Filesystem.Root()`) keep that call — only the `.Status()` part is replaced.
+
+### Reference implementation
+
+`checkpoint/temporary.go:collectChangedFiles()` (line 1028) already parses `git status --porcelain -z` with full rename/copy handling. The shim's parsing logic follows the same pattern but returns `git.Status` instead of `changedFilesResult`.
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+Plus manual verification: confirm the shim doesn't rewrite the index by checking `md5 .git/index` before and after a hook invocation.
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+
+---
+
+[Request interrupted by user]
+
+---
+
+um, sorry, I should have mentioned this earlier - we did do a get status replacement for a different reason - shadow file tracking - is this reusable?
+
+---
+
+yeah that was the one `checkpoint/temporary.go:collectChangedFiles`. continue then
+
+---
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.2.0/skills/requesting-code-review
+
+# Requesting Code Review
+
+Dispatch superpowers:code-reviewer subagent to catch issues before they cascade.
+
+**Core principle:** Review early, review often.
+
+## When to Request Review
+
+**Mandatory:**
+- After each task in subagent-driven development
+- After completing major feature
+- Before merge to main
+
+**Optional but valuable:**
+- When stuck (fresh perspective)
+- Before refactoring (baseline check)
+- After fixing complex bug
+
+## How to Request
+
+**1. Get git SHAs:**
+```bash
+BASE_SHA=$(git rev-parse HEAD~1)  # or origin/main
+HEAD_SHA=$(git rev-parse HEAD)
+```
+
+**2. Dispatch code-reviewer subagent:**
+
+Use Task tool with superpowers:code-reviewer type, fill template at `code-reviewer.md`
+
+**Placeholders:**
+- `{WHAT_WAS_IMPLEMENTED}` - What you just built
+- `{PLAN_OR_REQUIREMENTS}` - What it should do
+- `{BASE_SHA}` - Starting commit
+- `{HEAD_SHA}` - Ending commit
+- `{DESCRIPTION}` - Brief summary
+
+**3. Act on feedback:**
+- Fix Critical issues immediately
+- Fix Important issues before proceeding
+- Note Minor issues for later
+- Push back if reviewer is wrong (with reasoning)
+
+## Example
+
+```
+[Just completed Task 2: Add verification function]
+
+You: Let me request code review before proceeding.
+
+BASE_SHA=$(git log --oneline | grep "Task 1" | head -1 | awk '{print }')
+HEAD_SHA=$(git rev-parse HEAD)
+
+[Dispatch superpowers:code-reviewer subagent]
+  WHAT_WAS_IMPLEMENTED: Verification and repair functions for conversation index
+  PLAN_OR_REQUIREMENTS: Task 2 from docs/plans/deployment-plan.md
+  BASE_SHA: a7981ec
+  HEAD_SHA: 3df7661
+  DESCRIPTION: Added verifyIndex() and repairIndex() with 4 issue types
+
+[Subagent returns]:
+  Strengths: Clean architecture, real tests
+  Issues:
+    Important: Missing progress indicators
+    Minor: Magic number (100) for reporting interval
+  Assessment: Ready to proceed
+
+You: [Fix progress indicators]
+[Continue to Task 3]
+```
+
+## Integration with Workflows
+
+**Subagent-Driven Development:**
+- Review after EACH task
+- Catch issues before they compound
+- Fix before moving to next task
+
+**Executing Plans:**
+- Review after each batch (3 tasks)
+- Get feedback, apply, continue
+
+**Ad-Hoc Development:**
+- Review before merge
+- Review when stuck
+
+## Red Flags
+
+**Never:**
+- Skip review because "it's simple"
+- Ignore Critical issues
+- Proceed with unfixed Important issues
+- Argue with valid technical feedback
+
+**If reviewer wrong:**
+- Push back with technical reasoning
+- Show code/tests that prove it works
+- Request clarification
+
+See template at: requesting-code-review/code-reviewer.md
+
+---
+
+commit this, push, open draft PR.
+
+then wait until the bugbot check has returned and /github-pr-review
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+actually....before we go any further.... have a look at /tmp/entire-index-debug.log
+
+I think that 16:42 post-commit was from here
+
+if that's the case the bug is still live, no?
+
+can we test a commit and see if the md5 moves?
+
+---
+
+I just copied the built binary from here to the one on the path - check the version if you will
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
+
+ARGUMENTS: 171
+
+---
+
+wait until the bugbot check has returned and /github-pr-review
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+it's ready
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. User provided a detailed implementation plan for ENT-242: Replace go-git worktree.Status() with git CLI shim
+2. I created task list and started reading call sites
+3. User interrupted to ask about an existing git status replacement in `checkpoint/temporary.go:collectChangedFiles` - I confirmed it returns different types (changedFilesResult vs git.Status) so isn't directly reusable
+4. User confirmed and said to continue
+5. I initially created files in `strategy/` package
+6. User asked to put the shim in a `gitutil` package instead - I moved files to `cmd/entire/cli/gitutil/`
+7. Tests passed, then I updated all 10 call sites across strategy/ and cli/ packages
+8. Hit lint errors: `noctx` (exec.Command must use CommandContext) - fixed with context.Background()
+9. Hit test failures: 3 tests in state_test.go failed because manual `.git` directory creation wasn't enough for `git status` CLI - fixed by using `git init -b main`
+10. Hit more lint errors: `noctx` on the test git init commands - fixed with `exec.CommandContext(t.Context(), ...)`
+11. All tests passed, I updated CLAUDE.md to document the worktree.Status() bug
+12. Code review was dispatched and came back clean with suggestions
+13. User asked to commit, push, open draft PR
+14. During commit, the actual bug manifested (index corruption from old binary running hooks) - recovered with `git read-tree HEAD`
+15. Created branch `alex/ent-242-worktree-status-shim`, pushed, created draft PR #171
+16. User noticed the debug log showed the bug was still live - the hooks use the globally installed binary, not our source changes
+17. User copied the built binary to path, we verified it was version b5ccdfd4
+18. Made a test commit - the debug log confirmed index md5 was STABLE (bug fixed!)
+19. Reverted test commit, cleaned up
+20. Waited for bugbot, all checks passed (lint, test, license, bugbot skipping)
+21. Ran /github-pr-review on PR #171 - first round had 4 comments
+22. Fixed: added -uall flag, captured stderr via runGitCmd helper, added parseNulDelimitedNames tests
+23. Committed as 536ab7cf, pushed, replied to all 4 threads
+24. Waited for bugbot again on second commit, then ran /github-pr-review again
+25. Second round had 5 new comments from Copilot and cursor[bot]
+26. Fixed: worktree-side R/C check (defensive), declined others with reasoning
+27. Committed as a8e117d5, pushed, replied to all 5 threads
+
+Key files created/modified:
+- NEW: cmd/entire/cli/gitutil/worktree_status.go
+- NEW: cmd/entire/cli/gitutil/worktree_status_test.go
+- MODIFIED: cmd/entire/cli/strategy/common.go (2 call sites + import)
+- MODIFIED: cmd/entire/cli/strategy/manual_commit_hooks.go (2 call sites + import)
+- MODIFIED: cmd/entire/cli/state.go (4 call sites + import)
+- MODIFIED: cmd/entire/cli/rewind.go (1 call site + import)
+- MODIFIED: cmd/entire/cli/debug.go (1 call site + import)
+- MODIFIED: cmd/entire/cli/state_test.go (test helpers updated)
+- MODIFIED: CLAUDE.md (documented worktree.Status() bug)
+- MODIFIED: go.mod (new package)
+
+Summary:
+1. Primary Request and Intent:
+   The user asked to implement ENT-242: Replace all go-git `worktree.Status()` calls with a git CLI shim. go-git v5's `worktree.Status()` reads **and rewrites** the index file, corrupting it when called from git hooks (post-commit, prepare-commit-msg) by writing stale cache-tree entries referencing GC'd objects. The fix routes all calls through `git status --porcelain -z` which reads without rewriting. After implementation, user asked to commit, push, create a draft PR, wait for bugbot, and handle PR review feedback across two review rounds.
+
+2. Key Technical Concepts:
+   - go-git v5 index corruption bug: `worktree.Status()` rewrites `.git/index` with stale cache-tree entries
+   - `git status --porcelain -z` format: NUL-delimited, XY status codes, rename/copy entries have two NUL-separated paths
+   - `git.Status` type: `map[string]*git.FileStatus` with `Staging` and `Worktree` fields of type `git.StatusCode`
+   - StatusCode mapping: `' '→Unmodified, M→Modified, A→Added, D→Deleted, R→Renamed, C→Copied, ?→Untracked, U→UpdatedButUnmerged, T→Modified`
+   - `-uall` flag needed to list individual untracked files (not collapsed directories), matching go-git behavior
+   - `git diff --cached --name-only -z` for lightweight staged-files-only query
+   - `repo.Worktree()` itself is safe to call (for `.Filesystem.Root()` etc) — only `.Status()` triggers index rewrite
+   - Index recovery via `git read-tree HEAD` when corruption occurs
+   - PR #171 on `entireio/cli` repo, branch `alex/ent-242-worktree-status-shim`
+
+3. Files and Code Sections:
+
+   - **cmd/entire/cli/gitutil/worktree_status.go** (NEW - the shim)
+     - Core of the fix: provides `WorktreeStatus()` and `StagedFileNames()` as drop-in replacements
+     - Final version after 3 commits of review feedback:
+     ```go
+     package gitutil
+
+     import (
+         "bytes"
+         "context"
+         "fmt"
+         "os/exec"
+         "strings"
+         "github.com/go-git/go-git/v5"
+     )
+
+     func WorktreeStatus(repo *git.Repository) (git.Status, error) {
+         output, err := runGitCmd(repo, "git status", "status", "--porcelain", "-z", "-uall")
+         if err != nil {
+             return nil, err
+         }
+         return parsePorcelainStatus(string(output)), nil
+     }
+
+     func StagedFileNames(repo *git.Repository) ([]string, error) {
+         output, err := runGitCmd(repo, "git diff --cached", "diff", "--cached", "--name-only", "-z")
+         if err != nil {
+             return nil, err
+         }
+         return parseNulDelimitedNames(string(output)), nil
+     }
+
+     func runGitCmd(repo *git.Repository, label string, args ...string) ([]byte, error) {
+         repoRoot, err := worktreeRoot(repo)
+         if err != nil {
+             return nil, err
+         }
+         cmd := exec.CommandContext(context.Background(), "git", args...)
+         cmd.Dir = repoRoot
+         var stderr bytes.Buffer
+         cmd.Stderr = &stderr
+         output, err := cmd.Output()
+         if err != nil {
+             return nil, fmt.Errorf("%s failed in %s: %w: %s", label, repoRoot, err, strings.TrimSpace(stderr.String()))
+         }
+         return output, nil
+     }
+
+     func worktreeRoot(repo *git.Repository) (string, error) { ... }
+     func parseNulDelimitedNames(raw string) []string { ... }
+     func porcelainStatusCode(b byte) git.StatusCode { ... }
+     func parsePorcelainStatus(raw string) git.Status { ... }
+     ```
+     - Key detail: rename/copy check uses both X and Y columns: `if x == 'R' || x == 'C' || y == 'R' || y == 'C'`
+
+   - **cmd/entire/cli/gitutil/worktree_status_test.go** (NEW)
+     - 15 tests covering: empty, modified, staged, added/deleted/untracked, rename, copy, worktree-side rename, mixed staged+worktree, multiple files, type change, merge conflict, all status codes, NUL-delimited name parsing (empty, single, multiple, no trailing NUL)
+
+   - **cmd/entire/cli/strategy/common.go** (MODIFIED)
+     - Added `gitutil` import
+     - `checkCanRewind()`: replaced `worktree.Status()` with `gitutil.WorktreeStatus(repo)`, removed `repo.Worktree()` call
+     - `checkCanRewindWithWarning()`: replaced `worktree.Status()` with `gitutil.WorktreeStatus(repo)`, removed `repo.Worktree()` error-path early return
+
+   - **cmd/entire/cli/strategy/manual_commit_hooks.go** (MODIFIED)
+     - Added `gitutil` import
+     - `calculatePromptAttributionAtStart()`: replaced `worktree.Status()` with `gitutil.WorktreeStatus(repo)`, replaced `worktree.Filesystem.Root()` with `GetWorktreePath()`
+     - `getStagedFiles()`: replaced entire body with `gitutil.StagedFileNames(repo)`
+
+   - **cmd/entire/cli/state.go** (MODIFIED)
+     - Added `gitutil` import
+     - 4 call sites updated: `ComputeFileChanges()`, `ComputeDeletedFiles()`, `getUntrackedFilesForState()`, `DetectChangedFiles()`
+     - Pattern: removed `repo.Worktree()` + `worktree.Status()`, replaced with `gitutil.WorktreeStatus(repo)`
+
+   - **cmd/entire/cli/rewind.go** (MODIFIED)
+     - Added `gitutil` import
+     - `checkResetSafety()`: replaced `worktree.Status()` with `gitutil.WorktreeStatus(repo)`, removed `repo.Worktree()` call
+
+   - **cmd/entire/cli/debug.go** (MODIFIED)
+     - Added `gitutil` import
+     - `getFileChanges()`: replaced `worktree.Status()` with `gitutil.WorktreeStatus(repo)`, removed `repo.Worktree()` call
+
+   - **cmd/entire/cli/state_test.go** (MODIFIED)
+     - Added `os/exec` import
+     - `TestPreTaskState_CaptureLoadCleanup`: replaced manual `.git` dir creation with `exec.CommandContext(t.Context(), "git", "init", "-b", "main")`
+     - `setupTestRepoWithTranscript`: same replacement
+
+   - **CLAUDE.md** (MODIFIED)
+     - Added documentation under "go-git v5 Bugs - Use CLI Instead" section about `worktree.Status()` bug, with WRONG/CORRECT examples and note that `repo.Worktree()` itself is safe
+
+   - **go.mod** (MODIFIED)
+     - `go mod tidy` added indirect deps for the new `gitutil` test package
+
+4. Errors and fixes:
+   - **`noctx` lint error**: `exec.Command` must use `exec.CommandContext`. Fixed by using `context.Background()` in the shim.
+   - **3 test failures in state_test.go**: `git status` CLI needs a proper git repo, not just manual `.git/objects` + `.git/HEAD`. Fixed by replacing manual creation with `git init -b main`.
+   - **`noctx` lint error in tests**: Same issue on `exec.Command("git", "init", ...)` in tests. Fixed with `exec.CommandContext(t.Context(), ...)`.
+   - **`dupl` lint error**: After adding stderr capture, `WorktreeStatus` and `StagedFileNames` had duplicated boilerplate. Fixed by extracting `runGitCmd` helper.
+   - **Index corruption during commit**: The old installed binary's hooks corrupted the index during our first commit. Recovered with `git read-tree HEAD`. User then copied the rebuilt binary to PATH.
+   - **Missing `-uall` flag** (PR review): Without it, untracked directories are collapsed into `?? dir/` entries instead of individual files. Fixed by adding `-uall` to the git status command.
+   - **User requested `gitutil` package**: Initially created files in `strategy/` package, user asked to create in a `gitutil` package instead. Deleted strategy files, recreated in `cmd/entire/cli/gitutil/`.
+
+5. Problem Solving:
+   - Successfully replaced all 10 `worktree.Status()` call sites with git CLI shim
+   - Verified fix works by checking `/tmp/entire-index-debug.log` — index md5 stays stable across all hook invocations with the fixed binary
+   - Handled two rounds of PR review (Copilot + Cursor Bugbot), addressing valid issues (missing `-uall`, stderr capture, StagedFileNames tests, worktree-side R/C) and declining non-issues with reasoning (CLAUDE.md example style, gosec G204 not triggering, Git 2.28 version requirement)
+
+6. All user messages:
+   - "Implement the following plan: [ENT-242 plan]"
+   - "um, sorry, I should have mentioned this earlier - we did do a get status replacement for a different reason - shadow file tracking - is this reusable?"
+   - "yeah that was the one `checkpoint/temporary.go:collectChangedFiles`. continue then"
+   - "could we create the shim in a gitutil package?"
+   - "commit this, push, open draft PR. then wait until the bugbot check has returned and /github-pr-review"
+   - "OH wait, the hooks are global"
+   - "I just copied the built binary from the one on the path - check the version if you will"
+   - "actually....before we go any further.... have a look at /tmp/entire-index-debug.log. I think that 16:42 post-commit was from here. if that's the case the bug is still live, no? can we test a commit and see if the md5 moves?"
+   - "wait until the bugbot check has returned and /github-pr-review"
+   - "it's ready"
+
+7. Pending Tasks:
+   - PR #171 is still in draft status — user hasn't asked to mark it ready yet
+   - No explicit pending tasks from user
+
+8. Current Work:
+   Just completed the second round of PR review on PR #171 (`https://github.com/entireio/cli/pull/171`). Made a third commit (`a8e117d5`) adding worktree-side R/C check defensively, pushed, and replied to all 5 review threads. The PR has 3 commits:
+   - `b5ccdfd4` - Main implementation
+   - `536ab7cf` - First review round fixes (-uall, stderr, tests)
+   - `a8e117d5` - Second review round fix (worktree R/C)
+
+   All CI checks passed on the previous push. The latest push is awaiting CI.
+
+9. Optional Next Step:
+   No explicit next step requested. The user's last request was "wait until the bugbot check has returned and /github-pr-review" which has been completed — all review threads have been replied to. The PR remains in draft status. The user may want to mark it ready for review, squash commits, or proceed with other work.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+ehhhhhh our post-commit blew up 17:17:54 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index BEFORE: 5463457f42139ccb48210e9dbbb1f13e
+17:18:11 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index AFTER:  69d73e7e1dd3934940b40d8a706e9a49
+
+---
+
+hmm, the auto-summarization seems to have been broken as well....probably related?
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. This is a continuation from a previous conversation about ENT-242 (replacing go-git worktree.Status() with git CLI shim). The previous conversation created PR #171 with 3 commits and handled 2 rounds of PR review.
+
+2. The current conversation started by checking PR #171 CI status. All checks passed except Cursor Bugbot which remained pending.
+
+3. User pointed out that post-commit hook was still corrupting the index:
+```
+17:17:54 post-commit BEFORE: 5463457f42139ccb48210e9dbbb1f13e
+17:18:11 post-commit AFTER:  69d73e7e1dd3934940b40d8a706e9a49
+```
+
+4. I confirmed all worktree.Status() calls were replaced (grep showed zero remaining in production code).
+
+5. User reported git status failing: `fatal: unable to read e53647ba1f1e5203bedff558b482f178db045555` - same object every time.
+
+6. Fixed immediate corruption with `git read-tree HEAD`.
+
+7. Extensive investigation of the PostCommit handler code path:
+   - Traced every function: OpenRepository, filterSessionsWithNewContent, sessionHasNewContent, CondenseSession, extractSessionData, WriteCommitted, calculateSessionAttributions, deleteShadowBranch
+   - Confirmed NO go-git SetIndex calls in the path
+   - Confirmed all operations are object/ref level (SetEncodedObject, SetReference, RemoveReference)
+   - Checked go-git source code at `/Users/alex/go/pkg/mod/github.com/go-git/go-git/v5@v5.16.4/`
+   - Confirmed SetIndex is ONLY called from worktree.go, worktree_commit.go, worktree_status.go
+   - Empirically tested: `git diff --cached --name-only -z` and `git status --porcelain -z` do NOT change the index md5
+   - `git fsck --no-dangling` shows clean repo (only hasDotgit warnings)
+
+8. Added instrumentation to PostCommit handler:
+   - Created `traceIndexMD5()` function in manual_commit_hooks.go
+   - Added trace calls at: enter, before-filter, after-filter, before-condense, inside CondenseSession (extract-start, extract-done, store-opened, author-done, attribution-done, before-write, after-write), after-condense, before-branch-cleanup
+
+9. First instrumented test commit revealed:
+```
+condense:attribution-done: 5a002e4cd43d55b76f090026d11ed52e
+condense:before-write:     e04759b1e2a4165d1ead97d42bfe2983
+```
+The index changes between attribution calculation and WriteCommitted.
+
+10. Looking at the code between those points: GetCurrentBranchName(repo) and summarize.GenerateFromTranscript()
+
+11. Found the smoking gun: `summarize/claude.go:98` runs `claude --print` subprocess:
+```go
+cmd := runner(ctx, claudePath, "--print", "--output-format", "json", "--model", model, "--setting-sources", "user")
+```
+The Claude CLI subprocess likely performs git operations that write to the index.
+
+12. User then said auto-summarization seems broken too, "probably related?"
+
+13. The instrumentation code was left in the source files (manual_commit_hooks.go and manual_commit_condensation.go) but the `git reset --hard a8e117d5` removed the changes from the working tree (since a8e117d5 is the last real commit). However, manual_commit_condensation.go appears to have been modified by the user/linter, removing the trace instrumentation but keeping the original code structure.
+
+Key files examined:
+- manual_commit_hooks.go: PostCommit handler, filterSessionsWithNewContent, sessionHasNewContent, sessionHasNewContentFromLiveTranscript
+- manual_commit_condensation.go: CondenseSession, extractSessionData, calculateSessionAttributions
+- checkpoint/committed.go: WriteCommitted, ensureSessionsBranch, CreateBlobFromContent
+- manual_commit_attribution.go: CalculateAttributionWithAccumulated, getAllChangedFilesBetweenTrees
+- summarize/summarize.go: GenerateFromTranscript
+- summarize/claude.go: ClaudeGenerator.Generate - THE SMOKING GUN
+
+User messages:
+1. (implicit from continuation) Continue from where we left off
+2. "ehhhhhh our post-commit blew up" - pointing to index corruption in debug log
+3. "git status fatal: unable to read e53647ba... and it's always the same object it has trouble with :| is this a local problem??"
+4. "hmm, the auto-summarization seems to have been broken as well....probably related?"
+
+The auto-summarization being broken is likely related because:
+- The summarizer runs `claude --print` which is the Claude CLI
+- If the Claude CLI itself does git operations (like checking status for context), it could write to the index
+- If the Claude CLI is broken or not available, summarization would fail
+- Both issues (index corruption during summarization AND summarization being broken) point to the Claude CLI subprocess
+
+Summary:
+1. Primary Request and Intent:
+   The user is continuing work on ENT-242 (PR #171) which replaces go-git's `worktree.Status()` with git CLI shims to prevent index corruption. After the PR was submitted and reviewed, the user discovered the index corruption bug is STILL occurring during the post-commit hook, despite all 10 `worktree.Status()` call sites being replaced. The user wants to understand why the index is still being mutated and fix the root cause. The user also noted that auto-summarization appears broken, asking if the two issues are related.
+
+2. Key Technical Concepts:
+   - go-git v5 index corruption: `worktree.Status()` reads AND rewrites `.git/index` with stale cache-tree entries
+   - `SetIndex` in go-git: Only called from `worktree.go`, `worktree_commit.go`, `worktree_status.go` — confirmed by grepping go-git source at `/Users/alex/go/pkg/mod/github.com/go-git/go-git/v5@v5.16.4/`
+   - go-git's `RepositoryFilesystem` correctly routes index to worktree-specific path and objects to shared commondir
+   - `git read-tree HEAD` rebuilds the index from scratch, fixing corruption
+   - The summarizer (`summarize/claude.go`) runs `claude --print` as a subprocess during post-commit condensation — this is the smoking gun for index corruption
+   - Instrumented binary approach to narrow down when exactly the index changes during PostCommit
+
+3. Files and Code Sections:
+   - **`cmd/entire/cli/strategy/manual_commit_hooks.go`**
+     - Contains `PostCommit()` handler (line 402) — the full post-commit code path
+     - Contains `filterSessionsWithNewContent()` (line 556), `sessionHasNewContent()` (line 576), `sessionHasNewContentFromLiveTranscript()` (line 641)
+     - `sessionHasNewContentFromLiveTranscript` calls `getStagedFiles(repo)` → `gitutil.StagedFileNames` → `git diff --cached --name-only -z` (line 684)
+     - Was temporarily instrumented with `traceIndexMD5()` function and trace calls; reset back to a8e117d5
+   
+   - **`cmd/entire/cli/strategy/manual_commit_condensation.go`**
+     - Contains `CondenseSession()` (line 106) — the condensation path that runs during post-commit
+     - Line 131: `calculateSessionAttributions()` — tree diffing, confirmed no index ops
+     - Line 145: `summarize.GenerateFromTranscript()` — **THE CULPRIT**: runs Claude CLI subprocess
+     - Was temporarily instrumented with trace calls; the user/linter appears to have removed the instrumentation
+   
+   - **`cmd/entire/cli/summarize/claude.go`** (THE SMOKING GUN)
+     - Line 74: `ClaudeGenerator.Generate()` runs `claude --print` subprocess
+     ```go
+     cmd := runner(ctx, claudePath, "--print", "--output-format", "json", "--model", model, "--setting-sources", "user")
+     cmd.Stdin = strings.NewReader(prompt)
+     ```
+     - The Claude CLI subprocess likely performs git operations that write to the index
+   
+   - **`cmd/entire/cli/checkpoint/committed.go`**
+     - `WriteCommitted()` (line 40) — creates blobs, trees, commits on `entire/sessions` branch
+     - All operations are object/ref level (`SetEncodedObject`, `SetReference`) — confirmed no index writes
+     - `ensureSessionsBranch()` (line 929) — creates orphan branch if needed
+   
+   - **`cmd/entire/cli/strategy/manual_commit_attribution.go`**
+     - `CalculateAttributionWithAccumulated()` (line 165) — tree diffing via go-git, no index ops
+     - `getAllChangedFilesBetweenTrees()` (line 16) — compares tree hashes, no index ops
+   
+   - **`/Users/alex/go/pkg/mod/github.com/go-git/go-git/v5@v5.16.4/storage/filesystem/index.go`**
+     - Confirmed `SetIndex()` and `Index()` are the only methods that write/read the git index
+     - `SetIndex` is only called from worktree operations (Status, Add, Commit, Reset)
+   
+   - **`/Users/alex/go/pkg/mod/github.com/go-git/go-git/v5@v5.16.4/storage/filesystem/dotgit/repository_filesystem.go`**
+     - `RepositoryFilesystem` correctly routes: objects/refs to commonDotGitFs, index to dotGitFs (worktree-specific)
+   
+   - **`cmd/entire/cli/gitutil/worktree_status.go`** and **`worktree_status_test.go`** — the shim created in the previous conversation, confirmed working
+
+4. Errors and fixes:
+   - **Index corruption persists despite shim replacement**: After replacing all 10 `worktree.Status()` calls, the index still changed during post-commit. Diagnosed via instrumentation showing the change occurs between `condense:attribution-done` and `condense:before-write` — exactly where `summarize.GenerateFromTranscript()` runs `claude --print` subprocess.
+   - **`git status: fatal: unable to read e53647ba...`**: Fixed immediately with `git read-tree HEAD`. Object doesn't exist in the repo (`git cat-file -t` fails, `git fsck --no-dangling` is clean).
+   - **Auto-summarization broken**: User reported this; likely related to the Claude CLI subprocess issues.
+   - **Test commit cleanup**: Made 2 test commits for instrumentation, reset with `git reset --hard a8e117d5`.
+
+5. Problem Solving:
+   - Systematically eliminated all possible sources of index writes in the PostCommit path:
+     - Grepped for `.Status()`, `worktree.`, `.Add(`, `.Reset(`, `.Checkout(` — none in production post-commit path
+     - Grepped go-git source for `SetIndex` — only in worktree operations
+     - Empirically tested `git diff --cached` and `git status` — neither changes index md5
+     - Ran `git fsck --no-dangling` — repo objects are clean
+     - Checked `RepositoryFilesystem` mapping — correct for worktrees
+   - Added instrumentation (`traceIndexMD5` function) to PostCommit and CondenseSession
+   - First instrumented test pinpointed change to between `attribution-done` and `before-write`
+   - Second instrumented test (with finer granularity around GetCurrentBranchName and summarize) didn't trigger condensation because shadow branch was already deleted
+   - Identified `summarize/claude.go` running `claude --print` as the likely cause
+
+6. All user messages:
+   - "ehhhhhh our post-commit blew up 17:17:54 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index BEFORE: 5463457f42139ccb48210e9dbbb1f13e 17:18:11 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index AFTER: 69d73e7e1dd3934940b40d8a706e9a49"
+   - "git status fatal: unable to read e53647ba1f1e5203bedff558b482f178db045555 and it's always the same object it has trouble with :| is this a local problem??"
+   - "hmm, the auto-summarization seems to have been broken as well....probably related?"
+
+7. Pending Tasks:
+   - Investigate and fix the root cause of index corruption during `summarize.GenerateFromTranscript()` → `claude --print` subprocess
+   - Investigate why auto-summarization is broken (user's latest question)
+   - PR #171 is still in draft status
+   - The instrumentation code needs to be cleaned up (was reset to a8e117d5 but condensation.go may have residual changes from user/linter)
+
+8. Current Work:
+   Investigating why the git index is still being corrupted during post-commit despite replacing all `worktree.Status()` calls. Through instrumentation, narrowed the corruption to the `summarize.GenerateFromTranscript()` call which runs `claude --print` as a subprocess. The user's latest message says "hmm, the auto-summarization seems to have been broken as well....probably related?" — suggesting both the index corruption and broken summarization stem from the same root cause (the Claude CLI subprocess).
+
+9. Optional Next Step:
+   Investigate the `claude --print` subprocess as the source of index corruption. The user asked "probably related?" about auto-summarization being broken and index corruption. Next steps should:
+   1. Check if Claude CLI is available/working (`claude --version`)
+   2. Investigate what git operations `claude --print` performs that could write to the index
+   3. Consider adding `GIT_INDEX_FILE` or `GIT_OPTIONAL_LOCKS=0` environment variable to the subprocess to prevent it from touching the index
+   4. Address the broken auto-summarization
+
+   The user's exact quote was: "hmm, the auto-summarization seems to have been broken as well....probably related?"
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+yeah, it doesn't seem to be making it to the metadata.json in the checkpoint
+
+---
+
+[Request interrupted by user]
+
+---
+
+whoa whoa whoa, before we get too far down the garden path
+
+OK, so there's a auto-summarization bug - cool, write me a linear issue to go fix it after please (Project:Troy)
+
+but what the heck is going on with claude and indexes....and did you just do a hacky workaround moving the git index?
+
+also the rest of the stuff in this PR is _unnecessary_???
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+"and go-git v5's implementation does call SetIndex which rewrites the index." <- ARE WE SURE? this didn't seem to be a problem before, or are we now just seeing more gcs?
+
+---
+
+okay, wtf...why does claude cli do shit in git?
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. This is a continuation from a previous conversation about ENT-242 (replacing go-git worktree.Status() with git CLI shim). The previous conversation created PR #171 with 3 commits. The current session picked up investigating why the git index was STILL being corrupted during post-commit hooks despite replacing all worktree.Status() calls.
+
+2. Previous investigation had narrowed the corruption to the `summarize.GenerateFromTranscript()` call which runs `claude --print` as a subprocess during post-commit condensation. The user had also noted auto-summarization seemed broken.
+
+3. In this session:
+   - Read summarize/claude.go and summarize/summarize.go to understand the Claude CLI subprocess
+   - Read condensation code (manual_commit_condensation.go lines 100-200)
+   - Checked working tree status: clean on branch alex/ent-242-worktree-status-shim
+   - Checked Entire logs - found summarization WAS succeeding (3 "summary generated" entries)
+   - Found timing correlation: 17-28 second gaps during summarization = index corruption window
+   - Implemented GIT_INDEX_FILE fix in claude.go to isolate subprocess
+   - Fixed gosec lint error (tmpIndex.Close() → _ = tmpIndex.Close())
+   - All tests passed (fmt, lint, test:ci)
+   - Investigated auto-summarization "broken" issue
+   - Found the REAL bug: in checkpoint/committed.go writeSessionToSubdirectory(), the CommittedMetadata struct literal was missing `Summary: opts.Summary`
+   - Fixed it by adding the missing field
+   - Created Linear issue ENT-243 for the summary bug (per user request)
+   - User pushed back on the GIT_INDEX_FILE approach, questioning whether it was hacky
+   - User questioned whether the worktree.Status() shim in PR #171 was even necessary
+   - Investigated go-git source code: confirmed worktree.Status() does NOT call SetIndex - it only calls Index() (read-only)
+   - Empirically tested: ran `claude --print` and checked index md5 before/after - NO CHANGE
+   - This disproved the theory that claude --print was corrupting the index
+   - Found critical detail in go-git encoder.go line 47: `// TODO: support extensions` - the encoder DROPS cache-tree extensions on write
+   - Was searching for what in the post-commit path actually calls SetIndex when the conversation was summarized
+
+Key findings:
+- worktree.Status() does NOT call SetIndex (only reads index)
+- claude --print does NOT modify the index (empirically proven)
+- go-git's index encoder drops cache-tree extensions (line 47: "TODO: support extensions")
+- The CommittedMetadata struct was missing Summary field (separate bug, ENT-243)
+- The root cause of index corruption is still unknown
+
+User messages and key feedback:
+1. "also to generate a new shadow I think we need a new user prompt" - noting that testing condensation requires new session content
+2. "um, so what did you do in the end to fix it???" - asking about the summary fix
+3. "whoa whoa whoa, before we get too far down the garden path / OK, so there's a auto-summarization bug - cool, write me a linear issue to go fix it after please (Project:Troy) / but what the heck is going on with claude and indexes....and did you just do a hacky workaround moving the git index? / also the rest of the stuff in this PR is _unnecessary_???" - pushing back hard
+4. "ARE WE SURE? this didn't seem to be a problem before, or are we now just seeing more gcs?" - questioning the worktree.Status() premise
+5. "okay, wtf...why does claude cli do shit in git?" - asking about Claude CLI's git operations
+6. "hang on - if the index hasn't changed going in, why would a process invoked inside the commit context change the index (and be stale)? wouldn't we see the index changing back to what it was when we would expect it to change?" - excellent point about index round-trip behavior
+
+Current state of files:
+- summarize/claude.go has the GIT_INDEX_FILE fix (but this may not be the right fix since we proved claude --print doesn't change the index)
+- checkpoint/committed.go had Summary field added then user rejected the revert (wants to keep it? or just didn't want to revert at that moment?)
+
+The investigation is ongoing - we've disproven both original theories (worktree.Status() and claude --print) and are now looking at what ACTUALLY calls SetIndex during the post-commit hook.
+
+Summary:
+1. Primary Request and Intent:
+   The user is investigating and fixing ENT-242: git index corruption during post-commit hooks. PR #171 (branch `alex/ent-242-worktree-status-shim`) already replaced 10 `worktree.Status()` call sites with git CLI shims, but the index was STILL being corrupted. This session investigated the remaining corruption source. The user also requested a Linear issue for a separate auto-summarization bug (ENT-243). The user is increasingly skeptical of both the original PR's necessity AND the proposed fixes, demanding we identify the TRUE root cause.
+
+2. Key Technical Concepts:
+   - go-git v5 index handling: `Index()` is read-only, `SetIndex()` is write. `worktree.Status()` only calls `Index()` — it does NOT rewrite the index.
+   - go-git index encoder (line 47): `// TODO: support extensions` — the encoder **drops cache-tree extensions** on write. Any go-git code path doing `Index()` → modify → `SetIndex()` silently strips the TREE extension.
+   - `claude --print` subprocess: empirically proven to NOT modify the git index (md5 unchanged before/after).
+   - Git hooks run synchronously — `git commit` blocks until post-commit hook completes.
+   - The `entire/sessions` orphan branch stores condensed session metadata via go-git object/ref operations (not index operations).
+   - `CommittedMetadata` struct was missing `Summary` field in the constructor — separate bug filed as ENT-243.
+
+3. Files and Code Sections:
+   - **`cmd/entire/cli/summarize/claude.go`** — Contains the `ClaudeGenerator.Generate()` method that runs `claude --print` subprocess. Was modified to add `GIT_INDEX_FILE` isolation (lines 101-111), but this fix may be unnecessary since we proved `claude --print` doesn't change the index.
+     ```go
+     // Current state of file includes this addition (may need removal):
+     tmpIndex, tmpErr := os.CreateTemp("", "entire-summarize-idx-*")
+     if tmpErr == nil {
+         name := tmpIndex.Name()
+         _ = tmpIndex.Close()
+         defer os.Remove(name)
+         cmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+name)
+     }
+     ```
+   - **`cmd/entire/cli/checkpoint/committed.go`** — `writeSessionToSubdirectory()` (line 307-322) builds `CommittedMetadata` struct but was missing `Summary: opts.Summary`. Fix was applied but user rejected the revert attempt (wants it kept for ENT-243 or was just rejecting the revert action).
+     ```go
+     // Line 307-322 currently includes:
+     sessionMetadata := CommittedMetadata{
+         ...
+         InitialAttribution: opts.InitialAttribution,
+         Summary:            opts.Summary, // THIS LINE WAS ADDED
+     }
+     ```
+   - **`cmd/entire/cli/strategy/manual_commit_condensation.go`** — `CondenseSession()` (line 106) is the main condensation path called from PostCommit. Lines 135-156 run summarization. Lines 128-133 run `GetGitAuthorFromRepo`, `calculateSessionAttributions`, `GetCurrentBranchName`. All traced and confirmed to NOT touch the index.
+   - **`cmd/entire/cli/strategy/manual_commit_hooks.go`** — `PostCommit()` (line 402) is the full post-commit handler. `filterSessionsWithNewContent()` (line 556), `sessionHasNewContent()` (line 576), `sessionHasNewContentFromLiveTranscript()` (line 641) — all traced, only object-store and ref reads.
+   - **`/Users/alex/go/pkg/mod/github.com/go-git/go-git/v5@v5.16.4/worktree_status.go`** — `Status()` (line 38) → `status()` (line 63) → calls `diffCommitWithStaging` and `diffStagingWithWorktree`, both only call `Index()` (read). `SetIndex` calls in this file are ONLY in `Add()`, `AddWithOptions()`, `AddGlob()`, `Remove()`, `RemoveGlob()`, `Move()`.
+   - **`/Users/alex/go/pkg/mod/github.com/go-git/go-git/v5@v5.16.4/storage/filesystem/index.go`** — `Index()` (line 35) is pure read. `SetIndex()` (line 16) writes via encoder.
+   - **`/Users/alex/go/pkg/mod/github.com/go-git/go-git/v5@v5.16.4/plumbing/format/index/encoder.go`** — Line 47: `// TODO: support extensions` — **the encoder drops all index extensions including cache-tree (TREE) and EOIE on write**. This is the mechanism by which any `SetIndex()` call corrupts the index — it strips the cache-tree, which can reference objects that GC later prunes.
+   - **`.entire/logs/8dab6c26-fc6b-4cc5-8263-6150b598af24.log`** — Confirmed all 3 summarization runs succeeded. Timing: attribution at 17:53:39.501, summary at 17:54:07.070 (28 seconds), post-commit completed at 17:54:07.514 (28222ms total).
+
+4. Errors and fixes:
+   - **gosec lint error on `tmpIndex.Close()`**: Fixed by changing to `_ = tmpIndex.Close()` and capturing name before close.
+   - **Wrong premise about worktree.Status()**: User pushed back asking "ARE WE SURE?" — investigation of go-git source proved `Status()` does NOT call `SetIndex()`. The entire PR #171 shim may be unnecessary for the index corruption bug.
+   - **Wrong premise about claude --print**: Empirical test showed `claude --print` does NOT change the index md5 (`10e6ff5bf027120ab6d97412edb1caf2` before and after). The `GIT_INDEX_FILE` fix addresses a non-problem.
+   - **User rejected revert of Summary fix**: When I tried to revert the `Summary: opts.Summary` addition from committed.go, the user rejected the edit. Status unclear — the fix is still in the file.
+
+5. Problem Solving:
+   - **SOLVED**: Auto-summarization summary not appearing in metadata.json — missing `Summary: opts.Summary` in CommittedMetadata constructor. Filed as ENT-243.
+   - **DISPROVEN**: Theory that `worktree.Status()` corrupts the index — it only reads, never writes.
+   - **DISPROVEN**: Theory that `claude --print` corrupts the index — empirically proven false.
+   - **DISCOVERED**: go-git encoder drops cache-tree extensions on any `SetIndex()` call (line 47: "TODO: support extensions").
+   - **UNSOLVED**: What actually calls `SetIndex()` during the post-commit hook? We've traced every function in the PostCommit path and found NO `SetIndex()` calls. Yet the debug log shows the index md5 changing during post-commit hooks that run condensation (17-28 second runs). The user's key insight: "if the index hasn't changed going in, why would a process invoked inside the commit context change the index (and be stale)? wouldn't we see the index changing back to what it was when we would expect it to change?"
+   - Was in the process of searching for any `worktree.Add()`, `worktree.Remove()`, `worktree.Reset()`, `worktree.Commit()` calls in production (non-test) code that might be on the post-commit path.
+
+6. All user messages:
+   - "also to generate a new shadow I think we need a new user prompt"
+   - "um, so what did you do in the end to fix it???"
+   - "whoa whoa whoa, before we get too far down the garden path / OK, so there's a auto-summarization bug - cool, write me a linear issue to go fix it after please (Project:Troy) / but what the heck is going on with claude and indexes....and did you just do a hacky workaround moving the git index? / also the rest of the stuff in this PR is _unnecessary_???"
+   - [After I explained the worktree.Status() shim is necessary] "ARE WE SURE? this didn't seem to be a problem before, or are we now just seeing more gcs?"
+   - "okay, wtf...why does claude cli do shit in git?"
+   - "hang on - if the index hasn't changed going in, why would a process invoked inside the commit context change the index (and be stale)? wouldn't we see the index changing back to what it was when we would expect it to change?"
+
+7. Pending Tasks:
+   - Identify the TRUE root cause of index corruption during post-commit hooks — what code path actually calls `SetIndex()`?
+   - Determine whether the worktree.Status() shim in PR #171 is necessary or should be reverted
+   - Determine whether the `GIT_INDEX_FILE` fix in claude.go should be kept or reverted (since `claude --print` was proven to not change the index)
+   - Determine disposition of the `Summary: opts.Summary` fix in committed.go (ENT-243 was filed, but fix is still on this branch)
+
+8. Current Work:
+   Actively investigating what ACTUALLY modifies the git index during the post-commit hook. Both original theories (worktree.Status() and claude --print) have been disproven. Was searching through all `worktree.Add()`, `worktree.Remove()`, `worktree.Reset()`, `worktree.Commit()` calls in production code to find if any are on the post-commit path. The grep results were too large and saved to a file. Key discovery: go-git's encoder drops cache-tree extensions (`// TODO: support extensions`), so any `SetIndex()` call would strip cache-tree. The user's latest insight suggests something external may be modifying the index during the 17-28 second window while summarization runs.
+
+   Debug log evidence pattern: index ONLY changes during post-commit hooks that run condensation+summarization (long-running, 17-28 seconds). It does NOT change during instant post-commit hooks (no condensation). This timing correlation is important — it could indicate an external process (IDE, file watcher) modifying the index during the longer window.
+
+9. Optional Next Step:
+   Continue investigating the actual source of index modification. The large grep output for `worktree.(Add|Remove|Reset|Commit)` was saved to `/Users/alex/.REDACTED.txt` — need to filter to only production (non-test) code. Key production hit: `common.go` lines 958, 965, 975, 985 have `worktree.Add()` and `worktree.Remove()` calls and `auto_commit.go` line 41 has `worktree.Commit()`. Need to check if any of these are reachable from the post-commit path. Also need to consider the user's hypothesis about external processes (IDE/VS Code) modifying the index during the 17-28 second window.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+show me where that post attribution-done and before-write section is?
+
+---
+
+post-commit condense:attribution-done: 5a002e4cd43d55b76f090026d11ed52e
+post-commit condense:before-write: e04759b1e2a4165d1ead97d42bfe2983
+post-commit condense:after-write: e04759b1e2a4165d1ead97d42bfe2983
+post-commit after-condense-8dab6c26: e04759b1e2a4165d1ead97d42bfe2983
+post-commit before-branch-cleanup: e04759b1e2a4165d1ead97d42bfe2983
+and the before-write logging was on what line?
+
+---
+
+so is the problem that we keep the window open for a much longer time than we should in that operation? I would have thought an interactive hook could keep things open for much longer?
+
+---
+
+nothing, that's just what you (or another claude) told me 😅
+
+the only thing that I've got is that it always seems to be the same error on the status:
+> git status
+fatal: unable to read e53647ba1f1e5203bedff558b482f178db045555
+
+---
+
+and it keeps popping _back_ into the index right?
+
+---
+
+it seems to happen after a condensation commit
+
+---
+
+add and commit it
+
+---
+
+and make a copy of it so we can inspect it ongoing
+
+---
+
+...
+./.REDACTED.md
+./.REDACTED.md
+./.REDACTED.md
+./.REDACTED.md
+./.REDACTED.md
+./.REDACTED.md
+./.REDACTED.md
+./.REDACTED.md
+./.claude/plugins/cache/claude-plugins-official/superpowers/4.1.1/tests/claude-code/README.md
+./.claude/plugins/cache/claude-plugins-official/superpowers/4.2.0/tests/claude-code/README.md
+./.REDACTED.md
+./.REDACTED.md
+./.REDACTED.md
+./.REDACTED.md
+./.REDACTED.md
+
+these exist?
+
+how or why would they end up in the index?
+
+---
+
+are we running claude from the cwd?
+
+---
+
+hmm, and also not calling any hooks itself, which is probably an issue given the entire hooks :|
+
+---
+
+fresh branch
+
+---
+
+ok, let's spawn the summarization claude from a temp dir
+
+---
+
+and is there a way to not use _any_ settings at all?
+
+---
+
+let's test this
+
+---
+
+I've just built and made this version available on path. I guess this commit should do it then?
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+19:34:40 prepare-commit-msg INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index BEFORE: 162ede80b048cee9f1e4753cd67a2179
+19:34:41 prepare-commit-msg INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index AFTER:  162ede80b048cee9f1e4753cd67a2179
+19:34:41 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index BEFORE: 162ede80b048cee9f1e4753cd67a2179
+19:34:56 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index AFTER:  ba59dc132d107f0a65bd7783fd691f61
+
+---
+
+replace the claude call with a 15s sleep?
+
+---
+
+yeah just commit this change we can revert it afterwards
+
+---
+
+19:37:59 prepare-commit-msg INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index BEFORE: 71a326bb8f72cbcd26a5ab212661da1b
+19:38:00 prepare-commit-msg INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index AFTER:  71a326bb8f72cbcd26a5ab212661da1b
+19:38:00 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index BEFORE: 71a326bb8f72cbcd26a5ab212661da1b
+19:38:16 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index AFTER:  71a326bb8f72cbcd26a5ab212661da1b
+that tested the path... let's do another for good measure
+
+---
+
+hmm, did we condense?
+
+---
+
+yes please
+
+---
+
+19:41:47 prepare-commit-msg INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index BEFORE: d474737cb40c0809bd987bf8ca2318d0
+19:41:47 prepare-commit-msg INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index AFTER:  d474737cb40c0809bd987bf8ca2318d0
+19:41:47 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index BEFORE: d474737cb40c0809bd987bf8ca2318d0
+19:42:03 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index AFTER:  d474737cb40c0809bd987bf8ca2318d0
+looks clean.
+
+ok let's reset back to the last one we had with claude (tmp dir)
+
+---
+
+yeah write a file and commit
+
+---
+
+19:43:20 prepare-commit-msg INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index BEFORE: aabaf422b23c8780df9b468cd550dc97
+19:43:20 prepare-commit-msg INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index AFTER:  aabaf422b23c8780df9b468cd550dc97
+19:43:20 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index BEFORE: aabaf422b23c8780df9b468cd550dc97
+19:43:32 post-commit INDEX=/Users/alex/workspace/cli/.git/worktrees/4/index AFTER:  c45afcc567ec95146f48f046697638b1 boom. 🤦🏻 (I've reset the index)

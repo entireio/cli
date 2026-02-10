@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "d6dc17ecd9e6",
+  "strategy": "manual-commit",
+  "branch": "completion-stanza-manager",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go",
+    "cmd/entire/cli/stanza.go",
+    "cmd/entire/cli/stanza_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d6/dc17ecd9e6/0/metadata.json",
+      "transcript": "/d6/dc17ecd9e6/0/full.jsonl",
+      "context": "/d6/dc17ecd9e6/0/context.md",
+      "content_hash": "/d6/dc17ecd9e6/0/content_hash.txt",
+      "prompt": "/d6/dc17ecd9e6/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 75,
+    "cache_creation_tokens": 191466,
+    "cache_read_tokens": 5922221,
+    "output_tokens": 8447,
+    "api_call_count": 69
+  }
+}

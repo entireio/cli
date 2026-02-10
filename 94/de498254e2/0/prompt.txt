@@ -1,0 +1,57 @@
+can you help me understand what `entire clean` is doing?
+
+---
+
+can you recheck the code base, we added some auto cleanup for shadow branches. so I wonder if this is an edge case now
+
+---
+
+I feel the command is to present on the top level so I wonder if it makes sense to move it under the "entire sessions" what do you think?
+
+---
+
+Yes
+
+---
+
+What do you think about renaming it to "cleanup" ?
+
+---
+
+yes
+
+---
+
+is there any other cleanup necessary in relation to the dual strategy?
+
+---
+
+for the "entire session cleanup" command, can you see anything that would needs to be cleaned up if someone uses auto-commit?
+
+---
+
+yes
+
+---
+
+I also understand that auto-commit is not creating shadow branches, but maybe there are other things that could be left in a stale state and should be cleaned up?
+
+---
+
+yes
+
+---
+
+3 and I would even consider cleaning up independent of what strategy is currently active, the otherone might have been active before?
+
+---
+
+yes
+
+---
+
+one last modification: there is now strategy specific logic outside of the strategy, can we maybe refactor that too?
+
+---
+
+can we rename the "clean" file names to "cleanup" too?

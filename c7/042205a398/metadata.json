@@ -1,0 +1,40 @@
+{
+  "checkpoint_id": "c7042205a398",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-242-fix-index-corruption",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/gitutil/",
+    "cmd/entire/cli/gitutil/worktree_status.go",
+    "cmd/entire/cli/gitutil/worktree_status_test.go",
+    "cmd/entire/cli/rewind.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/worktree_status.go",
+    "cmd/entire/cli/strategy/worktree_status_test.go",
+    "cmd/entire/cli/summarize/claude.go",
+    "testfile.txt"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c7/042205a398/0/metadata.json",
+      "transcript": "/c7/042205a398/0/full.jsonl",
+      "context": "/c7/042205a398/0/context.md",
+      "content_hash": "/c7/042205a398/0/content_hash.txt",
+      "prompt": "/c7/042205a398/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 528,
+    "cache_creation_tokens": 1071229,
+    "cache_read_tokens": 44079305,
+    "output_tokens": 23938,
+    "api_call_count": 414
+  }
+}

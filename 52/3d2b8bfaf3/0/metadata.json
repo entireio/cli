@@ -1,0 +1,21 @@
+{
+  "checkpoint_id": "523d2b8bfaf3",
+  "session_id": "2026-01-27-3b1b6293-65e1-4c3e-9f95-d530143332f2",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-27T11:33:39.232182+11:00",
+  "branch": "soph/fix-strange-multi-session-bug",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/architecture/claude-hooks-integration.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "5b3867d0-d5da-4640-9ea3-cae75454343a",
+  "transcript_lines_at_start": 254,
+  "token_usage": {
+    "input_tokens": 286,
+    "cache_creation_tokens": 136019,
+    "cache_read_tokens": 2372982,
+    "output_tokens": 142,
+    "api_call_count": 38
+  }
+}

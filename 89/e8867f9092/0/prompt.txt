@@ -1,0 +1,13 @@
+I did now continue the second session and made changes there two, so two sessions should have been active but the checkpoint only contains one, it's the last commit in /Users/soph/Work/entire/test/gemini_test can you check?
+
+---
+
+yes, can you also compares this to how this works for the claude agent code, so both align? (claude code should be source of truth)
+
+---
+
+are there tests for this behaviour in claude? if so can we add similar ones to gemini?
+
+---
+
+can you check if it's easy to refactor the concurrent session logic so there is less code/logic replication in both claude and gemini implementations? or is this two different because the agent logic slightly differs?

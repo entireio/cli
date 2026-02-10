@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "bcc28959f548",
+  "strategy": "manual-commit",
+  "branch": "gtrrz-victor/ent-252-duplicate-session-information-written-to-checkpoint",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/lint.yml",
+    "mise.toml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/bc/c28959f548/0/metadata.json",
+      "transcript": "/bc/c28959f548/0/full.jsonl",
+      "context": "/bc/c28959f548/0/context.md",
+      "content_hash": "/bc/c28959f548/0/content_hash.txt",
+      "prompt": "/bc/c28959f548/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 7,
+    "cache_creation_tokens": 21183,
+    "cache_read_tokens": 203863,
+    "output_tokens": 574,
+    "api_call_count": 5
+  }
+}

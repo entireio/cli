@@ -1,0 +1,14 @@
+{
+  "checkpoint_id": "74af160f6f80",
+  "session_id": "2026-01-06-ccc58457-00a5-4a2f-82a9-175e4473c60b",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-06T14:29:08.212605+01:00",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
+    "cmd/entire/cli/integration_test/setup_cmd_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit.go"
+  ]
+}

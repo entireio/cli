@@ -1,0 +1,17 @@
+{
+  "checkpoint_id": "7169f9710768",
+  "session_id": "2026-01-23-79e9becd-0b83-42f1-8cb1-33375d080476",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-23T11:57:36.34752+11:00",
+  "branch": "soph/do-not-truncate",
+  "checkpoints_count": 0,
+  "files_touched": null,
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 138,
+    "cache_creation_tokens": 74296,
+    "cache_read_tokens": 729219,
+    "output_tokens": 72,
+    "api_call_count": 18
+  }
+}
