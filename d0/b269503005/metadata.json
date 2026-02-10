@@ -4,8 +4,7 @@
   "branch": "alex/entire-explain-fixes",
   "checkpoints_count": 1,
   "files_touched": [
-    "cmd/entire/cli/explain.go",
-    "cmd/entire/cli/explain_test.go"
+    "cmd/entire/cli/explain.go"
   ],
   "sessions": [
     {
@@ -17,10 +16,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 59,
-    "cache_creation_tokens": 209078,
-    "cache_read_tokens": 5118184,
-    "output_tokens": 4284,
-    "api_call_count": 55
+    "input_tokens": 83,
+    "cache_creation_tokens": 219923,
+    "cache_read_tokens": 7514102,
+    "output_tokens": 5309,
+    "api_call_count": 73
   }
 }

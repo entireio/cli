@@ -16,3 +16,21 @@ Implement the following plan:
 
 commit this
 
+### Prompt 3
+
+okay, so pop quiz - what should this version of entire explain show us for this branch?
+
+### Prompt 4
+
+well, I've just reset our branch to origin/main then cherry-picked our commit...
+
+also it does have a checkpoint id -> Entire-Checkpoint: d0b269503005
+
+do a git log/show to have a look around.
+
+so _I_ would have expected a single checkpoint...
+
+### Prompt 5
+
+whoops! yeah let's put the reachableFromMain back...
+

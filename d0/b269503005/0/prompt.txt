@@ -90,3 +90,21 @@ If you need specific details from before exiting plan mode (like exact code snip
 ---
 
 commit this
+
+---
+
+okay, so pop quiz - what should this version of entire explain show us for this branch?
+
+---
+
+well, I've just reset our branch to origin/main then cherry-picked our commit...
+
+also it does have a checkpoint id -> Entire-Checkpoint: d0b269503005
+
+do a git log/show to have a look around.
+
+so _I_ would have expected a single checkpoint...
+
+---
+
+whoops! yeah let's put the reachableFromMain back...
