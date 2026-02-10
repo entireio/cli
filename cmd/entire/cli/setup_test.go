@@ -917,8 +917,8 @@ func TestAgentInstallURL(t *testing.T) {
 func TestFindInstalledAgent_ReturnsAgent(t *testing.T) {
 	t.Parallel()
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	ag, err := findInstalledAgent(&stdoutBuf, &stderrBuf)
+	var stderrBuf bytes.Buffer
+	ag, err := findInstalledAgent(&stderrBuf)
 
 	// This test is environment-dependent:
 	// - If claude or gemini is installed, ag should be non-nil

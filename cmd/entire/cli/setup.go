@@ -240,7 +240,7 @@ func runEnableWithStrategy(w, errW io.Writer, selectedStrategy string, localDev,
 	}
 
 	// Find an installed agent
-	ag, err := findInstalledAgent(w, errW)
+	ag, err := findInstalledAgent(errW)
 	if err != nil {
 		return err
 	}
@@ -339,7 +339,7 @@ func runEnableInteractive(w, errW io.Writer, localDev, _, useLocalSettings, useP
 	}
 
 	// Find an installed agent
-	ag, err := findInstalledAgent(w, errW)
+	ag, err := findInstalledAgent(errW)
 	if err != nil {
 		return err
 	}
@@ -500,12 +500,17 @@ func checkDisabledGuard(w io.Writer) bool {
 
 // isInstalledWithHookSupport returns true if the agent is installed (binary in PATH)
 // and implements HookSupport, so we can install hooks for it.
-func isInstalledWithHookSupport(ag agent.Agent) bool {
+// Returns (false, err) when IsInstalled() returns an unexpected OS error, so callers
+// can propagate it instead of showing a generic "not found" message.
+func isInstalledWithHookSupport(ag agent.Agent) (bool, error) {
 	if _, ok := ag.(agent.HookSupport); !ok {
-		return false
+		return false, nil
 	}
 	installed, err := ag.IsInstalled()
-	return err == nil && installed
+	if err != nil {
+		return false, err
+	}
+	return installed, nil
 }
 
 // findInstalledAgent returns the first installed agent that supports hooks.
@@ -513,12 +518,20 @@ func isInstalledWithHookSupport(ag agent.Agent) bool {
 // Only agents that are both installed (binary in PATH) and implement HookSupport
 // are returned, so the enable flow can always install hooks.
 // Returns the agent and nil error if found, or nil agent and an error with
-// helpful install instructions written to errW (stderr).
-func findInstalledAgent(stdout, errW io.Writer) (agent.Agent, error) {
+// helpful install instructions written to errW (stderr). OS errors from
+// IsInstalled() (e.g. permission errors on PATH) are propagated to the caller.
+func findInstalledAgent(errW io.Writer) (agent.Agent, error) {
+	var firstErr error
+
 	// Try the default agent first
 	ag := agent.Default()
-	if ag != nil && isInstalledWithHookSupport(ag) {
-		return ag, nil
+	if ag != nil {
+		ok, err := isInstalledWithHookSupport(ag)
+		if err != nil {
+			firstErr = err
+		} else if ok {
+			return ag, nil
+		}
 	}
 
 	// Check all registered agents
@@ -527,9 +540,19 @@ func findInstalledAgent(stdout, errW io.Writer) (agent.Agent, error) {
 		if err != nil {
 			continue
 		}
-		if isInstalledWithHookSupport(a) {
+		ok, err := isInstalledWithHookSupport(a)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else if ok {
 			return a, nil
 		}
+	}
+
+	// If we hit an OS error while checking, propagate it
+	if firstErr != nil {
+		return nil, fmt.Errorf("error checking if agent is installed: %w", firstErr)
 	}
 
 	// No hook-supporting agents found - provide helpful error to stderr
