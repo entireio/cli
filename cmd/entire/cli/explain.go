@@ -16,10 +16,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -71,6 +73,12 @@ func newExplainCmd() *cobra.Command {
 	var forceFlag bool
 	var searchAllFlag bool
 
+	// Export flags
+	var exportFlag bool
+	var showcaseFlag bool
+	var exportFormat string
+	var outputFile string
+
 	cmd := &cobra.Command{
 		Use:   "explain",
 		Short: "Explain a session, commit, or checkpoint",
@@ -99,6 +107,12 @@ Summary generation (for --checkpoint):
   --generate    Generate an AI summary for the checkpoint
   --force       Regenerate even if a summary already exists (requires --generate)
 
+Export modes (requires --checkpoint):
+  --export        Export checkpoint in structured format (JSON or Markdown)
+  --showcase      Apply privacy-focused redaction (use with --export)
+  --format FORMAT Export format: json, markdown (default: json, use with --export)
+  --output FILE   Write export to file instead of stdout (use with --export)
+
 Performance options:
   --search-all  Remove branch/depth limits when searching for commits (may be slow)
 
@@ -106,6 +120,21 @@ Checkpoint detail view shows:
   - Author of the checkpoint
   - Associated git commits that reference the checkpoint
   - Prompts and responses from the session
+
+Export examples:
+  entire explain -c abc123 --export --showcase --format=json -o showcase.json
+  entire explain -c abc123 --export --format=markdown -o README.md
+  entire explain -c abc123 --raw-transcript  # Still works (raw JSONL)
+
+Security (showcase mode):
+  Showcase mode applies aggressive redaction for public sharing:
+  - API keys and tokens (entropy-based)
+  - Internal URLs and private IPs
+  - File paths normalized to project-relative
+  - Usernames and email addresses
+  - Project names from git remotes
+
+  ALWAYS review output before publishing - redaction is best-effort.
 
 Note: --session filters the list view; --commit and --checkpoint are mutually exclusive.`,
 		Args: func(_ *cobra.Command, args []string) error {
@@ -131,9 +160,25 @@ Note: --session filters the list view; --commit and --checkpoint are mutually ex
 				return errors.New("--raw-transcript requires --checkpoint/-c flag")
 			}
 
+			// Export flag validations
+			if exportFlag && checkpointFlag == "" {
+				return errors.New("--export requires --checkpoint/-c flag")
+			}
+			if showcaseFlag && !exportFlag {
+				return errors.New("--showcase requires --export flag")
+			}
+			if (exportFormat != "" || outputFile != "") && !exportFlag {
+				return errors.New("--format and --output require --export flag")
+			}
+
+			// Mutually exclusive: can't use --export with --raw-transcript, --short, --full
+			if exportFlag && (rawTranscriptFlag || shortFlag || fullFlag) {
+				return errors.New("--export is mutually exclusive with --raw-transcript, --short, --full")
+			}
+
 			// Convert short flag to verbose (verbose = !short)
 			verbose := !shortFlag
-			return runExplain(cmd.OutOrStdout(), cmd.ErrOrStderr(), sessionFlag, commitFlag, checkpointFlag, noPagerFlag, verbose, fullFlag, rawTranscriptFlag, generateFlag, forceFlag, searchAllFlag)
+			return runExplain(cmd.OutOrStdout(), cmd.ErrOrStderr(), sessionFlag, commitFlag, checkpointFlag, noPagerFlag, verbose, fullFlag, rawTranscriptFlag, generateFlag, forceFlag, searchAllFlag, exportFlag, showcaseFlag, exportFormat, outputFile)
 		},
 	}
 
@@ -148,16 +193,24 @@ Note: --session filters the list view; --commit and --checkpoint are mutually ex
 	cmd.Flags().BoolVar(&forceFlag, "force", false, "Regenerate summary even if one already exists (requires --generate)")
 	cmd.Flags().BoolVar(&searchAllFlag, "search-all", false, "Search all commits (no branch/depth limit, may be slow)")
 
-	// Make --short, --full, and --raw-transcript mutually exclusive
-	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript")
+	// Export flags
+	cmd.Flags().BoolVar(&exportFlag, "export", false, "Export checkpoint in structured format")
+	cmd.Flags().BoolVar(&showcaseFlag, "showcase", false, "Apply showcase redaction (use with --export)")
+	cmd.Flags().StringVar(&exportFormat, "format", "json", "Export format: json, markdown")
+	cmd.Flags().StringVarP(&outputFile, "output", "o", "", "Write to file instead of stdout")
+
+	// Make --short, --full, --raw-transcript, and --export mutually exclusive
+	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "export")
 	// --generate and --raw-transcript are incompatible (summary would be generated but not shown)
 	cmd.MarkFlagsMutuallyExclusive("generate", "raw-transcript")
+	// --generate and --export are incompatible
+	cmd.MarkFlagsMutuallyExclusive("generate", "export")
 
 	return cmd
 }
 
 // runExplain routes to the appropriate explain function based on flags.
-func runExplain(w, errW io.Writer, sessionID, commitRef, checkpointID string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool) error {
+func runExplain(w, errW io.Writer, sessionID, commitRef, checkpointID string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, export, showcase bool, format, outputFile string) error {
 	// Count mutually exclusive flags (--commit and --checkpoint are mutually exclusive)
 	// --session is now a filter for the list view, not a separate mode
 	flagCount := 0
@@ -180,7 +233,7 @@ func runExplain(w, errW io.Writer, sessionID, commitRef, checkpointID string, no
 		return runExplainCommit(w, commitRef, noPager, verbose, full, searchAll)
 	}
 	if checkpointID != "" {
-		return runExplainCheckpoint(w, errW, checkpointID, noPager, verbose, full, rawTranscript, generate, force, searchAll)
+		return runExplainCheckpoint(w, errW, checkpointID, noPager, verbose, full, rawTranscript, generate, force, searchAll, export, showcase, format, outputFile)
 	}
 
 	// Default or with session filter: show list view (optionally filtered by session)
@@ -194,7 +247,8 @@ func runExplain(w, errW io.Writer, sessionID, commitRef, checkpointID string, no
 // When force is true, regenerates even if a summary already exists.
 // When rawTranscript is true, outputs only the raw transcript file (JSONL format).
 // When searchAll is true, searches all commits without branch/depth limits (used for finding associated commits).
-func runExplainCheckpoint(w, errW io.Writer, checkpointIDPrefix string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool) error {
+// When export is true, exports the checkpoint in structured format (delegates to runExportCheckpoint).
+func runExplainCheckpoint(w, errW io.Writer, checkpointIDPrefix string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, export, showcase bool, format, outputFile string) error {
 	repo, err := openRepository()
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
@@ -257,6 +311,11 @@ func runExplainCheckpoint(w, errW io.Writer, checkpointIDPrefix string, noPager,
 	content, err := store.ReadLatestSessionContent(context.Background(), fullCheckpointID)
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint content: %w", err)
+	}
+
+	// Handle export mode (must come before summary generation and raw transcript)
+	if export {
+		return runExportCheckpoint(w, errW, fullCheckpointID, content, summary, showcase, format, outputFile)
 	}
 
 	// Handle summary generation
@@ -330,6 +389,87 @@ func generateCheckpointSummary(w, _ io.Writer, store *checkpoint.GitStore, check
 	}
 
 	fmt.Fprintln(w, "✓ Summary generated and saved")
+	return nil
+}
+
+// runExportCheckpoint exports a checkpoint in structured format (JSON or Markdown).
+// Applies showcase redaction if requested.
+func runExportCheckpoint(w, _ io.Writer, checkpointID id.CheckpointID,
+	content *checkpoint.SessionContent, summary *checkpoint.CheckpointSummary,
+	showcase bool, format, outputFile string) error {
+
+	// Prepare transcript for export
+	transcriptBytes := content.Transcript
+	prompts := content.Prompts
+	contextMd := string(content.Context)
+	filesTouched := content.Metadata.FilesTouched
+
+	// Apply redaction if showcase mode
+	if showcase {
+		cfg, err := settings.Load()
+		if err != nil {
+			return fmt.Errorf("loading settings: %w", err)
+		}
+
+		showcaseConfig := cfg.GetShowcaseConfig()
+		if showcaseConfig == nil {
+			showcaseConfig = &redact.ShowcaseConfig{}
+			*showcaseConfig = redact.DefaultShowcaseConfig()
+		}
+
+		// Layer 1: Existing entropy-based redaction
+		transcriptBytes, err = redact.JSONLBytes(transcriptBytes)
+		if err != nil {
+			return fmt.Errorf("entropy redaction failed: %w", err)
+		}
+
+		// Layer 2: Showcase redaction (patterns, blocklist, structural)
+		transcriptBytes, err = redact.ShowcaseJSONL(transcriptBytes, *showcaseConfig)
+		if err != nil {
+			return fmt.Errorf("showcase redaction failed: %w", err)
+		}
+
+		prompts = redact.Showcase(prompts, *showcaseConfig)
+		contextMd = redact.Showcase(contextMd, *showcaseConfig)
+
+		filesTouched = make([]string, len(content.Metadata.FilesTouched))
+		for i, path := range content.Metadata.FilesTouched {
+			filesTouched[i] = redact.Showcase(path, *showcaseConfig)
+		}
+	}
+
+	// Format output
+	var output []byte
+	var err error
+
+	switch format {
+	case "json":
+		output, err = formatExportJSON(checkpointID, content, summary,
+			transcriptBytes, prompts, contextMd, filesTouched)
+	case "markdown":
+		output, err = formatExportMarkdown(checkpointID, content, summary,
+			transcriptBytes, prompts, contextMd, filesTouched)
+	default:
+		return fmt.Errorf("unsupported format: %s", format)
+	}
+
+	if err != nil {
+		return fmt.Errorf("formatting failed: %w", err)
+	}
+
+	// Write output
+	if outputFile == "" {
+		if _, err = w.Write(output); err != nil {
+			return fmt.Errorf("failed to write output: %w", err)
+		}
+	} else {
+		//nolint:gosec // G306: export file is public output, 0o644 is appropriate
+		if err := os.WriteFile(outputFile, output, 0o644); err != nil {
+			return fmt.Errorf("failed to write file: %w", err)
+		}
+		fmt.Fprintf(w, "Exported to %s\n", outputFile)
+	}
+
 	return nil
 }
 
