@@ -545,7 +545,8 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 	fmt.Fprintf(w, "Agent: %s\n\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	if _, err := hookAgent.InstallHooks(localDev, forceHooks); err != nil {
+	installedHooks, err := hookAgent.InstallHooks(localDev, forceHooks)
+	if err != nil {
 		return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
 	}
 
@@ -603,11 +604,20 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
 
-	if agentName == agent.AgentNameGemini {
-		fmt.Fprintln(w, "✓ Hooks installed - This is a work in progress")
+	if installedHooks == 0 {
+		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
+		if agentName == agent.AgentNameGemini {
+			msg += " (Preview)"
+		}
+		fmt.Fprintf(w, "%s\n", msg)
 	} else {
-		fmt.Fprintln(w, "✓ Hooks installed")
+		msg := fmt.Sprintf("Installed %d hooks for %s", installedHooks, ag.Description())
+		if agentName == agent.AgentNameGemini {
+			msg += " (Preview)"
+		}
+		fmt.Fprintf(w, "%s\n", msg)
 	}
+
 	fmt.Fprintf(w, "✓ Project configured (%s)\n", configDisplayProject)
 
 	// Let the strategy handle its own setup requirements (creates entire/checkpoints/v1 branch, etc.)

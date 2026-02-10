@@ -215,9 +215,11 @@ func (s *ManualCommitStrategy) initializeSession(repo *git.Repository, sessionID
 	}
 
 	now := time.Now()
+	headHash := head.Hash().String()
 	state := &SessionState{
 		SessionID:             sessionID,
-		BaseCommit:            head.Hash().String(),
+		BaseCommit:            headHash,
+		AttributionBaseCommit: headHash,
 		WorktreePath:          worktreePath,
 		WorktreeID:            worktreeID,
 		StartedAt:             now,

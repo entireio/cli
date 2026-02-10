@@ -1,11 +1,13 @@
 package strategy
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -1009,6 +1011,135 @@ func TestTurnEnd_Active_NoActions(t *testing.T) {
 	_, err = repo.Reference(refName, true)
 	assert.NoError(t, err,
 		"shadow branch should still exist after no-op turn end")
+}
+
+// TestTurnEnd_DeferredCondensation_AttributionUsesOriginalBase verifies that
+// deferred condensation (ACTIVE_COMMITTED → IDLE) uses AttributionBaseCommit
+// instead of BaseCommit for attribution, so the diff is non-zero.
+//
+// Scenario: agent modifies a file, user commits mid-turn, then turn ends.
+// Without the fix, BaseCommit is updated to the new HEAD by PostCommit migration,
+// so baseTree == headTree and attribution shows zero changes.
+// With the fix, AttributionBaseCommit preserves the original base commit.
+func TestTurnEnd_DeferredCondensation_AttributionUsesOriginalBase(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-deferred-attribution"
+
+	// Initialize session and save a checkpoint that includes a modified file.
+	// The "agent" modifies test.txt before saving the checkpoint.
+	setupSessionWithFileChange(t, s, repo, dir, sessionID)
+
+	// Record the original base commit (commit A)
+	state, err := s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	originalBaseCommit := state.BaseCommit
+
+	// Verify AttributionBaseCommit is set at session init
+	assert.Equal(t, originalBaseCommit, state.AttributionBaseCommit,
+		"AttributionBaseCommit should equal BaseCommit at session start")
+
+	// Set phase to ACTIVE (simulating agent mid-turn)
+	state.Phase = session.PhaseActive
+	state.FilesTouched = []string{"test.txt"}
+	require.NoError(t, s.saveSessionState(state))
+
+	// User commits (creates commit B). This triggers PostCommit which:
+	// - Transitions ACTIVE → ACTIVE_COMMITTED (defers condensation)
+	// - Migrates shadow branch to new HEAD
+	// - Updates BaseCommit to new HEAD
+	commitWithCheckpointTrailer(t, repo, dir, "a1b2c3d4e5f6")
+
+	err = s.PostCommit()
+	require.NoError(t, err)
+
+	// Reload state and verify the key invariant:
+	// BaseCommit has moved to the new HEAD, but AttributionBaseCommit stays at original
+	state, err = s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	require.Equal(t, session.PhaseActiveCommitted, state.Phase)
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	newHeadHash := head.Hash().String()
+
+	assert.Equal(t, newHeadHash, state.BaseCommit,
+		"BaseCommit should be updated to new HEAD after migration")
+	assert.Equal(t, originalBaseCommit, state.AttributionBaseCommit,
+		"AttributionBaseCommit should still point to original base (commit A)")
+	assert.NotEqual(t, state.BaseCommit, state.AttributionBaseCommit,
+		"BaseCommit and AttributionBaseCommit should diverge after mid-turn commit")
+
+	// Now simulate TurnEnd (agent finishes) — deferred condensation runs
+	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
+	remaining := session.ApplyCommonActions(state, result)
+	require.Contains(t, remaining, session.ActionCondense)
+
+	err = s.HandleTurnEnd(state, remaining)
+	require.NoError(t, err)
+
+	// After condensation, verify AttributionBaseCommit is updated to match BaseCommit
+	assert.Equal(t, state.BaseCommit, state.AttributionBaseCommit,
+		"AttributionBaseCommit should be updated after successful condensation")
+
+	// Verify condensation actually happened
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err, "entire/sessions branch should exist after deferred condensation")
+
+	// Read back the committed metadata and verify attribution is non-zero.
+	// The agent modified test.txt (added a line), so AgentLines should be > 0.
+	store := checkpoint.NewGitStore(repo)
+	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
+	content, err := store.ReadSessionContent(context.Background(), cpID, 0)
+	require.NoError(t, err, "should be able to read condensed session content")
+	require.NotNil(t, content)
+	require.NotNil(t, content.Metadata.InitialAttribution,
+		"condensed metadata should include attribution")
+	assert.Positive(t, content.Metadata.InitialAttribution.TotalCommitted,
+		"attribution TotalCommitted should be non-zero (agent modified test.txt)")
+}
+
+// setupSessionWithFileChange is like setupSessionWithCheckpoint but also modifies
+// test.txt so the shadow branch checkpoint includes actual file changes.
+// This enables attribution testing: the diff between base commit and the
+// checkpoint/HEAD shows real line changes.
+func setupSessionWithFileChange(t *testing.T, s *ManualCommitStrategy, _ *git.Repository, dir, sessionID string) {
+	t.Helper()
+
+	// Modify test.txt to simulate agent work (adds lines relative to initial commit)
+	testFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(testFile, []byte("initial content\nagent added line\n"), 0o644))
+
+	// Create metadata directory with a transcript file
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	transcript := `{"type":"human","message":{"content":"test prompt"}}
+{"type":"assistant","message":{"content":"test response"}}
+`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(metadataDirAbs, paths.TranscriptFileName),
+		[]byte(transcript), 0o644))
+
+	// SaveChanges creates the shadow branch and checkpoint
+	err := s.SaveChanges(SaveContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"test.txt"},
+		NewFiles:       []string{},
+		DeletedFiles:   []string{},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	})
+	require.NoError(t, err, "SaveChanges should succeed to create shadow branch content")
 }
 
 // setupSessionWithCheckpoint initializes a session and creates one checkpoint
