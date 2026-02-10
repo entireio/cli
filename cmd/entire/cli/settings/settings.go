@@ -43,6 +43,10 @@ type EntireSettings struct {
 	// Defaults to "info".
 	LogLevel string `json:"log_level,omitempty"`
 
+	// AutoRunResume controls whether `entire resume` automatically runs the
+	// agent resume command when `--run` is not explicitly provided.
+	AutoRunResume bool `json:"autoRunResume,omitempty"`
+
 	// StrategyOptions contains strategy-specific configuration
 	StrategyOptions map[string]any `json:"strategy_options,omitempty"`
 
@@ -178,6 +182,15 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		if ll != "" {
 			settings.LogLevel = ll
 		}
+	}
+
+	// Override autoRunResume if present
+	if autoRunResumeRaw, ok := raw["autoRunResume"]; ok {
+		var ar bool
+		if err := json.Unmarshal(autoRunResumeRaw, &ar); err != nil {
+			return fmt.Errorf("parsing autoRunResume field: %w", err)
+		}
+		settings.AutoRunResume = ar
 	}
 
 	// Merge strategy_options if present

@@ -180,6 +180,8 @@ Multiple AI sessions can run on the same commit. If you start a second session w
 | `--force`, `-f`  | Resume from older checkpoint without prompt |
 | `--run`, `-r`    | Start the restored session immediately      |
 
+Set `"autoRunResume": true` in `.entire/settings.json` (or `.entire/settings.local.json`) to make `--run` the default.
+
 ### `entire enable` Flags
 
 | Flag                   | Description                                                        |
@@ -238,6 +240,7 @@ Personal overrides, gitignored by default:
 |--------------------------------------|----------------------------------|------------------------------------------------------|
 | `enabled`                            | `true`, `false`                  | Enable/disable Entire                                |
 | `log_level`                          | `debug`, `info`, `warn`, `error` | Logging verbosity                                    |
+| `autoRunResume`                      | `true`, `false`                  | Auto-run restored session for `entire resume`        |
 | `strategy`                           | `manual-commit`, `auto-commit`   | Session capture strategy                             |
 | `strategy_options.push_sessions`     | `true`, `false`                  | Auto-push `entire/checkpoints/v1` branch on git push |
 | `strategy_options.summarize.enabled` | `true`, `false`                  | Auto-generate AI summaries at commit time            |

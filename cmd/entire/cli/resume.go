@@ -51,7 +51,7 @@ most recent commit with a checkpoint.  You'll be prompted to confirm resuming in
 			if checkDisabledGuard(cmd.OutOrStdout()) {
 				return nil
 			}
-			return runResume(args[0], force, autoRun)
+			return runResume(args[0], force, resolveAutoRun(cmd, autoRun))
 		},
 	}
 
@@ -59,6 +59,18 @@ most recent commit with a checkpoint.  You'll be prompted to confirm resuming in
 	cmd.Flags().BoolVarP(&autoRun, "run", "r", false, "Start the restored session immediately")
 
 	return cmd
+}
+
+func resolveAutoRun(cmd *cobra.Command, autoRun bool) bool {
+	if cmd.Flags().Changed("run") {
+		return autoRun
+	}
+
+	s, err := LoadEntireSettings()
+	if err != nil {
+		return autoRun
+	}
+	return s.AutoRunResume
 }
 
 func runResume(branchName string, force, autoRun bool) error {

@@ -662,3 +662,67 @@ func TestRunResumeCommand(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveAutoRun(t *testing.T) {
+	tests := []struct {
+		name         string
+		settingsJSON string
+		flagArg      string
+		want         bool
+	}{
+		{
+			name: "default false when unset",
+			want: false,
+		},
+		{
+			name:         "reads autoRunResume from settings",
+			settingsJSON: `{"strategy":"manual-commit","autoRunResume":true}`,
+			want:         true,
+		},
+		{
+			name:         "explicit --run=false overrides settings",
+			settingsJSON: `{"strategy":"manual-commit","autoRunResume":true}`,
+			flagArg:      "--run=false",
+			want:         false,
+		},
+		{
+			name:         "explicit --run overrides settings",
+			settingsJSON: `{"strategy":"manual-commit","autoRunResume":false}`,
+			flagArg:      "--run",
+			want:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+
+			if tt.settingsJSON != "" {
+				if err := os.MkdirAll(filepath.Dir(EntireSettingsFile), 0o755); err != nil {
+					t.Fatalf("failed to create settings dir: %v", err)
+				}
+				if err := os.WriteFile(EntireSettingsFile, []byte(tt.settingsJSON), 0o644); err != nil {
+					t.Fatalf("failed to write settings file: %v", err)
+				}
+			}
+
+			cmd := newResumeCmd()
+			if tt.flagArg != "" {
+				if err := cmd.ParseFlags([]string{tt.flagArg}); err != nil {
+					t.Fatalf("failed to parse flags: %v", err)
+				}
+			}
+
+			autoRun, err := cmd.Flags().GetBool("run")
+			if err != nil {
+				t.Fatalf("failed to read run flag: %v", err)
+			}
+
+			got := resolveAutoRun(cmd, autoRun)
+			if got != tt.want {
+				t.Fatalf("resolveAutoRun() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
