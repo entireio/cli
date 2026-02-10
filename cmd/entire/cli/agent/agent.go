@@ -64,6 +64,9 @@ type Agent interface {
 	// Returns (true, nil) if found, (false, nil) if not found,
 	// and (false, err) only for unexpected OS errors.
 	IsInstalled() (bool, error)
+
+	// InstallURL returns the installation documentation URL for this agent.
+	InstallURL() string
 }
 
 // HookSupport is implemented by agents with lifecycle hooks.

@@ -84,6 +84,11 @@ func (g *GeminiCLIAgent) IsInstalled() (bool, error) {
 	return true, nil
 }
 
+// InstallURL returns the installation documentation URL for Gemini CLI.
+func (g *GeminiCLIAgent) InstallURL() string {
+	return "https://github.com/google-gemini/gemini-cli"
+}
+
 // GetHookConfigPath returns the path to Gemini's hook config file.
 func (g *GeminiCLIAgent) GetHookConfigPath() string {
 	return ".gemini/settings.json"

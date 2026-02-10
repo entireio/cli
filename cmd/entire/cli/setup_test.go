@@ -358,8 +358,8 @@ func TestRunEnableWithStrategy_PreservesExistingSettings(t *testing.T) {
 	writeSettings(t, initialSettings)
 
 	// Run enable with a different strategy
-	var stdout bytes.Buffer
-	err := runEnableWithStrategy(&stdout, "auto-commit", false, false, false, true, false, false, false)
+	var stdout, stderr bytes.Buffer
+	err := runEnableWithStrategy(&stdout, &stderr, "auto-commit", false, false, false, true, false, false, false)
 	if err != nil {
 		t.Fatalf("runEnableWithStrategy() error = %v", err)
 	}
@@ -402,8 +402,8 @@ func TestRunEnableWithStrategy_PreservesLocalSettings(t *testing.T) {
 	writeLocalSettings(t, localSettings)
 
 	// Run enable with --local flag
-	var stdout bytes.Buffer
-	err := runEnableWithStrategy(&stdout, "auto-commit", false, false, true, false, false, false, false)
+	var stdout, stderr bytes.Buffer
+	err := runEnableWithStrategy(&stdout, &stderr, "auto-commit", false, false, true, false, false, false, false)
 	if err != nil {
 		t.Fatalf("runEnableWithStrategy() error = %v", err)
 	}
@@ -879,7 +879,7 @@ func TestEnableCmd_AgentFlagEmptyValue(t *testing.T) {
 	}
 }
 
-func TestGetInstallURL(t *testing.T) {
+func TestAgentInstallURL(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -897,19 +897,18 @@ func TestGetInstallURL(t *testing.T) {
 			agent:   "gemini",
 			wantURL: "https://github.com/google-gemini/gemini-cli",
 		},
-		{
-			name:    "unknown agent",
-			agent:   "unknown",
-			wantURL: "https://github.com/entireio/cli#requirements",
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := getInstallURL(tt.agent)
+			ag, err := agent.Get(agent.AgentName(tt.agent))
+			if err != nil {
+				t.Fatalf("agent.Get(%q): %v", tt.agent, err)
+			}
+			got := ag.InstallURL()
 			if got != tt.wantURL {
-				t.Errorf("getInstallURL(%q) = %q, want %q", tt.agent, got, tt.wantURL)
+				t.Errorf("InstallURL() = %q, want %q", got, tt.wantURL)
 			}
 		})
 	}
@@ -918,25 +917,25 @@ func TestGetInstallURL(t *testing.T) {
 func TestFindInstalledAgent_ReturnsAgent(t *testing.T) {
 	t.Parallel()
 
-	var buf bytes.Buffer
-	ag, err := findInstalledAgent(&buf)
+	var stdoutBuf, stderrBuf bytes.Buffer
+	ag, err := findInstalledAgent(&stdoutBuf, &stderrBuf)
 
 	// This test is environment-dependent:
 	// - If claude or gemini is installed, ag should be non-nil
-	// - If neither is installed, err should be non-nil with helpful message
+	// - If neither is installed, err should be non-nil with helpful message on stderr
 	if ag != nil {
 		// Agent was found - verify it has a valid name
 		if ag.Name() == "" {
 			t.Error("findInstalledAgent() returned agent with empty name")
 		}
 	} else {
-		// No agent found - verify helpful error message was printed
+		// No agent found - verify helpful error message was printed to stderr
 		if err == nil {
 			t.Error("findInstalledAgent() returned nil agent and nil error")
 		}
-		output := buf.String()
+		output := stderrBuf.String()
 		if !strings.Contains(output, "No AI agents with hook support found in PATH") {
-			t.Errorf("expected helpful error message, got: %s", output)
+			t.Errorf("expected helpful error message on stderr, got: %s", output)
 		}
 	}
 }

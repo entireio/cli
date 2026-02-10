@@ -83,6 +83,11 @@ func (c *ClaudeCodeAgent) IsInstalled() (bool, error) {
 	return true, nil
 }
 
+// InstallURL returns the installation documentation URL for Claude Code.
+func (c *ClaudeCodeAgent) InstallURL() string {
+	return "https://docs.anthropic.com/en/docs/claude-code"
+}
+
 // GetHookConfigPath returns the path to Claude's hook config file.
 func (c *ClaudeCodeAgent) GetHookConfigPath() string {
 	return ".claude/settings.json"

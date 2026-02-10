@@ -97,7 +97,7 @@ Strategies: manual-commit (default), auto-commit`,
 				if !installed {
 					fmt.Fprintf(cmd.ErrOrStderr(),
 						"%s is not installed or not found in PATH.\nInstall it from: %s\n",
-						agentName, getInstallURL(agentName))
+						agentName, ag.InstallURL())
 					return NewSilentError(errors.New("agent not installed"))
 				}
 
@@ -105,9 +105,9 @@ Strategies: manual-commit (default), auto-commit`,
 			}
 			// If strategy is specified via flag, skip interactive selection
 			if strategyFlag != "" {
-				return runEnableWithStrategy(cmd.OutOrStdout(), strategyFlag, localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
+				return runEnableWithStrategy(cmd.OutOrStdout(), cmd.ErrOrStderr(), strategyFlag, localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
 			}
-			return runEnableInteractive(cmd.OutOrStdout(), localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
+			return runEnableInteractive(cmd.OutOrStdout(), cmd.ErrOrStderr(), localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
 		},
 	}
 
@@ -226,7 +226,7 @@ func isFullyEnabled() (enabled bool, agentDesc string, configPath string) {
 // runEnableWithStrategy enables Entire with a specified strategy (non-interactive).
 // The selectedStrategy can be either a display name (manual-commit, auto-commit)
 // or an internal name (manual-commit, auto-commit).
-func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
+func runEnableWithStrategy(w, errW io.Writer, selectedStrategy string, localDev, _, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
 	// Map the strategy to internal name if it's a display name
 	internalStrategy := selectedStrategy
 	if mapped, ok := strategyDisplayToInternal[selectedStrategy]; ok {
@@ -240,7 +240,7 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 	}
 
 	// Find an installed agent
-	ag, err := findInstalledAgent(w)
+	ag, err := findInstalledAgent(w, errW)
 	if err != nil {
 		return err
 	}
@@ -324,7 +324,7 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 }
 
 // runEnableInteractive runs the interactive enable flow.
-func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
+func runEnableInteractive(w, errW io.Writer, localDev, _, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
 	// Check if already fully enabled — show summary and return early.
 	// Skip early return if any configuration flags are set (user wants to reconfigure).
 	hasConfigFlags := forceHooks || skipPushSessions || !telemetry || useLocalSettings || useProjectSettings || localDev
@@ -339,7 +339,7 @@ func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProject
 	}
 
 	// Find an installed agent
-	ag, err := findInstalledAgent(w)
+	ag, err := findInstalledAgent(w, errW)
 	if err != nil {
 		return err
 	}
@@ -498,9 +498,9 @@ func checkDisabledGuard(w io.Writer) bool {
 	return false
 }
 
-// agentHasHooksAndInstalled returns true if the agent is installed (binary in PATH)
+// isInstalledWithHookSupport returns true if the agent is installed (binary in PATH)
 // and implements HookSupport, so we can install hooks for it.
-func agentHasHooksAndInstalled(ag agent.Agent) bool {
+func isInstalledWithHookSupport(ag agent.Agent) bool {
 	if _, ok := ag.(agent.HookSupport); !ok {
 		return false
 	}
@@ -513,11 +513,11 @@ func agentHasHooksAndInstalled(ag agent.Agent) bool {
 // Only agents that are both installed (binary in PATH) and implement HookSupport
 // are returned, so the enable flow can always install hooks.
 // Returns the agent and nil error if found, or nil agent and an error with
-// helpful install instructions if no such agents are installed.
-func findInstalledAgent(w io.Writer) (agent.Agent, error) {
+// helpful install instructions written to errW (stderr).
+func findInstalledAgent(stdout, errW io.Writer) (agent.Agent, error) {
 	// Try the default agent first
 	ag := agent.Default()
-	if ag != nil && agentHasHooksAndInstalled(ag) {
+	if ag != nil && isInstalledWithHookSupport(ag) {
 		return ag, nil
 	}
 
@@ -527,21 +527,21 @@ func findInstalledAgent(w io.Writer) (agent.Agent, error) {
 		if err != nil {
 			continue
 		}
-		if agentHasHooksAndInstalled(a) {
+		if isInstalledWithHookSupport(a) {
 			return a, nil
 		}
 	}
 
-	// No hook-supporting agents found - provide helpful error
-	fmt.Fprintln(w, "No AI agents with hook support found in PATH.")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Please install one of the following:")
+	// No hook-supporting agents found - provide helpful error to stderr
+	fmt.Fprintln(errW, "No AI agents with hook support found in PATH.")
+	fmt.Fprintln(errW)
+	fmt.Fprintln(errW, "Please install one of the following:")
 	for _, name := range agent.List() {
 		a, err := agent.Get(name)
 		if err != nil {
 			continue
 		}
-		fmt.Fprintf(w, "  - %s: %s\n", a.Description(), getInstallURL(string(name)))
+		fmt.Fprintf(errW, "  - %s: %s\n", a.Description(), a.InstallURL())
 	}
 	return nil, NewSilentError(errors.New("no agents installed"))
 }
@@ -560,18 +560,6 @@ func setupAgentHooks(ag agent.Agent, localDev, forceHooks bool) (int, error) {
 		return 0, fmt.Errorf("failed to install hooks for %s: %w", ag.Name(), err)
 	}
 	return count, nil
-}
-
-// getInstallURL returns the installation documentation URL for an agent.
-func getInstallURL(agentName string) string {
-	switch agentName {
-	case string(agent.AgentNameClaudeCode):
-		return "https://docs.anthropic.com/en/docs/claude-code"
-	case string(agent.AgentNameGemini):
-		return "https://github.com/google-gemini/gemini-cli"
-	default:
-		return "https://github.com/entireio/cli#requirements"
-	}
 }
 
 // printAgentError writes an error message followed by available agents and usage.
