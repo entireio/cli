@@ -1,0 +1,28 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b2fb19a19759",
+  "strategy": "manual-commit",
+  "branch": "soph/issue-templates",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".github/ISSUE_TEMPLATE/bug_report.yml",
+    ".github/ISSUE_TEMPLATE/config.yml",
+    ".github/ISSUE_TEMPLATE/feature_request.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b2/fb19a19759/0/metadata.json",
+      "transcript": "/b2/fb19a19759/0/full.jsonl",
+      "context": "/b2/fb19a19759/0/context.md",
+      "content_hash": "/b2/fb19a19759/0/content_hash.txt",
+      "prompt": "/b2/fb19a19759/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 70,
+    "cache_creation_tokens": 63790,
+    "cache_read_tokens": 1097347,
+    "output_tokens": 1309,
+    "api_call_count": 19
+  }
+}

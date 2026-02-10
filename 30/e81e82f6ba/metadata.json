@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "30e81e82f6ba",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "2f1c6bc9d94b4e92afc6eff508f8b5a6c7a39d0a",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/telemetry/telemetry.go",
+    "cmd/entire/cli/telemetry/telemetry_test.go",
+    "cmd/entire/main.go",
+    "plans/feat-posthog-telemetry.md",
+    "posthog-cli-telemetry-implementation.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/30/e81e82f6ba/0/metadata.json",
+      "transcript": "/30/e81e82f6ba/0/full.jsonl",
+      "context": "/30/e81e82f6ba/0/context.md",
+      "content_hash": "/30/e81e82f6ba/0/content_hash.txt",
+      "prompt": "/30/e81e82f6ba/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

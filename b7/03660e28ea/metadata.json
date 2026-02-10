@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "b703660e28ea",
+  "strategy": "manual-commit",
+  "branch": "20260205-strict-settings-parsing",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/settings/settings.go",
+    "cmd/entire/cli/settings/settings_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b7/03660e28ea/0/metadata.json",
+      "transcript": "/b7/03660e28ea/0/full.jsonl",
+      "context": "/b7/03660e28ea/0/context.md",
+      "content_hash": "/b7/03660e28ea/0/content_hash.txt",
+      "prompt": "/b7/03660e28ea/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 158,
+    "cache_creation_tokens": 24688,
+    "cache_read_tokens": 771366,
+    "output_tokens": 6012,
+    "api_call_count": 22
+  }
+}

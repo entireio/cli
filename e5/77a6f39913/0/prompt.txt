@@ -1,0 +1,33 @@
+The calculatePromptAttributionAtStart function silently returns an empty result on multiple error conditions (lines 936-952, 963-971). While this is acceptable for optional attribution tracking, consider logging these errors at Debug level to help diagnose issues where attribution is unexpectedly missing.
+
+For example, if the shadow branch exists but has corruption, or if git operations fail due to permissions issues, the attribution will be silently skipped with no visibility into why. Adding debug logs here (similar to the ones in manual_commit_condensation.go lines 139-177) would improve debuggability.
+
+---
+
+When a file has staged changes, calculatePromptAttributionAtStart reads from the git index (staging area), but WriteTemporary captures from the worktree. If a user has both staged and unstaged changes to the same file, the unstaged changes are captured in the shadow branch but not counted in PromptAttributions. This causes user contributions to be undercounted and agent contributions to be overcounted in the final attribution metrics.
+
+---
+
+Can you explain fully how we handle unstaged changes when the manual commit is done?
+
+---
+
+User edits made after the base commit but before the first prompt are never captured. The condition state.CheckpointCount > 0 skips attribution calculation for the first checkpoint. Additionally, calculatePromptAttributionAtStart returns early when no shadow branch exists. These edits get included in the shadow branch via SaveChanges and are incorrectly attributed to the agent. The inner CalculatePromptAttribution function can handle nil checkpoint trees by falling back to baseTree, but the callers prevent this logic from executing.
+
+---
+
+The getAllChangedFilesBetweenTrees function has a performance issue: it reads the content of every file in both trees twice (once when collecting files in the fileSet loop, and again in the filtering loop at lines 42-47). This is inefficient for large repositories.
+
+The function iterates through all files in both trees to build fileSet, but then for each file in the set, it calls getFileContent(tree1, filePath) and getFileContent(tree2, filePath) again. Since getFileContent can be expensive (reading file contents, checking for binary files), this double-reading should be avoided.
+
+Consider caching the content during the first pass, or using git tree comparison APIs that can detect changes without reading full file contents.
+
+Question on this finding: can't we get a hash from git for each file and check like this for diff? instead of getting the content?
+
+---
+
+is geFtileContent still used now?
+
+---
+
+does getAllChangedFilesBetweenTrees have tests?

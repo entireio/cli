@@ -1,0 +1,34 @@
+{
+  "checkpoint_id": "ba9a1bd49e00",
+  "strategy": "manual-commit",
+  "branch": "alex/extract-git-package",
+  "migration_source_commit": "d8d193dc532e1159030aa537dd9c757dd1071606",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/transcript.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/git_operations.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "docs/plans/2026-02-04-stop-hook-performance.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ba/9a1bd49e00/0/metadata.json",
+      "transcript": "/ba/9a1bd49e00/0/full.jsonl",
+      "context": "/ba/9a1bd49e00/0/context.md",
+      "content_hash": "/ba/9a1bd49e00/0/content_hash.txt",
+      "prompt": "/ba/9a1bd49e00/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2153,
+    "cache_creation_tokens": 1840069,
+    "cache_read_tokens": 33965778,
+    "output_tokens": 21068,
+    "api_call_count": 339
+  }
+}

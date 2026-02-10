@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "649d11045222",
+  "strategy": "manual-commit",
+  "branch": "alex/test-explain-checkpoint-boundaries",
+  "migration_source_commit": "8e32b92427b9e13f749a559b735326596d4e4c6a",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/transcript/parse.go",
+    "cmd/entire/cli/transcript/parse_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/64/9d11045222/0/metadata.json",
+      "transcript": "/64/9d11045222/0/full.jsonl",
+      "context": "/64/9d11045222/0/context.md",
+      "content_hash": "/64/9d11045222/0/content_hash.txt",
+      "prompt": "/64/9d11045222/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 236,
+    "cache_creation_tokens": 580915,
+    "cache_read_tokens": 6085496,
+    "output_tokens": 306,
+    "api_call_count": 61
+  }
+}

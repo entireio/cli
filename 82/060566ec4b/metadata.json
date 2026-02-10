@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "82060566ec4b",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-221-type-consolidation",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/session/state_test.go",
+    "cmd/entire/cli/state.go",
+    "docs/architecture/claude-hooks-integration.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/82/060566ec4b/0/metadata.json",
+      "transcript": "/82/060566ec4b/0/full.jsonl",
+      "context": "/82/060566ec4b/0/context.md",
+      "content_hash": "/82/060566ec4b/0/content_hash.txt",
+      "prompt": "/82/060566ec4b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 41,
+    "cache_creation_tokens": 46651,
+    "cache_read_tokens": 1326135,
+    "output_tokens": 401,
+    "api_call_count": 27
+  }
+}

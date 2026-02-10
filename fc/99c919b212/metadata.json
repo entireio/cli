@@ -1,0 +1,41 @@
+{
+  "checkpoint_id": "fc99c919b212",
+  "strategy": "manual-commit",
+  "branch": "alex/mark-sessions-as-closed",
+  "migration_source_commit": "3de782f7957ca9891832636d762ed1097895258f",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/claude.go",
+    "cmd/entire/cli/agent/claudecode/hooks.go",
+    "cmd/entire/cli/agent/claudecode/types.go",
+    "cmd/entire/cli/agent/geminicli/gemini.go",
+    "cmd/entire/cli/agent/geminicli/gemini_test.go",
+    "cmd/entire/cli/agent/geminicli/hooks.go",
+    "cmd/entire/cli/agent/types.go",
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/integration_test/agent_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/session_state_test.go",
+    "docs/plans/2026-02-03-session-end-tracking.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fc/99c919b212/0/metadata.json",
+      "transcript": "/fc/99c919b212/0/full.jsonl",
+      "context": "/fc/99c919b212/0/context.md",
+      "content_hash": "/fc/99c919b212/0/content_hash.txt",
+      "prompt": "/fc/99c919b212/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 299,
+    "cache_creation_tokens": 637373,
+    "cache_read_tokens": 15576859,
+    "output_tokens": 1394,
+    "api_call_count": 134
+  }
+}

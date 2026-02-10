@@ -1,0 +1,283 @@
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
+
+---
+
+I've merged the other PR but we now have some merge issues. 
+
+merge with parent alex/ent-221-better-state-tracking-for-sessions
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. The user invoked `/github-pr-review` skill for PR #169 on the `alex/ent-221-type-consolidation` branch.
+
+2. I fetched PR details - PR #169 "Consolidate session state types and simplify transcript tracking (ENT-221)" by khaong, and found review comments.
+
+3. I analyzed all comment threads and found 10 threads total, but only 1 needed a response - from cursor[bot] about missing backward compat migration for `LastInteractionTime` field rename (comment ID 2778466000).
+
+4. The cursor[bot] comment identified that `LastInteractionAt` was renamed to `LastInteractionTime` with JSON tag changed from `last_interaction_at` to `last_interaction_time` without backward compatibility handling.
+
+5. I confirmed the issue by checking the diff between main and the PR branch - the field and JSON tag both changed.
+
+6. I attempted to add a deprecated `LastInteractionAt` field with migration in `NormalizeAfterLoad()`, but the user rejected this edit.
+
+7. **Key user feedback**: The user said "the other branch just got merged today, so nobody will be using it - can we create a new patch PR which renames it on main instead?"
+
+8. I then:
+   - Created branch `alex/rename-last-interaction-time` from `origin/main`
+   - Renamed `LastInteractionAt` → `LastInteractionTime` and `last_interaction_at` → `last_interaction_time` across 10 files
+   - Ran fmt, lint, and all tests (pass)
+   - Committed and pushed
+   - Created draft PR #175
+   - Replied to the cursor[bot] comment on PR #169
+
+9. The user then returned in a new session and said: "I've merged the other PR but we now have some merge issues. merge with parent alex/ent-221-better-state-tracking-for-sessions"
+
+10. I fetched the parent branch and attempted to merge, which resulted in 6 conflicted files:
+    - `cmd/entire/cli/session/state.go`
+    - `cmd/entire/cli/strategy/auto_commit.go`
+    - `cmd/entire/cli/strategy/manual_commit.go`
+    - `cmd/entire/cli/strategy/manual_commit_session.go`
+    - `cmd/entire/cli/strategy/manual_commit_types.go`
+    - `cmd/entire/cli/strategy/session_state_test.go`
+
+11. I read all 6 conflicted files and analyzed the conflicts. The pattern was:
+    - HEAD (type-consolidation branch) uses consolidated types: `SessionState = session.State` alias, `StepCount`, `CheckpointTranscriptStart`, no conversion functions
+    - The parent branch has the older separate `SessionState` struct, `CheckpointCount`, `CondensedTranscriptLines`, and conversion functions (`sessionStateToStrategy`/`sessionStateFromStrategy`)
+    - In all cases, HEAD's version is correct since this is the type-consolidation branch
+
+12. I started resolving the first conflict in `session/state.go` - the conflict was between `Phase` field (HEAD) and `LastInteractionTime` field (incoming), where HEAD already had `LastInteractionTime` further down. I resolved this to keep both `Phase` and the single `LastInteractionTime`.
+
+13. The remaining 5 conflicts still need to be resolved.
+
+Now let me detail the specific conflicts remaining:
+
+**auto_commit.go** (lines 946-968): HEAD uses `StepCount: 0` with comment about CheckpointTranscriptStart defaulting to 0, incoming uses `CheckpointCount: 0` and `CondensedTranscriptLines: 0`. Want HEAD version.
+
+**manual_commit.go** (lines 58-160): HEAD removed conversion functions (SessionState is now an alias for session.State), incoming still has `sessionStateToStrategy()` and `sessionStateFromStrategy()`. Want HEAD version (no conversion functions).
+
+**manual_commit_session.go** (lines 230-234): HEAD uses `StepCount: 0`, incoming uses `CheckpointCount: 0`. Want HEAD version.
+
+**manual_commit_types.go** (lines 26-48): HEAD has `type SessionState = session.State` alias, incoming has full struct definition. Want HEAD version.
+
+**session_state_test.go** (lines 151-155, 185-189): HEAD uses `StepCount`, incoming uses `CheckpointCount`. Want HEAD version.
+
+Summary:
+1. Primary Request and Intent:
+   - The user initially invoked `/github-pr-review` to review and respond to PR review comments on PR #169 ("Consolidate session state types and simplify transcript tracking (ENT-221)") on branch `alex/ent-221-type-consolidation`.
+   - After finding one unaddressed cursor[bot] comment about missing backward compat for `LastInteractionAt` → `LastInteractionTime` rename, the user rejected the in-PR fix and instead requested a separate patch PR on main to rename the field there first (since the original field was only merged that day with no existing state files).
+   - In the second session, the user asked to merge the parent branch `alex/ent-221-better-state-tracking-for-sessions` into the current `alex/ent-221-type-consolidation` branch to resolve merge issues after the patch PR was merged.
+
+2. Key Technical Concepts:
+   - Go type aliases (`type SessionState = session.State`) to consolidate duplicate types
+   - Session state management with JSON serialization in `.git/entire-sessions/` files
+   - Field renames with JSON tag changes (`last_interaction_at` → `last_interaction_time`)
+   - Shadow branch strategy for checkpoint management
+   - Backward compatibility migrations via `NormalizeAfterLoad()`
+   - Git merge conflict resolution between type-consolidation branch and parent branch
+   - The type-consolidation branch renamed fields: `CheckpointCount` → `StepCount`, `CondensedTranscriptLines` → `CheckpointTranscriptStart`, and made `SessionState` a type alias for `session.State` (eliminating conversion functions)
+
+3. Files and Code Sections:
+   - **`cmd/entire/cli/session/state.go`** — Core session state type definition
+     - Contains `State` struct with all session fields
+     - Has `NormalizeAfterLoad()` for backward compat migrations
+     - Conflict: HEAD added `Phase` field, incoming added `LastInteractionTime` where HEAD already had it lower. **First conflict resolved** — kept `Phase` + single `LastInteractionTime`:
+     ```go
+     Phase Phase `json:"phase,omitempty"`
+     PendingCheckpointID string `json:"pending_checkpoint_id,omitempty"`
+     LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
+     ```
+   
+   - **`cmd/entire/cli/strategy/auto_commit.go`** — Auto-commit strategy implementation
+     - Conflict at `InitializeSession()` new state creation (lines ~946-968): HEAD uses `StepCount: 0` with comment about CheckpointTranscriptStart, incoming uses `CheckpointCount: 0` and `CondensedTranscriptLines: 0`. **Still needs resolution — want HEAD version.**
+   
+   - **`cmd/entire/cli/strategy/manual_commit.go`** — Manual-commit strategy main file
+     - Conflict (lines 58-160): HEAD removed `sessionStateToStrategy()` and `sessionStateFromStrategy()` conversion functions (since `SessionState` is now a type alias), incoming still has them. **Still needs resolution — want HEAD version (no conversion functions).**
+   
+   - **`cmd/entire/cli/strategy/manual_commit_session.go`** — Session state management for manual-commit
+     - Conflict in `initializeSession()` (lines 230-234): HEAD uses `StepCount: 0`, incoming uses `CheckpointCount: 0`. **Still needs resolution — want HEAD version.**
+   
+   - **`cmd/entire/cli/strategy/manual_commit_types.go`** — Type definitions
+     - Conflict (lines 26-48): HEAD has `type SessionState = session.State` (alias), incoming has full separate struct definition. **Still needs resolution — want HEAD version (the alias).**
+   
+   - **`cmd/entire/cli/strategy/session_state_test.go`** — Tests for session state
+     - Two conflicts (lines 151-155 and 185-189): HEAD uses `StepCount`, incoming uses `CheckpointCount`. **Still needs resolution — want HEAD version.**
+   
+   - **`cmd/entire/cli/status.go`** — Status display with `LastInteractionTime` references
+   - **`cmd/entire/cli/status_test.go`** — Status tests with `LastInteractionTime` references
+   - **`cmd/entire/cli/strategy/manual_commit_hooks.go`** — Hook handlers with `LastInteractionTime` and `StepCount`/`CheckpointTranscriptStart`
+   - **`cmd/entire/cli/integration_test/last_interaction_test.go`** — Integration tests for `LastInteractionTime`
+
+4. Errors and fixes:
+   - **Attempted backward compat fix rejected by user**: I tried to add a deprecated `LastInteractionAt` field with migration in `NormalizeAfterLoad()` on the type-consolidation branch. User rejected this, explaining the field was only merged that day so no state files exist with the old tag. User directed me to create a patch PR on main instead.
+   - **Worktree checkout issue**: When trying to `git checkout main`, got `fatal: 'main' is already used by worktree at '/Users/alex/workspace/cli'`. Fixed by creating branch from `origin/main` with `git checkout -b alex/rename-last-interaction-time origin/main`.
+   - **Merge conflicts**: Merging parent branch `alex/ent-221-better-state-tracking-for-sessions` into `alex/ent-221-type-consolidation` produced 6 conflicted files. Currently resolving them.
+
+5. Problem Solving:
+   - Successfully created and merged patch PR #175 to rename `LastInteractionAt` → `LastInteractionTime` on main
+   - Replied to cursor[bot] review comment on PR #169 explaining the approach
+   - Currently resolving merge conflicts between the parent branch and the type-consolidation branch (1 of 6 conflicts resolved)
+
+6. All user messages:
+   - (Invoked `/github-pr-review` skill)
+   - "the other branch just got merged today, so nobody will be using it - can we create a new patch PR which renames it on main instead?"
+   - "I've merged the other PR but we now have some merge issues. merge with parent alex/ent-221-better-state-tracking-for-sessions"
+
+7. Pending Tasks:
+   - Resolve remaining 5 merge conflicts in the merge of `origin/alex/ent-221-better-state-tracking-for-sessions` into `alex/ent-221-type-consolidation`:
+     1. `cmd/entire/cli/strategy/auto_commit.go` — Keep HEAD's `StepCount` version
+     2. `cmd/entire/cli/strategy/manual_commit.go` — Keep HEAD's version (remove conversion functions)
+     3. `cmd/entire/cli/strategy/manual_commit_session.go` — Keep HEAD's `StepCount` version
+     4. `cmd/entire/cli/strategy/manual_commit_types.go` — Keep HEAD's type alias version
+     5. `cmd/entire/cli/strategy/session_state_test.go` — Keep HEAD's `StepCount` version (2 conflicts)
+   - After resolving conflicts: run `mise run fmt && mise run lint && mise run test:ci`
+   - Commit the merge
+
+8. Current Work:
+   Resolving merge conflicts from merging `origin/alex/ent-221-better-state-tracking-for-sessions` into `alex/ent-221-type-consolidation`. The user said: "I've merged the other PR but we now have some merge issues. merge with parent alex/ent-221-better-state-tracking-for-sessions"
+   
+   I have resolved the first conflict in `cmd/entire/cli/session/state.go` (removed duplicate `LastInteractionTime` field, kept `Phase` from HEAD). Five more conflicts remain. In all cases, HEAD (type-consolidation) has the correct version since it has the consolidated/renamed types.
+
+9. Optional Next Step:
+   Continue resolving the remaining 5 merge conflicts. The next file to resolve is `cmd/entire/cli/strategy/auto_commit.go` where the conflict is in `InitializeSession()` — keep HEAD's version with `StepCount: 0` and the comment about `CheckpointTranscriptStart`. Then resolve `manual_commit.go` (remove the incoming conversion functions), `manual_commit_session.go`, `manual_commit_types.go`, and `session_state_test.go`. After all conflicts are resolved, run fmt/lint/tests and commit the merge.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+push

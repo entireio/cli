@@ -1,0 +1,17 @@
+I'm using the gemini agent code (added in this branch) with the testrepo /Users/soph/Work/entire/test/gemini_test and it worked once, now i can see the logs in `.entire/logs` that hooks are firing but now shadow branch is created, can you take a look if you can identify the issue?
+
+---
+
+can we figure out if there are more types we don't support?
+
+---
+
+what's the source for `edit` ?
+
+---
+
+and we know that the one we removed are not real?
+
+---
+
+let's only add replace then for now, but leave the others, I'll follow up with the original author of the changes

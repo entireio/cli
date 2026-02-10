@@ -1,0 +1,16 @@
+{
+  "checkpoint_id": "3aa278c851a7",
+  "session_id": "2026-01-20-ee6078de-2c4f-428e-b137-aafce7251a7a",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-20T21:08:10.66092+01:00",
+  "branch": "soph/add-branch-to-metadata",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go"
+  ],
+  "agent": "Claude Code"
+}

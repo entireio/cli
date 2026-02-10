@@ -1,0 +1,13 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+While we want this output text to be obvious, it needs to be friendly to first-timers.  Also, we should make a guess at their $SHELL and show appropriate instructions with a fallback.  Make a suggestion at making this friendlier
+@/Users/paul/src/entireio/cli/scripts/install.sh:212-224
+
+### Prompt 2
+
+do it
+

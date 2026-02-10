@@ -1,0 +1,38 @@
+{
+  "checkpoint_id": "481f1b2fbf9b",
+  "session_id": "1a289c77-a9da-491d-954a-2df7f0dd6a17",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-07T06:47:55.568838Z",
+  "branch": "alex/ent-221-phase-aware-git-hooks",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/hooks.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/phase_wiring_test.go",
+    "cmd/entire/cli/session/phase.go",
+    "cmd/entire/cli/session/phase_test.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go",
+    "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go",
+    "cmd/entire/cli/strategy/phase_wiring_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "4b622670-caef-44c4-9f32-b7ab80048a96",
+  "token_usage": {
+    "input_tokens": 285,
+    "cache_creation_tokens": 1445362,
+    "cache_read_tokens": 26765806,
+    "output_tokens": 10095,
+    "api_call_count": 245
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-07T06:47:25.604056Z",
+    "agent_lines": 852,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 852,
+    "agent_percentage": 100
+  }
+}

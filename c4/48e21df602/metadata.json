@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "c448e21df602",
+  "strategy": "manual-commit",
+  "branch": "soph/remove-entire-sessions",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".claude/scripts/entire-wrapper.sh",
+    ".gemini/scripts/entire-wrapper.sh",
+    "cmd/entire/cli/agent/claudecode/hooks_test.go",
+    "cmd/entire/cli/agent/geminicli/hooks_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c4/48e21df602/0/metadata.json",
+      "transcript": "/c4/48e21df602/0/full.jsonl",
+      "context": "/c4/48e21df602/0/context.md",
+      "content_hash": "/c4/48e21df602/0/content_hash.txt",
+      "prompt": "/c4/48e21df602/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 37,
+    "cache_creation_tokens": 111251,
+    "cache_read_tokens": 2533457,
+    "output_tokens": 2140,
+    "api_call_count": 31
+  }
+}

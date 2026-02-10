@@ -1,0 +1,24 @@
+{
+  "checkpoint_id": "ec6d3a8b5152",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-109-text-output-checkpoint-flag",
+  "migration_source_commit": "bc10f15b3e56f9776f6612ff9e8534304c635e86",
+  "checkpoints_count": 0,
+  "files_touched": [],
+  "sessions": [
+    {
+      "metadata": "/ec/6d3a8b5152/0/metadata.json",
+      "transcript": "/ec/6d3a8b5152/0/full.jsonl",
+      "context": "/ec/6d3a8b5152/0/context.md",
+      "content_hash": "/ec/6d3a8b5152/0/content_hash.txt",
+      "prompt": "/ec/6d3a8b5152/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4464,
+    "cache_creation_tokens": 632767,
+    "cache_read_tokens": 5016752,
+    "output_tokens": 266,
+    "api_call_count": 67
+  }
+}

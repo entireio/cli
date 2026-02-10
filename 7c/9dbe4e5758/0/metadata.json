@@ -1,0 +1,30 @@
+{
+  "checkpoint_id": "7c9dbe4e5758",
+  "session_id": "f744aef5-5139-4c21-91e5-3f44ce902105",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-29T18:48:24.460333Z",
+  "branch": "soph/make-sure-https-works",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/git_operations.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "0c7d6548-741e-4a97-aff1-cb078aa4ebd2",
+  "transcript_lines_at_start": 44,
+  "token_usage": {
+    "input_tokens": 7244,
+    "cache_creation_tokens": 56597,
+    "cache_read_tokens": 1694313,
+    "output_tokens": 73,
+    "api_call_count": 26
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-01-29T18:48:24.410255Z",
+    "agent_lines": 23,
+    "human_added": 111,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 134,
+    "agent_percentage": 17.16417910447761
+  }
+}

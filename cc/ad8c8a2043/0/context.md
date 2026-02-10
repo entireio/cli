@@ -1,0 +1,12 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+can you look at the changes in this branch and we should do the same for the gemini hook setup
+
+### Prompt 2
+
+The wrapper script blindly sources the project's .env file while set -euo pipefail is active. The set -u (nounset) option causes the script to immediately exit if the .env file references any undefined variable (e.g., DATABASE_URL=postgres://${DB_USER}:${DB_PASS}@localhost/mydb). Since .env files are commonly used by other tools (Docker Compose, Rails, etc.) and may contain variable references that aren't defined in the hook's environment, this can cause all Claude Code hooks to fail. The script...
+

@@ -1,0 +1,8 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+can you fix the local branch? i merged in main and maybe I resolved the conflict wrong
+

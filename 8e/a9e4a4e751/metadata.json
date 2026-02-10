@@ -1,0 +1,35 @@
+{
+  "checkpoint_id": "8ea9e4a4e751",
+  "strategy": "manual-commit",
+  "branch": "soph/improved-shadow-v2",
+  "migration_source_commit": "1409451eadb3a28f3fb0215c6e928640e728b0a0",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/multi_session_warning_test.go",
+    "cmd/entire/cli/integration_test/shadow_branch_overlap_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/strategy.go",
+    "docs/testing/shadow-branch-overlap-tests.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/8e/a9e4a4e751/0/metadata.json",
+      "transcript": "/8e/a9e4a4e751/0/full.jsonl",
+      "context": "/8e/a9e4a4e751/0/context.md",
+      "content_hash": "/8e/a9e4a4e751/0/content_hash.txt",
+      "prompt": "/8e/a9e4a4e751/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1097,
+    "cache_creation_tokens": 408556,
+    "cache_read_tokens": 22750646,
+    "output_tokens": 445,
+    "api_call_count": 211
+  }
+}

@@ -1,0 +1,200 @@
+Implement the following plan:
+
+# ENT-242: Replace go-git worktree.Status() with git CLI shim
+
+## Context
+
+go-git v5's `worktree.Status()` reads **and rewrites** the worktree index file. When called from git hook paths (post-commit, prepare-commit-msg), this rewrites the index with stale cache-tree entries that reference objects pruned by GC, causing index corruption (`fatal: unable to read <sha>`). Confirmed via instrumentation showing post-commit hook changes the index checksum.
+
+The fix: route all `worktree.Status()` calls through a shim that uses git CLI (`git status --porcelain`), which reads the index without rewriting it. The shim provides a single swap point for when go-git v6 fixes the bug.
+
+## Approach
+
+Create a new file `strategy/worktree_status.go` with two shim functions that return go-git types. All 10 call sites switch to use these shims.
+
+### New file: `cmd/entire/cli/strategy/worktree_status.go`
+
+Two exported functions:
+
+1. **`WorktreeStatus(repo *git.Repository) (git.Status, error)`**
+   - Parses `git status --porcelain -z` (NUL-delimited, handles special chars)
+   - Returns `git.Status` (= `map[string]*git.FileStatus`) with `Staging` and `Worktree` fields populated
+   - Maps porcelain XY codes to `git.StatusCode` values
+   - Handles renames/copies (R/C have two NUL-separated entries)
+   - `repo` param used to get worktree root for `cmd.Dir`; also makes future swap-back trivial
+   - Status code mapping: `' '→Unmodified, M→Modified, A→Added, D→Deleted, R→Renamed, C→Copied, ?→Untracked, U→UpdatedButUnmerged, T→Modified`
+
+2. **`StagedFileNames(repo *git.Repository) ([]string, error)`**
+   - Uses `git diff --cached --name-only -z` (lightweight, staging-only query)
+   - Returns just file names, no status parsing
+   - Used by `getStagedFiles()` which only needs names
+
+Both functions include a swap-back comment:
+```go
+// When go-git v6 fixes index corruption (ENT-242), swap to:
+//   w, _ := repo.Worktree(); return w.Status()
+```
+
+### New file: `cmd/entire/cli/strategy/worktree_status_test.go`
+
+Test the porcelain parsing logic:
+- Standard modified/added/deleted/untracked entries
+- Rename entries (two NUL-separated paths)
+- Mixed staged + worktree changes
+- Empty output (clean worktree)
+
+### Call site updates (10 sites)
+
+**`strategy/` package (4 sites) — use directly:**
+
+| File | Line | Function | Change |
+|------|------|----------|--------|
+| `manual_commit_hooks.go` | 982 | `getStagedFiles()` | Replace body with `StagedFileNames(repo)` |
+| `manual_commit_hooks.go` | 936 | `calculatePromptAttributionAtStart()` | `worktree.Status()` → `WorktreeStatus(repo)` |
+| `common.go` | 667 | `checkCanRewind()` | `worktree.Status()` → `WorktreeStatus(repo)` |
+| `common.go` | 733 | `checkCanRewindWithWarning()` | `worktree.Status()` → `WorktreeStatus(repo)` |
+
+**`cli/` package (6 sites) — call via `strategy.WorktreeStatus()`:**
+
+| File | Line | Function | Change |
+|------|------|----------|--------|
+| `state.go` | 214 | `ComputeFileChanges()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+| `state.go` | 283 | `ComputeDeletedFiles()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+| `state.go` | 344 | `getUntrackedFilesForState()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+| `state.go` | 546 | `DetectChangedFiles()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+| `rewind.go` | 1144 | `checkResetSafety()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+| `debug.go` | 295 | `getFileChanges()` | `worktree.Status()` → `strategy.WorktreeStatus(repo)` |
+
+**Note:** Callers that still need `repo.Worktree()` for other purposes (e.g., `calculatePromptAttributionAtStart` reads `worktree.Filesystem.Root()`) keep that call — only the `.Status()` part is replaced.
+
+### Reference implementation
+
+`checkpoint/temporary.go:collectChangedFiles()` (line 1028) already parses `git status --porcelain -z` with full rename/copy handling. The shim's parsing logic follows the same pattern but returns `git.Status` instead of `changedFilesResult`.
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+Plus manual verification: confirm the shim doesn't rewrite the index by checking `md5 .git/index` before and after a hook invocation.
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+
+---
+
+[Request interrupted by user]
+
+---
+
+um, sorry, I should have mentioned this earlier - we did do a get status replacement for a different reason - shadow file tracking - is this reusable?
+
+---
+
+yeah that was the one `checkpoint/temporary.go:collectChangedFiles`. continue then
+
+---
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.2.0/skills/requesting-code-review
+
+# Requesting Code Review
+
+Dispatch superpowers:code-reviewer subagent to catch issues before they cascade.
+
+**Core principle:** Review early, review often.
+
+## When to Request Review
+
+**Mandatory:**
+- After each task in subagent-driven development
+- After completing major feature
+- Before merge to main
+
+**Optional but valuable:**
+- When stuck (fresh perspective)
+- Before refactoring (baseline check)
+- After fixing complex bug
+
+## How to Request
+
+**1. Get git SHAs:**
+```bash
+BASE_SHA=$(git rev-parse HEAD~1)  # or origin/main
+HEAD_SHA=$(git rev-parse HEAD)
+```
+
+**2. Dispatch code-reviewer subagent:**
+
+Use Task tool with superpowers:code-reviewer type, fill template at `code-reviewer.md`
+
+**Placeholders:**
+- `{WHAT_WAS_IMPLEMENTED}` - What you just built
+- `{PLAN_OR_REQUIREMENTS}` - What it should do
+- `{BASE_SHA}` - Starting commit
+- `{HEAD_SHA}` - Ending commit
+- `{DESCRIPTION}` - Brief summary
+
+**3. Act on feedback:**
+- Fix Critical issues immediately
+- Fix Important issues before proceeding
+- Note Minor issues for later
+- Push back if reviewer is wrong (with reasoning)
+
+## Example
+
+```
+[Just completed Task 2: Add verification function]
+
+You: Let me request code review before proceeding.
+
+BASE_SHA=$(git log --oneline | grep "Task 1" | head -1 | awk '{print }')
+HEAD_SHA=$(git rev-parse HEAD)
+
+[Dispatch superpowers:code-reviewer subagent]
+  WHAT_WAS_IMPLEMENTED: Verification and repair functions for conversation index
+  PLAN_OR_REQUIREMENTS: Task 2 from docs/plans/deployment-plan.md
+  BASE_SHA: a7981ec
+  HEAD_SHA: 3df7661
+  DESCRIPTION: Added verifyIndex() and repairIndex() with 4 issue types
+
+[Subagent returns]:
+  Strengths: Clean architecture, real tests
+  Issues:
+    Important: Missing progress indicators
+    Minor: Magic number (100) for reporting interval
+  Assessment: Ready to proceed
+
+You: [Fix progress indicators]
+[Continue to Task 3]
+```
+
+## Integration with Workflows
+
+**Subagent-Driven Development:**
+- Review after EACH task
+- Catch issues before they compound
+- Fix before moving to next task
+
+**Executing Plans:**
+- Review after each batch (3 tasks)
+- Get feedback, apply, continue
+
+**Ad-Hoc Development:**
+- Review before merge
+- Review when stuck
+
+## Red Flags
+
+**Never:**
+- Skip review because "it's simple"
+- Ignore Critical issues
+- Proceed with unfixed Important issues
+- Argue with valid technical feedback
+
+**If reviewer wrong:**
+- Push back with technical reasoning
+- Show code/tests that prove it works
+- Request clarification
+
+See template at: requesting-code-review/code-reviewer.md

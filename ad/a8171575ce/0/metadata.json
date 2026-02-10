@@ -1,0 +1,33 @@
+{
+  "checkpoint_id": "ada8171575ce",
+  "session_id": "e8106766-ab6a-43ed-8849-77d5114eaff1",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-06T04:16:58.816121Z",
+  "branch": "alex/ent-207-fix-agent-name-misattribution",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "a4a296ae-c68b-4db4-8d73-f076eba959f1",
+  "transcript_lines_at_start": 212,
+  "token_usage": {
+    "input_tokens": 53,
+    "cache_creation_tokens": 89888,
+    "cache_read_tokens": 3799890,
+    "output_tokens": 3922,
+    "api_call_count": 47
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-06T04:16:58.711153Z",
+    "agent_lines": 207,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 207,
+    "agent_percentage": 100
+  }
+}
