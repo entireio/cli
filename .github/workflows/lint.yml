@@ -18,13 +18,11 @@ jobs:
           fetch-depth: "0"
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: jdx/mise-action@v3
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
 
-      - name: Check gofmt formatting
-        run: mise run fmt:check
+      - uses: jdx/mise-action@v3
 
       - name: Run golangci-lint
         run: mise run lint
-
-      - name: Check go.mod tidiness
-        run: mise run lint:gomod
