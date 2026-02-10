@@ -40,8 +40,9 @@ This command:
 If the branch doesn't exist locally but exists on origin, you'll be prompted
 to fetch it.
 
-If newer commits exist on the branch without checkpoints (e.g., after merging main),
-you'll be prompted to confirm resuming from the older checkpoint.`,
+If newer commits without checkpoints exist on the branch (e.g., after merging main
+or cherry-picking from elsewhere), this operation will reset your Git status to the
+most recent commit with a checkpoint.  You'll be prompted to confirm resuming in this case.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if checkDisabledGuard(cmd.OutOrStdout()) {
