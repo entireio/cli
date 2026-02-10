@@ -76,10 +76,16 @@ This shows all available checkpoints in the current session. Select one to resto
 To see and restore sessions from earlier work:
 
 ```
-entire resume
+entire resume <branch>
 ```
 
 Lists all past sessions with timestamps. You can view the conversation history or restore the code from any session.
+
+To restore and immediately start the session in one step:
+
+```
+entire resume --run <branch>
+```
 
 ### 5. Disable Entire (Optional)
 
@@ -166,6 +172,13 @@ Multiple AI sessions can run on the same commit. If you start a second session w
 | `entire rewind`  | Rewind to a previous checkpoint                                               |
 | `entire status`  | Show current session and strategy info                                        |
 | `entire version` | Show Entire CLI version                                                       |
+
+### `entire resume` Flags
+
+| Flag             | Description                                 |
+|------------------|---------------------------------------------|
+| `--force`, `-f`  | Resume from older checkpoint without prompt |
+| `--run`, `-r`    | Start the restored session immediately      |
 
 ### `entire enable` Flags
 
