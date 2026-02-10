@@ -1,0 +1,14 @@
+#!/bin/sh
+#MISE description="Lint gofmt"
+
+# List of non-formatted files:
+files="$(gofmt -l -s .)"
+
+# Is that list empty?  If not exit nonzero and say which files are unformatted:
+if [ -n "$files" ]; then
+  echo "These .go files need to be formatted:"
+  echo ""
+  echo "$files"
+  echo ""
+  echo "To fix: mise run fmt"
+fi

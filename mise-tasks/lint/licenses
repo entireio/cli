@@ -14,7 +14,8 @@ echo "Checking dependency licenses..."
 if ! command -v go-licenses &> /dev/null; then
     echo "Installing go-licenses tool..."
     go install github.com/google/go-licenses@latest
-    export PATH="$(go env GOPATH)/bin:$PATH"
+    GOPATH=$(go env GOPATH)
+    export PATH="$GOPATH/bin:$PATH"
 fi
 
 # Load allowed licenses
@@ -38,11 +39,12 @@ echo ""
 
 # Get licenses from dependencies
 TEMP_FILE=$(mktemp)
+# shellcheck disable=SC2312
 go-licenses csv ./cmd/entire 2>/dev/null | sort | uniq > "$TEMP_FILE"
 
 # Check each dependency
 VIOLATIONS=()
-while IFS=',' read -r package url license; do
+while IFS=',' read -r package _url license; do
     # Skip internal packages
     if [[ "$package" == entire.io/* ]]; then
         continue

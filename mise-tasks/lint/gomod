@@ -1,0 +1,12 @@
+#!/bin/sh
+#MISE description="go mod tidy"
+
+go mod tidy
+
+# Check and fail if there are differences with committed files:
+status="$(git status --porcelain=v1 go.mod go.sum 2>/dev/null)"
+if [ "$status" != "" ]; then
+  echo "go module files modified, please commit result of 'go mod tidy'!"
+  echo "$status"
+  exit 1
+fi
