@@ -28,7 +28,7 @@ const (
 const PiSettingsFileName = "settings.json"
 
 // entireExtensionPackage is the npm package for the pi-entire extension.
-const entireExtensionPackage = "npm:@anthropic/pi-entire"
+const entireExtensionPackage = "npm:@hjanuschka/pi-entire"
 
 // GetHookNames returns the hook verbs Pi supports.
 // These become subcommands: entire hooks pi <verb>

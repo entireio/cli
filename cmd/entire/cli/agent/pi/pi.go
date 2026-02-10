@@ -210,6 +210,163 @@ func (p *PiAgent) FormatResumeCommand(sessionID string) string {
 	return "pi  # then use /resume to select session"
 }
 
+// GetLastUserPrompt extracts the last user prompt from the session.
+func (p *PiAgent) GetLastUserPrompt(session *agent.AgentSession) string {
+	if session == nil || len(session.NativeData) == 0 {
+		return ""
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(session.NativeData)))
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	var lastPrompt string
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var entry piSessionEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue
+		}
+
+		if entry.Type == "message" && entry.Message != nil && entry.Message.Role == "user" {
+			// Extract text from content
+			for _, block := range entry.Message.Content {
+				if block.Type == "text" && block.Text != "" {
+					lastPrompt = block.Text
+				}
+			}
+		}
+	}
+
+	return lastPrompt
+}
+
+// TruncateAtUUID returns a new session truncated at the given entry ID (inclusive).
+func (p *PiAgent) TruncateAtUUID(session *agent.AgentSession, entryID string) (*agent.AgentSession, error) {
+	if session == nil {
+		return nil, errors.New("session is nil")
+	}
+
+	if len(session.NativeData) == 0 {
+		return nil, errors.New("session has no native data")
+	}
+
+	if entryID == "" {
+		// No truncation needed, return copy
+		return &agent.AgentSession{
+			SessionID:     session.SessionID,
+			AgentName:     session.AgentName,
+			RepoPath:      session.RepoPath,
+			SessionRef:    session.SessionRef,
+			StartTime:     session.StartTime,
+			NativeData:    session.NativeData,
+			ModifiedFiles: session.ModifiedFiles,
+		}, nil
+	}
+
+	// Parse and truncate
+	var result []byte
+	scanner := bufio.NewScanner(strings.NewReader(string(session.NativeData)))
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		// Add this line to result
+		result = append(result, line...)
+		result = append(result, '\n')
+
+		// Check if this is the target entry
+		var entry piSessionEntry
+		if err := json.Unmarshal(line, &entry); err == nil {
+			if entry.ID == entryID {
+				break
+			}
+		}
+	}
+
+	return &agent.AgentSession{
+		SessionID:     session.SessionID,
+		AgentName:     session.AgentName,
+		RepoPath:      session.RepoPath,
+		SessionRef:    session.SessionRef,
+		StartTime:     session.StartTime,
+		NativeData:    result,
+		ModifiedFiles: p.extractModifiedFiles(result),
+	}, nil
+}
+
+// FindCheckpointUUID finds the entry ID of the message containing the tool result
+// for the given tool call ID.
+func (p *PiAgent) FindCheckpointUUID(session *agent.AgentSession, toolCallID string) (string, bool) {
+	if session == nil || len(session.NativeData) == 0 {
+		return "", false
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(session.NativeData)))
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var entry piSessionEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue
+		}
+
+		if entry.Type == "message" && entry.Message != nil && entry.Message.Role == "toolResult" {
+			if entry.Message.ToolCallID == toolCallID {
+				return entry.ID, true
+			}
+		}
+	}
+
+	return "", false
+}
+
+// CalculateTokenUsage calculates token usage from a pi transcript.
+// Pi stores usage in assistant messages.
+func (p *PiAgent) CalculateTokenUsage(transcript []byte) *agent.TokenUsage {
+	usage := &agent.TokenUsage{}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(transcript)))
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var entry piSessionEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue
+		}
+
+		if entry.Type == "message" && entry.Message != nil && entry.Message.Role == "assistant" {
+			// Pi stores usage in the message - we'd need to parse it
+			// For now, count API calls
+			usage.APICallCount++
+		}
+	}
+
+	return usage
+}
+
 // extractModifiedFiles parses JSONL and extracts modified file paths.
 func (p *PiAgent) extractModifiedFiles(data []byte) []string {
 	files := make(map[string]bool)
