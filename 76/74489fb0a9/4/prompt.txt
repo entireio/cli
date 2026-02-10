@@ -125,4 +125,4 @@ mise run fmt && mise run lint && mise run test:ci
 | New session index | `len(Sessions) + 1` | `len(Sessions)` |
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/bba6327a-2899-4c9a-978a-2675b8b597a2.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl

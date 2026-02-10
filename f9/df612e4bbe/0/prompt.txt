@@ -247,7 +247,7 @@ Summary:
 
    User explicitly asked for tests, and the tests are written but lint is failing. Need to make lint pass to complete the task.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-ent-109-text-output-checkpoint-flag/7f78a542-6201-447a-8277-213165356894.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -430,7 +430,7 @@ Summary:
 9. Optional Next Step:
    None - the task is complete. The user requested "push it", which was the final action completed successfully. All changes are committed and pushed.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-ent-109-text-output-checkpoint-flag/7f78a542-6201-447a-8277-213165356894.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 

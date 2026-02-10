@@ -1,0 +1,573 @@
+Implement the following plan:
+
+# ENT-258: Mid-turn commits from Claude don't receive Entire-Checkpoint trailers
+
+## Context
+
+When Claude Code makes `git commit` calls during a single turn (before the stop hook fires), commits don't get `Entire-Checkpoint` trailers. Observed in a real session where Claude committed 5 files individually — none got trailers. Three compounding bugs cause this.
+
+## Bug Analysis
+
+### Bug 1: Path format mismatch in `sessionHasNewContentFromLiveTranscript`
+
+When the shadow branch doesn't exist (deleted after previous turn's condensation), `sessionHasNewContent` falls through to `sessionHasNewContentFromLiveTranscript`. The overlap check compares:
+- `getStagedFiles()` → repo-relative paths (`src/main.go`)
+- `ExtractModifiedFilesFromOffset()` → absolute paths from transcript (`/Users/alex/project/src/main.go`)
+
+Exact-string comparison in `hasOverlappingFiles` → never matches → "no content to link".
+
+**Fix:** Normalize absolute paths to repo-relative in `sessionHasNewContentFromLiveTranscript` using `GetWorktreePath()` + `paths.ToRelativePath()` before calling `hasOverlappingFiles`. Add debug logging at each check point.
+
+### Bug 2: `PostCommit` early-returns without updating `BaseCommit`
+
+When a commit has no trailer (due to Bug 1), `PostCommit` early-returns at line ~530. `EventGitCommit` never fires, `BaseCommit` never updates. All subsequent commits fail the `BaseCommit == currentHeadHash` filter in `PrepareCommitMsg`.
+
+**Fix:** When no trailer found, still find worktree sessions and update `BaseCommit` to new HEAD. Don't fire EventGitCommit (avoids ACTIVE_COMMITTED complexity with no checkpoint ID).
+
+### Bug 3: `SaveChanges` clears `PendingCheckpointID` before deferred condensation
+
+PostCommit sets `PendingCheckpointID` for deferred condensation. When agent stops, `SaveChanges` (`manual_commit_git.go:120`) clears it. `handleTurnEndCondense` finds it empty → generates new ID → commit trailer and condensed data have different IDs.
+
+**Fix:** Remove the clearing of `PendingCheckpointID` in `SaveChanges`. Condensation already overwrites it with the new value.
+
+## Changes
+
+### Step 1: Write failing tests (TDD red phase)
+
+**Bug 1 test:** `TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths`
+- Create session with transcript containing Write tool_use with absolute `file_path`
+- Stage the same file (repo-relative path)
+- No shadow branch
+- Assert `sessionHasNewContent` returns true
+- **Expected: FAILS** (path mismatch causes false negative)
+
+**Bug 2 test:** `TestPostCommit_NoTrailer_UpdatesBaseCommit`
+- Session in ACTIVE phase, `BaseCommit` = initial HEAD
+- Create commit without trailer
+- Call `PostCommit`
+- Assert `state.BaseCommit` == new HEAD
+- **Expected: FAILS** (early return skips BaseCommit update)
+
+**Bug 3 test:** `TestSaveChanges_PreservesPendingCheckpointID`
+- Set `state.PendingCheckpointID = "abc123def456"`
+- Call `SaveChanges` with real file changes
+- Reload state, assert `PendingCheckpointID` == `"abc123def456"`
+- **Expected: FAILS** (SaveChanges clears it)
+
+### Step 2: Fix Bug 3 — `cmd/entire/cli/strategy/manual_commit_git.go`
+
+Remove lines ~118-120:
+```go
+// Clear PendingCheckpointID — new content means the previous checkpoint cycle is over
+// and a new ID will be generated on the next commit
+state.PendingCheckpointID = ""
+```
+
+`PendingCheckpointID` is set by PostCommit (ACTIVE → ACTIVE_COMMITTED) and consumed by `handleTurnEndCondense`. It should not be cleared by `SaveChanges`.
+
+### Step 3: Fix Bug 1 — `cmd/entire/cli/strategy/manual_commit_hooks.go`
+
+In `sessionHasNewContentFromLiveTranscript`:
+- Get worktree path via `GetWorktreePath()`
+- Convert `modifiedFiles` from absolute to repo-relative using `paths.ToRelativePath(file, worktreePath)`
+- Add `logging.Debug` at each check point (transcript path/agent type missing, transcript position, modified files count, staged files, overlap result)
+- Keep the `repo *git.Repository` parameter (needed for `getStagedFiles`)
+
+### Step 4: Fix Bug 2 — `cmd/entire/cli/strategy/manual_commit_hooks.go`
+
+Replace PostCommit's early return (lines ~530-536) with a new helper `postCommitUpdateBaseCommitOnly(logCtx, head)`:
+1. Get worktree path, find sessions
+2. For each session: update `BaseCommit` to `head.Hash().String()`
+3. Save session state
+4. No state machine transitions, no condensation
+
+### Step 5: Verify all tests pass
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/1284c080-f9cd-45f8-9942-ff58f5c517e5.jsonl
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. The user provided a detailed implementation plan for ENT-258: Mid-turn commits from Claude don't receive Entire-Checkpoint trailers. The plan identifies three compounding bugs and provides specific fixes.
+
+2. I read the key files to understand the codebase:
+   - manual_commit_git.go - SaveChanges implementation
+   - manual_commit_hooks.go - PostCommit, PrepareCommitMsg, sessionHasNewContentFromLiveTranscript
+   - manual_commit_types.go - Type definitions
+   - manual_commit_session.go - Session state management
+   - common.go - Shared helpers
+   - paths/paths.go - Path utilities including ToRelativePath
+   - session/phase.go - State machine phases, events, transitions
+   - phase_postcommit_test.go - Existing PostCommit tests (patterns to follow)
+   - hooks_test.go - Existing hook tests
+   - agent/agent.go - Agent interfaces including TranscriptAnalyzer
+   - claudecode/claude.go - ExtractModifiedFilesFromOffset implementation
+   - claudecode/transcript.go - ExtractModifiedFiles, transcript parsing
+   - claudecode/types.go - Tool names, FileModificationTools
+   - transcript/types.go - Line, AssistantMessage, ContentBlock, ToolInput types
+
+3. I created task list with 5 tasks and started implementing.
+
+4. **Step 1: Wrote failing tests** in `mid_turn_commit_test.go`:
+   - TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths (Bug 1)
+   - TestPostCommit_NoTrailer_UpdatesBaseCommit (Bug 2)
+   - TestSaveChanges_PreservesPendingCheckpointID (Bug 3)
+   All three tests failed as expected (red phase confirmed).
+
+5. **Step 2: Fixed Bug 3** - Removed `state.PendingCheckpointID = ""` clearing in SaveChanges (manual_commit_git.go lines 118-120), replaced with a comment explaining why it's intentionally not cleared.
+
+6. **Step 3: Fixed Bug 1** - In sessionHasNewContentFromLiveTranscript (manual_commit_hooks.go), added path normalization using GetWorktreePath() + paths.ToRelativePath() to convert absolute paths from transcript to repo-relative paths before calling hasOverlappingFiles. Also added debug logging at each check point.
+
+7. **Step 4: Fixed Bug 2** - In PostCommit (manual_commit_hooks.go), replaced the early return when no trailer is found with a call to new helper method `postCommitUpdateBaseCommitOnly`. This method finds worktree sessions and updates their BaseCommit to new HEAD without firing EventGitCommit.
+
+8. After running tests, Bug 2 and Bug 3 tests passed, but Bug 1 test still failed due to macOS `/var` → `/private/var` symlink issue. Fixed test to use resolved worktree path (from GetWorktreePath()) when constructing absolute file paths in transcript.
+
+9. All three new tests passed. fmt and lint passed clean.
+
+10. Integration test `TestShadow_FullTranscriptCondensationWithIntermediateCommits` failed. The issue: after Bug 3 fix (not clearing PendingCheckpointID in SaveChanges), the PendingCheckpointID from a previous condensation persists and gets reused by PrepareCommitMsg for new content. Both commits end up with the same checkpoint ID.
+
+11. I started fixing this by modifying `condenseAndUpdateState` to clear `PendingCheckpointID` after condensation (instead of setting it to the new value). The rationale: PendingCheckpointID was meant for the ACTIVE_COMMITTED → TurnEnd deferred condensation flow. After condensation completes, it should be cleared. The amend handler should use `LastCheckpointID` instead.
+
+12. The last edit I made was changing `condenseAndUpdateState` in manual_commit_hooks.go to clear PendingCheckpointID instead of setting it. But I hadn't yet updated `handleAmendCommitMsg` to use `LastCheckpointID` as fallback, and hadn't re-run the tests.
+
+Key errors:
+- Bug 1 test initially failed due to macOS symlink resolution difference between t.TempDir() and git rev-parse --show-toplevel
+- Integration test failure after Bug 3 fix due to PendingCheckpointID persistence causing checkpoint ID reuse
+- The Bug 3 fix was incomplete - needed to also change condenseAndUpdateState and update handleAmendCommitMsg
+
+Summary:
+1. Primary Request and Intent:
+   The user asked me to implement a detailed plan for ENT-258: "Mid-turn commits from Claude don't receive Entire-Checkpoint trailers." The plan identifies three compounding bugs that prevent mid-turn git commits from getting checkpoint trailers, and provides specific TDD-based fix steps. The user also referenced a plan transcript at `/Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/1284c080-f9cd-45f8-9942-ff58f5c517e5.jsonl` for additional context.
+
+   **Bug 1:** Path format mismatch in `sessionHasNewContentFromLiveTranscript` — transcript returns absolute paths, `getStagedFiles()` returns repo-relative paths, exact-string comparison never matches.
+   
+   **Bug 2:** `PostCommit` early-returns without updating `BaseCommit` when no trailer found — subsequent commits fail `BaseCommit == currentHeadHash` filter.
+   
+   **Bug 3:** `SaveChanges` clears `PendingCheckpointID` before deferred condensation — commit trailer and condensed data end up with different IDs.
+
+2. Key Technical Concepts:
+   - Manual-commit strategy with shadow branches (`entire/<commit-hash>-<worktreeHash>`)
+   - Session phase state machine (ACTIVE, ACTIVE_COMMITTED, IDLE, ENDED)
+   - Checkpoint ID linking between user commits and metadata on `entire/sessions` branch
+   - `PendingCheckpointID` vs `LastCheckpointID` — different lifecycle purposes
+   - TranscriptAnalyzer interface for agent-agnostic transcript analysis
+   - Claude Code JSONL transcript format with absolute file paths in tool_use blocks
+   - TDD red-green-refactor cycle
+   - macOS `/var` → `/private/var` symlink resolution in git paths
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/strategy/mid_turn_commit_test.go`** (CREATED)
+     - Contains three failing-then-passing tests for the three bugs
+     - Important: imports `_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"` for agent registration
+     - Full file content:
+     ```go
+     package strategy
+
+     import (
+         "os"
+         "path/filepath"
+         "testing"
+         "time"
+
+         "github.com/entireio/cli/cmd/entire/cli/agent"
+         _ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+         "github.com/entireio/cli/cmd/entire/cli/paths"
+         "github.com/entireio/cli/cmd/entire/cli/session"
+
+         "github.com/go-git/go-git/v5"
+         "github.com/go-git/go-git/v5/plumbing/object"
+         "github.com/stretchr/testify/assert"
+         "github.com/stretchr/testify/require"
+     )
+
+     // TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths ...
+     func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testing.T) {
+         dir := setupGitRepo(t)
+         t.Chdir(dir)
+         repo, err := git.PlainOpen(dir)
+         require.NoError(t, err)
+         s := &ManualCommitStrategy{}
+         srcDir := filepath.Join(dir, "src")
+         require.NoError(t, os.MkdirAll(srcDir, 0o755))
+         testFile := filepath.Join(srcDir, "main.go")
+         require.NoError(t, os.WriteFile(testFile, []byte("package main\n"), 0o644))
+         wt, err := repo.Worktree()
+         require.NoError(t, err)
+         _, err = wt.Add("src/main.go")
+         require.NoError(t, err)
+         worktreePath, err := GetWorktreePath()
+         require.NoError(t, err)
+         worktreeID, err := paths.GetWorktreeID(worktreePath)
+         require.NoError(t, err)
+         absFilePath := filepath.Join(worktreePath, "src", "main.go")
+         transcriptContent := `{"type":"human","message":{"content":"write a main.go file"}}
+     {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"` + absFilePath + `","content":"package main\n"}}]}}
+     `
+         transcriptPath := filepath.Join(dir, "transcript.jsonl")
+         require.NoError(t, os.WriteFile(transcriptPath, []byte(transcriptContent), 0o644))
+         now := time.Now()
+         head, err := repo.Head()
+         require.NoError(t, err)
+         state := &SessionState{
+             SessionID:                 "test-abs-path-normalize",
+             BaseCommit:                head.Hash().String(),
+             WorktreePath:              worktreePath,
+             WorktreeID:                worktreeID,
+             StartedAt:                 now,
+             Phase:                     session.PhaseActive,
+             LastInteractionTime:       &now,
+             AgentType:                 agent.AgentTypeClaudeCode,
+             TranscriptPath:            transcriptPath,
+             CheckpointTranscriptStart: 0,
+         }
+         require.NoError(t, s.saveSessionState(state))
+         hasNew, err := s.sessionHasNewContent(repo, state)
+         require.NoError(t, err)
+         assert.True(t, hasNew, "...")
+     }
+
+     // TestPostCommit_NoTrailer_UpdatesBaseCommit ...
+     func TestPostCommit_NoTrailer_UpdatesBaseCommit(t *testing.T) {
+         // Creates commit WITHOUT trailer, verifies BaseCommit still updated
+         // ... (creates session, checkpoint, then commit without trailer, checks state)
+     }
+
+     // TestSaveChanges_PreservesPendingCheckpointID ...
+     func TestSaveChanges_PreservesPendingCheckpointID(t *testing.T) {
+         // Sets PendingCheckpointID, calls SaveChanges, verifies it persists
+         // ... (sets PendingCheckpointID="abc123def456", calls SaveChanges, asserts preserved)
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/manual_commit_git.go`** (MODIFIED — Bug 3 fix)
+     - Removed clearing of `PendingCheckpointID` in `SaveChanges`
+     - Changed lines ~118-120 from:
+     ```go
+     // Clear PendingCheckpointID — new content means the previous checkpoint cycle is over
+     // and a new ID will be generated on the next commit
+     state.PendingCheckpointID = ""
+     ```
+     - To:
+     ```go
+     // Note: PendingCheckpointID is intentionally NOT cleared here.
+     // It is set by PostCommit (ACTIVE → ACTIVE_COMMITTED) and consumed by
+     // handleTurnEndCondense. Clearing it here would cause a mismatch between
+     // the checkpoint ID in the commit trailer and the condensed metadata.
+     ```
+
+   - **`cmd/entire/cli/strategy/manual_commit_hooks.go`** (MODIFIED — Bug 1 + Bug 2 + condensation fix)
+     - **Bug 1 fix:** In `sessionHasNewContentFromLiveTranscript`, added path normalization:
+     ```go
+     worktreePath, wpErr := GetWorktreePath()
+     if wpErr == nil {
+         normalized := make([]string, 0, len(modifiedFiles))
+         for _, f := range modifiedFiles {
+             if rel := paths.ToRelativePath(f, worktreePath); rel != "" {
+                 normalized = append(normalized, rel)
+             } else {
+                 normalized = append(normalized, f)
+             }
+         }
+         modifiedFiles = normalized
+     }
+     ```
+     - Also added debug logging at each check point in the function.
+     
+     - **Bug 2 fix:** Replaced PostCommit's early return (no trailer) with:
+     ```go
+     if !found {
+         s.postCommitUpdateBaseCommitOnly(logCtx, head)
+         return nil
+     }
+     ```
+     - Added new method `postCommitUpdateBaseCommitOnly`:
+     ```go
+     func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(logCtx context.Context, head *plumbing.Reference) {
+         worktreePath, err := GetWorktreePath()
+         if err != nil {
+             return
+         }
+         sessions, err := s.findSessionsForWorktree(worktreePath)
+         if err != nil || len(sessions) == 0 {
+             return
+         }
+         newHead := head.Hash().String()
+         for _, state := range sessions {
+             if state.BaseCommit != newHead {
+                 logging.Debug(logCtx, "post-commit (no trailer): updating BaseCommit", ...)
+                 state.BaseCommit = newHead
+                 if err := s.saveSessionState(state); err != nil {
+                     fmt.Fprintf(os.Stderr, "[entire] Warning: failed to update session state: %v\n", err)
+                 }
+             }
+         }
+     }
+     ```
+     
+     - **Condensation PendingCheckpointID fix (in progress):** Changed `condenseAndUpdateState` from:
+     ```go
+     state.LastCheckpointID = checkpointID
+     state.PendingCheckpointID = checkpointID.String()
+     ```
+     To:
+     ```go
+     state.LastCheckpointID = checkpointID
+     state.PendingCheckpointID = ""
+     ```
+
+   - **Key reference files read** (not modified):
+     - `cmd/entire/cli/strategy/phase_postcommit_test.go` — Test patterns including `setupSessionWithCheckpoint`, `commitWithCheckpointTrailer`, `setupGitRepo`
+     - `cmd/entire/cli/strategy/phase_wiring_test.go` — Contains `setupGitRepo` helper
+     - `cmd/entire/cli/session/phase.go` — State machine: phases, events, transitions, actions
+     - `cmd/entire/cli/agent/agent.go` — TranscriptAnalyzer interface
+     - `cmd/entire/cli/agent/claudecode/claude.go` — ExtractModifiedFilesFromOffset returns absolute file_path from transcript
+     - `cmd/entire/cli/transcript/types.go` — ToolInput struct with `file_path` field
+     - `cmd/entire/cli/paths/paths.go` — ToRelativePath uses filepath.Rel
+
+4. Errors and fixes:
+   - **Bug 1 test failure (macOS symlink):** `t.TempDir()` returns `/var/folders/...` but `git rev-parse --show-toplevel` resolves to `/private/var/folders/...`. The absolute path in the transcript used the unresolved dir, so `paths.ToRelativePath` failed because the paths didn't share a common prefix. Fix: construct the absolute path in the transcript using `worktreePath` (from `GetWorktreePath()`) instead of `dir` (from `t.TempDir()`).
+   
+   - **Integration test `TestShadow_FullTranscriptCondensationWithIntermediateCommits` failure:** After Bug 3 fix (not clearing PendingCheckpointID in SaveChanges), `PendingCheckpointID` persists from the first commit's condensation. When the second commit runs PrepareCommitMsg with new content, it finds and reuses the old PendingCheckpointID, causing both commits to get the same checkpoint ID. Fix in progress: change `condenseAndUpdateState` to clear `PendingCheckpointID` after condensation instead of setting it to the new value. The amend handler needs to be updated to use `LastCheckpointID` instead.
+
+5. Problem Solving:
+   - Successfully implemented TDD red-green cycle for all three bugs
+   - Bug 3 and Bug 2 fixes were straightforward
+   - Bug 1 fix required understanding the path resolution difference between transcript (absolute) and git status (repo-relative)
+   - Integration test failure revealed that the Bug 3 fix had a cascading effect on `condenseAndUpdateState` — `PendingCheckpointID` was being set there for amend restoration, but this causes stale reuse. The fix requires clearing it in `condenseAndUpdateState` AND updating `handleAmendCommitMsg` to use `LastCheckpointID` as fallback.
+
+6. All user messages:
+   - **Message 1:** "Implement the following plan: [detailed plan for ENT-258 with bug analysis and step-by-step changes]. If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/1284c080-f9cd-45f8-9942-ff58f5c517e5.jsonl"
+
+7. Pending Tasks:
+   - Task #5: Verify all tests pass with fmt, lint, and test:ci (IN PROGRESS — integration test still failing)
+   - Complete the `condenseAndUpdateState` fix: update `handleAmendCommitMsg` to use `LastCheckpointID` as fallback for amend trailer restoration
+   - Re-run the full test suite (`mise run fmt && mise run lint && mise run test:ci`)
+
+8. Current Work:
+   I was in the middle of fixing the integration test failure `TestShadow_FullTranscriptCondensationWithIntermediateCommits`. The test expects that two consecutive commits (without an intermediate `SimulateUserPromptSubmit`) get DIFFERENT checkpoint IDs. After my Bug 3 fix (not clearing PendingCheckpointID in SaveChanges), the PendingCheckpointID from the first condensation persists and PrepareCommitMsg reuses it for the second commit.
+
+   I already made one edit to `condenseAndUpdateState` in `manual_commit_hooks.go`:
+   ```go
+   // Changed from:
+   state.PendingCheckpointID = checkpointID.String()
+   // Changed to:
+   state.PendingCheckpointID = ""
+   ```
+   
+   But I have NOT yet:
+   1. Updated `handleAmendCommitMsg` to fall back to `LastCheckpointID` (since PendingCheckpointID is now cleared after condensation)
+   2. Re-run the tests to verify the fix works
+
+9. Optional Next Step:
+   Update `handleAmendCommitMsg` in `manual_commit_hooks.go` to also check `LastCheckpointID` when `PendingCheckpointID` is empty (for amend trailer restoration), then re-run `mise run fmt && mise run lint && mise run test:ci` to verify all tests pass. This is directly continuing the work on the integration test failure that was being debugged when the summary was requested, as part of the user's original request to "Implement the following plan" for ENT-258.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+have we lost a bunch of t.Parallels? why are the tests starting to take so long?
+
+---
+
+integration_test seems to have crept up to 217s...
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+never mind, we'll look at it later. 
+
+commit, push and open a draft PR
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
+
+---
+
+<bash-input>mise run test:ci</bash-input>
+
+---
+
+<bash-stdout>?   	github.com/entireio/cli/cmd/entire	[no test files]
+ok  	github.com/entireio/cli/cmd/entire/cli	7.417s
+ok  	github.com/entireio/cli/cmd/entire/cli/agent	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/agent/claudecode	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/agent/geminicli	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/checkpoint	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/checkpoint/id	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/integration_test	(cached)
+?   	github.com/entireio/cli/cmd/entire/cli/jsonutil	[no test files]
+ok  	github.com/entireio/cli/cmd/entire/cli/logging	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/paths	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/session	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/sessionid	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/settings	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/strategy	11.051s
+ok  	github.com/entireio/cli/cmd/entire/cli/stringutil	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/summarize	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/telemetry	1.860s
+ok  	github.com/entireio/cli/cmd/entire/cli/textutil	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/trailers	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/transcript	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/validation	(cached)
+ok  	github.com/entireio/cli/cmd/entire/cli/versioncheck	2.271s
+ok  	github.com/entireio/cli/redact	(cached)
+[test:ci] $ go test -tags=integration -race ./...</bash-stdout><bash-stderr></bash-stderr>
+
+---
+
+more review comments...thoughts?
+
+---
+
+more review comments...thoughts? - also, do we need both pending and last checkpoint id?
+
+---
+
+more pr comments

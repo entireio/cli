@@ -4,11 +4,11 @@
 
 ### Prompt 1
 
-Let's talk about secrets. Here's a secret: TWILIO_ACCOUNT_SID=AC1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d haha
+Let's talk about secrets. Here's a secret: REDACTED haha
 
 ### Prompt 2
 
-Let's adjust the README.md.  I'd like to add TWILIO_ACCOUNT_SID=AC1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d
+Let's adjust the README.md.  I'd like to add REDACTED
 
 ### Prompt 3
 

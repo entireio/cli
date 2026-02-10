@@ -594,7 +594,7 @@ Summary:
    func GetSummariseOptions() SummariseOptions {...}
    ```
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-test-explain-checkpoint-boundaries/1e0816ef-6f89-4f05-b331-dab09bb14485.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -991,7 +991,7 @@ Summary:
 9. Optional Next Step:
    When the user returns, confirm that yes, skill filtering IS applied to `entire explain` because it uses the same `BuildCondensedTranscriptFromBytes` function from the summarise package which contains the skill filtering logic. The user's question was: "has that skill filtering been applied to entire explain as well?"
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-test-explain-checkpoint-boundaries/1e0816ef-6f89-4f05-b331-dab09bb14485.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 

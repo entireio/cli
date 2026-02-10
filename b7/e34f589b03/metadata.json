@@ -1,0 +1,25 @@
+{
+  "checkpoint_id": "b7e34f589b03",
+  "strategy": "manual-commit",
+  "branch": "simplify-enable-onboarding",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/setup.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b7/e34f589b03/0/metadata.json",
+      "transcript": "/b7/e34f589b03/0/full.jsonl",
+      "context": "/b7/e34f589b03/0/context.md",
+      "content_hash": "/b7/e34f589b03/0/content_hash.txt",
+      "prompt": "/b7/e34f589b03/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 25,
+    "cache_creation_tokens": 32925,
+    "cache_read_tokens": 1165919,
+    "output_tokens": 338,
+    "api_call_count": 23
+  }
+}

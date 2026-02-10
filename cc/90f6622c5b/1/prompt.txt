@@ -221,7 +221,7 @@ Summary:
    
    The script is ready to commit - we just need to stage and commit it, then potentially push both commits (staticcheck fix and migration script improvements).
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-4/f022dad1-9896-4a6c-bb91-0d1efb580b70.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

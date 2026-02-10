@@ -835,7 +835,7 @@ Summary:
    - `cmd/entire/cli/hooks_claudecode_handlers.go` - multiple `[timing]` stderr prints
    - `cmd/entire/cli/agent/claudecode/transcript.go` - timing variables t1, t2, t3, t4 and `time` import
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/dfbb4922-3529-4eab-a5dc-3c8d30b7c660.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 
@@ -1376,7 +1376,7 @@ Summary:
    
    User's exact request: "yes please, let's investigate" in response to my question "Want me to investigate a fix?"
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/dfbb4922-3529-4eab-a5dc-3c8d30b7c660.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -1756,5 +1756,5 @@ Summary:
 9. Optional Next Step:
    Need to add `os/exec` import to `temporary.go`, run tests (`mise run fmt && mise run lint && go test -v -run "TestWriteTemporary_FirstCheckpoint" ./cmd/entire/cli/checkpoint/...`), commit the changes, and push. The user explicitly requested: "switch out the worktree.Status() implementation with native git commands" - this edit was just completed and needs to be verified and committed.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/dfbb4922-3529-4eab-a5dc-3c8d30b7c660.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.

@@ -116,7 +116,7 @@ mise run fmt && mise run lint && mise run test:ci
 Manual test: run `entire status` in a repo with active sessions across worktrees.
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-3/05909f78-f64e-4a10-81d1-08b13a7b8e14.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 
@@ -347,7 +347,7 @@ Summary:
    - cmd/entire/cli/strategy/manual_commit_types.go
    - cmd/entire/cli/strategy/strategy.go
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-3/af74d9e0-6474-4284-85e7-2edd27abf21e.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -729,7 +729,7 @@ Summary:
 9. Optional Next Step:
    The user said "I think we're about done here" in the summary instructions. No explicit next steps were requested. The CheckpointCount bug could be investigated separately if the user asks.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-3/af74d9e0-6474-4284-85e7-2edd27abf21e.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 

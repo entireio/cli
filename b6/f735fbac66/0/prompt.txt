@@ -223,7 +223,7 @@ Summary:
 
    I found that Bash commands (`rm -rf`, `cp -r`) aren't tracked by `FileModificationTools`, which explains some missing files, but need to verify this is the complete explanation by checking if the uncommitted files match files created/modified via Bash..
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/0442a060-edc3-4307-bddb-11a2951fd1a1.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -445,7 +445,7 @@ Summary:
    
    I found `strategy/common.go:532` has the same pattern - should fix this next..
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/0442a060-edc3-4307-bddb-11a2951fd1a1.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

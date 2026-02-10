@@ -270,7 +270,7 @@ Summary:
    ```
    Then the user could test in `/Users/soph/Work/entire/test/test1234` to confirm neither session shows as active now (since neither is the current session)..
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/21a2e002-8b63-45db-8e0d-1978fe0600aa.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

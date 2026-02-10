@@ -151,7 +151,7 @@ git show entire/sessions:<checkpoint-path>/metadata.json
 ```
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/df93cd9c-8436-49e5-af80-61126ae55a83.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 
 ---
 
@@ -275,7 +275,7 @@ Summary:
 9. Optional Next Step:
    The task is complete. All tests pass and the implementation matches the plan. No further steps needed unless the user requests additional changes or wants a commit created.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/13da966e-44f7-4a36-8060-ca40451e4561.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

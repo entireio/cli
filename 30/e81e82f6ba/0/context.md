@@ -4,7 +4,7 @@
 
 ### Prompt 1
 
-if my api key is "phc_wTxw5VskuikxcZAVW5itX7iJkbgKyTChsj11yEkrfEQ" give me the build command to have a binary ready to send events
+if my api key is "REDACTED" give me the build command to have a binary ready to send events
 
 ### Prompt 2
 

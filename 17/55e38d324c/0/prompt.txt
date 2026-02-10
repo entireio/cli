@@ -59,4 +59,4 @@ mise run test:integration
 The test should verify the warning message includes all expected components when a session conflict is detected.
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/60b38d1e-f048-428b-89da-e5dca96614d4.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl

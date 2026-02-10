@@ -74,7 +74,7 @@ mise run fmt && mise run lint && mise run test:ci
 ```
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-3/9fae7bf2-1c4c-48fb-940d-0832168fcc93.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 

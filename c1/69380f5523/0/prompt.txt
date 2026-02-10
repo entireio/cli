@@ -570,7 +570,7 @@ func TestChunkTranscript_SmallContent(t *testing.T) {
 	}
 }
 ../../../../../../Users/alex/workspace/cli/.worktrees/alex/code-dup-tooling/cmd/entire/cli/agent/geminicli/gemini_test.go:567: 567-582 lines are duplicate of `cmd/entire/cli/agent/geminicli/gemini_test.go:480-492` (dupl)
-func TestChunkTranscript_InvalidJSON_FallsBackToJSONL(t *testing.T) {
+func REDACTED(t *testing.T) {
 	ag := &GeminiCLIAgent{}
 
 	// Invalid JSON that looks like JSONL

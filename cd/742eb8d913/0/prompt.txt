@@ -406,7 +406,7 @@ Summary:
    1. Fetch and display the remaining Copilot comment on PR #90
    2. Discuss the proposed solution with the user before implementing
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/79e9becd-0b83-42f1-8cb1-33375d080476.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 
@@ -713,7 +713,7 @@ Summary:
    - Me: "Map is gone. Still have both constant sets (for the circular import reason), but mapping is now derived from agents' `Type()` method. Ready to review the token usage changes, or ship it?"
    - User: Requested this summary
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/79e9becd-0b83-42f1-8cb1-33375d080476.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 
@@ -987,7 +987,7 @@ Summary:
    - hooks_cmd.go: `newAgentHooksCmd` function takes `string` but receives `AgentName` - update function signature or cast
    - setup.go: `agentName` variable needs to be typed as `AgentName` or cast when comparing/passing to functions
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/79e9becd-0b83-42f1-8cb1-33375d080476.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

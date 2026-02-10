@@ -130,5 +130,5 @@ Let me chronologically analyze the conversation:
    
    User's exact request: "Let's prefix it then with 'Last Prompt: ' in both places?".
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/880d23f9-86b3-4345-af42-46381ab10e4d.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.

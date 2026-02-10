@@ -1,0 +1,508 @@
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
+
+---
+
+this bit seems quite cyclomatic-complex. do we have unit test coverage for this area?
+
+---
+
+yeah we need to add this test case, and also any missing scenarios - I'd like to see if we can simplify but we need a safety net
+
+---
+
+should we also logWarn in that block?
+
+---
+
+yes, do it
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
+
+---
+
+Does the fact the caller needs to handle all the 'remaining' actions make you a bit nervous too?
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically trace through the conversation to capture all important details.
+
+1. The user invoked `/github-pr-review` to review PR #172 on entireio/cli
+2. I fetched PR details: PR #172 "Phase-aware PostCommit and PrepareCommitMsg amend fix (ENT-221)", author: khaong, repo: entireio/cli
+3. Found 5 comment threads, 4 already addressed by PR author, 1 from cursor[bot] unaddressed
+4. The unaddressed thread (ID 2778490776) was about "Condensation failure orphans shadow branch by updating BaseCommit" - a medium severity bug
+5. I analyzed the bug and confirmed it was legitimate - when `condenseAndUpdateState()` returns false, the fallthrough at line 621 incorrectly updates BaseCommit
+6. User said "let's discuss" and asked about cyclomatic complexity and test coverage
+7. I analyzed existing test coverage - 4 tests exist but many paths uncovered
+8. User asked to add missing test cases and create a safety net for simplification
+9. I entered plan mode, explored the codebase with agents, designed a plan
+10. First plan used `condenseAttempted` boolean - user rejected this saying it increases cyclo complexity
+11. I redesigned to eliminate the fallthrough pattern entirely - each branch handles its own BaseCommit update
+12. User approved the revised plan
+13. I wrote 7 new tests via dev agent, verified bug tests fail (tests 1 & 7), applied the fix, fixed lint issues, all tests pass
+14. User asked about adding logging.Warn to the condensation failure block - I added it
+15. Committed as eafc9512, pushed, replied to cursor[bot]'s thread
+16. User invoked `/github-pr-review` again - found new cursor[bot] comment about misleading ActionWarnStaleSession comment
+17. Fixed the comment, committed as 9e64962e, pushed, replied
+18. User's latest message asks about whether the fact that callers need to handle all 'remaining' actions makes me nervous too - suggesting a broader concern about the architecture
+
+Key files:
+- `cmd/entire/cli/strategy/manual_commit_hooks.go` - Main file with the bug fix
+- `cmd/entire/cli/strategy/phase_postcommit_test.go` - Test file with 7 new tests
+- `cmd/entire/cli/session/phase.go` - State machine transitions
+
+The user's latest question is asking about a design concern - the `remaining` actions pattern from `ApplyCommonActions` requiring callers to handle all strategy-specific actions. This was their last message before asking for the summary.
+
+Summary:
+1. Primary Request and Intent:
+   - User invoked `/github-pr-review` on PR #172 ("Phase-aware PostCommit and PrepareCommitMsg amend fix") to address unresolved review comments
+   - Found and confirmed a bug identified by cursor[bot]: condensation failure orphans shadow branches by incorrectly updating `BaseCommit`
+   - User wanted comprehensive test coverage for the PostCommit action dispatch loop before simplifying it ("we need to add this test case, and also any missing scenarios - I'd like to see if we can simplify but we need a safety net")
+   - User rejected the initial fix approach (`condenseAttempted` boolean) because it increased cyclomatic complexity: "this fixes test coverage ✅ however the fix approach _increases_ cyclo with the additional boolean and branch? can we figure out a better way to do this?"
+   - User approved the revised approach: eliminate the fallthrough pattern entirely, making each branch self-contained
+   - User suggested adding `logging.Warn` to the condensation failure block
+   - On second `/github-pr-review`, addressed a new cursor[bot] comment about misleading `ActionWarnStaleSession` comment
+   - User's final question before summary: "Does the fact the caller needs to handle all the 'remaining' actions make you a bit nervous too?" — expressing architectural concern about the `ApplyCommonActions` pattern where callers must exhaustively handle strategy-specific actions
+
+2. Key Technical Concepts:
+   - **Strategy pattern** for session management (ManualCommitStrategy, AutoCommitStrategy)
+   - **State machine** for session phases: PhaseIdle, PhaseActive, PhaseActiveCommitted, PhaseEnded
+   - **Shadow branches**: `entire/<HEAD-hash[:7]>-<worktreeHash[:6]>` for temporary checkpoint storage
+   - **BaseCommit tracking**: Session state stores BaseCommit which determines shadow branch name; if updated incorrectly, shadow branch becomes inaccessible
+   - **Two-pass PostCommit processing**: Pass 1 runs condensation/discard actions, Pass 2 runs deferred migrations
+   - **`ApplyCommonActions`** pattern: applies common actions (UpdateLastInteraction, ClearEndedAt), returns `remaining` strategy-specific actions for caller to dispatch
+   - **Action dispatch**: ActionCondense, ActionCondenseIfFilesTouched, ActionDiscardIfNoFiles, ActionMigrateShadowBranch, ActionWarnStaleSession
+   - **Condensation**: copying session data from shadow branches to permanent `entire/sessions` branch
+   - **TDD approach**: wrote failing tests first, then applied fix
+   - **Condensation failure injection**: corrupting shadow branch ref to `plumbing.ZeroHash` to make `sessionHasNewContent` fail-open (`hasNew=true`) and `CondenseSession` fail
+
+3. Files and Code Sections:
+   - **`cmd/entire/cli/strategy/manual_commit_hooks.go`** (main fix file)
+     - Contains PostCommit method with the action dispatch loop (~lines 580-634)
+     - Contains `condenseAndUpdateState` helper (line ~674)
+     - **Bug**: Fallthrough at line 621 (`if !condensed && !hasPendingMigration`) called `updateBaseCommitIfChanged` even when condensation was attempted but failed
+     - **Fix applied**: Eliminated fallthrough pattern. Each action branch now handles its own BaseCommit update. Removed `condensed` and `hasPendingMigration` booleans. Changed `condenseAndUpdateState` from `bool` return to `void`. Added `logging.Warn` for condensation failures. Split `ActionWarnStaleSession` into its own case with accurate comment.
+     - Final action dispatch structure:
+     ```go
+     for _, action := range remaining {
+         switch action {
+         case session.ActionCondense:
+             if hasNew {
+                 s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete)
+                 // On failure, BaseCommit is preserved
+             } else {
+                 s.updateBaseCommitIfChanged(logCtx, state, newHead)
+             }
+         case session.ActionCondenseIfFilesTouched:
+             if len(state.FilesTouched) > 0 && hasNew {
+                 s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete)
+             } else {
+                 s.updateBaseCommitIfChanged(logCtx, state, newHead)
+             }
+         case session.ActionDiscardIfNoFiles:
+             if len(state.FilesTouched) == 0 {
+                 logging.Debug(logCtx, "post-commit: skipping empty ended session (no files to condense)",
+                     slog.String("session_id", state.SessionID),
+                 )
+             }
+             s.updateBaseCommitIfChanged(logCtx, state, newHead)
+         case session.ActionMigrateShadowBranch:
+             pendingMigrations = append(pendingMigrations, pendingMigration{state: state})
+         case session.ActionClearEndedAt, session.ActionUpdateLastInteraction:
+             // Handled by session.ApplyCommonActions above
+         case session.ActionWarnStaleSession:
+             // Not produced by EventGitCommit; listed for switch exhaustiveness
+         }
+     }
+     ```
+     - `condenseAndUpdateState` now returns void and includes `logging.Warn`:
+     ```go
+     ) {
+         result, err := s.CondenseSession(repo, checkpointID, state)
+         if err != nil {
+             fmt.Fprintf(os.Stderr, "[entire] Warning: condensation failed for session %s: %v\n",
+                 state.SessionID, err)
+             logging.Warn(logCtx, "post-commit: condensation failed",
+                 slog.String("session_id", state.SessionID),
+                 slog.String("error", err.Error()),
+             )
+             return
+         }
+         // ... success path updates BaseCommit, StepCount, etc.
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/phase_postcommit_test.go`** (test file)
+     - Previously had 4 tests, now has 11 (7 new)
+     - New tests added before the helper functions:
+       1. `TestPostCommit_CondensationFailure_PreservesShadowBranch` — IDLE, corrupted shadow branch (ZeroHash), verifies BaseCommit NOT updated
+       2. `TestPostCommit_IdleSession_NoNewContent_UpdatesBaseCommit` — IDLE, CheckpointTranscriptStart=2, verifies BaseCommit IS updated
+       3. `TestPostCommit_EndedSession_FilesTouched_Condenses` — ENDED with FilesTouched, verifies condensation and shadow branch cleanup
+       4. `TestPostCommit_EndedSession_FilesTouched_NoNewContent` — ENDED with FilesTouched but CheckpointTranscriptStart=2, verifies no condensation
+       5. `TestPostCommit_EndedSession_NoFilesTouched_Discards` — ENDED with nil FilesTouched, verifies discard path
+       6. `TestPostCommit_ActiveCommitted_MigratesShadowBranch` — ACTIVE_COMMITTED, verifies shadow branch migration
+       7. `TestPostCommit_CondensationFailure_EndedSession_PreservesShadowBranch` — ENDED with FilesTouched, corrupted shadow branch
+     - Condensation failure injection technique:
+     ```go
+     shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+     corruptRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), plumbing.ZeroHash)
+     require.NoError(t, repo.Storer.SetReference(corruptRef))
+     ```
+     - No-new-content injection: `state.CheckpointTranscriptStart = 2` (transcript from `setupSessionWithCheckpoint` has exactly 2 lines)
+
+   - **`cmd/entire/cli/session/phase.go`** (read-only, reference)
+     - State machine transitions for EventGitCommit from each phase
+     - `ApplyCommonActions` function at line 299 — handles common actions, returns strategy-specific `remaining` actions
+     - ActionWarnStaleSession is only produced by EventSessionStart (PhaseActive, PhaseActiveCommitted), never by EventGitCommit
+
+   - **`cmd/entire/cli/strategy/manual_commit_types.go`** (read-only)
+     - `SessionState = session.State` (type alias)
+
+   - **`cmd/entire/cli/session/state.go`** (read-only)
+     - State struct with BaseCommit, Phase, StepCount, CheckpointTranscriptStart, FilesTouched, EndedAt fields
+
+   - **`cmd/entire/cli/strategy/manual_commit_condensation.go`** (read-only)
+     - `CondenseSession` function — reads shadow branch, extracts session data, writes to `entire/sessions`
+
+4. Errors and fixes:
+   - **testifylint errors (10 issues)**: `assert.Error` and `assert.NoError` on error values needed to be `require.Error`/`require.NoError`. Fixed by changing all 10 occurrences in the new test functions.
+   - **unparam error**: After removing `condensed = true` usage, `condenseAndUpdateState` return value (`bool`) was never used. Fixed by changing return type from `bool` to void (removing `return false`/`return true`).
+   - **Compiler error "too many return values"**: After changing signature to void, still had `return true` at the end. Fixed by removing it.
+   - **User feedback on approach**: User rejected initial `condenseAttempted` boolean approach for increasing cyclomatic complexity. Redesigned to eliminate fallthrough pattern entirely.
+   - **User feedback on logging**: User asked "should we also logWarn in that block?" for the condensation failure path. Added `logging.Warn` call.
+
+5. Problem Solving:
+   - **Bug identification**: Confirmed cursor[bot]'s finding that condensation failure orphans shadow branches. Traced the exact code path: `condenseAndUpdateState` returns false → `condensed` stays false → fallthrough updates BaseCommit → shadow branch becomes inaccessible.
+   - **Condensation failure injection**: Needed to find a way to make `hasNew=true` (so condensation path is entered) but `CondenseSession` fails. Discovered that deleting the shadow branch doesn't work (causes `sessionHasNewContentFromLiveTranscript` fallback which returns false). Solution: corrupt the branch ref to `plumbing.ZeroHash` — reference exists (fail-open → `hasNew=true`) but `CommitObject(ZeroHash)` fails in CondenseSession.
+   - **No-new-content injection**: Determined that `setupSessionWithCheckpoint` creates a 2-line transcript, so setting `CheckpointTranscriptStart = 2` makes `transcriptLines > CheckpointTranscriptStart` evaluate to false.
+   - **Cyclomatic complexity reduction**: Eliminated fallthrough by making each action branch self-contained for BaseCommit handling. Net removal of 2 local variables and 1 conditional block.
+
+6. All user messages:
+   - "let's discuss"
+   - "this bit seems quite cyclomatic-complex. do we have unit test coverage for this area?"
+   - "yeah we need to add this test case, and also any missing scenarios - I'd like to see if we can simplify but we need a safety net"
+   - "this fixes test coverage ✅ however the fix approach _increases_ cyclo with the additional boolean and branch? can we figure out a better way to do this?"
+   - (Approved the revised plan)
+   - "should we also logWarn in that block?"
+   - "yes, do it" (to commit and reply to PR)
+   - (Invoked `/github-pr-review` again)
+   - "Does the fact the caller needs to handle all the 'remaining' actions make you a bit nervous too?"
+
+7. Pending Tasks:
+   - Respond to user's architectural concern about the `remaining` actions pattern from `ApplyCommonActions` — the user is asking whether the pattern where callers must exhaustively handle all strategy-specific actions is fragile/concerning
+   - PR may need to be marked as ready for review (was asked before second review round, not yet confirmed)
+
+8. Current Work:
+   All PR review comments have been addressed with two commits:
+   - `eafc9512`: Bug fix (eliminate fallthrough pattern) + 7 new tests
+   - `9e64962e`: Fix misleading ActionWarnStaleSession comment
+   
+   The user's most recent message before the summary request is: **"Does the fact the caller needs to handle all the 'remaining' actions make you a bit nervous too?"** — this is a new architectural question about the `ApplyCommonActions` pattern in `session/phase.go` where strategy-specific actions are passed through as `remaining` and the caller (PostCommit's dispatch loop) must handle each one. The concern is that if new actions are added to the state machine, callers could silently miss them.
+
+9. Optional Next Step:
+   Respond to the user's architectural concern about the `remaining` actions pattern. The user asked: "Does the fact the caller needs to handle all the 'remaining' actions make you a bit nervous too?" This suggests they may want to explore making this pattern safer — e.g., exhaustive switch enforcement, or restructuring so `ApplyCommonActions` doesn't return a slice that callers must match against. This is a design discussion, not yet an implementation request.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-3/b6b20c21-d3cb-42a4-9a55-bb2dbb2212e4.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+🤔
+
+the pattern here doesn't seem right - there needs to be an inversion of control where the caller passes the required actions to the state machine framework :|
+
+using interfaces to dictate what actions are required? and then the call sites can pass no-ops if they truly don't do anything for those actions?
+
+---
+
+follow-up...
+
+though are there any other clean alternatives?
+
+---
+
+it's a bit Java, I'm showing my training 😛
+
+but it is the best way to flag a problem at code creation time I think? Definitely open to any other options that give us that!
+
+---
+
+yeah, let's definitely create the follow up Linear issue with the context and thinking - Project: Troy
+
+---
+
+and note the related PRs?
+
+---
+
+check the PR comments, we just found a biiiiiiig bug
+
+---
+
+log an issue to move gemini across (Project: Troy, Milestone: R1).
+
+then let's fix it - write a test first

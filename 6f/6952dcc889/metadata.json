@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "6f6952dcc889",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-221-cleanup-and-sessions-fix",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_geminicli_handlers.go",
+    "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/6f/6952dcc889/0/metadata.json",
+      "transcript": "/6f/6952dcc889/0/full.jsonl",
+      "context": "/6f/6952dcc889/0/context.md",
+      "content_hash": "/6f/6952dcc889/0/content_hash.txt",
+      "prompt": "/6f/6952dcc889/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 109,
+    "cache_creation_tokens": 241586,
+    "cache_read_tokens": 4885256,
+    "output_tokens": 1808,
+    "api_call_count": 77
+  }
+}

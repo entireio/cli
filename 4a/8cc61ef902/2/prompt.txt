@@ -980,7 +980,7 @@ Summary:
 
    User's last explicit request: "yeah it doesn't make sense to commit in a broken state" - confirming we should fix all call sites before committing.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/4b3ddf27-d7f7-4773-b4f2-b94b999c661d.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -1142,7 +1142,7 @@ Summary:
    
    The `ShadowBranchConflictError` and `SessionIDConflictError` checks in `InitializeSession` are now effectively dead code for cross-worktree scenarios, but the `SessionIDConflictError` could still fire if two sessions in the SAME worktree try to use the same shadow branch (same base commit, same worktreeID, but different session IDs). This handles concurrent sessions in the same terminal/worktree.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/4b3ddf27-d7f7-4773-b4f2-b94b999c661d.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 
@@ -1306,7 +1306,7 @@ Summary:
    ```
    The next step would be to verify the CI passes, or if the user asks, check the status again.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/4b3ddf27-d7f7-4773-b4f2-b94b999c661d.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

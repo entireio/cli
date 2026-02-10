@@ -436,7 +436,7 @@ Summary:
    
    User's explicit request: "C) update this branch from alex/ent-109-text-output-checkpoint-flag first, then let's tackle #10"
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-ent-108-add-ai-summaries/b82405ba-a054-4152-bc86-e9b0d4832b68.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -723,5 +723,5 @@ Summary:
 9. Optional Next Step:
    The immediate task (replying to review comments) was completed. The PR is ready for further review. No explicit next steps were requested by the user. If there are additional review comments or the user wants to proceed with merging, they would need to indicate that.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-ent-108-add-ai-summaries/b82405ba-a054-4152-bc86-e9b0d4832b68.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.

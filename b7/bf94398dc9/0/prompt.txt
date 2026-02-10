@@ -331,7 +331,7 @@ Summary:
    PR 4: Cleanup (current-session.txt, sessions fix, reset guards, docs)
    ```
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/0c275b1b-9732-433e-9e70-9b7bfdb578a3.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -711,7 +711,7 @@ Summary:
    
    **Note**: The git object corruption (`unable to read e53647ba...`) should be investigated first, as it may affect ongoing work.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/0c275b1b-9732-433e-9e70-9b7bfdb578a3.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -932,7 +932,7 @@ Summary:
    
    Per the skill instructions: "When batch complete: Show what was implemented, Show verification output, Say: 'Ready for feedback.'"
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/0c275b1b-9732-433e-9e70-9b7bfdb578a3.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

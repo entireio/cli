@@ -75,7 +75,7 @@ if err != nil {
 4. Manual test: A command that returns SilentError - should not double-print
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-cli/21849540-fe69-4c4b-aa74-50d294481e10.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 
 ---
 

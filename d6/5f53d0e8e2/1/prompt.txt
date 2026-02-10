@@ -1,0 +1,21 @@
+we need to fix some merge conflicts
+
+---
+
+yeah merge from main
+
+---
+
+origin/main
+
+---
+
+yes, then commit, push
+
+---
+
+oh, do we have another merge conflict now?
+
+---
+
+check origin/main again 😅

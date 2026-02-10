@@ -406,7 +406,7 @@ Summary:
    1. Fetch and display the remaining Copilot comment on PR #90
    2. Discuss the proposed solution with the user before implementing
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/79e9becd-0b83-42f1-8cb1-33375d080476.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 

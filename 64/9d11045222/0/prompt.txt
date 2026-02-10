@@ -544,7 +544,7 @@ Summary:
 9. Optional Next Step:
    No explicit next step. The user's request to scope prompts and summaries to the checkpoint has been completed. The user may want to review the changes or test them manually, but no further implementation was requested.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-alex-test-explain-checkpoint-boundaries/67d765b5-4286-4ec5-b051-950466e186f0.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 

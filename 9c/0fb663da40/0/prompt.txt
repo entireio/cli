@@ -275,7 +275,7 @@ Summary:
    ```
    This needs to try shadow branch lookup before falling back to local file, using `selectedPoint.ID` (commit hash) and `selectedPoint.MetadataDir`.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/c35cf82b-0486-4d17-94d7-7fa36376faff.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -433,7 +433,7 @@ Summary:
    ```
    Then handle `rewind.go`, `resume.go`, and `session.go` similarly.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/c35cf82b-0486-4d17-94d7-7fa36376faff.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -624,7 +624,7 @@ Summary:
    - Backwards compatibility: Still reads old non-chunked transcripts
    - Agent-specific: JSONL splits at line boundaries, Gemini JSON splits messages array
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/c35cf82b-0486-4d17-94d7-7fa36376faff.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -812,5 +812,5 @@ Summary:
 9. Optional Next Step:
    Continue updating remaining files to use `agent.TokenUsage` instead of `checkpoint.TokenUsage`. The user explicitly requested: "ok, yeeh now lets do the token usage move to agent package". I was in the middle of this refactoring when the summary was requested.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/c35cf82b-0486-4d17-94d7-7fa36376faff.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.

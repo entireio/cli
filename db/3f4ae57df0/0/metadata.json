@@ -1,0 +1,95 @@
+{
+  "checkpoint_id": "db3f4ae57df0",
+  "session_id": "b6b20c21-d3cb-42a4-9a55-bb2dbb2212e4",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-08T11:40:26.565566Z",
+  "branch": "alex/ent-221-phase-aware-git-hooks",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "99f98ca4-4258-4e34-b54d-5bb0d2f9a151",
+  "token_usage": {
+    "input_tokens": 2559,
+    "cache_creation_tokens": 736117,
+    "cache_read_tokens": 12596740,
+    "output_tokens": 13157,
+    "api_call_count": 130
+  },
+  "summary": {
+    "intent": "Review and address all unresolved comments on PR #172, focusing on a bug where condensation failure could orphan shadow branches by incorrectly updating BaseCommit.",
+    "outcome": "Fixed the condensation failure bug by eliminating the fallthrough pattern in PostCommit, added 7 comprehensive test cases, addressed all PR review comments with two commits (eafc9512, 9e64962e), and discovered a critical bug where ACTIVE_COMMITTED→IDLE condensation is silently dropped in transitionSessionTurnEnd.",
+    "learnings": {
+      "repo": [
+        "Session state machine uses shadow branches named `entire/\u003cHEAD-hash[:7]\u003e-\u003cworktreeHash[:6]\u003e` for temporary checkpoint storage",
+        "PostCommit uses a two-pass pattern: pass 1 runs condensation/discard actions, pass 2 runs deferred shadow branch migrations",
+        "Condensation copies session data from shadow branches to permanent `entire/sessions` branch",
+        "The `exhaustive` linter is enabled but only catches missing switch cases, not silent action drops in ApplyCommonActions",
+        "ACTIVE_COMMITTED phase defers condensation until turn end (EventTurnEnd), allowing agents to commit mid-turn",
+        "Gemini's handler doesn't use the state machine for turn-end transitions yet, unlike Claude Code's handler"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 621,
+          "end_line": 623,
+          "finding": "Original fallthrough pattern incorrectly updated BaseCommit on condensation failure, making shadow branches inaccessible. Fixed by making each action branch self-contained for BaseCommit updates."
+        },
+        {
+          "path": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+          "line": 674,
+          "end_line": 695,
+          "finding": "condenseAndUpdateState return value (bool) became unused after eliminating fallthrough pattern. Changed to void and added logging.Warn for failures."
+        },
+        {
+          "path": "cmd/entire/cli/session/phase.go",
+          "line": 304,
+          "end_line": 315,
+          "finding": "ApplyCommonActions switch has no default case - new actions not listed in common or strategy-specific arms silently vanish before callers see them."
+        },
+        {
+          "path": "cmd/entire/cli/hooks_claudecode_handlers.go",
+          "line": 751,
+          "finding": "transitionSessionTurnEnd ignores return value from ApplyCommonActions, silently dropping ActionCondense from ACTIVE_COMMITTED→IDLE transition. Breaks deferred condensation path entirely."
+        },
+        {
+          "path": "cmd/entire/cli/strategy/phase_postcommit_test.go",
+          "finding": "Condensation failure injection: corrupt shadow branch ref to plumbing.ZeroHash so reference exists (sessionHasNewContent fails open→hasNew=true) but CommitObject fails in CondenseSession."
+        },
+        {
+          "path": "cmd/entire/cli/strategy/phase_postcommit_test.go",
+          "finding": "No-new-content injection: setupSessionWithCheckpoint creates 2-line transcript, setting CheckpointTranscriptStart=2 makes hasNew=false."
+        }
+      ],
+      "workflow": [
+        "TDD approach: wrote failing tests first (condensation failure cases), then applied fix, ensuring bugs are caught by tests",
+        "testifylint requires using `require.Error`/`require.NoError` for error assertions, not `assert.Error`/`assert.NoError`",
+        "When reducing cyclomatic complexity, prefer eliminating booleans and fallthrough patterns by making each branch self-contained",
+        "Adding logging.Warn alongside stderr output for operational events aids debugging via .entire/logs/"
+      ]
+    },
+    "friction": [
+      "Initial fix approach using `condenseAttempted` boolean increased cyclomatic complexity instead of reducing it, requiring redesign",
+      "Go doesn't support exhaustive switch checking for int/string constants, requiring workarounds like linters or interfaces",
+      "unparam linter error: needed to change condenseAndUpdateState from bool return to void after removing usage",
+      "testifylint errors: 10 occurrences of assert.Error/assert.NoError needed to be changed to require.Error/require.NoError"
+    ],
+    "open_items": [
+      "ENT-250: Introduce ActionHandler interface for compile-time exhaustive action dispatch to prevent silent action drops (related to ENT-221)",
+      "ENT-251: Wire Gemini afterAgent handler through session state machine for turn-end transitions (Project: Troy, Milestone: R1)",
+      "Fix critical bug in transitionSessionTurnEnd where ActionCondense from ACTIVE_COMMITTED→IDLE is silently dropped (currently in progress, writing test first)",
+      "Address cursor[bot] comment about -c/-C commit operations (low severity, can be tracked separately)"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-08T11:39:56.283164Z",
+    "agent_lines": 276,
+    "human_added": 25,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 301,
+    "agent_percentage": 91.69435215946844
+  }
+}

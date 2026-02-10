@@ -161,7 +161,7 @@ Building entire CLI from: /Users/soph/Work/entire/devenv/cli
 Built: /var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.4qYvjLB4PQ
 === Creating test repo in: /var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.N6JIukK8D2 ===
 === Step 1: Initialize git repo ===
-Initialized empty Git repository in /private/var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.N6JIukK8D2/.git/
+Initialized empty Git repository in REDACTED.N6JIukK8D2/.git/
 === Step 2: Create initial commit ===
 [main (root-commit) c45a518] Initial commit
  1 file changed, 8 insertions(+)

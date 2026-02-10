@@ -1,0 +1,49 @@
+{
+  "checkpoint_id": "4577507c2299",
+  "session_id": "8dab6c26-fc6b-4cc5-8263-6150b598af24",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-07T08:46:56.124476Z",
+  "branch": "alex/ent-242-fix-index-corruption",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/gitutil/",
+    "cmd/entire/cli/gitutil/worktree_status.go",
+    "cmd/entire/cli/gitutil/worktree_status_test.go",
+    "cmd/entire/cli/rewind.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/worktree_status.go",
+    "cmd/entire/cli/strategy/worktree_status_test.go",
+    "cmd/entire/cli/summarize/claude.go",
+    "testfile.txt",
+    "testfile2.txt",
+    "testfile3.txt",
+    "testfile4.txt",
+    "testfile5.txt"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "92061ce8-05a7-47ec-a47a-79e4c86b12a8",
+  "transcript_lines_at_start": 3620,
+  "token_usage": {
+    "input_tokens": 590,
+    "cache_creation_tokens": 1091003,
+    "cache_read_tokens": 49087369,
+    "output_tokens": 25009,
+    "api_call_count": 452
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-07T08:46:44.927722Z",
+    "agent_lines": 0,
+    "human_added": 1,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1,
+    "agent_percentage": 0
+  }
+}

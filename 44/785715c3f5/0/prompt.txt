@@ -827,7 +827,7 @@ Summary:
    }
    ```
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/0cf3db51-1c73-43bb-8d05-dc02739514a5.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -1074,7 +1074,7 @@ Summary:
    
    User's last message: "I don't think the reviewer would have been making commits. and as you note, the commits are nearly a minute apart. you're about to run out of context so let's compact and come at this fresh"
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/0cf3db51-1c73-43bb-8d05-dc02739514a5.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 
@@ -1464,7 +1464,7 @@ Let me chronologically analyze the conversation:
 
 5. **Third Investigation - Checking the Design**:
    - The clearing was in the initial commit (`e72157d`) - original design
-   - Test `TestShadowStrategy_LastCheckpointID_ClearedOnNewPrompt` explicitly tests this behavior
+   - Test `REDACTED` explicitly tests this behavior
    - Design assumes: Prompt → Work → Stop → Commit → Prompt (clear) → Work → Stop → Commit
    - Doesn't handle: commits during active work (before Stop)
 
@@ -1637,7 +1637,7 @@ This clarified that:
 - Reuse when `currentTranscriptLines == condensed_transcript_lines` (dormant)
 - New checkpoint when `currentTranscriptLines > condensed_transcript_lines` (working)
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/0cf3db51-1c73-43bb-8d05-dc02739514a5.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 
@@ -1907,7 +1907,7 @@ Summary:
    - Create a new branch from main referencing ENT-112 and cherry-pick/apply the fixes
    - User said: "we will take our changes to a new branch and reference the same issue"
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/0cf3db51-1c73-43bb-8d05-dc02739514a5.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 

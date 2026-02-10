@@ -277,7 +277,7 @@ Summary:
    
    The implementation is done, but the test needs updating to include the per-file data it was previously inferring via heuristic.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/0276a600-2f22-4d2b-844c-3feb9c5aa108.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -379,7 +379,7 @@ Building entire CLI from: /Users/soph/Work/entire/devenv/cli
 Built: /var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.4qYvjLB4PQ
 === Creating test repo in: /var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.N6JIukK8D2 ===
 === Step 1: Initialize git repo ===
-Initialized empty Git repository in /private/var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.N6JIukK8D2/.git/
+Initialized empty Git repository in REDACTED.N6JIukK8D2/.git/
 === Step 2: Create initial commit ===
 [main (root-commit) c45a518] Initial commit
  1 file changed, 8 insertions(+)
@@ -482,7 +482,7 @@ Session state files:
 {
   "session_id": "2026-01-27-2e538dbf-c215-49cb-ba7a-eb20831013f2",
   "base_commit": "c45a5188b5425146edf12d73efea75d662615712",
-  "worktree_path": "/private/var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.N6JIukK8D2",
+  "worktree_path": "REDACTED.N6JIukK8D2",
   "started_at": "2026-01-27T22:41:29.619796+01:00",
   "checkpoint_count": 0,
   "concurrent_warning_shown": true,
@@ -492,7 +492,7 @@ Session state files:
 {
   "session_id": "2026-01-27-7b9ea928-b815-4ac5-b628-4c50ddeef88d",
   "base_commit": "c45a5188b5425146edf12d73efea75d662615712",
-  "worktree_path": "/private/var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.N6JIukK8D2",
+  "worktree_path": "REDACTED.N6JIukK8D2",
   "started_at": "2026-01-27T22:41:20.921391+01:00",
   "checkpoint_count": 1,
   "untracked_files_at_start": [
@@ -609,7 +609,7 @@ Added to PATH: /var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.3DQJrp18MZ
 Verifying entire location: /var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.3DQJrp18MZ/entire
 === Creating test repo in: /var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.7MHvwN4BhP ===
 === Step 1: Initialize git repo ===
-Initialized empty Git repository in /private/var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.7MHvwN4BhP/.git/
+Initialized empty Git repository in REDACTED.7MHvwN4BhP/.git/
 === Step 2: Create initial commit ===
 [main (root-commit) 81a343d] Initial commit
  1 file changed, 8 insertions(+)
@@ -712,7 +712,7 @@ Session state files:
 {
   "session_id": "2026-01-27-1b3a1cda-1552-4dc0-9bb5-ec7b1c06e97b",
   "base_commit": "81a343d3356e7e430e0c820ad3cb5f50d6baf6be",
-  "worktree_path": "/private/var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.7MHvwN4BhP",
+  "worktree_path": "REDACTED.7MHvwN4BhP",
   "started_at": "2026-01-27T22:58:49.963307+01:00",
   "checkpoint_count": 0,
   "concurrent_warning_shown": true,
@@ -722,7 +722,7 @@ Session state files:
 {
   "session_id": "2026-01-27-fb129f8d-ae43-4061-ba5b-1f790052790c",
   "base_commit": "81a343d3356e7e430e0c820ad3cb5f50d6baf6be",
-  "worktree_path": "/private/var/folders/gz/h7sjhvz13cb0gcrzzcncqtyw0000gn/T/tmp.7MHvwN4BhP",
+  "worktree_path": "REDACTED.7MHvwN4BhP",
   "started_at": "2026-01-27T22:58:38.910205+01:00",
   "checkpoint_count": 1,
   "untracked_files_at_start": [
@@ -740,7 +740,7 @@ Session state files:
     "api_call_count": 4
   },
   "transcript_lines_at_start": 1,
-  "transcript_path": "/Users/soph/.claude/projects/-private-var-folders-gz-h7sjhvz13cb0gcrzzcncqtyw0000gn-T-tmp-7MHvwN4BhP/fb129f8d-ae43-4061-ba5b-1f790052790c.jsonl",
+  "transcript_path": "/Users/soph/.REDACTED.jsonl",
   "prompt_attributions": [
     {
       "checkpoint_number": 1,
@@ -1043,7 +1043,7 @@ Summary:
    - Human added: ~8 (utils.py: 6 lines + main.py user edits: 2 lines)
    - Agent %: should be reasonable proportion
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/0276a600-2f22-4d2b-844c-3feb9c5aa108.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

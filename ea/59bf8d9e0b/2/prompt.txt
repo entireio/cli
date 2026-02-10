@@ -59,4 +59,4 @@ When `--telemetry=false` is passed, telemetry is disabled. When omitted or `--te
    - `entire enable --telemetry` should enable telemetry
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-cli/e1bc91d1-2731-4b12-bf00-44f4dcddffd1.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl

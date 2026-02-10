@@ -126,7 +126,7 @@ Summary:
 
    Recent work context: "The tests are failing because they expect the legacy branch name format (`entire/<hash>`) but the new code creates suffixed branches (`entire/<hash>-1`). Let me update the tests to handle the new format."
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/9d7a9d52-7eb4-427d-847d-ee5451884f3d.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -282,5 +282,5 @@ Summary:
    
    Need to clarify with user which approach is intended before proceeding.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/9d7a9d52-7eb4-427d-847d-ee5451884f3d.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.

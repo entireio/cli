@@ -527,7 +527,7 @@ func handleOpencodeSessionStart(cmd *cobra.Command, args []string) error {
 
 This directly continues the implementation task that was in progress..
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/52c38054-a209-4b88-9a0d-d98ba15865dd.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -627,10 +627,10 @@ session: ses_456997037ffejTvODKbQ6qUkPe
 Calling hook: stop
 [entire-integration]
 "selentire-integration] Hook exit code: 1UkPe",
-Lentire-integration] Hook stderr: Read OpenCode session from: /Users/soph/Work/entire/test/opencode_test/.entire/opencode/sessions/ses_456997037ffejTv0DKbQ6qUkPe/transcript.jsonl
+Lentire-integration] Hook stderr: Read OpenCode session from: /Users/soph/Work/entire/test/opencode_test/.REDACTED.jsonl
 Usage: estamp":
 "2026-01-10T19:33:57.8812",
-entire hooks opencode stop [flags]rk/entire/test/opencode_test/.entire/opencode/sessions/ses_456997037ffejTv0DKbQ6qUkPe/transcript.jsonl"
+entire hooks opencode stop [flags]rk/entire/test/opencode_test/.REDACTED.jsonl"
 }
 Flags:
 -h, --help help for stop
@@ -653,7 +653,7 @@ exitCode:
 1,
 stderr:
 encode stop [flags]\n\nFlags: \n -h, --help
-"Read OpenCode session from: /Users/soph/Work/entire/test/opencode_test/.entire/opencode/sessions/ses_456997037ffejTv0DKbQ6qUkPe/transcript.jsonl\nUsage:\n entire hooks op
+"Read OpenCode session from: /Users/soph/Work/entire/test/opencode_test/.REDACTED.jsonl\nUsage:\n entire hooks op
 help for stop\n\nfailed to save changes: failed to initialize session: failed to get HEAD: reference not found\n",
 at callHook (/Users/soph/Work/entire/devenv/opencode-entire-integration/dist/cli/entire.js:66:23)
 [entire-integration] [entire-integration] [entire-integration] [entire-integration]
@@ -1097,7 +1097,7 @@ My response: "I see the issue - the same `transcript_path not found in hook inpu
 
 **Specific next action**: Check if there's a PersistentPreRunE or middleware in the cobra command chain that might be consuming stdin or failing before the RunE handler executes. Also verify that the handler is actually registered correctly by checking `GetHookHandler("opencode", "stop")` returns non-nil..
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/52c38054-a209-4b88-9a0d-d98ba15865dd.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

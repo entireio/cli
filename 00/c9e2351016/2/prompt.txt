@@ -306,7 +306,7 @@ All handled by existing `Reset()` method:
 - The `--force` flag skips confirmation but still shows what was deleted
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/9dceb801-3063-4810-99be-61b047419cd3.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 
 ---
 

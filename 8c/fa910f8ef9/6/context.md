@@ -4,7 +4,7 @@
 
 ### Prompt 1
 
-While looking at the logs I noticed a few tokens related fields, can you try making some sense out of it, for example in this log: ~/.claude/projects/-Users-soph-Work-entire-devenv-cli/eb4bcc15-3ff5-4d73-bac5-9bc1d786b2bb.jsonl
+While looking at the logs I noticed a few tokens related fields, can you try making some sense out of it, for example in this log: ~/.REDACTED.jsonl
 
 ### Prompt 2
 

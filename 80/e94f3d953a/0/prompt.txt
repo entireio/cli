@@ -246,7 +246,7 @@ Summary:
    
    This directly continues the implementation work that was interrupted by the summary request.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/a318ad73-17a2-4575-845d-8952a1e5958b.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -436,5 +436,5 @@ Summary:
    
    Direct quote from conversation showing the task: User said "no let's refactor the warning too as outlined in the spec" in response to my question about whether the implementation was feature complete. I was in the middle of this refactoring work when the summary was requested, specifically fixing compilation errors in setup.go after renaming variables and flags.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/a318ad73-17a2-4575-845d-8952a1e5958b.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.

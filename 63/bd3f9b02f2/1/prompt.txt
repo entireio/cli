@@ -271,5 +271,5 @@ Summary:
 9. Optional Next Step:
    Update `/Users/alex/workspace/cli/.worktrees/1/docs/plans/2026-02-06-session-phase-state-machine.md` to sync with the finalized plan from `/Users/alex/.claude/plans/prancy-noodling-ember.md`. The user explicitly said: "exit edit mode, update the local doc - then I'll instruct the next steps."
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/8ef64fdd-df8c-41f2-ac32-d9471671f062.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.

@@ -49,7 +49,7 @@ mise run fmt && mise run lint && mise run test:ci
 ```
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/a3b65315-4a3c-488d-9e35-cea56e21ffef.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 
 ---
 

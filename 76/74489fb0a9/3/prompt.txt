@@ -170,7 +170,7 @@ git show entire/sessions:<checkpoint-path>/metadata.json
 ```
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/5b0da9e3-42fa-42ce-a039-ad516ce23a1b.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 
 ---
 
@@ -356,7 +356,7 @@ Summary:
    - Manually verify by running `git show entire/sessions:<checkpoint-path>/metadata.json` to confirm the new format
    - No further implementation work is needed unless the user requests it
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/df93cd9c-8436-49e5-af80-61126ae55a83.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

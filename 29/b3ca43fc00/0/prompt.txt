@@ -106,7 +106,7 @@ Rationale: If the user configured a filter, they expect secrets to be redacted. 
 4. Manual test with `gitleaks-filter` to verify secrets are redacted
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/paul/.claude/projects/-Users-paul-src-entireio-cli/28f3ad20-cb5d-48d7-9f66-b5f59c724471.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/paul/.REDACTED.jsonl
 
 ---
 

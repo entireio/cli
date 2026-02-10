@@ -436,7 +436,7 @@ func TestVersionCheckFullFlow(t *testing.T) {
 - ✅ Max 1-second post-command delay only when cache is stale (once per 24h)
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-test-cli-cli/2d9dd00e-30ba-4902-ae08-cf7466b5442e.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 
 ---
 

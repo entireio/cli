@@ -116,7 +116,7 @@ mise run fmt && mise run lint && mise run test:ci
 Manual test: run `entire status` in a repo with active sessions across worktrees.
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-3/05909f78-f64e-4a10-81d1-08b13a7b8e14.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 

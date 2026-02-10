@@ -12,7 +12,7 @@ can you check if we could use the leafUuid? has every row in a log that? then we
 
 ### Prompt 3
 
-can you double check the log, like this is the log of this current session ~/.claude/projects/-Users-soph-Work-entire-devenv-cli/eb4bcc15-3ff5-4d73-bac5-9bc1d786b2bb.jsonl if I look at the first rows they don't have a "uuid" field only a "leafUuid"
+can you double check the log, like this is the log of this current session ~/.REDACTED.jsonl if I look at the first rows they don't have a "uuid" field only a "leafUuid"
 
 ### Prompt 4
 

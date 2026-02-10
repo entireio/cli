@@ -201,7 +201,7 @@ Summary:
    
    I was in the middle of examining `checkConcurrentSessions()` in `hooks_claudecode_handlers.go` at lines 92-171 to understand how to access the other session's prompt via `otherSession.SessionID`..
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/44df7d08-6bc4-4532-bef8-167ea3797cee.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

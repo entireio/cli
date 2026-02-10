@@ -217,7 +217,7 @@ Summary:
    
    The key issue is the test at `resume_test.go:74` and similar lines expect output to contain "Session:" but my changes removed that line in favor of the new multi-session output format..
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/b00b80af-879f-4265-b95b-48db0938673c.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---
@@ -421,7 +421,7 @@ Summary:
 9. Optional Next Step:
    Fix `getLastTimestampFromBytes` by removing the junk code, then integrate the timestamp comparison into `resumeSession` and `resumeSingleSession` to prompt before overwriting newer local logs. The resume command already has a `--force` flag that could be reused to skip this confirmation..
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/b00b80af-879f-4265-b95b-48db0938673c.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
 
 ---

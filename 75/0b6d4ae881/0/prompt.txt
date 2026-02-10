@@ -150,4 +150,4 @@ Until fixed, user can use absolute path in settings:
 ```
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/paul/.claude/projects/-Users-paul-src-entireio-cli/361b2a28-c539-4588-965a-139fa3a89ef1.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/paul/.REDACTED.jsonl

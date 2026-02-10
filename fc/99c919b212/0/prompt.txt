@@ -809,5 +809,5 @@ Summary:
    
    Need to analyze the relationship and propose a consolidation approach, then update handlers to use `agent.HookSessionEnd` for parsing session-end hook input.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/062a8bdd-4322-4ffa-bc38-3e8b8bfb5a56.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.

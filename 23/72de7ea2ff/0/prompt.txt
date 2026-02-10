@@ -182,5 +182,5 @@ Summary:
    - Usage of `os.Stat()`, `os.ReadFile()`, `os.WriteFile()` with relative paths (not starting with `/`)
    - Possibly a custom linter that flags patterns like `filepath.Join(cwd, ...)` where `cwd` comes from `os.Getwd()`.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.claude/projects/-Users-soph-Work-entire-devenv-cli/deeac353-0765-4439-9056-293619a99172.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
 Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.

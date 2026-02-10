@@ -56,7 +56,7 @@ if noTelemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 2. Run `mise run fmt && mise run lint` to verify code style
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-cli/ad64798f-0493-4cad-a94e-325ea052d103.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 
 ---
 
@@ -131,7 +131,7 @@ if noTelemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
 2. Run `mise run fmt && mise run lint` to verify code style
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-cli/ad64798f-0493-4cad-a94e-325ea052d103.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 
 ---
 
@@ -197,7 +197,7 @@ Removed the `else if` blocks that set telemetry to `true` when nil in non-intera
 2. Run `mise run fmt && mise run lint` to verify code style
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-cli/dda84cb8-78af-4fea-b68b-96283426796b.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 
 ---
 
@@ -264,7 +264,7 @@ Removed the `else if` blocks that set telemetry to `true` when nil in non-intera
 2. Run `mise run fmt && mise run lint` to verify code style
 
 
-If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.claude/projects/-Users-gtrrz-victor-wks-cli/dda84cb8-78af-4fea-b68b-96283426796b.jsonl
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
 
 ---
 

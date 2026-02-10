@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "a47cfcb669b1",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-221-better-state-tracking-for-sessions",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/session/phase_test.go",
+    "docs/generated/.gitignore"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a4/7cfcb669b1/0/metadata.json",
+      "transcript": "/a4/7cfcb669b1/0/full.jsonl",
+      "context": "/a4/7cfcb669b1/0/context.md",
+      "content_hash": "/a4/7cfcb669b1/0/content_hash.txt",
+      "prompt": "/a4/7cfcb669b1/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 16,
+    "cache_creation_tokens": 36239,
+    "cache_read_tokens": 664524,
+    "output_tokens": 139,
+    "api_call_count": 14
+  }
+}

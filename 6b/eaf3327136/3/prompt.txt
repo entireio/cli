@@ -835,7 +835,7 @@ Summary:
    - `cmd/entire/cli/hooks_claudecode_handlers.go` - multiple `[timing]` stderr prints
    - `cmd/entire/cli/agent/claudecode/transcript.go` - timing variables t1, t2, t3, t4 and `time` import
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-1/dfbb4922-3529-4eab-a5dc-3c8d30b7c660.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 

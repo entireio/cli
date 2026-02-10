@@ -181,7 +181,7 @@ Summary:
 9. Optional Next Step:
    None - the user's requests have been completed. The PR is created and ready for review.
 
-If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli/0cf3db51-1c73-43bb-8d05-dc02739514a5.jsonl
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
 
 ---
 
