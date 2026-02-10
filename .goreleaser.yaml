@@ -33,6 +33,7 @@ notarize:
         issuer_id: "{{.Env.MACOS_NOTARY_ISSUER_ID}}"
         key_id: "{{.Env.MACOS_NOTARY_KEY_ID}}"
         key: "{{.Env.MACOS_NOTARY_KEY}}"
+        wait: true # do not let an unusable binary slip into the wild
 
 archives:
   - formats:
