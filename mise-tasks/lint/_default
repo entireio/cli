@@ -1,0 +1,3 @@
+#!/bin/sh
+#MISE description="Lint"
+#MISE depends=["lint:go", "lint:gofmt", "lint:gomod", "lint:shellcheck"]
