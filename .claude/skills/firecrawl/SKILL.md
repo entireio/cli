@@ -286,5 +286,5 @@ wait
 For many URLs, use xargs with `-P` for parallel execution:
 
 ```bash
-cat urls.txt | xargs -P 10 -I {} sh -c 'firecrawl scrape "{}" -o ".firecrawl/$(echo {} | md5).md"'
+cat urls.txt | xargs -P 10 -I {} sh -c 'firecrawl scrape "$1" -o ".firecrawl/$(echo "$1" | md5sum | cut -d" " -f1).md"' _ {}
 ```

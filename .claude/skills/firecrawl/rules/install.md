@@ -93,4 +93,4 @@ export PATH=~/.npm-global/bin:$PATH
 
 ### Specific Instructions for Codex
 
-When a user selects to authenticate with a browser, run `firecrawl config --browser` to automatically open the browser for authentication without requiring interactive input.
+When a user selects to authenticate with a browser, run `firecrawl login --browser` to automatically open the browser for authentication without requiring interactive input.
