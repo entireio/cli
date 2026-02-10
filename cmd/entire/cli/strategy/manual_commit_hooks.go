@@ -946,8 +946,10 @@ func (s *ManualCommitStrategy) sessionHasNewContent(repo *git.Repository, state 
 		}
 	}
 
-	// If we have transcript content, use transcript-based detection
-	if hasTranscript && transcriptLines > 0 {
+	// If we have transcript content (or at least the file exists), use transcript-based detection.
+	// This prevents falling back to the file-based check for agents that SHOULD have transcripts
+	// (like Claude Code) but might have empty/corrupt ones.
+	if hasTranscript {
 		return transcriptLines > state.CheckpointTranscriptStart, nil
 	}
 

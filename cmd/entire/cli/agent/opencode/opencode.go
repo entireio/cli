@@ -30,7 +30,7 @@ const (
 
 // Plugin filename and dir.
 const (
-	pluginDirName  = ".opencode/plugins"
+	pluginDirName  = ".opencode/plugin"
 	pluginFileName = "entire.js"
 )
 
