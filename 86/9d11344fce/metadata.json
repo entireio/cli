@@ -3,10 +3,21 @@
   "checkpoint_id": "869d11344fce",
   "strategy": "manual-commit",
   "branch": "gtrrz-victor/add-cli-version-metadatajsons",
-  "checkpoints_count": 7,
+  "checkpoints_count": 10,
   "files_touched": [
+    ".goreleaser.yaml",
+    "cmd/entire/cli/buildinfo/buildinfo.go",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/integration_test/cli_version_metadata_test.go",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
     "cmd/entire/cli/versioncheck/versioncheck.go",
-    "cmd/entire/cli/versioncheck/versioncheck_test.go"
+    "cmd/entire/cli/versioncheck/versioncheck_test.go",
+    "mise-tasks/dev/publish",
+    "mise.toml"
   ],
   "sessions": [
     {
@@ -15,13 +26,20 @@
       "context": "/86/9d11344fce/0/context.md",
       "content_hash": "/86/9d11344fce/0/content_hash.txt",
       "prompt": "/86/9d11344fce/0/prompt.txt"
+    },
+    {
+      "metadata": "/86/9d11344fce/1/metadata.json",
+      "transcript": "/86/9d11344fce/1/full.jsonl",
+      "context": "/86/9d11344fce/1/context.md",
+      "content_hash": "/86/9d11344fce/1/content_hash.txt",
+      "prompt": "/86/9d11344fce/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 38,
-    "cache_creation_tokens": 93750,
-    "cache_read_tokens": 1567039,
-    "output_tokens": 3192,
-    "api_call_count": 28
+    "input_tokens": 126,
+    "cache_creation_tokens": 389486,
+    "cache_read_tokens": 9836454,
+    "output_tokens": 6284,
+    "api_call_count": 104
   }
 }
