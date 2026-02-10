@@ -101,7 +101,7 @@ Performance options:
   --search-all  Remove branch/depth limits when searching for commits (may be slow)
 
 Checkpoint detail view shows:
-  - Author who created the checkpoint
+  - Author of the checkpoint
   - Associated git commits that reference the checkpoint
   - Prompts and responses from the session
 
