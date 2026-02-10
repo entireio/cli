@@ -1479,7 +1479,8 @@ func TestShadowStrategy_CondenseSession_EphemeralBranchTrailer(t *testing.T) {
 		t.Fatalf("failed to create metadata dir: %v", err)
 	}
 
-	transcript := `{"type":"human","message":{"content":"test prompt"}} //nolint:goconst // already present in codebase
+	//nolint:goconst // already present in codebase
+	transcript := `{"type":"human","message":{"content":"test prompt"}}
 {"type":"assistant","message":{"content":"test response"}}
 `
 	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644); err != nil {
