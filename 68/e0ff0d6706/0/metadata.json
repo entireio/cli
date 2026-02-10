@@ -1,0 +1,30 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "68e0ff0d6706",
+  "session_id": "9d440bfc-a64f-43be-aa10-10a3764a59ea",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-10T06:25:00.265115Z",
+  "branch": "20260210-fix-all-lints",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/messages.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "991fac9e-b48b-430f-85c9-fdc4a00a3863",
+  "token_usage": {
+    "input_tokens": 7,
+    "cache_creation_tokens": 13211,
+    "cache_read_tokens": 136049,
+    "output_tokens": 805,
+    "api_call_count": 5
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-10T06:25:00.140779Z",
+    "agent_lines": 2,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 1,
+    "total_committed": 2,
+    "agent_percentage": 100
+  }
+}
