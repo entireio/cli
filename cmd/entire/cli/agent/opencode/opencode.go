@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // Ensure Agent implements required interfaces.
@@ -125,8 +126,10 @@ func (o *Agent) ParseHookInput(hookType agent.HookType, reader io.Reader) (*agen
 
 	if v, ok := raw["session_id"].(string); ok {
 		// Validate session ID to prevent path traversal
-		if err := validateSessionID(v); err != nil {
-			return nil, fmt.Errorf("invalid session_id: %w", err)
+		if v != "" {
+			if err := validation.ValidateAgentSessionID(v); err != nil {
+				return nil, fmt.Errorf("invalid session_id: %w", err)
+			}
 		}
 		input.SessionID = v
 	}
@@ -138,22 +141,6 @@ func (o *Agent) ParseHookInput(hookType agent.HookType, reader io.Reader) (*agen
 	}
 
 	return input, nil
-}
-
-// validateSessionID validates that the session ID is safe for use in file paths.
-// It rejects IDs containing path separators or traversal sequences.
-func validateSessionID(sessionID string) error {
-	if sessionID == "" {
-		return nil // Empty is allowed (will fall back to unknownSessionID later)
-	}
-	// Reject path separators and traversal attempts
-	if strings.Contains(sessionID, "/") || strings.Contains(sessionID, "\\") {
-		return errors.New("session ID contains path separator")
-	}
-	if strings.Contains(sessionID, "..") {
-		return errors.New("session ID contains path traversal sequence")
-	}
-	return nil
 }
 
 // GetSessionID returns SessionID from input.

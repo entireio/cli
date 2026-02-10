@@ -161,6 +161,22 @@ func handleOpenCodeStop() error {
 	relNewFiles := FilterAndNormalizePaths(newFiles, repoRoot)
 	relDeletedFiles := FilterAndNormalizePaths(deletedFiles, repoRoot)
 
+	// Guard against zero changes
+	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
+	if totalChanges == 0 {
+		fmt.Fprintf(os.Stderr, "No files were modified during this session\n")
+		fmt.Fprintf(os.Stderr, "Skipping checkpoint\n")
+
+		// Transition session phase: ACTIVE → IDLE
+		transitionSessionTurnEnd(sessionID)
+
+		// Clean up pre-prompt state
+		if err := CleanupPrePromptState(sessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", err)
+		}
+		return nil
+	}
+
 	// Get git author for commit authorship
 	author, err := GetGitAuthor()
 	if err != nil {

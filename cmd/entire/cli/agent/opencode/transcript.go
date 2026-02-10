@@ -77,7 +77,10 @@ type exportToolState struct {
 
 // ExportSession runs `opencode export <sessionID>` from the repository root.
 func ExportSession(sessionID string) ([]byte, error) {
-	ctx := context.Background()
+	// Add 30s timeout to prevent hanging indefinitely
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get repo root: %w", err)
@@ -87,6 +90,9 @@ func ExportSession(sessionID string) ([]byte, error) {
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("opencode export timed out after 30s: %w", err)
+		}
 		return nil, fmt.Errorf("opencode export failed: %w", err)
 	}
 	return output, nil
@@ -131,15 +137,14 @@ func convertMessageToLine(msg exportMessage) (TranscriptLine, error) {
 	switch msg.Info.Role {
 	case RoleUser:
 		// Extract text content from parts
-		var textContent string
+		var textParts []string
 		for _, part := range msg.Parts {
 			if part.Type == PartTypeText && part.Text != "" {
-				textContent = part.Text
-				break
+				textParts = append(textParts, part.Text)
 			}
 		}
 		messageContent = transcript.UserMessage{
-			Content: textContent,
+			Content: strings.Join(textParts, "\n\n"),
 		}
 
 	case RoleAssistant:
