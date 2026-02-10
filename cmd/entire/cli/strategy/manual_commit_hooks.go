@@ -905,8 +905,8 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(repo *git.Repository
 	return result
 }
 
-// sessionHasNewContent checks if a session has new transcript content
-// beyond what was already condensed.
+// sessionHasNewContent checks if a session has new content beyond what was
+// already condensed. Checks both transcript content and files touched.
 func (s *ManualCommitStrategy) sessionHasNewContent(repo *git.Repository, state *SessionState) (bool, error) {
 	// Get shadow branch
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
@@ -932,19 +932,33 @@ func (s *ManualCommitStrategy) sessionHasNewContent(repo *git.Repository, state 
 	// Look for transcript file
 	metadataDir := paths.EntireMetadataDir + "/" + state.SessionID
 	var transcriptLines int
+	var hasTranscript bool
 
 	if file, fileErr := tree.File(metadataDir + "/" + paths.TranscriptFileName); fileErr == nil {
+		hasTranscript = true
 		if content, contentErr := file.Contents(); contentErr == nil {
 			transcriptLines = countTranscriptItems(state.AgentType, content)
 		}
 	} else if file, fileErr := tree.File(metadataDir + "/" + paths.TranscriptFileNameLegacy); fileErr == nil {
+		hasTranscript = true
 		if content, contentErr := file.Contents(); contentErr == nil {
 			transcriptLines = countTranscriptItems(state.AgentType, content)
 		}
 	}
 
-	// Has new content if there are more lines than already condensed
-	return transcriptLines > state.CheckpointTranscriptStart, nil
+	// If we have transcript content, use transcript-based detection
+	if hasTranscript && transcriptLines > 0 {
+		return transcriptLines > state.CheckpointTranscriptStart, nil
+	}
+
+	// For agents without transcripts (e.g., OpenCode), check if there are files touched.
+	// If the shadow branch exists and we have FilesTouched, there's new content to condense.
+	// StepCount > 0 indicates at least one checkpoint was saved to the shadow branch.
+	if len(state.FilesTouched) > 0 && state.StepCount > 0 {
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // sessionHasNewContentFromLiveTranscript checks if a session has new content

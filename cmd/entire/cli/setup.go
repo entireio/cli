@@ -1100,6 +1100,19 @@ func removeAgentHooks(w io.Writer) error {
 		}
 	}
 
+	// Remove OpenCode hooks
+	openCodeAgent, err := agent.Get(agent.AgentNameOpenCode)
+	if err == nil {
+		if hookAgent, ok := openCodeAgent.(agent.HookSupport); ok {
+			wasInstalled := hookAgent.AreHooksInstalled()
+			if err := hookAgent.UninstallHooks(); err != nil {
+				errs = append(errs, err)
+			} else if wasInstalled {
+				fmt.Fprintln(w, "  Removed OpenCode hooks")
+			}
+		}
+	}
+
 	return errors.Join(errs...)
 }
 
