@@ -15,13 +15,12 @@ Entire hooks into your git workflow to capture AI agent sessions on every push. 
 - [Development](#development)
 - [Getting Help](#getting-help)
 - [License](#license)
-- [OpenCode Integration](#opencode-integration)
 
 ## Requirements
 
 - Git
 - macOS or Linux (Windows via WSL)
-- One of: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Gemini CLI](https://github.com/google-gemini/gemini-cli), or [OpenCode](https://github.com/entireio/opencode) installed and authenticated
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Gemini CLI](https://github.com/google-gemini/gemini-cli) installed and authenticated
 
 ## Quick Start
 
@@ -48,7 +47,7 @@ entire status
 entire enable
 ```
 
-This installs agent and git hooks to work with your AI agent (Claude Code, Gemini CLI, or OpenCode). The hooks capture session data at specific points in your workflow. Your code commits stay clean—all session metadata is stored on a separate `entire/checkpoints/v1` branch.
+This installs agent and git hooks to work with your AI agent (Claude Code or Gemini CLI). The hooks capture session data at specific points in your workflow. Your code commits stay clean—all session metadata is stored on a separate `entire/checkpoints/v1` branch.
 
 **When checkpoints are created** depends on your chosen strategy (default is `manual-commit`):
 - **Manual-commit**: Checkpoints are created when you or the agent make a git commit
@@ -56,7 +55,7 @@ This installs agent and git hooks to work with your AI agent (Claude Code, Gemin
 
 ### 2. Work with Your AI Agent
 
-Just use Claude Code, Gemini CLI, or OpenCode normally. Entire runs in the background, tracking your session:
+Just use Claude Code or Gemini CLI normally. Entire runs in the background, tracking your session:
 
 ```
 entire status  # Check current session status anytime
@@ -172,7 +171,7 @@ Multiple AI sessions can run on the same commit. If you start a second session w
 
 | Flag                   | Description                                                        |
 |------------------------|--------------------------------------------------------------------|
-| `--agent <name>`       | AI agent to setup hooks for: `claude-code` (default), `gemini`, or `opencode` |
+| `--agent <name>`       | AI agent to setup hooks for: `claude-code` (default) or `gemini`   |
 | `--force`, `-f`        | Force reinstall hooks (removes existing Entire hooks first)        |
 | `--local`              | Write settings to `settings.local.json` instead of `settings.json` |
 | `--project`            | Write settings to `settings.json` even if it already exists        |
@@ -378,10 +377,6 @@ entire <command> --help    # Command-specific help
 
 - **GitHub Issues:** Report bugs or request features at https://github.com/entireio/cli/issues
 - **Contributing:** See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
-
-## OpenCode Integration
-
-See `OPENCODE.md` for setup and current limitations. `entire enable --agent opencode` installs a small plugin under `.opencode/plugins/entire.js` that forwards OpenCode events to Entire hooks (no polling).
 
 ## License
 
