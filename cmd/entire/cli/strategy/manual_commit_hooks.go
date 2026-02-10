@@ -25,11 +25,36 @@ import (
 	"github.com/go-git/go-git/v5/utils/binary"
 )
 
+// hasTTY checks if /dev/tty is available for interactive prompts.
+// Returns false when running as an agent subprocess (no controlling terminal).
+//
+// In test environments, ENTIRE_TEST_TTY overrides the real check:
+//   - ENTIRE_TEST_TTY=1 → simulate human (TTY available)
+//   - ENTIRE_TEST_TTY=0 → simulate agent (no TTY)
+func hasTTY() bool {
+	if v := os.Getenv("ENTIRE_TEST_TTY"); v != "" {
+		return v == "1"
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	_ = tty.Close()
+	return true
+}
+
 // askConfirmTTY prompts the user for a yes/no confirmation via /dev/tty.
 // This works even when stdin is redirected (e.g., git commit -m).
 // Returns true for yes, false for no. If TTY is unavailable, returns the default.
 // If context is non-empty, it is displayed on a separate line before the prompt.
 func askConfirmTTY(prompt string, context string, defaultYes bool) bool {
+	// In test mode, don't try to interact with the real TTY — just use the default.
+	// ENTIRE_TEST_TTY=1 simulates "a human is present" for the hasTTY() check
+	// but we can't actually read from the TTY in tests.
+	if os.Getenv("ENTIRE_TEST_TTY") != "" {
+		return defaultYes
+	}
+
 	// Open /dev/tty for both reading and writing
 	// This is the controlling terminal, which works even when stdin/stderr are redirected
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
@@ -237,6 +262,19 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(commitMsgFile string, source str
 			slog.String("source", source),
 		)
 		return nil //nolint:nilerr // Intentional: hooks must be silent on failure
+	}
+
+	// Fast path: when an agent is committing (ACTIVE session + no TTY), skip
+	// content detection and interactive prompts. The agent can't respond to TTY
+	// prompts and the content detection can miss mid-session work (no shadow
+	// branch yet, transcript analysis may fail). Generate a checkpoint ID and
+	// add the trailer directly.
+	if !hasTTY() {
+		for _, state := range sessions {
+			if state.Phase.IsActive() {
+				return s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source)
+			}
+		}
 	}
 
 	// Check if any session has new content to condense
@@ -1023,6 +1061,54 @@ func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(repo *git.
 	}
 
 	return true, nil
+}
+
+// addTrailerForAgentCommit handles the fast path when an agent is committing
+// (ACTIVE session + no TTY). Generates a checkpoint ID and adds the trailer
+// directly, bypassing content detection and interactive prompts.
+func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error {
+	// Use PendingCheckpointID if set, otherwise generate a new one
+	var cpID id.CheckpointID
+	if state.PendingCheckpointID != "" {
+		var err error
+		cpID, err = id.NewCheckpointID(state.PendingCheckpointID)
+		if err != nil {
+			cpID = "" // fall through to generate
+		}
+	}
+	if cpID.IsEmpty() {
+		var err error
+		cpID, err = id.Generate()
+		if err != nil {
+			return nil //nolint:nilerr // Hook must be silent on failure
+		}
+	}
+
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return nil //nolint:nilerr // Hook must be silent on failure
+	}
+
+	message := string(content)
+
+	// Don't add if trailer already exists
+	if _, found := trailers.ParseCheckpoint(message); found {
+		return nil
+	}
+
+	message = addCheckpointTrailer(message, cpID)
+
+	logging.Info(logCtx, "prepare-commit-msg: agent commit trailer added",
+		slog.String("strategy", "manual-commit"),
+		slog.String("source", source),
+		slog.String("checkpoint_id", cpID.String()),
+		slog.String("session_id", state.SessionID),
+	)
+
+	if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil {
+		return nil //nolint:nilerr // Hook must be silent on failure
+	}
+	return nil
 }
 
 // addCheckpointTrailer adds the Entire-Checkpoint trailer to a commit message.

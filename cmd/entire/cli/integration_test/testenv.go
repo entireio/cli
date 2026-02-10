@@ -901,11 +901,25 @@ func (env *TestEnv) GetLatestCommitMessageOnBranch(branchName string) string {
 	return commit.Message
 }
 
-// GitCommitWithShadowHooks stages and commits files, simulating the prepare-commit-msg and post-commit hooks.
-// This is used for testing manual-commit strategy which needs:
-// - prepare-commit-msg hook: adds the Entire-Checkpoint trailer
-// - post-commit hook: condenses session data if trailer is present
+// GitCommitWithShadowHooks stages and commits files, simulating the prepare-commit-msg
+// and post-commit hooks as a human (with TTY). This is the default for tests.
 func (env *TestEnv) GitCommitWithShadowHooks(message string, files ...string) {
+	env.T.Helper()
+	env.gitCommitWithShadowHooks(message, true, files...)
+}
+
+// GitCommitWithShadowHooksAsAgent is like GitCommitWithShadowHooks but simulates
+// an agent commit (no TTY). This triggers the fast path in PrepareCommitMsg that
+// skips content detection and interactive prompts for ACTIVE sessions.
+func (env *TestEnv) GitCommitWithShadowHooksAsAgent(message string, files ...string) {
+	env.T.Helper()
+	env.gitCommitWithShadowHooks(message, false, files...)
+}
+
+// gitCommitWithShadowHooks is the shared implementation for committing with shadow hooks.
+// When simulateTTY is true, sets ENTIRE_TEST_TTY=1 to simulate a human at the terminal.
+// When false, filters it out to simulate an agent subprocess (no controlling terminal).
+func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, files ...string) {
 	env.T.Helper()
 
 	// Stage files using go-git
@@ -919,9 +933,19 @@ func (env *TestEnv) GitCommitWithShadowHooks(message string, files ...string) {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
 
-	// Run prepare-commit-msg hook using the shared binary
-	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile)
+	// Run prepare-commit-msg hook using the shared binary.
+	// Pass source="message" to match real `git commit -m` behavior.
+	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
 	prepCmd.Dir = env.RepoDir
+	if simulateTTY {
+		// Simulate human at terminal: ENTIRE_TEST_TTY=1 makes hasTTY() return true
+		// and askConfirmTTY() return defaultYes without reading from /dev/tty.
+		prepCmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=1")
+	} else {
+		// Simulate agent: ENTIRE_TEST_TTY=0 makes hasTTY() return false,
+		// triggering the fast path that adds trailers for ACTIVE sessions.
+		prepCmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0")
+	}
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)
 		// Don't fail - hook may silently succeed
@@ -982,10 +1006,11 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
 
-	// Run prepare-commit-msg hook with "commit" source (indicates amend)
-	// Format: entire hooks git prepare-commit-msg <msgfile> commit
+	// Run prepare-commit-msg hook with "commit" source (indicates amend).
+	// Set ENTIRE_TEST_TTY=1 to simulate human (amend is always a human operation).
 	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "commit")
 	prepCmd.Dir = env.RepoDir
+	prepCmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=1")
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg (amend) output: %s", output)
 	}
@@ -1044,9 +1069,12 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
 
-	// Run prepare-commit-msg hook using the shared binary
+	// Run prepare-commit-msg hook using the shared binary.
+	// Set ENTIRE_TEST_TTY=1 to simulate human (this tests the editor flow where
+	// the user removes the trailer before committing).
 	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile)
 	prepCmd.Dir = env.RepoDir
+	prepCmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=1")
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)
 	}

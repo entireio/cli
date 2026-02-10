@@ -181,3 +181,32 @@ func TestShadowStrategy_MidSessionCommit_NoTrailerForUnrelatedFile(t *testing.T)
 		t.Log("Correctly omitted checkpoint trailer for unrelated file commit")
 	}
 }
+
+// TestShadowStrategy_AgentCommit_AlwaysGetsTrailer tests that when an agent commits
+// (ACTIVE session + no TTY), the trailer is always added regardless of content
+// detection. This is the fast path that bypasses transcript analysis.
+func TestShadowStrategy_AgentCommit_AlwaysGetsTrailer(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t, strategy.StrategyNameManualCommit)
+
+	session := env.NewSession()
+
+	// Start session (sets phase to ACTIVE)
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+
+	// Create a file and commit as agent (no TTY)
+	env.WriteFile("agent_file.txt", "created by agent")
+	env.GitCommitWithShadowHooksAsAgent("Agent commit", "agent_file.txt")
+
+	// Agent commits should ALWAYS get a trailer (fast path, no content detection)
+	commitHash := env.GetHeadHash()
+	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
+	if checkpointID == "" {
+		t.Error("Agent commit during ACTIVE session should always get a checkpoint trailer")
+	} else {
+		t.Logf("Agent commit correctly got checkpoint trailer: %s", checkpointID)
+	}
+}
