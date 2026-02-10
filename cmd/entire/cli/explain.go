@@ -136,11 +136,11 @@ Note: --session filters the list view; --commit and --checkpoint are mutually ex
 	}
 
 	cmd.Flags().StringVar(&sessionFlag, "session", "", "Filter checkpoints by session ID (or prefix)")
-	cmd.Flags().StringVar(&commitFlag, "commit", "", "Explain a specific commit (SHA or ref)")
+	cmd.Flags().StringVar(&commitFlag, "commit", "", "Explain a specific commit (SHA or ref, \"commit-ish\")")
 	cmd.Flags().StringVarP(&checkpointFlag, "checkpoint", "c", "", "Explain a specific checkpoint (ID or prefix)")
 	cmd.Flags().BoolVar(&noPagerFlag, "no-pager", false, "Disable pager output")
 	cmd.Flags().BoolVarP(&shortFlag, "short", "s", false, "Show summary only (omit prompts and files)")
-	cmd.Flags().BoolVar(&fullFlag, "full", false, "Show parsed full transcript (all prompts/responses)")
+	cmd.Flags().BoolVar(&fullFlag, "full", false, "Show full parsed transcript (all prompts/responses)")
 	cmd.Flags().BoolVar(&rawTranscriptFlag, "raw-transcript", false, "Show raw transcript file (JSONL format)")
 	cmd.Flags().BoolVar(&generateFlag, "generate", false, "Generate an AI summary for the checkpoint")
 	cmd.Flags().BoolVar(&forceFlag, "force", false, "Regenerate summary even if one already exists (requires --generate)")
