@@ -34,6 +34,7 @@ func (m *mockAgent) GetSessionDir(_ string) (string, error)       { return "", n
 func (m *mockAgent) ReadSession(_ *HookInput) (*AgentSession, error) { return nil, nil }
 func (m *mockAgent) WriteSession(_ *AgentSession) error              { return nil }
 func (m *mockAgent) FormatResumeCommand(_ string) string             { return "" }
+func (m *mockAgent) IsInstalled() (bool, error)                      { return false, nil }
 
 // mockHookSupport implements both Agent and HookSupport interfaces.
 type mockHookSupport struct {

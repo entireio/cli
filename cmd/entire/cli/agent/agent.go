@@ -59,6 +59,11 @@ type Agent interface {
 
 	// FormatResumeCommand returns command to resume a session
 	FormatResumeCommand(sessionID string) string
+
+	// IsInstalled checks if the agent's CLI binary is available in PATH.
+	// Returns (true, nil) if found, (false, nil) if not found,
+	// and (false, err) only for unexpected OS errors.
+	IsInstalled() (bool, error)
 }
 
 // HookSupport is implemented by agents with lifecycle hooks.

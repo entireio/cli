@@ -878,3 +878,65 @@ func TestEnableCmd_AgentFlagEmptyValue(t *testing.T) {
 		t.Error("should not contain default cobra/pflag error message")
 	}
 }
+
+func TestGetInstallURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		agent   string
+		wantURL string
+	}{
+		{
+			name:    "claude-code",
+			agent:   "claude-code",
+			wantURL: "https://docs.anthropic.com/en/docs/claude-code",
+		},
+		{
+			name:    "gemini",
+			agent:   "gemini",
+			wantURL: "https://github.com/google-gemini/gemini-cli",
+		},
+		{
+			name:    "unknown agent",
+			agent:   "unknown",
+			wantURL: "https://github.com/entireio/cli#requirements",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := getInstallURL(tt.agent)
+			if got != tt.wantURL {
+				t.Errorf("getInstallURL(%q) = %q, want %q", tt.agent, got, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestFindInstalledAgent_ReturnsAgent(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	ag, err := findInstalledAgent(&buf)
+
+	// This test is environment-dependent:
+	// - If claude or gemini is installed, ag should be non-nil
+	// - If neither is installed, err should be non-nil with helpful message
+	if ag != nil {
+		// Agent was found - verify it has a valid name
+		if ag.Name() == "" {
+			t.Error("findInstalledAgent() returned agent with empty name")
+		}
+	} else {
+		// No agent found - verify helpful error message was printed
+		if err == nil {
+			t.Error("findInstalledAgent() returned nil agent and nil error")
+		}
+		output := buf.String()
+		if !strings.Contains(output, "No AI agents found") {
+			t.Errorf("expected helpful error message, got: %s", output)
+		}
+	}
+}

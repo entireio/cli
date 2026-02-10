@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"time"
@@ -68,6 +69,18 @@ func (c *ClaudeCodeAgent) DetectPresence() (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// IsInstalled checks if the `claude` binary is available in PATH.
+func (c *ClaudeCodeAgent) IsInstalled() (bool, error) {
+	_, err := exec.LookPath("claude")
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("look path claude: %w", err)
+	}
+	return true, nil
 }
 
 // GetHookConfigPath returns the path to Claude's hook config file.

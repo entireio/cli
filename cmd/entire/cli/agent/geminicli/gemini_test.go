@@ -15,6 +15,21 @@ import (
 // Test constants
 const testSessionID = "abc123"
 
+func TestIsInstalled(t *testing.T) {
+	t.Parallel()
+
+	ag := &GeminiCLIAgent{}
+	installed, err := ag.IsInstalled()
+
+	// Should not return an error regardless of whether gemini is installed
+	if err != nil {
+		t.Fatalf("IsInstalled() error = %v", err)
+	}
+
+	// installed is environment-dependent, just verify it's a valid bool
+	_ = installed
+}
+
 func TestNewGeminiCLIAgent(t *testing.T) {
 	ag := NewGeminiCLIAgent()
 	if ag == nil {

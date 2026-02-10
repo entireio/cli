@@ -7,6 +7,21 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
+func TestIsInstalled(t *testing.T) {
+	t.Parallel()
+
+	c := &ClaudeCodeAgent{}
+	installed, err := c.IsInstalled()
+
+	// Should not return an error regardless of whether claude is installed
+	if err != nil {
+		t.Fatalf("IsInstalled() error = %v", err)
+	}
+
+	// installed is environment-dependent, just verify it's a valid bool
+	_ = installed
+}
+
 func TestParseHookInput_UserPromptSubmit(t *testing.T) {
 	t.Parallel()
 

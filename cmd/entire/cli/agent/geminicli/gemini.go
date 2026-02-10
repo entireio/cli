@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"time"
@@ -69,6 +70,18 @@ func (g *GeminiCLIAgent) DetectPresence() (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// IsInstalled checks if the `gemini` binary is available in PATH.
+func (g *GeminiCLIAgent) IsInstalled() (bool, error) {
+	_, err := exec.LookPath("gemini")
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("look path gemini: %w", err)
+	}
+	return true, nil
 }
 
 // GetHookConfigPath returns the path to Gemini's hook config file.
