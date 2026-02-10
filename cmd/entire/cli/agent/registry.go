@@ -118,12 +118,17 @@ func GetByAgentType(agentType AgentType) (Agent, error) {
 
 // AllProtectedDirs returns the union of ProtectedDirs from all registered agents.
 func AllProtectedDirs() []string {
+	// Copy factories under the lock, then release before calling external code.
 	registryMu.RLock()
-	defer registryMu.RUnlock()
+	factories := make([]Factory, 0, len(registry))
+	for _, f := range registry {
+		factories = append(factories, f)
+	}
+	registryMu.RUnlock()
 
 	seen := make(map[string]struct{})
 	var dirs []string
-	for _, factory := range registry {
+	for _, factory := range factories {
 		for _, d := range factory().ProtectedDirs() {
 			if _, ok := seen[d]; !ok {
 				seen[d] = struct{}{}
