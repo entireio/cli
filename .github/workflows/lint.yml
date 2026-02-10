@@ -23,7 +23,7 @@ jobs:
         run: mise run lint
 
       # So this golangci-lint uses the same config as `mise run lint:go`, but using special sauce to
-      # create inline feedback on Github's UI.  On local dev, the same issues should be surfaced by
+      # create inline feedback on GitHub's UI.  On local dev, the same issues should be surfaced by
       # mise-tasks/lint/go
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
