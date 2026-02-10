@@ -242,8 +242,9 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 ```
 
 When condensing multiple concurrent sessions:
-- All sessions stored in numbered subdirectories using 0-based indexing (`0/`, `1/`, `2/`, ...)
-- Latest session is always in the highest-numbered folder
+- All sessions are stored in numbered subdirectories using 0-based indexing (`0/`, `1/`, `2/`, ...)
+- Each `session_id` is assigned a stable index; subsequent writes for the same session reuse the same numbered folder
+- New `session_id` values are appended at the next index, so higher-numbered folders correspond to more recently introduced sessions, not necessarily the chronologically latest activity
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
 
