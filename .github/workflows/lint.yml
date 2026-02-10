@@ -17,6 +17,10 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+
       - uses: jdx/mise-action@v3
 
       - name: Run linters
