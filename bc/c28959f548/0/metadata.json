@@ -1,0 +1,29 @@
+{
+  "checkpoint_id": "bcc28959f548",
+  "session_id": "e4d2c72e-cd24-427e-a02f-360e7a284090",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-09T23:45:04.120999Z",
+  "branch": "gtrrz-victor/ent-252-duplicate-session-information-written-to-checkpoint",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/lint.yml",
+    "mise.toml"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 7,
+    "cache_creation_tokens": 21183,
+    "cache_read_tokens": 203863,
+    "output_tokens": 574,
+    "api_call_count": 5
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-09T23:45:03.918096Z",
+    "agent_lines": 0,
+    "human_added": 6353,
+    "human_modified": 13,
+    "human_removed": 0,
+    "total_committed": 6366,
+    "agent_percentage": 0
+  }
+}
