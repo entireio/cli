@@ -23,5 +23,5 @@ jobs:
 
       - uses: jdx/mise-action@v3
 
-      - name: Run golangci-lint
+      - name: Run linters
         run: mise run lint
