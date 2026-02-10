@@ -28,14 +28,14 @@ use Git directly: git reset --hard <commit>
 The command will:
   - Find all sessions where base_commit matches the current HEAD
   - Delete each session state file (.git/entire-sessions/<session-id>.json)
-  - Delete the shadow branch (entire/<commit-hash>)
+  - Delete the shadow branch (entire/<commit-hash>-<worktree-hash>)
 
 Use --session <id> to reset a single session instead of all sessions.
 
 Example: If HEAD is at commit abc1234567890, the command will:
   1. Find all .json files in .git/entire-sessions/ with "base_commit": "abc1234567890"
   2. Delete those session files (e.g., 2026-02-02-xyz123.json, 2026-02-02-abc456.json)
-  3. Delete the shadow branch entire/abc1234
+  3. Delete the shadow branch entire/abc1234-fd5432
 
 Without --force, prompts for confirmation before deleting.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {

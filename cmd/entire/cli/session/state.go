@@ -61,7 +61,7 @@ type State struct {
 	PendingCheckpointID string `json:"pending_checkpoint_id,omitempty"`
 
 	// LastInteractionTime is updated on every hook invocation.
-	// Used for stale session detection in "entire sessions fix".
+	// Used for stale session detection in "entire doctor".
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 
 	// StepCount is the number of checkpoints/steps created in this session.

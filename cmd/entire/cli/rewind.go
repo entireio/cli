@@ -49,8 +49,12 @@ func newRewindCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "rewind",
-		Short: "Rewind commands for session management",
-		Long:  "Commands for rewinding and managing Claude Code sessions",
+		Short: "Browse checkpoints and rewind your session",
+		Long: `Interactive command for rewinding and managing Claude Code sessions.
+
+This command will show you an interactive list of recent checkpoints.  You'll be
+able to select one for Entire to rewind your branch state, including your code and
+your agent's context.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Check if Entire is disabled
 			if checkDisabledGuard(cmd.OutOrStdout()) {

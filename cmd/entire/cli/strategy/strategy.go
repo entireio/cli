@@ -501,7 +501,7 @@ type SessionResetter interface {
 }
 
 // SessionCondenser is an optional interface for strategies that support
-// force-condensing a session. This is used by "entire sessions fix" to
+// force-condensing a session. This is used by "entire doctor" to
 // salvage stuck sessions by condensing their data to permanent storage.
 type SessionCondenser interface {
 	// CondenseSessionByID force-condenses a session and cleans up.

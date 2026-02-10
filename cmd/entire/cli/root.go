@@ -13,8 +13,8 @@ const gettingStarted = `
 
 Getting Started:
   To get started with Entire CLI, run 'entire enable' to configure
-  your environment. For more information, visit:
-  https://entire.io/docs/cli/getting-started
+  your project's environment. For more information, visit:
+  https://docs.entire.io/getting-started
 
 `
 
@@ -35,7 +35,7 @@ func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "entire",
 		Short: "Entire CLI",
-		Long:  "A command-line interface for Entire" + gettingStarted + accessibilityHelp,
+		Long:  "The command-line interface for Entire" + gettingStarted + accessibilityHelp,
 		// Let main.go handle error printing to avoid duplication
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -85,7 +85,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newExplainCmd())
 	cmd.AddCommand(newDebugCmd())
-	cmd.AddCommand(newSessionsCmd())
+	cmd.AddCommand(newDoctorCmd())
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 
@@ -98,7 +98,7 @@ func NewRootCmd() *cobra.Command {
 func newVersionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "Show version information",
+		Short: "Show build information",
 		Run: func(_ *cobra.Command, _ []string) {
 			fmt.Printf("Entire CLI %s (%s)\n", Version, Commit)
 			fmt.Printf("Go version: %s\n", runtime.Version())

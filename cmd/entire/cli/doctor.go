@@ -19,26 +19,11 @@ import (
 // stalenessThreshold is the duration after which an active session is considered stuck.
 const stalenessThreshold = 1 * time.Hour
 
-func newSessionsCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "sessions",
-		Short: "Session management commands",
-		Long:  "Commands for managing and fixing Entire sessions.",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
-		},
-	}
-
-	cmd.AddCommand(newSessionsFixCmd())
-
-	return cmd
-}
-
-func newSessionsFixCmd() *cobra.Command {
+func newDoctorCmd() *cobra.Command {
 	var forceFlag bool
 
 	cmd := &cobra.Command{
-		Use:   "fix",
+		Use:   "doctor",
 		Short: "Fix stuck sessions",
 		Long: `Scan for stuck or problematic sessions and offer to fix them.
 
@@ -51,7 +36,8 @@ For each stuck session, you can choose to:
   - Discard: Remove the session state and shadow branch data
   - Skip: Leave the session as-is
 
-Use --force to condense all fixable sessions without prompting.`,
+Use --force to condense all fixable sessions without prompting.  Sessions that can't
+be condensed will be discarded.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSessionsFix(cmd, forceFlag)
 		},

@@ -13,8 +13,8 @@ func newCleanCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "clean",
-		Short: "Clean up orphaned entire's data",
-		Long: `Remove orphaned entire's data that wasn't cleaned up automatically.
+		Short: "Clean up orphaned Entire data",
+		Long: `Remove orphaned Entire data (session state, shadow branches, checkpoint metadata) that wasn't cleaned up automatically.
 
 This command finds and removes orphaned data from any strategy:
 
@@ -32,7 +32,7 @@ This command finds and removes orphaned data from any strategy:
     Manual-commit checkpoints are permanent (condensed history) and are
     never considered orphaned.
 
-Without --force, shows a preview of items that would be deleted.
+Default: shows a preview of items that would be deleted.
 With --force, actually deletes the orphaned items.
 
 The entire/checkpoints/v1 branch itself is never deleted.`,
@@ -41,7 +41,7 @@ The entire/checkpoints/v1 branch itself is never deleted.`,
 		},
 	}
 
-	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Actually delete items (otherwise just preview)")
+	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Actually delete items (default: dry run)")
 
 	return cmd
 }
