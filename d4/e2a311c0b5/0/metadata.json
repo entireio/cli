@@ -1,0 +1,83 @@
+{
+  "checkpoint_id": "d4e2a311c0b5",
+  "session_id": "a0927dd5-61a3-4802-a716-4480286f16d4",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-10T03:46:21.428812Z",
+  "branch": "alex/entire-explain-fixes",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/explain.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "fbd86b81-41b8-47ec-89d1-66ffd60ea2b1",
+  "token_usage": {
+    "input_tokens": 147,
+    "cache_creation_tokens": 342567,
+    "cache_read_tokens": 14094565,
+    "output_tokens": 8760,
+    "api_call_count": 132
+  },
+  "summary": {
+    "intent": "Fix `entire explain` branch filtering that breaks when a feature branch has merge commits from main, caused by `repo.Log()` doing full DAG traversal and hitting `consecutiveMainLimit` before finding older feature branch checkpoints.",
+    "outcome": "Implemented first-parent traversal via `walkFirstParentCommits()`, restored `reachableFromMain` filtering to exclude commits shared with main, added worktree hash filtering to prevent temporary checkpoints from other worktrees from appearing, and addressed 5 PR review comments including an early-stop optimization and a worktree filter bug.",
+    "learnings": {
+      "repo": [
+        "go-git v5's `repo.Log()` with `git.LogOrderCommitterTime` traverses ALL parents of merge commits (full DAG walk), not just first-parent chain",
+        "Shadow branches are namespaced by worktree hash: `entire/\u003ccommit[:7]\u003e-\u003cworktreeHash[:6]\u003e`",
+        "`checkpoint.HashWorktreeID()` hashes the worktree ID (empty string for main worktree produces non-empty hash)",
+        "First-parent semantics on main are intentional - we want main's own commit line, not commits from merged side branches"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 844,
+          "end_line": 875,
+          "finding": "Created `walkFirstParentCommits()` helper that walks only `commit.Parent(0)` to stay on branch's main line, avoiding full DAG walk through merge commits"
+        },
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 806,
+          "end_line": 842,
+          "finding": "Created `computeReachableFromMain()` shared helper that uses first-parent walk on main branch to build set of commits to exclude - prevents feature branch checkpoints before branch point from being included"
+        },
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 792,
+          "end_line": 804,
+          "finding": "Created `getCurrentWorktreeHash()` helper using `paths.GetWorktreeID()` to read `.git` file and determine linked worktree, returning empty string on error"
+        },
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 973,
+          "end_line": 986,
+          "finding": "Worktree filtering in `getReachableTemporaryCheckpoints()` skips filtering entirely when `getCurrentWorktreeHash()` returns empty string (error case), preventing all shadow branches from being filtered out"
+        },
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "line": 893,
+          "end_line": 920,
+          "finding": "Early termination optimization: on first-parent chain, once you hit a commit reachable from main, all ancestors are also on main, so return `errStopIteration` to stop traversal"
+        }
+      ],
+      "workflow": [
+        "Testing with `go run ./cmd/entire explain --no-pager` on real branch caught two issues: (1) incorrectly removed `reachableFromMain` filtering entirely, (2) temporary checkpoints from other worktrees leaking through",
+        "Bot review comments (Copilot and Cursor) caught real bugs: error swallowing in `Parent(0)`, missing early-stop optimization, and worktree filter returning empty string on error"
+      ]
+    },
+    "friction": [
+      "Initially removed `reachableFromMain` filtering entirely when it was still needed - first-parent walk fixes merge DAG traversal but doesn't stop at branch point",
+      "Lint errors: `nilerr` flagged returning nil when error not nil in `walkFirstParentCommits`, `errcheck` flagged 6 test error returns",
+      "Worktree filter bug only caught by bot review: returning empty string on error would filter out ALL shadow branches instead of skipping filtering"
+    ],
+    "open_items": []
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-10T03:46:00.754413Z",
+    "agent_lines": 14,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 14,
+    "agent_percentage": 100
+  }
+}

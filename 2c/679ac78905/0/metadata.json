@@ -1,0 +1,63 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "2c679ac78905",
+  "session_id": "a0927dd5-61a3-4802-a716-4480286f16d4",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-10T05:31:48.333779Z",
+  "branch": "alex/entire-explain-fixes",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "abe789c0-464c-43c9-bc8e-72a43c2272bd",
+  "checkpoint_transcript_start": 1022,
+  "transcript_lines_at_start": 1022,
+  "token_usage": {
+    "input_tokens": 224,
+    "cache_creation_tokens": 556187,
+    "cache_read_tokens": 21209621,
+    "output_tokens": 13878,
+    "api_call_count": 200
+  },
+  "summary": {
+    "intent": "Fix a regression in the `getBranchCheckpoints` function where checkpoint commits from merged feature branches were not being found on the main branch after switching from full DAG walk to first-parent walk.",
+    "outcome": "Successfully fixed the regression by using full DAG walk (`repo.Log()`) on default branches and first-parent walk on feature branches. Added regression test and confirmed the fix works with all tests passing.",
+    "learnings": {
+      "repo": [
+        "The repo uses `origin/HEAD` symbolic ref first to detect default branch, then falls back to `origin/main`, `origin/master`, local `main`, local `master`",
+        "Checkpoint commits on feature branches become second parents when merged into main, so first-parent walk misses them",
+        "The old code used `repo.Log()` for all branches with `reachableFromMain` filtering that was a no-op on default branch"
+      ],
+      "code": [
+        {
+          "path": "cmd/entire/cli/explain.go",
+          "finding": "getBranchCheckpoints needs different traversal strategies: full DAG walk for default branch (to find merged commits), first-parent walk for feature branches (to avoid main's history)"
+        },
+        {
+          "path": "cmd/entire/cli/checkpoint/committed.go",
+          "finding": "WriteCommitted API requires WriteCommittedOptions struct, not individual parameters"
+        }
+      ],
+      "workflow": [
+        "Writing a failing test first helps confirm the bug and validate the fix",
+        "Checkpoint IDs must be lowercase hex strings of specific length (12 chars)"
+      ]
+    },
+    "friction": [
+      "Initial test implementation was overly complex and had to be simplified",
+      "Multiple attempts needed to get the checkpoint ID format correct (uppercase vs lowercase, wrong length)"
+    ],
+    "open_items": []
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-10T05:31:35.802071Z",
+    "agent_lines": 153,
+    "human_added": 110,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 263,
+    "agent_percentage": 58.174904942965775
+  }
+}

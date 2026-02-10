@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "2c679ac78905",
+  "strategy": "manual-commit",
+  "branch": "alex/entire-explain-fixes",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2c/679ac78905/0/metadata.json",
+      "transcript": "/2c/679ac78905/0/full.jsonl",
+      "context": "/2c/679ac78905/0/context.md",
+      "content_hash": "/2c/679ac78905/0/content_hash.txt",
+      "prompt": "/2c/679ac78905/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 224,
+    "cache_creation_tokens": 556187,
+    "cache_read_tokens": 21209621,
+    "output_tokens": 13878,
+    "api_call_count": 200
+  }
+}

@@ -1,0 +1,73 @@
+Implement the following plan:
+
+# Plan: Use `mise run lint` in GitHub Actions
+
+## Problem
+
+The CI lint workflow uses a mix of approaches:
+1. Raw `gofmt -l -s .` shell command for formatting checks
+2. `golangci/golangci-lint-action@v9` GitHub Action for linting
+3. `mise run lint:gomod` for go.mod tidiness
+
+Meanwhile, locally we use `mise run fmt` and `mise run lint`. This is inconsistent — if a developer runs `mise run lint` locally and it passes, CI should behave the same way.
+
+## Changes
+
+### 1. Add a `fmt:check` mise task (`mise.toml`)
+
+Add a new task that checks formatting without modifying files (mirrors what CI currently does):
+
+```toml
+[tasks."fmt:check"]
+description = "Check gofmt formatting (no changes)"
+run = """
+unformatted=$(gofmt -l -s .)
+if [ -n "$unformatted" ]; then
+  echo "The following files need gofmt formatting:"
+  echo "$unformatted"
+  exit 1
+fi
+"""
+```
+
+### 2. Simplify `lint.yml` to use mise tasks
+
+Replace the 3 separate steps with mise-based equivalents:
+
+```yaml
+steps:
+  - uses: actions/checkout@v6
+    with:
+      fetch-depth: "0"
+
+  - uses: jdx/mise-action@v3
+
+  - name: Check gofmt formatting
+    run: mise run fmt:check
+
+  - name: Run golangci-lint
+    run: mise run lint
+
+  - name: Check go.mod tidiness
+    run: mise run lint:gomod
+```
+
+This removes the `golangci/golangci-lint-action@v9` dependency entirely. The `mise-action` already installs golangci-lint via `mise.toml`, so it's redundant.
+
+### Note on `only-new-issues`
+
+The current GitHub Action uses `only-new-issues: true`. Our `.golangci.yaml` already has `new: true` and `new-from-merge-base: main`, which achieves the same thing — only lint new/changed code relative to `main`. So behavior is preserved.
+
+## Files to modify
+
+- `mise.toml` — add `fmt:check` task
+- `.github/workflows/lint.yml` — replace steps with mise tasks
+
+## Verification
+
+1. Run `mise run fmt:check` locally — should pass on clean code, fail if files aren't formatted
+2. Run `mise run lint` locally — should pass
+3. Push to PR branch and verify CI passes
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
