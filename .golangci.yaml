@@ -2,9 +2,7 @@ version: "2"
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  new: true
   fix: true
-  new-from-merge-base: main
 linters:
   default: standard
   enable:
