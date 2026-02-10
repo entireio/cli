@@ -310,15 +310,6 @@ mise run lint
 mise run fmt
 ```
 
-### Project Structure
-
-- `cmd/entire/` - Main CLI entry point
-- `cmd/entire/cli/` - CLI utilities and helpers
-- `cmd/entire/cli/strategy/` - Session checkpoint strategies
-- `cmd/entire/cli/checkpoint/` - Checkpoint storage abstractions
-- `cmd/entire/cli/session/` - Session state management
-- `cmd/entire/cli/integration_test/` - Integration tests
-
 ## Getting Help
 
 ```
