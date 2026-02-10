@@ -14,11 +14,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// Ensure OpenCodeAgent implements required interfaces.
+// Ensure Agent implements required interfaces.
 var (
-	_ agent.Agent       = (*OpenCodeAgent)(nil)
-	_ agent.HookSupport = (*OpenCodeAgent)(nil)
-	_ agent.HookHandler = (*OpenCodeAgent)(nil)
+	_ agent.Agent       = (*Agent)(nil)
+	_ agent.HookSupport = (*Agent)(nil)
+	_ agent.HookHandler = (*Agent)(nil)
 )
 
 // Hook names for OpenCode bridge plugin.
@@ -33,36 +33,36 @@ const (
 	pluginFileName = "entire.js"
 )
 
-// OpenCodeAgent implements Agent for OpenCode.
-type OpenCodeAgent struct{}
+// Agent implements the OpenCode agent.
+type Agent struct{}
 
-// init registers the agent.
+//nolint:gochecknoinits // Agent self-registration is the intended pattern
 func init() {
-	agent.Register(agent.AgentNameOpenCode, NewOpenCodeAgent)
+	agent.Register(agent.AgentNameOpenCode, NewAgent)
 }
 
-// NewOpenCodeAgent creates a new OpenCode agent.
-func NewOpenCodeAgent() agent.Agent {
-	return &OpenCodeAgent{}
+// NewAgent creates a new OpenCode agent.
+func NewAgent() agent.Agent {
+	return &Agent{}
 }
 
 // Name returns the registry key.
-func (o *OpenCodeAgent) Name() agent.AgentName {
+func (o *Agent) Name() agent.AgentName {
 	return agent.AgentNameOpenCode
 }
 
 // Type returns the display name.
-func (o *OpenCodeAgent) Type() agent.AgentType {
+func (o *Agent) Type() agent.AgentType {
 	return agent.AgentTypeOpenCode
 }
 
 // Description returns a human-readable description.
-func (o *OpenCodeAgent) Description() string {
+func (o *Agent) Description() string {
 	return "OpenCode - event-bridged via plugin"
 }
 
 // DetectPresence checks for OpenCode project markers.
-func (o *OpenCodeAgent) DetectPresence() (bool, error) {
+func (o *Agent) DetectPresence() (bool, error) {
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
 		repoRoot = "."
@@ -87,22 +87,22 @@ func (o *OpenCodeAgent) DetectPresence() (bool, error) {
 }
 
 // GetHookConfigPath returns the plugin location.
-func (o *OpenCodeAgent) GetHookConfigPath() string {
+func (o *Agent) GetHookConfigPath() string {
 	return filepath.Join(pluginDirName, pluginFileName)
 }
 
 // SupportsHooks returns true (via plugin bridge).
-func (o *OpenCodeAgent) SupportsHooks() bool {
+func (o *Agent) SupportsHooks() bool {
 	return true
 }
 
 // GetHookNames returns supported hook verbs.
-func (o *OpenCodeAgent) GetHookNames() []string {
+func (o *Agent) GetHookNames() []string {
 	return []string{HookNamePromptSubmit, HookNameStop}
 }
 
 // ParseHookInput parses JSON from stdin produced by the OpenCode plugin.
-func (o *OpenCodeAgent) ParseHookInput(hookType agent.HookType, reader io.Reader) (*agent.HookInput, error) {
+func (o *Agent) ParseHookInput(hookType agent.HookType, reader io.Reader) (*agent.HookInput, error) {
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read input: %w", err)
@@ -156,7 +156,7 @@ func validateSessionID(sessionID string) error {
 }
 
 // GetSessionID returns SessionID from input.
-func (o *OpenCodeAgent) GetSessionID(input *agent.HookInput) string {
+func (o *Agent) GetSessionID(input *agent.HookInput) string {
 	if input == nil {
 		return ""
 	}
@@ -164,18 +164,18 @@ func (o *OpenCodeAgent) GetSessionID(input *agent.HookInput) string {
 }
 
 // TransformSessionID is a passthrough for OpenCode.
-func (o *OpenCodeAgent) TransformSessionID(agentSessionID string) string {
+func (o *Agent) TransformSessionID(agentSessionID string) string {
 	return agentSessionID
 }
 
 // ExtractAgentSessionID returns the agent session ID from Entire session ID (passthrough).
-func (o *OpenCodeAgent) ExtractAgentSessionID(entireSessionID string) string {
+func (o *Agent) ExtractAgentSessionID(entireSessionID string) string {
 	return entireSessionID
 }
 
 // GetSessionDir maps repo to OpenCode storage (project hash unknown; use repo root marker).
 // For now, return the repo root; session reading code will locate storage by session ID.
-func (o *OpenCodeAgent) GetSessionDir(repoPath string) (string, error) {
+func (o *Agent) GetSessionDir(repoPath string) (string, error) {
 	if repoPath == "" {
 		return "", errors.New("repo path is required")
 	}
@@ -183,7 +183,7 @@ func (o *OpenCodeAgent) GetSessionDir(repoPath string) (string, error) {
 }
 
 // ReadSession reconstructs from storage; minimal stub for now.
-func (o *OpenCodeAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {
+func (o *Agent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {
 	if input == nil {
 		return nil, errors.New("hook input is nil")
 	}
@@ -197,12 +197,12 @@ func (o *OpenCodeAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession
 }
 
 // WriteSession is a no-op for OpenCode.
-func (o *OpenCodeAgent) WriteSession(session *agent.AgentSession) error {
+func (o *Agent) WriteSession(_ *agent.AgentSession) error {
 	return errors.New("opencode WriteSession not supported")
 }
 
 // FormatResumeCommand returns a best-effort resume suggestion.
-func (o *OpenCodeAgent) FormatResumeCommand(sessionID string) string {
+func (o *Agent) FormatResumeCommand(sessionID string) string {
 	if strings.TrimSpace(sessionID) == "" {
 		return "opencode"
 	}
@@ -210,7 +210,7 @@ func (o *OpenCodeAgent) FormatResumeCommand(sessionID string) string {
 }
 
 // InstallHooks writes the bridge plugin into .opencode/plugins/entire.js.
-func (o *OpenCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
+func (o *Agent) InstallHooks(_ bool, force bool) (int, error) {
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
 		repoRoot = "."
@@ -230,7 +230,7 @@ func (o *OpenCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	}
 
 	content := []byte(strings.TrimSpace(embeddedPlugin))
-	if err := os.WriteFile(pluginPath, content, 0o640); err != nil {
+	if err := os.WriteFile(pluginPath, content, 0o600); err != nil {
 		return 0, fmt.Errorf("failed to write plugin: %w", err)
 	}
 
@@ -238,7 +238,7 @@ func (o *OpenCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 }
 
 // UninstallHooks removes the bridge plugin.
-func (o *OpenCodeAgent) UninstallHooks() error {
+func (o *Agent) UninstallHooks() error {
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
 		repoRoot = "."
@@ -251,7 +251,7 @@ func (o *OpenCodeAgent) UninstallHooks() error {
 }
 
 // AreHooksInstalled checks for plugin presence.
-func (o *OpenCodeAgent) AreHooksInstalled() bool {
+func (o *Agent) AreHooksInstalled() bool {
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
 		repoRoot = "."
@@ -262,7 +262,7 @@ func (o *OpenCodeAgent) AreHooksInstalled() bool {
 }
 
 // GetSupportedHooks returns hook types this agent surfaces.
-func (o *OpenCodeAgent) GetSupportedHooks() []agent.HookType {
+func (o *Agent) GetSupportedHooks() []agent.HookType {
 	return []agent.HookType{
 		agent.HookUserPromptSubmit,
 		agent.HookStop,

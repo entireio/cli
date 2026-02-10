@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -15,6 +16,18 @@ import (
 
 // TranscriptLine is an alias to the shared transcript.Line type.
 type TranscriptLine = transcript.Line
+
+// Message role constants.
+const (
+	RoleUser      = "user"
+	RoleAssistant = "assistant"
+)
+
+// Part type constants.
+const (
+	PartTypeText = "text"
+	PartTypeTool = "tool"
+)
 
 // OpenCode export format structures.
 type exportData struct {
@@ -64,12 +77,13 @@ type exportToolState struct {
 
 // ExportSession runs `opencode export <sessionID>` from the repository root.
 func ExportSession(sessionID string) ([]byte, error) {
+	ctx := context.Background()
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get repo root: %w", err)
 	}
 
-	cmd := exec.Command("opencode", "export", sessionID)
+	cmd := exec.CommandContext(ctx, "opencode", "export", sessionID)
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
@@ -115,11 +129,11 @@ func convertMessageToLine(msg exportMessage) (TranscriptLine, error) {
 	var messageContent interface{}
 
 	switch msg.Info.Role {
-	case "user":
+	case RoleUser:
 		// Extract text content from parts
 		var textContent string
 		for _, part := range msg.Parts {
-			if part.Type == "text" && part.Text != "" {
+			if part.Type == PartTypeText && part.Text != "" {
 				textContent = part.Text
 				break
 			}
@@ -128,19 +142,19 @@ func convertMessageToLine(msg exportMessage) (TranscriptLine, error) {
 			Content: textContent,
 		}
 
-	case "assistant":
+	case RoleAssistant:
 		// Build content blocks from parts
 		var contentBlocks []transcript.ContentBlock
 		for _, part := range msg.Parts {
 			switch part.Type {
-			case "text":
+			case PartTypeText:
 				if part.Text != "" {
 					contentBlocks = append(contentBlocks, transcript.ContentBlock{
-						Type: "text",
+						Type: PartTypeText,
 						Text: part.Text,
 					})
 				}
-			case "tool":
+			case PartTypeTool:
 				if part.Tool != "" && part.State != nil {
 					inputJSON, err := json.Marshal(part.State.Input)
 					if err != nil {
@@ -234,7 +248,11 @@ func SerializeTranscriptWithTime(lines []TranscriptLineWithTime) ([]byte, error)
 
 // ParseTranscript parses raw JSONL content into transcript lines.
 func ParseTranscript(data []byte) ([]TranscriptLine, error) {
-	return transcript.ParseFromBytes(data)
+	lines, err := transcript.ParseFromBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+	return lines, nil
 }
 
 // ExtractLastUserPrompt extracts the last user message from transcript lines.
@@ -348,8 +366,8 @@ func CalculateTokenUsage(lines []TranscriptLine) *agent.TokenUsage {
 			continue
 		}
 
-		msgID, _ := msg["id"].(string)
-		if msgID == "" || seenMessages[msgID] {
+		msgID, ok := msg["id"].(string)
+		if !ok || msgID == "" || seenMessages[msgID] {
 			continue
 		}
 		seenMessages[msgID] = true

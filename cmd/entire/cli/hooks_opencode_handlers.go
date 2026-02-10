@@ -54,7 +54,7 @@ func handleOpenCodePromptSubmit() error {
 }
 
 // handleOpenCodeStop creates a checkpoint using OpenCode session info.
-func handleOpenCodeStop() error { //nolint:maintidx // mirrors Claude/Gemini handler shape
+func handleOpenCodeStop() error {
 	ag, err := GetCurrentHookAgent()
 	if err != nil {
 		return fmt.Errorf("failed to get agent: %w", err)
@@ -103,7 +103,11 @@ func handleOpenCodeStop() error { //nolint:maintidx // mirrors Claude/Gemini han
 	// Parse transcript to extract modified files if we have it
 	var transcriptLines []opencode.TranscriptLine
 	if len(transcriptData) > 0 {
-		transcriptLines, _ = opencode.ParseTranscript(transcriptData)
+		var parseErr error
+		transcriptLines, parseErr = opencode.ParseTranscript(transcriptData)
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to parse transcript: %v\n", parseErr)
+		}
 	}
 
 	// Load pre-prompt state if available
