@@ -13,8 +13,8 @@ func newCleanCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "clean",
-		Short: "Clean up orphaned session data",
-		Long: `Remove orphaned session data that wasn't cleaned up automatically.
+		Short: "Clean up orphaned Entire data",
+		Long: `Remove orphaned Entire data (session state, shadow branches, checkpoint metadata) that wasn't cleaned up automatically.
 
 This command finds and removes orphaned data from any strategy:
 
