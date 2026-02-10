@@ -613,6 +613,12 @@ func handleClaudeCodePostTask() error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to compute new files: %v\n", err)
 	}
 
+	// Detect deleted files from git status
+	_, _, deletedFiles, err := DetectChangedFiles()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to detect deleted files: %v\n", err)
+	}
+
 	// Get repo root for path conversion (not cwd, since Claude may be in a subdirectory)
 	// Using cwd would filter out files in sibling directories (paths starting with ..)
 	repoRoot, err := paths.RepoRoot()
@@ -623,9 +629,10 @@ func handleClaudeCodePostTask() error {
 	// Filter and normalize paths
 	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
 	relNewFiles := FilterAndNormalizePaths(newFiles, repoRoot)
+	relDeletedFiles := FilterAndNormalizePaths(deletedFiles, repoRoot)
 
 	// If no file changes, skip creating a checkpoint
-	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 {
+	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
 		fmt.Fprintf(os.Stderr, "[entire] No file changes detected, skipping task checkpoint\n")
 		// Cleanup pre-task state (ignore error - cleanup is best-effort)
 		_ = CleanupPreTaskState(input.ToolUseID) //nolint:errcheck // best-effort cleanup
@@ -665,7 +672,7 @@ func handleClaudeCodePostTask() error {
 		AgentID:                input.AgentID,
 		ModifiedFiles:          relModifiedFiles,
 		NewFiles:               relNewFiles,
-		DeletedFiles:           nil, // TODO: compute deleted files
+		DeletedFiles:           relDeletedFiles,
 		TranscriptPath:         input.TranscriptPath,
 		SubagentTranscriptPath: subagentTranscriptPath,
 		CheckpointUUID:         checkpointUUID,
