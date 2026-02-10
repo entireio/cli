@@ -1,173 +1,89 @@
 package opencode
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
-	"sort"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // TranscriptLine is an alias to the shared transcript.Line type.
 type TranscriptLine = transcript.Line
 
-// OpenCode storage directory structure:
-// ~/.local/share/opencode/storage/
-// ├── message/
-// │   └── ses_<session-id>/
-// │       └── msg_<id>.json       # Message metadata (role, tokens, timestamps)
-// ├── part/
-// │   └── msg_<id>/               # Parts directory per message
-// │       └── prt_<id>.json       # Part content (text, tool calls, etc.)
-// └── session/
-//     └── <project-hash>/         # Session metadata per project
-
-// MessageMetadata represents the metadata stored in message/*.json files.
-type MessageMetadata struct {
-	ID        string `json:"id"`
-	SessionID string `json:"sessionID"`
-	Role      string `json:"role"`
-	ParentID  string `json:"parentID,omitempty"`
-	Time      struct {
-		Created   int64 `json:"created"`
-		Completed int64 `json:"completed,omitempty"`
-	} `json:"time"`
-	Tokens struct {
-		Input     int `json:"input"`
-		Output    int `json:"output"`
-		Reasoning int `json:"reasoning"`
-		Cache     struct {
-			Read  int `json:"read"`
-			Write int `json:"write"`
-		} `json:"cache"`
-	} `json:"tokens"`
-	Finish     string `json:"finish,omitempty"`
-	ModelID    string `json:"modelID,omitempty"`
-	ProviderID string `json:"providerID,omitempty"`
+// OpenCode export format structures.
+type exportData struct {
+	Info struct {
+		ID string `json:"id"`
+	} `json:"info"`
+	Messages []exportMessage `json:"messages"`
 }
 
-// MessagePart represents a part stored in part/msg_<id>/*.json files.
-type MessagePart struct {
-	ID        string `json:"id"`
-	SessionID string `json:"sessionID"`
-	MessageID string `json:"messageID"`
-	Type      string `json:"type"`
+type exportMessage struct {
+	Info struct {
+		ID     string `json:"id"`
+		Role   string `json:"role"`
+		Tokens struct {
+			Input     int `json:"input"`
+			Output    int `json:"output"`
+			Reasoning int `json:"reasoning"`
+			Cache     struct {
+				Read  int `json:"read"`
+				Write int `json:"write"`
+			} `json:"cache"`
+		} `json:"tokens,omitempty"`
+		ModelID    string `json:"modelID,omitempty"`
+		ProviderID string `json:"providerID,omitempty"`
+	} `json:"info"`
+	Parts []exportPart `json:"parts"`
+}
+
+type exportPart struct {
+	Type string `json:"type"`
 	// For text type
 	Text string `json:"text,omitempty"`
 	// For tool type
-	CallID string `json:"callID,omitempty"`
-	Tool   string `json:"tool,omitempty"`
-	State  *struct {
-		Status string                 `json:"status,omitempty"`
-		Input  map[string]interface{} `json:"input,omitempty"`
-		Output interface{}            `json:"output,omitempty"`
-		Title  string                 `json:"title,omitempty"`
-		Time   struct {
-			Start int64 `json:"start"`
-			End   int64 `json:"end"`
-		} `json:"time,omitempty"`
-	} `json:"state,omitempty"`
-	// For step parts
-	Reason string `json:"reason,omitempty"`
-	Tokens *struct {
-		Input     int `json:"input"`
-		Output    int `json:"output"`
-		Reasoning int `json:"reasoning"`
-		Cache     struct {
-			Read  int `json:"read"`
-			Write int `json:"write"`
-		} `json:"cache"`
-	} `json:"tokens,omitempty"`
-	Cost float64 `json:"cost,omitempty"`
+	Tool  string           `json:"tool,omitempty"`
+	State *exportToolState `json:"state,omitempty"`
 }
 
-// GetStorageDir returns the OpenCode storage directory path.
-// On macOS/Linux: ~/.local/share/opencode/storage
-// Respects XDG_DATA_HOME if set.
-func GetStorageDir() (string, error) {
-	// Check for XDG_DATA_HOME first
-	if xdgDataHome := os.Getenv("XDG_DATA_HOME"); xdgDataHome != "" {
-		return filepath.Join(xdgDataHome, "opencode", "storage"), nil
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	// Platform-specific default
-	switch runtime.GOOS {
-	case "darwin", "linux":
-		return filepath.Join(homeDir, ".local", "share", "opencode", "storage"), nil
-	case "windows":
-		// On Windows, use AppData\Local
-		if appData := os.Getenv("LOCALAPPDATA"); appData != "" {
-			return filepath.Join(appData, "opencode", "storage"), nil
-		}
-		return filepath.Join(homeDir, "AppData", "Local", "opencode", "storage"), nil
-	default:
-		return filepath.Join(homeDir, ".local", "share", "opencode", "storage"), nil
-	}
+type exportToolState struct {
+	Input  map[string]interface{} `json:"input,omitempty"`
+	Output interface{}            `json:"output,omitempty"`
+	Status string                 `json:"status,omitempty"`
 }
 
-// ReconstructTranscript reads OpenCode storage and reconstructs a JSONL transcript
-// compatible with Entire's transcript format.
-func ReconstructTranscript(sessionID string) ([]byte, error) {
-	storageDir, err := GetStorageDir()
+// ExportSession runs `opencode export <sessionID>` from the repository root.
+func ExportSession(sessionID string) ([]byte, error) {
+	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get storage directory: %w", err)
+		return nil, fmt.Errorf("failed to get repo root: %w", err)
 	}
 
-	// Read all messages for this session
-	messagesDir := filepath.Join(storageDir, "message", sessionID)
-	if _, err := os.Stat(messagesDir); os.IsNotExist(err) {
-		return nil, fmt.Errorf("session not found in OpenCode storage: %s", sessionID)
-	}
-
-	entries, err := os.ReadDir(messagesDir)
+	cmd := exec.Command("opencode", "export", sessionID)
+	cmd.Dir = repoRoot
+	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read messages directory: %w", err)
+		return nil, fmt.Errorf("opencode export failed: %w", err)
+	}
+	return output, nil
+}
+
+// ConvertExportToJSONL converts OpenCode export JSON to JSONL format compatible with Entire.
+func ConvertExportToJSONL(exportJSON []byte) ([]byte, error) {
+	var data exportData
+	if err := json.Unmarshal(exportJSON, &data); err != nil {
+		return nil, fmt.Errorf("failed to parse export data: %w", err)
 	}
 
-	// Load all messages
-	var messages []MessageMetadata
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-
-		msgPath := filepath.Join(messagesDir, entry.Name())
-		data, err := os.ReadFile(msgPath) //nolint:gosec // Path is constructed from session ID
-		if err != nil {
-			continue
-		}
-
-		var msg MessageMetadata
-		if err := json.Unmarshal(data, &msg); err != nil {
-			continue
-		}
-		messages = append(messages, msg)
-	}
-
-	// Sort messages by creation time
-	sort.Slice(messages, func(i, j int) bool {
-		return messages[i].Time.Created < messages[j].Time.Created
-	})
-
-	// Convert to transcript lines
 	var lines []TranscriptLine
-	partsDir := filepath.Join(storageDir, "part")
-
-	for _, msg := range messages {
-		line, err := messageToTranscriptLine(msg, partsDir)
+	for _, msg := range data.Messages {
+		line, err := convertMessageToLine(msg)
 		if err != nil {
 			continue // Skip malformed messages
 		}
@@ -177,20 +93,15 @@ func ReconstructTranscript(sessionID string) ([]byte, error) {
 	return SerializeTranscript(lines)
 }
 
-// messageToTranscriptLine converts an OpenCode message to a transcript line.
-func messageToTranscriptLine(msg MessageMetadata, partsDir string) (TranscriptLine, error) {
-	parts, err := loadMessageParts(msg.ID, partsDir)
-	if err != nil {
-		return TranscriptLine{}, err
-	}
-
+// convertMessageToLine converts an OpenCode export message to a transcript line.
+func convertMessageToLine(msg exportMessage) (TranscriptLine, error) {
 	var messageContent interface{}
 
-	switch msg.Role {
+	switch msg.Info.Role {
 	case "user":
 		// Extract text content from parts
 		var textContent string
-		for _, part := range parts {
+		for _, part := range msg.Parts {
 			if part.Type == "text" && part.Text != "" {
 				textContent = part.Text
 				break
@@ -203,7 +114,7 @@ func messageToTranscriptLine(msg MessageMetadata, partsDir string) (TranscriptLi
 	case "assistant":
 		// Build content blocks from parts
 		var contentBlocks []transcript.ContentBlock
-		for _, part := range parts {
+		for _, part := range msg.Parts {
 			switch part.Type {
 			case "text":
 				if part.Text != "" {
@@ -214,7 +125,6 @@ func messageToTranscriptLine(msg MessageMetadata, partsDir string) (TranscriptLi
 				}
 			case "tool":
 				if part.Tool != "" && part.State != nil {
-					// Convert tool input to JSON
 					inputJSON, _ := json.Marshal(part.State.Input)
 					contentBlocks = append(contentBlocks, transcript.ContentBlock{
 						Type:  "tool_use",
@@ -225,75 +135,44 @@ func messageToTranscriptLine(msg MessageMetadata, partsDir string) (TranscriptLi
 			}
 		}
 
-		// Add token usage info
 		messageContent = map[string]interface{}{
 			"content": contentBlocks,
-			"id":      msg.ID,
-			"model":   msg.ModelID,
+			"id":      msg.Info.ID,
+			"model":   msg.Info.ModelID,
 			"usage": map[string]interface{}{
-				"input_tokens":                msg.Tokens.Input,
-				"output_tokens":               msg.Tokens.Output,
-				"cache_creation_input_tokens": msg.Tokens.Cache.Write,
-				"cache_read_input_tokens":     msg.Tokens.Cache.Read,
+				"input_tokens":                msg.Info.Tokens.Input,
+				"output_tokens":               msg.Info.Tokens.Output,
+				"cache_creation_input_tokens": msg.Info.Tokens.Cache.Write,
+				"cache_read_input_tokens":     msg.Info.Tokens.Cache.Read,
 			},
 		}
 	}
 
-	// Marshal the message content
 	msgJSON, err := json.Marshal(messageContent)
 	if err != nil {
 		return TranscriptLine{}, fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	// Generate a UUID from the message ID
-	uuid := msg.ID
-
 	return TranscriptLine{
-		Type:    msg.Role,
-		UUID:    uuid,
+		Type:    msg.Info.Role,
+		UUID:    msg.Info.ID,
 		Message: msgJSON,
 	}, nil
 }
 
-// loadMessageParts loads all parts for a message from the parts directory.
-func loadMessageParts(messageID string, partsDir string) ([]MessagePart, error) {
-	msgPartsDir := filepath.Join(partsDir, messageID)
-	if _, err := os.Stat(msgPartsDir); os.IsNotExist(err) {
-		return nil, nil // No parts is OK
-	}
-
-	entries, err := os.ReadDir(msgPartsDir)
+// ReconstructTranscript exports and converts an OpenCode session to JSONL format.
+func ReconstructTranscript(sessionID string) ([]byte, error) {
+	exportJSON, err := ExportSession(sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read parts directory: %w", err)
+		return nil, err
 	}
-
-	var parts []MessagePart
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-
-		partPath := filepath.Join(msgPartsDir, entry.Name())
-		data, err := os.ReadFile(partPath) //nolint:gosec // Path is constructed from message ID
-		if err != nil {
-			continue
-		}
-
-		var part MessagePart
-		if err := json.Unmarshal(data, &part); err != nil {
-			continue
-		}
-		parts = append(parts, part)
-	}
-
-	return parts, nil
+	return ConvertExportToJSONL(exportJSON)
 }
 
 // SerializeTranscript converts transcript lines to JSONL bytes.
 func SerializeTranscript(lines []TranscriptLine) ([]byte, error) {
 	var buf bytes.Buffer
 	for _, line := range lines {
-		// Add timestamp field for compatibility
 		lineWithTimestamp := struct {
 			Type      string          `json:"type"`
 			UUID      string          `json:"uuid"`
@@ -318,24 +197,7 @@ func SerializeTranscript(lines []TranscriptLine) ([]byte, error) {
 
 // ParseTranscript parses raw JSONL content into transcript lines.
 func ParseTranscript(data []byte) ([]TranscriptLine, error) {
-	var lines []TranscriptLine
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	// Use a large buffer for potentially large lines
-	const maxScannerBuffer = 10 * 1024 * 1024 // 10MB
-	scanner.Buffer(make([]byte, 0, maxScannerBuffer), maxScannerBuffer)
-
-	for scanner.Scan() {
-		var line TranscriptLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue // Skip malformed lines
-		}
-		lines = append(lines, line)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to scan transcript: %w", err)
-	}
-	return lines, nil
+	return transcript.ParseFromBytes(data)
 }
 
 // ExtractLastUserPrompt extracts the last user message from transcript lines.
@@ -350,12 +212,10 @@ func ExtractLastUserPrompt(lines []TranscriptLine) string {
 			continue
 		}
 
-		// Handle string content
 		if str, ok := msg.Content.(string); ok {
 			return str
 		}
 
-		// Handle array content (text blocks)
 		if arr, ok := msg.Content.([]interface{}); ok {
 			var texts []string
 			for _, item := range arr {
@@ -385,67 +245,33 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 			continue
 		}
 
-		// Parse as map to access content
-		var msg map[string]interface{}
+		var msg transcript.AssistantMessage
 		if err := json.Unmarshal(line.Message, &msg); err != nil {
 			continue
 		}
 
-		contentRaw, ok := msg["content"]
-		if !ok {
-			continue
-		}
-
-		content, ok := contentRaw.([]interface{})
-		if !ok {
-			continue
-		}
-
-		for _, blockRaw := range content {
-			block, ok := blockRaw.(map[string]interface{})
-			if !ok {
+		for _, block := range msg.Content {
+			if block.Type != "tool_use" {
 				continue
 			}
 
-			blockType, _ := block["type"].(string)
-			if blockType != "tool_use" {
+			if !isFileModificationTool(block.Name) {
 				continue
 			}
 
-			toolName, _ := block["name"].(string)
-			if !isFileModificationTool(toolName) {
+			var input transcript.ToolInput
+			if err := json.Unmarshal(block.Input, &input); err != nil {
 				continue
 			}
 
-			inputRaw, ok := block["input"]
-			if !ok {
-				continue
+			file := input.FilePath
+			if file == "" {
+				file = input.NotebookPath
 			}
 
-			// Input could be json.RawMessage or map
-			var inputMap map[string]interface{}
-			switch v := inputRaw.(type) {
-			case json.RawMessage:
-				if err := json.Unmarshal(v, &inputMap); err != nil {
-					continue
-				}
-			case map[string]interface{}:
-				inputMap = v
-			default:
-				continue
-			}
-
-			filePath, _ := inputMap["file_path"].(string)
-			if filePath == "" {
-				filePath, _ = inputMap["filePath"].(string)
-			}
-			if filePath == "" {
-				filePath, _ = inputMap["path"].(string)
-			}
-
-			if filePath != "" && !fileSet[filePath] {
-				fileSet[filePath] = true
-				files = append(files, filePath)
+			if file != "" && !fileSet[file] {
+				fileSet[file] = true
+				files = append(files, file)
 			}
 		}
 	}
@@ -457,7 +283,7 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 var FileModificationTools = []string{
 	"write",
 	"edit",
-	"bash", // Can modify files
+	"bash",
 }
 
 // isFileModificationTool checks if a tool name is a file modification tool.
@@ -473,8 +299,6 @@ func isFileModificationTool(name string) bool {
 // CalculateTokenUsage calculates token usage from OpenCode transcript lines.
 func CalculateTokenUsage(lines []TranscriptLine) *agent.TokenUsage {
 	usage := &agent.TokenUsage{}
-
-	// Track unique message IDs to avoid double-counting
 	seenMessages := make(map[string]bool)
 
 	for _, line := range lines {
@@ -482,7 +306,6 @@ func CalculateTokenUsage(lines []TranscriptLine) *agent.TokenUsage {
 			continue
 		}
 
-		// Parse as map to access usage
 		var msg map[string]interface{}
 		if err := json.Unmarshal(line.Message, &msg); err != nil {
 			continue
