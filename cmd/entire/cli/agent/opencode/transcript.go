@@ -208,18 +208,6 @@ func ReconstructTranscript(sessionID string) ([]byte, error) {
 	return ConvertExportToJSONL(exportJSON)
 }
 
-// SerializeTranscript converts transcript lines to JSONL bytes.
-func SerializeTranscript(lines []TranscriptLine) ([]byte, error) {
-	var linesWithTime []TranscriptLineWithTime
-	for _, line := range lines {
-		linesWithTime = append(linesWithTime, TranscriptLineWithTime{
-			Line:      line,
-			CreatedAt: time.Now(),
-		})
-	}
-	return SerializeTranscriptWithTime(linesWithTime)
-}
-
 // SerializeTranscriptWithTime converts transcript lines with timestamps to JSONL bytes.
 func SerializeTranscriptWithTime(lines []TranscriptLineWithTime) ([]byte, error) {
 	var buf bytes.Buffer

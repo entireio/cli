@@ -172,6 +172,16 @@ func handleOpenCodeStop() error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
 	}
 
+	// Calculate token usage
+	var tokenUsage *agent.TokenUsage
+	if len(transcriptLines) > 0 {
+		tokenUsage = opencode.CalculateTokenUsage(transcriptLines)
+		if tokenUsage != nil && tokenUsage.APICallCount > 0 {
+			fmt.Fprintf(os.Stderr, "Token usage: input=%d, output=%d, calls=%d\n",
+				tokenUsage.InputTokens, tokenUsage.OutputTokens, tokenUsage.APICallCount)
+		}
+	}
+
 	ctx := strategy.SaveContext{
 		SessionID:      sessionID,
 		ModifiedFiles:  relModifiedFiles,
@@ -183,6 +193,7 @@ func handleOpenCodeStop() error {
 		AuthorName:     author.Name,
 		AuthorEmail:    author.Email,
 		AgentType:      ag.Type(),
+		TokenUsage:     tokenUsage,
 	}
 
 	if preState != nil {

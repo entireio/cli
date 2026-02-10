@@ -71,7 +71,8 @@ func (o *Agent) DetectPresence() (bool, error) {
 	markers := []string{
 		filepath.Join(repoRoot, "opencode.json"),
 		filepath.Join(repoRoot, "opencode.jsonc"),
-		filepath.Join(repoRoot, "AGENTS.md"),
+		// AGENTS.md is a cross-tool convention used by Claude Code/Cursor too,
+		// so exclude it to prevent false positives.
 		filepath.Join(repoRoot, ".opencode"),
 	}
 	for _, m := range markers {
