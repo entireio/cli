@@ -1,0 +1,707 @@
+Implement the following plan:
+
+# Fix `entire clean` logging and branch deletion bugs
+
+## Context
+
+Two bugs in `entire clean`:
+1. Structured logs (`2026/02/10 12:43:25 INFO deleted orphaned shadow branch...`) leak to the terminal instead of going to `.entire/logs/entire.log`
+2. `--force` reports branches as deleted but they remain — go-git v5's `RemoveReference()` doesn't work with packed refs/worktrees
+
+## Bug 1: Logging to stdio
+
+**Root cause**: `logging.Init()` is never called for the `clean` command. `getLogger()` falls back to `slog.Default()` which writes text-format logs to stderr.
+
+**Fix**: Call `logging.Init("")` (empty session ID) at the start of `runClean()` and defer `logging.Close()`.
+
+**File**: `cmd/entire/cli/clean.go:49` — `runClean()`
+
+## Bug 2: Shadow branches not deleted
+
+**Root cause**: `repo.Storer.RemoveReference()` doesn't properly persist deletions when refs are packed (`.git/packed-refs`) or in a worktree context. This is the same class of go-git v5 bug documented in CLAUDE.md for `reset --hard` and `checkout`.
+
+Tests pass because they use `git.PlainInit` which creates loose refs — `RemoveReference` works for those.
+
+**Fix**: Use `git branch -D <branch>` via CLI, consistent with how `HardResetWithProtection()` and `CheckoutBranch()` bypass go-git.
+
+### Changes
+
+1. **Add `DeleteBranchCLI()` helper** in `cmd/entire/cli/strategy/common.go`
+   - `func DeleteBranchCLI(branchName string) error` — runs `git branch -D <branch>`
+   - Pattern matches `HardResetWithProtection()` at line 1112
+
+2. **Update all non-test `RemoveReference` call sites** to use the new helper:
+
+   | File | Line | Function | Notes |
+   |------|------|----------|-------|
+   | `strategy/cleanup.go` | 142 | `DeleteShadowBranches()` | Used by `entire clean` |
+   | `strategy/manual_commit_git.go` | 362 | `deleteShadowBranch()` | Used by condensation |
+   | `strategy/manual_commit_reset.go` | 81 | `Reset()` | Used by `entire reset` |
+   | `strategy/manual_commit_condensation.go` | 620 | `cleanupShadowBranchIfUnused()` | Post-commit cleanup |
+   | `strategy/manual_commit_migration.go` | 67 | shadow branch rename | Delete old after creating new |
+   | `cli/sessions_fix.go` | 291 | `fixOrphanedSession()` | Session fix command |
+   | `checkpoint/temporary.go` | 618 | `GitStore.DeleteShadowBranch()` | Dead code (no callers), fix for correctness |
+
+3. **Update test for `DeleteShadowBranches`** in `strategy/clean_test.go` — verify deletion via `git branch --list` CLI instead of go-git `repo.Reference()` to test the real code path.
+
+### Scope note
+`sessions_fix.go` is in the `cli` package, not `strategy`. It can call `strategy.DeleteBranchCLI()` since `cli` imports `strategy`. For `checkpoint/temporary.go`, it's in the `checkpoint` package — either add a similar helper there or make it call out to git CLI directly (it's dead code anyway).
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+Then manual test: create a repo with packed refs + shadow branches, run `entire clean -f`, verify branches are actually gone with `git branch -l 'entire/*'`.
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-3/9ebafbbe-fc3e-4094-b197-ec99c77392c6.jsonl
+
+---
+
+commit this
+
+---
+
+You are an expert code reviewer. Follow these steps:
+
+      1. If no PR number is provided in the args, use Bash("gh pr list") to show open PRs
+      2. If a PR number is provided, use Bash("gh pr view <number>") to get PR details
+      3. Use Bash("gh pr diff <number>") to get the diff
+      4. Analyze the changes and provide a thorough code review that includes:
+         - Overview of what the PR does
+         - Analysis of code quality and style
+         - Specific suggestions for improvements
+         - Any potential issues or risks
+
+      Keep your review concise but thorough. Focus on:
+      - Code correctness
+      - Following project conventions
+      - Performance implications
+      - Test coverage
+      - Security considerations
+
+      Format your review with clear sections and bullet points.
+
+      PR number: this branch
+
+---
+
+push and create a PR
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. User provided a detailed implementation plan for fixing two bugs in `entire clean`:
+   - Bug 1: Structured logs leaking to terminal instead of `.entire/logs/entire.log`
+   - Bug 2: `--force` reports branches as deleted but they remain due to go-git v5's `RemoveReference()` not working with packed refs/worktrees
+
+2. I read key files: clean.go, cleanup.go, common.go, manual_commit_git.go, manual_commit_reset.go, manual_commit_condensation.go, manual_commit_migration.go, sessions_fix.go, checkpoint/temporary.go, logging/logger.go, clean_test.go
+
+3. I created 5 tasks and implemented them:
+   - Task 1: Added `logging.Init("")` to clean.go
+   - Task 2: Added `DeleteBranchCLI()` helper to common.go
+   - Task 3: Replaced all 7 RemoveReference call sites
+   - Task 4: Updated test verification to use git CLI
+   - Task 5: Ran fmt, lint, tests
+
+4. Lint errors encountered and fixed:
+   - errcheck on `_ = logging.Init("")` → changed to `if err := logging.Init(""); err == nil { defer logging.Close() }`
+   - gosec G204 on checkpoint/temporary.go → added `//nolint:gosec` comment
+   - noctx in test → changed `exec.Command` to `exec.CommandContext`
+   - unused variables (repo, ref) → removed or blanked with `_`
+   - unused imports (plumbing) → removed where no longer needed, added strings where needed
+
+5. User asked to commit → committed as 22c57db7
+
+6. User asked for `/review` → I provided a code review of the branch
+
+7. User asked to push and create PR → pushed and created PR #201
+
+8. User invoked `/github-pr-review` → I fetched 5 review comments from Copilot and cursor[bot]
+
+9. I was in the process of fixing the review feedback when the summary was requested. Specifically:
+   - I had already read the review comments
+   - I identified 3 actionable fixes:
+     a. `discardSession` in sessions_fix.go lost idempotency (missing "not found" handling) - flagged by both Copilot and cursor[bot]
+     b. Stale docstring on `DeleteShadowBranches` in cleanup.go
+     c. Log level getter not set for `entire clean`
+   - I had already started fixing #a by adding `strings` import to sessions_fix.go
+   - I had NOT yet made the actual "not found" handling change in discardSession
+   - I had NOT yet fixed the docstring in cleanup.go
+   - I had NOT yet added SetLogLevelGetter to clean.go
+
+Let me now capture all the specific code changes and current state.
+
+Current state of files modified:
+- sessions_fix.go: I added `"strings"` to imports but haven't yet added the "not found" handling in discardSession
+- cleanup.go: docstring still says "Returns an error only if the repository cannot be opened" but that's no longer true
+- clean.go: missing SetLogLevelGetter call before logging.Init
+
+The last edit I made was adding `"strings"` to the imports in sessions_fix.go. I was about to add the "not found" idempotency handling in discardSession.
+
+Summary:
+1. Primary Request and Intent:
+   The user asked to implement a detailed plan to fix two bugs in `entire clean`:
+   - **Bug 1**: Structured logs (`INFO deleted orphaned shadow branch...`) leaked to stderr instead of going to `.entire/logs/entire.log` because `logging.Init()` was never called for the `clean` command.
+   - **Bug 2**: `--force` reported branches as deleted but they persisted because go-git v5's `RemoveReference()` doesn't work with packed refs (`.git/packed-refs`) or in worktree contexts.
+   
+   After implementation, the user requested: commit, code review (`/review`), push and create PR, then handle PR review feedback (`/github-pr-review`).
+
+2. Key Technical Concepts:
+   - go-git v5 bug: `RemoveReference()` fails silently with packed refs and worktrees
+   - Pattern: Use git CLI (`git branch -D`) instead of go-git for branch deletion, matching `HardResetWithProtection()` pattern
+   - `logging.Init("")` with empty session ID for standalone commands
+   - Idempotent branch deletion: checking for "not found" in error messages from `git branch -D`
+   - Strategy pattern for session management (manual-commit, auto-commit)
+   - Shadow branches: `entire/<commit[:7]>-<worktreeHash[:6]>`
+   - Session phase state machine: ACTIVE, ACTIVE_COMMITTED, IDLE, ENDED
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/clean.go`**
+     - Added `logging.Init("")` to route structured logs to `.entire/logs/` instead of stderr
+     ```go
+     func runClean(w io.Writer, force bool) error {
+         // Initialize logging so structured logs go to .entire/logs/ instead of stderr.
+         // Error is non-fatal: if logging init fails, logs go to stderr (acceptable fallback).
+         if err := logging.Init(""); err == nil {
+             defer logging.Close()
+         }
+         // ...
+     }
+     ```
+     - PR review identified missing `logging.SetLogLevelGetter(GetLogLevel)` call before `Init` — fix pending.
+
+   - **`cmd/entire/cli/strategy/common.go`**
+     - Added `DeleteBranchCLI()` helper at line ~1108:
+     ```go
+     func DeleteBranchCLI(branchName string) error {
+         ctx := context.Background()
+         cmd := exec.CommandContext(ctx, "git", "branch", "-D", branchName)
+         if output, err := cmd.CombinedOutput(); err != nil {
+             return fmt.Errorf("failed to delete branch %s: %s: %w", branchName, strings.TrimSpace(string(output)), err)
+         }
+         return nil
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/cleanup.go`**
+     - `DeleteShadowBranches()`: Removed `OpenRepository()` call and replaced `RemoveReference` loop with `DeleteBranchCLI` calls
+     - Docstring still says "Returns an error only if the repository cannot be opened" — stale, fix pending
+
+   - **`cmd/entire/cli/strategy/manual_commit_git.go`**
+     - `deleteShadowBranch()`: Changed to use `DeleteBranchCLI` with "not found" idempotency handling, blanked `repo` param to `_`, removed `plumbing` import, added `strings` import:
+     ```go
+     func deleteShadowBranch(_ *git.Repository, branchName string) error {
+         err := DeleteBranchCLI(branchName)
+         if err != nil {
+             if strings.Contains(err.Error(), "not found") {
+                 return nil
+             }
+             return err
+         }
+         return nil
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/manual_commit_reset.go`**
+     - `Reset()`: Changed `ref, err` to `_, err` for branch existence check, replaced `RemoveReference` with `DeleteBranchCLI(shadowBranchName)`
+
+   - **`cmd/entire/cli/strategy/manual_commit_condensation.go`**
+     - `cleanupShadowBranchIfUnused()`: Blanked `repo` param to `_`, replaced `RemoveReference` with `DeleteBranchCLI` plus "not found" idempotency
+
+   - **`cmd/entire/cli/strategy/manual_commit_migration.go`**
+     - `migrateShadowBranchIfNeeded()`: Replaced `repo.Storer.RemoveReference(oldRefName)` with `DeleteBranchCLI(oldShadowBranch)` (non-fatal path)
+
+   - **`cmd/entire/cli/sessions_fix.go`**
+     - `discardSession()`: Blanked `repo` param to `_`, replaced `RemoveReference` block with `strategy.DeleteBranchCLI(ss.ShadowBranch)`
+     - **PR review identified missing "not found" idempotency handling** — the old code silently skipped if branch was gone, new code returns error. Fix in progress.
+     - Most recent edit: added `"strings"` to imports in preparation for "not found" handling
+
+   - **`cmd/entire/cli/checkpoint/temporary.go`**
+     - `GitStore.DeleteShadowBranch()`: Replaced `RemoveReference` with `exec.CommandContext` directly (can't import `strategy` package due to import cycle)
+     ```go
+     func (s *GitStore) DeleteShadowBranch(baseCommit, worktreeID string) error {
+         shadowBranchName := ShadowBranchNameForCommit(baseCommit, worktreeID)
+         cmd := exec.CommandContext(context.Background(), "git", "branch", "-D", shadowBranchName) //nolint:gosec
+         if output, err := cmd.CombinedOutput(); err != nil {
+             return fmt.Errorf("failed to delete shadow branch %s: %s: %w", shadowBranchName, strings.TrimSpace(string(output)), err)
+         }
+         return nil
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/clean_test.go`**
+     - `TestDeleteShadowBranches`: Updated verification from go-git `repo.Reference()` to `exec.CommandContext(context.Background(), "git", "branch", "--list", b)` to match production code path
+
+4. Errors and fixes:
+   - **errcheck lint error** on `_ = logging.Init("")`: Changed to `if err := logging.Init(""); err == nil { defer logging.Close() }` pattern
+   - **gosec G204** on `exec.CommandContext` in checkpoint/temporary.go: Added `//nolint:gosec // shadowBranchName is constructed from commit hash, not user input`
+   - **noctx lint error** in test using `exec.Command`: Changed to `exec.CommandContext(context.Background(), ...)`
+   - **Unused variable `repo`** in `DeleteShadowBranches` after removing `OpenRepository()`: Removed the entire `OpenRepository()` block
+   - **Unused variable `ref`** in `manual_commit_reset.go`: Changed `ref, err` to `_, err`
+   - **Unused parameter `repo`** in `cleanupShadowBranchIfUnused` and `discardSession`: Blanked to `_`
+   - **Missing import `strings`** in `manual_commit_git.go`: Added to imports
+   - **Unused import `plumbing`** in `manual_commit_git.go`: Removed
+
+5. Problem Solving:
+   - Successfully replaced all 7 non-test `RemoveReference` call sites with CLI-based deletion
+   - All tests pass (unit + integration, 56s integration suite)
+   - Lint passes with 0 issues
+   - PR #201 created at https://github.com/entireio/cli/pull/201
+   - 5 PR review comments received from Copilot and cursor[bot] — 3 actionable fixes identified, fix in progress
+
+6. All user messages:
+   - "Implement the following plan: [detailed plan for fixing entire clean logging and branch deletion bugs]"
+   - "commit this"
+   - "/review this branch" (via command)
+   - "push and create a PR"
+   - "/github-pr-review" (via command, with detailed skill instructions for GitHub PR review workflow)
+
+7. Pending Tasks:
+   - **Fix `discardSession` idempotency** (sessions_fix.go): Add "not found" handling so branch-already-gone doesn't return an error. Import for `strings` already added.
+   - **Update `DeleteShadowBranches` docstring** (cleanup.go): Remove "Returns an error only if the repository cannot be opened" since repo is no longer opened.
+   - **Add `logging.SetLogLevelGetter(GetLogLevel)`** before `logging.Init("")` in clean.go for consistency with hooks_git_cmd.go.
+   - **Reply to PR review threads** after pushing fixes.
+   - Low priority: cursor[bot] noted duplication between `checkpoint/temporary.go` and `strategy/common.go` — acknowledged as dead code, likely just reply to acknowledge.
+
+8. Current Work:
+   I was in the middle of addressing PR review feedback from `/github-pr-review`. I had:
+   1. Fetched and analyzed 5 review threads (3 from Copilot, 2 from cursor[bot])
+   2. Identified 3 actionable fixes and 1 low-priority acknowledgment
+   3. Started fixing the most critical one: `discardSession` idempotency in `sessions_fix.go`
+   4. **Last edit made**: Added `"strings"` to the imports block of `sessions_fix.go`
+   
+   I had NOT yet:
+   - Added the actual "not found" handling logic in `discardSession`
+   - Updated the `DeleteShadowBranches` docstring in `cleanup.go`
+   - Added `logging.SetLogLevelGetter(GetLogLevel)` to `clean.go`
+   - Run fmt/lint/test after these fixes
+   - Committed, pushed, and replied to PR review threads
+
+9. Optional Next Step:
+   Continue fixing PR review feedback. The immediate next step is to add "not found" idempotency handling in `discardSession` at `sessions_fix.go:288`:
+   ```go
+   if err := strategy.DeleteBranchCLI(ss.ShadowBranch); err != nil {
+       // Branch already gone is not an error — keeps discard idempotent
+       if !strings.Contains(err.Error(), "not found") {
+           return fmt.Errorf("failed to delete shadow branch: %w", err)
+       }
+   }
+   ```
+   Then update the docstring in cleanup.go, add SetLogLevelGetter to clean.go, run fmt/lint/test, commit, push, and reply to the 5 PR review threads.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
+
+---
+
+we also have merge conflix
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
