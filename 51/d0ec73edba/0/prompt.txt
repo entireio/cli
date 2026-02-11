@@ -1,0 +1,145 @@
+Implement the following plan:
+
+# Fix: Empty repo "reference not found" error (#242)
+
+## Context
+
+In a freshly `git init`'d repo with no commits, `repo.Head()` returns `plumbing.ErrReferenceNotFound`. Both strategies fail during session initialization, producing a cryptic error: `"failed to save changes: failed to initialize session: failed to get HEAD: reference not found"`. The fix: detect the empty-repo case early, provide clear messaging, and degrade gracefully.
+
+## Changes
+
+### 1. Add `ErrEmptyRepository` sentinel error
+
+**File:** `cmd/entire/cli/strategy/strategy.go` (after line 27)
+
+Add alongside existing sentinel errors:
+```go
+var ErrEmptyRepository = errors.New("repository has no commits yet")
+```
+
+### 2. Add `IsEmptyRepository` helper
+
+**File:** `cmd/entire/cli/strategy/common.go`
+
+```go
+func IsEmptyRepository(repo *git.Repository) bool {
+    _, err := repo.Head()
+    return errors.Is(err, plumbing.ErrReferenceNotFound)
+}
+```
+
+### 3. Fix manual-commit `initializeSession`
+
+**File:** `cmd/entire/cli/strategy/manual_commit_session.go:195-198`
+
+Replace generic error with empty-repo detection:
+```go
+head, err := repo.Head()
+if err != nil {
+    if errors.Is(err, plumbing.ErrReferenceNotFound) {
+        return nil, fmt.Errorf("%w: create an initial commit to enable session checkpoints", ErrEmptyRepository)
+    }
+    return nil, fmt.Errorf("failed to get HEAD: %w", err)
+}
+```
+
+### 4. Fix auto-commit `InitializeSession`
+
+**File:** `cmd/entire/cli/strategy/auto_commit.go:908-911`
+
+Same pattern:
+```go
+head, err := repo.Head()
+if err != nil {
+    if errors.Is(err, plumbing.ErrReferenceNotFound) {
+        return fmt.Errorf("%w: create an initial commit to enable session checkpoints", ErrEmptyRepository)
+    }
+    return fmt.Errorf("failed to get HEAD: %w", err)
+}
+```
+
+### 5. Improve hook handler messaging
+
+**File:** `cmd/entire/cli/hooks_claudecode_handlers.go:82-84`
+
+Detect `ErrEmptyRepository` and print a friendlier note instead of the generic warning:
+```go
+if err := initializer.InitializeSession(...); err != nil {
+    if errors.Is(err, strategy.ErrEmptyRepository) {
+        fmt.Fprintln(os.Stderr, "Note: Session checkpoints disabled (no commits yet). Create your first commit to enable them.")
+    } else {
+        fmt.Fprintf(os.Stderr, "Warning: failed to initialize session state: %v\n", err)
+    }
+}
+```
+
+Add `"errors"` to imports (strategy is already imported).
+
+### 6. Add warning in `entire enable`
+
+**File:** `cmd/entire/cli/setup.go` — in `RunE` (after git repo check at line 74)
+
+Add a lightweight check right after the existing `paths.RepoRoot()` validation:
+```go
+// Warn if repo has no commits yet
+if repo, err := strategy.OpenRepository(); err == nil && strategy.IsEmptyRepository(repo) {
+    fmt.Fprintln(cmd.OutOrStdout(), "Note: This repository has no commits yet. Entire will be configured, but")
+    fmt.Fprintln(cmd.OutOrStdout(), "session checkpoints won't work until you create your first commit.")
+    fmt.Fprintln(cmd.OutOrStdout())
+}
+```
+
+Add `"github.com/entireio/cli/cmd/entire/cli/strategy"` to imports.
+
+### 7. Unit tests
+
+**File:** `cmd/entire/cli/strategy/manual_commit_test.go` — new test function
+
+Test that `initializeSession` returns `ErrEmptyRepository` on an empty repo. Uses `t.TempDir()`, `git.PlainInit()`, and `t.Chdir()` (no `t.Parallel()` since `t.Chdir` is process-global).
+
+**File:** `cmd/entire/cli/strategy/auto_commit_test.go` — new test function
+
+Same pattern for auto-commit's `InitializeSession`.
+
+**File:** `cmd/entire/cli/strategy/common_test.go` — new test function
+
+Test `IsEmptyRepository` returns true for empty repo, false for repo with commits.
+
+## Files touched
+
+| File | Change |
+|------|--------|
+| `strategy/strategy.go` | Add `ErrEmptyRepository` sentinel |
+| `strategy/common.go` | Add `IsEmptyRepository()` helper |
+| `strategy/manual_commit_session.go` | Detect empty repo in `initializeSession` |
+| `strategy/auto_commit.go` | Detect empty repo in `InitializeSession` |
+| `hooks_claudecode_handlers.go` | Friendly message for empty repo |
+| `setup.go` | Warning during `entire enable` |
+| `strategy/manual_commit_test.go` | Unit test |
+| `strategy/auto_commit_test.go` | Unit test |
+| `strategy/common_test.go` | Unit test |
+
+## What this does NOT change
+
+- No attempt to fully support empty repos (too many downstream HEAD dependencies)
+- No changes to `SaveChanges` or `SaveTaskCheckpoint` — the improved error from `initializeSession` flows through naturally
+- No changes to other `repo.Head()` callers — they're only reachable with an initialized session, which can't happen in an empty repo
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+Manual test:
+1. `mkdir /tmp/test-empty && cd /tmp/test-empty && git init`
+2. `entire enable` — should succeed with warning about no commits
+3. Start a Claude Code session — should see "Note: Session checkpoints disabled" instead of the cryptic error
+4. `git commit --allow-empty -m "Initial commit"` — subsequent sessions should work normally
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/robin/.REDACTED.jsonl
+
+---
+
+commit this on a feature branch. use prefix 'rwr/' for the branch name

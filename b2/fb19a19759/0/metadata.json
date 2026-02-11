@@ -1,0 +1,32 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b2fb19a19759",
+  "session_id": "170cebcc-4cb9-42aa-a322-6e590fc9db0d",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-10T08:37:40.062031Z",
+  "branch": "soph/issue-templates",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".github/ISSUE_TEMPLATE/bug_report.yml",
+    ".github/ISSUE_TEMPLATE/config.yml",
+    ".github/ISSUE_TEMPLATE/feature_request.yml"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "fa91359e-a1c3-451f-8686-d11645710350",
+  "token_usage": {
+    "input_tokens": 70,
+    "cache_creation_tokens": 63790,
+    "cache_read_tokens": 1097347,
+    "output_tokens": 1309,
+    "api_call_count": 19
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-10T08:37:39.861524Z",
+    "agent_lines": 161,
+    "human_added": 0,
+    "human_modified": 3,
+    "human_removed": 8,
+    "total_committed": 164,
+    "agent_percentage": 98.17073170731707
+  }
+}

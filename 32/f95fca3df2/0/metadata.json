@@ -1,0 +1,32 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "32f95fca3df2",
+  "session_id": "cd46624d-fbea-4097-aaf8-2f63c3db0818",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T16:12:33.409504Z",
+  "branch": "soph/fix-issue-with-reusing-checkpoint-id",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "9c9ad069-1275-403c-8d55-b75a7b493f3e",
+  "token_usage": {
+    "input_tokens": 352,
+    "cache_creation_tokens": 219606,
+    "cache_read_tokens": 2410913,
+    "output_tokens": 87,
+    "api_call_count": 43
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T16:12:33.210207Z",
+    "agent_lines": 39,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 39,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/cd46624d-fbea-4097-aaf8-2f63c3db0818.jsonl"
+}

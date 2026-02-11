@@ -1,0 +1,436 @@
+Implement the following plan:
+
+# Fix `entire explain` branch filtering with merge commits
+
+## Context
+
+`entire explain` branch filtering breaks when a feature branch has merge commits from main. The root cause: `repo.Log()` with `git.LogOrderCommitterTime` traverses ALL parents of merge commits (full DAG walk). After merging main into a feature branch, the walker enters main's full history. The `consecutiveMainLimit` (100) fires before older feature branch checkpoints are found, silently dropping them.
+
+go-git v5's `LogOptions` has no `FirstParent` option, so we need manual first-parent traversal.
+
+## Changes
+
+### 1. Extract first-parent walk helper in `explain.go`
+
+Create a `walkFirstParentCommits` helper that walks the first-parent chain from a starting hash, calling a visitor function for each commit. Stops at `commitScanLimit`.
+
+```go
+func walkFirstParentCommits(repo *git.Repository, from plumbing.Hash, limit int, fn func(*object.Commit) error) error
+```
+
+This replaces both `repo.Log()` call sites that walk the user's branch.
+
+### 2. Simplify `getBranchCheckpoints()` (~explain.go:803)
+
+**Remove:**
+- `isOnDefault` / `mainBranchHash` / default branch resolution block (lines 830-849) — only needed for `reachableFromMain` filtering, which is no longer necessary
+- `reachableFromMain` precomputation (lines 852-868)
+- `consecutiveMainLimit` constant and `consecutiveMainCount` tracking (lines 883, 893-902)
+
+**Replace:** `repo.Log()` at line 872 with `walkFirstParentCommits`. The visitor function only needs to extract checkpoint trailers and look up committed checkpoints — no main-branch skip logic needed.
+
+**Keep:** `isOnDefault` is still needed for `getReachableTemporaryCheckpoints()` call at line 952. Compute it separately just for that.
+
+### 3. Simplify `getAssociatedCommits()` (~explain.go:455)
+
+**Remove:**
+- `isOnDefault` / `mainBranchHash` block (lines 468-471)
+- `reachableFromMain` precomputation (lines 474-490)
+- The `reachableFromMain` skip check (line 512)
+
+**Replace:** `repo.Log()` at line 492 with `walkFirstParentCommits`.
+
+### 4. Update `isShadowBranchReachable()` (~explain.go:998)
+
+**Replace:** `repo.Log()` at line 1005 with first-parent traversal for consistency. Shadow branch base commits should be on the first-parent chain if the session was started on this branch.
+
+### 5. Clean up dead code
+
+- Remove `consecutiveMainLimit` constant (line 791) if no longer referenced
+- Remove `strategy.GetMainBranchHash()` import if unused after changes
+- Remove `strategy.GetDefaultBranchName()` usage from `getBranchCheckpoints` if no longer needed there
+
+### 6. Add regression test
+
+Add `TestGetBranchCheckpoints_WithMergeFromMain` to `explain_test.go`:
+- Create repo with main branch and several commits
+- Create feature branch with a checkpoint commit
+- Merge main into feature (creating a merge commit at HEAD)
+- Add another feature checkpoint commit after the merge
+- Call `getBranchCheckpoints()` — verify BOTH feature checkpoint commits appear
+- This is the exact scenario that was broken
+
+Also add `TestGetBranchCheckpoints_MergeCommitAtHEAD` to verify the case where HEAD itself is the merge commit.
+
+## Files to modify
+
+- `cmd/entire/cli/explain.go` — main changes (3 call sites + new helper + remove constants)
+- `cmd/entire/cli/explain_test.go` — add regression tests
+
+## Files NOT modified
+
+- `checkpoint/temporary.go` `ListCheckpointsForBranch()` — walks shadow branches which are linear (no merges)
+- `checkpoint/committed.go` `GetCheckpointAuthor()` — walks `entire/checkpoints/v1` branch; merge handling there is a separate concern
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+Specifically verify:
+- New test `TestGetBranchCheckpoints_WithMergeFromMain` passes
+- New test `TestGetBranchCheckpoints_MergeCommitAtHEAD` passes
+- Existing tests `TestGetBranchCheckpoints_FiltersMainCommits` and `TestGetBranchCheckpoints_OnFeatureBranch` still pass
+- Integration tests pass: `mise run test:integration`
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.claude/projects/-Users-alex-workspace-cli--worktrees-4/3ebf3bfc-e5d1-4f6e-95bb-247329ebfa73.jsonl
+
+---
+
+commit this
+
+---
+
+okay, so pop quiz - what should this version of entire explain show us for this branch?
+
+---
+
+well, I've just reset our branch to origin/main then cherry-picked our commit...
+
+also it does have a checkpoint id -> Entire-Checkpoint: d0b269503005
+
+do a git log/show to have a look around.
+
+so _I_ would have expected a single checkpoint...
+
+---
+
+whoops! yeah let's put the reachableFromMain back...
+
+---
+
+okay...now for these temporary ones....
+
+can we tell if they're relevant to this workspace?
+
+---
+
+push, raise a draft PR
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. User provided a detailed plan to fix `entire explain` branch filtering with merge commits
+2. I read explain.go and explain_test.go to understand the codebase
+3. Created task list with 7 tasks
+4. Implemented walkFirstParentCommits helper
+5. Simplified getBranchCheckpoints - removed reachableFromMain, consecutiveMainLimit, mainBranchHash resolution
+6. Simplified getAssociatedCommits - same removals
+7. Updated isShadowBranchReachable to use first-parent walk
+8. Removed consecutiveMainLimit constant
+9. Added regression tests: TestGetBranchCheckpoints_WithMergeFromMain, TestGetBranchCheckpoints_MergeCommitAtHEAD, TestWalkFirstParentCommits_SkipsMergeParents
+10. Fixed lint errors: nilerr in walkFirstParentCommits, errcheck in tests
+11. All tests passed, committed
+12. User asked me to commit - done
+13. User asked "pop quiz" - what should entire explain show for this branch?
+14. I reasoned it should show 0 or few checkpoints
+15. User said they reset branch to origin/main, cherry-picked our commit, and it has Entire-Checkpoint: d0b269503005 trailer
+16. I investigated with git log/show - found the checkpoint exists
+17. Ran `go run ./cmd/entire explain --no-pager` - showed 6 checkpoints instead of expected 1
+18. KEY BUG: We removed reachableFromMain filtering entirely, but it's still needed! First-parent walk fixes the merge DAG issue, but commits before the branch point (shared with main) still need filtering.
+19. User confirmed: "whoops! yeah let's put the reachableFromMain back..."
+20. I restored reachableFromMain by creating computeReachableFromMain() helper shared by both functions
+21. Important: computeReachableFromMain also uses walkFirstParentCommits for main's history (consistent traversal)
+22. After fix: entire explain showed 4 checkpoints (1 committed + 3 temporary from shadow branches)
+23. User asked about temporary checkpoints - "can we tell if they're relevant to this workspace?"
+24. I investigated shadow branch naming: entire/<commit[:7]>-<worktreeHash[:6]>
+25. Found worktree 4 has hash 4b2277, only 1 of 7 shadow branches belongs to this worktree
+26. getReachableTemporaryCheckpoints was NOT filtering by worktree hash
+27. Added getCurrentWorktreeHash() helper and worktree filtering in getReachableTemporaryCheckpoints
+28. Added tests: TestGetCurrentWorktreeHash_MainWorktree, TestGetReachableTemporaryCheckpoints_FiltersByWorktree
+29. All tests passed including integration tests with -race
+30. Amended the commit
+31. User said "push, raise a draft PR"
+
+Key errors and fixes:
+- nilerr lint error in walkFirstParentCommits: restructured to use `current, err = current.Parent(0)` with nilerr nolint
+- errcheck lint errors in tests: added error checking for repo.CommitObject and .Tree() calls
+- MAJOR: Removed reachableFromMain filtering entirely (wrong!) - restored it as computeReachableFromMain()
+- Missing worktree filtering in getReachableTemporaryCheckpoints - added getCurrentWorktreeHash() + ParseShadowBranchName filtering
+
+Current state: User asked to push and raise a draft PR. The commit is 827a88a4 on branch alex/entire-explain-fixes.
+
+Summary:
+1. Primary Request and Intent:
+   The user asked me to implement a plan to fix `entire explain` branch filtering that breaks when a feature branch has merge commits from main. The root cause: `repo.Log()` with `git.LogOrderCommitterTime` traverses ALL parents of merge commits (full DAG walk), entering main's full history after merging main into a feature branch. The `consecutiveMainLimit` (100) fires before older feature branch checkpoints are found, silently dropping them. The fix: use first-parent traversal instead of full DAG walk. After implementation, the user tested and found two additional issues that needed fixing: (1) reachableFromMain filtering was still needed (I had incorrectly removed it), and (2) temporary checkpoints from other worktrees were leaking into the output.
+
+2. Key Technical Concepts:
+   - go-git v5's `repo.Log()` does a full DAG walk following ALL parents of merge commits
+   - First-parent traversal follows only `commit.Parent(0)`, staying on the branch's "main line"
+   - `reachableFromMain` filtering is still needed to exclude commits shared with main (before branch point)
+   - Shadow branches are namespaced by worktree hash: `entire/<commit[:7]>-<worktreeHash[:6]>`
+   - `checkpoint.HashWorktreeID()` hashes the worktree ID (empty string for main worktree)
+   - `checkpoint.ParseShadowBranchName()` extracts commit prefix and worktree hash from branch name
+   - `paths.GetWorktreeID()` reads `.git` file to determine if linked worktree
+
+3. Files and Code Sections:
+   - `cmd/entire/cli/explain.go` - Main implementation file with all changes:
+     - Added `getCurrentWorktreeHash()` helper (lines 792-804):
+       ```go
+       func getCurrentWorktreeHash() string {
+           repoRoot, err := paths.RepoRoot()
+           if err != nil { return "" }
+           worktreeID, err := paths.GetWorktreeID(repoRoot)
+           if err != nil { return "" }
+           return checkpoint.HashWorktreeID(worktreeID)
+       }
+       ```
+     - Added `computeReachableFromMain()` helper (lines 806-842) - shared by getBranchCheckpoints and getAssociatedCommits, resolves default branch name, walks main's first-parent chain to build hash set
+     - Added `walkFirstParentCommits()` helper (lines 844-875):
+       ```go
+       func walkFirstParentCommits(repo *git.Repository, from plumbing.Hash, limit int, fn func(*object.Commit) error) error {
+           current, err := repo.CommitObject(from)
+           if err != nil { return fmt.Errorf("failed to get commit %s: %w", from, err) }
+           for count := 0; limit <= 0 || count < limit; count++ {
+               if err := fn(current); err != nil {
+                   if errors.Is(err, errStopIteration) { return nil }
+                   return err
+               }
+               if current.NumParents() == 0 { return nil }
+               current, err = current.Parent(0)
+               if err != nil { return nil }
+           }
+           return nil
+       }
+       ```
+     - Modified `getBranchCheckpoints()` - replaced `repo.Log()` with `walkFirstParentCommits`, added `reachableFromMain` filtering, removed `consecutiveMainLimit` tracking
+     - Modified `getAssociatedCommits()` - same pattern: walkFirstParentCommits + reachableFromMain
+     - Modified `isShadowBranchReachable()` - replaced `repo.Log()` with `walkFirstParentCommits`
+     - Modified `getReachableTemporaryCheckpoints()` - added worktree hash filtering using `getCurrentWorktreeHash()` and `checkpoint.ParseShadowBranchName()`
+     - Removed `consecutiveMainLimit` constant
+     - Added `paths` import
+   
+   - `cmd/entire/cli/explain_test.go` - Test file with new regression tests:
+     - `createMergeCommit()` helper - creates merge commits using go-git plumbing APIs with two parent hashes
+     - `TestGetBranchCheckpoints_WithMergeFromMain` - creates feature branch with checkpoint, merges main, adds another checkpoint, verifies both found
+     - `TestGetBranchCheckpoints_MergeCommitAtHEAD` - verifies checkpoints found when HEAD is the merge commit
+     - `TestWalkFirstParentCommits_SkipsMergeParents` - unit test verifying only first-parent commits visited (M->B->A, not C)
+     - `TestGetCurrentWorktreeHash_MainWorktree` - verifies hash computation for main worktree
+     - `TestGetReachableTemporaryCheckpoints_FiltersByWorktree` - creates shadow branches for two worktree IDs, verifies only matching one returned
+
+4. Errors and fixes:
+   - **nilerr lint error**: `walkFirstParentCommits` had `parentErr != nil { break }` followed by `return nil` - linter flagged returning nil when error is not nil. Fixed by restructuring: `current, err = current.Parent(0); if err != nil { return nil //nolint:nilerr }` 
+   - **errcheck lint errors (6)**: Test code had `repo.CommitObject(featureCommit)` and `.Tree()` with `_` error returns. Fixed by adding proper error checking with `t.Fatalf`.
+   - **MAJOR: Removed reachableFromMain filtering entirely**: After deploying, `entire explain` showed 6 checkpoints instead of 1 - main's committed checkpoints leaked through. User caught this: "whoops! yeah let's put the reachableFromMain back..." Fixed by creating `computeReachableFromMain()` shared helper that both `getBranchCheckpoints` and `getAssociatedCommits` use. The key insight: first-parent walk fixes merge DAG traversal, but reachableFromMain is still needed to stop at the branch point.
+   - **Missing worktree filtering**: After fixing reachableFromMain, output showed 4 checkpoints (1 committed + 3 temporary from other worktrees' shadow branches). User asked "can we tell if they're relevant to this workspace?" Fixed by adding `getCurrentWorktreeHash()` and filtering in `getReachableTemporaryCheckpoints()`.
+
+5. Problem Solving:
+   - Original bug: full DAG walk through merge commits entering main's history, hitting consecutiveMainLimit
+   - Solution: walkFirstParentCommits + reachableFromMain + worktree hash filtering
+   - The iterative discovery process: first removed too much (no reachableFromMain), then found worktree leaking - each caught by real-world testing with `go run ./cmd/entire explain --no-pager`
+
+6. All user messages:
+   - "Implement the following plan: [detailed plan for fix]"
+   - "commit this"
+   - "okay, so pop quiz - what should this version of entire explain show us for this branch?"
+   - "well, I've just reset our branch to origin/main then cherry-picked our commit... also it does have a checkpoint id -> Entire-Checkpoint: d0b269503005 do a git log/show to have a look around. so _I_ would have expected a single checkpoint..."
+   - "whoops! yeah let's put the reachableFromMain back..."
+   - "okay...now for these temporary ones.... can we tell if they're relevant to this workspace?"
+   - "push, raise a draft PR"
+
+7. Pending Tasks:
+   - Push the branch to remote
+   - Create a draft PR
+
+8. Current Work:
+   The commit `827a88a4` on branch `alex/entire-explain-fixes` contains all three fixes (first-parent walk, reachableFromMain restoration, worktree filtering). All tests pass including integration tests with `-race`. The user's most recent request is: "push, raise a draft PR"
+
+9. Optional Next Step:
+   Push the branch and create a draft PR using `gh pr create --draft`. The user explicitly said: "push, raise a draft PR"
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+Base directory for this skill: /Users/alex/.claude/skills/github-pr-review
+
+# GitHub PR Review
+
+## Overview
+
+Technical mechanics for GitHub PR review workflows via `gh` CLI. Covers fetching review comments, replying to threads, creating/updating PRs.
+
+**Companion skill:** For *how to evaluate* feedback, see `superpowers:receiving-code-review`. This skill covers *how to interact* with GitHub.
+
+**Security:** Use fine-grained PAT with minimal permissions.
+
+## Setup (One-Time)
+
+### Fine-Grained PAT
+
+Create at github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens:
+
+| Permission | Level |
+|------------|-------|
+| Pull requests | Read & Write |
+| Contents | Read |
+
+**Can't:** Delete repos, push code, delete branches, manage settings.
+
+### Configure & Allowlist
+
+```bash
+export GH_TOKEN="github_pat_xxxx"
+```
+
+Add to `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments:*)",
+      "Bash(gh api repos/*/*/pulls/*/comments/*/replies:*)"
+    ]
+  }
+}
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| Get owner/repo | `gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"'` |
+| Get PR number | `gh pr view --json number -q .number` |
+| Get PR author | `gh pr view --json author -q .author.login` |
+| Fetch all review comments | `gh api repos/{owner}/{repo}/pulls/{pr}/comments --paginate` |
+| Get single comment | `gh api repos/{owner}/{repo}/pulls/comments/{comment_id}` |
+| Reply to comment | `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="msg"` |
+| Create PR | `gh pr create --title "T" --body "B" [--draft]` |
+| Mark ready | `gh pr ready [number]` |
+| Convert to draft | `gh pr ready --undo [number]` |
+| Edit PR | `gh pr edit [number] --title "T" --body "B"` |
+
+## Workflow: Respond to PR Review
+
+### 1. Get repo info and PR details
+
+```bash
+owner_repo=$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')
+pr_number=$(gh pr view --json number -q .number)
+pr_author=$(gh pr view --json author -q .author.login)
+```
+
+### 2. Fetch and analyze threads
+
+```bash
+# Fetch all comments and group into threads, showing last author per thread
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq 'sort_by([.in_reply_to_id // .id, .created_at]) | group_by(.in_reply_to_id // .id) | map({thread_id: (.[0].in_reply_to_id // .[0].id), path: .[0].path, line: (.[0].line // .[0].original_line), last_author: .[-1].user.login, last_body: .[-1].body[0:100], count: length})'
+```
+
+### 3. Filter to threads needing response
+
+```bash
+# Filter to threads where last_author != PR author
+# Note: Use '| not' instead of '!=' to avoid shell escaping issues with !
+... | jq --arg author "$pr_author" '[.[] | select(.last_author == $author | not)]'
+```
+
+For each thread needing response:
+- Read the comment + file/line context
+- Apply `superpowers:receiving-code-review` skill for evaluation
+- Fix code and/or reply to thread
+
+### 4. Commit fixes and push
+- run the build, tests, linting as required
+- commit the changes, noting the commit sha
+- push the changes so they're visible
+- We need to do this FIRST so we have the commit shas to put into the replies to the pr review
+
+### 5. Re-fetch comment IDs (if rebased)
+
+**Important:** If you rebased or force-pushed, comment IDs may have changed. Re-fetch the comment threads before replying:
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments --paginate | jq '...'
+```
+
+### 6. Reply to a thread
+
+```bash
+gh api repos/${owner_repo}/pulls/${pr_number}/comments/{comment_id}/replies \
+  -f body="Fixed in commit abc123. [description of fix]"
+```
+
+### 7. Summarize and finish
+
+After all threads addressed, ask if ready to mark PR ready for review.
+
+**Note:** REST API doesn't expose "resolved" status. We infer "done" when PR author made last comment in thread.
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Broad PAT permissions | Use fine-grained PAT with only Pull requests + Contents |
+| Missing pagination | Always use `--paginate` for comment fetching |
+| Top-level reply | Use `/comments/{id}/replies` endpoint, not `/comments` |
+| Re-responding to threads | Skip threads where PR author made last comment |
+| Forgetting to reply after fix | Always reply to confirm the fix was made |
+| jq `!=` fails with shell error | Use `select(.x == "y" \| not)` instead of `select(.x != "y")` |
+| 404 on reply after rebase | Comment IDs change after force-push/rebase. Re-fetch comments before replying |
+
+---
+
+we got test failz
+
+---
+
+--search-all is still working as designed yes?
+
+---
+
+yes please. is there no test for this behaviour?
+
+---
+
+<bash-input>git checkout main</bash-input>
+
+---
+
+<bash-stdout>Your branch is up to date with 'origin/main'.
+Switched to branch 'main'</bash-stdout><bash-stderr></bash-stderr>
+
+---
+
+<bash-input>entire explain</bash-input>
+
+---
+
+<bash-stdout>Branch: main
+Checkpoints: 2
+
+[2ea0c2a8161d] "Implement the following plan:\n\n# Move shell completion pr..."
+  02-09 16:54 (99ce4e8) ENT-248: Completion installation (#180)
+
+[c4a4c0bba140] "Ensure that JSON parsing of .entire/settings.json is stri..."
+  02-06 15:24 (6ca4281) Strict JSON settings parsing (#157)</bash-stdout><bash-stderr></bash-stderr>
+
+---
+
+I think we broke explain's main branch functionality
+
+---
+
+where was the old code that handled this?
