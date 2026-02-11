@@ -117,7 +117,7 @@ func ConvertExportToJSONL(exportJSON []byte) ([]byte, error) {
 		if err != nil {
 			continue // Skip malformed messages
 		}
-		createdAt := parseExportTimestamp(msg.Info.Time.Created)
+		createdAt := parseExportTimestamp(msg.Info.Time.Created, msg.Info.Time.Completed)
 		lines = append(lines, TranscriptLineWithTime{
 			Line:      line,
 			CreatedAt: createdAt,
@@ -218,12 +218,16 @@ func SerializeTranscriptWithTime(lines []TranscriptLineWithTime) ([]byte, error)
 			Type      string          `json:"type"`
 			UUID      string          `json:"uuid"`
 			Message   json.RawMessage `json:"message"`
-			Timestamp string          `json:"timestamp"`
+			Timestamp string          `json:"timestamp,omitempty"`
 		}{
-			Type:      line.Line.Type,
-			UUID:      line.Line.UUID,
-			Message:   line.Line.Message,
-			Timestamp: line.CreatedAt.Format(time.RFC3339),
+			Type:    line.Line.Type,
+			UUID:    line.Line.UUID,
+			Message: line.Line.Message,
+		}
+
+		// Only include timestamp if available (non-zero). Keeps output deterministic for missing times.
+		if !line.CreatedAt.IsZero() {
+			lineWithTimestamp.Timestamp = line.CreatedAt.Format(time.RFC3339)
 		}
 
 		data, err := json.Marshal(lineWithTimestamp)
@@ -300,17 +304,22 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 	return files
 }
 
-// parseExportTimestamp converts a raw export timestamp to time.Time, handling milliseconds.
-func parseExportTimestamp(raw int64) time.Time {
-	if raw == 0 {
-		return time.Now()
+// parseExportTimestamp converts raw export timestamps to time.Time, handling milliseconds.
+// Prefers created, falls back to completed, otherwise returns zero time for determinism.
+func parseExportTimestamp(created, completed int64) time.Time {
+	if created != 0 {
+		return parseUnixSecondsOrMillis(created)
 	}
+	if completed != 0 {
+		return parseUnixSecondsOrMillis(completed)
+	}
+	return time.Time{}
+}
 
-	// OpenCode exports are likely milliseconds since epoch; detect and convert.
+func parseUnixSecondsOrMillis(raw int64) time.Time {
 	if raw > 1_000_000_000_000 {
 		return time.Unix(0, raw*int64(time.Millisecond))
 	}
-
 	return time.Unix(raw, 0)
 }
 
