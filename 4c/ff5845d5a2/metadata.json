@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "4cff5845d5a2",
+  "strategy": "manual-commit",
+  "branch": "alex/entire-clean-fixes",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/clean.go",
+    "cmd/entire/cli/sessions_fix.go",
+    "cmd/entire/cli/strategy/cleanup.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_reset.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/4c/ff5845d5a2/0/metadata.json",
+      "transcript": "/4c/ff5845d5a2/0/full.jsonl",
+      "context": "/4c/ff5845d5a2/0/context.md",
+      "content_hash": "/4c/ff5845d5a2/0/content_hash.txt",
+      "prompt": "/4c/ff5845d5a2/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 5681,
+    "cache_creation_tokens": 526519,
+    "cache_read_tokens": 15651239,
+    "output_tokens": 8908,
+    "api_call_count": 157
+  }
+}

@@ -1,0 +1,9 @@
+implement the printWrngAgentError, follow same pattern as printMissinAgentError
+
+---
+
+delete duplications
+
+---
+
+add test to check we print wrong agent name
