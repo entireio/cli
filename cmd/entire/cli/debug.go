@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -75,7 +74,7 @@ func runDebugAutoCommit(w io.Writer, transcriptPath string) error {
 
 	// Auto-detect transcript if not provided
 	if transcriptPath == "" && currentSession != "" {
-		detected, detectErr := findTranscriptForSession(currentSession, repoRoot)
+		detected, detectErr := findTranscriptForSession(currentSession)
 		if detectErr != nil {
 			fmt.Fprintf(w, "\nCould not auto-detect transcript: %v\n", detectErr)
 		} else if detected != "" {
@@ -139,12 +138,12 @@ func printPrePromptState(w io.Writer, sessionID string) {
 	switch {
 	case err != nil:
 		fmt.Fprintf(w, "Pre-prompt state: (error: %v)\n", err)
-	case preState == nil:
-		fmt.Fprintln(w, "Pre-prompt state: (none captured)")
-	default:
+	case preState != nil:
 		fmt.Fprintf(w, "Pre-prompt state: captured at %s\n", preState.Timestamp)
 		fmt.Fprintf(w, "  Pre-existing untracked files: %d\n", len(preState.UntrackedFiles))
 		printUntrackedFilesSummary(w, preState.UntrackedFiles)
+	default:
+		fmt.Fprintln(w, "Pre-prompt state: (none captured)")
 	}
 }
 
@@ -187,10 +186,14 @@ func printTranscriptChanges(w io.Writer, transcriptPath, currentSession, repoRoo
 			fmt.Fprintf(w, "  Error loading pre-prompt state: %v\n", loadErr)
 		}
 	}
-	// Always call ComputeFileChanges - deleted files don't depend on preState
-	newFiles, deletedFiles, err = ComputeFileChanges(preState)
+	// Always call DetectFileChanges - deleted files don't depend on preState
+	fileChanges, err := DetectFileChanges(preState.PreUntrackedFiles())
 	if err != nil {
 		fmt.Fprintf(w, "  Error computing file changes: %v\n", err)
+	}
+	if fileChanges != nil {
+		newFiles = fileChanges.New
+		deletedFiles = fileChanges.Deleted
 	}
 
 	// Filter and normalize paths
@@ -337,7 +340,7 @@ func getFileChanges() ([]string, []string, []string, []string, error) {
 
 // findTranscriptForSession attempts to find the transcript file for a session.
 // Returns the path if found, empty string if not found, or error on failure.
-func findTranscriptForSession(sessionID, repoRoot string) (string, error) {
+func findTranscriptForSession(sessionID string) (string, error) {
 	// Try to get agent type from session state
 	sessionState, err := strategy.LoadSessionState(sessionID)
 	if err != nil {
@@ -354,17 +357,12 @@ func findTranscriptForSession(sessionID, repoRoot string) (string, error) {
 		return "", fmt.Errorf("failed to get agent from sessionID: %s", sessionID)
 	}
 
-	// Get the session directory for this agent
-	sessionDir, err := ag.GetSessionDir(repoRoot)
+	// Resolve transcript path (checks session state's transcript_path first,
+	// falls back to agent's GetSessionDir + ResolveSessionFile)
+	transcriptPath, err := resolveTranscriptPath(sessionID, ag)
 	if err != nil {
-		return "", fmt.Errorf("failed to get session dir: %w", err)
+		return "", fmt.Errorf("failed to resolve transcript path: %w", err)
 	}
-
-	// Extract the agent-specific session ID (removes date prefix)
-	agentSessionID := ag.ExtractAgentSessionID(sessionID)
-
-	// Build the transcript path
-	transcriptPath := filepath.Join(sessionDir, agentSessionID+".jsonl")
 
 	// Check if it exists
 	if _, err := os.Stat(transcriptPath); err != nil {

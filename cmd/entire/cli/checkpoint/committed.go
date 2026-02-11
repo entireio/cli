@@ -348,6 +348,7 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 		InitialAttribution:          opts.InitialAttribution,
 		Summary:                     opts.Summary,
 		CLIVersion:                  buildinfo.Version,
+		TranscriptPath:              opts.SessionTranscriptPath,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(sessionMetadata, "", "  ")

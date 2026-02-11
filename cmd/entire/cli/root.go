@@ -39,9 +39,11 @@ func NewRootCmd() *cobra.Command {
 			HiddenDefaultCmd: true,
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
-			// Skip for hidden commands
-			if cmd.Hidden {
-				return
+			// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)
+			for c := cmd; c != nil; c = c.Parent() {
+				if c.Hidden {
+					return
+				}
 			}
 
 			// Load settings once for telemetry and version check
@@ -61,7 +63,7 @@ func NewRootCmd() *cobra.Command {
 
 			// Version check and notification (synchronous with 2s timeout)
 			// Runs AFTER command completes to avoid interfering with interactive modes
-			versioncheck.CheckAndNotify(cmd, buildinfo.Version)
+			versioncheck.CheckAndNotify(cmd.OutOrStdout(), buildinfo.Version)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()

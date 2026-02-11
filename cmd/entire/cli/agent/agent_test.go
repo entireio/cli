@@ -28,7 +28,11 @@ func (m *mockAgent) ParseHookInput(_ HookType, _ io.Reader) (*HookInput, error) 
 func (m *mockAgent) GetSessionID(_ *HookInput) string             { return "" }
 func (m *mockAgent) TransformSessionID(agentID string) string     { return agentID }
 func (m *mockAgent) ExtractAgentSessionID(entireID string) string { return entireID }
+func (m *mockAgent) ProtectedDirs() []string                      { return nil }
 func (m *mockAgent) GetSessionDir(_ string) (string, error)       { return "", nil }
+func (m *mockAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
+	return sessionDir + "/" + agentSessionID + ".jsonl"
+}
 
 //nolint:nilnil // Mock implementation
 func (m *mockAgent) ReadSession(_ *HookInput) (*AgentSession, error) { return nil, nil }

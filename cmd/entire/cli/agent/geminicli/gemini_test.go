@@ -285,6 +285,61 @@ func TestExtractAgentSessionID(t *testing.T) {
 	}
 }
 
+func TestResolveSessionFile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("finds existing Gemini-named file", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		ag := &GeminiCLIAgent{}
+
+		// Create a file with Gemini's naming convention
+		geminiFile := filepath.Join(tmpDir, "session-2026-02-10T09-19-0544a0f5.json")
+		if err := os.WriteFile(geminiFile, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		result := ag.ResolveSessionFile(tmpDir, "0544a0f5-46a6-41b3-a89c-e7804df731b8")
+		if result != geminiFile {
+			t.Errorf("ResolveSessionFile() = %q, want %q", result, geminiFile)
+		}
+	})
+
+	t.Run("falls back to default when no match", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		ag := &GeminiCLIAgent{}
+
+		result := ag.ResolveSessionFile(tmpDir, "0544a0f5-46a6-41b3-a89c-e7804df731b8")
+		expected := filepath.Join(tmpDir, "0544a0f5-46a6-41b3-a89c-e7804df731b8.json")
+		if result != expected {
+			t.Errorf("ResolveSessionFile() = %q, want %q", result, expected)
+		}
+	})
+
+	t.Run("handles short session ID", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		ag := &GeminiCLIAgent{}
+
+		// Short ID (less than 8 chars) should use entire ID as prefix
+		result := ag.ResolveSessionFile(tmpDir, "abc123")
+		expected := filepath.Join(tmpDir, "abc123.json")
+		if result != expected {
+			t.Errorf("ResolveSessionFile() = %q, want %q", result, expected)
+		}
+	})
+}
+
+func TestProtectedDirs(t *testing.T) {
+	t.Parallel()
+	ag := &GeminiCLIAgent{}
+	dirs := ag.ProtectedDirs()
+	if len(dirs) != 1 || dirs[0] != ".gemini" {
+		t.Errorf("ProtectedDirs() = %v, want [.gemini]", dirs)
+	}
+}
+
 func TestGetSessionDir(t *testing.T) {
 	ag := &GeminiCLIAgent{}
 
