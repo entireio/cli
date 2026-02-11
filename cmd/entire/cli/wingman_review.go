@@ -202,55 +202,67 @@ func runWingmanReview(payloadPath string) error {
 	return nil
 }
 
-// computeDiff gets the code changes to review. baseCommit is the HEAD hash
-// captured at trigger time so the diff is stable even if HEAD moves during
-// the initial delay (e.g., auto-commit creates another commit, or user commits).
-func computeDiff(repoRoot string, baseCommit string) (string, error) {
-	// Use the captured base commit when available for deterministic diffs
-	diffRef := "HEAD"
-	if baseCommit != "" {
-		diffRef = baseCommit
-	}
-
-	// Try uncommitted changes against the base commit
+// computeDiff gets the full branch diff for review. It diffs the current HEAD
+// against the merge base with the default branch (main/master), giving the
+// reviewer a holistic view of all branch changes rather than just one commit.
+func computeDiff(repoRoot string, _ string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), wingmanGitTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "diff", diffRef)
+	// Find the merge base with the default branch for a holistic branch diff.
+	mergeBase := findMergeBase(ctx, repoRoot)
+	if mergeBase != "" {
+		wingmanLog("using merge-base %s for branch diff", mergeBase)
+		diff, err := gitDiff(ctx, repoRoot, mergeBase)
+		if err == nil && strings.TrimSpace(diff) != "" {
+			return diff, nil
+		}
+		// Fall through to HEAD diff if merge-base diff fails or is empty
+	}
+
+	// Fallback: diff uncommitted changes against HEAD
+	wingmanLog("falling back to HEAD diff")
+	diff, err := gitDiff(ctx, repoRoot, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("git diff failed: %w", err)
+	}
+
+	// If no uncommitted changes, try the latest commit itself
+	if strings.TrimSpace(diff) == "" {
+		diff, err = gitDiff(ctx, repoRoot, "HEAD~1", "HEAD")
+		if err != nil {
+			return "", nil //nolint:nilerr // no diff is not an error
+		}
+	}
+
+	return diff, nil
+}
+
+// findMergeBase returns the merge-base commit between HEAD and the default
+// branch (tries main, then master). Returns empty string if not found.
+func findMergeBase(ctx context.Context, repoRoot string) string {
+	for _, branch := range []string{"main", "master"} {
+		cmd := exec.CommandContext(ctx, "git", "merge-base", branch, "HEAD")
+		cmd.Dir = repoRoot
+		out, err := cmd.Output()
+		if err == nil {
+			return strings.TrimSpace(string(out))
+		}
+	}
+	return ""
+}
+
+// gitDiff runs git diff with the given args and returns stdout.
+func gitDiff(ctx context.Context, repoRoot string, args ...string) (string, error) {
+	fullArgs := append([]string{"diff"}, args...)
+	cmd := exec.CommandContext(ctx, "git", fullArgs...) //nolint:gosec // args are from internal logic
 	cmd.Dir = repoRoot
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-
 	if err := cmd.Run(); err != nil {
-		// If the ref doesn't exist (initial commit), try diff of staged/unstaged
-		ctx2, cancel2 := context.WithTimeout(context.Background(), wingmanGitTimeout)
-		defer cancel2()
-		cmd2 := exec.CommandContext(ctx2, "git", "diff")
-		cmd2.Dir = repoRoot
-		var stdout2 bytes.Buffer
-		cmd2.Stdout = &stdout2
-		if err2 := cmd2.Run(); err2 != nil {
-			return "", fmt.Errorf("git diff failed: %w (stderr: %s)", err, stderr.String())
-		}
-		return stdout2.String(), nil
+		return "", fmt.Errorf("git diff %v: %w (stderr: %s)", args, err, stderr.String())
 	}
-
-	// If no uncommitted changes, the commit itself may contain the changes
-	// (auto-commit strategy creates commits on the active branch)
-	if strings.TrimSpace(stdout.String()) == "" {
-		ctx2, cancel2 := context.WithTimeout(context.Background(), wingmanGitTimeout)
-		defer cancel2()
-
-		cmd2 := exec.CommandContext(ctx2, "git", "diff", diffRef+"~1", diffRef)
-		cmd2.Dir = repoRoot
-		var stdout2 bytes.Buffer
-		cmd2.Stdout = &stdout2
-		if err := cmd2.Run(); err == nil && strings.TrimSpace(stdout2.String()) != "" {
-			return stdout2.String(), nil
-		}
-	}
-
 	return stdout.String(), nil
 }
 
