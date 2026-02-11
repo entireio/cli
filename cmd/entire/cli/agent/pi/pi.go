@@ -128,6 +128,9 @@ func (p *PiAgent) ParseHookInput(hookType agent.HookType, reader io.Reader) (*ag
 	if raw.LeafID != "" {
 		input.RawData["leaf_id"] = raw.LeafID
 	}
+	if raw.CWD != "" {
+		input.RawData["cwd"] = raw.CWD
+	}
 
 	return input, nil
 }
@@ -274,10 +277,20 @@ func (p *PiAgent) TruncateAtUUID(session *agent.AgentSession, entryID string) (*
 		}, nil
 	}
 
-	// Parse and truncate using a large-line-safe reader.
-	var result []byte
-	reader := bufio.NewReader(bytes.NewReader(session.NativeData))
+	type lineMeta struct {
+		raw      []byte
+		entryID  string
+		parentID string
+		header   bool
+	}
 
+	lines := make([]lineMeta, 0)
+	parentByID := make(map[string]string)
+	hasParentRefs := false
+	targetFound := false
+	targetEntryID := ""
+
+	reader := bufio.NewReader(bytes.NewReader(session.NativeData))
 	for {
 		line, readErr := reader.ReadBytes('\n')
 		if readErr != nil && readErr != io.EOF {
@@ -287,25 +300,93 @@ func (p *PiAgent) TruncateAtUUID(session *agent.AgentSession, entryID string) (*
 		if len(line) > 0 {
 			trimmed := bytes.TrimSpace(line)
 			if len(trimmed) > 0 {
-				// Add original line bytes to preserve formatting/newlines.
-				result = append(result, line...)
-
-				// Check if this is the target entry.
-				// Parse only the ID fields to avoid failing on message content schema variants.
+				meta := lineMeta{raw: append([]byte(nil), line...)}
 				var entry struct {
-					ID   string `json:"id"`
-					UUID string `json:"uuid"`
+					Type     string  `json:"type"`
+					ID       string  `json:"id"`
+					UUID     string  `json:"uuid"`
+					ParentID *string `json:"parentId"`
 				}
 				if err := json.Unmarshal(trimmed, &entry); err == nil {
-					if entry.ID == entryID || entry.UUID == entryID {
-						break
+					meta.header = entry.Type == "session"
+					if entry.ID != "" {
+						meta.entryID = entry.ID
+					} else if entry.UUID != "" {
+						meta.entryID = entry.UUID
+					}
+					if entry.ParentID != nil {
+						meta.parentID = strings.TrimSpace(*entry.ParentID)
+						if meta.parentID != "" {
+							hasParentRefs = true
+						}
+					}
+					if meta.entryID != "" {
+						parentByID[meta.entryID] = meta.parentID
+						if meta.entryID == entryID {
+							targetFound = true
+							targetEntryID = meta.entryID
+						}
 					}
 				}
+				lines = append(lines, meta)
 			}
 		}
 
 		if readErr == io.EOF {
 			break
+		}
+	}
+
+	if !targetFound {
+		return &agent.AgentSession{
+			SessionID:     session.SessionID,
+			AgentName:     session.AgentName,
+			RepoPath:      session.RepoPath,
+			SessionRef:    session.SessionRef,
+			StartTime:     session.StartTime,
+			NativeData:    session.NativeData,
+			ModifiedFiles: session.ModifiedFiles,
+		}, nil
+	}
+
+	var result []byte
+	if !hasParentRefs {
+		for _, line := range lines {
+			result = append(result, line.raw...)
+			if line.entryID == targetEntryID {
+				break
+			}
+		}
+	} else {
+		pathIDs := make(map[string]struct{})
+		current := targetEntryID
+		for i := 0; i <= len(parentByID); i++ {
+			if current == "" {
+				break
+			}
+			if _, seen := pathIDs[current]; seen {
+				break
+			}
+			pathIDs[current] = struct{}{}
+
+			parent, ok := parentByID[current]
+			if !ok || parent == "" || parent == current {
+				break
+			}
+			current = parent
+		}
+
+		for _, line := range lines {
+			if line.header {
+				result = append(result, line.raw...)
+				continue
+			}
+			if line.entryID == "" {
+				continue
+			}
+			if _, ok := pathIDs[line.entryID]; ok {
+				result = append(result, line.raw...)
+			}
 		}
 	}
 

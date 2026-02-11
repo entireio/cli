@@ -301,6 +301,9 @@ func TestInstallHooks_TemplateContainsCanonicalLifecycleMappings(t *testing.T) {
 	if !strings.Contains(content, `leaf_id: activeLeafId`) {
 		t.Fatalf("template must include active leaf id in stop payload")
 	}
+	if !strings.Contains(content, `cwd: ctx.cwd`) {
+		t.Fatalf("template must include cwd in session-start payload")
+	}
 	if !strings.Contains(content, `pi.on("tool_call"`) || !strings.Contains(content, `runHook("before-tool"`) {
 		t.Fatalf("template must map tool_call to before-tool")
 	}

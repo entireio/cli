@@ -6,6 +6,7 @@ import "encoding/json"
 type piHookInput struct {
 	SessionID      string          `json:"session_id"`
 	TranscriptPath string          `json:"transcript_path"`
+	CWD            string          `json:"cwd,omitempty"`
 	Prompt         string          `json:"prompt,omitempty"`
 	ModifiedFiles  []string        `json:"modified_files,omitempty"`
 	ToolName       string          `json:"tool_name,omitempty"`

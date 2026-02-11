@@ -79,6 +79,9 @@ func TestSetupPiHooks_ScaffoldContainsAllRequiredHookCommands(t *testing.T) {
 	if !strings.Contains(content, "leaf_id: activeLeafId") {
 		t.Fatalf("managed scaffold missing leaf_id forwarding in stop payload")
 	}
+	if !strings.Contains(content, "cwd: ctx.cwd") {
+		t.Fatalf("managed scaffold missing cwd forwarding in session-start payload")
+	}
 }
 
 func TestSetupPiHooks_EnableIsIdempotent(t *testing.T) {

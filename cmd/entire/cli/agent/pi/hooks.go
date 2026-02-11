@@ -285,6 +285,7 @@ type HookVerb = "session-start" | "user-prompt-submit" | "before-tool" | "after-
 type HookPayload = {
 	session_id?: string;
 	transcript_path?: string;
+	cwd?: string;
 	prompt?: string;
 	modified_files?: string[];
 	tool_name?: string;
@@ -441,6 +442,7 @@ export default function register(pi: ExtensionAPI) {
 		await runHook("session-start", {
 			session_id: activeSessionId,
 			transcript_path: activeTranscriptPath,
+			cwd: ctx.cwd,
 		}, ctx);
 	});
 
@@ -463,6 +465,7 @@ export default function register(pi: ExtensionAPI) {
 		await runHook("session-start", {
 			session_id: activeSessionId,
 			transcript_path: activeTranscriptPath,
+			cwd: ctx.cwd,
 		}, ctx);
 	});
 
@@ -485,6 +488,7 @@ export default function register(pi: ExtensionAPI) {
 		await runHook("session-start", {
 			session_id: activeSessionId,
 			transcript_path: activeTranscriptPath,
+			cwd: ctx.cwd,
 		}, ctx);
 	});
 

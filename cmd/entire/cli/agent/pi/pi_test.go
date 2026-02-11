@@ -103,7 +103,7 @@ func TestGetHookConfigPathAndSupportsHooks(t *testing.T) {
 
 func TestParseHookInput(t *testing.T) {
 	ag := &PiAgent{}
-	input := `{"session_id":"sess-1","transcript_path":"/tmp/session.jsonl","prompt":"Fix it","modified_files":["a.go","b.go"],"leaf_id":"leaf-123"}`
+	input := `{"session_id":"sess-1","transcript_path":"/tmp/session.jsonl","cwd":"/repo/path","prompt":"Fix it","modified_files":["a.go","b.go"],"leaf_id":"leaf-123"}`
 
 	hookInput, err := ag.ParseHookInput(agent.HookStop, strings.NewReader(input))
 	if err != nil {
@@ -130,6 +130,9 @@ func TestParseHookInput(t *testing.T) {
 	}
 	if got := hookInput.RawData["leaf_id"]; got != "leaf-123" {
 		t.Fatalf("RawData[leaf_id] = %v, want leaf-123", got)
+	}
+	if got := hookInput.RawData["cwd"]; got != "/repo/path" {
+		t.Fatalf("RawData[cwd] = %v, want /repo/path", got)
 	}
 }
 
@@ -399,6 +402,37 @@ func TestTruncateAtUUID(t *testing.T) {
 	}
 	if string(copied.NativeData) != string(session.NativeData) {
 		t.Fatalf("empty truncation should return unchanged session")
+	}
+}
+
+func TestTruncateAtUUID_TreePath(t *testing.T) {
+	ag := &PiAgent{}
+	session := &agent.AgentSession{
+		SessionID:  "s-tree",
+		AgentName:  agent.AgentNamePi,
+		SessionRef: "/tmp/x",
+		NativeData: []byte(`{"type":"session","version":3,"id":"sess","timestamp":"2026-01-01T00:00:00Z","cwd":"/repo"}
+{"type":"message","id":"1","parentId":null,"message":{"role":"user","content":"root"}}
+{"type":"message","id":"2","parentId":"1","message":{"role":"assistant","content":[{"type":"text","text":"branch"}]}}
+{"type":"message","id":"3","parentId":"2","message":{"role":"user","content":"left"}}
+{"type":"message","id":"4","parentId":"2","message":{"role":"user","content":"right"}}
+`),
+	}
+
+	truncated, err := ag.TruncateAtUUID(session, "3")
+	if err != nil {
+		t.Fatalf("TruncateAtUUID(tree) error = %v", err)
+	}
+
+	text := string(truncated.NativeData)
+	if !strings.Contains(text, `"type":"session"`) {
+		t.Fatalf("expected session header to be preserved, got: %s", text)
+	}
+	if !strings.Contains(text, `"id":"1"`) || !strings.Contains(text, `"id":"2"`) || !strings.Contains(text, `"id":"3"`) {
+		t.Fatalf("expected root->target path to be preserved, got: %s", text)
+	}
+	if strings.Contains(text, `"id":"4"`) {
+		t.Fatalf("expected sibling branch to be excluded, got: %s", text)
 	}
 }
 
