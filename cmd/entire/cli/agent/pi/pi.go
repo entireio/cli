@@ -3,6 +3,7 @@ package pi
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -123,6 +124,9 @@ func (p *PiAgent) ParseHookInput(hookType agent.HookType, reader io.Reader) (*ag
 	}
 	if raw.ToolUseID != "" {
 		input.RawData["tool_use_id"] = raw.ToolUseID
+	}
+	if raw.LeafID != "" {
+		input.RawData["leaf_id"] = raw.LeafID
 	}
 
 	return input, nil
@@ -270,32 +274,38 @@ func (p *PiAgent) TruncateAtUUID(session *agent.AgentSession, entryID string) (*
 		}, nil
 	}
 
-	// Parse and truncate
+	// Parse and truncate using a large-line-safe reader.
 	var result []byte
-	scanner := bufio.NewScanner(strings.NewReader(string(session.NativeData)))
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
+	reader := bufio.NewReader(bytes.NewReader(session.NativeData))
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if readErr != nil && readErr != io.EOF {
+			return nil, fmt.Errorf("failed to read transcript while truncating: %w", readErr)
 		}
 
-		// Add this line to result
-		result = append(result, line...)
-		result = append(result, '\n')
+		if len(line) > 0 {
+			trimmed := bytes.TrimSpace(line)
+			if len(trimmed) > 0 {
+				// Add original line bytes to preserve formatting/newlines.
+				result = append(result, line...)
 
-		// Check if this is the target entry.
-		// Parse only the ID fields to avoid failing on message content schema variants.
-		var entry struct {
-			ID   string `json:"id"`
-			UUID string `json:"uuid"`
-		}
-		if err := json.Unmarshal(line, &entry); err == nil {
-			if entry.ID == entryID || entry.UUID == entryID {
-				break
+				// Check if this is the target entry.
+				// Parse only the ID fields to avoid failing on message content schema variants.
+				var entry struct {
+					ID   string `json:"id"`
+					UUID string `json:"uuid"`
+				}
+				if err := json.Unmarshal(trimmed, &entry); err == nil {
+					if entry.ID == entryID || entry.UUID == entryID {
+						break
+					}
+				}
 			}
+		}
+
+		if readErr == io.EOF {
+			break
 		}
 	}
 
@@ -341,27 +351,15 @@ func (p *PiAgent) GetTranscriptPosition(path string) (int, error) {
 		return 0, nil
 	}
 
-	file, err := os.Open(path) //nolint:gosec // Reading a local transcript path provided by the agent hook.
+	_, totalLines, err := ParseTranscriptFromLine(path, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("failed to open transcript file: %w", err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), transcriptScannerBufferSize)
-
-	lineCount := 0
-	for scanner.Scan() {
-		lineCount++
-	}
-	if err := scanner.Err(); err != nil {
 		return 0, fmt.Errorf("failed to read transcript: %w", err)
 	}
 
-	return lineCount, nil
+	return totalLines, nil
 }
 
 // ExtractModifiedFilesFromOffset extracts files modified since a given line number.

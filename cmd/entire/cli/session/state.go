@@ -108,6 +108,11 @@ type State struct {
 	// TranscriptPath is the path to the live transcript file (for mid-session commit detection)
 	TranscriptPath string `json:"transcript_path,omitempty"`
 
+	// TranscriptLeafID is the active transcript leaf identifier for tree-based agents (Pi).
+	// Used during post-hoc condensation to reconstruct the active branch when the transcript
+	// contains multiple branches in a single JSONL file.
+	TranscriptLeafID string `json:"transcript_leaf_id,omitempty"`
+
 	// FirstPrompt is the first user prompt that started this session (truncated for display)
 	FirstPrompt string `json:"first_prompt,omitempty"`
 

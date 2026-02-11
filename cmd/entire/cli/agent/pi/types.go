@@ -12,4 +12,5 @@ type piHookInput struct {
 	ToolUseID      string          `json:"tool_use_id,omitempty"`
 	ToolInput      json.RawMessage `json:"tool_input,omitempty"`
 	ToolResponse   json.RawMessage `json:"tool_response,omitempty"`
+	LeafID         string          `json:"leaf_id,omitempty"`
 }

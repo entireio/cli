@@ -291,6 +291,7 @@ type HookPayload = {
 	tool_use_id?: string;
 	tool_input?: unknown;
 	tool_response?: unknown;
+	leaf_id?: string;
 };
 
 type HookResponse = {
@@ -417,21 +418,25 @@ async function runHook(verb: HookVerb, payload: HookPayload, ctx: ExtensionConte
 	});
 }
 
-function readSessionState(ctx: ExtensionContext): { sessionId?: string; transcriptPath?: string } {
+function readSessionState(ctx: ExtensionContext): { sessionId?: string; transcriptPath?: string; leafId?: string } {
+	const leafId = ctx.sessionManager.getLeafId();
 	return {
 		sessionId: ctx.sessionManager.getSessionId() || undefined,
 		transcriptPath: ctx.sessionManager.getSessionFile() || undefined,
+		leafId: leafId ?? undefined,
 	};
 }
 
 export default function register(pi: ExtensionAPI) {
 	let activeSessionId: string | undefined;
 	let activeTranscriptPath: string | undefined;
+	let activeLeafId: string | undefined;
 
 	pi.on("session_start", async (_event, ctx) => {
 		const state = readSessionState(ctx);
 		activeSessionId = state.sessionId;
 		activeTranscriptPath = state.transcriptPath;
+		activeLeafId = state.leafId;
 
 		await runHook("session-start", {
 			session_id: activeSessionId,
@@ -453,6 +458,7 @@ export default function register(pi: ExtensionAPI) {
 		const state = readSessionState(ctx);
 		activeSessionId = state.sessionId;
 		activeTranscriptPath = state.transcriptPath;
+		activeLeafId = state.leafId;
 
 		await runHook("session-start", {
 			session_id: activeSessionId,
@@ -460,10 +466,37 @@ export default function register(pi: ExtensionAPI) {
 		}, ctx);
 	});
 
+	pi.on("session_fork", async (event, ctx) => {
+		const previousSessionId = activeSessionId;
+		const previousTranscriptPath = event.previousSessionFile || activeTranscriptPath;
+
+		if (previousSessionId || previousTranscriptPath) {
+			await runHook("session-end", {
+				session_id: previousSessionId,
+				transcript_path: previousTranscriptPath,
+			}, ctx);
+		}
+
+		const state = readSessionState(ctx);
+		activeSessionId = state.sessionId;
+		activeTranscriptPath = state.transcriptPath;
+		activeLeafId = state.leafId;
+
+		await runHook("session-start", {
+			session_id: activeSessionId,
+			transcript_path: activeTranscriptPath,
+		}, ctx);
+	});
+
+	pi.on("session_tree", async (event, _ctx) => {
+		activeLeafId = event.newLeafId || undefined;
+	});
+
 	pi.on("before_agent_start", async (event, ctx) => {
 		const state = readSessionState(ctx);
 		activeSessionId = state.sessionId;
 		activeTranscriptPath = state.transcriptPath;
+		activeLeafId = state.leafId;
 
 		await runHook("user-prompt-submit", {
 			session_id: activeSessionId,
@@ -476,6 +509,7 @@ export default function register(pi: ExtensionAPI) {
 		const state = readSessionState(ctx);
 		activeSessionId = state.sessionId;
 		activeTranscriptPath = state.transcriptPath;
+		activeLeafId = state.leafId;
 
 		await runHook("before-tool", {
 			session_id: activeSessionId,
@@ -490,6 +524,7 @@ export default function register(pi: ExtensionAPI) {
 		const state = readSessionState(ctx);
 		activeSessionId = state.sessionId;
 		activeTranscriptPath = state.transcriptPath;
+		activeLeafId = state.leafId;
 
 		await runHook("after-tool", {
 			session_id: activeSessionId,
@@ -509,6 +544,7 @@ export default function register(pi: ExtensionAPI) {
 		const state = readSessionState(ctx);
 		activeSessionId = state.sessionId;
 		activeTranscriptPath = state.transcriptPath;
+		activeLeafId = state.leafId;
 
 		const modifiedFiles = extractModifiedFilesFromBranch(ctx.sessionManager.getBranch());
 
@@ -516,11 +552,13 @@ export default function register(pi: ExtensionAPI) {
 			session_id: activeSessionId,
 			transcript_path: activeTranscriptPath,
 			modified_files: modifiedFiles,
+			leaf_id: activeLeafId,
 		}, ctx);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		const state = readSessionState(ctx);
+		activeLeafId = state.leafId || activeLeafId;
 		const sessionId = activeSessionId || state.sessionId;
 		const transcriptPath = activeTranscriptPath || state.transcriptPath;
 

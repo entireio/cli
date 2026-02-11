@@ -162,7 +162,8 @@ func handlePiStop() error { //nolint:maintidx // mirrors existing stop handler c
 		fmt.Fprintf(os.Stderr, "Parsing Pi transcript from line %d\n", transcriptOffset)
 	}
 
-	entries, totalLines, err := pi.ParseTranscriptFromLine(transcriptPath, transcriptOffset)
+	leafID := hookInputRawString(input, "leaf_id")
+	entries, totalLines, err := pi.ParseTranscriptFromLineWithLeaf(transcriptPath, transcriptOffset, leafID)
 	if err != nil {
 		return fmt.Errorf("failed to parse Pi transcript from line %d: %w", transcriptOffset, err)
 	}
@@ -182,7 +183,10 @@ func handlePiStop() error { //nolint:maintidx // mirrors existing stop handler c
 	}
 	fmt.Fprintf(os.Stderr, "Extracted summary to: %s\n", sessionDir+"/"+paths.SummaryFileName)
 
-	modifiedFiles := pi.ExtractModifiedFilesFromEntries(entries)
+	modifiedFiles := hookInputRawStringSlice(input, "modified_files")
+	if len(modifiedFiles) == 0 {
+		modifiedFiles = pi.ExtractModifiedFilesFromEntries(entries)
+	}
 
 	lastPrompt := ""
 	if len(allPrompts) > 0 {
@@ -222,6 +226,7 @@ func handlePiStop() error { //nolint:maintidx // mirrors existing stop handler c
 	if totalChanges == 0 {
 		fmt.Fprintln(os.Stderr, "No files were modified during this session")
 		fmt.Fprintln(os.Stderr, "Skipping commit")
+		persistPiTranscriptLeaf(sessionID, leafID)
 		transitionSessionTurnEnd(sessionID)
 		if err := CleanupPrePromptState(sessionID); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", err)
@@ -254,10 +259,7 @@ func handlePiStop() error { //nolint:maintidx // mirrors existing stop handler c
 		transcriptLinesAtStart = preState.StepTranscriptStart
 	}
 
-	tokenUsage, usageErr := pi.CalculateTokenUsageFromFile(transcriptPath, transcriptLinesAtStart)
-	if usageErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to calculate token usage: %v\n", usageErr)
-	}
+	tokenUsage := pi.CalculateTokenUsageFromEntries(entries)
 
 	saveCtx := strategy.SaveContext{
 		SessionID:                sessionID,
@@ -273,6 +275,7 @@ func handlePiStop() error { //nolint:maintidx // mirrors existing stop handler c
 		AgentType:                ag.Type(),
 		StepTranscriptStart:      transcriptLinesAtStart,
 		StepTranscriptIdentifier: transcriptIdentifierAtStart,
+		TranscriptLeafID:         leafID,
 		TokenUsage:               tokenUsage,
 	}
 
@@ -290,6 +293,9 @@ func handlePiStop() error { //nolint:maintidx // mirrors existing stop handler c
 		}
 		sessionState.CheckpointTranscriptStart = totalLines
 		sessionState.StepCount++
+		if leafID != "" {
+			sessionState.TranscriptLeafID = leafID
+		}
 		if updateErr := strategy.SaveSessionState(sessionState); updateErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to update session state: %v\n", updateErr)
 		} else {
@@ -304,6 +310,88 @@ func handlePiStop() error { //nolint:maintidx // mirrors existing stop handler c
 	}
 
 	return nil
+}
+
+func hookInputRawString(input *agent.HookInput, key string) string {
+	if input == nil || input.RawData == nil {
+		return ""
+	}
+	value, ok := input.RawData[key]
+	if !ok {
+		return ""
+	}
+	str, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(str)
+}
+
+func hookInputRawStringSlice(input *agent.HookInput, key string) []string {
+	if input == nil || input.RawData == nil {
+		return nil
+	}
+	value, ok := input.RawData[key]
+	if !ok {
+		return nil
+	}
+
+	switch typed := value.(type) {
+	case []string:
+		if len(typed) == 0 {
+			return nil
+		}
+		copied := make([]string, 0, len(typed))
+		for _, item := range typed {
+			trimmed := strings.TrimSpace(item)
+			if trimmed != "" {
+				copied = append(copied, trimmed)
+			}
+		}
+		return copied
+	case []interface{}:
+		result := make([]string, 0, len(typed))
+		for _, item := range typed {
+			str, ok := item.(string)
+			if !ok {
+				continue
+			}
+			trimmed := strings.TrimSpace(str)
+			if trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+		if len(result) == 0 {
+			return nil
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
+func persistPiTranscriptLeaf(sessionID, leafID string) {
+	leafID = strings.TrimSpace(leafID)
+	if leafID == "" {
+		return
+	}
+
+	state, err := strategy.LoadSessionState(sessionID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load session state for leaf persistence: %v\n", err)
+		return
+	}
+	if state == nil {
+		return
+	}
+
+	if state.TranscriptLeafID == leafID {
+		return
+	}
+	state.TranscriptLeafID = leafID
+	if err := strategy.SaveSessionState(state); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to persist transcript leaf id: %v\n", err)
+	}
 }
 
 func resolvePiTranscriptOffset(sessionID string, preState *PrePromptState) int {

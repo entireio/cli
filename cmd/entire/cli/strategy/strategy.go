@@ -186,6 +186,10 @@ type SaveContext struct {
 	StepTranscriptIdentifier string // Last identifier when step started (UUID for Claude, message ID for Gemini)
 	StepTranscriptStart      int    // Transcript line count when this step/turn started
 
+	// TranscriptLeafID is the active leaf identifier for tree-based transcripts (Pi).
+	// Empty for non-tree agents.
+	TranscriptLeafID string
+
 	// TokenUsage contains the token usage for this checkpoint
 	TokenUsage *agent.TokenUsage
 }

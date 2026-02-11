@@ -149,6 +149,14 @@ func (s *AutoCommitStrategy) SaveChanges(ctx SaveContext) error {
 			slog.String("checkpoint_type", "session"),
 		)
 		fmt.Fprintf(os.Stderr, "Skipped checkpoint (no changes since last commit)\n")
+		if ctx.TranscriptLeafID != "" {
+			if state, loadErr := LoadSessionState(ctx.SessionID); loadErr == nil && state != nil {
+				state.TranscriptLeafID = ctx.TranscriptLeafID
+				if saveErr := SaveSessionState(state); saveErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to save transcript leaf id for skipped checkpoint: %v\n", saveErr)
+				}
+			}
+		}
 		return nil
 	}
 
@@ -157,6 +165,15 @@ func (s *AutoCommitStrategy) SaveChanges(ctx SaveContext) error {
 	_, err = s.commitMetadataToMetadataBranch(repo, ctx, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to commit metadata to entire/checkpoints/v1 branch: %w", err)
+	}
+
+	if ctx.TranscriptLeafID != "" {
+		if state, loadErr := LoadSessionState(ctx.SessionID); loadErr == nil && state != nil {
+			state.TranscriptLeafID = ctx.TranscriptLeafID
+			if saveErr := SaveSessionState(state); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to save transcript leaf id after checkpoint: %v\n", saveErr)
+			}
+		}
 	}
 
 	// Log checkpoint creation

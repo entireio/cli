@@ -125,7 +125,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 	// potentially stale shadow branch copy (SaveChanges may have been skipped if the
 	// last turn had no code changes).
 	// Pass CheckpointTranscriptStart for accurate token calculation (line offset for Claude, message index for Gemini).
-	sessionData, err := s.extractSessionData(repo, ref.Hash(), state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart)
+	sessionData, err := s.extractSessionData(repo, ref.Hash(), state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.TranscriptLeafID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract session data: %w", err)
 	}
@@ -162,7 +162,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		if len(scopedTranscript) > 0 {
 			summaryTranscript := scopedTranscript
 			if state.AgentType == agent.AgentTypePi {
-				normalized, normalizeErr := normalizePiTranscriptForSummarizer(scopedTranscript)
+				normalized, normalizeErr := normalizePiTranscriptForSummarizer(scopedTranscript, state.TranscriptLeafID)
 				if normalizeErr != nil {
 					logging.Warn(summarizeCtx, "pi transcript normalization failed",
 						slog.String("session_id", state.SessionID),
@@ -325,7 +325,8 @@ func calculateSessionAttributions(repo *git.Repository, shadowRef *plumbing.Refe
 // continued growing — the shadow branch copy would be stale.
 // checkpointTranscriptStart is the line offset for JSONL-based agents (Claude, Pi)
 // or message index for Gemini, where the current checkpoint began.
-func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType agent.AgentType, liveTranscriptPath string, checkpointTranscriptStart int) (*ExtractedSessionData, error) {
+// transcriptLeafID is the active branch leaf for tree-based transcripts (Pi).
+func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType agent.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, transcriptLeafID string) (*ExtractedSessionData, error) {
 	commit, err := repo.CommitObject(shadowRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commit object: %w", err)
@@ -366,7 +367,7 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 	if fullTranscript != "" {
 		data.Transcript = []byte(fullTranscript)
 		data.FullTranscriptLines = countTranscriptItems(agentType, fullTranscript)
-		data.Prompts = extractUserPrompts(agentType, fullTranscript)
+		data.Prompts = extractUserPrompts(agentType, fullTranscript, transcriptLeafID)
 		data.Context = generateContextFromPrompts(data.Prompts)
 	}
 
@@ -375,7 +376,7 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 
 	// Calculate token usage from the extracted transcript portion
 	if len(data.Transcript) > 0 {
-		data.TokenUsage = calculateTokenUsage(agentType, data.Transcript, checkpointTranscriptStart)
+		data.TokenUsage = calculateTokenUsage(agentType, data.Transcript, checkpointTranscriptStart, transcriptLeafID)
 	}
 
 	return data, nil
@@ -422,17 +423,17 @@ func countTranscriptItems(agentType agent.AgentType, content string) int {
 
 // extractUserPrompts extracts all user prompts from transcript content.
 // Returns prompts with IDE context tags stripped (e.g., <ide_opened_file>).
-func extractUserPrompts(agentType agent.AgentType, content string) []string {
+func extractUserPrompts(agentType agent.AgentType, content string, transcriptLeafID string) []string {
 	if content == "" {
 		return nil
 	}
 
 	if agentType == agent.AgentTypePi {
-		prompts, err := pi.ExtractAllUserPrompts([]byte(content))
+		entries, err := pi.ParseTranscriptWithLeaf([]byte(content), transcriptLeafID)
 		if err != nil {
 			return nil
 		}
-		return prompts
+		return pi.ExtractAllUserPromptsFromEntries(entries)
 	}
 
 	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
@@ -463,13 +464,13 @@ func extractUserPrompts(agentType agent.AgentType, content string) []string {
 // startOffset is the line number for JSONL-based agents (Claude Code, Pi)
 // or message index for Gemini CLI, where the current checkpoint began,
 // allowing calculation for only the portion of the transcript since the last checkpoint.
-func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int) *agent.TokenUsage {
+func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int, transcriptLeafID string) *agent.TokenUsage {
 	if len(data) == 0 {
 		return &agent.TokenUsage{}
 	}
 
 	if agentType == agent.AgentTypePi {
-		return pi.CalculateTokenUsageFromTranscript(data, startOffset)
+		return pi.CalculateTokenUsageFromTranscriptWithLeaf(data, startOffset, transcriptLeafID)
 	}
 
 	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
@@ -499,59 +500,75 @@ func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int
 }
 
 const (
-	piTranscriptEntryTypeMessage = "message"
-	piContentTypeText            = "text"
+	piTranscriptEntryTypeMessage    = "message"
+	piTranscriptEntryTypeCompaction = "compaction"
+	piTranscriptEntryTypeBranch     = "branch_summary"
+	piTranscriptEntryTypeCustom     = "custom_message"
+	piContentTypeText               = "text"
+	piSummarizerBranchSummaryPrefix = "Branch summary: "
+	piSummarizerCompactionPrefix    = "Compaction summary: "
+	piSummarizerCustomMessagePrefix = "Custom message: "
 )
 
 // normalizePiTranscriptForSummarizer converts Pi transcript JSONL entries to the
 // Claude-style JSONL structure expected by summarize.BuildCondensedTranscriptFromBytes.
-func normalizePiTranscriptForSummarizer(content []byte) ([]byte, error) {
-	entries, err := pi.ParseTranscript(content)
+func normalizePiTranscriptForSummarizer(content []byte, transcriptLeafID string) ([]byte, error) {
+	entries, err := pi.ParseTranscriptWithLeaf(content, transcriptLeafID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse pi transcript: %w", err)
 	}
 
 	var out bytes.Buffer
 	for _, entry := range entries {
-		if entry.Type != piTranscriptEntryTypeMessage || entry.Message == nil {
-			continue
-		}
-
-		switch entry.Message.Role {
-		case "user":
-			userContent, ok := normalizePiUserContent(entry.Message.Content)
-			if !ok {
+		switch entry.Type {
+		case piTranscriptEntryTypeMessage:
+			if entry.Message == nil {
 				continue
 			}
-			line, marshalErr := json.Marshal(map[string]interface{}{
-				"type": "user",
-				"uuid": entry.EntryID(),
-				"message": map[string]interface{}{
-					"content": userContent,
-				},
-			})
-			if marshalErr != nil {
+			switch entry.Message.Role {
+			case "user":
+				userContent, ok := normalizePiUserContent(entry.Message.Content)
+				if !ok {
+					continue
+				}
+				appendJSONLLine(&out, map[string]interface{}{
+					"type": "user",
+					"uuid": entry.EntryID(),
+					"message": map[string]interface{}{
+						"content": userContent,
+					},
+				})
+			case "assistant":
+				assistantContent := normalizePiAssistantContent(entry.Message.Content)
+				if len(assistantContent) == 0 {
+					continue
+				}
+				appendJSONLLine(&out, map[string]interface{}{
+					"type": "assistant",
+					"uuid": entry.EntryID(),
+					"message": map[string]interface{}{
+						"content": assistantContent,
+					},
+				})
+			}
+		case piTranscriptEntryTypeBranch:
+			text := strings.TrimSpace(entry.Summary)
+			if text == "" {
 				continue
 			}
-			out.Write(line)
-			out.WriteByte('\n')
-		case "assistant":
-			assistantContent := normalizePiAssistantContent(entry.Message.Content)
-			if len(assistantContent) == 0 {
+			appendPiAssistantTextLine(&out, entry.EntryID(), piSummarizerBranchSummaryPrefix+text)
+		case piTranscriptEntryTypeCompaction:
+			text := strings.TrimSpace(entry.Summary)
+			if text == "" {
 				continue
 			}
-			line, marshalErr := json.Marshal(map[string]interface{}{
-				"type": "assistant",
-				"uuid": entry.EntryID(),
-				"message": map[string]interface{}{
-					"content": assistantContent,
-				},
-			})
-			if marshalErr != nil {
+			appendPiAssistantTextLine(&out, entry.EntryID(), piSummarizerCompactionPrefix+text)
+		case piTranscriptEntryTypeCustom:
+			text := normalizePiCustomMessageText(entry.Content)
+			if text == "" {
 				continue
 			}
-			out.Write(line)
-			out.WriteByte('\n')
+			appendPiAssistantTextLine(&out, entry.EntryID(), piSummarizerCustomMessagePrefix+text)
 		}
 	}
 
@@ -636,6 +653,61 @@ func normalizePiAssistantContent(content interface{}) []map[string]interface{} {
 	}
 
 	return blocks
+}
+
+func appendJSONLLine(out *bytes.Buffer, value map[string]interface{}) {
+	line, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	out.Write(line)
+	out.WriteByte('\n')
+}
+
+func appendPiAssistantTextLine(out *bytes.Buffer, uuid string, text string) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return
+	}
+	appendJSONLLine(out, map[string]interface{}{
+		"type": "assistant",
+		"uuid": uuid,
+		"message": map[string]interface{}{
+			"content": []map[string]interface{}{{
+				"type": piContentTypeText,
+				"text": trimmed,
+			}},
+		},
+	})
+}
+
+func normalizePiCustomMessageText(content interface{}) string {
+	switch typed := content.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []interface{}:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if m["type"] != piContentTypeText {
+				continue
+			}
+			text, ok := m["text"].(string)
+			if !ok {
+				continue
+			}
+			trimmed := strings.TrimSpace(text)
+			if trimmed != "" {
+				parts = append(parts, trimmed)
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, "\n\n"))
+	default:
+		return ""
+	}
 }
 
 func canonicalizePiToolInput(args map[string]interface{}) map[string]interface{} {
