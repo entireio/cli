@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -264,6 +265,11 @@ func handleSessionStartCommon() error {
 
 	// Build informational message
 	message := "\n\nPowered by Entire:\n  This conversation will be linked to your next commit."
+
+	// Append wingman note if enabled
+	if settings.IsWingmanEnabled() {
+		message += "\n  Wingman is active: your changes will be automatically reviewed."
+	}
 
 	// Check for concurrent sessions and append count if any
 	strat := GetStrategy()
