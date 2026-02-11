@@ -51,11 +51,11 @@ func TestInsights_JSONOutput(t *testing.T) {
 
 		// Check for expected fields
 		expectedFields := []string{
-			"TotalSessions",
-			"TotalCheckpoints",
-			"TotalTime",
-			"TotalTokens",
-			"EstimatedCost",
+			"total_sessions",
+			"total_checkpoints",
+			"total_time",
+			"total_tokens",
+			"estimated_cost",
 		}
 
 		for _, field := range expectedFields {
@@ -196,7 +196,7 @@ func TestInsights_MutualExclusivity(t *testing.T) {
 			return
 		}
 
-		if !strings.Contains(output, "mutually exclusive") {
+		if !strings.Contains(output, "mutually exclusive") && !strings.Contains(output, "if any flags in the group") {
 			t.Errorf("expected 'mutually exclusive' error, got: %s", output)
 		}
 	})

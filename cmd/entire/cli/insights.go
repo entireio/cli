@@ -81,7 +81,7 @@ subsequent runs only process new sessions since last run.`,
 
 			// Validate flag dependencies
 			if formatJSONFlag && exportFlag {
-				return errors.New("--formatJSON and --export are mutually exclusive")
+				return errors.New("--json and --export are mutually exclusive")
 			}
 			if (formatFlag != "" || outputFlag != "") && !exportFlag {
 				return errors.New("--format and --output require --export flag")
@@ -107,13 +107,13 @@ subsequent runs only process new sessions since last run.`,
 	cmd.Flags().StringVar(&periodFlag, "period", periodWeek, "Time period: week, month, year")
 	cmd.Flags().StringVar(&repoFlag, "repo", "", "Filter by repository name")
 	cmd.Flags().StringVar(&agentFlag, "agent", "", "Filter by agent type")
-	cmd.Flags().BoolVar(&formatJSONFlag, "formatJSON", false, "Output as JSON to stdout")
+	cmd.Flags().BoolVar(&formatJSONFlag, "json", false, "Output as JSON to stdout")
 	cmd.Flags().BoolVar(&exportFlag, "export", false, "Export in structured format")
 	cmd.Flags().StringVar(&formatFlag, "format", "", "Export format: json, markdown, html (requires --export)")
 	cmd.Flags().StringVarP(&outputFlag, "output", "o", "", "Write to file instead of stdout")
 	cmd.Flags().BoolVar(&noCacheFlag, "no-cache", false, "Force full re-analysis (ignore cache)")
 
-	cmd.MarkFlagsMutuallyExclusive("formatJSON", "export")
+	cmd.MarkFlagsMutuallyExclusive("json", "export")
 
 	return cmd
 }
