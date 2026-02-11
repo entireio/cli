@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b87290028c1b",
+  "strategy": "manual-commit",
+  "branch": "feature/agent-installation-validation",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/setup.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b8/7290028c1b/0/metadata.json",
+      "transcript": "/b8/7290028c1b/0/full.jsonl",
+      "context": "/b8/7290028c1b/0/context.md",
+      "content_hash": "/b8/7290028c1b/0/content_hash.txt",
+      "prompt": "/b8/7290028c1b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 42,
+    "cache_creation_tokens": 89330,
+    "cache_read_tokens": 350236,
+    "output_tokens": 17,
+    "api_call_count": 5
+  }
+}
