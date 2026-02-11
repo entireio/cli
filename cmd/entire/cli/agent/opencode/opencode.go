@@ -194,7 +194,7 @@ func (o *Agent) FormatResumeCommand(sessionID string) string {
 	if strings.TrimSpace(sessionID) == "" {
 		return "opencode"
 	}
-	return "opencode --session " + sessionID
+	return "opencode attach --session " + sessionID
 }
 
 // InstallHooks writes the bridge plugin into .opencode/plugins/entire.js.

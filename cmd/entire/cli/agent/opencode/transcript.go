@@ -408,3 +408,15 @@ func CalculateTokenUsage(lines []TranscriptLine) *agent.TokenUsage {
 
 	return usage
 }
+
+// CalculateTokenUsageFromLines scopes token usage to a subset of lines starting at startLine.
+// This prevents double-counting across turns when transcripts are cumulative.
+func CalculateTokenUsageFromLines(lines []TranscriptLine, startLine int) *agent.TokenUsage {
+	if startLine <= 0 {
+		return CalculateTokenUsage(lines)
+	}
+	if startLine >= len(lines) {
+		return &agent.TokenUsage{}
+	}
+	return CalculateTokenUsage(lines[startLine:])
+}

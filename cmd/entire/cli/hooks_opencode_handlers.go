@@ -188,12 +188,16 @@ func handleOpenCodeStop() error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
 	}
 
-	// Calculate token usage
+	// Calculate token usage scoped to this turn (avoid cumulative double-counting)
 	var tokenUsage *agent.TokenUsage
 	if len(transcriptLines) > 0 {
-		tokenUsage = opencode.CalculateTokenUsage(transcriptLines)
+		startLine := 0
+		if preState != nil {
+			startLine = preState.StepTranscriptStart
+		}
+		tokenUsage = opencode.CalculateTokenUsageFromLines(transcriptLines, startLine)
 		if tokenUsage != nil && tokenUsage.APICallCount > 0 {
-			fmt.Fprintf(os.Stderr, "Token usage: input=%d, output=%d, calls=%d\n",
+			fmt.Fprintf(os.Stderr, "Token usage for this checkpoint: input=%d, output=%d, calls=%d\n",
 				tokenUsage.InputTokens, tokenUsage.OutputTokens, tokenUsage.APICallCount)
 		}
 	}
