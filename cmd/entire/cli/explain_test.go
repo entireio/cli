@@ -2187,7 +2187,7 @@ func TestExtractPromptsFromScopedTranscript(t *testing.T) {
 {"type":"assistant","uuid":"a2","message":{"content":[{"type":"text","text":"Second response"}]}}
 `)
 
-	prompts := extractPromptsFromTranscript(transcript)
+	prompts := extractPromptsFromTranscript(transcript, "")
 
 	if len(prompts) != 2 {
 		t.Fatalf("expected 2 prompts, got %d", len(prompts))

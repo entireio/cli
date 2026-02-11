@@ -319,7 +319,7 @@ func generateCheckpointSummary(w, _ io.Writer, store *checkpoint.GitStore, check
 	ctx := context.Background()
 	logging.Info(ctx, "generating checkpoint summary")
 
-	summary, err := summarize.GenerateFromTranscript(ctx, scopedTranscript, cpSummary.FilesTouched, nil)
+	summary, err := summarize.GenerateFromTranscript(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent, nil)
 	if err != nil {
 		return fmt.Errorf("failed to generate summary: %w", err)
 	}
@@ -375,9 +375,23 @@ func explainTemporaryCheckpoint(w io.Writer, repo *git.Repository, store *checkp
 
 	tc := matches[0]
 
+	// Get shadow commit and tree to read metadata
+	shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
+	if commitErr != nil {
+		return "", false
+	}
+
+	shadowTree, treeErr := shadowCommit.Tree()
+	if treeErr != nil {
+		return "", false
+	}
+
+	// Read agent type from shadow branch metadata (stored during checkpoint creation)
+	agentType := strategy.ReadAgentTypeFromTree(shadowTree, tc.MetadataDir)
+
 	// Handle raw transcript output
 	if rawTranscript {
-		transcriptBytes, transcriptErr := store.GetTranscriptFromCommit(tc.CommitHash, tc.MetadataDir, agent.AgentTypeUnknown)
+		transcriptBytes, transcriptErr := store.GetTranscriptFromCommit(tc.CommitHash, tc.MetadataDir, agentType)
 		if transcriptErr != nil || len(transcriptBytes) == 0 {
 			// Return specific error message (consistent with committed checkpoints)
 			return fmt.Sprintf("checkpoint %s has no transcript", tc.CommitHash.String()[:7]), false
@@ -387,17 +401,6 @@ func explainTemporaryCheckpoint(w io.Writer, repo *git.Repository, store *checkp
 			return fmt.Sprintf("failed to write transcript: %v", writeErr), false
 		}
 		return "", true
-	}
-
-	// Found exactly one match - read metadata from shadow branch commit tree
-	shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
-	if commitErr != nil {
-		return "", false
-	}
-
-	shadowTree, treeErr := shadowCommit.Tree()
-	if treeErr != nil {
-		return "", false
 	}
 
 	// Read prompts from shadow branch
@@ -427,7 +430,7 @@ func explainTemporaryCheckpoint(w io.Writer, repo *git.Repository, store *checkp
 	var fullTranscript []byte
 	var scopedTranscript []byte
 	if full || verbose {
-		fullTranscript, _ = store.GetTranscriptFromCommit(tc.CommitHash, tc.MetadataDir, agent.AgentTypeUnknown) //nolint:errcheck // Best-effort
+		fullTranscript, _ = store.GetTranscriptFromCommit(tc.CommitHash, tc.MetadataDir, agentType) //nolint:errcheck // Best-effort
 
 		if verbose && len(fullTranscript) > 0 {
 			// Compute scoped transcript by finding where parent's transcript ended
@@ -436,7 +439,7 @@ func explainTemporaryCheckpoint(w io.Writer, repo *git.Repository, store *checkp
 			scopedTranscript = fullTranscript // Default to full if no parent
 			if shadowCommit.NumParents() > 0 {
 				if parent, parentErr := shadowCommit.Parent(0); parentErr == nil {
-					parentTranscript, _ := store.GetTranscriptFromCommit(parent.Hash, tc.MetadataDir, agent.AgentTypeUnknown) //nolint:errcheck // Best-effort
+					parentTranscript, _ := store.GetTranscriptFromCommit(parent.Hash, tc.MetadataDir, agentType) //nolint:errcheck // Best-effort
 					if len(parentTranscript) > 0 {
 						// Count lines in parent transcript to know where to slice from
 						parentLineCount := countLines(parentTranscript)
@@ -446,7 +449,7 @@ func explainTemporaryCheckpoint(w io.Writer, repo *git.Repository, store *checkp
 			}
 		}
 	}
-	appendTranscriptSection(&sb, verbose, full, fullTranscript, scopedTranscript, sessionPrompt)
+	appendTranscriptSection(&sb, verbose, full, fullTranscript, scopedTranscript, sessionPrompt, agentType)
 
 	return sb.String(), true
 }
@@ -534,12 +537,12 @@ func scopeTranscriptForCheckpoint(fullTranscript []byte, linesAtStart int) []byt
 
 // extractPromptsFromTranscript extracts user prompts from transcript bytes.
 // Returns a slice of prompt strings.
-func extractPromptsFromTranscript(transcriptBytes []byte) []string {
+func extractPromptsFromTranscript(transcriptBytes []byte, agentType agent.AgentType) []string {
 	if len(transcriptBytes) == 0 {
 		return nil
 	}
 
-	condensed, err := summarize.BuildCondensedTranscriptFromBytes(transcriptBytes)
+	condensed, err := summarize.BuildCondensedTranscriptFromBytes(transcriptBytes, agentType)
 	if err != nil {
 		return nil
 	}
@@ -573,7 +576,7 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 	scopedTranscript := scopeTranscriptForCheckpoint(content.Transcript, meta.GetTranscriptStart())
 
 	// Extract prompts from the scoped transcript for intent extraction
-	scopedPrompts := extractPromptsFromTranscript(scopedTranscript)
+	scopedPrompts := extractPromptsFromTranscript(scopedTranscript, meta.Agent)
 
 	// Header - always shown
 	// Note: CheckpointID is always exactly 12 characters, matching checkpointIDDisplayLength
@@ -653,7 +656,7 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 	}
 
 	// Transcript section: full shows entire session, verbose shows checkpoint scope
-	appendTranscriptSection(&sb, verbose, full, content.Transcript, scopedTranscript, content.Prompts)
+	appendTranscriptSection(&sb, verbose, full, content.Transcript, scopedTranscript, content.Prompts, meta.Agent)
 
 	return sb.String()
 }
@@ -662,24 +665,24 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 // based on verbosity level. Full mode shows the entire session, verbose shows checkpoint scope.
 // fullTranscript is the entire session transcript, scopedContent is either scoped transcript bytes
 // or a pre-formatted string (for backwards compat), and scopedFallback is used when scoped parsing fails.
-func appendTranscriptSection(sb *strings.Builder, verbose, full bool, fullTranscript, scopedTranscript []byte, scopedFallback string) {
+func appendTranscriptSection(sb *strings.Builder, verbose, full bool, fullTranscript, scopedTranscript []byte, scopedFallback string, agentType agent.AgentType) {
 	switch {
 	case full:
 		sb.WriteString("\n")
 		sb.WriteString("Transcript (full session):\n")
-		sb.WriteString(formatTranscriptBytes(fullTranscript, ""))
+		sb.WriteString(formatTranscriptBytes(fullTranscript, "", agentType))
 
 	case verbose:
 		sb.WriteString("\n")
 		sb.WriteString("Transcript (checkpoint scope):\n")
-		sb.WriteString(formatTranscriptBytes(scopedTranscript, scopedFallback))
+		sb.WriteString(formatTranscriptBytes(scopedTranscript, scopedFallback, agentType))
 	}
 }
 
 // formatTranscriptBytes formats transcript bytes into a human-readable string.
-// It parses the JSONL transcript and formats it using the condensed format.
+// It parses the transcript (JSONL for Claude, JSON for Gemini) and formats it using the condensed format.
 // The fallback is used for backwards compatibility when transcript parsing fails or is empty.
-func formatTranscriptBytes(transcriptBytes []byte, fallback string) string {
+func formatTranscriptBytes(transcriptBytes []byte, fallback string, agentType agent.AgentType) string {
 	if len(transcriptBytes) == 0 {
 		if fallback != "" {
 			return fallback + "\n"
@@ -687,7 +690,7 @@ func formatTranscriptBytes(transcriptBytes []byte, fallback string) string {
 		return "  (none)\n"
 	}
 
-	condensed, err := summarize.BuildCondensedTranscriptFromBytes(transcriptBytes)
+	condensed, err := summarize.BuildCondensedTranscriptFromBytes(transcriptBytes, agentType)
 	if err != nil || len(condensed) == 0 {
 		if fallback != "" {
 			return fallback + "\n"
@@ -922,7 +925,7 @@ func getBranchCheckpoints(repo *git.Repository, limit int) ([]strategy.RewindPoi
 		content, _ := store.ReadLatestSessionContent(context.Background(), cpID) //nolint:errcheck  // Best-effort
 		if content != nil {
 			scopedTranscript := scopeTranscriptForCheckpoint(content.Transcript, content.Metadata.GetTranscriptStart())
-			scopedPrompts := extractPromptsFromTranscript(scopedTranscript)
+			scopedPrompts := extractPromptsFromTranscript(scopedTranscript, content.Metadata.Agent)
 			if len(scopedPrompts) > 0 && scopedPrompts[0] != "" {
 				point.SessionPrompt = scopedPrompts[0]
 			}
