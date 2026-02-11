@@ -53,12 +53,12 @@ func handleOpenCodeSessionIdle() error {
 	transcriptPath := input.SessionRef
 	if transcriptPath != "" && sessionID != unknownSessionID {
 		resolved := ag.ResolveSessionFile(transcriptPath, ag.ExtractAgentSessionID(sessionID))
-		if fileExists(resolved) {
+		if fileExistsAndIsRegular(resolved) {
 			transcriptPath = resolved
 		}
 	}
 
-	if transcriptPath == "" || !fileExists(transcriptPath) {
+	if transcriptPath == "" || !fileExistsAndIsRegular(transcriptPath) {
 		// OpenCode sessions may not always have a transcript file accessible
 		// from the filesystem. Continue without transcript to still capture
 		// git status changes.
@@ -111,7 +111,7 @@ func setupOpenCodeSessionDir(ctx *openCodeSessionContext) error {
 	}
 
 	// Copy transcript if available
-	if ctx.transcriptPath != "" && fileExists(ctx.transcriptPath) {
+	if ctx.transcriptPath != "" && fileExistsAndIsRegular(ctx.transcriptPath) {
 		logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
 		if err := copyFile(ctx.transcriptPath, logFile); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to copy transcript: %v\n", err)

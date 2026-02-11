@@ -528,3 +528,117 @@ func TestExtractModifiedFiles(t *testing.T) {
 		t.Errorf("files[1] = %q, want %q", files[1], "README.md")
 	}
 }
+
+func TestExtractModifiedFiles_EventMsgPatchApplyBegin(t *testing.T) {
+	t.Parallel()
+
+	// Actual Codex rollout format: event_msg with patch_apply_begin payload
+	// File paths are HashMap keys in the changes object
+	data := []byte(`{"type":"event_msg","payload":{"type":"patch_apply_begin","changes":{"src/main.rs":{"status":"modified"},"src/lib.rs":{"status":"added"}}}}
+{"type":"session_meta","payload":{"session_id":"abc"}}
+{"type":"event_msg","payload":{"type":"patch_apply_begin","changes":{"README.md":{"status":"modified"}}}}
+`)
+
+	files := ExtractModifiedFiles(data)
+	if len(files) != 3 {
+		t.Fatalf("ExtractModifiedFiles() returned %d files, want 3, got: %v", len(files), files)
+	}
+
+	// Build a set for order-independent checking (HashMap iteration order is non-deterministic)
+	fileSet := make(map[string]bool)
+	for _, f := range files {
+		fileSet[f] = true
+	}
+
+	for _, expected := range []string{"src/main.rs", "src/lib.rs", "README.md"} {
+		if !fileSet[expected] {
+			t.Errorf("expected file %q not found in result %v", expected, files)
+		}
+	}
+}
+
+func TestExtractModifiedFiles_MixedFormats(t *testing.T) {
+	t.Parallel()
+
+	// Mix of old-style item events and new event_msg format
+	data := []byte(`{"type":"item.completed","item":{"type":"file_change","file_path":"old-format.go"}}
+{"type":"event_msg","payload":{"type":"patch_apply_begin","changes":{"new-format.rs":{"status":"modified"}}}}
+{"type":"item.completed","item":{"type":"function_call","name":"write_file","input":{"file_path":"func-call.py"}}}
+`)
+
+	files := ExtractModifiedFiles(data)
+	if len(files) != 3 {
+		t.Fatalf("ExtractModifiedFiles() returned %d files, want 3, got: %v", len(files), files)
+	}
+
+	fileSet := make(map[string]bool)
+	for _, f := range files {
+		fileSet[f] = true
+	}
+
+	for _, expected := range []string{"old-format.go", "new-format.rs", "func-call.py"} {
+		if !fileSet[expected] {
+			t.Errorf("expected file %q not found in result %v", expected, files)
+		}
+	}
+}
+
+func TestExtractModifiedFiles_LargeLine(t *testing.T) {
+	t.Parallel()
+
+	// Verify that lines > 64KB are handled correctly (bufio.Scanner would fail)
+	longValue := strings.Repeat("a", 100_000)
+	data := []byte(`{"type":"event_msg","payload":{"type":"patch_apply_begin","changes":{"large-file.txt":{"status":"modified"}}}}
+{"type":"response_item","payload":{"text":"` + longValue + `"}}
+{"type":"event_msg","payload":{"type":"patch_apply_begin","changes":{"after-large.txt":{"status":"added"}}}}
+`)
+
+	files := ExtractModifiedFiles(data)
+	fileSet := make(map[string]bool)
+	for _, f := range files {
+		fileSet[f] = true
+	}
+
+	if !fileSet["large-file.txt"] {
+		t.Error("expected large-file.txt in result")
+	}
+	if !fileSet["after-large.txt"] {
+		t.Error("expected after-large.txt in result (should not be lost after large line)")
+	}
+}
+
+func TestInstallHooks_NoOverwriteUserNotify(t *testing.T) {
+	// Test that InstallHooks respects existing non-Entire notify lines
+	// even when an Entire notify line was previously found and removed.
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	// Pre-create config with both an Entire line and a user line
+	configPath := filepath.Join(".codex", "config.toml")
+	if err := os.MkdirAll(".codex", 0o750); err != nil {
+		t.Fatalf("failed to create .codex: %v", err)
+	}
+	content := "notify = [\"my-custom-tool\"]\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	ag := &CodexAgent{}
+	// Without force, should not overwrite user's custom notify line
+	count, err := ag.InstallHooks(false, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	if count != 0 {
+		t.Errorf("InstallHooks() count = %d, want 0 (should not overwrite user notify)", count)
+	}
+
+	// Verify user's line is still there
+	data, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatalf("failed to read config: %v", readErr)
+	}
+	if !strings.Contains(string(data), "my-custom-tool") {
+		t.Error("user's custom notify line was removed")
+	}
+}

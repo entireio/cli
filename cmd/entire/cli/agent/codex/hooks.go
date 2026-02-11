@@ -87,12 +87,10 @@ func (c *CodexAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	// - Always remove Entire notify lines (to update)
 	// - When force=true, also remove non-Entire notify lines (to avoid duplicate TOML keys)
 	var filteredLines []string
-	notifyFound := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "notify") && strings.Contains(trimmed, "=") {
 			if isEntireNotifyLine(trimmed) {
-				notifyFound = true
 				continue // Skip existing Entire notify line
 			}
 			if force {
@@ -102,8 +100,9 @@ func (c *CodexAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		filteredLines = append(filteredLines, line)
 	}
 
-	// If there's a non-Entire notify line, don't overwrite it
-	if !notifyFound && !force {
+	// If there's a non-Entire notify line, don't overwrite it (regardless of whether
+	// an Entire line was found/removed — we respect user-configured notify commands).
+	if !force {
 		for _, line := range filteredLines {
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, "notify") && strings.Contains(trimmed, "=") {

@@ -325,9 +325,11 @@ func (c *CodexAgent) ExtractModifiedFilesFromOffset(path string, startOffset int
 		if len(lineData) > 0 {
 			lineNum++
 			if lineNum > startOffset {
-				if fp := extractFilePathFromLine(lineData); fp != "" && !fileSet[fp] {
-					fileSet[fp] = true
-					files = append(files, fp)
+				for _, fp := range extractFilePathsFromLine(lineData) {
+					if !fileSet[fp] {
+						fileSet[fp] = true
+						files = append(files, fp)
+					}
 				}
 			}
 		}
@@ -360,49 +362,101 @@ func (c *CodexAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 }
 
 // ExtractModifiedFiles extracts file paths from Codex transcript data.
-// Parses JSONL events and collects file paths from file_change and function_call items.
+// Parses JSONL events and collects file paths from file_change, function_call,
+// and event_msg (patch_apply_begin) items.
+// Uses bufio.NewReader instead of Scanner to avoid the 64KB default token limit.
 func ExtractModifiedFiles(data []byte) []string {
 	fileSet := make(map[string]bool)
 	var files []string
 
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	for scanner.Scan() {
-		if fp := extractFilePathFromLine(scanner.Bytes()); fp != "" && !fileSet[fp] {
-			fileSet[fp] = true
-			files = append(files, fp)
+	reader := bufio.NewReader(strings.NewReader(string(data)))
+	for {
+		lineData, readErr := reader.ReadBytes('\n')
+		if readErr != nil && readErr != io.EOF {
+			break
+		}
+
+		if len(lineData) > 0 {
+			for _, fp := range extractFilePathsFromLine(lineData) {
+				if !fileSet[fp] {
+					fileSet[fp] = true
+					files = append(files, fp)
+				}
+			}
+		}
+
+		if readErr == io.EOF {
+			break
 		}
 	}
 
 	return files
 }
 
-// extractFilePathFromLine extracts a file path from a single JSONL line.
-// Checks for file_change items and function_call items that modify files.
-func extractFilePathFromLine(lineData []byte) string {
+// extractFilePathsFromLine extracts file paths from a single JSONL line.
+// Handles multiple Codex event formats:
+//   - response_item with file_change or function_call items (via "item" field)
+//   - event_msg with patch_apply_begin payload (file paths are HashMap keys in "changes")
+//
+// Returns nil if no file paths are found.
+func extractFilePathsFromLine(lineData []byte) []string {
 	var event rolloutEvent
 	if json.Unmarshal(lineData, &event) != nil {
-		return ""
+		return nil
 	}
+
+	// Check for event_msg events (e.g., patch_apply_begin with changes HashMap)
+	// See codex-rs/exec/src/exec_events.rs: PatchApplyBeginEvent { changes: HashMap<PathBuf, FileChange> }
+	if event.Type == "event_msg" && len(event.Payload) > 0 {
+		return extractFilePathsFromEventMsg(event.Payload)
+	}
+
+	// Check for response_item events with file-modifying items
 	if event.Item == nil {
-		return ""
+		return nil
 	}
 
 	var item rolloutItem
 	if json.Unmarshal(event.Item, &item) != nil {
-		return ""
+		return nil
 	}
 
 	// Check for file_change items
 	if item.Type == ItemTypeFileChange {
-		return extractFilePathFromItem(event.Item)
+		if fp := extractFilePathFromItem(event.Item); fp != "" {
+			return []string{fp}
+		}
 	}
 
 	// Check for function_call items that modify files (e.g., write_file, apply_diff)
 	if item.Type == ItemTypeFunctionCall {
-		return extractFilePathFromFunctionCall(event.Item)
+		if fp := extractFilePathFromFunctionCall(event.Item); fp != "" {
+			return []string{fp}
+		}
 	}
 
-	return ""
+	return nil
+}
+
+// extractFilePathsFromEventMsg extracts file paths from an event_msg payload.
+// For patch_apply_begin events, file paths are the keys of the changes HashMap.
+func extractFilePathsFromEventMsg(payload json.RawMessage) []string {
+	var msg eventMsgPayload
+	if json.Unmarshal(payload, &msg) != nil {
+		return nil
+	}
+
+	if msg.Type != EventMsgTypePatchApplyBegin || len(msg.Changes) == 0 {
+		return nil
+	}
+
+	paths := make([]string, 0, len(msg.Changes))
+	for filePath := range msg.Changes {
+		if filePath != "" {
+			paths = append(paths, filePath)
+		}
+	}
+	return paths
 }
 
 // extractFilePathFromItem extracts a file path from an item's various path fields.

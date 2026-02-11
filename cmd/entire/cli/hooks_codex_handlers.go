@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -26,7 +27,14 @@ func handleCodexAgentTurnComplete() error {
 		return fmt.Errorf("failed to get codex agent: %w", err)
 	}
 
-	input, err := ag.ParseHookInput(agent.HookStop, os.Stdin)
+	// Codex sends its notify payload as the last positional argument (not stdin).
+	// See codex-rs/hooks/src/user_notification.rs: command.arg(notify_payload), stdin(Stdio::null())
+	var reader io.Reader = os.Stdin
+	if args := GetCurrentHookArgs(); len(args) > 0 {
+		reader = strings.NewReader(args[len(args)-1])
+	}
+
+	input, err := ag.ParseHookInput(agent.HookStop, reader)
 	if err != nil {
 		return fmt.Errorf("failed to parse hook input: %w", err)
 	}
@@ -48,12 +56,12 @@ func handleCodexAgentTurnComplete() error {
 	transcriptPath := input.SessionRef
 	if transcriptPath != "" && sessionID != unknownSessionID {
 		resolved := ag.ResolveSessionFile(transcriptPath, ag.ExtractAgentSessionID(sessionID))
-		if fileExists(resolved) {
+		if fileExistsAndIsRegular(resolved) {
 			transcriptPath = resolved
 		}
 	}
 
-	if transcriptPath == "" || !fileExists(transcriptPath) {
+	if transcriptPath == "" || !fileExistsAndIsRegular(transcriptPath) {
 		return fmt.Errorf("transcript file not found or empty: %s", transcriptPath)
 	}
 

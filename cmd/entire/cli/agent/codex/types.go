@@ -30,6 +30,15 @@ type rolloutItem struct {
 	Name   string `json:"name,omitempty"`
 }
 
+// eventMsgPayload represents the payload of an "event_msg" rollout event.
+// Codex emits event_msg events for various internal events. The "patch_apply_begin"
+// subtype contains a changes map where keys are file paths being modified.
+// See codex-rs/exec/src/exec_events.rs: PatchApplyBeginEvent { changes: HashMap<PathBuf, FileChange> }
+type eventMsgPayload struct {
+	Type    string                     `json:"type"`
+	Changes map[string]json.RawMessage `json:"changes,omitempty"`
+}
+
 // Codex event item types
 const (
 	ItemTypeFileChange       = "file_change"
@@ -37,4 +46,9 @@ const (
 	ItemTypeAgentMessage     = "agent_message"
 	ItemTypeFunctionCall     = "function_call"
 	ItemTypeLocalShellCall   = "local_shell_call"
+)
+
+// Codex event_msg subtypes
+const (
+	EventMsgTypePatchApplyBegin = "patch_apply_begin"
 )
