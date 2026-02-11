@@ -3,8 +3,9 @@
   "checkpoint_id": "769ddf2969b6",
   "strategy": "manual-commit",
   "branch": "soph/gemini-rewind",
-  "checkpoints_count": 1,
+  "checkpoints_count": 3,
   "files_touched": [
+    "cmd/entire/cli/agent/geminicli/transcript.go",
     "cmd/entire/cli/checkpoint/checkpoint.go",
     "cmd/entire/cli/checkpoint/committed.go",
     "cmd/entire/cli/resume.go",
@@ -28,13 +29,20 @@
       "context": "/76/9ddf2969b6/1/context.md",
       "content_hash": "/76/9ddf2969b6/1/content_hash.txt",
       "prompt": "/76/9ddf2969b6/1/prompt.txt"
+    },
+    {
+      "metadata": "/76/9ddf2969b6/2/metadata.json",
+      "transcript": "/76/9ddf2969b6/2/full.jsonl",
+      "context": "/76/9ddf2969b6/2/context.md",
+      "content_hash": "/76/9ddf2969b6/2/content_hash.txt",
+      "prompt": "/76/9ddf2969b6/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 62,
-    "cache_creation_tokens": 192782,
-    "cache_read_tokens": 5912941,
-    "output_tokens": 15768,
-    "api_call_count": 54
+    "input_tokens": 3476,
+    "cache_creation_tokens": 292437,
+    "cache_read_tokens": 8031778,
+    "output_tokens": 17730,
+    "api_call_count": 80
   }
 }
