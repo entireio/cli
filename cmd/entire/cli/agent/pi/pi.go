@@ -16,15 +16,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// Agent name and type constants
-const (
-	AgentNamePi agent.AgentName = "pi"
-	AgentTypePi agent.AgentType = "Pi Coding Agent"
-)
-
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
 func init() {
-	agent.Register(AgentNamePi, NewPiAgent)
+	agent.Register(agent.AgentNamePi, NewPiAgent)
 }
 
 // PiAgent implements the Agent interface for pi coding agent.
@@ -37,12 +31,12 @@ func NewPiAgent() agent.Agent {
 
 // Name returns the agent registry key.
 func (p *PiAgent) Name() agent.AgentName {
-	return AgentNamePi
+	return agent.AgentNamePi
 }
 
 // Type returns the agent type identifier.
 func (p *PiAgent) Type() agent.AgentType {
-	return AgentTypePi
+	return agent.AgentTypePi
 }
 
 // Description returns a human-readable description.
@@ -60,12 +54,6 @@ func (p *PiAgent) DetectPresence() (bool, error) {
 	// Check for .pi directory
 	piDir := filepath.Join(repoRoot, ".pi")
 	if _, err := os.Stat(piDir); err == nil {
-		return true, nil
-	}
-
-	// Check for .pi/settings.json
-	settingsFile := filepath.Join(repoRoot, ".pi", "settings.json")
-	if _, err := os.Stat(settingsFile); err == nil {
 		return true, nil
 	}
 
@@ -447,14 +435,16 @@ func (p *PiAgent) GetTranscriptPosition(path string) (int, error) {
 	lineCount := 0
 
 	for {
-		_, err := reader.ReadBytes('\n')
+		lineData, err := reader.ReadBytes('\n')
+		if len(lineData) > 0 {
+			lineCount++
+		}
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
 			return 0, fmt.Errorf("failed to read transcript: %w", err)
 		}
-		lineCount++
 	}
 
 	return lineCount, nil
@@ -490,10 +480,27 @@ func (p *PiAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (
 					// Extract files from this entry
 					if entry.Type == "message" && entry.Message != nil {
 						msg := entry.Message
+
+						// Check toolResult messages for write/edit
 						if msg.Role == "toolResult" && (msg.ToolName == "write" || msg.ToolName == "edit") {
 							if details, ok := msg.Details.(map[string]interface{}); ok {
 								if filePath, ok := details["path"].(string); ok && filePath != "" {
 									modFiles[filePath] = true
+								}
+							}
+						}
+
+						// Check assistant messages for tool calls
+						if msg.Role == "assistant" {
+							for _, content := range msg.Content {
+								if content.Type == "toolCall" {
+									if content.Name == "write" || content.Name == "edit" {
+										if args, ok := content.Arguments.(map[string]interface{}); ok {
+											if filePath, ok := args["path"].(string); ok && filePath != "" {
+												modFiles[filePath] = true
+											}
+										}
+									}
 								}
 							}
 						}

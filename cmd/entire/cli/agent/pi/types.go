@@ -10,28 +10,28 @@ type piHookInput struct {
 
 // piSessionEntry represents a line in pi's JSONL session file.
 type piSessionEntry struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id,omitempty"`
-	ParentID  string          `json:"parentId,omitempty"`
-	Timestamp string          `json:"timestamp,omitempty"`
-	Message   *piMessage      `json:"message,omitempty"`
-	Version   int             `json:"version,omitempty"`
-	CWD       string          `json:"cwd,omitempty"`
-	Summary   string          `json:"summary,omitempty"`
-	Data      interface{}     `json:"data,omitempty"`
+	Type      string      `json:"type"`
+	ID        string      `json:"id,omitempty"`
+	ParentID  string      `json:"parentId,omitempty"`
+	Timestamp string      `json:"timestamp,omitempty"`
+	Message   *piMessage  `json:"message,omitempty"`
+	Version   int         `json:"version,omitempty"`
+	CWD       string      `json:"cwd,omitempty"`
+	Summary   string      `json:"summary,omitempty"`
+	Data      interface{} `json:"data,omitempty"`
 }
 
 // piMessage represents a message in pi's session format.
 type piMessage struct {
-	Role      string           `json:"role"`
-	Content   []piContentBlock `json:"content,omitempty"`
-	ToolName  string           `json:"toolName,omitempty"`
-	ToolCallID string          `json:"toolCallId,omitempty"`
-	Details   interface{}      `json:"details,omitempty"`
-	IsError   bool             `json:"isError,omitempty"`
-	Timestamp int64            `json:"timestamp,omitempty"`
-	Provider  string           `json:"provider,omitempty"`
-	Model     string           `json:"model,omitempty"`
+	Role       string           `json:"role"`
+	Content    []piContentBlock `json:"content,omitempty"`
+	ToolName   string           `json:"toolName,omitempty"`
+	ToolCallID string           `json:"toolCallId,omitempty"`
+	Details    interface{}      `json:"details,omitempty"`
+	IsError    bool             `json:"isError,omitempty"`
+	Timestamp  int64            `json:"timestamp,omitempty"`
+	Provider   string           `json:"provider,omitempty"`
+	Model      string           `json:"model,omitempty"`
 }
 
 // piContentBlock represents a content block in pi messages.

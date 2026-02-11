@@ -56,23 +56,41 @@ func (p *PiAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	settingsPath := filepath.Join(repoRoot, ".pi", PiSettingsFileName)
 
 	// Read existing settings if they exist
-	var settings PiSettings
+	// Use map[string]json.RawMessage to preserve unknown fields
+	var rawSettings map[string]json.RawMessage
+	var packages []string
+
 	existingData, readErr := os.ReadFile(settingsPath) //nolint:gosec
 	if readErr == nil {
-		if err := json.Unmarshal(existingData, &settings); err != nil {
+		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
 			return 0, fmt.Errorf("failed to parse existing settings.json: %w", err)
 		}
+		// Extract packages array if it exists
+		if packagesRaw, ok := rawSettings["packages"]; ok {
+			if err := json.Unmarshal(packagesRaw, &packages); err != nil {
+				return 0, fmt.Errorf("failed to parse packages in settings.json: %w", err)
+			}
+		}
+	} else {
+		rawSettings = make(map[string]json.RawMessage)
 	}
 
 	// Check if extension is already installed
-	for _, pkg := range settings.Packages {
+	for _, pkg := range packages {
 		if pkg == entireExtensionPackage {
 			return 0, nil // Already installed
 		}
 	}
 
 	// Add the extension package
-	settings.Packages = append(settings.Packages, entireExtensionPackage)
+	packages = append(packages, entireExtensionPackage)
+
+	// Update the packages field in rawSettings
+	packagesJSON, err := json.Marshal(packages)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal packages: %w", err)
+	}
+	rawSettings["packages"] = packagesJSON
 
 	// Create directory if needed
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
@@ -80,7 +98,7 @@ func (p *PiAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	}
 
 	// Write settings
-	output, err := json.MarshalIndent(settings, "", "  ")
+	output, err := json.MarshalIndent(rawSettings, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal settings: %w", err)
 	}
@@ -105,22 +123,37 @@ func (p *PiAgent) UninstallHooks() error {
 		return nil // No settings file means nothing to uninstall
 	}
 
-	var settings PiSettings
-	if err := json.Unmarshal(data, &settings); err != nil {
+	// Use map[string]json.RawMessage to preserve unknown fields
+	var rawSettings map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSettings); err != nil {
 		return fmt.Errorf("failed to parse settings.json: %w", err)
 	}
 
+	// Extract and modify packages array
+	var packages []string
+	if packagesRaw, ok := rawSettings["packages"]; ok {
+		if err := json.Unmarshal(packagesRaw, &packages); err != nil {
+			return fmt.Errorf("failed to parse packages in settings.json: %w", err)
+		}
+	}
+
 	// Remove the extension package
-	newPackages := make([]string, 0, len(settings.Packages))
-	for _, pkg := range settings.Packages {
+	newPackages := make([]string, 0, len(packages))
+	for _, pkg := range packages {
 		if pkg != entireExtensionPackage {
 			newPackages = append(newPackages, pkg)
 		}
 	}
-	settings.Packages = newPackages
+
+	// Update the packages field in rawSettings
+	packagesJSON, err := json.Marshal(newPackages)
+	if err != nil {
+		return fmt.Errorf("failed to marshal packages: %w", err)
+	}
+	rawSettings["packages"] = packagesJSON
 
 	// Write back
-	output, err := json.MarshalIndent(settings, "", "  ")
+	output, err := json.MarshalIndent(rawSettings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
@@ -145,12 +178,20 @@ func (p *PiAgent) AreHooksInstalled() bool {
 		return false
 	}
 
-	var settings PiSettings
-	if err := json.Unmarshal(data, &settings); err != nil {
+	// Use map[string]json.RawMessage for consistency
+	var rawSettings map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSettings); err != nil {
 		return false
 	}
 
-	for _, pkg := range settings.Packages {
+	var packages []string
+	if packagesRaw, ok := rawSettings["packages"]; ok {
+		if err := json.Unmarshal(packagesRaw, &packages); err != nil {
+			return false
+		}
+	}
+
+	for _, pkg := range packages {
 		if pkg == entireExtensionPackage {
 			return true
 		}
