@@ -108,6 +108,26 @@ Checkpoint detail view shows:
   - Prompts and responses from the session
 
 Note: --session filters the list view; --commit and --checkpoint are mutually exclusive.`,
+		Example: `  # Show all checkpoints on the current branch
+  entire explain
+
+  # Explain a specific checkpoint in detail
+  entire explain --checkpoint a3b2c4d5e6f7
+
+  # Show summary only (short mode)
+  entire explain --checkpoint a3b2c4d5e6f7 --short
+
+  # Show full session transcript
+  entire explain --checkpoint a3b2c4d5e6f7 --full
+
+  # Explain the checkpoint associated with a commit
+  entire explain --commit HEAD
+
+  # Filter checkpoints by session ID
+  entire explain --session 2026-01-13
+
+  # Generate an AI summary for a checkpoint
+  entire explain --checkpoint a3b2c4d5e6f7 --generate`,
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) > 0 {
 				return fmt.Errorf("unexpected argument %q\nHint: use --checkpoint, --session, or --commit to specify what to explain", args[0])

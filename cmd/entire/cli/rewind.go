@@ -52,6 +52,20 @@ func newRewindCmd() *cobra.Command {
 This command will show you an interactive list of recent checkpoints.  You'll be
 able to select one for Entire to rewind your branch state, including your code and
 your agent's context.`,
+		Example: `  # Browse checkpoints interactively
+  entire rewind
+
+  # List available rewind points as JSON
+  entire rewind --list
+
+  # Rewind to a specific checkpoint (non-interactive)
+  entire rewind --to abc1234
+
+  # Restore only session logs without changing files
+  entire rewind --to abc1234 --logs-only
+
+  # Reset branch to a committed checkpoint (destructive)
+  entire rewind --to abc1234 --reset`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Check if Entire is disabled
 			if checkDisabledGuard(cmd.OutOrStdout()) {

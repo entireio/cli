@@ -64,6 +64,20 @@ Uses the manual-commit strategy by default. To use a different strategy:
   entire enable --strategy auto-commit
 
 Strategies: manual-commit (default), auto-commit`,
+		Example: `  # Enable Entire with default settings (interactive)
+  entire enable
+
+  # Enable with a specific strategy
+  entire enable --strategy auto-commit
+
+  # Enable for a specific agent (non-interactive)
+  entire enable --agent claude-code
+
+  # Enable with auto-commit strategy for a specific agent
+  entire enable --strategy auto-commit --agent gemini
+
+  # Force reinstall hooks
+  entire enable --force`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Check if we're in a git repository first - this is a prerequisite error,
 			// not a usage error, so we silence Cobra's output and use SilentError
@@ -150,6 +164,14 @@ To completely remove Entire integrations from this repository, use --uninstall:
   - Session state files (.git/entire-sessions/)
   - Shadow branches (entire/<hash>)
   - Agent hooks (Claude Code, Gemini CLI)`,
+		Example: `  # Disable Entire (hooks become no-ops)
+  entire disable
+
+  # Completely remove Entire from the repository
+  entire disable --uninstall
+
+  # Uninstall without confirmation prompt
+  entire disable --uninstall --force`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if uninstall {
 				return runUninstall(cmd.OutOrStdout(), cmd.ErrOrStderr(), force)

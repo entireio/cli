@@ -27,6 +27,11 @@ func newStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show Entire status",
 		Long:  "Show whether Entire is currently enabled or disabled",
+		Example: `  # Show current status
+  entire status
+
+  # Show detailed status for each settings file
+  entire status --detailed`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runStatus(cmd.OutOrStdout(), detailed)
 		},

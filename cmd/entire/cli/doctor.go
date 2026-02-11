@@ -38,6 +38,11 @@ For each stuck session, you can choose to:
 
 Use --force to condense all fixable sessions without prompting.  Sessions that can't
 be condensed will be discarded.`,
+		Example: `  # Scan for stuck sessions and fix interactively
+  entire doctor
+
+  # Fix all stuck sessions without prompting
+  entire doctor --force`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSessionsFix(cmd, forceFlag)
 		},

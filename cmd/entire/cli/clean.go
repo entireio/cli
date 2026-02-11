@@ -37,6 +37,11 @@ Default: shows a preview of items that would be deleted.
 With --force, actually deletes the orphaned items.
 
 The entire/checkpoints/v1 branch itself is never deleted.`,
+		Example: `  # Preview orphaned items (dry run)
+  entire clean
+
+  # Delete orphaned items
+  entire clean --force`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClean(cmd.OutOrStdout(), forceFlag)
 		},

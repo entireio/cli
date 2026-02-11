@@ -43,6 +43,11 @@ to fetch it.
 If newer commits without checkpoints exist on the branch (e.g., after merging main
 or cherry-picking from elsewhere), this operation will reset your Git status to the
 most recent commit with a checkpoint.  You'll be prompted to confirm resuming in this case.`,
+		Example: `  # Switch to a branch and resume its session
+  entire resume feature/login
+
+  # Resume from an older checkpoint without confirmation
+  entire resume feature/login --force`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if checkDisabledGuard(cmd.OutOrStdout()) {
