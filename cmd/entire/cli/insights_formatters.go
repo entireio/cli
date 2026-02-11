@@ -9,6 +9,8 @@ import (
 )
 
 // formatInsightsTerminal formats insights for terminal output.
+//
+//nolint:unparam // error return kept for consistency with other formatters
 func formatInsightsTerminal(report *InsightsReport, cacheStats CacheStats) ([]byte, error) {
 	var sb strings.Builder
 
@@ -113,6 +115,8 @@ func formatInsightsJSON(report *InsightsReport) ([]byte, error) {
 }
 
 // formatInsightsMarkdown formats insights as Markdown.
+//
+//nolint:unparam // error return kept for consistency with other formatters
 func formatInsightsMarkdown(report *InsightsReport) ([]byte, error) {
 	var sb strings.Builder
 
@@ -197,6 +201,8 @@ func formatInsightsMarkdown(report *InsightsReport) ([]byte, error) {
 }
 
 // formatInsightsHTML formats insights as HTML with a light, minimal design.
+//
+//nolint:maintidx,unparam // High complexity and error return acceptable for comprehensive HTML formatting
 func formatInsightsHTML(report *InsightsReport) ([]byte, error) {
 	var sb strings.Builder
 
@@ -692,14 +698,14 @@ func renderHeatmap(hours [24]int) string {
 	}
 
 	// Find max for scaling
-	max := 0
+	maxCount := 0
 	for _, count := range hours {
-		if count > max {
-			max = count
+		if count > maxCount {
+			maxCount = count
 		}
 	}
 
-	if max == 0 {
+	if maxCount == 0 {
 		return "  No activity\n"
 	}
 
@@ -711,8 +717,9 @@ func renderHeatmap(hours [24]int) string {
 		sb.WriteString(fmt.Sprintf("%2d ", hour))
 	}
 	sb.WriteString("\n  ")
+	//nolint:gosec // G602: hours is [24]int, hour range is 0-11, safe array access
 	for hour := range 12 {
-		intensity := float64(hours[hour]) / float64(max)
+		intensity := float64(hours[hour]) / float64(maxCount)
 		sb.WriteString(barChar(intensity))
 		sb.WriteString("  ")
 	}
@@ -722,7 +729,7 @@ func renderHeatmap(hours [24]int) string {
 	}
 	sb.WriteString("\n  ")
 	for hour := 12; hour < 24; hour++ {
-		intensity := float64(hours[hour]) / float64(max)
+		intensity := float64(hours[hour]) / float64(maxCount)
 		sb.WriteString(barChar(intensity))
 		sb.WriteString("  ")
 	}
@@ -733,12 +740,14 @@ func renderHeatmap(hours [24]int) string {
 
 // barChar returns a bar character based on intensity (0.0 to 1.0).
 func barChar(intensity float64) string {
-	if intensity < 0.1 {
+	switch {
+	case intensity < 0.1:
 		return "░"
-	} else if intensity < 0.3 {
+	case intensity < 0.3:
 		return "▒"
-	} else if intensity < 0.6 {
+	case intensity < 0.6:
 		return "▓"
+	default:
+		return "█"
 	}
-	return "█"
 }

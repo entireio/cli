@@ -14,16 +14,16 @@ import (
 // SessionFacet contains cached per-session analytics.
 // This allows incremental updates - only new sessions need full analysis.
 type SessionFacet struct {
-	SessionID      string
-	StartTime      time.Time
-	Duration       time.Duration
-	Tokens         int
-	Messages       int
-	FilesModified  int
-	Agent          agent.AgentType
-	Description    string
-	ToolCounts     map[string]int
-	HourlyActivity [24]int
+	SessionID      string          `json:"session_id"`
+	StartTime      time.Time       `json:"start_time"`
+	Duration       time.Duration   `json:"duration"`
+	Tokens         int             `json:"tokens"`
+	Messages       int             `json:"messages"`
+	FilesModified  int             `json:"files_modified"`
+	Agent          agent.AgentType `json:"agent"`
+	Description    string          `json:"description"`
+	ToolCounts     map[string]int  `json:"tool_counts"`
+	HourlyActivity [24]int         `json:"hourly_activity"`
 }
 
 // InsightsCache contains cached session facets.
@@ -41,11 +41,11 @@ const (
 func getCachePath(repoName string) (string, error) {
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get repo root: %w", err)
 	}
 
 	cacheDir := filepath.Join(repoRoot, ".entire", "insights-cache")
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
 		return "", fmt.Errorf("failed to create cache directory: %w", err)
 	}
 
@@ -64,6 +64,7 @@ func loadCache(repoName string) (*InsightsCache, error) {
 		return nil, err
 	}
 
+	//nolint:gosec // G304: cachePath is constructed from internal sources, not user input
 	data, err := os.ReadFile(cachePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -78,7 +79,8 @@ func loadCache(repoName string) (*InsightsCache, error) {
 
 	var cache InsightsCache
 	if err := json.Unmarshal(data, &cache); err != nil {
-		// Cache is corrupt - return empty cache
+		// Cache is corrupt - log and return empty cache to allow recovery
+		//nolint:nilerr // Intentionally ignoring corrupt cache to allow graceful recovery
 		return &InsightsCache{
 			Facets:      make(map[string]SessionFacet),
 			LastUpdated: time.Now(),

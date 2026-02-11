@@ -17,11 +17,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	formatJSON     = "json"
+	formatMarkdown = "markdown"
+	formatHTML     = "html"
+	periodWeek     = "week"
+	periodMonth    = "month"
+	periodYear     = "year"
+)
+
 func newInsightsCmd() *cobra.Command {
 	var periodFlag string
 	var repoFlag string
 	var agentFlag string
-	var jsonFlag bool
+	var formatJSONFlag bool
 	var exportFlag bool
 	var formatFlag string
 	var outputFlag string
@@ -71,46 +80,46 @@ subsequent runs only process new sessions since last run.`,
 			}
 
 			// Validate flag dependencies
-			if jsonFlag && exportFlag {
-				return errors.New("--json and --export are mutually exclusive")
+			if formatJSONFlag && exportFlag {
+				return errors.New("--formatJSON and --export are mutually exclusive")
 			}
 			if (formatFlag != "" || outputFlag != "") && !exportFlag {
 				return errors.New("--format and --output require --export flag")
 			}
 
 			// Validate period
-			if periodFlag != "" && periodFlag != "week" && periodFlag != "month" && periodFlag != "year" {
-				return fmt.Errorf("invalid period: %s (must be week, month, or year)", periodFlag)
+			if periodFlag != "" && periodFlag != periodWeek && periodFlag != periodMonth && periodFlag != periodYear {
+				return fmt.Errorf("invalid period: %s (must be %s, %s, or %s)", periodFlag, periodWeek, periodMonth, periodYear)
 			}
 
 			// Validate format
 			if exportFlag && formatFlag == "" {
-				formatFlag = "json" // Default format
+				formatFlag = formatJSON // Default format
 			}
-			if formatFlag != "" && formatFlag != "json" && formatFlag != "markdown" && formatFlag != "html" {
-				return fmt.Errorf("invalid format: %s (must be json, markdown, or html)", formatFlag)
+			if formatFlag != "" && formatFlag != formatJSON && formatFlag != formatMarkdown && formatFlag != formatHTML {
+				return fmt.Errorf("invalid format: %s (must be %s, %s, or %s)", formatFlag, formatJSON, formatMarkdown, formatHTML)
 			}
 
-			return runInsights(cmd.OutOrStdout(), cmd.ErrOrStderr(), periodFlag, repoFlag, agentFlag, jsonFlag, exportFlag, formatFlag, outputFlag, noCacheFlag)
+			return runInsights(cmd.OutOrStdout(), cmd.ErrOrStderr(), periodFlag, repoFlag, agentFlag, formatJSONFlag, exportFlag, formatFlag, outputFlag, noCacheFlag)
 		},
 	}
 
-	cmd.Flags().StringVar(&periodFlag, "period", "week", "Time period: week, month, year")
+	cmd.Flags().StringVar(&periodFlag, "period", periodWeek, "Time period: week, month, year")
 	cmd.Flags().StringVar(&repoFlag, "repo", "", "Filter by repository name")
 	cmd.Flags().StringVar(&agentFlag, "agent", "", "Filter by agent type")
-	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON to stdout")
+	cmd.Flags().BoolVar(&formatJSONFlag, "formatJSON", false, "Output as JSON to stdout")
 	cmd.Flags().BoolVar(&exportFlag, "export", false, "Export in structured format")
 	cmd.Flags().StringVar(&formatFlag, "format", "", "Export format: json, markdown, html (requires --export)")
 	cmd.Flags().StringVarP(&outputFlag, "output", "o", "", "Write to file instead of stdout")
 	cmd.Flags().BoolVar(&noCacheFlag, "no-cache", false, "Force full re-analysis (ignore cache)")
 
-	cmd.MarkFlagsMutuallyExclusive("json", "export")
+	cmd.MarkFlagsMutuallyExclusive("formatJSON", "export")
 
 	return cmd
 }
 
 // runInsights executes the insights command.
-func runInsights(w, _ io.Writer, period, repoFilter, agentFilter string, jsonOut, export bool, format, outputFile string, noCache bool) error {
+func runInsights(w, _ io.Writer, period, repoFilter, agentFilter string, formatJSONOut, export bool, format, outputFile string, noCache bool) error {
 	repo, err := openRepository()
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
@@ -120,7 +129,7 @@ func runInsights(w, _ io.Writer, period, repoFilter, agentFilter string, jsonOut
 	repoName, err := extractRepoName(repo)
 	if err != nil {
 		logging.Warn(context.Background(), "failed to extract repo name", "error", err)
-		repoName = "unknown"
+		repoName = unknownStrategyName
 	}
 
 	// If repo filter is set and doesn't match current repo, return early
@@ -164,15 +173,15 @@ func runInsights(w, _ io.Writer, period, repoFilter, agentFilter string, jsonOut
 	// Format output
 	var output []byte
 	switch {
-	case jsonOut:
+	case formatJSONOut:
 		output, err = formatInsightsJSON(report)
 	case export:
 		switch format {
-		case "json":
+		case formatJSON:
 			output, err = formatInsightsJSON(report)
-		case "markdown":
+		case formatMarkdown:
 			output, err = formatInsightsMarkdown(report)
-		case "html":
+		case formatHTML:
 			output, err = formatInsightsHTML(report)
 		default:
 			return fmt.Errorf("unsupported format: %s", format)
@@ -205,12 +214,13 @@ func runInsights(w, _ io.Writer, period, repoFilter, agentFilter string, jsonOut
 func extractRepoName(repo *git.Repository) (string, error) {
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get repo root: %w", err)
 	}
 
 	remotes, err := repo.Remotes()
-	if err != nil || len(remotes) == 0 {
-		// Fallback to directory name
+	//nolint:nilerr // Intentionally ignoring error - fallback to directory name
+	if len(remotes) == 0 || err != nil {
+		// Fallback to directory name (ignore error, use directory name as fallback)
 		return filepath.Base(repoRoot), nil
 	}
 

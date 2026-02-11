@@ -202,7 +202,7 @@ func TestSimpleHash(t *testing.T) {
 
 			// Check that hash is hexadecimal
 			for _, c := range got {
-				if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+				if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 					t.Errorf("simpleHash() = %v, contains non-hex character %c", got, c)
 				}
 			}

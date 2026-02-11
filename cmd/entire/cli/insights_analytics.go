@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"runtime"
 	"sort"
 	"sync"
@@ -27,79 +28,81 @@ type InsightsQuery struct {
 // InsightsReport contains aggregated analytics results.
 type InsightsReport struct {
 	// Summary stats
-	TotalSessions    int
-	TotalCheckpoints int
-	TotalTime        time.Duration
-	TotalTokens      int
-	EstimatedCost    float64
-	FilesModified    int
-	CommitsCreated   int
+	TotalSessions    int           `json:"total_sessions"`
+	TotalCheckpoints int           `json:"total_checkpoints"`
+	TotalTime        time.Duration `json:"total_time"`
+	TotalTokens      int           `json:"total_tokens"`
+	EstimatedCost    float64       `json:"estimated_cost"`
+	FilesModified    int           `json:"files_modified"`
+	CommitsCreated   int           `json:"commits_created"`
 
 	// Agent breakdown
-	AgentStats []AgentStat
+	AgentStats []AgentStat `json:"agent_stats"`
 
 	// Activity patterns
-	DailyActivity   []ActivityPoint
-	WeeklyActivity  []ActivityPoint
-	MonthlyActivity []ActivityPoint
-	PeakHours       [24]int
+	DailyActivity   []ActivityPoint `json:"daily_activity"`
+	WeeklyActivity  []ActivityPoint `json:"weekly_activity"`
+	MonthlyActivity []ActivityPoint `json:"monthly_activity"`
+	PeakHours       [24]int         `json:"peak_hours"`
 
 	// Top-K lists
-	TopRepos []RepoStat
-	TopTools []ToolStat
+	TopRepos []RepoStat `json:"top_repos"`
+	TopTools []ToolStat `json:"top_tools"`
 
 	// Recent sessions
-	RecentSessions []SessionSummary
+	RecentSessions []SessionSummary `json:"recent_sessions"`
 
 	// Time range
-	StartTime time.Time
-	EndTime   time.Time
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time"`
 }
 
 // AgentStat contains stats for a specific agent type.
 type AgentStat struct {
-	Agent    agent.AgentType
-	Sessions int
-	Tokens   int
-	Hours    float64
+	Agent    agent.AgentType `json:"agent"`
+	Sessions int             `json:"sessions"`
+	Tokens   int             `json:"tokens"`
+	Hours    float64         `json:"hours"`
 }
 
 // ActivityPoint represents activity at a specific time.
 type ActivityPoint struct {
-	Date     time.Time
-	Sessions int
-	Hours    float64
+	Date     time.Time `json:"date"`
+	Sessions int       `json:"sessions"`
+	Hours    float64   `json:"hours"`
 }
 
 // RepoStat contains stats for a repository.
 type RepoStat struct {
-	Name  string
-	Hours float64
+	Name  string  `json:"name"`
+	Hours float64 `json:"hours"`
 }
 
 // ToolStat contains stats for a tool.
 type ToolStat struct {
-	Name  string
-	Count int
+	Name  string `json:"name"`
+	Count int    `json:"count"`
 }
 
 // SessionSummary contains summary info for a session.
 type SessionSummary struct {
-	ID          string
-	Description string
-	StartTime   time.Time
-	Duration    time.Duration
-	Tokens      int
+	ID          string        `json:"id"`
+	Description string        `json:"description"`
+	StartTime   time.Time     `json:"start_time"`
+	Duration    time.Duration `json:"duration"`
+	Tokens      int           `json:"tokens"`
 }
 
 // CacheStats contains cache performance metrics.
 type CacheStats struct {
-	TotalSessions  int
-	CachedSessions int
-	NewSessions    int
+	TotalSessions  int `json:"total_sessions"`
+	CachedSessions int `json:"cached_sessions"`
+	NewSessions    int `json:"new_sessions"`
 }
 
 // computeInsights computes insights from sessions.
+//
+//nolint:unparam // error return kept for future error handling
 func computeInsights(repo *git.Repository, sessions []strategy.Session, query InsightsQuery, cache *InsightsCache, noCache bool) (*InsightsReport, CacheStats, error) {
 	ctx := context.Background()
 	store := checkpoint.NewGitStore(repo)
@@ -396,7 +399,7 @@ func chunkTranscript(transcriptBytes []byte, maxSize int) []byte {
 func extractToolUsage(transcriptBytes []byte) (map[string]int, error) {
 	lines, err := transcript.ParseFromBytes(transcriptBytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
 	}
 
 	toolCounts := make(map[string]int)
@@ -425,7 +428,7 @@ func extractToolUsage(transcriptBytes []byte) (map[string]int, error) {
 func extractHourlyActivity(transcriptBytes []byte) ([24]int, error) {
 	lines, err := transcript.ParseFromBytes(transcriptBytes)
 	if err != nil {
-		return [24]int{}, err
+		return [24]int{}, fmt.Errorf("failed to parse transcript: %w", err)
 	}
 
 	var hourly [24]int
