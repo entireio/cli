@@ -117,10 +117,7 @@ func ConvertExportToJSONL(exportJSON []byte) ([]byte, error) {
 		if err != nil {
 			continue // Skip malformed messages
 		}
-		createdAt := time.Now()
-		if msg.Info.Time.Created > 0 {
-			createdAt = time.Unix(msg.Info.Time.Created, 0)
-		}
+		createdAt := parseExportTimestamp(msg.Info.Time.Created)
 		lines = append(lines, TranscriptLineWithTime{
 			Line:      line,
 			CreatedAt: createdAt,
@@ -307,11 +304,7 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 				continue
 			}
 
-			var input transcript.ToolInput
-			if err := json.Unmarshal(block.Input, &input); err != nil {
-				continue
-			}
-
+			input := decodeToolInput(block.Input)
 			file := input.FilePath
 			if file == "" {
 				file = input.NotebookPath
@@ -325,6 +318,55 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 	}
 
 	return files
+}
+
+// parseExportTimestamp converts a raw export timestamp to time.Time, handling milliseconds.
+func parseExportTimestamp(raw int64) time.Time {
+	if raw == 0 {
+		return time.Now()
+	}
+
+	// OpenCode exports are likely milliseconds since epoch; detect and convert.
+	if raw > 1_000_000_000_000 {
+		return time.Unix(0, raw*int64(time.Millisecond))
+	}
+
+	return time.Unix(raw, 0)
+}
+
+// decodeToolInput handles both snake_case and camelCase tool inputs.
+func decodeToolInput(raw json.RawMessage) transcript.ToolInput {
+	var input transcript.ToolInput
+	if err := json.Unmarshal(raw, &input); err == nil {
+		if input.FilePath != "" || input.NotebookPath != "" {
+			return input
+		}
+	}
+
+	var alt struct {
+		FilePath     string `json:"filePath"`
+		NotebookPath string `json:"notebookPath"`
+		Path         string `json:"path"`
+		Notebook     string `json:"notebook"`
+		Filename     string `json:"filename"`
+	}
+	if err := json.Unmarshal(raw, &alt); err != nil {
+		return input
+	}
+
+	input.FilePath = firstNonEmpty(alt.FilePath, alt.Path, alt.Filename)
+	input.NotebookPath = firstNonEmpty(alt.NotebookPath, alt.Notebook)
+
+	return input
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // FileModificationTools lists OpenCode tools that modify files.
