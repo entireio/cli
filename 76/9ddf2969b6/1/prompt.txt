@@ -1,0 +1,341 @@
+Implement the following plan:
+
+# Fix: Per-session agent resolution in multi-session checkpoints
+
+## Context
+
+A checkpoint can contain multiple sessions from different agents (e.g., session 0 from Claude, session 1 from Gemini). The per-session agent type **is stored correctly** in each session's `metadata.json` on `entire/checkpoints/v1` (`CommittedMetadata.Agent`), but the consumption layer collapses everything to a single agent — always session 0's. This means session 1's transcript gets written to the wrong directory, with the wrong file extension, and the wrong resume command.
+
+The user's key insight: `RestoreLogsOnly()` already reads each session's metadata (including `content.Metadata.Agent`) inside its loop — it just ignores it. Rather than threading `SessionAgents` arrays through `CheckpointInfo` → `RewindPoint` → consumers, we resolve per-session agents **at consumption time** inside `RestoreLogsOnly()` and return the per-session info so callers can print correct resume commands.
+
+## Changes
+
+### 1. Add `RestoredSession` struct
+
+**`strategy/manual_commit_rewind.go`** — New struct returned by `RestoreLogsOnly`:
+```go
+type RestoredSession struct {
+    SessionID string
+    Agent     agent.AgentType
+    Prompt    string
+}
+```
+
+### 2. Change `RestoreLogsOnly` return type
+
+**`strategy/strategy.go`** — `LogsOnlyRestorer` interface (line 473-478):
+```go
+type LogsOnlyRestorer interface {
+    RestoreLogsOnly(point RewindPoint, force bool) ([]RestoredSession, error)
+}
+```
+
+**`strategy/manual_commit_rewind.go`** — Implementation signature (line 619):
+```go
+func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) ([]RestoredSession, error)
+```
+
+### 3. Per-session agent resolution in `RestoreLogsOnly()`
+
+**`strategy/manual_commit_rewind.go`** — Inside the session loop (after line 704), use `content.Metadata.Agent` to resolve a per-session agent:
+
+```go
+// Resolve per-session agent (fall back to outer ag for old checkpoints)
+sessionAgent := ag
+sessionAgentDir := sessionDir
+if content.Metadata.Agent != "" {
+    if perAg, err := ResolveAgentForRewind(content.Metadata.Agent); err == nil {
+        sessionAgent = perAg
+        if d, err := sessionAgent.GetSessionDir(repoRoot); err == nil {
+            sessionAgentDir = d
+        }
+    }
+}
+
+sessionFile := ResolveSessionFilePath(sessionID, sessionAgent, sessionAgentDir)
+```
+
+Collect `RestoredSession` entries and return them.
+
+Remove the outer single-agent `sessionDir` setup (lines 655-663) — each session computes its own dir.
+
+### 4. Per-session agent in `classifySessionsForRestore()`
+
+**`strategy/manual_commit_rewind.go`** — Same per-session resolution pattern:
+
+- Add `repoRoot string` parameter (caller at line 667 already has `repoRoot`)
+- Inside the loop, resolve per-session agent from `content.Metadata.Agent`
+- Use per-session agent + dir for `ResolveSessionFilePath`
+
+### 5. Update all callers in `rewind.go`
+
+5 call sites (lines 556, 605, 887, 928, 998) currently discard the return:
+```go
+if err := restorer.RestoreLogsOnly(point, true); err != nil {
+```
+
+Change to capture `[]RestoredSession`:
+```go
+sessions, err := restorer.RestoreLogsOnly(point, true)
+if err != nil {
+```
+
+Pass `sessions` to `printMultiSessionResumeCommands` (see step 7).
+
+### 6. Simplify `resume.go` caller
+
+**`resume.go`** (lines 408-486) currently:
+1. Calls `RestoreLogsOnly(point, force)`
+2. Re-opens the repository and re-reads the metadata tree to print resume commands
+
+With the new return type, eliminate the re-read — use `[]RestoredSession` directly:
+```go
+sessions, err := restorer.RestoreLogsOnly(point, force)
+if err != nil { ... }
+// Use sessions to print resume commands — no re-read needed
+```
+
+This removes ~40 lines of fallback/re-read logic (lines 422-486).
+
+### 7. Update `printMultiSessionResumeCommands()`
+
+**`rewind.go`** — Change signature from `(point RewindPoint, agent Agent)` to `(sessions []strategy.RestoredSession)`:
+
+For each session, resolve the agent from `session.Agent` via `ResolveAgentForRewind()`, then call `FormatResumeCommand`. Falls back to default agent for empty agent type.
+
+### 8. Unify `getAgent()` with `ResolveAgentForRewind()`
+
+**`rewind.go`** — Replace `getAgent()` body (line 33-42) to delegate:
+```go
+func getAgent(agentType agentpkg.AgentType) (agentpkg.Agent, error) {
+    return strategy.ResolveAgentForRewind(agentType)
+}
+```
+
+Fixes the inconsistency where `getAgent("")` errors but `ResolveAgentForRewind("")` falls back to Claude.
+
+## Files to modify
+
+| File | What |
+|------|------|
+| `cmd/entire/cli/strategy/strategy.go` | Change `LogsOnlyRestorer` interface return type |
+| `cmd/entire/cli/strategy/manual_commit_rewind.go` | Add `RestoredSession`, per-session agent in `RestoreLogsOnly()` and `classifySessionsForRestore()` |
+| `cmd/entire/cli/rewind.go` | Update 5 callers, rewrite `printMultiSessionResumeCommands()`, unify `getAgent()` |
+| `cmd/entire/cli/resume.go` | Simplify caller to use returned `[]RestoredSession` |
+
+## Verification
+
+1. `go build ./...`
+2. `mise run fmt && mise run lint`
+3. `go test ./cmd/entire/cli/... -count=1`
+4. Manual: create a checkpoint with two sessions from different agents, rewind, verify each transcript lands in the correct agent directory with correct resume commands
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+
+---
+
+Do not fallback, if session metadata does not have agent, print a warning like the session can not be restored agent is unknown
+
+---
+
+we should at least log that sessions that are skipped
+
+---
+
+that warn does not sound rigth, we are finding the sessions we will restore.
+
+---
+
+fix test
+
+---
+
+can you tell me what path pattern we are using while restoring a gemini chat ?
+
+---
+
+latest gemini session path is -> tmp/c21e88c2222c11176465156df273ed8854ee1b358c89bc253f4fd08666c70d82/chats/session-2026-02-10T23-57-9f5659bb.json 
+where the second element in the path you can find it into the full.jsonl projectHash attribute and the session id is composed with session-<startTime date hour and minute>-first part of session_id.
+Make a plan to fix that path only for gemini sessions
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the entire conversation:
+
+1. **Initial Request**: User provided a detailed plan to implement per-session agent resolution in multi-session checkpoints. The plan was in a markdown format with 8 steps.
+
+2. **Implementation Phase**: I read 4 key files (strategy.go, manual_commit_rewind.go, rewind.go, resume.go) and implemented the changes:
+   - Added `RestoredSession` struct to strategy.go
+   - Changed `LogsOnlyRestorer` interface return type from `error` to `([]RestoredSession, error)`
+   - Updated `RestoreLogsOnly()` implementation with per-session agent resolution
+   - Updated `classifySessionsForRestore()` with per-session agent resolution
+   - Updated all 5 callers in rewind.go
+   - Rewrote `printMultiSessionResumeCommands()` to accept `[]strategy.RestoredSession`
+   - Unified `getAgent()` with `ResolveAgentForRewind()`
+   - Simplified resume.go caller
+
+3. **Errors encountered**:
+   - wrapcheck lint error on `getAgent()` - fixed by wrapping the error
+   - `gofmt` stripped `//nolint:ireturn` comments from unrelated files - fixed by `git checkout` on those files
+   - 3 integration test failures (TestResume_*) because output no longer contained "Session:" - fixed by adding `Session:` line for single-session output
+   - TestResumeFromCurrentBranch_WithEntireCheckpointTrailer failed because old checkpoints without agent metadata were being skipped - fixed by adding `|| len(sessions) == 0` fallback in resume.go
+
+4. **User feedback #1**: User selected lines 628-632 and said "Do not fallback, if session metadata does not have agent, print a warning like the session can not be restored agent is unknown"
+   - I removed the outer `outerAgent` fallback entirely
+   - Made sessions without agent metadata skip with warnings
+   - Updated `classifySessionsForRestore` to remove `outerAgent` parameter
+   - Added `|| len(sessions) == 0` fallback in resume.go for backward compatibility
+
+5. **User feedback #2**: User selected "skipping conflict check" and said "that warn does not sound right, we are finding the sessions we will restore"
+   - Changed warning text to "cannot check for local conflicts"
+
+6. **User feedback #3**: User modified the file directly (removed warning messages from classifySessionsForRestore, simplified the skip conditions) and said "fix test"
+   - The user's edit removed the `|| len(sessions) == 0` check from resume.go
+   - I re-added it to fix the TestResumeFromCurrentBranch_WithEntireCheckpointTrailer test
+
+7. **Current Phase**: User entered plan mode asking about Gemini session path patterns during restore. They provided the actual Gemini path format:
+   - `tmp/c21e88c2222c11176465156df273ed8854ee1b358c89bc253f4fd08666c70d82/chats/session-2026-02-10T23-57-9f5659bb.json`
+   - The second element is a SHA256 hash found in `full.jsonl` `projectHash` attribute
+   - The session filename is `session-<startTime date hour minute>-<first part of session_id>`
+   - Current code uses `SanitizePathForGemini()` which replaces non-alphanumeric chars with `-` (WRONG - should be SHA256 hash)
+   - `projectHash` is NOT currently stored in checkpoint metadata
+
+I launched 2 Explore agents to understand the current implementation and available metadata. The key finding is that `projectHash` is not stored anywhere in checkpoint metadata, meaning we need to either:
+1. Extract it from the transcript (full.jsonl) at restore time
+2. Store it in checkpoint metadata going forward
+
+The plan file still has the old plan content and needs to be overwritten with the new Gemini path fix plan.
+
+Summary:
+1. Primary Request and Intent:
+   - **Completed task**: Implement per-session agent resolution in multi-session checkpoints so that each session's transcript is written to the correct agent-specific directory with the correct file extension and resume command.
+   - **Current task (in plan mode)**: Fix the Gemini session path resolution during restore. The current code uses `SanitizePathForGemini()` (replaces non-alphanumeric chars with `-`) to compute the directory, but the actual Gemini path uses a SHA256 hash. The user wants the path fixed **only for Gemini sessions**. The actual path pattern is: `~/.gemini/tmp/<sha256-project-hash>/chats/session-<startTime date hour minute>-<first-part-of-session-id>.json`
+
+2. Key Technical Concepts:
+   - Strategy pattern for session management (ManualCommitStrategy, AutoCommitStrategy)
+   - `LogsOnlyRestorer` interface with `RestoreLogsOnly()` method returning `[]RestoredSession`
+   - `RestoredSession` struct carries per-session agent type for correct path resolution
+   - `ResolveSessionFilePath()` → checks session state `TranscriptPath` first, falls back to `GetSessionDir()` + `ResolveSessionFile()`
+   - Gemini stores transcripts at `~/.gemini/tmp/<project-hash>/chats/session-<startTime>-<shortid>.json`
+   - The `<project-hash>` is a SHA256 hash (NOT a sanitized path), found in `full.jsonl` as `projectHash` attribute
+   - `projectHash` is NOT currently stored in `CommittedMetadata` — key gap for restore
+   - Checkpoint metadata stored on `entire/checkpoints/v1` orphan branch in sharded directories
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/strategy/strategy.go`**
+     - Defines `RewindPoint`, `LogsOnlyRestorer` interface, and now `RestoredSession` struct
+     - Changed `LogsOnlyRestorer.RestoreLogsOnly` return from `error` to `([]RestoredSession, error)`
+     ```go
+     type RestoredSession struct {
+         SessionID string
+         Agent     agent.AgentType
+         Prompt    string
+     }
+     type LogsOnlyRestorer interface {
+         RestoreLogsOnly(point RewindPoint, force bool) ([]RestoredSession, error)
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/manual_commit_rewind.go`**
+     - Core implementation of `RestoreLogsOnly()` — now resolves per-session agents from `content.Metadata.Agent`, skips sessions without agent metadata with warnings
+     - `classifySessionsForRestore()` — removed `outerAgent` parameter, skips sessions without agent metadata silently (user simplified this)
+     - `ResolveAgentForRewind()` — falls back to default agent for empty types
+     - `ResolveSessionFilePath()` — checks session state `TranscriptPath` first, then falls back to agent's `GetSessionDir()` + `ResolveSessionFile()`
+     - Key current code for session restore loop:
+     ```go
+     // Resolve per-session agent from metadata — skip if agent is unknown
+     if content.Metadata.Agent == "" {
+         fmt.Fprintf(os.Stderr, "  Warning: session %d (%s) has no agent metadata, skipping (cannot determine target directory)\n", i, sessionID)
+         continue
+     }
+     sessionAgent, agErr := ResolveAgentForRewind(content.Metadata.Agent)
+     if agErr != nil {
+         fmt.Fprintf(os.Stderr, "  Warning: session %d (%s) has unknown agent %q, skipping\n", i, sessionID, content.Metadata.Agent)
+         continue
+     }
+     ```
+     - User's final edit to `classifySessionsForRestore` (simplified, no warnings):
+     ```go
+     sessionID := content.Metadata.SessionID
+     if sessionID == "" || content.Metadata.Agent == "" {
+         continue
+     }
+     sessionAgent, agErr := ResolveAgentForRewind(content.Metadata.Agent)
+     if agErr != nil {
+         continue
+     }
+     ```
+
+   - **`cmd/entire/cli/rewind.go`**
+     - `getAgent()` now delegates to `strategy.ResolveAgentForRewind()` (with error wrapping)
+     - `printMultiSessionResumeCommands()` changed from `(point, agent)` to `(sessions []strategy.RestoredSession)` — resolves per-session agents
+     - All 5 `RestoreLogsOnly` callers updated to capture `[]RestoredSession`
+
+   - **`cmd/entire/cli/resume.go`**
+     - Simplified `resumeSession` — uses `[]RestoredSession` directly instead of re-reading metadata tree
+     - Falls back to `resumeSingleSession` when `restoreErr != nil || len(sessions) == 0`
+     - Added `Session:` line for single-session output to maintain test compatibility
+
+   - **`cmd/entire/cli/agent/geminicli/gemini.go`** (read-only, for current plan)
+     - `GetSessionDir()` — returns `~/.gemini/tmp/<SanitizePathForGemini(repoPath)>/chats` (WRONG — should use SHA256 hash)
+     - `SanitizePathForGemini()` — replaces non-alphanumeric with `-` (WRONG for path resolution)
+     - `ResolveSessionFile()` — globs for `session-*-<first8chars>.json`, falls back to `<id>.json`
+
+   - **`cmd/entire/cli/checkpoint/checkpoint.go`** (read-only, for current plan)
+     - `CommittedMetadata` — does NOT contain `projectHash` field
+     - `SessionContent` — contains `Metadata`, `Transcript`, `Prompts`, `Context`
+
+4. Errors and fixes:
+   - **wrapcheck lint error on `getAgent()`**: Direct delegation to `strategy.ResolveAgentForRewind()` didn't wrap the error. Fixed by adding `fmt.Errorf("resolving agent: %w", err)`.
+   - **`gofmt -s` stripping `//nolint:ireturn` comments**: `mise run fmt` (which runs `gofmt -s -w .`) stripped nolint comments from unrelated files (auto_commit.go, manual_commit.go, registry.go). Fixed by `git checkout --` on those files and only running gofmt on changed files.
+   - **3 integration tests failing (TestResume_SwitchBranch, TestResume_MultipleSessionsOnBranch, TestResume_AfterMergingMain)**: Tests checked for `"Session:"` in output which was removed. Fixed by adding `fmt.Fprintf(os.Stderr, "Session: %s\n", sessions[0].SessionID)` for single-session cases.
+   - **TestResumeFromCurrentBranch_WithEntireCheckpointTrailer failing**: Test creates checkpoint without agent metadata. After removing outerAgent fallback, all sessions were skipped, returning empty slice. Fixed by adding `|| len(sessions) == 0` to fallback condition in resume.go.
+   - **User feedback: "Do not fallback"**: User said not to use fallback agent for sessions without metadata. Removed `outerAgent` entirely, sessions without agent metadata are skipped with warning.
+   - **User feedback: "that warn does not sound right"**: "skipping conflict check" was misleading for `classifySessionsForRestore`. Changed to "cannot check for local conflicts".
+   - **User edited classifySessionsForRestore directly**: Removed warning messages, simplified conditions. Then said "fix test" — the user's edit to resume.go also removed the `len(sessions) == 0` fallback. Re-added it.
+
+5. Problem Solving:
+   - Solved the core multi-agent checkpoint problem: sessions from different agents now get written to correct directories with correct resume commands
+   - Handled backward compatibility for old checkpoints without agent metadata via fallback to `resumeSingleSession`
+   - Currently investigating Gemini path resolution bug: `GetSessionDir()` uses path sanitization but actual Gemini uses SHA256 hash for project directory
+
+6. All user messages:
+   - "Implement the following plan: [detailed 8-step plan for per-session agent resolution]"
+   - "Do not fallback, if session metadata does not have agent, print a warning like the session can not be restored agent is unknown" (selected lines 628-632 of manual_commit_rewind.go)
+   - "that warn does not sound rigth, we are finding the sessions we will restore." (selected "skipping conflict check" text)
+   - "fix test" (after user manually edited classifySessionsForRestore to remove warnings and simplify)
+   - "can you tell me what path pattern we are using while restoring a gemini chat ?"
+   - "latest gemini session path is -> tmp/c21e88c2222c11176465156df273ed8854ee1b358c89bc253f4fd08666c70d82/chats/session-2026-02-10T23-57-9f5659bb.json where the second element in the path you can find it into the full.jsonl projectHash attribute and the session id is composed with session-<startTime date hour and minute>-first part of session_id. Make a plan to fix that path only for gemini sessions"
+
+7. Pending Tasks:
+   - Create a plan to fix Gemini session path resolution during restore. The plan needs to:
+     - Extract `projectHash` from the `full.jsonl` transcript at restore time (or store it in checkpoint metadata)
+     - Fix `GetSessionDir()` or the fallback path to use the SHA256 hash instead of sanitized path
+     - Fix filename construction to use `session-<startTime>-<shortid>.json` format
+     - Only affect Gemini sessions, not Claude
+
+8. Current Work:
+   In plan mode. Two Explore agents completed investigating:
+   1. Gemini path resolution code (`GetSessionDir`, `ResolveSessionFile`, `SanitizePathForGemini`)
+   2. Checkpoint metadata structures (`CommittedMetadata`, `SessionContent`)
+
+   Key finding: `projectHash` is NOT stored in checkpoint metadata. It would need to be extracted from the `full.jsonl` transcript bytes at restore time, or added to the metadata going forward.
+
+   The plan file at `/Users/gtrrz-victor/.claude/plans/tingly-shimmying-tiger.md` still contains the OLD plan (per-session agent resolution) and needs to be overwritten with the new Gemini path fix plan.
+
+9. Optional Next Step:
+   Write the new plan to the plan file. The user's exact request: "latest gemini session path is -> tmp/c21e88c2222c11176465156df273ed8854ee1b358c89bc253f4fd08666c70d82/chats/session-2026-02-10T23-57-9f5659bb.json where the second element in the path you can find it into the full.jsonl projectHash attribute and the session id is composed with session-<startTime date hour and minute>-first part of session_id. Make a plan to fix that path only for gemini sessions"
+
+   Need to: Design the plan based on exploration results (Phase 2), read critical files (Phase 3), write final plan (Phase 4), and call ExitPlanMode (Phase 5). Key design question: should `projectHash` be extracted from transcript bytes at restore time, or stored in `CommittedMetadata` going forward (or both)?
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+[Request interrupted by user for tool use]
