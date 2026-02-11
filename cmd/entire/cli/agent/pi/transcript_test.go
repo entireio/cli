@@ -303,6 +303,31 @@ func TestParseTranscriptFromLine_OffsetAndTotalLines(t *testing.T) {
 	}
 }
 
+func TestParseTranscriptFromLine_OffsetCountsBlankLines(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	content := `{"type":"message","id":"1","message":{"role":"user","content":"one"}}
+
+{"type":"message","id":"2","message":{"role":"assistant","content":[{"type":"text","text":"two"}]}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	entries, totalLines, err := ParseTranscriptFromLine(path, 2)
+	if err != nil {
+		t.Fatalf("ParseTranscriptFromLine() error = %v", err)
+	}
+	if totalLines != 3 {
+		t.Fatalf("totalLines = %d, want 3", totalLines)
+	}
+	if len(entries) != 1 || entries[0].EntryID() != "2" {
+		t.Fatalf("unexpected parsed entries from offset: %#v", entries)
+	}
+}
+
 func TestParseTranscriptFromLine_EmptyPath(t *testing.T) {
 	t.Parallel()
 

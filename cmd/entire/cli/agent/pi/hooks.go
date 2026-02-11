@@ -71,6 +71,18 @@ func (p *PiAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		if !os.IsNotExist(err) {
 			return 0, fmt.Errorf("failed to read existing extension file: %w", err)
 		}
+
+		for _, path := range discoverExtensionFiles(repoRoot) {
+			data, readErr := os.ReadFile(path) //nolint:gosec // discovered from fixed extension directory patterns
+			if readErr != nil {
+				continue
+			}
+			if hasRequiredSignatures(string(data)) {
+				// Entire hooks are already installed via a user-managed extension.
+				return 0, nil
+			}
+		}
+
 		if err := writeManagedExtension(entryPath, desiredContent); err != nil {
 			return 0, err
 		}

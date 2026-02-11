@@ -478,6 +478,26 @@ func TestGetTranscriptPosition(t *testing.T) {
 	}
 }
 
+func TestGetTranscriptPosition_NoTrailingNewline(t *testing.T) {
+	ag := &PiAgent{}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	content := `{"type":"message","id":"1","message":{"role":"user","content":"one"}}
+{"type":"message","id":"2","message":{"role":"assistant","content":[{"type":"text","text":"two"}]}}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	count, err := ag.GetTranscriptPosition(path)
+	if err != nil {
+		t.Fatalf("GetTranscriptPosition() error = %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("GetTranscriptPosition() = %d, want 2", count)
+	}
+}
+
 func TestExtractModifiedFilesFromOffset(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")

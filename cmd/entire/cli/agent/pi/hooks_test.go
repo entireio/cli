@@ -230,6 +230,43 @@ export default function() {}
 	}
 }
 
+func TestInstallHooks_DoesNotInstallWhenUserExtensionAlreadyForwardsHooks(t *testing.T) {
+	repoRoot := t.TempDir()
+	t.Chdir(repoRoot)
+
+	customPath := filepath.Join(repoRoot, ".pi", piExtensionDirName, "custom.ts")
+	if err := os.MkdirAll(filepath.Dir(customPath), 0o755); err != nil {
+		t.Fatalf("failed to create extension dir: %v", err)
+	}
+
+	content := `// user extension forwarding to Entire
+// hooks pi session-start
+// hooks pi user-prompt-submit
+// hooks pi before-tool
+// hooks pi after-tool
+// hooks pi stop
+// hooks pi session-end
+export default function() {}
+`
+	if err := os.WriteFile(customPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write custom extension: %v", err)
+	}
+
+	ag := &PiAgent{}
+	count, err := ag.InstallHooks(false, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("InstallHooks() count = %d, want 0 when user extension already installs hooks", count)
+	}
+
+	entryPath := filepath.Join(repoRoot, ".pi", piExtensionDirName, managedExtensionDir, managedExtensionFile)
+	if _, err := os.Stat(entryPath); !os.IsNotExist(err) {
+		t.Fatalf("managed scaffold should not be created when user extension already forwards hooks")
+	}
+}
+
 func TestInstallHooks_TemplateContainsCanonicalLifecycleMappings(t *testing.T) {
 	repoRoot := t.TempDir()
 	t.Chdir(repoRoot)

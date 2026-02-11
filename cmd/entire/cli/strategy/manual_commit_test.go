@@ -1974,7 +1974,7 @@ func TestNormalizePiTranscriptForSummarizer(t *testing.T) {
 	t.Parallel()
 
 	data := []byte(`{"type":"message","id":"u1","message":{"role":"user","content":"Add auth"}}
-{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Implementing."},{"type":"toolCall","name":"write","arguments":{"file_path":"auth.go"}}]}}
+{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Implementing."},{"type":"toolCall","name":"write","arguments":{"path":"auth.go"}}]}}
 {"type":"message","id":"r1","message":{"role":"toolResult","toolName":"write","details":{"path":"auth.go"}}}
 `)
 
@@ -1992,6 +1992,9 @@ func TestNormalizePiTranscriptForSummarizer(t *testing.T) {
 	}
 	if !strings.Contains(text, `"type":"tool_use"`) {
 		t.Fatalf("normalized transcript missing tool_use block: %s", text)
+	}
+	if !strings.Contains(text, `"file_path":"auth.go"`) {
+		t.Fatalf("normalized transcript missing canonicalized file_path: %s", text)
 	}
 }
 

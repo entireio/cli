@@ -624,7 +624,7 @@ func normalizePiAssistantContent(content interface{}) []map[string]interface{} {
 				}
 				input := map[string]interface{}{}
 				if args, ok := m["arguments"].(map[string]interface{}); ok {
-					input = args
+					input = canonicalizePiToolInput(args)
 				}
 				blocks = append(blocks, map[string]interface{}{
 					"type":  "tool_use",
@@ -636,6 +636,25 @@ func normalizePiAssistantContent(content interface{}) []map[string]interface{} {
 	}
 
 	return blocks
+}
+
+func canonicalizePiToolInput(args map[string]interface{}) map[string]interface{} {
+	if len(args) == 0 {
+		return map[string]interface{}{}
+	}
+
+	normalized := make(map[string]interface{}, len(args)+1)
+	for key, value := range args {
+		normalized[key] = value
+	}
+
+	if _, exists := normalized["file_path"]; !exists {
+		if path, ok := normalized["path"].(string); ok && path != "" {
+			normalized["file_path"] = path
+		}
+	}
+
+	return normalized
 }
 
 // extractUserPromptsFromLines extracts user prompts from JSONL transcript lines.

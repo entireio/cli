@@ -1138,7 +1138,11 @@ func removeAgentHooks(w io.Writer) error {
 			if err := hookAgent.UninstallHooks(); err != nil {
 				errs = append(errs, err)
 			} else if wasInstalled {
-				fmt.Fprintln(w, "  Removed Pi hooks")
+				if hookAgent.AreHooksInstalled() {
+					fmt.Fprintln(w, "  Preserved unmanaged Pi hooks")
+				} else {
+					fmt.Fprintln(w, "  Removed Pi hooks")
+				}
 			}
 		}
 	}

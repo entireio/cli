@@ -61,7 +61,7 @@ func ParseTranscript(data []byte) ([]TranscriptEntry, error) {
 }
 
 // ParseTranscriptFromLine parses transcript entries from a file starting at startLine (0-indexed).
-// Returns parsed entries and the total number of non-empty lines in the file.
+// Returns parsed entries and the total number of physical lines in the file.
 func ParseTranscriptFromLine(path string, startLine int) ([]TranscriptEntry, int, error) {
 	if path == "" {
 		return nil, 0, nil
@@ -279,11 +279,8 @@ func parseTranscriptFromReader(reader io.Reader, startLine int) ([]TranscriptEnt
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
 
-		if lineCount >= startLine {
+		if lineCount >= startLine && line != "" {
 			var entry TranscriptEntry
 			if err := json.Unmarshal([]byte(line), &entry); err == nil {
 				entries = append(entries, entry)

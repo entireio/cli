@@ -46,10 +46,13 @@ func (p *PiAgent) Description() string {
 	return "Pi - AI coding agent CLI"
 }
 
-// DetectPresence checks if pi is configured in the repository.
+// DetectPresence checks if Pi is configured in the repository.
 func (p *PiAgent) DetectPresence() (bool, error) {
+	// Get repo root to check for .pi directory
+	// This is needed because the CLI may be run from a subdirectory
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
+		// Not in a git repo, fall back to CWD-relative check
 		repoRoot = "."
 	}
 
@@ -58,7 +61,6 @@ func (p *PiAgent) DetectPresence() (bool, error) {
 	if _, err := os.Stat(piDir); err == nil {
 		return true, nil
 	}
-
 	// Check for .pi/settings.json
 	settingsFile := filepath.Join(repoRoot, ".pi", "settings.json")
 	if _, err := os.Stat(settingsFile); err == nil {
@@ -348,18 +350,15 @@ func (p *PiAgent) GetTranscriptPosition(path string) (int, error) {
 	}
 	defer file.Close()
 
-	reader := bufio.NewReader(file)
-	lineCount := 0
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), transcriptScannerBufferSize)
 
-	for {
-		_, err := reader.ReadBytes('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return 0, fmt.Errorf("failed to read transcript: %w", err)
-		}
+	lineCount := 0
+	for scanner.Scan() {
 		lineCount++
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("failed to read transcript: %w", err)
 	}
 
 	return lineCount, nil
