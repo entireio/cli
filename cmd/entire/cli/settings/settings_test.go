@@ -58,6 +58,7 @@ func TestLoad_AcceptsValidKeys(t *testing.T) {
 		"enabled": true,
 		"local_dev": false,
 		"log_level": "debug",
+		"autoRunResume": true,
 		"strategy_options": {"key": "value"},
 		"telemetry": true
 	}`
@@ -88,6 +89,9 @@ func TestLoad_AcceptsValidKeys(t *testing.T) {
 	}
 	if settings.LogLevel != "debug" {
 		t.Errorf("expected log_level 'debug', got %q", settings.LogLevel)
+	}
+	if !settings.AutoRunResume {
+		t.Error("expected autoRunResume to be true")
 	}
 	if settings.Telemetry == nil || !*settings.Telemetry {
 		t.Error("expected telemetry to be true")

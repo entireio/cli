@@ -229,6 +229,28 @@ func TestLoadEntireSettings_LocalOverridesLocalDev(t *testing.T) {
 	}
 }
 
+func TestLoadEntireSettings_LocalOverridesAutoRunResume(t *testing.T) {
+	setupLocalOverrideTestDir(t)
+
+	baseSettings := `{"strategy": "manual-commit", "autoRunResume": false}`
+	if err := os.WriteFile(EntireSettingsFile, []byte(baseSettings), 0o644); err != nil {
+		t.Fatalf("Failed to write settings file: %v", err)
+	}
+
+	localSettings := `{"autoRunResume": true}`
+	if err := os.WriteFile(EntireSettingsLocalFile, []byte(localSettings), 0o644); err != nil {
+		t.Fatalf("Failed to write local settings file: %v", err)
+	}
+
+	settings, err := LoadEntireSettings()
+	if err != nil {
+		t.Fatalf("LoadEntireSettings() error = %v", err)
+	}
+	if !settings.AutoRunResume {
+		t.Error("AutoRunResume should be true from local override")
+	}
+}
+
 func TestLoadEntireSettings_LocalMergesStrategyOptions(t *testing.T) {
 	setupLocalOverrideTestDir(t)
 

@@ -81,6 +81,12 @@ entire resume <branch>
 
 Entire checks out the branch, restores the latest checkpointed session metadata (one or more sessions), and prints command(s) to continue.
 
+To restore and immediately start the session in one step:
+
+```
+entire resume --run <branch>
+```
+
 ### 5. Disable Entire (Optional)
 
 ```
@@ -167,6 +173,15 @@ Multiple AI sessions can run on the same commit. If you start a second session w
 | `entire status`  | Show current session and strategy info                                        |
 | `entire version` | Show Entire CLI version                                                       |
 
+### `entire resume` Flags
+
+| Flag             | Description                                 |
+|------------------|---------------------------------------------|
+| `--force`, `-f`  | Resume from older checkpoint without prompt |
+| `--run`, `-r`    | Start the restored session immediately      |
+
+Set `"autoRunResume": true` in `.entire/settings.json` (or `.entire/settings.local.json`) to make `--run` the default.
+
 ### `entire enable` Flags
 
 | Flag                   | Description                                                        |
@@ -225,6 +240,7 @@ Personal overrides, gitignored by default:
 |--------------------------------------|----------------------------------|------------------------------------------------------|
 | `enabled`                            | `true`, `false`                  | Enable/disable Entire                                |
 | `log_level`                          | `debug`, `info`, `warn`, `error` | Logging verbosity                                    |
+| `autoRunResume`                      | `true`, `false`                  | Auto-run restored session for `entire resume`        |
 | `strategy`                           | `manual-commit`, `auto-commit`   | Session capture strategy                             |
 | `strategy_options.push_sessions`     | `true`, `false`                  | Auto-push `entire/checkpoints/v1` branch on git push |
 | `strategy_options.summarize.enabled` | `true`, `false`                  | Auto-generate AI summaries at commit time            |
