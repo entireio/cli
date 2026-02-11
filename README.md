@@ -47,7 +47,9 @@ entire status
 # Download and install
 Invoke-WebRequest -Uri "https://github.com/entireio/cli/releases/latest/download/entire_windows_amd64.zip" -OutFile "entire.zip"
 Expand-Archive -Path "entire.zip" -DestinationPath "$env:LOCALAPPDATA\entire"
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:LOCALAPPDATA\entire", "User")
+# Add to User PATH (read User PATH specifically, not combined Machine+User)
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+[Environment]::SetEnvironmentVariable("Path", $userPath + ";$env:LOCALAPPDATA\entire", "User")
 
 # Enable in your project
 cd your-project

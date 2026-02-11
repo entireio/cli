@@ -11,7 +11,9 @@ Invoke-WebRequest -Uri "https://github.com/entireio/cli/releases/download/v0.4.2
 Expand-Archive -Path "entire.zip" -DestinationPath "$env:LOCALAPPDATA\entire"
 
 # Add to PATH
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:LOCALAPPDATA\entire", "User")
+# Add to User PATH (read User PATH specifically, not combined Machine+User)
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+[Environment]::SetEnvironmentVariable("Path", $userPath + ";$env:LOCALAPPDATA\entire", "User")
 
 # Verify installation
 entire version

@@ -11,7 +11,7 @@ Successfully forked and built **Entire CLI** with full **Windows support**, crea
 ### 1. Working Windows Binary
 - **File**: `entire-windows-amd64.exe`
 - **Size**: 12.9 MB
-- **Location**: `C:\Users\theri\Desktop\entire-cli-zip\`
+- **Location**: Local build directory
 - **Go Version**: 1.25.6
 - **Status**: ✅ Fully functional
 
@@ -119,7 +119,9 @@ Invoke-WebRequest -Uri "https://github.com/entireio/cli/releases/download/v0.4.2
 
 # Install
 Expand-Archive -Path "entire.zip" -DestinationPath "$env:LOCALAPPDATA\entire"
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:LOCALAPPDATA\entire", "User")
+# Add to User PATH correctly (read User PATH specifically, not combined Machine+User)
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+[Environment]::SetEnvironmentVariable("Path", $userPath + ";$env:LOCALAPPDATA\entire", "User")
 
 # Use
 entire enable
@@ -153,22 +155,20 @@ go build -ldflags "-s -w" -o entire-windows-amd64.exe ./cmd/entire
 
 ---
 
-## 💰 Bounties Created
+## 💰 Research Areas Identified
 
-As part of this integration, we created **10 Entire-focused bounties** on OpenClawMind:
+This implementation uncovered several research opportunities around Entire:
 
-1. Entire.io CLI Deep Dive Analysis (50 coins)
-2. $60M Seed Investor Analysis (40 coins)
-3. Agent Context Preservation Comparison (45 coins)
-4. Git for Agents: Evolution of Version Control (30 coins)
-5. Nat Friedman Track Record Analysis (25 coins)
-6. AI-Native SDLC Research (25 coins)
-7. Entire.io Adoption Tracking (20 coins)
-8. Semantic Reasoning Layer Research (25 coins)
-9. Developer Platform Market Analysis (25 coins)
-10. Multi-Agent Coordination State (20 coins)
-
-**Total**: 285 coins in Entire.io research bounties
+1. Entire.io CLI Deep Dive Analysis
+2. $60M Seed Investor Analysis
+3. Agent Context Preservation Comparison
+4. Git for Agents: Evolution of Version Control
+5. Nat Friedman Track Record Analysis
+6. AI-Native SDLC Research
+7. Entire.io Adoption Tracking
+8. Semantic Reasoning Layer Research
+9. Developer Platform Market Analysis
+10. Multi-Agent Coordination State
 
 ---
 
