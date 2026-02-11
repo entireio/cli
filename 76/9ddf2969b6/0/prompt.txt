@@ -1,0 +1,32 @@
+Implement the following plan:
+
+# Fix: Persist transcript_path in checkpoint metadata for restore
+
+## Context
+
+During restore, `GetSessionDir()` + `ResolveSessionFile()` can't reconstruct the correct path for Gemini sessions (wrong hashing algorithm, wrong filename format). The `transcript_path` is already in `SessionState` for both Claude and Gemini. Persist it in checkpoint metadata so restore reads it back directly — same codepath for all agents.
+
+## Changes
+
+### 1. `checkpoint/checkpoint.go`
+- Add to `CommittedMetadata`: `TranscriptPath string \`json:"transcript_path,omitempty"\``
+- Add to `WriteCommittedOptions`: `SessionTranscriptPath string` (home-relative path to persist in metadata)
+
+### 2. `checkpoint/committed.go`
+- In `writeSessionToSubdirectory()`, set `sessionMetadata.TranscriptPath = opts.SessionTranscriptPath`
+
+### 3. `strategy/manual_commit_condensation.go`
+- In `CondenseSession()`, add `SessionTranscriptPath: homeRelativePath(state.TranscriptPath)` to `WriteCommittedOptions`
+
+### 4. `strategy/common.go`
+- Add `homeRelativePath(absPath string) string` — strips `$HOME/` prefix, returns `""` if not under home
+
+### 5. `strategy/manual_commit_rewind.go`
+- In `RestoreLogsOnly()` and `classifySessionsForRestore()`: if `content.Metadata.TranscriptPath != ""`, resolve to `$HOME/<path>` and use it. Else fallback to existing `ResolveSessionFilePath()`.
+
+## Verification
+
+`go build ./... && mise run fmt && mise run lint && go test ./cmd/entire/cli/... -count=1`
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
