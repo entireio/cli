@@ -1,0 +1,32 @@
+# Sync Entire session checkpoints from fork PRs.
+#
+# When a PR from a fork is merged, this workflow imports the checkpoint data
+# (session transcripts, prompts, context) from the fork's entire/checkpoints/v1
+# branch into the upstream repo's entire/checkpoints/v1 branch.
+#
+# This enables the full Entire session history to be preserved even when
+# contributors work from forks without push access to upstream.
+#
+# How it works:
+#   1. Finds Entire-Checkpoint trailers in the merged commits
+#   2. Fetches the fork's entire/checkpoints/v1 branch
+#   3. Selectively imports only the referenced checkpoint directories
+#   4. Pushes the updated checkpoints branch to upstream
+
+name: Sync Fork Checkpoints
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  sync-checkpoints:
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.fork == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: entireio/cli/.github/actions/sync-fork-checkpoints@main
