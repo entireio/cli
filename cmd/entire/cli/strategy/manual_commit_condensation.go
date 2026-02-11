@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -140,18 +142,17 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 	// Get current branch name
 	branchName := GetCurrentBranchName(repo)
 
-	// Generate summary if enabled
+	// Generate summary if enabled.
 	var summary *cpkg.Summary
 	if settings.IsSummarizeEnabled() && len(sessionData.Transcript) > 0 {
 		logCtx := logging.WithComponent(context.Background(), "attribution")
 		summarizeCtx := logging.WithComponent(logCtx, "summarize")
 
 		// Scope transcript to this checkpoint's portion.
-		// SliceFromLine only works for JSONL (Claude Code) transcripts where
+		// SliceFromLine only works for JSONL (Claude Code/Pi) transcripts where
 		// CheckpointTranscriptStart is a line offset. For Gemini JSON transcripts,
 		// CheckpointTranscriptStart is a message index and the transcript is a single
 		// JSON blob, so line-based slicing would produce malformed content.
-		// The summarizer (ParseFromBytes) only supports JSONL, so skip scoping for Gemini.
 		var scopedTranscript []byte
 		if state.AgentType == agent.AgentTypeGemini {
 			scopedTranscript = sessionData.Transcript
@@ -159,16 +160,31 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 			scopedTranscript = transcript.SliceFromLine(sessionData.Transcript, state.CheckpointTranscriptStart)
 		}
 		if len(scopedTranscript) > 0 {
-			var err error
-			summary, err = summarize.GenerateFromTranscript(summarizeCtx, scopedTranscript, sessionData.FilesTouched, nil)
-			if err != nil {
-				logging.Warn(summarizeCtx, "summary generation failed",
-					slog.String("session_id", state.SessionID),
-					slog.String("error", err.Error()))
-				// Continue without summary - non-blocking
-			} else {
-				logging.Info(summarizeCtx, "summary generated",
-					slog.String("session_id", state.SessionID))
+			summaryTranscript := scopedTranscript
+			if state.AgentType == agent.AgentTypePi {
+				normalized, normalizeErr := normalizePiTranscriptForSummarizer(scopedTranscript)
+				if normalizeErr != nil {
+					logging.Warn(summarizeCtx, "pi transcript normalization failed",
+						slog.String("session_id", state.SessionID),
+						slog.String("error", normalizeErr.Error()))
+					summaryTranscript = nil
+				} else {
+					summaryTranscript = normalized
+				}
+			}
+
+			if len(summaryTranscript) > 0 {
+				var err error
+				summary, err = summarize.GenerateFromTranscript(summarizeCtx, summaryTranscript, sessionData.FilesTouched, nil)
+				if err != nil {
+					logging.Warn(summarizeCtx, "summary generation failed",
+						slog.String("session_id", state.SessionID),
+						slog.String("error", err.Error()))
+					// Continue without summary - non-blocking
+				} else {
+					logging.Info(summarizeCtx, "summary generated",
+						slog.String("session_id", state.SessionID))
+				}
 			}
 		}
 	}
@@ -303,11 +319,12 @@ func calculateSessionAttributions(repo *git.Repository, shadowRef *plumbing.Refe
 
 // extractSessionData extracts session data from the shadow branch.
 // filesTouched is the list of files tracked during the session (from SessionState.FilesTouched).
-// agentType identifies the agent (e.g., "Gemini CLI", "Claude Code") to determine transcript format.
+// agentType identifies the agent (e.g., "Claude Code", "Gemini CLI", "Pi Coding Agent") to determine transcript format.
 // liveTranscriptPath, when non-empty and readable, is preferred over the shadow branch copy.
 // This handles the case where SaveChanges was skipped (no code changes) but the transcript
 // continued growing — the shadow branch copy would be stale.
-// checkpointTranscriptStart is the line offset (Claude) or message index (Gemini) where the current checkpoint began.
+// checkpointTranscriptStart is the line offset for JSONL-based agents (Claude, Pi)
+// or message index for Gemini, where the current checkpoint began.
 func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType agent.AgentType, liveTranscriptPath string, checkpointTranscriptStart int) (*ExtractedSessionData, error) {
 	commit, err := repo.CommitObject(shadowRef)
 	if err != nil {
@@ -373,6 +390,14 @@ func countTranscriptItems(agentType agent.AgentType, content string) int {
 		return 0
 	}
 
+	if agentType == agent.AgentTypePi {
+		allLines := strings.Split(content, "\n")
+		for len(allLines) > 0 && strings.TrimSpace(allLines[len(allLines)-1]) == "" {
+			allLines = allLines[:len(allLines)-1]
+		}
+		return len(allLines)
+	}
+
 	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
 	if agentType == agent.AgentTypeGemini || agentType == agent.AgentTypeUnknown {
 		transcript, err := geminicli.ParseTranscript([]byte(content))
@@ -402,6 +427,14 @@ func extractUserPrompts(agentType agent.AgentType, content string) []string {
 		return nil
 	}
 
+	if agentType == agent.AgentTypePi {
+		prompts, err := pi.ExtractAllUserPrompts([]byte(content))
+		if err != nil {
+			return nil
+		}
+		return prompts
+	}
+
 	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
 	if agentType == agent.AgentTypeGemini || agentType == agent.AgentTypeUnknown {
 		prompts, err := geminicli.ExtractAllUserPrompts([]byte(content))
@@ -427,12 +460,16 @@ func extractUserPrompts(agentType agent.AgentType, content string) []string {
 }
 
 // calculateTokenUsage calculates token usage from raw transcript data.
-// startOffset is the line number (Claude Code) or message index (Gemini CLI)
-// where the current checkpoint began, allowing calculation for only the portion
-// of the transcript since the last checkpoint.
+// startOffset is the line number for JSONL-based agents (Claude Code, Pi)
+// or message index for Gemini CLI, where the current checkpoint began,
+// allowing calculation for only the portion of the transcript since the last checkpoint.
 func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int) *agent.TokenUsage {
 	if len(data) == 0 {
 		return &agent.TokenUsage{}
+	}
+
+	if agentType == agent.AgentTypePi {
+		return pi.CalculateTokenUsageFromTranscript(data, startOffset)
 	}
 
 	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
@@ -459,6 +496,146 @@ func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int
 		lines = lines[startOffset:]
 	}
 	return claudecode.CalculateTokenUsage(lines)
+}
+
+const (
+	piTranscriptEntryTypeMessage = "message"
+	piContentTypeText            = "text"
+)
+
+// normalizePiTranscriptForSummarizer converts Pi transcript JSONL entries to the
+// Claude-style JSONL structure expected by summarize.BuildCondensedTranscriptFromBytes.
+func normalizePiTranscriptForSummarizer(content []byte) ([]byte, error) {
+	entries, err := pi.ParseTranscript(content)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse pi transcript: %w", err)
+	}
+
+	var out bytes.Buffer
+	for _, entry := range entries {
+		if entry.Type != piTranscriptEntryTypeMessage || entry.Message == nil {
+			continue
+		}
+
+		switch entry.Message.Role {
+		case "user":
+			userContent, ok := normalizePiUserContent(entry.Message.Content)
+			if !ok {
+				continue
+			}
+			line, marshalErr := json.Marshal(map[string]interface{}{
+				"type": "user",
+				"uuid": entry.EntryID(),
+				"message": map[string]interface{}{
+					"content": userContent,
+				},
+			})
+			if marshalErr != nil {
+				continue
+			}
+			out.Write(line)
+			out.WriteByte('\n')
+		case "assistant":
+			assistantContent := normalizePiAssistantContent(entry.Message.Content)
+			if len(assistantContent) == 0 {
+				continue
+			}
+			line, marshalErr := json.Marshal(map[string]interface{}{
+				"type": "assistant",
+				"uuid": entry.EntryID(),
+				"message": map[string]interface{}{
+					"content": assistantContent,
+				},
+			})
+			if marshalErr != nil {
+				continue
+			}
+			out.Write(line)
+			out.WriteByte('\n')
+		}
+	}
+
+	return out.Bytes(), nil
+}
+
+func normalizePiUserContent(content interface{}) (interface{}, bool) {
+	switch typed := content.(type) {
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return nil, false
+		}
+		return trimmed, true
+	case []interface{}:
+		blocks := make([]map[string]interface{}, 0)
+		for _, item := range typed {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if m["type"] != piContentTypeText {
+				continue
+			}
+			text, ok := m["text"].(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				continue
+			}
+			blocks = append(blocks, map[string]interface{}{"type": piContentTypeText, "text": text})
+		}
+		if len(blocks) == 0 {
+			return nil, false
+		}
+		return blocks, true
+	default:
+		return nil, false
+	}
+}
+
+func normalizePiAssistantContent(content interface{}) []map[string]interface{} {
+	blocks := make([]map[string]interface{}, 0)
+
+	switch typed := content.(type) {
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed != "" {
+			blocks = append(blocks, map[string]interface{}{"type": piContentTypeText, "text": trimmed})
+		}
+	case []interface{}:
+		for _, item := range typed {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			blockType, ok := m["type"].(string)
+			if !ok {
+				continue
+			}
+			switch blockType {
+			case piContentTypeText:
+				text, ok := m["text"].(string)
+				if !ok || strings.TrimSpace(text) == "" {
+					continue
+				}
+				blocks = append(blocks, map[string]interface{}{"type": piContentTypeText, "text": text})
+			case "toolCall":
+				name, ok := m["name"].(string)
+				if !ok || name == "" {
+					continue
+				}
+				input := map[string]interface{}{}
+				if args, ok := m["arguments"].(map[string]interface{}); ok {
+					input = args
+				}
+				blocks = append(blocks, map[string]interface{}{
+					"type":  "tool_use",
+					"name":  name,
+					"input": input,
+				})
+			}
+		}
+	}
+
+	return blocks
 }
 
 // extractUserPromptsFromLines extracts user prompts from JSONL transcript lines.
