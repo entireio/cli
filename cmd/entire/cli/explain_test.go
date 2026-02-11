@@ -2202,6 +2202,45 @@ func TestExtractPromptsFromScopedTranscript(t *testing.T) {
 	}
 }
 
+func TestExtractPromptsFromScopedTranscript_PiMessageFormat(t *testing.T) {
+	t.Parallel()
+
+	transcript := []byte(`{"type":"message","id":"u1","message":{"role":"user","content":"First Pi prompt"}}
+{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"First Pi response"}]}}
+{"type":"message","id":"u2","message":{"role":"user","content":"Second Pi prompt"}}
+`)
+
+	prompts := extractPromptsFromTranscript(transcript)
+	if len(prompts) != 2 {
+		t.Fatalf("expected 2 prompts, got %d", len(prompts))
+	}
+	if prompts[0] != "First Pi prompt" {
+		t.Fatalf("expected first Pi prompt, got %q", prompts[0])
+	}
+	if prompts[1] != "Second Pi prompt" {
+		t.Fatalf("expected second Pi prompt, got %q", prompts[1])
+	}
+}
+
+func TestFormatTranscriptBytes_PiMessageFormat(t *testing.T) {
+	t.Parallel()
+
+	transcript := []byte(`{"type":"message","id":"u1","message":{"role":"user","content":"Fix README"}}
+{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Done."},{"type":"toolCall","name":"write","arguments":{"path":"README.md"}}]}}
+`)
+
+	formatted := formatTranscriptBytes(transcript, "")
+	if !strings.Contains(formatted, "[User] Fix README") {
+		t.Fatalf("expected formatted output to include user message, got:\n%s", formatted)
+	}
+	if !strings.Contains(formatted, "[Assistant] Done.") {
+		t.Fatalf("expected formatted output to include assistant message, got:\n%s", formatted)
+	}
+	if !strings.Contains(formatted, "[Tool] write: README.md") {
+		t.Fatalf("expected formatted output to include normalized tool call, got:\n%s", formatted)
+	}
+}
+
 func TestFormatCheckpointOutput_UsesScopedPrompts(t *testing.T) {
 	// Full transcript with 4 lines (2 prompts + 2 responses)
 	// Checkpoint starts at line 2 (should only show second prompt)

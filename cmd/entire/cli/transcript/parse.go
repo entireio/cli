@@ -13,6 +13,10 @@ import (
 
 // ParseFromBytes parses transcript content from a byte slice.
 // Uses bufio.Reader to handle arbitrarily long lines.
+//
+// Supports:
+//   - Claude/Gemini normalized JSONL lines with top-level type=user|assistant
+//   - Pi JSONL message entries (type=message with message.role=user|assistant)
 func ParseFromBytes(content []byte) ([]Line, error) {
 	var lines []Line
 	reader := bufio.NewReader(bytes.NewReader(content))
@@ -31,8 +35,7 @@ func ParseFromBytes(content []byte) ([]Line, error) {
 			continue
 		}
 
-		var line Line
-		if err := json.Unmarshal(lineBytes, &line); err == nil {
+		if line, ok := parseTranscriptLine(lineBytes); ok {
 			lines = append(lines, line)
 		}
 
@@ -42,6 +45,167 @@ func ParseFromBytes(content []byte) ([]Line, error) {
 	}
 
 	return lines, nil
+}
+
+func parseTranscriptLine(lineBytes []byte) (Line, bool) {
+	trimmed := bytes.TrimSpace(lineBytes)
+	if len(trimmed) == 0 {
+		return Line{}, false
+	}
+
+	var base struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(trimmed, &base); err != nil {
+		return Line{}, false
+	}
+
+	switch base.Type {
+	case TypeUser, TypeAssistant:
+		var line Line
+		if err := json.Unmarshal(trimmed, &line); err != nil {
+			return Line{}, false
+		}
+		return line, true
+	case "message":
+		return parsePiMessageLine(trimmed)
+	default:
+		return Line{}, false
+	}
+}
+
+func parsePiMessageLine(lineBytes []byte) (Line, bool) {
+	var piEntry struct {
+		ID      string          `json:"id"`
+		UUID    string          `json:"uuid"`
+		Message json.RawMessage `json:"message"`
+	}
+	if err := json.Unmarshal(lineBytes, &piEntry); err != nil {
+		return Line{}, false
+	}
+	if len(piEntry.Message) == 0 {
+		return Line{}, false
+	}
+
+	var msg struct {
+		Role    string      `json:"role"`
+		Content interface{} `json:"content"`
+	}
+	if err := json.Unmarshal(piEntry.Message, &msg); err != nil {
+		return Line{}, false
+	}
+
+	uuid := piEntry.ID
+	if uuid == "" {
+		uuid = piEntry.UUID
+	}
+
+	switch msg.Role {
+	case "user":
+		raw, err := json.Marshal(map[string]interface{}{"content": msg.Content})
+		if err != nil {
+			return Line{}, false
+		}
+		return Line{Type: TypeUser, UUID: uuid, Message: raw}, true
+	case "assistant":
+		normalizedContent := normalizePiAssistantContent(msg.Content)
+		if len(normalizedContent) == 0 {
+			return Line{}, false
+		}
+		raw, err := json.Marshal(map[string]interface{}{"content": normalizedContent})
+		if err != nil {
+			return Line{}, false
+		}
+		return Line{Type: TypeAssistant, UUID: uuid, Message: raw}, true
+	default:
+		return Line{}, false
+	}
+}
+
+func normalizePiAssistantContent(content interface{}) []map[string]interface{} {
+	blocks := make([]map[string]interface{}, 0)
+
+	switch typed := content.(type) {
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed != "" {
+			blocks = append(blocks, map[string]interface{}{"type": ContentTypeText, "text": trimmed})
+		}
+	case []interface{}:
+		for _, item := range typed {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			blockTypeValue, hasBlockType := m["type"]
+			if !hasBlockType {
+				continue
+			}
+			blockType, ok := blockTypeValue.(string)
+			if !ok {
+				continue
+			}
+
+			switch blockType {
+			case ContentTypeText:
+				textValue, hasText := m["text"]
+				if !hasText {
+					continue
+				}
+				text, ok := textValue.(string)
+				if !ok {
+					continue
+				}
+
+				trimmed := strings.TrimSpace(text)
+				if trimmed == "" {
+					continue
+				}
+				blocks = append(blocks, map[string]interface{}{"type": ContentTypeText, "text": trimmed})
+			case "toolCall":
+				nameValue, hasName := m["name"]
+				if !hasName {
+					continue
+				}
+				name, ok := nameValue.(string)
+				if !ok || name == "" {
+					continue
+				}
+
+				input := map[string]interface{}{}
+				if args, ok := m["arguments"].(map[string]interface{}); ok {
+					input = canonicalizePiToolCallInput(args)
+				}
+				blocks = append(blocks, map[string]interface{}{
+					"type":  ContentTypeToolUse,
+					"name":  name,
+					"input": input,
+				})
+			}
+		}
+	}
+
+	return blocks
+}
+
+func canonicalizePiToolCallInput(args map[string]interface{}) map[string]interface{} {
+	if len(args) == 0 {
+		return map[string]interface{}{}
+	}
+
+	normalized := make(map[string]interface{}, len(args)+1)
+	for key, value := range args {
+		normalized[key] = value
+	}
+
+	if _, exists := normalized["file_path"]; !exists {
+		if path, ok := normalized["path"].(string); ok && strings.TrimSpace(path) != "" {
+			normalized["file_path"] = path
+		}
+	}
+
+	return normalized
 }
 
 // SliceFromLine returns the content starting from line number `startLine` (0-indexed).
