@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "2373a92c6c40",
+  "strategy": "manual-commit",
+  "branch": "20260206-secrets-redaction",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "redact/redact.go",
+    "redact/redact_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/23/73a92c6c40/0/metadata.json",
+      "transcript": "/23/73a92c6c40/0/full.jsonl",
+      "context": "/23/73a92c6c40/0/context.md",
+      "content_hash": "/23/73a92c6c40/0/content_hash.txt",
+      "prompt": "/23/73a92c6c40/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 56,
+    "cache_creation_tokens": 81547,
+    "cache_read_tokens": 3446234,
+    "output_tokens": 8050,
+    "api_call_count": 54
+  }
+}

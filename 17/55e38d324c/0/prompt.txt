@@ -1,0 +1,62 @@
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# Plan: Add Test for Session Conflict Warning at Session Start
+
+## Goal
+Add an integration test that verifies the new session conflict warning message format when a second session starts while another session has uncommitted checkpoints.
+
+## Background
+The session conflict warning was updated to a friendlier format:
+```
+You have an existing session running (<existing-session-id>).
+Do you want to continue with this new session (<new-session-id>)?
+
+Yes: Ignore this warning
+No: Type /exit, then either:
+  • Resume the other session: <resume-command>
+  • Reset and start fresh: entire reset --force && <cli-command>
+
+To hide this notice in the future: entire enable --disable-multisession-warning
+```
+
+## File to Create/Modify
+- `cmd/entire/cli/integration_test/session_conflict_test.go` - Add new test
+
+## Test Implementation
+
+### Test Name
+`TestSessionConflict_WarningMessageFormat`
+
+### Test Steps
+1. Initialize test repo on a feature branch
+2. Create first session and save a checkpoint (so `CheckpointCount > 0`)
+3. Start a second session (different session ID, same base commit)
+4. Capture the hook output using `SimulateSessionStartWithOutput()`
+5. Parse the JSON response and verify the `systemMessage` contains:
+   - The existing session ID
+   - The new session ID
+   - Resume command format (`claude -r <session-id>`)
+   - Reset instruction (`entire reset --force && claude`)
+   - Warning disable option (`entire enable --disable-multisession-warning`)
+
+### Test Helper Needed
+Add `SimulateSessionStartWithOutput(sessionID string) (stdout, stderr string, err error)` to `integration_test/hooks.go` - similar to existing `SimulateUserPromptSubmitWithOutput()` but for session-start hook.
+
+## Key Files Reference
+- **Implementation:** `cmd/entire/cli/hooks.go` (lines 275-329 - `checkConcurrentSessions`)
+- **Test patterns:** `cmd/entire/cli/integration_test/session_conflict_test.go` (existing tests)
+- **Test helpers:** `cmd/entire/cli/integration_test/hooks.go` (`HookRunner`, session helpers)
+
+## Verification
+```bash
+mise run test:integration
+```
+
+The test should verify the warning message includes all expected components when a session conflict is detected.
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl

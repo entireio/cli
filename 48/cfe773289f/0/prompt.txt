@@ -1,0 +1,1 @@
+in verbose mode, we should show the git commit message. (do the normal dev process to add this please including TDD)

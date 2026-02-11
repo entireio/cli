@@ -1,0 +1,13 @@
+{
+  "checkpoint_id": "0a31ea1143de",
+  "session_id": "2026-01-13-dc577197-3905-4039-9b27-8ab77a6b087f",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-13T12:59:11.182003+01:00",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/manual_commit_workflow_test.go",
+    "cmd/entire/cli/integration_test/rewind_test.go",
+    "cmd/entire/cli/integration_test/session_conflict_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+  ]
+}

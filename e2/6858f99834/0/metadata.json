@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "e26858f99834",
+  "session_id": "42845d94-59b3-4717-95f6-765405cfabe1",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-04T12:36:42.195773Z",
+  "branch": "alex/fix-shadow-branch-performance",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/temporary.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "a2c86351-6a78-4977-9609-9203e3c2cc66",
+  "transcript_lines_at_start": 255,
+  "token_usage": {
+    "input_tokens": 556,
+    "cache_creation_tokens": 226063,
+    "cache_read_tokens": 11650961,
+    "output_tokens": 9508,
+    "api_call_count": 118
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-04T12:36:42.124433Z",
+    "agent_lines": 0,
+    "human_added": 2,
+    "human_modified": 17,
+    "human_removed": 0,
+    "total_committed": 2,
+    "agent_percentage": 0
+  }
+}

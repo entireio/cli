@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "c9883595c929",
+  "strategy": "manual-commit",
+  "branch": "",
+  "migration_source_commit": "34e45a34c5fafef17c98993dff95d38e91fc1a40",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/CODEOWNERS"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c9/883595c929/0/metadata.json",
+      "transcript": "/c9/883595c929/0/full.jsonl",
+      "context": "/c9/883595c929/0/context.md",
+      "content_hash": "/c9/883595c929/0/content_hash.txt",
+      "prompt": "/c9/883595c929/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

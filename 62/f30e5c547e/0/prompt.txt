@@ -1,0 +1,79 @@
+Implement the following plan:
+
+# Plan: Update sessions-and-checkpoints.md to match current codebase
+
+## Context
+
+The documentation at `docs/architecture/sessions-and-checkpoints.md` was written from an early design doc and has diverged significantly from the actual implementation. Struct definitions, interface signatures, package locations, directory layouts, and even entire features (session nesting) described in the doc don't exist in the code. This update brings the doc in line with the actual codebase.
+
+## File to modify
+
+- `docs/architecture/sessions-and-checkpoints.md`
+
+## Changes
+
+### 1. Replace `Session` struct (lines 14-33)
+- Remove the aspirational `session` package struct with `FirstPrompt`, `AgentType`, `AgentSessionID`, `SubSessions`, `ParentID`, `ToolUseID`, `IsSubSession()`
+- Replace with actual `strategy.Session` from `strategy/session.go`: `ID`, `Description`, `Strategy`, `StartTime`, `Checkpoints`
+
+### 2. Replace `Checkpoint` struct (lines 40-54)
+- Remove `ID string`, `SessionID string`, `Type CheckpointType`
+- Replace with actual `strategy.Checkpoint` from `strategy/session.go`: `CheckpointID id.CheckpointID`, `Message`, `Timestamp`, `IsTaskCheckpoint`, `ToolUseID`
+
+### 3. Update `checkpoint.Type` naming (lines 48-53)
+- Change `CheckpointType` to `checkpoint.Type` (from `checkpoint/checkpoint.go`)
+
+### 4. Remove session nesting section (lines 63-74)
+- Delete the entire "Session Nesting" section — subsessions are not implemented
+
+### 5. Replace `Sessions` interface (lines 81-86)
+- Remove the aspirational `Sessions interface` with `Create`, `Get`, `List`
+- Replace with the actual standalone functions: `ListSessions()` and `GetSession()` from `strategy/session.go`
+
+### 6. Replace `CheckpointStore` interface (lines 93-132)
+- Remove `CheckpointStore` with old method signatures and `TemporaryCheckpoint`/`CommittedCheckpoint` structs
+- Replace with actual `checkpoint.Store` interface from `checkpoint/checkpoint.go` — document key methods with their actual signatures (`WriteTemporary(ctx, WriteTemporaryOptions)`, `ReadTemporary(ctx, baseCommit, worktreeID)`, `WriteCommitted(ctx, WriteCommittedOptions)`, `ReadCommitted(ctx, checkpointID)`, `ReadSessionContent(ctx, checkpointID, sessionIndex)`, `ListCommitted(ctx)`, `ListTemporary(ctx)`)
+- Show the actual `WriteTemporaryOptions` and `WriteCommittedOptions` types (abbreviated — just key fields)
+
+### 7. Update `TokenUsage` package location
+- Change from `checkpoint` package to `agent.TokenUsage` in `agent/types.go`
+
+### 8. Update Condense function signature (lines 142-145)
+- Change from `Condense(ctx, sessionID, commitRef)` to actual `CondenseSession(repo, checkpointID, state)` from `manual_commit_condensation.go`
+
+### 9. Update AutoCommit SaveChanges signature (lines 150-152)
+- Change from `SaveChanges(ctx context.Context, ...)` to actual `SaveChanges(ctx SaveContext)` from `auto_commit.go`
+
+### 10. Fix shadow branch naming (line 170)
+- Change `entire/<base-commit-hash[:7]>` to `entire/<commit[:7]>-<worktreeHash[:6]>`
+
+### 11. Fix committed storage format (lines 200-211)
+- Replace "latest at root, previous in numbered subfolders `1/`, `2/`" with actual 0-based layout:
+  - Root: only `metadata.json` (CheckpointSummary)
+  - All sessions in numbered subdirectories: `0/`, `1/`, `2/`...
+- Update the tree diagram to match actual `CheckpointSummary` struct comment at `checkpoint.go:391-401`
+
+### 12. Fix multi-session metadata.json example (lines 214-235)
+- Replace with actual `CheckpointSummary` JSON shape: `checkpoint_id`, `strategy`, `branch`, `checkpoints_count`, `files_touched`, `sessions` (array of `SessionFilePaths`), `token_usage`
+- Remove `session_id`, `session_ids`, `session_count` fields that don't exist in `CheckpointSummary`
+
+### 13. Fix package structure section (lines 319-331)
+- `session/session.go` doesn't exist → remove it
+- Add `session/phase.go` which does exist
+- Note that `Session` type lives in `strategy/session.go`
+- Add `checkpoint/id/` subdirectory
+
+### 14. Fix shadow branch migration description (line 372)
+- Change `entire/<old>` / `entire/<new>` to include worktree hash
+
+### 15. Minor: update strategy table and rewind section
+- Verify and keep if accurate (they appear correct)
+
+## Verification
+
+After editing, grep for key identifiers to confirm they match the codebase:
+- `CheckpointSummary`, `WriteTemporaryOptions`, `WriteCommittedOptions`, `CondenseSession`, `checkpoint.Store`, `checkpoint.Type`
+- Confirm no references to removed concepts: `SubSessions`, `ParentID`, `CheckpointStore`, `TemporaryCheckpoint`
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl

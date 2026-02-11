@@ -1,0 +1,8 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+I am having problems if I start a claude session inside a folder while entire is enabled, becuase either is auto or manual mode, it is not creating checkpoints neither shadow branches. It only works if the claude session is started at root git folder. why ?
+

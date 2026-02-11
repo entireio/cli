@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "7514bb56ca11",
+  "strategy": "manual-commit",
+  "branch": "gtrrz-victor/improve-status-cmd-output",
+  "migration_source_commit": "96babec3d3cbc8e0351b447aa422f0b054c6f142",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "cmd/entire/cli/config.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/75/14bb56ca11/0/metadata.json",
+      "transcript": "/75/14bb56ca11/0/full.jsonl",
+      "context": "/75/14bb56ca11/0/context.md",
+      "content_hash": "/75/14bb56ca11/0/content_hash.txt",
+      "prompt": "/75/14bb56ca11/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 328,
+    "cache_creation_tokens": 154811,
+    "cache_read_tokens": 2882844,
+    "output_tokens": 134,
+    "api_call_count": 40
+  }
+}

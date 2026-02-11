@@ -1,0 +1,33 @@
+{
+  "checkpoint_id": "4dee03b57bf0",
+  "strategy": "manual-commit",
+  "branch": "alex/fix-shadow-branch-performance",
+  "migration_source_commit": "9313fd4ad19a931b99baf5e72b8cfc1ea22a6894",
+  "checkpoints_count": 15,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/transcript.go",
+    "cmd/entire/cli/checkpoint/checkpoint_test.go",
+    "cmd/entire/cli/checkpoint/temporary.go",
+    "cmd/entire/cli/debug.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/state_test.go",
+    "docs/plans/2026-02-04-stop-hook-performance.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/4d/ee03b57bf0/0/metadata.json",
+      "transcript": "/4d/ee03b57bf0/0/full.jsonl",
+      "context": "/4d/ee03b57bf0/0/context.md",
+      "content_hash": "/4d/ee03b57bf0/0/content_hash.txt",
+      "prompt": "/4d/ee03b57bf0/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1402,
+    "cache_creation_tokens": 1174751,
+    "cache_read_tokens": 22864208,
+    "output_tokens": 10924,
+    "api_call_count": 237
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "aa5706b3c44a",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-221-wire-up-state-machine",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_wiring_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/aa/5706b3c44a/0/metadata.json",
+      "transcript": "/aa/5706b3c44a/0/full.jsonl",
+      "context": "/aa/5706b3c44a/0/context.md",
+      "content_hash": "/aa/5706b3c44a/0/content_hash.txt",
+      "prompt": "/aa/5706b3c44a/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 38,
+    "cache_creation_tokens": 109187,
+    "cache_read_tokens": 3394939,
+    "output_tokens": 678,
+    "api_call_count": 34
+  }
+}

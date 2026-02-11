@@ -1,0 +1,31 @@
+{
+  "checkpoint_id": "c7f7b48fb868",
+  "strategy": "manual-commit",
+  "branch": "soph/fix-session-date-change-bug",
+  "migration_source_commit": "57ee330aa8ba3594ea27504f9da268f52e5eb268",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers_test.go",
+    "cmd/entire/cli/session/session_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/validation/validators.go",
+    "cmd/entire/cli/validation/validators_test.go",
+    "docs/requirements/review-01.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c7/f7b48fb868/0/metadata.json",
+      "transcript": "/c7/f7b48fb868/0/full.jsonl",
+      "context": "/c7/f7b48fb868/0/context.md",
+      "content_hash": "/c7/f7b48fb868/0/content_hash.txt",
+      "prompt": "/c7/f7b48fb868/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2302,
+    "cache_creation_tokens": 268662,
+    "cache_read_tokens": 6258380,
+    "output_tokens": 163,
+    "api_call_count": 76
+  }
+}

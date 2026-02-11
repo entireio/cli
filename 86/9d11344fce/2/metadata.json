@@ -1,0 +1,30 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "869d11344fce",
+  "session_id": "7ff991f5-9a8b-4e94-ae66-40204bc3049b",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-10T03:33:16.764532Z",
+  "branch": "gtrrz-victor/add-cli-version-metadatajsons",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/setup_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 21,
+    "cache_creation_tokens": 64574,
+    "cache_read_tokens": 847437,
+    "output_tokens": 1509,
+    "api_call_count": 15
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-10T03:33:16.722799Z",
+    "agent_lines": 28,
+    "human_added": 1362,
+    "human_modified": 15,
+    "human_removed": 0,
+    "total_committed": 1400,
+    "agent_percentage": 2
+  }
+}

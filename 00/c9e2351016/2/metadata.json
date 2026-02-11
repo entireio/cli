@@ -1,0 +1,32 @@
+{
+  "checkpoint_id": "00c9e2351016",
+  "session_id": "0a93878f-dc30-4a5d-882f-3cd81cd3d499",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-03T00:31:46.110831Z",
+  "branch": "gtrrz-victor/adds-entire-reset-command",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/reset_test.go",
+    "cmd/entire/cli/reset.go",
+    "cmd/entire/cli/reset_test.go",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/strategy/manual_commit_reset.go"
+  ],
+  "agent": "Agent",
+  "token_usage": {
+    "input_tokens": 485,
+    "cache_creation_tokens": 240071,
+    "cache_read_tokens": 7067722,
+    "output_tokens": 354,
+    "api_call_count": 88
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-03T00:31:46.001683Z",
+    "agent_lines": 32,
+    "human_added": 0,
+    "human_modified": 1,
+    "human_removed": 4,
+    "total_committed": 33,
+    "agent_percentage": 96.96969696969697
+  }
+}

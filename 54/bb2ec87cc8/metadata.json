@@ -1,0 +1,39 @@
+{
+  "checkpoint_id": "54bb2ec87cc8",
+  "strategy": "manual-commit",
+  "branch": "soph/improved-shadow",
+  "migration_source_commit": "f376341e36b7015b9e5835fd8f5304a0d948b6fe",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/mid_session_rebase_test.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_migration.go",
+    "cmd/entire/cli/strategy/manual_commit_migration_test.go",
+    "docs/architecture/shadow-branch-suffixes.md",
+    "shadow-branch-suffixes.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/54/bb2ec87cc8/0/metadata.json",
+      "transcript": "/54/bb2ec87cc8/0/full.jsonl",
+      "context": "/54/bb2ec87cc8/0/context.md",
+      "content_hash": "/54/bb2ec87cc8/0/content_hash.txt",
+      "prompt": "/54/bb2ec87cc8/0/prompt.txt"
+    },
+    {
+      "metadata": "/54/bb2ec87cc8/2/metadata.json",
+      "transcript": "/54/bb2ec87cc8/2/full.jsonl",
+      "context": "/54/bb2ec87cc8/2/context.md",
+      "content_hash": "/54/bb2ec87cc8/2/content_hash.txt",
+      "prompt": "/54/bb2ec87cc8/2/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4738,
+    "cache_creation_tokens": 425361,
+    "cache_read_tokens": 12412065,
+    "output_tokens": 368,
+    "api_call_count": 113
+  }
+}

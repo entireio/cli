@@ -1,0 +1,294 @@
+Implement the following plan:
+
+# Review: TokenUsage Implementation Across Strategies
+
+## Summary
+
+The token usage tracking has been implemented across both strategies but has code duplication and a potential data loss bug.
+
+---
+
+## Issues Found
+
+### 1. Code Duplication: Field-by-Field Accumulation (Medium Priority)
+
+The same 5-field accumulation pattern appears in multiple places:
+
+**Location A:** `manual_commit_git.go:266-289`
+```go
+func accumulateTokenUsage(existing, additional *checkpoint.TokenUsage) *checkpoint.TokenUsage {
+    // ... 25 lines of field-by-field accumulation
+    return &checkpoint.TokenUsage{
+        InputTokens:         existing.InputTokens + additional.InputTokens,
+        CacheCreationTokens: existing.CacheCreationTokens + additional.CacheCreationTokens,
+        // ... 3 more fields
+    }
+}
+```
+
+**Location B:** `agent/claudecode/transcript.go:437-441`
+```go
+subagentUsage.InputTokens += agentUsage.InputTokens
+subagentUsage.CacheCreationTokens += agentUsage.CacheCreationTokens
+subagentUsage.CacheReadTokens += agentUsage.CacheReadTokens
+subagentUsage.OutputTokens += agentUsage.OutputTokens
+subagentUsage.APICallCount += agentUsage.APICallCount
+```
+
+**Impact:** If a new field is added to TokenUsage, multiple places need updating.
+
+---
+
+### 2. Missing TokenUsage in session.State (High Priority - Potential Bug)
+
+**The Problem:**
+- `strategy.SessionState` has `TokenUsage *checkpoint.TokenUsage` field
+- `session.State` does NOT have a TokenUsage field
+- Conversion functions in `manual_commit.go:58-96` don't map TokenUsage
+
+**Location:** `manual_commit.go:58-75`
+```go
+func sessionStateToStrategy(state *session.State) *SessionState {
+    return &SessionState{
+        SessionID:     state.SessionID,
+        // ... other fields mapped
+        // TokenUsage is NOT mapped!
+    }
+}
+```
+
+**Why it works today:** The code path in `SaveChanges()` and `CondenseSession()` uses `SessionState` directly via JSON marshal/unmarshal to `.git/entire-sessions/<session-id>.json`, bypassing the `session.State` type. But this inconsistency could cause issues if code paths change.
+
+---
+
+### 3. Different Accumulation Behavior Between Strategies (By Design, but worth noting)
+
+| Aspect | Auto-Commit | Manual-Commit |
+|--------|-------------|---------------|
+| Accumulation | None (per-checkpoint) | Accumulated across checkpoints |
+| Storage | Each checkpoint has own metadata.json | Session state accumulates, written on condensation |
+| Total usage | Must sum all checkpoint metadata files | Single accumulated value |
+
+This is intentional due to different architectures but means getting "total session usage" requires different logic per strategy.
+
+---
+
+### 4. TaskCheckpointContext Missing TokenUsage (Low Priority)
+
+`TaskCheckpointContext` in `strategy.go` doesn't have a `TokenUsage` field, so subagent task checkpoints don't track tokens. This might be intentional (subagent tokens tracked via `SubagentTokens` field instead).
+
+---
+
+## Recommended Fixes
+
+### Fix 1: Add Methods to TokenUsage (Eliminates Duplication)
+
+**File:** `cmd/entire/cli/checkpoint/checkpoint.go`
+
+Add two methods to the `TokenUsage` struct:
+
+```go
+// Accumulate returns a new TokenUsage with values summed from both.
+// Handles nil receivers and arguments safely.
+func (t *TokenUsage) Accumulate(other *TokenUsage) *TokenUsage {
+    if other == nil {
+        return t
+    }
+    if t == nil {
+        return &TokenUsage{
+            InputTokens:         other.InputTokens,
+            CacheCreationTokens: other.CacheCreationTokens,
+            CacheReadTokens:     other.CacheReadTokens,
+            OutputTokens:        other.OutputTokens,
+            APICallCount:        other.APICallCount,
+            SubagentTokens:      other.SubagentTokens,
+        }
+    }
+    return &TokenUsage{
+        InputTokens:         t.InputTokens + other.InputTokens,
+        CacheCreationTokens: t.CacheCreationTokens + other.CacheCreationTokens,
+        CacheReadTokens:     t.CacheReadTokens + other.CacheReadTokens,
+        OutputTokens:        t.OutputTokens + other.OutputTokens,
+        APICallCount:        t.APICallCount + other.APICallCount,
+        SubagentTokens:      t.SubagentTokens.Accumulate(other.SubagentTokens),
+    }
+}
+
+// Add adds the values from other to this TokenUsage in place.
+func (t *TokenUsage) Add(other *TokenUsage) {
+    if t == nil || other == nil {
+        return
+    }
+    t.InputTokens += other.InputTokens
+    t.CacheCreationTokens += other.CacheCreationTokens
+    t.CacheReadTokens += other.CacheReadTokens
+    t.OutputTokens += other.OutputTokens
+    t.APICallCount += other.APICallCount
+}
+```
+
+### Fix 2: Update Callers to Use New Methods
+
+**File:** `cmd/entire/cli/strategy/manual_commit_git.go`
+
+Replace `accumulateTokenUsage()` call:
+```go
+// Before:
+state.TokenUsage = accumulateTokenUsage(state.TokenUsage, ctx.TokenUsage)
+
+// After:
+state.TokenUsage = state.TokenUsage.Accumulate(ctx.TokenUsage)
+```
+
+Delete the `accumulateTokenUsage()` function entirely.
+
+**File:** `cmd/entire/cli/agent/claudecode/transcript.go`
+
+Replace field-by-field addition in `CalculateTotalTokenUsage()`:
+```go
+// Before:
+subagentUsage.InputTokens += agentUsage.InputTokens
+subagentUsage.CacheCreationTokens += agentUsage.CacheCreationTokens
+// ... etc
+
+// After:
+subagentUsage.Add(agentUsage)
+```
+
+### Fix 3: Add TokenUsage to session.State (Consistency Fix)
+
+**File:** `cmd/entire/cli/session/state.go`
+
+Add field to State struct:
+```go
+type State struct {
+    // ... existing fields
+    TokenUsage *checkpoint.TokenUsage `json:"token_usage,omitempty"`
+}
+```
+
+**File:** `cmd/entire/cli/strategy/manual_commit.go`
+
+Update both conversion functions to map TokenUsage:
+```go
+func sessionStateToStrategy(state *session.State) *SessionState {
+    return &SessionState{
+        // ... existing fields
+        TokenUsage: state.TokenUsage,
+    }
+}
+
+func sessionStateFromStrategy(state *SessionState) *session.State {
+    return &session.State{
+        // ... existing fields
+        TokenUsage: state.TokenUsage,
+    }
+}
+```
+
+---
+
+## Files to Modify
+
+1. `cmd/entire/cli/checkpoint/checkpoint.go` - Add `Accumulate()` and `Add()` methods
+2. `cmd/entire/cli/strategy/manual_commit_git.go` - Use new method, delete old function
+3. `cmd/entire/cli/agent/claudecode/transcript.go` - Use `Add()` method
+4. `cmd/entire/cli/session/state.go` - Add TokenUsage field
+5. `cmd/entire/cli/strategy/manual_commit.go` - Update conversion functions
+
+---
+
+## Verification
+
+1. Run `mise run test` - all tests should pass
+2. Run `mise run lint` - no new lint errors
+3. Manual test: create a session, make changes, commit, verify token_usage in metadata.json
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+
+---
+
+manual strategy is also missing the props TranscriptUUIDAtStart and TranscriptLinesAtStart inside metadata
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Implement the following plan:
+
+# Add TranscriptUUIDAtStart and TranscriptLinesAtStart to Manual Commit Strategy
+
+## Summary
+
+The manual commit strategy is missing `TranscriptUUIDAtStart` and `TranscriptLinesAtStart` fields in the metadata.json written during condensation. These fields track where in the transcript this checkpoint's content starts, which is needed for proper transcript slicing when viewing checkpoint history.
+
+## Changes Required
+
+### 1. Add Fields to SessionState (`cmd/entire/cli/strategy/manual_commit_types.go`)
+
+Add after `TokenUsage` field (line 30):
+
+```go
+TranscriptUUIDAtStart  string `json:"transcript_uuid_at_start,omitempty"`  // Last UUID when condensation period started
+TranscriptLinesAtStart int    `json:"transcript_lines_at_start,omitempty"` // Line count when condensation period started
+```
+
+### 2. Add Fields to session.State (`cmd/entire/cli/session/state.go`)
+
+Add after `TokenUsage` field (line 59):
+
+```go
+TranscriptUUIDAtStart  string `json:"transcript_uuid_at_start,omitempty"`
+TranscriptLinesAtStart int    `json:"transcript_lines_at_start,omitempty"`
+```
+
+### 3. Update Conversion Functions (`cmd/entire/cli/strategy/manual_commit.go`)
+
+Add mappings in `sessionStateToStrategy` (line 75) and `sessionStateFromStrategy` (line 95):
+
+```go
+TranscriptUUIDAtStart:  state.TranscriptUUIDAtStart,
+TranscriptLinesAtStart: state.TranscriptLinesAtStart,
+```
+
+### 4. Store Values in SaveChanges (`cmd/entire/cli/strategy/manual_commit_git.go`)
+
+After token usage accumulation (line 86), add logic to store transcript position on first checkpoint of condensation period:
+
+```go
+// Store transcript position from first checkpoint of this condensation period
+// This tracks where the transcript content starts for the next condensation
+if state.CheckpointCount == 1 { // Just incremented from 0
+    state.TranscriptUUIDAtStart = ctx.TranscriptUUIDAtStart
+    state.TranscriptLinesAtStart = ctx.TranscriptLinesAtStart
+}
+```
+
+### 5. Pass Values to WriteCommitted (`cmd/entire/cli/strategy/manual_commit_condensation.go`)
+
+In `CondenseSession`, add these fields to the `WriteCommitted` call (after line 136 `TokenUsage`):
+
+```go
+TranscriptUUIDAtStart:  state.TranscriptUUIDAtStart,
+TranscriptLinesAtStart: state.TranscriptLinesAtStart,
+```
+
+## Files to Modify
+
+1. `cmd/entire/cli/strategy/manual_commit_types.go` - Add fields to SessionState
+2. `cmd/entire/cli/session/state.go` - Add fields to State
+3. `cmd/entire/cli/strategy/manual_commit.go` - Update conversion functions
+4. `cmd/entire/cli/strategy/manual_commit_git.go` - Store values on first checkpoint
+5. `cmd/entire/cli/strategy/manual_commit_condensation.go` - Pass values to WriteCommitted
+
+## Verification
+
+1. Run `mise run fmt && mise run lint` - no errors
+2. Run `mise run test` - all tests pass
+3. Manual test: create a session, make changes, commit, verify `transcript_uuid_at_start` and `transcript_lines_at_start` appear in metadata.json on entire/sessions branch
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl

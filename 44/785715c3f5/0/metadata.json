@@ -1,0 +1,32 @@
+{
+  "checkpoint_id": "44785715c3f5",
+  "session_id": "2026-01-22-0cf3db51-1c73-43bb-8d05-dc02739514a5",
+  "strategy": "manual-commit",
+  "created_at": "2026-01-22T10:53:22.476588+11:00",
+  "checkpoints_count": 35,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/transcript.go",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/explain_test.go",
+    "cmd/entire/cli/integration_test/last_checkpoint_id_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_types.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_uuid_at_start": "216bf60d-ee2d-45c6-b47d-1628cc3ddcb9",
+  "transcript_lines_at_start": 1996,
+  "token_usage": {
+    "input_tokens": 7189,
+    "cache_creation_tokens": 2292257,
+    "cache_read_tokens": 42908147,
+    "output_tokens": 1604,
+    "api_call_count": 449
+  }
+}
