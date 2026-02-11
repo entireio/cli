@@ -507,6 +507,41 @@ func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
 	}
 }
 
+func TestRemoveAgentHooks_RemovesPiHooks(t *testing.T) {
+	setupTestRepo(t)
+
+	ag, err := agent.Get(agent.AgentNamePi)
+	if err != nil {
+		t.Fatalf("failed to get pi agent: %v", err)
+	}
+	hookAgent, ok := ag.(agent.HookSupport)
+	if !ok {
+		t.Fatal("pi agent does not implement HookSupport")
+	}
+
+	if _, err := hookAgent.InstallHooks(false, false); err != nil {
+		t.Fatalf("failed to install pi hooks: %v", err)
+	}
+
+	entryPath := filepath.Join(".pi", "extensions", "entire", "index.ts")
+	if _, err := os.Stat(entryPath); err != nil {
+		t.Fatalf("expected pi scaffold to exist: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := removeAgentHooks(&stdout); err != nil {
+		t.Fatalf("removeAgentHooks() error = %v", err)
+	}
+
+	if _, err := os.Stat(entryPath); !os.IsNotExist(err) {
+		t.Fatalf("expected pi scaffold to be removed")
+	}
+
+	if !strings.Contains(stdout.String(), "Removed Pi hooks") {
+		t.Fatalf("expected output to mention Pi hook removal, got: %s", stdout.String())
+	}
+}
+
 func TestRunUninstall_NotAGitRepo(t *testing.T) {
 	// Create a temp directory without git init
 	tmpDir := t.TempDir()
