@@ -1,0 +1,34 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "51d0ec73edba",
+  "strategy": "manual-commit",
+  "branch": "rwr/fix-empty-repo-reference-not-found",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/common_test.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/51/d0ec73edba/0/metadata.json",
+      "transcript": "/51/d0ec73edba/0/full.jsonl",
+      "context": "/51/d0ec73edba/0/context.md",
+      "content_hash": "/51/d0ec73edba/0/content_hash.txt",
+      "prompt": "/51/d0ec73edba/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 40,
+    "cache_creation_tokens": 121985,
+    "cache_read_tokens": 4395843,
+    "output_tokens": 2501,
+    "api_call_count": 36
+  }
+}

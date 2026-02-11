@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "61a440d894cc",
+  "strategy": "manual-commit",
+  "branch": "soph/copy-checkpoints-from-forks",
+  "checkpoints_count": 6,
+  "files_touched": [
+    ".github/actions/sync-fork-checkpoints/action.yml",
+    ".github/workflows/sync-fork-checkpoints.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/61/a440d894cc/0/metadata.json",
+      "transcript": "/61/a440d894cc/0/full.jsonl",
+      "context": "/61/a440d894cc/0/context.md",
+      "content_hash": "/61/a440d894cc/0/content_hash.txt",
+      "prompt": "/61/a440d894cc/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 70,
+    "cache_creation_tokens": 140751,
+    "cache_read_tokens": 4554158,
+    "output_tokens": 6840,
+    "api_call_count": 42
+  }
+}
