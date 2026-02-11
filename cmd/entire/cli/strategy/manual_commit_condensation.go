@@ -148,14 +148,11 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		summarizeCtx := logging.WithComponent(logCtx, "summarize")
 
 		// Scope transcript to this checkpoint's portion.
-		// SliceFromLine only works for JSONL (Claude Code) transcripts where
-		// CheckpointTranscriptStart is a line offset. For Gemini JSON transcripts,
-		// CheckpointTranscriptStart is a message index and the transcript is a single
-		// JSON blob, so line-based slicing would produce malformed content.
-		// The summarizer (ParseFromBytes) only supports JSONL, so skip scoping for Gemini.
+		// For Claude Code (JSONL), CheckpointTranscriptStart is a line offset.
+		// For Gemini (JSON), CheckpointTranscriptStart is a message index.
 		var scopedTranscript []byte
 		if state.AgentType == agent.AgentTypeGemini {
-			scopedTranscript = sessionData.Transcript
+			scopedTranscript = geminicli.SliceFromMessage(sessionData.Transcript, state.CheckpointTranscriptStart)
 		} else {
 			scopedTranscript = transcript.SliceFromLine(sessionData.Transcript, state.CheckpointTranscriptStart)
 		}

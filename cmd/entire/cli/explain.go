@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -310,7 +311,7 @@ func generateCheckpointSummary(w, _ io.Writer, store *checkpoint.GitStore, check
 	}
 
 	// Scope the transcript to only this checkpoint's portion
-	scopedTranscript := scopeTranscriptForCheckpoint(content.Transcript, content.Metadata.GetTranscriptStart())
+	scopedTranscript := scopeTranscriptForCheckpoint(content.Transcript, content.Metadata.GetTranscriptStart(), content.Metadata.Agent)
 	if len(scopedTranscript) == 0 {
 		return fmt.Errorf("checkpoint %s has no transcript content for this checkpoint (scoped)", checkpointID)
 	}
@@ -441,9 +442,8 @@ func explainTemporaryCheckpoint(w io.Writer, repo *git.Repository, store *checkp
 				if parent, parentErr := shadowCommit.Parent(0); parentErr == nil {
 					parentTranscript, _ := store.GetTranscriptFromCommit(parent.Hash, tc.MetadataDir, agentType) //nolint:errcheck // Best-effort
 					if len(parentTranscript) > 0 {
-						// Count lines in parent transcript to know where to slice from
-						parentLineCount := countLines(parentTranscript)
-						scopedTranscript = transcript.SliceFromLine(fullTranscript, parentLineCount)
+						parentOffset := transcriptOffset(parentTranscript, agentType)
+						scopedTranscript = scopeTranscriptForCheckpoint(fullTranscript, parentOffset, agentType)
 					}
 				}
 			}
@@ -528,11 +528,15 @@ func getAssociatedCommits(repo *git.Repository, checkpointID id.CheckpointID, se
 	return commits, nil
 }
 
-// scopeTranscriptForCheckpoint slices a transcript to include only the lines
-// relevant to a specific checkpoint, starting from linesAtStart.
-// This allows showing only what happened during a checkpoint, not the entire session.
-func scopeTranscriptForCheckpoint(fullTranscript []byte, linesAtStart int) []byte {
-	return transcript.SliceFromLine(fullTranscript, linesAtStart)
+// scopeTranscriptForCheckpoint slices a transcript to include only the portion
+// relevant to a specific checkpoint, starting from the given offset.
+// For Claude Code (JSONL), the offset is a line number and we slice by line.
+// For Gemini (single JSON blob), the offset is a message index and we slice by message.
+func scopeTranscriptForCheckpoint(fullTranscript []byte, startOffset int, agentType agent.AgentType) []byte {
+	if agentType == agent.AgentTypeGemini {
+		return geminicli.SliceFromMessage(fullTranscript, startOffset)
+	}
+	return transcript.SliceFromLine(fullTranscript, startOffset)
 }
 
 // extractPromptsFromTranscript extracts user prompts from transcript bytes.
@@ -572,8 +576,8 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 
 	// Scope the transcript to this checkpoint's portion
 	// If CheckpointTranscriptStart > 0, we slice the transcript to only include
-	// lines from that point onwards (excluding earlier checkpoint content)
-	scopedTranscript := scopeTranscriptForCheckpoint(content.Transcript, meta.GetTranscriptStart())
+	// content from that point onwards (excluding earlier checkpoint content)
+	scopedTranscript := scopeTranscriptForCheckpoint(content.Transcript, meta.GetTranscriptStart(), meta.Agent)
 
 	// Extract prompts from the scoped transcript for intent extraction
 	scopedPrompts := extractPromptsFromTranscript(scopedTranscript, meta.Agent)
@@ -924,7 +928,7 @@ func getBranchCheckpoints(repo *git.Repository, limit int) ([]strategy.RewindPoi
 		// Read session prompt from metadata branch (best-effort)
 		content, _ := store.ReadLatestSessionContent(context.Background(), cpID) //nolint:errcheck  // Best-effort
 		if content != nil {
-			scopedTranscript := scopeTranscriptForCheckpoint(content.Transcript, content.Metadata.GetTranscriptStart())
+			scopedTranscript := scopeTranscriptForCheckpoint(content.Transcript, content.Metadata.GetTranscriptStart(), content.Metadata.Agent)
 			scopedPrompts := extractPromptsFromTranscript(scopedTranscript, content.Metadata.Agent)
 			if len(scopedPrompts) > 0 && scopedPrompts[0] != "" {
 				point.SessionPrompt = scopedPrompts[0]
@@ -1517,6 +1521,19 @@ func countLines(content []byte) int {
 		}
 	}
 	return count
+}
+
+// transcriptOffset returns the appropriate offset for scoping a transcript.
+// For Claude Code (JSONL), this is the line count. For Gemini (JSON), this is the message count.
+func transcriptOffset(transcriptBytes []byte, agentType agent.AgentType) int {
+	if agentType == agent.AgentTypeGemini {
+		t, err := geminicli.ParseTranscript(transcriptBytes)
+		if err != nil {
+			return 0
+		}
+		return len(t.Messages)
+	}
+	return countLines(transcriptBytes)
 }
 
 // hasCodeChanges returns true if the commit has changes to non-metadata files.
