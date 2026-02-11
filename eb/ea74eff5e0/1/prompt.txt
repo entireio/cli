@@ -1,0 +1,150 @@
+Implement the following plan:
+
+# Fix: Per-session agent resolution in multi-session checkpoints
+
+## Context
+
+A checkpoint can contain multiple sessions from different agents (e.g., session 0 from Claude, session 1 from Gemini). The per-session agent type **is stored correctly** in each session's `metadata.json` on `entire/checkpoints/v1` (`CommittedMetadata.Agent`), but the consumption layer collapses everything to a single agent — always session 0's. This means session 1's transcript gets written to the wrong directory, with the wrong file extension, and the wrong resume command.
+
+The user's key insight: `RestoreLogsOnly()` already reads each session's metadata (including `content.Metadata.Agent`) inside its loop — it just ignores it. Rather than threading `SessionAgents` arrays through `CheckpointInfo` → `RewindPoint` → consumers, we resolve per-session agents **at consumption time** inside `RestoreLogsOnly()` and return the per-session info so callers can print correct resume commands.
+
+## Changes
+
+### 1. Add `RestoredSession` struct
+
+**`strategy/manual_commit_rewind.go`** — New struct returned by `RestoreLogsOnly`:
+```go
+type RestoredSession struct {
+    SessionID string
+    Agent     agent.AgentType
+    Prompt    string
+}
+```
+
+### 2. Change `RestoreLogsOnly` return type
+
+**`strategy/strategy.go`** — `LogsOnlyRestorer` interface (line 473-478):
+```go
+type LogsOnlyRestorer interface {
+    RestoreLogsOnly(point RewindPoint, force bool) ([]RestoredSession, error)
+}
+```
+
+**`strategy/manual_commit_rewind.go`** — Implementation signature (line 619):
+```go
+func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) ([]RestoredSession, error)
+```
+
+### 3. Per-session agent resolution in `RestoreLogsOnly()`
+
+**`strategy/manual_commit_rewind.go`** — Inside the session loop (after line 704), use `content.Metadata.Agent` to resolve a per-session agent:
+
+```go
+// Resolve per-session agent (fall back to outer ag for old checkpoints)
+sessionAgent := ag
+sessionAgentDir := sessionDir
+if content.Metadata.Agent != "" {
+    if perAg, err := ResolveAgentForRewind(content.Metadata.Agent); err == nil {
+        sessionAgent = perAg
+        if d, err := sessionAgent.GetSessionDir(repoRoot); err == nil {
+            sessionAgentDir = d
+        }
+    }
+}
+
+sessionFile := ResolveSessionFilePath(sessionID, sessionAgent, sessionAgentDir)
+```
+
+Collect `RestoredSession` entries and return them.
+
+Remove the outer single-agent `sessionDir` setup (lines 655-663) — each session computes its own dir.
+
+### 4. Per-session agent in `classifySessionsForRestore()`
+
+**`strategy/manual_commit_rewind.go`** — Same per-session resolution pattern:
+
+- Add `repoRoot string` parameter (caller at line 667 already has `repoRoot`)
+- Inside the loop, resolve per-session agent from `content.Metadata.Agent`
+- Use per-session agent + dir for `ResolveSessionFilePath`
+
+### 5. Update all callers in `rewind.go`
+
+5 call sites (lines 556, 605, 887, 928, 998) currently discard the return:
+```go
+if err := restorer.RestoreLogsOnly(point, true); err != nil {
+```
+
+Change to capture `[]RestoredSession`:
+```go
+sessions, err := restorer.RestoreLogsOnly(point, true)
+if err != nil {
+```
+
+Pass `sessions` to `printMultiSessionResumeCommands` (see step 7).
+
+### 6. Simplify `resume.go` caller
+
+**`resume.go`** (lines 408-486) currently:
+1. Calls `RestoreLogsOnly(point, force)`
+2. Re-opens the repository and re-reads the metadata tree to print resume commands
+
+With the new return type, eliminate the re-read — use `[]RestoredSession` directly:
+```go
+sessions, err := restorer.RestoreLogsOnly(point, force)
+if err != nil { ... }
+// Use sessions to print resume commands — no re-read needed
+```
+
+This removes ~40 lines of fallback/re-read logic (lines 422-486).
+
+### 7. Update `printMultiSessionResumeCommands()`
+
+**`rewind.go`** — Change signature from `(point RewindPoint, agent Agent)` to `(sessions []strategy.RestoredSession)`:
+
+For each session, resolve the agent from `session.Agent` via `ResolveAgentForRewind()`, then call `FormatResumeCommand`. Falls back to default agent for empty agent type.
+
+### 8. Unify `getAgent()` with `ResolveAgentForRewind()`
+
+**`rewind.go`** — Replace `getAgent()` body (line 33-42) to delegate:
+```go
+func getAgent(agentType agentpkg.AgentType) (agentpkg.Agent, error) {
+    return strategy.ResolveAgentForRewind(agentType)
+}
+```
+
+Fixes the inconsistency where `getAgent("")` errors but `ResolveAgentForRewind("")` falls back to Claude.
+
+## Files to modify
+
+| File | What |
+|------|------|
+| `cmd/entire/cli/strategy/strategy.go` | Change `LogsOnlyRestorer` interface return type |
+| `cmd/entire/cli/strategy/manual_commit_rewind.go` | Add `RestoredSession`, per-session agent in `RestoreLogsOnly()` and `classifySessionsForRestore()` |
+| `cmd/entire/cli/rewind.go` | Update 5 callers, rewrite `printMultiSessionResumeCommands()`, unify `getAgent()` |
+| `cmd/entire/cli/resume.go` | Simplify caller to use returned `[]RestoredSession` |
+
+## Verification
+
+1. `go build ./...`
+2. `mise run fmt && mise run lint`
+3. `go test ./cmd/entire/cli/... -count=1`
+4. Manual: create a checkpoint with two sessions from different agents, rewind, verify each transcript lands in the correct agent directory with correct resume commands
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+
+---
+
+Do not fallback, if session metadata does not have agent, print a warning like the session can not be restored agent is unknown
+
+---
+
+we should at least log that sessions that are skipped
+
+---
+
+that warn does not sound rigth, we are finding the sessions we will restore.
+
+---
+
+fix test

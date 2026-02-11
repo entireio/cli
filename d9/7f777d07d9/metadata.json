@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "d97f777d07d9",
+  "strategy": "manual-commit",
+  "branch": "soph/better-git-hook-handling",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/hooks.go",
+    "cmd/entire/cli/strategy/hooks_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d9/7f777d07d9/0/metadata.json",
+      "transcript": "/d9/7f777d07d9/0/full.jsonl",
+      "context": "/d9/7f777d07d9/0/context.md",
+      "content_hash": "/d9/7f777d07d9/0/content_hash.txt",
+      "prompt": "/d9/7f777d07d9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 14,
+    "cache_creation_tokens": 138455,
+    "cache_read_tokens": 1227331,
+    "output_tokens": 868,
+    "api_call_count": 10
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "769ddf2969b6",
+  "strategy": "manual-commit",
+  "branch": "soph/gemini-rewind",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/agent/geminicli/transcript.go",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/rewind.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/76/9ddf2969b6/0/metadata.json",
+      "transcript": "/76/9ddf2969b6/0/full.jsonl",
+      "context": "/76/9ddf2969b6/0/context.md",
+      "content_hash": "/76/9ddf2969b6/0/content_hash.txt",
+      "prompt": "/76/9ddf2969b6/0/prompt.txt"
+    },
+    {
+      "metadata": "/76/9ddf2969b6/1/metadata.json",
+      "transcript": "/76/9ddf2969b6/1/full.jsonl",
+      "context": "/76/9ddf2969b6/1/context.md",
+      "content_hash": "/76/9ddf2969b6/1/content_hash.txt",
+      "prompt": "/76/9ddf2969b6/1/prompt.txt"
+    },
+    {
+      "metadata": "/76/9ddf2969b6/2/metadata.json",
+      "transcript": "/76/9ddf2969b6/2/full.jsonl",
+      "context": "/76/9ddf2969b6/2/context.md",
+      "content_hash": "/76/9ddf2969b6/2/content_hash.txt",
+      "prompt": "/76/9ddf2969b6/2/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3476,
+    "cache_creation_tokens": 292437,
+    "cache_read_tokens": 8031778,
+    "output_tokens": 17730,
+    "api_call_count": 80
+  }
+}

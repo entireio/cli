@@ -1,0 +1,38 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "51d0ec73edba",
+  "session_id": "5a69ca08-eee5-4626-ac94-c23483e262cb",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T13:19:11.160491Z",
+  "branch": "rwr/fix-empty-repo-reference-not-found",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/setup.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/auto_commit_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/common_test.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 40,
+    "cache_creation_tokens": 121985,
+    "cache_read_tokens": 4395843,
+    "output_tokens": 2501,
+    "api_call_count": 36
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T13:19:11.088023Z",
+    "agent_lines": 120,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 120,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-robin-Developer-cli/5a69ca08-eee5-4626-ac94-c23483e262cb.jsonl"
+}

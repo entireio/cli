@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "50e6e7e6ec02",
+  "strategy": "manual-commit",
+  "branch": "soph/fix-issue-with-reusing-checkpoint-id",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/architecture/sessions-and-checkpoints.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/50/e6e7e6ec02/0/metadata.json",
+      "transcript": "/50/e6e7e6ec02/0/full.jsonl",
+      "context": "/50/e6e7e6ec02/0/context.md",
+      "content_hash": "/50/e6e7e6ec02/0/content_hash.txt",
+      "prompt": "/50/e6e7e6ec02/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2940,
+    "cache_creation_tokens": 102420,
+    "cache_read_tokens": 840974,
+    "output_tokens": 36,
+    "api_call_count": 19
+  }
+}

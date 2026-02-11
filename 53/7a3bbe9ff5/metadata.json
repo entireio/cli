@@ -1,0 +1,30 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "537a3bbe9ff5",
+  "strategy": "manual-commit",
+  "branch": "feature/agent-installation-validation",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "cmd/entire/cli/agent/claudecode/claude.go",
+    "cmd/entire/cli/agent/claudecode/claude_test.go",
+    "cmd/entire/cli/agent/geminicli/gemini.go",
+    "cmd/entire/cli/agent/geminicli/gemini_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/53/7a3bbe9ff5/0/metadata.json",
+      "transcript": "/53/7a3bbe9ff5/0/full.jsonl",
+      "context": "/53/7a3bbe9ff5/0/context.md",
+      "content_hash": "/53/7a3bbe9ff5/0/content_hash.txt",
+      "prompt": "/53/7a3bbe9ff5/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2106,
+    "cache_creation_tokens": 231618,
+    "cache_read_tokens": 1831477,
+    "output_tokens": 62,
+    "api_call_count": 29
+  }
+}
