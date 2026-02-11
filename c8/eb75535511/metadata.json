@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "c8eb75535511",
+  "strategy": "manual-commit",
+  "branch": "soph/gemini-rewind",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/registry.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c8/eb75535511/0/metadata.json",
+      "transcript": "/c8/eb75535511/0/full.jsonl",
+      "context": "/c8/eb75535511/0/context.md",
+      "content_hash": "/c8/eb75535511/0/content_hash.txt",
+      "prompt": "/c8/eb75535511/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 7,
+    "cache_creation_tokens": 1640,
+    "cache_read_tokens": 811511,
+    "output_tokens": 83,
+    "api_call_count": 5
+  }
+}

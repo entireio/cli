@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "769ddf2969b6",
+  "session_id": "9e44573d-4eb8-4de0-8659-418f3c68706d",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T00:45:28.783975Z",
+  "branch": "soph/gemini-rewind",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/strategy/common.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 35,
+    "cache_creation_tokens": 100187,
+    "cache_read_tokens": 3802738,
+    "output_tokens": 2869,
+    "api_call_count": 33
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T00:45:28.520942Z",
+    "agent_lines": 65,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 65,
+    "agent_percentage": 100
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "9b04c3d92e38",
+  "session_id": "9e44573d-4eb8-4de0-8659-418f3c68706d",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T03:14:48.04987Z",
+  "branch": "gtrrz-victor/ignore-hidden-commands",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/buildinfo/buildinfo.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "b547ae53-d548-4e98-8c4f-0335d0ca3b24",
+  "checkpoint_transcript_start": 132,
+  "transcript_lines_at_start": 132,
+  "token_usage": {
+    "input_tokens": 14,
+    "cache_creation_tokens": 4991,
+    "cache_read_tokens": 1540569,
+    "output_tokens": 668,
+    "api_call_count": 12
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T03:14:47.793273Z",
+    "agent_lines": 0,
+    "human_added": 382,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 382,
+    "agent_percentage": 0
+  }
+}
