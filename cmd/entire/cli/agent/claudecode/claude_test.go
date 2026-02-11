@@ -1,25 +1,69 @@
 package claudecode
 
 import (
+	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
-func TestIsInstalled(t *testing.T) {
+func TestIsInstalled_Found(t *testing.T) {
 	t.Parallel()
 
-	c := &ClaudeCodeAgent{}
+	c := &ClaudeCodeAgent{
+		LookPath: func(file string) (string, error) {
+			if file == "claude" {
+				return "/usr/bin/claude", nil
+			}
+			return "", exec.ErrNotFound
+		},
+	}
 	installed, err := c.IsInstalled()
 
-	// Should not return an error regardless of whether claude is installed
 	if err != nil {
 		t.Fatalf("IsInstalled() error = %v", err)
 	}
+	if !installed {
+		t.Error("IsInstalled() = false, want true")
+	}
+}
 
-	// installed is environment-dependent, just verify it's a valid bool
-	_ = installed
+func TestIsInstalled_NotFound(t *testing.T) {
+	t.Parallel()
+
+	c := &ClaudeCodeAgent{
+		LookPath: func(_ string) (string, error) {
+			return "", exec.ErrNotFound
+		},
+	}
+	installed, err := c.IsInstalled()
+
+	if err != nil {
+		t.Fatalf("IsInstalled() error = %v", err)
+	}
+	if installed {
+		t.Error("IsInstalled() = true, want false")
+	}
+}
+
+func TestIsInstalled_OSError(t *testing.T) {
+	t.Parallel()
+
+	c := &ClaudeCodeAgent{
+		LookPath: func(_ string) (string, error) {
+			return "", errors.New("permission denied")
+		},
+	}
+	installed, err := c.IsInstalled()
+
+	if err == nil {
+		t.Fatal("IsInstalled() should return error for OS errors")
+	}
+	if installed {
+		t.Error("IsInstalled() = true, want false on error")
+	}
 }
 
 func TestResolveSessionFile(t *testing.T) {

@@ -28,7 +28,11 @@ func init() {
 // GeminiCLIAgent implements the Agent interface for Gemini CLI.
 //
 //nolint:revive // GeminiCLIAgent is clearer than Agent in this context
-type GeminiCLIAgent struct{}
+type GeminiCLIAgent struct {
+	// LookPath checks if a binary exists in PATH. Defaults to exec.LookPath when nil.
+	// Exported for testing.
+	LookPath func(file string) (string, error)
+}
 
 func NewGeminiCLIAgent() agent.Agent {
 	return &GeminiCLIAgent{}
@@ -74,7 +78,11 @@ func (g *GeminiCLIAgent) DetectPresence() (bool, error) {
 
 // IsInstalled checks if the `gemini` binary is available in PATH.
 func (g *GeminiCLIAgent) IsInstalled() (bool, error) {
-	_, err := exec.LookPath("gemini")
+	lookPath := g.LookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	_, err := lookPath("gemini")
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
 			return false, nil
