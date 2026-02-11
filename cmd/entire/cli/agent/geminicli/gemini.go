@@ -170,6 +170,32 @@ func (g *GeminiCLIAgent) ExtractAgentSessionID(entireSessionID string) string {
 	return sessionid.ModelSessionID(entireSessionID)
 }
 
+// ProtectedDirs returns directories that Gemini uses for config/state.
+func (g *GeminiCLIAgent) ProtectedDirs() []string { return []string{".gemini"} }
+
+// ResolveSessionFile returns the path to a Gemini session file.
+// Gemini names files as session-<date>-<shortid>.json where shortid is the first 8 chars
+// of the session UUID. This searches for an existing file matching the pattern, falling
+// back to <dir>/<id>.json if no match is found.
+func (g *GeminiCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
+	// Try to find existing file matching Gemini's naming convention:
+	// session-*-<first8chars>.json
+	shortID := agentSessionID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+
+	pattern := filepath.Join(sessionDir, "session-*-"+shortID+".json")
+	matches, err := filepath.Glob(pattern)
+	if err == nil && len(matches) > 0 {
+		// Return the most recent match (last alphabetically, since date is in the name)
+		return matches[len(matches)-1]
+	}
+
+	// Fallback: construct a default path
+	return filepath.Join(sessionDir, agentSessionID+".json")
+}
+
 // GetSessionDir returns the directory where Gemini stores session transcripts.
 // Gemini stores sessions in ~/.gemini/tmp/<project-hash>/chats/
 func (g *GeminiCLIAgent) GetSessionDir(repoPath string) (string, error) {

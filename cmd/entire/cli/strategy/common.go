@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -36,6 +37,15 @@ const (
 // NOTE: A similar sentinel exists in checkpoint/temporary.go - this is intentional.
 // Each package needs its own package-scoped sentinel for git log iteration patterns.
 var errStop = errors.New("stop iteration")
+
+// IsEmptyRepository returns true if the repository has no commits yet.
+// After git-init, HEAD points to an unborn branch (e.g., refs/heads/main)
+// whose target does not yet exist. repo.Head() returns ErrReferenceNotFound
+// in this case.
+func IsEmptyRepository(repo *git.Repository) bool {
+	_, err := repo.Head()
+	return errors.Is(err, plumbing.ErrReferenceNotFound)
+}
 
 // IsAncestorOf checks if commit is an ancestor of (or equal to) target.
 // Returns true if target can reach commit by following parent links.
@@ -188,12 +198,64 @@ const (
 	entireGitignore    = ".entire/.gitignore"
 	entireDir          = ".entire"
 	gitDir             = ".git"
-	claudeDir          = ".claude"
 	shadowBranchPrefix = "entire/"
 
 	// DefaultAgentType is the generic fallback agent type name
 	DefaultAgentType = agent.AgentTypeUnknown
 )
+
+// isProtectedPath returns true if relPath is inside a directory that should
+// never be modified or deleted during rewind or other destructive operations.
+// Protected directories include git internals, entire metadata, and all
+// registered agent config directories.
+func isProtectedPath(relPath string) bool {
+	for _, dir := range protectedDirs() {
+		if relPath == dir || strings.HasPrefix(relPath, dir+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// protectedDirs returns the list of directories to protect. This combines
+// static infrastructure dirs with agent-reported dirs from the registry.
+// The result is cached via sync.Once since it's called per-file during filepath.Walk.
+//
+// NOTE: The cache is never invalidated. In production this is fine (the agent registry
+// is populated at init time and never changes). However, tests that mutate the agent
+// registry after the first call to protectedDirs/isProtectedPath will see stale results.
+// If you need to test isProtectedPath with a custom registry, either:
+//   - run those tests in a separate process, or
+//   - call resetProtectedDirsForTest() to clear the cache.
+func protectedDirs() []string {
+	protectedDirsOnce.Do(func() {
+		protectedDirsCache = append([]string{gitDir, entireDir}, agent.AllProtectedDirs()...)
+	})
+	return protectedDirsCache
+}
+
+var (
+	protectedDirsOnce  sync.Once
+	protectedDirsCache []string
+)
+
+// homeRelativePath strips the $HOME/ prefix from an absolute path,
+// returning a home-relative path suitable for persisting in metadata.
+// Returns "" if the path is empty or not under $HOME.
+func homeRelativePath(absPath string) string {
+	if absPath == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	prefix := home + string(filepath.Separator)
+	if !strings.HasPrefix(absPath, prefix) {
+		return ""
+	}
+	return absPath[len(prefix):]
+}
 
 // isSpecificAgentType returns true if the agent type is a known, specific value
 // (not empty and not the generic "Agent" fallback).
@@ -1174,7 +1236,7 @@ func HardResetWithProtection(commitHash plumbing.Hash) (shortID string, err erro
 // collectUntrackedFiles collects all untracked files in the working directory.
 // This is used to capture the initial state when starting a session,
 // ensuring untracked files present at session start are preserved during rewind.
-// Excludes .git/, .entire/, and .claude/ directories (which are system/config directories).
+// Excludes protected directories (.git/, .entire/, and agent config directories).
 // Works correctly from any subdirectory within the repository.
 func collectUntrackedFiles() ([]string, error) {
 	// Get repository root to walk from there
@@ -1197,16 +1259,14 @@ func collectUntrackedFiles() ([]string, error) {
 
 		// Skip directories
 		if info.IsDir() {
-			// Skip .git, .claude, and .entire directories
-			if relPath == gitDir || relPath == claudeDir || relPath == entireDir ||
-				strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, claudeDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
+			if isProtectedPath(relPath) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		// Skip files in special directories (shouldn't reach here due to SkipDir, but safety check)
-		if strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, claudeDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
+		// Skip files in protected directories (shouldn't reach here due to SkipDir, but safety check)
+		if isProtectedPath(relPath) {
 			return nil
 		}
 

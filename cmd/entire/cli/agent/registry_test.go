@@ -178,3 +178,79 @@ func TestDefault(t *testing.T) {
 		t.Error("expected non-nil agent after registering default")
 	}
 }
+
+func TestAllProtectedDirs(t *testing.T) {
+	// Save original registry state
+	originalRegistry := make(map[AgentName]Factory)
+	registryMu.Lock()
+	for k, v := range registry {
+		originalRegistry[k] = v
+	}
+	registry = make(map[AgentName]Factory)
+	registryMu.Unlock()
+
+	defer func() {
+		registryMu.Lock()
+		registry = originalRegistry
+		registryMu.Unlock()
+	}()
+
+	t.Run("empty registry returns empty", func(t *testing.T) {
+		dirs := AllProtectedDirs()
+		if len(dirs) != 0 {
+			t.Errorf("expected empty dirs, got %v", dirs)
+		}
+	})
+
+	t.Run("collects dirs from registered agents", func(t *testing.T) {
+		registryMu.Lock()
+		registry = make(map[AgentName]Factory)
+		registryMu.Unlock()
+
+		Register(AgentName("agent-a"), func() Agent {
+			return &protectedDirAgent{dirs: []string{".agent-a"}}
+		})
+		Register(AgentName("agent-b"), func() Agent {
+			return &protectedDirAgent{dirs: []string{".agent-b", ".shared"}}
+		})
+
+		dirs := AllProtectedDirs()
+		if len(dirs) != 3 {
+			t.Fatalf("expected 3 dirs, got %d: %v", len(dirs), dirs)
+		}
+		// AllProtectedDirs returns sorted
+		expected := []string{".agent-a", ".agent-b", ".shared"}
+		for i, d := range dirs {
+			if d != expected[i] {
+				t.Errorf("dirs[%d] = %q, want %q", i, d, expected[i])
+			}
+		}
+	})
+
+	t.Run("deduplicates across agents", func(t *testing.T) {
+		registryMu.Lock()
+		registry = make(map[AgentName]Factory)
+		registryMu.Unlock()
+
+		Register(AgentName("agent-x"), func() Agent {
+			return &protectedDirAgent{dirs: []string{".shared"}}
+		})
+		Register(AgentName("agent-y"), func() Agent {
+			return &protectedDirAgent{dirs: []string{".shared"}}
+		})
+
+		dirs := AllProtectedDirs()
+		if len(dirs) != 1 {
+			t.Errorf("expected 1 dir (deduplicated), got %d: %v", len(dirs), dirs)
+		}
+	})
+}
+
+// protectedDirAgent is a mock that returns configurable protected dirs.
+type protectedDirAgent struct {
+	mockAgent
+
+	dirs []string
+}
+
+func (p *protectedDirAgent) ProtectedDirs() []string { return p.dirs }

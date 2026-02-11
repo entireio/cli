@@ -6,6 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // Register agent for ResolveAgentForRewind tests
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"  // Register agent for ResolveAgentForRewind tests
+
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -275,4 +279,64 @@ func TestDualStrategy_PreviewRewind(t *testing.T) {
 	if len(preview.FilesToDelete) > 0 {
 		t.Errorf("Dual strategy preview should have no files to delete, got: %v", preview.FilesToDelete)
 	}
+}
+
+func TestResolveAgentForRewind(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty type falls back to default agent", func(t *testing.T) {
+		t.Parallel()
+		ag, err := ResolveAgentForRewind("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ag == nil {
+			t.Fatal("expected non-nil agent")
+		}
+		// Default is Claude
+		if ag.Name() != agent.AgentNameClaudeCode {
+			t.Errorf("Name() = %q, want %q", ag.Name(), agent.AgentNameClaudeCode)
+		}
+	})
+
+	t.Run("AgentTypeUnknown falls back to default agent", func(t *testing.T) {
+		t.Parallel()
+		ag, err := ResolveAgentForRewind("Agent")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ag.Name() != agent.AgentNameClaudeCode {
+			t.Errorf("Name() = %q, want %q", ag.Name(), agent.AgentNameClaudeCode)
+		}
+	})
+
+	t.Run("Claude Code type resolves correctly", func(t *testing.T) {
+		t.Parallel()
+		ag, err := ResolveAgentForRewind("Claude Code")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ag.Name() != agent.AgentNameClaudeCode {
+			t.Errorf("Name() = %q, want %q", ag.Name(), agent.AgentNameClaudeCode)
+		}
+	})
+
+	t.Run("Gemini CLI type resolves correctly", func(t *testing.T) {
+		t.Parallel()
+		ag, err := ResolveAgentForRewind("Gemini CLI")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ag.Name() != agent.AgentNameGemini {
+			t.Errorf("Name() = %q, want %q", ag.Name(), agent.AgentNameGemini)
+		}
+	})
+
+	t.Run("unknown type returns error", func(t *testing.T) {
+		t.Parallel()
+		_, err := ResolveAgentForRewind("Nonexistent Agent")
+		if err == nil {
+			t.Error("expected error for unknown agent type")
+		}
+	})
 }

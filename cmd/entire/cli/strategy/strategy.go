@@ -26,6 +26,9 @@ var ErrNotTaskCheckpoint = errors.New("not a task checkpoint")
 // ErrNotImplemented is returned when a feature is not yet implemented.
 var ErrNotImplemented = errors.New("not implemented")
 
+// ErrEmptyRepository is returned when the repository has no commits yet.
+var ErrEmptyRepository = errors.New("repository has no commits yet")
+
 // SessionIDConflictError is returned when trying to start a new session
 // but the shadow branch already has commits from a different session ID.
 // This prevents orphaning existing session work.
@@ -466,6 +469,15 @@ type TurnEndHandler interface {
 	HandleTurnEnd(state *session.State, actions []session.Action) error
 }
 
+// RestoredSession describes a single session that was restored by RestoreLogsOnly.
+// Each session may come from a different agent, so callers use this to print
+// per-session resume commands without re-reading the metadata tree.
+type RestoredSession struct {
+	SessionID string
+	Agent     agent.AgentType
+	Prompt    string
+}
+
 // LogsOnlyRestorer is an optional interface for strategies that support
 // restoring session logs without file state restoration.
 // This is used for "logs-only" rewind points where only the session transcript
@@ -473,9 +485,10 @@ type TurnEndHandler interface {
 type LogsOnlyRestorer interface {
 	// RestoreLogsOnly restores session logs from a logs-only rewind point.
 	// Does not modify the working directory - only restores the transcript
-	// to Claude's project directory.
+	// to the agent's session directory (determined per-session from checkpoint metadata).
 	// If force is false, prompts for confirmation when local logs have newer timestamps.
-	RestoreLogsOnly(point RewindPoint, force bool) error
+	// Returns info about each restored session so callers can print correct resume commands.
+	RestoreLogsOnly(point RewindPoint, force bool) ([]RestoredSession, error)
 }
 
 // SessionResetter is an optional interface for strategies that support

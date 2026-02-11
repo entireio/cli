@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/go-git/go-git/v5"
@@ -690,6 +691,93 @@ func TestIsOnDefaultBranch(t *testing.T) {
 		}
 		if branchName != "" {
 			t.Errorf("branchName = %q, want empty string for detached HEAD", branchName)
+		}
+	})
+}
+
+// resetProtectedDirsForTest resets the cached protected dirs so tests that
+// manipulate the agent registry can get fresh results. Call this in any test
+// that registers/unregisters agents and then checks isProtectedPath behavior.
+//
+//nolint:unused // Intentionally kept as a test utility for future tests that mutate the agent registry.
+func resetProtectedDirsForTest() {
+	protectedDirsOnce = sync.Once{}
+	protectedDirsCache = nil
+}
+
+func TestIsProtectedPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		path      string
+		protected bool
+	}{
+		{".git", true},
+		{".git/objects", true},
+		{".entire", true},
+		{".entire/metadata/session.json", true},
+		{".claude", true},
+		{".claude/settings.json", true},
+		{".gemini", true},
+		{".gemini/settings.json", true},
+		{"src/main.go", false},
+		{"README.md", false},
+		{".gitignore", false},
+		{".github/workflows/ci.yml", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
+			if got := isProtectedPath(tt.path); got != tt.protected {
+				t.Errorf("isProtectedPath(%q) = %v, want %v", tt.path, got, tt.protected)
+			}
+		})
+	}
+}
+
+func TestIsEmptyRepository(t *testing.T) {
+	t.Parallel()
+	t.Run("empty repo returns true", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		repo, err := git.PlainInit(dir, false)
+		if err != nil {
+			t.Fatalf("failed to init repo: %v", err)
+		}
+		if !IsEmptyRepository(repo) {
+			t.Error("IsEmptyRepository() = false, want true for empty repo")
+		}
+	})
+
+	t.Run("repo with commit returns false", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		repo, err := git.PlainInit(dir, false)
+		if err != nil {
+			t.Fatalf("failed to init repo: %v", err)
+		}
+
+		// Create a commit
+		testFile := filepath.Join(dir, "test.txt")
+		if err := os.WriteFile(testFile, []byte("content"), 0o644); err != nil {
+			t.Fatalf("failed to write file: %v", err)
+		}
+		wt, err := repo.Worktree()
+		if err != nil {
+			t.Fatalf("failed to get worktree: %v", err)
+		}
+		if _, err := wt.Add("test.txt"); err != nil {
+			t.Fatalf("failed to add file: %v", err)
+		}
+		if _, err := wt.Commit("Initial commit", &git.CommitOptions{
+			Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+		}); err != nil {
+			t.Fatalf("failed to commit: %v", err)
+		}
+
+		if IsEmptyRepository(repo) {
+			t.Error("IsEmptyRepository() = true, want false for repo with commit")
 		}
 	})
 }

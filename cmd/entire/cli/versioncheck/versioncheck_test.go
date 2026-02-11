@@ -276,23 +276,11 @@ func newVersionServer(t *testing.T, version string) *httptest.Server {
 	return server
 }
 
-func TestCheckAndNotify_SkipsHiddenCommand(t *testing.T) {
-	server := newVersionServer(t, "v9.9.9")
-	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
-	cmd.Hidden = true
-
-	CheckAndNotify(cmd, "1.0.0")
-
-	if buf.Len() != 0 {
-		t.Errorf("expected no output for hidden command, got %q", buf.String())
-	}
-}
-
 func TestCheckAndNotify_SkipsDevVersion(t *testing.T) {
 	server := newVersionServer(t, "v9.9.9")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 
-	CheckAndNotify(cmd, "dev")
+	CheckAndNotify(cmd.OutOrStdout(), "dev")
 
 	if buf.Len() != 0 {
 		t.Errorf("expected no output for dev version, got %q", buf.String())
@@ -303,7 +291,7 @@ func TestCheckAndNotify_SkipsEmptyVersion(t *testing.T) {
 	server := newVersionServer(t, "v9.9.9")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 
-	CheckAndNotify(cmd, "")
+	CheckAndNotify(cmd.OutOrStdout(), "")
 
 	if buf.Len() != 0 {
 		t.Errorf("expected no output for empty version, got %q", buf.String())
@@ -327,7 +315,7 @@ func TestCheckAndNotify_SkipsWhenCacheIsFresh(t *testing.T) {
 		t.Fatalf("saveCache() error = %v", err)
 	}
 
-	CheckAndNotify(cmd, "1.0.0")
+	CheckAndNotify(cmd.OutOrStdout(), "1.0.0")
 
 	if buf.Len() != 0 {
 		t.Errorf("expected no output when cache is fresh, got %q", buf.String())
@@ -338,7 +326,7 @@ func TestCheckAndNotify_PrintsNotificationWhenOutdated(t *testing.T) {
 	server := newVersionServer(t, "v2.0.0")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 
-	CheckAndNotify(cmd, "1.0.0")
+	CheckAndNotify(cmd.OutOrStdout(), "1.0.0")
 
 	output := buf.String()
 	if !strings.Contains(output, "v2.0.0") {
@@ -353,7 +341,7 @@ func TestCheckAndNotify_NoNotificationWhenUpToDate(t *testing.T) {
 	server := newVersionServer(t, "v1.0.0")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 
-	CheckAndNotify(cmd, "1.0.0")
+	CheckAndNotify(cmd.OutOrStdout(), "1.0.0")
 
 	if buf.Len() != 0 {
 		t.Errorf("expected no output when up to date, got %q", buf.String())
@@ -368,7 +356,7 @@ func TestCheckAndNotify_FetchFailureUpdatesCacheToPreventRetry(t *testing.T) {
 
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 
-	CheckAndNotify(cmd, "1.0.0")
+	CheckAndNotify(cmd.OutOrStdout(), "1.0.0")
 
 	// No notification on fetch failure
 	if buf.Len() != 0 {
