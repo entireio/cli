@@ -34,82 +34,6 @@ func hasSuffix(path, suffix string) bool {
 	return len(path) >= len(suffix) && path[len(path)-len(suffix):] == suffix
 }
 
-func TestPreTaskState_CaptureLoadCleanup(t *testing.T) {
-	// Create a temporary directory for testing
-	tmpDir := t.TempDir()
-
-	// Save current directory and restore after test
-	// Create a test git repo
-	testRepoDir := filepath.Join(tmpDir, "testrepo")
-	if err := os.MkdirAll(testRepoDir, 0o755); err != nil {
-		t.Fatalf("Failed to create test repo dir: %v", err)
-	}
-
-	// Initialize git repo (using git command since we need a real repo)
-	t.Chdir(testRepoDir)
-
-	// Create .entire/tmp directory
-	if err := os.MkdirAll(paths.EntireTmpDir, 0o755); err != nil {
-		t.Fatalf("Failed to create tmp dir: %v", err)
-	}
-
-	// Initialize git repo manually (need at least .git directory)
-	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
-		t.Fatalf("Failed to create .git: %v", err)
-	}
-	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
-		t.Fatalf("Failed to create HEAD: %v", err)
-	}
-
-	toolUseID := "toolu_test123"
-
-	// Test load when state doesn't exist
-	state, err := LoadPreTaskState(toolUseID)
-	if err != nil {
-		t.Errorf("LoadPreTaskState() error = %v, want nil", err)
-	}
-	if state != nil {
-		t.Error("LoadPreTaskState() should return nil for non-existent state")
-	}
-
-	// Create a state file manually to test load
-	stateFile := preTaskStateFile(toolUseID)
-	stateContent := `{
-		"tool_use_id": "toolu_test123",
-		"timestamp": "2025-01-01T00:00:00Z",
-		"untracked_files": ["file1.txt", "file2.txt"]
-	}`
-	if err := os.WriteFile(stateFile, []byte(stateContent), 0o644); err != nil {
-		t.Fatalf("Failed to create state file: %v", err)
-	}
-
-	// Test load
-	state, err = LoadPreTaskState(toolUseID)
-	if err != nil {
-		t.Errorf("LoadPreTaskState() error = %v", err)
-	}
-	if state == nil {
-		t.Fatal("LoadPreTaskState() returned nil")
-	}
-	if state.ToolUseID != toolUseID {
-		t.Errorf("ToolUseID = %v, want %v", state.ToolUseID, toolUseID)
-	}
-	if len(state.UntrackedFiles) != 2 {
-		t.Errorf("UntrackedFiles count = %d, want 2", len(state.UntrackedFiles))
-	}
-
-	// Test cleanup
-	err = CleanupPreTaskState(toolUseID)
-	if err != nil {
-		t.Errorf("CleanupPreTaskState() error = %v", err)
-	}
-
-	// Verify file was removed
-	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
-		t.Error("State file should be removed after cleanup")
-	}
-}
-
 func TestPrePromptState_BackwardCompat_LastTranscriptLineCount(t *testing.T) {
 	// Verify that state files written by older CLI versions with "last_transcript_line_count"
 	// are correctly migrated to StepTranscriptStart on load.
@@ -185,35 +109,6 @@ func TestPrePromptState_BackwardCompat_LastTranscriptLineCount(t *testing.T) {
 	// Cleanup
 	if err := CleanupPrePromptState(sessionID); err != nil {
 		t.Errorf("CleanupPrePromptState() error = %v", err)
-	}
-}
-
-func TestComputeNewFilesFromTask(t *testing.T) {
-	preState := &PreTaskState{
-		ToolUseID:      "toolu_test",
-		UntrackedFiles: []string{"existing1.txt", "existing2.txt"},
-	}
-
-	// Test with pre-state
-	currentFiles := []string{"existing1.txt", "newfile.txt", "existing2.txt", "anotherNew.txt"}
-	newFiles := computeNewFilesFromTaskState(preState, currentFiles)
-
-	if len(newFiles) != 2 {
-		t.Errorf("computeNewFilesFromTaskState() returned %d files, want 2", len(newFiles))
-	}
-
-	// Check that the new files are correct
-	expectedNew := map[string]bool{"newfile.txt": true, "anotherNew.txt": true}
-	for _, f := range newFiles {
-		if !expectedNew[f] {
-			t.Errorf("Unexpected new file: %s", f)
-		}
-	}
-
-	// Test with nil pre-state
-	newFiles = computeNewFilesFromTaskState(nil, currentFiles)
-	if newFiles != nil {
-		t.Errorf("computeNewFilesFromTaskState(nil) should return nil, got %v", newFiles)
 	}
 }
 
@@ -491,10 +386,10 @@ func TestPrePromptState_WithSummaryOnlyTranscript(t *testing.T) {
 	}
 }
 
-func TestComputeFileChanges_DeletedFilesWithNilPreState(t *testing.T) {
-	// This test verifies that ComputeFileChanges detects deleted files
-	// even when preState is nil. This is critical because deleted file
-	// detection doesn't depend on pre-prompt state.
+func TestDetectFileChanges_DeletedFilesWithNilPreState(t *testing.T) {
+	// This test verifies that DetectFileChanges detects deleted files
+	// even when previouslyUntracked is nil. Deleted file detection
+	// doesn't depend on pre-prompt state.
 
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -534,28 +429,28 @@ func TestComputeFileChanges_DeletedFilesWithNilPreState(t *testing.T) {
 		t.Fatalf("failed to delete tracked file: %v", err)
 	}
 
-	// Call ComputeFileChanges with nil preState
-	newFiles, deletedFiles, err := ComputeFileChanges(nil)
+	// Call DetectFileChanges with nil previouslyUntracked
+	changes, err := DetectFileChanges(nil)
 	if err != nil {
-		t.Fatalf("ComputeFileChanges(nil) error = %v", err)
+		t.Fatalf("DetectFileChanges(nil) error = %v", err)
 	}
 
-	// newFiles should be nil when preState is nil
-	if newFiles != nil {
-		t.Errorf("ComputeFileChanges(nil) newFiles = %v, want nil", newFiles)
+	// New should be nil when there are no untracked files
+	if len(changes.New) != 0 {
+		t.Errorf("DetectFileChanges(nil) New = %v, want empty", changes.New)
 	}
 
-	// deletedFiles should contain the deleted tracked file
-	if len(deletedFiles) != 1 {
-		t.Errorf("ComputeFileChanges(nil) deletedFiles = %v, want [tracked.txt]", deletedFiles)
-	} else if deletedFiles[0] != "tracked.txt" {
-		t.Errorf("ComputeFileChanges(nil) deletedFiles[0] = %v, want tracked.txt", deletedFiles[0])
+	// Deleted should contain the deleted tracked file
+	if len(changes.Deleted) != 1 {
+		t.Errorf("DetectFileChanges(nil) Deleted = %v, want [tracked.txt]", changes.Deleted)
+	} else if changes.Deleted[0] != "tracked.txt" {
+		t.Errorf("DetectFileChanges(nil) Deleted[0] = %v, want tracked.txt", changes.Deleted[0])
 	}
 }
 
-func TestComputeFileChanges_NewAndDeletedFiles(t *testing.T) {
-	// This test verifies that ComputeFileChanges correctly identifies both
-	// new files (untracked files not in preState) and deleted files
+func TestDetectFileChanges_NewAndDeletedFiles(t *testing.T) {
+	// This test verifies that DetectFileChanges correctly identifies both
+	// new files (untracked files not in previouslyUntracked) and deleted files
 	// (tracked files that were deleted).
 
 	tmpDir := t.TempDir()
@@ -614,36 +509,30 @@ func TestComputeFileChanges_NewAndDeletedFiles(t *testing.T) {
 		t.Fatalf("failed to write new file: %v", err)
 	}
 
-	// Create preState that includes the pre-existing untracked file
-	preState := &PrePromptState{
-		SessionID:      "test-session",
-		UntrackedFiles: []string{"pre-existing-untracked.txt"},
-	}
-
-	// Call ComputeFileChanges with preState
-	newFiles, deletedFiles, err := ComputeFileChanges(preState)
+	// Call DetectFileChanges with pre-existing untracked files
+	changes, err := DetectFileChanges([]string{"pre-existing-untracked.txt"})
 	if err != nil {
-		t.Fatalf("ComputeFileChanges(preState) error = %v", err)
+		t.Fatalf("DetectFileChanges() error = %v", err)
 	}
 
-	// newFiles should contain only new-file.txt (not pre-existing-untracked.txt)
-	if len(newFiles) != 1 {
-		t.Errorf("ComputeFileChanges(preState) newFiles = %v, want [new-file.txt]", newFiles)
-	} else if newFiles[0] != "new-file.txt" {
-		t.Errorf("ComputeFileChanges(preState) newFiles[0] = %v, want new-file.txt", newFiles[0])
+	// New should contain only new-file.txt (not pre-existing-untracked.txt)
+	if len(changes.New) != 1 {
+		t.Errorf("DetectFileChanges() New = %v, want [new-file.txt]", changes.New)
+	} else if changes.New[0] != "new-file.txt" {
+		t.Errorf("DetectFileChanges() New[0] = %v, want new-file.txt", changes.New[0])
 	}
 
-	// deletedFiles should contain tracked1.txt
-	if len(deletedFiles) != 1 {
-		t.Errorf("ComputeFileChanges(preState) deletedFiles = %v, want [tracked1.txt]", deletedFiles)
-	} else if deletedFiles[0] != "tracked1.txt" {
-		t.Errorf("ComputeFileChanges(preState) deletedFiles[0] = %v, want tracked1.txt", deletedFiles[0])
+	// Deleted should contain tracked1.txt
+	if len(changes.Deleted) != 1 {
+		t.Errorf("DetectFileChanges() Deleted = %v, want [tracked1.txt]", changes.Deleted)
+	} else if changes.Deleted[0] != "tracked1.txt" {
+		t.Errorf("DetectFileChanges() Deleted[0] = %v, want tracked1.txt", changes.Deleted[0])
 	}
 }
 
-func TestComputeFileChanges_NoChanges(t *testing.T) {
-	// This test verifies ComputeFileChanges returns empty slices
-	// when there are no new or deleted files.
+func TestDetectFileChanges_NoChanges(t *testing.T) {
+	// This test verifies DetectFileChanges returns empty slices
+	// when there are no new, modified, or deleted files.
 
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -678,23 +567,93 @@ func TestComputeFileChanges_NoChanges(t *testing.T) {
 		t.Fatalf("failed to commit: %v", err)
 	}
 
-	// Create preState with no untracked files
-	preState := &PrePromptState{
-		SessionID:      "test-session",
-		UntrackedFiles: []string{},
-	}
-
-	// Call ComputeFileChanges - no changes should be detected
-	newFiles, deletedFiles, err := ComputeFileChanges(preState)
+	// Call DetectFileChanges with empty previouslyUntracked - no changes should be detected
+	changes, err := DetectFileChanges([]string{})
 	if err != nil {
-		t.Fatalf("ComputeFileChanges(preState) error = %v", err)
+		t.Fatalf("DetectFileChanges() error = %v", err)
 	}
 
-	if len(newFiles) != 0 {
-		t.Errorf("ComputeFileChanges(preState) newFiles = %v, want empty", newFiles)
+	if len(changes.Modified) != 0 {
+		t.Errorf("DetectFileChanges() Modified = %v, want empty", changes.Modified)
 	}
 
-	if len(deletedFiles) != 0 {
-		t.Errorf("ComputeFileChanges(preState) deletedFiles = %v, want empty", deletedFiles)
+	if len(changes.New) != 0 {
+		t.Errorf("DetectFileChanges() New = %v, want empty", changes.New)
+	}
+
+	if len(changes.Deleted) != 0 {
+		t.Errorf("DetectFileChanges() Deleted = %v, want empty", changes.Deleted)
+	}
+}
+
+func TestDetectFileChanges_NilPreviouslyUntracked_ReturnsModified(t *testing.T) {
+	// This test verifies that DetectFileChanges with nil previouslyUntracked
+	// returns all untracked files as New and also returns Modified files.
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Initialize git repo with go-git
+	repo, err := git.PlainInit(tmpDir, false)
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+
+	// Create and commit a tracked file
+	trackedFile := filepath.Join(tmpDir, "tracked.txt")
+	if err := os.WriteFile(trackedFile, []byte("content"), 0o644); err != nil {
+		t.Fatalf("failed to write tracked file: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	if _, err := worktree.Add("tracked.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	// Modify the tracked file and create an untracked file
+	if err := os.WriteFile(trackedFile, []byte("modified content"), 0o644); err != nil {
+		t.Fatalf("failed to modify tracked file: %v", err)
+	}
+	untrackedFile := filepath.Join(tmpDir, "untracked.txt")
+	if err := os.WriteFile(untrackedFile, []byte("untracked"), 0o644); err != nil {
+		t.Fatalf("failed to write untracked file: %v", err)
+	}
+
+	// Call DetectFileChanges with nil (all untracked files should be returned)
+	changes, err := DetectFileChanges(nil)
+	if err != nil {
+		t.Fatalf("DetectFileChanges(nil) error = %v", err)
+	}
+
+	// Modified should contain tracked.txt
+	if len(changes.Modified) != 1 {
+		t.Errorf("DetectFileChanges(nil) Modified = %v, want [tracked.txt]", changes.Modified)
+	} else if changes.Modified[0] != "tracked.txt" {
+		t.Errorf("DetectFileChanges(nil) Modified[0] = %v, want tracked.txt", changes.Modified[0])
+	}
+
+	// New should contain untracked.txt
+	if len(changes.New) != 1 {
+		t.Errorf("DetectFileChanges(nil) New = %v, want [untracked.txt]", changes.New)
+	} else if changes.New[0] != "untracked.txt" {
+		t.Errorf("DetectFileChanges(nil) New[0] = %v, want untracked.txt", changes.New[0])
+	}
+
+	// Deleted should be empty
+	if len(changes.Deleted) != 0 {
+		t.Errorf("DetectFileChanges(nil) Deleted = %v, want empty", changes.Deleted)
 	}
 }

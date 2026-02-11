@@ -42,12 +42,24 @@ type Agent interface {
 	// ExtractAgentSessionID extracts agent session ID from Entire ID
 	ExtractAgentSessionID(entireSessionID string) string
 
+	// ProtectedDirs returns repo-root-relative directories that should never be
+	// modified or deleted during rewind or other destructive operations.
+	// Examples: [".claude"] for Claude, [".gemini"] for Gemini.
+	ProtectedDirs() []string
+
 	// GetSessionDir returns where agent stores session data for this repo.
 	// Examples:
 	//   Claude: ~/.claude/projects/<sanitized-repo-path>/
 	//   Aider: current working directory (returns repoPath)
 	//   Cursor: ~/Library/Application Support/Cursor/User/globalStorage/
 	GetSessionDir(repoPath string) (string, error)
+
+	// ResolveSessionFile returns the path to the session transcript file for a given
+	// agent session ID. Agents use different naming conventions:
+	//   Claude: <sessionDir>/<id>.jsonl
+	//   Gemini: <sessionDir>/session-<date>-<shortid>.json (searches for existing file)
+	// If no existing file is found, returns a sensible default path.
+	ResolveSessionFile(sessionDir, agentSessionID string) string
 
 	// ReadSession reads session data from agent's storage.
 	// Handles different formats: JSONL (Claude), SQLite (Cursor), Markdown (Aider)

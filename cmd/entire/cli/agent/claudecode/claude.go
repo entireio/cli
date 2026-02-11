@@ -162,6 +162,15 @@ func (c *ClaudeCodeAgent) ExtractAgentSessionID(entireSessionID string) string {
 	return sessionid.ModelSessionID(entireSessionID)
 }
 
+// ResolveSessionFile returns the path to a Claude session file.
+// Claude names files directly as <id>.jsonl.
+func (c *ClaudeCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
+	return filepath.Join(sessionDir, agentSessionID+".jsonl")
+}
+
+// ProtectedDirs returns directories that Claude uses for config/state.
+func (c *ClaudeCodeAgent) ProtectedDirs() []string { return []string{".claude"} }
+
 // GetSessionDir returns the directory where Claude stores session transcripts.
 func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
 	// Check for test environment override

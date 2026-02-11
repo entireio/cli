@@ -13,19 +13,13 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/spf13/cobra"
 	"golang.org/x/mod/semver"
 )
 
 // CheckAndNotify performs a version check and notifies the user if a newer version is available.
 // This is the main entry point for the version check system.
 // The function is silent on all errors to avoid interrupting CLI operations.
-func CheckAndNotify(cmd *cobra.Command, currentVersion string) {
-	// Skip checks for hidden commands
-	if cmd.Hidden {
-		return
-	}
-
+func CheckAndNotify(w io.Writer, currentVersion string) {
 	// Skip checks for dev builds
 	if currentVersion == "dev" || currentVersion == "" {
 		return
@@ -66,7 +60,7 @@ func CheckAndNotify(cmd *cobra.Command, currentVersion string) {
 
 	// Show notification if outdated
 	if isOutdated(currentVersion, latestVersion) {
-		printNotification(cmd, currentVersion, latestVersion)
+		printNotification(w, currentVersion, latestVersion)
 	}
 }
 
@@ -262,8 +256,8 @@ func updateCommand() string {
 }
 
 // printNotification prints the version update notification to the user.
-func printNotification(cmd *cobra.Command, current, latest string) {
+func printNotification(w io.Writer, current, latest string) {
 	msg := fmt.Sprintf("\nA newer version of Entire CLI is available: %s (current: %s)\nRun '%s' to update.\n",
 		latest, current, updateCommand())
-	fmt.Fprint(cmd.OutOrStdout(), msg)
+	fmt.Fprint(w, msg)
 }

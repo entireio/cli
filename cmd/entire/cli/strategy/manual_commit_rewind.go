@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/sessionid"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/charmbracelet/huh"
@@ -248,7 +248,7 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(limit int) ([]RewindPoint
 
 // Rewind restores the working directory to a checkpoint.
 //
-//nolint:maintidx // Complex rewind flow spans multiple recovery modes.
+
 func (s *ManualCommitStrategy) Rewind(point RewindPoint) error {
 	repo, err := OpenRepository()
 	if err != nil {
@@ -328,7 +328,7 @@ func (s *ManualCommitStrategy) Rewind(point RewindPoint) error {
 	}
 
 	// Find and delete untracked files that aren't in the checkpoint
-	// These are likely files created by Claude in later checkpoints
+	// These are likely files created by the agent in later checkpoints
 	err = filepath.Walk(repoRoot, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return nil //nolint:nilerr // Skip filesystem errors during walk
@@ -340,16 +340,16 @@ func (s *ManualCommitStrategy) Rewind(point RewindPoint) error {
 			return nil //nolint:nilerr // Skip paths we can't make relative
 		}
 
-		// Skip directories and special paths
+		// Skip directories and protected paths
 		if info.IsDir() {
-			if relPath == gitDir || relPath == claudeDir || relPath == entireDir || strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, claudeDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
+			if isProtectedPath(relPath) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		// Skip if path is a special directory
-		if strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, claudeDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
+		// Skip files in protected directories
+		if isProtectedPath(relPath) {
 			return nil
 		}
 
@@ -561,21 +561,16 @@ func (s *ManualCommitStrategy) PreviewRewind(point RewindPoint) (*RewindPreview,
 			return nil //nolint:nilerr // Skip paths we can't make relative
 		}
 
-		// Skip directories and special paths
+		// Skip directories and protected paths
 		if info.IsDir() {
-			if relPath == gitDir || relPath == claudeDir || relPath == entireDir ||
-				strings.HasPrefix(relPath, gitDir+"/") ||
-				strings.HasPrefix(relPath, claudeDir+"/") ||
-				strings.HasPrefix(relPath, entireDir+"/") {
+			if isProtectedPath(relPath) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		// Skip special directories
-		if strings.HasPrefix(relPath, gitDir+"/") ||
-			strings.HasPrefix(relPath, claudeDir+"/") ||
-			strings.HasPrefix(relPath, entireDir+"/") {
+		// Skip files in protected directories
+		if isProtectedPath(relPath) {
 			return nil
 		}
 
@@ -617,53 +612,44 @@ func (s *ManualCommitStrategy) PreviewRewind(point RewindPoint) (*RewindPreview,
 }
 
 // RestoreLogsOnly restores session logs from a logs-only rewind point.
-// This fetches the transcript from entire/checkpoints/v1 and writes it to Claude's project directory.
+// This fetches the transcript from entire/checkpoints/v1 and writes it to the agent's session directory.
 // Does not modify the working directory.
 // When multiple sessions were condensed to the same checkpoint, ALL sessions are restored.
 // If force is false, prompts for confirmation when local logs have newer timestamps.
-func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) error {
+// Returns info about each restored session so callers can print correct per-session resume commands.
+func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) ([]RestoredSession, error) {
 	if !point.IsLogsOnly {
-		return errors.New("not a logs-only rewind point")
+		return nil, errors.New("not a logs-only rewind point")
 	}
 
 	if point.CheckpointID.IsEmpty() {
-		return errors.New("missing checkpoint ID")
+		return nil, errors.New("missing checkpoint ID")
 	}
 
 	// Get checkpoint store
 	store, err := s.getCheckpointStore()
 	if err != nil {
-		return fmt.Errorf("failed to get checkpoint store: %w", err)
+		return nil, fmt.Errorf("failed to get checkpoint store: %w", err)
 	}
 
 	// Read checkpoint summary to get session count
 	summary, err := store.ReadCommitted(context.Background(), point.CheckpointID)
 	if err != nil {
-		return fmt.Errorf("failed to read checkpoint: %w", err)
+		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 	if summary == nil {
-		return fmt.Errorf("checkpoint not found: %s", point.CheckpointID)
+		return nil, fmt.Errorf("checkpoint not found: %s", point.CheckpointID)
 	}
 
-	// Get repo root for Claude project path lookup
+	// Get repo root for agent session directory lookup
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get repository root: %w", err)
-	}
-
-	claudeProjectDir, err := paths.GetClaudeProjectDir(repoRoot)
-	if err != nil {
-		return fmt.Errorf("failed to get Claude project directory: %w", err)
-	}
-
-	// Ensure project directory exists
-	if err := os.MkdirAll(claudeProjectDir, 0o750); err != nil {
-		return fmt.Errorf("failed to create Claude project directory: %w", err)
+		return nil, fmt.Errorf("failed to get repository root: %w", err)
 	}
 
 	// Check for newer local logs if not forcing
 	if !force {
-		sessions := s.classifySessionsForRestore(context.Background(), claudeProjectDir, store, point.CheckpointID, summary)
+		sessions := s.classifySessionsForRestore(context.Background(), repoRoot, store, point.CheckpointID, summary)
 		hasConflicts := false
 		for _, sess := range sessions {
 			if sess.Status == StatusLocalNewer {
@@ -674,11 +660,11 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 		if hasConflicts {
 			shouldOverwrite, promptErr := PromptOverwriteNewerLogs(sessions)
 			if promptErr != nil {
-				return promptErr
+				return nil, promptErr
 			}
 			if !shouldOverwrite {
 				fmt.Fprintf(os.Stderr, "Resume cancelled. Local session logs preserved.\n")
-				return nil
+				return nil, nil
 			}
 		}
 	}
@@ -690,6 +676,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 	}
 
 	// Restore all sessions (oldest to newest, using 0-based indexing)
+	var restored []RestoredSession
 	for i := range totalSessions {
 		content, readErr := store.ReadSessionContent(context.Background(), point.CheckpointID, i)
 		if readErr != nil {
@@ -702,13 +689,34 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 
 		sessionID := content.Metadata.SessionID
 		if sessionID == "" {
-			// Fallback: can't identify session without ID
 			fmt.Fprintf(os.Stderr, "  Warning: session %d has no session ID, skipping\n", i)
 			continue
 		}
 
-		modelSessionID := sessionid.ModelSessionID(sessionID)
-		claudeSessionFile := filepath.Join(claudeProjectDir, modelSessionID+".jsonl")
+		// Resolve per-session agent from metadata — skip if agent is unknown
+		if content.Metadata.Agent == "" {
+			fmt.Fprintf(os.Stderr, "  Warning: session %d (%s) has no agent metadata, skipping (cannot determine target directory)\n", i, sessionID)
+			continue
+		}
+		sessionAgent, agErr := ResolveAgentForRewind(content.Metadata.Agent)
+		if agErr != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: session %d (%s) has unknown agent %q, skipping\n", i, sessionID, content.Metadata.Agent)
+			continue
+		}
+
+		// Prefer transcript path from checkpoint metadata (works for all agents).
+		// Fall back to agent-based resolution for old checkpoints without this field.
+		var sessionFile string
+		if resolved := resolveTranscriptPathFromMetadata(content.Metadata.TranscriptPath); resolved != "" {
+			sessionFile = resolved
+		} else {
+			sessionAgentDir, dirErr := sessionAgent.GetSessionDir(repoRoot)
+			if dirErr != nil {
+				fmt.Fprintf(os.Stderr, "  Warning: failed to get session dir for session %d: %v\n", i, dirErr)
+				continue
+			}
+			sessionFile = ResolveSessionFilePath(sessionID, sessionAgent, sessionAgentDir)
+		}
 
 		// Get first prompt for display
 		promptPreview := ExtractFirstPrompt(content.Prompts)
@@ -722,21 +730,77 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) er
 					fmt.Fprintf(os.Stderr, "  Session %d: %s\n", i+1, promptPreview)
 				}
 			}
-			fmt.Fprintf(os.Stderr, "    Writing to: %s\n", claudeSessionFile)
+			fmt.Fprintf(os.Stderr, "    Writing to: %s\n", sessionFile)
 		} else {
-			fmt.Fprintf(os.Stderr, "Writing transcript to: %s\n", claudeSessionFile)
+			fmt.Fprintf(os.Stderr, "Writing transcript to: %s\n", sessionFile)
 		}
 
-		if writeErr := os.WriteFile(claudeSessionFile, content.Transcript, 0o600); writeErr != nil {
+		// Ensure parent directory exists (session file may be in a different dir than sessionAgentDir)
+		if mkdirErr := os.MkdirAll(filepath.Dir(sessionFile), 0o750); mkdirErr != nil {
+			fmt.Fprintf(os.Stderr, "    Warning: failed to create directory: %v\n", mkdirErr)
+			continue
+		}
+
+		if writeErr := os.WriteFile(sessionFile, content.Transcript, 0o600); writeErr != nil {
 			if totalSessions > 1 {
 				fmt.Fprintf(os.Stderr, "    Warning: failed to write transcript: %v\n", writeErr)
 				continue
 			}
-			return fmt.Errorf("failed to write transcript: %w", writeErr)
+			return nil, fmt.Errorf("failed to write transcript: %w", writeErr)
 		}
+
+		restored = append(restored, RestoredSession{
+			SessionID: sessionID,
+			Agent:     sessionAgent.Type(),
+			Prompt:    promptPreview,
+		})
 	}
 
-	return nil
+	return restored, nil
+}
+
+// resolveTranscriptPathFromMetadata expands a home-relative transcript path
+// from checkpoint metadata to an absolute path. Returns "" if the path is empty.
+func resolveTranscriptPathFromMetadata(homeRelPath string) string {
+	if homeRelPath == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, homeRelPath)
+}
+
+// ResolveAgentForRewind resolves the agent from checkpoint metadata.
+// Falls back to the default agent (Claude) for old checkpoints that lack agent info.
+func ResolveAgentForRewind(agentType agent.AgentType) (agent.Agent, error) {
+	if !isSpecificAgentType(agentType) {
+		ag := agent.Default()
+		if ag == nil {
+			return nil, errors.New("no default agent registered")
+		}
+		return ag, nil
+	}
+	ag, err := agent.GetByAgentType(agentType)
+	if err != nil {
+		return nil, fmt.Errorf("resolving agent %q: %w", agentType, err)
+	}
+	return ag, nil
+}
+
+// ResolveSessionFilePath determines the correct file path for an agent's session transcript.
+// Checks session state for transcript_path first (needed for agents like Gemini that store
+// transcripts at paths that GetSessionDir can't reconstruct, e.g. SHA-256 hashed directories).
+// Falls back to the agent's ExtractAgentSessionID + ResolveSessionFile with fallbackSessionDir.
+func ResolveSessionFilePath(sessionID string, ag agent.Agent, fallbackSessionDir string) string {
+	state, err := LoadSessionState(sessionID)
+	if err == nil && state != nil && state.TranscriptPath != "" {
+		return state.TranscriptPath
+	}
+
+	agentSessionID := ag.ExtractAgentSessionID(sessionID)
+	return ag.ResolveSessionFile(fallbackSessionDir, agentSessionID)
 }
 
 // readSessionPrompt reads the first prompt from the session's prompt.txt file stored in git.
@@ -789,7 +853,9 @@ type SessionRestoreInfo struct {
 
 // classifySessionsForRestore checks all sessions in a checkpoint and returns info
 // about each session, including whether local logs have newer timestamps.
-func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, claudeProjectDir string, store cpkg.Store, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
+// repoRoot is used to compute per-session agent directories.
+// Sessions without agent metadata are skipped (cannot determine target directory).
+func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.Store, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
 	var sessions []SessionRestoreInfo
 
 	totalSessions := len(summary.Sessions)
@@ -801,12 +867,26 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, c
 		}
 
 		sessionID := content.Metadata.SessionID
-		if sessionID == "" {
+		if sessionID == "" || content.Metadata.Agent == "" {
 			continue
 		}
 
-		modelSessionID := sessionid.ModelSessionID(sessionID)
-		localPath := filepath.Join(claudeProjectDir, modelSessionID+".jsonl")
+		sessionAgent, agErr := ResolveAgentForRewind(content.Metadata.Agent)
+		if agErr != nil {
+			continue
+		}
+
+		// Prefer transcript path from checkpoint metadata, fall back to agent-based resolution.
+		var localPath string
+		if resolved := resolveTranscriptPathFromMetadata(content.Metadata.TranscriptPath); resolved != "" {
+			localPath = resolved
+		} else {
+			sessionAgentDir, dirErr := sessionAgent.GetSessionDir(repoRoot)
+			if dirErr != nil {
+				continue
+			}
+			localPath = ResolveSessionFilePath(sessionID, sessionAgent, sessionAgentDir)
+		}
 
 		localTime := paths.GetLastTimestampFromFile(localPath)
 		checkpointTime := paths.GetLastTimestampFromBytes(content.Transcript)

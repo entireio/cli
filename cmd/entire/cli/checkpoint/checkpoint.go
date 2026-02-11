@@ -276,6 +276,11 @@ type WriteCommittedOptions struct {
 	//   - the transcript was empty or too short to summarize
 	//   - the checkpoint predates the summarization feature
 	Summary *Summary
+
+	// SessionTranscriptPath is the home-relative path to the session transcript file.
+	// Persisted in CommittedMetadata so restore can write the transcript back to
+	// the correct location without reconstructing agent-specific paths.
+	SessionTranscriptPath string
 }
 
 // CommittedInfo contains summary information about a committed checkpoint.
@@ -359,6 +364,11 @@ type CommittedMetadata struct {
 
 	// InitialAttribution is line-level attribution calculated at commit time
 	InitialAttribution *InitialAttribution `json:"initial_attribution,omitempty"`
+
+	// TranscriptPath is the home-relative path to the session transcript file.
+	// Persisted so restore can write the transcript back to the correct location
+	// without needing to reconstruct agent-specific paths (e.g. SHA-256 hashed dirs for Gemini).
+	TranscriptPath string `json:"transcript_path,omitempty"`
 }
 
 // GetTranscriptStart returns the transcript line offset at which this checkpoint's data begins.

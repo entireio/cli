@@ -198,7 +198,7 @@ Fires whenever a subagent updates its todo list. Enables fine-grained, increment
 
 2.  **Detect File Changes**:
 
-    - Calls `DetectChangedFiles()` to check for modifications since the last checkpoint.
+    - Calls `DetectFileChanges()` to check for modifications since the last checkpoint.
     - Compares against git worktree status for modified, new, and deleted files.
 
 3.  **Skip if No Changes**: If no files have changed, logs a message and returns without creating a checkpoint.

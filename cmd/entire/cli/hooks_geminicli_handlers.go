@@ -202,14 +202,17 @@ func commitGeminiSession(ctx *geminiSessionContext) error {
 	}
 
 	// Compute new and deleted files (single git status call)
-	newFiles, deletedFiles, err := ComputeFileChanges(preState)
+	changes, err := DetectFileChanges(preState.PreUntrackedFiles())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
 	}
 
 	relModifiedFiles := FilterAndNormalizePaths(ctx.modifiedFiles, repoRoot)
-	relNewFiles := FilterAndNormalizePaths(newFiles, repoRoot)
-	relDeletedFiles := FilterAndNormalizePaths(deletedFiles, repoRoot)
+	var relNewFiles, relDeletedFiles []string
+	if changes != nil {
+		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
+		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
+	}
 
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
 	if totalChanges == 0 {
