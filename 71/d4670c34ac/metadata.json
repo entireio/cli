@@ -3,9 +3,18 @@
   "checkpoint_id": "71d4670c34ac",
   "strategy": "manual-commit",
   "branch": "dipree/entire-wingman",
-  "checkpoints_count": 1,
+  "checkpoints_count": 4,
   "files_touched": [
-    "cmd/entire/cli/setup_test.go"
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/settings/settings.go",
+    "cmd/entire/cli/setup_test.go",
+    "cmd/entire/cli/wingman.go",
+    "cmd/entire/cli/wingman_prompt.go",
+    "cmd/entire/cli/wingman_review.go",
+    "cmd/entire/cli/wingman_spawn_other.go",
+    "cmd/entire/cli/wingman_spawn_unix.go",
+    "cmd/entire/cli/wingman_test.go"
   ],
   "sessions": [
     {
@@ -14,13 +23,20 @@
       "context": "/71/d4670c34ac/0/context.md",
       "content_hash": "/71/d4670c34ac/0/content_hash.txt",
       "prompt": "/71/d4670c34ac/0/prompt.txt"
+    },
+    {
+      "metadata": "/71/d4670c34ac/1/metadata.json",
+      "transcript": "/71/d4670c34ac/1/full.jsonl",
+      "context": "/71/d4670c34ac/1/context.md",
+      "content_hash": "/71/d4670c34ac/1/content_hash.txt",
+      "prompt": "/71/d4670c34ac/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 21,
-    "cache_creation_tokens": 40107,
-    "cache_read_tokens": 634763,
-    "output_tokens": 997,
-    "api_call_count": 19
+    "input_tokens": 163,
+    "cache_creation_tokens": 163688,
+    "cache_read_tokens": 11925702,
+    "output_tokens": 8042,
+    "api_call_count": 151
   }
 }
