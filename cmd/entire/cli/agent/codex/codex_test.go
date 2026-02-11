@@ -259,6 +259,46 @@ func TestInstallHooks(t *testing.T) {
 	})
 }
 
+func TestInstallHooks_ForceRemovesExistingNotify(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	// Pre-create config with a user notify line
+	configPath := filepath.Join(".codex", "config.toml")
+	if err := os.MkdirAll(".codex", 0o750); err != nil {
+		t.Fatalf("failed to create .codex: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("notify = [\"my-custom-tool\"]\n"), 0o600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	ag := &CodexAgent{}
+	count, err := ag.InstallHooks(false, true) // force=true
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	if count != 1 {
+		t.Errorf("InstallHooks() count = %d, want 1", count)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read config: %v", err)
+	}
+	content := string(data)
+
+	// Should have exactly one notify line (Entire's), not two
+	if strings.Count(content, "notify = ") != 1 {
+		t.Errorf("expected exactly 1 notify line, got:\n%s", content)
+	}
+	if !strings.Contains(content, `"entire"`) {
+		t.Errorf("expected Entire notify line, got:\n%s", content)
+	}
+	if strings.Contains(content, "my-custom-tool") {
+		t.Error("force install should have removed the user's custom notify line")
+	}
+}
+
 func TestAreHooksInstalled(t *testing.T) {
 	t.Run("not installed", func(t *testing.T) {
 		tempDir := t.TempDir()
@@ -375,6 +415,11 @@ func TestIsEntireNotifyLine(t *testing.T) {
 			line: `notify = []`,
 			want: false,
 		},
+		{
+			name: "false positive - tool name containing entire substring",
+			line: `notify = ["my-entire-tool"]`,
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -384,6 +429,74 @@ func TestIsEntireNotifyLine(t *testing.T) {
 				t.Errorf("isEntireNotifyLine(%q) = %v, want %v", tt.line, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestWriteSession_CreatesParentDir(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	sessionPath := filepath.Join(tempDir, "nested", "dir", "session.jsonl")
+
+	ag := &CodexAgent{}
+	err := ag.WriteSession(&agent.AgentSession{
+		SessionID:  "test-session",
+		AgentName:  agent.AgentNameCodex,
+		SessionRef: sessionPath,
+		NativeData: []byte(`{"type":"session_meta"}`),
+	})
+	if err != nil {
+		t.Fatalf("WriteSession() error = %v", err)
+	}
+
+	if _, err := os.Stat(sessionPath); os.IsNotExist(err) {
+		t.Error("WriteSession() did not create file")
+	}
+}
+
+func TestGetTranscriptPosition_NoTrailingNewline(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	// Create a JSONL file with 3 lines, no trailing newline on last line
+	filePath := filepath.Join(tempDir, "rollout.jsonl")
+	content := `{"type":"session_meta"}
+{"type":"response_item"}
+{"type":"turn_context"}`
+	if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	ag := &CodexAgent{}
+	pos, err := ag.GetTranscriptPosition(filePath)
+	if err != nil {
+		t.Fatalf("GetTranscriptPosition() error = %v", err)
+	}
+	if pos != 3 {
+		t.Errorf("GetTranscriptPosition() = %d, want 3 (should count final line without trailing newline)", pos)
+	}
+}
+
+func TestResolveSessionFile_RecursiveSearch(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	// Create a nested date-based directory structure like Codex uses
+	nestedDir := filepath.Join(tempDir, "2026", "02", "11")
+	if err := os.MkdirAll(nestedDir, 0o750); err != nil {
+		t.Fatalf("failed to create dirs: %v", err)
+	}
+
+	// Create rollout file in nested dir
+	rolloutFile := filepath.Join(nestedDir, "rollout-abc123.jsonl")
+	if err := os.WriteFile(rolloutFile, []byte(`{"type":"session_meta"}`), 0o600); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	ag := &CodexAgent{}
+	result := ag.ResolveSessionFile(tempDir, "abc123")
+	if result != rolloutFile {
+		t.Errorf("ResolveSessionFile() = %q, want %q", result, rolloutFile)
 	}
 }
 

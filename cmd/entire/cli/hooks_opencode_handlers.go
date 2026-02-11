@@ -1,4 +1,4 @@
-// hooks_codex_handlers.go contains Codex CLI specific hook handler implementations.
+// hooks_opencode_handlers.go contains OpenCode specific hook handler implementations.
 // These are called by the hook registry in hook_registry.go.
 package cli
 
@@ -11,19 +11,24 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// handleCodexAgentTurnComplete handles the agent-turn-complete hook for Codex CLI.
-// This is the only hook Codex supports, firing after each agent turn completes.
-// It is equivalent to Claude Code's "Stop" hook — it commits session changes with metadata.
-func handleCodexAgentTurnComplete() error {
-	ag, err := agent.Get(agent.AgentNameCodex)
+// handleOpenCodeSessionCreated handles the session-created hook for OpenCode.
+// This fires when a new OpenCode session starts, equivalent to Claude's SessionStart.
+func handleOpenCodeSessionCreated() error {
+	return handleSessionStartCommon()
+}
+
+// handleOpenCodeSessionIdle handles the session-idle hook for OpenCode.
+// This fires when OpenCode's session transitions to idle (agent finished processing).
+// Equivalent to Claude's "Stop" hook — it commits session changes with metadata.
+func handleOpenCodeSessionIdle() error {
+	ag, err := agent.Get(agent.AgentNameOpenCode)
 	if err != nil {
-		return fmt.Errorf("failed to get codex agent: %w", err)
+		return fmt.Errorf("failed to get opencode agent: %w", err)
 	}
 
 	input, err := ag.ParseHookInput(agent.HookStop, os.Stdin)
@@ -32,8 +37,8 @@ func handleCodexAgentTurnComplete() error {
 	}
 
 	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
-	logging.Info(logCtx, "codex-agent-turn-complete",
-		slog.String("hook", "agent-turn-complete"),
+	logging.Info(logCtx, "opencode-session-idle",
+		slog.String("hook", "session-idle"),
 		slog.String("hook_type", "agent"),
 		slog.String("model_session_id", input.SessionID),
 		slog.String("transcript_path", input.SessionRef),
@@ -44,7 +49,7 @@ func handleCodexAgentTurnComplete() error {
 		sessionID = unknownSessionID
 	}
 
-	// Resolve transcript path from session directory
+	// Resolve transcript path
 	transcriptPath := input.SessionRef
 	if transcriptPath != "" && sessionID != unknownSessionID {
 		resolved := ag.ResolveSessionFile(transcriptPath, ag.ExtractAgentSessionID(sessionID))
@@ -54,48 +59,46 @@ func handleCodexAgentTurnComplete() error {
 	}
 
 	if transcriptPath == "" || !fileExists(transcriptPath) {
-		return fmt.Errorf("transcript file not found or empty: %s", transcriptPath)
+		// OpenCode sessions may not always have a transcript file accessible
+		// from the filesystem. Continue without transcript to still capture
+		// git status changes.
+		logging.Debug(logCtx, "no transcript file found, continuing with git status only",
+			slog.String("transcript_path", transcriptPath),
+		)
 	}
 
-	// Create session context
-	ctx := &codexSessionContext{
+	ctx := &openCodeSessionContext{
 		sessionID:      sessionID,
 		transcriptPath: transcriptPath,
 		userPrompt:     input.UserPrompt,
 	}
 
-	if err := setupCodexSessionDir(ctx); err != nil {
+	if err := setupOpenCodeSessionDir(ctx); err != nil {
 		return err
 	}
 
-	if err := extractCodexMetadata(ctx); err != nil {
+	if err := commitOpenCodeSession(ctx); err != nil {
 		return err
 	}
 
-	if err := commitCodexSession(ctx); err != nil {
-		return err
-	}
-
-	// Transition session ACTIVE → IDLE (equivalent to Claude's transitionSessionTurnEnd)
+	// Transition session ACTIVE → IDLE
 	transitionSessionTurnEnd(sessionID)
 
 	return nil
 }
 
-// codexSessionContext holds parsed session data for Codex commits.
-type codexSessionContext struct {
+// openCodeSessionContext holds parsed session data for OpenCode commits.
+type openCodeSessionContext struct {
 	sessionID      string
 	transcriptPath string
 	sessionDir     string
 	sessionDirAbs  string
-	transcriptData []byte
 	userPrompt     string
-	modifiedFiles  []string
 	commitMessage  string
 }
 
-// setupCodexSessionDir creates session directory and copies transcript.
-func setupCodexSessionDir(ctx *codexSessionContext) error {
+// setupOpenCodeSessionDir creates session directory and copies transcript if available.
+func setupOpenCodeSessionDir(ctx *openCodeSessionContext) error {
 	ctx.sessionDir = paths.SessionMetadataDirFromSessionID(ctx.sessionID)
 	sessionDirAbs, err := paths.AbsPath(ctx.sessionDir)
 	if err != nil {
@@ -107,29 +110,19 @@ func setupCodexSessionDir(ctx *codexSessionContext) error {
 		return fmt.Errorf("failed to create session directory: %w", err)
 	}
 
-	logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
-	if err := copyFile(ctx.transcriptPath, logFile); err != nil {
-		return fmt.Errorf("failed to copy transcript: %w", err)
+	// Copy transcript if available
+	if ctx.transcriptPath != "" && fileExists(ctx.transcriptPath) {
+		logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
+		if err := copyFile(ctx.transcriptPath, logFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to copy transcript: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Copied transcript to: %s\n", ctx.sessionDir+"/"+paths.TranscriptFileName)
+		}
 	}
-	fmt.Fprintf(os.Stderr, "Copied transcript to: %s\n", ctx.sessionDir+"/"+paths.TranscriptFileName)
 
-	transcriptData, err := os.ReadFile(ctx.transcriptPath)
-	if err != nil {
-		return fmt.Errorf("failed to read transcript: %w", err)
-	}
-	ctx.transcriptData = transcriptData
-
-	return nil
-}
-
-// extractCodexMetadata extracts prompts, modified files, and commit message from transcript.
-func extractCodexMetadata(ctx *codexSessionContext) error {
-	// Extract modified files from Codex JSONL transcript
-	ctx.modifiedFiles = codex.ExtractModifiedFiles(ctx.transcriptData)
-
-	// Write prompt file (Codex provides user prompt in the notify payload)
-	promptFile := filepath.Join(ctx.sessionDirAbs, paths.PromptFileName)
+	// Write prompt file
 	if ctx.userPrompt != "" {
+		promptFile := filepath.Join(sessionDirAbs, paths.PromptFileName)
 		if err := os.WriteFile(promptFile, []byte(ctx.userPrompt), 0o600); err != nil {
 			return fmt.Errorf("failed to write prompt file: %w", err)
 		}
@@ -142,8 +135,8 @@ func extractCodexMetadata(ctx *codexSessionContext) error {
 	return nil
 }
 
-// commitCodexSession commits the session changes using the strategy.
-func commitCodexSession(ctx *codexSessionContext) error {
+// commitOpenCodeSession commits the session changes using the strategy.
+func commitOpenCodeSession(ctx *openCodeSessionContext) error {
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
 		return fmt.Errorf("failed to get repo root: %w", err)
@@ -163,11 +156,13 @@ func commitCodexSession(ctx *codexSessionContext) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
 	}
 
-	relModifiedFiles := FilterAndNormalizePaths(ctx.modifiedFiles, repoRoot)
+	// OpenCode sessions: use git status as primary file change detection
 	var relNewFiles, relDeletedFiles []string
+	var relModifiedFiles []string
 	if changes != nil {
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
+		relModifiedFiles = FilterAndNormalizePaths(changes.Modified, repoRoot)
 	}
 
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
@@ -184,7 +179,7 @@ func commitCodexSession(ctx *codexSessionContext) error {
 
 	// Create context file
 	contextFile := filepath.Join(ctx.sessionDirAbs, paths.ContextFileName)
-	if err := createContextFileForCodex(contextFile, ctx.commitMessage, ctx.sessionID, ctx.userPrompt); err != nil {
+	if err := createContextFileForOpenCode(contextFile, ctx.commitMessage, ctx.sessionID, ctx.userPrompt); err != nil {
 		return fmt.Errorf("failed to create context file: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Created context file: %s\n", ctx.sessionDir+"/"+paths.ContextFileName)
@@ -199,7 +194,6 @@ func commitCodexSession(ctx *codexSessionContext) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
 	}
 
-	// Get agent type from the hook agent
 	hookAgent, agentErr := GetCurrentHookAgent()
 	if agentErr != nil {
 		return fmt.Errorf("failed to get agent: %w", agentErr)
@@ -232,8 +226,8 @@ func commitCodexSession(ctx *codexSessionContext) error {
 	return nil
 }
 
-// createContextFileForCodex creates a context.md file for Codex sessions.
-func createContextFileForCodex(contextFile, commitMessage, sessionID, prompt string) error {
+// createContextFileForOpenCode creates a context.md file for OpenCode sessions.
+func createContextFileForOpenCode(contextFile, commitMessage, sessionID, prompt string) error {
 	var sb strings.Builder
 
 	sb.WriteString("# Session Context\n\n")

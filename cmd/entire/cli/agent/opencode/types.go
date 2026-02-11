@@ -8,10 +8,20 @@ const (
 	ToolMultiEdit  = "MultiEdit"
 )
 
-// FileModificationTools lists tools that create or modify files
-var FileModificationTools = []string{
-	ToolWrite,
-	ToolEdit,
-	ToolApplyPatch,
-	ToolMultiEdit,
+// FileModificationTools returns tools that create or modify files.
+// Returns a new slice each call to prevent mutation.
+func FileModificationTools() []string {
+	return []string{
+		ToolWrite,
+		ToolEdit,
+		ToolApplyPatch,
+		ToolMultiEdit,
+	}
+}
+
+// pluginPayload is the JSON structure sent from the Entire plugin to hook handlers.
+// The OpenCode plugin pipes this via BunShell stdin.
+type pluginPayload struct {
+	Type      string `json:"type"`
+	SessionID string `json:"sessionID"`
 }

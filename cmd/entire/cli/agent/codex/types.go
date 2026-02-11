@@ -14,20 +14,20 @@ type notifyPayload struct {
 }
 
 // rolloutEvent represents a single event line in a Codex rollout JSONL file.
-// Codex stores session transcripts as JSONL where each line is an event.
+// Codex stores session transcripts as JSONL where each line is a typed event.
+// Known types: session_meta, response_item, turn_context, compacted, event_msg.
 type rolloutEvent struct {
-	Type     string          `json:"type"`
-	ThreadID string          `json:"thread_id,omitempty"`
-	TurnID   string          `json:"turn_id,omitempty"`
-	Item     json.RawMessage `json:"item,omitempty"`
-	Text     string          `json:"text,omitempty"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Item    json.RawMessage `json:"item,omitempty"`
 }
 
-// rolloutItem represents the item field in a rollout event.
+// rolloutItem represents the item/payload content in a rollout event.
 type rolloutItem struct {
 	ID     string `json:"id,omitempty"`
 	Type   string `json:"type,omitempty"`
 	Status string `json:"status,omitempty"`
+	Name   string `json:"name,omitempty"`
 }
 
 // Codex event item types
@@ -35,4 +35,6 @@ const (
 	ItemTypeFileChange       = "file_change"
 	ItemTypeCommandExecution = "command_execution"
 	ItemTypeAgentMessage     = "agent_message"
+	ItemTypeFunctionCall     = "function_call"
+	ItemTypeLocalShellCall   = "local_shell_call"
 )

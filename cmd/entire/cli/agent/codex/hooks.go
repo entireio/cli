@@ -30,12 +30,6 @@ const entireNotifyCommand = `["entire", "hooks", "codex", "agent-turn-complete"]
 // entireNotifyLocalDevCommand is the local-dev variant of the notify handler.
 const entireNotifyLocalDevCommand = `["go", "run", "${CODEX_PROJECT_DIR}/cmd/entire/main.go", "hooks", "codex", "agent-turn-complete"]`
 
-// entireNotifyPrefixes are command prefixes that identify Entire notify hooks.
-var entireNotifyPrefixes = []string{
-	`"entire"`,
-	`"go", "run"`,
-}
-
 // GetHookNames returns the hook verbs Codex CLI supports.
 // These become subcommands: entire hooks codex <verb>
 func (c *CodexAgent) GetHookNames() []string {
@@ -84,14 +78,21 @@ func (c *CodexAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		}
 	}
 
-	// Remove existing Entire notify lines if force or if we need to update
+	// Remove existing notify lines:
+	// - Always remove Entire notify lines (to update)
+	// - When force=true, also remove non-Entire notify lines (to avoid duplicate TOML keys)
 	var filteredLines []string
 	notifyFound := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "notify") && strings.Contains(trimmed, "=") && isEntireNotifyLine(trimmed) {
-			notifyFound = true
-			continue // Skip existing Entire notify line
+		if strings.HasPrefix(trimmed, "notify") && strings.Contains(trimmed, "=") {
+			if isEntireNotifyLine(trimmed) {
+				notifyFound = true
+				continue // Skip existing Entire notify line
+			}
+			if force {
+				continue // force=true: remove non-Entire notify lines too
+			}
 		}
 		filteredLines = append(filteredLines, line)
 	}
@@ -195,11 +196,20 @@ func (c *CodexAgent) GetSupportedHooks() []agent.HookType {
 }
 
 // isEntireNotifyLine checks if a TOML notify line contains an Entire command.
+// Uses two detection patterns:
+//   - Production: contains "entire" as a standalone TOML array element (quoted)
+//   - Local dev: contains "go", "run" prefix with "entire" anywhere (path substring)
 func isEntireNotifyLine(line string) bool {
-	for _, prefix := range entireNotifyPrefixes {
-		if strings.Contains(line, prefix) && strings.Contains(line, "entire") {
-			return true
-		}
+	// Production hook: notify = ["entire", "hooks", "codex", ...]
+	// Check for "entire" as a standalone quoted element to avoid false positives
+	// like notify = ["my-entire-tool"]
+	if strings.Contains(line, `"entire"`) {
+		return true
+	}
+	// Local dev hook: notify = ["go", "run", ".../entire/main.go", ...]
+	// The "go", "run" prefix combined with "entire" substring is specific enough
+	if strings.Contains(line, `"go", "run"`) && strings.Contains(line, "entire") {
+		return true
 	}
 	return false
 }

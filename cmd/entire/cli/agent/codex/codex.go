@@ -57,14 +57,9 @@ func (c *CodexAgent) DetectPresence() (bool, error) {
 		repoRoot = "."
 	}
 
-	// Check for .codex directory
+	// Check for .codex directory (if it doesn't exist, config.toml inside it won't either)
 	codexDir := filepath.Join(repoRoot, ".codex")
 	if _, err := os.Stat(codexDir); err == nil {
-		return true, nil
-	}
-	// Check for .codex/config.toml
-	configFile := filepath.Join(repoRoot, ".codex", "config.toml")
-	if _, err := os.Stat(configFile); err == nil {
 		return true, nil
 	}
 	return false, nil
@@ -175,14 +170,30 @@ func (c *CodexAgent) getCodexHome() (string, error) {
 }
 
 // ResolveSessionFile returns the path to a Codex session file.
-// Codex stores sessions as rollout-*.jsonl in date-based directories.
-// Searches for an existing file matching the pattern, falls back to a default path.
+// Codex stores sessions as rollout-*.jsonl in date-based directories (YYYY/MM/DD/).
+// Searches recursively for an existing file matching the session ID, falls back to a default path.
 func (c *CodexAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	// Search for rollout files containing the session ID
-	pattern := filepath.Join(sessionDir, "**", "rollout-*"+agentSessionID+"*.jsonl")
-	matches, err := filepath.Glob(pattern)
-	if err == nil && len(matches) > 0 {
-		return matches[len(matches)-1]
+	// filepath.Glob does NOT support ** recursive matching.
+	// Walk the directory tree to find rollout files containing the session ID.
+	var found string
+	//nolint:errcheck // WalkDir errors are non-fatal; fallback path handles missing dirs
+	_ = filepath.WalkDir(sessionDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr // Skip inaccessible directories
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if strings.HasSuffix(name, ".jsonl") && strings.Contains(name, agentSessionID) {
+			found = path
+			// Don't stop early — keep walking to find the latest (deepest) match
+		}
+		return nil
+	})
+
+	if found != "" {
+		return found
 	}
 
 	// Fallback: construct a default path
@@ -227,6 +238,11 @@ func (c *CodexAgent) WriteSession(session *agent.AgentSession) error {
 		return errors.New("session has no native data to write")
 	}
 
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(session.SessionRef), 0o750); err != nil {
+		return fmt.Errorf("failed to create parent directory: %w", err)
+	}
+
 	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
 		return fmt.Errorf("failed to write session file: %w", err)
 	}
@@ -262,9 +278,13 @@ func (c *CodexAgent) GetTranscriptPosition(path string) (int, error) {
 	lineCount := 0
 
 	for {
-		_, err := reader.ReadBytes('\n')
+		lineData, err := reader.ReadBytes('\n')
 		if err != nil {
 			if err == io.EOF {
+				// Count a final partial line (no trailing newline)
+				if len(lineData) > 0 {
+					lineCount++
+				}
 				break
 			}
 			return 0, fmt.Errorf("failed to read transcript: %w", err)
@@ -305,33 +325,9 @@ func (c *CodexAgent) ExtractModifiedFilesFromOffset(path string, startOffset int
 		if len(lineData) > 0 {
 			lineNum++
 			if lineNum > startOffset {
-				var event rolloutEvent
-				if parseErr := json.Unmarshal(lineData, &event); parseErr == nil {
-					// Extract file paths from file_change events
-					if event.Item != nil {
-						var item rolloutItem
-						if json.Unmarshal(event.Item, &item) == nil && item.Type == ItemTypeFileChange {
-							// Try to extract file path from the item
-							var fileItem struct {
-								FilePath string `json:"file_path"`
-								Path     string `json:"path"`
-								Filename string `json:"filename"`
-							}
-							if json.Unmarshal(event.Item, &fileItem) == nil {
-								fp := fileItem.FilePath
-								if fp == "" {
-									fp = fileItem.Path
-								}
-								if fp == "" {
-									fp = fileItem.Filename
-								}
-								if fp != "" && !fileSet[fp] {
-									fileSet[fp] = true
-									files = append(files, fp)
-								}
-							}
-						}
-					}
+				if fp := extractFilePathFromLine(lineData); fp != "" && !fileSet[fp] {
+					fileSet[fp] = true
+					files = append(files, fp)
 				}
 			}
 		}
@@ -364,50 +360,86 @@ func (c *CodexAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 }
 
 // ExtractModifiedFiles extracts file paths from Codex transcript data.
-// Parses JSONL events and collects file_change items.
+// Parses JSONL events and collects file paths from file_change and function_call items.
 func ExtractModifiedFiles(data []byte) []string {
 	fileSet := make(map[string]bool)
 	var files []string
 
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
-		var event rolloutEvent
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-			continue
-		}
-		if event.Item == nil {
-			continue
-		}
-
-		var item rolloutItem
-		if json.Unmarshal(event.Item, &item) != nil {
-			continue
-		}
-		if item.Type != ItemTypeFileChange {
-			continue
-		}
-
-		var fileItem struct {
-			FilePath string `json:"file_path"`
-			Path     string `json:"path"`
-			Filename string `json:"filename"`
-		}
-		if json.Unmarshal(event.Item, &fileItem) != nil {
-			continue
-		}
-
-		fp := fileItem.FilePath
-		if fp == "" {
-			fp = fileItem.Path
-		}
-		if fp == "" {
-			fp = fileItem.Filename
-		}
-		if fp != "" && !fileSet[fp] {
+		if fp := extractFilePathFromLine(scanner.Bytes()); fp != "" && !fileSet[fp] {
 			fileSet[fp] = true
 			files = append(files, fp)
 		}
 	}
 
 	return files
+}
+
+// extractFilePathFromLine extracts a file path from a single JSONL line.
+// Checks for file_change items and function_call items that modify files.
+func extractFilePathFromLine(lineData []byte) string {
+	var event rolloutEvent
+	if json.Unmarshal(lineData, &event) != nil {
+		return ""
+	}
+	if event.Item == nil {
+		return ""
+	}
+
+	var item rolloutItem
+	if json.Unmarshal(event.Item, &item) != nil {
+		return ""
+	}
+
+	// Check for file_change items
+	if item.Type == ItemTypeFileChange {
+		return extractFilePathFromItem(event.Item)
+	}
+
+	// Check for function_call items that modify files (e.g., write_file, apply_diff)
+	if item.Type == ItemTypeFunctionCall {
+		return extractFilePathFromFunctionCall(event.Item)
+	}
+
+	return ""
+}
+
+// extractFilePathFromItem extracts a file path from an item's various path fields.
+func extractFilePathFromItem(data json.RawMessage) string {
+	var fileItem struct {
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"`
+		Filename string `json:"filename"`
+	}
+	if json.Unmarshal(data, &fileItem) != nil {
+		return ""
+	}
+
+	if fileItem.FilePath != "" {
+		return fileItem.FilePath
+	}
+	if fileItem.Path != "" {
+		return fileItem.Path
+	}
+	return fileItem.Filename
+}
+
+// extractFilePathFromFunctionCall extracts a file path from a function call's input.
+func extractFilePathFromFunctionCall(data json.RawMessage) string {
+	var fc struct {
+		Name  string          `json:"name"`
+		Input json.RawMessage `json:"input"`
+	}
+	if json.Unmarshal(data, &fc) != nil {
+		return ""
+	}
+
+	// Only extract from file-modifying functions
+	switch fc.Name {
+	case "write_file", "apply_diff", "edit_file", "create_file":
+		return extractFilePathFromItem(fc.Input)
+	default:
+		return ""
+	}
 }

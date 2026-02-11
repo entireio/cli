@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -72,21 +73,51 @@ func (o *OpenCodeAgent) DetectPresence() (bool, error) {
 	return false, nil
 }
 
-// GetHookConfigPath returns the path to OpenCode's config file.
-// OpenCode does not support lifecycle hooks, so this returns the config file
-// path for reference only.
+// GetHookConfigPath returns the path to OpenCode's plugin file.
+// OpenCode uses a TypeScript plugin system; hooks are installed as
+// .opencode/plugins/entire.ts which is auto-discovered by OpenCode.
 func (o *OpenCodeAgent) GetHookConfigPath() string {
-	return "opencode.json"
+	return filepath.Join(".opencode", "plugins", EntirePluginFileName)
 }
 
-// SupportsHooks returns false as OpenCode does not support lifecycle hooks.
+// SupportsHooks returns true as OpenCode supports hooks via its plugin system.
 func (o *OpenCodeAgent) SupportsHooks() bool {
-	return false
+	return true
 }
 
-// ParseHookInput returns an error as OpenCode does not support hooks.
-func (o *OpenCodeAgent) ParseHookInput(_ agent.HookType, _ io.Reader) (*agent.HookInput, error) {
-	return nil, errors.New("opencode does not support lifecycle hooks")
+// ParseHookInput parses OpenCode hook input from stdin.
+// The Entire plugin pipes JSON payloads with type and sessionID fields.
+func (o *OpenCodeAgent) ParseHookInput(hookType agent.HookType, reader io.Reader) (*agent.HookInput, error) {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read input: %w", err)
+	}
+
+	if len(data) == 0 {
+		return nil, errors.New("empty input")
+	}
+
+	input := &agent.HookInput{
+		HookType:  hookType,
+		Timestamp: time.Now(),
+		RawData:   make(map[string]interface{}),
+	}
+
+	var payload pluginPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("failed to parse plugin payload: %w", err)
+	}
+
+	input.SessionID = payload.SessionID
+	input.RawData["type"] = payload.Type
+
+	// Resolve session transcript path
+	sessionDir, dirErr := o.GetSessionDir("")
+	if dirErr == nil && input.SessionID != "" {
+		input.SessionRef = o.ResolveSessionFile(sessionDir, o.ExtractAgentSessionID(input.SessionID))
+	}
+
+	return input, nil
 }
 
 // GetSessionID extracts the session ID from hook input.
@@ -177,6 +208,11 @@ func (o *OpenCodeAgent) WriteSession(session *agent.AgentSession) error {
 	// Validate it's valid JSON before writing
 	if !json.Valid(session.NativeData) {
 		return errors.New("session native data is not valid JSON")
+	}
+
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(session.SessionRef), 0o750); err != nil {
+		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
 	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {

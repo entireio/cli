@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
@@ -199,6 +200,23 @@ func init() {
 			return nil
 		}
 		return handleCodexAgentTurnComplete()
+	})
+
+	// Register OpenCode handlers
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameSessionCreated, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpenCodeSessionCreated()
+	})
+
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameSessionIdle, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpenCodeSessionIdle()
 	})
 }
 
