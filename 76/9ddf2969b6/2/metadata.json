@@ -1,0 +1,31 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "769ddf2969b6",
+  "session_id": "e5a72190-7808-4cc0-9b23-1fe10104ea1e",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T00:45:29.886319Z",
+  "branch": "soph/gemini-rewind",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/agent/geminicli/transcript.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 3414,
+    "cache_creation_tokens": 99655,
+    "cache_read_tokens": 2118837,
+    "output_tokens": 1962,
+    "api_call_count": 26
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T00:45:29.779956Z",
+    "agent_lines": 35,
+    "human_added": 30,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 65,
+    "agent_percentage": 53.84615384615385
+  },
+  "transcript_path": ".claude/projects/-Users-gtrrz-victor-wks-cli/e5a72190-7808-4cc0-9b23-1fe10104ea1e.jsonl"
+}

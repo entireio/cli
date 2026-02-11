@@ -1,0 +1,29 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "62f30e5c547e",
+  "session_id": "e5933dce-dc0c-4367-9158-04a9eadedc83",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-10T17:43:14.055863Z",
+  "branch": "soph/update-sessions-and-checkpoints-doc",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/architecture/sessions-and-checkpoints.md"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 81503,
+    "cache_read_tokens": 455917,
+    "output_tokens": 13,
+    "api_call_count": 8
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-10T17:43:13.858891Z",
+    "agent_lines": 134,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 134,
+    "agent_percentage": 100
+  }
+}
