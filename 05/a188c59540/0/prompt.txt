@@ -1,0 +1,5 @@
+Let's add an additional note to this "Powered by Entire: This conversation will be linked to your next commit." in case wingman is enabled.
+
+---
+
+Commit and push
