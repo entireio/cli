@@ -156,7 +156,7 @@ Multiple AI sessions can run on the same commit. If you start a second session w
 
 | Command          | Description                                                                   |
 | ---------------- | ----------------------------------------------------------------------------- |
-| `entire clean`   | Remove orphaned entire's data that wasn't cleaned up automatically            |
+| `entire clean`   | Remove orphaned Entire's data that wasn't cleaned up automatically            |
 | `entire disable` | Remove Entire hooks from repository                                           |
 | `entire doctor`  | Fix or clean up stuck sessions                                                |
 | `entire enable`  | Enable Entire in your repository (uses `manual-commit` by default)            |
