@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 )
 
 // TestAgentDetection verifies agent detection and default behavior.
@@ -1089,23 +1090,132 @@ func TestPiAgent_SessionOperations(t *testing.T) {
 func TestPiAgent_HelperMethods(t *testing.T) {
 	t.Parallel()
 
-	ag, err := agent.Get(agent.AgentNamePi)
-	if err != nil {
-		t.Fatalf("agent.Get(pi) error = %v", err)
-	}
+	t.Run("identity transform and basic metadata", func(t *testing.T) {
+		t.Parallel()
 
-	if got := ag.TransformSessionID("abc123"); got != "abc123" {
-		t.Fatalf("TransformSessionID() = %q, want %q", got, "abc123")
-	}
-	if got := ag.ExtractAgentSessionID("abc123"); got != "abc123" {
-		t.Fatalf("ExtractAgentSessionID() = %q, want %q", got, "abc123")
-	}
+		ag, err := agent.Get(agent.AgentNamePi)
+		if err != nil {
+			t.Fatalf("agent.Get(pi) error = %v", err)
+		}
 
-	if got := ag.FormatResumeCommand("abc123"); !strings.Contains(got, "pi") {
-		t.Fatalf("FormatResumeCommand() = %q, want to contain %q", got, "pi")
-	}
+		if got := ag.TransformSessionID("abc123"); got != "abc123" {
+			t.Fatalf("TransformSessionID() = %q, want %q", got, "abc123")
+		}
+		if got := ag.ExtractAgentSessionID("abc123"); got != "abc123" {
+			t.Fatalf("ExtractAgentSessionID() = %q, want %q", got, "abc123")
+		}
 
-	if got := ag.GetHookConfigPath(); got != "" {
-		t.Fatalf("GetHookConfigPath() = %q, want empty", got)
-	}
+		if got := ag.FormatResumeCommand("abc123"); !strings.Contains(got, "pi") {
+			t.Fatalf("FormatResumeCommand() = %q, want to contain %q", got, "pi")
+		}
+
+		if got := ag.GetHookConfigPath(); got != "" {
+			t.Fatalf("GetHookConfigPath() = %q, want empty", got)
+		}
+	})
+
+	t.Run("GetLastUserPrompt extracts latest prompt", func(t *testing.T) {
+		t.Parallel()
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		transcriptPath := filepath.Join(env.RepoDir, "pi-helper-last-user.jsonl")
+		content := `{"type":"message","id":"1","message":{"role":"user","content":"first prompt"}}
+{"type":"message","id":"2","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}
+{"type":"message","id":"3","message":{"role":"user","content":[{"type":"text","text":"second"},{"type":"text","text":"prompt"}]}}
+`
+		if err := os.WriteFile(transcriptPath, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write transcript: %v", err)
+		}
+
+		ag, _ := agent.Get(agent.AgentNamePi)
+		piAgent, ok := ag.(*pi.PiAgent)
+		if !ok {
+			t.Fatalf("agent type = %T, want *pi.PiAgent", ag)
+		}
+
+		session, err := ag.ReadSession(&agent.HookInput{SessionID: "s1", SessionRef: transcriptPath})
+		if err != nil {
+			t.Fatalf("ReadSession() error = %v", err)
+		}
+
+		prompt := piAgent.GetLastUserPrompt(session)
+		if prompt != "second\n\nprompt" {
+			t.Fatalf("GetLastUserPrompt() = %q, want %q", prompt, "second\n\nprompt")
+		}
+	})
+
+	t.Run("TruncateAtUUID keeps root-to-target path on branched transcript", func(t *testing.T) {
+		t.Parallel()
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		transcriptPath := filepath.Join(env.RepoDir, "pi-helper-truncate-tree.jsonl")
+		content := `{"type":"session","version":3,"id":"sess","timestamp":"2026-01-01T00:00:00Z","cwd":"/repo"}
+{"type":"message","id":"1","parentId":null,"message":{"role":"user","content":"root"}}
+{"type":"message","id":"2","parentId":"1","message":{"role":"assistant","content":[{"type":"text","text":"branch"}]}}
+{"type":"message","id":"3","parentId":"2","message":{"role":"user","content":"left"}}
+{"type":"message","id":"4","parentId":"2","message":{"role":"user","content":"right"}}
+`
+		if err := os.WriteFile(transcriptPath, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write transcript: %v", err)
+		}
+
+		ag, _ := agent.Get(agent.AgentNamePi)
+		piAgent, ok := ag.(*pi.PiAgent)
+		if !ok {
+			t.Fatalf("agent type = %T, want *pi.PiAgent", ag)
+		}
+
+		session, err := ag.ReadSession(&agent.HookInput{SessionID: "s1", SessionRef: transcriptPath})
+		if err != nil {
+			t.Fatalf("ReadSession() error = %v", err)
+		}
+
+		truncated, err := piAgent.TruncateAtUUID(session, "3")
+		if err != nil {
+			t.Fatalf("TruncateAtUUID() error = %v", err)
+		}
+
+		text := string(truncated.NativeData)
+		if strings.Contains(text, `"id":"4"`) {
+			t.Fatalf("expected sibling branch to be excluded, got: %s", text)
+		}
+		if !strings.Contains(text, `"id":"1"`) || !strings.Contains(text, `"id":"2"`) || !strings.Contains(text, `"id":"3"`) {
+			t.Fatalf("expected root->target path to be preserved, got: %s", text)
+		}
+	})
+
+	t.Run("FindCheckpointUUID finds tool result entry", func(t *testing.T) {
+		t.Parallel()
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		transcriptPath := filepath.Join(env.RepoDir, "pi-helper-checkpoint.jsonl")
+		content := `{"type":"message","id":"1","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool-123","name":"write","arguments":{"path":"a.txt"}}]}}
+{"type":"message","id":"2","message":{"role":"toolResult","toolName":"write","toolCallId":"tool-123","details":{"path":"a.txt"}}}
+`
+		if err := os.WriteFile(transcriptPath, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write transcript: %v", err)
+		}
+
+		ag, _ := agent.Get(agent.AgentNamePi)
+		piAgent, ok := ag.(*pi.PiAgent)
+		if !ok {
+			t.Fatalf("agent type = %T, want *pi.PiAgent", ag)
+		}
+
+		session, err := ag.ReadSession(&agent.HookInput{SessionID: "s1", SessionRef: transcriptPath})
+		if err != nil {
+			t.Fatalf("ReadSession() error = %v", err)
+		}
+
+		uuid, found := piAgent.FindCheckpointUUID(session, "tool-123")
+		if !found {
+			t.Fatal("FindCheckpointUUID() found = false, want true")
+		}
+		if uuid != "2" {
+			t.Fatalf("FindCheckpointUUID() uuid = %q, want %q", uuid, "2")
+		}
+	})
 }
