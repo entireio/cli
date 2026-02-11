@@ -1,0 +1,31 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "5803ad485a72",
+  "session_id": "fe1ffae3-f297-4dc1-9b9d-8a2b49059af7",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T16:15:38.050104Z",
+  "branch": "soph/better-git-hook-handling",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "TASK.md",
+    "cmd/entire/cli/strategy/hooks.go",
+    "cmd/entire/cli/strategy/hooks_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 24,
+    "cache_creation_tokens": 77693,
+    "cache_read_tokens": 1398916,
+    "output_tokens": 629,
+    "api_call_count": 22
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T16:15:37.932461Z",
+    "agent_lines": 579,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 490,
+    "total_committed": 579,
+    "agent_percentage": 100
+  }
+}
