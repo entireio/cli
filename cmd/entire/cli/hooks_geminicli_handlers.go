@@ -489,6 +489,12 @@ func handleGeminiAfterAgent() error {
 		return fmt.Errorf("transcript file not found or empty: %s", transcriptPath)
 	}
 
+	// Early check: bail out quickly if the repo has no commits yet.
+	if repo, err := strategy.OpenRepository(); err == nil && strategy.IsEmptyRepository(repo) {
+		fmt.Fprintln(os.Stderr, "Entire: skipping checkpoint. Will activate after first commit.")
+		return NewSilentError(strategy.ErrEmptyRepository)
+	}
+
 	// Create session context and commit
 	ctx := &geminiSessionContext{
 		sessionID:      sessionID,
