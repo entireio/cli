@@ -1,0 +1,106 @@
+Implement the following plan:
+
+# Fix: Gemini session path during restore
+
+## Context
+
+When restoring Gemini session transcripts from checkpoints, both the **directory** and **filename** are wrong:
+- **Directory**: `GetSessionDir()` uses `SanitizePathForGemini()` (replaces non-alphanumeric → `-`) but Gemini uses a SHA256 `projectHash` from the transcript JSON
+- **Filename**: Fallback creates `<sessionID>.json` but Gemini uses `session-<YYYY-MM-DDTHH-MM>-<shortid>.json`
+
+Correct path: `~/.gemini/tmp/<projectHash>/chats/session-2026-02-10T23-57-9f5659bb.json`
+
+## Changes
+
+### 1. Add `geminiTranscriptMeta` extractor and filename helper
+
+**`strategy/manual_commit_rewind.go`** — Extract `projectHash` and `startTime` from the Gemini transcript JSON:
+```go
+type geminiTranscriptMeta struct {
+    ProjectHash string `json:"projectHash"`
+    StartTime   string `json:"startTime"`
+}
+
+func extractGeminiMeta(transcript []byte) geminiTranscriptMeta {
+    var meta geminiTranscriptMeta
+    json.Unmarshal(transcript, &meta)
+    return meta
+}
+
+func geminiSessionFileName(agentSessionID string, startTime string) string {
+    shortID := agentSessionID
+    if len(shortID) > 8 {
+        shortID = shortID[:8]
+    }
+    // startTime from transcript is like "2026-02-10T23:57:..."
+    // Gemini filename uses "2026-02-10T23-57" (colons replaced with dashes, truncated to minute)
+    t, err := time.Parse(time.RFC3339, startTime)
+    if err != nil {
+        // Try parsing just the date+time portion
+        t, err = time.Parse("2006-01-02T15:04", startTime[:16])
+        if err != nil {
+            return agentSessionID + ".json"
+        }
+    }
+    return fmt.Sprintf("session-%s-%s.json", t.Format("2006-01-02T15-04"), shortID)
+}
+```
+
+### 2. Override path resolution for Gemini in `RestoreLogsOnly()` and `classifySessionsForRestore()`
+
+After `sessionAgent.GetSessionDir(repoRoot)`, override both dir and filename for Gemini:
+
+```go
+// Override for Gemini: use projectHash for dir, session-<startTime>-<shortid>.json for filename
+if sessionAgent.Type() == agent.AgentTypeGemini && len(content.Transcript) > 0 {
+    meta := extractGeminiMeta(content.Transcript)
+    if meta.ProjectHash != "" {
+        if home, err := os.UserHomeDir(); err == nil {
+            sessionAgentDir = filepath.Join(home, ".gemini", "tmp", meta.ProjectHash, "chats")
+        }
+    }
+    agentSessionID := sessionAgent.ExtractAgentSessionID(sessionID)
+    sessionFile = filepath.Join(sessionAgentDir, geminiSessionFileName(agentSessionID, meta.StartTime))
+} else {
+    sessionFile = ResolveSessionFilePath(sessionID, sessionAgent, sessionAgentDir)
+}
+```
+
+### 3. Add `ProjectHash` and `StartTime` to `GeminiTranscript`
+
+**`agent/geminicli/transcript.go`**:
+```go
+type GeminiTranscript struct {
+    ProjectHash string          `json:"projectHash,omitempty"`
+    StartTime   string          `json:"startTime,omitempty"`
+    Messages    []GeminiMessage `json:"messages"`
+}
+```
+
+## Files to modify
+
+| File | What |
+|------|------|
+| `cmd/entire/cli/strategy/manual_commit_rewind.go` | Add `extractGeminiProjectHash()`, `geminiSessionFileName()`, use in `RestoreLogsOnly()` and `classifySessionsForRestore()` |
+| `cmd/entire/cli/agent/geminicli/transcript.go` | Add `ProjectHash` field to `GeminiTranscript` |
+
+## Verification
+
+1. `go build ./...`
+2. `mise run fmt && mise run lint`
+3. `go test ./cmd/entire/cli/... -count=1`
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+
+---
+
+we have a transcript_path inside state. how is this filled?
+
+---
+
+We are storing a field transcript_path into our session state, we should record that field also all the way down to the session metadata json, so we have just to read that attribute to restore the session. Have in mind that transcript_path contains user path as it is absolute, we should delete users home from that path before storing it.
+
+---
+
+[Request interrupted by user for tool use]

@@ -1,0 +1,232 @@
+Implement the following plan:
+
+# Entire Wingman - Implementation Plan
+
+## Context
+
+The wingman feature adds an automated code review loop to the CLI. After an agent turn that modifies files, a background reviewer analyzes the changes (using checkpoint data to understand intent), writes suggestions to `.entire/REVIEW.md`, and then — after a short delay — triggers the main agent to apply those suggestions via `claude --continue -p`. This creates a self-improving development loop where agent output gets automatically reviewed and refined.
+
+## Architecture Overview
+
+```
+Agent turn ends (stop hook)
+    │
+    ├── SaveChanges (existing)
+    ├── transitionSessionTurnEnd (existing)
+    └── [NEW] If wingman enabled && files changed && no pending REVIEW.md && not already reviewed:
+        │
+        └── Spawn detached: `entire wingman __review <json>`
+            │
+            ├── Sleep ~10s (let agent turn fully settle)
+            ├── git diff HEAD (get code changes)
+            ├── Read user prompts from payload (for intent)
+            ├── claude --print --model sonnet (review)
+            ├── Write .entire/REVIEW.md
+            └── Wait ~30s, then if session still IDLE:
+                └── claude --continue -p "Apply .entire/REVIEW.md" --setting-sources ""
+                    │
+                    └── Agent applies suggestions, deletes REVIEW.md
+                        (no hooks fire due to --setting-sources "",
+                         so no infinite loop)
+```
+
+## Implementation Steps
+
+### 1. Settings support
+
+**File: `cmd/entire/cli/settings/settings.go`**
+
+Add `IsWingmanEnabled()` method + package-level convenience function, following the `IsSummarizeEnabled()` pattern. Settings path: `strategy_options.wingman.enabled`.
+
+### 2. `entire wingman` command group
+
+**New file: `cmd/entire/cli/wingman.go`**
+
+Cobra command group with subcommands:
+- `entire wingman enable` — Sets `strategy_options.wingman.enabled = true` in settings. Validates Entire is enabled first.
+- `entire wingman disable` — Sets it to `false`. Deletes `.entire/REVIEW.md` if present.
+- `entire wingman status` — Shows enabled state + last review timestamp from `.entire/wingman-state.json`.
+
+**File: `cmd/entire/cli/root.go`** — Register `newWingmanCmd()`.
+
+### 3. Hidden `__review` command (detached worker)
+
+**Within `cmd/entire/cli/wingman.go`** (or separate `wingman_review.go`):
+
+Hidden command: `entire wingman __review <json-payload>`
+
+Steps:
+1. Unmarshal `WingmanPayload` (session ID, repo root, modified/new/deleted files, user prompts, commit message)
+2. `cd` to repo root
+3. **Initial delay**: Sleep ~10s to let the agent turn fully settle
+4. Compute diff: `git diff HEAD` for uncommitted changes, or `git diff HEAD~1 HEAD` if auto-commit strategy just committed
+5. Build review prompt (diff + prompts + file list)
+6. Call `claude --print --model sonnet --output-format json --setting-sources ""` with prompt via stdin (reuse `stripGitEnv` pattern from `summarize/claude.go`, run from `os.TempDir()`)
+7. Parse response, extract review text
+8. Write `.entire/REVIEW.md`
+9. Update `.entire/wingman-state.json` (dedup tracking)
+10. **Auto-apply phase**: Sleep ~30s, then:
+   - Load session state, check phase is `IDLE`
+   - If idle: spawn `claude --continue -p "Read .entire/REVIEW.md. Apply each suggestion. When done, delete .entire/REVIEW.md." --setting-sources ""`
+   - `--setting-sources ""` disables all hooks on the automated process — prevents recursive wingman triggers and session state conflicts
+   - If not idle (user is active): exit, leave REVIEW.md for notification
+
+### 4. Detached subprocess spawner
+
+**New file: `cmd/entire/cli/wingman_spawn_unix.go`** (`//go:build unix`)
+**New file: `cmd/entire/cli/wingman_spawn_other.go`** (`//go:build !unix`)
+
+Follow exact pattern from `telemetry/detached_unix.go`:
+- `os.Executable()` to get own binary
+- `Setpgid: true` for process group detachment
+- `cmd.Start()` + `Process.Release()`
+- Non-unix stub is a no-op (log warning)
+
+### 5. Hook integration (stop hook trigger)
+
+**File: `cmd/entire/cli/hooks_claudecode_handlers.go`**
+
+After `transitionSessionTurnEnd(sessionID)` in `commitWithMetadata()` (~line 378):
+
+```go
+if totalChanges > 0 && settings.IsWingmanEnabled() {
+    // triggerWingmanReview checks for pending REVIEW.md and dedup internally
+    triggerWingmanReview(WingmanPayload{
+        SessionID:     sessionID,
+        RepoRoot:      repoRoot,
+        ModifiedFiles: relModifiedFiles,
+        NewFiles:      relNewFiles,
+        DeletedFiles:  relDeletedFiles,
+        Prompts:       allPrompts,
+        CommitMessage: commitMessage,
+    })
+}
+```
+
+`triggerWingmanReview` (in wingman.go):
+1. Check if `.entire/REVIEW.md` already exists — skip if a pending review hasn't been applied yet
+2. Check deduplication: compute SHA256 of sorted file paths, compare against `.entire/wingman-state.json`. Skip if same hash (already reviewed these exact changes).
+3. Marshal payload to JSON
+4. Call `spawnDetachedWingmanReview(jsonStr)`
+5. Print to stderr: `"[wingman] Review starting in background...\n"`
+
+### 6. Notification on next prompt (fallback)
+
+**File: `cmd/entire/cli/hooks_claudecode_handlers.go`**
+
+In `captureInitialState()`, after existing logic:
+
+```go
+if settings.IsWingmanEnabled() {
+    if _, err := os.Stat(filepath.Join(repoRoot, ".entire", "REVIEW.md")); err == nil {
+        fmt.Fprintf(os.Stderr, "[wingman] Review available: .entire/REVIEW.md — review and apply suggestions\n")
+    }
+}
+```
+
+### 7. Review prompt template
+
+**New file: `cmd/entire/cli/wingman_prompt.go`**
+
+Prompt instructs Claude to act as a senior code reviewer. Key elements:
+- User's intent (from prompts/commit message)
+- Full code diff
+- File change list
+- Checkpoint context for understanding "why"
+
+Output format: structured Markdown with severity levels (`CRITICAL` / `WARNING` / `SUGGESTION`), file paths, line numbers, descriptions, and fix suggestions.
+
+### 8. Deduplication & state tracking
+
+**State file: `.entire/wingman-state.json`**
+
+```json
+{
+  "session_id": "...",
+  "files_hash": "sha256-of-sorted-file-paths",
+  "reviewed_at": "2026-02-11T...",
+  "review_applied": false
+}
+```
+
+- Before spawning review: skip if `files_hash` matches current
+- After writing REVIEW.md: update state
+- `.entire/wingman-state.json` is already inside `.entire/` (gitignored)
+
+### 9. Loop-breaking mechanism
+
+The `--setting-sources ""` flag on the auto-apply `claude --continue` call disables all Claude Code hooks (including Entire's stop hook). This means:
+- No `commitWithMetadata()` fires after the auto-apply turn
+- No wingman trigger, no infinite loop
+- The file edits are still in the working directory
+- The next human-initiated turn will checkpoint them normally
+
+### 10. Tests
+
+**New file: `cmd/entire/cli/wingman_test.go`**
+- Settings parsing (`IsWingmanEnabled` with various configs)
+- Dedup logic (files hash computation, skip-if-same-hash)
+- Review prompt building (correct template interpolation, diff truncation)
+- Payload serialization/deserialization round-trip
+- `triggerWingmanReview` skips when disabled / when dedup matches
+
+**File: `cmd/entire/cli/settings/settings_test.go`** (if exists)
+- `IsWingmanEnabled()` with strategy_options variations
+
+## Files Summary
+
+| Action | File | Purpose |
+|--------|------|---------|
+| Create | `cmd/entire/cli/wingman.go` | Command group, payload types, trigger, dedup, review runner |
+| Create | `cmd/entire/cli/wingman_prompt.go` | Review prompt template |
+| Create | `cmd/entire/cli/wingman_spawn_unix.go` | Detached process spawner (unix) |
+| Create | `cmd/entire/cli/wingman_spawn_other.go` | Detached process spawner (stub) |
+| Create | `cmd/entire/cli/wingman_test.go` | Unit tests |
+| Modify | `cmd/entire/cli/settings/settings.go` | Add `IsWingmanEnabled()` |
+| Modify | `cmd/entire/cli/root.go` | Register `newWingmanCmd()` |
+| Modify | `cmd/entire/cli/hooks_claudecode_handlers.go` | Trigger wingman + REVIEW.md notification |
+
+## Existing code to reuse
+
+- `summarize/claude.go` — `stripGitEnv()`, Claude CLI invocation pattern, JSON response parsing
+- `telemetry/detached_unix.go` — detached subprocess spawn pattern
+- `settings/settings.go` — `IsSummarizeEnabled()` pattern for feature flags
+- `session/phase.go` — Phase check (IDLE detection for auto-apply timing)
+- `strategy.LoadSessionState()` — Read session phase from `.git/entire-sessions/`
+
+## Edge cases
+
+- **Claude CLI not installed**: Detached subprocess catches `exec.Error`, logs to `.entire/logs/`, exits silently
+- **Large diffs**: Truncate diff at ~100KB in the prompt to keep review quality high
+- **Race with user**: 30s delay + phase check prevents conflicts; if user starts typing, auto-apply is skipped
+- **Multiple concurrent sessions**: Each session has its own session ID in the payload; dedup is per-session
+
+## Verification
+
+1. `mise run fmt && mise run lint && mise run test:ci` — all pass
+2. Manual test: enable wingman, make a change with Claude, verify:
+   - `.entire/REVIEW.md` appears after ~10s
+   - Review contains structured feedback referencing the actual diff
+   - After ~30s (if idle), Claude auto-resumes and applies suggestions
+   - REVIEW.md is deleted after application
+   - No infinite loop (next stop hook does not re-trigger wingman for same files)
+3. Test fallback: start typing before 30s elapses, verify REVIEW.md notification appears on next prompt-submit
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/dip/.REDACTED.jsonl
+
+---
+
+Are all tests passing?
+
+---
+
+Commit the changes
+
+---
+
+Look at the @.entire/REVIEW.md, check if it's valid feedback and resolve if necessary.
+
+---
+
+Commit and empty the REVIEW.md file.
