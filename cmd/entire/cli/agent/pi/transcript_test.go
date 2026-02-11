@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -160,6 +161,101 @@ not-json-line
 	}
 	if len(entries) != 2 {
 		t.Fatalf("ParseTranscript() len = %d, want 2", len(entries))
+	}
+}
+
+func TestParseTranscript_TreeWalk_DefaultsToLastLeaf(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"type":"message","id":"root","parentId":null,"message":{"role":"user","content":"start"}}
+{"type":"message","id":"a1","parentId":"root","message":{"role":"assistant","content":[{"type":"text","text":"branch point"}]}}
+{"type":"message","id":"left","parentId":"a1","message":{"role":"assistant","content":[{"type":"text","text":"left branch"}]}}
+{"type":"message","id":"right","parentId":"a1","message":{"role":"assistant","content":[{"type":"text","text":"right branch"}]}}
+`)
+
+	entries, err := ParseTranscript(data)
+	if err != nil {
+		t.Fatalf("ParseTranscript() error = %v", err)
+	}
+
+	gotIDs := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		gotIDs = append(gotIDs, entry.EntryID())
+	}
+	wantIDs := []string{"root", "a1", "right"}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("active branch ids = %#v, want %#v", gotIDs, wantIDs)
+	}
+}
+
+func TestParseTranscriptWithLeaf_SelectsExplicitBranch(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"type":"message","id":"root","parentId":null,"message":{"role":"user","content":"start"}}
+{"type":"message","id":"a1","parentId":"root","message":{"role":"assistant","content":[{"type":"text","text":"branch point"}]}}
+{"type":"message","id":"left","parentId":"a1","message":{"role":"assistant","content":[{"type":"text","text":"left branch"}]}}
+{"type":"message","id":"right","parentId":"a1","message":{"role":"assistant","content":[{"type":"text","text":"right branch"}]}}
+`)
+
+	entries, err := ParseTranscriptWithLeaf(data, "left")
+	if err != nil {
+		t.Fatalf("ParseTranscriptWithLeaf() error = %v", err)
+	}
+
+	gotIDs := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		gotIDs = append(gotIDs, entry.EntryID())
+	}
+	wantIDs := []string{"root", "a1", "left"}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("active branch ids = %#v, want %#v", gotIDs, wantIDs)
+	}
+}
+
+func TestParseTranscriptFromLineWithLeaf_RespectsOffsetAfterTreeWalk(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	content := `{"type":"message","id":"root","parentId":null,"message":{"role":"user","content":"start"}}
+{"type":"message","id":"a1","parentId":"root","message":{"role":"assistant","content":[{"type":"text","text":"branch point"}]}}
+{"type":"message","id":"left","parentId":"a1","message":{"role":"assistant","content":[{"type":"text","text":"left branch"}]}}
+{"type":"message","id":"right","parentId":"a1","message":{"role":"assistant","content":[{"type":"text","text":"right branch"}]}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	entries, totalLines, err := ParseTranscriptFromLineWithLeaf(path, 2, "left")
+	if err != nil {
+		t.Fatalf("ParseTranscriptFromLineWithLeaf() error = %v", err)
+	}
+	if totalLines != 4 {
+		t.Fatalf("totalLines = %d, want 4", totalLines)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+	if entries[0].EntryID() != "left" {
+		t.Fatalf("EntryID() = %q, want left", entries[0].EntryID())
+	}
+}
+
+func TestParseTranscript_LargeLine(t *testing.T) {
+	t.Parallel()
+
+	huge := strings.Repeat("a", 11*1024*1024)
+	data := []byte(`{"type":"message","id":"1","message":{"role":"user","content":"` + huge + `"}}` + "\n")
+
+	entries, err := ParseTranscript(data)
+	if err != nil {
+		t.Fatalf("ParseTranscript() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+	if entries[0].EntryID() != "1" {
+		t.Fatalf("EntryID() = %q, want 1", entries[0].EntryID())
 	}
 }
 

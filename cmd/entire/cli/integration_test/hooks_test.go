@@ -236,6 +236,101 @@ func TestPiHookRunner_SimulateStop(t *testing.T) {
 	})
 }
 
+func TestPiHookRunner_SimulateStop_WithLeafIDUsesActiveBranch(t *testing.T) {
+	t.Parallel()
+
+	RunForAllStrategiesWithRepoEnv(t, func(t *testing.T, env *TestEnv, strategyName string) {
+		session := env.NewPiSession()
+
+		if err := env.SimulatePiSessionStart(session.ID); err != nil {
+			t.Fatalf("SimulatePiSessionStart failed: %v", err)
+		}
+		if err := env.SimulatePiUserPromptSubmit(session.ID); err != nil {
+			t.Fatalf("SimulatePiUserPromptSubmit failed: %v", err)
+		}
+
+		env.WriteFile("left.txt", "left branch content")
+
+		transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", session.ID+"-branched.jsonl")
+		branchedTranscript := `{"type":"message","id":"1","parentId":null,"message":{"role":"user","content":"root prompt"}}
+{"type":"message","id":"2","parentId":"1","message":{"role":"assistant","content":[{"type":"text","text":"branch point"}]}}
+{"type":"message","id":"3","parentId":"2","message":{"role":"user","content":"left prompt"}}
+{"type":"message","id":"4","parentId":"3","message":{"role":"assistant","content":[{"type":"text","text":"left branch reply"},{"type":"toolCall","id":"tc-left","name":"write","arguments":{"path":"left.txt"}}]}}
+{"type":"message","id":"5","parentId":"4","message":{"role":"toolResult","toolName":"write","toolCallId":"tc-left","details":{"path":"left.txt"}}}
+{"type":"message","id":"6","parentId":"2","message":{"role":"user","content":"right prompt"}}
+{"type":"message","id":"7","parentId":"6","message":{"role":"assistant","content":[{"type":"text","text":"right branch reply"}]}}
+`
+		env.WriteFile(filepath.Join(".entire", "tmp", session.ID+"-branched.jsonl"), branchedTranscript)
+
+		if err := env.SimulatePiStopWithLeaf(session.ID, transcriptPath, "5"); err != nil {
+			t.Fatalf("SimulatePiStopWithLeaf failed: %v", err)
+		}
+
+		promptPath := filepath.Join(env.RepoDir, ".entire", "metadata", session.ID, "prompt.txt")
+		promptData, err := os.ReadFile(promptPath)
+		if err != nil {
+			t.Fatalf("failed to read prompt file: %v", err)
+		}
+		promptText := string(promptData)
+		if !strings.Contains(promptText, "left prompt") {
+			t.Fatalf("expected left-branch prompt in prompt file, got: %s", promptText)
+		}
+		if strings.Contains(promptText, "right prompt") {
+			t.Fatalf("expected right-branch prompt to be excluded, got: %s", promptText)
+		}
+
+		summaryPath := filepath.Join(env.RepoDir, ".entire", "metadata", session.ID, "summary.txt")
+		summaryData, err := os.ReadFile(summaryPath)
+		if err != nil {
+			t.Fatalf("failed to read summary file: %v", err)
+		}
+		summaryText := string(summaryData)
+		if strings.Contains(summaryText, "right branch reply") {
+			t.Fatalf("expected right branch summary content to be excluded, got: %s", summaryText)
+		}
+	})
+}
+
+func TestPiHookRunner_SimulateStop_NoChangesPersistsLeafID(t *testing.T) {
+	t.Parallel()
+
+	RunForAllStrategiesWithRepoEnv(t, func(t *testing.T, env *TestEnv, strategyName string) {
+		session := env.NewPiSession()
+
+		if err := env.SimulatePiSessionStart(session.ID); err != nil {
+			t.Fatalf("SimulatePiSessionStart failed: %v", err)
+		}
+		if err := env.SimulatePiUserPromptSubmit(session.ID); err != nil {
+			t.Fatalf("SimulatePiUserPromptSubmit failed: %v", err)
+		}
+
+		transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", session.ID+"-nochanges.jsonl")
+		branchedTranscript := `{"type":"message","id":"1","parentId":null,"message":{"role":"user","content":"root prompt"}}
+{"type":"message","id":"2","parentId":"1","message":{"role":"assistant","content":[{"type":"text","text":"branch point"}]}}
+{"type":"message","id":"3","parentId":"2","message":{"role":"user","content":"left prompt"}}
+{"type":"message","id":"4","parentId":"3","message":{"role":"assistant","content":[{"type":"text","text":"left branch reply"}]}}
+{"type":"message","id":"5","parentId":"2","message":{"role":"user","content":"right prompt"}}
+{"type":"message","id":"6","parentId":"5","message":{"role":"assistant","content":[{"type":"text","text":"right branch reply"}]}}
+`
+		env.WriteFile(filepath.Join(".entire", "tmp", session.ID+"-nochanges.jsonl"), branchedTranscript)
+
+		if err := env.SimulatePiStopWithLeaf(session.ID, transcriptPath, "4"); err != nil {
+			t.Fatalf("SimulatePiStopWithLeaf failed: %v", err)
+		}
+
+		state, err := env.GetSessionState(session.ID)
+		if err != nil {
+			t.Fatalf("GetSessionState failed: %v", err)
+		}
+		if state == nil {
+			t.Fatalf("expected session state to exist")
+		}
+		if state.TranscriptLeafID != "4" {
+			t.Fatalf("TranscriptLeafID = %q, want %q", state.TranscriptLeafID, "4")
+		}
+	})
+}
+
 func TestPiHookRunner_SimulateStop_AlreadyCommitted(t *testing.T) {
 	t.Parallel()
 

@@ -292,6 +292,15 @@ func TestInstallHooks_TemplateContainsCanonicalLifecycleMappings(t *testing.T) {
 	if !strings.Contains(content, `pi.on("session_switch"`) {
 		t.Fatalf("template must handle session_switch")
 	}
+	if !strings.Contains(content, `pi.on("session_fork"`) {
+		t.Fatalf("template must handle session_fork")
+	}
+	if !strings.Contains(content, `pi.on("session_tree"`) {
+		t.Fatalf("template must handle session_tree")
+	}
+	if !strings.Contains(content, `leaf_id: activeLeafId`) {
+		t.Fatalf("template must include active leaf id in stop payload")
+	}
 	if !strings.Contains(content, `pi.on("tool_call"`) || !strings.Contains(content, `runHook("before-tool"`) {
 		t.Fatalf("template must map tool_call to before-tool")
 	}
@@ -308,6 +317,17 @@ func TestInstallHooks_TemplateContainsCanonicalLifecycleMappings(t *testing.T) {
 	startIdx := strings.Index(switchBlock, `runHook("session-start"`)
 	if endIdx == -1 || startIdx == -1 || endIdx > startIdx {
 		t.Fatalf("session_switch mapping must call session-end before session-start")
+	}
+
+	forkIdx := strings.Index(content, `pi.on("session_fork"`)
+	if forkIdx == -1 {
+		t.Fatalf("missing session_fork handler")
+	}
+	forkBlock := content[forkIdx:]
+	forkEndIdx := strings.Index(forkBlock, `runHook("session-end"`)
+	forkStartIdx := strings.Index(forkBlock, `runHook("session-start"`)
+	if forkEndIdx == -1 || forkStartIdx == -1 || forkEndIdx > forkStartIdx {
+		t.Fatalf("session_fork mapping must call session-end before session-start")
 	}
 }
 

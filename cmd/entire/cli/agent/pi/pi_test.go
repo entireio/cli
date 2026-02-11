@@ -103,7 +103,7 @@ func TestGetHookConfigPathAndSupportsHooks(t *testing.T) {
 
 func TestParseHookInput(t *testing.T) {
 	ag := &PiAgent{}
-	input := `{"session_id":"sess-1","transcript_path":"/tmp/session.jsonl","prompt":"Fix it","modified_files":["a.go","b.go"]}`
+	input := `{"session_id":"sess-1","transcript_path":"/tmp/session.jsonl","prompt":"Fix it","modified_files":["a.go","b.go"],"leaf_id":"leaf-123"}`
 
 	hookInput, err := ag.ParseHookInput(agent.HookStop, strings.NewReader(input))
 	if err != nil {
@@ -127,6 +127,9 @@ func TestParseHookInput(t *testing.T) {
 	}
 	if _, ok := hookInput.RawData["modified_files"]; !ok {
 		t.Fatalf("RawData[modified_files] missing")
+	}
+	if got := hookInput.RawData["leaf_id"]; got != "leaf-123" {
+		t.Fatalf("RawData[leaf_id] = %v, want leaf-123", got)
 	}
 }
 
@@ -396,6 +399,27 @@ func TestTruncateAtUUID(t *testing.T) {
 	}
 	if string(copied.NativeData) != string(session.NativeData) {
 		t.Fatalf("empty truncation should return unchanged session")
+	}
+}
+
+func TestTruncateAtUUID_LargeLine(t *testing.T) {
+	ag := &PiAgent{}
+	huge := strings.Repeat("x", 11*1024*1024)
+	session := &agent.AgentSession{
+		SessionID:  "s-large",
+		AgentName:  agent.AgentNamePi,
+		SessionRef: "/tmp/x",
+		NativeData: []byte(`{"type":"message","id":"1","message":{"role":"user","content":"` + huge + `"}}
+{"type":"message","id":"2","message":{"role":"assistant","content":[{"type":"text","text":"two"}]}}
+`),
+	}
+
+	truncated, err := ag.TruncateAtUUID(session, "1")
+	if err != nil {
+		t.Fatalf("TruncateAtUUID() with large line error = %v", err)
+	}
+	if strings.Count(string(truncated.NativeData), "\n") != 1 {
+		t.Fatalf("expected 1 line after truncation, got %d", strings.Count(string(truncated.NativeData), "\n"))
 	}
 }
 

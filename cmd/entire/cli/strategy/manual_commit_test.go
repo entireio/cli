@@ -1933,7 +1933,7 @@ func TestExtractUserPrompts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := extractUserPrompts(tt.agentType, tt.content)
+			result := extractUserPrompts(tt.agentType, tt.content, "")
 			if len(result) != len(tt.expected) {
 				t.Errorf("extractUserPrompts() returned %d prompts, want %d", len(result), len(tt.expected))
 				return
@@ -1955,7 +1955,7 @@ func TestCalculateTokenUsage_Pi(t *testing.T) {
 {"type":"message","id":"3","message":{"role":"user","content":"ignore"}}
 `)
 
-	usage := calculateTokenUsage(agent.AgentTypePi, data, 0)
+	usage := calculateTokenUsage(agent.AgentTypePi, data, 0, "")
 	if usage.APICallCount != 2 {
 		t.Fatalf("APICallCount = %d, want 2", usage.APICallCount)
 	}
@@ -1978,7 +1978,7 @@ func TestNormalizePiTranscriptForSummarizer(t *testing.T) {
 {"type":"message","id":"r1","message":{"role":"toolResult","toolName":"write","details":{"path":"auth.go"}}}
 `)
 
-	normalized, err := normalizePiTranscriptForSummarizer(data)
+	normalized, err := normalizePiTranscriptForSummarizer(data, "")
 	if err != nil {
 		t.Fatalf("normalizePiTranscriptForSummarizer() error = %v", err)
 	}
@@ -1995,6 +1995,66 @@ func TestNormalizePiTranscriptForSummarizer(t *testing.T) {
 	}
 	if !strings.Contains(text, `"file_path":"auth.go"`) {
 		t.Fatalf("normalized transcript missing canonicalized file_path: %s", text)
+	}
+}
+
+func TestNormalizePiTranscriptForSummarizer_IncludesNonMessageContextEntries(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"type":"message","id":"u1","parentId":null,"message":{"role":"user","content":"Start"}}
+{"type":"branch_summary","id":"b1","parentId":"u1","fromId":"oldleaf","summary":"Explored alternate implementation"}
+{"type":"compaction","id":"c1","parentId":"b1","summary":"Earlier context compacted","firstKeptEntryId":"u1","tokensBefore":1234}
+{"type":"custom_message","id":"m1","parentId":"c1","customType":"my-ext","display":true,"content":[{"type":"text","text":"Remember to update docs"}]}
+`)
+
+	normalized, err := normalizePiTranscriptForSummarizer(data, "m1")
+	if err != nil {
+		t.Fatalf("normalizePiTranscriptForSummarizer() error = %v", err)
+	}
+
+	text := string(normalized)
+	if !strings.Contains(text, piSummarizerBranchSummaryPrefix+"Explored alternate implementation") {
+		t.Fatalf("normalized transcript missing branch_summary content: %s", text)
+	}
+	if !strings.Contains(text, piSummarizerCompactionPrefix+"Earlier context compacted") {
+		t.Fatalf("normalized transcript missing compaction content: %s", text)
+	}
+	if !strings.Contains(text, piSummarizerCustomMessagePrefix+"Remember to update docs") {
+		t.Fatalf("normalized transcript missing custom_message content: %s", text)
+	}
+}
+
+func TestPiCondensationHelpers_RespectLeafID(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"type":"message","id":"1","parentId":null,"message":{"role":"user","content":"root prompt"}}
+{"type":"message","id":"2","parentId":"1","message":{"role":"assistant","content":[{"type":"text","text":"branch"}],"usage":{"input":5,"output":2}}}
+{"type":"message","id":"3","parentId":"2","message":{"role":"user","content":"left prompt"}}
+{"type":"message","id":"4","parentId":"3","message":{"role":"assistant","content":[{"type":"text","text":"left"}],"usage":{"input":7,"output":3}}}
+{"type":"message","id":"5","parentId":"2","message":{"role":"user","content":"right prompt"}}
+{"type":"message","id":"6","parentId":"5","message":{"role":"assistant","content":[{"type":"text","text":"right"}],"usage":{"input":11,"output":4}}}
+`)
+
+	prompts := extractUserPrompts(agent.AgentTypePi, string(data), "4")
+	if len(prompts) != 2 || prompts[0] != "root prompt" || prompts[1] != "left prompt" {
+		t.Fatalf("extractUserPrompts() with leaf returned %#v, want [root prompt left prompt]", prompts)
+	}
+
+	usage := calculateTokenUsage(agent.AgentTypePi, data, 0, "4")
+	if usage.APICallCount != 2 || usage.InputTokens != 12 || usage.OutputTokens != 5 {
+		t.Fatalf("calculateTokenUsage() with leaf = %+v, want calls=2 input=12 output=5", usage)
+	}
+
+	normalized, err := normalizePiTranscriptForSummarizer(data, "4")
+	if err != nil {
+		t.Fatalf("normalizePiTranscriptForSummarizer() error = %v", err)
+	}
+	text := string(normalized)
+	if strings.Contains(text, "right prompt") || strings.Contains(text, `"text":"right"`) {
+		t.Fatalf("normalized transcript should exclude right branch, got: %s", text)
+	}
+	if !strings.Contains(text, "left prompt") {
+		t.Fatalf("normalized transcript should include left branch, got: %s", text)
 	}
 }
 

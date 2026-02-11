@@ -833,10 +833,19 @@ func (r *PiHookRunner) SimulatePiAfterTool(sessionID, transcriptPath, toolName s
 // SimulatePiStop simulates the stop hook for Pi.
 func (r *PiHookRunner) SimulatePiStop(sessionID, transcriptPath string) error {
 	r.T.Helper()
+	return r.SimulatePiStopWithLeaf(sessionID, transcriptPath, "")
+}
 
-	input := map[string]string{
+// SimulatePiStopWithLeaf simulates the stop hook for Pi with an explicit active leaf ID.
+func (r *PiHookRunner) SimulatePiStopWithLeaf(sessionID, transcriptPath, leafID string) error {
+	r.T.Helper()
+
+	input := map[string]any{
 		"session_id":      sessionID,
 		"transcript_path": transcriptPath,
+	}
+	if leafID != "" {
+		input["leaf_id"] = leafID
 	}
 
 	return r.runPiHookWithInput("stop", input)
@@ -992,6 +1001,13 @@ func (env *TestEnv) SimulatePiStop(sessionID, transcriptPath string) error {
 	env.T.Helper()
 	runner := NewPiHookRunner(env.RepoDir, env.T)
 	return runner.SimulatePiStop(sessionID, transcriptPath)
+}
+
+// SimulatePiStopWithLeaf is a convenience method on TestEnv.
+func (env *TestEnv) SimulatePiStopWithLeaf(sessionID, transcriptPath, leafID string) error {
+	env.T.Helper()
+	runner := NewPiHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePiStopWithLeaf(sessionID, transcriptPath, leafID)
 }
 
 // SimulatePiSessionSwitch simulates Pi's session_switch lifecycle mapping:

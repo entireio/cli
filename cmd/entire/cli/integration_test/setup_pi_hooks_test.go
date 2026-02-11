@@ -69,6 +69,16 @@ func TestSetupPiHooks_ScaffoldContainsAllRequiredHookCommands(t *testing.T) {
 			t.Fatalf("managed scaffold missing required hook command %q", command)
 		}
 	}
+
+	if !strings.Contains(content, `pi.on("session_fork"`) {
+		t.Fatalf("managed scaffold missing session_fork event mapping")
+	}
+	if !strings.Contains(content, `pi.on("session_tree"`) {
+		t.Fatalf("managed scaffold missing session_tree event mapping")
+	}
+	if !strings.Contains(content, "leaf_id: activeLeafId") {
+		t.Fatalf("managed scaffold missing leaf_id forwarding in stop payload")
+	}
 }
 
 func TestSetupPiHooks_EnableIsIdempotent(t *testing.T) {
