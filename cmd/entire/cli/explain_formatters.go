@@ -14,7 +14,6 @@ import (
 func formatExportJSON(checkpointID id.CheckpointID,
 	content *checkpoint.SessionContent, summary *checkpoint.CheckpointSummary,
 	transcript []byte, prompts, context string, filesTouched []string) ([]byte, error) {
-
 	out := map[string]any{
 		"checkpoint_id": checkpointID.String(),
 		"session_id":    content.Metadata.SessionID,
@@ -49,7 +48,6 @@ func formatExportJSON(checkpointID id.CheckpointID,
 func formatExportMarkdown(checkpointID id.CheckpointID,
 	content *checkpoint.SessionContent, summary *checkpoint.CheckpointSummary,
 	transcript []byte, prompts, context string, filesTouched []string) ([]byte, error) {
-
 	var sb strings.Builder
 
 	// Header

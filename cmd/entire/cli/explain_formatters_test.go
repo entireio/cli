@@ -6,15 +6,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/summarize"
 )
 
 func TestFormatExportJSON_ValidOutput(t *testing.T) {
 	t.Parallel()
 
-	checkpointID := id.NewCheckpointID()
+	checkpointID, err := id.NewCheckpointID("a1b2c3d4e5f6")
+	if err != nil {
+		t.Fatalf("NewCheckpointID() error = %v", err)
+	}
 	now := time.Now()
 
 	content := &checkpoint.SessionContent{
@@ -23,7 +26,7 @@ func TestFormatExportJSON_ValidOutput(t *testing.T) {
 			CreatedAt: now,
 			Strategy:  "manual-commit",
 			Agent:     "Claude Code",
-			TokenUsage: checkpoint.TokenUsage{
+			TokenUsage: &agent.TokenUsage{
 				InputTokens:  100,
 				OutputTokens: 200,
 			},
@@ -31,7 +34,7 @@ func TestFormatExportJSON_ValidOutput(t *testing.T) {
 		},
 		Transcript: []byte(`{"type":"text","content":"test"}`),
 		Prompts:    "Test prompt",
-		Context:    []byte("Test context"),
+		Context:    "Test context",
 	}
 
 	summary := &checkpoint.CheckpointSummary{
@@ -72,7 +75,10 @@ func TestFormatExportJSON_ValidOutput(t *testing.T) {
 func TestFormatExportJSON_WithSummary(t *testing.T) {
 	t.Parallel()
 
-	checkpointID := id.NewCheckpointID()
+	checkpointID, err := id.NewCheckpointID("b2c3d4e5f6a1")
+	if err != nil {
+		t.Fatalf("NewCheckpointID() error = %v", err)
+	}
 	now := time.Now()
 
 	content := &checkpoint.SessionContent{
@@ -81,13 +87,13 @@ func TestFormatExportJSON_WithSummary(t *testing.T) {
 			CreatedAt:  now,
 			Strategy:   "manual-commit",
 			Agent:      "Claude Code",
-			TokenUsage: checkpoint.TokenUsage{},
-			Summary: &summarize.Summary{
-				Intent:     "Test intent",
-				Outcome:    "Test outcome",
-				Learnings:  summarize.Learnings{Code: []summarize.CodeLearning{}},
-				Friction:   []string{},
-				OpenItems:  []string{},
+			TokenUsage: &agent.TokenUsage{},
+			Summary: &checkpoint.Summary{
+				Intent:    "Test intent",
+				Outcome:   "Test outcome",
+				Learnings: checkpoint.LearningsSummary{Code: []checkpoint.CodeLearning{}},
+				Friction:  []string{},
+				OpenItems: []string{},
 			},
 		},
 		Transcript: []byte(`{"type":"text","content":"test"}`),
@@ -124,7 +130,10 @@ func TestFormatExportJSON_WithSummary(t *testing.T) {
 func TestFormatExportMarkdown_Structure(t *testing.T) {
 	t.Parallel()
 
-	checkpointID := id.NewCheckpointID()
+	checkpointID, err := id.NewCheckpointID("c3d4e5f6a1b2")
+	if err != nil {
+		t.Fatalf("NewCheckpointID() error = %v", err)
+	}
 	now := time.Now()
 
 	content := &checkpoint.SessionContent{
@@ -133,7 +142,7 @@ func TestFormatExportMarkdown_Structure(t *testing.T) {
 			CreatedAt:    now,
 			Strategy:     "manual-commit",
 			Agent:        "Claude Code",
-			TokenUsage:   checkpoint.TokenUsage{},
+			TokenUsage:   &agent.TokenUsage{},
 			FilesTouched: []string{"file1.go", "file2.go"},
 		},
 		Transcript: []byte(`{"type":"text","content":"test"}`),
@@ -179,7 +188,10 @@ func TestFormatExportMarkdown_Structure(t *testing.T) {
 func TestFormatExportMarkdown_WithSummary(t *testing.T) {
 	t.Parallel()
 
-	checkpointID := id.NewCheckpointID()
+	checkpointID, err := id.NewCheckpointID("d4e5f6a1b2c3")
+	if err != nil {
+		t.Fatalf("NewCheckpointID() error = %v", err)
+	}
 	now := time.Now()
 
 	content := &checkpoint.SessionContent{
@@ -188,12 +200,12 @@ func TestFormatExportMarkdown_WithSummary(t *testing.T) {
 			CreatedAt:  now,
 			Strategy:   "manual-commit",
 			Agent:      "Claude Code",
-			TokenUsage: checkpoint.TokenUsage{},
-			Summary: &summarize.Summary{
+			TokenUsage: &agent.TokenUsage{},
+			Summary: &checkpoint.Summary{
 				Intent:  "Implement feature X",
 				Outcome: "Successfully implemented",
-				Learnings: summarize.Learnings{
-					Code: []summarize.CodeLearning{
+				Learnings: checkpoint.LearningsSummary{
+					Code: []checkpoint.CodeLearning{
 						{Path: "api/handler.go", Finding: "Added error handling"},
 					},
 				},
@@ -240,7 +252,10 @@ func TestFormatExportMarkdown_WithSummary(t *testing.T) {
 func TestFormatExportJSON_HandlesEmptyFields(t *testing.T) {
 	t.Parallel()
 
-	checkpointID := id.NewCheckpointID()
+	checkpointID, err := id.NewCheckpointID("e5f6a1b2c3d4")
+	if err != nil {
+		t.Fatalf("NewCheckpointID() error = %v", err)
+	}
 	now := time.Now()
 
 	content := &checkpoint.SessionContent{
@@ -272,7 +287,10 @@ func TestFormatExportJSON_HandlesEmptyFields(t *testing.T) {
 func TestFormatExportMarkdown_HandlesEmptyFiles(t *testing.T) {
 	t.Parallel()
 
-	checkpointID := id.NewCheckpointID()
+	checkpointID, err := id.NewCheckpointID("f6a1b2c3d4e5")
+	if err != nil {
+		t.Fatalf("NewCheckpointID() error = %v", err)
+	}
 	now := time.Now()
 
 	content := &checkpoint.SessionContent{

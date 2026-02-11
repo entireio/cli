@@ -167,7 +167,7 @@ Note: --session filters the list view; --commit and --checkpoint are mutually ex
 			if showcaseFlag && !exportFlag {
 				return errors.New("--showcase requires --export flag")
 			}
-			if (exportFormat != "" || outputFile != "") && !exportFlag {
+			if (cmd.Flags().Changed("format") || cmd.Flags().Changed("output")) && !exportFlag {
 				return errors.New("--format and --output require --export flag")
 			}
 
@@ -397,7 +397,6 @@ func generateCheckpointSummary(w, _ io.Writer, store *checkpoint.GitStore, check
 func runExportCheckpoint(w, _ io.Writer, checkpointID id.CheckpointID,
 	content *checkpoint.SessionContent, summary *checkpoint.CheckpointSummary,
 	showcase bool, format, outputFile string) error {
-
 	// Prepare transcript for export
 	transcriptBytes := content.Transcript
 	prompts := content.Prompts
@@ -435,6 +434,49 @@ func runExportCheckpoint(w, _ io.Writer, checkpointID id.CheckpointID,
 		filesTouched = make([]string, len(content.Metadata.FilesTouched))
 		for i, path := range content.Metadata.FilesTouched {
 			filesTouched[i] = redact.Showcase(path, *showcaseConfig)
+		}
+
+		// Redact summary fields if present
+		if content.Metadata.Summary != nil {
+			redactedSummary := *content.Metadata.Summary
+			redactedSummary.Intent = redact.Showcase(redactedSummary.Intent, *showcaseConfig)
+			redactedSummary.Outcome = redact.Showcase(redactedSummary.Outcome, *showcaseConfig)
+
+			// Redact Learnings fields
+			redactedSummary.Learnings.Repo = make([]string, len(redactedSummary.Learnings.Repo))
+			for i, item := range redactedSummary.Learnings.Repo {
+				redactedSummary.Learnings.Repo[i] = redact.Showcase(item, *showcaseConfig)
+			}
+			redactedSummary.Learnings.Code = make([]checkpoint.CodeLearning, len(redactedSummary.Learnings.Code))
+			for i, cl := range redactedSummary.Learnings.Code {
+				redactedSummary.Learnings.Code[i] = checkpoint.CodeLearning{
+					Path:    redact.Showcase(cl.Path, *showcaseConfig),
+					Line:    cl.Line,
+					EndLine: cl.EndLine,
+					Finding: redact.Showcase(cl.Finding, *showcaseConfig),
+				}
+			}
+			redactedSummary.Learnings.Workflow = make([]string, len(redactedSummary.Learnings.Workflow))
+			for i, item := range redactedSummary.Learnings.Workflow {
+				redactedSummary.Learnings.Workflow[i] = redact.Showcase(item, *showcaseConfig)
+			}
+
+			// Redact Friction and OpenItems slices
+			redactedSummary.Friction = make([]string, len(redactedSummary.Friction))
+			for i, item := range redactedSummary.Friction {
+				redactedSummary.Friction[i] = redact.Showcase(item, *showcaseConfig)
+			}
+			redactedSummary.OpenItems = make([]string, len(redactedSummary.OpenItems))
+			for i, item := range redactedSummary.OpenItems {
+				redactedSummary.OpenItems[i] = redact.Showcase(item, *showcaseConfig)
+			}
+
+			// Create a redacted copy of content metadata
+			redactedMetadata := content.Metadata
+			redactedMetadata.Summary = &redactedSummary
+			redactedContent := *content
+			redactedContent.Metadata = redactedMetadata
+			content = &redactedContent
 		}
 	}
 
@@ -1310,7 +1352,7 @@ func runExplainCommit(w io.Writer, commitRef string, noPager, verbose, full, sea
 
 	// Delegate to checkpoint detail view
 	// Note: errW is only used for generate mode, but we pass w for safety
-	return runExplainCheckpoint(w, w, checkpointID.String(), noPager, verbose, full, false, false, false, searchAll)
+	return runExplainCheckpoint(w, w, checkpointID.String(), noPager, verbose, full, false, false, false, searchAll, false, false, "", "")
 }
 
 // formatSessionInfo formats session information for display.

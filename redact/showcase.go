@@ -38,22 +38,25 @@ func DefaultShowcaseConfig() ShowcaseConfig {
 func Showcase(s string, cfg ShowcaseConfig) string {
 	result := s
 
-	// Layer 1: Pattern-based redaction
-	result = redactPatterns(result)
-
-	// Layer 2: Blocklist matching
-	result = redactBlocklist(result, cfg.CustomBlocklist)
-
-	// Layer 3: Structural normalization
+	// Layer 1: File path redaction (must run first to prevent paths from matching other patterns)
 	if cfg.RedactPaths {
 		result = redactFilePaths(result, cfg.AllowedPaths)
+	}
+
+	// Layer 2: Pattern-based redaction (non-email patterns)
+	result = redactPatterns(result)
+
+	// Layer 3: Structural redaction (git remotes before emails, then blocklist)
+	// Redact git remotes before emails to avoid matching git@host as an email
+	if cfg.RedactProjectInfo {
+		result = redactProjectInfo(result)
 	}
 	if cfg.RedactUsernames {
 		result = redactUsernames(result, cfg.AllowedDomains)
 	}
-	if cfg.RedactProjectInfo {
-		result = redactProjectInfo(result)
-	}
+
+	// Layer 4: Blocklist matching (runs last to catch any remaining sensitive terms)
+	result = redactBlocklist(result, cfg.CustomBlocklist)
 
 	return result
 }
@@ -139,8 +142,10 @@ var (
 	privateIPPattern   = regexp.MustCompile(`\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})(?::[0-9]+)?\b`)
 
 	// Cloud ARNs
-	awsARNPattern = regexp.MustCompile(`arn:aws:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:[a-zA-Z0-9/._-]+`)
-	gcpPattern    = regexp.MustCompile(`projects/[a-z0-9-]+/[a-zA-Z0-9/._-]+`)
+	// Account ID is optional for some ARN types (e.g., S3: arn:aws:s3:::bucket/key)
+	awsARNPattern = regexp.MustCompile(`arn:aws:[a-z0-9-]+:[a-z0-9-]*:(?:[0-9]{12})?:[a-zA-Z0-9/._-]+`)
+	// GCP resource paths - require known resource types to avoid matching regular file paths
+	gcpPattern = regexp.MustCompile(`projects/[a-z0-9-]+/(?:locations|zones|regions|instances|datasets|buckets|topics|subscriptions)/[a-zA-Z0-9/._-]+`)
 
 	// Database connection strings
 	dbConnPattern = regexp.MustCompile(`(?i)(postgres|postgresql|mongodb|mysql|redis)://[^\s\)\"\']+`)
@@ -149,7 +154,8 @@ var (
 	emailPattern = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`)
 
 	// AWS account IDs (12 digits in AWS context)
-	awsAccountPattern = regexp.MustCompile(`(?i)(aws|account|arn)[\s:][^\s]*?([0-9]{12})\b`)
+	// Capture separator to preserve it in replacement
+	awsAccountPattern = regexp.MustCompile(`(?i)(aws|account|arn)([\s:]\s*)([0-9]{12})\b`)
 
 	// JWT tokens (starts with eyJ)
 	jwtPattern = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`)
@@ -169,14 +175,12 @@ func redactPatterns(s string) string {
 	result = awsARNPattern.ReplaceAllString(result, "[AWS_ARN]")
 	result = gcpPattern.ReplaceAllString(result, "[GCP_RESOURCE]")
 	result = dbConnPattern.ReplaceAllString(result, "[DB_CONNECTION_STRING]")
-	result = emailPattern.ReplaceAllString(result, "[EMAIL]")
+	// NOTE: Email redaction is handled by redactUsernames() to allow AllowedDomains filtering
 	result = jwtPattern.ReplaceAllString(result, "[JWT_TOKEN]")
 	result = pemKeyPattern.ReplaceAllString(result, "[PEM_PRIVATE_KEY]")
 
-	// AWS account IDs - preserve context, redact number
-	result = awsAccountPattern.ReplaceAllStringFunc(result, func(match string) string {
-		return awsAccountPattern.ReplaceAllString(match, "${1} [AWS_ACCOUNT_ID]")
-	})
+	// AWS account IDs - preserve context and separator, redact number
+	result = awsAccountPattern.ReplaceAllString(result, "${1}${2}[AWS_ACCOUNT_ID]")
 
 	return result
 }
@@ -209,7 +213,8 @@ func redactFilePaths(s string, allowedPaths []string) string {
 				}
 			}
 		}
-		return "[PATH]"
+		// Preserve leading slash when redacting
+		return "/[PATH]"
 	})
 
 	return result
@@ -235,10 +240,12 @@ func redactProjectInfo(s string) string {
 	result := s
 
 	// Redact git remote URLs (common patterns)
+	// Only match known git hosting domains to avoid over-redacting
 	gitRemotePatterns := []*regexp.Regexp{
 		regexp.MustCompile(`git@[^:]+:[^/]+/[^\s.]+\.git`),
 		regexp.MustCompile(`https://[^/]+/[^/]+/[^\s.]+\.git`),
-		regexp.MustCompile(`https://[^/]+/[^/]+/[^\s/]+`), // GitHub/GitLab URLs without .git
+		// Match GitHub/GitLab/Bitbucket URLs without .git
+		regexp.MustCompile(`https://(?:github\.com|gitlab\.com|bitbucket\.org)/[^/]+/[^\s/]+`),
 	}
 
 	for _, pattern := range gitRemotePatterns {
@@ -249,7 +256,7 @@ func redactProjectInfo(s string) string {
 }
 
 // globToRegex converts a simple glob pattern to regex.
-// Supports * (any characters) and ? (single character).
+// Supports * (word chars and hyphens) and ? (single character).
 func globToRegex(glob string) string {
 	// Escape regex special chars except * and ?
 	specialChars := `\.+^$()[]{}|`
@@ -259,8 +266,10 @@ func globToRegex(glob string) string {
 	}
 
 	// Convert glob wildcards to regex
-	result = strings.ReplaceAll(result, "*", ".*")
-	result = strings.ReplaceAll(result, "?", ".")
+	// Use [\w-]* to match word characters and hyphens, staying within token boundaries
+	// This prevents greedy matching across dots and other punctuation
+	result = strings.ReplaceAll(result, "*", `[\w-]*`)
+	result = strings.ReplaceAll(result, "?", `[\w]`)
 
 	// Match word boundaries
 	return `\b` + result + `\b`

@@ -101,11 +101,11 @@ const InternalURL = "https://api.internal.company.com"
 
 		// Sensitive data that should be redacted
 		sensitivePatterns := []string{
-			"sk-proj-test-secret-key", // API key (entropy-based)
-			"10.0.1.5",                  // Private IP (pattern-based)
-			"postgres://",               // DB connection string (pattern-based)
-			"admin@acme-corp.com",       // Email (pattern-based)
-			"api.internal.company.com",  // Internal URL (pattern-based)
+			"sk-proj-test-secret-key",  // API key (entropy-based)
+			"10.0.1.5",                 // Private IP (pattern-based)
+			"postgres://",              // DB connection string (pattern-based)
+			"admin@acme-corp.com",      // Email (pattern-based)
+			"api.internal.company.com", // Internal URL (pattern-based)
 		}
 
 		for _, pattern := range sensitivePatterns {
