@@ -239,6 +239,32 @@ func (s *EntireSettings) IsSummarizeEnabled() bool {
 	return enabled
 }
 
+// IsWingmanEnabled checks if wingman auto-review is enabled in settings.
+// Returns false by default if settings cannot be loaded or the key is missing.
+func IsWingmanEnabled() bool {
+	s, err := Load()
+	if err != nil {
+		return false
+	}
+	return s.IsWingmanEnabled()
+}
+
+// IsWingmanEnabled checks if wingman auto-review is enabled in this settings instance.
+func (s *EntireSettings) IsWingmanEnabled() bool {
+	if s.StrategyOptions == nil {
+		return false
+	}
+	wingmanOpts, ok := s.StrategyOptions["wingman"].(map[string]any)
+	if !ok {
+		return false
+	}
+	enabled, ok := wingmanOpts["enabled"].(bool)
+	if !ok {
+		return false
+	}
+	return enabled
+}
+
 // IsPushSessionsDisabled checks if push_sessions is disabled in settings.
 // Returns true if push_sessions is explicitly set to false.
 func (s *EntireSettings) IsPushSessionsDisabled() bool {

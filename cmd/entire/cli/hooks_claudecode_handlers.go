@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -73,6 +74,16 @@ func captureInitialState() error {
 	// CLI captures state directly (including transcript position)
 	if err := CapturePrePromptState(hookData.sessionID, hookData.input.SessionRef); err != nil {
 		return err
+	}
+
+	// Notify user if a wingman review is pending
+	if settings.IsWingmanEnabled() {
+		repoRoot, rootErr := paths.RepoRoot()
+		if rootErr == nil {
+			if _, statErr := os.Stat(filepath.Join(repoRoot, wingmanReviewFile)); statErr == nil {
+				fmt.Fprintf(os.Stderr, "[wingman] Review available: .entire/REVIEW.md — review and apply suggestions\n")
+			}
+		}
 	}
 
 	// If strategy implements SessionInitializer, call it to initialize session state
@@ -376,6 +387,19 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 	// This moves ACTIVE → IDLE or ACTIVE_COMMITTED → IDLE.
 	// For ACTIVE_COMMITTED → IDLE, HandleTurnEnd dispatches ActionCondense.
 	transitionSessionTurnEnd(sessionID)
+
+	// Trigger wingman review if enabled and files changed
+	if totalChanges > 0 && settings.IsWingmanEnabled() {
+		triggerWingmanReview(WingmanPayload{
+			SessionID:     sessionID,
+			RepoRoot:      repoRoot,
+			ModifiedFiles: relModifiedFiles,
+			NewFiles:      relNewFiles,
+			DeletedFiles:  relDeletedFiles,
+			Prompts:       allPrompts,
+			CommitMessage: commitMessage,
+		})
+	}
 
 	// Clean up pre-prompt state (CLI responsibility)
 	if err := CleanupPrePromptState(sessionID); err != nil {

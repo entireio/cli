@@ -1,0 +1,284 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestComputeFilesHash_Deterministic(t *testing.T) {
+	t.Parallel()
+
+	files := []string{"b.go", "a.go", "c.go"}
+	hash1 := computeFilesHash(files)
+	hash2 := computeFilesHash(files)
+
+	if hash1 != hash2 {
+		t.Errorf("expected deterministic hash, got %s and %s", hash1, hash2)
+	}
+
+	// Order shouldn't matter
+	files2 := []string{"c.go", "a.go", "b.go"}
+	hash3 := computeFilesHash(files2)
+
+	if hash1 != hash3 {
+		t.Errorf("expected order-independent hash, got %s and %s", hash1, hash3)
+	}
+}
+
+func TestComputeFilesHash_DifferentFiles(t *testing.T) {
+	t.Parallel()
+
+	hash1 := computeFilesHash([]string{"a.go", "b.go"})
+	hash2 := computeFilesHash([]string{"a.go", "c.go"})
+
+	if hash1 == hash2 {
+		t.Error("expected different hashes for different file lists")
+	}
+}
+
+func TestComputeFilesHash_Empty(t *testing.T) {
+	t.Parallel()
+
+	hash := computeFilesHash(nil)
+	if hash == "" {
+		t.Error("expected non-empty hash for empty file list")
+	}
+}
+
+func TestWingmanPayload_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	payload := WingmanPayload{
+		SessionID:     "test-session-123",
+		RepoRoot:      "/tmp/repo",
+		BaseCommit:    "abc123def456",
+		ModifiedFiles: []string{"main.go", "util.go"},
+		NewFiles:      []string{"new.go"},
+		DeletedFiles:  []string{"old.go"},
+		Prompts:       []string{"Fix the bug", "Add tests"},
+		CommitMessage: "fix: resolve issue",
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	var decoded WingmanPayload
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if decoded.SessionID != payload.SessionID {
+		t.Errorf("session_id: got %q, want %q", decoded.SessionID, payload.SessionID)
+	}
+	if decoded.RepoRoot != payload.RepoRoot {
+		t.Errorf("repo_root: got %q, want %q", decoded.RepoRoot, payload.RepoRoot)
+	}
+	if decoded.BaseCommit != payload.BaseCommit {
+		t.Errorf("base_commit: got %q, want %q", decoded.BaseCommit, payload.BaseCommit)
+	}
+	if len(decoded.ModifiedFiles) != len(payload.ModifiedFiles) {
+		t.Errorf("modified_files: got %d, want %d", len(decoded.ModifiedFiles), len(payload.ModifiedFiles))
+	}
+	if len(decoded.NewFiles) != len(payload.NewFiles) {
+		t.Errorf("new_files: got %d, want %d", len(decoded.NewFiles), len(payload.NewFiles))
+	}
+	if len(decoded.DeletedFiles) != len(payload.DeletedFiles) {
+		t.Errorf("deleted_files: got %d, want %d", len(decoded.DeletedFiles), len(payload.DeletedFiles))
+	}
+	if len(decoded.Prompts) != len(payload.Prompts) {
+		t.Errorf("prompts: got %d, want %d", len(decoded.Prompts), len(payload.Prompts))
+	}
+	if decoded.CommitMessage != payload.CommitMessage {
+		t.Errorf("commit_message: got %q, want %q", decoded.CommitMessage, payload.CommitMessage)
+	}
+}
+
+func TestBuildReviewPrompt_IncludesAllSections(t *testing.T) {
+	t.Parallel()
+
+	prompts := []string{"Fix the authentication bug"}
+	fileList := "auth.go (modified), auth_test.go (new)"
+	diff := `diff --git a/auth.go b/auth.go
+--- a/auth.go
++++ b/auth.go
+@@ -10,6 +10,8 @@ func Login(user, pass string) error {
++    if user == "" {
++        return errors.New("empty user")
++    }
+`
+
+	result := buildReviewPrompt(prompts, fileList, diff)
+
+	if !strings.Contains(result, "Fix the authentication bug") {
+		t.Error("prompt should contain user prompt")
+	}
+	if !strings.Contains(result, "auth.go (modified)") {
+		t.Error("prompt should contain file list")
+	}
+	if !strings.Contains(result, "diff --git") {
+		t.Error("prompt should contain diff")
+	}
+	if !strings.Contains(result, "senior code reviewer") {
+		t.Error("prompt should contain reviewer instruction")
+	}
+}
+
+func TestBuildReviewPrompt_EmptyPrompts(t *testing.T) {
+	t.Parallel()
+
+	result := buildReviewPrompt(nil, "file.go (modified)", "some diff")
+
+	if !strings.Contains(result, "(no prompts captured)") {
+		t.Error("should show no-prompts placeholder for empty prompts")
+	}
+}
+
+func TestBuildReviewPrompt_TruncatesLargeDiff(t *testing.T) {
+	t.Parallel()
+
+	// Create a diff larger than maxDiffSize
+	largeDiff := strings.Repeat("x", maxDiffSize+1000)
+
+	result := buildReviewPrompt([]string{"test"}, "file.go", largeDiff)
+
+	if !strings.Contains(result, "diff truncated at 100KB") {
+		t.Error("should truncate large diffs")
+	}
+	// The prompt should not contain the full diff
+	if strings.Contains(result, strings.Repeat("x", maxDiffSize+1000)) {
+		t.Error("should not contain the full oversized diff")
+	}
+}
+
+func TestWingmanState_SaveLoad(t *testing.T) {
+	// Uses t.Chdir so cannot be parallel
+	tmpDir := t.TempDir()
+
+	// Initialize a real git repo (paths.AbsPath needs git rev-parse)
+	cmd := exec.CommandContext(context.Background(), "git", "init", tmpDir)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to git init: %v", err)
+	}
+
+	// Create .entire directory
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+
+	state := &WingmanState{
+		SessionID:     "test-session",
+		FilesHash:     "abc123",
+		ReviewApplied: false,
+	}
+
+	if err := saveWingmanState(state); err != nil {
+		t.Fatalf("failed to save state: %v", err)
+	}
+
+	loaded, err := loadWingmanState()
+	if err != nil {
+		t.Fatalf("failed to load state: %v", err)
+	}
+
+	if loaded.SessionID != state.SessionID {
+		t.Errorf("session_id: got %q, want %q", loaded.SessionID, state.SessionID)
+	}
+	if loaded.FilesHash != state.FilesHash {
+		t.Errorf("files_hash: got %q, want %q", loaded.FilesHash, state.FilesHash)
+	}
+	if loaded.ReviewApplied != state.ReviewApplied {
+		t.Errorf("review_applied: got %v, want %v", loaded.ReviewApplied, state.ReviewApplied)
+	}
+}
+
+func TestWingmanStripGitEnv(t *testing.T) {
+	t.Parallel()
+
+	env := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/user",
+		"GIT_DIR=/repo/.git",
+		"GIT_WORK_TREE=/repo",
+		"EDITOR=vim",
+	}
+
+	filtered := wingmanStripGitEnv(env)
+
+	for _, e := range filtered {
+		if strings.HasPrefix(e, "GIT_") {
+			t.Errorf("GIT_ variable should be stripped: %s", e)
+		}
+	}
+
+	if len(filtered) != 3 {
+		t.Errorf("expected 3 non-GIT vars, got %d", len(filtered))
+	}
+}
+
+func TestIsWingmanEnabled_Settings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		options  map[string]any
+		expected bool
+	}{
+		{
+			name:     "nil options",
+			options:  nil,
+			expected: false,
+		},
+		{
+			name:     "empty options",
+			options:  map[string]any{},
+			expected: false,
+		},
+		{
+			name:     "wingman not present",
+			options:  map[string]any{"summarize": map[string]any{"enabled": true}},
+			expected: false,
+		},
+		{
+			name:     "wingman enabled",
+			options:  map[string]any{"wingman": map[string]any{"enabled": true}},
+			expected: true,
+		},
+		{
+			name:     "wingman disabled",
+			options:  map[string]any{"wingman": map[string]any{"enabled": false}},
+			expected: false,
+		},
+		{
+			name:     "wingman wrong type",
+			options:  map[string]any{"wingman": "invalid"},
+			expected: false,
+		},
+		{
+			name:     "wingman enabled wrong type",
+			options:  map[string]any{"wingman": map[string]any{"enabled": "yes"}},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := &EntireSettings{
+				StrategyOptions: tt.options,
+			}
+			if got := s.IsWingmanEnabled(); got != tt.expected {
+				t.Errorf("IsWingmanEnabled() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
