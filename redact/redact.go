@@ -12,6 +12,15 @@ import (
 // secretPattern matches high-entropy strings that may be secrets.
 var secretPattern = regexp.MustCompile(`[A-Za-z0-9/+_=-]{10,}`)
 
+// knownSecretPatterns contains regex patterns for well-known secret formats
+// with distinctive structures but potentially low entropy (e.g., fixed prefixes).
+var knownSecretPatterns = []*regexp.Regexp{
+	// AWS Access Key ID: AKIA followed by 16 alphanumeric uppercase characters
+	// Format is stable since AWS IAM launch (2011)
+	// Docs: https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html
+	regexp.MustCompile(`\bAKIA[A-Z0-9]{16}\b`),
+}
+
 // entropyThreshold is the minimum Shannon entropy for a string to be considered
 // a secret. 4.5 was chosen through trial and error: high enough to avoid false
 // positives on common words and identifiers, low enough to catch typical API keys
@@ -155,9 +164,21 @@ func shouldSkipJSONLObject(obj map[string]any) bool {
 	return ok && (strings.HasPrefix(t, "image") || t == "base64")
 }
 
-// isSecret returns true if match is a high-entropy string that looks like a secret.
+// isSecret returns true if match is a high-entropy string or matches a known secret pattern.
 func isSecret(match string) bool {
-	return shannonEntropy(match) > entropyThreshold
+	// Check entropy-based detection first (fast path for most secrets)
+	if shannonEntropy(match) > entropyThreshold {
+		return true
+	}
+
+	// Check pattern-based detection for structured secrets with low entropy
+	for _, pattern := range knownSecretPatterns {
+		if pattern.MatchString(match) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func shannonEntropy(s string) float64 {

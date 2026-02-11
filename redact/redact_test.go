@@ -3,6 +3,7 @@ package redact
 import (
 	"bytes"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -229,5 +230,28 @@ func TestShouldSkipJSONLObject_RedactionBehavior(t *testing.T) {
 	wantRepls2 := [][2]string{{highEntropySecret, "REDACTED"}}
 	if !slices.Equal(repls2, wantRepls2) {
 		t.Errorf("got %q, want %q", repls2, wantRepls2)
+	}
+}
+
+func TestAWSAccessKeyID_PatternDetection(t *testing.T) {
+	t.Parallel()
+	awsKeyID := "AKIA" + "IOSFODNN7EXAMPLE"
+
+	if !isSecret(awsKeyID) {
+		t.Error("AWS Access Key ID should be detected")
+	}
+
+	result := String("export AWS_ACCESS_KEY_ID=" + awsKeyID)
+	if !strings.Contains(result, "REDACTED") {
+		t.Errorf("expected redaction, got %q", result)
+	}
+
+	// Verify invalid formats are NOT detected
+	if isSecret("AKIA123") {
+		t.Error("AKIA123 should not be detected (too short)")
+	}
+
+	if isSecret("BKIAIOSFODNN7EXAMPLE") {
+		t.Error("BKIAIOSFODNN7EXAMPLE should not be detected (wrong prefix)")
 	}
 }
