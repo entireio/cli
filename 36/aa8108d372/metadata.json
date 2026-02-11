@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "36aa8108d372",
+  "strategy": "manual-commit",
+  "branch": "soph/test-coverage-for-hook-contracts",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/hook_contracts_test.go",
+    "cmd/entire/cli/integration_test/testenv.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/36/aa8108d372/0/metadata.json",
+      "transcript": "/36/aa8108d372/0/full.jsonl",
+      "context": "/36/aa8108d372/0/context.md",
+      "content_hash": "/36/aa8108d372/0/content_hash.txt",
+      "prompt": "/36/aa8108d372/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 455,
+    "cache_creation_tokens": 342989,
+    "cache_read_tokens": 3890106,
+    "output_tokens": 125,
+    "api_call_count": 50
+  }
+}

@@ -1,0 +1,22 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+can you review TASK.md for me and validate the assumptions / implications are correct
+
+### Prompt 2
+
+My main issue with this large refactor is that we need to be sure our integration tests are high level enough that they would be able to signal any breaking changes during the refactor. I'm especially worried about these parts where we simulate the agent in tests by calling the hooks. Can you take a look if you have any suggestions?
+
+### Prompt 3
+
+Yeah let's follow through with your recommendations
+
+### Prompt 4
+
+why adding the note and not just removing the param? 
+
++// Note: agentName parameter is accepted for API compatibility but not written to settings.
+
