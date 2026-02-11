@@ -89,16 +89,18 @@ Strategies: manual-commit (default), auto-commit`,
 					return NewSilentError(errors.New("wrong agent name"))
 				}
 
-				// Check if the agent binary is installed
-				installed, err := ag.IsInstalled()
-				if err != nil {
-					return fmt.Errorf("error checking if %s is installed: %w", agentName, err)
-				}
-				if !installed {
-					fmt.Fprintf(cmd.ErrOrStderr(),
-						"%s is not installed or not found in PATH.\nInstall it from: %s\n",
-						agentName, ag.InstallURL())
-					return NewSilentError(errors.New("agent not installed"))
+				// Check if the agent binary is installed (skip in test mode)
+				if os.Getenv("ENTIRE_SKIP_AGENT_CHECK") != "1" {
+					installed, err := ag.IsInstalled()
+					if err != nil {
+						return fmt.Errorf("error checking if %s is installed: %w", agentName, err)
+					}
+					if !installed {
+						fmt.Fprintf(cmd.ErrOrStderr(),
+							"%s is not installed or not found in PATH.\nInstall it from: %s\n",
+							agentName, ag.InstallURL())
+						return NewSilentError(errors.New("agent not installed"))
+					}
 				}
 
 				return setupAgentHooksNonInteractive(cmd.OutOrStdout(), ag, strategyFlag, localDev, forceHooks, skipPushSessions, telemetry)
