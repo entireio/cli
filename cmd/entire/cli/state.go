@@ -38,7 +38,7 @@ type PrePromptState struct {
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
-// This nil-vs-empty distinction lets ComputeFileChanges know whether to skip new-file detection.
+// This nil-vs-empty distinction lets DetectFileChanges know whether to skip new-file detection.
 // When the receiver is non-nil but UntrackedFiles is nil (e.g., old state files deserialized with
 // "untracked_files": null), returns an empty non-nil slice so that all current untracked files
 // are correctly treated as new.
@@ -223,58 +223,71 @@ func CleanupPrePromptState(sessionID string) error {
 	return nil
 }
 
-// ComputeFileChanges returns new files (created during session) and deleted files
-// (tracked files that were deleted) using a single git status call.
+// FileChanges holds categorized file changes from git status.
+type FileChanges struct {
+	Modified []string // Modified or staged files
+	New      []string // Untracked files (filtered if previouslyUntracked provided)
+	Deleted  []string // Deleted files (staged or unstaged)
+}
+
+// DetectFileChanges returns categorized file changes from the current git status.
 //
-// preUntrackedFiles is the list of untracked files captured before the session/task started.
-// Pass nil to skip new-file detection (deletedFiles are still computed).
-// Pass a non-nil slice (even empty) to detect new files by diffing against the pre-existing set.
-func ComputeFileChanges(preUntrackedFiles []string) (newFiles, deletedFiles []string, err error) {
+// previouslyUntracked controls new-file detection:
+//   - nil: all untracked files go into New
+//   - non-nil: only untracked files NOT in the pre-existing set go into New
+//
+// Modified includes both worktree and staging modified/added files.
+// Deleted includes both staged and unstaged deletions.
+// All results exclude .entire/ directory.
+func DetectFileChanges(previouslyUntracked []string) (*FileChanges, error) {
 	repo, err := openRepository()
 	if err != nil {
-		return nil, nil, err
+		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 
 	worktree, err := repo.Worktree()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get worktree: %w", err)
+		return nil, fmt.Errorf("failed to get worktree: %w", err)
 	}
 
 	status, err := worktree.Status()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get status: %w", err)
+		return nil, fmt.Errorf("failed to get status: %w", err)
 	}
 
-	// Build set of pre-existing untracked files for quick lookup (only if preState exists)
+	// Build set of pre-existing untracked files for quick lookup
 	var preExisting map[string]bool
-	if preUntrackedFiles != nil {
-		preExisting = make(map[string]bool, len(preUntrackedFiles))
-		for _, f := range preUntrackedFiles {
+	if previouslyUntracked != nil {
+		preExisting = make(map[string]bool, len(previouslyUntracked))
+		for _, f := range previouslyUntracked {
 			preExisting[f] = true
 		}
 	}
 
-	// Process all files from git status
+	var changes FileChanges
 	for file, st := range status {
-		// Skip .entire directory
 		if paths.IsInfrastructurePath(file) {
 			continue
 		}
 
 		switch {
-		case st.Worktree == git.Untracked && preExisting != nil:
-			// New file if it wasn't untracked before the session
-			// (only compute if we have preState to compare against)
-			if !preExisting[file] {
-				newFiles = append(newFiles, file)
+		case st.Worktree == git.Untracked:
+			if preExisting != nil {
+				if !preExisting[file] {
+					changes.New = append(changes.New, file)
+				}
+			} else {
+				changes.New = append(changes.New, file)
 			}
-		case st.Worktree == git.Deleted && st.Staging != git.Deleted:
-			// Deleted file (tracked file that was deleted, not yet staged)
-			deletedFiles = append(deletedFiles, file)
+		case st.Worktree == git.Deleted || st.Staging == git.Deleted:
+			changes.Deleted = append(changes.Deleted, file)
+		case st.Worktree == git.Modified || st.Staging == git.Modified ||
+			st.Worktree == git.Added || st.Staging == git.Added:
+			changes.Modified = append(changes.Modified, file)
 		}
 	}
 
-	return newFiles, deletedFiles, nil
+	return &changes, nil
 }
 
 // FilterAndNormalizePaths converts absolute paths to relative and filters out
@@ -343,7 +356,7 @@ type PreTaskState struct {
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
-// See PrePromptState.PreUntrackedFiles for the nil-vs-empty semantics.
+// See PrePromptState.PreUntrackedFiles for nil-vs-empty semantics.
 func (s *PreTaskState) PreUntrackedFiles() []string {
 	if s == nil {
 		return nil
@@ -490,52 +503,6 @@ func FindActivePreTaskFile() (taskToolUseID string, found bool) {
 	toolUseID := strings.TrimPrefix(latestFile, preTaskFilePrefix)
 	toolUseID = strings.TrimSuffix(toolUseID, ".json")
 	return toolUseID, true
-}
-
-// DetectChangedFiles detects files that have been modified, added, or deleted
-// since the last commit (or compared to the index for incremental checkpoints).
-// Returns three slices: modified files, new (untracked) files, and deleted files.
-// Excludes .entire/ directory from all results.
-func DetectChangedFiles() (modified, newFiles, deleted []string, err error) {
-	repo, err := openRepository()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to open repository: %w", err)
-	}
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	status, err := worktree.Status()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get status: %w", err)
-	}
-
-	for file, st := range status {
-		// Skip .entire directory
-		if paths.IsInfrastructurePath(file) {
-			continue
-		}
-
-		// Handle different status codes
-		// Worktree status indicates changes not yet staged
-		// Staging status indicates changes staged for commit
-		switch {
-		case st.Worktree == git.Untracked:
-			// New untracked file
-			newFiles = append(newFiles, file)
-		case st.Worktree == git.Deleted || st.Staging == git.Deleted:
-			// Deleted file
-			deleted = append(deleted, file)
-		case st.Worktree == git.Modified || st.Staging == git.Modified ||
-			st.Worktree == git.Added || st.Staging == git.Added:
-			// Modified or staged file
-			modified = append(modified, file)
-		}
-	}
-
-	return modified, newFiles, deleted, nil
 }
 
 // GetNextCheckpointSequence returns the next sequence number for incremental checkpoints.

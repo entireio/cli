@@ -229,15 +229,18 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 	}
 
 	// Compute new and deleted files (single git status call)
-	newFiles, deletedFiles, err := ComputeFileChanges(preState.PreUntrackedFiles())
+	changes, err := DetectFileChanges(preState.PreUntrackedFiles())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
 	}
 
 	// Filter and normalize all paths (CLI responsibility)
 	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
-	relNewFiles := FilterAndNormalizePaths(newFiles, repoRoot)
-	relDeletedFiles := FilterAndNormalizePaths(deletedFiles, repoRoot)
+	var relNewFiles, relDeletedFiles []string
+	if changes != nil {
+		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
+		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
+	}
 
 	// Check if there are any changes to commit
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
@@ -420,14 +423,14 @@ func handleClaudeCodePostTodo() error {
 	}
 
 	// Detect file changes since last checkpoint
-	modified, newFiles, deleted, err := DetectChangedFiles()
+	changes, err := DetectFileChanges(nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to detect changed files: %v\n", err)
 		return nil
 	}
 
 	// If no file changes, skip creating a checkpoint
-	if len(modified) == 0 && len(newFiles) == 0 && len(deleted) == 0 {
+	if len(changes.Modified) == 0 && len(changes.New) == 0 && len(changes.Deleted) == 0 {
 		fmt.Fprintf(os.Stderr, "[entire] No file changes detected, skipping incremental checkpoint\n")
 		return nil
 	}
@@ -483,9 +486,9 @@ func handleClaudeCodePostTodo() error {
 	ctx := strategy.TaskCheckpointContext{
 		SessionID:           sessionID,
 		ToolUseID:           taskToolUseID,
-		ModifiedFiles:       modified,
-		NewFiles:            newFiles,
-		DeletedFiles:        deleted,
+		ModifiedFiles:       changes.Modified,
+		NewFiles:            changes.New,
+		DeletedFiles:        changes.Deleted,
 		TranscriptPath:      input.TranscriptPath,
 		AuthorName:          author.Name,
 		AuthorEmail:         author.Email,
@@ -610,7 +613,7 @@ func handleClaudeCodePostTask() error {
 	}
 
 	// Compute new and deleted files (single git status call)
-	newFiles, deletedFiles, err := ComputeFileChanges(preState.PreUntrackedFiles())
+	changes, err := DetectFileChanges(preState.PreUntrackedFiles())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
 	}
@@ -624,8 +627,11 @@ func handleClaudeCodePostTask() error {
 
 	// Filter and normalize paths
 	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
-	relNewFiles := FilterAndNormalizePaths(newFiles, repoRoot)
-	relDeletedFiles := FilterAndNormalizePaths(deletedFiles, repoRoot)
+	var relNewFiles, relDeletedFiles []string
+	if changes != nil {
+		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
+		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
+	}
 
 	// If no file changes, skip creating a checkpoint
 	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
