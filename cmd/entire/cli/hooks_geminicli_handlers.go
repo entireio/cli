@@ -417,9 +417,10 @@ func handleGeminiBeforeAgent() error {
 	}
 	if input.UserPrompt != "" {
 		// Truncate long prompts for logging
+		const maxPromptPreviewLen = 100
 		promptPreview := input.UserPrompt
-		if len(promptPreview) > 100 {
-			promptPreview = promptPreview[:100] + "..."
+		if len(promptPreview) > maxPromptPreviewLen {
+			promptPreview = promptPreview[:maxPromptPreviewLen] + "..."
 		}
 		logArgs = append(logArgs, slog.String("prompt_preview", promptPreview))
 	}

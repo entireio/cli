@@ -816,7 +816,7 @@ func computeReachableFromMain(repo *git.Repository) map[plumbing.Hash]bool {
 	}
 
 	// Walk main's first-parent chain to build the set
-	_ = walkFirstParentCommits(repo, mainBranchHash, 1000, func(c *object.Commit) error { //nolint:errcheck // Best-effort
+	_ = walkFirstParentCommits(repo, mainBranchHash, strategy.MaxCommitTraversalDepth, func(c *object.Commit) error { //nolint:errcheck // Best-effort
 		reachableFromMain[c.Hash] = true
 		return nil
 	})
