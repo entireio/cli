@@ -26,6 +26,9 @@ var ErrNotTaskCheckpoint = errors.New("not a task checkpoint")
 // ErrNotImplemented is returned when a feature is not yet implemented.
 var ErrNotImplemented = errors.New("not implemented")
 
+// ErrEmptyRepository is returned when the repository has no commits yet.
+var ErrEmptyRepository = errors.New("repository has no commits yet")
+
 // SessionIDConflictError is returned when trying to start a new session
 // but the shadow branch already has commits from a different session ID.
 // This prevents orphaning existing session work.

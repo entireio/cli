@@ -735,3 +735,49 @@ func TestIsProtectedPath(t *testing.T) {
 		})
 	}
 }
+
+func TestIsEmptyRepository(t *testing.T) {
+	t.Parallel()
+	t.Run("empty repo returns true", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		repo, err := git.PlainInit(dir, false)
+		if err != nil {
+			t.Fatalf("failed to init repo: %v", err)
+		}
+		if !IsEmptyRepository(repo) {
+			t.Error("IsEmptyRepository() = false, want true for empty repo")
+		}
+	})
+
+	t.Run("repo with commit returns false", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		repo, err := git.PlainInit(dir, false)
+		if err != nil {
+			t.Fatalf("failed to init repo: %v", err)
+		}
+
+		// Create a commit
+		testFile := filepath.Join(dir, "test.txt")
+		if err := os.WriteFile(testFile, []byte("content"), 0o644); err != nil {
+			t.Fatalf("failed to write file: %v", err)
+		}
+		wt, err := repo.Worktree()
+		if err != nil {
+			t.Fatalf("failed to get worktree: %v", err)
+		}
+		if _, err := wt.Add("test.txt"); err != nil {
+			t.Fatalf("failed to add file: %v", err)
+		}
+		if _, err := wt.Commit("Initial commit", &git.CommitOptions{
+			Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+		}); err != nil {
+			t.Fatalf("failed to commit: %v", err)
+		}
+
+		if IsEmptyRepository(repo) {
+			t.Error("IsEmptyRepository() = true, want false for repo with commit")
+		}
+	})
+}

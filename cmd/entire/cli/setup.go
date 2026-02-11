@@ -76,6 +76,14 @@ Strategies: manual-commit (default), auto-commit`,
 			if err := validateSetupFlags(useLocalSettings, useProjectSettings); err != nil {
 				return err
 			}
+
+			// Warn if repo has no commits yet
+			if repo, err := strategy.OpenRepository(); err == nil && strategy.IsEmptyRepository(repo) {
+				fmt.Fprintln(cmd.OutOrStdout(), "Note: This repository has no commits yet. Entire will be configured, but")
+				fmt.Fprintln(cmd.OutOrStdout(), "session checkpoints won't work until you create your first commit.")
+				fmt.Fprintln(cmd.OutOrStdout())
+			}
+
 			// Non-interactive mode if --agent flag is provided
 			if cmd.Flags().Changed("agent") && agentName == "" {
 				printMissingAgentError(cmd.ErrOrStderr())
