@@ -400,7 +400,7 @@ func runExportCheckpoint(w, _ io.Writer, checkpointID id.CheckpointID,
 	// Prepare transcript for export
 	transcriptBytes := content.Transcript
 	prompts := content.Prompts
-	contextMd := string(content.Context)
+	contextMd := content.Context
 	filesTouched := content.Metadata.FilesTouched
 
 	// Apply redaction if showcase mode

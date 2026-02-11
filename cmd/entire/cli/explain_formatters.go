@@ -12,7 +12,7 @@ import (
 
 // formatExportJSON formats checkpoint data as JSON.
 func formatExportJSON(checkpointID id.CheckpointID,
-	content *checkpoint.SessionContent, summary *checkpoint.CheckpointSummary,
+	content *checkpoint.SessionContent, _ *checkpoint.CheckpointSummary,
 	transcript []byte, prompts, context string, filesTouched []string) ([]byte, error) {
 	out := map[string]any{
 		"checkpoint_id": checkpointID.String(),
@@ -41,13 +41,19 @@ func formatExportJSON(checkpointID id.CheckpointID,
 		}
 	}
 
-	return json.MarshalIndent(out, "", "  ")
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal JSON: %w", err)
+	}
+	return data, nil
 }
 
 // formatExportMarkdown formats checkpoint data as Markdown.
+//
+//nolint:unparam // error return kept for consistency with formatExportJSON
 func formatExportMarkdown(checkpointID id.CheckpointID,
-	content *checkpoint.SessionContent, summary *checkpoint.CheckpointSummary,
-	transcript []byte, prompts, context string, filesTouched []string) ([]byte, error) {
+	content *checkpoint.SessionContent, _ *checkpoint.CheckpointSummary,
+	transcript []byte, _, _ string, filesTouched []string) ([]byte, error) {
 	var sb strings.Builder
 
 	// Header

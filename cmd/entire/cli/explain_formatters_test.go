@@ -43,7 +43,7 @@ func TestFormatExportJSON_ValidOutput(t *testing.T) {
 	}
 
 	output, err := formatExportJSON(checkpointID, content, summary,
-		content.Transcript, content.Prompts, string(content.Context), content.Metadata.FilesTouched)
+		content.Transcript, content.Prompts, content.Context, content.Metadata.FilesTouched)
 
 	if err != nil {
 		t.Fatalf("formatExportJSON() error = %v", err)
