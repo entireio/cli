@@ -330,8 +330,6 @@ func isSessionIdle(sessionID string) bool {
 
 // triggerAutoApply spawns claude --continue to apply the review suggestions.
 func triggerAutoApply(repoRoot string) error {
-	applyPrompt := "Read .entire/REVIEW.md. Apply each suggestion that you agree with. When done, delete .entire/REVIEW.md."
-
 	ctx, cancel := context.WithTimeout(context.Background(), wingmanApplyTimeout)
 	defer cancel()
 
@@ -342,7 +340,7 @@ func triggerAutoApply(repoRoot string) error {
 		// Auto-accept edits so the agent can modify files and delete REVIEW.md
 		// without requiring user consent (this runs in a background process).
 		"--permission-mode", "acceptEdits",
-		applyPrompt,
+		wingmanApplyInstruction,
 	)
 	cmd.Dir = repoRoot
 	// Strip GIT_* env vars to prevent hook interference, and set

@@ -83,7 +83,7 @@ func captureInitialState() error {
 		if rootErr == nil {
 			if _, statErr := os.Stat(filepath.Join(repoRoot, wingmanReviewFile)); statErr == nil {
 				fmt.Fprintf(os.Stderr, "[wingman] Review available: .entire/REVIEW.md\n")
-				if err := outputHookResponse(wingmanApplySystemMessage); err != nil {
+				if err := outputHookResponse(wingmanApplyInstruction); err != nil {
 					fmt.Fprintf(os.Stderr, "[wingman] Warning: failed to inject review instruction: %v\n", err)
 				}
 			}
