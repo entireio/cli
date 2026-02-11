@@ -1479,11 +1479,7 @@ func TestShadowStrategy_CondenseSession_EphemeralBranchTrailer(t *testing.T) {
 		t.Fatalf("failed to create metadata dir: %v", err)
 	}
 
-	//nolint:goconst // test data repeated across test functions
-	transcript := `{"type":"human","message":{"content":"test prompt"}}
-{"type":"assistant","message":{"content":"test response"}}
-`
-	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(testHumanAssistantTranscript), 0o644); err != nil {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
@@ -1831,6 +1827,13 @@ func TestCountTranscriptItems(t *testing.T) {
 			expected:  0,
 		},
 		{
+			name:      "Pi JSONL transcript",
+			agentType: agent.AgentTypePi,
+			content: `{"type":"message","id":"1","message":{"role":"user","content":"Hello"}}
+{"type":"message","id":"2","message":{"role":"assistant","content":[{"type":"text","text":"Hi"}]}}`,
+			expected: 2,
+		},
+		{
 			name:      "Claude Code JSONL",
 			agentType: agent.AgentTypeClaudeCode,
 			content: `{"type":"human","message":{"content":"Hello"}}
@@ -1905,6 +1908,14 @@ func TestExtractUserPrompts(t *testing.T) {
 			expected: nil,
 		},
 		{
+			name:      "Pi user prompts",
+			agentType: agent.AgentTypePi,
+			content: `{"type":"message","id":"1","message":{"role":"user","content":"First"}}
+{"type":"message","id":"2","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}
+{"type":"message","id":"3","message":{"role":"user","content":[{"type":"text","text":"Second"},{"type":"text","text":"Prompt"}]}}`,
+			expected: []string{"First", "Second\n\nPrompt"},
+		},
+		{
 			name:      "Claude Code JSONL with user messages",
 			agentType: agent.AgentTypeClaudeCode,
 			content: `{"type":"user","message":{"content":"Hello"}}
@@ -1933,6 +1944,54 @@ func TestExtractUserPrompts(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCalculateTokenUsage_Pi(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"type":"message","id":"1","message":{"role":"assistant","usage":{"input_tokens":10,"output_tokens":4}}}
+{"type":"message","id":"2","message":{"role":"assistant","tokens":{"inputTokens":5,"outputTokens":2,"cacheReadTokens":1}}}
+{"type":"message","id":"3","message":{"role":"user","content":"ignore"}}
+`)
+
+	usage := calculateTokenUsage(agent.AgentTypePi, data, 0)
+	if usage.APICallCount != 2 {
+		t.Fatalf("APICallCount = %d, want 2", usage.APICallCount)
+	}
+	if usage.InputTokens != 15 {
+		t.Fatalf("InputTokens = %d, want 15", usage.InputTokens)
+	}
+	if usage.OutputTokens != 6 {
+		t.Fatalf("OutputTokens = %d, want 6", usage.OutputTokens)
+	}
+	if usage.CacheReadTokens != 1 {
+		t.Fatalf("CacheReadTokens = %d, want 1", usage.CacheReadTokens)
+	}
+}
+
+func TestNormalizePiTranscriptForSummarizer(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"type":"message","id":"u1","message":{"role":"user","content":"Add auth"}}
+{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Implementing."},{"type":"toolCall","name":"write","arguments":{"file_path":"auth.go"}}]}}
+{"type":"message","id":"r1","message":{"role":"toolResult","toolName":"write","details":{"path":"auth.go"}}}
+`)
+
+	normalized, err := normalizePiTranscriptForSummarizer(data)
+	if err != nil {
+		t.Fatalf("normalizePiTranscriptForSummarizer() error = %v", err)
+	}
+
+	text := string(normalized)
+	if !strings.Contains(text, `"type":"user"`) {
+		t.Fatalf("normalized transcript missing user line: %s", text)
+	}
+	if !strings.Contains(text, `"type":"assistant"`) {
+		t.Fatalf("normalized transcript missing assistant line: %s", text)
+	}
+	if !strings.Contains(text, `"type":"tool_use"`) {
+		t.Fatalf("normalized transcript missing tool_use block: %s", text)
 	}
 }
 
@@ -2945,6 +3004,275 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 		t.Error("Prompts should contain first prompt")
 	}
 	if !strings.Contains(content.Prompts, "Now add error handling") {
+		t.Error("Prompts should contain second prompt")
+	}
+}
+
+// TestCondenseSession_PiTranscript verifies that CondenseSession works correctly
+// with Pi JSONL transcripts, including prompt extraction and token usage.
+func TestCondenseSession_PiTranscript(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	testFile := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial content"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := worktree.Add("test.txt"); err != nil {
+		t.Fatalf("failed to stage file: %v", err)
+	}
+	_, err = worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-02-11-pi-test"
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	if err := os.MkdirAll(metadataDirAbs, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	piTranscript := `{"type":"message","id":"1","message":{"role":"user","content":"<ide_opened_file>test.txt</ide_opened_file>Create a new file"}}
+{"type":"message","id":"2","message":{"role":"assistant","content":[{"type":"text","text":"I'll create it"}],"usage":{"input_tokens":50,"output_tokens":20,"cache_read_input_tokens":10}}}
+`
+
+	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(piTranscript), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	if err := os.WriteFile(testFile, []byte("modified by pi"), 0o644); err != nil {
+		t.Fatalf("failed to modify file: %v", err)
+	}
+
+	err = s.SaveChanges(SaveContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"test.txt"},
+		NewFiles:       []string{},
+		DeletedFiles:   []string{},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 1",
+		AuthorName:     "Pi",
+		AuthorEmail:    "pi@test.com",
+		AgentType:      agent.AgentTypePi,
+	})
+	if err != nil {
+		t.Fatalf("SaveChanges() error = %v", err)
+	}
+
+	state, err := s.loadSessionState(sessionID)
+	if err != nil {
+		t.Fatalf("loadSessionState() error = %v", err)
+	}
+	if state.AgentType != agent.AgentTypePi {
+		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypePi)
+	}
+
+	checkpointID := id.MustCheckpointID("112233aabbcc")
+	result, err := s.CondenseSession(repo, checkpointID, state)
+	if err != nil {
+		t.Fatalf("CondenseSession() error = %v", err)
+	}
+
+	if result.CheckpointID != checkpointID {
+		t.Errorf("CheckpointID = %v, want %v", result.CheckpointID, checkpointID)
+	}
+	if result.TotalTranscriptLines != 2 {
+		t.Errorf("TotalTranscriptLines = %d, want 2", result.TotalTranscriptLines)
+	}
+
+	store := checkpoint.NewGitStore(repo)
+	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
+	if err != nil {
+		t.Fatalf("ReadLatestSessionContent() error = %v", err)
+	}
+
+	if !strings.Contains(content.Prompts, "Create a new file") {
+		t.Errorf("Prompts = %q, should contain %q", content.Prompts, "Create a new file")
+	}
+	if strings.Contains(content.Prompts, "<ide_opened_file>") {
+		t.Error("Prompts should not contain IDE tags")
+	}
+
+	if content.Metadata.TokenUsage == nil {
+		t.Fatal("TokenUsage should not be nil for Pi transcript")
+	}
+	if content.Metadata.TokenUsage.InputTokens != 50 {
+		t.Errorf("InputTokens = %d, want 50", content.Metadata.TokenUsage.InputTokens)
+	}
+	if content.Metadata.TokenUsage.OutputTokens != 20 {
+		t.Errorf("OutputTokens = %d, want 20", content.Metadata.TokenUsage.OutputTokens)
+	}
+	if content.Metadata.TokenUsage.CacheReadTokens != 10 {
+		t.Errorf("CacheReadTokens = %d, want 10", content.Metadata.TokenUsage.CacheReadTokens)
+	}
+}
+
+// TestCondenseSession_PiMultiCheckpoint verifies that multi-checkpoint Pi sessions
+// scope token usage to only the checkpoint portion (line offset semantics).
+func TestCondenseSession_PiMultiCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	testFile := filepath.Join(dir, "code.go")
+	if err := os.WriteFile(testFile, []byte("package main"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := worktree.Add("code.go"); err != nil {
+		t.Fatalf("failed to stage file: %v", err)
+	}
+	_, err = worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-02-11-pi-multi"
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	if err := os.MkdirAll(metadataDirAbs, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	transcriptPath := filepath.Join(metadataDirAbs, paths.TranscriptFileName)
+
+	checkpoint1Transcript := `{"type":"message","id":"1","message":{"role":"user","content":"Add main"}}
+{"type":"message","id":"2","message":{"role":"assistant","content":[{"type":"text","text":"Done"}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":20}}}
+`
+	if err := os.WriteFile(transcriptPath, []byte(checkpoint1Transcript), 0o644); err != nil {
+		t.Fatalf("failed to write checkpoint1 transcript: %v", err)
+	}
+
+	if err := os.WriteFile(testFile, []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("failed to modify file: %v", err)
+	}
+
+	err = s.SaveChanges(SaveContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"code.go"},
+		NewFiles:       []string{},
+		DeletedFiles:   []string{},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 1",
+		AuthorName:     "Pi",
+		AuthorEmail:    "pi@test.com",
+		AgentType:      agent.AgentTypePi,
+	})
+	if err != nil {
+		t.Fatalf("SaveChanges() checkpoint 1 error = %v", err)
+	}
+
+	state, err := s.loadSessionState(sessionID)
+	if err != nil {
+		t.Fatalf("loadSessionState() error = %v", err)
+	}
+
+	checkpoint2Transcript := `{"type":"message","id":"1","message":{"role":"user","content":"Add main"}}
+{"type":"message","id":"2","message":{"role":"assistant","content":[{"type":"text","text":"Done"}],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":20}}}
+{"type":"message","id":"3","message":{"role":"user","content":"Add error handling"}}
+{"type":"message","id":"4","message":{"role":"assistant","content":[{"type":"text","text":"Done"}],"usage":{"input_tokens":200,"output_tokens":75,"cache_read_input_tokens":30}}}
+`
+	if err := os.WriteFile(transcriptPath, []byte(checkpoint2Transcript), 0o644); err != nil {
+		t.Fatalf("failed to write checkpoint2 transcript: %v", err)
+	}
+
+	if err := os.WriteFile(testFile, []byte("package main\n\nfunc main() {\n\tif err := run(); err != nil {\n\t\tpanic(err)\n\t}\n}\n"), 0o644); err != nil {
+		t.Fatalf("failed to modify file for checkpoint2: %v", err)
+	}
+
+	state.CheckpointTranscriptStart = 2
+	state.StepCount = 1
+	if err := s.saveSessionState(state); err != nil {
+		t.Fatalf("failed to update session state: %v", err)
+	}
+
+	err = s.SaveChanges(SaveContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"code.go"},
+		NewFiles:       []string{},
+		DeletedFiles:   []string{},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 2",
+		AuthorName:     "Pi",
+		AuthorEmail:    "pi@test.com",
+		AgentType:      agent.AgentTypePi,
+	})
+	if err != nil {
+		t.Fatalf("SaveChanges() checkpoint 2 error = %v", err)
+	}
+
+	state, err = s.loadSessionState(sessionID)
+	if err != nil {
+		t.Fatalf("loadSessionState() after checkpoint2 error = %v", err)
+	}
+
+	checkpointID := id.MustCheckpointID("445566ddeeff")
+	result, err := s.CondenseSession(repo, checkpointID, state)
+	if err != nil {
+		t.Fatalf("CondenseSession() error = %v", err)
+	}
+
+	if result.CheckpointsCount != 2 {
+		t.Errorf("CheckpointsCount = %d, want 2", result.CheckpointsCount)
+	}
+	if result.TotalTranscriptLines != 4 {
+		t.Errorf("TotalTranscriptLines = %d, want 4", result.TotalTranscriptLines)
+	}
+
+	store := checkpoint.NewGitStore(repo)
+	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
+	if err != nil {
+		t.Fatalf("ReadLatestSessionContent() error = %v", err)
+	}
+
+	if content.Metadata.TokenUsage == nil {
+		t.Fatal("TokenUsage should not be nil")
+	}
+	if content.Metadata.TokenUsage.InputTokens != 200 {
+		t.Errorf("InputTokens = %d, want 200", content.Metadata.TokenUsage.InputTokens)
+	}
+	if content.Metadata.TokenUsage.OutputTokens != 75 {
+		t.Errorf("OutputTokens = %d, want 75", content.Metadata.TokenUsage.OutputTokens)
+	}
+	if content.Metadata.TokenUsage.CacheReadTokens != 30 {
+		t.Errorf("CacheReadTokens = %d, want 30", content.Metadata.TokenUsage.CacheReadTokens)
+	}
+	if content.Metadata.TokenUsage.APICallCount != 1 {
+		t.Errorf("APICallCount = %d, want 1", content.Metadata.TokenUsage.APICallCount)
+	}
+
+	if !strings.Contains(content.Prompts, "Add main") {
+		t.Error("Prompts should contain first prompt")
+	}
+	if !strings.Contains(content.Prompts, "Add error handling") {
 		t.Error("Prompts should contain second prompt")
 	}
 }
