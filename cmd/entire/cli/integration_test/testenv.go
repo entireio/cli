@@ -102,10 +102,12 @@ func (env *TestEnv) Cleanup() {
 
 // cliEnv returns the environment variables for CLI execution.
 // Includes both Claude and Gemini project dirs so tests work for any agent.
+// Sets ENTIRE_SKIP_AGENT_CHECK=1 to bypass agent installation checks in tests.
 func (env *TestEnv) cliEnv() []string {
 	return append(os.Environ(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
+		"ENTIRE_SKIP_AGENT_CHECK=1",
 	)
 }
 

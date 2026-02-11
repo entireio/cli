@@ -513,14 +513,34 @@ func isInstalledWithHookSupport(ag agent.Agent) (bool, error) {
 	return installed, nil
 }
 
-// findInstalledAgent returns the first installed agent that supports hooks.
+// findInstalledAgentFn is the function used to find an installed agent.
+// It can be overridden in tests to return a mock agent.
+var findInstalledAgentFn = findInstalledAgentImpl
+
+// findInstalledAgent calls the findInstalledAgentFn function variable.
+// This indirection allows tests to mock the agent detection.
+func findInstalledAgent(errW io.Writer) (agent.Agent, error) {
+	return findInstalledAgentFn(errW)
+}
+
+// findInstalledAgentImpl returns the first installed agent that supports hooks.
 // It tries the default agent first, then checks all registered agents.
 // Only agents that are both installed (binary in PATH) and implement HookSupport
 // are returned, so the enable flow can always install hooks.
 // Returns the agent and nil error if found, or nil agent and an error with
 // helpful install instructions written to errW (stderr). OS errors from
 // IsInstalled() (e.g. permission errors on PATH) are propagated to the caller.
-func findInstalledAgent(errW io.Writer) (agent.Agent, error) {
+//
+// If ENTIRE_SKIP_AGENT_CHECK=1 is set (used by integration tests), the default
+// agent is returned without checking if it's installed.
+func findInstalledAgentImpl(errW io.Writer) (agent.Agent, error) {
+	// Allow tests to skip the agent check
+	if os.Getenv("ENTIRE_SKIP_AGENT_CHECK") == "1" {
+		ag := agent.Default()
+		if ag != nil {
+			return ag, nil
+		}
+	}
 	var firstErr error
 
 	// Try the default agent first

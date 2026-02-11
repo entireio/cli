@@ -344,6 +344,7 @@ func TestDetermineSettingsTarget_SettingsNotExists_NoFlags(t *testing.T) {
 }
 
 func TestRunEnableWithStrategy_PreservesExistingSettings(t *testing.T) {
+	t.Setenv("ENTIRE_SKIP_AGENT_CHECK", "1")
 	setupTestRepo(t)
 
 	// Create initial settings with strategy_options (like push enabled)
@@ -388,6 +389,7 @@ func TestRunEnableWithStrategy_PreservesExistingSettings(t *testing.T) {
 }
 
 func TestRunEnableWithStrategy_PreservesLocalSettings(t *testing.T) {
+	t.Setenv("ENTIRE_SKIP_AGENT_CHECK", "1")
 	setupTestRepo(t)
 
 	// Create project settings
