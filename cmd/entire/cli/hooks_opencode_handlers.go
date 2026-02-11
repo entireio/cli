@@ -151,7 +151,11 @@ func commitOpenCodeSession(ctx *openCodeSessionContext) error {
 	}
 
 	// Compute new and deleted files (single git status call)
-	changes, err := DetectFileChanges(preState.PreUntrackedFiles())
+	var preUntracked []string
+	if preState != nil {
+		preUntracked = preState.PreUntrackedFiles()
+	}
+	changes, err := DetectFileChanges(preUntracked)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
 	}

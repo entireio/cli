@@ -253,8 +253,12 @@ func TestInstallHooks(t *testing.T) {
 			t.Fatalf("failed to read config.toml: %v", err)
 		}
 		content := string(data)
-		if !strings.Contains(content, "go") || !strings.Contains(content, "entire") {
+		if !strings.Contains(content, `"go"`) || !strings.Contains(content, "entire") {
 			t.Errorf("config.toml missing local dev notify line, got:\n%s", content)
+		}
+		// Verify env var was resolved at write-time (no ${...} templates)
+		if strings.Contains(content, "${") {
+			t.Errorf("config.toml contains unresolved env var template, got:\n%s", content)
 		}
 	})
 }
@@ -401,8 +405,13 @@ func TestIsEntireNotifyLine(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "entire local dev hook",
+			name: "entire local dev hook with env var",
 			line: `notify = ["go", "run", "${CODEX_PROJECT_DIR}/cmd/entire/main.go", "hooks", "codex", "agent-turn-complete"]`,
+			want: true,
+		},
+		{
+			name: "entire local dev hook with resolved path",
+			line: `notify = ["go", "run", "/home/user/projects/entire/cmd/entire/main.go", "hooks", "codex", "agent-turn-complete"]`,
 			want: true,
 		},
 		{

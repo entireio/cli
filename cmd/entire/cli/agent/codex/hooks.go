@@ -27,8 +27,13 @@ const CodexConfigFileName = "config.toml"
 // entireNotifyCommand is the command Entire installs as the Codex notify handler.
 const entireNotifyCommand = `["entire", "hooks", "codex", "agent-turn-complete"]`
 
-// entireNotifyLocalDevCommand is the local-dev variant of the notify handler.
-const entireNotifyLocalDevCommand = `["go", "run", "${CODEX_PROJECT_DIR}/cmd/entire/main.go", "hooks", "codex", "agent-turn-complete"]`
+// entireNotifyLocalDevPrefix is the argv prefix for the local-dev notify handler.
+// The project directory is resolved at write-time since Codex executes notify
+// commands as a direct argv array without shell expansion.
+var entireNotifyLocalDevPrefix = []string{"go", "run"} //nolint:gochecknoglobals // template for local-dev command construction
+
+// entireNotifyLocalDevSuffix is the binary-relative path and subcommand for local dev.
+const entireNotifyLocalDevSuffix = "/cmd/entire/main.go"
 
 // GetHookNames returns the hook verbs Codex CLI supports.
 // These become subcommands: entire hooks codex <verb>
@@ -64,7 +69,7 @@ func (c *CodexAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	// Determine which command to install
 	notifyValue := entireNotifyCommand
 	if localDev {
-		notifyValue = entireNotifyLocalDevCommand
+		notifyValue = buildLocalDevNotifyCommand()
 	}
 	notifyLine := "notify = " + notifyValue
 
@@ -212,6 +217,30 @@ func isEntireNotifyLine(line string) bool {
 		return true
 	}
 	return false
+}
+
+// buildLocalDevNotifyCommand constructs the local-dev notify command with the
+// project directory resolved at write-time. Codex executes notify commands as
+// a direct argv array without shell expansion, so env vars like ${CODEX_PROJECT_DIR}
+// would not be expanded at runtime.
+func buildLocalDevNotifyCommand() string {
+	projectDir := os.Getenv("CODEX_PROJECT_DIR")
+	if projectDir == "" {
+		// Fallback: use current working directory
+		var err error
+		projectDir, err = os.Getwd() //nolint:forbidigo // Intentional: need CWD for local dev path resolution
+		if err != nil {
+			projectDir = "."
+		}
+	}
+	mainGo := projectDir + entireNotifyLocalDevSuffix
+	// Build TOML array: ["go", "run", "/abs/path/cmd/entire/main.go", "hooks", "codex", "agent-turn-complete"]
+	parts := make([]string, 0, len(entireNotifyLocalDevPrefix)+4)
+	for _, p := range entireNotifyLocalDevPrefix {
+		parts = append(parts, `"`+p+`"`)
+	}
+	parts = append(parts, `"`+mainGo+`"`, `"hooks"`, `"codex"`, `"agent-turn-complete"`)
+	return "[" + strings.Join(parts, ", ") + "]"
 }
 
 // appendNotifyLine adds a notify line to the config, placing it logically.
