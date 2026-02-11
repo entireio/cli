@@ -32,6 +32,11 @@ const (
 	branchMaster = "master"
 )
 
+// CommitSearchLimit is the maximum number of commits to search through
+// when looking for checkpoints or matching commits. This prevents
+// excessive traversal in repositories with long histories.
+const CommitSearchLimit = 1000
+
 // errStop is a sentinel error used to break out of git log iteration.
 // Shared across strategies that iterate through git commits.
 // NOTE: A similar sentinel exists in checkpoint/temporary.go - this is intentional.
@@ -40,7 +45,7 @@ var errStop = errors.New("stop iteration")
 
 // IsAncestorOf checks if commit is an ancestor of (or equal to) target.
 // Returns true if target can reach commit by following parent links.
-// Limits search to 1000 commits to avoid excessive traversal.
+// Limits search to CommitSearchLimit commits to avoid excessive traversal.
 func IsAncestorOf(repo *git.Repository, commit, target plumbing.Hash) bool {
 	if commit == target {
 		return true
@@ -56,7 +61,7 @@ func IsAncestorOf(repo *git.Repository, commit, target plumbing.Hash) bool {
 	count := 0
 	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best-effort search, errors are non-fatal
 		count++
-		if count > 1000 {
+		if count > CommitSearchLimit {
 			return errStop
 		}
 		if c.Hash == commit {
