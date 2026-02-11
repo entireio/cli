@@ -19,10 +19,12 @@ Entire hooks into your git workflow to capture AI agent sessions on every push. 
 ## Requirements
 
 - Git
-- macOS or Linux (Windows via WSL)
+- **macOS** / **Linux** / **Windows** ✅ (native Windows support added!)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Gemini CLI](https://github.com/google-gemini/gemini-cli) installed and authenticated
 
 ## Quick Start
+
+### macOS / Linux
 
 ```bash
 # Install via Homebrew
@@ -38,6 +40,24 @@ cd your-project && entire enable
 # Check status
 entire status
 ```
+
+### Windows
+
+```powershell
+# Download and install
+Invoke-WebRequest -Uri "https://github.com/entireio/cli/releases/latest/download/entire_windows_amd64.zip" -OutFile "entire.zip"
+Expand-Archive -Path "entire.zip" -DestinationPath "$env:LOCALAPPDATA\entire"
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:LOCALAPPDATA\entire", "User")
+
+# Enable in your project
+cd your-project
+entire enable
+
+# Check status
+entire status
+```
+
+See [WINDOWS_BUILD.md](WINDOWS_BUILD.md) for detailed Windows instructions.
 
 ## Typical Workflow
 
