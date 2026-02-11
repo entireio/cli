@@ -508,7 +508,7 @@ func isInstalledWithHookSupport(ag agent.Agent) (bool, error) {
 	}
 	installed, err := ag.IsInstalled()
 	if err != nil {
-		return false, fmt.Errorf("IsInstalled failed: %w", err)
+		return false, fmt.Errorf("checking installation status: %w", err)
 	}
 	return installed, nil
 }
