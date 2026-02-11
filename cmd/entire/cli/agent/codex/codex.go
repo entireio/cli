@@ -3,6 +3,7 @@ package codex
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -369,7 +370,7 @@ func ExtractModifiedFiles(data []byte) []string {
 	fileSet := make(map[string]bool)
 	var files []string
 
-	reader := bufio.NewReader(strings.NewReader(string(data)))
+	reader := bufio.NewReader(bytes.NewReader(data))
 	for {
 		lineData, readErr := reader.ReadBytes('\n')
 		if readErr != nil && readErr != io.EOF {
