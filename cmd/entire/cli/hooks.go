@@ -238,7 +238,7 @@ func logPostTaskHookContext(w io.Writer, input *PostTaskHookInput, subagentTrans
 }
 
 // handleSessionStartCommon is the shared implementation for session start hooks.
-// Used by both Claude Code and Gemini CLI handlers.
+// Used by Claude Code, Gemini CLI, and Pi handlers.
 func handleSessionStartCommon() error {
 	ag, err := GetCurrentHookAgent()
 	if err != nil {

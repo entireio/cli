@@ -157,7 +157,7 @@ To completely remove Entire integrations from this repository, use --uninstall:
   - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
   - Session state files (.git/entire-sessions/)
   - Shadow branches (entire/<hash>)
-  - Agent hooks (Claude Code, Gemini CLI)`,
+  - Agent hooks (Claude Code, Gemini CLI, Pi)`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if uninstall {
 				return runUninstall(cmd.OutOrStdout(), cmd.ErrOrStderr(), force)
@@ -182,7 +182,7 @@ func isFullyEnabled() (enabled bool, agentDesc string, configPath string) {
 		return false, "", ""
 	}
 
-	// Check any agent hooks installed (not just Claude Code — works with Gemini too)
+	// Check any agent hooks installed (not just Claude Code — works with Gemini and Pi too)
 	installedAgents := GetAgentsWithHooksInstalled()
 	if len(installedAgents) == 0 {
 		return false, "", ""
@@ -923,11 +923,12 @@ func runUninstall(w, errW io.Writer, force bool) error {
 	gitHooksInstalled := strategy.IsGitHookInstalled()
 	claudeHooksInstalled := checkClaudeCodeHooksInstalled()
 	geminiHooksInstalled := checkGeminiCLIHooksInstalled()
+	piHooksInstalled := checkPiHooksInstalled()
 	entireDirExists := checkEntireDirExists()
 
 	// Check if there's anything to uninstall
 	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
-		shadowBranchCount == 0 && !claudeHooksInstalled && !geminiHooksInstalled {
+		shadowBranchCount == 0 && !claudeHooksInstalled && !geminiHooksInstalled && !piHooksInstalled {
 		fmt.Fprintln(w, "Entire is not installed in this repository.")
 		return nil
 	}
@@ -948,12 +949,20 @@ func runUninstall(w, errW io.Writer, force bool) error {
 			fmt.Fprintf(w, "  - Shadow branches (%d)\n", shadowBranchCount)
 		}
 		switch {
+		case claudeHooksInstalled && geminiHooksInstalled && piHooksInstalled:
+			fmt.Fprintln(w, "  - Agent hooks (Claude Code, Gemini CLI, Pi)")
 		case claudeHooksInstalled && geminiHooksInstalled:
 			fmt.Fprintln(w, "  - Agent hooks (Claude Code, Gemini CLI)")
+		case claudeHooksInstalled && piHooksInstalled:
+			fmt.Fprintln(w, "  - Agent hooks (Claude Code, Pi)")
+		case geminiHooksInstalled && piHooksInstalled:
+			fmt.Fprintln(w, "  - Agent hooks (Gemini CLI, Pi)")
 		case claudeHooksInstalled:
 			fmt.Fprintln(w, "  - Agent hooks (Claude Code)")
 		case geminiHooksInstalled:
 			fmt.Fprintln(w, "  - Agent hooks (Gemini CLI)")
+		case piHooksInstalled:
+			fmt.Fprintln(w, "  - Agent hooks (Pi)")
 		}
 		fmt.Fprintln(w)
 
@@ -1068,6 +1077,19 @@ func checkGeminiCLIHooksInstalled() bool {
 	return hookAgent.AreHooksInstalled()
 }
 
+// checkPiHooksInstalled checks if Pi hooks are installed.
+func checkPiHooksInstalled() bool {
+	ag, err := agent.Get(agent.AgentNamePi)
+	if err != nil {
+		return false
+	}
+	hookAgent, ok := ag.(agent.HookSupport)
+	if !ok {
+		return false
+	}
+	return hookAgent.AreHooksInstalled()
+}
+
 // checkEntireDirExists checks if the .entire directory exists.
 func checkEntireDirExists() bool {
 	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
@@ -1104,6 +1126,19 @@ func removeAgentHooks(w io.Writer) error {
 				errs = append(errs, err)
 			} else if wasInstalled {
 				fmt.Fprintln(w, "  Removed Gemini CLI hooks")
+			}
+		}
+	}
+
+	// Remove Pi hooks
+	piAgent, err := agent.Get(agent.AgentNamePi)
+	if err == nil {
+		if hookAgent, ok := piAgent.(agent.HookSupport); ok {
+			wasInstalled := hookAgent.AreHooksInstalled()
+			if err := hookAgent.UninstallHooks(); err != nil {
+				errs = append(errs, err)
+			} else if wasInstalled {
+				fmt.Fprintln(w, "  Removed Pi hooks")
 			}
 		}
 	}
