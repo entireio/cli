@@ -134,17 +134,22 @@ func TestPrepareCommitMsg_AmendNoTrailerNoPendingID(t *testing.T) {
 		"commit message should be unchanged when no trailer to restore")
 }
 
-// TestPrepareCommitMsg_NormalCommitUsesPendingCheckpointID verifies that during
-// a normal commit (source=""), if the session is in ACTIVE_COMMITTED phase with
-// a PendingCheckpointID, the pending ID is reused instead of generating a new one.
-// This ensures idempotent checkpoint IDs across prepare-commit-msg invocations.
-func TestPrepareCommitMsg_NormalCommitUsesPendingCheckpointID(t *testing.T) {
+// TestPrepareCommitMsg_ConsecutiveCommits_UniqueCheckpointIDs verifies that
+// consecutive commits during an active session each get their own unique
+// checkpoint ID. This is a regression test for a bug where PendingCheckpointID
+// (set by PostCommit for deferred condensation) was incorrectly reused by
+// PrepareCommitMsg for subsequent commits, causing duplicate checkpoint IDs.
+//
+// The fix: PrepareCommitMsg should always generate a fresh ID for new commits.
+// Idempotency for hook re-runs on the same commit is handled by checking if
+// the commit message already has a trailer (not by reusing PendingCheckpointID).
+func TestPrepareCommitMsg_ConsecutiveCommits_UniqueCheckpointIDs(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
 	s := &ManualCommitStrategy{}
 
-	sessionID := "test-session-normal-pending"
+	sessionID := "test-session-consecutive-commits"
 	err := s.InitializeSession(sessionID, agent.AgentTypeClaudeCode, "", "")
 	require.NoError(t, err)
 
@@ -152,34 +157,36 @@ func TestPrepareCommitMsg_NormalCommitUsesPendingCheckpointID(t *testing.T) {
 	createShadowBranchWithTranscript(t, dir, sessionID)
 
 	// Set the session to ACTIVE_COMMITTED with a PendingCheckpointID
+	// This simulates the state after PostCommit ran for a previous commit
 	state, err := s.loadSessionState(sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	state.Phase = session.PhaseActiveCommitted
-	state.PendingCheckpointID = "fedcba987654"
-	// Ensure StepCount reflects that a checkpoint exists on the shadow branch
+	state.PendingCheckpointID = "fedcba987654" // ID from previous commit
 	state.StepCount = 1
 	err = s.saveSessionState(state)
 	require.NoError(t, err)
 
-	// Write a commit message file with no trailer (normal editor flow)
+	// Write a NEW commit message file (simulating a second commit)
 	commitMsgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
-	normalMsg := "Feature: add new functionality\n"
+	normalMsg := "Feature: second commit\n"
 	require.NoError(t, os.WriteFile(commitMsgFile, []byte(normalMsg), 0o644))
 
-	// Call PrepareCommitMsg with source="" (normal commit, editor flow)
+	// Call PrepareCommitMsg for the new commit
 	err = s.PrepareCommitMsg(commitMsgFile, "")
 	require.NoError(t, err)
 
-	// Read the file back - trailer should use PendingCheckpointID
+	// Read the file back - trailer should have a NEW checkpoint ID
 	content, err := os.ReadFile(commitMsgFile)
 	require.NoError(t, err)
 
 	cpID, found := trailers.ParseCheckpoint(string(content))
 	assert.True(t, found,
-		"trailer should be present for normal commit with active session content")
-	assert.Equal(t, "fedcba987654", cpID.String(),
-		"normal commit should reuse PendingCheckpointID instead of generating a new one")
+		"trailer should be present for commit with active session content")
+	assert.NotEqual(t, "fedcba987654", cpID.String(),
+		"consecutive commits should get unique checkpoint IDs, not reuse PendingCheckpointID from previous commit")
+	assert.Len(t, cpID.String(), 12,
+		"checkpoint ID should be 12 hex characters")
 }
 
 // createShadowBranchWithTranscript creates a shadow branch commit with a minimal
