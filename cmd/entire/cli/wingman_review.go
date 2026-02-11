@@ -17,6 +17,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// wingmanLog writes a timestamped log line to stderr. In the detached subprocess,
+// stderr is redirected to .entire/logs/wingman.log by the spawner.
+func wingmanLog(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "%s [wingman] %s\n", time.Now().Format(time.RFC3339), msg)
+}
+
 const (
 	// wingmanInitialDelay is how long to wait before starting the review,
 	// letting the agent turn fully settle.
@@ -28,6 +35,15 @@ const (
 
 	// wingmanReviewModel is the Claude model used for reviews.
 	wingmanReviewModel = "sonnet"
+
+	// wingmanGitTimeout is the timeout for git diff operations.
+	wingmanGitTimeout = 60 * time.Second
+
+	// wingmanReviewTimeout is the timeout for the claude --print review call.
+	wingmanReviewTimeout = 5 * time.Minute
+
+	// wingmanApplyTimeout is the timeout for the claude --continue auto-apply call.
+	wingmanApplyTimeout = 15 * time.Minute
 )
 
 // wingmanCLIResponse represents the JSON response from the Claude CLI --output-format json.
@@ -46,33 +62,60 @@ func newWingmanReviewCmd() *cobra.Command {
 	}
 }
 
-func runWingmanReview(payloadJSON string) error {
+func runWingmanReview(payloadPath string) error {
+	wingmanLog("review process started (pid=%d)", os.Getpid())
+	wingmanLog("reading payload from %s", payloadPath)
+
+	// Read payload from file (avoids OS argv limits with large payloads)
+	payloadJSON, err := os.ReadFile(payloadPath) //nolint:gosec // path is from our own spawn
+	if err != nil {
+		wingmanLog("ERROR reading payload: %v", err)
+		return fmt.Errorf("failed to read payload file: %w", err)
+	}
+	// Clean up payload file after reading
+	_ = os.Remove(payloadPath)
+
 	var payload WingmanPayload
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		wingmanLog("ERROR unmarshaling payload: %v", err)
 		return fmt.Errorf("failed to unmarshal payload: %w", err)
 	}
 
 	repoRoot := payload.RepoRoot
 	if repoRoot == "" {
+		wingmanLog("ERROR repo_root is empty in payload")
 		return errors.New("repo_root is required in payload")
 	}
 
+	totalFiles := len(payload.ModifiedFiles) + len(payload.NewFiles) + len(payload.DeletedFiles)
+	wingmanLog("session=%s repo=%s base_commit=%s files=%d",
+		payload.SessionID, repoRoot, payload.BaseCommit, totalFiles)
+
 	// Clean up lock file when review completes (regardless of success/failure)
 	lockPath := filepath.Join(repoRoot, wingmanLockFile)
-	defer os.Remove(lockPath)
+	defer func() {
+		_ = os.Remove(lockPath)
+		wingmanLog("lock file removed")
+	}()
 
 	// Initial delay: let the agent turn fully settle
+	wingmanLog("waiting %s for agent turn to settle", wingmanInitialDelay)
 	time.Sleep(wingmanInitialDelay)
 
 	// Compute diff using the base commit captured at trigger time
+	wingmanLog("computing diff against %s", payload.BaseCommit)
+	diffStart := time.Now()
 	diff, err := computeDiff(repoRoot, payload.BaseCommit)
 	if err != nil {
+		wingmanLog("ERROR computing diff: %v", err)
 		return fmt.Errorf("failed to compute diff: %w", err)
 	}
 
 	if strings.TrimSpace(diff) == "" {
+		wingmanLog("no changes found in diff, exiting")
 		return nil // No changes to review
 	}
+	wingmanLog("diff computed: %d bytes in %s", len(diff), time.Since(diffStart).Round(time.Millisecond))
 
 	// Build file list for the prompt
 	allFiles := make([]string, 0, len(payload.ModifiedFiles)+len(payload.NewFiles)+len(payload.DeletedFiles))
@@ -89,50 +132,66 @@ func runWingmanReview(payloadJSON string) error {
 
 	// Build review prompt
 	prompt := buildReviewPrompt(payload.Prompts, fileList, diff)
+	wingmanLog("review prompt built: %d bytes", len(prompt))
 
 	// Call Claude CLI for review
+	wingmanLog("calling claude CLI (model=%s, timeout=%s)", wingmanReviewModel, wingmanReviewTimeout)
+	reviewStart := time.Now()
 	reviewText, err := callClaudeForReview(prompt)
 	if err != nil {
+		wingmanLog("ERROR claude CLI failed after %s: %v", time.Since(reviewStart).Round(time.Millisecond), err)
 		return fmt.Errorf("failed to get review from Claude: %w", err)
 	}
+	wingmanLog("review received: %d bytes in %s", len(reviewText), time.Since(reviewStart).Round(time.Millisecond))
 
 	// Write REVIEW.md
 	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
 	if err := os.MkdirAll(filepath.Dir(reviewPath), 0o750); err != nil {
+		wingmanLog("ERROR creating directory: %v", err)
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 	//nolint:gosec // G306: review file is not secrets
 	if err := os.WriteFile(reviewPath, []byte(reviewText), 0o644); err != nil {
+		wingmanLog("ERROR writing REVIEW.md: %v", err)
 		return fmt.Errorf("failed to write REVIEW.md: %w", err)
 	}
+	wingmanLog("REVIEW.md written to %s", reviewPath)
 
-	// Update dedup state
+	// Update dedup state — write directly to known path instead of using
+	// os.Chdir (which mutates process-wide state).
 	allFilePaths := make([]string, 0, len(payload.ModifiedFiles)+len(payload.NewFiles)+len(payload.DeletedFiles))
 	allFilePaths = append(allFilePaths, payload.ModifiedFiles...)
 	allFilePaths = append(allFilePaths, payload.NewFiles...)
 	allFilePaths = append(allFilePaths, payload.DeletedFiles...)
 
-	// Save state from repo root context
-	if err := os.Chdir(repoRoot); err == nil {
-		_ = saveWingmanState(&WingmanState{ //nolint:errcheck // best-effort state save
-			SessionID:     payload.SessionID,
-			FilesHash:     computeFilesHash(allFilePaths),
-			ReviewedAt:    time.Now(),
-			ReviewApplied: false,
-		})
-	}
+	saveWingmanStateDirect(repoRoot, &WingmanState{
+		SessionID:     payload.SessionID,
+		FilesHash:     computeFilesHash(allFilePaths),
+		ReviewedAt:    time.Now(),
+		ReviewApplied: false,
+	})
+	wingmanLog("dedup state saved")
 
 	// Auto-apply phase: wait then check if session is idle
+	wingmanLog("waiting %s before auto-apply check", wingmanApplyDelay)
 	time.Sleep(wingmanApplyDelay)
 
-	if !isSessionIdle(payload.SessionID) {
+	idle := isSessionIdle(payload.SessionID)
+	wingmanLog("session idle check: idle=%v", idle)
+
+	if !idle {
+		wingmanLog("session is active, leaving REVIEW.md for notification")
 		return nil // User is active, leave REVIEW.md for notification
 	}
 
 	// Trigger auto-apply via claude --continue
+	wingmanLog("triggering auto-apply via claude --continue")
+	applyStart := time.Now()
 	if err := triggerAutoApply(repoRoot); err != nil {
+		wingmanLog("ERROR auto-apply failed after %s: %v", time.Since(applyStart).Round(time.Millisecond), err)
 		return fmt.Errorf("failed to trigger auto-apply: %w", err)
 	}
+	wingmanLog("auto-apply completed in %s", time.Since(applyStart).Round(time.Millisecond))
 
 	return nil
 }
@@ -148,8 +207,10 @@ func computeDiff(repoRoot string, baseCommit string) (string, error) {
 	}
 
 	// Try uncommitted changes against the base commit
+	ctx, cancel := context.WithTimeout(context.Background(), wingmanGitTimeout)
+	defer cancel()
 
-	cmd := exec.CommandContext(context.Background(), "git", "diff", diffRef)
+	cmd := exec.CommandContext(ctx, "git", "diff", diffRef)
 	cmd.Dir = repoRoot
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -157,7 +218,9 @@ func computeDiff(repoRoot string, baseCommit string) (string, error) {
 
 	if err := cmd.Run(); err != nil {
 		// If the ref doesn't exist (initial commit), try diff of staged/unstaged
-		cmd2 := exec.CommandContext(context.Background(), "git", "diff")
+		ctx2, cancel2 := context.WithTimeout(context.Background(), wingmanGitTimeout)
+		defer cancel2()
+		cmd2 := exec.CommandContext(ctx2, "git", "diff")
 		cmd2.Dir = repoRoot
 		var stdout2 bytes.Buffer
 		cmd2.Stdout = &stdout2
@@ -170,8 +233,10 @@ func computeDiff(repoRoot string, baseCommit string) (string, error) {
 	// If no uncommitted changes, the commit itself may contain the changes
 	// (auto-commit strategy creates commits on the active branch)
 	if strings.TrimSpace(stdout.String()) == "" {
+		ctx2, cancel2 := context.WithTimeout(context.Background(), wingmanGitTimeout)
+		defer cancel2()
 
-		cmd2 := exec.CommandContext(context.Background(), "git", "diff", diffRef+"~1", diffRef)
+		cmd2 := exec.CommandContext(ctx2, "git", "diff", diffRef+"~1", diffRef)
 		cmd2.Dir = repoRoot
 		var stdout2 bytes.Buffer
 		cmd2.Stdout = &stdout2
@@ -185,7 +250,10 @@ func computeDiff(repoRoot string, baseCommit string) (string, error) {
 
 // callClaudeForReview calls the claude CLI to perform the review.
 func callClaudeForReview(prompt string) (string, error) {
-	cmd := exec.CommandContext(context.Background(), "claude", "--print", "--output-format", "json", "--model", wingmanReviewModel, "--setting-sources", "")
+	ctx, cancel := context.WithTimeout(context.Background(), wingmanReviewTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude", "--print", "--output-format", "json", "--model", wingmanReviewModel, "--setting-sources", "")
 
 	// Isolate from git repo to prevent hooks and index pollution
 	cmd.Dir = os.TempDir()
@@ -231,7 +299,10 @@ func isSessionIdle(sessionID string) bool {
 func triggerAutoApply(repoRoot string) error {
 	applyPrompt := "Read .entire/REVIEW.md. Apply each suggestion that you agree with. When done, delete .entire/REVIEW.md."
 
-	cmd := exec.CommandContext(context.Background(), "claude", "--continue", "-p", applyPrompt, "--setting-sources", "")
+	ctx, cancel := context.WithTimeout(context.Background(), wingmanApplyTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude", "--continue", "-p", applyPrompt, "--setting-sources", "")
 	cmd.Dir = repoRoot
 	// Strip GIT_* env vars to prevent hook interference, but keep other env
 	cmd.Env = wingmanStripGitEnv(os.Environ())
@@ -254,4 +325,19 @@ func wingmanStripGitEnv(env []string) []string {
 		}
 	}
 	return filtered
+}
+
+// saveWingmanStateDirect writes the wingman state file directly to a known path
+// under repoRoot, avoiding os.Chdir (which mutates process-wide state).
+func saveWingmanStateDirect(repoRoot string, state *WingmanState) {
+	statePath := filepath.Join(repoRoot, wingmanStateFile)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o750); err != nil {
+		return
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return
+	}
+	//nolint:gosec,errcheck // G306: state file is config, not secrets; best-effort write
+	_ = os.WriteFile(statePath, data, 0o644)
 }

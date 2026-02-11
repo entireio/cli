@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/spf13/cobra"
@@ -175,21 +177,28 @@ func newWingmanStatusCmd() *cobra.Command {
 
 // triggerWingmanReview checks preconditions and spawns the detached review process.
 func triggerWingmanReview(payload WingmanPayload) {
+	logCtx := logging.WithComponent(context.Background(), "wingman")
 	repoRoot := payload.RepoRoot
+
+	totalFiles := len(payload.ModifiedFiles) + len(payload.NewFiles) + len(payload.DeletedFiles)
+	logging.Info(logCtx, "wingman trigger evaluating",
+		slog.String("session_id", payload.SessionID),
+		slog.Int("file_count", totalFiles),
+	)
 
 	// Check if a pending REVIEW.md already exists
 	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
 	if _, err := os.Stat(reviewPath); err == nil {
+		logging.Info(logCtx, "wingman skipped: pending review exists")
 		fmt.Fprintf(os.Stderr, "[wingman] Pending review exists, skipping\n")
 		return
 	}
 
-	// Lock file prevents concurrent review spawns. Multiple rapid stop hooks
-	// could race past the dedup check (which reads stale state) before any
-	// review completes and updates the state file.
+	// Atomic lock file prevents concurrent review spawns. O_CREATE|O_EXCL
+	// is atomic on all platforms, avoiding the TOCTOU race of Stat+WriteFile.
 	lockPath := filepath.Join(repoRoot, wingmanLockFile)
-	if _, err := os.Stat(lockPath); err == nil {
-		fmt.Fprintf(os.Stderr, "[wingman] Review already in progress, skipping\n")
+	if !acquireWingmanLock(lockPath, payload.SessionID) {
+		logging.Info(logCtx, "wingman skipped: could not acquire lock")
 		return
 	}
 
@@ -202,6 +211,9 @@ func triggerWingmanReview(payload WingmanPayload) {
 
 	state, _ := loadWingmanState() //nolint:errcheck // best-effort dedup
 	if state != nil && state.FilesHash == filesHash && state.SessionID == payload.SessionID {
+		logging.Info(logCtx, "wingman skipped: dedup hash match",
+			slog.String("files_hash", filesHash[:12]),
+		)
 		fmt.Fprintf(os.Stderr, "[wingman] Already reviewed these changes, skipping\n")
 		return
 	}
@@ -209,22 +221,74 @@ func triggerWingmanReview(payload WingmanPayload) {
 	// Capture HEAD at trigger time so the detached review diffs against
 	// the correct commit even if HEAD moves during the initial delay.
 	payload.BaseCommit = resolveHEAD(repoRoot)
+	logging.Debug(logCtx, "wingman captured base commit",
+		slog.String("base_commit", payload.BaseCommit),
+	)
 
-	// Write lock file synchronously before spawning to prevent races
-	//nolint:gosec // G306: lock file is not secrets
-	_ = os.WriteFile(lockPath, []byte(payload.SessionID), 0o644) //nolint:errcheck // best-effort lock
-
-	// Marshal payload
+	// Write payload to a temp file instead of passing as a CLI argument,
+	// which can exceed OS argv limits (~128KB Linux, ~256KB macOS) with
+	// many files or long prompts.
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
+		logging.Error(logCtx, "wingman failed to marshal payload", slog.Any("error", err))
 		fmt.Fprintf(os.Stderr, "[wingman] Failed to marshal payload: %v\n", err)
 		_ = os.Remove(lockPath)
 		return
 	}
+	payloadPath := filepath.Join(repoRoot, ".entire", "wingman-payload.json")
+	//nolint:gosec // G306: payload file is not secrets
+	if err := os.WriteFile(payloadPath, payloadJSON, 0o644); err != nil {
+		logging.Error(logCtx, "wingman failed to write payload file", slog.Any("error", err))
+		fmt.Fprintf(os.Stderr, "[wingman] Failed to write payload file: %v\n", err)
+		_ = os.Remove(lockPath)
+		return
+	}
 
-	// Spawn detached review process
-	spawnDetachedWingmanReview(string(payloadJSON))
+	// Spawn detached review process with path to payload file
+	spawnDetachedWingmanReview(repoRoot, payloadPath)
+	logging.Info(logCtx, "wingman review spawned",
+		slog.String("session_id", payload.SessionID),
+		slog.String("base_commit", payload.BaseCommit),
+		slog.Int("file_count", totalFiles),
+	)
 	fmt.Fprintf(os.Stderr, "[wingman] Review starting in background...\n")
+}
+
+// staleLockThreshold is how old a lock file can be before we consider it stale
+// (e.g., the detached process was SIGKILLed and the defer never ran).
+const staleLockThreshold = 30 * time.Minute
+
+// acquireWingmanLock atomically creates the lock file. Returns true if acquired.
+// If the lock already exists but is older than staleLockThreshold, it is removed
+// and re-acquired (handles crashed detached processes).
+func acquireWingmanLock(lockPath, sessionID string) bool {
+	//nolint:gosec // G304: lockPath is constructed from repoRoot + constant
+	f, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			fmt.Fprintf(os.Stderr, "[wingman] Failed to create lock: %v\n", err)
+			return false
+		}
+		// Lock exists — check if it's stale
+		info, statErr := os.Stat(lockPath)
+		if statErr != nil || time.Since(info.ModTime()) <= staleLockThreshold {
+			fmt.Fprintf(os.Stderr, "[wingman] Review already in progress, skipping\n")
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "[wingman] Removing stale lock (age: %s)\n",
+			time.Since(info.ModTime()).Round(time.Second))
+		_ = os.Remove(lockPath)
+		// Retry the atomic create
+		//nolint:gosec // G304: lockPath is constructed from repoRoot + constant
+		f, err = os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[wingman] Failed to create lock after stale removal: %v\n", err)
+			return false
+		}
+	}
+	_, _ = f.WriteString(sessionID) //nolint:errcheck // best-effort session ID write
+	_ = f.Close()
+	return true
 }
 
 // resolveHEAD returns the current HEAD commit hash, or empty string on error.
@@ -239,11 +303,12 @@ func resolveHEAD(repoRoot string) string {
 }
 
 // computeFilesHash returns a SHA256 hex digest of the sorted file paths.
+// Uses null byte separator (impossible in filenames) to avoid ambiguity.
 func computeFilesHash(files []string) string {
 	sorted := make([]string, len(files))
 	copy(sorted, files)
 	sort.Strings(sorted)
-	h := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
+	h := sha256.Sum256([]byte(strings.Join(sorted, "\x00")))
 	return hex.EncodeToString(h[:])
 }
 
