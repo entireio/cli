@@ -20,3 +20,25 @@ func (e *SilentError) Unwrap() error {
 func NewSilentError(err error) *SilentError {
 	return &SilentError{Err: err}
 }
+
+// ExitCodeError wraps an error with a specific process exit code.
+// Use this when a subcommand needs to exit with a code other than 1.
+// main.go checks for this type and uses ExitCode instead of the default 1.
+type ExitCodeError struct {
+	Err      error
+	ExitCode int
+}
+
+func (e *ExitCodeError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *ExitCodeError) Unwrap() error {
+	return e.Err
+}
+
+// NewExitCodeError creates an ExitCodeError wrapping the given error
+// with the specified exit code.
+func NewExitCodeError(err error, code int) *ExitCodeError {
+	return &ExitCodeError{Err: err, ExitCode: code}
+}
