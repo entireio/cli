@@ -83,6 +83,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newExplainCmd())
 	cmd.AddCommand(newDebugCmd())
 	cmd.AddCommand(newDoctorCmd())
+	cmd.AddCommand(newCodexCmd())
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 
