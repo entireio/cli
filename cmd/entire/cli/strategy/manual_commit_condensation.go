@@ -386,7 +386,7 @@ func countTranscriptItems(agentType agent.AgentType, content string) int {
 		// Otherwise fall through to JSONL parsing for Unknown type
 	}
 
-	// Claude Code and other JSONL-based agents
+	// Claude Code, Cursor, and other JSONL-based agents
 	allLines := strings.Split(content, "\n")
 	// Trim trailing empty lines (from final \n in JSONL)
 	for len(allLines) > 0 && strings.TrimSpace(allLines[len(allLines)-1]) == "" {
@@ -422,7 +422,7 @@ func extractUserPrompts(agentType agent.AgentType, content string) []string {
 		// Otherwise fall through to JSONL parsing for Unknown type
 	}
 
-	// Claude Code and other JSONL-based agents
+	// Claude Code, Cursor, and other JSONL-based agents
 	return extractUserPromptsFromLines(strings.Split(content, "\n"))
 }
 
@@ -449,7 +449,7 @@ func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int
 		// Otherwise fall through to JSONL parsing for Unknown type
 	}
 
-	// Claude Code and other JSONL-based agents
+	// Claude Code, Cursor, and other JSONL-based agents
 	lines, err := claudecode.ParseTranscript(data)
 	if err != nil || len(lines) == 0 {
 		return &agent.TokenUsage{}

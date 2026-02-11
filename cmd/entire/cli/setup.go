@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	setpkg "github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/charmbracelet/huh"
@@ -602,6 +603,13 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 
+	// When enabling Cursor, also write .cursor/entire.json (Cursor does not use .claude/settings.json)
+	if agentName == agent.AgentNameCursor {
+		if err := setpkg.SaveCursorEntireSettings(settings); err != nil {
+			return fmt.Errorf("failed to save Cursor settings: %w", err)
+		}
+	}
+
 	// Install git hooks AFTER saving settings (InstallGitHook reads local_dev from settings)
 	if _, err := strategy.InstallGitHook(true); err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
@@ -609,13 +617,13 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 
 	if installedHooks == 0 {
 		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
-		if agentName == agent.AgentNameGemini {
+		if agentName == agent.AgentNameGemini || agentName == agent.AgentNameCursor {
 			msg += " (Preview)"
 		}
 		fmt.Fprintf(w, "%s\n", msg)
 	} else {
 		msg := fmt.Sprintf("Installed %d hooks for %s", installedHooks, ag.Description())
-		if agentName == agent.AgentNameGemini {
+		if agentName == agent.AgentNameGemini || agentName == agent.AgentNameCursor {
 			msg += " (Preview)"
 		}
 		fmt.Fprintf(w, "%s\n", msg)
@@ -1073,33 +1081,22 @@ func checkEntireDirExists() bool {
 // removeAgentHooks removes hooks from all agents that support hooks.
 func removeAgentHooks(w io.Writer) error {
 	var errs []error
-
-	// Remove Claude Code hooks
-	claudeAgent, err := agent.Get(agent.AgentNameClaudeCode)
-	if err == nil {
-		if hookAgent, ok := claudeAgent.(agent.HookSupport); ok {
-			wasInstalled := hookAgent.AreHooksInstalled()
-			if err := hookAgent.UninstallHooks(); err != nil {
-				errs = append(errs, err)
-			} else if wasInstalled {
-				fmt.Fprintln(w, "  Removed Claude Code hooks")
-			}
+	for _, name := range agent.List() {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		hookAgent, ok := ag.(agent.HookSupport)
+		if !ok {
+			continue
+		}
+		wasInstalled := hookAgent.AreHooksInstalled()
+		if err := hookAgent.UninstallHooks(); err != nil {
+			errs = append(errs, err)
+		} else if wasInstalled {
+			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
 		}
 	}
-
-	// Remove Gemini CLI hooks
-	geminiAgent, err := agent.Get(agent.AgentNameGemini)
-	if err == nil {
-		if hookAgent, ok := geminiAgent.(agent.HookSupport); ok {
-			wasInstalled := hookAgent.AreHooksInstalled()
-			if err := hookAgent.UninstallHooks(); err != nil {
-				errs = append(errs, err)
-			} else if wasInstalled {
-				fmt.Fprintln(w, "  Removed Gemini CLI hooks")
-			}
-		}
-	}
-
 	return errors.Join(errs...)
 }
 

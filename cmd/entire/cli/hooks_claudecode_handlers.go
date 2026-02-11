@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,93 +28,78 @@ type hookInputData struct {
 	sessionID string
 }
 
-// parseAndLogHookInput parses the hook input and sets up logging context.
-func parseAndLogHookInput() (*hookInputData, error) {
-	// Get the agent from the hook command context (e.g., "entire hooks claude-code ...")
+// parseHookInputWithType parses hook input from reader using the current hook agent and given hook type.
+// Used by both Claude Code and Cursor handlers so each agent can parse its own payload format.
+func parseHookInputWithType(hookType agent.HookType, reader io.Reader, logName string) (*hookInputData, error) {
 	ag, err := GetCurrentHookAgent()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get agent: %w", err)
 	}
-
-	// Parse hook input using agent interface
-	input, err := ag.ParseHookInput(agent.HookUserPromptSubmit, os.Stdin)
+	input, err := ag.ParseHookInput(hookType, reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse hook input: %w", err)
 	}
-
 	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
-	logging.Info(logCtx, "user-prompt-submit",
-		slog.String("hook", "user-prompt-submit"),
+	logging.Info(logCtx, logName,
+		slog.String("hook", logName),
 		slog.String("hook_type", "agent"),
 		slog.String("model_session_id", input.SessionID),
 		slog.String("transcript_path", input.SessionRef),
 	)
-
 	sessionID := input.SessionID
 	if sessionID == "" {
 		sessionID = unknownSessionID
 	}
+	return &hookInputData{agent: ag, input: input, sessionID: sessionID}, nil
+}
 
-	// Get the Entire session ID, preferring the persisted value to handle midnight boundary
-	return &hookInputData{
-		agent:     ag,
-		input:     input,
-		sessionID: sessionID,
-	}, nil
+// parseAndLogHookInput parses the hook input and sets up logging context (user-prompt-submit).
+func parseAndLogHookInput() (*hookInputData, error) {
+	return parseHookInputWithType(agent.HookUserPromptSubmit, os.Stdin, "user-prompt-submit")
+}
+
+// captureInitialStateFromInput runs capture-initial-state logic given already-parsed hook input.
+func captureInitialStateFromInput(ag agent.Agent, input *agent.HookInput) error {
+	sessionID := input.SessionID
+	if sessionID == "" {
+		sessionID = unknownSessionID
+	}
+	if err := CapturePrePromptState(sessionID, input.SessionRef); err != nil {
+		return err
+	}
+	strat := GetStrategy()
+	if initializer, ok := strat.(strategy.SessionInitializer); ok {
+		if err := initializer.InitializeSession(sessionID, ag.Type(), input.SessionRef, input.UserPrompt); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to initialize session state: %v\n", err)
+		}
+	}
+	return nil
 }
 
 // captureInitialState captures the initial state on user prompt submit.
 func captureInitialState() error {
-	// Parse hook input and setup logging
 	hookData, err := parseAndLogHookInput()
 	if err != nil {
 		return err
 	}
-
-	// CLI captures state directly (including transcript position)
-	if err := CapturePrePromptState(hookData.sessionID, hookData.input.SessionRef); err != nil {
-		return err
-	}
-
-	// If strategy implements SessionInitializer, call it to initialize session state
-	strat := GetStrategy()
-	if initializer, ok := strat.(strategy.SessionInitializer); ok {
-		agentType := hookData.agent.Type()
-		if err := initializer.InitializeSession(hookData.sessionID, agentType, hookData.input.SessionRef, hookData.input.UserPrompt); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to initialize session state: %v\n", err)
-		}
-	}
-
-	return nil
+	return captureInitialStateFromInput(hookData.agent, hookData.input)
 }
 
 // commitWithMetadata commits the session changes with metadata.
-func commitWithMetadata() error { //nolint:maintidx // already present in codebase
-	// Get the agent for hook input parsing and session ID transformation
-	ag, err := GetCurrentHookAgent()
+func commitWithMetadata() error {
+	hookData, err := parseHookInputWithType(agent.HookStop, os.Stdin, "stop")
 	if err != nil {
-		return fmt.Errorf("failed to get agent: %w", err)
+		return err
 	}
+	return commitWithMetadataFromInput(hookData.agent, hookData.input)
+}
 
-	// Parse hook input using agent interface
-	input, err := ag.ParseHookInput(agent.HookStop, os.Stdin)
-	if err != nil {
-		return fmt.Errorf("failed to parse hook input: %w", err)
-	}
-
-	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
-	logging.Info(logCtx, "stop",
-		slog.String("hook", "stop"),
-		slog.String("hook_type", "agent"),
-		slog.String("model_session_id", input.SessionID),
-		slog.String("transcript_path", input.SessionRef),
-	)
-
+// commitWithMetadataFromInput runs commit/checkpoint logic given already-parsed stop hook input.
+func commitWithMetadataFromInput(ag agent.Agent, input *agent.HookInput) error { //nolint:maintidx // large shared stop logic
 	sessionID := input.SessionID
 	if sessionID == "" {
 		sessionID = unknownSessionID
 	}
-
 	transcriptPath := input.SessionRef
 	if transcriptPath == "" || !fileExists(transcriptPath) {
 		return fmt.Errorf("transcript file not found or empty: %s", transcriptPath)
@@ -130,11 +116,10 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 		return fmt.Errorf("failed to create session directory: %w", err)
 	}
 
-	// Wait for Claude Code to flush the transcript file.
-	// The stop hook fires before the transcript is fully written to disk.
-	// We poll for our own hook_progress sentinel entry in the file tail,
-	// which guarantees all prior entries have been flushed.
-	waitForTranscriptFlush(transcriptPath, time.Now())
+	// Wait for agent to flush the transcript file (Claude Code writes a sentinel; other agents may not).
+	if ag.Type() == agent.AgentTypeClaudeCode {
+		waitForTranscriptFlush(transcriptPath, time.Now())
+	}
 
 	// Copy transcript
 	logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
@@ -294,11 +279,7 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
 	}
 
-	// Get agent type from the currently executing hook agent (authoritative source)
-	var agentType agent.AgentType
-	if hookAgent, agentErr := GetCurrentHookAgent(); agentErr == nil {
-		agentType = hookAgent.Type()
-	}
+	agentType := ag.Type()
 
 	// Get transcript position from pre-prompt state (captured at step/turn start)
 	var transcriptIdentifierAtStart string
@@ -308,10 +289,9 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 		transcriptLinesAtStart = preState.StepTranscriptStart
 	}
 
-	// Calculate token usage for this checkpoint (Claude Code specific)
+	// Calculate token usage for this checkpoint (Claude Code specific; Cursor/others can be added later)
 	var tokenUsage *agent.TokenUsage
-	if transcriptPath != "" {
-		// Subagents are stored in a subagents/ directory next to the main transcript
+	if ag.Type() == agent.AgentTypeClaudeCode && transcriptPath != "" {
 		subagentsDir := filepath.Join(filepath.Dir(transcriptPath), sessionID, "subagents")
 		usage, err := claudecode.CalculateTotalTokenUsage(transcriptPath, transcriptLinesAtStart, subagentsDir)
 		if err != nil {
@@ -385,21 +365,93 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 	return nil
 }
 
+// runPostTodoLogic runs the post-todo incremental checkpoint logic (shared by Claude Code and Cursor).
+func runPostTodoLogic(ag agent.Agent, sessionID, transcriptPath, toolName, toolUseID string, toolInput []byte) {
+	taskToolUseID, found := FindActivePreTaskFile()
+	if !found {
+		return
+	}
+	if skip, branchName := ShouldSkipOnDefaultBranch(); skip {
+		fmt.Fprintf(os.Stderr, "Entire: skipping incremental checkpoint on branch '%s'\n", branchName)
+		return
+	}
+	changes, err := DetectFileChanges(nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to detect changed files: %v\n", err)
+		return
+	}
+	if len(changes.Modified) == 0 && len(changes.New) == 0 && len(changes.Deleted) == 0 {
+		fmt.Fprintf(os.Stderr, "[entire] No file changes detected, skipping incremental checkpoint\n")
+		return
+	}
+	author, err := GetGitAuthor()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get git author: %v\n", err)
+		return
+	}
+	strat := GetStrategy()
+	if err := strat.EnsureSetup(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
+		return
+	}
+	if sessionID == "" {
+		sessionID = paths.ExtractSessionIDFromTranscriptPath(transcriptPath)
+	}
+	seq := GetNextCheckpointSequence(sessionID, taskToolUseID)
+	todoContent := ExtractLastCompletedTodoFromToolInput(toolInput)
+	if todoContent == "" {
+		todoCount := CountTodosFromToolInput(toolInput)
+		if todoCount > 0 {
+			todoContent = fmt.Sprintf("Planning: %d todos", todoCount)
+		}
+	}
+	ctx := strategy.TaskCheckpointContext{
+		SessionID:           sessionID,
+		ToolUseID:           taskToolUseID,
+		ModifiedFiles:       changes.Modified,
+		NewFiles:            changes.New,
+		DeletedFiles:        changes.Deleted,
+		TranscriptPath:      transcriptPath,
+		AuthorName:          author.Name,
+		AuthorEmail:         author.Email,
+		IsIncremental:       true,
+		IncrementalSequence: seq,
+		IncrementalType:     toolName,
+		IncrementalData:     toolInput,
+		TodoContent:         todoContent,
+		AgentType:           ag.Type(),
+	}
+	if err := strat.SaveTaskCheckpoint(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to save incremental checkpoint: %v\n", err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[entire] Created incremental checkpoint #%d for %s (task: %s)\n",
+		seq, toolName, taskToolUseID[:min(12, len(taskToolUseID))])
+}
+
+// handlePostTodoFromInput runs post-todo incremental checkpoint logic given already-parsed hook input.
+func handlePostTodoFromInput(ag agent.Agent, input *agent.HookInput) {
+	toolName := "TodoWrite"
+	if name, ok := input.RawData["tool_name"].(string); ok && name != "" {
+		toolName = name
+	}
+	sessionID := input.SessionID
+	if sessionID == "" {
+		sessionID = paths.ExtractSessionIDFromTranscriptPath(input.SessionRef)
+	}
+	runPostTodoLogic(ag, sessionID, input.SessionRef, toolName, input.ToolUseID, input.ToolInput)
+}
+
 // handleClaudeCodePostTodo handles the PostToolUse[TodoWrite] hook for subagent checkpoints.
-// Creates a checkpoint if we're in a subagent context (active pre-task file exists).
-// Skips silently if not in subagent context (main agent).
 func handleClaudeCodePostTodo() error {
 	input, err := parseSubagentCheckpointHookInput(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("failed to parse PostToolUse[TodoWrite] input: %w", err)
 	}
-
-	// Get agent for logging context
 	ag, err := GetCurrentHookAgent()
 	if err != nil {
 		return fmt.Errorf("failed to get agent: %w", err)
 	}
-
 	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
 	logging.Info(logCtx, "post-todo",
 		slog.String("hook", "post-todo"),
@@ -408,143 +460,152 @@ func handleClaudeCodePostTodo() error {
 		slog.String("transcript_path", input.TranscriptPath),
 		slog.String("tool_use_id", input.ToolUseID),
 	)
-
-	// Check if we're in a subagent context by looking for an active pre-task file
-	taskToolUseID, found := FindActivePreTaskFile()
-	if !found {
-		// Not in subagent context - this is a main agent TodoWrite, skip
-		return nil
-	}
-
-	// Skip on default branch to avoid polluting main/master history
-	if skip, branchName := ShouldSkipOnDefaultBranch(); skip {
-		fmt.Fprintf(os.Stderr, "Entire: skipping incremental checkpoint on branch '%s'\n", branchName)
-		return nil
-	}
-
-	// Detect file changes since last checkpoint
-	changes, err := DetectFileChanges(nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to detect changed files: %v\n", err)
-		return nil
-	}
-
-	// If no file changes, skip creating a checkpoint
-	if len(changes.Modified) == 0 && len(changes.New) == 0 && len(changes.Deleted) == 0 {
-		fmt.Fprintf(os.Stderr, "[entire] No file changes detected, skipping incremental checkpoint\n")
-		return nil
-	}
-
-	// Get git author
-	author, err := GetGitAuthor()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to get git author: %v\n", err)
-		return nil
-	}
-
-	// Get the active strategy
-	strat := GetStrategy()
-
-	// Ensure strategy setup is complete
-	if err := strat.EnsureSetup(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
-		return nil
-	}
-
-	// Get the session ID from the transcript path or input, then transform to Entire session ID
-	sessionID := input.SessionID
-	if sessionID == "" {
-		sessionID = paths.ExtractSessionIDFromTranscriptPath(input.TranscriptPath)
-	}
-
-	// Get next checkpoint sequence
-	seq := GetNextCheckpointSequence(sessionID, taskToolUseID)
-
-	// Extract the todo content from the tool_input.
-	// PostToolUse receives the NEW todo list where the just-completed work is
-	// marked as "completed". The last completed item is the work that was just done.
-	todoContent := ExtractLastCompletedTodoFromToolInput(input.ToolInput)
-	if todoContent == "" {
-		// No completed items - this is likely the first TodoWrite (planning phase).
-		// Check if there are any todos at all to avoid duplicate messages.
-		todoCount := CountTodosFromToolInput(input.ToolInput)
-		if todoCount > 0 {
-			// Use "Planning: N todos" format for the first TodoWrite
-			todoContent = fmt.Sprintf("Planning: %d todos", todoCount)
-		}
-		// If todoCount == 0, todoContent remains empty and FormatIncrementalMessage
-		// will fall back to "Checkpoint #N" format
-	}
-
-	// Get agent type from the currently executing hook agent (authoritative source)
-	var agentType agent.AgentType
-	if hookAgent, agentErr := GetCurrentHookAgent(); agentErr == nil {
-		agentType = hookAgent.Type()
-	}
-
-	// Build incremental checkpoint context
-	ctx := strategy.TaskCheckpointContext{
-		SessionID:           sessionID,
-		ToolUseID:           taskToolUseID,
-		ModifiedFiles:       changes.Modified,
-		NewFiles:            changes.New,
-		DeletedFiles:        changes.Deleted,
-		TranscriptPath:      input.TranscriptPath,
-		AuthorName:          author.Name,
-		AuthorEmail:         author.Email,
-		IsIncremental:       true,
-		IncrementalSequence: seq,
-		IncrementalType:     input.ToolName,
-		IncrementalData:     input.ToolInput,
-		TodoContent:         todoContent,
-		AgentType:           agentType,
-	}
-
-	// Save incremental checkpoint
-	if err := strat.SaveTaskCheckpoint(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to save incremental checkpoint: %v\n", err)
-		return nil
-	}
-
-	fmt.Fprintf(os.Stderr, "[entire] Created incremental checkpoint #%d for %s (task: %s)\n",
-		seq, input.ToolName, taskToolUseID[:min(12, len(taskToolUseID))])
+	runPostTodoLogic(ag, input.SessionID, input.TranscriptPath, input.ToolName, input.ToolUseID, input.ToolInput)
 	return nil
+}
+
+// handlePreTaskFromInput runs pre-task logic given already-parsed hook input.
+func handlePreTaskFromInput(ag agent.Agent, input *agent.HookInput) error {
+	taskInput := &TaskHookInput{
+		SessionID:      input.SessionID,
+		TranscriptPath: input.SessionRef,
+		ToolUseID:      input.ToolUseID,
+		ToolInput:      input.ToolInput,
+	}
+	logPreTaskHookContext(os.Stdout, taskInput)
+	return CapturePreTaskState(input.ToolUseID)
 }
 
 // handleClaudeCodePreTask handles the PreToolUse[Task] hook
 func handleClaudeCodePreTask() error {
-	input, err := parseTaskHookInput(os.Stdin)
+	hookData, err := parseHookInputWithType(agent.HookPreToolUse, os.Stdin, "pre-task")
 	if err != nil {
-		return fmt.Errorf("failed to parse PreToolUse[Task] input: %w", err)
+		return err
 	}
-
-	// Get agent for logging context
-	ag, err := GetCurrentHookAgent()
-	if err != nil {
-		return fmt.Errorf("failed to get agent: %w", err)
-	}
-
-	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), hookData.agent.Name())
 	logging.Info(logCtx, "pre-task",
 		slog.String("hook", "pre-task"),
 		slog.String("hook_type", "subagent"),
-		slog.String("model_session_id", input.SessionID),
-		slog.String("transcript_path", input.TranscriptPath),
-		slog.String("tool_use_id", input.ToolUseID),
+		slog.String("model_session_id", hookData.input.SessionID),
+		slog.String("transcript_path", hookData.input.SessionRef),
+		slog.String("tool_use_id", hookData.input.ToolUseID),
 	)
+	return handlePreTaskFromInput(hookData.agent, hookData.input)
+}
 
-	// Log context to stdout
-	logPreTaskHookContext(os.Stdout, input)
+// postTaskParams holds the inputs needed to run post-task checkpoint logic.
+type postTaskParams struct {
+	SessionID      string
+	TranscriptPath string
+	ToolUseID      string
+	AgentID        string
+	ToolInput      []byte
+}
 
-	// Capture pre-task state locally (for computing new files when task completes).
-	// We don't create a shadow branch commit here. Commits are created during
-	// task completion (handleClaudeCodePostTask/handleClaudeCodePostTodo) only if the task resulted
-	// in file changes.
-	if err := CapturePreTaskState(input.ToolUseID); err != nil {
-		return fmt.Errorf("failed to capture pre-task state: %w", err)
+// runPostTaskLogic runs the post-task checkpoint logic (shared by Claude Code and Cursor).
+func runPostTaskLogic(ag agent.Agent, p postTaskParams) error {
+	subagentType, taskDescription := ParseSubagentTypeAndDescription(p.ToolInput)
+	transcriptDir := filepath.Dir(p.TranscriptPath)
+	var subagentTranscriptPath string
+	if p.AgentID != "" {
+		subagentTranscriptPath = AgentTranscriptPath(transcriptDir, p.AgentID)
+		if !fileExists(subagentTranscriptPath) {
+			subagentTranscriptPath = ""
+		}
+	}
+	postInput := &PostTaskHookInput{
+		TaskHookInput: TaskHookInput{SessionID: p.SessionID, TranscriptPath: p.TranscriptPath, ToolUseID: p.ToolUseID, ToolInput: p.ToolInput},
+		AgentID:       p.AgentID,
+		ToolInput:     p.ToolInput,
+	}
+	logPostTaskHookContext(os.Stdout, postInput, subagentTranscriptPath)
+
+	var modifiedFiles []string
+	if subagentTranscriptPath != "" {
+		transcript, err := parseTranscript(subagentTranscriptPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to parse subagent transcript: %v\n", err)
+		} else {
+			modifiedFiles = extractModifiedFiles(transcript)
+		}
+	} else {
+		transcript, err := parseTranscript(p.TranscriptPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to parse transcript: %v\n", err)
+		} else {
+			modifiedFiles = extractModifiedFiles(transcript)
+		}
 	}
 
+	preState, err := LoadPreTaskState(p.ToolUseID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load pre-task state: %v\n", err)
+	}
+	changes, err := DetectFileChanges(preState.PreUntrackedFiles())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
+	}
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		return fmt.Errorf("failed to get repo root: %w", err)
+	}
+	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	var relNewFiles, relDeletedFiles []string
+	if changes != nil {
+		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
+		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
+	}
+	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
+		fmt.Fprintf(os.Stderr, "[entire] No file changes detected, skipping task checkpoint\n")
+		_ = CleanupPreTaskState(p.ToolUseID) //nolint:errcheck // best-effort
+		return nil
+	}
+	transcript, _ := parseTranscript(p.TranscriptPath) //nolint:errcheck // best-effort
+	checkpointUUID, _ := FindCheckpointUUID(transcript, p.ToolUseID)
+	author, err := GetGitAuthor()
+	if err != nil {
+		return fmt.Errorf("failed to get git author: %w", err)
+	}
+	strat := GetStrategy()
+	if err := strat.EnsureSetup(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
+	}
+	ctx := strategy.TaskCheckpointContext{
+		SessionID:              p.SessionID,
+		ToolUseID:              p.ToolUseID,
+		AgentID:                p.AgentID,
+		ModifiedFiles:          relModifiedFiles,
+		NewFiles:               relNewFiles,
+		DeletedFiles:           relDeletedFiles,
+		TranscriptPath:         p.TranscriptPath,
+		SubagentTranscriptPath: subagentTranscriptPath,
+		CheckpointUUID:         checkpointUUID,
+		AuthorName:             author.Name,
+		AuthorEmail:            author.Email,
+		SubagentType:           subagentType,
+		TaskDescription:        taskDescription,
+		AgentType:              ag.Type(),
+	}
+	if err := strat.SaveTaskCheckpoint(ctx); err != nil {
+		return fmt.Errorf("failed to save task checkpoint: %w", err)
+	}
+	_ = CleanupPreTaskState(p.ToolUseID) //nolint:errcheck // best-effort
 	return nil
+}
+
+// handlePostTaskFromInput runs post-task checkpoint logic given already-parsed hook input.
+func handlePostTaskFromInput(ag agent.Agent, input *agent.HookInput) error {
+	agentID := ""
+	if id, ok := input.RawData["agent_id"].(string); ok {
+		agentID = id
+	}
+	return runPostTaskLogic(ag, postTaskParams{
+		SessionID:      input.SessionID,
+		TranscriptPath: input.SessionRef,
+		ToolUseID:      input.ToolUseID,
+		AgentID:        agentID,
+		ToolInput:      input.ToolInput,
+	})
 }
 
 // handleClaudeCodePostTask handles the PostToolUse[Task] hook
@@ -553,17 +614,11 @@ func handleClaudeCodePostTask() error {
 	if err != nil {
 		return fmt.Errorf("failed to parse PostToolUse[Task] input: %w", err)
 	}
-
-	// Extract subagent type from tool_input for logging
-	subagentType, taskDescription := ParseSubagentTypeAndDescription(input.ToolInput)
-
-	// Get agent for logging context
 	ag, err := GetCurrentHookAgent()
 	if err != nil {
 		return fmt.Errorf("failed to get agent: %w", err)
 	}
-
-	// Log parsed input context
+	subagentType, _ := ParseSubagentTypeAndDescription(input.ToolInput)
 	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
 	logging.Info(logCtx, "post-task",
 		slog.String("hook", "post-task"),
@@ -572,128 +627,13 @@ func handleClaudeCodePostTask() error {
 		slog.String("agent_id", input.AgentID),
 		slog.String("subagent_type", subagentType),
 	)
-
-	// Determine subagent transcript path
-	transcriptDir := filepath.Dir(input.TranscriptPath)
-	var subagentTranscriptPath string
-	if input.AgentID != "" {
-		subagentTranscriptPath = AgentTranscriptPath(transcriptDir, input.AgentID)
-		if !fileExists(subagentTranscriptPath) {
-			subagentTranscriptPath = ""
-		}
-	}
-
-	// Log context to stdout
-	logPostTaskHookContext(os.Stdout, input, subagentTranscriptPath)
-
-	// Parse transcript to extract modified files
-	var modifiedFiles []string
-	if subagentTranscriptPath != "" {
-		// Use subagent transcript if available
-		transcript, err := parseTranscript(subagentTranscriptPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to parse subagent transcript: %v\n", err)
-		} else {
-			modifiedFiles = extractModifiedFiles(transcript)
-		}
-	} else {
-		// Fall back to main transcript
-		transcript, err := parseTranscript(input.TranscriptPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to parse transcript: %v\n", err)
-		} else {
-			modifiedFiles = extractModifiedFiles(transcript)
-		}
-	}
-
-	// Load pre-task state and compute new files
-	preState, err := LoadPreTaskState(input.ToolUseID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load pre-task state: %v\n", err)
-	}
-
-	// Compute new and deleted files (single git status call)
-	changes, err := DetectFileChanges(preState.PreUntrackedFiles())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
-	}
-
-	// Get repo root for path conversion (not cwd, since Claude may be in a subdirectory)
-	// Using cwd would filter out files in sibling directories (paths starting with ..)
-	repoRoot, err := paths.RepoRoot()
-	if err != nil {
-		return fmt.Errorf("failed to get repo root: %w", err)
-	}
-
-	// Filter and normalize paths
-	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
-	var relNewFiles, relDeletedFiles []string
-	if changes != nil {
-		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
-		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
-	}
-
-	// If no file changes, skip creating a checkpoint
-	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
-		fmt.Fprintf(os.Stderr, "[entire] No file changes detected, skipping task checkpoint\n")
-		// Cleanup pre-task state (ignore error - cleanup is best-effort)
-		_ = CleanupPreTaskState(input.ToolUseID) //nolint:errcheck // best-effort cleanup
-		return nil
-	}
-
-	// Find checkpoint UUID from main transcript (best-effort, ignore errors)
-	transcript, _ := parseTranscript(input.TranscriptPath) //nolint:errcheck // best-effort extraction
-	checkpointUUID, _ := FindCheckpointUUID(transcript, input.ToolUseID)
-
-	// Get git author
-	author, err := GetGitAuthor()
-	if err != nil {
-		return fmt.Errorf("failed to get git author: %w", err)
-	}
-
-	// Get the configured strategy
-	strat := GetStrategy()
-
-	// Ensure strategy setup is in place
-	if err := strat.EnsureSetup(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
-	}
-
-	// Get agent type from the currently executing hook agent (authoritative source)
-	var agentType agent.AgentType
-	if hookAgent, agentErr := GetCurrentHookAgent(); agentErr == nil {
-		agentType = hookAgent.Type()
-	}
-
-	// Build task checkpoint context - strategy handles metadata creation
-	// Note: Incremental checkpoints are now created during task execution via handleClaudeCodePostTodo,
-	// so we don't need to collect/cleanup staging area here.
-	ctx := strategy.TaskCheckpointContext{
-		SessionID:              input.SessionID,
-		ToolUseID:              input.ToolUseID,
-		AgentID:                input.AgentID,
-		ModifiedFiles:          relModifiedFiles,
-		NewFiles:               relNewFiles,
-		DeletedFiles:           relDeletedFiles,
-		TranscriptPath:         input.TranscriptPath,
-		SubagentTranscriptPath: subagentTranscriptPath,
-		CheckpointUUID:         checkpointUUID,
-		AuthorName:             author.Name,
-		AuthorEmail:            author.Email,
-		SubagentType:           subagentType,
-		TaskDescription:        taskDescription,
-		AgentType:              agentType,
-	}
-
-	// Call strategy to save task checkpoint - strategy handles all metadata creation
-	if err := strat.SaveTaskCheckpoint(ctx); err != nil {
-		return fmt.Errorf("failed to save task checkpoint: %w", err)
-	}
-
-	// Cleanup pre-task state (ignore error - cleanup is best-effort)
-	_ = CleanupPreTaskState(input.ToolUseID) //nolint:errcheck // best-effort cleanup
-
-	return nil
+	return runPostTaskLogic(ag, postTaskParams{
+		SessionID:      input.SessionID,
+		TranscriptPath: input.TranscriptPath,
+		ToolUseID:      input.ToolUseID,
+		AgentID:        input.AgentID,
+		ToolInput:      input.ToolInput,
+	})
 }
 
 // handleClaudeCodeSessionStart handles the SessionStart hook for Claude Code.
@@ -701,36 +641,32 @@ func handleClaudeCodeSessionStart() error {
 	return handleSessionStartCommon()
 }
 
-// handleClaudeCodeSessionEnd handles the SessionEnd hook for Claude Code.
-// This fires when the user explicitly closes the session.
-// Updates the session state with EndedAt timestamp.
-func handleClaudeCodeSessionEnd() error {
-	ag, err := GetCurrentHookAgent()
-	if err != nil {
-		return fmt.Errorf("failed to get agent: %w", err)
-	}
-
-	input, err := ag.ParseHookInput(agent.HookSessionEnd, os.Stdin)
-	if err != nil {
-		return fmt.Errorf("failed to parse hook input: %w", err)
-	}
-
-	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
-	logging.Info(logCtx, "session-end",
-		slog.String("hook", "session-end"),
-		slog.String("hook_type", "agent"),
-		slog.String("model_session_id", input.SessionID),
-	)
-
+// handleSessionEndFromInput runs session-end logic given already-parsed hook input.
+func handleSessionEndFromInput(ag agent.Agent, input *agent.HookInput) error {
 	if input.SessionID == "" {
-		return nil // No session to update
+		return nil
 	}
-
-	// Best-effort cleanup - don't block session closure on failure
 	if err := markSessionEnded(input.SessionID); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to mark session ended: %v\n", err)
 	}
 	return nil
+}
+
+// handleClaudeCodeSessionEnd handles the SessionEnd hook for Claude Code.
+// This fires when the user explicitly closes the session.
+// Updates the session state with EndedAt timestamp.
+func handleClaudeCodeSessionEnd() error {
+	hookData, err := parseHookInputWithType(agent.HookSessionEnd, os.Stdin, "session-end")
+	if err != nil {
+		return err
+	}
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), hookData.agent.Name())
+	logging.Info(logCtx, "session-end",
+		slog.String("hook", "session-end"),
+		slog.String("hook_type", "agent"),
+		slog.String("model_session_id", hookData.input.SessionID),
+	)
+	return handleSessionEndFromInput(hookData.agent, hookData.input)
 }
 
 // transitionSessionTurnEnd fires EventTurnEnd to move the session from

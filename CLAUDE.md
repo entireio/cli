@@ -247,6 +247,18 @@ relPath := paths.ToRelativePath("/repo/api/file.ts", repoRoot)  // returns "api/
 
 Test case in `state_test.go`: `TestFilterAndNormalizePaths_SiblingDirectories` documents this bug pattern.
 
+### Agents (`cmd/entire/cli/agent/`)
+
+Supported agents: **claude-code** (Claude Code), **cursor** (Cursor IDE), **gemini** (Gemini CLI). Each can register hooks and parse hook payloads; strategies use agent type for transcript handling (e.g. JSONL for Claude/Cursor, JSON for Gemini).
+
+| Agent        | Hook config              | Notes |
+|-------------|---------------------------|--------|
+| claude-code | `.claude/settings.json`   | Default agent |
+| cursor      | `.cursor/hooks.json`     | Uses `.cursor/entire.json` for Entire settings; does **not** use `.claude/settings.json` |
+| gemini      | `.gemini/settings.json`   | Preview |
+
+Enable with `entire enable --agent cursor`; Cursor hooks and settings are written only under `.cursor/`.
+
 ### Session Strategies (`cmd/entire/cli/strategy/`)
 
 The CLI uses a strategy pattern for managing session data and checkpoints. Each strategy implements the `Strategy` interface defined in `strategy.go`.
