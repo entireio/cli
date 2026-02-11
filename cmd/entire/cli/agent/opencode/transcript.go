@@ -248,33 +248,13 @@ func ParseTranscript(data []byte) ([]TranscriptLine, error) {
 // ExtractLastUserPrompt extracts the last user message from transcript lines.
 func ExtractLastUserPrompt(lines []TranscriptLine) string {
 	for i := len(lines) - 1; i >= 0; i-- {
-		if lines[i].Type != "user" {
+		if lines[i].Type != transcript.TypeUser {
 			continue
 		}
 
-		var msg transcript.UserMessage
-		if err := json.Unmarshal(lines[i].Message, &msg); err != nil {
-			continue
-		}
-
-		if str, ok := msg.Content.(string); ok {
-			return str
-		}
-
-		if arr, ok := msg.Content.([]interface{}); ok {
-			var texts []string
-			for _, item := range arr {
-				if m, ok := item.(map[string]interface{}); ok {
-					if m["type"] == "text" {
-						if text, ok := m["text"].(string); ok {
-							texts = append(texts, text)
-						}
-					}
-				}
-			}
-			if len(texts) > 0 {
-				return strings.Join(texts, "\n\n")
-			}
+		content := transcript.ExtractUserContent(lines[i].Message)
+		if content != "" {
+			return content
 		}
 	}
 	return ""
@@ -373,7 +353,6 @@ func firstNonEmpty(values ...string) string {
 var FileModificationTools = []string{
 	"write",
 	"edit",
-	"bash",
 }
 
 // isFileModificationTool checks if a tool name is a file modification tool.
