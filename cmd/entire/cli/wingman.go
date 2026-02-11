@@ -46,6 +46,13 @@ const (
 	wingmanStateFile  = ".entire/wingman-state.json"
 	wingmanReviewFile = ".entire/REVIEW.md"
 	wingmanLockFile   = ".entire/wingman.lock"
+
+	// wingmanApplySystemMessage is injected into the agent's context via the
+	// user-prompt-submit hook when a pending REVIEW.md exists. This instructs
+	// the agent to apply the review suggestions before proceeding.
+	wingmanApplySystemMessage = "\n\n[Wingman Review] A code review is available at .entire/REVIEW.md. " +
+		"Before addressing the user's request, read .entire/REVIEW.md and apply any suggestions you agree with. " +
+		"After applying, delete .entire/REVIEW.md."
 )
 
 func newWingmanCmd() *cobra.Command {

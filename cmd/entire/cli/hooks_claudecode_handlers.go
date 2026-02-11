@@ -76,12 +76,16 @@ func captureInitialState() error {
 		return err
 	}
 
-	// Notify user if a wingman review is pending
+	// If a wingman review is pending, inject instruction into the agent's context
+	// so it automatically reads and applies the suggestions.
 	if settings.IsWingmanEnabled() {
 		repoRoot, rootErr := paths.RepoRoot()
 		if rootErr == nil {
 			if _, statErr := os.Stat(filepath.Join(repoRoot, wingmanReviewFile)); statErr == nil {
-				fmt.Fprintf(os.Stderr, "[wingman] Review available: .entire/REVIEW.md — review and apply suggestions\n")
+				fmt.Fprintf(os.Stderr, "[wingman] Review available: .entire/REVIEW.md\n")
+				if err := outputHookResponse(wingmanApplySystemMessage); err != nil {
+					fmt.Fprintf(os.Stderr, "[wingman] Warning: failed to inject review instruction: %v\n", err)
+				}
 			}
 		}
 	}
