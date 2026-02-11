@@ -130,14 +130,20 @@ func runWingmanReview(payloadPath string) error {
 	}
 	fileList := strings.Join(allFiles, ", ")
 
+	// Read session context from checkpoint data (best-effort)
+	sessionContext := readSessionContext(repoRoot, payload.SessionID)
+	if sessionContext != "" {
+		wingmanLog("session context loaded: %d bytes", len(sessionContext))
+	}
+
 	// Build review prompt
-	prompt := buildReviewPrompt(payload.Prompts, fileList, diff)
+	prompt := buildReviewPrompt(payload.Prompts, payload.CommitMessage, sessionContext, payload.SessionID, fileList, diff)
 	wingmanLog("review prompt built: %d bytes", len(prompt))
 
 	// Call Claude CLI for review
 	wingmanLog("calling claude CLI (model=%s, timeout=%s)", wingmanReviewModel, wingmanReviewTimeout)
 	reviewStart := time.Now()
-	reviewText, err := callClaudeForReview(prompt)
+	reviewText, err := callClaudeForReview(repoRoot, prompt)
 	if err != nil {
 		wingmanLog("ERROR claude CLI failed after %s: %v", time.Since(reviewStart).Round(time.Millisecond), err)
 		return fmt.Errorf("failed to get review from Claude: %w", err)
@@ -249,14 +255,27 @@ func computeDiff(repoRoot string, baseCommit string) (string, error) {
 }
 
 // callClaudeForReview calls the claude CLI to perform the review.
-func callClaudeForReview(prompt string) (string, error) {
+// repoRoot is the repository root so the reviewer can access the full codebase.
+func callClaudeForReview(repoRoot, prompt string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), wingmanReviewTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "claude", "--print", "--output-format", "json", "--model", wingmanReviewModel, "--setting-sources", "")
+	cmd := exec.CommandContext(ctx, "claude",
+		"--print",
+		"--output-format", "json",
+		"--model", wingmanReviewModel,
+		"--setting-sources", "",
+		// Grant read-only tool access so the reviewer can inspect source files
+		// beyond just the diff. Permission bypass is safe here since tools are
+		// restricted to read-only operations.
+		"--allowedTools", "Read,Glob,Grep",
+		"--permission-mode", "bypassPermissions",
+	)
 
-	// Isolate from git repo to prevent hooks and index pollution
-	cmd.Dir = os.TempDir()
+	// Run from repo root so the reviewer can read source files for context.
+	// Loop-breaking is handled by --setting-sources "" (disables hooks) and
+	// wingmanStripGitEnv (prevents git index pollution).
+	cmd.Dir = repoRoot
 	cmd.Env = wingmanStripGitEnv(os.Environ())
 
 	cmd.Stdin = strings.NewReader(prompt)
@@ -286,6 +305,20 @@ func callClaudeForReview(prompt string) (string, error) {
 	return cliResponse.Result, nil
 }
 
+// readSessionContext reads the context.md file from the session's checkpoint
+// metadata directory. Returns empty string if unavailable.
+func readSessionContext(repoRoot, sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	contextPath := filepath.Join(repoRoot, ".entire", "metadata", sessionID, "context.md")
+	data, err := os.ReadFile(contextPath) //nolint:gosec // path constructed from repoRoot + session ID
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
 // isSessionIdle checks if the given session is in the IDLE phase.
 func isSessionIdle(sessionID string) bool {
 	state, err := strategy.LoadSessionState(sessionID)
@@ -302,10 +335,22 @@ func triggerAutoApply(repoRoot string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), wingmanApplyTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "claude", "--continue", "-p", applyPrompt, "--setting-sources", "")
+	cmd := exec.CommandContext(ctx, "claude",
+		"--continue",
+		"--print",
+		"--setting-sources", "",
+		// Auto-accept edits so the agent can modify files and delete REVIEW.md
+		// without requiring user consent (this runs in a background process).
+		"--permission-mode", "acceptEdits",
+		applyPrompt,
+	)
 	cmd.Dir = repoRoot
-	// Strip GIT_* env vars to prevent hook interference, but keep other env
-	cmd.Env = wingmanStripGitEnv(os.Environ())
+	// Strip GIT_* env vars to prevent hook interference, and set
+	// ENTIRE_WINGMAN_APPLY=1 so git hooks (post-commit) know not to
+	// trigger another wingman review (prevents infinite recursion).
+	env := wingmanStripGitEnv(os.Environ())
+	env = append(env, "ENTIRE_WINGMAN_APPLY=1")
+	cmd.Env = env
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

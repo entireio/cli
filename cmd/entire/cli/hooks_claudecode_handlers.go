@@ -388,8 +388,10 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 	// For ACTIVE_COMMITTED → IDLE, HandleTurnEnd dispatches ActionCondense.
 	transitionSessionTurnEnd(sessionID)
 
-	// Trigger wingman review if enabled and files changed
-	if totalChanges > 0 && settings.IsWingmanEnabled() {
+	// Trigger wingman review for auto-commit strategy (commit already happened
+	// in SaveChanges). Manual-commit triggers wingman from the git post-commit hook
+	// instead, since the user commits manually.
+	if totalChanges > 0 && strat.Name() == strategy.StrategyNameAutoCommit && settings.IsWingmanEnabled() {
 		triggerWingmanReview(WingmanPayload{
 			SessionID:     sessionID,
 			RepoRoot:      repoRoot,

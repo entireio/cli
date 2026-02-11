@@ -163,6 +163,10 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 				g.logCompleted(hookErr)
 			}
 
+			// Trigger wingman review after commit (manual-commit strategy).
+			// Auto-commit triggers from the stop hook instead.
+			triggerWingmanFromCommit()
+
 			return nil
 		},
 	}

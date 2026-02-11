@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/spf13/cobra"
 )
 
@@ -177,6 +178,12 @@ func newWingmanStatusCmd() *cobra.Command {
 
 // triggerWingmanReview checks preconditions and spawns the detached review process.
 func triggerWingmanReview(payload WingmanPayload) {
+	// Prevent infinite recursion: if we're inside a wingman auto-apply,
+	// don't trigger another review. The env var is set by triggerAutoApply.
+	if os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
+		return
+	}
+
 	logCtx := logging.WithComponent(context.Background(), "wingman")
 	repoRoot := payload.RepoRoot
 
@@ -252,6 +259,79 @@ func triggerWingmanReview(payload WingmanPayload) {
 		slog.Int("file_count", totalFiles),
 	)
 	fmt.Fprintf(os.Stderr, "[wingman] Review starting in background...\n")
+}
+
+// triggerWingmanFromCommit builds a wingman payload from the HEAD commit and
+// triggers a review. Used by the git post-commit hook for manual-commit strategy
+// where files are committed by the user (not by SaveChanges).
+func triggerWingmanFromCommit() {
+	// Prevent infinite recursion: skip if inside wingman auto-apply
+	if os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
+		return
+	}
+	if !settings.IsWingmanEnabled() {
+		return
+	}
+
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		return
+	}
+
+	head := resolveHEAD(repoRoot)
+	if head == "" {
+		return
+	}
+
+	// Get changed files from the commit
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	//nolint:gosec // G204: head is from git rev-parse, not user input
+	cmd := exec.CommandContext(ctx, "git", "diff-tree", "--no-commit-id", "--name-status", "-r", head)
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return
+	}
+
+	var modified, newFiles, deleted []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if len(line) < 3 {
+			continue
+		}
+		status := line[0]
+		file := strings.TrimSpace(line[1:])
+		switch status {
+		case 'M':
+			modified = append(modified, file)
+		case 'A':
+			newFiles = append(newFiles, file)
+		case 'D':
+			deleted = append(deleted, file)
+		}
+	}
+
+	if len(modified)+len(newFiles)+len(deleted) == 0 {
+		return
+	}
+
+	// Get commit message
+	//nolint:gosec // G204: head is from git rev-parse, not user input
+	msgCmd := exec.CommandContext(ctx, "git", "log", "-1", "--format=%B", head)
+	msgCmd.Dir = repoRoot
+	msgOut, _ := msgCmd.Output() //nolint:errcheck // best-effort commit message
+	commitMessage := strings.TrimSpace(string(msgOut))
+
+	sessionID := strategy.FindMostRecentSession()
+
+	triggerWingmanReview(WingmanPayload{
+		SessionID:     sessionID,
+		RepoRoot:      repoRoot,
+		ModifiedFiles: modified,
+		NewFiles:      newFiles,
+		DeletedFiles:  deleted,
+		CommitMessage: commitMessage,
+	})
 }
 
 // staleLockThreshold is how old a lock file can be before we consider it stale

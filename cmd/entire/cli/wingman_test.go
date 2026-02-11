@@ -114,7 +114,10 @@ func TestBuildReviewPrompt_IncludesAllSections(t *testing.T) {
 +    }
 `
 
-	result := buildReviewPrompt(prompts, fileList, diff)
+	commitMsg := "Fix empty user login crash"
+	sessionCtx := "## Summary\nFixed authentication bug for empty usernames"
+
+	result := buildReviewPrompt(prompts, commitMsg, sessionCtx, "test-session-456", fileList, diff)
 
 	if !strings.Contains(result, "Fix the authentication bug") {
 		t.Error("prompt should contain user prompt")
@@ -125,18 +128,39 @@ func TestBuildReviewPrompt_IncludesAllSections(t *testing.T) {
 	if !strings.Contains(result, "diff --git") {
 		t.Error("prompt should contain diff")
 	}
-	if !strings.Contains(result, "senior code reviewer") {
+	if !strings.Contains(result, "intent-aware review") {
 		t.Error("prompt should contain reviewer instruction")
+	}
+	if !strings.Contains(result, "Fix empty user login crash") {
+		t.Error("prompt should contain commit message")
+	}
+	if !strings.Contains(result, "Fixed authentication bug") {
+		t.Error("prompt should contain session context")
+	}
+	if !strings.Contains(result, ".entire/metadata/test-session-456/full.jsonl") {
+		t.Error("prompt should contain checkpoint transcript path")
+	}
+	if !strings.Contains(result, ".entire/metadata/test-session-456/prompt.txt") {
+		t.Error("prompt should contain checkpoint prompt path")
+	}
+	if !strings.Contains(result, ".entire/metadata/test-session-456/context.md") {
+		t.Error("prompt should contain checkpoint context path")
 	}
 }
 
 func TestBuildReviewPrompt_EmptyPrompts(t *testing.T) {
 	t.Parallel()
 
-	result := buildReviewPrompt(nil, "file.go (modified)", "some diff")
+	result := buildReviewPrompt(nil, "", "", "", "file.go (modified)", "some diff")
 
 	if !strings.Contains(result, "(no prompts captured)") {
 		t.Error("should show no-prompts placeholder for empty prompts")
+	}
+	if !strings.Contains(result, "(no commit message)") {
+		t.Error("should show placeholder for empty commit message")
+	}
+	if !strings.Contains(result, "(no session context available)") {
+		t.Error("should show placeholder for empty session context")
 	}
 }
 
@@ -146,7 +170,7 @@ func TestBuildReviewPrompt_TruncatesLargeDiff(t *testing.T) {
 	// Create a diff larger than maxDiffSize
 	largeDiff := strings.Repeat("x", maxDiffSize+1000)
 
-	result := buildReviewPrompt([]string{"test"}, "file.go", largeDiff)
+	result := buildReviewPrompt([]string{"test"}, "", "", "test-session", "file.go", largeDiff)
 
 	if !strings.Contains(result, "diff truncated at 100KB") {
 		t.Error("should truncate large diffs")

@@ -30,6 +30,9 @@ type EntireSettings struct {
 	// Strategy is the name of the git strategy to use
 	Strategy string `json:"strategy"`
 
+	// Agent is the name of the agent (e.g., "claude-code", "amp")
+	Agent string `json:"agent,omitempty"`
+
 	// Enabled indicates whether Entire is active. When false, CLI commands
 	// show a disabled message and hooks exit silently. Defaults to true.
 	Enabled bool `json:"enabled"`
@@ -148,6 +151,17 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		}
 		if s != "" {
 			settings.Strategy = s
+		}
+	}
+
+	// Override agent if present and non-empty
+	if agentRaw, ok := raw["agent"]; ok {
+		var a string
+		if err := json.Unmarshal(agentRaw, &a); err != nil {
+			return fmt.Errorf("parsing agent field: %w", err)
+		}
+		if a != "" {
+			settings.Agent = a
 		}
 	}
 
