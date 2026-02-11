@@ -1,0 +1,35 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "537a3bbe9ff5",
+  "session_id": "a09df891-c504-4318-a9ac-3685982583e6",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T12:04:52.433953Z",
+  "branch": "feature/agent-installation-validation",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "cmd/entire/cli/agent/claudecode/claude.go",
+    "cmd/entire/cli/agent/claudecode/claude_test.go",
+    "cmd/entire/cli/agent/geminicli/gemini.go",
+    "cmd/entire/cli/agent/geminicli/gemini_test.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "d1528182-d278-4b36-9274-e239e2a7b2a9",
+  "token_usage": {
+    "input_tokens": 2106,
+    "cache_creation_tokens": 231618,
+    "cache_read_tokens": 1831477,
+    "output_tokens": 62,
+    "api_call_count": 29
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T12:04:52.206586Z",
+    "agent_lines": 172,
+    "human_added": 490,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 662,
+    "agent_percentage": 25.981873111782477
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/a09df891-c504-4318-a9ac-3685982583e6.jsonl"
+}
