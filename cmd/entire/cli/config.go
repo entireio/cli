@@ -13,6 +13,8 @@ import (
 
 	// Import claudecode to register the agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	// Import opencode to register the agent
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 )
 
 // Package-level aliases to avoid shadowing the settings package with local variables named "settings".
