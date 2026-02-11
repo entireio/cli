@@ -1270,12 +1270,18 @@ func outputWithPager(w io.Writer, content string) {
 
 		// Use pager if content exceeds terminal height
 		if lineCount > height-2 {
-			pager := os.Getenv("PAGER")
-			if pager == "" {
-				pager = "less"
+			// Use a safe default pager instead of environment variable to prevent command injection
+			pagerCmd := "less"
+			
+			// Validate and find the pager executable in PATH
+			pagerPath, err := exec.LookPath(pagerCmd)
+			if err != nil {
+				// Fallback to direct output if pager not found
+				fmt.Fprint(w, content)
+				return
 			}
 
-			cmd := exec.CommandContext(context.Background(), pager) //nolint:gosec // pager from env is expected
+			cmd := exec.CommandContext(context.Background(), pagerPath)
 			cmd.Stdin = strings.NewReader(content)
 			cmd.Stdout = f
 			cmd.Stderr = os.Stderr
