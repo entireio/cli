@@ -277,59 +277,6 @@ func ComputeFileChanges(preUntrackedFiles []string) (newFiles, deletedFiles []st
 	return newFiles, deletedFiles, nil
 }
 
-// ComputeNewFiles compares current untracked files with pre-prompt state
-// to find files that were created during the session.
-//
-// Deprecated: Use ComputeFileChanges instead for better performance.
-func ComputeNewFiles(preState *PrePromptState) ([]string, error) {
-	if preState == nil {
-		return nil, nil
-	}
-
-	currentUntracked, err := getUntrackedFilesForState()
-	if err != nil {
-		return nil, err
-	}
-
-	return findNewUntrackedFiles(currentUntracked, preState.UntrackedFiles), nil
-}
-
-// ComputeDeletedFiles returns files that were deleted during the session
-// (tracked files that no longer exist).
-//
-// Deprecated: Use ComputeFileChanges instead for better performance.
-func ComputeDeletedFiles() ([]string, error) {
-	repo, err := openRepository()
-	if err != nil {
-		return nil, err
-	}
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return nil, err //nolint:wrapcheck // already present in codebase
-	}
-
-	status, err := worktree.Status()
-	if err != nil {
-		return nil, err //nolint:wrapcheck // already present in codebase
-	}
-
-	var deletedFiles []string
-	for file, st := range status {
-		// Skip .entire directory
-		if paths.IsInfrastructurePath(file) {
-			continue
-		}
-
-		// Find deleted files that haven't been staged yet
-		if st.Worktree == git.Deleted && st.Staging != git.Deleted {
-			deletedFiles = append(deletedFiles, file)
-		}
-	}
-
-	return deletedFiles, nil
-}
-
 // FilterAndNormalizePaths converts absolute paths to relative and filters out
 // infrastructure paths and paths outside the repo.
 func FilterAndNormalizePaths(files []string, cwd string) []string {
