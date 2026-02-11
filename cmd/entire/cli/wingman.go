@@ -43,7 +43,7 @@ type WingmanState struct {
 	ReviewApplied bool      `json:"review_applied"`
 }
 
-//go:embed wingman_apply.md
+//go:embed wingman_instruction.md
 var wingmanApplyInstruction string
 
 const (
