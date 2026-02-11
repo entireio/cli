@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "534758833def",
+  "session_id": "5a69ca08-eee5-4626-ac94-c23483e262cb",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T14:04:32.548393Z",
+  "branch": "rwr/fix-empty-repo-reference-not-found",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_geminicli_handlers.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "a96a7548-194f-4c60-a3b0-0941de722cd3",
+  "checkpoint_transcript_start": 239,
+  "transcript_lines_at_start": 239,
+  "token_usage": {
+    "input_tokens": 28,
+    "cache_creation_tokens": 12903,
+    "cache_read_tokens": 2282621,
+    "output_tokens": 865,
+    "api_call_count": 16
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T14:04:32.290334Z",
+    "agent_lines": 5,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 5,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-robin-Developer-cli/5a69ca08-eee5-4626-ac94-c23483e262cb.jsonl"
+}
