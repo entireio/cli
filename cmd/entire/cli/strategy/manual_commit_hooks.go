@@ -1483,6 +1483,8 @@ func (s *ManualCommitStrategy) HandleTurnEnd(state *SessionState, actions []sess
 
 // handleTurnEndCondense performs deferred condensation at turn end.
 func (s *ManualCommitStrategy) handleTurnEndCondense(logCtx context.Context, state *SessionState) {
+	defer s.flushPendingPush(logCtx, state)
+
 	repo, err := OpenRepository()
 	if err != nil {
 		logging.Warn(logCtx, "turn-end condense: failed to open repo",
@@ -1535,19 +1537,6 @@ func (s *ManualCommitStrategy) handleTurnEndCondense(logCtx context.Context, sta
 	shadowBranchesToDelete := map[string]struct{}{}
 
 	s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete)
-
-	// Push condensed checkpoint data if a push happened while condensation was deferred
-	if state.PendingPushRemote != "" {
-		remote := state.PendingPushRemote
-		state.PendingPushRemote = ""
-		logging.Info(logCtx, "turn-end: pushing condensed checkpoint data",
-			slog.String("remote", remote))
-		if pushErr := pushSessionsBranchCommon(remote, paths.MetadataBranchName); pushErr != nil {
-			logging.Warn(logCtx, "turn-end: failed to push condensed checkpoint data",
-				slog.String("remote", remote),
-				slog.String("error", pushErr.Error()))
-		}
-	}
 
 	// Delete shadow branches after condensation — but only if no other active
 	// sessions share the branch (same safety check PostCommit uses).

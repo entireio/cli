@@ -164,6 +164,58 @@ func TestHandleTurnEnd_PushAfterCondensation(t *testing.T) {
 		"StepCount should be reset after condensation")
 }
 
+// TestHandleTurnEnd_PushClearedWhenNoNewContent verifies that PendingPushRemote
+// is cleared even when handleTurnEndCondense returns early due to no new
+// transcript content (the !hasNew path at the early return).
+func TestHandleTurnEnd_PushClearedWhenNoNewContent(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-turnend-push-no-content"
+
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	// Simulate agent mid-turn
+	state, err := s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseActive
+	require.NoError(t, s.saveSessionState(state))
+
+	// Agent commits → PostCommit transitions ACTIVE → ACTIVE_COMMITTED
+	commitWithCheckpointTrailer(t, repo, dir, "d4e5f6a1b2c3")
+	err = s.PostCommit()
+	require.NoError(t, err)
+
+	state, err = s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	require.Equal(t, session.PhaseActiveCommitted, state.Phase)
+
+	// Record pending push remote
+	s.recordPendingPushRemote("origin")
+	state, err = s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	require.Equal(t, "origin", state.PendingPushRemote)
+
+	// Set CheckpointTranscriptStart = 2 so sessionHasNewContent returns false
+	// (transcript has exactly 2 lines from setupSessionWithCheckpoint)
+	state.CheckpointTranscriptStart = 2
+	require.NoError(t, s.saveSessionState(state))
+
+	// Turn ends → HandleTurnEnd should still clear PendingPushRemote
+	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
+	remaining := session.ApplyCommonActions(state, result)
+
+	err = s.HandleTurnEnd(state, remaining)
+	require.NoError(t, err)
+
+	assert.Empty(t, state.PendingPushRemote,
+		"PendingPushRemote should be cleared even when no new content to condense")
+}
+
 // TestInitializeSession_ClearsPendingPushRemote verifies that PendingPushRemote
 // is cleared on new prompt start (handles Ctrl-C recovery case).
 func TestInitializeSession_ClearsPendingPushRemote(t *testing.T) {

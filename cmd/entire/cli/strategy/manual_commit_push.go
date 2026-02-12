@@ -20,6 +20,23 @@ func (s *ManualCommitStrategy) PrePush(remote string) error {
 	return pushSessionsBranchCommon(remote, paths.MetadataBranchName)
 }
 
+// flushPendingPush pushes the metadata branch if a push was recorded while
+// condensation was deferred, then clears PendingPushRemote. Intended to be
+// called via defer so that all exit paths in handleTurnEndCondense clear the
+// field.
+func (s *ManualCommitStrategy) flushPendingPush(logCtx context.Context, state *SessionState) {
+	if state.PendingPushRemote == "" {
+		return
+	}
+	remote := state.PendingPushRemote
+	state.PendingPushRemote = ""
+	logging.Info(logCtx, "turn-end: pushing checkpoint data", slog.String("remote", remote))
+	if pushErr := pushSessionsBranchCommon(remote, paths.MetadataBranchName); pushErr != nil {
+		logging.Warn(logCtx, "turn-end: failed to push checkpoint data",
+			slog.String("remote", remote), slog.String("error", pushErr.Error()))
+	}
+}
+
 // recordPendingPushRemote records the push remote on sessions that have deferred
 // condensation (ACTIVE_COMMITTED with PendingCheckpointID). When condensation
 // completes at turn-end, the metadata branch is pushed to this remote.
