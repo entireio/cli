@@ -39,13 +39,14 @@ func spawnDetachedWingmanReview(repoRoot, payloadPath string) {
 	// Redirect stderr to a log file for debugging the background process.
 	// This catches panics, errors, and all wingmanLog() output.
 	cmd.Stdout = io.Discard
+	var logFile *os.File
 	logDir := filepath.Join(repoRoot, ".entire", "logs")
 	if mkErr := os.MkdirAll(logDir, 0o750); mkErr == nil {
 		//nolint:gosec // G304: path is constructed from repoRoot + constants
 		if f, openErr := os.OpenFile(filepath.Join(logDir, "wingman.log"),
 			os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); openErr == nil {
+			logFile = f
 			cmd.Stderr = f
-			// f stays open in the child process; the OS closes it on exit
 		} else {
 			cmd.Stderr = io.Discard
 		}
@@ -55,6 +56,9 @@ func spawnDetachedWingmanReview(repoRoot, payloadPath string) {
 
 	// Start the process (non-blocking)
 	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
 		return
 	}
 
@@ -83,11 +87,13 @@ func spawnDetachedWingmanApply(repoRoot string) {
 	cmd.Env = os.Environ()
 
 	cmd.Stdout = io.Discard
+	var applyLogFile *os.File
 	logDir := filepath.Join(repoRoot, ".entire", "logs")
 	if mkErr := os.MkdirAll(logDir, 0o750); mkErr == nil {
 		//nolint:gosec // G304: path is constructed from repoRoot + constants
 		if f, openErr := os.OpenFile(filepath.Join(logDir, "wingman.log"),
 			os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); openErr == nil {
+			applyLogFile = f
 			cmd.Stderr = f
 		} else {
 			cmd.Stderr = io.Discard
@@ -97,6 +103,9 @@ func spawnDetachedWingmanApply(repoRoot string) {
 	}
 
 	if err := cmd.Start(); err != nil {
+		if applyLogFile != nil {
+			_ = applyLogFile.Close()
+		}
 		return
 	}
 

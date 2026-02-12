@@ -383,7 +383,9 @@ func acquireWingmanLock(lockPath, sessionID string) bool {
 
 // resolveHEAD returns the current HEAD commit hash, or empty string on error.
 func resolveHEAD(repoRoot string) string {
-	cmd := exec.CommandContext(context.Background(), "git", "rev-parse", "HEAD")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
 	cmd.Dir = repoRoot
 	out, err := cmd.Output()
 	if err != nil {
