@@ -9,3 +9,8 @@ package cli
 func spawnDetachedWingmanReview(_, _ string) {
 	// No-op: detached subprocess spawning not implemented for this platform
 }
+
+// spawnDetachedWingmanApply is a no-op on non-Unix platforms.
+func spawnDetachedWingmanApply(_ string) {
+	// No-op: detached subprocess spawning not implemented for this platform
+}

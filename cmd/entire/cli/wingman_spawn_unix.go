@@ -62,3 +62,44 @@ func spawnDetachedWingmanReview(repoRoot, payloadPath string) {
 	//nolint:errcheck // Best effort - process should continue regardless
 	_ = cmd.Process.Release()
 }
+
+// spawnDetachedWingmanApply spawns a detached subprocess to auto-apply the
+// pending REVIEW.md via claude --continue. Called from the stop hook when a
+// review is pending after the agent turn ends.
+func spawnDetachedWingmanApply(repoRoot string) {
+	executable, err := os.Executable()
+	if err != nil {
+		return
+	}
+
+	//nolint:gosec // G204: repoRoot is from paths.RepoRoot(), not user input
+	cmd := exec.CommandContext(context.Background(), executable, "wingman", "__apply", repoRoot)
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	cmd.Dir = "/"
+	cmd.Env = os.Environ()
+
+	cmd.Stdout = io.Discard
+	logDir := filepath.Join(repoRoot, ".entire", "logs")
+	if mkErr := os.MkdirAll(logDir, 0o750); mkErr == nil {
+		//nolint:gosec // G304: path is constructed from repoRoot + constants
+		if f, openErr := os.OpenFile(filepath.Join(logDir, "wingman.log"),
+			os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); openErr == nil {
+			cmd.Stderr = f
+		} else {
+			cmd.Stderr = io.Discard
+		}
+	} else {
+		cmd.Stderr = io.Discard
+	}
+
+	if err := cmd.Start(); err != nil {
+		return
+	}
+
+	//nolint:errcheck // Best effort - process should continue regardless
+	_ = cmd.Process.Release()
+}

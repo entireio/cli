@@ -76,15 +76,22 @@ func captureInitialState() error {
 		return err
 	}
 
-	// If a wingman review is pending, inject instruction into the agent's context
-	// so it automatically reads and applies the suggestions.
+	// If a wingman review is pending for the CURRENT session and auto-apply
+	// hasn't been attempted yet, inject instruction as a belt-and-suspenders
+	// backup. The primary delivery mechanism is the stop hook auto-apply.
 	if settings.IsWingmanEnabled() {
 		repoRoot, rootErr := paths.RepoRoot()
 		if rootErr == nil {
 			if _, statErr := os.Stat(filepath.Join(repoRoot, wingmanReviewFile)); statErr == nil {
-				fmt.Fprintf(os.Stderr, "[wingman] Review available: .entire/REVIEW.md\n")
-				if err := outputHookResponse(wingmanApplyInstruction); err != nil {
-					fmt.Fprintf(os.Stderr, "[wingman] Warning: failed to inject review instruction: %v\n", err)
+				wingmanState := loadWingmanStateDirect(repoRoot)
+				shouldInject := wingmanState != nil &&
+					wingmanState.SessionID == hookData.sessionID &&
+					wingmanState.ApplyAttemptedAt == nil
+				if shouldInject {
+					fmt.Fprintf(os.Stderr, "[wingman] Review available: .entire/REVIEW.md\n")
+					if err := outputHookResponse(wingmanApplyInstruction); err != nil {
+						fmt.Fprintf(os.Stderr, "[wingman] Warning: failed to inject review instruction: %v\n", err)
+					}
 				}
 			}
 		}
@@ -413,6 +420,20 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 			Prompts:       allPrompts,
 			CommitMessage: commitMessage,
 		})
+	}
+
+	// Auto-apply pending wingman review: the stop hook fires when the agent turn
+	// ends (ACTIVE → IDLE), which is the natural safe moment to trigger --continue.
+	// This is the PRIMARY delivery mechanism for wingman reviews.
+	if settings.IsWingmanEnabled() && os.Getenv("ENTIRE_WINGMAN_APPLY") == "" {
+		reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
+		if _, statErr := os.Stat(reviewPath); statErr == nil {
+			wingmanState := loadWingmanStateDirect(repoRoot)
+			if wingmanState == nil || wingmanState.ApplyAttemptedAt == nil {
+				fmt.Fprintf(os.Stderr, "[wingman] Pending review found, spawning auto-apply\n")
+				spawnDetachedWingmanApply(repoRoot)
+			}
+		}
 	}
 
 	// Clean up pre-prompt state (CLI responsibility)

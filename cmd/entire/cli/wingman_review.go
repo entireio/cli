@@ -29,10 +29,6 @@ const (
 	// letting the agent turn fully settle.
 	wingmanInitialDelay = 10 * time.Second
 
-	// wingmanApplyDelay is how long to wait after writing REVIEW.md
-	// before attempting to auto-apply.
-	wingmanApplyDelay = 30 * time.Second
-
 	// wingmanReviewModel is the Claude model used for reviews.
 	wingmanReviewModel = "sonnet"
 
@@ -178,20 +174,26 @@ func runWingmanReview(payloadPath string) error {
 	})
 	wingmanLog("dedup state saved")
 
-	// Auto-apply phase: wait then check if session is idle
-	wingmanLog("waiting %s before auto-apply check", wingmanApplyDelay)
-	time.Sleep(wingmanApplyDelay)
-
+	// Check if session is idle right now (rare — user usually starts typing
+	// during the 10s settle + review time). If idle, apply immediately.
+	// Otherwise, the stop hook will handle auto-apply when the current turn ends.
 	idle := isSessionIdle(payload.SessionID)
 	wingmanLog("session idle check: idle=%v", idle)
 
 	if !idle {
-		wingmanLog("session is active, leaving REVIEW.md for notification")
-		return nil // User is active, leave REVIEW.md for notification
+		wingmanLog("session is active, stop hook will handle auto-apply when turn ends")
+		return nil
 	}
 
-	// Trigger auto-apply via claude --continue
-	wingmanLog("triggering auto-apply via claude --continue")
+	// Mark apply as attempted before triggering (retry prevention)
+	now := time.Now()
+	state := loadWingmanStateDirect(repoRoot)
+	if state != nil {
+		state.ApplyAttemptedAt = &now
+		saveWingmanStateDirect(repoRoot, state)
+	}
+
+	wingmanLog("triggering auto-apply via claude --continue (session idle)")
 	applyStart := time.Now()
 	if err := triggerAutoApply(repoRoot); err != nil {
 		wingmanLog("ERROR auto-apply failed after %s: %v", time.Since(applyStart).Round(time.Millisecond), err)
@@ -231,7 +233,7 @@ func computeDiff(repoRoot string, _ string) (string, error) {
 	if strings.TrimSpace(diff) == "" {
 		diff, err = gitDiff(ctx, repoRoot, "HEAD~1", "HEAD")
 		if err != nil {
-			return "", nil //nolint:nilerr // no diff is not an error
+			return "", nil
 		}
 	}
 
@@ -242,7 +244,7 @@ func computeDiff(repoRoot string, _ string) (string, error) {
 // branch (tries main, then master). Returns empty string if not found.
 func findMergeBase(ctx context.Context, repoRoot string) string {
 	for _, branch := range []string{"main", "master"} {
-		cmd := exec.CommandContext(ctx, "git", "merge-base", branch, "HEAD")
+		cmd := exec.CommandContext(ctx, "git", "merge-base", branch, "HEAD") //nolint:gosec // branch is from hardcoded slice
 		cmd.Dir = repoRoot
 		out, err := cmd.Output()
 		if err == nil {
@@ -338,6 +340,51 @@ func isSessionIdle(sessionID string) bool {
 		return false
 	}
 	return state.Phase == session.PhaseIdle
+}
+
+// runWingmanApply is the entrypoint for the __apply subcommand, spawned by the
+// stop hook when a pending REVIEW.md is detected. It re-checks preconditions
+// and triggers claude --continue to apply the review.
+func runWingmanApply(repoRoot string) error {
+	wingmanLog("apply process started (pid=%d)", os.Getpid())
+
+	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
+	if !fileExists(reviewPath) {
+		wingmanLog("no REVIEW.md found, nothing to apply")
+		return nil
+	}
+
+	// Retry prevention: check if apply was already attempted for this review
+	state := loadWingmanStateDirect(repoRoot)
+	if state != nil && state.ApplyAttemptedAt != nil {
+		wingmanLog("apply already attempted at %s, skipping", state.ApplyAttemptedAt.Format(time.RFC3339))
+		return nil
+	}
+
+	// Re-check session is still idle (user may have typed during spawn delay)
+	if state != nil && state.SessionID != "" {
+		if !isSessionIdle(state.SessionID) {
+			wingmanLog("session became active during spawn, aborting (next stop hook will retry)")
+			return nil
+		}
+	}
+
+	// Mark apply as attempted BEFORE triggering
+	if state != nil {
+		now := time.Now()
+		state.ApplyAttemptedAt = &now
+		saveWingmanStateDirect(repoRoot, state)
+	}
+
+	wingmanLog("triggering auto-apply via claude --continue")
+	applyStart := time.Now()
+	if err := triggerAutoApply(repoRoot); err != nil {
+		wingmanLog("ERROR auto-apply failed after %s: %v", time.Since(applyStart).Round(time.Millisecond), err)
+		return fmt.Errorf("failed to trigger auto-apply: %w", err)
+	}
+	wingmanLog("auto-apply completed in %s", time.Since(applyStart).Round(time.Millisecond))
+
+	return nil
 }
 
 // triggerAutoApply spawns claude --continue to apply the review suggestions.

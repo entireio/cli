@@ -37,10 +37,11 @@ type WingmanPayload struct {
 
 // WingmanState tracks deduplication and review state.
 type WingmanState struct {
-	SessionID     string    `json:"session_id"`
-	FilesHash     string    `json:"files_hash"`
-	ReviewedAt    time.Time `json:"reviewed_at"`
-	ReviewApplied bool      `json:"review_applied"`
+	SessionID        string     `json:"session_id"`
+	FilesHash        string     `json:"files_hash"`
+	ReviewedAt       time.Time  `json:"reviewed_at"`
+	ReviewApplied    bool       `json:"review_applied"`
+	ApplyAttemptedAt *time.Time `json:"apply_attempted_at,omitempty"`
 }
 
 //go:embed wingman_instruction.md
@@ -50,6 +51,10 @@ const (
 	wingmanStateFile  = ".entire/wingman-state.json"
 	wingmanReviewFile = ".entire/REVIEW.md"
 	wingmanLockFile   = ".entire/wingman.lock"
+
+	// wingmanStaleReviewTTL is the maximum age of a pending REVIEW.md before
+	// it's considered stale and automatically cleaned up.
+	wingmanStaleReviewTTL = 1 * time.Hour
 )
 
 func newWingmanCmd() *cobra.Command {
@@ -70,6 +75,7 @@ to apply them.`,
 	cmd.AddCommand(newWingmanDisableCmd())
 	cmd.AddCommand(newWingmanStatusCmd())
 	cmd.AddCommand(newWingmanReviewCmd())
+	cmd.AddCommand(newWingmanApplyCmd())
 
 	return cmd
 }
@@ -197,10 +203,9 @@ func triggerWingmanReview(payload WingmanPayload) {
 		slog.Int("file_count", totalFiles),
 	)
 
-	// Check if a pending REVIEW.md already exists
-	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
-	if _, err := os.Stat(reviewPath); err == nil {
-		logging.Info(logCtx, "wingman skipped: pending review exists")
+	// Check if a pending REVIEW.md already exists for the current session
+	if shouldSkipPendingReview(repoRoot, payload.SessionID) {
+		logging.Info(logCtx, "wingman skipped: pending review exists for current session")
 		fmt.Fprintf(os.Stderr, "[wingman] Pending review exists, skipping\n")
 		return
 	}
@@ -437,4 +442,66 @@ func saveWingmanState(state *WingmanState) error {
 		return fmt.Errorf("writing wingman state: %w", err)
 	}
 	return nil
+}
+
+// loadWingmanStateDirect reads the wingman state file directly from a known
+// path under repoRoot. Returns nil if the file doesn't exist or can't be parsed.
+func loadWingmanStateDirect(repoRoot string) *WingmanState {
+	statePath := filepath.Join(repoRoot, wingmanStateFile)
+	data, err := os.ReadFile(statePath) //nolint:gosec // path is repo-relative constant
+	if err != nil {
+		return nil
+	}
+	var state WingmanState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil
+	}
+	return &state
+}
+
+// newWingmanApplyCmd returns a hidden subcommand used by the stop hook to
+// apply a pending REVIEW.md via claude --continue in a detached subprocess.
+func newWingmanApplyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "__apply",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runWingmanApply(args[0])
+		},
+	}
+}
+
+// shouldSkipPendingReview checks whether a pending REVIEW.md should prevent
+// a new review from being triggered. It cleans up stale/orphaned reviews.
+//
+// Returns true only when REVIEW.md exists AND belongs to the current session
+// AND is younger than wingmanStaleReviewTTL.
+func shouldSkipPendingReview(repoRoot, currentSessionID string) bool {
+	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
+	if _, err := os.Stat(reviewPath); err != nil {
+		return false // No REVIEW.md, don't skip
+	}
+
+	// REVIEW.md exists — check state to determine if it's current or stale
+	state := loadWingmanStateDirect(repoRoot)
+	if state == nil {
+		// Orphan: REVIEW.md without state file — clean up
+		_ = os.Remove(reviewPath)
+		return false
+	}
+
+	if state.SessionID != currentSessionID {
+		// Different session — stale review, clean up
+		_ = os.Remove(reviewPath)
+		return false
+	}
+
+	if time.Since(state.ReviewedAt) > wingmanStaleReviewTTL {
+		// Same session but too old — clean up
+		_ = os.Remove(reviewPath)
+		return false
+	}
+
+	return true // Current session, fresh review — skip
 }

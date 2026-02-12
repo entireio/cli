@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestComputeFilesHash_Deterministic(t *testing.T) {
@@ -304,5 +305,212 @@ func TestIsWingmanEnabled_Settings(t *testing.T) {
 				t.Errorf("IsWingmanEnabled() = %v, want %v", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestWingmanState_ApplyAttemptedAt_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().Truncate(time.Second)
+	state := &WingmanState{
+		SessionID:        "sess-1",
+		FilesHash:        "hash1",
+		ReviewedAt:       now,
+		ReviewApplied:    false,
+		ApplyAttemptedAt: &now,
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	var decoded WingmanState
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if decoded.ApplyAttemptedAt == nil {
+		t.Fatal("ApplyAttemptedAt should not be nil after round-trip")
+	}
+	if !decoded.ApplyAttemptedAt.Truncate(time.Second).Equal(now) {
+		t.Errorf("ApplyAttemptedAt: got %v, want %v", decoded.ApplyAttemptedAt, now)
+	}
+}
+
+func TestWingmanState_ApplyAttemptedAt_OmitEmpty(t *testing.T) {
+	t.Parallel()
+
+	state := &WingmanState{
+		SessionID: "sess-1",
+		FilesHash: "hash1",
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	if strings.Contains(string(data), "apply_attempted_at") {
+		t.Error("ApplyAttemptedAt should be omitted when nil")
+	}
+}
+
+func TestLoadWingmanStateDirect(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing file returns nil", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		got := loadWingmanStateDirect(tmpDir)
+		if got != nil {
+			t.Errorf("expected nil for missing file, got %+v", got)
+		}
+	})
+
+	t.Run("valid file returns state", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		entireDir := filepath.Join(tmpDir, ".entire")
+		if err := os.MkdirAll(entireDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		now := time.Now()
+		stateJSON := `{"session_id":"sess-1","files_hash":"hash1","reviewed_at":"` + now.Format(time.RFC3339Nano) + `","review_applied":false}`
+		if err := os.WriteFile(filepath.Join(entireDir, "wingman-state.json"), []byte(stateJSON), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got := loadWingmanStateDirect(tmpDir)
+		if got == nil {
+			t.Fatal("expected non-nil state")
+		}
+		if got.SessionID != "sess-1" {
+			t.Errorf("SessionID: got %q, want %q", got.SessionID, "sess-1")
+		}
+	})
+}
+
+func TestShouldSkipPendingReview_NoReviewFile(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if shouldSkipPendingReview(tmpDir, "sess-1") {
+		t.Error("should not skip when no REVIEW.md exists")
+	}
+}
+
+func TestShouldSkipPendingReview_SameSession(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write REVIEW.md
+	if err := os.WriteFile(filepath.Join(entireDir, "REVIEW.md"), []byte("review"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write state with same session
+	saveWingmanStateDirect(tmpDir, &WingmanState{
+		SessionID:  "sess-1",
+		FilesHash:  "hash1",
+		ReviewedAt: time.Now(),
+	})
+
+	if !shouldSkipPendingReview(tmpDir, "sess-1") {
+		t.Error("should skip when same session has fresh review")
+	}
+}
+
+func TestShouldSkipPendingReview_DifferentSession(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewPath := filepath.Join(entireDir, "REVIEW.md")
+	if err := os.WriteFile(reviewPath, []byte("stale review"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	saveWingmanStateDirect(tmpDir, &WingmanState{
+		SessionID:  "old-session",
+		FilesHash:  "hash1",
+		ReviewedAt: time.Now(),
+	})
+
+	if shouldSkipPendingReview(tmpDir, "new-session") {
+		t.Error("should not skip when review is from different session")
+	}
+
+	// REVIEW.md should have been cleaned up
+	if _, err := os.Stat(reviewPath); err == nil {
+		t.Error("stale REVIEW.md should have been deleted")
+	}
+}
+
+func TestShouldSkipPendingReview_StaleTTL(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewPath := filepath.Join(entireDir, "REVIEW.md")
+	if err := os.WriteFile(reviewPath, []byte("old review"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// State with same session but old ReviewedAt
+	saveWingmanStateDirect(tmpDir, &WingmanState{
+		SessionID:  "sess-1",
+		FilesHash:  "hash1",
+		ReviewedAt: time.Now().Add(-2 * time.Hour), // 2 hours old
+	})
+
+	if shouldSkipPendingReview(tmpDir, "sess-1") {
+		t.Error("should not skip when review is older than TTL")
+	}
+
+	if _, err := os.Stat(reviewPath); err == nil {
+		t.Error("stale REVIEW.md should have been deleted")
+	}
+}
+
+func TestShouldSkipPendingReview_OrphanNoState(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewPath := filepath.Join(entireDir, "REVIEW.md")
+	if err := os.WriteFile(reviewPath, []byte("orphan review"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No state file
+	if shouldSkipPendingReview(tmpDir, "sess-1") {
+		t.Error("should not skip when no state file exists (orphan)")
+	}
+
+	if _, err := os.Stat(reviewPath); err == nil {
+		t.Error("orphan REVIEW.md should have been deleted")
 	}
 }
