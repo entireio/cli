@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/redact"
 )
 
 // ErrSessionSkipped is returned when a session should be skipped (e.g., due to concurrent warning).
@@ -110,7 +111,7 @@ func setupGeminiSessionDir(ctx *geminiSessionContext) error {
 	}
 
 	logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
-	if err := copyFile(ctx.transcriptPath, logFile); err != nil {
+	if err := copyFileRedacted(ctx.transcriptPath, logFile); err != nil {
 		return fmt.Errorf("failed to copy transcript: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Copied transcript to: %s\n", ctx.sessionDir+"/"+paths.TranscriptFileName)
@@ -133,7 +134,7 @@ func extractGeminiMetadata(ctx *geminiSessionContext) error {
 	ctx.allPrompts = allPrompts
 
 	promptFile := filepath.Join(ctx.sessionDirAbs, paths.PromptFileName)
-	promptContent := strings.Join(allPrompts, "\n\n---\n\n")
+	promptContent := redact.String(strings.Join(allPrompts, "\n\n---\n\n"))
 	if err := os.WriteFile(promptFile, []byte(promptContent), 0o600); err != nil {
 		return fmt.Errorf("failed to write prompt file: %w", err)
 	}
@@ -146,7 +147,7 @@ func extractGeminiMetadata(ctx *geminiSessionContext) error {
 	ctx.summary = summary
 
 	summaryFile := filepath.Join(ctx.sessionDirAbs, paths.SummaryFileName)
-	if err := os.WriteFile(summaryFile, []byte(summary), 0o600); err != nil {
+	if err := os.WriteFile(summaryFile, []byte(redact.String(summary)), 0o600); err != nil {
 		return fmt.Errorf("failed to write summary file: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Extracted summary to: %s\n", ctx.sessionDir+"/"+paths.SummaryFileName)
@@ -323,7 +324,7 @@ func createContextFileForGemini(contextFile, commitMessage, sessionID string, pr
 		sb.WriteString("\n")
 	}
 
-	if err := os.WriteFile(contextFile, []byte(sb.String()), 0o600); err != nil {
+	if err := os.WriteFile(contextFile, []byte(redact.String(sb.String())), 0o600); err != nil {
 		return fmt.Errorf("failed to write context file: %w", err)
 	}
 	return nil

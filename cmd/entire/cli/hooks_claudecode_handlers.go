@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/redact"
 )
 
 // hookInputData contains parsed hook input and session identifiers.
@@ -136,9 +137,10 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 	// which guarantees all prior entries have been flushed.
 	waitForTranscriptFlush(transcriptPath, time.Now())
 
-	// Copy transcript
+	// Copy transcript with redaction to prevent secrets from leaking into session metadata.
+	// The committed storage path also redacts, but this ensures the filesystem copy is safe too.
 	logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
-	if err := copyFile(transcriptPath, logFile); err != nil {
+	if err := copyFileRedacted(transcriptPath, logFile); err != nil {
 		return fmt.Errorf("failed to copy transcript: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Copied transcript to: %s\n", sessionDir+"/"+paths.TranscriptFileName)
@@ -192,7 +194,7 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 	// Extract all prompts since last checkpoint for prompt file
 	allPrompts := extractUserPrompts(transcript)
 	promptFile := filepath.Join(sessionDirAbs, paths.PromptFileName)
-	promptContent := strings.Join(allPrompts, "\n\n---\n\n")
+	promptContent := redact.String(strings.Join(allPrompts, "\n\n---\n\n"))
 	if err := os.WriteFile(promptFile, []byte(promptContent), 0o600); err != nil {
 		return fmt.Errorf("failed to write prompt file: %w", err)
 	}
@@ -200,7 +202,7 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 
 	// Extract summary
 	summaryFile := filepath.Join(sessionDirAbs, paths.SummaryFileName)
-	summary := extractLastAssistantMessage(transcript)
+	summary := redact.String(extractLastAssistantMessage(transcript))
 	if err := os.WriteFile(summaryFile, []byte(summary), 0o600); err != nil {
 		return fmt.Errorf("failed to write summary file: %w", err)
 	}

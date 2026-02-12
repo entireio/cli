@@ -3,8 +3,10 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/huh"
+	"github.com/entireio/cli/redact"
 )
 
 // IsAccessibleMode returns true if accessibility mode should be enabled.
@@ -45,6 +47,36 @@ func copyFile(src, dst string) error {
 		return err //nolint:wrapcheck // already present in codebase
 	}
 	if err := os.WriteFile(dst, input, 0o600); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+	return nil
+}
+
+// copyFileRedacted copies a file from src to dst with secret redaction applied.
+// Uses format-aware redaction based on file extension:
+//   - .jsonl: JSONL-aware redaction (line-delimited JSON, e.g. Claude Code transcripts)
+//   - .json:  JSON-aware redaction (single JSON document, e.g. Gemini CLI transcripts)
+//   - other:  plain-text redaction
+func copyFileRedacted(src, dst string) error {
+	data, err := os.ReadFile(src) //nolint:gosec // Reading from controlled git metadata path
+	if err != nil {
+		return err //nolint:wrapcheck // already present in codebase
+	}
+	switch {
+	case strings.HasSuffix(src, ".jsonl"):
+		data, err = redact.JSONLBytes(data)
+		if err != nil {
+			return fmt.Errorf("failed to redact JSONL: %w", err)
+		}
+	case strings.HasSuffix(src, ".json"):
+		data, err = redact.JSONBytes(data)
+		if err != nil {
+			return fmt.Errorf("failed to redact JSON: %w", err)
+		}
+	default:
+		data = redact.Bytes(data)
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 	return nil

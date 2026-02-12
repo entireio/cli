@@ -49,6 +49,25 @@ type EntireSettings struct {
 	// Telemetry controls anonymous usage analytics.
 	// nil = not asked yet (show prompt), true = opted in, false = opted out
 	Telemetry *bool `json:"telemetry,omitempty"`
+
+	// Redaction controls secret detection behavior in session transcripts.
+	// nil = use defaults (pattern detection enabled, entropy threshold 4.5).
+	Redaction *RedactionSettings `json:"redaction,omitempty"`
+}
+
+// RedactionSettings controls how secrets are detected and redacted.
+type RedactionSettings struct {
+	// PatternDetection enables/disables gitleaks-based pattern matching.
+	// nil = enabled (default). Set to false to use entropy-only detection.
+	PatternDetection *bool `json:"pattern_detection,omitempty"`
+
+	// EntropyThreshold overrides the Shannon entropy threshold.
+	// nil = use default (4.5). Lower values catch more but risk false positives.
+	EntropyThreshold *float64 `json:"entropy_threshold,omitempty"`
+
+	// CustomRulesPath points to a custom gitleaks.toml file.
+	// Empty = use the embedded default rules.
+	CustomRulesPath string `json:"custom_rules_path,omitempty"`
 }
 
 // Load loads the Entire settings from .entire/settings.json,
@@ -202,6 +221,27 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 			return fmt.Errorf("parsing telemetry field: %w", err)
 		}
 		settings.Telemetry = &t
+	}
+
+	// Override redaction if present
+	if redactionRaw, ok := raw["redaction"]; ok {
+		var r RedactionSettings
+		if err := json.Unmarshal(redactionRaw, &r); err != nil {
+			return fmt.Errorf("parsing redaction field: %w", err)
+		}
+		if settings.Redaction == nil {
+			settings.Redaction = &r
+		} else {
+			if r.PatternDetection != nil {
+				settings.Redaction.PatternDetection = r.PatternDetection
+			}
+			if r.EntropyThreshold != nil {
+				settings.Redaction.EntropyThreshold = r.EntropyThreshold
+			}
+			if r.CustomRulesPath != "" {
+				settings.Redaction.CustomRulesPath = r.CustomRulesPath
+			}
+		}
 	}
 
 	return nil

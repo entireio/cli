@@ -8,6 +8,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/redact"
 )
 
 // TaskCheckpoint contains the checkpoint information for a task
@@ -63,15 +64,17 @@ func ReadTaskCheckpoint(taskMetadataDir string) (*TaskCheckpoint, error) {
 }
 
 // WriteTaskPrompt writes the task prompt to the task metadata directory.
+// Redacts secrets before writing to prevent leakage in session metadata.
 func WriteTaskPrompt(taskMetadataDir, prompt string) error {
 	promptFile := filepath.Join(taskMetadataDir, paths.PromptFileName)
-	if err := os.WriteFile(promptFile, []byte(prompt), 0o600); err != nil {
+	if err := os.WriteFile(promptFile, []byte(redact.String(prompt)), 0o600); err != nil {
 		return fmt.Errorf("failed to write prompt file: %w", err)
 	}
 	return nil
 }
 
 // CopyAgentTranscript copies a subagent's transcript to the task metadata directory.
+// Redacts secrets in the JSONL content before writing.
 // If the source transcript doesn't exist, this is a no-op (not an error).
 func CopyAgentTranscript(srcTranscript, taskMetadataDir, agentID string) error {
 	// Check if source exists
@@ -81,5 +84,5 @@ func CopyAgentTranscript(srcTranscript, taskMetadataDir, agentID string) error {
 	}
 
 	dstTranscript := filepath.Join(taskMetadataDir, fmt.Sprintf("agent-%s.jsonl", agentID))
-	return copyFile(srcTranscript, dstTranscript)
+	return copyFileRedacted(srcTranscript, dstTranscript)
 }

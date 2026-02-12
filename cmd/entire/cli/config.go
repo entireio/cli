@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/redact"
 
 	// Import claudecode to register the agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -120,4 +121,31 @@ func JoinAgentNames(names []agent.AgentName) string {
 		strs[i] = string(n)
 	}
 	return strings.Join(strs, ",")
+}
+
+// initRedactionFromSettings loads redaction settings and initializes the
+// redaction engine. Falls back to defaults silently on any error.
+func initRedactionFromSettings() {
+	s, err := settings.Load()
+	if err != nil || s.Redaction == nil {
+		return
+	}
+
+	cfg := redact.Config{
+		PatternDetectionEnabled: true,
+		EntropyThreshold:        4.5,
+	}
+
+	if s.Redaction.PatternDetection != nil {
+		cfg.PatternDetectionEnabled = *s.Redaction.PatternDetection
+	}
+	if s.Redaction.EntropyThreshold != nil {
+		cfg.EntropyThreshold = *s.Redaction.EntropyThreshold
+	}
+	cfg.CustomRulesPath = s.Redaction.CustomRulesPath
+
+	if err := redact.Init(cfg); err != nil {
+		logging.Info(context.Background(), "failed to initialize redaction from settings",
+			slog.String("error", err.Error()))
+	}
 }

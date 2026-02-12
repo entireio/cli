@@ -379,9 +379,10 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 			}
 		}
 
-		// Add subagent transcript if available
+		// Add subagent transcript if available (redact secrets before storing)
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 			if agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath); readErr == nil {
+				agentContent, _ = redact.JSONLBytes(agentContent)
 				if blobHash, blobErr := CreateBlobFromContent(s.repo, agentContent); blobErr == nil {
 					agentPath := taskMetadataDir + "/agent-" + opts.AgentID + ".jsonl"
 					entries[agentPath] = object.TreeEntry{

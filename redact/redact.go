@@ -12,32 +12,77 @@ import (
 // secretPattern matches high-entropy strings that may be secrets.
 var secretPattern = regexp.MustCompile(`[A-Za-z0-9/+_=-]{10,}`)
 
-// entropyThreshold is the minimum Shannon entropy for a string to be considered
-// a secret. 4.5 was chosen through trial and error: high enough to avoid false
-// positives on common words and identifiers, low enough to catch typical API keys
-// and tokens which tend to have entropy well above 5.0.
+// entropyThreshold is the default minimum Shannon entropy for a string to be
+// considered a secret. 4.5 was chosen through trial and error: high enough to
+// avoid false positives on common words and identifiers, low enough to catch
+// typical API keys and tokens which tend to have entropy well above 5.0.
 const entropyThreshold = 4.5
 
-// String replaces high-entropy strings matching secretPattern with REDACTED.
+// String replaces secrets in s with "REDACTED" using layered detection:
+// 1. Entropy-based: high-entropy alphanumeric sequences
+// 2. Pattern-based: gitleaks regex rules (if enabled)
+// A string is redacted if EITHER method flags it.
 func String(s string) string {
-	locs := secretPattern.FindAllStringIndex(s, -1)
-	if len(locs) == 0 {
+	cfg := getConfig()
+	rs := getRuleSet()
+
+	// Collect matches from both detection methods.
+	var allMatches []Match
+
+	// 1. Entropy-based detection (always on).
+	entropyMatches := findEntropyMatches(s, cfg.EntropyThreshold)
+	allMatches = append(allMatches, entropyMatches...)
+
+	// 2. Pattern-based detection (if enabled and rules loaded).
+	if cfg.PatternDetectionEnabled && rs != nil {
+		patternMatches := rs.FindMatches(s)
+		allMatches = append(allMatches, patternMatches...)
+	}
+
+	if len(allMatches) == 0 {
 		return s
 	}
+
+	// Merge overlapping regions and build result.
+	merged := mergeRegions(allMatches)
+
+	// Invoke log callback if set.
+	if cfg.LogMatchCallback != nil {
+		for _, m := range merged {
+			preview := maskedPreview(s[m.Start:m.End])
+			cfg.LogMatchCallback(m.Method, m.RuleID, preview)
+		}
+	}
+
 	var b strings.Builder
 	prev := 0
-	for _, loc := range locs {
-		b.WriteString(s[prev:loc[0]])
-		match := s[loc[0]:loc[1]]
-		if isSecret(match) {
-			b.WriteString("REDACTED")
-		} else {
-			b.WriteString(match)
-		}
-		prev = loc[1]
+	for _, m := range merged {
+		b.WriteString(s[prev:m.Start])
+		b.WriteString("REDACTED")
+		prev = m.End
 	}
 	b.WriteString(s[prev:])
 	return b.String()
+}
+
+// findEntropyMatches returns matches for high-entropy alphanumeric sequences.
+func findEntropyMatches(s string, threshold float64) []Match {
+	locs := secretPattern.FindAllStringIndex(s, -1)
+	if len(locs) == 0 {
+		return nil
+	}
+	var matches []Match
+	for _, loc := range locs {
+		match := s[loc[0]:loc[1]]
+		if shannonEntropy(match) > threshold {
+			matches = append(matches, Match{
+				Start:  loc[0],
+				End:    loc[1],
+				Method: "entropy",
+			})
+		}
+	}
+	return matches
 }
 
 // Bytes is a convenience wrapper around String for []byte content.
@@ -48,6 +93,35 @@ func Bytes(b []byte) []byte {
 		return b
 	}
 	return []byte(redacted)
+}
+
+// JSONBytes redacts secrets in a single JSON document (e.g., Gemini transcripts).
+// It parses the JSON, walks all string values, and performs targeted replacements
+// while preserving the original formatting. Falls back to Bytes() on parse error.
+func JSONBytes(b []byte) ([]byte, error) {
+	s := string(b)
+	var parsed any
+	if err := json.Unmarshal(b, &parsed); err != nil {
+		// Not valid JSON — fall back to plain-text redaction.
+		return Bytes(b), nil
+	}
+	repls := collectJSONLReplacements(parsed)
+	if len(repls) == 0 {
+		return b, nil
+	}
+	result := s
+	for _, r := range repls {
+		origJSON, err := jsonEncodeString(r[0])
+		if err != nil {
+			return nil, err
+		}
+		replJSON, err := jsonEncodeString(r[1])
+		if err != nil {
+			return nil, err
+		}
+		result = strings.ReplaceAll(result, origJSON, replJSON)
+	}
+	return []byte(result), nil
 }
 
 // JSONLBytes is a convenience wrapper around JSONLContent for []byte content.
@@ -153,11 +227,6 @@ func shouldSkipJSONLField(key string) bool {
 func shouldSkipJSONLObject(obj map[string]any) bool {
 	t, ok := obj["type"].(string)
 	return ok && (strings.HasPrefix(t, "image") || t == "base64")
-}
-
-// isSecret returns true if match is a high-entropy string that looks like a secret.
-func isSecret(match string) bool {
-	return shannonEntropy(match) > entropyThreshold
 }
 
 func shannonEntropy(s string) float64 {

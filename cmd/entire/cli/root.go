@@ -38,6 +38,11 @@ func NewRootCmd() *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{
 			HiddenDefaultCmd: true,
 		},
+		PersistentPreRun: func(_ *cobra.Command, _ []string) {
+			// Initialize redaction engine from settings (if configured).
+			// Falls back to defaults (patterns enabled, entropy 4.5) on error.
+			initRedactionFromSettings()
+		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
 			// Skip for hidden commands
 			if cmd.Hidden {

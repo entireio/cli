@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/redact"
 
 	"github.com/charmbracelet/huh"
 	"github.com/go-git/go-git/v5"
@@ -823,7 +824,7 @@ func createContextFileMinimal(contextFile, commitMessage, sessionID, promptFile,
 		content.WriteString(fmt.Sprintf("- %s\n", action))
 	}
 
-	if err := os.WriteFile(contextFile, []byte(content.String()), 0o600); err != nil {
+	if err := os.WriteFile(contextFile, []byte(redact.String(content.String())), 0o600); err != nil {
 		return fmt.Errorf("failed to write context file: %w", err)
 	}
 	return nil
