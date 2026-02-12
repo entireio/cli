@@ -329,6 +329,9 @@ func readSessionContext(repoRoot, sessionID string) string {
 	contextPath := filepath.Join(repoRoot, ".entire", "metadata", sessionID, "context.md")
 	data, err := os.ReadFile(contextPath) //nolint:gosec // path constructed from repoRoot + session ID
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			wingmanLog("WARNING: failed to read session context: %v", err)
+		}
 		return ""
 	}
 	return string(data)
@@ -373,26 +376,25 @@ func hasAnyLiveSession(repoRoot string) bool {
 		checked++
 
 		sid := strings.TrimSuffix(name, ".json")
-		phase := readSessionPhase(sessDir, sid)
-		if phase == "" || phase == string(session.PhaseEnded) {
+		info := readSessionPhaseInfo(sessDir, sid)
+		if info.Phase == "" || info.Phase == string(session.PhaseEnded) {
 			continue
 		}
 
-		// ACTIVE/ACTIVE_COMMITTED sessions that haven't been updated in a
-		// long time are likely orphaned from crashed agents — skip them.
+		// ACTIVE/ACTIVE_COMMITTED sessions that haven't had a real agent
+		// interaction in a long time are likely orphaned from crashed agents.
+		// Uses LastInteractionTime from JSON (not file modtime) because
+		// PostCommit saves all session files on every commit, refreshing
+		// modtime even for stale sessions.
 		// IDLE sessions are always considered live (user may just be away).
-		if session.Phase(phase).IsActive() {
-			info, statErr := entry.Info()
-			if statErr != nil {
-				continue
-			}
-			if time.Since(info.ModTime()) > staleActiveSessionThreshold {
-				wingmanLog("skipping stale active session %s (phase=%s, age=%s)", sid, phase, time.Since(info.ModTime()).Round(time.Second))
+		if session.Phase(info.Phase).IsActive() {
+			if info.LastInteractionTime != nil && time.Since(*info.LastInteractionTime) > staleActiveSessionThreshold {
+				wingmanLog("skipping stale active session %s (phase=%s, last_interaction=%s ago)", sid, info.Phase, time.Since(*info.LastInteractionTime).Round(time.Second))
 				continue
 			}
 		}
 
-		wingmanLog("found live session %s (phase=%s)", sid, phase)
+		wingmanLog("found live session %s (phase=%s)", sid, info.Phase)
 		return true
 	}
 
@@ -439,19 +441,28 @@ func findSessionStateDir(repoRoot string) string {
 	return sessDir
 }
 
-// readSessionPhase reads just the phase field from a session state JSON file.
-func readSessionPhase(sessDir, sessionID string) string {
+// sessionPhaseInfo holds the subset of session state needed for liveness checks.
+type sessionPhaseInfo struct {
+	Phase               string
+	LastInteractionTime *time.Time
+}
+
+func readSessionPhaseInfo(sessDir, sessionID string) sessionPhaseInfo {
 	data, err := os.ReadFile(filepath.Join(sessDir, sessionID+".json")) //nolint:gosec // sessDir is from git internals
 	if err != nil {
-		return ""
+		return sessionPhaseInfo{}
 	}
 	var partial struct {
-		Phase string `json:"phase"`
+		Phase               string     `json:"phase"`
+		LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 	}
 	if json.Unmarshal(data, &partial) != nil {
-		return ""
+		return sessionPhaseInfo{}
 	}
-	return partial.Phase
+	return sessionPhaseInfo{
+		Phase:               partial.Phase,
+		LastInteractionTime: partial.LastInteractionTime,
+	}
 }
 
 // runWingmanApply is the entrypoint for the __apply subcommand, spawned by the
@@ -484,12 +495,12 @@ func runWingmanApply(repoRoot string) error {
 	if state != nil && state.SessionID != "" {
 		sessDir := findSessionStateDir(repoRoot)
 		if sessDir != "" {
-			phase := readSessionPhase(sessDir, state.SessionID)
-			if phase != "" && session.Phase(phase).IsActive() {
-				wingmanLog("session is active (phase=%s), aborting (next stop hook will retry)", phase)
+			phaseInfo := readSessionPhaseInfo(sessDir, state.SessionID)
+			if phaseInfo.Phase != "" && session.Phase(phaseInfo.Phase).IsActive() {
+				wingmanLog("session is active (phase=%s), aborting (next stop hook will retry)", phaseInfo.Phase)
 				return nil
 			}
-			wingmanLog("session phase=%s, safe to proceed", phase)
+			wingmanLog("session phase=%s, safe to proceed", phaseInfo.Phase)
 		}
 	}
 

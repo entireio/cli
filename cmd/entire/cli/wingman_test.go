@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -740,14 +741,12 @@ func TestHasAnyLiveSession_StaleActiveSessionSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create an ACTIVE session file with a very old modification time
-	sessFile := filepath.Join(sessDir, "stale-active.json")
-	if err := os.WriteFile(sessFile, []byte(`{"phase":"active"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Set modification time beyond staleActiveSessionThreshold
+	// Create an ACTIVE session with last_interaction_time beyond threshold.
+	// Uses JSON field (not file modtime) for staleness detection.
 	staleTime := time.Now().Add(-staleActiveSessionThreshold - 1*time.Hour)
-	if err := os.Chtimes(sessFile, staleTime, staleTime); err != nil {
+	sessData := fmt.Sprintf(`{"phase":"active","last_interaction_time":"%s"}`, staleTime.Format(time.RFC3339Nano))
+	sessFile := filepath.Join(sessDir, "stale-active.json")
+	if err := os.WriteFile(sessFile, []byte(sessData), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -765,14 +764,12 @@ func TestHasAnyLiveSession_StaleIdleSessionNotSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create an IDLE session file with an old modification time.
+	// Create an IDLE session with an old last_interaction_time.
 	// IDLE sessions should always count as live (user may just be away).
-	sessFile := filepath.Join(sessDir, "old-idle.json")
-	if err := os.WriteFile(sessFile, []byte(`{"phase":"idle"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	oldTime := time.Now().Add(-staleActiveSessionThreshold - 1*time.Hour)
-	if err := os.Chtimes(sessFile, oldTime, oldTime); err != nil {
+	sessData := fmt.Sprintf(`{"phase":"idle","last_interaction_time":"%s"}`, oldTime.Format(time.RFC3339Nano))
+	sessFile := filepath.Join(sessDir, "old-idle.json")
+	if err := os.WriteFile(sessFile, []byte(sessData), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -791,12 +788,10 @@ func TestHasAnyLiveSession_FreshActiveNotSkipped(t *testing.T) {
 	}
 
 	// Create a stale ACTIVE_COMMITTED session (should be skipped)
-	staleFile := filepath.Join(sessDir, "stale.json")
-	if err := os.WriteFile(staleFile, []byte(`{"phase":"active_committed"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	staleTime := time.Now().Add(-staleActiveSessionThreshold - 1*time.Hour)
-	if err := os.Chtimes(staleFile, staleTime, staleTime); err != nil {
+	staleData := fmt.Sprintf(`{"phase":"active_committed","last_interaction_time":"%s"}`, staleTime.Format(time.RFC3339Nano))
+	staleFile := filepath.Join(sessDir, "stale.json")
+	if err := os.WriteFile(staleFile, []byte(staleData), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -808,6 +803,32 @@ func TestHasAnyLiveSession_FreshActiveNotSkipped(t *testing.T) {
 
 	if !hasAnyLiveSession(tmpDir) {
 		t.Error("should return true when a fresh live session exists alongside stale ones")
+	}
+}
+
+func TestHasAnyLiveSession_RecentModtimeButStaleInteraction(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the PostCommit bug: file modtime is recent (just written),
+	// but LastInteractionTime is old because no TurnStart/TurnEnd occurred.
+	// This reproduces the scenario where PostCommit saves stale sessions,
+	// refreshing modtime without updating LastInteractionTime.
+	staleTime := time.Now().Add(-staleActiveSessionThreshold - 1*time.Hour)
+	sessData := fmt.Sprintf(`{"phase":"active_committed","last_interaction_time":"%s"}`, staleTime.Format(time.RFC3339Nano))
+	sessFile := filepath.Join(sessDir, "stale-but-recent-modtime.json")
+	if err := os.WriteFile(sessFile, []byte(sessData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// File modtime is NOW (just created) — but LastInteractionTime is old.
+
+	if hasAnyLiveSession(tmpDir) {
+		t.Error("should return false: LastInteractionTime is stale even though file modtime is recent")
 	}
 }
 
