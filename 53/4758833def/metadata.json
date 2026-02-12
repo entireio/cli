@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "534758833def",
+  "strategy": "manual-commit",
+  "branch": "rwr/fix-empty-repo-reference-not-found",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_geminicli_handlers.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/53/4758833def/0/metadata.json",
+      "transcript": "/53/4758833def/0/full.jsonl",
+      "context": "/53/4758833def/0/context.md",
+      "content_hash": "/53/4758833def/0/content_hash.txt",
+      "prompt": "/53/4758833def/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 28,
+    "cache_creation_tokens": 12903,
+    "cache_read_tokens": 2282621,
+    "output_tokens": 865,
+    "api_call_count": 16
+  }
+}

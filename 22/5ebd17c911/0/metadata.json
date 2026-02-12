@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "225ebd17c911",
+  "session_id": "47fd13df-2018-45de-8102-afe43bbc5e17",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T17:47:21.329591Z",
+  "branch": "soph/better-git-hook-handling",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/hooks.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "745b81b9-df0e-4ff6-a0d5-46a96ed55d77",
+  "checkpoint_transcript_start": 344,
+  "transcript_lines_at_start": 344,
+  "token_usage": {
+    "input_tokens": 15,
+    "cache_creation_tokens": 9891,
+    "cache_read_tokens": 1186408,
+    "output_tokens": 104,
+    "api_call_count": 11
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T17:47:21.103616Z",
+    "agent_lines": 8,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 8,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/47fd13df-2018-45de-8102-afe43bbc5e17.jsonl"
+}

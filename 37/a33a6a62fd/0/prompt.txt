@@ -1,0 +1,81 @@
+can you review the changes in this branch again
+
+---
+
+I think we need to apply the mock in more places: --- FAIL: TestRunEnableWithStrategy_PreservesExistingSettings (0.00s)
+    setup_test.go:364: runEnableWithStrategy() error = no agents installed
+--- FAIL: TestRunEnableWithStrategy_PreservesLocalSettings (0.00s)
+    setup_test.go:408: runEnableWithStrategy() error = no agents installed
+Captured state before prompt: 1 untracked files, transcript at line 3 (uuid: user-2)
+Captured state before prompt: 0 untracked files, transcript at line 0 (uuid: )
+Captured state before prompt: 1 untracked files, transcript at line 2 (uuid: )
+FAIL
+FAIL    github.com/entireio/cli/cmd/entire/cli    4.207s
+ok      github.com/entireio/cli/cmd/entire/cli/agent    2.112s
+ok      github.com/entireio/cli/cmd/entire/cli/agent/claudecode    1.116s
+ok      github.com/entireio/cli/cmd/entire/cli/agent/geminicli    1.134s
+?       github.com/entireio/cli/cmd/entire/cli/buildinfo    [no test files]
+ok      github.com/entireio/cli/cmd/entire/cli/checkpoint    2.444s
+ok      github.com/entireio/cli/cmd/entire/cli/checkpoint/id    1.013s
+--- FAIL: TestSetupGeminiHooks_PreservesExistingSettings (0.02s)
+    setup_gemini_hooks_test.go:117: enable gemini failed: exit status 1
+        Output: gemini is not installed or not found in PATH.
+        Install it from: https://github.com/google-gemini/gemini-cli
+--- FAIL: TestSetupGeminiHooks_AddsAllRequiredHooks (0.01s)
+    setup_gemini_hooks_test.go:33: enable gemini command failed: exit status 1
+        Output: gemini is not installed or not found in PATH.
+        Install it from: https://github.com/google-gemini/gemini-cli
+--- FAIL: TestEnableDefaultStrategy (0.01s)
+    setup_cmd_test.go:188: enable command failed: exit status 1
+        Output: No AI agents with hook support found in PATH.
+        
+        Please install one of the following:
+          - Claude Code - Anthropic's CLI coding assistant: https://docs.anthropic.com/en/docs/claude-code
+          - Gemini CLI - Google's AI coding assistant: https://github.com/google-gemini/gemini-cli
+--- FAIL: TestSetupClaudeHooks_PreservesExistingSettings (0.01s)
+    setup_claude_hooks_test.go:121: enable claude-hooks failed: exit status 1
+        Output: claude-code is not installed or not found in PATH.
+        Install it from: https://docs.anthropic.com/en/docs/claude-code
+--- FAIL: TestSetupClaudeHooks_AddsAllRequiredHooks (0.02s)
+    setup_claude_hooks_test.go:52: enable claude-hooks command failed: exit status 1
+        Output: claude-code is not installed or not found in PATH.
+        Install it from: https://docs.anthropic.com/en/docs/claude-code
+--- FAIL: TestSetupAgentFlag (0.01s)
+    agent_strategy_test.go:359: CLI command failed: exit status 1
+        Args: [enable --agent claude-code]
+        Output: claude-code is not installed or not found in PATH.
+        Install it from: https://docs.anthropic.com/en/docs/claude-code
+--- FAIL: TestEnableWhenDisabled (0.00s)
+    --- FAIL: TestEnableWhenDisabled/auto-commit (0.01s)
+        setup_cmd_test.go:165: CLI command failed: exit status 1
+            Args: [enable --strategy auto-commit]
+            Output: No AI agents with hook support found in PATH.
+            
+            Please install one of the following:
+              - Claude Code - Anthropic's CLI coding assistant: https://docs.anthropic.com/en/docs/claude-code
+              - Gemini CLI - Google's AI coding assistant: https://github.com/google-gemini/gemini-cli
+    --- FAIL: TestEnableWhenDisabled/manual-commit (0.01s)
+        setup_cmd_test.go:165: CLI command failed: exit status 1
+            Args: [enable --strategy manual-commit]
+            Output: No AI agents with hook support found in PATH.
+            
+            Please install one of the following:
+              - Claude Code - Anthropic's CLI coding assistant: https://docs.anthropic.com/en/docs/claude-code
+              - Gemini CLI - Google's AI coding assistant: https://github.com/google-gemini/gemini-cli
+--- FAIL: TestEnableDisable (0.00s)
+    --- FAIL: TestEnableDisable/manual-commit (0.03s)
+        setup_cmd_test.go:88: CLI command failed: exit status 1
+            Args: [enable --strategy manual-commit]
+            Output: No AI agents with hook support found in PATH.
+            
+            Please install one of the following:
+              - Claude Code - Anthropic's CLI coding assistant: https://docs.anthropic.com/en/docs/claude-code
+              - Gemini CLI - Google's AI coding assistant: https://github.com/google-gemini/gemini-cli
+    --- FAIL: TestEnableDisable/auto-commit (0.03s)
+        setup_cmd_test.go:88: CLI command failed: exit status 1
+            Args: [enable --strategy auto-commit]
+            Output: No AI agents with hook support found in PATH.
+            
+            Please install one of the following:
+              - Claude Code - Anthropic's CLI coding assistant: https://docs.anthropic.com/en/docs/claude-code
+              - Gemini CLI - Google's AI coding assistant: https://github.com/google-gemini/gemini-cli
