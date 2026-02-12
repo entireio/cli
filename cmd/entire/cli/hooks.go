@@ -302,13 +302,27 @@ func handleSessionStartCommon() error {
 // hookResponse represents a JSON response.
 // Used to control whether Agent continues processing the prompt.
 type hookResponse struct {
-	SystemMessage string `json:"systemMessage,omitempty"`
+	SystemMessage     string `json:"systemMessage,omitempty"`
+	AdditionalContext string `json:"additionalContext,omitempty"`
 }
 
 // outputHookResponse outputs a JSON response to stdout
 func outputHookResponse(reason string) error {
 	resp := hookResponse{
 		SystemMessage: reason,
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		return fmt.Errorf("failed to encode hook response: %w", err)
+	}
+	return nil
+}
+
+// outputHookResponseWithContext outputs a JSON response that adds context to
+// the agent's conversation. additionalContext is injected into Claude's context
+// and treated as required instructions, not just a warning.
+func outputHookResponseWithContext(context string) error {
+	resp := hookResponse{
+		AdditionalContext: context,
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
 		return fmt.Errorf("failed to encode hook response: %w", err)

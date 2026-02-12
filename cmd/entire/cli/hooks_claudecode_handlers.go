@@ -76,28 +76,20 @@ func captureInitialState() error {
 		return err
 	}
 
-	// If a wingman review is pending for the CURRENT session and auto-apply
-	// hasn't been attempted yet, inject instruction as a belt-and-suspenders
-	// backup. The primary delivery mechanism is the stop hook auto-apply.
+	// If a wingman review is pending, inject it as additionalContext so the
+	// agent addresses it BEFORE the user's request. This is the primary
+	// delivery mechanism — the agent sees the instruction as mandatory context.
 	if settings.IsWingmanEnabled() {
 		repoRoot, rootErr := paths.RepoRoot()
 		if rootErr == nil {
 			wingmanLogCtx := logging.WithComponent(context.Background(), "wingman")
 			if _, statErr := os.Stat(filepath.Join(repoRoot, wingmanReviewFile)); statErr == nil {
-				wingmanState := loadWingmanStateDirect(repoRoot)
-				shouldInject := wingmanState != nil &&
-					wingmanState.SessionID == hookData.sessionID &&
-					wingmanState.ApplyAttemptedAt == nil
-				if shouldInject {
-					fmt.Fprintf(os.Stderr, "[wingman] Review available: .entire/REVIEW.md\n")
-					logging.Info(wingmanLogCtx, "wingman injecting review instruction on prompt-submit",
-						slog.String("session_id", hookData.sessionID),
-					)
-					if err := outputHookResponse(wingmanApplyInstruction); err != nil {
-						fmt.Fprintf(os.Stderr, "[wingman] Warning: failed to inject review instruction: %v\n", err)
-					}
-				} else if wingmanState != nil && wingmanState.ApplyAttemptedAt != nil {
-					logging.Debug(wingmanLogCtx, "wingman review pending but auto-apply already attempted, skipping injection")
+				fmt.Fprintf(os.Stderr, "[wingman] Review available: .entire/REVIEW.md — injecting into context\n")
+				logging.Info(wingmanLogCtx, "wingman injecting review instruction on prompt-submit",
+					slog.String("session_id", hookData.sessionID),
+				)
+				if err := outputHookResponseWithContext(wingmanApplyInstruction); err != nil {
+					fmt.Fprintf(os.Stderr, "[wingman] Warning: failed to inject review instruction: %v\n", err)
 				}
 			}
 
