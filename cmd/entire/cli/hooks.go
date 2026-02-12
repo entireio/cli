@@ -331,6 +331,18 @@ func outputHookResponse(context string) error {
 	return nil
 }
 
+// outputHookMessage outputs a JSON response with only a systemMessage — shown
+// to the user in the terminal but NOT injected into the agent's conversation.
+// Use this for informational notifications (e.g., wingman status) that the user
+// should see but the agent should not act on.
+func outputHookMessage(message string) error {
+	resp := hookResponse{SystemMessage: message}
+	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		return fmt.Errorf("failed to encode hook response: %w", err)
+	}
+	return nil
+}
+
 // outputHookResponseWithContextAndMessage outputs a JSON response with both
 // additionalContext (injected into agent conversation) and a systemMessage
 // (shown to the user as a warning/info).

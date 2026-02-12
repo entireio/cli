@@ -100,13 +100,17 @@ func captureInitialState() error {
 				}
 			}
 
-			// Log if a review is currently in progress (lock file exists)
+			// Notify if a review is currently in progress (lock file exists).
+			// outputHookMessage writes JSON to stdout; session initialization
+			// below only touches disk/stderr, so there's no double-write risk.
 			lockPath := filepath.Join(repoRoot, wingmanLockFile)
 			if _, statErr := os.Stat(lockPath); statErr == nil {
-				fmt.Fprintf(os.Stderr, "[wingman] Review in progress...\n")
 				logging.Info(wingmanLogCtx, "wingman review in progress",
 					slog.String("session_id", hookData.sessionID),
 				)
+				if err := outputHookMessage("[Wingman] Review in progress..."); err != nil {
+					fmt.Fprintf(os.Stderr, "[wingman] Warning: failed to output review-in-progress message: %v\n", err)
+				}
 			}
 		}
 	}
@@ -299,6 +303,7 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 		if err := CleanupPrePromptState(sessionID); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", err)
 		}
+		outputWingmanStopNotification(repoRoot)
 		return nil
 	}
 
@@ -445,6 +450,8 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 	if err := CleanupPrePromptState(sessionID); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", err)
 	}
+
+	outputWingmanStopNotification(repoRoot)
 
 	return nil
 }
@@ -801,6 +808,31 @@ func handleClaudeCodeSessionEnd() error {
 	triggerWingmanAutoApplyOnSessionEnd()
 
 	return nil
+}
+
+// outputWingmanStopNotification outputs a systemMessage notification about
+// wingman status at the end of a stop hook. This makes wingman activity visible
+// in the agent terminal without injecting context into the agent's conversation.
+// Best-effort: status may be stale due to concurrent wingman processes.
+func outputWingmanStopNotification(repoRoot string) {
+	if !settings.IsWingmanEnabled() {
+		return
+	}
+	if os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
+		return
+	}
+
+	lockPath := filepath.Join(repoRoot, wingmanLockFile)
+	if _, err := os.Stat(lockPath); err == nil {
+		_ = outputHookMessage("[Wingman] Reviewing your changes...") //nolint:errcheck // best-effort notification
+		return
+	}
+
+	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
+	if _, err := os.Stat(reviewPath); err == nil {
+		_ = outputHookMessage("[Wingman] Review pending \u2014 will be addressed on your next prompt") //nolint:errcheck // best-effort notification
+		return
+	}
 }
 
 // transitionSessionTurnEnd fires EventTurnEnd to move the session from
