@@ -87,6 +87,14 @@ func handleCodexAgentTurnComplete() error {
 	// Transition session ACTIVE → IDLE (equivalent to Claude's transitionSessionTurnEnd)
 	transitionSessionTurnEnd(sessionID)
 
+	// Capture post-turn state for the next turn's file change detection.
+	// Codex has no "before turn" hook, so we capture state after each turn completes.
+	// This gives the next turn's handler an accurate baseline of untracked files.
+	// The transcript path is not used for offset tracking in Codex, so pass empty.
+	if err := CapturePrePromptState(sessionID, ""); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to capture state for next turn: %v\n", err)
+	}
+
 	return nil
 }
 

@@ -98,6 +98,25 @@ func TestParseHookInput_SessionCreated(t *testing.T) {
 	}
 }
 
+func TestParseHookInput_SessionBusy(t *testing.T) {
+	t.Parallel()
+
+	ag := &OpenCodeAgent{}
+	input := `{"type":"session-busy","sessionID":"ses_busy456"}`
+
+	result, err := ag.ParseHookInput(agent.HookUserPromptSubmit, strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("ParseHookInput() error = %v", err)
+	}
+
+	if result.SessionID != "ses_busy456" {
+		t.Errorf("SessionID = %q, want %q", result.SessionID, "ses_busy456")
+	}
+	if result.RawData["type"] != "session-busy" {
+		t.Errorf("RawData[type] = %q, want %q", result.RawData["type"], "session-busy")
+	}
+}
+
 func TestParseHookInput_EmptyInput(t *testing.T) {
 	t.Parallel()
 
@@ -282,14 +301,17 @@ func TestGetHookNames(t *testing.T) {
 
 	ag := &OpenCodeAgent{}
 	names := ag.GetHookNames()
-	if len(names) != 2 {
-		t.Fatalf("GetHookNames() returned %d names, want 2", len(names))
+	if len(names) != 3 {
+		t.Fatalf("GetHookNames() returned %d names, want 3", len(names))
 	}
 	if names[0] != HookNameSessionCreated {
 		t.Errorf("names[0] = %q, want %q", names[0], HookNameSessionCreated)
 	}
-	if names[1] != HookNameSessionIdle {
-		t.Errorf("names[1] = %q, want %q", names[1], HookNameSessionIdle)
+	if names[1] != HookNameSessionBusy {
+		t.Errorf("names[1] = %q, want %q", names[1], HookNameSessionBusy)
+	}
+	if names[2] != HookNameSessionIdle {
+		t.Errorf("names[2] = %q, want %q", names[2], HookNameSessionIdle)
 	}
 }
 
@@ -303,8 +325,8 @@ func TestInstallHooks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("InstallHooks() error = %v", err)
 		}
-		if count != 2 {
-			t.Errorf("InstallHooks() count = %d, want 2", count)
+		if count != 3 {
+			t.Errorf("InstallHooks() count = %d, want 3", count)
 		}
 
 		// Verify file exists and contains marker
@@ -325,6 +347,9 @@ func TestInstallHooks(t *testing.T) {
 		}
 		if !strings.Contains(content, "entire hooks opencode") {
 			t.Error("plugin file missing entire command reference")
+		}
+		if !strings.Contains(content, "session-busy") {
+			t.Error("plugin file missing session-busy handler")
 		}
 	})
 
@@ -358,8 +383,8 @@ func TestInstallHooks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("InstallHooks() error = %v", err)
 		}
-		if count != 2 {
-			t.Errorf("InstallHooks() count = %d, want 2", count)
+		if count != 3 {
+			t.Errorf("InstallHooks() count = %d, want 3", count)
 		}
 
 		pluginPath := filepath.Join(".opencode", "plugins", EntirePluginFileName)
@@ -389,8 +414,8 @@ func TestInstallHooks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("force InstallHooks() error = %v", err)
 		}
-		if count != 2 {
-			t.Errorf("force InstallHooks() count = %d, want 2", count)
+		if count != 3 {
+			t.Errorf("force InstallHooks() count = %d, want 3", count)
 		}
 
 		pluginPath := filepath.Join(".opencode", "plugins", EntirePluginFileName)
@@ -510,8 +535,8 @@ func TestGetSupportedHooks(t *testing.T) {
 
 	ag := &OpenCodeAgent{}
 	hooks := ag.GetSupportedHooks()
-	if len(hooks) != 2 {
-		t.Fatalf("GetSupportedHooks() returned %d hooks, want 2", len(hooks))
+	if len(hooks) != 3 {
+		t.Fatalf("GetSupportedHooks() returned %d hooks, want 3", len(hooks))
 	}
 }
 

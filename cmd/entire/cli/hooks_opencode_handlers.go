@@ -22,6 +22,42 @@ func handleOpenCodeSessionCreated() error {
 	return handleSessionStartCommon()
 }
 
+// handleOpenCodeSessionBusy handles the session-busy hook for OpenCode.
+// This fires when OpenCode's session transitions to busy (agent starts processing a turn).
+// Equivalent to Claude's "UserPromptSubmit" hook — it captures pre-prompt state
+// (untracked files) so that the session-idle handler can accurately detect new files.
+func handleOpenCodeSessionBusy() error {
+	ag, err := agent.Get(agent.AgentNameOpenCode)
+	if err != nil {
+		return fmt.Errorf("failed to get opencode agent: %w", err)
+	}
+
+	input, err := ag.ParseHookInput(agent.HookUserPromptSubmit, os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Info(logCtx, "opencode-session-busy",
+		slog.String("hook", "session-busy"),
+		slog.String("hook_type", "agent"),
+		slog.String("model_session_id", input.SessionID),
+	)
+
+	sessionID := input.SessionID
+	if sessionID == "" {
+		sessionID = unknownSessionID
+	}
+
+	// Capture pre-prompt state (untracked files) before the agent starts working.
+	// The transcript path is not used for OpenCode (no offset tracking), so pass empty.
+	if err := CapturePrePromptState(sessionID, ""); err != nil {
+		return fmt.Errorf("failed to capture pre-prompt state: %w", err)
+	}
+
+	return nil
+}
+
 // handleOpenCodeSessionIdle handles the session-idle hook for OpenCode.
 // This fires when OpenCode's session transitions to idle (agent finished processing).
 // Equivalent to Claude's "Stop" hook — it commits session changes with metadata.

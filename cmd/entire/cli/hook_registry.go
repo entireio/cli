@@ -211,6 +211,14 @@ func init() {
 		return handleOpenCodeSessionCreated()
 	})
 
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameSessionBusy, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpenCodeSessionBusy()
+	})
+
 	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameSessionIdle, func() error {
 		enabled, err := IsEnabled()
 		if err == nil && !enabled {
