@@ -1,0 +1,23 @@
+qdrant:
+  url: "${QDRANT_URL}"
+  api_key: "${QDRANT_API_KEY}"
+  collection: "entireio-cli-issues"
+
+embedding:
+  provider: "gemini"
+  api_key: "${GEMINI_API_KEY}"
+  model: "gemini-embedding-001"
+
+defaults:
+  similarity_threshold: 0.75
+  max_similar_to_show: 5
+
+transfer:
+  duplicate_confidence_threshold: 0.85
+  enable_duplicate_comments: true
+  enable_duplicate_closing: true
+
+repositories:
+  - org: "entireio"
+    repo: "entireio-cli"
+    enabled: true
