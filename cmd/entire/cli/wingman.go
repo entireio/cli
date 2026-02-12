@@ -81,7 +81,9 @@ to apply them.`,
 }
 
 func newWingmanEnableCmd() *cobra.Command {
-	return &cobra.Command{
+	var useLocal bool
+
+	cmd := &cobra.Command{
 		Use:   "enable",
 		Short: "Enable wingman auto-review",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -90,14 +92,21 @@ func newWingmanEnableCmd() *cobra.Command {
 				return NewSilentError(errors.New("not a git repository"))
 			}
 
-			s, err := settings.Load()
+			// Load merged settings to check preconditions
+			merged, err := settings.Load()
 			if err != nil {
 				return fmt.Errorf("failed to load settings: %w", err)
 			}
 
-			if !s.Enabled {
+			if !merged.Enabled {
 				fmt.Fprintln(cmd.ErrOrStderr(), "Entire is not enabled. Run 'entire enable' first.")
 				return NewSilentError(errors.New("entire not enabled"))
+			}
+
+			// Load the target file specifically so we don't bloat it with merged values
+			s, err := loadSettingsTarget(useLocal)
+			if err != nil {
+				return fmt.Errorf("failed to load settings: %w", err)
 			}
 
 			if s.StrategyOptions == nil {
@@ -105,22 +114,32 @@ func newWingmanEnableCmd() *cobra.Command {
 			}
 			s.StrategyOptions["wingman"] = map[string]any{"enabled": true}
 
-			if err := settings.Save(s); err != nil {
+			if err := saveSettingsTarget(s, useLocal); err != nil {
 				return fmt.Errorf("failed to save settings: %w", err)
 			}
 
-			fmt.Fprintln(cmd.OutOrStdout(), "Wingman enabled. Code changes will be automatically reviewed after agent turns.")
+			msg := "Wingman enabled. Code changes will be automatically reviewed after agent turns."
+			if useLocal {
+				msg += " (saved to settings.local.json)"
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), msg)
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&useLocal, "local", false, "Write to settings.local.json instead of settings.json")
+
+	return cmd
 }
 
 func newWingmanDisableCmd() *cobra.Command {
-	return &cobra.Command{
+	var useLocal bool
+
+	cmd := &cobra.Command{
 		Use:   "disable",
 		Short: "Disable wingman auto-review",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			s, err := settings.Load()
+			s, err := loadSettingsTarget(useLocal)
 			if err != nil {
 				return fmt.Errorf("failed to load settings: %w", err)
 			}
@@ -130,7 +149,7 @@ func newWingmanDisableCmd() *cobra.Command {
 			}
 			s.StrategyOptions["wingman"] = map[string]any{"enabled": false}
 
-			if err := settings.Save(s); err != nil {
+			if err := saveSettingsTarget(s, useLocal); err != nil {
 				return fmt.Errorf("failed to save settings: %w", err)
 			}
 
@@ -140,10 +159,54 @@ func newWingmanDisableCmd() *cobra.Command {
 				_ = os.Remove(reviewPath)
 			}
 
-			fmt.Fprintln(cmd.OutOrStdout(), "Wingman disabled.")
+			msg := "Wingman disabled."
+			if useLocal {
+				msg += " (saved to settings.local.json)"
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), msg)
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&useLocal, "local", false, "Write to settings.local.json instead of settings.json")
+
+	return cmd
+}
+
+// loadSettingsTarget loads settings from the appropriate file based on the --local flag.
+// When local is true, loads from settings.local.json only (without merging).
+// When local is false, loads the merged settings (project + local).
+func loadSettingsTarget(local bool) (*settings.EntireSettings, error) {
+	if !local {
+		s, err := settings.Load()
+		if err != nil {
+			return nil, fmt.Errorf("loading settings: %w", err)
+		}
+		return s, nil
+	}
+	absPath, err := paths.AbsPath(settings.EntireSettingsLocalFile)
+	if err != nil {
+		absPath = settings.EntireSettingsLocalFile
+	}
+	s, err := settings.LoadFromFile(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading local settings: %w", err)
+	}
+	return s, nil
+}
+
+// saveSettingsTarget saves settings to the appropriate file based on the --local flag.
+func saveSettingsTarget(s *settings.EntireSettings, local bool) error {
+	if local {
+		if err := settings.SaveLocal(s); err != nil {
+			return fmt.Errorf("saving local settings: %w", err)
+		}
+		return nil
+	}
+	if err := settings.Save(s); err != nil {
+		return fmt.Errorf("saving settings: %w", err)
+	}
+	return nil
 }
 
 func newWingmanStatusCmd() *cobra.Command {

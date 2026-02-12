@@ -594,6 +594,119 @@ func TestHasAnyLiveSession_MixedPhases(t *testing.T) {
 	}
 }
 
+func TestLoadSettingsTarget_Local(t *testing.T) {
+	// Uses t.Chdir so cannot be parallel
+	tmpDir := t.TempDir()
+
+	cmd := exec.CommandContext(context.Background(), "git", "init", tmpDir)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to git init: %v", err)
+	}
+
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write project settings with wingman disabled
+	projectSettings := `{"strategy": "manual-commit", "enabled": true, "strategy_options": {"wingman": {"enabled": false}}}`
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(projectSettings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write local settings with different strategy
+	localSettings := `{"strategy": "` + strategyDisplayAutoCommit + `"}`
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(localSettings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(tmpDir)
+
+	t.Run("local=false returns merged settings", func(t *testing.T) {
+		s, err := loadSettingsTarget(false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Merged: local overrides project strategy
+		if s.Strategy != strategyDisplayAutoCommit {
+			t.Errorf("Strategy = %q, want %q", s.Strategy, strategyDisplayAutoCommit)
+		}
+	})
+
+	t.Run("local=true returns only local settings", func(t *testing.T) {
+		s, err := loadSettingsTarget(true)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if s.Strategy != strategyDisplayAutoCommit {
+			t.Errorf("Strategy = %q, want %q", s.Strategy, strategyDisplayAutoCommit)
+		}
+		// Local file has no wingman settings
+		if s.IsWingmanEnabled() {
+			t.Error("local settings should not have wingman enabled")
+		}
+	})
+}
+
+func TestSaveSettingsTarget_Local(t *testing.T) {
+	// Uses t.Chdir so cannot be parallel
+	tmpDir := t.TempDir()
+
+	cmd := exec.CommandContext(context.Background(), "git", "init", tmpDir)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to git init: %v", err)
+	}
+
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(tmpDir)
+
+	s := &EntireSettings{
+		StrategyOptions: map[string]any{
+			"wingman": map[string]any{"enabled": true},
+		},
+	}
+
+	t.Run("local=true saves to local file", func(t *testing.T) {
+		if err := saveSettingsTarget(s, true); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		localPath := filepath.Join(entireDir, "settings.local.json")
+		data, err := os.ReadFile(localPath)
+		if err != nil {
+			t.Fatalf("local settings file should exist: %v", err)
+		}
+		if !strings.Contains(string(data), `"wingman"`) {
+			t.Error("local settings should contain wingman config")
+		}
+
+		// Project file should not exist
+		projectPath := filepath.Join(entireDir, "settings.json")
+		if _, err := os.Stat(projectPath); err == nil {
+			t.Error("project settings file should not have been created")
+		}
+	})
+
+	t.Run("local=false saves to project file", func(t *testing.T) {
+		if err := saveSettingsTarget(s, false); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		projectPath := filepath.Join(entireDir, "settings.json")
+		data, err := os.ReadFile(projectPath)
+		if err != nil {
+			t.Fatalf("project settings file should exist: %v", err)
+		}
+		if !strings.Contains(string(data), `"wingman"`) {
+			t.Error("project settings should contain wingman config")
+		}
+	})
+}
+
 func TestShouldSkipPendingReview_OrphanNoState(t *testing.T) {
 	t.Parallel()
 
