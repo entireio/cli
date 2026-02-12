@@ -1,0 +1,41 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "9b04c3d92e38",
+  "session_id": "ca8cc13b-d3df-4615-8f3f-f48a96b1a6f9",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-12T05:37:42.679215Z",
+  "branch": "gtrrz-victor/delete-old-sessionid-logic",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/openclaw/HOOK.md.tmpl",
+    "cmd/entire/cli/agent/openclaw/handler.ts",
+    "cmd/entire/cli/agent/openclaw/hooks.go",
+    "cmd/entire/cli/agent/openclaw/hooks_test.go",
+    "cmd/entire/cli/agent/openclaw/openclaw.go",
+    "cmd/entire/cli/agent/openclaw/openclaw_test.go",
+    "cmd/entire/cli/agent/openclaw/transcript.go",
+    "cmd/entire/cli/agent/openclaw/transcript_test.go",
+    "cmd/entire/cli/agent/openclaw/types.go",
+    "cmd/entire/cli/agent/registry.go",
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/hooks_cmd.go",
+    "cmd/entire/cli/hooks_openclaw_handlers.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 98,
+    "cache_creation_tokens": 204863,
+    "cache_read_tokens": 11327914,
+    "output_tokens": 19985,
+    "api_call_count": 94
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-12T05:37:42.555866Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 1700,
+    "human_removed": 639,
+    "total_committed": 1700,
+    "agent_percentage": 0
+  }
+}
