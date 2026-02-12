@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -279,6 +281,57 @@ func TestGeminiCLIHooksCmd_HasLoggingHooks(t *testing.T) {
 	}
 }
 
+func TestPiHooksCmd_HasLoggingHooks(t *testing.T) {
+	// This test verifies that the pi hooks command has PersistentPreRunE
+	// and PersistentPostRunE for logging initialization and cleanup
+
+	hooksCmd := newHooksCmd()
+
+	var piCmd *cobra.Command
+	for _, sub := range hooksCmd.Commands() {
+		if sub.Use == "pi" {
+			piCmd = sub
+			break
+		}
+	}
+
+	if piCmd == nil {
+		t.Fatal("expected to find pi subcommand under hooks")
+	}
+
+	if piCmd.PersistentPreRunE == nil {
+		t.Error("expected PersistentPreRunE to be set for logging initialization")
+	}
+
+	if piCmd.PersistentPostRunE == nil {
+		t.Error("expected PersistentPostRunE to be set for logging cleanup")
+	}
+}
+
+func TestGetHookType_ToolHooks(t *testing.T) {
+	tests := []struct {
+		name string
+		hook string
+		want string
+	}{
+		{name: "gemini before-tool", hook: geminicli.HookNameBeforeTool, want: "tool"},
+		{name: "gemini after-tool", hook: geminicli.HookNameAfterTool, want: "tool"},
+		{name: "pi before-tool", hook: pi.HookNameBeforeTool, want: "tool"},
+		{name: "pi after-tool", hook: pi.HookNameAfterTool, want: "tool"},
+		{name: "claude pre-task", hook: "pre-task", want: "subagent"},
+		{name: "agent hook", hook: "session-start", want: "agent"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getHookType(tt.hook)
+			if got != tt.want {
+				t.Fatalf("getHookType(%q) = %q, want %q", tt.hook, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHookCommand_SetsCurrentHookAgentName(t *testing.T) {
 	// Verify that newAgentHookVerbCmdWithLogging sets currentHookAgentName
 	// correctly for the handler, and clears it after
@@ -298,6 +351,7 @@ func TestHookCommand_SetsCurrentHookAgentName(t *testing.T) {
 	}{
 		{"claude-code hook sets claude-code", agent.AgentNameClaudeCode},
 		{"gemini hook sets gemini", agent.AgentNameGemini},
+		{"pi hook sets pi", agent.AgentNamePi},
 	}
 
 	for _, tt := range tests {

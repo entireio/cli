@@ -507,6 +507,79 @@ func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
 	}
 }
 
+func TestRemoveAgentHooks_RemovesPiHooks(t *testing.T) {
+	setupTestRepo(t)
+
+	ag, err := agent.Get(agent.AgentNamePi)
+	if err != nil {
+		t.Fatalf("failed to get pi agent: %v", err)
+	}
+	hookAgent, ok := ag.(agent.HookSupport)
+	if !ok {
+		t.Fatal("pi agent does not implement HookSupport")
+	}
+
+	if _, err := hookAgent.InstallHooks(false, false); err != nil {
+		t.Fatalf("failed to install pi hooks: %v", err)
+	}
+
+	entryPath := filepath.Join(".pi", "extensions", "entire", "index.ts")
+	if _, err := os.Stat(entryPath); err != nil {
+		t.Fatalf("expected pi scaffold to exist: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := removeAgentHooks(&stdout); err != nil {
+		t.Fatalf("removeAgentHooks() error = %v", err)
+	}
+
+	if _, err := os.Stat(entryPath); !os.IsNotExist(err) {
+		t.Fatalf("expected pi scaffold to be removed")
+	}
+
+	if !strings.Contains(stdout.String(), "Removed Pi hooks") {
+		t.Fatalf("expected output to mention Pi hook removal, got: %s", stdout.String())
+	}
+}
+
+func TestRemoveAgentHooks_PreservesUnmanagedPiHooks(t *testing.T) {
+	setupTestRepo(t)
+
+	entryPath := filepath.Join(".pi", "extensions", "custom.ts")
+	if err := os.MkdirAll(filepath.Dir(entryPath), 0o755); err != nil {
+		t.Fatalf("failed to create extension dir: %v", err)
+	}
+	content := `// user extension forwarding to Entire
+// hooks pi session-start
+// hooks pi user-prompt-submit
+// hooks pi before-tool
+// hooks pi after-tool
+// hooks pi stop
+// hooks pi session-end
+export default function() {}
+`
+	if err := os.WriteFile(entryPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write user extension: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := removeAgentHooks(&stdout); err != nil {
+		t.Fatalf("removeAgentHooks() error = %v", err)
+	}
+
+	if _, err := os.Stat(entryPath); err != nil {
+		t.Fatalf("expected unmanaged extension to remain: %v", err)
+	}
+
+	output := stdout.String()
+	if strings.Contains(output, "Removed Pi hooks") {
+		t.Fatalf("unexpected removed message for unmanaged hooks: %s", output)
+	}
+	if !strings.Contains(output, "Preserved unmanaged Pi hooks") {
+		t.Fatalf("expected preserved unmanaged message, got: %s", output)
+	}
+}
+
 func TestRunUninstall_NotAGitRepo(t *testing.T) {
 	// Create a temp directory without git init
 	tmpDir := t.TempDir()

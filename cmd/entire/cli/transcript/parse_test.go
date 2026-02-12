@@ -225,3 +225,80 @@ func TestSliceFromLine_NoTrailingNewline(t *testing.T) {
 		t.Errorf("expected line to be u2, got %s", lines[0].UUID)
 	}
 }
+
+func TestParseFromBytes_PiMessageFormat(t *testing.T) {
+	t.Parallel()
+
+	content := []byte(`{"type":"message","id":"u1","message":{"role":"user","content":"hello from pi"}}
+{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"I can help"}]}}
+`)
+
+	lines, err := ParseFromBytes(content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(lines))
+	}
+
+	if lines[0].Type != TypeUser || lines[0].UUID != "u1" {
+		t.Fatalf("unexpected user line: %+v", lines[0])
+	}
+
+	if got := ExtractUserContent(lines[0].Message); got != "hello from pi" {
+		t.Fatalf("expected extracted user prompt, got %q", got)
+	}
+
+	if lines[1].Type != TypeAssistant || lines[1].UUID != "a1" {
+		t.Fatalf("unexpected assistant line: %+v", lines[1])
+	}
+
+	var assistant AssistantMessage
+	if err := json.Unmarshal(lines[1].Message, &assistant); err != nil {
+		t.Fatalf("failed to decode assistant message: %v", err)
+	}
+	if len(assistant.Content) != 1 || assistant.Content[0].Type != ContentTypeText {
+		t.Fatalf("unexpected assistant content: %+v", assistant.Content)
+	}
+}
+
+func TestParseFromBytes_PiToolCallNormalizesPathToFilePath(t *testing.T) {
+	t.Parallel()
+
+	content := []byte(`{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"toolCall","name":"write","arguments":{"path":"cmd/main.go"}}]}}
+`)
+
+	lines, err := ParseFromBytes(content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(lines))
+	}
+
+	var assistant AssistantMessage
+	if err := json.Unmarshal(lines[0].Message, &assistant); err != nil {
+		t.Fatalf("failed to decode assistant message: %v", err)
+	}
+	if len(assistant.Content) != 1 {
+		t.Fatalf("expected 1 assistant block, got %d", len(assistant.Content))
+	}
+
+	block := assistant.Content[0]
+	if block.Type != ContentTypeToolUse {
+		t.Fatalf("expected tool_use block, got %q", block.Type)
+	}
+	if block.Name != "write" {
+		t.Fatalf("expected tool name write, got %q", block.Name)
+	}
+
+	var input ToolInput
+	if err := json.Unmarshal(block.Input, &input); err != nil {
+		t.Fatalf("failed to decode tool input: %v", err)
+	}
+	if input.FilePath != "cmd/main.go" {
+		t.Fatalf("expected file_path cmd/main.go, got %q", input.FilePath)
+	}
+}

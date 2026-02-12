@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 )
 
 // TestAgentDetection verifies agent detection and default behavior.
@@ -871,6 +872,350 @@ func TestGeminiCLIHelperMethods(t *testing.T) {
 
 		if path != ".gemini/settings.json" {
 			t.Errorf("GetHookConfigPath() = %q, want %q", path, ".gemini/settings.json")
+		}
+	})
+}
+
+func TestPiAgent_IsRegistered(t *testing.T) {
+	t.Parallel()
+
+	agents := agent.List()
+	found := false
+	for _, name := range agents {
+		if name == agent.AgentNamePi {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("agent.List() = %v, want to contain %q", agents, agent.AgentNamePi)
+	}
+}
+
+func TestPiAgent_DetectPresenceWhenPiDirExists(t *testing.T) {
+	env := NewTestEnv(t)
+	env.InitRepo()
+	t.Chdir(env.RepoDir)
+
+	if err := os.MkdirAll(filepath.Join(env.RepoDir, ".pi"), 0o755); err != nil {
+		t.Fatalf("failed to create .pi directory: %v", err)
+	}
+
+	ag, err := agent.Get(agent.AgentNamePi)
+	if err != nil {
+		t.Fatalf("agent.Get(pi) error = %v", err)
+	}
+
+	present, err := ag.DetectPresence()
+	if err != nil {
+		t.Fatalf("DetectPresence() error = %v", err)
+	}
+	if !present {
+		t.Fatal("DetectPresence() = false, want true when .pi exists")
+	}
+}
+
+func TestPiAgent_HookInstallUninstallLifecycle(t *testing.T) {
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire("manual-commit")
+	t.Chdir(env.RepoDir)
+
+	ag, err := agent.Get(agent.AgentNamePi)
+	if err != nil {
+		t.Fatalf("agent.Get(pi) error = %v", err)
+	}
+
+	hookAgent, ok := ag.(agent.HookSupport)
+	if !ok {
+		t.Fatal("pi agent does not implement HookSupport")
+	}
+
+	count, err := hookAgent.InstallHooks(false, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("InstallHooks() count = %d, want 1", count)
+	}
+
+	extPath := filepath.Join(env.RepoDir, ".pi", "extensions", "entire", "index.ts")
+	if _, err := os.Stat(extPath); err != nil {
+		t.Fatalf("expected extension scaffold at %s: %v", extPath, err)
+	}
+
+	if !hookAgent.AreHooksInstalled() {
+		t.Fatal("AreHooksInstalled() = false, want true after install")
+	}
+
+	if err := hookAgent.UninstallHooks(); err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+
+	if _, err := os.Stat(extPath); !os.IsNotExist(err) {
+		t.Fatalf("expected extension scaffold removed after uninstall")
+	}
+	if hookAgent.AreHooksInstalled() {
+		t.Fatal("AreHooksInstalled() = true, want false after uninstall")
+	}
+}
+
+func TestPiAgent_LocalDevHookScaffold(t *testing.T) {
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire("manual-commit")
+	t.Chdir(env.RepoDir)
+
+	ag, err := agent.Get(agent.AgentNamePi)
+	if err != nil {
+		t.Fatalf("agent.Get(pi) error = %v", err)
+	}
+
+	hookAgent, ok := ag.(agent.HookSupport)
+	if !ok {
+		t.Fatal("pi agent does not implement HookSupport")
+	}
+
+	if _, err := hookAgent.InstallHooks(true, true); err != nil {
+		t.Fatalf("InstallHooks(localDev=true) error = %v", err)
+	}
+
+	extPath := filepath.Join(env.RepoDir, ".pi", "extensions", "entire", "index.ts")
+	data, err := os.ReadFile(extPath)
+	if err != nil {
+		t.Fatalf("failed to read extension scaffold: %v", err)
+	}
+
+	expectedMainPath := filepath.Join(env.RepoDir, "cmd", "entire", "main.go")
+	content := string(data)
+	if !strings.Contains(content, expectedMainPath) {
+		t.Fatalf("local-dev scaffold missing absolute go main path %q", expectedMainPath)
+	}
+}
+
+func TestPiAgent_HookInstallationVariants(t *testing.T) {
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire("manual-commit")
+	t.Chdir(env.RepoDir)
+
+	ag, err := agent.Get(agent.AgentNamePi)
+	if err != nil {
+		t.Fatalf("agent.Get(pi) error = %v", err)
+	}
+
+	hookAgent := ag.(agent.HookSupport)
+
+	count, err := hookAgent.InstallHooks(false, false)
+	if err != nil {
+		t.Fatalf("initial InstallHooks() error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("initial InstallHooks() count = %d, want 1", count)
+	}
+
+	count, err = hookAgent.InstallHooks(false, false)
+	if err != nil {
+		t.Fatalf("idempotent InstallHooks() error = %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("idempotent InstallHooks() count = %d, want 0", count)
+	}
+
+	count, err = hookAgent.InstallHooks(false, true)
+	if err != nil {
+		t.Fatalf("force InstallHooks() error = %v", err)
+	}
+	if count != 0 && count != 1 {
+		t.Fatalf("force InstallHooks() count = %d, want 0 or 1", count)
+	}
+	if !hookAgent.AreHooksInstalled() {
+		t.Fatal("AreHooksInstalled() = false after force install")
+	}
+}
+
+func TestPiAgent_SessionOperations(t *testing.T) {
+	t.Parallel()
+	env := NewTestEnv(t)
+	env.InitRepo()
+
+	ag, err := agent.Get(agent.AgentNamePi)
+	if err != nil {
+		t.Fatalf("agent.Get(pi) error = %v", err)
+	}
+
+	srcPath := filepath.Join(env.RepoDir, "pi-session.jsonl")
+	srcContent := `{"type":"message","id":"1","message":{"role":"assistant","content":[{"type":"toolCall","name":"write","arguments":{"path":"main.go"}}]}}
+`
+	if err := os.WriteFile(srcPath, []byte(srcContent), 0o644); err != nil {
+		t.Fatalf("failed to write source transcript: %v", err)
+	}
+
+	session, err := ag.ReadSession(&agent.HookInput{SessionID: "pi-session", SessionRef: srcPath})
+	if err != nil {
+		t.Fatalf("ReadSession() error = %v", err)
+	}
+	if session.AgentName != agent.AgentNamePi {
+		t.Fatalf("AgentName = %q, want %q", session.AgentName, agent.AgentNamePi)
+	}
+	if len(session.ModifiedFiles) != 1 || session.ModifiedFiles[0] != "main.go" {
+		t.Fatalf("ModifiedFiles = %#v, want [main.go]", session.ModifiedFiles)
+	}
+
+	dstPath := filepath.Join(env.RepoDir, "pi-session-copy.jsonl")
+	session.SessionRef = dstPath
+	if err := ag.WriteSession(session); err != nil {
+		t.Fatalf("WriteSession() error = %v", err)
+	}
+
+	data, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatalf("failed to read copied transcript: %v", err)
+	}
+	if string(data) != srcContent {
+		t.Fatalf("copied transcript mismatch")
+	}
+
+	err = ag.WriteSession(&agent.AgentSession{
+		SessionID:  "wrong",
+		AgentName:  agent.AgentNameGemini,
+		SessionRef: filepath.Join(env.RepoDir, "wrong.jsonl"),
+		NativeData: []byte("x"),
+	})
+	if err == nil {
+		t.Fatal("WriteSession() expected error for wrong agent")
+	}
+}
+
+func TestPiAgent_HelperMethods(t *testing.T) {
+	t.Parallel()
+
+	t.Run("identity transform and basic metadata", func(t *testing.T) {
+		t.Parallel()
+
+		ag, err := agent.Get(agent.AgentNamePi)
+		if err != nil {
+			t.Fatalf("agent.Get(pi) error = %v", err)
+		}
+
+		if got := ag.TransformSessionID("abc123"); got != "abc123" {
+			t.Fatalf("TransformSessionID() = %q, want %q", got, "abc123")
+		}
+		if got := ag.ExtractAgentSessionID("abc123"); got != "abc123" {
+			t.Fatalf("ExtractAgentSessionID() = %q, want %q", got, "abc123")
+		}
+
+		if got := ag.FormatResumeCommand("abc123"); !strings.Contains(got, "pi") {
+			t.Fatalf("FormatResumeCommand() = %q, want to contain %q", got, "pi")
+		}
+
+		if got := ag.GetHookConfigPath(); got != "" {
+			t.Fatalf("GetHookConfigPath() = %q, want empty", got)
+		}
+	})
+
+	t.Run("GetLastUserPrompt extracts latest prompt", func(t *testing.T) {
+		t.Parallel()
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		transcriptPath := filepath.Join(env.RepoDir, "pi-helper-last-user.jsonl")
+		content := `{"type":"message","id":"1","message":{"role":"user","content":"first prompt"}}
+{"type":"message","id":"2","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}
+{"type":"message","id":"3","message":{"role":"user","content":[{"type":"text","text":"second"},{"type":"text","text":"prompt"}]}}
+`
+		if err := os.WriteFile(transcriptPath, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write transcript: %v", err)
+		}
+
+		ag, _ := agent.Get(agent.AgentNamePi)
+		piAgent, ok := ag.(*pi.PiAgent)
+		if !ok {
+			t.Fatalf("agent type = %T, want *pi.PiAgent", ag)
+		}
+
+		session, err := ag.ReadSession(&agent.HookInput{SessionID: "s1", SessionRef: transcriptPath})
+		if err != nil {
+			t.Fatalf("ReadSession() error = %v", err)
+		}
+
+		prompt := piAgent.GetLastUserPrompt(session)
+		if prompt != "second\n\nprompt" {
+			t.Fatalf("GetLastUserPrompt() = %q, want %q", prompt, "second\n\nprompt")
+		}
+	})
+
+	t.Run("TruncateAtUUID keeps root-to-target path on branched transcript", func(t *testing.T) {
+		t.Parallel()
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		transcriptPath := filepath.Join(env.RepoDir, "pi-helper-truncate-tree.jsonl")
+		content := `{"type":"session","version":3,"id":"sess","timestamp":"2026-01-01T00:00:00Z","cwd":"/repo"}
+{"type":"message","id":"1","parentId":null,"message":{"role":"user","content":"root"}}
+{"type":"message","id":"2","parentId":"1","message":{"role":"assistant","content":[{"type":"text","text":"branch"}]}}
+{"type":"message","id":"3","parentId":"2","message":{"role":"user","content":"left"}}
+{"type":"message","id":"4","parentId":"2","message":{"role":"user","content":"right"}}
+`
+		if err := os.WriteFile(transcriptPath, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write transcript: %v", err)
+		}
+
+		ag, _ := agent.Get(agent.AgentNamePi)
+		piAgent, ok := ag.(*pi.PiAgent)
+		if !ok {
+			t.Fatalf("agent type = %T, want *pi.PiAgent", ag)
+		}
+
+		session, err := ag.ReadSession(&agent.HookInput{SessionID: "s1", SessionRef: transcriptPath})
+		if err != nil {
+			t.Fatalf("ReadSession() error = %v", err)
+		}
+
+		truncated, err := piAgent.TruncateAtUUID(session, "3")
+		if err != nil {
+			t.Fatalf("TruncateAtUUID() error = %v", err)
+		}
+
+		text := string(truncated.NativeData)
+		if strings.Contains(text, `"id":"4"`) {
+			t.Fatalf("expected sibling branch to be excluded, got: %s", text)
+		}
+		if !strings.Contains(text, `"id":"1"`) || !strings.Contains(text, `"id":"2"`) || !strings.Contains(text, `"id":"3"`) {
+			t.Fatalf("expected root->target path to be preserved, got: %s", text)
+		}
+	})
+
+	t.Run("FindCheckpointUUID finds tool result entry", func(t *testing.T) {
+		t.Parallel()
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		transcriptPath := filepath.Join(env.RepoDir, "pi-helper-checkpoint.jsonl")
+		content := `{"type":"message","id":"1","message":{"role":"assistant","content":[{"type":"toolCall","id":"tool-123","name":"write","arguments":{"path":"a.txt"}}]}}
+{"type":"message","id":"2","message":{"role":"toolResult","toolName":"write","toolCallId":"tool-123","details":{"path":"a.txt"}}}
+`
+		if err := os.WriteFile(transcriptPath, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write transcript: %v", err)
+		}
+
+		ag, _ := agent.Get(agent.AgentNamePi)
+		piAgent, ok := ag.(*pi.PiAgent)
+		if !ok {
+			t.Fatalf("agent type = %T, want *pi.PiAgent", ag)
+		}
+
+		session, err := ag.ReadSession(&agent.HookInput{SessionID: "s1", SessionRef: transcriptPath})
+		if err != nil {
+			t.Fatalf("ReadSession() error = %v", err)
+		}
+
+		uuid, found := piAgent.FindCheckpointUUID(session, "tool-123")
+		if !found {
+			t.Fatal("FindCheckpointUUID() found = false, want true")
+		}
+		if uuid != "2" {
+			t.Fatalf("FindCheckpointUUID() uuid = %q, want %q", uuid, "2")
 		}
 	})
 }

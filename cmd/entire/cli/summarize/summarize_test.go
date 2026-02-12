@@ -542,6 +542,41 @@ func TestGenerateFromTranscript_NilGenerator(t *testing.T) {
 	}
 }
 
+func TestBuildCondensedTranscriptFromBytes_PiMessageFormat(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{"type":"message","id":"u1","message":{"role":"user","content":"Please update the README"}}
+{"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"I will update it."},{"type":"toolCall","name":"write","arguments":{"path":"README.md"}}]}}
+`)
+
+	entries, err := BuildCondensedTranscriptFromBytes(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries (user + assistant + tool), got %d", len(entries))
+	}
+
+	if entries[0].Type != EntryTypeUser || entries[0].Content != "Please update the README" {
+		t.Fatalf("unexpected user entry: %+v", entries[0])
+	}
+
+	if entries[1].Type != EntryTypeAssistant || entries[1].Content != "I will update it." {
+		t.Fatalf("unexpected assistant entry: %+v", entries[1])
+	}
+
+	if entries[2].Type != EntryTypeTool {
+		t.Fatalf("expected tool entry, got %+v", entries[2])
+	}
+	if entries[2].ToolName != "write" {
+		t.Fatalf("expected tool name write, got %q", entries[2].ToolName)
+	}
+	if entries[2].ToolDetail != "README.md" {
+		t.Fatalf("expected tool detail README.md, got %q", entries[2].ToolDetail)
+	}
+}
+
 // mustMarshal is a test helper that marshals v to JSON, failing the test on error.
 func mustMarshal(t *testing.T, v interface{}) json.RawMessage {
 	t.Helper()

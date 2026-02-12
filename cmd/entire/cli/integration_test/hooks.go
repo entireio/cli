@@ -695,3 +695,346 @@ func (env *TestEnv) SimulateGeminiSessionEnd(sessionID, transcriptPath string) e
 	runner := NewGeminiHookRunner(env.RepoDir, env.GeminiProjectDir, env.T)
 	return runner.SimulateGeminiSessionEnd(sessionID, transcriptPath)
 }
+
+// PiHookRunner executes Pi hooks in the test environment.
+type PiHookRunner struct {
+	RepoDir string
+	T       interface {
+		Helper()
+		Fatalf(format string, args ...interface{})
+		Logf(format string, args ...interface{})
+	}
+}
+
+// NewPiHookRunner creates a new Pi hook runner for the given repo directory.
+func NewPiHookRunner(repoDir string, t interface {
+	Helper()
+	Fatalf(format string, args ...interface{})
+	Logf(format string, args ...interface{})
+}) *PiHookRunner {
+	return &PiHookRunner{RepoDir: repoDir, T: t}
+}
+
+func (r *PiHookRunner) runPiHookWithInput(hookName string, input interface{}) error {
+	r.T.Helper()
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("failed to marshal hook input: %w", err)
+	}
+
+	return r.runPiHookInRepoDir(hookName, inputJSON)
+}
+
+func (r *PiHookRunner) runPiHookInRepoDir(hookName string, inputJSON []byte) error {
+	cmd := exec.Command(getTestBinary(), "hooks", "pi", hookName)
+	cmd.Dir = r.RepoDir
+	cmd.Stdin = bytes.NewReader(inputJSON)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("hook %s failed: %w\nInput: %s\nOutput: %s",
+			hookName, err, inputJSON, output)
+	}
+
+	r.T.Logf("Pi hook %s output: %s", hookName, output)
+	return nil
+}
+
+// runPiHookWithOutput runs a Pi hook and returns both stdout and stderr separately.
+func (r *PiHookRunner) runPiHookWithOutput(hookName string, inputJSON []byte) HookOutput {
+	cmd := exec.Command(getTestBinary(), "hooks", "pi", hookName)
+	cmd.Dir = r.RepoDir
+	cmd.Stdin = bytes.NewReader(inputJSON)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	return HookOutput{
+		Stdout: stdout.Bytes(),
+		Stderr: stderr.Bytes(),
+		Err:    err,
+	}
+}
+
+// SimulatePiSessionStart simulates the session-start hook for Pi.
+func (r *PiHookRunner) SimulatePiSessionStart(sessionID string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+	}
+
+	return r.runPiHookWithInput("session-start", input)
+}
+
+// SimulatePiSessionStartWithOutput simulates session-start and returns output.
+func (r *PiHookRunner) SimulatePiSessionStartWithOutput(sessionID string) HookOutput {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+	}
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return HookOutput{Err: fmt.Errorf("failed to marshal hook input: %w", err)}
+	}
+
+	return r.runPiHookWithOutput("session-start", inputJSON)
+}
+
+// SimulatePiUserPromptSubmit simulates the user-prompt-submit hook for Pi.
+func (r *PiHookRunner) SimulatePiUserPromptSubmit(sessionID string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+		"prompt":          "test prompt",
+	}
+
+	return r.runPiHookWithInput("user-prompt-submit", input)
+}
+
+// SimulatePiBeforeTool simulates the before-tool hook for Pi.
+func (r *PiHookRunner) SimulatePiBeforeTool(sessionID, transcriptPath, toolName string, toolInput any) error {
+	r.T.Helper()
+
+	input := map[string]any{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+		"tool_name":       toolName,
+		"tool_input":      toolInput,
+	}
+
+	return r.runPiHookWithInput("before-tool", input)
+}
+
+// SimulatePiAfterTool simulates the after-tool hook for Pi.
+func (r *PiHookRunner) SimulatePiAfterTool(sessionID, transcriptPath, toolName string, toolInput any, toolResponse any) error {
+	r.T.Helper()
+
+	input := map[string]any{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+		"tool_name":       toolName,
+		"tool_input":      toolInput,
+		"tool_response":   toolResponse,
+	}
+
+	return r.runPiHookWithInput("after-tool", input)
+}
+
+// SimulatePiStop simulates the stop hook for Pi.
+func (r *PiHookRunner) SimulatePiStop(sessionID, transcriptPath string) error {
+	r.T.Helper()
+	return r.SimulatePiStopWithLeaf(sessionID, transcriptPath, "")
+}
+
+// SimulatePiStopWithLeaf simulates the stop hook for Pi with an explicit active leaf ID.
+func (r *PiHookRunner) SimulatePiStopWithLeaf(sessionID, transcriptPath, leafID string) error {
+	r.T.Helper()
+
+	input := map[string]any{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	}
+	if leafID != "" {
+		input["leaf_id"] = leafID
+	}
+
+	return r.runPiHookWithInput("stop", input)
+}
+
+// SimulatePiSessionEnd simulates the session-end hook for Pi.
+func (r *PiHookRunner) SimulatePiSessionEnd(sessionID, transcriptPath string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	}
+
+	return r.runPiHookWithInput("session-end", input)
+}
+
+// PiSession represents a simulated Pi session.
+type PiSession struct {
+	ID             string
+	EntireID       string
+	TranscriptPath string
+	env            *TestEnv
+}
+
+// NewPiSession creates a new simulated Pi session.
+func (env *TestEnv) NewPiSession() *PiSession {
+	env.T.Helper()
+
+	env.SessionCounter++
+	sessionID := fmt.Sprintf("pi-session-%d", env.SessionCounter)
+	entireID := sessionid.EntireSessionID(sessionID)
+	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", sessionID+".jsonl")
+
+	return &PiSession{
+		ID:             sessionID,
+		EntireID:       entireID,
+		TranscriptPath: transcriptPath,
+		env:            env,
+	}
+}
+
+// CreatePiTranscript creates a Pi JSONL transcript for this session.
+func (s *PiSession) CreatePiTranscript(prompt string, changes []FileChange) string {
+	if err := os.MkdirAll(filepath.Dir(s.TranscriptPath), 0o755); err != nil {
+		s.env.T.Fatalf("failed to create transcript dir: %v", err)
+	}
+
+	entries := make([]map[string]interface{}, 0, len(changes)+3)
+	entries = append(entries, map[string]interface{}{
+		"type": "message",
+		"id":   "1",
+		"message": map[string]interface{}{
+			"role":    "user",
+			"content": prompt,
+		},
+	})
+
+	assistantContent := make([]map[string]interface{}, 0, len(changes)+1)
+	assistantContent = append(assistantContent, map[string]interface{}{
+		"type": "text",
+		"text": "I'll help with that.",
+	})
+	for i, change := range changes {
+		assistantContent = append(assistantContent, map[string]interface{}{
+			"type": "toolCall",
+			"id":   fmt.Sprintf("tool-%d", i+1),
+			"name": "write",
+			"arguments": map[string]interface{}{
+				"path": change.Path,
+			},
+		})
+	}
+
+	entries = append(entries, map[string]interface{}{
+		"type": "message",
+		"id":   "2",
+		"message": map[string]interface{}{
+			"role":    "assistant",
+			"content": assistantContent,
+		},
+	})
+
+	for i, change := range changes {
+		entries = append(entries, map[string]interface{}{
+			"type": "message",
+			"id":   fmt.Sprintf("result-%d", i+1),
+			"message": map[string]interface{}{
+				"role":       "toolResult",
+				"toolName":   "write",
+				"toolCallId": fmt.Sprintf("tool-%d", i+1),
+				"details": map[string]interface{}{
+					"path": change.Path,
+				},
+			},
+		})
+	}
+
+	var out bytes.Buffer
+	for _, entry := range entries {
+		line, err := json.Marshal(entry)
+		if err != nil {
+			s.env.T.Fatalf("failed to marshal transcript entry: %v", err)
+		}
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+
+	if err := os.WriteFile(s.TranscriptPath, out.Bytes(), 0o644); err != nil {
+		s.env.T.Fatalf("failed to write transcript: %v", err)
+	}
+
+	return s.TranscriptPath
+}
+
+// SimulatePiSessionStart is a convenience method on TestEnv.
+func (env *TestEnv) SimulatePiSessionStart(sessionID string) error {
+	env.T.Helper()
+	runner := NewPiHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePiSessionStart(sessionID)
+}
+
+// SimulatePiSessionStartWithOutput is a convenience method on TestEnv.
+func (env *TestEnv) SimulatePiSessionStartWithOutput(sessionID string) HookOutput {
+	env.T.Helper()
+	runner := NewPiHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePiSessionStartWithOutput(sessionID)
+}
+
+// SimulatePiUserPromptSubmit is a convenience method on TestEnv.
+func (env *TestEnv) SimulatePiUserPromptSubmit(sessionID string) error {
+	env.T.Helper()
+	runner := NewPiHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePiUserPromptSubmit(sessionID)
+}
+
+// SimulatePiBeforeTool is a convenience method on TestEnv.
+func (env *TestEnv) SimulatePiBeforeTool(sessionID, transcriptPath, toolName string, toolInput any) error {
+	env.T.Helper()
+	runner := NewPiHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePiBeforeTool(sessionID, transcriptPath, toolName, toolInput)
+}
+
+// SimulatePiAfterTool is a convenience method on TestEnv.
+func (env *TestEnv) SimulatePiAfterTool(sessionID, transcriptPath, toolName string, toolInput any, toolResponse any) error {
+	env.T.Helper()
+	runner := NewPiHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePiAfterTool(sessionID, transcriptPath, toolName, toolInput, toolResponse)
+}
+
+// SimulatePiStop is a convenience method on TestEnv.
+func (env *TestEnv) SimulatePiStop(sessionID, transcriptPath string) error {
+	env.T.Helper()
+	runner := NewPiHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePiStop(sessionID, transcriptPath)
+}
+
+// SimulatePiStopWithLeaf is a convenience method on TestEnv.
+func (env *TestEnv) SimulatePiStopWithLeaf(sessionID, transcriptPath, leafID string) error {
+	env.T.Helper()
+	runner := NewPiHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePiStopWithLeaf(sessionID, transcriptPath, leafID)
+}
+
+// SimulatePiSessionSwitch simulates Pi's session_switch lifecycle mapping:
+// session-end(old) then session-start(new).
+func (r *PiHookRunner) SimulatePiSessionSwitch(previousSessionID, newSessionID, previousTranscriptPath string) error {
+	r.T.Helper()
+
+	if err := r.SimulatePiSessionEnd(previousSessionID, previousTranscriptPath); err != nil {
+		return fmt.Errorf("session-switch: session-end failed: %w", err)
+	}
+	if err := r.SimulatePiSessionStart(newSessionID); err != nil {
+		return fmt.Errorf("session-switch: session-start failed: %w", err)
+	}
+
+	return nil
+}
+
+// SimulatePiSessionEnd is a convenience method on TestEnv.
+func (env *TestEnv) SimulatePiSessionEnd(sessionID, transcriptPath string) error {
+	env.T.Helper()
+	runner := NewPiHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePiSessionEnd(sessionID, transcriptPath)
+}
+
+// SimulatePiSessionSwitch is a convenience method on TestEnv.
+func (env *TestEnv) SimulatePiSessionSwitch(previousSessionID, newSessionID, previousTranscriptPath string) error {
+	env.T.Helper()
+	runner := NewPiHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePiSessionSwitch(previousSessionID, newSessionID, previousTranscriptPath)
+}

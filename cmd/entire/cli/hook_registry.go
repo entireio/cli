@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
@@ -189,6 +190,58 @@ func init() {
 			return nil
 		}
 		return handleGeminiNotification()
+	})
+
+	registerPiHookHandlers()
+}
+
+func registerPiHookHandlers() {
+	RegisterHookHandler(agent.AgentNamePi, pi.HookNameSessionStart, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handlePiSessionStart()
+	})
+
+	RegisterHookHandler(agent.AgentNamePi, pi.HookNameSessionEnd, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handlePiSessionEnd()
+	})
+
+	RegisterHookHandler(agent.AgentNamePi, pi.HookNameUserPromptSubmit, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handlePiUserPromptSubmit()
+	})
+
+	RegisterHookHandler(agent.AgentNamePi, pi.HookNameBeforeTool, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handlePiBeforeTool()
+	})
+
+	RegisterHookHandler(agent.AgentNamePi, pi.HookNameAfterTool, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handlePiAfterTool()
+	})
+
+	RegisterHookHandler(agent.AgentNamePi, pi.HookNameStop, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handlePiStop()
 	})
 }
 
