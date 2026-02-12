@@ -327,12 +327,12 @@ type hookResponse struct {
 
 // outputHookResponse outputs a JSON response with additionalContext for
 // SessionStart hooks. The context is injected into the agent's conversation.
-func outputHookResponse(context string) error {
+func outputHookResponse(additionalContext string) error {
 	resp := hookResponse{
-		SystemMessage: context,
+		SystemMessage: additionalContext,
 		HookSpecificOutput: &hookSpecificOutput{
 			HookEventName:     "SessionStart",
-			AdditionalContext: context,
+			AdditionalContext: additionalContext,
 		},
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
@@ -356,12 +356,12 @@ func outputHookMessage(message string) error {
 // outputHookResponseWithContextAndMessage outputs a JSON response with both
 // additionalContext (injected into agent conversation) and a systemMessage
 // (shown to the user as a warning/info).
-func outputHookResponseWithContextAndMessage(context, message string) error {
+func outputHookResponseWithContextAndMessage(additionalContext, message string) error {
 	resp := hookResponse{
 		SystemMessage: message,
 		HookSpecificOutput: &hookSpecificOutput{
 			HookEventName:     "UserPromptSubmit",
-			AdditionalContext: context,
+			AdditionalContext: additionalContext,
 		},
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {

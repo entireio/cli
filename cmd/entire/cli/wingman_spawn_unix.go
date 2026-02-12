@@ -67,8 +67,11 @@ func spawnDetachedWingmanReview(repoRoot, payloadPath string) {
 	pid := cmd.Process.Pid
 	fmt.Fprintf(os.Stderr, "[wingman] Review subprocess spawned (pid=%d)\n", pid)
 
-	// The log file handle is inherited by the child process and will be
-	// closed when that process exits. Don't close it here.
+	// Close the parent's copy of the log file descriptor. The child process
+	// received its own copy via dup during Start(), so this won't affect it.
+	if logFile != nil {
+		_ = logFile.Close()
+	}
 
 	// Release the process so it can run independently
 	//nolint:errcheck // Best effort - process should continue regardless
@@ -121,8 +124,11 @@ func spawnDetachedWingmanApply(repoRoot string) {
 	pid := cmd.Process.Pid
 	fmt.Fprintf(os.Stderr, "[wingman] Apply subprocess spawned (pid=%d)\n", pid)
 
-	// The log file handle is inherited by the child process and will be
-	// closed when that process exits. Don't close it here.
+	// Close the parent's copy of the log file descriptor. The child process
+	// received its own copy via dup during Start(), so this won't affect it.
+	if applyLogFile != nil {
+		_ = applyLogFile.Close()
+	}
 
 	//nolint:errcheck // Best effort - process should continue regardless
 	_ = cmd.Process.Release()
