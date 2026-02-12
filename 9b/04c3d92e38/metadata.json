@@ -3,11 +3,17 @@
   "checkpoint_id": "9b04c3d92e38",
   "strategy": "manual-commit",
   "branch": "gtrrz-victor/delete-old-sessionid-logic",
-  "checkpoints_count": 2,
+  "checkpoints_count": 3,
   "files_touched": [
     "cmd/entire/cli/buildinfo/buildinfo.go",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/resume.go",
     "cmd/entire/cli/root.go",
-    "cmd/entire/cli/root_test.go"
+    "cmd/entire/cli/root_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go"
   ],
   "sessions": [
     {
@@ -23,13 +29,20 @@
       "context": "/9b/04c3d92e38/1/context.md",
       "content_hash": "/9b/04c3d92e38/1/content_hash.txt",
       "prompt": "/9b/04c3d92e38/1/prompt.txt"
+    },
+    {
+      "metadata": "/9b/04c3d92e38/2/metadata.json",
+      "transcript": "/9b/04c3d92e38/2/full.jsonl",
+      "context": "/9b/04c3d92e38/2/context.md",
+      "content_hash": "/9b/04c3d92e38/2/content_hash.txt",
+      "prompt": "/9b/04c3d92e38/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 38,
-    "cache_creation_tokens": 67353,
-    "cache_read_tokens": 2549008,
-    "output_tokens": 2226,
-    "api_call_count": 32
+    "input_tokens": 100,
+    "cache_creation_tokens": 230701,
+    "cache_read_tokens": 10789716,
+    "output_tokens": 5090,
+    "api_call_count": 90
   }
 }
