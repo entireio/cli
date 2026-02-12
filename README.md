@@ -2,6 +2,14 @@
 
 Entire hooks into your git workflow to capture AI agent sessions on every push. Sessions are indexed alongside commits, creating a searchable record of how code was written in your repo.
 
+With Entire, you can:
+
+* **Understand why code changed** — see the full prompt/response transcript and files touched
+* **Recover instantly** — rewind to a known-good checkpoint when an agent goes sideways and resume seamlessly
+* **Keep Git history clean** — preserve agent context on a separate branch
+* **Onboard faster** — show the path from prompt → change → commit
+* **Maintain traceability** — support audit and compliance requirements when needed
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
