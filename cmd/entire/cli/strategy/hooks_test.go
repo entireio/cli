@@ -905,3 +905,135 @@ func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 		t.Errorf("error should mention 'failed to remove hooks', got: %v", err)
 	}
 }
+
+// Self-heal: reinstalling hooks after a third-party tool overwrites or deletes them.
+
+func TestInstallGitHook_SelfHealAfterThirdPartyOverwrite(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// Install Entire hooks, then simulate a third-party tool overwriting them
+	if _, err := InstallGitHook(true); err != nil {
+		t.Fatalf("initial install error: %v", err)
+	}
+
+	thirdPartyContents := make(map[string]string)
+	for _, hook := range gitHookNames {
+		content := "#!/bin/sh\n# third_party_tool managed hook\nrun_third_party \"" + hook + "\" \"$@\"\n"
+		thirdPartyContents[hook] = content
+		if err := os.WriteFile(filepath.Join(hooksDir, hook), []byte(content), 0o755); err != nil {
+			t.Fatalf("failed to overwrite %s: %v", hook, err)
+		}
+	}
+
+	// Detection: hooks should be seen as missing
+	if IsGitHookInstalled() {
+		t.Fatal("IsGitHookInstalled() = true after overwrite, want false")
+	}
+
+	// Self-heal reinstall
+	count, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("self-heal error: %v", err)
+	}
+	if count == 0 {
+		t.Error("self-heal should install hooks (count > 0)")
+	}
+	if !IsGitHookInstalled() {
+		t.Error("hooks should be detected after self-heal")
+	}
+
+	// Each hook should have Entire marker, chain to backup, and backup should contain third-party content
+	for _, hook := range gitHookNames {
+		data, err := os.ReadFile(filepath.Join(hooksDir, hook))
+		if err != nil {
+			t.Fatalf("hook %s missing: %v", hook, err)
+		}
+		if !strings.Contains(string(data), entireHookMarker) {
+			t.Errorf("hook %s missing Entire marker", hook)
+		}
+		if !strings.Contains(string(data), chainComment) {
+			t.Errorf("hook %s missing chain call", hook)
+		}
+
+		backupData, err := os.ReadFile(filepath.Join(hooksDir, hook+backupSuffix))
+		if err != nil {
+			t.Fatalf("backup for %s missing: %v", hook, err)
+		}
+		if string(backupData) != thirdPartyContents[hook] {
+			t.Errorf("backup for %s = %q, want third-party content", hook, string(backupData))
+		}
+	}
+}
+
+func TestInstallGitHook_SelfHealAfterHooksDeleted(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	if _, err := InstallGitHook(true); err != nil {
+		t.Fatalf("initial install error: %v", err)
+	}
+
+	// Simulate third-party tool deleting all hooks
+	for _, hook := range gitHookNames {
+		if err := os.Remove(filepath.Join(hooksDir, hook)); err != nil {
+			t.Fatalf("failed to delete %s: %v", hook, err)
+		}
+	}
+
+	if IsGitHookInstalled() {
+		t.Fatal("IsGitHookInstalled() = true after deletion, want false")
+	}
+
+	count, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("self-heal error: %v", err)
+	}
+	if count != len(gitHookNames) {
+		t.Errorf("self-heal installed %d hooks, want %d", count, len(gitHookNames))
+	}
+	if !IsGitHookInstalled() {
+		t.Error("hooks should be detected after self-heal")
+	}
+
+	// No backups should exist (nothing to back up)
+	for _, hook := range gitHookNames {
+		if _, err := os.Stat(filepath.Join(hooksDir, hook+backupSuffix)); !os.IsNotExist(err) {
+			t.Errorf("backup for %s should not exist when hook was deleted", hook)
+		}
+	}
+}
+
+func TestInstallGitHook_SelfHealPreservesOriginalBackup(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// User has a custom hook before Entire is ever installed
+	originalContent := "#!/bin/sh\necho 'user original hook'\n"
+	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	if err := os.WriteFile(hookPath, []byte(originalContent), 0o755); err != nil {
+		t.Fatalf("failed to create custom hook: %v", err)
+	}
+
+	// First install backs up the user's hook
+	if _, err := InstallGitHook(true); err != nil {
+		t.Fatalf("initial install error: %v", err)
+	}
+
+	// Third-party tool overwrites our hook (but backup still exists)
+	thirdPartyContent := "#!/bin/sh\n# third_party_tool managed\nrun_third_party prepare-commit-msg\n"
+	if err := os.WriteFile(hookPath, []byte(thirdPartyContent), 0o755); err != nil {
+		t.Fatalf("failed to overwrite: %v", err)
+	}
+
+	// Self-heal
+	if _, err := InstallGitHook(true); err != nil {
+		t.Fatalf("self-heal error: %v", err)
+	}
+
+	// The ORIGINAL user backup must be preserved, not overwritten with third-party content
+	backupData, err := os.ReadFile(hookPath + backupSuffix)
+	if err != nil {
+		t.Fatalf("backup should exist: %v", err)
+	}
+	if string(backupData) != originalContent {
+		t.Errorf("original backup overwritten: got %q, want %q", string(backupData), originalContent)
+	}
+}

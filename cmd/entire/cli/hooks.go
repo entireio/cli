@@ -273,6 +273,15 @@ func handleSessionStartCommon() error {
 		}
 	}
 
+	// Self-heal if git hooks were overwritten.
+	if !strategy.IsGitHookInstalled() {
+		if n, err := strategy.InstallGitHook(true); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "[entire] Warning: failed to reinstall git hooks: %v\n", err)
+		} else if n > 0 {
+			_, _ = fmt.Fprintf(os.Stderr, "[entire] Reinstalled %d git hook(s) (chained with existing hooks)\n", n)
+		}
+	}
+
 	// Output informational message using agent-specific format
 	if err := outputHookResponse(message); err != nil {
 		return err
