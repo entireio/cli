@@ -166,6 +166,88 @@ T+30-50s Delivery path determined
 
 The 10-second initial delay lets the agent turn fully settle before computing the diff, ensuring all file writes are flushed.
 
+## Review Prompt Construction
+
+The review prompt is the core of wingman's value. Unlike a naive diff-only review, it leverages Entire's checkpoint data to give the reviewer **full context about what the developer was trying to accomplish**. This enables intent-aware review — catching not just bugs, but misalignment between what was asked and what was built.
+
+### Context Sources
+
+The prompt is assembled from six sources, each contributing a different layer of understanding:
+
+| Source | Origin | What It Provides |
+|--------|--------|-----------------|
+| **Developer prompts** | `prompt.txt` from checkpoint metadata | The original instructions given to the agent — the ground truth of intent |
+| **Commit message** | Git commit or auto-commit message | A summary of what was done (may differ from what was asked) |
+| **Session context** | `context.md` from checkpoint metadata | Generated summary of key actions, decisions, and session flow |
+| **Checkpoint files** | `.entire/metadata/<session-id>/` | Paths provided so the reviewer can read the full transcript, prompts, or context if needed |
+| **File list** | Payload from trigger | Which files changed and how (modified/new/deleted) |
+| **Branch diff** | `git diff` against merge-base | The actual code changes — computed against `main`/`master` for a holistic branch-level view |
+
+### Prompt Structure
+
+```
+┌─ System Role ──────────────────────────────────────────┐
+│ "You are a senior code reviewer performing an           │
+│  intent-aware review."                                  │
+├─ Session Context ──────────────────────────────────────┤
+│ Developer's Prompts     <prompts>...</prompts>          │
+│ Commit Message          (plain text)                    │
+│ Session Context         <session-context>...</session-context> │
+│ Checkpoint File Paths   (for deeper investigation)      │
+├─ Code Changes ─────────────────────────────────────────┤
+│ Files changed:          file.go (modified), ...         │
+│ Diff                    <diff>...</diff>                │
+├─ Review Instructions ──────────────────────────────────┤
+│ Intent alignment        (most important)                │
+│ Correctness             bugs, logic errors, races       │
+│ Security                injection, secrets, path traversal │
+│ Robustness              edge cases, leaks, timeouts     │
+│ Do NOT flag             style, docs on clear code       │
+│ Output format           Markdown with severity levels   │
+└────────────────────────────────────────────────────────┘
+```
+
+### Intent-Aware Review
+
+The review instructions prioritize **intent alignment** as the most important category:
+
+1. Do the changes actually accomplish what the developer asked for?
+2. Are there any prompts or requirements that were missed or only partially implemented?
+3. Does the implementation match the stated approach in the session context?
+
+This is only possible because Entire captures the developer's prompts and session context as checkpoint metadata. A reviewer that only sees the diff cannot evaluate whether the code matches the original request.
+
+### Diff Strategy
+
+The diff is computed against the **merge-base** with `main`/`master`, not just the latest commit. This gives the reviewer a holistic view of all branch changes rather than a narrow single-commit diff. Fallback chain:
+
+1. `git merge-base main HEAD` → diff against merge-base (branch-level view)
+2. `git merge-base master HEAD` → try master if main doesn't exist
+3. `git diff HEAD` → uncommitted changes only
+4. `git diff HEAD~1 HEAD` → latest commit if no uncommitted changes
+
+### Read-Only Tool Access
+
+The reviewer Claude instance has access to `Read`, `Glob`, and `Grep` tools with `--permission-mode bypassPermissions`. This allows it to:
+
+- Read source files beyond the diff for additional context
+- Search for related code patterns or usages
+- Inspect the checkpoint metadata files referenced in the prompt
+
+Tools are restricted to read-only operations — the reviewer cannot modify files.
+
+### Truncation
+
+Diffs larger than 100KB are truncated to maintain review quality. Very large diffs tend to produce unfocused reviews.
+
+### Output Format
+
+The reviewer outputs structured Markdown with:
+- **Summary**: Does the change accomplish its goal? Overall quality assessment.
+- **Issues**: Each with severity (`CRITICAL`, `WARNING`, `SUGGESTION`), file path with line reference, description, and suggested fix.
+
+This output is written directly to `.entire/REVIEW.md` and later read by the agent during delivery.
+
 ## Stale Review Cleanup
 
 Reviews can become stale in several scenarios. The `shouldSkipPendingReview()` function handles cleanup:
