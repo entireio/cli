@@ -151,6 +151,30 @@ The review prompt leverages Entire's checkpoint data to give the reviewer **full
 | **File list** | Payload from trigger | Which files changed and how (modified/new/deleted) |
 | **Branch diff** | `git diff` against merge-base | The actual code changes — computed against `main`/`master` for a holistic branch-level view |
 
+### Prompt Structure
+
+```
+┌─ System Role ──────────────────────────────────────────┐
+│ "You are a senior code reviewer performing an           │
+│  intent-aware review."                                  │
+├─ Session Context ──────────────────────────────────────┤
+│ Developer's Prompts     <prompts>...</prompts>          │
+│ Commit Message          (plain text)                    │
+│ Session Context         <session-context>...</session-context> │
+│ Checkpoint File Paths   (for deeper investigation)      │
+├─ Code Changes ─────────────────────────────────────────┤
+│ Files changed:          file.go (modified), ...         │
+│ Diff                    <diff>...</diff>                │
+├─ Review Instructions ──────────────────────────────────┤
+│ Intent alignment        (most important)                │
+│ Correctness             bugs, logic errors, races       │
+│ Security                injection, secrets, path traversal │
+│ Robustness              edge cases, leaks, timeouts     │
+│ Do NOT flag             style, docs on clear code       │
+│ Output format           Markdown with severity levels   │
+└────────────────────────────────────────────────────────┘
+```
+
 ### Diff Strategy
 
 The diff is computed against the **merge-base** with `main`/`master`, not just the latest commit. This gives the reviewer a holistic view of all branch changes rather than a narrow single-commit diff. Fallback chain:
