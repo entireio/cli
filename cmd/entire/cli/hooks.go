@@ -8,9 +8,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -266,9 +268,17 @@ func handleSessionStartCommon() error {
 	// Build informational message
 	message := "\n\nPowered by Entire:\n  This conversation will be linked to your next commit."
 
-	// Append wingman note if enabled
+	// Append wingman note if enabled, with pending review indication
 	if settings.IsWingmanEnabled() {
-		message += "\n  Wingman is active: your changes will be automatically reviewed."
+		if repoRoot, rootErr := paths.RepoRoot(); rootErr == nil {
+			if _, statErr := os.Stat(filepath.Join(repoRoot, wingmanReviewFile)); statErr == nil {
+				message += "\n  Wingman: a review is pending and will be addressed on your next prompt."
+			} else {
+				message += "\n  Wingman is active: your changes will be automatically reviewed."
+			}
+		} else {
+			message += "\n  Wingman is active: your changes will be automatically reviewed."
+		}
 	}
 
 	// Check for concurrent sessions and append count if any

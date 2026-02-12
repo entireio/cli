@@ -745,14 +745,14 @@ func TestHasAnyLiveSession_StaleActiveSessionSkipped(t *testing.T) {
 	if err := os.WriteFile(sessFile, []byte(`{"phase":"active"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Set modification time to 5 hours ago (beyond staleActiveSessionThreshold)
-	staleTime := time.Now().Add(-5 * time.Hour)
+	// Set modification time beyond staleActiveSessionThreshold
+	staleTime := time.Now().Add(-staleActiveSessionThreshold - 1*time.Hour)
 	if err := os.Chtimes(sessFile, staleTime, staleTime); err != nil {
 		t.Fatal(err)
 	}
 
 	if hasAnyLiveSession(tmpDir) {
-		t.Error("should return false when only active session is stale (5h old)")
+		t.Error("should return false when only active session is beyond staleActiveSessionThreshold")
 	}
 }
 
@@ -771,7 +771,7 @@ func TestHasAnyLiveSession_StaleIdleSessionNotSkipped(t *testing.T) {
 	if err := os.WriteFile(sessFile, []byte(`{"phase":"idle"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	oldTime := time.Now().Add(-5 * time.Hour)
+	oldTime := time.Now().Add(-staleActiveSessionThreshold - 1*time.Hour)
 	if err := os.Chtimes(sessFile, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
@@ -795,7 +795,7 @@ func TestHasAnyLiveSession_FreshActiveNotSkipped(t *testing.T) {
 	if err := os.WriteFile(staleFile, []byte(`{"phase":"active_committed"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	staleTime := time.Now().Add(-5 * time.Hour)
+	staleTime := time.Now().Add(-staleActiveSessionThreshold - 1*time.Hour)
 	if err := os.Chtimes(staleFile, staleTime, staleTime); err != nil {
 		t.Fatal(err)
 	}
