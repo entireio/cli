@@ -116,8 +116,8 @@ func BuildCondensedTranscriptFromBytes(content []byte, agentType agent.AgentType
 	switch agentType {
 	case agent.AgentTypeGemini:
 		return buildCondensedTranscriptFromGemini(content)
-	case agent.AgentTypeClaudeCode, agent.AgentTypeUnknown:
-		// Claude format - fall through to shared logic below
+	case agent.AgentTypeClaudeCode, agent.AgentTypeCodex, agent.AgentTypeOpenCode, agent.AgentTypeUnknown:
+		// JSONL format (Claude, Codex, OpenCode) - fall through to shared logic below
 	}
 	// Claude format (JSONL) - handles Claude Code, Unknown, and any future agent types
 	lines, err := transcript.ParseFromBytes(content)

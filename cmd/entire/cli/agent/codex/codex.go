@@ -15,7 +15,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/sessionid"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -121,19 +120,6 @@ func (c *CodexAgent) ParseHookInput(hookType agent.HookType, reader io.Reader) (
 // GetSessionID extracts the session ID from hook input.
 func (c *CodexAgent) GetSessionID(input *agent.HookInput) string {
 	return input.SessionID
-}
-
-// TransformSessionID converts a Codex session ID to an Entire session ID.
-// This is an identity function - the agent session ID IS the Entire session ID.
-func (c *CodexAgent) TransformSessionID(agentSessionID string) string {
-	return agentSessionID
-}
-
-// ExtractAgentSessionID extracts the Codex session ID from an Entire session ID.
-// Since Entire session ID = agent session ID (identity), this returns the input unchanged.
-// For backwards compatibility with legacy date-prefixed IDs, it strips the prefix if present.
-func (c *CodexAgent) ExtractAgentSessionID(entireSessionID string) string {
-	return sessionid.ModelSessionID(entireSessionID)
 }
 
 // ProtectedDirs returns directories that Codex uses for config/state.

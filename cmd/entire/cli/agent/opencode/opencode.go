@@ -12,7 +12,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/sessionid"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -114,7 +113,7 @@ func (o *OpenCodeAgent) ParseHookInput(hookType agent.HookType, reader io.Reader
 	// Resolve session transcript path
 	sessionDir, dirErr := o.GetSessionDir("")
 	if dirErr == nil && input.SessionID != "" {
-		input.SessionRef = o.ResolveSessionFile(sessionDir, o.ExtractAgentSessionID(input.SessionID))
+		input.SessionRef = o.ResolveSessionFile(sessionDir, input.SessionID)
 	}
 
 	return input, nil
@@ -123,19 +122,6 @@ func (o *OpenCodeAgent) ParseHookInput(hookType agent.HookType, reader io.Reader
 // GetSessionID extracts the session ID from hook input.
 func (o *OpenCodeAgent) GetSessionID(input *agent.HookInput) string {
 	return input.SessionID
-}
-
-// TransformSessionID converts an OpenCode session ID to an Entire session ID.
-// This is an identity function - the agent session ID IS the Entire session ID.
-func (o *OpenCodeAgent) TransformSessionID(agentSessionID string) string {
-	return agentSessionID
-}
-
-// ExtractAgentSessionID extracts the OpenCode session ID from an Entire session ID.
-// Since Entire session ID = agent session ID (identity), this returns the input unchanged.
-// For backwards compatibility with legacy date-prefixed IDs, it strips the prefix if present.
-func (o *OpenCodeAgent) ExtractAgentSessionID(entireSessionID string) string {
-	return sessionid.ModelSessionID(entireSessionID)
 }
 
 // ProtectedDirs returns directories that OpenCode uses for config/state.

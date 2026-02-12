@@ -270,16 +270,6 @@ func TestFormatResumeCommand(t *testing.T) {
 	}
 }
 
-func TestTransformSessionID(t *testing.T) {
-	t.Parallel()
-
-	ag := &OpenCodeAgent{}
-	id := ag.TransformSessionID("ses_abc123")
-	if id != "ses_abc123" {
-		t.Errorf("TransformSessionID() = %q, want %q", id, "ses_abc123")
-	}
-}
-
 func TestGetSessionDir(t *testing.T) {
 	// Not parallel: subtests use t.Setenv which modifies process-global state
 

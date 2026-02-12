@@ -206,16 +206,6 @@ func TestFormatResumeCommand(t *testing.T) {
 	}
 }
 
-func TestTransformSessionID(t *testing.T) {
-	t.Parallel()
-
-	ag := &CodexAgent{}
-	id := ag.TransformSessionID(testThreadID)
-	if id != testThreadID {
-		t.Errorf("TransformSessionID() = %q, want %q", id, testThreadID)
-	}
-}
-
 func TestGetHookNames(t *testing.T) {
 	t.Parallel()
 

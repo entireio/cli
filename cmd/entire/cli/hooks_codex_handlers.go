@@ -15,7 +15,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // handleCodexAgentTurnComplete handles the agent-turn-complete hook for Codex CLI.
@@ -55,7 +54,7 @@ func handleCodexAgentTurnComplete() error {
 	// Resolve transcript path from session directory
 	transcriptPath := input.SessionRef
 	if transcriptPath != "" && sessionID != unknownSessionID {
-		resolved := ag.ResolveSessionFile(transcriptPath, ag.ExtractAgentSessionID(sessionID))
+		resolved := ag.ResolveSessionFile(transcriptPath, sessionID)
 		if fileExistsAndIsRegular(resolved) {
 			transcriptPath = resolved
 		}
@@ -70,6 +69,13 @@ func handleCodexAgentTurnComplete() error {
 		sessionID:      sessionID,
 		transcriptPath: transcriptPath,
 		userPrompt:     input.UserPrompt,
+	}
+
+	// Ensure strategy setup is in place (git hooks, gitignore, metadata branch).
+	// Codex has no separate turn-start hook, so we do this here before committing.
+	strat := GetStrategy()
+	if err := strat.EnsureSetup(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
 	}
 
 	if err := setupCodexSessionDir(ctx); err != nil {
@@ -158,116 +164,15 @@ func extractCodexMetadata(ctx *codexSessionContext) error {
 	return nil
 }
 
-// commitCodexSession commits the session changes using the strategy.
+// commitCodexSession commits the session changes using the shared commit pipeline.
 func commitCodexSession(ctx *codexSessionContext) error {
-	repoRoot, err := paths.RepoRoot()
-	if err != nil {
-		return fmt.Errorf("failed to get repo root: %w", err)
-	}
-
-	preState, err := LoadPrePromptState(ctx.sessionID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load pre-prompt state: %v\n", err)
-	}
-	if preState != nil {
-		fmt.Fprintf(os.Stderr, "Loaded pre-prompt state: %d pre-existing untracked files\n", len(preState.UntrackedFiles))
-	}
-
-	// Compute new and deleted files (single git status call)
-	var preUntracked []string
-	if preState != nil {
-		preUntracked = preState.PreUntrackedFiles()
-	}
-	changes, err := DetectFileChanges(preUntracked)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
-	}
-
-	relModifiedFiles := FilterAndNormalizePaths(ctx.modifiedFiles, repoRoot)
-	var relNewFiles, relDeletedFiles []string
-	if changes != nil {
-		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
-		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
-	}
-
-	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
-	if totalChanges == 0 {
-		fmt.Fprintf(os.Stderr, "No files were modified during this session\n")
-		fmt.Fprintf(os.Stderr, "Skipping commit\n")
-		if cleanupErr := CleanupPrePromptState(ctx.sessionID); cleanupErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", cleanupErr)
-		}
-		return nil
-	}
-
-	logFileChanges(relModifiedFiles, relNewFiles, relDeletedFiles)
-
-	// Create context file
-	contextFile := filepath.Join(ctx.sessionDirAbs, paths.ContextFileName)
-	if err := createContextFileForCodex(contextFile, ctx.commitMessage, ctx.sessionID, ctx.userPrompt); err != nil {
-		return fmt.Errorf("failed to create context file: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "Created context file: %s\n", ctx.sessionDir+"/"+paths.ContextFileName)
-
-	author, err := GetGitAuthor()
-	if err != nil {
-		return fmt.Errorf("failed to get git author: %w", err)
-	}
-
-	strat := GetStrategy()
-	if err := strat.EnsureSetup(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
-	}
-
-	// Get agent type from the hook agent
-	hookAgent, agentErr := GetCurrentHookAgent()
-	if agentErr != nil {
-		return fmt.Errorf("failed to get agent: %w", agentErr)
-	}
-	agentType := hookAgent.Type()
-
-	saveCtx := strategy.SaveContext{
-		SessionID:      ctx.sessionID,
-		ModifiedFiles:  relModifiedFiles,
-		NewFiles:       relNewFiles,
-		DeletedFiles:   relDeletedFiles,
-		MetadataDir:    ctx.sessionDir,
-		MetadataDirAbs: ctx.sessionDirAbs,
-		CommitMessage:  ctx.commitMessage,
-		TranscriptPath: ctx.transcriptPath,
-		AuthorName:     author.Name,
-		AuthorEmail:    author.Email,
-		AgentType:      agentType,
-	}
-
-	if err := strat.SaveChanges(saveCtx); err != nil {
-		return fmt.Errorf("failed to save session: %w", err)
-	}
-
-	if cleanupErr := CleanupPrePromptState(ctx.sessionID); cleanupErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", cleanupErr)
-	}
-
-	fmt.Fprintf(os.Stderr, "Session saved successfully\n")
-	return nil
-}
-
-// createContextFileForCodex creates a context.md file for Codex sessions.
-func createContextFileForCodex(contextFile, commitMessage, sessionID, prompt string) error {
-	var sb strings.Builder
-
-	sb.WriteString("# Session Context\n\n")
-	sb.WriteString(fmt.Sprintf("Session ID: %s\n", sessionID))
-	sb.WriteString(fmt.Sprintf("Commit Message: %s\n\n", commitMessage))
-
-	if prompt != "" {
-		sb.WriteString("## Prompt\n\n")
-		sb.WriteString(prompt)
-		sb.WriteString("\n")
-	}
-
-	if err := os.WriteFile(contextFile, []byte(sb.String()), 0o600); err != nil {
-		return fmt.Errorf("failed to write context file: %w", err)
-	}
-	return nil
+	return commitAgentSession(&agentCommitContext{
+		sessionID:               ctx.sessionID,
+		sessionDir:              ctx.sessionDir,
+		sessionDirAbs:           ctx.sessionDirAbs,
+		commitMessage:           ctx.commitMessage,
+		transcriptPath:          ctx.transcriptPath,
+		transcriptModifiedFiles: ctx.modifiedFiles,
+		prompts:                 singlePrompt(ctx.userPrompt),
+	})
 }
