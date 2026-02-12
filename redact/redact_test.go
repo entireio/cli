@@ -159,6 +159,48 @@ func TestShouldSkipJSONLField_RedactionBehavior(t *testing.T) {
 	}
 }
 
+func TestString_PatternDetection(t *testing.T) {
+	// These secrets have entropy below 4.5 so entropy-only detection misses them.
+	// Gitleaks pattern matching should catch them.
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "AWS access key (entropy ~3.9, below 4.5 threshold)",
+			input: "key=AKIAYRWQG5EJLPZLBYNP",
+			want:  "key=REDACTED",
+		},
+		{
+			name:  "two AWS keys separated by space produce two REDACTED tokens",
+			input: "key=AKIAYRWQG5EJLPZLBYNP AKIAYRWQG5EJLPZLBYNP",
+			want:  "key=REDACTED REDACTED",
+		},
+		{
+			name:  "adjacent AWS keys without separator merge into single REDACTED",
+			input: "key=AKIAYRWQG5EJLPZLBYNPAKIAYRWQG5EJLPZLBYNP",
+			want:  "key=REDACTED",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Verify entropy is below threshold (proving entropy-only would miss this).
+			for _, loc := range secretPattern.FindAllStringIndex(tt.input, -1) {
+				e := shannonEntropy(tt.input[loc[0]:loc[1]])
+				if e > entropyThreshold {
+					t.Fatalf("test secret has entropy %.2f > %.1f; this test is meant for low-entropy secrets", e, entropyThreshold)
+				}
+			}
+
+			got := String(tt.input)
+			if got != tt.want {
+				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestShouldSkipJSONLObject(t *testing.T) {
 	tests := []struct {
 		name string

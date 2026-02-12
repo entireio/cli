@@ -134,6 +134,14 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 		return fmt.Errorf("transcript file not found or empty: %s", transcriptPath)
 	}
 
+	// Early check: bail out quickly if the repo has no commits yet.
+	// Without this, the function does a lot of work (transcript copy, prompt extraction, etc.)
+	// before eventually failing deep in strategy.SaveChanges().
+	if repo, err := strategy.OpenRepository(); err == nil && strategy.IsEmptyRepository(repo) {
+		fmt.Fprintln(os.Stderr, "Entire: skipping checkpoint. Will activate after first commit.")
+		return NewSilentError(strategy.ErrEmptyRepository)
+	}
+
 	// Create session metadata folder using the entire session ID (preserves original date on resume)
 	// Use AbsPath to ensure we create at repo root, not relative to cwd
 	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)

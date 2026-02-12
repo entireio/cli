@@ -38,6 +38,15 @@ const (
 // Each package needs its own package-scoped sentinel for git log iteration patterns.
 var errStop = errors.New("stop iteration")
 
+// IsEmptyRepository returns true if the repository has no commits yet.
+// After git-init, HEAD points to an unborn branch (e.g., refs/heads/main)
+// whose target does not yet exist. repo.Head() returns ErrReferenceNotFound
+// in this case.
+func IsEmptyRepository(repo *git.Repository) bool {
+	_, err := repo.Head()
+	return errors.Is(err, plumbing.ErrReferenceNotFound)
+}
+
 // IsAncestorOf checks if commit is an ancestor of (or equal to) target.
 // Returns true if target can reach commit by following parent links.
 // Limits search to 1000 commits to avoid excessive traversal.
