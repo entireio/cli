@@ -18,7 +18,7 @@ When enabled, wingman runs a background review after each commit (or checkpoint)
 | Instruction | `wingman_instruction.md` | Embedded instruction injected into agent context |
 | Process spawning | `wingman_spawn_unix.go` | Detached subprocess spawning (Unix) |
 | Process spawning | `wingman_spawn_other.go` | No-op stubs (non-Unix) |
-| Hook integration | `hooks_claudecode_handlers.go` | Prompt-submit injection, stop hook trigger, session-end trigger |
+| Hook integration | `hooks_claudecode_handlers.go` | Prompt-submit injection, stop hook notifications, session-end trigger |
 
 ### State Files
 
@@ -64,7 +64,7 @@ The review runs in a fully detached subprocess (`entire wingman __review <payloa
 └────────────────────────────────────────────────────────┘
 ```
 
-The review process uses `--setting-sources ""` to disable hooks (prevents recursion) and strips `GIT_*` environment variables for isolation.
+The review process uses `--setting-sources ""` to disable hooks (prevents recursion). The Claude CLI calls (`callClaudeForReview` and `triggerAutoApply`) strip `GIT_*` environment variables via `wingmanStripGitEnv()` to prevent index corruption — the detached process itself inherits the parent's environment.
 
 ### Phase 3: Delivery
 
@@ -72,11 +72,9 @@ There are two delivery mechanisms. The system chooses based on whether any sessi
 
 #### Primary: Prompt-Submit Injection (Visible)
 
-When a live session exists (IDLE, ACTIVE, or ACTIVE_COMMITTED phase), the review is delivered through the agent's next prompt:
+When a live session exists (IDLE, ACTIVE, or ACTIVE_COMMITTED phase — excluding stale ACTIVE sessions older than 4 hours), the review is delivered through the agent's next prompt:
 
 ```
-Review finishes → REVIEW.md written → live session detected → defer to injection
-
 User sends prompt → UserPromptSubmit hook fires
                   → REVIEW.md exists on disk
                   → Inject as additionalContext (mandatory agent instruction)
@@ -84,64 +82,23 @@ User sends prompt → UserPromptSubmit hook fires
                   → Agent then proceeds with user's actual request
 ```
 
-The `additionalContext` hook response field adds the instruction directly to Claude's context, making it a mandatory pre-step rather than an ignorable warning. The embedded instruction (`wingman_instruction.md`) tells the agent to:
-
-1. Read `.entire/REVIEW.md`
-2. Address each suggestion (skip any it disagrees with)
-3. Delete `.entire/REVIEW.md` when done
-4. Briefly tell the user what changed
-
-This path is **visible** — the user sees the agent working through the review in their terminal.
+The `additionalContext` hook response field adds the instruction directly to Claude's context, making it a mandatory pre-step. The embedded instruction (`wingman_instruction.md`) tells the agent to read the review, address suggestions, delete the file, and briefly tell the user what changed.
 
 #### Fallback: Background Auto-Apply (Invisible)
 
 When no live sessions exist (all ENDED or none), REVIEW.md is applied via a background process:
 
 ```
-Review finishes → REVIEW.md written → no live sessions → background auto-apply
-
 entire wingman __apply <repoRoot>
   → Verify REVIEW.md exists
   → Check ApplyAttemptedAt not set (retry prevention)
-  → Re-check session idle (guard against race)
+  → Re-check session phase is not ACTIVE/ACTIVE_COMMITTED (guard against race)
   → claude --continue --print --permission-mode acceptEdits
 ```
 
-This path is **invisible** — it runs silently. It exists as a fallback for when no session will receive the injection (e.g., user closed all sessions during the review window).
+This path is **invisible** — it runs silently. It exists as a fallback for when no session will receive the injection (e.g., user closed all sessions during the review window). Both IDLE and ENDED phases are considered safe for auto-apply — only truly active sessions (ACTIVE/ACTIVE_COMMITTED) block it.
 
-### Decision Flow
-
-```
-                    REVIEW.md written
-                          │
-                          ▼
-                ┌─────────────────┐
-                │ Any live session │
-                │   exists?        │
-                └────────┬────────┘
-                    │          │
-                   Yes         No
-                    │          │
-                    ▼          ▼
-            ┌──────────┐ ┌──────────────┐
-            │  Defer   │ │  Background  │
-            │  to next │ │  auto-apply  │
-            │  prompt  │ │  immediately │
-            └──────────┘ └──────────────┘
-                    │
-                    ▼
-            User sends prompt
-                    │
-                    ▼
-            additionalContext
-            injection fires
-                    │
-                    ▼
-            Agent applies review
-            (visible in terminal)
-```
-
-### Trigger Points Summary
+### Trigger Points
 
 | Trigger | When | What Happens |
 |---------|------|-------------|
@@ -149,6 +106,19 @@ This path is **invisible** — it runs silently. It exists as a fallback for whe
 | **Prompt-submit hook** (`captureInitialState`) | User sends prompt | If REVIEW.md exists → inject as `additionalContext`. |
 | **Stop hook** (`triggerWingmanAutoApplyIfPending`) | Agent turn ends | If REVIEW.md exists + no live sessions → spawn `__apply`. |
 | **Session-end hook** (`triggerWingmanAutoApplyOnSessionEnd`) | User closes session | If REVIEW.md exists + no remaining live sessions → spawn `__apply`. |
+
+## User-Visible Messages
+
+Wingman outputs `systemMessage` notifications at key points so the user can see what wingman is doing in their agent terminal. These are informational only — they are NOT injected into the agent's context.
+
+| Message | Hook | Condition | Purpose |
+|---------|------|-----------|---------|
+| `[Wingman] A code review is pending and will be addressed before your request.` | Prompt-submit | REVIEW.md exists (with `additionalContext` injection) | Tells user the agent will apply a review first |
+| `[Wingman] Review in progress...` | Prompt-submit | Lock file exists (no REVIEW.md) | Tells user a review is running in the background |
+| `[Wingman] Reviewing your changes...` | Stop | Lock file exists | Tells user a review was triggered and is still running |
+| `[Wingman] Review pending — will be addressed on your next prompt` | Stop | REVIEW.md exists (no lock file) | Tells user a completed review will be delivered next prompt |
+
+The prompt-submit REVIEW.md injection message is paired with `additionalContext` — the agent sees and acts on the review. All other messages use `outputHookMessage()` which emits `systemMessage`-only JSON (visible in terminal, invisible to agent).
 
 ## Timing
 
@@ -168,11 +138,9 @@ The 10-second initial delay lets the agent turn fully settle before computing th
 
 ## Review Prompt Construction
 
-The review prompt is the core of wingman's value. Unlike a naive diff-only review, it leverages Entire's checkpoint data to give the reviewer **full context about what the developer was trying to accomplish**. This enables intent-aware review — catching not just bugs, but misalignment between what was asked and what was built.
+The review prompt leverages Entire's checkpoint data to give the reviewer **full context about what the developer was trying to accomplish**. This enables intent-aware review — catching not just bugs, but misalignment between what was asked and what was built. A reviewer that only sees the diff cannot evaluate whether the code matches the original request.
 
 ### Context Sources
-
-The prompt is assembled from six sources, each contributing a different layer of understanding:
 
 | Source | Origin | What It Provides |
 |--------|--------|-----------------|
@@ -182,40 +150,6 @@ The prompt is assembled from six sources, each contributing a different layer of
 | **Checkpoint files** | `.entire/metadata/<session-id>/` | Paths provided so the reviewer can read the full transcript, prompts, or context if needed |
 | **File list** | Payload from trigger | Which files changed and how (modified/new/deleted) |
 | **Branch diff** | `git diff` against merge-base | The actual code changes — computed against `main`/`master` for a holistic branch-level view |
-
-### Prompt Structure
-
-```
-┌─ System Role ──────────────────────────────────────────┐
-│ "You are a senior code reviewer performing an           │
-│  intent-aware review."                                  │
-├─ Session Context ──────────────────────────────────────┤
-│ Developer's Prompts     <prompts>...</prompts>          │
-│ Commit Message          (plain text)                    │
-│ Session Context         <session-context>...</session-context> │
-│ Checkpoint File Paths   (for deeper investigation)      │
-├─ Code Changes ─────────────────────────────────────────┤
-│ Files changed:          file.go (modified), ...         │
-│ Diff                    <diff>...</diff>                │
-├─ Review Instructions ──────────────────────────────────┤
-│ Intent alignment        (most important)                │
-│ Correctness             bugs, logic errors, races       │
-│ Security                injection, secrets, path traversal │
-│ Robustness              edge cases, leaks, timeouts     │
-│ Do NOT flag             style, docs on clear code       │
-│ Output format           Markdown with severity levels   │
-└────────────────────────────────────────────────────────┘
-```
-
-### Intent-Aware Review
-
-The review instructions prioritize **intent alignment** as the most important category:
-
-1. Do the changes actually accomplish what the developer asked for?
-2. Are there any prompts or requirements that were missed or only partially implemented?
-3. Does the implementation match the stated approach in the session context?
-
-This is only possible because Entire captures the developer's prompts and session context as checkpoint metadata. A reviewer that only sees the diff cannot evaluate whether the code matches the original request.
 
 ### Diff Strategy
 
@@ -228,17 +162,7 @@ The diff is computed against the **merge-base** with `main`/`master`, not just t
 
 ### Read-Only Tool Access
 
-The reviewer Claude instance has access to `Read`, `Glob`, and `Grep` tools with `--permission-mode bypassPermissions`. This allows it to:
-
-- Read source files beyond the diff for additional context
-- Search for related code patterns or usages
-- Inspect the checkpoint metadata files referenced in the prompt
-
-Tools are restricted to read-only operations — the reviewer cannot modify files.
-
-### Truncation
-
-Diffs larger than 100KB are truncated to maintain review quality. Very large diffs tend to produce unfocused reviews.
+The reviewer Claude instance has access to `Read`, `Glob`, and `Grep` tools with `--permission-mode bypassPermissions`. This allows it to read source files beyond the diff, search for related patterns, and inspect checkpoint metadata. Tools are restricted to read-only operations.
 
 ### Output Format
 
@@ -246,7 +170,7 @@ The reviewer outputs structured Markdown with:
 - **Summary**: Does the change accomplish its goal? Overall quality assessment.
 - **Issues**: Each with severity (`CRITICAL`, `WARNING`, `SUGGESTION`), file path with line reference, description, and suggested fix.
 
-This output is written directly to `.entire/REVIEW.md` and later read by the agent during delivery.
+Diffs larger than 100KB are truncated to maintain review quality. The output is written directly to `.entire/REVIEW.md`.
 
 ## Stale Review Cleanup
 
@@ -272,8 +196,9 @@ The `ApplyAttemptedAt` field in `WingmanState` prevents infinite auto-apply atte
 - **Lock file**: Atomic `O_CREATE|O_EXCL` prevents concurrent review spawns. Stale locks (>30 min) are auto-cleaned.
 - **Dedup hash**: SHA256 of sorted file paths prevents re-reviewing identical change sets.
 - **Detached processes**: Review and apply run in their own process groups (`Setpgid: true`), surviving parent exit.
-- **GIT_* stripping**: Subprocesses strip all `GIT_*` env vars to prevent index corruption.
+- **GIT_* stripping**: Claude CLI calls strip `GIT_*` env vars via `wingmanStripGitEnv()` to prevent index corruption. Applied in `callClaudeForReview()` and `triggerAutoApply()`, not at process spawn time.
 - **ENTIRE_WINGMAN_APPLY=1**: Set during auto-apply to prevent the post-commit hook from triggering another review (recursion prevention).
+- **Stale session detection**: ACTIVE/ACTIVE_COMMITTED sessions not updated in 4+ hours are considered orphaned (crashed agent) and ignored by `hasAnyLiveSession`. IDLE sessions are always considered live regardless of age.
 
 ## Configuration
 
@@ -306,3 +231,4 @@ Wingman state is stored in `.entire/settings.json`:
 | `wingmanApplyTimeout` | 15m | Timeout for auto-apply process |
 | `wingmanStaleReviewTTL` | 1h | Max age before review is cleaned up |
 | `staleLockThreshold` | 30m | Max age before lock is considered stale |
+| `staleActiveSessionThreshold` | 4h | Max age before ACTIVE session is considered stale/orphaned |

@@ -101,9 +101,9 @@ func runWingmanReview(payloadPath string) error {
 	time.Sleep(wingmanInitialDelay)
 
 	// Compute diff using the base commit captured at trigger time
-	wingmanLog("computing diff against %s", payload.BaseCommit)
+	wingmanLog("computing diff (merge-base with main/master)")
 	diffStart := time.Now()
-	diff, err := computeDiff(repoRoot, payload.BaseCommit)
+	diff, err := computeDiff(repoRoot)
 	if err != nil {
 		wingmanLog("ERROR computing diff: %v", err)
 		return fmt.Errorf("failed to compute diff: %w", err)
@@ -208,7 +208,7 @@ func runWingmanReview(payloadPath string) error {
 // computeDiff gets the full branch diff for review. It diffs the current HEAD
 // against the merge base with the default branch (main/master), giving the
 // reviewer a holistic view of all branch changes rather than just one commit.
-func computeDiff(repoRoot string, _ string) (string, error) {
+func computeDiff(repoRoot string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), wingmanGitTimeout)
 	defer cancel()
 
@@ -234,7 +234,7 @@ func computeDiff(repoRoot string, _ string) (string, error) {
 	if strings.TrimSpace(diff) == "" {
 		diff, err = gitDiff(ctx, repoRoot, "HEAD~1", "HEAD")
 		if err != nil {
-			return "", nil
+			return "", fmt.Errorf("git diff for latest commit failed: %w", err)
 		}
 	}
 
@@ -334,18 +334,20 @@ func readSessionContext(repoRoot, sessionID string) string {
 	return string(data)
 }
 
-// staleSessionThreshold is the maximum age of a session state file before it
-// is considered stale and ignored by hasAnyLiveSession. This prevents orphaned
-// session files (e.g., from crashed processes) from permanently blocking auto-apply.
-const staleSessionThreshold = 2 * time.Hour
+// staleActiveSessionThreshold is the maximum age of a session state file in an
+// ACTIVE phase before it is considered stale (crashed agent) and ignored by
+// hasAnyLiveSession. Only applies to ACTIVE/ACTIVE_COMMITTED phases — an IDLE
+// session is always considered live regardless of age (user may just be away).
+const staleActiveSessionThreshold = 4 * time.Hour
 
 // hasAnyLiveSession checks if any session is in a non-ENDED phase (IDLE,
 // ACTIVE, or ACTIVE_COMMITTED). Used to decide whether to defer review
 // application to the prompt-submit injection (visible to user) vs background
 // auto-apply (invisible).
 //
-// Session state files older than staleSessionThreshold are skipped to prevent
-// orphaned sessions from permanently blocking auto-apply.
+// ACTIVE/ACTIVE_COMMITTED sessions older than staleActiveSessionThreshold are
+// skipped as likely orphaned from crashed processes. IDLE sessions are always
+// considered live regardless of age.
 func hasAnyLiveSession(repoRoot string) bool {
 	sessDir := findSessionStateDir(repoRoot)
 	if sessDir == "" {
@@ -361,7 +363,8 @@ func hasAnyLiveSession(repoRoot string) bool {
 	checked := 0
 	for _, entry := range entries {
 		if checked >= maxCheck {
-			return false
+			wingmanLog("stopping live-session scan after %d entries; assuming live session may exist", checked)
+			return true
 		}
 		name := entry.Name()
 		if !strings.HasSuffix(name, ".json") {
@@ -369,23 +372,28 @@ func hasAnyLiveSession(repoRoot string) bool {
 		}
 		checked++
 
-		// Skip stale session files that haven't been updated recently.
-		// These are likely orphaned from crashed processes.
-		info, statErr := entry.Info()
-		if statErr != nil {
-			continue
-		}
-		if time.Since(info.ModTime()) > staleSessionThreshold {
-			wingmanLog("skipping stale session file %s (age=%s)", name, time.Since(info.ModTime()).Round(time.Second))
+		sid := strings.TrimSuffix(name, ".json")
+		phase := readSessionPhase(sessDir, sid)
+		if phase == "" || phase == string(session.PhaseEnded) {
 			continue
 		}
 
-		sid := strings.TrimSuffix(name, ".json")
-		phase := readSessionPhase(sessDir, sid)
-		if phase != "" && phase != string(session.PhaseEnded) {
-			wingmanLog("found live session %s (phase=%s)", sid, phase)
-			return true
+		// ACTIVE/ACTIVE_COMMITTED sessions that haven't been updated in a
+		// long time are likely orphaned from crashed agents — skip them.
+		// IDLE sessions are always considered live (user may just be away).
+		if session.Phase(phase).IsActive() {
+			info, statErr := entry.Info()
+			if statErr != nil {
+				continue
+			}
+			if time.Since(info.ModTime()) > staleActiveSessionThreshold {
+				wingmanLog("skipping stale active session %s (phase=%s, age=%s)", sid, phase, time.Since(info.ModTime()).Round(time.Second))
+				continue
+			}
 		}
+
+		wingmanLog("found live session %s (phase=%s)", sid, phase)
+		return true
 	}
 
 	return false
