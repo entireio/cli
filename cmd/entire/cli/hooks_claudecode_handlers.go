@@ -93,6 +93,10 @@ func captureInitialState() error {
 					"[Wingman] A code review is pending and will be addressed before your request.",
 				); err != nil {
 					fmt.Fprintf(os.Stderr, "[wingman] Warning: failed to inject review instruction: %v\n", err)
+				} else {
+					// Hook response written to stdout — must return immediately
+					// to avoid corrupting the JSON with additional output.
+					return nil
 				}
 			}
 

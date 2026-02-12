@@ -545,6 +545,7 @@ func TestHookResponse_SessionStart(t *testing.T) {
 	t.Parallel()
 
 	resp := hookResponse{
+		SystemMessage: "Powered by Entire",
 		HookSpecificOutput: &hookSpecificOutput{
 			HookEventName:     "SessionStart",
 			AdditionalContext: "Powered by Entire",
@@ -562,9 +563,9 @@ func TestHookResponse_SessionStart(t *testing.T) {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
 
-	// systemMessage should be absent (omitempty)
-	if _, ok := raw["systemMessage"]; ok {
-		t.Error("systemMessage should be omitted when empty")
+	// systemMessage should be present (same as additionalContext for user visibility)
+	if _, ok := raw["systemMessage"]; !ok {
+		t.Error("systemMessage should be present for SessionStart")
 	}
 
 	// hookSpecificOutput should be present

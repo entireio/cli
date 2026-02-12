@@ -319,6 +319,7 @@ type hookResponse struct {
 // SessionStart hooks. The context is injected into the agent's conversation.
 func outputHookResponse(context string) error {
 	resp := hookResponse{
+		SystemMessage: context,
 		HookSpecificOutput: &hookSpecificOutput{
 			HookEventName:     "SessionStart",
 			AdditionalContext: context,
