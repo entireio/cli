@@ -1,0 +1,71 @@
+Implement the following plan:
+
+# Plan: Wingman status notifications in agent terminal
+
+## Context
+
+Wingman status messages (review started, review pending) currently go to stderr, which is invisible in Claude Code's UI. The only visible wingman output is the `additionalContext` prompt injection when REVIEW.md is applied. The user wants informational `systemMessage` notifications so they can see what wingman is doing — not injected into the agent's context, just displayed in the terminal.
+
+## Changes
+
+### 1. Add `outputHookMessage` helper (`cmd/entire/cli/hooks.go`)
+
+New function alongside the existing `outputHookResponse` and `outputHookResponseWithContextAndMessage`. Outputs a JSON hook response with only `systemMessage` — no `additionalContext`, so nothing gets injected into the agent's conversation.
+
+```go
+func outputHookMessage(message string) error {
+    resp := hookResponse{SystemMessage: message}
+    return json.NewEncoder(os.Stdout).Encode(resp)
+}
+```
+
+### 2. Stop hook: wingman status notification (`cmd/entire/cli/hooks_claudecode_handlers.go`)
+
+Add `outputWingmanStopNotification(repoRoot string)` that checks wingman state and outputs a message. Call it at the end of `commitWithMetadata()` in both:
+- The no-changes early return path (~line 297, before `return nil`)
+- The normal return path (~line 448, before `return nil`)
+
+Logic:
+- If wingman not enabled or `ENTIRE_WINGMAN_APPLY` set → skip
+- If lock file (`.entire/wingman.lock`) exists → review is running → `"[Wingman] Reviewing your changes..."`
+- Else if REVIEW.md exists → review done, pending delivery → `"[Wingman] Review pending — will be addressed on your next prompt"`
+- Otherwise → no message
+
+The stop hook currently never writes to stdout. Adding a `systemMessage`-only JSON response is safe since Claude Code parses any JSON output from hooks.
+
+### 3. Prompt-submit hook: review-in-progress notification (`cmd/entire/cli/hooks_claudecode_handlers.go`)
+
+In `captureInitialState()`, the lock file check (lines 103-110) currently writes `"[wingman] Review in progress..."` to stderr only. Change to use `outputHookMessage` so the message appears in the agent terminal.
+
+This runs only when there's NO REVIEW.md (the injection path returns early on line 99). Session initialization runs after and only touches disk/stderr, so outputting JSON before it is safe — no double-write risk.
+
+## Files to modify
+
+- `cmd/entire/cli/hooks.go` — Add `outputHookMessage` helper
+- `cmd/entire/cli/hooks_claudecode_handlers.go` — Add stop hook notification function, update prompt-submit lock file message
+
+## Verification
+
+1. `mise run fmt && mise run lint && mise run test:ci`
+2. Manual: enable wingman, make changes, trigger stop hook — should see "[Wingman] Reviewing..." in agent terminal
+3. Manual: with pending REVIEW.md, trigger stop hook — should see "[Wingman] Review pending..."
+4. Manual: with lock file present, send a prompt — should see "[Wingman] Review in progress..."
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/dip/.REDACTED.jsonl
+
+---
+
+commit this
+
+---
+
+push it
+
+---
+
+Update the documentation make sure there's no redundant parts in there, add a table for messaging and when they happen. Look at the PR review comments and see if there's anything valid in there. Adress them. Commit and push.
+
+---
+
+I like that the prompt structure is documented.

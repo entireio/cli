@@ -1,0 +1,91 @@
+Implement the following plan:
+
+# Plan: Fix hook response format and add wingman warning message
+
+## Context
+
+The wingman review injection via `additionalContext` isn't working because the hook response JSON format is wrong. The code outputs `{"additionalContext": "..."}` at the top level, but Claude Code expects it nested under `hookSpecificOutput`:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "..."
+  }
+}
+```
+
+This also affects `SessionStart` which uses `systemMessage` at the top level for context injection, but should use `hookSpecificOutput.additionalContext` to inject context Claude can see.
+
+The user also wants a `systemMessage` warning (universal field, shown to user) when a wingman review is about to be injected on prompt submit.
+
+Ref: https://code.claude.com/docs/en/hooks
+
+## Changes
+
+### 1. Update `hookResponse` struct and output functions
+
+**File:** `cmd/entire/cli/hooks.go` (lines 302-331)
+
+Replace the current `hookResponse` struct and functions:
+
+```go
+// Current (broken):
+type hookResponse struct {
+    SystemMessage     string `json:"systemMessage,omitempty"`
+    AdditionalContext string `json:"additionalContext,omitempty"`
+}
+```
+
+New struct matching Claude Code's expected format:
+
+```go
+type hookSpecificOutput struct {
+    HookEventName     string `json:"hookEventName"`
+    AdditionalContext string `json:"additionalContext,omitempty"`
+}
+
+type hookResponse struct {
+    SystemMessage      string              `json:"systemMessage,omitempty"`
+    HookSpecificOutput *hookSpecificOutput `json:"hookSpecificOutput,omitempty"`
+}
+```
+
+Update `outputHookResponse` (SessionStart) to use `hookSpecificOutput` with `additionalContext` instead of top-level `systemMessage`, since the goal is to inject context Claude can see.
+
+Update `outputHookResponseWithContext` (UserPromptSubmit) to nest `additionalContext` under `hookSpecificOutput` with `hookEventName: "UserPromptSubmit"`.
+
+### 2. Add wingman warning as `systemMessage`
+
+**File:** `cmd/entire/cli/hooks_claudecode_handlers.go` (lines 86-93)
+
+When REVIEW.md is detected and the additionalContext is being injected, also include a `systemMessage` warning to the user:
+
+```
+[Wingman] A code review is pending and will be addressed before your request.
+```
+
+Create a new output function (or enhance the existing one) that sets both `systemMessage` AND `hookSpecificOutput.additionalContext` in a single hookResponse.
+
+### 3. Update tests
+
+Add/update tests for the hook response functions to verify the correct JSON structure is output (nested `hookSpecificOutput`).
+
+## Files to modify
+
+- `cmd/entire/cli/hooks.go` — `hookResponse` struct, `outputHookResponse`, `outputHookResponseWithContext`
+- `cmd/entire/cli/hooks_claudecode_handlers.go` — wingman injection in `captureInitialState()` (line ~91)
+- `cmd/entire/cli/hooks.go` or `hooks_test.go` — tests for response format
+
+## Verification
+
+1. `mise run fmt && mise run lint && mise run test:ci`
+2. Manual: run `echo '{"session_id":"test"}' | go run ./cmd/entire/main.go hooks claude-code user-prompt-submit 2>/dev/null` and verify the JSON output has `hookSpecificOutput.additionalContext` nested correctly
+3. Start a Claude Code session with wingman enabled + REVIEW.md present, submit a prompt, verify the agent addresses the review
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/dip/.REDACTED.jsonl
+
+---
+
+commit this
