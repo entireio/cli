@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/openclaw"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
@@ -173,6 +174,39 @@ func init() {
 			return nil
 		}
 		return handleGeminiBeforeToolSelection()
+	})
+
+	// Register OpenClaw handlers
+	RegisterHookHandler(agent.AgentNameOpenClaw, openclaw.HookNameSessionStart, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpenClawSessionStart()
+	})
+
+	RegisterHookHandler(agent.AgentNameOpenClaw, openclaw.HookNameSessionEnd, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpenClawSessionEnd()
+	})
+
+	RegisterHookHandler(agent.AgentNameOpenClaw, openclaw.HookNameStop, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpenClawStop()
+	})
+
+	RegisterHookHandler(agent.AgentNameOpenClaw, openclaw.HookNameUserPromptSubmit, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpenClawUserPromptSubmit()
 	})
 
 	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNamePreCompress, func() error {
