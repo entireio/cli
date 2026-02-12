@@ -11,8 +11,27 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
+// initHooksTestRepo creates a temporary git repository, changes to it, and clears
+// the repo root cache. Returns the repo directory path and the hooks directory path.
+func initHooksTestRepo(t *testing.T) (string, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "init")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	paths.ClearRepoRootCache()
+
+	return tmpDir, filepath.Join(tmpDir, ".git", "hooks")
+}
+
 func TestGetGitDirInPath_RegularRepo(t *testing.T) {
-	// Create a temp directory and initialize a real git repo
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
 	ctx := context.Background()
@@ -45,7 +64,8 @@ func TestGetGitDirInPath_RegularRepo(t *testing.T) {
 }
 
 func TestGetGitDirInPath_Worktree(t *testing.T) {
-	// Create a temp directory with a main repo and a worktree
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	mainRepo := filepath.Join(tmpDir, "main")
 	worktreeDir := filepath.Join(tmpDir, "worktree")
@@ -131,6 +151,8 @@ func TestGetGitDirInPath_Worktree(t *testing.T) {
 }
 
 func TestGetGitDirInPath_NotARepo(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
 	_, err := getGitDirInPath(tmpDir)
@@ -144,38 +166,20 @@ func TestGetGitDirInPath_NotARepo(t *testing.T) {
 	}
 }
 
+// isGitSequenceOperation tests use t.Chdir() so cannot call t.Parallel().
+
 func TestIsGitSequenceOperation_NoOperation(t *testing.T) {
-	// Create a temp directory and initialize a real git repo
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
+	initHooksTestRepo(t)
 
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// No sequence operation in progress
 	if isGitSequenceOperation() {
 		t.Error("isGitSequenceOperation() = true, want false for clean repo")
 	}
 }
 
 func TestIsGitSequenceOperation_RebaseMerge(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
+	tmpDir, _ := initHooksTestRepo(t)
 
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Simulate rebase-merge state
-	rebaseMergeDir := filepath.Join(tmpDir, ".git", "rebase-merge")
-	if err := os.MkdirAll(rebaseMergeDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git", "rebase-merge"), 0o755); err != nil {
 		t.Fatalf("failed to create rebase-merge dir: %v", err)
 	}
 
@@ -185,19 +189,9 @@ func TestIsGitSequenceOperation_RebaseMerge(t *testing.T) {
 }
 
 func TestIsGitSequenceOperation_RebaseApply(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
+	tmpDir, _ := initHooksTestRepo(t)
 
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Simulate rebase-apply state
-	rebaseApplyDir := filepath.Join(tmpDir, ".git", "rebase-apply")
-	if err := os.MkdirAll(rebaseApplyDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git", "rebase-apply"), 0o755); err != nil {
 		t.Fatalf("failed to create rebase-apply dir: %v", err)
 	}
 
@@ -207,19 +201,9 @@ func TestIsGitSequenceOperation_RebaseApply(t *testing.T) {
 }
 
 func TestIsGitSequenceOperation_CherryPick(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
+	tmpDir, _ := initHooksTestRepo(t)
 
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Simulate cherry-pick state
-	cherryPickHead := filepath.Join(tmpDir, ".git", "CHERRY_PICK_HEAD")
-	if err := os.WriteFile(cherryPickHead, []byte("abc123"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, ".git", "CHERRY_PICK_HEAD"), []byte("abc123"), 0o644); err != nil {
 		t.Fatalf("failed to create CHERRY_PICK_HEAD: %v", err)
 	}
 
@@ -229,19 +213,9 @@ func TestIsGitSequenceOperation_CherryPick(t *testing.T) {
 }
 
 func TestIsGitSequenceOperation_Revert(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
+	tmpDir, _ := initHooksTestRepo(t)
 
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Simulate revert state
-	revertHead := filepath.Join(tmpDir, ".git", "REVERT_HEAD")
-	if err := os.WriteFile(revertHead, []byte("abc123"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, ".git", "REVERT_HEAD"), []byte("abc123"), 0o644); err != nil {
 		t.Fatalf("failed to create REVERT_HEAD: %v", err)
 	}
 
@@ -341,19 +315,7 @@ func TestIsGitSequenceOperation_Worktree(t *testing.T) {
 }
 
 func TestInstallGitHook_Idempotent(t *testing.T) {
-	// Create a temp directory and initialize a real git repo
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Clear cache so paths resolve correctly
-	paths.ClearRepoRootCache()
+	_, hooksDir := initHooksTestRepo(t)
 
 	// First install should install hooks
 	firstCount, err := InstallGitHook(true)
@@ -364,6 +326,19 @@ func TestInstallGitHook_Idempotent(t *testing.T) {
 		t.Error("First InstallGitHook() should install hooks (count > 0)")
 	}
 
+	// Capture hook contents after first install
+	firstContents := make(map[string]string)
+	for _, hook := range gitHookNames {
+		data, err := os.ReadFile(filepath.Join(hooksDir, hook))
+		if err != nil {
+			t.Fatalf("hook %s should exist after install: %v", hook, err)
+		}
+		firstContents[hook] = string(data)
+		if !strings.Contains(string(data), entireHookMarker) {
+			t.Errorf("hook %s should contain Entire marker", hook)
+		}
+	}
+
 	// Second install should return 0 (all hooks already up to date)
 	secondCount, err := InstallGitHook(true)
 	if err != nil {
@@ -372,22 +347,21 @@ func TestInstallGitHook_Idempotent(t *testing.T) {
 	if secondCount != 0 {
 		t.Errorf("Second InstallGitHook() returned %d, want 0 (hooks unchanged)", secondCount)
 	}
+
+	// Content should be identical after second install
+	for _, hook := range gitHookNames {
+		data, err := os.ReadFile(filepath.Join(hooksDir, hook))
+		if err != nil {
+			t.Fatalf("hook %s should exist: %v", hook, err)
+		}
+		if string(data) != firstContents[hook] {
+			t.Errorf("hook %s content changed after idempotent reinstall", hook)
+		}
+	}
 }
 
 func TestRemoveGitHook_RemovesInstalledHooks(t *testing.T) {
-	// Create a temp directory and initialize a real git repo
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Clear cache so paths resolve correctly
-	paths.ClearRepoRootCache()
+	tmpDir, _ := initHooksTestRepo(t)
 
 	// Install hooks first
 	installCount, err := InstallGitHook(true)
@@ -428,19 +402,7 @@ func TestRemoveGitHook_RemovesInstalledHooks(t *testing.T) {
 }
 
 func TestRemoveGitHook_NoHooksInstalled(t *testing.T) {
-	// Create a temp directory and initialize a real git repo
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Clear cache so paths resolve correctly
-	paths.ClearRepoRootCache()
+	initHooksTestRepo(t)
 
 	// Remove hooks when none are installed - should handle gracefully
 	removeCount, err := RemoveGitHook()
@@ -453,22 +415,9 @@ func TestRemoveGitHook_NoHooksInstalled(t *testing.T) {
 }
 
 func TestRemoveGitHook_IgnoresNonEntireHooks(t *testing.T) {
-	// Create a temp directory and initialize a real git repo
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Clear cache so paths resolve correctly
-	paths.ClearRepoRootCache()
+	_, hooksDir := initHooksTestRepo(t)
 
 	// Create a non-Entire hook manually
-	hooksDir := filepath.Join(tmpDir, ".git", "hooks")
 	customHookPath := filepath.Join(hooksDir, "pre-commit")
 	customHookContent := "#!/bin/sh\necho 'custom hook'"
 	if err := os.WriteFile(customHookPath, []byte(customHookContent), 0o755); err != nil {
@@ -505,24 +454,428 @@ func TestRemoveGitHook_NotAGitRepo(t *testing.T) {
 	}
 }
 
+func TestInstallGitHook_BacksUpCustomHook(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// Create a custom prepare-commit-msg hook
+	customHookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	customContent := "#!/bin/sh\necho 'my custom hook'\n"
+	if err := os.WriteFile(customHookPath, []byte(customContent), 0o755); err != nil {
+		t.Fatalf("failed to create custom hook: %v", err)
+	}
+
+	count, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	if count == 0 {
+		t.Error("InstallGitHook() should install hooks")
+	}
+
+	// Verify custom hook was backed up
+	backupPath := customHookPath + backupSuffix
+	backupData, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("backup file should exist at %s: %v", backupPath, err)
+	}
+	if string(backupData) != customContent {
+		t.Errorf("backup content = %q, want %q", string(backupData), customContent)
+	}
+
+	// Verify installed hook has our marker and chain call
+	hookData, err := os.ReadFile(customHookPath)
+	if err != nil {
+		t.Fatalf("hook file should exist: %v", err)
+	}
+	hookContent := string(hookData)
+	if !strings.Contains(hookContent, entireHookMarker) {
+		t.Error("installed hook should contain Entire marker")
+	}
+	if !strings.Contains(hookContent, chainComment) {
+		t.Error("installed hook should contain chain call")
+	}
+	if !strings.Contains(hookContent, "prepare-commit-msg"+backupSuffix) {
+		t.Error("chain call should reference the backup file")
+	}
+}
+
+func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// Create a backup file manually (simulating a previous backup)
+	firstBackupContent := "#!/bin/sh\necho 'first custom hook'\n"
+	backupPath := filepath.Join(hooksDir, "prepare-commit-msg"+backupSuffix)
+	if err := os.WriteFile(backupPath, []byte(firstBackupContent), 0o755); err != nil {
+		t.Fatalf("failed to create backup: %v", err)
+	}
+
+	// Create a second custom hook at the standard path
+	secondCustomContent := "#!/bin/sh\necho 'second custom hook'\n"
+	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	if err := os.WriteFile(hookPath, []byte(secondCustomContent), 0o755); err != nil {
+		t.Fatalf("failed to create second custom hook: %v", err)
+	}
+
+	_, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	// Verify the original backup was NOT overwritten
+	backupData, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("backup should still exist: %v", err)
+	}
+	if string(backupData) != firstBackupContent {
+		t.Errorf("backup content = %q, want original %q", string(backupData), firstBackupContent)
+	}
+
+	// Verify our hook was installed with chain call
+	hookData, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("hook should exist: %v", err)
+	}
+	if !strings.Contains(string(hookData), entireHookMarker) {
+		t.Error("hook should contain Entire marker")
+	}
+	if !strings.Contains(string(hookData), chainComment) {
+		t.Error("hook should contain chain call since backup exists")
+	}
+}
+
+func TestInstallGitHook_IdempotentWithChaining(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// Create a custom hook, then install
+	customHookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	if err := os.WriteFile(customHookPath, []byte("#!/bin/sh\necho custom\n"), 0o755); err != nil {
+		t.Fatalf("failed to create custom hook: %v", err)
+	}
+
+	firstCount, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("first InstallGitHook() error = %v", err)
+	}
+	if firstCount == 0 {
+		t.Error("first install should install hooks")
+	}
+
+	// Re-install should return 0 (idempotent)
+	secondCount, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("second InstallGitHook() error = %v", err)
+	}
+	if secondCount != 0 {
+		t.Errorf("second InstallGitHook() = %d, want 0 (idempotent)", secondCount)
+	}
+}
+
+func TestInstallGitHook_NoBackupWhenNoExistingHook(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	_, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	// No .pre-entire files should exist
+	for _, hook := range gitHookNames {
+		backupPath := filepath.Join(hooksDir, hook+backupSuffix)
+		if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+			t.Errorf("backup %s should not exist for fresh install", hook+backupSuffix)
+		}
+
+		// Hook should not contain chain call
+		data, err := os.ReadFile(filepath.Join(hooksDir, hook))
+		if err != nil {
+			t.Fatalf("hook %s should exist: %v", hook, err)
+		}
+		if strings.Contains(string(data), chainComment) {
+			t.Errorf("hook %s should not contain chain call for fresh install", hook)
+		}
+	}
+}
+
+func TestInstallGitHook_MixedHooks(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// Only create custom hooks for some hooks
+	customHooks := map[string]string{
+		"prepare-commit-msg": "#!/bin/sh\necho 'custom pcm'\n",
+		"pre-push":           "#!/bin/sh\necho 'custom prepush'\n",
+	}
+	for name, content := range customHooks {
+		hookPath := filepath.Join(hooksDir, name)
+		if err := os.WriteFile(hookPath, []byte(content), 0o755); err != nil {
+			t.Fatalf("failed to create %s: %v", name, err)
+		}
+	}
+
+	_, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	// Hooks with pre-existing content should have backups and chain calls
+	for name := range customHooks {
+		backupPath := filepath.Join(hooksDir, name+backupSuffix)
+		if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+			t.Errorf("backup for %s should exist", name)
+		}
+
+		data, err := os.ReadFile(filepath.Join(hooksDir, name))
+		if err != nil {
+			t.Fatalf("hook %s should exist: %v", name, err)
+		}
+		if !strings.Contains(string(data), chainComment) {
+			t.Errorf("hook %s should contain chain call", name)
+		}
+	}
+
+	// Hooks without pre-existing content should NOT have backups or chain calls
+	noCustom := []string{"commit-msg", "post-commit"}
+	for _, name := range noCustom {
+		backupPath := filepath.Join(hooksDir, name+backupSuffix)
+		if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+			t.Errorf("backup for %s should NOT exist", name)
+		}
+
+		data, err := os.ReadFile(filepath.Join(hooksDir, name))
+		if err != nil {
+			t.Fatalf("hook %s should exist: %v", name, err)
+		}
+		if strings.Contains(string(data), chainComment) {
+			t.Errorf("hook %s should NOT contain chain call", name)
+		}
+	}
+}
+
+func TestRemoveGitHook_RestoresBackup(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// Create a custom hook, install (backs it up), then remove
+	customContent := "#!/bin/sh\necho 'my custom hook'\n"
+	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	if err := os.WriteFile(hookPath, []byte(customContent), 0o755); err != nil {
+		t.Fatalf("failed to create custom hook: %v", err)
+	}
+
+	_, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	removed, err := RemoveGitHook()
+	if err != nil {
+		t.Fatalf("RemoveGitHook() error = %v", err)
+	}
+	if removed == 0 {
+		t.Error("RemoveGitHook() should remove hooks")
+	}
+
+	// Original custom hook should be restored
+	data, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("hook should be restored: %v", err)
+	}
+	if string(data) != customContent {
+		t.Errorf("restored hook content = %q, want %q", string(data), customContent)
+	}
+
+	// Backup should be gone
+	backupPath := hookPath + backupSuffix
+	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+		t.Error("backup should be removed after restore")
+	}
+}
+
+func TestRemoveGitHook_RestoresBackupWhenHookAlreadyGone(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// Create custom hook, install (creates backup), then delete the main hook
+	customContent := "#!/bin/sh\necho 'original'\n"
+	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	if err := os.WriteFile(hookPath, []byte(customContent), 0o755); err != nil {
+		t.Fatalf("failed to create custom hook: %v", err)
+	}
+
+	_, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	// Simulate another tool deleting our hook
+	if err := os.Remove(hookPath); err != nil {
+		t.Fatalf("failed to remove hook: %v", err)
+	}
+
+	_, err = RemoveGitHook()
+	if err != nil {
+		t.Fatalf("RemoveGitHook() error = %v", err)
+	}
+
+	// Backup should be restored even though the main hook was already gone
+	data, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal("backup should be restored to main hook path")
+	}
+	if string(data) != customContent {
+		t.Errorf("restored hook content = %q, want %q", string(data), customContent)
+	}
+
+	// Backup file should be gone
+	backupPath := hookPath + backupSuffix
+	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+		t.Error("backup file should not exist after restore")
+	}
+}
+
+func TestGenerateChainedContent(t *testing.T) {
+	t.Parallel()
+
+	base := "#!/bin/sh\n# Entire CLI hooks\nentire hooks git pre-push \"$1\" || true\n"
+	result := generateChainedContent(base, "pre-push")
+
+	// Should start with the base content
+	if !strings.HasPrefix(result, base) {
+		t.Error("chained content should start with base content")
+	}
+
+	// Should contain the chain comment
+	if !strings.Contains(result, chainComment) {
+		t.Error("chained content should contain chain comment")
+	}
+
+	// Should resolve hook directory from $0
+	if !strings.Contains(result, `_entire_hook_dir="$(dirname "$0")"`) {
+		t.Error("chained content should resolve hook directory from $0")
+	}
+
+	// Should check executable permission on backup
+	expectedCheck := `[ -x "$_entire_hook_dir/pre-push` + backupSuffix + `" ]`
+	if !strings.Contains(result, expectedCheck) {
+		t.Errorf("chained content should check -x on backup, got:\n%s", result)
+	}
+
+	// Should forward all arguments with "$@"
+	expectedExec := `"$_entire_hook_dir/pre-push` + backupSuffix + `" "$@"`
+	if !strings.Contains(result, expectedExec) {
+		t.Errorf("chained content should execute backup with $@, got:\n%s", result)
+	}
+}
+
+func TestInstallGitHook_InstallRemoveReinstall(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// Create a custom hook
+	customContent := "#!/bin/sh\necho 'user hook'\n"
+	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	if err := os.WriteFile(hookPath, []byte(customContent), 0o755); err != nil {
+		t.Fatalf("failed to create custom hook: %v", err)
+	}
+
+	// Install: should back up and chain
+	count, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("first install error: %v", err)
+	}
+	if count == 0 {
+		t.Error("first install should install hooks")
+	}
+	backupPath := hookPath + backupSuffix
+	if !fileExists(backupPath) {
+		t.Fatal("backup should exist after install")
+	}
+
+	// Remove: should restore backup
+	_, err = RemoveGitHook()
+	if err != nil {
+		t.Fatalf("remove error: %v", err)
+	}
+	data, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal("hook should be restored after remove")
+	}
+	if string(data) != customContent {
+		t.Errorf("restored hook = %q, want %q", string(data), customContent)
+	}
+	if fileExists(backupPath) {
+		t.Error("backup should not exist after remove")
+	}
+
+	// Reinstall: should back up again and chain
+	count, err = InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("reinstall error: %v", err)
+	}
+	if count == 0 {
+		t.Error("reinstall should install hooks")
+	}
+	if !fileExists(backupPath) {
+		t.Fatal("backup should exist after reinstall")
+	}
+	data, err = os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal("hook should exist after reinstall")
+	}
+	if !strings.Contains(string(data), entireHookMarker) {
+		t.Error("reinstalled hook should contain Entire marker")
+	}
+	if !strings.Contains(string(data), chainComment) {
+		t.Error("reinstalled hook should contain chain call")
+	}
+}
+
+func TestRemoveGitHook_DoesNotOverwriteReplacedHook(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// User has custom hook A
+	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	hookAContent := "#!/bin/sh\necho 'hook A'\n"
+	if err := os.WriteFile(hookPath, []byte(hookAContent), 0o755); err != nil {
+		t.Fatalf("failed to create hook A: %v", err)
+	}
+
+	// entire enable: backs up A, installs our hook with chain
+	_, err := InstallGitHook(true)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	// User replaces our hook with their own hook B
+	hookBContent := "#!/bin/sh\necho 'hook B'\n"
+	if err := os.WriteFile(hookPath, []byte(hookBContent), 0o755); err != nil {
+		t.Fatalf("failed to create hook B: %v", err)
+	}
+
+	// entire disable: should NOT overwrite hook B with backup A
+	_, err = RemoveGitHook()
+	if err != nil {
+		t.Fatalf("RemoveGitHook() error = %v", err)
+	}
+
+	// Hook B should still be in place
+	data, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal("hook should still exist")
+	}
+	if string(data) != hookBContent {
+		t.Errorf("hook content = %q, want hook B %q (should not be overwritten by backup)", string(data), hookBContent)
+	}
+
+	// Backup should still exist (not consumed)
+	backupPath := hookPath + backupSuffix
+	if !fileExists(backupPath) {
+		t.Error("backup should be left in place when hook was modified")
+	}
+}
+
 func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("Test cannot run as root (permission checks are bypassed)")
 	}
 
-	// Create a temp directory and initialize a real git repo
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to init git repo: %v", err)
-	}
-
-	// Clear cache so paths resolve correctly
-	paths.ClearRepoRootCache()
+	tmpDir, _ := initHooksTestRepo(t)
 
 	// Install hooks first
 	_, err := InstallGitHook(true)
