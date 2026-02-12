@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -97,7 +96,7 @@ Strategies: manual-commit (default), auto-commit`,
 					printWrongAgentError(cmd.ErrOrStderr(), agentName)
 					return NewSilentError(errors.New("wrong agent name"))
 				}
-				return setupAgentHooksNonInteractive(cmd.OutOrStdout(), ag, strategyFlag, localDev, forceHooks, skipPushSessions, telemetry)
+				return setupAgentHooksNonInteractive(cmd.OutOrStdout(), ag, strategyFlag, localDev, forceHooks, useLocalSettings, skipPushSessions, telemetry)
 			}
 			// If strategy is specified via flag, skip interactive selection
 			if strategyFlag != "" {
@@ -506,17 +505,12 @@ func setupClaudeCodeHook(localDev, forceHooks, useLocal bool) (int, error) { //n
 		return 0, fmt.Errorf("failed to get claude-code agent: %w", err)
 	}
 
-	ccAgent, ok := ag.(*claudecode.ClaudeCodeAgent)
+	hookAgent, ok := ag.(agent.HookSupport)
 	if !ok {
-		return 0, errors.New("claude-code agent has unexpected type")
+		return 0, errors.New("claude-code agent does not support hooks")
 	}
 
-	settingsFile := claudecode.ClaudeSettingsFileName
-	if useLocal {
-		settingsFile = claudecode.ClaudeSettingsLocalFileName
-	}
-
-	count, err := ccAgent.InstallHooksTo(localDev, forceHooks, settingsFile)
+	count, err := hookAgent.InstallHooks(localDev, forceHooks, useLocal)
 	if err != nil {
 		return 0, fmt.Errorf("failed to install claude-code hooks: %w", err)
 	}
@@ -552,7 +546,7 @@ func printWrongAgentError(w io.Writer, name string) {
 
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.
 // If strategyName is provided, it sets the strategy; otherwise uses default.
-func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName string, localDev, forceHooks, skipPushSessions, telemetry bool) error {
+func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName string, localDev, forceHooks, useLocalSettings, skipPushSessions, telemetry bool) error {
 	agentName := ag.Name()
 	// Check if agent supports hooks
 	hookAgent, ok := ag.(agent.HookSupport)
@@ -563,7 +557,7 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 	fmt.Fprintf(w, "Agent: %s\n\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := hookAgent.InstallHooks(localDev, forceHooks)
+	installedHooks, err := hookAgent.InstallHooks(localDev, forceHooks, useLocalSettings)
 	if err != nil {
 		return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
 	}

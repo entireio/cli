@@ -15,7 +15,7 @@ func TestInstallHooks_PermissionsDeny_FreshInstall(t *testing.T) {
 	t.Chdir(tempDir)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(false, false)
+	_, err := agent.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -34,13 +34,13 @@ func TestInstallHooks_PermissionsDeny_Idempotent(t *testing.T) {
 
 	agent := &ClaudeCodeAgent{}
 	// First install
-	_, err := agent.InstallHooks(false, false)
+	_, err := agent.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
 
 	// Second install
-	_, err = agent.InstallHooks(false, false)
+	_, err = agent.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("second InstallHooks() error = %v", err)
 	}
@@ -71,7 +71,7 @@ func TestInstallHooks_PermissionsDeny_PreservesUserRules(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(false, false)
+	_, err := agent.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -99,7 +99,7 @@ func TestInstallHooks_PermissionsDeny_PreservesAllowRules(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(false, false)
+	_, err := agent.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -130,7 +130,7 @@ func TestInstallHooks_PermissionsDeny_SkipsExistingRule(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(false, false)
+	_, err := agent.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -157,7 +157,7 @@ func TestInstallHooks_PermissionsDeny_PreservesUnknownFields(t *testing.T) {
 }`)
 
 	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(false, false)
+	_, err := agent.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -283,7 +283,7 @@ func TestUninstallHooks(t *testing.T) {
 	agent := &ClaudeCodeAgent{}
 
 	// First install
-	_, err := agent.InstallHooks(false, false)
+	_, err := agent.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -366,7 +366,7 @@ func TestUninstallHooks_RemovesDenyRule(t *testing.T) {
 	agent := &ClaudeCodeAgent{}
 
 	// First install (which adds the deny rule)
-	_, err := agent.InstallHooks(false, false)
+	_, err := agent.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -460,9 +460,9 @@ func TestAreHooksInstalled_ChecksBothFiles(t *testing.T) {
 	}
 
 	// Install to local only
-	_, err := ag.InstallHooksTo(false, false, ClaudeSettingsLocalFileName)
+	_, err := ag.InstallHooks(false, false, true)
 	if err != nil {
-		t.Fatalf("InstallHooksTo() error = %v", err)
+		t.Fatalf("InstallHooks(useLocal=true) error = %v", err)
 	}
 
 	// Should detect hooks in local file
@@ -478,7 +478,7 @@ func TestAreHooksInstalled_DetectsProjectFile(t *testing.T) {
 	ag := &ClaudeCodeAgent{}
 
 	// Install to project settings only
-	_, err := ag.InstallHooks(false, false)
+	_, err := ag.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -495,13 +495,13 @@ func TestUninstallHooks_RemovesFromBothFiles(t *testing.T) {
 	ag := &ClaudeCodeAgent{}
 
 	// Install hooks to both files
-	_, err := ag.InstallHooks(false, false)
+	_, err := ag.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
-	_, err = ag.InstallHooksTo(false, false, ClaudeSettingsLocalFileName)
+	_, err = ag.InstallHooks(false, false, true)
 	if err != nil {
-		t.Fatalf("InstallHooksTo() error = %v", err)
+		t.Fatalf("InstallHooks(useLocal=true) error = %v", err)
 	}
 
 	// Verify hooks exist in both
@@ -544,9 +544,9 @@ func TestUninstallHooks_LocalOnly(t *testing.T) {
 	ag := &ClaudeCodeAgent{}
 
 	// Install to local only
-	_, err := ag.InstallHooksTo(false, false, ClaudeSettingsLocalFileName)
+	_, err := ag.InstallHooks(false, false, true)
 	if err != nil {
-		t.Fatalf("InstallHooksTo() error = %v", err)
+		t.Fatalf("InstallHooks(useLocal=true) error = %v", err)
 	}
 
 	if !ag.AreHooksInstalled() {
@@ -564,17 +564,17 @@ func TestUninstallHooks_LocalOnly(t *testing.T) {
 	}
 }
 
-func TestInstallHooksTo_WritesToLocalFile(t *testing.T) {
+func TestInstallHooks_WritesToLocalFile(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
 	ag := &ClaudeCodeAgent{}
-	count, err := ag.InstallHooksTo(false, false, ClaudeSettingsLocalFileName)
+	count, err := ag.InstallHooks(false, false, true)
 	if err != nil {
-		t.Fatalf("InstallHooksTo() error = %v", err)
+		t.Fatalf("InstallHooks(useLocal=true) error = %v", err)
 	}
 	if count == 0 {
-		t.Fatal("InstallHooksTo() installed 0 hooks, want > 0")
+		t.Fatal("InstallHooks(useLocal=true) installed 0 hooks, want > 0")
 	}
 
 	// Verify settings.local.json was created with hooks
@@ -590,14 +590,14 @@ func TestInstallHooksTo_WritesToLocalFile(t *testing.T) {
 	}
 }
 
-func TestInstallHooksTo_DoesNotModifyProjectSettings(t *testing.T) {
+func TestInstallHooks_DoesNotModifyProjectSettings(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
 	ag := &ClaudeCodeAgent{}
 
 	// Install to project settings first
-	_, err := ag.InstallHooks(false, false)
+	_, err := ag.InstallHooks(false, false, false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -607,9 +607,9 @@ func TestInstallHooksTo_DoesNotModifyProjectSettings(t *testing.T) {
 	}
 
 	// Now install to local settings
-	_, err = ag.InstallHooksTo(false, false, ClaudeSettingsLocalFileName)
+	_, err = ag.InstallHooks(false, false, true)
 	if err != nil {
-		t.Fatalf("InstallHooksTo() error = %v", err)
+		t.Fatalf("InstallHooks(useLocal=true) error = %v", err)
 	}
 
 	// Verify project settings unchanged

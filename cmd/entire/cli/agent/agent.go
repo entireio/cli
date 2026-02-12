@@ -82,8 +82,9 @@ type HookSupport interface {
 	// InstallHooks installs agent-specific hooks.
 	// If localDev is true, hooks point to local development build.
 	// If force is true, removes existing Entire hooks before installing.
+	// If useLocal is true, writes to local (non-committed) settings file.
 	// Returns the number of hooks installed.
-	InstallHooks(localDev bool, force bool) (int, error)
+	InstallHooks(localDev bool, force bool, useLocal bool) (int, error)
 
 	// UninstallHooks removes installed hooks
 	UninstallHooks() error

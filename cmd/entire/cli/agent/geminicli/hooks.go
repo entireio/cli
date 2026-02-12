@@ -61,8 +61,9 @@ func (g *GeminiCLIAgent) GetHookNames() []string {
 
 // InstallHooks installs Gemini CLI hooks in .gemini/settings.json.
 // If force is true, removes existing Entire hooks before installing.
+// The useLocal parameter is ignored for Gemini (no local settings concept).
 // Returns the number of hooks installed.
-func (g *GeminiCLIAgent) InstallHooks(localDev bool, force bool) (int, error) {
+func (g *GeminiCLIAgent) InstallHooks(localDev bool, force bool, _ bool) (int, error) {
 	// Use repo root instead of CWD to find .gemini directory
 	// This ensures hooks are installed correctly when run from a subdirectory
 	repoRoot, err := paths.RepoRoot()

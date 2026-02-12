@@ -60,16 +60,15 @@ var entireHookPrefixes = []string{
 	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go ",
 }
 
-// InstallHooks installs Claude Code hooks in .claude/settings.json.
+// InstallHooks installs Claude Code hooks in .claude/settings.json (or
+// .claude/settings.local.json when useLocal is true).
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
-func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
-	return c.InstallHooksTo(localDev, force, ClaudeSettingsFileName)
-}
-
-// InstallHooksTo installs Claude Code hooks to the specified settings file
-// (e.g. settings.json or settings.local.json).
-func (c *ClaudeCodeAgent) InstallHooksTo(localDev bool, force bool, settingsFileName string) (int, error) {
+func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool, useLocal bool) (int, error) {
+	settingsFileName := ClaudeSettingsFileName
+	if useLocal {
+		settingsFileName = ClaudeSettingsLocalFileName
+	}
 	// Use repo root instead of CWD to find .claude directory
 	// This ensures hooks are installed correctly when run from a subdirectory
 	repoRoot, err := paths.RepoRoot()

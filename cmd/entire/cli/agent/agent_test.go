@@ -46,10 +46,10 @@ type mockHookSupport struct {
 
 var _ HookSupport = (*mockHookSupport)(nil) // Compile-time interface check
 
-func (m *mockHookSupport) InstallHooks(_, _ bool) (int, error) { return 0, nil }
-func (m *mockHookSupport) UninstallHooks() error               { return nil }
-func (m *mockHookSupport) AreHooksInstalled() bool             { return false }
-func (m *mockHookSupport) GetSupportedHooks() []HookType       { return nil }
+func (m *mockHookSupport) InstallHooks(_, _, _ bool) (int, error) { return 0, nil }
+func (m *mockHookSupport) UninstallHooks() error                  { return nil }
+func (m *mockHookSupport) AreHooksInstalled() bool                { return false }
+func (m *mockHookSupport) GetSupportedHooks() []HookType          { return nil }
 
 // mockFileWatcher implements both Agent and FileWatcher interfaces.
 type mockFileWatcher struct {
