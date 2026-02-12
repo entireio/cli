@@ -2,7 +2,7 @@
 # Backfill script for applying Simili Bot triage to existing open issues
 # Usage: ./scripts/simili-backfill.sh
 
-set -e
+set -euo pipefail
 
 REPO="entireio/cli"
 CONFIG=".github/simili.yaml"
