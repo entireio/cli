@@ -906,8 +906,6 @@ func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 	}
 }
 
-// Self-heal: reinstalling hooks after a third-party tool overwrites or deletes them.
-
 func TestInstallGitHook_SelfHealAfterThirdPartyOverwrite(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
