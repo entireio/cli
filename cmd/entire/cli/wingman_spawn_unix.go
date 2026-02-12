@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -56,11 +57,15 @@ func spawnDetachedWingmanReview(repoRoot, payloadPath string) {
 
 	// Start the process (non-blocking)
 	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "[wingman] Failed to spawn review subprocess: %v\n", err)
 		if logFile != nil {
 			_ = logFile.Close()
 		}
 		return
 	}
+
+	pid := cmd.Process.Pid
+	fmt.Fprintf(os.Stderr, "[wingman] Review subprocess spawned (pid=%d)\n", pid)
 
 	// Release the process so it can run independently
 	//nolint:errcheck // Best effort - process should continue regardless
@@ -103,11 +108,15 @@ func spawnDetachedWingmanApply(repoRoot string) {
 	}
 
 	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "[wingman] Failed to spawn apply subprocess: %v\n", err)
 		if applyLogFile != nil {
 			_ = applyLogFile.Close()
 		}
 		return
 	}
+
+	pid := cmd.Process.Pid
+	fmt.Fprintf(os.Stderr, "[wingman] Apply subprocess spawned (pid=%d)\n", pid)
 
 	//nolint:errcheck // Best effort - process should continue regardless
 	_ = cmd.Process.Release()

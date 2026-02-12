@@ -334,59 +334,18 @@ func readSessionContext(repoRoot, sessionID string) string {
 	return string(data)
 }
 
-// isSessionIdle checks if any session is in the IDLE phase by reading
-// session state files directly from the repo. Uses repoRoot to locate
-// .git/entire-sessions/ without relying on the current working directory
-// (which is "/" in detached subprocesses).
-func isSessionIdle(repoRoot, sessionID string) bool {
-	sessDir := findSessionStateDir(repoRoot)
-	if sessDir == "" {
-		wingmanLog("cannot find session state dir for %s", repoRoot)
-		return false
-	}
-
-	// Fast path: check the specific session
-	if sessionID != "" {
-		if phase := readSessionPhase(sessDir, sessionID); phase == string(session.PhaseIdle) {
-			return true
-		}
-	}
-
-	// Slow path: check if ANY session is idle
-	// (covers session restart, ended sessions, etc.)
-	entries, err := os.ReadDir(sessDir)
-	if err != nil {
-		return false
-	}
-	const maxSessionCheck = 50
-	checked := 0
-	for _, entry := range entries {
-		if checked >= maxSessionCheck {
-			wingmanLog("hit session check limit (%d), assuming not idle", maxSessionCheck)
-			return false
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		sid := strings.TrimSuffix(name, ".json")
-		if sid == sessionID {
-			continue // Already checked
-		}
-		checked++
-		if phase := readSessionPhase(sessDir, sid); phase == string(session.PhaseIdle) {
-			wingmanLog("found idle session %s (original session %s was not idle)", sid, sessionID)
-			return true
-		}
-	}
-
-	return false
-}
+// staleSessionThreshold is the maximum age of a session state file before it
+// is considered stale and ignored by hasAnyLiveSession. This prevents orphaned
+// session files (e.g., from crashed processes) from permanently blocking auto-apply.
+const staleSessionThreshold = 2 * time.Hour
 
 // hasAnyLiveSession checks if any session is in a non-ENDED phase (IDLE,
 // ACTIVE, or ACTIVE_COMMITTED). Used to decide whether to defer review
 // application to the prompt-submit injection (visible to user) vs background
 // auto-apply (invisible).
+//
+// Session state files older than staleSessionThreshold are skipped to prevent
+// orphaned sessions from permanently blocking auto-apply.
 func hasAnyLiveSession(repoRoot string) bool {
 	sessDir := findSessionStateDir(repoRoot)
 	if sessDir == "" {
@@ -409,6 +368,18 @@ func hasAnyLiveSession(repoRoot string) bool {
 			continue
 		}
 		checked++
+
+		// Skip stale session files that haven't been updated recently.
+		// These are likely orphaned from crashed processes.
+		info, statErr := entry.Info()
+		if statErr != nil {
+			continue
+		}
+		if time.Since(info.ModTime()) > staleSessionThreshold {
+			wingmanLog("skipping stale session file %s (age=%s)", name, time.Since(info.ModTime()).Round(time.Second))
+			continue
+		}
+
 		sid := strings.TrimSuffix(name, ".json")
 		phase := readSessionPhase(sessDir, sid)
 		if phase != "" && phase != string(session.PhaseEnded) {
@@ -483,22 +454,34 @@ func runWingmanApply(repoRoot string) error {
 
 	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
 	if !fileExists(reviewPath) {
-		wingmanLog("no REVIEW.md found, nothing to apply")
+		wingmanLog("no REVIEW.md found at %s, nothing to apply", reviewPath)
 		return nil
 	}
+	wingmanLog("REVIEW.md found at %s", reviewPath)
 
 	// Retry prevention: check if apply was already attempted for this review
 	state := loadWingmanStateDirect(repoRoot)
-	if state != nil && state.ApplyAttemptedAt != nil {
+	switch {
+	case state == nil:
+		wingmanLog("no wingman state found, proceeding without session check")
+	case state.ApplyAttemptedAt != nil:
 		wingmanLog("apply already attempted at %s, skipping", state.ApplyAttemptedAt.Format(time.RFC3339))
 		return nil
+	default:
+		wingmanLog("wingman state loaded: session=%s", state.SessionID)
 	}
 
-	// Re-check session is still idle (user may have typed during spawn delay)
+	// Re-check session hasn't become active (user may have typed during spawn delay).
+	// IDLE and ENDED are safe — only ACTIVE/ACTIVE_COMMITTED should block.
 	if state != nil && state.SessionID != "" {
-		if !isSessionIdle(repoRoot, state.SessionID) {
-			wingmanLog("session became active during spawn, aborting (next stop hook will retry)")
-			return nil
+		sessDir := findSessionStateDir(repoRoot)
+		if sessDir != "" {
+			phase := readSessionPhase(sessDir, state.SessionID)
+			if phase != "" && session.Phase(phase).IsActive() {
+				wingmanLog("session is active (phase=%s), aborting (next stop hook will retry)", phase)
+				return nil
+			}
+			wingmanLog("session phase=%s, safe to proceed", phase)
 		}
 	}
 

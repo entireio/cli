@@ -730,3 +730,247 @@ func TestShouldSkipPendingReview_OrphanNoState(t *testing.T) {
 		t.Error("orphan REVIEW.md should have been deleted")
 	}
 }
+
+func TestHasAnyLiveSession_StaleSessionSkipped(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an ACTIVE session file with a very old modification time
+	sessFile := filepath.Join(sessDir, "stale-active.json")
+	if err := os.WriteFile(sessFile, []byte(`{"phase":"active"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Set modification time to 3 hours ago (beyond staleSessionThreshold)
+	staleTime := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(sessFile, staleTime, staleTime); err != nil {
+		t.Fatal(err)
+	}
+
+	if hasAnyLiveSession(tmpDir) {
+		t.Error("should return false when only session is stale (3h old)")
+	}
+}
+
+func TestHasAnyLiveSession_FreshSessionNotSkipped(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a stale ACTIVE session (should be skipped)
+	staleFile := filepath.Join(sessDir, "stale.json")
+	if err := os.WriteFile(staleFile, []byte(`{"phase":"active_committed"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staleTime := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(staleFile, staleTime, staleTime); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a fresh IDLE session (should not be skipped)
+	freshFile := filepath.Join(sessDir, "fresh.json")
+	if err := os.WriteFile(freshFile, []byte(`{"phase":"idle"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasAnyLiveSession(tmpDir) {
+		t.Error("should return true when a fresh live session exists alongside stale ones")
+	}
+}
+
+func TestRunWingmanApply_EndedPhaseProceeds(t *testing.T) {
+	t.Parallel()
+
+	// This test verifies that runWingmanApply does NOT abort when the session
+	// phase is ENDED (the bug fix). We can't test the full auto-apply (it
+	// spawns claude CLI), but we can verify it passes the phase check.
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create REVIEW.md
+	reviewPath := filepath.Join(entireDir, "REVIEW.md")
+	if err := os.WriteFile(reviewPath, []byte("review content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create wingman state
+	saveWingmanStateDirect(tmpDir, &WingmanState{
+		SessionID:  "sess-ended",
+		FilesHash:  "hash1",
+		ReviewedAt: time.Now(),
+	})
+
+	// Create session state dir with ENDED phase
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "sess-ended.json"), []byte(`{"phase":"ended"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// runWingmanApply will pass the phase check but fail at triggerAutoApply
+	// (no claude CLI). The important thing is it doesn't return nil early
+	// with "session became active" — it should get past the phase check.
+	err := runWingmanApply(tmpDir)
+	if err == nil {
+		t.Log("runWingmanApply returned nil (auto-apply succeeded or no claude CLI)")
+	} else {
+		// Expected: fails at triggerAutoApply because claude CLI isn't available
+		if strings.Contains(err.Error(), "session became active") {
+			t.Error("should not abort with 'session became active' for ENDED phase")
+		}
+		t.Logf("runWingmanApply failed as expected (no claude CLI): %v", err)
+	}
+
+	// Verify apply was attempted (state should be updated)
+	state := loadWingmanStateDirect(tmpDir)
+	if state == nil {
+		t.Fatal("expected wingman state to exist")
+	}
+	if state.ApplyAttemptedAt == nil {
+		t.Error("ApplyAttemptedAt should be set after passing phase check")
+	}
+}
+
+func TestRunWingmanApply_ActivePhaseAborts(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create REVIEW.md
+	reviewPath := filepath.Join(entireDir, "REVIEW.md")
+	if err := os.WriteFile(reviewPath, []byte("review content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create wingman state
+	saveWingmanStateDirect(tmpDir, &WingmanState{
+		SessionID:  "sess-active",
+		FilesHash:  "hash1",
+		ReviewedAt: time.Now(),
+	})
+
+	// Create session state dir with ACTIVE phase
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "sess-active.json"), []byte(`{"phase":"active"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// runWingmanApply should return nil (aborted) without attempting apply
+	err := runWingmanApply(tmpDir)
+	if err != nil {
+		t.Errorf("expected nil error (clean abort), got: %v", err)
+	}
+
+	// Verify apply was NOT attempted
+	state := loadWingmanStateDirect(tmpDir)
+	if state != nil && state.ApplyAttemptedAt != nil {
+		t.Error("ApplyAttemptedAt should not be set when phase is ACTIVE")
+	}
+}
+
+func TestRunWingmanApply_ActiveCommittedPhaseAborts(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create REVIEW.md
+	if err := os.WriteFile(filepath.Join(entireDir, "REVIEW.md"), []byte("review"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create wingman state
+	saveWingmanStateDirect(tmpDir, &WingmanState{
+		SessionID:  "sess-ac",
+		FilesHash:  "hash1",
+		ReviewedAt: time.Now(),
+	})
+
+	// Create session state dir with ACTIVE_COMMITTED phase
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "sess-ac.json"), []byte(`{"phase":"active_committed"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runWingmanApply(tmpDir)
+	if err != nil {
+		t.Errorf("expected nil error (clean abort), got: %v", err)
+	}
+
+	// Verify apply was NOT attempted
+	state := loadWingmanStateDirect(tmpDir)
+	if state != nil && state.ApplyAttemptedAt != nil {
+		t.Error("ApplyAttemptedAt should not be set when phase is ACTIVE_COMMITTED")
+	}
+}
+
+func TestRunWingmanApply_IdlePhaseProceeds(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create REVIEW.md
+	if err := os.WriteFile(filepath.Join(entireDir, "REVIEW.md"), []byte("review"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create wingman state
+	saveWingmanStateDirect(tmpDir, &WingmanState{
+		SessionID:  "sess-idle",
+		FilesHash:  "hash1",
+		ReviewedAt: time.Now(),
+	})
+
+	// Create session state dir with IDLE phase
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "sess-idle.json"), []byte(`{"phase":"idle"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should pass phase check (IDLE is safe) then fail at triggerAutoApply
+	err := runWingmanApply(tmpDir)
+
+	// Verify apply was attempted (passes the phase check)
+	state := loadWingmanStateDirect(tmpDir)
+	if state == nil {
+		t.Fatal("expected wingman state to exist")
+	}
+	if state.ApplyAttemptedAt == nil {
+		t.Error("ApplyAttemptedAt should be set after passing phase check")
+	}
+	// We expect an error from triggerAutoApply (no claude CLI), that's fine
+	_ = err
+}

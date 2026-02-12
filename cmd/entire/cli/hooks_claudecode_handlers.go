@@ -840,17 +840,25 @@ func transitionSessionTurnEnd(sessionID string) {
 // will deliver the review visibly in the user's terminal instead. Background
 // auto-apply is only used when no sessions are alive (all ended).
 func triggerWingmanAutoApplyIfPending(repoRoot string) {
-	if !settings.IsWingmanEnabled() || os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
+	logCtx := logging.WithComponent(context.Background(), "wingman")
+	if !settings.IsWingmanEnabled() {
+		logging.Debug(logCtx, "wingman auto-apply skip: wingman not enabled")
 		return
 	}
-	logCtx := logging.WithComponent(context.Background(), "wingman")
+	if os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
+		logging.Debug(logCtx, "wingman auto-apply skip: already in apply subprocess")
+		return
+	}
 	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
 	if _, statErr := os.Stat(reviewPath); statErr != nil {
+		logging.Debug(logCtx, "wingman auto-apply skip: no REVIEW.md pending")
 		return
 	}
 	wingmanState := loadWingmanStateDirect(repoRoot)
 	if wingmanState != nil && wingmanState.ApplyAttemptedAt != nil {
-		logging.Debug(logCtx, "wingman auto-apply already attempted, skipping")
+		logging.Debug(logCtx, "wingman auto-apply already attempted, skipping",
+			slog.Time("attempted_at", *wingmanState.ApplyAttemptedAt),
+		)
 		return
 	}
 	// Don't spawn background auto-apply if a live session exists.
@@ -872,20 +880,30 @@ func triggerWingmanAutoApplyIfPending(repoRoot string) {
 // session ends. If no live sessions remain, spawns background auto-apply.
 // Called from both Claude Code and Gemini CLI SessionEnd hooks.
 func triggerWingmanAutoApplyOnSessionEnd() {
-	if !settings.IsWingmanEnabled() || os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
+	logCtx := logging.WithComponent(context.Background(), "wingman")
+	if !settings.IsWingmanEnabled() {
+		logging.Debug(logCtx, "wingman auto-apply on session-end skip: wingman not enabled")
+		return
+	}
+	if os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
+		logging.Debug(logCtx, "wingman auto-apply on session-end skip: already in apply subprocess")
 		return
 	}
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
+		logging.Debug(logCtx, "wingman auto-apply on session-end skip: cannot resolve repo root")
 		return
 	}
-	logCtx := logging.WithComponent(context.Background(), "wingman")
 	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
 	if _, statErr := os.Stat(reviewPath); statErr != nil {
+		logging.Debug(logCtx, "wingman auto-apply on session-end skip: no REVIEW.md pending")
 		return
 	}
 	wingmanState := loadWingmanStateDirect(repoRoot)
 	if wingmanState != nil && wingmanState.ApplyAttemptedAt != nil {
+		logging.Debug(logCtx, "wingman auto-apply on session-end skip: already attempted",
+			slog.Time("attempted_at", *wingmanState.ApplyAttemptedAt),
+		)
 		return
 	}
 	if hasAnyLiveSession(repoRoot) {
