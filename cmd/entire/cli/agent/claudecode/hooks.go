@@ -87,9 +87,17 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 			return 0, fmt.Errorf("failed to parse existing settings.json: %w", err)
 		}
 		if hooksRaw, ok := rawSettings["hooks"]; ok {
+			// First unmarshal into rawClaudeHooks to preserve unknown fields
+			var rawHooks rawClaudeHooks
+			if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
+				return 0, fmt.Errorf("failed to parse hooks in settings.json: %w", err)
+			}
+			// Then unmarshal into settings.Hooks for the known fields
 			if err := json.Unmarshal(hooksRaw, &settings.Hooks); err != nil {
 				return 0, fmt.Errorf("failed to parse hooks in settings.json: %w", err)
 			}
+			// Store raw hooks for later preservation
+			rawSettings["hooks_raw"] = hooksRaw
 		}
 		if permRaw, ok := rawSettings["permissions"]; ok {
 			if err := json.Unmarshal(permRaw, &rawPermissions); err != nil {
@@ -188,11 +196,41 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		return 0, nil // All hooks and permissions already installed
 	}
 
-	// Marshal hooks and update raw settings
-	hooksJSON, err := json.Marshal(settings.Hooks)
+	// Marshal hooks preserving unknown fields
+	// First get the raw hooks map
+	var rawHooks rawClaudeHooks
+	if rawHooksRaw, ok := rawSettings["hooks_raw"]; ok {
+		if err := json.Unmarshal(rawHooksRaw, &rawHooks); err != nil {
+			return 0, fmt.Errorf("failed to unmarshal raw hooks: %w", err)
+		}
+	} else {
+		rawHooks = make(rawClaudeHooks)
+	}
+	
+	// Update known hook types in rawHooks with modified values
+	knownHooks := map[string]interface{}{
+		"SessionStart":     settings.Hooks.SessionStart,
+		"SessionEnd":       settings.Hooks.SessionEnd,
+		"UserPromptSubmit": settings.Hooks.UserPromptSubmit,
+		"Stop":             settings.Hooks.Stop,
+		"PreToolUse":       settings.Hooks.PreToolUse,
+		"PostToolUse":      settings.Hooks.PostToolUse,
+	}
+	
+	for hookName, hookValue := range knownHooks {
+		hooksJSON, err := json.Marshal(hookValue)
+		if err != nil {
+			return 0, fmt.Errorf("failed to marshal %s hooks: %w", hookName, err)
+		}
+		rawHooks[hookName] = hooksJSON
+	}
+	
+	// Marshal the complete rawHooks back
+	hooksJSON, err := json.Marshal(rawHooks)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
+	delete(rawSettings, "hooks_raw") // Remove temporary storage
 	rawSettings["hooks"] = hooksJSON
 
 	// Marshal permissions and update raw settings
@@ -238,10 +276,22 @@ func (c *ClaudeCodeAgent) UninstallHooks() error {
 	}
 
 	var settings ClaudeSettings
+	var rawHooks rawClaudeHooks
+	
 	if hooksRaw, ok := rawSettings["hooks"]; ok {
+		// Unmarshal into rawClaudeHooks to preserve unknown fields
+		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
+			return fmt.Errorf("failed to parse hooks: %w", err)
+		}
+		// Also unmarshal into settings.Hooks for the known fields
 		if err := json.Unmarshal(hooksRaw, &settings.Hooks); err != nil {
 			return fmt.Errorf("failed to parse hooks: %w", err)
 		}
+	}
+	
+	// Initialize rawHooks if it wasn't populated (no hooks key or empty)
+	if rawHooks == nil {
+		rawHooks = make(rawClaudeHooks)
 	}
 
 	// Remove Entire hooks from all hook types
@@ -295,8 +345,27 @@ func (c *ClaudeCodeAgent) UninstallHooks() error {
 		}
 	}
 
-	// Marshal hooks back
-	hooksJSON, err := json.Marshal(settings.Hooks)
+	// Marshal hooks back preserving unknown fields
+	// Update known hook types in rawHooks with modified values
+	knownHooks := map[string]interface{}{
+		"SessionStart":     settings.Hooks.SessionStart,
+		"SessionEnd":       settings.Hooks.SessionEnd,
+		"UserPromptSubmit": settings.Hooks.UserPromptSubmit,
+		"Stop":             settings.Hooks.Stop,
+		"PreToolUse":       settings.Hooks.PreToolUse,
+		"PostToolUse":      settings.Hooks.PostToolUse,
+	}
+	
+	for hookName, hookValue := range knownHooks {
+		hooksJSON, err := json.Marshal(hookValue)
+		if err != nil {
+			return fmt.Errorf("failed to marshal %s hooks: %w", hookName, err)
+		}
+		rawHooks[hookName] = hooksJSON
+	}
+	
+	// Marshal the complete rawHooks back
+	hooksJSON, err := json.Marshal(rawHooks)
 	if err != nil {
 		return fmt.Errorf("failed to marshal hooks: %w", err)
 	}
