@@ -279,6 +279,8 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 		fmt.Fprintf(os.Stderr, "Skipping commit\n")
 		// Still transition phase even when skipping commit — the turn is ending.
 		transitionSessionTurnEnd(sessionID)
+		// Auto-apply pending wingman review even when no file changes this turn
+		triggerWingmanAutoApplyIfPending(repoRoot)
 		// Clean up state even when skipping
 		if err := CleanupPrePromptState(sessionID); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", err)
@@ -422,19 +424,8 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 		})
 	}
 
-	// Auto-apply pending wingman review: the stop hook fires when the agent turn
-	// ends (ACTIVE → IDLE), which is the natural safe moment to trigger --continue.
-	// This is the PRIMARY delivery mechanism for wingman reviews.
-	if settings.IsWingmanEnabled() && os.Getenv("ENTIRE_WINGMAN_APPLY") == "" {
-		reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
-		if _, statErr := os.Stat(reviewPath); statErr == nil {
-			wingmanState := loadWingmanStateDirect(repoRoot)
-			if wingmanState == nil || wingmanState.ApplyAttemptedAt == nil {
-				fmt.Fprintf(os.Stderr, "[wingman] Pending review found, spawning auto-apply\n")
-				spawnDetachedWingmanApply(repoRoot)
-			}
-		}
-	}
+	// Auto-apply pending wingman review on turn end
+	triggerWingmanAutoApplyIfPending(repoRoot)
 
 	// Clean up pre-prompt state (CLI responsibility)
 	if err := CleanupPrePromptState(sessionID); err != nil {
@@ -819,6 +810,25 @@ func transitionSessionTurnEnd(sessionID string) {
 	if updateErr := strategy.SaveSessionState(turnState); updateErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to update session phase on turn end: %v\n", updateErr)
 	}
+}
+
+// triggerWingmanAutoApplyIfPending checks for a pending REVIEW.md and spawns
+// the auto-apply subprocess if conditions are met. Called from the stop hook
+// on every turn end (both with-changes and no-changes paths).
+func triggerWingmanAutoApplyIfPending(repoRoot string) {
+	if !settings.IsWingmanEnabled() || os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
+		return
+	}
+	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
+	if _, statErr := os.Stat(reviewPath); statErr != nil {
+		return
+	}
+	wingmanState := loadWingmanStateDirect(repoRoot)
+	if wingmanState != nil && wingmanState.ApplyAttemptedAt != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[wingman] Pending review found, spawning auto-apply\n")
+	spawnDetachedWingmanApply(repoRoot)
 }
 
 // markSessionEnded transitions the session to ENDED phase via the state machine.
