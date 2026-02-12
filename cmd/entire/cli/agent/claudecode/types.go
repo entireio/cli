@@ -7,6 +7,10 @@ type ClaudeSettings struct {
 	Hooks ClaudeHooks `json:"hooks"`
 }
 
+// rawClaudeHooks preserves unknown hook types using RawMessage
+// This prevents silently dropping hooks not defined in ClaudeHooks struct
+type rawClaudeHooks map[string]json.RawMessage
+
 // ClaudeHooks contains the hook configurations
 type ClaudeHooks struct {
 	SessionStart     []ClaudeHookMatcher `json:"SessionStart,omitempty"`
