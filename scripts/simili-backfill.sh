@@ -4,7 +4,7 @@
 
 set -e
 
-REPO="entireio/entireio-cli"
+REPO="entireio/cli"
 CONFIG=".github/simili.yaml"
 
 echo "🔍 Fetching open issues from $REPO..."
