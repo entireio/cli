@@ -103,10 +103,10 @@ func captureInitialState() error {
 			// Notify if a review is currently in progress (fresh lock file).
 			// outputHookMessage writes JSON to stdout; session initialization
 			// below only touches disk/stderr, so there's no double-write risk.
-			// Stale locks (>staleLockThreshold) are ignored — the review process
-			// likely crashed and the lock was never cleaned up.
+			// Uses wingmanNotificationLockThreshold (10min) — tighter than the
+			// 30min staleLockThreshold used for lock acquisition.
 			lockPath := filepath.Join(repoRoot, wingmanLockFile)
-			if lockInfo, statErr := os.Stat(lockPath); statErr == nil && time.Since(lockInfo.ModTime()) <= staleLockThreshold {
+			if lockInfo, statErr := os.Stat(lockPath); statErr == nil && time.Since(lockInfo.ModTime()) <= wingmanNotificationLockThreshold {
 				logging.Info(wingmanLogCtx, "wingman review in progress",
 					slog.String("session_id", hookData.sessionID),
 				)
@@ -812,6 +812,13 @@ func handleClaudeCodeSessionEnd() error {
 	return nil
 }
 
+// wingmanNotificationLockThreshold is the maximum lock file age for showing
+// "Reviewing your changes..." notifications. Much tighter than staleLockThreshold
+// (used for lock acquisition) because a real review takes at most
+// wingmanInitialDelay (10s) + wingmanReviewTimeout (5m) ≈ 6 minutes.
+// A lock older than this is almost certainly stale for notification purposes.
+const wingmanNotificationLockThreshold = 10 * time.Minute
+
 // outputWingmanStopNotification outputs a systemMessage notification about
 // wingman status at the end of a stop hook. This makes wingman activity visible
 // in the agent terminal without injecting context into the agent's conversation.
@@ -825,7 +832,7 @@ func outputWingmanStopNotification(repoRoot string) {
 	}
 
 	lockPath := filepath.Join(repoRoot, wingmanLockFile)
-	if info, err := os.Stat(lockPath); err == nil && time.Since(info.ModTime()) <= staleLockThreshold {
+	if info, err := os.Stat(lockPath); err == nil && time.Since(info.ModTime()) <= wingmanNotificationLockThreshold {
 		_ = outputHookMessage("[Wingman] Reviewing your changes...") //nolint:errcheck // best-effort notification
 		return
 	}
