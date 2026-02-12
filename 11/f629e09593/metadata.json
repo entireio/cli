@@ -1,0 +1,29 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "11f629e09593",
+  "strategy": "manual-commit",
+  "branch": "soph/ensure-hooks-improvement",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/integration_test/hooks_test.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/hooks.go",
+    "cmd/entire/cli/strategy/manual_commit.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/11/f629e09593/0/metadata.json",
+      "transcript": "/11/f629e09593/0/full.jsonl",
+      "context": "/11/f629e09593/0/context.md",
+      "content_hash": "/11/f629e09593/0/content_hash.txt",
+      "prompt": "/11/f629e09593/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 148,
+    "cache_creation_tokens": 242878,
+    "cache_read_tokens": 1896511,
+    "output_tokens": 32,
+    "api_call_count": 18
+  }
+}
