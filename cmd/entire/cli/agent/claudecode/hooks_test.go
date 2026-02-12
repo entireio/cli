@@ -448,6 +448,122 @@ func readClaudeSettingsFile(t *testing.T, tempDir, fileName string) ClaudeSettin
 	return settings
 }
 
+func TestAreHooksInstalled_ChecksBothFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &ClaudeCodeAgent{}
+
+	// No files - not installed
+	if ag.AreHooksInstalled() {
+		t.Error("should not be installed when no settings files exist")
+	}
+
+	// Install to local only
+	_, err := ag.InstallHooksTo(false, false, ClaudeSettingsLocalFileName)
+	if err != nil {
+		t.Fatalf("InstallHooksTo() error = %v", err)
+	}
+
+	// Should detect hooks in local file
+	if !ag.AreHooksInstalled() {
+		t.Error("should detect hooks in settings.local.json")
+	}
+}
+
+func TestAreHooksInstalled_DetectsProjectFile(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &ClaudeCodeAgent{}
+
+	// Install to project settings only
+	_, err := ag.InstallHooks(false, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	if !ag.AreHooksInstalled() {
+		t.Error("should detect hooks in settings.json")
+	}
+}
+
+func TestUninstallHooks_RemovesFromBothFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &ClaudeCodeAgent{}
+
+	// Install hooks to both files
+	_, err := ag.InstallHooks(false, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	_, err = ag.InstallHooksTo(false, false, ClaudeSettingsLocalFileName)
+	if err != nil {
+		t.Fatalf("InstallHooksTo() error = %v", err)
+	}
+
+	// Verify hooks exist in both
+	projectSettings := readClaudeSettingsFile(t, tempDir, ClaudeSettingsFileName)
+	if !hookCommandExists(projectSettings.Hooks.Stop, "entire hooks claude-code stop") {
+		t.Fatal("hooks should be in settings.json before uninstall")
+	}
+	localSettings := readClaudeSettingsFile(t, tempDir, ClaudeSettingsLocalFileName)
+	if !hookCommandExists(localSettings.Hooks.Stop, "entire hooks claude-code stop") {
+		t.Fatal("hooks should be in settings.local.json before uninstall")
+	}
+
+	// Uninstall should clean both
+	err = ag.UninstallHooks()
+	if err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+
+	if ag.AreHooksInstalled() {
+		t.Error("hooks should not be installed after uninstall")
+	}
+
+	// Verify hooks removed from project settings
+	projectSettings = readClaudeSettingsFile(t, tempDir, ClaudeSettingsFileName)
+	if hookCommandExists(projectSettings.Hooks.Stop, "entire hooks claude-code stop") {
+		t.Error("hooks should be removed from settings.json")
+	}
+
+	// Verify hooks removed from local settings
+	localSettings = readClaudeSettingsFile(t, tempDir, ClaudeSettingsLocalFileName)
+	if hookCommandExists(localSettings.Hooks.Stop, "entire hooks claude-code stop") {
+		t.Error("hooks should be removed from settings.local.json")
+	}
+}
+
+func TestUninstallHooks_LocalOnly(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &ClaudeCodeAgent{}
+
+	// Install to local only
+	_, err := ag.InstallHooksTo(false, false, ClaudeSettingsLocalFileName)
+	if err != nil {
+		t.Fatalf("InstallHooksTo() error = %v", err)
+	}
+
+	if !ag.AreHooksInstalled() {
+		t.Fatal("hooks should be installed before uninstall")
+	}
+
+	// Uninstall should find and remove from local file
+	err = ag.UninstallHooks()
+	if err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+
+	if ag.AreHooksInstalled() {
+		t.Error("hooks should not be installed after uninstall")
+	}
+}
+
 func TestInstallHooksTo_WritesToLocalFile(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
@@ -485,7 +601,10 @@ func TestInstallHooksTo_DoesNotModifyProjectSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
-	projectData, _ := os.ReadFile(filepath.Join(tempDir, ".claude", ClaudeSettingsFileName))
+	projectData, err := os.ReadFile(filepath.Join(tempDir, ".claude", ClaudeSettingsFileName))
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
 
 	// Now install to local settings
 	_, err = ag.InstallHooksTo(false, false, ClaudeSettingsLocalFileName)
@@ -494,7 +613,10 @@ func TestInstallHooksTo_DoesNotModifyProjectSettings(t *testing.T) {
 	}
 
 	// Verify project settings unchanged
-	projectDataAfter, _ := os.ReadFile(filepath.Join(tempDir, ".claude", ClaudeSettingsFileName))
+	projectDataAfter, err := os.ReadFile(filepath.Join(tempDir, ".claude", ClaudeSettingsFileName))
+	if err != nil {
+		t.Fatalf("failed to read settings.json after local install: %v", err)
+	}
 	if string(projectData) != string(projectDataAfter) {
 		t.Error("settings.json was modified when installing to local file")
 	}

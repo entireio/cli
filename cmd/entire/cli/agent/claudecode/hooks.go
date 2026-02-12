@@ -93,16 +93,16 @@ func (c *ClaudeCodeAgent) InstallHooksTo(localDev bool, force bool, settingsFile
 	existingData, readErr := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from cwd + fixed path
 	if readErr == nil {
 		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
-			return 0, fmt.Errorf("failed to parse existing settings.json: %w", err)
+			return 0, fmt.Errorf("failed to parse existing %s: %w", settingsFileName, err)
 		}
 		if hooksRaw, ok := rawSettings["hooks"]; ok {
 			if err := json.Unmarshal(hooksRaw, &settings.Hooks); err != nil {
-				return 0, fmt.Errorf("failed to parse hooks in settings.json: %w", err)
+				return 0, fmt.Errorf("failed to parse hooks in %s: %w", settingsFileName, err)
 			}
 		}
 		if permRaw, ok := rawSettings["permissions"]; ok {
 			if err := json.Unmarshal(permRaw, &rawPermissions); err != nil {
-				return 0, fmt.Errorf("failed to parse permissions in settings.json: %w", err)
+				return 0, fmt.Errorf("failed to parse permissions in %s: %w", settingsFileName, err)
 			}
 		}
 	} else {
@@ -180,7 +180,7 @@ func (c *ClaudeCodeAgent) InstallHooksTo(localDev bool, force bool, settingsFile
 	var denyRules []string
 	if denyRaw, ok := rawPermissions["deny"]; ok {
 		if err := json.Unmarshal(denyRaw, &denyRules); err != nil {
-			return 0, fmt.Errorf("failed to parse permissions.deny in settings.json: %w", err)
+			return 0, fmt.Errorf("failed to parse permissions.deny in %s: %w", settingsFileName, err)
 		}
 	}
 	if !slices.Contains(denyRules, metadataDenyRule) {
@@ -222,20 +222,32 @@ func (c *ClaudeCodeAgent) InstallHooksTo(localDev bool, force bool, settingsFile
 	}
 
 	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return 0, fmt.Errorf("failed to write settings.json: %w", err)
+		return 0, fmt.Errorf("failed to write %s: %w", settingsFileName, err)
 	}
 
 	return count, nil
 }
 
 // UninstallHooks removes Entire hooks from Claude Code settings.
+// It checks both settings.json and settings.local.json to ensure hooks are
+// removed regardless of which file they were installed to.
 func (c *ClaudeCodeAgent) UninstallHooks() error {
-	// Use repo root to find .claude directory when run from a subdirectory
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
+
+	for _, fileName := range []string{ClaudeSettingsFileName, ClaudeSettingsLocalFileName} {
+		if err := c.uninstallHooksFrom(repoRoot, fileName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// uninstallHooksFrom removes Entire hooks from a single Claude Code settings file.
+func (c *ClaudeCodeAgent) uninstallHooksFrom(repoRoot, settingsFileName string) error {
+	settingsPath := filepath.Join(repoRoot, ".claude", settingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
 		return nil //nolint:nilerr // No settings file means nothing to uninstall
@@ -243,13 +255,13 @@ func (c *ClaudeCodeAgent) UninstallHooks() error {
 
 	var rawSettings map[string]json.RawMessage
 	if err := json.Unmarshal(data, &rawSettings); err != nil {
-		return fmt.Errorf("failed to parse settings.json: %w", err)
+		return fmt.Errorf("failed to parse %s: %w", settingsFileName, err)
 	}
 
 	var settings ClaudeSettings
 	if hooksRaw, ok := rawSettings["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &settings.Hooks); err != nil {
-			return fmt.Errorf("failed to parse hooks: %w", err)
+			return fmt.Errorf("failed to parse hooks in %s: %w", settingsFileName, err)
 		}
 	}
 
@@ -317,19 +329,32 @@ func (c *ClaudeCodeAgent) UninstallHooks() error {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
 	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write settings.json: %w", err)
+		return fmt.Errorf("failed to write %s: %w", settingsFileName, err)
 	}
 	return nil
 }
 
 // AreHooksInstalled checks if Entire hooks are installed.
+// It checks both settings.json and settings.local.json since hooks may be
+// installed in either file depending on the --local flag.
 func (c *ClaudeCodeAgent) AreHooksInstalled() bool {
 	// Use repo root to find .claude directory when run from a subdirectory
 	repoRoot, err := paths.RepoRoot()
 	if err != nil {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
+
+	for _, fileName := range []string{ClaudeSettingsFileName, ClaudeSettingsLocalFileName} {
+		if c.hasHooksInFile(repoRoot, fileName) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasHooksInFile checks if Entire hooks are present in a single settings file.
+func (c *ClaudeCodeAgent) hasHooksInFile(repoRoot, settingsFileName string) bool {
+	settingsPath := filepath.Join(repoRoot, ".claude", settingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
 		return false
