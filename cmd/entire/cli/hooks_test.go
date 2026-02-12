@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -537,5 +538,173 @@ func TestLogPostTaskHookContext(t *testing.T) {
 				t.Errorf("Missing or wrong subagent path, got:\n%s", output)
 			}
 		})
+	}
+}
+
+func TestHookResponse_SessionStart(t *testing.T) {
+	t.Parallel()
+
+	resp := hookResponse{
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:     "SessionStart",
+			AdditionalContext: "Powered by Entire",
+		},
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	// Verify the nested structure
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	// systemMessage should be absent (omitempty)
+	if _, ok := raw["systemMessage"]; ok {
+		t.Error("systemMessage should be omitted when empty")
+	}
+
+	// hookSpecificOutput should be present
+	hsoRaw, ok := raw["hookSpecificOutput"]
+	if !ok {
+		t.Fatal("hookSpecificOutput missing from response")
+	}
+
+	var hso map[string]string
+	if err := json.Unmarshal(hsoRaw, &hso); err != nil {
+		t.Fatalf("failed to unmarshal hookSpecificOutput: %v", err)
+	}
+
+	if hso["hookEventName"] != "SessionStart" {
+		t.Errorf("hookEventName = %q, want %q", hso["hookEventName"], "SessionStart")
+	}
+	if hso["additionalContext"] != "Powered by Entire" {
+		t.Errorf("additionalContext = %q, want %q", hso["additionalContext"], "Powered by Entire")
+	}
+}
+
+func TestHookResponse_UserPromptSubmit(t *testing.T) {
+	t.Parallel()
+
+	resp := hookResponse{
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:     "UserPromptSubmit",
+			AdditionalContext: "Review instructions here",
+		},
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	// systemMessage should be absent
+	if _, ok := raw["systemMessage"]; ok {
+		t.Error("systemMessage should be omitted when empty")
+	}
+
+	hsoRaw, ok := raw["hookSpecificOutput"]
+	if !ok {
+		t.Fatal("hookSpecificOutput missing from response")
+	}
+
+	var hso map[string]string
+	if err := json.Unmarshal(hsoRaw, &hso); err != nil {
+		t.Fatalf("failed to unmarshal hookSpecificOutput: %v", err)
+	}
+
+	if hso["hookEventName"] != "UserPromptSubmit" {
+		t.Errorf("hookEventName = %q, want %q", hso["hookEventName"], "UserPromptSubmit")
+	}
+	if hso["additionalContext"] != "Review instructions here" {
+		t.Errorf("additionalContext = %q, want %q", hso["additionalContext"], "Review instructions here")
+	}
+}
+
+func TestHookResponse_WithContextAndMessage(t *testing.T) {
+	t.Parallel()
+
+	resp := hookResponse{
+		SystemMessage: "[Wingman] A code review is pending.",
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:     "UserPromptSubmit",
+			AdditionalContext: "Apply the review",
+		},
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	// systemMessage should be present
+	var sysMsg string
+	if err := json.Unmarshal(raw["systemMessage"], &sysMsg); err != nil {
+		t.Fatalf("failed to unmarshal systemMessage: %v", err)
+	}
+	if sysMsg != "[Wingman] A code review is pending." {
+		t.Errorf("systemMessage = %q, want %q", sysMsg, "[Wingman] A code review is pending.")
+	}
+
+	// hookSpecificOutput should also be present
+	hsoRaw, ok := raw["hookSpecificOutput"]
+	if !ok {
+		t.Fatal("hookSpecificOutput missing from response")
+	}
+
+	var hso map[string]string
+	if err := json.Unmarshal(hsoRaw, &hso); err != nil {
+		t.Fatalf("failed to unmarshal hookSpecificOutput: %v", err)
+	}
+
+	if hso["hookEventName"] != "UserPromptSubmit" {
+		t.Errorf("hookEventName = %q, want %q", hso["hookEventName"], "UserPromptSubmit")
+	}
+	if hso["additionalContext"] != "Apply the review" {
+		t.Errorf("additionalContext = %q, want %q", hso["additionalContext"], "Apply the review")
+	}
+}
+
+func TestHookResponse_NilHookSpecificOutput(t *testing.T) {
+	t.Parallel()
+
+	resp := hookResponse{
+		SystemMessage: "Just a message",
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	// hookSpecificOutput should be absent (omitempty on pointer)
+	if _, ok := raw["hookSpecificOutput"]; ok {
+		t.Error("hookSpecificOutput should be omitted when nil")
+	}
+
+	var sysMsg string
+	if err := json.Unmarshal(raw["systemMessage"], &sysMsg); err != nil {
+		t.Fatalf("failed to unmarshal systemMessage: %v", err)
+	}
+	if sysMsg != "Just a message" {
+		t.Errorf("systemMessage = %q, want %q", sysMsg, "Just a message")
 	}
 }

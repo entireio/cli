@@ -299,17 +299,30 @@ func handleSessionStartCommon() error {
 	return nil
 }
 
-// hookResponse represents a JSON response.
-// Used to control whether Agent continues processing the prompt.
-type hookResponse struct {
-	SystemMessage     string `json:"systemMessage,omitempty"`
+// hookSpecificOutput contains event-specific fields nested under hookSpecificOutput
+// in the hook response JSON. Claude Code requires this nesting for additionalContext
+// to be injected into the agent's conversation.
+type hookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"`
 	AdditionalContext string `json:"additionalContext,omitempty"`
 }
 
-// outputHookResponse outputs a JSON response to stdout
-func outputHookResponse(reason string) error {
+// hookResponse represents a JSON response to a Claude Code hook.
+// systemMessage is shown to the user as a warning/info message.
+// hookSpecificOutput contains event-specific fields like additionalContext.
+type hookResponse struct {
+	SystemMessage      string              `json:"systemMessage,omitempty"`
+	HookSpecificOutput *hookSpecificOutput `json:"hookSpecificOutput,omitempty"`
+}
+
+// outputHookResponse outputs a JSON response with additionalContext for
+// SessionStart hooks. The context is injected into the agent's conversation.
+func outputHookResponse(context string) error {
 	resp := hookResponse{
-		SystemMessage: reason,
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:     "SessionStart",
+			AdditionalContext: context,
+		},
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
 		return fmt.Errorf("failed to encode hook response: %w", err)
@@ -317,12 +330,16 @@ func outputHookResponse(reason string) error {
 	return nil
 }
 
-// outputHookResponseWithContext outputs a JSON response that adds context to
-// the agent's conversation. additionalContext is injected into Claude's context
-// and treated as required instructions, not just a warning.
-func outputHookResponseWithContext(context string) error {
+// outputHookResponseWithContextAndMessage outputs a JSON response with both
+// additionalContext (injected into agent conversation) and a systemMessage
+// (shown to the user as a warning/info).
+func outputHookResponseWithContextAndMessage(context, message string) error {
 	resp := hookResponse{
-		AdditionalContext: context,
+		SystemMessage: message,
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:     "UserPromptSubmit",
+			AdditionalContext: context,
+		},
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
 		return fmt.Errorf("failed to encode hook response: %w", err)

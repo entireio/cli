@@ -88,7 +88,10 @@ func captureInitialState() error {
 				logging.Info(wingmanLogCtx, "wingman injecting review instruction on prompt-submit",
 					slog.String("session_id", hookData.sessionID),
 				)
-				if err := outputHookResponseWithContext(wingmanApplyInstruction); err != nil {
+				if err := outputHookResponseWithContextAndMessage(
+					wingmanApplyInstruction,
+					"[Wingman] A code review is pending and will be addressed before your request.",
+				); err != nil {
 					fmt.Fprintf(os.Stderr, "[wingman] Warning: failed to inject review instruction: %v\n", err)
 				}
 			}
