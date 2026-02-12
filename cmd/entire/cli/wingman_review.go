@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/spf13/cobra"
 )
 
@@ -177,7 +176,7 @@ func runWingmanReview(payloadPath string) error {
 	// Check if session is idle right now (rare — user usually starts typing
 	// during the 10s settle + review time). If idle, apply immediately.
 	// Otherwise, the stop hook will handle auto-apply when the current turn ends.
-	idle := isSessionIdle(payload.SessionID)
+	idle := isSessionIdle(repoRoot, payload.SessionID)
 	wingmanLog("session idle check: idle=%v", idle)
 
 	if !idle {
@@ -333,13 +332,101 @@ func readSessionContext(repoRoot, sessionID string) string {
 	return string(data)
 }
 
-// isSessionIdle checks if the given session is in the IDLE phase.
-func isSessionIdle(sessionID string) bool {
-	state, err := strategy.LoadSessionState(sessionID)
-	if err != nil || state == nil {
+// isSessionIdle checks if any session is in the IDLE phase by reading
+// session state files directly from the repo. Uses repoRoot to locate
+// .git/entire-sessions/ without relying on the current working directory
+// (which is "/" in detached subprocesses).
+func isSessionIdle(repoRoot, sessionID string) bool {
+	sessDir := findSessionStateDir(repoRoot)
+	if sessDir == "" {
+		wingmanLog("cannot find session state dir for %s", repoRoot)
 		return false
 	}
-	return state.Phase == session.PhaseIdle
+
+	// Fast path: check the specific session
+	if sessionID != "" {
+		if phase := readSessionPhase(sessDir, sessionID); phase == string(session.PhaseIdle) {
+			return true
+		}
+	}
+
+	// Slow path: check if ANY session is idle
+	// (covers session restart, ended sessions, etc.)
+	entries, err := os.ReadDir(sessDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		sid := strings.TrimSuffix(name, ".json")
+		if sid == sessionID {
+			continue // Already checked
+		}
+		if phase := readSessionPhase(sessDir, sid); phase == string(session.PhaseIdle) {
+			wingmanLog("found idle session %s (original session %s was not idle)", sid, sessionID)
+			return true
+		}
+	}
+
+	return false
+}
+
+// findSessionStateDir locates the .git/entire-sessions/ directory by
+// reading .git to handle both normal repos and worktrees.
+func findSessionStateDir(repoRoot string) string {
+	gitPath := filepath.Join(repoRoot, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return ""
+	}
+
+	var gitDir string
+	if info.IsDir() {
+		// Normal repo: .git is a directory
+		gitDir = gitPath
+	} else {
+		// Worktree: .git is a file containing "gitdir: <path>"
+		data, readErr := os.ReadFile(gitPath) //nolint:gosec // path from repoRoot
+		if readErr != nil {
+			return ""
+		}
+		content := strings.TrimSpace(string(data))
+		if !strings.HasPrefix(content, "gitdir: ") {
+			return ""
+		}
+		gitDir = strings.TrimPrefix(content, "gitdir: ")
+		if !filepath.IsAbs(gitDir) {
+			gitDir = filepath.Join(repoRoot, gitDir)
+		}
+		// For worktrees, session state is in the common dir
+		// .git/worktrees/<name> → ../../ is the common .git dir
+		commonDir := filepath.Join(gitDir, "..", "..")
+		gitDir = filepath.Clean(commonDir)
+	}
+
+	sessDir := filepath.Join(gitDir, "entire-sessions")
+	if _, statErr := os.Stat(sessDir); statErr != nil {
+		return ""
+	}
+	return sessDir
+}
+
+// readSessionPhase reads just the phase field from a session state JSON file.
+func readSessionPhase(sessDir, sessionID string) string {
+	data, err := os.ReadFile(filepath.Join(sessDir, sessionID+".json")) //nolint:gosec // sessDir is from git internals
+	if err != nil {
+		return ""
+	}
+	var partial struct {
+		Phase string `json:"phase"`
+	}
+	if json.Unmarshal(data, &partial) != nil {
+		return ""
+	}
+	return partial.Phase
 }
 
 // runWingmanApply is the entrypoint for the __apply subcommand, spawned by the
@@ -363,7 +450,7 @@ func runWingmanApply(repoRoot string) error {
 
 	// Re-check session is still idle (user may have typed during spawn delay)
 	if state != nil && state.SessionID != "" {
-		if !isSessionIdle(state.SessionID) {
+		if !isSessionIdle(repoRoot, state.SessionID) {
 			wingmanLog("session became active during spawn, aborting (next stop hook will retry)")
 			return nil
 		}
