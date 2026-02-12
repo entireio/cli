@@ -34,6 +34,9 @@ const (
 // This is Claude-specific and not shared with other agents.
 const ClaudeSettingsFileName = "settings.json"
 
+// ClaudeSettingsLocalFileName is the local (non-committed) settings file.
+const ClaudeSettingsLocalFileName = "settings.local.json"
+
 // metadataDenyRule blocks Claude from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
@@ -61,6 +64,12 @@ var entireHookPrefixes = []string{
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
+	return c.InstallHooksTo(localDev, force, ClaudeSettingsFileName)
+}
+
+// InstallHooksTo installs Claude Code hooks to the specified settings file
+// (e.g. settings.json or settings.local.json).
+func (c *ClaudeCodeAgent) InstallHooksTo(localDev bool, force bool, settingsFileName string) (int, error) {
 	// Use repo root instead of CWD to find .claude directory
 	// This ensures hooks are installed correctly when run from a subdirectory
 	repoRoot, err := paths.RepoRoot()
@@ -72,7 +81,7 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		}
 	}
 
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
+	settingsPath := filepath.Join(repoRoot, ".claude", settingsFileName)
 
 	// Read existing settings if they exist
 	var settings ClaudeSettings

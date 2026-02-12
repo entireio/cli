@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -242,8 +243,15 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 	}
 	fmt.Fprintf(w, "Agent: %s (use --agent to change)\n\n", agentType)
 
+	// Determine which settings file to write to
+	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
+	if err != nil {
+		entireDirAbs = paths.EntireDir // Fallback to relative
+	}
+	shouldUseLocal, showNotification := determineSettingsTarget(entireDirAbs, useLocalSettings, useProjectSettings)
+
 	// Setup Claude Code hooks (agent hooks don't depend on settings)
-	if _, err := setupClaudeCodeHook(localDev, forceHooks); err != nil {
+	if _, err := setupClaudeCodeHook(localDev, forceHooks, shouldUseLocal); err != nil {
 		return fmt.Errorf("failed to setup Claude Code hooks: %w", err)
 	}
 
@@ -277,13 +285,6 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 		f := false
 		settings.Telemetry = &f
 	}
-
-	// Determine which settings file to write to
-	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir // Fallback to relative
-	}
-	shouldUseLocal, showNotification := determineSettingsTarget(entireDirAbs, useLocalSettings, useProjectSettings)
 
 	if showNotification {
 		fmt.Fprintln(w, "Info: Project settings exist. Saving to settings.local.json instead.")
@@ -342,8 +343,16 @@ func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProject
 	}
 	fmt.Fprintf(w, "Agent: %s (use --agent to change)\n\n", agentType)
 
+	// Determine which settings file to write to (needed for both Entire and agent settings)
+	// First run always creates settings.json (no prompt)
+	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
+	if err != nil {
+		entireDirAbs = paths.EntireDir // Fallback to relative
+	}
+	shouldUseLocal, showNotification := determineSettingsTarget(entireDirAbs, useLocalSettings, useProjectSettings)
+
 	// Setup Claude Code hooks (agent hooks don't depend on settings)
-	if _, err := setupClaudeCodeHook(localDev, forceHooks); err != nil {
+	if _, err := setupClaudeCodeHook(localDev, forceHooks, shouldUseLocal); err != nil {
 		return fmt.Errorf("failed to setup Claude Code hooks: %w", err)
 	}
 
@@ -373,14 +382,6 @@ func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProject
 		}
 		settings.StrategyOptions["push_sessions"] = false
 	}
-
-	// Determine which settings file to write to
-	// First run always creates settings.json (no prompt)
-	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir // Fallback to relative
-	}
-	shouldUseLocal, showNotification := determineSettingsTarget(entireDirAbs, useLocalSettings, useProjectSettings)
 
 	if showNotification {
 		fmt.Fprintln(w, "Info: Project settings exist. Saving to settings.local.json instead.")
@@ -497,19 +498,25 @@ func checkDisabledGuard(w io.Writer) bool {
 
 // setupClaudeCodeHook sets up Claude Code hooks.
 // This is a convenience wrapper that uses the agent package.
+// If useLocal is true, writes to settings.local.json instead of settings.json.
 // Returns the number of hooks installed (0 if already installed).
-func setupClaudeCodeHook(localDev, forceHooks bool) (int, error) { //nolint:unparam // already present in codebase
+func setupClaudeCodeHook(localDev, forceHooks, useLocal bool) (int, error) { //nolint:unparam // already present in codebase
 	ag, err := agent.Get(agent.AgentNameClaudeCode)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get claude-code agent: %w", err)
 	}
 
-	hookAgent, ok := ag.(agent.HookSupport)
+	ccAgent, ok := ag.(*claudecode.ClaudeCodeAgent)
 	if !ok {
-		return 0, errors.New("claude-code agent does not support hooks")
+		return 0, errors.New("claude-code agent has unexpected type")
 	}
 
-	count, err := hookAgent.InstallHooks(localDev, forceHooks)
+	settingsFile := claudecode.ClaudeSettingsFileName
+	if useLocal {
+		settingsFile = claudecode.ClaudeSettingsLocalFileName
+	}
+
+	count, err := ccAgent.InstallHooksTo(localDev, forceHooks, settingsFile)
 	if err != nil {
 		return 0, fmt.Errorf("failed to install claude-code hooks: %w", err)
 	}
