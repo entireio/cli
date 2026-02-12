@@ -485,7 +485,10 @@ func TestInstallHooksTo_DoesNotModifyProjectSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
-	projectData, _ := os.ReadFile(filepath.Join(tempDir, ".claude", ClaudeSettingsFileName))
+	projectData, err := os.ReadFile(filepath.Join(tempDir, ".claude", ClaudeSettingsFileName))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
 
 	// Now install to local settings
 	_, err = ag.InstallHooksTo(false, false, ClaudeSettingsLocalFileName)
@@ -494,7 +497,10 @@ func TestInstallHooksTo_DoesNotModifyProjectSettings(t *testing.T) {
 	}
 
 	// Verify project settings unchanged
-	projectDataAfter, _ := os.ReadFile(filepath.Join(tempDir, ".claude", ClaudeSettingsFileName))
+	projectDataAfter, err := os.ReadFile(filepath.Join(tempDir, ".claude", ClaudeSettingsFileName))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
 	if string(projectData) != string(projectDataAfter) {
 		t.Error("settings.json was modified when installing to local file")
 	}
