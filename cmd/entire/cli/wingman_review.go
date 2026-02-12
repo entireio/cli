@@ -89,8 +89,11 @@ func runWingmanReview(payloadPath string) error {
 	// Clean up lock file when review completes (regardless of success/failure)
 	lockPath := filepath.Join(repoRoot, wingmanLockFile)
 	defer func() {
-		_ = os.Remove(lockPath)
-		wingmanLog("lock file removed")
+		if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			wingmanLog("WARNING: failed to remove lock file: %v", err)
+		} else {
+			wingmanLog("lock file removed")
+		}
 	}()
 
 	// Initial delay: let the agent turn fully settle
@@ -173,18 +176,18 @@ func runWingmanReview(payloadPath string) error {
 	})
 	wingmanLog("dedup state saved")
 
-	// Check if session is idle right now (rare — user usually starts typing
-	// during the 10s settle + review time). If idle, apply immediately.
-	// Otherwise, the stop hook will handle auto-apply when the current turn ends.
-	idle := isSessionIdle(repoRoot, payload.SessionID)
-	wingmanLog("session idle check: idle=%v", idle)
-
-	if !idle {
-		wingmanLog("session is active, stop hook will handle auto-apply when turn ends")
+	// If any session is live (IDLE/ACTIVE/ACTIVE_COMMITTED), don't auto-apply
+	// in the background. The prompt-submit hook will inject REVIEW.md as
+	// additionalContext when the user sends their next prompt — this is VISIBLE
+	// in their terminal. Only use background auto-apply when no sessions are
+	// alive (e.g., user closed all sessions).
+	if hasAnyLiveSession(repoRoot) {
+		wingmanLog("live session detected, deferring to prompt-submit injection (visible)")
 		return nil
 	}
 
-	// Mark apply as attempted before triggering (retry prevention)
+	// No live sessions — apply in background as fallback
+	wingmanLog("no live sessions, triggering background auto-apply")
 	now := time.Now()
 	state := loadWingmanStateDirect(repoRoot)
 	if state != nil {
@@ -192,7 +195,6 @@ func runWingmanReview(payloadPath string) error {
 		saveWingmanStateDirect(repoRoot, state)
 	}
 
-	wingmanLog("triggering auto-apply via claude --continue (session idle)")
 	applyStart := time.Now()
 	if err := triggerAutoApply(repoRoot); err != nil {
 		wingmanLog("ERROR auto-apply failed after %s: %v", time.Since(applyStart).Round(time.Millisecond), err)
@@ -356,7 +358,13 @@ func isSessionIdle(repoRoot, sessionID string) bool {
 	if err != nil {
 		return false
 	}
+	const maxSessionCheck = 50
+	checked := 0
 	for _, entry := range entries {
+		if checked >= maxSessionCheck {
+			wingmanLog("hit session check limit (%d), assuming not idle", maxSessionCheck)
+			return false
+		}
 		name := entry.Name()
 		if !strings.HasSuffix(name, ".json") {
 			continue
@@ -365,8 +373,46 @@ func isSessionIdle(repoRoot, sessionID string) bool {
 		if sid == sessionID {
 			continue // Already checked
 		}
+		checked++
 		if phase := readSessionPhase(sessDir, sid); phase == string(session.PhaseIdle) {
 			wingmanLog("found idle session %s (original session %s was not idle)", sid, sessionID)
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasAnyLiveSession checks if any session is in a non-ENDED phase (IDLE,
+// ACTIVE, or ACTIVE_COMMITTED). Used to decide whether to defer review
+// application to the prompt-submit injection (visible to user) vs background
+// auto-apply (invisible).
+func hasAnyLiveSession(repoRoot string) bool {
+	sessDir := findSessionStateDir(repoRoot)
+	if sessDir == "" {
+		return false
+	}
+
+	entries, err := os.ReadDir(sessDir)
+	if err != nil {
+		return false
+	}
+
+	const maxCheck = 50
+	checked := 0
+	for _, entry := range entries {
+		if checked >= maxCheck {
+			return false
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		checked++
+		sid := strings.TrimSuffix(name, ".json")
+		phase := readSessionPhase(sessDir, sid)
+		if phase != "" && phase != string(session.PhaseEnded) {
+			wingmanLog("found live session %s (phase=%s)", sid, phase)
 			return true
 		}
 	}

@@ -44,6 +44,11 @@ func handleGeminiSessionEnd() error { // Parse stdin once upfront — all subseq
 		fmt.Fprintf(os.Stderr, "Warning: failed to mark session ended: %v\n", err)
 	}
 
+	// If a wingman review is pending and this was the last live session,
+	// trigger background auto-apply. No more prompts will come from this
+	// session, so the prompt-submit injection can't deliver the review.
+	triggerWingmanAutoApplyOnSessionEnd()
+
 	return nil
 }
 

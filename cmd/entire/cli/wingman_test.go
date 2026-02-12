@@ -491,6 +491,109 @@ func TestShouldSkipPendingReview_StaleTTL(t *testing.T) {
 	}
 }
 
+func TestHasAnyLiveSession_NoSessionDir(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	// No .git at all
+	if hasAnyLiveSession(tmpDir) {
+		t.Error("should return false with no .git directory")
+	}
+}
+
+func TestHasAnyLiveSession_EmptySessionDir(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	gitDir := filepath.Join(tmpDir, ".git")
+	if err := os.MkdirAll(filepath.Join(gitDir, "entire-sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if hasAnyLiveSession(tmpDir) {
+		t.Error("should return false with empty session dir")
+	}
+}
+
+func TestHasAnyLiveSession_IdleSession(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an IDLE session
+	if err := os.WriteFile(filepath.Join(sessDir, "sess-idle.json"), []byte(`{"phase":"idle"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasAnyLiveSession(tmpDir) {
+		t.Error("should return true when IDLE session exists")
+	}
+}
+
+func TestHasAnyLiveSession_ActiveSession(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(sessDir, "sess-active.json"), []byte(`{"phase":"active"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasAnyLiveSession(tmpDir) {
+		t.Error("should return true when ACTIVE session exists")
+	}
+}
+
+func TestHasAnyLiveSession_AllEnded(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(sessDir, "sess-1.json"), []byte(`{"phase":"ended"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "sess-2.json"), []byte(`{"phase":"ended"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if hasAnyLiveSession(tmpDir) {
+		t.Error("should return false when all sessions are ended")
+	}
+}
+
+func TestHasAnyLiveSession_MixedPhases(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(sessDir, "sess-ended.json"), []byte(`{"phase":"ended"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "sess-idle.json"), []byte(`{"phase":"idle"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasAnyLiveSession(tmpDir) {
+		t.Error("should return true when at least one non-ended session exists")
+	}
+}
+
 func TestShouldSkipPendingReview_OrphanNoState(t *testing.T) {
 	t.Parallel()
 

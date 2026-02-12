@@ -787,6 +787,12 @@ func handleClaudeCodeSessionEnd() error {
 	if err := markSessionEnded(input.SessionID); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to mark session ended: %v\n", err)
 	}
+
+	// If a wingman review is pending and this was the last live session,
+	// trigger background auto-apply. No more prompts will come from this
+	// session, so the prompt-submit injection can't deliver the review.
+	triggerWingmanAutoApplyOnSessionEnd()
+
 	return nil
 }
 
@@ -822,6 +828,10 @@ func transitionSessionTurnEnd(sessionID string) {
 // triggerWingmanAutoApplyIfPending checks for a pending REVIEW.md and spawns
 // the auto-apply subprocess if conditions are met. Called from the stop hook
 // on every turn end (both with-changes and no-changes paths).
+//
+// When a live session exists, this is a no-op: the prompt-submit injection
+// will deliver the review visibly in the user's terminal instead. Background
+// auto-apply is only used when no sessions are alive (all ended).
 func triggerWingmanAutoApplyIfPending(repoRoot string) {
 	if !settings.IsWingmanEnabled() || os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
 		return
@@ -836,8 +846,47 @@ func triggerWingmanAutoApplyIfPending(repoRoot string) {
 		logging.Debug(logCtx, "wingman auto-apply already attempted, skipping")
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[wingman] Pending review found, spawning auto-apply\n")
-	logging.Info(logCtx, "wingman auto-apply spawning",
+	// Don't spawn background auto-apply if a live session exists.
+	// The prompt-submit hook will inject REVIEW.md as additionalContext,
+	// which is visible to the user in their terminal.
+	if hasAnyLiveSession(repoRoot) {
+		logging.Debug(logCtx, "wingman auto-apply deferred: live session will handle via injection")
+		fmt.Fprintf(os.Stderr, "[wingman] Review pending — will be injected on next prompt\n")
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[wingman] Pending review found, spawning auto-apply (no live sessions)\n")
+	logging.Info(logCtx, "wingman auto-apply spawning (no live sessions)",
+		slog.String("review_path", reviewPath),
+	)
+	spawnDetachedWingmanApply(repoRoot)
+}
+
+// triggerWingmanAutoApplyOnSessionEnd checks for a pending REVIEW.md after a
+// session ends. If no live sessions remain, spawns background auto-apply.
+// Called from both Claude Code and Gemini CLI SessionEnd hooks.
+func triggerWingmanAutoApplyOnSessionEnd() {
+	if !settings.IsWingmanEnabled() || os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
+		return
+	}
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		return
+	}
+	logCtx := logging.WithComponent(context.Background(), "wingman")
+	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
+	if _, statErr := os.Stat(reviewPath); statErr != nil {
+		return
+	}
+	wingmanState := loadWingmanStateDirect(repoRoot)
+	if wingmanState != nil && wingmanState.ApplyAttemptedAt != nil {
+		return
+	}
+	if hasAnyLiveSession(repoRoot) {
+		logging.Debug(logCtx, "wingman auto-apply deferred on session-end: other live sessions remain")
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[wingman] Last session ended with pending review, spawning auto-apply\n")
+	logging.Info(logCtx, "wingman auto-apply on session-end (no live sessions remain)",
 		slog.String("review_path", reviewPath),
 	)
 	spawnDetachedWingmanApply(repoRoot)
