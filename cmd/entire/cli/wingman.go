@@ -214,7 +214,8 @@ func triggerWingmanReview(payload WingmanPayload) {
 	// is atomic on all platforms, avoiding the TOCTOU race of Stat+WriteFile.
 	lockPath := filepath.Join(repoRoot, wingmanLockFile)
 	if !acquireWingmanLock(lockPath, payload.SessionID) {
-		logging.Info(logCtx, "wingman skipped: could not acquire lock")
+		logging.Info(logCtx, "wingman skipped: review already in progress")
+		fmt.Fprintf(os.Stderr, "[wingman] Review in progress, skipping\n")
 		return
 	}
 

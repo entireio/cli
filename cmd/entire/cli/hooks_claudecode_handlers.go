@@ -82,6 +82,7 @@ func captureInitialState() error {
 	if settings.IsWingmanEnabled() {
 		repoRoot, rootErr := paths.RepoRoot()
 		if rootErr == nil {
+			wingmanLogCtx := logging.WithComponent(context.Background(), "wingman")
 			if _, statErr := os.Stat(filepath.Join(repoRoot, wingmanReviewFile)); statErr == nil {
 				wingmanState := loadWingmanStateDirect(repoRoot)
 				shouldInject := wingmanState != nil &&
@@ -89,10 +90,24 @@ func captureInitialState() error {
 					wingmanState.ApplyAttemptedAt == nil
 				if shouldInject {
 					fmt.Fprintf(os.Stderr, "[wingman] Review available: .entire/REVIEW.md\n")
+					logging.Info(wingmanLogCtx, "wingman injecting review instruction on prompt-submit",
+						slog.String("session_id", hookData.sessionID),
+					)
 					if err := outputHookResponse(wingmanApplyInstruction); err != nil {
 						fmt.Fprintf(os.Stderr, "[wingman] Warning: failed to inject review instruction: %v\n", err)
 					}
+				} else if wingmanState != nil && wingmanState.ApplyAttemptedAt != nil {
+					logging.Debug(wingmanLogCtx, "wingman review pending but auto-apply already attempted, skipping injection")
 				}
+			}
+
+			// Log if a review is currently in progress (lock file exists)
+			lockPath := filepath.Join(repoRoot, wingmanLockFile)
+			if _, statErr := os.Stat(lockPath); statErr == nil {
+				fmt.Fprintf(os.Stderr, "[wingman] Review in progress...\n")
+				logging.Info(wingmanLogCtx, "wingman review in progress",
+					slog.String("session_id", hookData.sessionID),
+				)
 			}
 		}
 	}
@@ -819,15 +834,20 @@ func triggerWingmanAutoApplyIfPending(repoRoot string) {
 	if !settings.IsWingmanEnabled() || os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
 		return
 	}
+	logCtx := logging.WithComponent(context.Background(), "wingman")
 	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
 	if _, statErr := os.Stat(reviewPath); statErr != nil {
 		return
 	}
 	wingmanState := loadWingmanStateDirect(repoRoot)
 	if wingmanState != nil && wingmanState.ApplyAttemptedAt != nil {
+		logging.Debug(logCtx, "wingman auto-apply already attempted, skipping")
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[wingman] Pending review found, spawning auto-apply\n")
+	logging.Info(logCtx, "wingman auto-apply spawning",
+		slog.String("review_path", reviewPath),
+	)
 	spawnDetachedWingmanApply(repoRoot)
 }
 
