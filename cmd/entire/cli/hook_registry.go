@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -100,6 +101,57 @@ func init() {
 			return nil
 		}
 		return handleClaudeCodePostTodo()
+	})
+
+	// Register Cursor handlers
+	RegisterHookHandler(agent.AgentNameCursor, cursor.HookNameSessionStart, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleCursorSessionStart()
+	})
+	RegisterHookHandler(agent.AgentNameCursor, cursor.HookNameSessionEnd, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleCursorSessionEnd()
+	})
+	RegisterHookHandler(agent.AgentNameCursor, cursor.HookNameBeforeSubmitPrompt, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleCursorBeforeSubmitPrompt()
+	})
+	RegisterHookHandler(agent.AgentNameCursor, cursor.HookNameStop, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleCursorStop()
+	})
+	RegisterHookHandler(agent.AgentNameCursor, cursor.HookNamePreTask, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleCursorPreTask()
+	})
+	RegisterHookHandler(agent.AgentNameCursor, cursor.HookNamePostTask, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleCursorPostTask()
+	})
+	RegisterHookHandler(agent.AgentNameCursor, cursor.HookNamePostTodo, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleCursorPostTodo()
 	})
 
 	// Register Gemini CLI handlers
@@ -252,6 +304,7 @@ func newAgentHooksCmd(agentName agent.AgentName, handler agent.HookHandler) *cob
 func getHookType(hookName string) string {
 	switch hookName {
 	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo:
+		// Cursor uses same hook names (pre-task, post-task, post-todo)
 		return "subagent"
 	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
 		return "tool"

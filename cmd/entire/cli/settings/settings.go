@@ -23,6 +23,8 @@ const (
 	EntireSettingsFile = ".entire/settings.json"
 	// EntireSettingsLocalFile is the path to the local settings override file (not committed)
 	EntireSettingsLocalFile = ".entire/settings.local.json"
+	// CursorEntireSettingsFile is the path to Cursor-specific Entire settings (used when agent is Cursor)
+	CursorEntireSettingsFile = ".cursor/entire.json"
 )
 
 // EntireSettings represents the .entire/settings.json configuration
@@ -87,7 +89,25 @@ func Load() (*EntireSettings, error) {
 
 	applyDefaults(settings)
 
+	// Apply Cursor-specific overrides if .cursor/entire.json exists (when using Cursor agent)
+	cursorData, err := os.ReadFile(cursorEntireSettingsAbs())
+	if err == nil {
+		if err := mergeJSON(settings, cursorData); err != nil {
+			return nil, fmt.Errorf("merging Cursor settings: %w", err)
+		}
+	}
+	// Ignore os.IsNotExist; missing file means no Cursor overrides
+
 	return settings, nil
+}
+
+// cursorEntireSettingsAbs returns the absolute path to .cursor/entire.json (repo-root relative).
+func cursorEntireSettingsAbs() string {
+	abs, err := paths.AbsPath(CursorEntireSettingsFile)
+	if err != nil {
+		return CursorEntireSettingsFile
+	}
+	return abs
 }
 
 // LoadFromFile loads settings from a specific file path without merging local overrides.
@@ -253,6 +273,51 @@ func (s *EntireSettings) IsPushSessionsDisabled() bool {
 		return !boolVal // disabled = !push_sessions
 	}
 	return false
+}
+
+// LoadCursorEntireSettings loads Cursor-specific settings from .cursor/entire.json.
+// Returns (nil, nil) if the file does not exist. Caller can merge over base settings when agent is Cursor.
+func LoadCursorEntireSettings() (*EntireSettings, error) {
+	path := cursorEntireSettingsAbs()
+	data, err := os.ReadFile(path) //nolint:gosec // path from paths.AbsPath
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", CursorEntireSettingsFile, err)
+	}
+	s := &EntireSettings{
+		Strategy: DefaultStrategyName,
+		Enabled:  true,
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(s); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", CursorEntireSettingsFile, err)
+	}
+	applyDefaults(s)
+	return s, nil
+}
+
+// SaveCursorEntireSettings saves settings to .cursor/entire.json (for Cursor agent only).
+func SaveCursorEntireSettings(settings *EntireSettings) error {
+	pathAbs, err := paths.AbsPath(CursorEntireSettingsFile)
+	if err != nil {
+		pathAbs = CursorEntireSettingsFile
+	}
+	dir := filepath.Dir(pathAbs)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("creating .cursor directory: %w", err)
+	}
+	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling settings: %w", err)
+	}
+	//nolint:gosec // G306: config file, not secrets
+	if err := os.WriteFile(pathAbs, data, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", CursorEntireSettingsFile, err)
+	}
+	return nil
 }
 
 // Save saves the settings to .entire/settings.json.
