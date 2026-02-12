@@ -63,6 +63,12 @@ type State struct {
 	// Generated once when first needed, reused across all commits in the session.
 	PendingCheckpointID string `json:"pending_checkpoint_id,omitempty"`
 
+	// PendingPushRemote is the git remote name from a push that happened while
+	// condensation was deferred (ACTIVE_COMMITTED phase). After condensation
+	// completes at turn-end, entire/checkpoints/v1 is pushed to this remote.
+	// Cleared after push or on new prompt start.
+	PendingPushRemote string `json:"pending_push_remote,omitempty"`
+
 	// LastInteractionTime is updated on every hook invocation.
 	// Used for stale session detection in "entire doctor".
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`

@@ -1248,6 +1248,9 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 		if state.PendingCheckpointID != "" {
 			state.PendingCheckpointID = ""
 		}
+		if state.PendingPushRemote != "" {
+			state.PendingPushRemote = ""
+		}
 
 		// Calculate attribution at prompt start (BEFORE agent makes any changes)
 		// This captures user edits since the last checkpoint (or base commit for first prompt).
@@ -1532,6 +1535,19 @@ func (s *ManualCommitStrategy) handleTurnEndCondense(logCtx context.Context, sta
 	shadowBranchesToDelete := map[string]struct{}{}
 
 	s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete)
+
+	// Push condensed checkpoint data if a push happened while condensation was deferred
+	if state.PendingPushRemote != "" {
+		remote := state.PendingPushRemote
+		state.PendingPushRemote = ""
+		logging.Info(logCtx, "turn-end: pushing condensed checkpoint data",
+			slog.String("remote", remote))
+		if pushErr := pushSessionsBranchCommon(remote, paths.MetadataBranchName); pushErr != nil {
+			logging.Warn(logCtx, "turn-end: failed to push condensed checkpoint data",
+				slog.String("remote", remote),
+				slog.String("error", pushErr.Error()))
+		}
+	}
 
 	// Delete shadow branches after condensation — but only if no other active
 	// sessions share the branch (same safety check PostCommit uses).

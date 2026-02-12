@@ -1,6 +1,13 @@
 package strategy
 
-import "github.com/entireio/cli/cmd/entire/cli/paths"
+import (
+	"context"
+	"log/slog"
+
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
+)
 
 // PrePush is called by the git pre-push hook before pushing to a remote.
 // It pushes the entire/checkpoints/v1 branch alongside the user's push.
@@ -9,5 +16,43 @@ import "github.com/entireio/cli/cmd/entire/cli/paths"
 //   - "prompt" (default): ask user with option to enable auto
 //   - "false"/"off"/"no": never push
 func (s *ManualCommitStrategy) PrePush(remote string) error {
+	s.recordPendingPushRemote(remote)
 	return pushSessionsBranchCommon(remote, paths.MetadataBranchName)
+}
+
+// recordPendingPushRemote records the push remote on sessions that have deferred
+// condensation (ACTIVE_COMMITTED with PendingCheckpointID). When condensation
+// completes at turn-end, the metadata branch is pushed to this remote.
+func (s *ManualCommitStrategy) recordPendingPushRemote(remote string) {
+	logCtx := logging.WithComponent(context.Background(), "checkpoint")
+
+	worktreePath, err := GetWorktreePath()
+	if err != nil {
+		logging.Debug(logCtx, "recordPendingPushRemote: failed to get worktree path",
+			slog.String("error", err.Error()))
+		return
+	}
+
+	sessions, err := s.findSessionsForWorktree(worktreePath)
+	if err != nil || len(sessions) == 0 {
+		return
+	}
+
+	for _, state := range sessions {
+		if state.Phase != session.PhaseActiveCommitted || state.PendingCheckpointID == "" {
+			continue
+		}
+
+		state.PendingPushRemote = remote
+		if err := s.saveSessionState(state); err != nil {
+			logging.Warn(logCtx, "recordPendingPushRemote: failed to save session state",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", err.Error()))
+			continue
+		}
+
+		logging.Info(logCtx, "pre-push: recorded pending push remote for deferred condensation",
+			slog.String("session_id", state.SessionID),
+			slog.String("remote", remote))
+	}
 }
