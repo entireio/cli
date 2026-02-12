@@ -1,0 +1,17 @@
+I'd like to generate a changelog in the repository for the 0.4.3 release I'm planing to do based on the current state of main. Can you:
+
+- propose a good changelog format to be keept in a markdown file in the repo
+- suggest categories for changes (like bug, feature, improvement -> not to many, but is there a industry standard?)
+- generate an example change log for the changes since 0.4.2 for me to review, maximum one sentence per entry, not super long ideally also with a link to the PR
+
+---
+
+Can you also check some repos do a specific mention for external contributors, can you suggest something?
+
+---
+
+I like Option C
+
+---
+
+yes
