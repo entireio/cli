@@ -607,8 +607,28 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 		settings.Telemetry = &f
 	}
 
-	if err := SaveEntireSettings(settings); err != nil {
-		return fmt.Errorf("failed to save settings: %w", err)
+	// Determine which settings file to write to
+	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
+	if err != nil {
+		entireDirAbs = paths.EntireDir // Fallback to relative
+	}
+	shouldUseLocal, showNotification := determineSettingsTarget(entireDirAbs, useLocalSettings, false)
+
+	if showNotification {
+		fmt.Fprintln(w, "Info: Project settings exist. Saving to settings.local.json instead.")
+		fmt.Fprintln(w, "  Use --project to update the project settings file.")
+	}
+
+	configDisplay := configDisplayProject
+	if shouldUseLocal {
+		if err := SaveEntireSettingsLocal(settings); err != nil {
+			return fmt.Errorf("failed to save local settings: %w", err)
+		}
+		configDisplay = configDisplayLocal
+	} else {
+		if err := SaveEntireSettings(settings); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
 	}
 
 	// Install git hooks AFTER saving settings (InstallGitHook reads local_dev from settings)
@@ -630,7 +650,7 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 		fmt.Fprintf(w, "%s\n", msg)
 	}
 
-	fmt.Fprintf(w, "✓ Project configured (%s)\n", configDisplayProject)
+	fmt.Fprintf(w, "✓ Project configured (%s)\n", configDisplay)
 
 	// Let the strategy handle its own setup requirements (creates entire/checkpoints/v1 branch, etc.)
 	strat, err := strategy.Get(settings.Strategy)
