@@ -112,8 +112,9 @@ func (s *ManualCommitStrategy) EnsureSetup() error {
 
 	// Install generic hooks (they delegate to strategy at runtime)
 	if !IsGitHookInstalled() {
-		_, err := InstallGitHook(true)
-		return err
+		if _, err := InstallGitHook(true); err != nil {
+			return fmt.Errorf("failed to install git hooks: %w", err)
+		}
 	}
 	return nil
 }

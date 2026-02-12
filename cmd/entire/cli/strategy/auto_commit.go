@@ -448,6 +448,7 @@ func (s *AutoCommitStrategy) PreviewRewind(_ RewindPoint) (*RewindPreview, error
 // For auto-commit strategy:
 // - Ensure .entire/.gitignore has all required entries
 // - Create orphan entire/checkpoints/v1 branch if it doesn't exist
+// - Install git hooks if missing (self-healing for third-party overwrites)
 func (s *AutoCommitStrategy) EnsureSetup() error {
 	if err := EnsureEntireGitignore(); err != nil {
 		return err
@@ -461,6 +462,13 @@ func (s *AutoCommitStrategy) EnsureSetup() error {
 	// Ensure the entire/checkpoints/v1 orphan branch exists
 	if err := EnsureMetadataBranch(repo); err != nil {
 		return fmt.Errorf("failed to ensure metadata branch: %w", err)
+	}
+
+	// Install generic hooks if missing (they delegate to strategy at runtime)
+	if !IsGitHookInstalled() {
+		if _, err := InstallGitHook(true); err != nil {
+			return fmt.Errorf("failed to install git hooks: %w", err)
+		}
 	}
 
 	return nil
