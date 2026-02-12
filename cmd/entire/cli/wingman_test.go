@@ -731,7 +731,7 @@ func TestShouldSkipPendingReview_OrphanNoState(t *testing.T) {
 	}
 }
 
-func TestHasAnyLiveSession_StaleSessionSkipped(t *testing.T) {
+func TestHasAnyLiveSession_StaleActiveSessionSkipped(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -745,18 +745,18 @@ func TestHasAnyLiveSession_StaleSessionSkipped(t *testing.T) {
 	if err := os.WriteFile(sessFile, []byte(`{"phase":"active"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Set modification time to 3 hours ago (beyond staleSessionThreshold)
-	staleTime := time.Now().Add(-3 * time.Hour)
+	// Set modification time to 5 hours ago (beyond staleActiveSessionThreshold)
+	staleTime := time.Now().Add(-5 * time.Hour)
 	if err := os.Chtimes(sessFile, staleTime, staleTime); err != nil {
 		t.Fatal(err)
 	}
 
 	if hasAnyLiveSession(tmpDir) {
-		t.Error("should return false when only session is stale (3h old)")
+		t.Error("should return false when only active session is stale (5h old)")
 	}
 }
 
-func TestHasAnyLiveSession_FreshSessionNotSkipped(t *testing.T) {
+func TestHasAnyLiveSession_StaleIdleSessionNotSkipped(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -765,12 +765,37 @@ func TestHasAnyLiveSession_FreshSessionNotSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create a stale ACTIVE session (should be skipped)
+	// Create an IDLE session file with an old modification time.
+	// IDLE sessions should always count as live (user may just be away).
+	sessFile := filepath.Join(sessDir, "old-idle.json")
+	if err := os.WriteFile(sessFile, []byte(`{"phase":"idle"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-5 * time.Hour)
+	if err := os.Chtimes(sessFile, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasAnyLiveSession(tmpDir) {
+		t.Error("should return true for IDLE session regardless of age (user may be away)")
+	}
+}
+
+func TestHasAnyLiveSession_FreshActiveNotSkipped(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sessDir := filepath.Join(tmpDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a stale ACTIVE_COMMITTED session (should be skipped)
 	staleFile := filepath.Join(sessDir, "stale.json")
 	if err := os.WriteFile(staleFile, []byte(`{"phase":"active_committed"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	staleTime := time.Now().Add(-3 * time.Hour)
+	staleTime := time.Now().Add(-5 * time.Hour)
 	if err := os.Chtimes(staleFile, staleTime, staleTime); err != nil {
 		t.Fatal(err)
 	}
