@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/redact"
 )
 
 func TestLoad_RejectsUnknownKeys(t *testing.T) {
@@ -139,4 +141,224 @@ func TestLoad_LocalSettingsRejectsUnknownKeys(t *testing.T) {
 func containsUnknownField(msg string) bool {
 	// Go's json package reports unknown fields with this message format
 	return strings.Contains(msg, "unknown field")
+}
+
+func TestEntireSettings_GetShowcaseConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		settings *EntireSettings
+		wantNil  bool
+		validate func(*testing.T, *redact.ShowcaseConfig)
+	}{
+		{
+			name: "showcase config present with all fields",
+			settings: &EntireSettings{
+				StrategyOptions: map[string]any{
+					"showcase": map[string]any{
+						"redact_paths":        true,
+						"redact_usernames":    true,
+						"redact_project_info": false,
+						"allowed_paths":       []any{"src/", "lib/"},
+						"allowed_domains":     []any{"@example.com"},
+						"custom_blocklist":    []any{"acme-corp", "project-*"},
+					},
+				},
+			},
+			wantNil: false,
+			validate: func(t *testing.T, cfg *redact.ShowcaseConfig) {
+				if !cfg.RedactPaths {
+					t.Error("expected RedactPaths to be true")
+				}
+				if !cfg.RedactUsernames {
+					t.Error("expected RedactUsernames to be true")
+				}
+				if cfg.RedactProjectInfo {
+					t.Error("expected RedactProjectInfo to be false")
+				}
+				if len(cfg.AllowedPaths) != 2 {
+					t.Errorf("expected 2 allowed paths, got %d", len(cfg.AllowedPaths))
+				}
+				if len(cfg.AllowedDomains) != 1 {
+					t.Errorf("expected 1 allowed domain, got %d", len(cfg.AllowedDomains))
+				}
+				if len(cfg.CustomBlocklist) != 2 {
+					t.Errorf("expected 2 blocklist items, got %d", len(cfg.CustomBlocklist))
+				}
+			},
+		},
+		{
+			name: "showcase config with defaults",
+			settings: &EntireSettings{
+				StrategyOptions: map[string]any{
+					"showcase": map[string]any{},
+				},
+			},
+			wantNil: false,
+			validate: func(t *testing.T, cfg *redact.ShowcaseConfig) {
+				// Should return defaults from DefaultShowcaseConfig()
+				defaults := redact.DefaultShowcaseConfig()
+				if cfg.RedactPaths != defaults.RedactPaths {
+					t.Error("expected default RedactPaths")
+				}
+				if cfg.RedactUsernames != defaults.RedactUsernames {
+					t.Error("expected default RedactUsernames")
+				}
+				if cfg.RedactProjectInfo != defaults.RedactProjectInfo {
+					t.Error("expected default RedactProjectInfo")
+				}
+			},
+		},
+		{
+			name: "no showcase config",
+			settings: &EntireSettings{
+				StrategyOptions: map[string]any{
+					"other": map[string]any{},
+				},
+			},
+			wantNil: true,
+		},
+		{
+			name:     "nil StrategyOptions",
+			settings: &EntireSettings{},
+			wantNil:  true,
+		},
+		{
+			name: "showcase is not a map",
+			settings: &EntireSettings{
+				StrategyOptions: map[string]any{
+					"showcase": "invalid",
+				},
+			},
+			wantNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := tt.settings.GetShowcaseConfig()
+			if tt.wantNil {
+				if cfg != nil {
+					t.Errorf("expected nil config, got %+v", cfg)
+				}
+			} else {
+				if cfg == nil {
+					t.Fatal("expected non-nil config, got nil")
+				}
+				if tt.validate != nil {
+					tt.validate(t, cfg)
+				}
+			}
+		})
+	}
+}
+
+func TestEntireSettings_IsShowcaseEnabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		settings *EntireSettings
+		want     bool
+	}{
+		{
+			name: "showcase config present",
+			settings: &EntireSettings{
+				StrategyOptions: map[string]any{
+					"showcase": map[string]any{
+						"redact_paths": true,
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "showcase config missing",
+			settings: &EntireSettings{
+				StrategyOptions: map[string]any{
+					"other": map[string]any{},
+				},
+			},
+			want: false,
+		},
+		{
+			name:     "nil StrategyOptions",
+			settings: &EntireSettings{},
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.settings.IsShowcaseEnabled()
+			if got != tt.want {
+				t.Errorf("IsShowcaseEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetShowcaseConfig_ArrayParsing(t *testing.T) {
+	t.Parallel()
+
+	settings := &EntireSettings{
+		StrategyOptions: map[string]any{
+			"showcase": map[string]any{
+				"allowed_paths":    []any{"src/", "lib/", "cmd/"},
+				"allowed_domains":  []any{"@example.com", "@test.org"},
+				"custom_blocklist": []any{"term1", "term2", "term3"},
+			},
+		},
+	}
+
+	cfg := settings.GetShowcaseConfig()
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+
+	// Check allowed_paths
+	if len(cfg.AllowedPaths) != 3 {
+		t.Errorf("expected 3 allowed paths, got %d", len(cfg.AllowedPaths))
+	}
+	expectedPaths := []string{"src/", "lib/", "cmd/"}
+	for i, expected := range expectedPaths {
+		if i >= len(cfg.AllowedPaths) || cfg.AllowedPaths[i] != expected {
+			t.Errorf("allowed_paths[%d] = %q, want %q", i, cfg.AllowedPaths[i], expected)
+		}
+	}
+
+	// Check allowed_domains
+	if len(cfg.AllowedDomains) != 2 {
+		t.Errorf("expected 2 allowed domains, got %d", len(cfg.AllowedDomains))
+	}
+
+	// Check custom_blocklist
+	if len(cfg.CustomBlocklist) != 3 {
+		t.Errorf("expected 3 blocklist items, got %d", len(cfg.CustomBlocklist))
+	}
+}
+
+func TestGetShowcaseConfig_SkipsNonStringArrayElements(t *testing.T) {
+	t.Parallel()
+
+	settings := &EntireSettings{
+		StrategyOptions: map[string]any{
+			"showcase": map[string]any{
+				"allowed_paths": []any{"src/", 123, "lib/", nil, "cmd/"},
+			},
+		},
+	}
+
+	cfg := settings.GetShowcaseConfig()
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+
+	// Should only extract string values
+	if len(cfg.AllowedPaths) != 3 {
+		t.Errorf("expected 3 allowed paths (skipping non-strings), got %d", len(cfg.AllowedPaths))
+	}
 }

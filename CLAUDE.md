@@ -187,6 +187,69 @@ Don't use `fmt.Print*` for operational messages (checkpoint saves, hook invocati
 
 **Privacy**: Don't log user content (prompts, file contents, commit messages). Log only operational metadata (IDs, counts, paths, durations).
 
+### Explain Command Export Mode
+
+The `explain` command has been extended with export flags for structured output suitable for public sharing (e.g., portfolios, job applications).
+
+**Usage:**
+```bash
+# Export with showcase redaction (privacy-safe)
+entire explain -c <checkpoint-id> --export --showcase --format=json -o showcase.json
+
+# Export as markdown for README
+entire explain -c <checkpoint-id> --export --showcase --format=markdown -o SHOWCASE.md
+
+# Export without showcase (entropy-based redaction only)
+entire explain -c <checkpoint-id> --export --format=json -o export.json
+
+# Raw transcript (existing functionality, JSONL output)
+entire explain -c <checkpoint-id> --raw-transcript
+```
+
+**Export Flags:**
+- `--export`: Enable structured export mode (JSON or Markdown)
+- `--showcase`: Apply showcase redaction (use with --export)
+- `--format`: Output format (json, markdown) - default: json
+- `-o, --output`: Output file (default: stdout)
+
+**Showcase Redaction:**
+
+Showcase mode applies aggressive redaction for public sharing:
+- **Entropy-based** (existing): API keys, tokens, secrets
+- **Pattern-based**: Internal URLs, private IPs, DB connection strings, emails, JWTs, PEM keys, AWS ARNs
+- **Structural**: File paths normalized to project-relative, project names from git remotes
+- **Blocklist**: User-defined terms (company names, project codenames)
+
+Configuration in `.entire/settings.json`:
+```json
+{
+  "strategy_options": {
+    "showcase": {
+      "redact_paths": true,
+      "redact_usernames": true,
+      "redact_project_info": true,
+      "allowed_paths": ["src/", "lib/"],
+      "allowed_domains": [],
+      "custom_blocklist": ["my-company", "project-codename"]
+    }
+  }
+}
+```
+
+**Security Warning:**
+
+ALWAYS review output before publishing - redaction is best-effort. Showcase mode cannot guarantee 100% removal of all sensitive data.
+
+**Testing:**
+- Unit tests: `mise run test` (tests in `redact/showcase_test.go`, `settings/settings_test.go`, `cli/explain_formatters_test.go`)
+- Integration tests: `mise run test:integration` (tests in `integration_test/explain_export_test.go`)
+
+**Key files:**
+- `redact/showcase.go` - Showcase redaction implementation
+- `settings/settings.go` - Settings helpers for showcase config
+- `cli/explain.go` - Export flags and routing
+- `cli/explain_formatters.go` - JSON and Markdown formatters
+
 ### Git Operations
 
 We use github.com/go-git/go-git for most git operations, but with important exceptions:

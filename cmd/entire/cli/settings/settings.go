@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/redact"
 )
 
 // DefaultStrategyName is the default strategy when none is configured.
@@ -253,6 +254,69 @@ func (s *EntireSettings) IsPushSessionsDisabled() bool {
 		return !boolVal // disabled = !push_sessions
 	}
 	return false
+}
+
+// GetShowcaseConfig extracts showcase settings from StrategyOptions.
+// Returns nil if showcase settings are not configured.
+func (s *EntireSettings) GetShowcaseConfig() *redact.ShowcaseConfig {
+	if s.StrategyOptions == nil {
+		return nil
+	}
+	showcaseOpts, ok := s.StrategyOptions["showcase"].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	// Parse showcase options into ShowcaseConfig struct
+	cfg := redact.DefaultShowcaseConfig()
+
+	if redactPaths, ok := showcaseOpts["redact_paths"].(bool); ok {
+		cfg.RedactPaths = redactPaths
+	}
+	if redactUsernames, ok := showcaseOpts["redact_usernames"].(bool); ok {
+		cfg.RedactUsernames = redactUsernames
+	}
+	if redactProjectInfo, ok := showcaseOpts["redact_project_info"].(bool); ok {
+		cfg.RedactProjectInfo = redactProjectInfo
+	}
+
+	// Parse allowed_paths array
+	if allowedPaths, ok := showcaseOpts["allowed_paths"].([]any); ok {
+		cfg.AllowedPaths = make([]string, 0, len(allowedPaths))
+		for _, v := range allowedPaths {
+			if s, ok := v.(string); ok {
+				cfg.AllowedPaths = append(cfg.AllowedPaths, s)
+			}
+		}
+	}
+
+	// Parse allowed_domains array
+	if allowedDomains, ok := showcaseOpts["allowed_domains"].([]any); ok {
+		cfg.AllowedDomains = make([]string, 0, len(allowedDomains))
+		for _, v := range allowedDomains {
+			if s, ok := v.(string); ok {
+				cfg.AllowedDomains = append(cfg.AllowedDomains, s)
+			}
+		}
+	}
+
+	// Parse custom_blocklist array
+	if customBlocklist, ok := showcaseOpts["custom_blocklist"].([]any); ok {
+		cfg.CustomBlocklist = make([]string, 0, len(customBlocklist))
+		for _, v := range customBlocklist {
+			if s, ok := v.(string); ok {
+				cfg.CustomBlocklist = append(cfg.CustomBlocklist, s)
+			}
+		}
+	}
+
+	return &cfg
+}
+
+// IsShowcaseEnabled checks if showcase export is enabled in settings.
+// Returns true if the showcase configuration exists (regardless of other settings).
+func (s *EntireSettings) IsShowcaseEnabled() bool {
+	return s.GetShowcaseConfig() != nil
 }
 
 // Save saves the settings to .entire/settings.json.
