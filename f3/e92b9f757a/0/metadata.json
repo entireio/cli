@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "f3e92b9f757a",
+  "session_id": "266b3f40-6f1d-491c-aeca-825cbb3fcbc5",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-12T15:46:39.937236Z",
+  "branch": "dipree/entire-wingman",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "7883a13b-b1d1-4ce1-8cee-82b48e7b894b",
+  "checkpoint_transcript_start": 467,
+  "transcript_lines_at_start": 467,
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 8832,
+    "cache_read_tokens": 1316967,
+    "output_tokens": 3027,
+    "api_call_count": 10
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-12T15:46:39.505795Z",
+    "agent_lines": 0,
+    "human_added": 10,
+    "human_modified": 3,
+    "human_removed": 0,
+    "total_committed": 13,
+    "agent_percentage": 0
+  },
+  "transcript_path": ".claude/projects/-Users-dip-Repositories-cli/266b3f40-6f1d-491c-aeca-825cbb3fcbc5.jsonl"
+}
