@@ -6,7 +6,7 @@ qdrant:
 embedding:
   provider: "gemini"
   api_key: "${GEMINI_API_KEY}"
-  model: "gemini-embedding-001"
+  model: "text-embedding-004"
 
 defaults:
   similarity_threshold: 0.75
@@ -14,8 +14,6 @@ defaults:
 
 transfer:
   duplicate_confidence_threshold: 0.85
-  enable_duplicate_comments: true
-  enable_duplicate_closing: true
 
 repositories:
   - org: "entireio"
