@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 )
 
 func TestInstallHooks_FreshInstall(t *testing.T) {
@@ -205,6 +207,123 @@ func TestInstallHooks_PreservesUserHooks(t *testing.T) {
 	}
 	if !foundUserHook {
 		t.Error("user hook 'my-hook' was not preserved")
+	}
+}
+
+func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	// Create settings with hook types we don't handle (hypothetical future Gemini hook types)
+	writeGeminiSettings(t, tempDir, `{
+  "hooks": {
+    "FutureHook": [
+      {
+        "matcher": "",
+        "hooks": [{"name": "future-hook", "type": "command", "command": "echo future"}]
+      }
+    ],
+    "AnotherNewHook": [
+      {
+        "matcher": "pattern",
+        "hooks": [{"name": "another-hook", "type": "command", "command": "echo another"}]
+      }
+    ]
+  }
+}`)
+
+	agent := &GeminiCLIAgent{}
+	_, err := agent.InstallHooks(false, false)
+	if err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	// Read raw hooks to verify unknown hook types are preserved
+	rawHooks := testutil.ReadRawHooks(t, tempDir, ".gemini")
+
+	// Verify FutureHook is preserved
+	if _, ok := rawHooks["FutureHook"]; !ok {
+		t.Errorf("FutureHook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
+	}
+
+	// Verify AnotherNewHook is preserved
+	if _, ok := rawHooks["AnotherNewHook"]; !ok {
+		t.Errorf("AnotherNewHook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
+	}
+
+	// Verify the FutureHook content is intact
+	var futureMatchers []GeminiHookMatcher
+	if err := json.Unmarshal(rawHooks["FutureHook"], &futureMatchers); err != nil {
+		t.Fatalf("failed to parse FutureHook: %v", err)
+	}
+	if len(futureMatchers) != 1 {
+		t.Errorf("FutureHook matchers = %d, want 1", len(futureMatchers))
+	}
+	if len(futureMatchers) > 0 && len(futureMatchers[0].Hooks) > 0 {
+		if futureMatchers[0].Hooks[0].Command != "echo future" {
+			t.Errorf("FutureHook command = %q, want %q",
+				futureMatchers[0].Hooks[0].Command, "echo future")
+		}
+	}
+
+	// Verify AnotherNewHook content including matcher
+	var anotherMatchers []GeminiHookMatcher
+	if err := json.Unmarshal(rawHooks["AnotherNewHook"], &anotherMatchers); err != nil {
+		t.Fatalf("failed to parse AnotherNewHook: %v", err)
+	}
+	if len(anotherMatchers) > 0 {
+		if anotherMatchers[0].Matcher != "pattern" {
+			t.Errorf("AnotherNewHook matcher = %q, want %q", anotherMatchers[0].Matcher, "pattern")
+		}
+	}
+
+	// Verify our hooks were also installed
+	if _, ok := rawHooks["SessionStart"]; !ok {
+		t.Errorf("SessionStart hook should have been installed")
+	}
+}
+
+func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	// Create settings with Entire hooks AND unknown hook types
+	writeGeminiSettings(t, tempDir, `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [{"name": "entire-session-start", "type": "command", "command": "entire hooks gemini session-start"}]
+      }
+    ],
+    "FutureHook": [
+      {
+        "matcher": "",
+        "hooks": [{"name": "future-hook", "type": "command", "command": "echo future"}]
+      }
+    ]
+  }
+}`)
+
+	agent := &GeminiCLIAgent{}
+	err := agent.UninstallHooks()
+	if err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+
+	// Read raw hooks to verify unknown hook types are preserved
+	rawHooks := testutil.ReadRawHooks(t, tempDir, ".gemini")
+
+	// Verify FutureHook is preserved
+	if _, ok := rawHooks["FutureHook"]; !ok {
+		t.Errorf("FutureHook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
+	}
+
+	// Verify our hooks were removed (SessionStart should be empty/removed)
+	if sessionStartRaw, ok := rawHooks["SessionStart"]; ok {
+		var matchers []GeminiHookMatcher
+		if err := json.Unmarshal(sessionStartRaw, &matchers); err == nil && len(matchers) > 0 {
+			t.Errorf("SessionStart hook should have been removed")
+		}
 	}
 }
 
