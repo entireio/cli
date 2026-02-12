@@ -1,0 +1,31 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "9b04c3d92e38",
+  "session_id": "2a80b8d9-b65a-4c2e-8bf4-0df4958640fd",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-12T05:37:41.075994Z",
+  "branch": "gtrrz-victor/delete-old-sessionid-logic",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/root_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 24,
+    "cache_creation_tokens": 62362,
+    "cache_read_tokens": 1008439,
+    "output_tokens": 1558,
+    "api_call_count": 20
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-12T05:37:40.879277Z",
+    "agent_lines": 119,
+    "human_added": 1613,
+    "human_modified": 1,
+    "human_removed": 0,
+    "total_committed": 1733,
+    "agent_percentage": 6.866705135603
+  },
+  "transcript_path": ".claude/projects/-Users-gtrrz-victor-wks-cli/2a80b8d9-b65a-4c2e-8bf4-0df4958640fd.jsonl"
+}
