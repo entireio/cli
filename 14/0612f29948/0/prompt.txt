@@ -87,3 +87,218 @@ but we don't have an option in the cli to not install the hooks, so we would nee
 ---
 
 yes
+
+---
+
+I get this linting error on remote ci but it seems not on local ci:
+
+  Error: cmd/entire/cli/strategy/phase_postcommit_test.go:1259:16: string `{"type":"human","message":{"content":"test prompt"}}
+  {"type":"assistant","message":{"content":"test response"}}
+  ` has 3 occurrences, make it a constant (goconst)
+      transcript := `{"type":"human","message":{"content":"test prompt"}}
+                    ^
+  1 issues:
+  * goconst: 1
+  
+  Error: issues found
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. **Initial Request**: User asked to review PR 284 and check if there's existing code that checks git hooks setup on each session.
+
+2. **Investigation Phase**: I searched the codebase and found:
+   - `ManualCommitStrategy.EnsureSetup()` already checks `IsGitHookInstalled()` and reinstalls if needed
+   - This is called from stop hooks via `EnsureSetup()`
+   - `AutoCommitStrategy.EnsureSetup()` does NOT have this check
+   - PR 284 was adding redundant code for manual-commit strategy
+
+3. **User clarified**: For auto-commit, only the pre-push hook is needed. User decided to ignore PR 284 and implement the fix properly.
+
+4. **First Implementation**: Added hook self-healing to `AutoCommitStrategy.EnsureSetup()`:
+   ```go
+   if !IsGitHookInstalled() {
+       if _, err := InstallGitHook(true); err != nil {
+           return err
+       }
+   }
+   ```
+
+5. **User raised concern about timing**: "What now is a common pattern also is to say the agent 'do this change, and then make a commit' so the commit happens before stop." This means if EnsureSetup runs in stop hook, it's too late for mid-turn commits.
+
+6. **Moved EnsureSetup earlier**: Moved from stop hooks to user-prompt-submit hooks:
+   - Added to `captureInitialState()` in `hooks_claudecode_handlers.go`
+   - Added to `handleGeminiBeforeAgent()` in `hooks_geminicli_handlers.go`
+   - Removed from multiple stop/post-task handlers
+
+7. **User asked for test coverage**: I created integration tests in `hooks_test.go`:
+   - `TestUserPromptSubmit_ReinstallsOverwrittenHooks`
+   - `TestUserPromptSubmit_ReinstallsDeletedHooks`
+
+8. **Tests initially failed** because:
+   - `strategy.IsGitHookInstalled()` runs from current working directory, not test repo
+   - Created helper function `hasEntireHooks(repoDir)` with duplicated constants
+
+9. **User feedback on error wrapping**: "In EnsureSetup(), the error from InstallGitHook(true) is returned without context" - I wrapped it: `fmt.Errorf("failed to install git hooks: %w", err)`
+
+10. **User feedback on code duplication**: Test duplicates hook marker and hook names. I refactored:
+    - Added `IsGitHookInstalledInDir(repoDir string)` to strategy/hooks.go
+    - Added `ManagedGitHookNames()` to strategy/hooks.go
+    - Updated tests to use these exported functions
+
+11. **Test failure `TestResume_AfterMergingMain`**: The `GitMerge` function triggers git hooks which fail because `local_dev: true` causes hooks to use `go run ./cmd/entire/main.go` from temp directory.
+
+12. **User questioned why `local_dev: true` in tests**: Good point - tests use `getTestBinary()` directly, not the installed hooks. The comment was misleading.
+
+13. **Fixes for merge test**:
+    - Added `--no-verify` to `GitMerge` to skip hooks
+    - Updated comment in `testenv.go` to explain the limitation
+
+14. **Current issue**: goconst linting error on CI for repeated test transcript string. Added `//nolint:goconst` comments but gofmt removed one.
+
+Summary:
+1. Primary Request and Intent:
+   - Review PR 284 about self-healing git hooks when third-party tools overwrite them
+   - User discovered existing code already handles this for manual-commit strategy via `EnsureSetup()`
+   - User decided to ignore PR 284 and implement properly: add hook check to `AutoCommitStrategy.EnsureSetup()` AND move `EnsureSetup()` to run earlier (user-prompt-submit instead of stop) so hooks are installed before mid-turn commits
+   - Add test coverage for the hook reinstallation behavior
+   - Fix various code quality issues identified during review
+
+2. Key Technical Concepts:
+   - Git hook self-healing (reinstalling hooks when overwritten by lefthook, husky, etc.)
+   - Hook execution order: session-start → user-prompt-submit → agent works (may commit) → stop
+   - `EnsureSetup()` method on strategies: ensures gitignore, metadata branch, and git hooks
+   - `IsGitHookInstalled()` checks for Entire marker in hook files
+   - `local_dev: true` setting causes hooks to use `go run ./cmd/entire/main.go` (relative path)
+   - Integration tests use `getTestBinary()` pre-built binary, not installed git hooks
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/strategy/auto_commit.go`** - Added hook installation to EnsureSetup (already committed in previous session)
+     ```go
+     // Install generic hooks if missing (they delegate to strategy at runtime)
+     if !IsGitHookInstalled() {
+         if _, err := InstallGitHook(true); err != nil {
+             return fmt.Errorf("failed to install git hooks: %w", err)
+         }
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/manual_commit.go`** - Fixed error wrapping (already committed)
+     ```go
+     if !IsGitHookInstalled() {
+         if _, err := InstallGitHook(true); err != nil {
+             return fmt.Errorf("failed to install git hooks: %w", err)
+         }
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/hooks.go`** - Added exported helpers (already committed)
+     ```go
+     // ManagedGitHookNames returns the list of git hooks managed by Entire CLI.
+     func ManagedGitHookNames() []string {
+         return gitHookNames
+     }
+
+     // IsGitHookInstalledInDir checks if all Entire CLI hooks are installed in the given repo directory.
+     func IsGitHookInstalledInDir(repoDir string) bool {
+         gitDir, err := getGitDirInPath(repoDir)
+         if err != nil {
+             return false
+         }
+         return isGitHookInstalledInGitDir(gitDir)
+     }
+     ```
+
+   - **`cmd/entire/cli/hooks_claudecode_handlers.go`** - Moved EnsureSetup to user-prompt-submit (already committed)
+
+   - **`cmd/entire/cli/hooks_geminicli_handlers.go`** - Moved EnsureSetup to before-agent hook (already committed)
+
+   - **`cmd/entire/cli/integration_test/hooks_test.go`** - Added hook reinstallation tests (already committed)
+
+   - **`cmd/entire/cli/integration_test/resume_test.go`** - Current uncommitted changes
+     ```go
+     func (env *TestEnv) GitMerge(branchName string) {
+         env.T.Helper()
+         ctx := env.T.Context()
+         // Use --no-verify to skip hooks - the hooks use local_dev paths that don't work
+         // from test temp directories. This is fine since we're testing merge behavior,
+         // not hook execution during merge.
+         cmd := exec.CommandContext(ctx, "git", "merge", branchName, "-m", "Merge branch '"+branchName+"'", "--no-verify")
+         cmd.Dir = env.RepoDir
+         // ... rest of function
+     }
+     ```
+
+   - **`cmd/entire/cli/integration_test/testenv.go`** - Current uncommitted changes
+     ```go
+     settings := map[string]any{
+         "strategy":  strategyName,
+         "local_dev": true, // Note: git-triggered hooks won't work (path is relative); tests call hooks via getTestBinary() instead
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/phase_postcommit_test.go`** - Current work: adding nolint:goconst
+     - Added `//nolint:goconst // test data repeated across test functions` to first occurrence at line 1259
+     - Second occurrence at line 1292 needs the same nolint comment (gofmt removed it)
+
+4. Errors and fixes:
+   - **Tests failed with "hooks should be installed after InitEntire"**: `InitEntire` doesn't install hooks, `EnsureSetup()` does. Fixed by restructuring tests to call `SimulateUserPromptSubmit` first.
+   - **`strategy.IsGitHookInstalled()` runs from wrong directory**: Created `IsGitHookInstalledInDir(repoDir)` helper.
+   - **User feedback on duplicated constants**: Refactored to export `ManagedGitHookNames()` and `IsGitHookInstalledInDir()` from strategy package.
+   - **User feedback on unwrapped error**: Wrapped `InstallGitHook` errors with `fmt.Errorf("failed to install git hooks: %w", err)`.
+   - **TestResume_AfterMergingMain failed**: Git merge triggers hooks that use relative `go run` path. Fixed with `--no-verify` flag.
+   - **goconst lint error on CI**: Added `//nolint:goconst` comments but gofmt removed one from second occurrence.
+
+5. Problem Solving:
+   - Identified that PR 284 was redundant for manual-commit (already has hook check in EnsureSetup)
+   - Moved EnsureSetup from stop hooks to user-prompt-submit to catch mid-turn commits
+   - Created test infrastructure to verify hook reinstallation without relying on os.Chdir
+   - Fixed test environment issues with git-triggered hooks by using --no-verify
+
+6. All user messages:
+   - "can you review PR 284 and I think we already have code that checks if git commits are setup on each session, or?"
+   - "I mean not git config but git hooks, can you validate: we have EnsureSetup which calls IsGitHookInstalled and I think this happens during each session so basically we have what the PR does, right?"
+   - "For auto commit we only need the push hook, or?"
+   - "ok, let's do this fix then, ignore the existing PR"
+   - "Question: For manual strategy we assumed the user commits after a prompt is done, what now is a common pattern also is to say the agent 'do this change, and then make a commit' so the commit happens before stop. This means if we do EnsureSetup in stop we might be to late. Is there a good reason not to move EnsureSetup forward to the first hook that is called in a session?"
+   - "yes" (to move EnsureSetup earlier)
+   - "what other things does EnsureSetup do?"
+   - "do we have test coverage for this?"
+   - "yes please do" (add tests)
+   - "In EnsureSetup(), the error from InstallGitHook(true) is returned without context..."
+   - "This test duplicates the hook marker string and the list of hook names from strategy/hooks.go..."
+   - (Pasted test failure for TestResume_AfterMergingMain)
+   - "hmm, but these tests run in a temp repo? why is that enabled with `--local-dev`?"
+   - "but we don't have an option in the cli to not install the hooks, so we would need to add it just for that?"
+   - "yes" (to update the misleading comment)
+   - "I get this linting error on remote ci but it seems not on local ci: [goconst error]"
+
+7. Pending Tasks:
+   - Add `//nolint:goconst` comment to second occurrence in `phase_postcommit_test.go` (line 1292)
+
+8. Current Work:
+   Fixing goconst linting error. The user reported CI fails with:
+   ```
+   Error: cmd/entire/cli/strategy/phase_postcommit_test.go:1259:16: string `{"type":"human"...` has 3 occurrences, make it a constant (goconst)
+   ```
+   
+   I added `//nolint:goconst` to both occurrences in `phase_postcommit_test.go`, but gofmt appears to have removed the second one. Currently only line 1259 has the nolint comment; line 1292 needs it added back.
+
+9. Optional Next Step:
+   Add the `//nolint:goconst` comment to the second occurrence at line 1291-1292 in `phase_postcommit_test.go`:
+   ```go
+   //nolint:goconst // test data repeated across test functions
+   transcript := `{"type":"human","message":{"content":"test prompt"}}
+   {"type":"assistant","message":{"content":"test response"}}
+   `
+   ```
+   
+   User's last message: "I get this linting error on remote ci but it seems not on local ci: [goconst error]"
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.

@@ -3,32 +3,32 @@
   "checkpoint_id": "140612f29948",
   "session_id": "85f99978-1851-42ee-9aac-0c9fe2e61b70",
   "strategy": "manual-commit",
-  "created_at": "2026-02-12T13:41:11.964726Z",
+  "created_at": "2026-02-12T14:32:37.446224Z",
   "branch": "soph/ensure-hooks-improvement",
-  "checkpoints_count": 2,
+  "checkpoints_count": 1,
   "files_touched": [
-    "cmd/entire/cli/integration_test/resume_test.go",
-    "cmd/entire/cli/integration_test/testenv.go"
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go"
   ],
   "agent": "Claude Code",
-  "transcript_identifier_at_start": "e767a9be-637e-4819-aefa-89b053e0b5cd",
-  "checkpoint_transcript_start": 607,
-  "transcript_lines_at_start": 607,
+  "transcript_identifier_at_start": "34890b3d-c563-4afa-9124-fa6d9597bd9a",
+  "checkpoint_transcript_start": 808,
+  "transcript_lines_at_start": 808,
   "token_usage": {
-    "input_tokens": 224,
-    "cache_creation_tokens": 295533,
-    "cache_read_tokens": 3532500,
-    "output_tokens": 67,
-    "api_call_count": 27
+    "input_tokens": 660,
+    "cache_creation_tokens": 217915,
+    "cache_read_tokens": 5838877,
+    "output_tokens": 164,
+    "api_call_count": 82
   },
   "initial_attribution": {
-    "calculated_at": "2026-02-12T13:41:11.417576Z",
-    "agent_lines": 5,
+    "calculated_at": "2026-02-12T14:32:36.547878Z",
+    "agent_lines": 0,
     "human_added": 0,
     "human_modified": 0,
     "human_removed": 0,
-    "total_committed": 5,
-    "agent_percentage": 100
+    "total_committed": 0,
+    "agent_percentage": 0
   },
   "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/85f99978-1851-42ee-9aac-0c9fe2e61b70.jsonl"
 }

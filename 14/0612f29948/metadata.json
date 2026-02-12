@@ -3,10 +3,10 @@
   "checkpoint_id": "140612f29948",
   "strategy": "manual-commit",
   "branch": "soph/ensure-hooks-improvement",
-  "checkpoints_count": 2,
+  "checkpoints_count": 1,
   "files_touched": [
-    "cmd/entire/cli/integration_test/resume_test.go",
-    "cmd/entire/cli/integration_test/testenv.go"
+    "cmd/entire/cli/strategy/manual_commit_test.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go"
   ],
   "sessions": [
     {
@@ -18,10 +18,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 224,
-    "cache_creation_tokens": 295533,
-    "cache_read_tokens": 3532500,
-    "output_tokens": 67,
-    "api_call_count": 27
+    "input_tokens": 660,
+    "cache_creation_tokens": 217915,
+    "cache_read_tokens": 5838877,
+    "output_tokens": 164,
+    "api_call_count": 82
   }
 }

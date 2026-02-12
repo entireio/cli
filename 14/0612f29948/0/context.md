@@ -77,3 +77,29 @@ but we don't have an option in the cli to not install the hooks, so we would nee
 
 yes
 
+### Prompt 18
+
+I get this linting error on remote ci but it seems not on local ci:
+
+  Error: cmd/entire/cli/strategy/phase_postcommit_test.go:1259:16: string `{"type":"human","message":{"content":"test prompt"}}
+  {"type":"assistant","message":{"content":"test response"}}
+  ` has 3 occurrences, make it a constant (goconst)
+      transcript := `{"type":"human","message":{"content":"test prompt"}}
+                    ^
+  1 issues:
+  * goconst: 1
+  
+  Error: issues found
+
+### Prompt 19
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. **Initial Request**: User asked to review PR 284 and check if there's existing code that checks git hooks setup on each session.
+
+2. **Investigation Phase**: I searched the codebase and found:
+   - `ManualCommitStrategy.EnsureSetup()` already checks `IsGitHookInstalled()` and reinsta...
+
