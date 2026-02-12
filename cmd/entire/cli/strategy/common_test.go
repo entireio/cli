@@ -705,6 +705,114 @@ func resetProtectedDirsForTest() {
 	protectedDirsCache = nil
 }
 
+func TestGetGitAuthorFromRepo(t *testing.T) {
+	// Cannot use t.Parallel() because subtests use t.Setenv to isolate global git config.
+
+	tests := []struct {
+		name        string
+		localName   string
+		localEmail  string
+		globalName  string
+		globalEmail string
+		wantName    string
+		wantEmail   string
+	}{
+		{
+			name:       "both set locally",
+			localName:  "Local User",
+			localEmail: "local@example.com",
+			wantName:   "Local User",
+			wantEmail:  "local@example.com",
+		},
+		{
+			name:        "only name set locally falls back to global for email",
+			localName:   "Local User",
+			globalEmail: "global@example.com",
+			wantName:    "Local User",
+			wantEmail:   "global@example.com",
+		},
+		{
+			name:       "only email set locally falls back to global for name",
+			localEmail: "local@example.com",
+			globalName: "Global User",
+			wantName:   "Global User",
+			wantEmail:  "local@example.com",
+		},
+		{
+			name:        "nothing set locally falls back to global for both",
+			globalName:  "Global User",
+			globalEmail: "global@example.com",
+			wantName:    "Global User",
+			wantEmail:   "global@example.com",
+		},
+		{
+			name:      "nothing set anywhere returns defaults",
+			wantName:  "Unknown",
+			wantEmail: "unknown@local",
+		},
+		{
+			name:        "local takes precedence over global",
+			localName:   "Local User",
+			localEmail:  "local@example.com",
+			globalName:  "Global User",
+			globalEmail: "global@example.com",
+			wantName:    "Local User",
+			wantEmail:   "local@example.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Isolate global git config by pointing HOME to a temp dir
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", "")
+
+			// Write global .gitconfig if needed
+			if tt.globalName != "" || tt.globalEmail != "" {
+				globalCfg := "[user]\n"
+				if tt.globalName != "" {
+					globalCfg += "\tname = " + tt.globalName + "\n"
+				}
+				if tt.globalEmail != "" {
+					globalCfg += "\temail = " + tt.globalEmail + "\n"
+				}
+				if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(globalCfg), 0o644); err != nil {
+					t.Fatalf("failed to write global gitconfig: %v", err)
+				}
+			}
+
+			// Create a repo for config resolution
+			dir := t.TempDir()
+			repo, err := git.PlainInit(dir, false)
+			if err != nil {
+				t.Fatalf("failed to init repo: %v", err)
+			}
+
+			// Set local config if needed
+			if tt.localName != "" || tt.localEmail != "" {
+				cfg, err := repo.Config()
+				if err != nil {
+					t.Fatalf("failed to get repo config: %v", err)
+				}
+				cfg.User.Name = tt.localName
+				cfg.User.Email = tt.localEmail
+				if err := repo.SetConfig(cfg); err != nil {
+					t.Fatalf("failed to set repo config: %v", err)
+				}
+			}
+
+			gotName, gotEmail := GetGitAuthorFromRepo(repo)
+			if gotName != tt.wantName {
+				t.Errorf("name = %q, want %q", gotName, tt.wantName)
+			}
+			if gotEmail != tt.wantEmail {
+				t.Errorf("email = %q, want %q", gotEmail, tt.wantEmail)
+			}
+		})
+	}
+}
+
 func TestIsProtectedPath(t *testing.T) {
 	t.Parallel()
 
