@@ -100,11 +100,13 @@ func captureInitialState() error {
 				}
 			}
 
-			// Notify if a review is currently in progress (lock file exists).
+			// Notify if a review is currently in progress (fresh lock file).
 			// outputHookMessage writes JSON to stdout; session initialization
 			// below only touches disk/stderr, so there's no double-write risk.
+			// Stale locks (>staleLockThreshold) are ignored — the review process
+			// likely crashed and the lock was never cleaned up.
 			lockPath := filepath.Join(repoRoot, wingmanLockFile)
-			if _, statErr := os.Stat(lockPath); statErr == nil {
+			if lockInfo, statErr := os.Stat(lockPath); statErr == nil && time.Since(lockInfo.ModTime()) <= staleLockThreshold {
 				logging.Info(wingmanLogCtx, "wingman review in progress",
 					slog.String("session_id", hookData.sessionID),
 				)
@@ -823,7 +825,7 @@ func outputWingmanStopNotification(repoRoot string) {
 	}
 
 	lockPath := filepath.Join(repoRoot, wingmanLockFile)
-	if _, err := os.Stat(lockPath); err == nil {
+	if info, err := os.Stat(lockPath); err == nil && time.Since(info.ModTime()) <= staleLockThreshold {
 		_ = outputHookMessage("[Wingman] Reviewing your changes...") //nolint:errcheck // best-effort notification
 		return
 	}
