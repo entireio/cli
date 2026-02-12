@@ -6,7 +6,7 @@ qdrant:
 embedding:
   provider: "gemini"
   api_key: "${GEMINI_API_KEY}"
-  model: "text-embedding-004"
+  model: "gemini-embedding-001"
 
 defaults:
   similarity_threshold: 0.75
