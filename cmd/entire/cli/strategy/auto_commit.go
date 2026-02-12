@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -38,7 +39,16 @@ func isNotFoundError(err error) bool {
 // commitOrHead attempts to create a commit. If the commit would be empty (files already
 // committed), it returns HEAD hash instead. This handles the case where files were
 // modified during a session but already committed by the user before the hook runs.
+//
+// When the user has commit.gpgsign=true in their git config, this falls back to the
+// git CLI so that GPG, SSH, or X.509 signing is applied automatically.
 func commitOrHead(repo *git.Repository, worktree *git.Worktree, msg string, author *object.Signature) (plumbing.Hash, error) {
+	// When commit signing is enabled, use git CLI to let git handle
+	// GPG, SSH, or X.509 signing automatically (go-git only supports OpenPGP)
+	if shouldSignCommits() {
+		return commitWithCLI(repo, msg, author)
+	}
+
 	commitHash, err := worktree.Commit(msg, &git.CommitOptions{Author: author})
 	if errors.Is(err, git.ErrEmptyCommit) {
 		fmt.Fprintf(os.Stderr, "No changes to commit (files already committed)\n")
@@ -52,6 +62,52 @@ func commitOrHead(repo *git.Repository, worktree *git.Worktree, msg string, auth
 		return plumbing.ZeroHash, fmt.Errorf("failed to commit: %w", err)
 	}
 	return commitHash, nil
+}
+
+// shouldSignCommits checks if the user has commit signing enabled via git config.
+// Uses git CLI to respect all config scopes (local, global, system, includes).
+func shouldSignCommits() bool {
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "config", "--get", "commit.gpgsign")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(output)) == "true"
+}
+
+// commitWithCLI creates a git commit using the git CLI instead of go-git.
+// This is used when commit.gpgsign is enabled, as the git CLI handles
+// GPG, SSH, and X.509 signing automatically based on the user's config.
+func commitWithCLI(repo *git.Repository, msg string, author *object.Signature) (plumbing.Hash, error) {
+	ctx := context.Background()
+	authorStr := fmt.Sprintf("%s <%s>", author.Name, author.Email)
+
+	cmd := exec.CommandContext(ctx, "git", "commit", "-m", msg, "--author", authorStr) //nolint:gosec // authorStr is from git config, not user input
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		outputStr := string(output)
+		// Handle empty commit (files already committed)
+		if strings.Contains(outputStr, "nothing to commit") ||
+			strings.Contains(outputStr, "nothing added to commit") {
+			fmt.Fprintf(os.Stderr, "No changes to commit (files already committed)\n")
+			head, headErr := repo.Head()
+			if headErr != nil {
+				return plumbing.ZeroHash, fmt.Errorf("failed to get HEAD: %w", headErr)
+			}
+			return head.Hash(), nil
+		}
+		return plumbing.ZeroHash, fmt.Errorf("git commit failed: %s: %w", strings.TrimSpace(outputStr), err)
+	}
+
+	// Use git rev-parse to get the new HEAD hash since go-git may have
+	// a stale cached reference after a CLI commit
+	revCmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	revOutput, err := revCmd.Output()
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to get HEAD after commit: %w", err)
+	}
+	return plumbing.NewHash(strings.TrimSpace(string(revOutput))), nil
 }
 
 // AutoCommitStrategy implements the auto-commit strategy:
