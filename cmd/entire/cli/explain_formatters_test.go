@@ -43,7 +43,7 @@ func TestFormatExportJSON_ValidOutput(t *testing.T) {
 	}
 
 	output, err := formatExportJSON(checkpointID, content, summary,
-		content.Transcript, content.Prompts, content.Context, content.Metadata.FilesTouched)
+		content.Transcript, content.Prompts, content.Context, content.Metadata.FilesTouched, exportOptions{})
 
 	if err != nil {
 		t.Fatalf("formatExportJSON() error = %v", err)
@@ -102,7 +102,7 @@ func TestFormatExportJSON_WithSummary(t *testing.T) {
 	summary := &checkpoint.CheckpointSummary{CheckpointID: checkpointID}
 
 	output, err := formatExportJSON(checkpointID, content, summary,
-		content.Transcript, content.Prompts, "", []string{})
+		content.Transcript, content.Prompts, "", []string{}, exportOptions{})
 
 	if err != nil {
 		t.Fatalf("formatExportJSON() error = %v", err)
@@ -151,7 +151,7 @@ func TestFormatExportMarkdown_Structure(t *testing.T) {
 	summary := &checkpoint.CheckpointSummary{CheckpointID: checkpointID}
 
 	output, err := formatExportMarkdown(checkpointID, content, summary,
-		content.Transcript, "", "", content.Metadata.FilesTouched)
+		content.Transcript, "", "", content.Metadata.FilesTouched, exportOptions{})
 
 	if err != nil {
 		t.Fatalf("formatExportMarkdown() error = %v", err)
@@ -217,7 +217,7 @@ func TestFormatExportMarkdown_WithSummary(t *testing.T) {
 	summary := &checkpoint.CheckpointSummary{CheckpointID: checkpointID}
 
 	output, err := formatExportMarkdown(checkpointID, content, summary,
-		content.Transcript, "", "", []string{})
+		content.Transcript, "", "", []string{}, exportOptions{})
 
 	if err != nil {
 		t.Fatalf("formatExportMarkdown() error = %v", err)
@@ -271,7 +271,7 @@ func TestFormatExportJSON_HandlesEmptyFields(t *testing.T) {
 	summary := &checkpoint.CheckpointSummary{CheckpointID: checkpointID}
 
 	output, err := formatExportJSON(checkpointID, content, summary,
-		content.Transcript, "", "", content.Metadata.FilesTouched)
+		content.Transcript, "", "", content.Metadata.FilesTouched, exportOptions{})
 
 	if err != nil {
 		t.Fatalf("formatExportJSON() should handle empty fields, got error: %v", err)
@@ -306,7 +306,7 @@ func TestFormatExportMarkdown_HandlesEmptyFiles(t *testing.T) {
 	summary := &checkpoint.CheckpointSummary{CheckpointID: checkpointID}
 
 	output, err := formatExportMarkdown(checkpointID, content, summary,
-		content.Transcript, "", "", content.Metadata.FilesTouched)
+		content.Transcript, "", "", content.Metadata.FilesTouched, exportOptions{})
 
 	if err != nil {
 		t.Fatalf("formatExportMarkdown() should handle empty files, got error: %v", err)

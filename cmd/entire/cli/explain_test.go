@@ -353,7 +353,7 @@ func TestExplainDefault_NoCheckpoints_ShowsHelpfulMessage(t *testing.T) {
 func TestExplainBothFlagsError(t *testing.T) {
 	// Test that providing both --session and --commit returns an error
 	var stdout, stderr bytes.Buffer
-	err := runExplain(&stdout, &stderr, "session-id", "commit-sha", "", false, false, false, false, false, false, false, false, false, "", "")
+	err := runExplain(&stdout, &stderr, "session-id", "commit-sha", "", false, false, false, false, false, false, false, false, false, false, "", "", exportOptions{})
 
 	if err == nil {
 		t.Error("expected error when both flags provided, got nil")
@@ -813,7 +813,7 @@ func TestRunExplain_MutualExclusivityError(t *testing.T) {
 	var buf, errBuf bytes.Buffer
 
 	// Providing both --session and --checkpoint should error
-	err := runExplain(&buf, &errBuf, "session-id", "", "checkpoint-id", false, false, false, false, false, false, false, false, false, "", "")
+	err := runExplain(&buf, &errBuf, "session-id", "", "checkpoint-id", false, false, false, false, false, false, false, false, false, false, "", "", exportOptions{})
 
 	if err == nil {
 		t.Error("expected error when multiple flags provided")
@@ -857,7 +857,7 @@ func TestRunExplainCheckpoint_NotFound(t *testing.T) {
 	}
 
 	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(&buf, &errBuf, "nonexistent123", false, false, false, false, false, false, false, false, false, "", "")
+	err = runExplainCheckpoint(&buf, &errBuf, "nonexistent123", false, false, false, false, false, false, false, false, false, "", "", exportOptions{})
 
 	if err == nil {
 		t.Error("expected error for nonexistent checkpoint")
@@ -2493,7 +2493,7 @@ func TestRunExplain_SessionFlagFiltersListView(t *testing.T) {
 	// When session is specified alone, it should NOT error for mutual exclusivity
 	// It should route to the list view with a filter (which may fail for other reasons
 	// like not being in a git repo, but not for mutual exclusivity)
-	err := runExplain(&buf, &errBuf, "some-session", "", "", false, false, false, false, false, false, false, false, false, "", "")
+	err := runExplain(&buf, &errBuf, "some-session", "", "", false, false, false, false, false, false, false, false, false, false, "", "", exportOptions{})
 
 	// Should NOT be a mutual exclusivity error
 	if err != nil && strings.Contains(err.Error(), "cannot specify multiple") {
@@ -2505,7 +2505,7 @@ func TestRunExplain_SessionWithCheckpointStillMutuallyExclusive(t *testing.T) {
 	// Test that --session with --checkpoint is still an error
 	var buf, errBuf bytes.Buffer
 
-	err := runExplain(&buf, &errBuf, "some-session", "", "some-checkpoint", false, false, false, false, false, false, false, false, false, "", "")
+	err := runExplain(&buf, &errBuf, "some-session", "", "some-checkpoint", false, false, false, false, false, false, false, false, false, false, "", "", exportOptions{})
 
 	if err == nil {
 		t.Error("expected error when --session and --checkpoint both specified")
@@ -2519,7 +2519,7 @@ func TestRunExplain_SessionWithCommitStillMutuallyExclusive(t *testing.T) {
 	// Test that --session with --commit is still an error
 	var buf, errBuf bytes.Buffer
 
-	err := runExplain(&buf, &errBuf, "some-session", "some-commit", "", false, false, false, false, false, false, false, false, false, "", "")
+	err := runExplain(&buf, &errBuf, "some-session", "some-commit", "", false, false, false, false, false, false, false, false, false, false, "", "", exportOptions{})
 
 	if err == nil {
 		t.Error("expected error when --session and --commit both specified")
