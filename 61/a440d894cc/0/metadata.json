@@ -1,0 +1,32 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "61a440d894cc",
+  "session_id": "2cfdacb8-9317-430f-8975-0709d2837d1c",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T15:21:37.82417Z",
+  "branch": "soph/copy-checkpoints-from-forks",
+  "checkpoints_count": 6,
+  "files_touched": [
+    ".github/actions/sync-fork-checkpoints/action.yml",
+    ".github/workflows/sync-fork-checkpoints.yml"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "cc62f054-70b9-44bd-a1c2-a2c1aa4b229e",
+  "token_usage": {
+    "input_tokens": 70,
+    "cache_creation_tokens": 140751,
+    "cache_read_tokens": 4554158,
+    "output_tokens": 6840,
+    "api_call_count": 42
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T15:21:37.582677Z",
+    "agent_lines": 223,
+    "human_added": 490,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 713,
+    "agent_percentage": 31.276297335203367
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/2cfdacb8-9317-430f-8975-0709d2837d1c.jsonl"
+}

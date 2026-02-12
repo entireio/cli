@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "90fe9697fc50",
+  "strategy": "manual-commit",
+  "branch": "dipree/entire-wingman",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/architecture/wingman.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/90/fe9697fc50/0/metadata.json",
+      "transcript": "/90/fe9697fc50/0/full.jsonl",
+      "context": "/90/fe9697fc50/0/context.md",
+      "content_hash": "/90/fe9697fc50/0/content_hash.txt",
+      "prompt": "/90/fe9697fc50/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 22,
+    "cache_creation_tokens": 127367,
+    "cache_read_tokens": 1762904,
+    "output_tokens": 1960,
+    "api_call_count": 16
+  }
+}
