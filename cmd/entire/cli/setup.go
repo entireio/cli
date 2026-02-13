@@ -547,18 +547,19 @@ func printWrongAgentError(w io.Writer, name string) {
 // If strategyName is provided, it sets the strategy; otherwise uses default.
 func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName string, localDev, forceHooks, skipPushSessions, telemetry bool) error {
 	agentName := ag.Name()
-	// Check if agent supports hooks
-	hookAgent, ok := ag.(agent.HookSupport)
-	if !ok {
-		return fmt.Errorf("agent %s does not support hooks", agentName)
-	}
-
 	fmt.Fprintf(w, "Agent: %s\n\n", ag.Type())
 
-	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := hookAgent.InstallHooks(localDev, forceHooks)
-	if err != nil {
-		return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
+	installedHooks := 0
+
+	// If the agent supports hooks, let it install/manage them. Otherwise, we
+	// still proceed with Entire setup so non-hook-based integrations (for
+	// example, plugins that call `entire hooks ...` directly) can be used.
+	if hookAgent, ok := ag.(agent.HookSupport); ok {
+		var err error
+		installedHooks, err = hookAgent.InstallHooks(localDev, forceHooks)
+		if err != nil {
+			return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
+		}
 	}
 
 	// Setup .entire directory
@@ -615,13 +616,14 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
 
-	if installedHooks == 0 {
-		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
+	switch {
+	case installedHooks == 0:
+		msg := fmt.Sprintf("Hooks for %s already installed or managed externally", ag.Description())
 		if agentName == agent.AgentNameGemini {
 			msg += " (Preview)"
 		}
 		fmt.Fprintf(w, "%s\n", msg)
-	} else {
+	default:
 		msg := fmt.Sprintf("Installed %d hooks for %s", installedHooks, ag.Description())
 		if agentName == agent.AgentNameGemini {
 			msg += " (Preview)"
