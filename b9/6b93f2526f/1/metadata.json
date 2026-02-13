@@ -1,0 +1,51 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b96b93f2526f",
+  "session_id": "47782795-7bea-4028-97f1-55a3ac6d8927",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-13T10:58:49.15414Z",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 16,
+  "files_touched": [
+    "CLAUDE.md",
+    "carry-forward-design.md",
+    "checkpoint-approaches.md",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/doctor.go",
+    "cmd/entire/cli/doctor_test.go",
+    "cmd/entire/cli/hooks.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/last_checkpoint_id_test.go",
+    "cmd/entire/cli/integration_test/phase_transitions_test.go",
+    "cmd/entire/cli/phase_wiring_test.go",
+    "cmd/entire/cli/reset.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/mid_turn_commit_test.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go",
+    "cmd/entire/cli/strategy/phase_wiring_test.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "5d4df93e0a3d",
+  "token_usage": {
+    "input_tokens": 1114,
+    "cache_creation_tokens": 849212,
+    "cache_read_tokens": 28836890,
+    "output_tokens": 11474,
+    "api_call_count": 248
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-13T10:58:47.585385Z",
+    "agent_lines": 430,
+    "human_added": 0,
+    "human_modified": 46,
+    "human_removed": 411,
+    "total_committed": 476,
+    "agent_percentage": 90.33613445378151
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/47782795-7bea-4028-97f1-55a3ac6d8927.jsonl"
+}

@@ -1,0 +1,52 @@
+Implement the following plan:
+
+# Fix: Walk parent chain to detect hidden commands for telemetry/version check
+
+## Context
+
+Cobra's `cmd.Hidden` only reflects the command itself — children don't inherit it. When `entire hooks git post-commit` runs, the leaf `post-commit` has `Hidden: false` even though parent `hooks` is `Hidden: true`. Telemetry and version checks incorrectly run for these internal commands.
+
+## Plan
+
+Replace `cmd.Hidden` with a parent-walk loop in `root.go`'s `PersistentPostRun` (the single gate for both telemetry and version check).
+
+### Change in `cmd/entire/cli/root.go` (line 42-45)
+
+Before:
+```go
+// Skip for hidden commands
+if cmd.Hidden {
+    return
+}
+```
+
+After:
+```go
+// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)
+for c := cmd; c != nil; c = c.Parent() {
+    if c.Hidden {
+        return
+    }
+}
+```
+
+### Test in `cmd/entire/cli/root_test.go`
+
+Add a test that constructs a command tree with a hidden parent and a non-hidden leaf, calls `NewRootCmd()`, and verifies `PersistentPostRun` returns early. Or more practically: test the behavior via the telemetry path using a table-driven approach.
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+
+---
+
+TestCheckAndNotify_SkipsHiddenCommand is failing
+
+---
+
+[Request interrupted by user for tool use]

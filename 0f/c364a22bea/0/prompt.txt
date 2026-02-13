@@ -1,0 +1,321 @@
+Implement the following plan:
+
+# Plan: Wingman status notifications in agent terminal
+
+## Context
+
+Wingman status messages (review started, review pending) currently go to stderr, which is invisible in Claude Code's UI. The only visible wingman output is the `additionalContext` prompt injection when REVIEW.md is applied. The user wants informational `systemMessage` notifications so they can see what wingman is doing — not injected into the agent's context, just displayed in the terminal.
+
+## Changes
+
+### 1. Add `outputHookMessage` helper (`cmd/entire/cli/hooks.go`)
+
+New function alongside the existing `outputHookResponse` and `outputHookResponseWithContextAndMessage`. Outputs a JSON hook response with only `systemMessage` — no `additionalContext`, so nothing gets injected into the agent's conversation.
+
+```go
+func outputHookMessage(message string) error {
+    resp := hookResponse{SystemMessage: message}
+    return json.NewEncoder(os.Stdout).Encode(resp)
+}
+```
+
+### 2. Stop hook: wingman status notification (`cmd/entire/cli/hooks_claudecode_handlers.go`)
+
+Add `outputWingmanStopNotification(repoRoot string)` that checks wingman state and outputs a message. Call it at the end of `commitWithMetadata()` in both:
+- The no-changes early return path (~line 297, before `return nil`)
+- The normal return path (~line 448, before `return nil`)
+
+Logic:
+- If wingman not enabled or `ENTIRE_WINGMAN_APPLY` set → skip
+- If lock file (`.entire/wingman.lock`) exists → review is running → `"[Wingman] Reviewing your changes..."`
+- Else if REVIEW.md exists → review done, pending delivery → `"[Wingman] Review pending — will be addressed on your next prompt"`
+- Otherwise → no message
+
+The stop hook currently never writes to stdout. Adding a `systemMessage`-only JSON response is safe since Claude Code parses any JSON output from hooks.
+
+### 3. Prompt-submit hook: review-in-progress notification (`cmd/entire/cli/hooks_claudecode_handlers.go`)
+
+In `captureInitialState()`, the lock file check (lines 103-110) currently writes `"[wingman] Review in progress..."` to stderr only. Change to use `outputHookMessage` so the message appears in the agent terminal.
+
+This runs only when there's NO REVIEW.md (the injection path returns early on line 99). Session initialization runs after and only touches disk/stderr, so outputting JSON before it is safe — no double-write risk.
+
+## Files to modify
+
+- `cmd/entire/cli/hooks.go` — Add `outputHookMessage` helper
+- `cmd/entire/cli/hooks_claudecode_handlers.go` — Add stop hook notification function, update prompt-submit lock file message
+
+## Verification
+
+1. `mise run fmt && mise run lint && mise run test:ci`
+2. Manual: enable wingman, make changes, trigger stop hook — should see "[Wingman] Reviewing..." in agent terminal
+3. Manual: with pending REVIEW.md, trigger stop hook — should see "[Wingman] Review pending..."
+4. Manual: with lock file present, send a prompt — should see "[Wingman] Review in progress..."
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/dip/.REDACTED.jsonl
+
+---
+
+commit this
+
+---
+
+push it
+
+---
+
+Update the documentation make sure there's no redundant parts in there, add a table for messaging and when they happen. Look at the PR review comments and see if there's anything valid in there. Adress them. Commit and push.
+
+---
+
+I like that the prompt structure is documented.
+
+---
+
+Run lint and fix the issues, then push.
+
+---
+
+golangci-lint does fire a few times
+
+---
+
+Let's investigate first why every "Stop" now says "  ⎿  Stop says: [Wingman] Reviewing your changes...    " but I don't see anything in the logs?
+
+---
+
+Checks still failing on the PR   Running [/home/runner/golangci-lint-2.8.0-linux-amd64/golangci-lint config path] in [/home/runner/work/cli/cli] ...
+  Running [/home/runner/golangci-lint-2.8.0-linux-amd64/golangci-lint config verify] in [/home/runner/work/cli/cli] ...
+  Running [/home/runner/golangci-lint-2.8.0-linux-amd64/golangci-lint run] in [/home/runner/work/cli/cli] ...
+  Error: cmd/entire/cli/strategy/auto_commit.go:87:1: NewAutoCommitStrategy returns interface (github.com/entireio/cli/cmd/entire/cli/strategy.Strategy) (ireturn)
+  func NewAutoCommitStrategy() Strategy {
+  ^
+  Error: cmd/entire/cli/strategy/manual_commit.go:61:1: NewManualCommitStrategy returns interface (github.com/entireio/cli/cmd/entire/cli/strategy.Strategy) (ireturn)
+  func NewManualCommitStrategy() Strategy {
+  ^
+  Error: cmd/entire/cli/strategy/manual_commit.go:69:1: NewShadowStrategy returns interface (github.com/entireio/cli/cmd/entire/cli/strategy.Strategy) (ireturn)
+  func NewShadowStrategy() Strategy {
+  ^
+  Error: cmd/entire/cli/strategy/registry.go:27:1: Get returns interface (github.com/entireio/cli/cmd/entire/cli/strategy.Strategy) (ireturn)
+  func Get(name string) (Strategy, error) {
+  ^
+  Error: cmd/entire/cli/strategy/registry.go:64:1: Default returns interface (github.com/entireio/cli/cmd/entire/cli/strategy.Strategy) (ireturn)
+  func Default() Strategy {
+  ^
+  5 issues:
+  * ireturn: 5
+  
+  Error: issues found
+  Ran golangci-lint in 7564ms
+
+---
+
+Stop hook says   ⎿  Stop says: [Wingman] Reviewing your changes...  but I don't see anything in the logs, which means that nothing is actually getting reviewed. Check the timeline when the problem got introduced and fix it.
+
+---
+
+Commit and push
+
+---
+
+There is a REVIEW.md and I just closed this session. I would have expected that a background agent would have picked it up now but that didn't happen, investigate why. Also when opening a session would be nice if we can already indicate in the beginning when there is an existing REVIEW.md. Which is the case right now but I only see the "Wingman is active: your changes will be automatically reviewed." which doesn't fully reflect that.
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. **Initial Plan Implementation**: User asked to implement a plan for wingman status notifications in the agent terminal. The plan had 3 parts:
+   - Add `outputHookMessage` helper to `hooks.go`
+   - Add stop hook notification function `outputWingmanStopNotification` in `hooks_claudecode_handlers.go`
+   - Update prompt-submit lock file message to use `outputHookMessage`
+
+2. **First commit**: Successfully implemented all 3 changes. Had to fix `errcheck` lint errors by adding `//nolint:errcheck` comments. Also had to reconsider early return in prompt-submit lock check - decided NOT to return early since session initialization only touches disk/stderr.
+
+3. **Push with review**: User asked to push. I read REVIEW.md first, addressed the race condition comment suggestion, deleted REVIEW.md, amended the commit, and pushed.
+
+4. **Docs update and PR review**: User asked to update docs (remove redundancy, add messaging table), check PR comments, and address valid ones. I:
+   - Fixed `hasAnyLiveSession` to return true when maxCheck limit hit (PR comment #11/#12)
+   - Fixed `computeDiff` to return error when fallback git diff fails (PR comment #5)
+   - Removed unused `baseCommit` parameter from `computeDiff` (PR comment #4)
+   - Updated wingman docs: added User-Visible Messages table, fixed GIT_* stripping accuracy (PR comment #9), removed redundant Decision Flow diagram
+   - User said they liked the Prompt Structure being documented, so I restored it
+
+5. **Lint fix**: CI had `ireturn` errors for `strategy.Strategy`. Added it to `.golangci.yaml` allow list.
+
+6. **Stale lock investigation**: User reported every Stop hook showed "[Wingman] Reviewing your changes..." but no actual review in logs. Investigation found a stale test lock file (`.entire/wingman.lock` containing "test" from 16:17). First fix used `staleLockThreshold` (30min) which was still too generous. User reported it still happened. Second fix introduced `wingmanNotificationLockThreshold` (10min) - much tighter, matching the actual review duration.
+
+7. **Cleanup commit**: Committed remaining changes: removed obsolete `//nolint:ireturn`, added spawn comments, updated stale session tests.
+
+8. **New session - REVIEW.md and investigation**: User opened new session with pending REVIEW.md. Two issues:
+   - Background auto-apply didn't trigger on session close
+   - SessionStart message doesn't indicate pending REVIEW.md
+
+   Investigation of auto-apply failure found:
+   - Session-end hook DID fire and correctly transitioned `266b3f40` from idle→ended
+   - But `test.json` session state with `active_committed` phase (only ~3min old, within 4h threshold) blocked `hasAnyLiveSession`
+   - Then new session immediately revived `266b3f40` from ended→idle via SessionStart hook
+
+   Review from REVIEW.md addressed: updated tests to use `staleActiveSessionThreshold` constant instead of hardcoded 5h values.
+
+9. **SessionStart message fix**: Started implementing the fix to show pending review in SessionStart message. Modified `handleSessionStartCommon` in `hooks.go` to check for REVIEW.md existence and show different message. Added `path/filepath` and `paths` imports.
+
+**Current state**: The edit to `hooks.go` for SessionStart message was completed but NOT yet verified (fmt/lint/test not run), NOT committed, and NOT pushed. The test file changes from the review are also uncommitted.
+
+Key files modified across the conversation:
+- `cmd/entire/cli/hooks.go` - `outputHookMessage` helper, SessionStart pending review message
+- `cmd/entire/cli/hooks_claudecode_handlers.go` - `outputWingmanStopNotification`, `wingmanNotificationLockThreshold`, prompt-submit lock notification
+- `cmd/entire/cli/wingman_review.go` - `computeDiff` signature fix, error handling, `hasAnyLiveSession` maxCheck fix, stale session threshold
+- `docs/architecture/wingman.md` - messaging table, accuracy fixes, redundancy removal
+- `.golangci.yaml` - ireturn allow list
+- `cmd/entire/cli/config.go` - removed obsolete nolint
+- `cmd/entire/cli/wingman_spawn_unix.go` - added comments
+- `cmd/entire/cli/wingman_test.go` - updated stale session tests with constant references
+
+Summary:
+1. Primary Request and Intent:
+   - Implement a plan for wingman status notifications visible in the agent terminal using `systemMessage`-only JSON responses (no `additionalContext` injection into agent context)
+   - Push changes, address PR review comments, update wingman documentation with a messaging table and remove redundancy
+   - Investigate and fix false "Reviewing your changes..." notifications caused by stale lock files
+   - Investigate why background auto-apply didn't trigger when the user closed a session with a pending REVIEW.md
+   - Add pending review indication to the SessionStart message (currently only shows "Wingman is active")
+
+2. Key Technical Concepts:
+   - **Hook response types**: `systemMessage` (visible in terminal, not injected into agent) vs `additionalContext` (injected into agent conversation). `outputHookMessage` emits only `systemMessage`.
+   - **Wingman lifecycle**: Trigger → Review (detached process) → Delivery (prompt-submit injection or background auto-apply)
+   - **Lock file semantics**: `wingmanLockFile` (.entire/wingman.lock) indicates review in progress. `staleLockThreshold` (30min) for lock acquisition, `wingmanNotificationLockThreshold` (10min) for notifications.
+   - **Session phase state machine**: IDLE, ACTIVE, ACTIVE_COMMITTED, ENDED. SessionStart revives ENDED→IDLE. SessionStop transitions any phase→ENDED.
+   - **`hasAnyLiveSession`**: Determines whether to defer review delivery to prompt-submit injection (visible) vs background auto-apply (invisible). IDLE sessions always count as live. ACTIVE/ACTIVE_COMMITTED sessions older than `staleActiveSessionThreshold` (4h) are skipped.
+   - **Session revival race**: When a new Claude Code session starts with the same Entire session ID, `handleSessionStartCommon` fires `EventSessionStart` which transitions ENDED→IDLE, potentially racing with auto-apply.
+
+3. Files and Code Sections:
+   - **`cmd/entire/cli/hooks.go`**
+     - Central hook response utilities. Added `outputHookMessage` helper and modified `handleSessionStartCommon` for pending review indication.
+     - Added `outputHookMessage`:
+       ```go
+       func outputHookMessage(message string) error {
+           resp := hookResponse{SystemMessage: message}
+           if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+               return fmt.Errorf("failed to encode hook response: %w", err)
+           }
+           return nil
+       }
+       ```
+     - Modified SessionStart wingman message (most recent edit, uncommitted):
+       ```go
+       if settings.IsWingmanEnabled() {
+           if repoRoot, rootErr := paths.RepoRoot(); rootErr == nil {
+               if _, statErr := os.Stat(filepath.Join(repoRoot, wingmanReviewFile)); statErr == nil {
+                   message += "\n  Wingman: a review is pending and will be addressed on your next prompt."
+               } else {
+                   message += "\n  Wingman is active: your changes will be automatically reviewed."
+               }
+           } else {
+               message += "\n  Wingman is active: your changes will be automatically reviewed."
+           }
+       }
+       ```
+     - Added imports: `"path/filepath"` and `"github.com/entireio/cli/cmd/entire/cli/paths"`
+
+   - **`cmd/entire/cli/hooks_claudecode_handlers.go`**
+     - Contains `captureInitialState` (prompt-submit), `commitWithMetadata` (stop), and `handleClaudeCodeSessionEnd`.
+     - Added `wingmanNotificationLockThreshold` constant (10min) for notification staleness:
+       ```go
+       const wingmanNotificationLockThreshold = 10 * time.Minute
+       ```
+     - Added `outputWingmanStopNotification` function:
+       ```go
+       func outputWingmanStopNotification(repoRoot string) {
+           if !settings.IsWingmanEnabled() { return }
+           if os.Getenv("ENTIRE_WINGMAN_APPLY") != "" { return }
+           lockPath := filepath.Join(repoRoot, wingmanLockFile)
+           if info, err := os.Stat(lockPath); err == nil && time.Since(info.ModTime()) <= wingmanNotificationLockThreshold {
+               _ = outputHookMessage("[Wingman] Reviewing your changes...")
+               return
+           }
+           reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
+           if _, err := os.Stat(reviewPath); err == nil {
+               _ = outputHookMessage("[Wingman] Review pending — will be addressed on your next prompt")
+               return
+           }
+       }
+       ```
+     - Called `outputWingmanStopNotification(repoRoot)` at both return paths in `commitWithMetadata` (no-changes early return ~line 302 and normal return ~line 449)
+     - Updated prompt-submit lock check to use `wingmanNotificationLockThreshold` and `outputHookMessage` instead of stderr
+
+   - **`cmd/entire/cli/wingman_review.go`**
+     - Changed `computeDiff(repoRoot string, _ string)` to `computeDiff(repoRoot string)` (removed unused baseCommit param)
+     - Fixed silent error: `return "", nil` → `return "", fmt.Errorf("git diff for latest commit failed: %w", err)` when `git diff HEAD~1 HEAD` fails
+     - Fixed `hasAnyLiveSession` maxCheck safety: changed `return false` to `return true` when limit hit (assumes live session exists)
+     - Updated `staleActiveSessionThreshold` from 2h to 4h with proper IDLE vs ACTIVE distinction
+
+   - **`docs/architecture/wingman.md`**
+     - Added "User-Visible Messages" section with messaging table
+     - Fixed GIT_* stripping docs accuracy (stripped in Claude CLI calls, not at spawn time)
+     - Removed redundant Decision Flow ASCII diagram
+     - Restored Prompt Structure diagram (user explicitly wanted it)
+     - Removed redundant Intent-Aware Review and Truncation subsections (consolidated)
+
+   - **`.golangci.yaml`**
+     - Added `github.com/entireio/cli/cmd/entire/cli/strategy.Strategy` to ireturn allow list
+
+   - **`cmd/entire/cli/config.go`**
+     - Removed obsolete `//nolint:ireturn` on `GetStrategy()` (now in allow list)
+
+   - **`cmd/entire/cli/wingman_spawn_unix.go`**
+     - Added comments explaining log file handle inheritance in both spawn functions
+
+   - **`cmd/entire/cli/wingman_test.go`**
+     - Renamed tests for clarity: `TestHasAnyLiveSession_StaleActiveSessionSkipped`, `TestHasAnyLiveSession_StaleIdleSessionNotSkipped`, `TestHasAnyLiveSession_FreshActiveNotSkipped`
+     - Added new test for stale IDLE sessions (should still be considered live)
+     - Updated hardcoded 5h values to derive from `staleActiveSessionThreshold` constant (most recent edit, uncommitted)
+
+4. Errors and fixes:
+   - **errcheck lint errors**: `_ = outputHookMessage(...)` in `outputWingmanStopNotification` flagged by errcheck. Fixed by adding `//nolint:errcheck // best-effort notification` comments.
+   - **ireturn CI failures**: CI golangci-lint v2.8.0 flagged 5 functions returning `strategy.Strategy` interface. Fixed by adding `strategy.Strategy` to ireturn allow list in `.golangci.yaml`.
+   - **Stale lock notifications**: Every stop hook showed "Reviewing your changes..." due to a stale test lock file. First fix used `staleLockThreshold` (30min) - user reported it was still happening because the lock was <30min old. Second fix introduced `wingmanNotificationLockThreshold` (10min) which matches actual review duration.
+   - **User feedback on Prompt Structure**: I removed the Prompt Structure diagram from docs as "redundant". User explicitly said "I like that the prompt structure is documented." I restored it immediately.
+
+5. Problem Solving:
+   - **Auto-apply not triggering**: Investigated by checking session states, wingman state, and Entire logs. Found two independent blockers: (1) `test.json` stale session with `active_committed` phase blocked `hasAnyLiveSession`, (2) session revival race where new session transitions ENDED→IDLE before auto-apply can run. The `test.json` blocker is the actionable one - it's a testing artifact.
+   - **Stale lock notifications**: Traced through lock file contents ("test"), creation time (16:17), and wingman logs showing last real review at 16:15. Introduced tighter notification-specific threshold.
+
+6. All user messages:
+   - "Implement the following plan: [detailed plan for wingman status notifications]"
+   - "commit this"
+   - "push it"
+   - "Update the documentation make sure there's no redundant parts in there, add a table for messaging and when they happen. Look at the PR review comments and see if there's anything valid in there. Adress them. Commit and push."
+   - "I like that the prompt structure is documented."
+   - "Run lint and fix the issues, then push."
+   - "golangci-lint does fire a few times"
+   - "Checks still failing on the PR [with ireturn errors]"
+   - "Stop hook says ⎿ Stop says: [Wingman] Reviewing your changes... but I don't see anything in the logs, which means that nothing is actually getting reviewed. Check the timeline when the problem got introduced and fix it."
+   - "Commit and push"
+   - "There is a REVIEW.md and I just closed this session. I would have expected that a background agent would have picked it up now but that didn't happen, investigate why. Also when opening a session would be nice if we can already indicate in the beginning when there is an existing REVIEW.md. Which is the case right now but I only see the 'Wingman is active: your changes will be automatically reviewed.' which doesn't fully reflect that."
+
+7. Pending Tasks:
+   - Task #11: Add pending review indication to SessionStart message (in progress - edit done, not yet verified/committed)
+   - Run `mise run fmt && mise run lint && mise run test:ci` to verify all changes
+   - Commit and push the SessionStart message fix + test constant updates
+
+8. Current Work:
+   I was working on two things from the user's most recent request:
+   1. **Investigating why auto-apply didn't trigger** - COMPLETED. Root cause: `test.json` stale session blocked `hasAnyLiveSession`.
+   2. **Adding pending review indication to SessionStart message** - EDIT DONE but not verified/committed.
+   
+   The most recent edits are:
+   - `cmd/entire/cli/hooks.go`: Modified `handleSessionStartCommon` to check for REVIEW.md and show "Wingman: a review is pending and will be addressed on your next prompt." instead of the generic "Wingman is active" message. Added `path/filepath` and `paths` imports.
+   - `cmd/entire/cli/wingman_test.go`: Updated 3 test functions to use `staleActiveSessionThreshold` constant instead of hardcoded `-5 * time.Hour` (from REVIEW.md feedback).
+   - Deleted `.entire/REVIEW.md`
+
+9. Optional Next Step:
+   Run `mise run fmt && mise run lint && mise run test:ci` to verify the uncommitted changes (SessionStart message in `hooks.go` and test constant updates in `wingman_test.go`), then commit and push. The user's request was: "Also when opening a session would be nice if we can already indicate in the beginning when there is an existing REVIEW.md." The edit is done but needs verification and delivery.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/dip/.REDACTED.jsonl
+Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+Things looking ok now. The one thing that still doesn't work. I'm closing this session and I'm expecting that the review is then addressed completely in a background job but that doesn't happen.

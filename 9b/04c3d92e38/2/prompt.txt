@@ -1,0 +1,352 @@
+Implement the following plan:
+
+# Use ComputeTranscriptPath in Log Restoration
+
+## Context
+
+`RestoreLogsOnly` (manual_commit_rewind.go:619-740) and `resumeSingleSession` (resume.go:484-572) hardcode Claude-specific paths when restoring session transcripts from checkpoints. This breaks restoration for Gemini sessions (and any future agents).
+
+**The problems:**
+1. `RestoreLogsOnly` uses `paths.GetClaudeProjectDir(repoRoot)` — only works for Claude
+2. Both `RestoreLogsOnly` and `resumeSingleSession` hardcode `.jsonl` extension (Gemini uses `.json`)
+3. `classifySessionsForRestore` has the same hardcoded Claude paths
+
+**The fix:** Use the existing `ComputeTranscriptPath` method (already on the `Agent` interface from our previous work) to compute the correct path for each session during restoration.
+
+**Prerequisite:** Gemini's `ComputeTranscriptPath` requires `startTime` (session start time) to build its filename (`session-<date>-<id>.json`), but `CommittedMetadata` (checkpoint metadata stored in git) only has `CreatedAt` (checkpoint creation time). We need to add `StartedAt` to the committed metadata.
+
+## Changes
+
+### 1. Add `StartedAt` to checkpoint metadata
+
+**File:** `cmd/entire/cli/checkpoint/checkpoint.go`
+
+Add to `CommittedMetadata` (after line 335):
+```go
+StartedAt time.Time `json:"started_at,omitempty"`
+```
+
+Add to `WriteCommittedOptions` (after `Agent` field, around line 256):
+```go
+StartedAt time.Time
+```
+
+**File:** `cmd/entire/cli/checkpoint/committed.go` (line 333-348)
+
+Add to the `CommittedMetadata` struct literal where it's created from opts:
+```go
+StartedAt: opts.StartedAt,
+```
+
+### 2. Populate `StartedAt` during condensation and checkpoint writes
+
+**File:** `cmd/entire/cli/strategy/manual_commit_condensation.go` (line 177-195)
+
+Add `StartedAt: state.StartedAt` to `WriteCommittedOptions`:
+```go
+StartedAt: state.StartedAt,
+```
+
+**File:** `cmd/entire/cli/strategy/auto_commit.go`
+
+Add `StartedAt` to both `WriteCommittedOptions` call sites:
+- Line 253: Regular checkpoint write — get `StartedAt` from session state
+- Line 642: Task checkpoint write — same
+
+### 3. Update `RestoreLogsOnly` to use `ComputeTranscriptPath`
+
+**File:** `cmd/entire/cli/strategy/manual_commit_rewind.go` (lines 619-740)
+
+Replace the Claude-specific path computation:
+```go
+// REMOVE these lines (648-662):
+claudeProjectDir, err := paths.GetClaudeProjectDir(repoRoot)
+// ...
+os.MkdirAll(claudeProjectDir, 0o750)
+
+// REMOVE in the loop (710-711):
+modelSessionID := sessionid.ModelSessionID(sessionID)
+claudeSessionFile := filepath.Join(claudeProjectDir, modelSessionID+".jsonl")
+```
+
+Replace with agent-aware path computation per session:
+```go
+// In the loop, after getting sessionID:
+agentType := content.Metadata.Agent
+ag, agErr := agent.GetByAgentType(agentType)
+if agErr != nil {
+    fmt.Fprintf(os.Stderr, "  Warning: unknown agent type %q for session %d, skipping\n", agentType, i)
+    continue
+}
+
+agentSessionID := ag.ExtractAgentSessionID(sessionID)
+startedAt := content.Metadata.StartedAt
+if startedAt.IsZero() {
+    startedAt = content.Metadata.CreatedAt // backward compat
+}
+transcriptPath, pathErr := ag.ComputeTranscriptPath(repoRoot, agentSessionID, startedAt)
+if pathErr != nil {
+    fmt.Fprintf(os.Stderr, "  Warning: failed to compute transcript path for session %d: %v\n", i, pathErr)
+    continue
+}
+
+// Ensure parent directory exists
+if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o750); err != nil {
+    // ...
+}
+
+// Write transcript
+if writeErr := os.WriteFile(transcriptPath, content.Transcript, 0o600); writeErr != nil {
+    // ...
+}
+```
+
+### 4. Update `classifySessionsForRestore` similarly
+
+**File:** `cmd/entire/cli/strategy/manual_commit_rewind.go` (lines 792-825)
+
+Change the function signature to remove `claudeProjectDir` parameter, add `repoRoot`:
+```go
+func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.Store, ...) []SessionRestoreInfo
+```
+
+Inside the loop, replace:
+```go
+modelSessionID := sessionid.ModelSessionID(sessionID)
+localPath := filepath.Join(claudeProjectDir, modelSessionID+".jsonl")
+```
+
+With:
+```go
+agentType := content.Metadata.Agent
+ag, agErr := agent.GetByAgentType(agentType)
+if agErr != nil {
+    continue
+}
+agentSessionID := ag.ExtractAgentSessionID(sessionID)
+startedAt := content.Metadata.StartedAt
+if startedAt.IsZero() {
+    startedAt = content.Metadata.CreatedAt
+}
+localPath, pathErr := ag.ComputeTranscriptPath(repoRoot, agentSessionID, startedAt)
+if pathErr != nil {
+    continue
+}
+```
+
+Update the caller in `RestoreLogsOnly` (line 666) to pass `repoRoot` instead of `claudeProjectDir`.
+
+### 5. Update `resumeSingleSession` to use `ComputeTranscriptPath`
+
+**File:** `cmd/entire/cli/resume.go` (line 486)
+
+Replace:
+```go
+sessionLogPath := filepath.Join(sessionDir, agentSessionID+".jsonl")
+```
+
+With computing the path via `ComputeTranscriptPath`. We need the `startTime` — get it from the checkpoint metadata via `checkpoint.LookupSessionLog` or just use `time.Time{}` as zero (Claude ignores startTime, and for Gemini we'd need the actual metadata).
+
+Actually, `resumeSingleSession` already uses `ag.WriteSession()` which takes `SessionRef`. The path just needs to be correct. Since this is the fallback path when `RestoreLogsOnly` fails, and we don't have metadata with `StartedAt` here, the simplest fix is to use `ag.GetSessionDir()` + the agent-appropriate extension. But we'd need to know the extension.
+
+Better approach: use `ComputeTranscriptPath` with zero time as fallback. For Claude, time is ignored. For Gemini, a zero time would produce a usable (if imperfect) path. This is only the fallback path.
+
+```go
+transcriptPath, err := ag.ComputeTranscriptPath(repoRoot, agentSessionID, time.Time{})
+if err != nil {
+    // Fall back to old behavior
+    transcriptPath = filepath.Join(sessionDir, agentSessionID+".jsonl")
+}
+sessionLogPath := transcriptPath
+```
+
+### 6. Remove now-unused `paths.GetClaudeProjectDir` references from rewind
+
+After these changes, `paths.GetClaudeProjectDir` is no longer called from `RestoreLogsOnly` or `classifySessionsForRestore`. The function itself stays (used elsewhere), but the rewind code no longer depends on it.
+
+## Critical Files
+
+| File | Change |
+|------|--------|
+| `cmd/entire/cli/checkpoint/checkpoint.go` | Add `StartedAt` to `CommittedMetadata` and `WriteCommittedOptions` |
+| `cmd/entire/cli/checkpoint/committed.go:333` | Populate `StartedAt` from opts |
+| `cmd/entire/cli/strategy/manual_commit_condensation.go:177` | Pass `state.StartedAt` to `WriteCommittedOptions` |
+| `cmd/entire/cli/strategy/auto_commit.go:253,642` | Pass `StartedAt` to `WriteCommittedOptions` |
+| `cmd/entire/cli/strategy/manual_commit_rewind.go:619-740` | Replace Claude-specific paths with `ComputeTranscriptPath` |
+| `cmd/entire/cli/strategy/manual_commit_rewind.go:792-825` | Replace Claude-specific paths in `classifySessionsForRestore` |
+| `cmd/entire/cli/resume.go:486` | Use `ComputeTranscriptPath` instead of hardcoded `.jsonl` |
+
+## Verification
+
+1. `mise run fmt && mise run lint` — formatting and lint pass
+2. `mise run test:ci` — all unit + integration tests pass
+3. The integration test `TestShadowStrategy_MidSessionCommit_FromTranscript` already exercises the restoration path
+4. Check that `entire resume` works correctly for Claude sessions by verifying the resume integration tests pass
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. The user provided a detailed implementation plan for "Use ComputeTranscriptPath in Log Restoration"
+2. The plan had 6 main changes across 7 files
+3. I read all the key files to understand the codebase
+4. I created 5 tasks to track progress
+5. I implemented each change:
+   - Task 1: Added `StartedAt` to `CommittedMetadata` and `WriteCommittedOptions`
+   - Task 2: Populated `StartedAt` in condensation and auto-commit checkpoint writes
+   - Task 3: Updated `RestoreLogsOnly` and `classifySessionsForRestore` to use `ComputeTranscriptPath`
+   - Task 4: Updated `resumeSingleSession` to use `ComputeTranscriptPath`
+   - Task 5: Ran fmt, lint, and tests
+
+Key errors encountered:
+- Lint warning about `omitempty` on `time.Time` struct field - fixed by removing `omitempty`
+- Test failure `TestResumeFromCurrentBranch_WithEntireCheckpointTrailer` because old checkpoints have empty `Agent` field, causing `agent.GetByAgentType("")` to fail - fixed by falling back to `agent.Default()`
+- String replacement failures due to exact whitespace matching - fixed by using more specific match strings
+
+All tests passed at the end: unit tests, lint, fmt, and integration tests.
+
+Summary:
+1. Primary Request and Intent:
+   The user asked to implement a detailed plan titled "Use ComputeTranscriptPath in Log Restoration". The goal was to make `RestoreLogsOnly`, `classifySessionsForRestore`, and `resumeSingleSession` agent-agnostic by replacing hardcoded Claude-specific paths (using `paths.GetClaudeProjectDir` and `.jsonl` extension) with the existing `ComputeTranscriptPath` method from the `Agent` interface. This enables proper restoration for Gemini sessions (which use `.json` extension and date-based filenames) and any future agents.
+
+   A prerequisite was adding `StartedAt` to checkpoint metadata since Gemini's `ComputeTranscriptPath` requires session start time to build its filename.
+
+2. Key Technical Concepts:
+   - Strategy pattern for session data and checkpoint management (manual-commit, auto-commit)
+   - Agent interface with `ComputeTranscriptPath(repoPath, sessionID string, startTime time.Time) (string, error)`
+   - `CommittedMetadata` - metadata stored in `metadata.json` for each checkpoint on `entire/checkpoints/v1` branch
+   - `WriteCommittedOptions` - options passed when writing committed checkpoints
+   - Shadow branches (`entire/<commit-hash>-<worktreeHash>`) for temporary checkpoints
+   - Session state stored in `.git/entire-sessions/<session-id>.json`
+   - Checkpoint ID linking (12-hex-char) between user commits and metadata
+   - Agent type lookup via `agent.GetByAgentType(agentType)` with fallback to `agent.Default()`
+   - Backward compatibility with zero `StartedAt` falling back to `CreatedAt`
+
+3. Files and Code Sections:
+   - `cmd/entire/cli/checkpoint/checkpoint.go`
+     - Core checkpoint types. Added `StartedAt` field to both `CommittedMetadata` and `WriteCommittedOptions`.
+     - Added to `CommittedMetadata` (after `Agent` field):
+       ```go
+       // StartedAt is when the session was started (distinct from CreatedAt which is checkpoint creation time).
+       // Used to compute agent-specific transcript paths (e.g., Gemini uses date-based filenames).
+       StartedAt time.Time `json:"started_at"`
+       ```
+     - Added to `WriteCommittedOptions` (after `Agent` field):
+       ```go
+       // StartedAt is when the session was started (for agent-specific transcript path computation)
+       StartedAt time.Time
+       ```
+
+   - `cmd/entire/cli/checkpoint/committed.go`
+     - Handles writing committed checkpoints to git. Populated `StartedAt` from opts in session metadata creation.
+     - In `writeSessionToSubdirectory`, added `StartedAt: opts.StartedAt` to `CommittedMetadata` struct literal (after `Agent` field).
+
+   - `cmd/entire/cli/strategy/manual_commit_condensation.go`
+     - Handles condensing shadow branch data to permanent storage. Added `StartedAt: state.StartedAt` to the `WriteCommittedOptions` in `CondenseSession`.
+
+   - `cmd/entire/cli/strategy/auto_commit.go`
+     - Auto-commit strategy implementation. Added `StartedAt` to both `WriteCommittedOptions` call sites.
+     - In `commitMetadataToMetadataBranch` (~line 253): loads session state to get `StartedAt`:
+       ```go
+       var startedAt time.Time
+       if state, stateErr := LoadSessionState(sessionID); stateErr == nil && state != nil {
+           startedAt = state.StartedAt
+       }
+       ```
+     - In `commitTaskMetadataToMetadataBranch` (~line 648): same pattern with `ctx.SessionID`.
+
+   - `cmd/entire/cli/strategy/manual_commit_rewind.go`
+     - **Major changes.** Replaced Claude-specific path computation with agent-aware `ComputeTranscriptPath`.
+     - Updated imports: removed `sessionid`, added `agent` package.
+     - `RestoreLogsOnly` function: Replaced `claudeProjectDir`/`GetClaudeProjectDir` with `repoRoot` and per-session `ComputeTranscriptPath`:
+       ```go
+       agentType := content.Metadata.Agent
+       ag, agErr := agent.GetByAgentType(agentType)
+       if agErr != nil {
+           ag = agent.Default()
+           if ag == nil {
+               fmt.Fprintf(os.Stderr, "  Warning: unknown agent type %q for session %d, skipping\n", agentType, i)
+               continue
+           }
+       }
+       agentSessionID := ag.ExtractAgentSessionID(sessionID)
+       startedAt := content.Metadata.StartedAt
+       if startedAt.IsZero() {
+           startedAt = content.Metadata.CreatedAt // backward compat
+       }
+       transcriptPath, pathErr := ag.ComputeTranscriptPath(repoRoot, agentSessionID, startedAt)
+       ```
+     - `classifySessionsForRestore` function: Changed signature from `claudeProjectDir string` to `repoRoot string`. Same agent-aware path computation pattern with `Default()` fallback.
+
+   - `cmd/entire/cli/resume.go`
+     - Resume command implementation. Updated `resumeSingleSession` to use `ComputeTranscriptPath`.
+     - Added `"time"` import.
+     - Replaced hardcoded `.jsonl` path:
+       ```go
+       sessionLogPath, pathErr := ag.ComputeTranscriptPath(repoRoot, agentSessionID, time.Time{})
+       if pathErr != nil {
+           sessionLogPath = filepath.Join(sessionDir, agentSessionID+".jsonl")
+       }
+       ```
+
+   - `cmd/entire/cli/agent/agent.go` (read only)
+     - Agent interface definition with `ComputeTranscriptPath(repoPath, sessionID string, startTime time.Time) (string, error)`.
+
+   - `cmd/entire/cli/session/state.go` (read only)
+     - `State` struct with `StartedAt time.Time` field already present.
+
+   - `cmd/entire/cli/strategy/manual_commit_types.go` (read only)
+     - Type aliases and types for the strategy package.
+
+4. Errors and fixes:
+   - **`omitempty` lint warning on `time.Time` struct field**: Initially added `StartedAt time.Time \`json:"started_at,omitempty"\`` to `CommittedMetadata`. The linter flagged "Omitempty has no effect on nested struct fields". Fixed by removing `omitempty` since `CreatedAt` also doesn't use it, and zero time deserialization is handled via backward compat fallback.
+   
+   - **String replacement failure**: First attempt to edit `checkpoint.go` failed because the old_string didn't match exactly (tab/space issues). Fixed by using a more specific, shorter match string.
+   
+   - **Test failure `TestResumeFromCurrentBranch_WithEntireCheckpointTrailer`**: The test creates checkpoints without setting `AgentType` in `SaveContext`, so metadata has empty agent type. `agent.GetByAgentType("")` returned an error, causing the session to be skipped with warning "unknown agent type '' for session 0, skipping". Fixed by adding fallback to `agent.Default()` when `GetByAgentType` fails:
+     ```go
+     ag, agErr := agent.GetByAgentType(agentType)
+     if agErr != nil {
+         ag = agent.Default()
+         if ag == nil {
+             continue
+         }
+     }
+     ```
+     Applied this pattern in both `RestoreLogsOnly` and `classifySessionsForRestore`.
+
+5. Problem Solving:
+   - Successfully implemented all 6 changes from the plan across 7 files.
+   - All unit tests pass (including the previously failing resume test).
+   - All integration tests pass (`mise run test:integration` - 67.714s).
+   - Lint and fmt pass with 0 issues.
+   - Backward compatibility maintained: zero `StartedAt` falls back to `CreatedAt`, empty agent type falls back to `agent.Default()`.
+
+6. All user messages:
+   - "Implement the following plan: [detailed plan for Use ComputeTranscriptPath in Log Restoration]" - This was the only substantive user message, containing the full implementation plan with 6 changes, critical files table, and verification steps.
+
+7. Pending Tasks:
+   - No pending tasks. All 5 tasks were completed:
+     1. ✅ Add StartedAt to CommittedMetadata and WriteCommittedOptions
+     2. ✅ Populate StartedAt during condensation and checkpoint writes
+     3. ✅ Update RestoreLogsOnly and classifySessionsForRestore to use ComputeTranscriptPath
+     4. ✅ Update resumeSingleSession to use ComputeTranscriptPath
+     5. ✅ Run fmt, lint, and tests (all passing)
+
+8. Current Work:
+   All implementation work is complete. The last action was running `mise run test:integration` which passed successfully (67.714s). All verification steps from the plan have been completed:
+   - `mise run fmt && mise run lint` — passes with 0 issues
+   - `mise run test` — all unit tests pass
+   - `mise run test:integration` — all integration tests pass (67.714s)
+
+9. Optional Next Step:
+   The implementation is complete and all tests pass. The user has not asked for a commit. Per the CLAUDE.md instructions, commits should only be created when explicitly requested. No further action is needed unless the user requests it (e.g., committing the changes, creating a PR, etc.).
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.

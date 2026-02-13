@@ -1,0 +1,32 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b15d3b4e29e9",
+  "session_id": "d563fb6b-39cf-4895-bb5f-681c33e58bbc",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-13T09:03:54.510275Z",
+  "branch": "fix/gemini-explain",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/summarize/summarize.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "4bb0668a-344d-4075-b29a-8548908067e7",
+  "checkpoint_transcript_start": 46,
+  "transcript_lines_at_start": 46,
+  "token_usage": {
+    "input_tokens": 84,
+    "cache_creation_tokens": 26055,
+    "cache_read_tokens": 348148,
+    "output_tokens": 24,
+    "api_call_count": 11
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-13T09:03:54.253506Z",
+    "agent_lines": 8,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 8,
+    "agent_percentage": 100
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "5d755497c182",
+  "session_id": "2577a596-e227-47e1-bea8-752f792cbc24",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-13T09:42:28.326099Z",
+  "branch": "soph/release-0-4-4",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CHANGELOG.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "cf8f9c2f-ce8e-4994-b65a-b82ff52a898e",
+  "token_usage": {
+    "input_tokens": 241,
+    "cache_creation_tokens": 35683,
+    "cache_read_tokens": 548770,
+    "output_tokens": 60,
+    "api_call_count": 18
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-13T09:42:28.089557Z",
+    "agent_lines": 18,
+    "human_added": 0,
+    "human_modified": 4,
+    "human_removed": 2,
+    "total_committed": 22,
+    "agent_percentage": 81.81818181818183
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/2577a596-e227-47e1-bea8-752f792cbc24.jsonl"
+}

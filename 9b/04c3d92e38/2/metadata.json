@@ -1,0 +1,34 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "9b04c3d92e38",
+  "session_id": "4f8c1176-7025-4530-a860-c6fc4c63a150",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-12T05:37:41.544865Z",
+  "branch": "gtrrz-victor/delete-old-sessionid-logic",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/resume.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_rewind.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 62,
+    "cache_creation_tokens": 163348,
+    "cache_read_tokens": 8240708,
+    "output_tokens": 2864,
+    "api_call_count": 58
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-12T05:37:41.415015Z",
+    "agent_lines": 0,
+    "human_added": 1514,
+    "human_modified": 172,
+    "human_removed": 0,
+    "total_committed": 1602,
+    "agent_percentage": 0
+  }
+}
