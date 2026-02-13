@@ -799,8 +799,7 @@ func ResolveSessionFilePath(sessionID string, ag agent.Agent, fallbackSessionDir
 		return state.TranscriptPath
 	}
 
-	agentSessionID := ag.ExtractAgentSessionID(sessionID)
-	return ag.ResolveSessionFile(fallbackSessionDir, agentSessionID)
+	return ag.ResolveSessionFile(fallbackSessionDir, sessionID)
 }
 
 // readSessionPrompt reads the first prompt from the session's prompt.txt file stored in git.

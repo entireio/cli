@@ -9,7 +9,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/sessionid"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v5"
@@ -197,7 +196,7 @@ func TestResumeFromCurrentBranch_WithEntireCheckpointTrailer(t *testing.T) {
 	}
 
 	// Create metadata directory with session log (required for SaveChanges)
-	sessionID := "2025-12-10-xyz789"
+	sessionID := "4f8c1176-7025-4530-a860-c6fc4c63a150"
 	sessionLogContent := `{"type":"test"}`
 	metadataDir := filepath.Join(tmpDir, paths.EntireMetadataDir, sessionID)
 	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
@@ -236,8 +235,7 @@ func TestResumeFromCurrentBranch_WithEntireCheckpointTrailer(t *testing.T) {
 	}
 
 	// Verify that the session log was written to the Claude project directory
-	claudeSessionID := sessionid.ModelSessionID(sessionID)
-	expectedLogPath := filepath.Join(claudeDir, claudeSessionID+".jsonl")
+	expectedLogPath := filepath.Join(claudeDir, sessionID+".jsonl")
 
 	content, err := os.ReadFile(expectedLogPath)
 	if err != nil {

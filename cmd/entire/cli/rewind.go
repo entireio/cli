@@ -279,7 +279,7 @@ func runRewindInteractive() error { //nolint:maintidx // already present in code
 			if err := restoreTaskCheckpointTranscript(start, *selectedPoint, sessionID, checkpoint.CheckpointUUID, agent); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to restore truncated session transcript: %v\n", err)
 			} else {
-				fmt.Printf("Rewound to task checkpoint. %s\n", formatResumeCommand(sessionID, agent))
+				fmt.Printf("Rewound to task checkpoint. %s\n", agent.FormatResumeCommand(sessionID))
 			}
 			return nil
 		}
@@ -289,7 +289,7 @@ func runRewindInteractive() error { //nolint:maintidx // already present in code
 		// over path-based extraction which is less reliable.
 		sessionID = selectedPoint.SessionID
 		if sessionID == "" {
-			sessionID = extractSessionIDFromMetadata(selectedPoint.MetadataDir)
+			sessionID = filepath.Base(selectedPoint.MetadataDir)
 		}
 		transcriptFile = filepath.Join(selectedPoint.MetadataDir, paths.TranscriptFileNameLegacy)
 	}
@@ -324,7 +324,7 @@ func runRewindInteractive() error { //nolint:maintidx // already present in code
 		}
 	}
 
-	fmt.Printf("Rewound to %s. %s\n", shortID, formatResumeCommand(sessionID, agent))
+	fmt.Printf("Rewound to %s. %s\n", shortID, agent.FormatResumeCommand(sessionID))
 	return nil
 }
 
@@ -482,7 +482,7 @@ func runRewindToInternal(commitID string, logsOnly bool, reset bool) error {
 			if err := restoreTaskCheckpointTranscript(start, *selectedPoint, sessionID, checkpoint.CheckpointUUID, agent); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to restore truncated session transcript: %v\n", err)
 			} else {
-				fmt.Printf("Rewound to task checkpoint. %s\n", formatResumeCommand(sessionID, agent))
+				fmt.Printf("Rewound to task checkpoint. %s\n", agent.FormatResumeCommand(sessionID))
 			}
 			return nil
 		}
@@ -490,7 +490,7 @@ func runRewindToInternal(commitID string, logsOnly bool, reset bool) error {
 		// Prefer SessionID from trailer over path-based extraction
 		sessionID = selectedPoint.SessionID
 		if sessionID == "" {
-			sessionID = extractSessionIDFromMetadata(selectedPoint.MetadataDir)
+			sessionID = filepath.Base(selectedPoint.MetadataDir)
 		}
 		transcriptFile = filepath.Join(selectedPoint.MetadataDir, paths.TranscriptFileNameLegacy)
 	}
@@ -523,7 +523,7 @@ func runRewindToInternal(commitID string, logsOnly bool, reset bool) error {
 		}
 	}
 
-	fmt.Printf("Rewound to %s. %s\n", selectedPoint.ID[:7], formatResumeCommand(sessionID, agent))
+	fmt.Printf("Rewound to %s. %s\n", selectedPoint.ID[:7], agent.FormatResumeCommand(sessionID))
 	return nil
 }
 
@@ -642,15 +642,6 @@ func handleLogsOnlyResetNonInteractive(start strategy.Strategy, point strategy.R
 	}
 
 	return nil
-}
-
-func extractSessionIDFromMetadata(metadataDir string) string {
-	// The metadata directory name IS the Entire session ID.
-	// For new format: .entire/metadata/<agent-session-id> (e.g., UUID)
-	// For legacy format: .entire/metadata/<date-prefixed-id>
-	// Date-prefix stripping (for legacy IDs) is handled downstream by
-	// ExtractAgentSessionID/ModelSessionID, so we return the full name here.
-	return filepath.Base(metadataDir)
 }
 
 func restoreSessionTranscript(transcriptFile, sessionID string, agent agentpkg.Agent) error {
@@ -1227,12 +1218,6 @@ func sanitizeForTerminal(s string) string {
 	return result.String()
 }
 
-// formatResumeCommand returns the agent-appropriate command to resume a session.
-func formatResumeCommand(entireSessionID string, agent agentpkg.Agent) string {
-	agentSessionID := agent.ExtractAgentSessionID(entireSessionID)
-	return agent.FormatResumeCommand(agentSessionID)
-}
-
 // printMultiSessionResumeCommands prints resume commands for restored sessions.
 // Each session may have a different agent, so per-session agent resolution is used.
 func printMultiSessionResumeCommands(sessions []strategy.RestoredSession) {
@@ -1251,7 +1236,7 @@ func printMultiSessionResumeCommands(sessions []strategy.RestoredSession) {
 			continue
 		}
 
-		cmd := formatResumeCommand(sess.SessionID, ag)
+		cmd := ag.FormatResumeCommand(sess.SessionID)
 
 		if len(sessions) > 1 {
 			// Add "(most recent)" label to the last session

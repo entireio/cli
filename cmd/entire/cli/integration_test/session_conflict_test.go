@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/sessionid"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v5"
@@ -234,12 +233,9 @@ func createOrphanedShadowBranch(t *testing.T, repoDir, branchName, sessionID str
 		t.Fatalf("Failed to get HEAD commit: %v", err)
 	}
 
-	// Create an Entire session ID with date prefix
-	entireSessionID := sessionid.EntireSessionID(sessionID)
-
 	// Create commit message with Entire-Session trailer
 	commitMsg := "Orphaned checkpoint\n\n" +
-		"Entire-Session: " + entireSessionID + "\n" +
+		"Entire-Session: " + sessionID + "\n" +
 		"Entire-Strategy: manual-commit\n"
 
 	// Create the commit
@@ -347,7 +343,7 @@ func TestSessionStart_InformationalMessage(t *testing.T) {
 	if state1 == nil || state1.StepCount == 0 {
 		t.Fatal("Session 1 should have checkpoints")
 	}
-	t.Logf("Session 1 (%s) has %d checkpoint(s)", session1.EntireID, state1.StepCount)
+	t.Logf("Session 1 (%s) has %d checkpoint(s)", session1.ID, state1.StepCount)
 
 	// Start a second session (different session ID, same base commit)
 	session2 := env.NewSession()

@@ -39,9 +39,9 @@ If you discover a security vulnerability, **do not report it through GitHub Issu
 
 Contributions and communications are expected to occur through:
 
-- GitHub (issues, pull requests, discussions)
-- Official Entire Slack channels
-- Community events and public representation (e.g., conferences, meetups)
+- [GitHub Issues](https://github.com/entireio/cli/issues) - Bug reports and feature requests
+- [GitHub Discussions](https://github.com/entireio/cli/discussions) - Questions and general conversation
+- [Discord](https://discord.gg/4WXDu2Ph) - Real-time chat and support
 
 Please represent the project and community respectfully in all public and private interactions.
 
@@ -77,7 +77,6 @@ Please answer these questions in your bug report:
 3. **What actually happened?** - Include the full error message or unexpected output
 4. **Can you reproduce it?** - Does it happen every time or intermittently?
 5. **Any additional context?** - Logs, screenshots, or related issues
-
 
 ---
 
@@ -225,6 +224,16 @@ These are Go implementations that integrate Entire with different AI coding tool
 ---
 
 ## Submitting a Pull Request
+
+### Prerequisites
+
+1. **Install Entire** - Install the latest version of the Entire CLI (see [installation docs](https://docs.entire.io/cli/installation)), verify with `entire version`. Entire is already configured in the repository, so no need to run `entire enable`
+2. **Pass linting** - Run `mise run lint` (includes golangci-lint, gofmt, gomod, shellcheck)
+3. **Pass tests** - Run `mise run test` to verify your changes
+4. **Add tests** - Include tests for new Go code and functionality
+5. **Include checkpoint trailers** - All commits must have Entire checkpoint trailers from your sessions
+
+### Submitting
 
 1. **Push** your branch to your fork
 2. **Open a PR** against the `main` branch

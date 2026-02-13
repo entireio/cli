@@ -2138,7 +2138,7 @@ func TestScopeTranscriptForCheckpoint_SlicesTranscript(t *testing.T) {
 
 	// Checkpoint starts at line 2 (after prompt 1 and response 1)
 	// Should only include lines 2-4 (prompt 2, response 2, prompt 3)
-	scoped := scopeTranscriptForCheckpoint(fullTranscript, 2)
+	scoped := scopeTranscriptForCheckpoint(fullTranscript, 2, agent.AgentTypeClaudeCode)
 
 	// Parse the scoped transcript to verify content
 	lines, err := parseTranscriptFromBytes(scoped)
@@ -2167,7 +2167,7 @@ func TestScopeTranscriptForCheckpoint_ZeroLinesReturnsAll(t *testing.T) {
 `)
 
 	// With linesAtStart=0, should return full transcript
-	scoped := scopeTranscriptForCheckpoint(transcript, 0)
+	scoped := scopeTranscriptForCheckpoint(transcript, 0, agent.AgentTypeClaudeCode)
 
 	lines, err := parseTranscriptFromBytes(scoped)
 	if err != nil {
@@ -2187,7 +2187,7 @@ func TestExtractPromptsFromScopedTranscript(t *testing.T) {
 {"type":"assistant","uuid":"a2","message":{"content":[{"type":"text","text":"Second response"}]}}
 `)
 
-	prompts := extractPromptsFromTranscript(transcript)
+	prompts := extractPromptsFromTranscript(transcript, "")
 
 	if len(prompts) != 2 {
 		t.Fatalf("expected 2 prompts, got %d", len(prompts))

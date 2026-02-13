@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/sessionid"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -234,7 +233,6 @@ func TestDualStrategy_IncrementalPromptContent(t *testing.T) {
 func TestDualStrategy_SessionStateTracksTranscriptOffset(t *testing.T) {
 	env := NewFeatureBranchEnv(t, strategy.StrategyNameAutoCommit)
 	session := env.NewSession()
-	entireSessionID := sessionid.EntireSessionID(session.ID)
 
 	// First prompt
 	err := env.SimulateUserPromptSubmit(session.ID)
@@ -245,7 +243,7 @@ func TestDualStrategy_SessionStateTracksTranscriptOffset(t *testing.T) {
 	// Session state is created by InitializeSession during UserPromptSubmit
 	// We need to change to the repo directory to load session state (it uses GetGitCommonDir)
 	t.Chdir(env.RepoDir)
-	state, err := strategy.LoadSessionState(entireSessionID)
+	state, err := strategy.LoadSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("LoadSessionState failed: %v", err)
 	}
@@ -272,7 +270,7 @@ func TestDualStrategy_SessionStateTracksTranscriptOffset(t *testing.T) {
 	}
 
 	// Verify session state was updated with transcript position
-	state, err = strategy.LoadSessionState(entireSessionID)
+	state, err = strategy.LoadSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("LoadSessionState after stop failed: %v", err)
 	}
@@ -307,7 +305,7 @@ func TestDualStrategy_SessionStateTracksTranscriptOffset(t *testing.T) {
 	}
 
 	// Verify session state was updated again
-	state, err = strategy.LoadSessionState(entireSessionID)
+	state, err = strategy.LoadSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("LoadSessionState after second stop failed: %v", err)
 	}

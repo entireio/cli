@@ -225,51 +225,6 @@ func TestGetSessionID(t *testing.T) {
 	}
 }
 
-func TestTransformSessionID(t *testing.T) {
-	ag := &GeminiCLIAgent{}
-
-	// TransformSessionID is now an identity function
-	result := ag.TransformSessionID("abc123")
-	if result != "abc123" {
-		t.Errorf("TransformSessionID() = %q, want abc123 (identity function)", result)
-	}
-}
-
-func TestExtractAgentSessionID(t *testing.T) {
-	ag := &GeminiCLIAgent{}
-
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{
-			name:  "with date prefix",
-			input: "2025-01-09-abc123",
-			want:  "abc123",
-		},
-		{
-			name:  "without date prefix",
-			input: "abc123",
-			want:  "abc123",
-		},
-		{
-			name:  "longer session id",
-			input: "2025-12-31-session-id-here",
-			want:  "session-id-here",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ag.ExtractAgentSessionID(tt.input)
-			if got != tt.want {
-				t.Errorf("ExtractAgentSessionID(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestResolveSessionFile(t *testing.T) {
 	t.Parallel()
 
