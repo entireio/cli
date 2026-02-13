@@ -1,0 +1,89 @@
+can you review PR 284 and I think we already have code that checks if git commits are setup on each session, or?
+
+---
+
+I mean not git config but git hooks, can you validate: we have EnsureSetup which calls IsGitHookInstalled and I think this happens during each session so basically we have what the PR does, right?
+
+---
+
+For auto commit we only need the push hook, or?
+
+---
+
+ok, let's do this fix then, ignore the existing PR
+
+---
+
+commit this
+
+---
+
+[Request interrupted by user]
+
+---
+
+Question: For manual strategy we assumed the user commits after a prompt is done, what now is a common pattern also is to say the agent "do this change, and then make a commit" so the commit happens before stop. This means if we do EnsureSetup in stop we might be to late. Is there a good reason not to move EnsureSetup forward to the first hook that is called in a session?
+
+---
+
+yes
+
+---
+
+what other things does EnsureSetup do?
+
+---
+
+do we have test coverage for this?
+
+---
+
+yes please do
+
+---
+
+In EnsureSetup(), the error from InstallGitHook(true) is returned without context, while other failures in this method are wrapped (e.g., open repo / ensure metadata branch). Wrapping this error (e.g., "failed to install git hooks") would make failures easier to diagnose and keep error reporting consistent within the function.
+
+---
+
+This test duplicates the hook marker string and the list of hook names from strategy/hooks.go. That makes the test brittle (a future change to the marker or managed hooks will require updating tests in two places). Consider exposing these via a small exported helper in the strategy package (e.g., marker getter / managed hook list, or a function that validates hooks for a given git dir) so tests can reference the single source of truth without relying on os.Chdir().
+
+cmd/entire/cli/integration_test/hooks_test.go:130
+
+---
+
+--- FAIL: TestResume_AfterMergingMain (3.72s)
+    hooks.go:196: Hook user-prompt-submit output: Captured state before prompt: 0 untracked files, transcript at line 0 (uuid: )
+        ✓ Created orphan branch 'entire/checkpoints/v1' for session metadata
+    hooks.go:196: Hook stop output: Copied transcript to: .entire/metadata/test-session-1/full.jsonl
+        Extracted 1 prompt(s) to: .entire/metadata/test-session-1/prompt.txt
+        Extracted summary to: .entire/metadata/test-session-1/summary.txt
+        Using commit message: Create a hello script
+        Pre-prompt state: 0 pre-existing untracked files
+        Files modified during session (1):
+          - hello.rb
+        New files created (1):
+          + hello.rb
+        Created context file: .entire/metadata/test-session-1/context.md
+          Staged: hello.rb
+        Staging 1 new files created during session:
+          Staged new file: hello.rb
+        Committed code changes to active branch (fc6adb9)
+        Committed session metadata to entire/checkpoints/v1 (c315e0cb4f8d)
+        Updated session state: transcript position=5, checkpoint=1
+    resume_test.go:439: failed to merge branch master: exit status 1
+        Output: stat ./cmd/entire/main.go: no such file or directory
+        Not committing merge; use 'git commit' to complete the merge.
+FAIL
+
+---
+
+hmm, but these tests run in a temp repo? why is that enabled with `--local-dev` ?
+
+---
+
+but we don't have an option in the cli to not install the hooks, so we would need to add it just for that?
+
+---
+
+yes

@@ -1,0 +1,77 @@
+Implement the following plan:
+
+# Fix: Wingman auto-apply never triggers on session close + improve logging
+
+## Context
+
+When a user closes a Claude session with a pending `REVIEW.md`, the auto-apply never fires. The root cause is a phase check bug in the auto-apply subprocess: `runWingmanApply` calls `isSessionIdle()` which only returns `true` for `PhaseIdle`. But when triggered from the SessionEnd hook, the session has already been marked `PhaseEnded`, so `isSessionIdle` returns `false` and the subprocess aborts with "session became active during spawn."
+
+Additionally, stale session state files (like orphaned `test.json` with `phase: active_committed`) cause `hasAnyLiveSession()` to return `true` perpetually, blocking auto-apply from even being attempted.
+
+## Changes
+
+### 1. Fix phase check in `runWingmanApply` (`wingman_review.go:497-503`)
+
+Replace the `isSessionIdle` check with a direct phase check that only aborts when the session is truly busy (ACTIVE or ACTIVE_COMMITTED). IDLE and ENDED both mean "safe to auto-apply."
+
+```go
+// Re-check session hasn't become active (user may have typed during spawn delay).
+// IDLE and ENDED are safe — only ACTIVE/ACTIVE_COMMITTED should block.
+if state != nil && state.SessionID != "" {
+    sessDir := findSessionStateDir(repoRoot)
+    if sessDir != "" {
+        phase := readSessionPhase(sessDir, state.SessionID)
+        if session.Phase(phase).IsActive() {
+            wingmanLog("session is active (phase=%s), aborting (next stop hook will retry)", phase)
+            return nil
+        }
+        wingmanLog("session phase=%s, safe to proceed", phase)
+    }
+}
+```
+
+Uses existing `session.Phase.IsActive()` helper which returns true for ACTIVE/ACTIVE_COMMITTED only.
+
+### 2. Add staleness check to `hasAnyLiveSession` (`wingman_review.go:386-421`)
+
+Skip session state files that haven't been updated in over 2 hours. This prevents stale/orphaned sessions from permanently blocking auto-apply.
+
+```go
+const staleSessionThreshold = 2 * time.Hour
+
+// In the for loop, after reading the entry:
+info, statErr := entry.Info()
+if statErr != nil || time.Since(info.ModTime()) > staleSessionThreshold {
+    continue // Skip stale/unreadable sessions
+}
+```
+
+### 3. Improve logging throughout the auto-apply flow
+
+**In `triggerWingmanAutoApplyIfPending` (~line 842):** Add more detailed logging for the skip reasons — currently `hasAnyLiveSession` returns true silently when there are stale sessions.
+
+**In `triggerWingmanAutoApplyOnSessionEnd` (~line 874):** Add logging when conditions aren't met (wingman not enabled, no review pending, etc.) so silent returns are diagnosable.
+
+**In `spawnDetachedWingmanReview` and `spawnDetachedWingmanApply`:** Log the PID of the spawned process (or failure) to stderr and the structured log.
+
+**In `runWingmanApply`:** Log each decision point (review exists, state loaded, phase check, etc.) with `wingmanLog`.
+
+## Files to modify
+
+- `cmd/entire/cli/wingman_review.go` — Fix phase check in `runWingmanApply`, add staleness to `hasAnyLiveSession`, improve `wingmanLog` coverage
+- `cmd/entire/cli/hooks_claudecode_handlers.go` — Improve user-visible logging in `triggerWingmanAutoApplyIfPending` and `triggerWingmanAutoApplyOnSessionEnd`
+- `cmd/entire/cli/wingman_spawn_unix.go` — Log spawned PID
+- `cmd/entire/cli/wingman_test.go` — Add tests for the fixed phase check and staleness logic
+
+## Verification
+
+1. `mise run fmt && mise run lint && mise run test:ci`
+2. Check wingman.log after closing a session with pending REVIEW.md — should show `"session phase=ended, safe to proceed"` instead of aborting
+3. Stale session files should be skipped by `hasAnyLiveSession`
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/dip/.claude/projects/-Users-dip-Repositories-cli/d412db86-85b1-4122-b6a2-b9686b15bfa9.jsonl
+
+---
+
+commit this

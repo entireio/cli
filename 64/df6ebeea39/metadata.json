@@ -1,0 +1,28 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "64df6ebeea39",
+  "strategy": "manual-commit",
+  "branch": "dipree/entire-wingman",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/wingman_review.go",
+    "docs/architecture/wingman.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/64/df6ebeea39/0/metadata.json",
+      "transcript": "/64/df6ebeea39/0/full.jsonl",
+      "context": "/64/df6ebeea39/0/context.md",
+      "content_hash": "/64/df6ebeea39/0/content_hash.txt",
+      "prompt": "/64/df6ebeea39/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 38,
+    "cache_creation_tokens": 48828,
+    "cache_read_tokens": 2901646,
+    "output_tokens": 1611,
+    "api_call_count": 34
+  }
+}

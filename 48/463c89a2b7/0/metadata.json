@@ -1,0 +1,35 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "48463c89a2b7",
+  "session_id": "45f2ccfd-0915-42eb-9164-09d13a9dd8ee",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-12T20:40:38.820883Z",
+  "branch": "soph/safer-agent-hook-parsing",
+  "checkpoints_count": 7,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/hooks.go",
+    "cmd/entire/cli/agent/claudecode/hooks_test.go",
+    "cmd/entire/cli/agent/geminicli/hooks.go",
+    "cmd/entire/cli/agent/geminicli/hooks_test.go",
+    "cmd/entire/cli/agent/testutil/hooks.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "33a6acf7-021d-4928-a40c-6002807d8fb1",
+  "token_usage": {
+    "input_tokens": 1061,
+    "cache_creation_tokens": 399226,
+    "cache_read_tokens": 8153696,
+    "output_tokens": 222,
+    "api_call_count": 87
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-12T20:40:38.352035Z",
+    "agent_lines": 655,
+    "human_added": 1,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 656,
+    "agent_percentage": 99.84756097560977
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/45f2ccfd-0915-42eb-9164-09d13a9dd8ee.jsonl"
+}
