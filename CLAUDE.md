@@ -327,7 +327,7 @@ All strategies implement:
 
 Sessions track their lifecycle through phases managed by a state machine in `session/phase.go`:
 
-**Phases:** `ACTIVE`, `ACTIVE_COMMITTED`, `IDLE`, `ENDED`
+**Phases:** `ACTIVE`, `IDLE`, `ENDED`
 
 **Events:**
 - `TurnStart` - Agent begins a turn (UserPromptSubmit hook)
@@ -338,13 +338,12 @@ Sessions track their lifecycle through phases managed by a state machine in `ses
 
 **Key transitions:**
 - `IDLE + TurnStart → ACTIVE` - Agent starts working
-- `ACTIVE + TurnEnd → IDLE` - Agent finishes turn
-- `ACTIVE + GitCommit → ACTIVE_COMMITTED` - User commits while agent is working (condensation deferred)
-- `ACTIVE_COMMITTED + TurnEnd → IDLE` - Agent finishes after commit (condense now)
+- `ACTIVE + TurnEnd → IDLE` - Agent finishes turn; trailing transcript is appended to prior checkpoint if no new files were touched
+- `ACTIVE + GitCommit → ACTIVE` - User commits while agent is working (condense immediately, migrate shadow branch)
 - `IDLE + GitCommit → IDLE` - User commits between turns (condense immediately)
 - `ENDED + GitCommit → ENDED` - Post-session commit (condense if files touched)
 
-The state machine emits **actions** (e.g., `ActionCondense`, `ActionMigrateShadowBranch`, `ActionDeferCondensation`) that hook handlers dispatch to strategy-specific implementations.
+The state machine emits **actions** (e.g., `ActionCondense`, `ActionMigrateShadowBranch`) that hook handlers dispatch to strategy-specific implementations.
 
 #### Metadata Structure
 

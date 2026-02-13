@@ -120,9 +120,15 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
     - **Auto-commit**: Creates a commit on the active branch with the `Entire-Checkpoint` trailer.
     - Token usage is stored in `metadata.json` for later analysis and reporting.
 
-7.  **Update Session State**: Updates `CheckpointTranscriptStart` to track transcript position for detecting new content in future checkpoints (auto-commit strategy only).
+7.  **Handle Trailing Transcript** (manual-commit strategy):
 
-8.  **Cleanup**: Deletes the temporary `.entire/tmp/pre-prompt-<session-id>.json` file.
+    - If a git commit occurred during this turn (PostCommit already condensed), the agent may have continued generating conversation afterward (e.g., summarizing what it did).
+    - If no new files were touched in that trailing conversation, the transcript is appended to the prior committed checkpoint rather than creating a new shadow branch checkpoint.
+    - This keeps the committed checkpoint's transcript complete without creating unnecessary empty checkpoints.
+
+8.  **Update Session State**: Updates `CheckpointTranscriptStart` to track transcript position for detecting new content in future checkpoints (auto-commit strategy only).
+
+9.  **Cleanup**: Deletes the temporary `.entire/tmp/pre-prompt-<session-id>.json` file.
 
 ### `PreToolUse[Task]`
 
