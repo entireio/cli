@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b15d3b4e29e9",
+  "strategy": "manual-commit",
+  "branch": "fix/gemini-explain",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/summarize/summarize.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b1/5d3b4e29e9/0/metadata.json",
+      "transcript": "/b1/5d3b4e29e9/0/full.jsonl",
+      "context": "/b1/5d3b4e29e9/0/context.md",
+      "content_hash": "/b1/5d3b4e29e9/0/content_hash.txt",
+      "prompt": "/b1/5d3b4e29e9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 84,
+    "cache_creation_tokens": 26055,
+    "cache_read_tokens": 348148,
+    "output_tokens": 24,
+    "api_call_count": 11
+  }
+}
