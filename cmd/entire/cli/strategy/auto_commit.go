@@ -243,8 +243,9 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository
 	// Extract session ID from metadata dir
 	sessionID := filepath.Base(ctx.MetadataDir)
 
-	// Get current branch name
+	// Get current branch name and tree hash
 	branchName := GetCurrentBranchName(repo)
+	commitTreeHash := GetHeadTreeHash(repo)
 
 	// Combine all file changes into FilesTouched (same as manual-commit)
 	filesTouched := mergeFilesTouched(nil, ctx.ModifiedFiles, ctx.NewFiles, ctx.DeletedFiles)
@@ -255,6 +256,7 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository
 		SessionID:                   sessionID,
 		Strategy:                    StrategyNameAutoCommit, // Use new strategy name
 		Branch:                      branchName,
+		CommitTreeHash:              commitTreeHash,
 		MetadataDir:                 ctx.MetadataDirAbs, // Copy all files from metadata dir
 		AuthorName:                  ctx.AuthorName,
 		AuthorEmail:                 ctx.AuthorEmail,
@@ -643,8 +645,9 @@ func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(repo *git.Reposi
 		messageSubject = FormatSubagentEndMessage(ctx.SubagentType, ctx.TaskDescription, shortToolUseID)
 	}
 
-	// Get current branch name
+	// Get current branch name and tree hash
 	branchName := GetCurrentBranchName(repo)
+	commitTreeHash := GetHeadTreeHash(repo)
 
 	// Write committed checkpoint using the checkpoint store
 	err = store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
@@ -652,6 +655,7 @@ func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(repo *git.Reposi
 		SessionID:              ctx.SessionID,
 		Strategy:               StrategyNameAutoCommit,
 		Branch:                 branchName,
+		CommitTreeHash:         commitTreeHash,
 		IsTask:                 true,
 		ToolUseID:              ctx.ToolUseID,
 		AgentID:                ctx.AgentID,

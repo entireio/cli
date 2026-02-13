@@ -579,6 +579,117 @@ func TestWriteCommitted_BranchField(t *testing.T) {
 	})
 }
 
+// TestWriteCommitted_CommitTreeHashField verifies that the CommitTreeHash field
+// is correctly stored in both session-level and root-level metadata.json.
+func TestWriteCommitted_CommitTreeHashField(t *testing.T) {
+	t.Run("present", func(t *testing.T) {
+		repo, commitHash := setupBranchTestRepo(t)
+
+		// Get the tree hash of the initial commit
+		commit, err := repo.CommitObject(commitHash)
+		if err != nil {
+			t.Fatalf("failed to get commit: %v", err)
+		}
+		expectedTreeHash := commit.TreeHash.String()
+
+		checkpointID := id.MustCheckpointID("d1e2f3a4b5c6")
+		store := NewGitStore(repo)
+		err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
+			CheckpointID:   checkpointID,
+			SessionID:      "test-session-treehash",
+			Strategy:       "manual-commit",
+			CommitTreeHash: expectedTreeHash,
+			Transcript:     []byte("test transcript content"),
+			AuthorName:     "Test Author",
+			AuthorEmail:    "test@example.com",
+		})
+		if err != nil {
+			t.Fatalf("WriteCommitted() error = %v", err)
+		}
+
+		// Verify in session-level metadata (CommittedMetadata)
+		metadata := readLatestSessionMetadata(t, repo, checkpointID)
+		if metadata.CommitTreeHash != expectedTreeHash {
+			t.Errorf("CommittedMetadata.CommitTreeHash = %q, want %q", metadata.CommitTreeHash, expectedTreeHash)
+		}
+
+		// Verify in root-level metadata (CheckpointSummary)
+		summary, err := store.ReadCommitted(context.Background(), checkpointID)
+		if err != nil {
+			t.Fatalf("ReadCommitted() error = %v", err)
+		}
+		if summary.CommitTreeHash != expectedTreeHash {
+			t.Errorf("CheckpointSummary.CommitTreeHash = %q, want %q", summary.CommitTreeHash, expectedTreeHash)
+		}
+	})
+
+	t.Run("omitted when empty", func(t *testing.T) {
+		repo, _ := setupBranchTestRepo(t)
+
+		checkpointID := id.MustCheckpointID("e2f3a4b5c6d7")
+		store := NewGitStore(repo)
+		err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+			CheckpointID: checkpointID,
+			SessionID:    "test-session-no-treehash",
+			Strategy:     "manual-commit",
+			Transcript:   []byte("test transcript content"),
+			AuthorName:   "Test Author",
+			AuthorEmail:  "test@example.com",
+		})
+		if err != nil {
+			t.Fatalf("WriteCommitted() error = %v", err)
+		}
+
+		// Verify field is empty
+		metadata := readLatestSessionMetadata(t, repo, checkpointID)
+		if metadata.CommitTreeHash != "" {
+			t.Errorf("CommittedMetadata.CommitTreeHash = %q, want empty", metadata.CommitTreeHash)
+		}
+
+		// Verify omitted from JSON (omitempty)
+		ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+		if err != nil {
+			t.Fatalf("failed to get metadata branch: %v", err)
+		}
+		commitObj, err := repo.CommitObject(ref.Hash())
+		if err != nil {
+			t.Fatalf("failed to get commit: %v", err)
+		}
+		tree, err := commitObj.Tree()
+		if err != nil {
+			t.Fatalf("failed to get tree: %v", err)
+		}
+
+		// Check session-level metadata JSON
+		sessionPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
+		file, err := tree.File(sessionPath)
+		if err != nil {
+			t.Fatalf("failed to find session metadata: %v", err)
+		}
+		content, err := file.Contents()
+		if err != nil {
+			t.Fatalf("failed to read session metadata: %v", err)
+		}
+		if strings.Contains(content, `"commit_tree_hash"`) {
+			t.Errorf("session metadata should not contain 'commit_tree_hash' when empty (omitempty)")
+		}
+
+		// Check root-level metadata JSON
+		rootPath := checkpointID.Path() + "/" + paths.MetadataFileName
+		rootFile, err := tree.File(rootPath)
+		if err != nil {
+			t.Fatalf("failed to find root metadata: %v", err)
+		}
+		rootContent, err := rootFile.Contents()
+		if err != nil {
+			t.Fatalf("failed to read root metadata: %v", err)
+		}
+		if strings.Contains(rootContent, `"commit_tree_hash"`) {
+			t.Errorf("root metadata should not contain 'commit_tree_hash' when empty (omitempty)")
+		}
+	})
+}
+
 // TestUpdateSummary verifies that UpdateSummary correctly updates the summary
 // field in an existing checkpoint's metadata.
 func TestUpdateSummary(t *testing.T) {
