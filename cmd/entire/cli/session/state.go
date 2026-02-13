@@ -37,7 +37,7 @@ type State struct {
 
 	// AttributionBaseCommit is the commit used as the reference point for attribution calculations.
 	// Unlike BaseCommit (which tracks the shadow branch and moves with migration), this field
-	// preserves the original base commit so deferred condensation can correctly calculate
+	// preserves the original base commit so condensation can correctly calculate
 	// agent vs human line attribution. Updated only after successful condensation.
 	AttributionBaseCommit string `json:"attribution_base_commit,omitempty"`
 

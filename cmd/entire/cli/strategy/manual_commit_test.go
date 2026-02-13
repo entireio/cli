@@ -2455,7 +2455,7 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 // TestCondenseSession_PrefersLiveTranscript verifies that CondenseSession reads the
 // live transcript file when available, rather than the potentially stale shadow branch copy.
 // This reproduces the bug where SaveChanges was skipped (no code changes) but the
-// transcript continued growing — deferred condensation would read stale data.
+// transcript continued growing — condensation from the shadow branch would read stale data.
 func TestCondenseSession_PrefersLiveTranscript(t *testing.T) {
 	dir := t.TempDir()
 	repo, err := git.PlainInit(dir, false)

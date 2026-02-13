@@ -1059,6 +1059,9 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 		}
 	}
 	if sessionIndex == -1 {
+		if len(checkpointSummary.Sessions) == 0 {
+			return ErrCheckpointNotFound
+		}
 		// Fall back to latest session; log so mismatches are diagnosable.
 		sessionIndex = len(checkpointSummary.Sessions) - 1
 		logging.Debug(ctx, "UpdateCommitted: session ID not found, falling back to latest",
