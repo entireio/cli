@@ -159,14 +159,17 @@ func buildSummarizationPrompt(transcriptText string) string {
 	return fmt.Sprintf(summarizationPromptTemplate, transcriptText)
 }
 
-// stripGitEnv returns a copy of env with all GIT_* variables removed.
-// This prevents a subprocess from discovering or modifying the parent's git repo.
+// stripGitEnv returns a copy of env with all GIT_* variables removed and the
+// CLAUDECODE variable unset. GIT_* removal prevents a subprocess from discovering
+// or modifying the parent's git repo. CLAUDECODE removal prevents the Claude CLI
+// from refusing to start due to nested-session detection.
 func stripGitEnv(env []string) []string {
 	filtered := make([]string, 0, len(env))
 	for _, e := range env {
-		if !strings.HasPrefix(e, "GIT_") {
-			filtered = append(filtered, e)
+		if strings.HasPrefix(e, "GIT_") || strings.HasPrefix(e, "CLAUDECODE=") {
+			continue
 		}
+		filtered = append(filtered, e)
 	}
 	return filtered
 }

@@ -30,6 +30,9 @@ type EntireSettings struct {
 	// Strategy is the name of the git strategy to use
 	Strategy string `json:"strategy"`
 
+	// Agent is the name of the agent (e.g., "claude-code", "amp")
+	Agent string `json:"agent,omitempty"`
+
 	// Enabled indicates whether Entire is active. When false, CLI commands
 	// show a disabled message and hooks exit silently. Defaults to true.
 	Enabled bool `json:"enabled"`
@@ -151,6 +154,17 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		}
 	}
 
+	// Override agent if present and non-empty
+	if agentRaw, ok := raw["agent"]; ok {
+		var a string
+		if err := json.Unmarshal(agentRaw, &a); err != nil {
+			return fmt.Errorf("parsing agent field: %w", err)
+		}
+		if a != "" {
+			settings.Agent = a
+		}
+	}
+
 	// Override enabled if present
 	if enabledRaw, ok := raw["enabled"]; ok {
 		var e bool
@@ -233,6 +247,32 @@ func (s *EntireSettings) IsSummarizeEnabled() bool {
 		return false
 	}
 	enabled, ok := summarizeOpts["enabled"].(bool)
+	if !ok {
+		return false
+	}
+	return enabled
+}
+
+// IsWingmanEnabled checks if wingman auto-review is enabled in settings.
+// Returns false by default if settings cannot be loaded or the key is missing.
+func IsWingmanEnabled() bool {
+	s, err := Load()
+	if err != nil {
+		return false
+	}
+	return s.IsWingmanEnabled()
+}
+
+// IsWingmanEnabled checks if wingman auto-review is enabled in this settings instance.
+func (s *EntireSettings) IsWingmanEnabled() bool {
+	if s.StrategyOptions == nil {
+		return false
+	}
+	wingmanOpts, ok := s.StrategyOptions["wingman"].(map[string]any)
+	if !ok {
+		return false
+	}
+	enabled, ok := wingmanOpts["enabled"].(bool)
 	if !ok {
 		return false
 	}

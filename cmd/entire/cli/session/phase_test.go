@@ -234,11 +234,11 @@ func TestTransitionFromActiveCommitted(t *testing.T) {
 			wantActions: []Action{ActionCondense, ActionUpdateLastInteraction},
 		},
 		{
-			name:        "GitCommit_stays_with_migrate",
+			name:        "GitCommit_stays_with_migrate_no_interaction_update",
 			current:     PhaseActiveCommitted,
 			event:       EventGitCommit,
 			wantPhase:   PhaseActiveCommitted,
-			wantActions: []Action{ActionMigrateShadowBranch, ActionUpdateLastInteraction},
+			wantActions: []Action{ActionMigrateShadowBranch},
 		},
 		{
 			name:        "GitCommit_rebase_skips_everything",

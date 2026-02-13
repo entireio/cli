@@ -1,0 +1,582 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/spf13/cobra"
+)
+
+// wingmanLog writes a timestamped log line to stderr. In the detached subprocess,
+// stderr is redirected to .entire/logs/wingman.log by the spawner.
+func wingmanLog(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "%s [wingman] %s\n", time.Now().Format(time.RFC3339), msg)
+}
+
+const (
+	// wingmanInitialDelay is how long to wait before starting the review,
+	// letting the agent turn fully settle.
+	wingmanInitialDelay = 10 * time.Second
+
+	// wingmanReviewModel is the Claude model used for reviews.
+	wingmanReviewModel = "sonnet"
+
+	// wingmanGitTimeout is the timeout for git diff operations.
+	wingmanGitTimeout = 60 * time.Second
+
+	// wingmanReviewTimeout is the timeout for the claude --print review call.
+	wingmanReviewTimeout = 5 * time.Minute
+
+	// wingmanApplyTimeout is the timeout for the claude --continue auto-apply call.
+	wingmanApplyTimeout = 15 * time.Minute
+)
+
+// wingmanCLIResponse represents the JSON response from the Claude CLI --output-format json.
+type wingmanCLIResponse struct {
+	Result string `json:"result"`
+}
+
+func newWingmanReviewCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "__review",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runWingmanReview(args[0])
+		},
+	}
+}
+
+func runWingmanReview(payloadPath string) error {
+	wingmanLog("review process started (pid=%d)", os.Getpid())
+	wingmanLog("reading payload from %s", payloadPath)
+
+	// Read payload from file (avoids OS argv limits with large payloads)
+	payloadJSON, err := os.ReadFile(payloadPath) //nolint:gosec // path is from our own spawn
+	if err != nil {
+		wingmanLog("ERROR reading payload: %v", err)
+		return fmt.Errorf("failed to read payload file: %w", err)
+	}
+	// Clean up payload file after reading
+	_ = os.Remove(payloadPath)
+
+	var payload WingmanPayload
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		wingmanLog("ERROR unmarshaling payload: %v", err)
+		return fmt.Errorf("failed to unmarshal payload: %w", err)
+	}
+
+	repoRoot := payload.RepoRoot
+	if repoRoot == "" {
+		wingmanLog("ERROR repo_root is empty in payload")
+		return errors.New("repo_root is required in payload")
+	}
+
+	totalFiles := len(payload.ModifiedFiles) + len(payload.NewFiles) + len(payload.DeletedFiles)
+	wingmanLog("session=%s repo=%s base_commit=%s files=%d",
+		payload.SessionID, repoRoot, payload.BaseCommit, totalFiles)
+
+	// Clean up lock file when review completes (regardless of success/failure)
+	lockPath := filepath.Join(repoRoot, wingmanLockFile)
+	defer func() {
+		if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			wingmanLog("WARNING: failed to remove lock file: %v", err)
+		} else {
+			wingmanLog("lock file removed")
+		}
+	}()
+
+	// Initial delay: let the agent turn fully settle
+	wingmanLog("waiting %s for agent turn to settle", wingmanInitialDelay)
+	time.Sleep(wingmanInitialDelay)
+
+	// Compute diff using the base commit captured at trigger time
+	wingmanLog("computing diff (merge-base with main/master)")
+	diffStart := time.Now()
+	diff, err := computeDiff(repoRoot)
+	if err != nil {
+		wingmanLog("ERROR computing diff: %v", err)
+		return fmt.Errorf("failed to compute diff: %w", err)
+	}
+
+	if strings.TrimSpace(diff) == "" {
+		wingmanLog("no changes found in diff, exiting")
+		return nil // No changes to review
+	}
+	wingmanLog("diff computed: %d bytes in %s", len(diff), time.Since(diffStart).Round(time.Millisecond))
+
+	// Build file list for the prompt
+	allFiles := make([]string, 0, len(payload.ModifiedFiles)+len(payload.NewFiles)+len(payload.DeletedFiles))
+	for _, f := range payload.ModifiedFiles {
+		allFiles = append(allFiles, f+" (modified)")
+	}
+	for _, f := range payload.NewFiles {
+		allFiles = append(allFiles, f+" (new)")
+	}
+	for _, f := range payload.DeletedFiles {
+		allFiles = append(allFiles, f+" (deleted)")
+	}
+	fileList := strings.Join(allFiles, ", ")
+
+	// Read session context from checkpoint data (best-effort)
+	sessionContext := readSessionContext(repoRoot, payload.SessionID)
+	if sessionContext != "" {
+		wingmanLog("session context loaded: %d bytes", len(sessionContext))
+	}
+
+	// Build review prompt
+	prompt := buildReviewPrompt(payload.Prompts, payload.CommitMessage, sessionContext, payload.SessionID, fileList, diff)
+	wingmanLog("review prompt built: %d bytes", len(prompt))
+
+	// Call Claude CLI for review
+	wingmanLog("calling claude CLI (model=%s, timeout=%s)", wingmanReviewModel, wingmanReviewTimeout)
+	reviewStart := time.Now()
+	reviewText, err := callClaudeForReview(repoRoot, prompt)
+	if err != nil {
+		wingmanLog("ERROR claude CLI failed after %s: %v", time.Since(reviewStart).Round(time.Millisecond), err)
+		return fmt.Errorf("failed to get review from Claude: %w", err)
+	}
+	wingmanLog("review received: %d bytes in %s", len(reviewText), time.Since(reviewStart).Round(time.Millisecond))
+
+	// Write REVIEW.md
+	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
+	if err := os.MkdirAll(filepath.Dir(reviewPath), 0o750); err != nil {
+		wingmanLog("ERROR creating directory: %v", err)
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+	//nolint:gosec // G306: review file is not secrets
+	if err := os.WriteFile(reviewPath, []byte(reviewText), 0o644); err != nil {
+		wingmanLog("ERROR writing REVIEW.md: %v", err)
+		return fmt.Errorf("failed to write REVIEW.md: %w", err)
+	}
+	wingmanLog("REVIEW.md written to %s", reviewPath)
+
+	// Update dedup state — write directly to known path instead of using
+	// os.Chdir (which mutates process-wide state).
+	allFilePaths := make([]string, 0, len(payload.ModifiedFiles)+len(payload.NewFiles)+len(payload.DeletedFiles))
+	allFilePaths = append(allFilePaths, payload.ModifiedFiles...)
+	allFilePaths = append(allFilePaths, payload.NewFiles...)
+	allFilePaths = append(allFilePaths, payload.DeletedFiles...)
+
+	saveWingmanStateDirect(repoRoot, &WingmanState{
+		SessionID:     payload.SessionID,
+		FilesHash:     computeFilesHash(allFilePaths),
+		ReviewedAt:    time.Now(),
+		ReviewApplied: false,
+	})
+	wingmanLog("dedup state saved")
+
+	// If any session is live (IDLE/ACTIVE/ACTIVE_COMMITTED), don't auto-apply
+	// in the background. The prompt-submit hook will inject REVIEW.md as
+	// additionalContext when the user sends their next prompt — this is VISIBLE
+	// in their terminal. Only use background auto-apply when no sessions are
+	// alive (e.g., user closed all sessions).
+	if hasAnyLiveSession(repoRoot) {
+		wingmanLog("live session detected, deferring to prompt-submit injection (visible)")
+		return nil
+	}
+
+	// No live sessions — apply in background as fallback
+	wingmanLog("no live sessions, triggering background auto-apply")
+	now := time.Now()
+	state := loadWingmanStateDirect(repoRoot)
+	if state != nil {
+		state.ApplyAttemptedAt = &now
+		saveWingmanStateDirect(repoRoot, state)
+	}
+
+	applyStart := time.Now()
+	if err := triggerAutoApply(repoRoot); err != nil {
+		wingmanLog("ERROR auto-apply failed after %s: %v", time.Since(applyStart).Round(time.Millisecond), err)
+		return fmt.Errorf("failed to trigger auto-apply: %w", err)
+	}
+	wingmanLog("auto-apply completed in %s", time.Since(applyStart).Round(time.Millisecond))
+
+	return nil
+}
+
+// computeDiff gets the full branch diff for review. It diffs the current HEAD
+// against the merge base with the default branch (main/master), giving the
+// reviewer a holistic view of all branch changes rather than just one commit.
+func computeDiff(repoRoot string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), wingmanGitTimeout)
+	defer cancel()
+
+	// Find the merge base with the default branch for a holistic branch diff.
+	mergeBase := findMergeBase(ctx, repoRoot)
+	if mergeBase != "" {
+		wingmanLog("using merge-base %s for branch diff", mergeBase)
+		diff, err := gitDiff(ctx, repoRoot, mergeBase)
+		if err == nil && strings.TrimSpace(diff) != "" {
+			return diff, nil
+		}
+		// Fall through to HEAD diff if merge-base diff fails or is empty
+	}
+
+	// Fallback: diff uncommitted changes against HEAD
+	wingmanLog("falling back to HEAD diff")
+	diff, err := gitDiff(ctx, repoRoot, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("git diff failed: %w", err)
+	}
+
+	// If no uncommitted changes, try the latest commit itself
+	if strings.TrimSpace(diff) == "" {
+		diff, err = gitDiff(ctx, repoRoot, "HEAD~1", "HEAD")
+		if err != nil {
+			return "", fmt.Errorf("git diff for latest commit failed: %w", err)
+		}
+	}
+
+	return diff, nil
+}
+
+// findMergeBase returns the merge-base commit between HEAD and the default
+// branch (tries main, then master). Returns empty string if not found.
+func findMergeBase(ctx context.Context, repoRoot string) string {
+	for _, branch := range []string{"main", "master"} {
+		cmd := exec.CommandContext(ctx, "git", "merge-base", branch, "HEAD") //nolint:gosec // branch is from hardcoded slice
+		cmd.Dir = repoRoot
+		out, err := cmd.Output()
+		if err == nil {
+			return strings.TrimSpace(string(out))
+		}
+	}
+	return ""
+}
+
+// gitDiff runs git diff with the given args and returns stdout.
+func gitDiff(ctx context.Context, repoRoot string, args ...string) (string, error) {
+	fullArgs := append([]string{"diff"}, args...)
+	cmd := exec.CommandContext(ctx, "git", fullArgs...) //nolint:gosec // args are from internal logic
+	cmd.Dir = repoRoot
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git diff %v: %w (stderr: %s)", args, err, stderr.String())
+	}
+	return stdout.String(), nil
+}
+
+// callClaudeForReview calls the claude CLI to perform the review.
+// repoRoot is the repository root so the reviewer can access the full codebase.
+func callClaudeForReview(repoRoot, prompt string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), wingmanReviewTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude",
+		"--print",
+		"--output-format", "json",
+		"--model", wingmanReviewModel,
+		"--setting-sources", "",
+		// Grant read-only tool access so the reviewer can inspect source files
+		// beyond just the diff. Permission bypass is safe here since tools are
+		// restricted to read-only operations.
+		"--allowedTools", "Read,Glob,Grep",
+		"--permission-mode", "bypassPermissions",
+	)
+
+	// Run from repo root so the reviewer can read source files for context.
+	// Loop-breaking is handled by --setting-sources "" (disables hooks) and
+	// wingmanStripGitEnv (prevents git index pollution).
+	cmd.Dir = repoRoot
+	cmd.Env = wingmanStripGitEnv(os.Environ())
+
+	cmd.Stdin = strings.NewReader(prompt)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		var execErr *exec.Error
+		if errors.As(err, &execErr) {
+			return "", fmt.Errorf("claude CLI not found: %w", err)
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return "", fmt.Errorf("claude CLI failed (exit %d): %s", exitErr.ExitCode(), stderr.String())
+		}
+		return "", fmt.Errorf("failed to run claude CLI: %w", err)
+	}
+
+	// Parse the CLI response
+	var cliResponse wingmanCLIResponse
+	if err := json.Unmarshal(stdout.Bytes(), &cliResponse); err != nil {
+		return "", fmt.Errorf("failed to parse claude CLI response: %w", err)
+	}
+
+	return cliResponse.Result, nil
+}
+
+// readSessionContext reads the context.md file from the session's checkpoint
+// metadata directory. Returns empty string if unavailable.
+func readSessionContext(repoRoot, sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	contextPath := filepath.Join(repoRoot, ".entire", "metadata", sessionID, "context.md")
+	data, err := os.ReadFile(contextPath) //nolint:gosec // path constructed from repoRoot + session ID
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			wingmanLog("WARNING: failed to read session context: %v", err)
+		}
+		return ""
+	}
+	return string(data)
+}
+
+// staleActiveSessionThreshold is the maximum age of a session state file in an
+// ACTIVE phase before it is considered stale (crashed agent) and ignored by
+// hasAnyLiveSession. Only applies to ACTIVE/ACTIVE_COMMITTED phases — an IDLE
+// session is always considered live regardless of age (user may just be away).
+const staleActiveSessionThreshold = 4 * time.Hour
+
+// hasAnyLiveSession checks if any session is in a non-ENDED phase (IDLE,
+// ACTIVE, or ACTIVE_COMMITTED). Used to decide whether to defer review
+// application to the prompt-submit injection (visible to user) vs background
+// auto-apply (invisible).
+//
+// ACTIVE/ACTIVE_COMMITTED sessions older than staleActiveSessionThreshold are
+// skipped as likely orphaned from crashed processes. IDLE sessions are always
+// considered live regardless of age.
+func hasAnyLiveSession(repoRoot string) bool {
+	sessDir := findSessionStateDir(repoRoot)
+	if sessDir == "" {
+		return false
+	}
+
+	entries, err := os.ReadDir(sessDir)
+	if err != nil {
+		return false
+	}
+
+	const maxCheck = 50
+	checked := 0
+	for _, entry := range entries {
+		if checked >= maxCheck {
+			wingmanLog("stopping live-session scan after %d entries; assuming live session may exist", checked)
+			return true
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		checked++
+
+		sid := strings.TrimSuffix(name, ".json")
+		info := readSessionPhaseInfo(sessDir, sid)
+		if info.Phase == "" || info.Phase == string(session.PhaseEnded) {
+			continue
+		}
+
+		// ACTIVE/ACTIVE_COMMITTED sessions that haven't had a real agent
+		// interaction in a long time are likely orphaned from crashed agents.
+		// Uses LastInteractionTime from JSON (not file modtime) because
+		// PostCommit saves all session files on every commit, refreshing
+		// modtime even for stale sessions.
+		// IDLE sessions are always considered live (user may just be away).
+		if session.Phase(info.Phase).IsActive() {
+			if info.LastInteractionTime != nil && time.Since(*info.LastInteractionTime) > staleActiveSessionThreshold {
+				wingmanLog("skipping stale active session %s (phase=%s, last_interaction=%s ago)", sid, info.Phase, time.Since(*info.LastInteractionTime).Round(time.Second))
+				continue
+			}
+		}
+
+		wingmanLog("found live session %s (phase=%s)", sid, info.Phase)
+		return true
+	}
+
+	return false
+}
+
+// findSessionStateDir locates the .git/entire-sessions/ directory by
+// reading .git to handle both normal repos and worktrees.
+func findSessionStateDir(repoRoot string) string {
+	gitPath := filepath.Join(repoRoot, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return ""
+	}
+
+	var gitDir string
+	if info.IsDir() {
+		// Normal repo: .git is a directory
+		gitDir = gitPath
+	} else {
+		// Worktree: .git is a file containing "gitdir: <path>"
+		data, readErr := os.ReadFile(gitPath) //nolint:gosec // path from repoRoot
+		if readErr != nil {
+			return ""
+		}
+		content := strings.TrimSpace(string(data))
+		if !strings.HasPrefix(content, "gitdir: ") {
+			return ""
+		}
+		gitDir = strings.TrimPrefix(content, "gitdir: ")
+		if !filepath.IsAbs(gitDir) {
+			gitDir = filepath.Join(repoRoot, gitDir)
+		}
+		// For worktrees, session state is in the common dir
+		// .git/worktrees/<name> → ../../ is the common .git dir
+		commonDir := filepath.Join(gitDir, "..", "..")
+		gitDir = filepath.Clean(commonDir)
+	}
+
+	sessDir := filepath.Join(gitDir, "entire-sessions")
+	if _, statErr := os.Stat(sessDir); statErr != nil {
+		return ""
+	}
+	return sessDir
+}
+
+// sessionPhaseInfo holds the subset of session state needed for liveness checks.
+type sessionPhaseInfo struct {
+	Phase               string
+	LastInteractionTime *time.Time
+}
+
+func readSessionPhaseInfo(sessDir, sessionID string) sessionPhaseInfo {
+	data, err := os.ReadFile(filepath.Join(sessDir, sessionID+".json")) //nolint:gosec // sessDir is from git internals
+	if err != nil {
+		return sessionPhaseInfo{}
+	}
+	var partial struct {
+		Phase               string     `json:"phase"`
+		LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
+	}
+	if json.Unmarshal(data, &partial) != nil {
+		return sessionPhaseInfo{}
+	}
+	return sessionPhaseInfo{
+		Phase:               partial.Phase,
+		LastInteractionTime: partial.LastInteractionTime,
+	}
+}
+
+// runWingmanApply is the entrypoint for the __apply subcommand, spawned by the
+// stop hook when a pending REVIEW.md is detected. It re-checks preconditions
+// and triggers claude --continue to apply the review.
+func runWingmanApply(repoRoot string) error {
+	wingmanLog("apply process started (pid=%d)", os.Getpid())
+
+	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
+	if !fileExists(reviewPath) {
+		wingmanLog("no REVIEW.md found at %s, nothing to apply", reviewPath)
+		return nil
+	}
+	wingmanLog("REVIEW.md found at %s", reviewPath)
+
+	// Retry prevention: check if apply was already attempted for this review
+	state := loadWingmanStateDirect(repoRoot)
+	switch {
+	case state == nil:
+		wingmanLog("no wingman state found, proceeding without session check")
+	case state.ApplyAttemptedAt != nil:
+		wingmanLog("apply already attempted at %s, skipping", state.ApplyAttemptedAt.Format(time.RFC3339))
+		return nil
+	default:
+		wingmanLog("wingman state loaded: session=%s", state.SessionID)
+	}
+
+	// Re-check session hasn't become active (user may have typed during spawn delay).
+	// IDLE and ENDED are safe — only ACTIVE/ACTIVE_COMMITTED should block.
+	if state != nil && state.SessionID != "" {
+		sessDir := findSessionStateDir(repoRoot)
+		if sessDir != "" {
+			phaseInfo := readSessionPhaseInfo(sessDir, state.SessionID)
+			if phaseInfo.Phase != "" && session.Phase(phaseInfo.Phase).IsActive() {
+				wingmanLog("session is active (phase=%s), aborting (next stop hook will retry)", phaseInfo.Phase)
+				return nil
+			}
+			wingmanLog("session phase=%s, safe to proceed", phaseInfo.Phase)
+		}
+	}
+
+	// Mark apply as attempted BEFORE triggering
+	if state != nil {
+		now := time.Now()
+		state.ApplyAttemptedAt = &now
+		saveWingmanStateDirect(repoRoot, state)
+	}
+
+	wingmanLog("triggering auto-apply via claude --continue")
+	applyStart := time.Now()
+	if err := triggerAutoApply(repoRoot); err != nil {
+		wingmanLog("ERROR auto-apply failed after %s: %v", time.Since(applyStart).Round(time.Millisecond), err)
+		return fmt.Errorf("failed to trigger auto-apply: %w", err)
+	}
+	wingmanLog("auto-apply completed in %s", time.Since(applyStart).Round(time.Millisecond))
+
+	return nil
+}
+
+// triggerAutoApply spawns claude --continue to apply the review suggestions.
+func triggerAutoApply(repoRoot string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), wingmanApplyTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude",
+		"--continue",
+		"--print",
+		"--setting-sources", "",
+		// Auto-accept edits so the agent can modify files and delete REVIEW.md
+		// without requiring user consent (this runs in a background process).
+		"--permission-mode", "acceptEdits",
+		wingmanApplyInstruction,
+	)
+	cmd.Dir = repoRoot
+	// Strip GIT_* env vars to prevent hook interference, and set
+	// ENTIRE_WINGMAN_APPLY=1 so git hooks (post-commit) know not to
+	// trigger another wingman review (prevents infinite recursion).
+	env := wingmanStripGitEnv(os.Environ())
+	env = append(env, "ENTIRE_WINGMAN_APPLY=1")
+	cmd.Env = env
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	return cmd.Run() //nolint:wrapcheck // caller wraps
+}
+
+// wingmanStripGitEnv returns a copy of env with all GIT_* variables removed
+// and the CLAUDECODE variable unset. GIT_* removal prevents a subprocess from
+// discovering or modifying the parent's git repo. CLAUDECODE removal prevents
+// the Claude CLI from refusing to start due to nested-session detection.
+func wingmanStripGitEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if strings.HasPrefix(e, "GIT_") || strings.HasPrefix(e, "CLAUDECODE=") {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
+}
+
+// saveWingmanStateDirect writes the wingman state file directly to a known path
+// under repoRoot, avoiding os.Chdir (which mutates process-wide state).
+func saveWingmanStateDirect(repoRoot string, state *WingmanState) {
+	statePath := filepath.Join(repoRoot, wingmanStateFile)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o750); err != nil {
+		return
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return
+	}
+	//nolint:gosec,errcheck // G306: state file is config, not secrets; best-effort write
+	_ = os.WriteFile(statePath, data, 0o644)
+}

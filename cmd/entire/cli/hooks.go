@@ -8,10 +8,13 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -265,6 +268,19 @@ func handleSessionStartCommon() error {
 	// Build informational message
 	message := "\n\nPowered by Entire:\n  This conversation will be linked to your next commit."
 
+	// Append wingman note if enabled, with pending review indication
+	if settings.IsWingmanEnabled() {
+		if repoRoot, rootErr := paths.RepoRoot(); rootErr == nil {
+			if _, statErr := os.Stat(filepath.Join(repoRoot, wingmanReviewFile)); statErr == nil {
+				message += "\n  Wingman: a review is pending and will be addressed on your next prompt."
+			} else {
+				message += "\n  Wingman is active: your changes will be automatically reviewed."
+			}
+		} else {
+			message += "\n  Wingman is active: your changes will be automatically reviewed."
+		}
+	}
+
 	// Check for concurrent sessions and append count if any
 	strat := GetStrategy()
 	if concurrentChecker, ok := strat.(strategy.ConcurrentSessionChecker); ok {
@@ -293,16 +309,60 @@ func handleSessionStartCommon() error {
 	return nil
 }
 
-// hookResponse represents a JSON response.
-// Used to control whether Agent continues processing the prompt.
-type hookResponse struct {
-	SystemMessage string `json:"systemMessage,omitempty"`
+// hookSpecificOutput contains event-specific fields nested under hookSpecificOutput
+// in the hook response JSON. Claude Code requires this nesting for additionalContext
+// to be injected into the agent's conversation.
+type hookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"`
+	AdditionalContext string `json:"additionalContext,omitempty"`
 }
 
-// outputHookResponse outputs a JSON response to stdout
-func outputHookResponse(reason string) error {
+// hookResponse represents a JSON response to a Claude Code hook.
+// systemMessage is shown to the user as a warning/info message.
+// hookSpecificOutput contains event-specific fields like additionalContext.
+type hookResponse struct {
+	SystemMessage      string              `json:"systemMessage,omitempty"`
+	HookSpecificOutput *hookSpecificOutput `json:"hookSpecificOutput,omitempty"`
+}
+
+// outputHookResponse outputs a JSON response with additionalContext for
+// SessionStart hooks. The context is injected into the agent's conversation.
+func outputHookResponse(additionalContext string) error {
 	resp := hookResponse{
-		SystemMessage: reason,
+		SystemMessage: additionalContext,
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:     "SessionStart",
+			AdditionalContext: additionalContext,
+		},
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		return fmt.Errorf("failed to encode hook response: %w", err)
+	}
+	return nil
+}
+
+// outputHookMessage outputs a JSON response with only a systemMessage — shown
+// to the user in the terminal but NOT injected into the agent's conversation.
+// Use this for informational notifications (e.g., wingman status) that the user
+// should see but the agent should not act on.
+func outputHookMessage(message string) error {
+	resp := hookResponse{SystemMessage: message}
+	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		return fmt.Errorf("failed to encode hook response: %w", err)
+	}
+	return nil
+}
+
+// outputHookResponseWithContextAndMessage outputs a JSON response with both
+// additionalContext (injected into agent conversation) and a systemMessage
+// (shown to the user as a warning/info).
+func outputHookResponseWithContextAndMessage(additionalContext, message string) error {
+	resp := hookResponse{
+		SystemMessage: message,
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:     "UserPromptSubmit",
+			AdditionalContext: additionalContext,
+		},
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
 		return fmt.Errorf("failed to encode hook response: %w", err)

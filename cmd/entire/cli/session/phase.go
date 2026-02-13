@@ -239,9 +239,13 @@ func transitionFromActiveCommitted(event Event, ctx TransitionContext) Transitio
 		if ctx.IsRebaseInProgress {
 			return TransitionResult{NewPhase: PhaseActiveCommitted}
 		}
+		// Don't update LastInteractionTime on self-loop: a git commit is not
+		// proof the agent is alive. Only TurnStart/TurnEnd prove liveness.
+		// Without this, PostCommit refreshes all sessions on every commit,
+		// preventing hasAnyLiveSession from detecting truly stale sessions.
 		return TransitionResult{
 			NewPhase: PhaseActiveCommitted,
-			Actions:  []Action{ActionMigrateShadowBranch, ActionUpdateLastInteraction},
+			Actions:  []Action{ActionMigrateShadowBranch},
 		}
 	case EventSessionStart:
 		return TransitionResult{

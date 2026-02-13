@@ -3,3 +3,7 @@ settings.local.json
 metadata/
 current_session
 logs/
+wingman.lock
+wingman-state.json
+wingman-payload.json
+REVIEW.md
