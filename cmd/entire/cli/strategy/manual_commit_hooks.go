@@ -380,23 +380,15 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(commitMsgFile string, source str
 	}
 
 	if hasNewContent {
-		// New content: check PendingCheckpointID first (set during previous condensation),
-		// otherwise generate a new one. This ensures idempotent IDs across hook invocations.
-		for _, state := range sessionsWithContent {
-			if state.PendingCheckpointID != "" {
-				if cpID, err := id.NewCheckpointID(state.PendingCheckpointID); err == nil {
-					checkpointID = cpID
-					break
-				}
-			}
+		// New content: generate a fresh checkpoint ID.
+		// Idempotency for hook re-runs is handled by the trailer existence check above.
+		// NOTE: Do NOT reuse PendingCheckpointID here - it's from a previous commit's
+		// PostCommit and would cause duplicate IDs across different commits.
+		cpID, err := id.Generate()
+		if err != nil {
+			return fmt.Errorf("failed to generate checkpoint ID: %w", err)
 		}
-		if checkpointID.IsEmpty() {
-			cpID, err := id.Generate()
-			if err != nil {
-				return fmt.Errorf("failed to generate checkpoint ID: %w", err)
-			}
-			checkpointID = cpID
-		}
+		checkpointID = cpID
 	}
 	// Otherwise checkpointID is already set to LastCheckpointID from above
 
@@ -1068,23 +1060,6 @@ func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(repo *git.
 // (ACTIVE session + no TTY). Generates a checkpoint ID and adds the trailer
 // directly, bypassing content detection and interactive prompts.
 func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error {
-	// Use PendingCheckpointID if set, otherwise generate a new one
-	var cpID id.CheckpointID
-	if state.PendingCheckpointID != "" {
-		var err error
-		cpID, err = id.NewCheckpointID(state.PendingCheckpointID)
-		if err != nil {
-			cpID = "" // fall through to generate
-		}
-	}
-	if cpID.IsEmpty() {
-		var err error
-		cpID, err = id.Generate()
-		if err != nil {
-			return nil //nolint:nilerr // Hook must be silent on failure
-		}
-	}
-
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
@@ -1092,9 +1067,17 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 
 	message := string(content)
 
-	// Don't add if trailer already exists
+	// Don't add if trailer already exists (idempotency for hook re-runs)
 	if _, found := trailers.ParseCheckpoint(message); found {
 		return nil
+	}
+
+	// Generate a fresh checkpoint ID.
+	// NOTE: Do NOT reuse PendingCheckpointID here - it's from a previous commit's
+	// PostCommit and would cause duplicate IDs across different commits.
+	cpID, err := id.Generate()
+	if err != nil {
+		return nil //nolint:nilerr // Hook must be silent on failure
 	}
 
 	message = addCheckpointTrailer(message, cpID)

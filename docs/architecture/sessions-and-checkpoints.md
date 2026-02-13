@@ -166,6 +166,38 @@ Location: `.git/entire-sessions/<session-id>.json`
 
 Stored in git common dir (shared across worktrees). Tracks active session info.
 
+#### Checkpoint ID Fields
+
+Two checkpoint ID fields in session state track different lifecycle stages:
+
+| Field | Set By | Cleared By | Purpose |
+|-------|--------|------------|---------|
+| `PendingCheckpointID` | PostCommit (ACTIVE → ACTIVE_COMMITTED) | `condenseAndUpdateState` | Deferred condensation coordination |
+| `LastCheckpointID` | `condenseAndUpdateState` | `InitializeSession` (new prompt) | Amend trailer restoration |
+
+**Key invariant:** `PendingCheckpointID` is for **deferred condensation only** — it must NEVER be reused when generating checkpoint IDs for new commits. Each new commit gets a fresh ID; idempotency for hook re-runs is handled by checking if the commit message already has a trailer.
+
+**Deferred condensation flow:**
+
+```
+1. Agent is working                    [ACTIVE phase]
+2. User commits mid-turn
+   → PostCommit sets PendingCheckpointID
+   → Phase transitions to ACTIVE_COMMITTED
+   → Condensation deferred (agent still working)
+3. Agent continues working             [ACTIVE_COMMITTED phase]
+4. Agent stops (TurnEnd event)
+   → handleTurnEndCondense runs
+   → Uses PendingCheckpointID for condensation
+   → Clears PendingCheckpointID
+   → Sets LastCheckpointID
+5. Session idle                        [IDLE phase]
+```
+
+**Why not reuse `PendingCheckpointID` for new commits:**
+
+If a user makes multiple commits during a session, each commit needs a unique checkpoint ID. `PendingCheckpointID` persists from step 2 until step 4 completes. If `PrepareCommitMsg` reused it for a second commit before condensation finished, both commits would share the same checkpoint ID — corrupting the 1:1 link between commits and metadata.
+
 ### Temporary Checkpoints
 
 Branch: `entire/<commit[:7]>-<worktreeHash[:6]>`
