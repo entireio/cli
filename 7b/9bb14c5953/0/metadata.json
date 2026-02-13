@@ -1,0 +1,34 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "7b9bb14c5953",
+  "session_id": "4ddad80c-b9d6-490f-bd13-3f41ed52caf5",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-13T16:35:23.104159Z",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "78d98ff0c634",
+  "transcript_identifier_at_start": "0e5794de-2ae3-4fee-8fda-205dfb1b4483",
+  "token_usage": {
+    "input_tokens": 307,
+    "cache_creation_tokens": 554587,
+    "cache_read_tokens": 25908750,
+    "output_tokens": 6037,
+    "api_call_count": 253
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-13T16:35:21.993502Z",
+    "agent_lines": 14,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 14,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/4ddad80c-b9d6-490f-bd13-3f41ed52caf5.jsonl"
+}
