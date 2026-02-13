@@ -12,14 +12,21 @@ import (
 type Phase string
 
 const (
-	PhaseActive          Phase = "active"
-	PhaseActiveCommitted Phase = "active_committed"
-	PhaseIdle            Phase = "idle"
-	PhaseEnded           Phase = "ended"
+	PhaseActive Phase = "active"
+	PhaseIdle   Phase = "idle"
+	PhaseEnded  Phase = "ended"
 )
 
+// PhaseActiveCommitted is kept as a variable (not a valid phase constant) so that
+// external packages referencing it continue to compile during the migration.
+// It maps to PhaseActive at runtime via PhaseFromString.
+//
+// Deprecated: ACTIVE_COMMITTED has been removed from the state machine.
+// All references should be migrated to PhaseActive.
+var PhaseActiveCommitted Phase = "active_committed"
+
 // allPhases is the canonical list of phases for enumeration (e.g., diagram generation).
-var allPhases = []Phase{PhaseIdle, PhaseActive, PhaseActiveCommitted, PhaseEnded}
+var allPhases = []Phase{PhaseIdle, PhaseActive, PhaseEnded}
 
 // PhaseFromString normalizes a phase string, treating empty or unknown values
 // as PhaseIdle for backward compatibility with pre-state-machine session files.
@@ -27,8 +34,8 @@ func PhaseFromString(s string) Phase {
 	switch Phase(s) {
 	case PhaseActive:
 		return PhaseActive
-	case PhaseActiveCommitted:
-		return PhaseActiveCommitted
+	case "active_committed": // backward compat: old state files
+		return PhaseActive
 	case PhaseIdle:
 		return PhaseIdle
 	case PhaseEnded:
@@ -40,7 +47,7 @@ func PhaseFromString(s string) Phase {
 
 // IsActive reports whether the phase represents an active agent turn.
 func (p Phase) IsActive() bool {
-	return p == PhaseActive || p == PhaseActiveCommitted
+	return p == PhaseActive
 }
 
 // Event represents something that happened to a session.
@@ -138,8 +145,6 @@ func Transition(current Phase, event Event, ctx TransitionContext) TransitionRes
 		return transitionFromIdle(event, ctx)
 	case PhaseActive:
 		return transitionFromActive(event, ctx)
-	case PhaseActiveCommitted:
-		return transitionFromActiveCommitted(event, ctx)
 	case PhaseEnded:
 		return transitionFromEnded(event, ctx)
 	default:
@@ -183,10 +188,8 @@ func transitionFromIdle(event Event, ctx TransitionContext) TransitionResult {
 func transitionFromActive(event Event, ctx TransitionContext) TransitionResult {
 	switch event {
 	case EventTurnStart:
-		// Ctrl-C recovery: just continue.
-		// This is a degenerate case where the EndTurn is skipped after a in-turn commit.
-		// Either the agent crashed or the user interrupted it.
-		// We choose to continue, and defer condensation to the next TurnEnd or GitCommit.
+		// Ctrl-C recovery: the previous turn's TurnEnd was skipped (agent crashed or
+		// user interrupted). Just continue as active.
 		return TransitionResult{
 			NewPhase: PhaseActive,
 			Actions:  []Action{ActionUpdateLastInteraction},
@@ -201,8 +204,8 @@ func transitionFromActive(event Event, ctx TransitionContext) TransitionResult {
 			return TransitionResult{NewPhase: PhaseActive}
 		}
 		return TransitionResult{
-			NewPhase: PhaseActiveCommitted,
-			Actions:  []Action{ActionMigrateShadowBranch, ActionUpdateLastInteraction},
+			NewPhase: PhaseActive,
+			Actions:  []Action{ActionCondense, ActionMigrateShadowBranch, ActionUpdateLastInteraction},
 		}
 	case EventSessionStart:
 		return TransitionResult{
@@ -216,45 +219,6 @@ func transitionFromActive(event Event, ctx TransitionContext) TransitionResult {
 		}
 	default:
 		return TransitionResult{NewPhase: PhaseActive}
-	}
-}
-
-func transitionFromActiveCommitted(event Event, ctx TransitionContext) TransitionResult {
-	switch event {
-	case EventTurnStart:
-		// Ctrl-C recovery after commit.
-		// This is a degenerate case where the EndTurn is skipped after a in-turn commit.
-		// Either the agent crashed or the user interrupted it.
-		// We choose to continue, and defer condensation to the next TurnEnd or GitCommit.
-		return TransitionResult{
-			NewPhase: PhaseActive,
-			Actions:  []Action{ActionUpdateLastInteraction},
-		}
-	case EventTurnEnd:
-		return TransitionResult{
-			NewPhase: PhaseIdle,
-			Actions:  []Action{ActionCondense, ActionUpdateLastInteraction},
-		}
-	case EventGitCommit:
-		if ctx.IsRebaseInProgress {
-			return TransitionResult{NewPhase: PhaseActiveCommitted}
-		}
-		return TransitionResult{
-			NewPhase: PhaseActiveCommitted,
-			Actions:  []Action{ActionMigrateShadowBranch, ActionUpdateLastInteraction},
-		}
-	case EventSessionStart:
-		return TransitionResult{
-			NewPhase: PhaseActiveCommitted,
-			Actions:  []Action{ActionWarnStaleSession},
-		}
-	case EventSessionStop:
-		return TransitionResult{
-			NewPhase: PhaseEnded,
-			Actions:  []Action{ActionUpdateLastInteraction},
-		}
-	default:
-		return TransitionResult{NewPhase: PhaseActiveCommitted}
 	}
 }
 
@@ -332,7 +296,6 @@ func MermaidDiagram() string {
 	// State declarations with descriptions.
 	b.WriteString("    state \"IDLE\" as idle\n")
 	b.WriteString("    state \"ACTIVE\" as active\n")
-	b.WriteString("    state \"ACTIVE_COMMITTED\" as active_committed\n")
 	b.WriteString("    state \"ENDED\" as ended\n")
 	b.WriteString("\n")
 
