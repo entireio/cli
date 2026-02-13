@@ -1,0 +1,44 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b96b93f2526f",
+  "strategy": "manual-commit",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/doctor.go",
+    "cmd/entire/cli/doctor_test.go",
+    "cmd/entire/cli/hooks.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/phase_transitions_test.go",
+    "cmd/entire/cli/phase_wiring_test.go",
+    "cmd/entire/cli/reset.go",
+    "cmd/entire/cli/session/phase.go",
+    "cmd/entire/cli/session/phase_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/mid_turn_commit_test.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go",
+    "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go",
+    "cmd/entire/cli/strategy/phase_wiring_test.go",
+    "cmd/entire/cli/strategy/strategy.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b9/6b93f2526f/0/metadata.json",
+      "transcript": "/b9/6b93f2526f/0/full.jsonl",
+      "context": "/b9/6b93f2526f/0/context.md",
+      "content_hash": "/b9/6b93f2526f/0/content_hash.txt",
+      "prompt": "/b9/6b93f2526f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 186,
+    "cache_creation_tokens": 507605,
+    "cache_read_tokens": 21509936,
+    "output_tokens": 5282,
+    "api_call_count": 171
+  }
+}
