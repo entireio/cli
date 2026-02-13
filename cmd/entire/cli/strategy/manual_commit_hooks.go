@@ -1248,6 +1248,9 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 		if state.PendingCheckpointID != "" {
 			state.PendingCheckpointID = ""
 		}
+		if state.PendingPushRemote != "" {
+			state.PendingPushRemote = ""
+		}
 
 		// Calculate attribution at prompt start (BEFORE agent makes any changes)
 		// This captures user edits since the last checkpoint (or base commit for first prompt).
@@ -1480,6 +1483,8 @@ func (s *ManualCommitStrategy) HandleTurnEnd(state *SessionState, actions []sess
 
 // handleTurnEndCondense performs deferred condensation at turn end.
 func (s *ManualCommitStrategy) handleTurnEndCondense(logCtx context.Context, state *SessionState) {
+	defer s.flushPendingPush(logCtx, state)
+
 	repo, err := OpenRepository()
 	if err != nil {
 		logging.Warn(logCtx, "turn-end condense: failed to open repo",
