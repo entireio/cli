@@ -698,6 +698,10 @@ func EnsureEntireGitignore() error {
 		"settings.local.json",
 		"metadata/",
 		"logs/",
+		"wingman.lock",
+		"wingman-state.json",
+		"wingman-payload.json",
+		"REVIEW.md",
 	}
 
 	// Track what needs to be added
