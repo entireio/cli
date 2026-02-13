@@ -383,8 +383,7 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 	}
 
 	// Fire EventTurnEnd to transition session phase (all strategies).
-	// This moves ACTIVE → IDLE or ACTIVE_COMMITTED → IDLE.
-	// For ACTIVE_COMMITTED → IDLE, HandleTurnEnd dispatches ActionCondense.
+	// This moves ACTIVE → IDLE.
 	transitionSessionTurnEnd(sessionID)
 
 	// Clean up pre-prompt state (CLI responsibility)
@@ -733,8 +732,8 @@ func handleClaudeCodeSessionEnd() error {
 }
 
 // transitionSessionTurnEnd fires EventTurnEnd to move the session from
-// ACTIVE → IDLE (or ACTIVE_COMMITTED → IDLE). Best-effort: logs warnings
-// on failure rather than returning errors.
+// ACTIVE → IDLE. Best-effort: logs warnings on failure rather than
+// returning errors.
 func transitionSessionTurnEnd(sessionID string) {
 	turnState, loadErr := strategy.LoadSessionState(sessionID)
 	if loadErr != nil {
@@ -746,7 +745,7 @@ func transitionSessionTurnEnd(sessionID string) {
 	}
 	remaining := strategy.TransitionAndLog(turnState, session.EventTurnEnd, session.TransitionContext{})
 
-	// Dispatch strategy-specific actions (e.g., ActionCondense for ACTIVE_COMMITTED → IDLE)
+	// Dispatch strategy-specific actions emitted by the turn-end transition
 	if len(remaining) > 0 {
 		strat := GetStrategy()
 		if handler, ok := strat.(strategy.TurnEndHandler); ok {

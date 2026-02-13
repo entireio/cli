@@ -17,14 +17,14 @@ import (
 // TestShadow_CommitBeforeStop tests the "commit while agent is still working" flow.
 //
 // When the user commits while the agent is in the ACTIVE phase (between
-// SimulateUserPromptSubmit and SimulateStop), the session should transition to
-// ACTIVE_COMMITTED. This defers condensation because the agent is still working.
-// When the agent finishes its turn (SimulateStop), the deferred condensation fires
-// and the session transitions to IDLE with metadata persisted to entire/checkpoints/v1.
+// SimulateUserPromptSubmit and SimulateStop), condensation happens immediately
+// in PostCommit. The phase stays ACTIVE (no ACTIVE_COMMITTED transition).
+// The shadow branch is migrated to the new HEAD after condensation.
+// When the agent finishes its turn (SimulateStop), the session transitions to IDLE.
 //
 // State machine transitions tested:
-//   - ACTIVE + GitCommit -> ACTIVE_COMMITTED (defer condensation, migrate shadow branch)
-//   - ACTIVE_COMMITTED + TurnEnd -> IDLE + ActionCondense (deferred condensation fires)
+//   - ACTIVE + GitCommit -> ACTIVE + [ActionCondense, ActionMigrateShadowBranch]
+//   - ACTIVE + TurnEnd -> IDLE
 func TestShadow_CommitBeforeStop(t *testing.T) {
 	t.Parallel()
 
@@ -191,7 +191,7 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 	t.Logf("Session phase after stop: %s (StepCount: %d)", state.Phase, state.StepCount)
 
 	if !env.BranchExists(paths.MetadataBranchName) {
-		t.Fatal("entire/checkpoints/v1 branch should exist after TurnEnd condensation")
+		t.Fatal("entire/checkpoints/v1 branch should exist after PostCommit condensation")
 	}
 	latestCheckpointID := env.TryGetLatestCheckpointID()
 	if latestCheckpointID != "" {
