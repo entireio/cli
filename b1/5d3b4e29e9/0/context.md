@@ -16,3 +16,15 @@ The default case in BuildCondensedTranscriptFromBytes is an exact copy of the Ag
 
 yes
 
+### Prompt 3
+
+linting is failing now
+
+### Prompt 4
+
+[Request interrupted by user for tool use]
+
+### Prompt 5
+
+could we also just remove default then, and just list all the others explicitly
+
