@@ -1,0 +1,97 @@
+Implement the following plan:
+
+# Git Hook Chaining Implementation
+
+## Context
+
+`entire enable` overwrites existing custom git hooks (e.g., `prepare-commit-msg`) without warning. `entire disable --uninstall` needs to handle the case where another tool moved our hooks using the same `.pre-<tool>` backup pattern.
+
+## Files to Modify
+
+- `cmd/entire/cli/strategy/hooks.go` — core install/remove logic
+- `cmd/entire/cli/strategy/hooks_test.go` — tests
+
+No changes needed to `setup.go` or other callers — the `InstallGitHook`/`RemoveGitHook` signatures stay the same.
+
+## Implementation
+
+### 1. Add constants
+
+```go
+const backupSuffix = ".pre-entire"
+const chainComment = "# Chain: run pre-existing hook"
+```
+
+### 2. Refactor `InstallGitHook` to use a loop
+
+The current code has 4 near-identical blocks (one per hook). Refactor to a `hookSpec` struct + loop to avoid duplicating the new chaining logic 4 times:
+
+```go
+type hookSpec struct {
+    name    string
+    content string // Entire's hook content (without chain)
+}
+```
+
+### 3. Add chaining logic to install
+
+For each hook, before writing:
+
+1. If hook exists and **has** `entireHookMarker` → check if `.pre-entire` backup exists, ensure content includes chain call if so. Otherwise update normally (idempotent).
+2. If hook exists and **lacks** `entireHookMarker` → it's a custom hook:
+   - If `.pre-entire` backup already exists, don't overwrite it (safety). Just install our hook with chain call.
+   - Otherwise: `os.Rename` the existing hook to `<hook>.pre-entire`, then write our hook with chain call appended.
+   - Print `[entire] Backed up existing <hook> to <hook>.pre-entire` to stderr (always, even when `silent`, since this is an important operational message).
+3. If hook doesn't exist → write normally (no chain).
+
+### 4. Chain call template
+
+Appended to hook content when a backup exists:
+
+```sh
+# Chain: run pre-existing hook
+_entire_hook_dir="$(dirname "$0")"
+if [ -x "$_entire_hook_dir/<hook>.pre-entire" ]; then
+    "$_entire_hook_dir/<hook>.pre-entire" "$@"
+fi
+```
+
+Uses `dirname "$0"` to resolve the hooks directory dynamically — works correctly with worktrees.
+
+### 5. Update `RemoveGitHook`
+
+For each hook:
+
+1. If hook at standard path contains `entireHookMarker` → remove it.
+2. If `.pre-entire` backup exists → restore it to the original path via `os.Rename`.
+3. Scan for moved hooks: `filepath.Glob(<hooksDir>/<hook>.pre-*)` → for each match (excluding `.pre-entire`), check if it contains `entireHookMarker` → remove it.
+
+### 6. New helper functions
+
+- `generateChainedContent(baseContent, hookName string) string` — appends chain call to hook content
+- `scanForMovedHooks(hooksDir, hookName string) []string` — finds `<hook>.pre-*` files containing our marker (excluding `.pre-entire`)
+
+### 7. Tests
+
+Add to `hooks_test.go`:
+
+| Test | What it verifies |
+|------|-----------------|
+| `TestInstallGitHook_BacksUpCustomHook` | Custom hook renamed to `.pre-entire`, our hook has chain call |
+| `TestInstallGitHook_DoesNotOverwriteExistingBackup` | Second custom hook doesn't clobber first backup |
+| `TestInstallGitHook_IdempotentWithChaining` | Re-install with backup present returns count 0 |
+| `TestInstallGitHook_NoBackupWhenNoExistingHook` | No `.pre-entire` files created for fresh install |
+| `TestInstallGitHook_MixedHooks` | Only hooks with pre-existing custom content get backed up |
+| `TestRemoveGitHook_RestoresBackup` | After remove, original custom hook is back at the standard path |
+| `TestRemoveGitHook_CleansUpMovedHooks` | `<hook>.pre-husky` containing our marker is removed |
+| `TestRemoveGitHook_IgnoresMovedNonEntireHooks` | `<hook>.pre-foobar` without our marker is left alone |
+| `TestRemoveGitHook_RestoresBackupWhenHookAlreadyGone` | `.pre-entire` restored even if main hook was deleted by another tool |
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl

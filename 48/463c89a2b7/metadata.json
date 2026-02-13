@@ -1,0 +1,30 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "48463c89a2b7",
+  "strategy": "manual-commit",
+  "branch": "soph/safer-agent-hook-parsing",
+  "checkpoints_count": 7,
+  "files_touched": [
+    "cmd/entire/cli/agent/claudecode/hooks.go",
+    "cmd/entire/cli/agent/claudecode/hooks_test.go",
+    "cmd/entire/cli/agent/geminicli/hooks.go",
+    "cmd/entire/cli/agent/geminicli/hooks_test.go",
+    "cmd/entire/cli/agent/testutil/hooks.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/48/463c89a2b7/0/metadata.json",
+      "transcript": "/48/463c89a2b7/0/full.jsonl",
+      "context": "/48/463c89a2b7/0/context.md",
+      "content_hash": "/48/463c89a2b7/0/content_hash.txt",
+      "prompt": "/48/463c89a2b7/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1061,
+    "cache_creation_tokens": 399226,
+    "cache_read_tokens": 8153696,
+    "output_tokens": 222,
+    "api_call_count": 87
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "32f95fca3df2",
+  "strategy": "manual-commit",
+  "branch": "soph/fix-issue-with-reusing-checkpoint-id",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/32/f95fca3df2/0/metadata.json",
+      "transcript": "/32/f95fca3df2/0/full.jsonl",
+      "context": "/32/f95fca3df2/0/context.md",
+      "content_hash": "/32/f95fca3df2/0/content_hash.txt",
+      "prompt": "/32/f95fca3df2/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 352,
+    "cache_creation_tokens": 219606,
+    "cache_read_tokens": 2410913,
+    "output_tokens": 87,
+    "api_call_count": 43
+  }
+}

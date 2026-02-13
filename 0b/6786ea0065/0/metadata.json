@@ -1,0 +1,30 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "0b6786ea0065",
+  "session_id": "e59f0f58-7444-45a2-81a4-d280e6fb0430",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T19:47:46.855722Z",
+  "branch": "soph/initialize-checkpointbranch-with-user-email",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/common_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 5,
+    "cache_creation_tokens": 19962,
+    "cache_read_tokens": 113890,
+    "output_tokens": 11,
+    "api_call_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T19:47:46.679497Z",
+    "agent_lines": 1,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/e59f0f58-7444-45a2-81a4-d280e6fb0430.jsonl"
+}
