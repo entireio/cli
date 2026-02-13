@@ -236,6 +236,7 @@ func TestWingmanStripGitEnv(t *testing.T) {
 		"GIT_DIR=/repo/.git",
 		"GIT_WORK_TREE=/repo",
 		"EDITOR=vim",
+		"CLAUDECODE=1",
 	}
 
 	filtered := wingmanStripGitEnv(env)
@@ -244,10 +245,13 @@ func TestWingmanStripGitEnv(t *testing.T) {
 		if strings.HasPrefix(e, "GIT_") {
 			t.Errorf("GIT_ variable should be stripped: %s", e)
 		}
+		if strings.HasPrefix(e, "CLAUDECODE=") {
+			t.Errorf("CLAUDECODE variable should be stripped: %s", e)
+		}
 	}
 
 	if len(filtered) != 3 {
-		t.Errorf("expected 3 non-GIT vars, got %d", len(filtered))
+		t.Errorf("expected 3 non-stripped vars, got %d", len(filtered))
 	}
 }
 

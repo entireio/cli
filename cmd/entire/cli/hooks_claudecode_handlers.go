@@ -795,11 +795,6 @@ func handleClaudeCodeSessionEnd() error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to mark session ended: %v\n", err)
 	}
 
-	// If a wingman review is pending and this was the last live session,
-	// trigger background auto-apply. No more prompts will come from this
-	// session, so the prompt-submit injection can't deliver the review.
-	triggerWingmanAutoApplyOnSessionEnd()
-
 	return nil
 }
 
@@ -908,46 +903,6 @@ func triggerWingmanAutoApplyIfPending(repoRoot string) {
 	spawnDetachedWingmanApply(repoRoot)
 }
 
-// triggerWingmanAutoApplyOnSessionEnd checks for a pending REVIEW.md after a
-// session ends. If no live sessions remain, spawns background auto-apply.
-// Called from both Claude Code and Gemini CLI SessionEnd hooks.
-func triggerWingmanAutoApplyOnSessionEnd() {
-	logCtx := logging.WithComponent(context.Background(), "wingman")
-	if !settings.IsWingmanEnabled() {
-		logging.Debug(logCtx, "wingman auto-apply on session-end skip: wingman not enabled")
-		return
-	}
-	if os.Getenv("ENTIRE_WINGMAN_APPLY") != "" {
-		logging.Debug(logCtx, "wingman auto-apply on session-end skip: already in apply subprocess")
-		return
-	}
-	repoRoot, err := paths.RepoRoot()
-	if err != nil {
-		logging.Debug(logCtx, "wingman auto-apply on session-end skip: cannot resolve repo root")
-		return
-	}
-	reviewPath := filepath.Join(repoRoot, wingmanReviewFile)
-	if _, statErr := os.Stat(reviewPath); statErr != nil {
-		logging.Debug(logCtx, "wingman auto-apply on session-end skip: no REVIEW.md pending")
-		return
-	}
-	wingmanState := loadWingmanStateDirect(repoRoot)
-	if wingmanState != nil && wingmanState.ApplyAttemptedAt != nil {
-		logging.Debug(logCtx, "wingman auto-apply on session-end skip: already attempted",
-			slog.Time("attempted_at", *wingmanState.ApplyAttemptedAt),
-		)
-		return
-	}
-	if hasAnyLiveSession(repoRoot) {
-		logging.Debug(logCtx, "wingman auto-apply deferred on session-end: other live sessions remain")
-		return
-	}
-	fmt.Fprintf(os.Stderr, "[wingman] Last session ended with pending review, spawning auto-apply\n")
-	logging.Info(logCtx, "wingman auto-apply on session-end (no live sessions remain)",
-		slog.String("review_path", reviewPath),
-	)
-	spawnDetachedWingmanApply(repoRoot)
-}
 
 // markSessionEnded transitions the session to ENDED phase via the state machine.
 func markSessionEnded(sessionID string) error {

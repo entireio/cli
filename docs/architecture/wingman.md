@@ -64,7 +64,7 @@ The review runs in a fully detached subprocess (`entire wingman __review <payloa
 └────────────────────────────────────────────────────────┘
 ```
 
-The review process uses `--setting-sources ""` to disable hooks (prevents recursion). The Claude CLI calls (`callClaudeForReview` and `triggerAutoApply`) strip `GIT_*` environment variables via `wingmanStripGitEnv()` to prevent index corruption — the detached process itself inherits the parent's environment.
+The review process uses `--setting-sources ""` to disable hooks (prevents recursion). The Claude CLI calls (`callClaudeForReview` and `triggerAutoApply`) strip `GIT_*` and `CLAUDECODE` environment variables via `wingmanStripGitEnv()` — `GIT_*` removal prevents index corruption, and `CLAUDECODE` removal prevents the Claude CLI from refusing to start due to nested-session detection. The detached process itself inherits the parent's full environment; stripping happens only when spawning the Claude CLI subprocess.
 
 ### Phase 3: Delivery
 
@@ -105,7 +105,6 @@ This path is **invisible** — it runs silently. It exists as a fallback for whe
 | **Review process** (`runWingmanReview`) | Review finishes | If no live sessions → background auto-apply. Otherwise defer. |
 | **Prompt-submit hook** (`captureInitialState`) | User sends prompt | If REVIEW.md exists → inject as `additionalContext`. |
 | **Stop hook** (`triggerWingmanAutoApplyIfPending`) | Agent turn ends | If REVIEW.md exists + no live sessions → spawn `__apply`. |
-| **Session-end hook** (`triggerWingmanAutoApplyOnSessionEnd`) | User closes session | If REVIEW.md exists + no remaining live sessions → spawn `__apply`. |
 
 ## User-Visible Messages
 
@@ -220,19 +219,34 @@ The `ApplyAttemptedAt` field in `WingmanState` prevents infinite auto-apply atte
 - **Lock file**: Atomic `O_CREATE|O_EXCL` prevents concurrent review spawns. Stale locks (>30 min) are auto-cleaned.
 - **Dedup hash**: SHA256 of sorted file paths prevents re-reviewing identical change sets.
 - **Detached processes**: Review and apply run in their own process groups (`Setpgid: true`), surviving parent exit.
-- **GIT_* stripping**: Claude CLI calls strip `GIT_*` env vars via `wingmanStripGitEnv()` to prevent index corruption. Applied in `callClaudeForReview()` and `triggerAutoApply()`, not at process spawn time.
+- **Environment stripping**: Claude CLI calls strip `GIT_*` env vars (prevents index corruption) and `CLAUDECODE` (prevents nested-session detection refusal) via `wingmanStripGitEnv()`. Applied in `callClaudeForReview()` and `triggerAutoApply()`, not at process spawn time. The summarize package (`summarize/claude.go`) uses an identical `stripGitEnv()` for the same purpose.
 - **ENTIRE_WINGMAN_APPLY=1**: Set during auto-apply to prevent the post-commit hook from triggering another review (recursion prevention).
 - **Stale session detection**: ACTIVE/ACTIVE_COMMITTED sessions not updated in 4+ hours are considered orphaned (crashed agent) and ignored by `hasAnyLiveSession`. IDLE sessions are always considered live regardless of age.
 
 ## Configuration
 
+### Commands
+
 ```bash
-entire wingman enable   # Enable wingman auto-review
-entire wingman disable  # Disable and clean up pending reviews
-entire wingman status   # Show current status
+entire wingman enable [--local]   # Enable wingman auto-review
+entire wingman disable [--local]  # Disable and clean up pending reviews
+entire wingman status             # Show current status
 ```
 
-Wingman state is stored in `.entire/settings.json`:
+**Precondition:** `entire wingman enable` requires Entire to be enabled first (`entire enable`).
+
+### `--local` Flag
+
+The `--local` flag controls which settings file is written:
+
+| Flag | File | Committed to git | Purpose |
+|------|------|------------------|---------|
+| (default) | `.entire/settings.json` | Yes | Project-wide setting shared with team |
+| `--local` | `.entire/settings.local.json` | No (gitignored) | User-specific override |
+
+When loading settings, both files are merged — local overrides project. The `--local` flag only affects which file is *written* to.
+
+### Settings Structure
 
 ```json
 {
@@ -244,6 +258,26 @@ Wingman state is stored in `.entire/settings.json`:
 }
 ```
 
+### Status Output
+
+`entire wingman status` shows:
+
+```
+Wingman: enabled
+Last review: 2026-02-13T08:45:11+01:00
+Status: pending
+Pending review: .entire/REVIEW.md
+```
+
+Fields shown: enabled/disabled status, last review timestamp (if available), applied/pending status, and pending review file path (if exists).
+
+### Hidden Subcommands
+
+| Command | Purpose |
+|---------|---------|
+| `entire wingman __review <payload-path>` | Internal: spawned as detached review subprocess |
+| `entire wingman __apply <repoRoot>` | Internal: spawned to auto-apply pending REVIEW.md |
+
 ## Key Constants
 
 | Constant | Value | Purpose |
@@ -254,5 +288,39 @@ Wingman state is stored in `.entire/settings.json`:
 | `wingmanReviewTimeout` | 5m | Timeout for Claude review API call |
 | `wingmanApplyTimeout` | 15m | Timeout for auto-apply process |
 | `wingmanStaleReviewTTL` | 1h | Max age before review is cleaned up |
-| `staleLockThreshold` | 30m | Max age before lock is considered stale |
+| `staleLockThreshold` | 30m | Max age before lock is considered stale (for lock acquisition) |
+| `wingmanNotificationLockThreshold` | 10m | Max lock age for showing "Review in progress" notifications |
 | `staleActiveSessionThreshold` | 4h | Max age before ACTIVE session is considered stale/orphaned |
+| `maxDiffSize` | 100KB | Maximum diff size included in review prompt (truncates beyond) |
+
+None of these constants are user-configurable — they are internal to the implementation.
+
+## Claude CLI Invocations
+
+### Review Call (`callClaudeForReview`)
+
+```bash
+claude --print \
+  --output-format json \
+  --model sonnet \
+  --setting-sources "" \
+  --allowedTools "Read,Glob,Grep" \
+  --permission-mode bypassPermissions
+```
+
+- Working directory: repo root (reviewer can access source files)
+- Environment: `wingmanStripGitEnv()` strips `GIT_*` and `CLAUDECODE`
+- Input: review prompt via stdin
+
+### Auto-Apply Call (`triggerAutoApply`)
+
+```bash
+claude --continue \
+  --print \
+  --setting-sources "" \
+  --permission-mode acceptEdits \
+  <wingmanApplyInstruction>
+```
+
+- Working directory: repo root
+- Environment: `wingmanStripGitEnv()` strips `GIT_*` and `CLAUDECODE`, adds `ENTIRE_WINGMAN_APPLY=1`

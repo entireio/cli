@@ -26,6 +26,8 @@ func TestClaudeGenerator_GitIsolation(t *testing.T) {
 	t.Setenv("GIT_DIR", "/some/repo/.git")
 	t.Setenv("GIT_WORK_TREE", "/some/repo")
 	t.Setenv("GIT_INDEX_FILE", "/some/repo/.git/index")
+	// Set CLAUDECODE which is set when running inside Claude Code
+	t.Setenv("CLAUDECODE", "1")
 
 	input := Input{
 		Transcript: []Entry{
@@ -47,10 +49,13 @@ func TestClaudeGenerator_GitIsolation(t *testing.T) {
 		t.Errorf("cmd.Dir = %q, want %q", capturedCmd.Dir, os.TempDir())
 	}
 
-	// Verify no GIT_* env vars in the command's environment
+	// Verify no GIT_* or CLAUDECODE env vars in the command's environment
 	for _, env := range capturedCmd.Env {
 		if strings.HasPrefix(env, "GIT_") {
 			t.Errorf("found GIT_* env var in subprocess: %s", env)
+		}
+		if strings.HasPrefix(env, "CLAUDECODE=") {
+			t.Errorf("found CLAUDECODE env var in subprocess: %s", env)
 		}
 	}
 }
@@ -63,6 +68,7 @@ func TestStripGitEnv(t *testing.T) {
 		"GIT_WORK_TREE=/repo",
 		"GIT_INDEX_FILE=/repo/.git/index",
 		"SHELL=/bin/zsh",
+		"CLAUDECODE=1",
 	}
 
 	filtered := stripGitEnv(env)
