@@ -101,6 +101,12 @@ type Store interface {
 
 	// ListCommitted lists all committed checkpoints.
 	ListCommitted(ctx context.Context) ([]CommittedInfo, error)
+
+	// UpdateCommitted appends transcript content to an existing committed checkpoint.
+	// Used for trailing transcript handling: post-commit conversation that belongs
+	// to the checkpoint but arrives after initial condensation.
+	// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
+	UpdateCommitted(ctx context.Context, opts UpdateCommittedOptions) error
 }
 
 // WriteTemporaryResult contains the result of writing a temporary checkpoint.
@@ -281,6 +287,24 @@ type WriteCommittedOptions struct {
 	// Persisted in CommittedMetadata so restore can write the transcript back to
 	// the correct location without reconstructing agent-specific paths.
 	SessionTranscriptPath string
+}
+
+// UpdateCommittedOptions contains options for updating an existing committed checkpoint.
+type UpdateCommittedOptions struct {
+	// CheckpointID identifies the checkpoint to update
+	CheckpointID id.CheckpointID
+
+	// SessionID identifies which session slot to update within the checkpoint
+	SessionID string
+
+	// Transcript contains additional transcript lines to append
+	Transcript []byte
+
+	// Prompts contains additional prompts to append
+	Prompts []string
+
+	// Context is the updated context (replaces existing)
+	Context []byte
 }
 
 // CommittedInfo contains summary information about a committed checkpoint.

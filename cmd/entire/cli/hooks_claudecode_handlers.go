@@ -745,13 +745,13 @@ func transitionSessionTurnEnd(sessionID string) {
 	}
 	remaining := strategy.TransitionAndLog(turnState, session.EventTurnEnd, session.TransitionContext{})
 
-	// Dispatch strategy-specific actions emitted by the turn-end transition
-	if len(remaining) > 0 {
-		strat := GetStrategy()
-		if handler, ok := strat.(strategy.TurnEndHandler); ok {
-			if err := handler.HandleTurnEnd(turnState, remaining); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: turn-end action dispatch failed: %v\n", err)
-			}
+	// Always invoke strategy-specific turn-end handling. The handler may
+	// dispatch remaining actions AND perform turn-end housekeeping such as
+	// appending trailing transcripts to committed checkpoints.
+	strat := GetStrategy()
+	if handler, ok := strat.(strategy.TurnEndHandler); ok {
+		if err := handler.HandleTurnEnd(turnState, remaining); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: turn-end action dispatch failed: %v\n", err)
 		}
 	}
 

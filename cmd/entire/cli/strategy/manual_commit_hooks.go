@@ -1180,12 +1180,24 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 			state.TranscriptPath = transcriptPath
 		}
 
+		// Append any trailing transcript from the previous turn to the committed
+		// checkpoint before clearing LastCheckpointID. This captures conversation
+		// that happened after the commit (e.g., agent explaining what it did) but
+		// before the user entered a new prompt.
+		if !state.LastCheckpointID.IsEmpty() {
+			if err := s.handleTrailingTranscript(state); err != nil {
+				logCtx := logging.WithComponent(context.Background(), "trailing-transcript")
+				logging.Warn(logCtx, "trailing transcript append failed during InitializeSession",
+					slog.String("session_id", state.SessionID),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+
 		// Clear checkpoint ID on every new prompt
 		// This is set during PostCommit when a checkpoint is created, and should be
 		// cleared when the user enters a new prompt (starting fresh work)
-		if state.LastCheckpointID != "" {
-			state.LastCheckpointID = ""
-		}
+		state.LastCheckpointID = ""
 
 		// Calculate attribution at prompt start (BEFORE agent makes any changes)
 		// This captures user edits since the last checkpoint (or base commit for first prompt).
@@ -1387,16 +1399,26 @@ func (s *ManualCommitStrategy) getLastPrompt(repo *git.Repository, state *Sessio
 }
 
 // HandleTurnEnd dispatches strategy-specific actions emitted when an agent turn ends.
-// Since condensation now happens immediately in PostCommit, HandleTurnEnd is a no-op
-// for condensation. It only logs unexpected actions for diagnostics.
+// Since condensation now happens immediately in PostCommit, HandleTurnEnd handles:
+//   - Trailing transcript: appends post-commit conversation to the prior checkpoint
+//     when no new files were touched (StepCount == 0).
+//   - Unexpected action logging for diagnostics.
 //
 //nolint:unparam // error return required by interface but hooks must return nil
 func (s *ManualCommitStrategy) HandleTurnEnd(state *SessionState, actions []session.Action) error {
+	logCtx := logging.WithComponent(context.Background(), "checkpoint")
+
+	// Attempt to append trailing transcript (best-effort)
+	if err := s.handleTrailingTranscript(state); err != nil {
+		logging.Warn(logCtx, "trailing transcript append failed",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()),
+		)
+	}
+
 	if len(actions) == 0 {
 		return nil
 	}
-
-	logCtx := logging.WithComponent(context.Background(), "checkpoint")
 
 	for _, action := range actions {
 		switch action {

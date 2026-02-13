@@ -246,11 +246,32 @@ func (s *Session) CreateTranscript(prompt string, changes []FileChange) string {
 	return s.TranscriptPath
 }
 
+// SimulateUserPromptSubmitWithTranscript simulates the UserPromptSubmit hook
+// with a transcript path. This is needed for tests that rely on InitializeSession
+// updating state.TranscriptPath (e.g., trailing transcript tests).
+func (r *HookRunner) SimulateUserPromptSubmitWithTranscript(sessionID, transcriptPath string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	}
+
+	return r.runHookWithInput("user-prompt-submit", input)
+}
+
 // SimulateUserPromptSubmit is a convenience method on TestEnv.
 func (env *TestEnv) SimulateUserPromptSubmit(sessionID string) error {
 	env.T.Helper()
 	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
 	return runner.SimulateUserPromptSubmit(sessionID)
+}
+
+// SimulateUserPromptSubmitWithTranscript is a convenience method on TestEnv.
+func (env *TestEnv) SimulateUserPromptSubmitWithTranscript(sessionID, transcriptPath string) error {
+	env.T.Helper()
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	return runner.SimulateUserPromptSubmitWithTranscript(sessionID, transcriptPath)
 }
 
 // SimulateUserPromptSubmitWithResponse is a convenience method on TestEnv.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1003,6 +1004,227 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 	newRef := plumbing.NewHashReference(refName, newCommitHash)
 	if err := s.repo.Storer.SetReference(newRef); err != nil {
 		return fmt.Errorf("failed to set branch reference: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateCommitted appends transcript content to an existing committed checkpoint.
+// Used for trailing transcript handling: post-commit conversation that belongs
+// to the checkpoint but arrives after initial condensation.
+// Only appends transcript/prompts and replaces context. Does NOT re-run
+// auto-summarization or update FilesTouched/TokenUsage.
+// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
+func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOptions) error {
+	_ = ctx // Reserved for future use
+
+	if opts.CheckpointID.IsEmpty() {
+		return errors.New("invalid update options: checkpoint ID is required")
+	}
+
+	// Ensure sessions branch exists
+	if err := s.ensureSessionsBranch(); err != nil {
+		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	}
+
+	// Get current branch tip and flatten tree
+	ref, entries, err := s.getSessionsBranchEntries()
+	if err != nil {
+		return err
+	}
+
+	// Read root CheckpointSummary to find the session slot
+	basePath := opts.CheckpointID.Path() + "/"
+	rootMetadataPath := basePath + paths.MetadataFileName
+	entry, exists := entries[rootMetadataPath]
+	if !exists {
+		return ErrCheckpointNotFound
+	}
+
+	checkpointSummary, err := s.readSummaryFromBlob(entry.Hash)
+	if err != nil {
+		return fmt.Errorf("failed to read checkpoint summary: %w", err)
+	}
+
+	// Find session index matching opts.SessionID
+	sessionIndex := -1
+	for i := range len(checkpointSummary.Sessions) {
+		metaPath := fmt.Sprintf("%s%d/%s", basePath, i, paths.MetadataFileName)
+		if metaEntry, metaExists := entries[metaPath]; metaExists {
+			meta, metaErr := s.readMetadataFromBlob(metaEntry.Hash)
+			if metaErr == nil && meta.SessionID == opts.SessionID {
+				sessionIndex = i
+				break
+			}
+		}
+	}
+	if sessionIndex == -1 {
+		// Fall back to latest session; log so mismatches are diagnosable.
+		sessionIndex = len(checkpointSummary.Sessions) - 1
+		logging.Debug(ctx, "UpdateCommitted: session ID not found, falling back to latest",
+			slog.String("session_id", opts.SessionID),
+			slog.String("checkpoint_id", string(opts.CheckpointID)),
+			slog.Int("fallback_index", sessionIndex),
+		)
+	}
+
+	sessionPath := fmt.Sprintf("%s%d/", basePath, sessionIndex)
+
+	// Append transcript
+	if len(opts.Transcript) > 0 {
+		if err := s.appendTranscript(opts, sessionPath, entries); err != nil {
+			return fmt.Errorf("failed to append transcript: %w", err)
+		}
+	}
+
+	// Append prompts
+	if len(opts.Prompts) > 0 {
+		if err := s.appendPrompts(opts.Prompts, sessionPath, entries); err != nil {
+			return fmt.Errorf("failed to append prompts: %w", err)
+		}
+	}
+
+	// Replace context
+	if len(opts.Context) > 0 {
+		contextBlob, err := CreateBlobFromContent(s.repo, opts.Context)
+		if err != nil {
+			return fmt.Errorf("failed to create context blob: %w", err)
+		}
+		contextPath := sessionPath + paths.ContextFileName
+		entries[contextPath] = object.TreeEntry{
+			Name: contextPath,
+			Mode: filemode.Regular,
+			Hash: contextBlob,
+		}
+	}
+
+	// Build and commit
+	newTreeHash, err := BuildTreeFromEntries(s.repo, entries)
+	if err != nil {
+		return err
+	}
+
+	authorName, authorEmail := getGitAuthorFromRepo(s.repo)
+	commitMsg := fmt.Sprintf("Append trailing transcript for checkpoint %s", opts.CheckpointID)
+	newCommitHash, err := s.createCommit(newTreeHash, ref.Hash(), commitMsg, authorName, authorEmail)
+	if err != nil {
+		return err
+	}
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	newRef := plumbing.NewHashReference(refName, newCommitHash)
+	if err := s.repo.Storer.SetReference(newRef); err != nil {
+		return fmt.Errorf("failed to set branch reference: %w", err)
+	}
+
+	return nil
+}
+
+// appendTranscript reads the existing transcript blob, appends new content, and
+// writes the combined result back. Also updates the content hash.
+func (s *GitStore) appendTranscript(opts UpdateCommittedOptions, sessionPath string, entries map[string]object.TreeEntry) error {
+	transcriptPath := sessionPath + paths.TranscriptFileName
+
+	// Read existing transcript (handle chunked format by looking for base file)
+	var existingContent []byte
+	if entry, exists := entries[transcriptPath]; exists {
+		blob, err := s.repo.BlobObject(entry.Hash)
+		if err != nil {
+			return fmt.Errorf("failed to read existing transcript blob: %w", err)
+		}
+		reader, err := blob.Reader()
+		if err != nil {
+			return fmt.Errorf("failed to get transcript reader: %w", err)
+		}
+		existingContent, err = io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			return fmt.Errorf("failed to read transcript content: %w", err)
+		}
+	}
+
+	// Append new transcript with newline separator
+	var combined []byte
+	if len(existingContent) > 0 {
+		combined = existingContent
+		// Ensure existing ends with newline before appending
+		if combined[len(combined)-1] != '\n' {
+			combined = append(combined, '\n')
+		}
+		combined = append(combined, opts.Transcript...)
+	} else {
+		combined = opts.Transcript
+	}
+
+	// Write combined transcript blob
+	blobHash, err := CreateBlobFromContent(s.repo, combined)
+	if err != nil {
+		return fmt.Errorf("failed to create transcript blob: %w", err)
+	}
+	entries[transcriptPath] = object.TreeEntry{
+		Name: transcriptPath,
+		Mode: filemode.Regular,
+		Hash: blobHash,
+	}
+
+	// Update content hash
+	contentHash := fmt.Sprintf("sha256:%x", sha256.Sum256(combined))
+	hashBlob, err := CreateBlobFromContent(s.repo, []byte(contentHash))
+	if err != nil {
+		return fmt.Errorf("failed to create content hash blob: %w", err)
+	}
+	hashPath := sessionPath + paths.ContentHashFileName
+	entries[hashPath] = object.TreeEntry{
+		Name: hashPath,
+		Mode: filemode.Regular,
+		Hash: hashBlob,
+	}
+
+	return nil
+}
+
+// appendPrompts reads the existing prompt blob, appends new prompts with separator,
+// and writes the combined result back.
+func (s *GitStore) appendPrompts(newPrompts []string, sessionPath string, entries map[string]object.TreeEntry) error {
+	promptPath := sessionPath + paths.PromptFileName
+
+	// Read existing prompts
+	var existingContent string
+	if entry, exists := entries[promptPath]; exists {
+		blob, err := s.repo.BlobObject(entry.Hash)
+		if err != nil {
+			return fmt.Errorf("failed to read existing prompt blob: %w", err)
+		}
+		reader, err := blob.Reader()
+		if err != nil {
+			return fmt.Errorf("failed to get prompt reader: %w", err)
+		}
+		data, err := io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			return fmt.Errorf("failed to read prompt content: %w", err)
+		}
+		existingContent = string(data)
+	}
+
+	// Combine with separator
+	newContent := strings.Join(newPrompts, "\n\n---\n\n")
+	var combined string
+	if existingContent != "" {
+		combined = existingContent + "\n\n---\n\n" + newContent
+	} else {
+		combined = newContent
+	}
+
+	// Write combined prompts blob
+	blobHash, err := CreateBlobFromContent(s.repo, []byte(combined))
+	if err != nil {
+		return fmt.Errorf("failed to create prompt blob: %w", err)
+	}
+	entries[promptPath] = object.TreeEntry{
+		Name: promptPath,
+		Mode: filemode.Regular,
+		Hash: blobHash,
 	}
 
 	return nil
