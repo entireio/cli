@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "c2385b018377",
+  "strategy": "manual-commit",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "docs/architecture/sessions-and-checkpoints.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c2/385b018377/0/metadata.json",
+      "transcript": "/c2/385b018377/0/full.jsonl",
+      "context": "/c2/385b018377/0/context.md",
+      "content_hash": "/c2/385b018377/0/content_hash.txt",
+      "prompt": "/c2/385b018377/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 31,
+    "cache_creation_tokens": 7814,
+    "cache_read_tokens": 1822239,
+    "output_tokens": 501,
+    "api_call_count": 17
+  }
+}
