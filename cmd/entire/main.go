@@ -42,6 +42,12 @@ func main() {
 		}
 
 		cancel()
+
+		var exitCodeErr *cli.ExitCodeError
+		if errors.As(err, &exitCodeErr) {
+			os.Exit(exitCodeErr.ExitCode)
+		}
+
 		os.Exit(1)
 	}
 	cancel() // Cleanup on successful exit
