@@ -30,7 +30,8 @@
     "cmd/entire/cli/strategy/phase_postcommit_test.go",
     "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go",
     "cmd/entire/cli/strategy/phase_wiring_test.go",
-    "cmd/entire/cli/strategy/strategy.go"
+    "cmd/entire/cli/strategy/strategy.go",
+    "docs/architecture/sessions-and-checkpoints.md"
   ],
   "sessions": [
     {
@@ -46,13 +47,20 @@
       "context": "/b9/6b93f2526f/1/context.md",
       "content_hash": "/b9/6b93f2526f/1/content_hash.txt",
       "prompt": "/b9/6b93f2526f/1/prompt.txt"
+    },
+    {
+      "metadata": "/b9/6b93f2526f/2/metadata.json",
+      "transcript": "/b9/6b93f2526f/2/full.jsonl",
+      "context": "/b9/6b93f2526f/2/context.md",
+      "content_hash": "/b9/6b93f2526f/2/content_hash.txt",
+      "prompt": "/b9/6b93f2526f/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 1300,
-    "cache_creation_tokens": 1356817,
-    "cache_read_tokens": 50346826,
-    "output_tokens": 16756,
-    "api_call_count": 419
+    "input_tokens": 4271,
+    "cache_creation_tokens": 1565600,
+    "cache_read_tokens": 53103115,
+    "output_tokens": 17629,
+    "api_call_count": 461
   }
 }
