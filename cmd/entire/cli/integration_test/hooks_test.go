@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-  "github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 func TestHookRunner_SimulateUserPromptSubmit(t *testing.T) {

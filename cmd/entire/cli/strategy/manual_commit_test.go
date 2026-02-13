@@ -2124,6 +2124,165 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 		metadata.InitialAttribution.AgentPercentage)
 }
 
+// TestCondenseSession_IncludesCommitTreeHash verifies that condensation stores the
+// commit_tree_hash field in both session-level and root-level metadata.
+func TestCondenseSession_IncludesCommitTreeHash(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create initial commit
+	testFile := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(testFile, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := worktree.Add("main.go"); err != nil {
+		t.Fatalf("failed to stage file: %v", err)
+	}
+	_, err = worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2025-01-15-test-treehash"
+
+	// Create metadata directory with transcript
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	if err := os.MkdirAll(metadataDirAbs, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	transcript := `{"type":"human","message":{"content":"add a function"}}
+{"type":"assistant","message":{"content":"Done"}}
+`
+	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Agent modifies the file
+	if err := os.WriteFile(testFile, []byte("package main\n\nfunc hello() {}\n"), 0o644); err != nil {
+		t.Fatalf("failed to write agent changes: %v", err)
+	}
+
+	// Save a checkpoint
+	err = s.SaveChanges(SaveContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"main.go"},
+		NewFiles:       []string{},
+		DeletedFiles:   []string{},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	})
+	if err != nil {
+		t.Fatalf("SaveChanges() error = %v", err)
+	}
+
+	// User commits
+	if _, err := worktree.Add("main.go"); err != nil {
+		t.Fatalf("failed to stage: %v", err)
+	}
+	_, err = worktree.Commit("User commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "User", Email: "user@test.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	// Get HEAD's tree hash (what condense should capture)
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("failed to get HEAD: %v", err)
+	}
+	headCommit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatalf("failed to get HEAD commit: %v", err)
+	}
+	expectedTreeHash := headCommit.TreeHash.String()
+
+	// Load session state and condense
+	state, err := s.loadSessionState(sessionID)
+	if err != nil {
+		t.Fatalf("loadSessionState() error = %v", err)
+	}
+
+	checkpointID := id.MustCheckpointID("c3d4e5f6a7b8")
+	_, err = s.CondenseSession(repo, checkpointID, state)
+	if err != nil {
+		t.Fatalf("CondenseSession() error = %v", err)
+	}
+
+	// Read metadata from entire/checkpoints/v1 branch
+	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get sessions branch: %v", err)
+	}
+	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())
+	if err != nil {
+		t.Fatalf("failed to get sessions commit: %v", err)
+	}
+	tree, err := sessionsCommit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	// Verify commit_tree_hash in session-level metadata (0/metadata.json)
+	sessionMetadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
+	metadataFile, err := tree.File(sessionMetadataPath)
+	if err != nil {
+		t.Fatalf("failed to find session metadata at %s: %v", sessionMetadataPath, err)
+	}
+	content, err := metadataFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read session metadata: %v", err)
+	}
+
+	var sessionMeta struct {
+		CommitTreeHash string `json:"commit_tree_hash"`
+	}
+	if err := json.Unmarshal([]byte(content), &sessionMeta); err != nil {
+		t.Fatalf("failed to parse session metadata: %v", err)
+	}
+	if sessionMeta.CommitTreeHash != expectedTreeHash {
+		t.Errorf("session metadata commit_tree_hash = %q, want %q", sessionMeta.CommitTreeHash, expectedTreeHash)
+	}
+
+	// Verify commit_tree_hash in root-level summary (metadata.json)
+	rootMetadataPath := checkpointID.Path() + "/" + paths.MetadataFileName
+	rootFile, err := tree.File(rootMetadataPath)
+	if err != nil {
+		t.Fatalf("failed to find root metadata at %s: %v", rootMetadataPath, err)
+	}
+	rootContent, err := rootFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read root metadata: %v", err)
+	}
+
+	var rootMeta struct {
+		CommitTreeHash string `json:"commit_tree_hash"`
+	}
+	if err := json.Unmarshal([]byte(rootContent), &rootMeta); err != nil {
+		t.Fatalf("failed to parse root metadata: %v", err)
+	}
+	if rootMeta.CommitTreeHash != expectedTreeHash {
+		t.Errorf("root metadata commit_tree_hash = %q, want %q", rootMeta.CommitTreeHash, expectedTreeHash)
+	}
+}
+
 // TestExtractUserPromptsFromLines tests extraction of user prompts from JSONL format.
 func TestExtractUserPromptsFromLines(t *testing.T) {
 	tests := []struct {

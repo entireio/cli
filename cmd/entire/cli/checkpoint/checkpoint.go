@@ -204,6 +204,10 @@ type WriteCommittedOptions struct {
 	// Branch is the branch name where the checkpoint was created (empty if detached HEAD)
 	Branch string
 
+	// CommitTreeHash is the git tree hash of HEAD at condensation time.
+	// Used as a content-addressable anchor for re-linking after history rewrites (rebase, squash).
+	CommitTreeHash string
+
 	// Transcript is the session transcript content (full.jsonl)
 	Transcript []byte
 
@@ -338,7 +342,8 @@ type CommittedMetadata struct {
 	SessionID        string          `json:"session_id"`
 	Strategy         string          `json:"strategy"`
 	CreatedAt        time.Time       `json:"created_at"`
-	Branch           string          `json:"branch,omitempty"` // Branch where checkpoint was created (empty if detached HEAD)
+	Branch           string          `json:"branch,omitempty"`           // Branch where checkpoint was created (empty if detached HEAD)
+	CommitTreeHash   string          `json:"commit_tree_hash,omitempty"` // Git tree hash of HEAD at condensation time
 	CheckpointsCount int             `json:"checkpoints_count"`
 	FilesTouched     []string        `json:"files_touched"`
 
@@ -416,6 +421,7 @@ type CheckpointSummary struct {
 	CheckpointID     id.CheckpointID    `json:"checkpoint_id"`
 	Strategy         string             `json:"strategy"`
 	Branch           string             `json:"branch,omitempty"`
+	CommitTreeHash   string             `json:"commit_tree_hash,omitempty"`
 	CheckpointsCount int                `json:"checkpoints_count"`
 	FilesTouched     []string           `json:"files_touched"`
 	Sessions         []SessionFilePaths `json:"sessions"`

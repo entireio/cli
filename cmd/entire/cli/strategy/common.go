@@ -1468,6 +1468,20 @@ func GetCurrentBranchName(repo *git.Repository) string {
 	return head.Name().Short()
 }
 
+// GetHeadTreeHash returns the hex string of HEAD's tree hash.
+// Returns an empty string if HEAD or its commit cannot be read (e.g., empty repository).
+func GetHeadTreeHash(repo *git.Repository) string {
+	head, err := repo.Head()
+	if err != nil {
+		return ""
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return ""
+	}
+	return commit.TreeHash.String()
+}
+
 // getMainBranchHash returns the hash of the main branch (main or master).
 // Returns ZeroHash if no main branch is found.
 func GetMainBranchHash(repo *git.Repository) plumbing.Hash {
