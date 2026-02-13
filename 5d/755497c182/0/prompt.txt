@@ -1,0 +1,13 @@
+can you generate me a changelog.md update for 0.4.3 -> 0.4.4
+
+---
+
+- `entire enable` no longer prompts when already enabled <- why has this no PR?
+
+---
+
+link the PR
+
+---
+
+can you add it to CHANGELOG.md
