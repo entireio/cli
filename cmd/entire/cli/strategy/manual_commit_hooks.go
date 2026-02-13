@@ -1011,6 +1011,14 @@ func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(repo *git.
 // the committed files. This is used in PostCommit for ACTIVE sessions where staged files
 // are empty (already committed). Uses the live transcript to extract modified files and
 // compares against the committed file set.
+//
+// KNOWN LIMITATION: This function relies on transcript analysis to detect file modifications.
+// If the agent makes file modifications via shell commands (e.g., `sed`, `mv`, `cp`) that
+// aren't captured in the transcript's file modification tracking, those modifications may
+// not be detected. This is an acceptable edge case because:
+// 1. Most agent file modifications use the Write/Edit tools which are tracked
+// 2. Shell-based modifications are relatively rare in practice
+// 3. The consequence (missing a checkpoint trailer) is minor - the transcript is still saved
 func (s *ManualCommitStrategy) sessionHasNewContentInCommittedFiles(state *SessionState, committedFiles map[string]struct{}) bool {
 	logCtx := logging.WithComponent(context.Background(), "checkpoint")
 
@@ -2026,8 +2034,14 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 	}
 
 	// Update state for the carry-forward checkpoint.
-	// CheckpointTranscriptStart = 0 is intentional: prompt-level carry-forward means
-	// the next condensation re-processes the full transcript so the checkpoint is self-contained.
+	// CheckpointTranscriptStart = 0 is intentional: each checkpoint is self-contained with
+	// the full transcript. This trades storage efficiency for simplicity:
+	// - Pro: Each checkpoint is independently readable without needing to stitch together
+	//   multiple checkpoints to understand the session history
+	// - Con: For long sessions with multiple partial commits, each checkpoint includes
+	//   the full transcript, which could be large
+	// An alternative would be incremental checkpoints (only new content since last condensation),
+	// but this would complicate checkpoint retrieval and require careful tracking of dependencies.
 	state.FilesTouched = remainingFiles
 	state.StepCount = 1
 	state.CheckpointTranscriptStart = 0
