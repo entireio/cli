@@ -116,21 +116,15 @@ func BuildCondensedTranscriptFromBytes(content []byte, agentType agent.AgentType
 	switch agentType {
 	case agent.AgentTypeGemini:
 		return buildCondensedTranscriptFromGemini(content)
-	case agent.AgentTypeClaudeCode, agent.AgentTypeUnknown, "":
-		// Claude format (JSONL) - also used as default for unknown/empty agent types
-		lines, err := transcript.ParseFromBytes(content)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse transcript: %w", err)
-		}
-		return BuildCondensedTranscript(lines), nil
-	default:
-		// Fallback for any future agent types - try Claude format
-		lines, err := transcript.ParseFromBytes(content)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse transcript: %w", err)
-		}
-		return BuildCondensedTranscript(lines), nil
+	case agent.AgentTypeClaudeCode, agent.AgentTypeUnknown:
+		// Claude format - fall through to shared logic below
 	}
+	// Claude format (JSONL) - handles Claude Code, Unknown, and any future agent types
+	lines, err := transcript.ParseFromBytes(content)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+	return BuildCondensedTranscript(lines), nil
 }
 
 // buildCondensedTranscriptFromGemini parses Gemini JSON transcript and extracts a condensed view.
