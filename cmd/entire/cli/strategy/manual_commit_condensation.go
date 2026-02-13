@@ -137,8 +137,9 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
 	attribution := calculateSessionAttributions(repo, ref, sessionData, state)
-	// Get current branch name
+	// Get current branch name and tree hash
 	branchName := GetCurrentBranchName(repo)
+	commitTreeHash := GetHeadTreeHash(repo)
 
 	// Generate summary if enabled
 	var summary *cpkg.Summary
@@ -176,6 +177,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		SessionID:                   state.SessionID,
 		Strategy:                    StrategyNameManualCommit,
 		Branch:                      branchName,
+		CommitTreeHash:              commitTreeHash,
 		Transcript:                  sessionData.Transcript,
 		Prompts:                     sessionData.Prompts,
 		Context:                     sessionData.Context,
