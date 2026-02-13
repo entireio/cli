@@ -18,7 +18,7 @@ The fastest way to get a contribution merged is to align with maintainers before
 2. **Wait for maintainer feedback** -- we may have relevant context or plans
 3. **Get approval** before starting implementation
 4. **Submit your PR** referencing the approved issue
-5. **Address all feedback** including automated co-pilot comments
+5. **Address all feedback** including automated Copilot comments
 6. **Maintainer review and merge**
 
 ---
@@ -255,7 +255,7 @@ PRs that skip these steps are likely to be closed without merge.
 1. **Push** your branch to your fork
 2. **Open a PR** against the `main` branch
 3. **Describe your changes** -- Link the related issue, summarize what changed and what testing you did
-4. **Address co-pilot feedback** -- See [Responding to Automated Review](#responding-to-automated-review)
+4. **Address Copilot feedback** -- See [Responding to Automated Review](#responding-to-automated-review)
 5. **Wait for maintainer review**
 
 ---
@@ -264,13 +264,13 @@ PRs that skip these steps are likely to be closed without merge.
 
 Co-pilot agent reviews every PR and provides feedback on code quality, potential bugs, and project conventions.
 
-**Read and respond to every co-pilot comment.** PRs with unaddressed co-pilot feedback will not move to maintainer review.
+**Read and respond to every Copilot comment.** PRs with unaddressed Copilot feedback will not move to maintainer review.
 
 - **Fixed** -- Push a commit addressing the issue.
-- **Disagree** -- Reply explaining your reasoning. The co-pilot isn't always right.
+- **Disagree** -- Reply explaining your reasoning. The Copilot isn't always right.
 - **Question** -- Ask for clarification. We're happy to help.
 
-Addressing co-pilot feedback upfront is the fastest path to maintainer review.
+Addressing Copilot feedback upfront is the fastest path to maintainer review.
 
 ---
 
