@@ -243,9 +243,6 @@ func commitGeminiSession(ctx *geminiSessionContext) error {
 	}
 
 	strat := GetStrategy()
-	if err := strat.EnsureSetup(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
-	}
 
 	// Get agent type from the hook agent (determined by which hook command is running)
 	// This is authoritative - if we're in "entire hooks gemini session-end", it's Gemini CLI
@@ -443,6 +440,13 @@ func handleGeminiBeforeAgent() error {
 
 	// If strategy implements SessionInitializer, call it to initialize session state
 	strat := GetStrategy()
+
+	// Ensure strategy setup is in place (git hooks, gitignore, metadata branch).
+	// Done here at turn start so hooks are installed before any mid-turn commits.
+	if err := strat.EnsureSetup(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
+	}
+
 	if initializer, ok := strat.(strategy.SessionInitializer); ok {
 		agentType := ag.Type()
 		if err := initializer.InitializeSession(input.SessionID, agentType, input.SessionRef, input.UserPrompt); err != nil {

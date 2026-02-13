@@ -21,6 +21,12 @@ const chainComment = "# Chain: run pre-existing hook"
 // gitHookNames are the git hooks managed by Entire CLI
 var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "pre-push"}
 
+// ManagedGitHookNames returns the list of git hooks managed by Entire CLI.
+// This is useful for tests that need to manipulate hooks.
+func ManagedGitHookNames() []string {
+	return gitHookNames
+}
+
 // hookSpec defines a git hook's name and content template (without chain call).
 type hookSpec struct {
 	name    string
@@ -62,6 +68,21 @@ func IsGitHookInstalled() bool {
 	if err != nil {
 		return false
 	}
+	return isGitHookInstalledInGitDir(gitDir)
+}
+
+// IsGitHookInstalledInDir checks if all Entire CLI hooks are installed in the given repo directory.
+// This is useful for tests that need to check hooks without changing the working directory.
+func IsGitHookInstalledInDir(repoDir string) bool {
+	gitDir, err := getGitDirInPath(repoDir)
+	if err != nil {
+		return false
+	}
+	return isGitHookInstalledInGitDir(gitDir)
+}
+
+// isGitHookInstalledInGitDir checks if all hooks are installed in the given .git directory.
+func isGitHookInstalledInGitDir(gitDir string) bool {
 	for _, hook := range gitHookNames {
 		hookPath := filepath.Join(gitDir, "hooks", hook)
 		data, err := os.ReadFile(hookPath) //nolint:gosec // Path is constructed from constants

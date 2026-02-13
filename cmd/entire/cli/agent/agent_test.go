@@ -3,7 +3,6 @@ package agent
 import (
 	"io"
 	"testing"
-	"time"
 )
 
 const mockAgentName AgentName = "mock" // Used by mock implementations
@@ -25,11 +24,10 @@ func (m *mockAgent) SupportsHooks() bool           { return false }
 func (m *mockAgent) ParseHookInput(_ HookType, _ io.Reader) (*HookInput, error) {
 	return nil, nil
 }
-func (m *mockAgent) GetSessionID(_ *HookInput) string             { return "" }
-func (m *mockAgent) TransformSessionID(agentID string) string     { return agentID }
-func (m *mockAgent) ExtractAgentSessionID(entireID string) string { return entireID }
-func (m *mockAgent) ProtectedDirs() []string                      { return nil }
-func (m *mockAgent) GetSessionDir(_ string) (string, error)       { return "", nil }
+func (m *mockAgent) GetSessionID(_ *HookInput) string         { return "" }
+func (m *mockAgent) TransformSessionID(agentID string) string { return agentID }
+func (m *mockAgent) ProtectedDirs() []string                  { return nil }
+func (m *mockAgent) GetSessionDir(_ string) (string, error)   { return "", nil }
 func (m *mockAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 	return sessionDir + "/" + agentSessionID + ".jsonl"
 }
@@ -134,15 +132,9 @@ func TestEntryTypeConstants(t *testing.T) {
 //nolint:govet // testing struct field assignment
 func TestHookInputStructure(t *testing.T) {
 	input := HookInput{
-		HookType:     HookPreToolUse,
-		SessionID:    "test-session",
-		SessionRef:   "/path/to/session",
-		Timestamp:    time.Now(),
-		ToolName:     "Write",
-		ToolUseID:    "tool-123",
-		ToolInput:    []byte(`{"file_path": "test.go"}`),
-		ToolResponse: nil,
-		RawData:      map[string]interface{}{"extra": "data"},
+		HookType:  HookPreToolUse,
+		SessionID: "test-session",
+		RawData:   map[string]interface{}{"extra": "data"},
 	}
 
 	if input.HookType != HookPreToolUse {
@@ -153,13 +145,10 @@ func TestHookInputStructure(t *testing.T) {
 	}
 }
 
-//nolint:govet // testing struct field assignment
 func TestSessionChangeStructure(t *testing.T) {
 	change := SessionChange{
-		SessionID:  "test-session",
-		SessionRef: "/path/to/session",
-		EventType:  HookSessionStart,
-		Timestamp:  time.Now(),
+		SessionID: "test-session",
+		EventType: HookSessionStart,
 	}
 
 	if change.SessionID != "test-session" {

@@ -119,6 +119,13 @@ func captureInitialState() error {
 
 	// If strategy implements SessionInitializer, call it to initialize session state
 	strat := GetStrategy()
+
+	// Ensure strategy setup is in place (git hooks, gitignore, metadata branch).
+	// Done here at turn start so hooks are installed before any mid-turn commits.
+	if err := strat.EnsureSetup(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
+	}
+
 	if initializer, ok := strat.(strategy.SessionInitializer); ok {
 		agentType := hookData.agent.Type()
 		if err := initializer.InitializeSession(hookData.sessionID, agentType, hookData.input.SessionRef, hookData.input.UserPrompt); err != nil {
@@ -342,11 +349,6 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 	// Get the configured strategy
 	strat := GetStrategy()
 
-	// Ensure strategy setup is in place (auto-installs git hook, gitignore, etc. if needed)
-	if err := strat.EnsureSetup(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
-	}
-
 	// Get agent type from the currently executing hook agent (authoritative source)
 	var agentType agent.AgentType
 	if hookAgent, agentErr := GetCurrentHookAgent(); agentErr == nil {
@@ -517,12 +519,6 @@ func handleClaudeCodePostTodo() error {
 
 	// Get the active strategy
 	strat := GetStrategy()
-
-	// Ensure strategy setup is complete
-	if err := strat.EnsureSetup(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
-		return nil
-	}
 
 	// Get the session ID from the transcript path or input, then transform to Entire session ID
 	sessionID := input.SessionID
@@ -726,11 +722,6 @@ func handleClaudeCodePostTask() error {
 
 	// Get the configured strategy
 	strat := GetStrategy()
-
-	// Ensure strategy setup is in place
-	if err := strat.EnsureSetup(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to ensure strategy setup: %v\n", err)
-	}
 
 	// Get agent type from the currently executing hook agent (authoritative source)
 	var agentType agent.AgentType

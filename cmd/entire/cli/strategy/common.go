@@ -300,9 +300,10 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 
 	// Create orphan commit (no parent)
 	now := time.Now()
+	authorName, authorEmail := GetGitAuthorFromRepo(repo)
 	sig := object.Signature{
-		Name:  "Entire",
-		Email: "entire@local",
+		Name:  authorName,
+		Email: authorEmail,
 		When:  now,
 	}
 

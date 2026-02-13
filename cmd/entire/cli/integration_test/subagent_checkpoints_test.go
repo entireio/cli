@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/sessionid"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v5"
@@ -291,64 +290,16 @@ func TestSubagentCheckpoints_NoPreTaskFile(t *testing.T) {
 func verifyCheckpointStorage(t *testing.T, env *TestEnv, strategyName, sessionID, taskToolUseID string) {
 	t.Helper()
 
-	entireSessionID := sessionid.EntireSessionID(sessionID)
-
 	switch strategyName {
 	case strategy.StrategyNameManualCommit:
 		// Shadow strategy stores checkpoints in git tree on shadow branch (entire/<head-hash>)
 		// We need to verify that checkpoint data exists in the shadow branch tree
-		verifyShadowCheckpointStorage(t, env, entireSessionID, taskToolUseID)
+		verifyShadowCheckpointStorage(t, env, sessionID, taskToolUseID)
 
 	case strategy.StrategyNameAutoCommit:
 		// Dual strategy stores metadata on orphan entire/checkpoints/v1 branch
 		// Verify that commits were created (incremental + final)
 		t.Logf("Note: auto-commit strategy stores checkpoints in entire/checkpoints/v1 branch")
-	}
-}
-
-// verifyCheckpointDir verifies that a checkpoints directory contains valid checkpoint files.
-func verifyCheckpointDir(t *testing.T, checkpointsDir string) {
-	t.Helper()
-
-	entries, err := os.ReadDir(checkpointsDir)
-	if err != nil {
-		t.Errorf("Failed to read checkpoints directory %s: %v", checkpointsDir, err)
-		return
-	}
-
-	if len(entries) == 0 {
-		t.Errorf("Expected checkpoints in %s, but directory is empty", checkpointsDir)
-		return
-	}
-
-	// Verify at least one valid checkpoint file
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		checkpointFile := filepath.Join(checkpointsDir, entry.Name())
-		data, err := os.ReadFile(checkpointFile)
-		if err != nil {
-			t.Errorf("Failed to read checkpoint file %s: %v", checkpointFile, err)
-			continue
-		}
-
-		var checkpoint strategy.SubagentCheckpoint
-		if err := json.Unmarshal(data, &checkpoint); err != nil {
-			t.Errorf("Failed to parse checkpoint file %s: %v", checkpointFile, err)
-			continue
-		}
-
-		// Verify required fields
-		if checkpoint.Type == "" {
-			t.Errorf("Checkpoint file %s missing type field", entry.Name())
-		}
-		if checkpoint.ToolUseID == "" {
-			t.Errorf("Checkpoint file %s missing tool_use_id field", entry.Name())
-		}
-		if checkpoint.Timestamp.IsZero() {
-			t.Errorf("Checkpoint file %s missing timestamp field", entry.Name())
-		}
 	}
 }
 

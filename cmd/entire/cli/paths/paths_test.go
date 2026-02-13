@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/sessionid"
 )
 
 func TestIsInfrastructurePath(t *testing.T) {
@@ -82,38 +80,5 @@ func TestGetClaudeProjectDir_Default(t *testing.T) {
 
 	if result != expected {
 		t.Errorf("GetClaudeProjectDir() = %q, want %q", result, expected)
-	}
-}
-
-func TestEntireSessionID(t *testing.T) {
-	claudeSessionID := "8f76b0e8-b8f1-4a87-9186-848bdd83d62e"
-
-	result := sessionid.EntireSessionID(claudeSessionID)
-
-	// EntireSessionID is now an identity function - should return the input unchanged
-	if result != claudeSessionID {
-		t.Errorf("sessionid.EntireSessionID() = %q, want %q (identity function)", result, claudeSessionID)
-	}
-}
-
-func TestEntireSessionID_PreservesInput(t *testing.T) {
-	tests := []struct {
-		name            string
-		claudeSessionID string
-	}{
-		{"simple uuid", "abc123"},
-		{"full uuid", "8f76b0e8-b8f1-4a87-9186-848bdd83d62e"},
-		{"with special chars", "test-session_123"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := sessionid.EntireSessionID(tt.claudeSessionID)
-
-			// EntireSessionID is now an identity function
-			if result != tt.claudeSessionID {
-				t.Errorf("sessionid.EntireSessionID(%q) = %q, want %q (identity function)", tt.claudeSessionID, result, tt.claudeSessionID)
-			}
-		})
 	}
 }
