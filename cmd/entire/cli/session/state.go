@@ -59,10 +59,6 @@ type State struct {
 	// Empty means idle (backward compat with pre-state-machine files).
 	Phase Phase `json:"phase,omitempty"`
 
-	// PendingCheckpointID is the checkpoint ID for the current commit cycle.
-	// Generated once when first needed, reused across all commits in the session.
-	PendingCheckpointID string `json:"pending_checkpoint_id,omitempty"`
-
 	// LastInteractionTime is updated on every hook invocation.
 	// Used for stale session detection in "entire doctor".
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`

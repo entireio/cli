@@ -4,17 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -51,11 +44,11 @@ func TestPrepareCommitMsg_AmendPreservesExistingTrailer(t *testing.T) {
 		"trailer should preserve the original checkpoint ID")
 }
 
-// TestPrepareCommitMsg_AmendRestoresTrailerFromPendingCheckpointID verifies the amend
-// bug fix: when a user does `git commit --amend -m "new message"`, the Entire-Checkpoint
+// TestPrepareCommitMsg_AmendRestoresTrailerFromLastCheckpointID verifies the amend
+// restore: when a user does `git commit --amend -m "new message"`, the Entire-Checkpoint
 // trailer is lost because the new message replaces the old one. PrepareCommitMsg restores
-// the trailer from PendingCheckpointID in session state.
-func TestPrepareCommitMsg_AmendRestoresTrailerFromPendingCheckpointID(t *testing.T) {
+// the trailer from LastCheckpointID in session state.
+func TestPrepareCommitMsg_AmendRestoresTrailerFromLastCheckpointID(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
@@ -65,11 +58,11 @@ func TestPrepareCommitMsg_AmendRestoresTrailerFromPendingCheckpointID(t *testing
 	err := s.InitializeSession(sessionID, agent.AgentTypeClaudeCode, "", "")
 	require.NoError(t, err)
 
-	// Simulate state after condensation: PendingCheckpointID is set
+	// Simulate state after condensation: LastCheckpointID is set
 	state, err := s.loadSessionState(sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	state.PendingCheckpointID = "abc123def456"
+	state.LastCheckpointID = "abc123def456"
 	err = s.saveSessionState(state)
 	require.NoError(t, err)
 
@@ -82,21 +75,21 @@ func TestPrepareCommitMsg_AmendRestoresTrailerFromPendingCheckpointID(t *testing
 	err = s.PrepareCommitMsg(commitMsgFile, "commit")
 	require.NoError(t, err)
 
-	// Read the file back - trailer should be restored from PendingCheckpointID
+	// Read the file back - trailer should be restored from LastCheckpointID
 	content, err := os.ReadFile(commitMsgFile)
 	require.NoError(t, err)
 
 	cpID, found := trailers.ParseCheckpoint(string(content))
 	assert.True(t, found,
-		"trailer should be restored from PendingCheckpointID on amend")
+		"trailer should be restored from LastCheckpointID on amend")
 	assert.Equal(t, "abc123def456", cpID.String(),
-		"restored trailer should use PendingCheckpointID value")
+		"restored trailer should use LastCheckpointID value")
 }
 
-// TestPrepareCommitMsg_AmendNoTrailerNoPendingID verifies that when amending with
-// no existing trailer and no PendingCheckpointID in session state, no trailer is added.
+// TestPrepareCommitMsg_AmendNoTrailerNoLastID verifies that when amending with
+// no existing trailer and no LastCheckpointID in session state, no trailer is added.
 // This is the case where the session has never been condensed yet.
-func TestPrepareCommitMsg_AmendNoTrailerNoPendingID(t *testing.T) {
+func TestPrepareCommitMsg_AmendNoTrailerNoLastID(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
@@ -106,11 +99,11 @@ func TestPrepareCommitMsg_AmendNoTrailerNoPendingID(t *testing.T) {
 	err := s.InitializeSession(sessionID, agent.AgentTypeClaudeCode, "", "")
 	require.NoError(t, err)
 
-	// Verify PendingCheckpointID is empty (default)
+	// Verify LastCheckpointID is empty (default)
 	state, err := s.loadSessionState(sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	assert.Empty(t, state.PendingCheckpointID, "PendingCheckpointID should be empty by default")
+	assert.True(t, state.LastCheckpointID.IsEmpty(), "LastCheckpointID should be empty by default")
 
 	// Write a commit message file with NO trailer
 	commitMsgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
@@ -127,177 +120,9 @@ func TestPrepareCommitMsg_AmendNoTrailerNoPendingID(t *testing.T) {
 
 	_, found := trailers.ParseCheckpoint(string(content))
 	assert.False(t, found,
-		"no trailer should be added when PendingCheckpointID is empty")
+		"no trailer should be added when LastCheckpointID is empty")
 
 	// Message should be unchanged
 	assert.Equal(t, newMsg, string(content),
 		"commit message should be unchanged when no trailer to restore")
-}
-
-// TestPrepareCommitMsg_NormalCommitUsesPendingCheckpointID verifies that during
-// a normal commit (source=""), if the session is in ACTIVE_COMMITTED phase with
-// a PendingCheckpointID, the pending ID is reused instead of generating a new one.
-// This ensures idempotent checkpoint IDs across prepare-commit-msg invocations.
-func TestPrepareCommitMsg_NormalCommitUsesPendingCheckpointID(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	s := &ManualCommitStrategy{}
-
-	sessionID := "test-session-normal-pending"
-	err := s.InitializeSession(sessionID, agent.AgentTypeClaudeCode, "", "")
-	require.NoError(t, err)
-
-	// Create content on the shadow branch so filterSessionsWithNewContent finds it
-	createShadowBranchWithTranscript(t, dir, sessionID)
-
-	// Set the session to ACTIVE_COMMITTED with a PendingCheckpointID
-	state, err := s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	require.NotNil(t, state)
-	state.Phase = session.PhaseActiveCommitted
-	state.PendingCheckpointID = "fedcba987654"
-	// Ensure StepCount reflects that a checkpoint exists on the shadow branch
-	state.StepCount = 1
-	err = s.saveSessionState(state)
-	require.NoError(t, err)
-
-	// Write a commit message file with no trailer (normal editor flow)
-	commitMsgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
-	normalMsg := "Feature: add new functionality\n"
-	require.NoError(t, os.WriteFile(commitMsgFile, []byte(normalMsg), 0o644))
-
-	// Call PrepareCommitMsg with source="" (normal commit, editor flow)
-	err = s.PrepareCommitMsg(commitMsgFile, "")
-	require.NoError(t, err)
-
-	// Read the file back - trailer should use PendingCheckpointID
-	content, err := os.ReadFile(commitMsgFile)
-	require.NoError(t, err)
-
-	cpID, found := trailers.ParseCheckpoint(string(content))
-	assert.True(t, found,
-		"trailer should be present for normal commit with active session content")
-	assert.Equal(t, "fedcba987654", cpID.String(),
-		"normal commit should reuse PendingCheckpointID instead of generating a new one")
-}
-
-// createShadowBranchWithTranscript creates a shadow branch commit with a minimal
-// transcript file so that filterSessionsWithNewContent detects new content.
-// This uses low-level go-git plumbing to create the branch directly.
-func createShadowBranchWithTranscript(t *testing.T, repoDir string, sessionID string) {
-	t.Helper()
-
-	repo, err := git.PlainOpen(repoDir)
-	require.NoError(t, err)
-
-	head, err := repo.Head()
-	require.NoError(t, err)
-	baseCommit := head.Hash().String()
-
-	// Build the tree with a transcript file at the expected path
-	metadataDir := paths.EntireMetadataDir + "/" + sessionID
-	transcriptPath := metadataDir + "/" + paths.TranscriptFileName
-	transcriptContent := `{"type":"message","role":"assistant","content":"hello"}` + "\n"
-
-	// Create blob for transcript
-	blobObj := &plumbing.MemoryObject{}
-	blobObj.SetType(plumbing.BlobObject)
-	blobObj.SetSize(int64(len(transcriptContent)))
-	writer, err := blobObj.Writer()
-	require.NoError(t, err)
-	_, err = writer.Write([]byte(transcriptContent))
-	require.NoError(t, err)
-	require.NoError(t, writer.Close())
-
-	blobHash, err := repo.Storer.SetEncodedObject(blobObj)
-	require.NoError(t, err)
-
-	// Build nested tree structure: .entire/metadata/<sessionID>/full.jsonl
-	// We need to build trees bottom-up
-	innerTree := object.Tree{
-		Entries: []object.TreeEntry{
-			{Name: paths.TranscriptFileName, Mode: 0o100644, Hash: blobHash},
-		},
-	}
-	innerTreeObj := repo.Storer.NewEncodedObject()
-	innerTreeObj.SetType(plumbing.TreeObject)
-	require.NoError(t, innerTree.Encode(innerTreeObj))
-	innerTreeHash, err := repo.Storer.SetEncodedObject(innerTreeObj)
-	require.NoError(t, err)
-
-	// Build .entire/metadata/<sessionID> level
-	sessionTree := object.Tree{
-		Entries: []object.TreeEntry{
-			{Name: sessionID, Mode: 0o040000, Hash: innerTreeHash},
-		},
-	}
-	sessionTreeObj := repo.Storer.NewEncodedObject()
-	sessionTreeObj.SetType(plumbing.TreeObject)
-	require.NoError(t, sessionTree.Encode(sessionTreeObj))
-	sessionTreeHash, err := repo.Storer.SetEncodedObject(sessionTreeObj)
-	require.NoError(t, err)
-
-	// Build .entire/metadata level
-	metadataTree := object.Tree{
-		Entries: []object.TreeEntry{
-			{Name: "metadata", Mode: 0o040000, Hash: sessionTreeHash},
-		},
-	}
-	metadataTreeObj := repo.Storer.NewEncodedObject()
-	metadataTreeObj.SetType(plumbing.TreeObject)
-	require.NoError(t, metadataTree.Encode(metadataTreeObj))
-	metadataTreeHash, err := repo.Storer.SetEncodedObject(metadataTreeObj)
-	require.NoError(t, err)
-
-	// Build .entire level
-	entireTree := object.Tree{
-		Entries: []object.TreeEntry{
-			{Name: ".entire", Mode: 0o040000, Hash: metadataTreeHash},
-		},
-	}
-	entireTreeObj := repo.Storer.NewEncodedObject()
-	entireTreeObj.SetType(plumbing.TreeObject)
-	require.NoError(t, entireTree.Encode(entireTreeObj))
-	entireTreeHash, err := repo.Storer.SetEncodedObject(entireTreeObj)
-	require.NoError(t, err)
-
-	// Create commit on shadow branch
-	now := time.Now()
-	commitObj := &object.Commit{
-		Author: object.Signature{
-			Name:  "Test",
-			Email: "test@test.com",
-			When:  now,
-		},
-		Committer: object.Signature{
-			Name:  "Test",
-			Email: "test@test.com",
-			When:  now,
-		},
-		Message:  "checkpoint\n\nEntire-Metadata: " + metadataDir + "\nEntire-Session: " + sessionID + "\nEntire-Strategy: manual-commit\n",
-		TreeHash: entireTreeHash,
-	}
-	commitEnc := repo.Storer.NewEncodedObject()
-	require.NoError(t, commitObj.Encode(commitEnc))
-	commitHash, err := repo.Storer.SetEncodedObject(commitEnc)
-	require.NoError(t, err)
-
-	// Create the shadow branch reference
-	// WorktreeID is empty for main worktree, which matches what setupGitRepo creates
-	shadowBranchName := checkpoint.ShadowBranchNameForCommit(baseCommit, "")
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	ref := plumbing.NewHashReference(refName, commitHash)
-	require.NoError(t, repo.Storer.SetReference(ref))
-
-	// Verify the transcript is readable
-	verifyCommit, err := repo.CommitObject(commitHash)
-	require.NoError(t, err)
-	verifyTree, err := verifyCommit.Tree()
-	require.NoError(t, err)
-	file, err := verifyTree.File(transcriptPath)
-	require.NoError(t, err, "transcript file should exist at %s", transcriptPath)
-	content, err := file.Contents()
-	require.NoError(t, err)
-	require.NotEmpty(t, content, "transcript should have content")
 }

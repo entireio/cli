@@ -68,8 +68,10 @@ func TestMarkSessionEnded_IdleToEnded(t *testing.T) {
 	require.NotNil(t, loaded.EndedAt)
 }
 
-// TestMarkSessionEnded_ActiveCommittedToEnded verifies ACTIVE_COMMITTED → ENDED.
-func TestMarkSessionEnded_ActiveCommittedToEnded(t *testing.T) {
+// TestMarkSessionEnded_OldActiveCommittedToEnded verifies backward compatibility:
+// if a state file from an older CLI has phase="active_committed", it normalizes
+// to ACTIVE and then transitions to ENDED.
+func TestMarkSessionEnded_OldActiveCommittedToEnded(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
@@ -77,7 +79,7 @@ func TestMarkSessionEnded_ActiveCommittedToEnded(t *testing.T) {
 		SessionID:  "test-session-end-ac",
 		BaseCommit: "abc123",
 		StartedAt:  time.Now(),
-		Phase:      session.PhaseActiveCommitted,
+		Phase:      "active_committed", // raw string simulating old state file
 	}
 	err := strategy.SaveSessionState(state)
 	require.NoError(t, err)

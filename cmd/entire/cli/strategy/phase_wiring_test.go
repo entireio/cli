@@ -136,9 +136,10 @@ func TestInitializeSession_EndedToActive(t *testing.T) {
 	require.NotNil(t, state.LastInteractionTime)
 }
 
-// TestInitializeSession_ActiveCommittedToActive verifies Ctrl-C recovery
-// after a mid-session commit: ACTIVE_COMMITTED → ACTIVE.
-func TestInitializeSession_ActiveCommittedToActive(t *testing.T) {
+// TestInitializeSession_OldActiveCommittedToActive verifies backward compatibility:
+// if a state file from an older CLI version has phase="active_committed",
+// PhaseFromString normalizes it to ACTIVE, so the next TurnStart stays ACTIVE.
+func TestInitializeSession_OldActiveCommittedToActive(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
@@ -148,21 +149,22 @@ func TestInitializeSession_ActiveCommittedToActive(t *testing.T) {
 	err := s.InitializeSession("test-session-ac-recovery", "Claude Code", "", "")
 	require.NoError(t, err)
 
-	// Manually set to ACTIVE_COMMITTED
+	// Manually set phase to the old "active_committed" string (simulating old state file)
 	state, err := s.loadSessionState("test-session-ac-recovery")
 	require.NoError(t, err)
-	state.Phase = session.PhaseActiveCommitted
+	state.Phase = "active_committed" // raw string, not using the deprecated var
 	err = s.saveSessionState(state)
 	require.NoError(t, err)
 
-	// Call InitializeSession again - should transition ACTIVE_COMMITTED → ACTIVE
+	// Call InitializeSession again - PhaseFromString normalizes to ACTIVE,
+	// then TurnStart keeps it ACTIVE
 	err = s.InitializeSession("test-session-ac-recovery", "Claude Code", "", "")
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState("test-session-ac-recovery")
 	require.NoError(t, err)
 	assert.Equal(t, session.PhaseActive, state.Phase,
-		"should transition from ACTIVE_COMMITTED to ACTIVE")
+		"old active_committed phase should normalize to ACTIVE")
 }
 
 // TestInitializeSession_EmptyPhaseBackwardCompat verifies that sessions

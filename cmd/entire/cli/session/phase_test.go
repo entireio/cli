@@ -558,8 +558,8 @@ func TestMermaidDiagram(t *testing.T) {
 
 	// Verify key transitions are present.
 	assert.Contains(t, diagram, "idle --> active")
-	assert.Contains(t, diagram, "active --> active")   // GitCommit stays ACTIVE now
-	assert.Contains(t, diagram, "active --> idle")      // TurnEnd
+	assert.Contains(t, diagram, "active --> active") // GitCommit stays ACTIVE now
+	assert.Contains(t, diagram, "active --> idle")   // TurnEnd
 	assert.Contains(t, diagram, "ended --> idle")
 	assert.Contains(t, diagram, "ended --> active")
 

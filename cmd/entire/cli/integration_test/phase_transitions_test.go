@@ -147,7 +147,7 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 		t.Logf("Commit has checkpoint trailer: %s", checkpointID)
 	}
 
-	// CRITICAL: Verify session phase is ACTIVE_COMMITTED
+	// CRITICAL: Verify session phase stays ACTIVE (condenses immediately, no deferral)
 	state, err = env.GetSessionState(sess.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
@@ -155,17 +155,16 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 	if state == nil {
 		t.Fatal("Session state should exist after commit")
 	}
-	if state.Phase != session.PhaseActiveCommitted {
+	if state.Phase != session.PhaseActive {
 		t.Errorf("Phase after commit-while-active should be %q, got %q",
-			session.PhaseActiveCommitted, state.Phase)
+			session.PhaseActive, state.Phase)
 	}
 	t.Logf("Session phase after mid-turn commit: %s", state.Phase)
 
-	// Verify shadow branch was migrated to the new HEAD
-	// The old shadow branch (based on initialHead) may still exist or be cleaned up.
-	// The important thing is that the session's BaseCommit was updated.
-	if state.BaseCommit == initialHead {
-		t.Logf("Note: BaseCommit not yet updated (may happen during migration)")
+	// Condensation happens immediately during PostCommit for ACTIVE sessions.
+	// Verify StepCount was reset and shadow branch was migrated.
+	if state.StepCount != 0 {
+		t.Errorf("StepCount should be 0 after immediate condensation, got %d", state.StepCount)
 	}
 
 	// ========================================
@@ -186,16 +185,10 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 		t.Fatal("Session state should exist after stop")
 	}
 	if state.Phase != session.PhaseIdle {
-		t.Errorf("Phase after stop from ACTIVE_COMMITTED should be %q, got %q",
+		t.Errorf("Phase after stop from ACTIVE should be %q, got %q",
 			session.PhaseIdle, state.Phase)
 	}
 	t.Logf("Session phase after stop: %s (StepCount: %d)", state.Phase, state.StepCount)
-
-	// Deferred condensation should have fired during TurnEnd (ACTIVE_COMMITTED → IDLE).
-	// Verify StepCount was reset and metadata was persisted to entire/checkpoints/v1.
-	if state.StepCount != 0 {
-		t.Errorf("StepCount should be 0 after TurnEnd condensation, got %d", state.StepCount)
-	}
 
 	if !env.BranchExists(paths.MetadataBranchName) {
 		t.Fatal("entire/checkpoints/v1 branch should exist after TurnEnd condensation")

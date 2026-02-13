@@ -94,7 +94,6 @@ func TestClassifySession_ActiveStale_OldInteractionTime(t *testing.T) {
 	assert.Equal(t, 2, result.FilesTouchedCount)
 }
 
-//nolint:dupl // Tests distinct phase (ACTIVE vs ACTIVE_COMMITTED), collapsing harms readability
 func TestClassifySession_ActiveRecent_Healthy(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	repo, err := git.PlainOpen(dir)
@@ -113,43 +112,42 @@ func TestClassifySession_ActiveRecent_Healthy(t *testing.T) {
 	assert.Nil(t, result, "active session with recent interaction should be healthy")
 }
 
-func TestClassifySession_ActiveCommittedStale(t *testing.T) {
+func TestClassifySession_ActiveStale_HighStepCount(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
 	twoHoursAgo := time.Now().Add(-2 * time.Hour)
 	state := &strategy.SessionState{
-		SessionID:           "test-ac-stale",
+		SessionID:           "test-active-stale-high-steps",
 		BaseCommit:          testBaseCommit,
-		Phase:               session.PhaseActiveCommitted,
+		Phase:               session.PhaseActive,
 		StepCount:           5,
 		LastInteractionTime: &twoHoursAgo,
 	}
 
 	result := classifySession(state, repo, time.Now())
 
-	require.NotNil(t, result, "ACTIVE_COMMITTED session with stale interaction should be stuck")
+	require.NotNil(t, result, "ACTIVE session with stale interaction should be stuck")
 	assert.Contains(t, result.Reason, "active, last interaction")
 }
 
-//nolint:dupl // Tests distinct phase (ACTIVE_COMMITTED vs ACTIVE), collapsing harms readability
-func TestClassifySession_ActiveCommittedRecent_Healthy(t *testing.T) {
+func TestClassifySession_ActiveRecentHighSteps_Healthy(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
 	recentTime := time.Now().Add(-30 * time.Minute)
 	state := &strategy.SessionState{
-		SessionID:           "test-ac-healthy",
+		SessionID:           "test-active-recent-high-steps",
 		BaseCommit:          testBaseCommit,
-		Phase:               session.PhaseActiveCommitted,
+		Phase:               session.PhaseActive,
 		StepCount:           5,
 		LastInteractionTime: &recentTime,
 	}
 
 	result := classifySession(state, repo, time.Now())
-	assert.Nil(t, result, "ACTIVE_COMMITTED session with recent interaction should be healthy")
+	assert.Nil(t, result, "ACTIVE session with recent interaction should be healthy")
 }
 
 func TestClassifySession_EndedWithUncondensedData(t *testing.T) {
