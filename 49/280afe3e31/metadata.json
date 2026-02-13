@@ -3,8 +3,14 @@
   "checkpoint_id": "49280afe3e31",
   "strategy": "manual-commit",
   "branch": "soph/one-to-one-checkpoints",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/checkpoint/committed_update_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go",
     "summary.md"
   ],
   "sessions": [
@@ -14,13 +20,20 @@
       "context": "/49/280afe3e31/0/context.md",
       "content_hash": "/49/280afe3e31/0/content_hash.txt",
       "prompt": "/49/280afe3e31/0/prompt.txt"
+    },
+    {
+      "metadata": "/49/280afe3e31/1/metadata.json",
+      "transcript": "/49/280afe3e31/1/full.jsonl",
+      "context": "/49/280afe3e31/1/context.md",
+      "content_hash": "/49/280afe3e31/1/content_hash.txt",
+      "prompt": "/49/280afe3e31/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 16,
-    "cache_creation_tokens": 69238,
-    "cache_read_tokens": 1205118,
-    "output_tokens": 353,
-    "api_call_count": 15
+    "input_tokens": 119,
+    "cache_creation_tokens": 360546,
+    "cache_read_tokens": 12660988,
+    "output_tokens": 1871,
+    "api_call_count": 112
   }
 }
