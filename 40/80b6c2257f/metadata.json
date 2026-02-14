@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "4080b6c2257f",
+  "strategy": "manual-commit",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/e2e_test/scenario_checkpoint_workflows_test.go",
+    "cmd/entire/cli/e2e_test/testenv.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/40/80b6c2257f/0/metadata.json",
+      "transcript": "/40/80b6c2257f/0/full.jsonl",
+      "context": "/40/80b6c2257f/0/context.md",
+      "content_hash": "/40/80b6c2257f/0/content_hash.txt",
+      "prompt": "/40/80b6c2257f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 186,
+    "cache_creation_tokens": 72220,
+    "cache_read_tokens": 1541188,
+    "output_tokens": 66,
+    "api_call_count": 23
+  }
+}
