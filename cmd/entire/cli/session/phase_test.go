@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -411,158 +412,6 @@ func TestTransition_all_phase_event_combinations_are_defined(t *testing.T) {
 	}
 }
 
-func TestApplyCommonActions_SetsPhase(t *testing.T) {
-	t.Parallel()
-
-	state := &State{Phase: PhaseIdle}
-	result := TransitionResult{
-		NewPhase: PhaseActive,
-		Actions:  []Action{ActionUpdateLastInteraction},
-	}
-
-	remaining := ApplyCommonActions(state, result)
-
-	assert.Equal(t, PhaseActive, state.Phase)
-	assert.Empty(t, remaining, "UpdateLastInteraction should be consumed")
-}
-
-func TestApplyCommonActions_UpdatesLastInteractionTime(t *testing.T) {
-	t.Parallel()
-
-	state := &State{Phase: PhaseIdle}
-	before := time.Now()
-
-	result := TransitionResult{
-		NewPhase: PhaseActive,
-		Actions:  []Action{ActionUpdateLastInteraction},
-	}
-
-	_ = ApplyCommonActions(state, result)
-
-	require.NotNil(t, state.LastInteractionTime)
-	assert.False(t, state.LastInteractionTime.Before(before),
-		"LastInteractionTime should be >= test start time")
-}
-
-func TestApplyCommonActions_ClearsEndedAt(t *testing.T) {
-	t.Parallel()
-
-	endedAt := time.Now().Add(-time.Hour)
-	state := &State{
-		Phase:   PhaseEnded,
-		EndedAt: &endedAt,
-	}
-
-	result := TransitionResult{
-		NewPhase: PhaseIdle,
-		Actions:  []Action{ActionClearEndedAt},
-	}
-
-	remaining := ApplyCommonActions(state, result)
-
-	assert.Nil(t, state.EndedAt, "EndedAt should be cleared")
-	assert.Equal(t, PhaseIdle, state.Phase)
-	assert.Empty(t, remaining, "ClearEndedAt should be consumed")
-}
-
-func TestApplyCommonActions_PassesThroughStrategyActions(t *testing.T) {
-	t.Parallel()
-
-	state := &State{Phase: PhaseActiveCommitted}
-	result := TransitionResult{
-		NewPhase: PhaseIdle,
-		Actions:  []Action{ActionCondense, ActionUpdateLastInteraction},
-	}
-
-	remaining := ApplyCommonActions(state, result)
-
-	assert.Equal(t, []Action{ActionCondense}, remaining,
-		"ActionCondense should be passed through to caller")
-	assert.Equal(t, PhaseIdle, state.Phase)
-	require.NotNil(t, state.LastInteractionTime)
-}
-
-func TestApplyCommonActions_MultipleStrategyActions(t *testing.T) {
-	t.Parallel()
-
-	state := &State{Phase: PhaseActive}
-	result := TransitionResult{
-		NewPhase: PhaseActiveCommitted,
-		Actions:  []Action{ActionMigrateShadowBranch, ActionUpdateLastInteraction},
-	}
-
-	remaining := ApplyCommonActions(state, result)
-
-	assert.Equal(t, []Action{ActionMigrateShadowBranch}, remaining)
-	assert.Equal(t, PhaseActiveCommitted, state.Phase)
-}
-
-func TestApplyCommonActions_WarnStaleSessionPassedThrough(t *testing.T) {
-	t.Parallel()
-
-	state := &State{Phase: PhaseActive}
-	result := TransitionResult{
-		NewPhase: PhaseActive,
-		Actions:  []Action{ActionWarnStaleSession},
-	}
-
-	remaining := ApplyCommonActions(state, result)
-
-	assert.Equal(t, []Action{ActionWarnStaleSession}, remaining)
-}
-
-func TestApplyCommonActions_NoActions(t *testing.T) {
-	t.Parallel()
-
-	state := &State{Phase: PhaseIdle}
-	result := TransitionResult{
-		NewPhase: PhaseIdle,
-		Actions:  nil,
-	}
-
-	remaining := ApplyCommonActions(state, result)
-
-	assert.Nil(t, remaining)
-	assert.Equal(t, PhaseIdle, state.Phase)
-}
-
-func TestApplyCommonActions_EndedToActiveTransition(t *testing.T) {
-	t.Parallel()
-
-	endedAt := time.Now().Add(-time.Hour)
-	state := &State{
-		Phase:   PhaseEnded,
-		EndedAt: &endedAt,
-	}
-
-	// Simulate ENDED → ACTIVE transition (EventTurnStart)
-	result := Transition(PhaseEnded, EventTurnStart, TransitionContext{})
-	remaining := ApplyCommonActions(state, result)
-
-	assert.Equal(t, PhaseActive, state.Phase)
-	assert.Nil(t, state.EndedAt, "EndedAt should be cleared on re-entry")
-	require.NotNil(t, state.LastInteractionTime)
-	assert.Empty(t, remaining, "all actions should be consumed")
-}
-
-func TestApplyCommonActions_EndedToIdleOnSessionStart(t *testing.T) {
-	t.Parallel()
-
-	endedAt := time.Now().Add(-time.Hour)
-	state := &State{
-		Phase:   PhaseEnded,
-		EndedAt: &endedAt,
-	}
-
-	// Simulate ENDED → IDLE transition (EventSessionStart re-entry)
-	result := Transition(PhaseEnded, EventSessionStart, TransitionContext{})
-	remaining := ApplyCommonActions(state, result)
-
-	assert.Equal(t, PhaseIdle, state.Phase)
-	assert.Nil(t, state.EndedAt, "EndedAt should be cleared on session re-entry")
-	assert.Empty(t, remaining, "only ClearEndedAt, which is consumed")
-}
-
 func TestMermaidDiagram(t *testing.T) {
 	t.Parallel()
 
@@ -587,4 +436,214 @@ func TestMermaidDiagram(t *testing.T) {
 	assert.Contains(t, diagram, "MigrateShadowBranch")
 	assert.Contains(t, diagram, "ClearEndedAt")
 	assert.Contains(t, diagram, "WarnStaleSession")
+}
+
+// mockActionHandler records which handler methods were called.
+type mockActionHandler struct {
+	condenseCalled               bool
+	condenseIfFilesTouchedCalled bool
+	discardIfNoFilesCalled       bool
+	migrateShadowBranchCalled    bool
+	warnStaleSessionCalled       bool
+	returnErr                    error
+}
+
+func (m *mockActionHandler) HandleCondense(_ *State) error {
+	m.condenseCalled = true
+	return m.returnErr
+}
+
+func (m *mockActionHandler) HandleCondenseIfFilesTouched(_ *State) error {
+	m.condenseIfFilesTouchedCalled = true
+	return m.returnErr
+}
+
+func (m *mockActionHandler) HandleDiscardIfNoFiles(_ *State) error {
+	m.discardIfNoFilesCalled = true
+	return m.returnErr
+}
+
+func (m *mockActionHandler) HandleMigrateShadowBranch(_ *State) error {
+	m.migrateShadowBranchCalled = true
+	return m.returnErr
+}
+
+func (m *mockActionHandler) HandleWarnStaleSession(_ *State) error {
+	m.warnStaleSessionCalled = true
+	return m.returnErr
+}
+
+func TestApplyTransition_SetsPhaseAndHandlesCommonActions(t *testing.T) {
+	t.Parallel()
+
+	state := &State{Phase: PhaseIdle}
+	handler := &mockActionHandler{}
+	result := TransitionResult{
+		NewPhase: PhaseActive,
+		Actions:  []Action{ActionUpdateLastInteraction},
+	}
+
+	err := ApplyTransition(state, result, handler)
+
+	require.NoError(t, err)
+	assert.Equal(t, PhaseActive, state.Phase)
+	require.NotNil(t, state.LastInteractionTime)
+	assert.False(t, handler.condenseCalled)
+}
+
+func TestApplyTransition_CallsHandlerForCondense(t *testing.T) {
+	t.Parallel()
+
+	state := &State{Phase: PhaseActiveCommitted}
+	handler := &mockActionHandler{}
+	result := TransitionResult{
+		NewPhase: PhaseIdle,
+		Actions:  []Action{ActionCondense, ActionUpdateLastInteraction},
+	}
+
+	err := ApplyTransition(state, result, handler)
+
+	require.NoError(t, err)
+	assert.True(t, handler.condenseCalled)
+	assert.Equal(t, PhaseIdle, state.Phase)
+	require.NotNil(t, state.LastInteractionTime)
+}
+
+func TestApplyTransition_CallsHandlerForMigrateShadowBranch(t *testing.T) {
+	t.Parallel()
+
+	state := &State{Phase: PhaseActive}
+	handler := &mockActionHandler{}
+	result := TransitionResult{
+		NewPhase: PhaseActiveCommitted,
+		Actions:  []Action{ActionMigrateShadowBranch, ActionUpdateLastInteraction},
+	}
+
+	err := ApplyTransition(state, result, handler)
+
+	require.NoError(t, err)
+	assert.True(t, handler.migrateShadowBranchCalled)
+}
+
+func TestApplyTransition_CallsHandlerForCondenseIfFilesTouched(t *testing.T) {
+	t.Parallel()
+
+	state := &State{Phase: PhaseEnded}
+	handler := &mockActionHandler{}
+	result := TransitionResult{
+		NewPhase: PhaseEnded,
+		Actions:  []Action{ActionCondenseIfFilesTouched, ActionUpdateLastInteraction},
+	}
+
+	err := ApplyTransition(state, result, handler)
+
+	require.NoError(t, err)
+	assert.True(t, handler.condenseIfFilesTouchedCalled)
+}
+
+func TestApplyTransition_CallsHandlerForDiscardIfNoFiles(t *testing.T) {
+	t.Parallel()
+
+	state := &State{Phase: PhaseEnded}
+	handler := &mockActionHandler{}
+	result := TransitionResult{
+		NewPhase: PhaseEnded,
+		Actions:  []Action{ActionDiscardIfNoFiles, ActionUpdateLastInteraction},
+	}
+
+	err := ApplyTransition(state, result, handler)
+
+	require.NoError(t, err)
+	assert.True(t, handler.discardIfNoFilesCalled)
+}
+
+func TestApplyTransition_CallsHandlerForWarnStaleSession(t *testing.T) {
+	t.Parallel()
+
+	state := &State{Phase: PhaseActive}
+	handler := &mockActionHandler{}
+	result := TransitionResult{
+		NewPhase: PhaseActive,
+		Actions:  []Action{ActionWarnStaleSession},
+	}
+
+	err := ApplyTransition(state, result, handler)
+
+	require.NoError(t, err)
+	assert.True(t, handler.warnStaleSessionCalled)
+}
+
+func TestApplyTransition_ClearsEndedAt(t *testing.T) {
+	t.Parallel()
+
+	endedAt := time.Now().Add(-time.Hour)
+	state := &State{Phase: PhaseEnded, EndedAt: &endedAt}
+	handler := &mockActionHandler{}
+	result := TransitionResult{
+		NewPhase: PhaseIdle,
+		Actions:  []Action{ActionClearEndedAt},
+	}
+
+	err := ApplyTransition(state, result, handler)
+
+	require.NoError(t, err)
+	assert.Nil(t, state.EndedAt)
+}
+
+func TestApplyTransition_ReturnsHandlerError_ButRunsCommonActions(t *testing.T) {
+	t.Parallel()
+
+	state := &State{Phase: PhaseActiveCommitted}
+	handler := &mockActionHandler{returnErr: errors.New("condense failed")}
+	// ACTIVE_COMMITTED + TurnEnd → [Condense, UpdateLastInteraction]
+	result := TransitionResult{
+		NewPhase: PhaseIdle,
+		Actions:  []Action{ActionCondense, ActionUpdateLastInteraction},
+	}
+
+	err := ApplyTransition(state, result, handler)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "condense failed")
+	assert.Equal(t, PhaseIdle, state.Phase)
+	// Common action must still run even though handler failed.
+	require.NotNil(t, state.LastInteractionTime,
+		"UpdateLastInteraction must run despite earlier handler error")
+}
+
+func TestApplyTransition_StopsOnFirstHandlerError(t *testing.T) {
+	t.Parallel()
+
+	state := &State{Phase: PhaseActive}
+	handler := &mockActionHandler{returnErr: errors.New("migrate failed")}
+	result := TransitionResult{
+		NewPhase: PhaseActiveCommitted,
+		Actions:  []Action{ActionMigrateShadowBranch, ActionWarnStaleSession},
+	}
+
+	err := ApplyTransition(state, result, handler)
+
+	require.Error(t, err)
+	assert.True(t, handler.migrateShadowBranchCalled)
+	assert.False(t, handler.warnStaleSessionCalled, "should stop on first error")
+}
+
+func TestApplyTransition_ClearEndedAtRunsDespiteHandlerError(t *testing.T) {
+	t.Parallel()
+
+	endedAt := time.Now().Add(-time.Hour)
+	state := &State{Phase: PhaseEnded, EndedAt: &endedAt}
+	handler := &mockActionHandler{returnErr: errors.New("condense failed")}
+	// Synthetic action list to test the mechanism: no real transition produces
+	// this exact ordering, but it verifies that ClearEndedAt (common) always
+	// runs even when a preceding handler action fails.
+	result := TransitionResult{
+		NewPhase: PhaseEnded,
+		Actions:  []Action{ActionCondenseIfFilesTouched, ActionClearEndedAt},
+	}
+
+	err := ApplyTransition(state, result, handler)
+
+	require.Error(t, err)
+	assert.Nil(t, state.EndedAt, "ClearEndedAt must run despite earlier handler error")
 }

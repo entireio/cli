@@ -581,6 +581,69 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(logCtx context.Context, comm
 //   - ENDED → condense if files touched, discard if empty
 //
 // Shadow branches are only deleted when ALL sessions sharing the branch are non-active.
+// pendingMigration tracks a session whose shadow branch migration is deferred
+// to pass 2 of PostCommit (after all condensations complete).
+type pendingMigration struct {
+	state *SessionState
+}
+
+// postCommitActionHandler implements session.ActionHandler for PostCommit.
+// Each session in the loop gets its own handler with per-session context.
+// Handler methods use the *State parameter from ApplyTransition (same pointer
+// as the state being transitioned) rather than capturing state separately.
+type postCommitActionHandler struct {
+	s                      *ManualCommitStrategy
+	logCtx                 context.Context
+	repo                   *git.Repository
+	checkpointID           id.CheckpointID
+	head                   *plumbing.Reference
+	newHead                string
+	shadowBranchName       string
+	shadowBranchesToDelete map[string]struct{}
+	hasNew                 bool
+	pendingMigrations      *[]pendingMigration
+}
+
+func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
+	if h.hasNew {
+		h.s.condenseAndUpdateState(h.logCtx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete)
+	} else {
+		h.s.updateBaseCommitIfChanged(h.logCtx, state, h.newHead)
+	}
+	return nil
+}
+
+func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.State) error {
+	if len(state.FilesTouched) > 0 && h.hasNew {
+		h.s.condenseAndUpdateState(h.logCtx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete)
+	} else {
+		h.s.updateBaseCommitIfChanged(h.logCtx, state, h.newHead)
+	}
+	return nil
+}
+
+func (h *postCommitActionHandler) HandleDiscardIfNoFiles(state *session.State) error {
+	if len(state.FilesTouched) == 0 {
+		logging.Debug(h.logCtx, "post-commit: skipping empty ended session (no files to condense)",
+			slog.String("session_id", state.SessionID),
+		)
+	}
+	h.s.updateBaseCommitIfChanged(h.logCtx, state, h.newHead)
+	return nil
+}
+
+func (h *postCommitActionHandler) HandleMigrateShadowBranch(state *session.State) error {
+	// Deferred to pass 2 so condensation reads the old shadow branch first.
+	state.PendingCheckpointID = h.checkpointID.String()
+	*h.pendingMigrations = append(*h.pendingMigrations, pendingMigration{state: state})
+	return nil
+}
+
+func (h *postCommitActionHandler) HandleWarnStaleSession(_ *session.State) error {
+	// Not produced by EventGitCommit; no-op for exhaustiveness.
+	return nil
+}
+
 // During rebase/cherry-pick/revert operations, phase transitions are skipped entirely.
 //
 //nolint:unparam // error return required by interface but hooks must return nil
@@ -649,9 +712,6 @@ func (s *ManualCommitStrategy) PostCommit() error {
 	// Two-pass processing: condensation first, migration second.
 	// This prevents a migration from renaming a shadow branch before another
 	// session sharing that branch has had a chance to condense from it.
-	type pendingMigration struct {
-		state *SessionState
-	}
 	var pendingMigrations []pendingMigration
 
 	// Pass 1: Run transitions and dispatch condensation/discard actions.
@@ -672,53 +732,21 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		}
 		transitionCtx.HasFilesTouched = len(state.FilesTouched) > 0
 
-		// Run the state machine transition
-		remaining := TransitionAndLog(state, session.EventGitCommit, transitionCtx)
-
-		// Dispatch strategy-specific actions.
-		// Each branch handles its own BaseCommit update so there is no
-		// fallthrough conditional at the end. On condensation failure,
-		// BaseCommit is intentionally NOT updated to preserve access to
-		// the shadow branch (which is named after the old BaseCommit).
-		for _, action := range remaining {
-			switch action {
-			case session.ActionCondense:
-				if hasNew {
-					s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete)
-					// condenseAndUpdateState updates BaseCommit on success.
-					// On failure, BaseCommit is preserved so the shadow branch remains accessible.
-				} else {
-					// No new content to condense — just update BaseCommit
-					s.updateBaseCommitIfChanged(logCtx, state, newHead)
-				}
-			case session.ActionCondenseIfFilesTouched:
-				// The state machine already gates this action on HasFilesTouched,
-				// but hasNew is an additional content-level check (transcript has
-				// new content beyond what was previously condensed).
-				if len(state.FilesTouched) > 0 && hasNew {
-					s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete)
-					// On failure, BaseCommit is preserved (same as ActionCondense).
-				} else {
-					s.updateBaseCommitIfChanged(logCtx, state, newHead)
-				}
-			case session.ActionDiscardIfNoFiles:
-				if len(state.FilesTouched) == 0 {
-					logging.Debug(logCtx, "post-commit: skipping empty ended session (no files to condense)",
-						slog.String("session_id", state.SessionID),
-					)
-				}
-				s.updateBaseCommitIfChanged(logCtx, state, newHead)
-			case session.ActionMigrateShadowBranch:
-				// Deferred to pass 2 so condensation reads the old shadow branch first.
-				// Migration updates BaseCommit as part of the rename.
-				// Store checkpointID so HandleTurnEnd can reuse it for deferred condensation.
-				state.PendingCheckpointID = checkpointID.String()
-				pendingMigrations = append(pendingMigrations, pendingMigration{state: state})
-			case session.ActionClearEndedAt, session.ActionUpdateLastInteraction:
-				// Handled by session.ApplyCommonActions above
-			case session.ActionWarnStaleSession:
-				// Not produced by EventGitCommit; listed for switch exhaustiveness
-			}
+		// Run the state machine transition with handler for strategy-specific actions.
+		handler := &postCommitActionHandler{
+			s:                      s,
+			logCtx:                 logCtx,
+			repo:                   repo,
+			checkpointID:           checkpointID,
+			head:                   head,
+			newHead:                newHead,
+			shadowBranchName:       shadowBranchName,
+			shadowBranchesToDelete: shadowBranchesToDelete,
+			hasNew:                 hasNew,
+			pendingMigrations:      &pendingMigrations,
+		}
+		if err := TransitionAndLog(state, session.EventGitCommit, transitionCtx, handler); err != nil {
+			fmt.Fprintf(os.Stderr, "[entire] Warning: post-commit action handler error: %v\n", err)
 		}
 
 		// Save the updated state
@@ -1221,8 +1249,10 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 	}
 
 	if state != nil && state.BaseCommit != "" {
-		// Session is fully initialized — apply phase transition for TurnStart
-		TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{})
+		// Session is fully initialized — apply phase transition for TurnStart.
+		if transErr := TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+			fmt.Fprintf(os.Stderr, "[entire] Warning: turn start transition failed: %v\n", transErr)
+		}
 
 		// Backfill AgentType if empty or set to the generic default "Agent"
 		if !isSpecificAgentType(state.AgentType) && agentType != "" {
@@ -1277,8 +1307,10 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 		return fmt.Errorf("failed to initialize session: %w", err)
 	}
 
-	// Apply phase transition: new session starts as ACTIVE
-	TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{})
+	// Apply phase transition: new session starts as ACTIVE.
+	if transErr := TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: turn start transition failed: %v\n", transErr)
+	}
 
 	// Calculate attribution for pre-prompt edits
 	// This captures any user edits made before the first prompt
@@ -1448,34 +1480,51 @@ func (s *ManualCommitStrategy) getLastPrompt(repo *git.Repository, state *Sessio
 	return sessionData.Prompts[len(sessionData.Prompts)-1]
 }
 
-// HandleTurnEnd dispatches strategy-specific actions emitted when an agent turn ends.
-// This handles the ACTIVE_COMMITTED → IDLE transition where ActionCondense is deferred
-// from PostCommit (agent was still active during the commit).
-//
-//nolint:unparam // error return required by interface but hooks must return nil
-func (s *ManualCommitStrategy) HandleTurnEnd(state *SessionState, actions []session.Action) error {
-	if len(actions) == 0 {
-		return nil
-	}
+// turnEndActionHandler implements session.ActionHandler for turn-end transitions.
+// Only ActionCondense is expected at turn-end. Other actions log a diagnostic
+// warning instead of silently no-opping, to catch unexpected state machine changes.
+type turnEndActionHandler struct {
+	s     *ManualCommitStrategy
+	state *SessionState
+}
 
+func (h *turnEndActionHandler) HandleCondense(state *session.State) error {
 	logCtx := logging.WithComponent(context.Background(), "checkpoint")
-
-	for _, action := range actions {
-		switch action {
-		case session.ActionCondense:
-			s.handleTurnEndCondense(logCtx, state)
-		case session.ActionCondenseIfFilesTouched, session.ActionDiscardIfNoFiles,
-			session.ActionMigrateShadowBranch, session.ActionWarnStaleSession:
-			// Not expected at turn-end; log for diagnostics.
-			logging.Debug(logCtx, "turn-end: unexpected action",
-				slog.String("action", action.String()),
-				slog.String("session_id", state.SessionID),
-			)
-		case session.ActionClearEndedAt, session.ActionUpdateLastInteraction:
-			// Handled by session.ApplyCommonActions before this is called.
-		}
-	}
+	h.s.handleTurnEndCondense(logCtx, state)
 	return nil
+}
+
+func (h *turnEndActionHandler) HandleCondenseIfFilesTouched(_ *session.State) error {
+	h.logUnexpected("CondenseIfFilesTouched")
+	return nil
+}
+
+func (h *turnEndActionHandler) HandleDiscardIfNoFiles(_ *session.State) error {
+	h.logUnexpected("DiscardIfNoFiles")
+	return nil
+}
+
+func (h *turnEndActionHandler) HandleMigrateShadowBranch(_ *session.State) error {
+	h.logUnexpected("MigrateShadowBranch")
+	return nil
+}
+
+func (h *turnEndActionHandler) HandleWarnStaleSession(_ *session.State) error {
+	h.logUnexpected("WarnStaleSession")
+	return nil
+}
+
+func (h *turnEndActionHandler) logUnexpected(action string) {
+	logCtx := logging.WithComponent(context.Background(), "checkpoint")
+	logging.Debug(logCtx, "turn-end: unexpected action",
+		slog.String("action", action),
+		slog.String("session_id", h.state.SessionID),
+	)
+}
+
+// NewTurnEndActionHandler returns an ActionHandler for turn-end transitions.
+func (s *ManualCommitStrategy) NewTurnEndActionHandler(state *SessionState) session.ActionHandler { //nolint:ireturn // interface required by TurnEndHandler contract
+	return &turnEndActionHandler{s: s, state: state}
 }
 
 // handleTurnEndCondense performs deferred condensation at turn end.

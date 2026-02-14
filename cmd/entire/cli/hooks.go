@@ -284,7 +284,9 @@ func handleSessionStartCommon() error {
 	if state, loadErr := strategy.LoadSessionState(input.SessionID); loadErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load session state on start: %v\n", loadErr)
 	} else if state != nil {
-		strategy.TransitionAndLog(state, session.EventSessionStart, session.TransitionContext{})
+		if transErr := strategy.TransitionAndLog(state, session.EventSessionStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: session start transition failed: %v\n", transErr)
+		}
 		if saveErr := strategy.SaveSessionState(state); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to update session state on start: %v\n", saveErr)
 		}
