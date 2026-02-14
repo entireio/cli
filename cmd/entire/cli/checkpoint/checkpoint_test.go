@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -39,6 +40,8 @@ func TestCheckpointType_Values(t *testing.T) {
 }
 
 func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
+	t.Parallel()
+
 	// Create a temp directory for the test
 	tempDir := t.TempDir()
 
@@ -97,7 +100,40 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	}
 }
 
+func TestCopyMetadataDir_AllowsLeadingDotsInFileName(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	metadataDir := filepath.Join(tempDir, "metadata")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	dotFile := filepath.Join(metadataDir, "..notes.txt")
+	if err := os.WriteFile(dotFile, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("failed to write file with leading dots: %v", err)
+	}
+
+	store := NewGitStore(repo)
+	entries := make(map[string]object.TreeEntry)
+	if err := store.copyMetadataDir(metadataDir, "checkpoint/", entries); err != nil {
+		t.Fatalf("copyMetadataDir() error = %v", err)
+	}
+
+	if _, ok := entries["checkpoint/..notes.txt"]; !ok {
+		t.Error("expected file with leading dots to be included")
+	}
+}
+
 func TestAddDirectoryToEntriesWithAbsPath_AllowsLeadingDotsInFileName(t *testing.T) {
+	t.Parallel()
+
 	tempDir := t.TempDir()
 
 	repo, err := git.PlainInit(tempDir, false)
@@ -131,6 +167,8 @@ func TestAddDirectoryToEntriesWithAbsPath_AllowsLeadingDotsInFileName(t *testing
 }
 
 func TestAddDirectoryToEntriesWithAbsPath_NormalizesTreePathSeparators(t *testing.T) {
+	t.Parallel()
+
 	tempDir := t.TempDir()
 
 	repo, err := git.PlainInit(tempDir, false)
@@ -2953,6 +2991,8 @@ func TestCopyMetadataDir_RedactsSecrets(t *testing.T) {
 }
 
 func TestWriteCommitted_MetadataJSON_RedactsSecrets(t *testing.T) {
+	t.Parallel()
+
 	repo, _ := setupBranchTestRepo(t)
 	store := NewGitStore(repo)
 	checkpointID := id.MustCheckpointID("aabbccddeef4")
@@ -2987,6 +3027,8 @@ func TestWriteCommitted_MetadataJSON_RedactsSecrets(t *testing.T) {
 }
 
 func TestWriteCommitted_UpdateSummary_RedactsSecrets(t *testing.T) {
+	t.Parallel()
+
 	repo, _ := setupBranchTestRepo(t)
 	store := NewGitStore(repo)
 	checkpointID := id.MustCheckpointID("aabbccddeef5")
@@ -3021,6 +3063,8 @@ func TestWriteCommitted_UpdateSummary_RedactsSecrets(t *testing.T) {
 }
 
 func TestWriteCommitted_MetadataJSON_PreservesMetadataIDFields(t *testing.T) {
+	t.Parallel()
+
 	repo, _ := setupBranchTestRepo(t)
 	store := NewGitStore(repo)
 	checkpointID := id.MustCheckpointID("aabbccddeef6")
@@ -3074,6 +3118,8 @@ func TestWriteCommitted_MetadataJSON_PreservesMetadataIDFields(t *testing.T) {
 }
 
 func TestWriteCommitted_UpdateSummary_PreservesMetadataIDFields(t *testing.T) {
+	t.Parallel()
+
 	repo, _ := setupBranchTestRepo(t)
 	store := NewGitStore(repo)
 	checkpointID := id.MustCheckpointID("aabbccddeef7")
@@ -3127,7 +3173,55 @@ func TestWriteCommitted_UpdateSummary_PreservesMetadataIDFields(t *testing.T) {
 	}
 }
 
+func TestWriteCommitted_TaskSubagentTranscript_FallsBackToPlainTextRedaction(t *testing.T) {
+	t.Parallel()
+
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef8")
+
+	tempDir := t.TempDir()
+	subagentTranscriptPath := filepath.Join(tempDir, "subagent-transcript.jsonl")
+	invalidJSONL := `{"role":"assistant","content":"` + highEntropySecret + `"`
+	if err := os.WriteFile(subagentTranscriptPath, []byte(invalidJSONL), 0o644); err != nil {
+		t.Fatalf("failed to write subagent transcript: %v", err)
+	}
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:           checkpointID,
+		SessionID:              "redact-task-subagent-fallback-session",
+		Strategy:               "manual-commit",
+		Transcript:             []byte(`{"msg":"safe"}`),
+		CheckpointsCount:       1,
+		IsTask:                 true,
+		ToolUseID:              "tool-1",
+		AgentID:                "agent-1",
+		SubagentTranscriptPath: subagentTranscriptPath,
+		AuthorName:             "Test Author",
+		AuthorEmail:            "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get metadata branch reference: %v", err)
+	}
+
+	agentPath := checkpointID.Path() + "/tasks/tool-1/agent-agent-1.jsonl"
+	agentContent := readFileFromCheckpointCommit(t, repo, ref.Hash(), agentPath)
+	if strings.Contains(agentContent, highEntropySecret) {
+		t.Error("subagent transcript should not contain the secret after fallback redaction")
+	}
+	if !strings.Contains(agentContent, "REDACTED") {
+		t.Error("subagent transcript should contain REDACTED placeholder after fallback redaction")
+	}
+}
+
 func TestWriteTemporaryTask_MetadataFiles_RedactSecrets(t *testing.T) {
+	t.Parallel()
+
 	tempDir := t.TempDir()
 
 	repo, err := git.PlainInit(tempDir, false)
@@ -3387,6 +3481,234 @@ func TestWriteTemporary_MetadataDir_SkipsSymlinks(t *testing.T) {
 	if _, err := tree.File(filepath.ToSlash(filepath.Join(paths.EntireMetadataDir, sessionID, "sneaky-link"))); err == nil {
 		t.Error("sneaky-link should not be included in temporary checkpoint metadata")
 	}
+}
+
+// TestRedactSummary_CoversAllFields guards against Summary fields being added
+// without updating redactSummary(). It uses struct-shape tripwires and
+// reflection to verify that every string field is redacted, no field is
+// silently zeroed, and non-string data is preserved unchanged.
+func TestRedactSummary_CoversAllFields(t *testing.T) {
+	t.Parallel()
+
+	// Tripwire: fail when struct shape changes.
+	assertFieldCount(t, Summary{}, 5, "Summary")
+	assertFieldCount(t, LearningsSummary{}, 3, "LearningsSummary")
+	assertFieldCount(t, CodeLearning{}, 4, "CodeLearning")
+
+	// Auto-populate every field: strings get a secret marker,
+	// ints get a non-zero sentinel, slices get one element.
+	input := &Summary{}
+	fillStructFields(reflect.ValueOf(input).Elem(), highEntropySecret)
+
+	// Sanity: every scalar in the auto-filled input must be non-zero.
+	// Catches fillStructFields silently skipping a new field kind.
+	assertAllScalarsNonZero(t, reflect.ValueOf(input), "input")
+
+	result := redactSummary(input)
+	if result == nil {
+		t.Fatal("redactSummary returned nil for non-nil input")
+	}
+
+	inputStrings := collectStringFields(reflect.ValueOf(input), "")
+	resultStrings := collectStringFields(reflect.ValueOf(result), "")
+
+	// Key sets must match exactly.
+	for path := range inputStrings {
+		if _, ok := resultStrings[path]; !ok {
+			t.Errorf("field %s present in input but missing in result — redactSummary does not handle it", path)
+		}
+	}
+	for path := range resultStrings {
+		if _, ok := inputStrings[path]; !ok {
+			t.Errorf("unexpected field %s in result but not in input", path)
+		}
+	}
+
+	// Every input string must be non-empty (auto-fill sanity check).
+	for path, val := range inputStrings {
+		if val == "" {
+			t.Fatalf("auto-fill bug: field %s is empty in input", path)
+		}
+	}
+
+	// No result string may be empty (silently zeroed) or contain the raw secret.
+	for path, val := range resultStrings {
+		if val == "" {
+			t.Errorf("field %s was silently zeroed — redactSummary does not copy this field", path)
+		}
+		if strings.Contains(val, highEntropySecret) {
+			t.Errorf("field %s still contains raw secret after redaction", path)
+		}
+	}
+
+	// Non-string invariant: only string content may differ.
+	// Deep-copy both, normalize all strings to a fixed token, then DeepEqual.
+	inputNorm := jsonRoundTripSummary(t, input)
+	resultNorm := jsonRoundTripSummary(t, result)
+	setAllStrings(reflect.ValueOf(inputNorm).Elem(), "X")
+	setAllStrings(reflect.ValueOf(resultNorm).Elem(), "X")
+	if !reflect.DeepEqual(inputNorm, resultNorm) {
+		t.Errorf("redactSummary altered non-string data:\n  input  (normalized): %+v\n  result (normalized): %+v", inputNorm, resultNorm)
+	}
+}
+
+func assertFieldCount(t *testing.T, v any, expected int, name string) {
+	t.Helper()
+	actual := reflect.TypeOf(v).NumField()
+	if actual != expected {
+		t.Fatalf("%s has %d fields (expected %d) — update redactSummary() and this test",
+			name, actual, expected)
+	}
+}
+
+// fillStructFields recursively populates every field in a struct with
+// non-zero values: strings → secret, bools → true, ints/uints → 7,
+// floats → 7.5, pointers → allocate and recurse, slices → one element.
+func fillStructFields(v reflect.Value, secret string) {
+	switch v.Kind() {
+	case reflect.Ptr:
+		if v.IsNil() {
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		fillStructFields(v.Elem(), secret)
+	case reflect.Struct:
+		for i := range v.NumField() {
+			fillStructFields(v.Field(i), secret)
+		}
+	case reflect.String:
+		v.SetString(secret)
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(7)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v.SetUint(7)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(7.5)
+	case reflect.Slice:
+		s := reflect.MakeSlice(v.Type(), 1, 1)
+		fillStructFields(s.Index(0), secret)
+		v.Set(s)
+	}
+}
+
+// assertAllScalarsNonZero walks a struct and fatals if any scalar field
+// (string, bool, int, uint, float) is at its zero value. This guards
+// against fillStructFields silently skipping a new field kind.
+func assertAllScalarsNonZero(t *testing.T, v reflect.Value, prefix string) {
+	t.Helper()
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return
+		}
+		v = v.Elem()
+	}
+	switch v.Kind() {
+	case reflect.Struct:
+		tp := v.Type()
+		for i := range tp.NumField() {
+			name := tp.Field(i).Name
+			p := name
+			if prefix != "" {
+				p = prefix + "." + name
+			}
+			assertAllScalarsNonZero(t, v.Field(i), p)
+		}
+	case reflect.Slice:
+		for i := range v.Len() {
+			assertAllScalarsNonZero(t, v.Index(i), fmt.Sprintf("%s[%d]", prefix, i))
+		}
+	case reflect.String:
+		if v.String() == "" {
+			t.Fatalf("auto-fill bug: %s is empty string", prefix)
+		}
+	case reflect.Bool:
+		if !v.Bool() {
+			t.Fatalf("auto-fill bug: %s is false", prefix)
+		}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if v.Int() == 0 {
+			t.Fatalf("auto-fill bug: %s is zero", prefix)
+		}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if v.Uint() == 0 {
+			t.Fatalf("auto-fill bug: %s is zero", prefix)
+		}
+	case reflect.Float32, reflect.Float64:
+		if v.Float() == 0 {
+			t.Fatalf("auto-fill bug: %s is zero", prefix)
+		}
+	}
+}
+
+// collectStringFields recursively extracts all string values keyed by
+// dotted path (e.g. "Learnings.Code[0].Path").
+func collectStringFields(v reflect.Value, prefix string) map[string]string {
+	out := make(map[string]string)
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return out
+		}
+		v = v.Elem()
+	}
+	switch v.Kind() {
+	case reflect.Struct:
+		t := v.Type()
+		for i := range t.NumField() {
+			name := t.Field(i).Name
+			p := name
+			if prefix != "" {
+				p = prefix + "." + name
+			}
+			for k, val := range collectStringFields(v.Field(i), p) {
+				out[k] = val
+			}
+		}
+	case reflect.Slice:
+		for i := range v.Len() {
+			p := fmt.Sprintf("%s[%d]", prefix, i)
+			for k, val := range collectStringFields(v.Index(i), p) {
+				out[k] = val
+			}
+		}
+	case reflect.String:
+		out[prefix] = v.String()
+	}
+	return out
+}
+
+// setAllStrings recursively sets every string field/element to token.
+func setAllStrings(v reflect.Value, token string) {
+	switch v.Kind() {
+	case reflect.Ptr:
+		if !v.IsNil() {
+			setAllStrings(v.Elem(), token)
+		}
+	case reflect.Struct:
+		for i := range v.NumField() {
+			setAllStrings(v.Field(i), token)
+		}
+	case reflect.Slice:
+		for i := range v.Len() {
+			setAllStrings(v.Index(i), token)
+		}
+	case reflect.String:
+		v.SetString(token)
+	}
+}
+
+// jsonRoundTripSummary returns a deep copy of s via JSON round-trip.
+func jsonRoundTripSummary(t *testing.T, s *Summary) *Summary {
+	t.Helper()
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("failed to marshal Summary for deep copy: %v", err)
+	}
+	var cp Summary
+	if err := json.Unmarshal(data, &cp); err != nil {
+		t.Fatalf("failed to unmarshal Summary for deep copy: %v", err)
+	}
+	return &cp
 }
 
 // TestWriteCommitted_CLIVersionField verifies that buildinfo.Version is written

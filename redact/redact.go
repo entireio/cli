@@ -234,8 +234,10 @@ func redactJSONValue(v any) any {
 // marshalJSONPreservingFormatting marshals v while preserving basic formatting
 // characteristics from original (indentation and trailing newline).
 func marshalJSONPreservingFormatting(v any, original string) (string, error) {
-	// Preserve compact style for single-line JSON.
-	if !strings.Contains(original, "\n") {
+	trimmedOriginal := strings.TrimSuffix(original, "\n")
+	// Preserve compact style when JSON content itself is a single line,
+	// while still preserving an optional trailing newline.
+	if !strings.Contains(trimmedOriginal, "\n") {
 		out, err := json.Marshal(v)
 		if err != nil {
 			return "", fmt.Errorf("marshal JSON content: %w", err)

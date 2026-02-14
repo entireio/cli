@@ -204,10 +204,17 @@ func (s *GitStore) writeFinalTaskCheckpoint(opts WriteCommittedOptions, taskPath
 	if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 		agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
 		if readErr == nil {
-			agentContent, readErr = redact.JSONLBytes(agentContent)
-		}
-		if readErr == nil {
-			agentBlobHash, agentBlobErr := CreateBlobFromContent(s.repo, agentContent)
+			redactedAgentContent, redactErr := redact.JSONLBytes(agentContent)
+			if redactErr != nil {
+				logging.Warn(context.Background(), "failed to redact subagent transcript as JSONL, falling back to plain text redaction",
+					slog.String("error", redactErr.Error()),
+					slog.String("session_id", opts.SessionID),
+					slog.String("agent_id", opts.AgentID),
+				)
+				redactedAgentContent = redact.Bytes(agentContent)
+			}
+
+			agentBlobHash, agentBlobErr := CreateBlobFromContent(s.repo, redactedAgentContent)
 			if agentBlobErr == nil {
 				agentPath := taskPath + "agent-" + opts.AgentID + ".jsonl"
 				entries[agentPath] = object.TreeEntry{
@@ -1155,9 +1162,10 @@ func (s *GitStore) copyMetadataDir(metadataDir, basePath string, entries map[str
 		if err != nil {
 			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
 		}
+		relPath = filepath.Clean(relPath)
 
 		// Prevent path traversal via symlinks pointing outside the metadata dir
-		if strings.HasPrefix(relPath, "..") {
+		if relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("path traversal detected: %s", relPath)
 		}
 
