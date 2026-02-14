@@ -590,11 +590,12 @@ func TestApplyTransition_ClearsEndedAt(t *testing.T) {
 	assert.Nil(t, state.EndedAt)
 }
 
-func TestApplyTransition_ReturnsHandlerError(t *testing.T) {
+func TestApplyTransition_ReturnsHandlerError_ButRunsCommonActions(t *testing.T) {
 	t.Parallel()
 
 	state := &State{Phase: PhaseActiveCommitted}
 	handler := &mockActionHandler{returnErr: errors.New("condense failed")}
+	// ACTIVE_COMMITTED + TurnEnd → [Condense, UpdateLastInteraction]
 	result := TransitionResult{
 		NewPhase: PhaseIdle,
 		Actions:  []Action{ActionCondense, ActionUpdateLastInteraction},
@@ -605,6 +606,9 @@ func TestApplyTransition_ReturnsHandlerError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "condense failed")
 	assert.Equal(t, PhaseIdle, state.Phase)
+	// Common action must still run even though handler failed.
+	require.NotNil(t, state.LastInteractionTime,
+		"UpdateLastInteraction must run despite earlier handler error")
 }
 
 func TestApplyTransition_StopsOnFirstHandlerError(t *testing.T) {
@@ -622,4 +626,24 @@ func TestApplyTransition_StopsOnFirstHandlerError(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, handler.migrateShadowBranchCalled)
 	assert.False(t, handler.warnStaleSessionCalled, "should stop on first error")
+}
+
+func TestApplyTransition_ClearEndedAtRunsDespiteHandlerError(t *testing.T) {
+	t.Parallel()
+
+	endedAt := time.Now().Add(-time.Hour)
+	state := &State{Phase: PhaseEnded, EndedAt: &endedAt}
+	handler := &mockActionHandler{returnErr: errors.New("condense failed")}
+	// Synthetic action list to test the mechanism: no real transition produces
+	// this exact ordering, but it verifies that ClearEndedAt (common) always
+	// runs even when a preceding handler action fails.
+	result := TransitionResult{
+		NewPhase: PhaseEnded,
+		Actions:  []Action{ActionCondenseIfFilesTouched, ActionClearEndedAt},
+	}
+
+	err := ApplyTransition(state, result, handler)
+
+	require.Error(t, err)
+	assert.Nil(t, state.EndedAt, "ClearEndedAt must run despite earlier handler error")
 }

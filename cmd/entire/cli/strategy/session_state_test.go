@@ -384,7 +384,7 @@ func TestFindMostRecentSession_FallsBackWhenNoWorktreeMatch(t *testing.T) {
 }
 
 // errorActionHandler returns an error from HandleCondense to test
-// that TransitionAndLog continues despite handler errors.
+// that TransitionAndLog propagates handler errors while still applying the phase transition.
 type errorActionHandler struct {
 	session.NoOpActionHandler
 }
@@ -393,9 +393,10 @@ func (errorActionHandler) HandleCondense(_ *session.State) error {
 	return errors.New("test condense error")
 }
 
-// TestTransitionAndLog_ContinuesDespiteHandlerError verifies that TransitionAndLog
-// applies the phase transition even when the handler returns an error.
-func TestTransitionAndLog_ContinuesDespiteHandlerError(t *testing.T) {
+// TestTransitionAndLog_ReturnsHandlerError verifies that TransitionAndLog
+// applies the phase transition even when the handler returns an error,
+// and propagates that error to the caller.
+func TestTransitionAndLog_ReturnsHandlerError(t *testing.T) {
 	t.Parallel()
 
 	state := &SessionState{
@@ -405,9 +406,12 @@ func TestTransitionAndLog_ContinuesDespiteHandlerError(t *testing.T) {
 
 	// ACTIVE_COMMITTED + TurnEnd → IDLE with ActionCondense.
 	// The handler will fail on ActionCondense, but the phase should still be IDLE.
-	TransitionAndLog(state, session.EventTurnEnd, session.TransitionContext{}, &errorActionHandler{})
+	err := TransitionAndLog(state, session.EventTurnEnd, session.TransitionContext{}, &errorActionHandler{})
 
 	if state.Phase != session.PhaseIdle {
 		t.Errorf("Phase = %q, want %q (should transition despite handler error)", state.Phase, session.PhaseIdle)
+	}
+	if err == nil {
+		t.Error("TransitionAndLog() should return handler error")
 	}
 }

@@ -315,45 +315,64 @@ func (NoOpActionHandler) HandleDiscardIfNoFiles(_ *State) error       { return n
 func (NoOpActionHandler) HandleMigrateShadowBranch(_ *State) error    { return nil }
 func (NoOpActionHandler) HandleWarnStaleSession(_ *State) error       { return nil }
 
-// ApplyTransition applies a TransitionResult to state: sets the new phase,
-// handles common actions internally, and calls the ActionHandler for
-// strategy-specific actions. Returns on the first handler error, leaving
-// subsequent actions unexecuted.
+// ApplyTransition applies a TransitionResult to state: sets the new phase
+// unconditionally, then executes all actions. Common actions
+// (UpdateLastInteraction, ClearEndedAt) always run regardless of handler
+// errors so that bookkeeping fields stay consistent with the new phase.
+// Strategy-specific handler actions stop on the first error; subsequent
+// handler actions are skipped but common actions continue. Returns the
+// first handler error, or nil.
 func ApplyTransition(state *State, result TransitionResult, handler ActionHandler) error {
 	state.Phase = result.NewPhase
 
+	var handlerErr error
 	for _, action := range result.Actions {
 		switch action {
+		// Common actions: always applied, even after a handler error.
 		case ActionUpdateLastInteraction:
 			now := time.Now()
 			state.LastInteractionTime = &now
 		case ActionClearEndedAt:
 			state.EndedAt = nil
+
+		// Strategy-specific actions: skip remaining after the first handler error.
 		case ActionCondense:
-			if err := handler.HandleCondense(state); err != nil {
-				return fmt.Errorf("%s: %w", action, err)
+			if handlerErr == nil {
+				if err := handler.HandleCondense(state); err != nil {
+					handlerErr = fmt.Errorf("%s: %w", action, err)
+				}
 			}
 		case ActionCondenseIfFilesTouched:
-			if err := handler.HandleCondenseIfFilesTouched(state); err != nil {
-				return fmt.Errorf("%s: %w", action, err)
+			if handlerErr == nil {
+				if err := handler.HandleCondenseIfFilesTouched(state); err != nil {
+					handlerErr = fmt.Errorf("%s: %w", action, err)
+				}
 			}
 		case ActionDiscardIfNoFiles:
-			if err := handler.HandleDiscardIfNoFiles(state); err != nil {
-				return fmt.Errorf("%s: %w", action, err)
+			if handlerErr == nil {
+				if err := handler.HandleDiscardIfNoFiles(state); err != nil {
+					handlerErr = fmt.Errorf("%s: %w", action, err)
+				}
 			}
 		case ActionMigrateShadowBranch:
-			if err := handler.HandleMigrateShadowBranch(state); err != nil {
-				return fmt.Errorf("%s: %w", action, err)
+			if handlerErr == nil {
+				if err := handler.HandleMigrateShadowBranch(state); err != nil {
+					handlerErr = fmt.Errorf("%s: %w", action, err)
+				}
 			}
 		case ActionWarnStaleSession:
-			if err := handler.HandleWarnStaleSession(state); err != nil {
-				return fmt.Errorf("%s: %w", action, err)
+			if handlerErr == nil {
+				if err := handler.HandleWarnStaleSession(state); err != nil {
+					handlerErr = fmt.Errorf("%s: %w", action, err)
+				}
 			}
 		default:
-			return fmt.Errorf("unhandled action: %s", action)
+			if handlerErr == nil {
+				handlerErr = fmt.Errorf("unhandled action: %s", action)
+			}
 		}
 	}
-	return nil
+	return handlerErr
 }
 
 // MermaidDiagram generates a Mermaid state diagram from the transition table.

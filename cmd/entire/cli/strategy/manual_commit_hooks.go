@@ -745,7 +745,9 @@ func (s *ManualCommitStrategy) PostCommit() error {
 			hasNew:                 hasNew,
 			pendingMigrations:      &pendingMigrations,
 		}
-		TransitionAndLog(state, session.EventGitCommit, transitionCtx, handler)
+		if err := TransitionAndLog(state, session.EventGitCommit, transitionCtx, handler); err != nil {
+			fmt.Fprintf(os.Stderr, "[entire] Warning: post-commit action handler error: %v\n", err)
+		}
 
 		// Save the updated state
 		if err := s.saveSessionState(state); err != nil {
@@ -1247,8 +1249,10 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 	}
 
 	if state != nil && state.BaseCommit != "" {
-		// Session is fully initialized — apply phase transition for TurnStart
-		TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{})
+		// Session is fully initialized — apply phase transition for TurnStart.
+		if transErr := TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+			fmt.Fprintf(os.Stderr, "[entire] Warning: turn start transition failed: %v\n", transErr)
+		}
 
 		// Backfill AgentType if empty or set to the generic default "Agent"
 		if !isSpecificAgentType(state.AgentType) && agentType != "" {
@@ -1303,8 +1307,10 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 		return fmt.Errorf("failed to initialize session: %w", err)
 	}
 
-	// Apply phase transition: new session starts as ACTIVE
-	TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{})
+	// Apply phase transition: new session starts as ACTIVE.
+	if transErr := TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: turn start transition failed: %v\n", transErr)
+	}
 
 	// Calculate attribution for pre-prompt edits
 	// This captures any user edits made before the first prompt

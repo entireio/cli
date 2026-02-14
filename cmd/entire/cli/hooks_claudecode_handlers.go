@@ -733,8 +733,8 @@ func handleClaudeCodeSessionEnd() error {
 }
 
 // transitionSessionTurnEnd fires EventTurnEnd to move the session from
-// ACTIVE → IDLE (or ACTIVE_COMMITTED → IDLE). Best-effort: logs warnings
-// on failure rather than returning errors.
+// ACTIVE → IDLE (or ACTIVE_COMMITTED → IDLE). Best-effort: prints stderr
+// warnings on failure rather than returning errors.
 func transitionSessionTurnEnd(sessionID string) {
 	turnState, loadErr := strategy.LoadSessionState(sessionID)
 	if loadErr != nil {
@@ -751,7 +751,9 @@ func transitionSessionTurnEnd(sessionID string) {
 	if turnEnd, ok := strat.(strategy.TurnEndHandler); ok {
 		handler = turnEnd.NewTurnEndActionHandler(turnState)
 	}
-	strategy.TransitionAndLog(turnState, session.EventTurnEnd, session.TransitionContext{}, handler)
+	if err := strategy.TransitionAndLog(turnState, session.EventTurnEnd, session.TransitionContext{}, handler); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: turn-end action dispatch failed: %v\n", err)
+	}
 
 	if updateErr := strategy.SaveSessionState(turnState); updateErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to update session phase on turn end: %v\n", updateErr)
@@ -768,7 +770,9 @@ func markSessionEnded(sessionID string) error {
 		return nil // No state file, nothing to update
 	}
 
-	strategy.TransitionAndLog(state, session.EventSessionStop, session.TransitionContext{}, session.NoOpActionHandler{})
+	if transErr := strategy.TransitionAndLog(state, session.EventSessionStop, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: session stop transition failed: %v\n", transErr)
+	}
 
 	now := time.Now()
 	state.EndedAt = &now
