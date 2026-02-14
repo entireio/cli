@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -128,6 +129,20 @@ func JSONLBytes(b []byte) ([]byte, error) {
 	return []byte(redacted), nil
 }
 
+// JSONBytes is a convenience wrapper around JSONContent for []byte content.
+// JSON content is redacted with JSON-aware field skipping (e.g. keys ending in "id").
+func JSONBytes(b []byte) ([]byte, error) {
+	s := string(b)
+	redacted, err := JSONContent(s)
+	if err != nil {
+		return nil, err
+	}
+	if redacted == s {
+		return b, nil
+	}
+	return []byte(redacted), nil
+}
+
 // JSONLContent parses each line as JSON to determine which string values
 // need redaction, then performs targeted replacements on the raw JSON bytes.
 // Lines with no secrets are returned unchanged, preserving original formatting.
@@ -170,9 +185,114 @@ func JSONLContent(content string) (string, error) {
 	return b.String(), nil
 }
 
+// JSONContent parses a JSON string and redacts string values while skipping
+// identifier fields (keys ending in "id") and non-user payload fields.
+func JSONContent(content string) (string, error) {
+	var parsed any
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+		return "", fmt.Errorf("unmarshal JSON content: %w", err)
+	}
+
+	redacted := redactJSONValue(parsed)
+	if reflect.DeepEqual(parsed, redacted) {
+		return content, nil
+	}
+
+	return marshalJSONPreservingFormatting(redacted, content)
+}
+
+// redactJSONValue walks parsed JSON and redacts string values while preserving
+// skipped keys (e.g. ending in "id") and non-user payload fields.
+func redactJSONValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		if shouldSkipJSONLObject(val) {
+			return val
+		}
+		out := make(map[string]any, len(val))
+		for key, child := range val {
+			if shouldSkipJSONField(key) {
+				out[key] = child
+				continue
+			}
+			out[key] = redactJSONValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, child := range val {
+			out[i] = redactJSONValue(child)
+		}
+		return out
+	case string:
+		return String(val)
+	default:
+		return val
+	}
+}
+
+// marshalJSONPreservingFormatting marshals v while preserving basic formatting
+// characteristics from original (indentation and trailing newline).
+func marshalJSONPreservingFormatting(v any, original string) (string, error) {
+	trimmedOriginal := strings.TrimSuffix(original, "\n")
+	// Preserve compact style when JSON content itself is a single line,
+	// while still preserving an optional trailing newline.
+	if !strings.Contains(trimmedOriginal, "\n") {
+		out, err := json.Marshal(v)
+		if err != nil {
+			return "", fmt.Errorf("marshal JSON content: %w", err)
+		}
+		if strings.HasSuffix(original, "\n") {
+			out = append(out, '\n')
+		}
+		return string(out), nil
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	indent := detectJSONIndent(original)
+	if indent == "" {
+		indent = "  "
+	}
+	enc.SetIndent("", indent)
+	if err := enc.Encode(v); err != nil {
+		return "", fmt.Errorf("encode formatted JSON content: %w", err)
+	}
+
+	out := buf.String()
+	if !strings.HasSuffix(original, "\n") {
+		out = strings.TrimSuffix(out, "\n")
+	}
+	return out, nil
+}
+
+// detectJSONIndent returns the leading indentation used by the first indented
+// non-empty line in content.
+func detectJSONIndent(content string) string {
+	lines := strings.Split(content, "\n")
+	for i := 1; i < len(lines); i++ {
+		line := lines[i]
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		trimmed := strings.TrimLeft(line, " \t")
+		if len(trimmed) == len(line) {
+			continue
+		}
+		return line[:len(line)-len(trimmed)]
+	}
+	return ""
+}
+
 // collectJSONLReplacements walks a parsed JSON value and collects unique
 // (original, redacted) string pairs for values that need redaction.
 func collectJSONLReplacements(v any) [][2]string {
+	return collectJSONReplacements(v)
+}
+
+// collectJSONReplacements walks a parsed JSON value and collects unique
+// (original, redacted) string pairs for values that need redaction.
+func collectJSONReplacements(v any) [][2]string {
 	seen := make(map[string]bool)
 	var repls [][2]string
 	var walk func(v any)
@@ -183,7 +303,7 @@ func collectJSONLReplacements(v any) [][2]string {
 				return
 			}
 			for k, child := range val {
-				if shouldSkipJSONLField(k) {
+				if shouldSkipJSONField(k) {
 					continue
 				}
 				walk(child)
@@ -207,6 +327,12 @@ func collectJSONLReplacements(v any) [][2]string {
 // shouldSkipJSONLField returns true if a JSON key should be excluded from scanning/redaction.
 // Skips "signature" (exact) and any key ending in "id" (case-insensitive).
 func shouldSkipJSONLField(key string) bool {
+	return shouldSkipJSONField(key)
+}
+
+// shouldSkipJSONField returns true if a JSON key should be excluded from scanning/redaction.
+// Skips "signature" (exact) and any key ending in "id" (case-insensitive).
+func shouldSkipJSONField(key string) bool {
 	if key == "signature" {
 		return true
 	}

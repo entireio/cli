@@ -2,14 +2,19 @@ package redact
 
 import (
 	"bytes"
+	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 )
 
 // highEntropySecret is a string with Shannon entropy > 4.5 that will trigger redaction.
 const highEntropySecret = "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
+const redactedPlaceholder = "REDACTED"
 
 func TestBytes_NoSecrets(t *testing.T) {
+	t.Parallel()
+
 	input := []byte("hello world, this is normal text")
 	result := Bytes(input)
 	if string(result) != string(input) {
@@ -22,6 +27,8 @@ func TestBytes_NoSecrets(t *testing.T) {
 }
 
 func TestBytes_WithSecret(t *testing.T) {
+	t.Parallel()
+
 	input := []byte("my key is " + highEntropySecret + " ok")
 	result := Bytes(input)
 	expected := []byte("my key is REDACTED ok")
@@ -31,6 +38,8 @@ func TestBytes_WithSecret(t *testing.T) {
 }
 
 func TestJSONLBytes_NoSecrets(t *testing.T) {
+	t.Parallel()
+
 	input := []byte(`{"type":"text","content":"hello"}`)
 	result, err := JSONLBytes(input)
 	if err != nil {
@@ -45,6 +54,8 @@ func TestJSONLBytes_NoSecrets(t *testing.T) {
 }
 
 func TestJSONLBytes_WithSecret(t *testing.T) {
+	t.Parallel()
+
 	input := []byte(`{"type":"text","content":"key=` + highEntropySecret + `"}`)
 	result, err := JSONLBytes(input)
 	if err != nil {
@@ -57,6 +68,8 @@ func TestJSONLBytes_WithSecret(t *testing.T) {
 }
 
 func TestJSONLContent_TopLevelArray(t *testing.T) {
+	t.Parallel()
+
 	// Top-level JSON arrays are valid JSONL and should be redacted.
 	input := `["` + highEntropySecret + `","normal text"]`
 	result, err := JSONLContent(input)
@@ -70,6 +83,8 @@ func TestJSONLContent_TopLevelArray(t *testing.T) {
 }
 
 func TestJSONLContent_TopLevelArrayNoSecrets(t *testing.T) {
+	t.Parallel()
+
 	input := `["hello","world"]`
 	result, err := JSONLContent(input)
 	if err != nil {
@@ -81,6 +96,8 @@ func TestJSONLContent_TopLevelArrayNoSecrets(t *testing.T) {
 }
 
 func TestJSONLContent_InvalidJSONLine(t *testing.T) {
+	t.Parallel()
+
 	// Lines that aren't valid JSON should be processed with normal string redaction.
 	input := `{"type":"text", "invalid ` + highEntropySecret + " json"
 	result, err := JSONLContent(input)
@@ -93,7 +110,141 @@ func TestJSONLContent_InvalidJSONLine(t *testing.T) {
 	}
 }
 
+func TestJSONBytes_PreservesIDFields(t *testing.T) {
+	t.Parallel()
+
+	idFieldSecret := highEntropySecret + "-session-id"
+	intentSecret := highEntropySecret
+	input := `{"session_id":"` + idFieldSecret + `","intent":"` + intentSecret + `","agent_id":"` + idFieldSecret + `"}`
+	result, err := JSONBytes([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// If this field were not considered ID-like, it would be redacted.
+	if String(idFieldSecret) == idFieldSecret {
+		t.Fatal("id field secret should be redacted when not excluded")
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+	if got["session_id"] != idFieldSecret {
+		t.Errorf("session_id should be preserved, got %q", got["session_id"])
+	}
+	if got["intent"] != redactedPlaceholder {
+		t.Errorf("intent should be redacted, got %q", got["intent"])
+	}
+	if got["agent_id"] != idFieldSecret {
+		t.Errorf("agent_id should be preserved, got %q", got["agent_id"])
+	}
+}
+
+func TestJSONBytes_DuplicateIDAndPayloadValues(t *testing.T) {
+	t.Parallel()
+
+	dup := highEntropySecret
+	input := `{"session_id":"` + dup + `","intent":"` + dup + `","tool":"` + dup + `"}`
+	result, err := JSONBytes([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+
+	if got["session_id"] != dup {
+		t.Errorf("session_id should be preserved, got %q", got["session_id"])
+	}
+	if got["intent"] != redactedPlaceholder {
+		t.Errorf("intent should be redacted, got %q", got["intent"])
+	}
+	if got["tool"] != redactedPlaceholder {
+		t.Errorf("tool should be redacted, got %q", got["tool"])
+	}
+}
+
+func TestJSONBytes_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	_, err := JSONBytes([]byte(`{"session":"bad"`))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON content")
+	}
+}
+
+func TestJSONBytes_PreservesIndentedFormatting(t *testing.T) {
+	t.Parallel()
+
+	input := []byte("{\n  \"session_id\": \"sess-123\",\n  \"intent\": \"" + highEntropySecret + "\"\n}\n")
+
+	result, err := JSONBytes(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.HasSuffix(string(result), "\n") {
+		t.Fatalf("expected trailing newline to be preserved, got %q", result)
+	}
+	if !strings.Contains(string(result), "\n  \"") {
+		t.Fatalf("expected indented JSON formatting to be preserved, got %q", result)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+	if got["session_id"] != "sess-123" {
+		t.Errorf("session_id should be preserved, got %q", got["session_id"])
+	}
+	if got["intent"] != redactedPlaceholder {
+		t.Errorf("intent should be redacted, got %q", got["intent"])
+	}
+}
+
+func TestJSONBytes_PreservesCompactFormatting(t *testing.T) {
+	t.Parallel()
+
+	input := []byte("{\"intent\":\"" + highEntropySecret + "\"}")
+
+	result, err := JSONBytes(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if strings.Contains(string(result), "\n") {
+		t.Fatalf("expected compact JSON output without newline, got %q", result)
+	}
+	if !strings.Contains(string(result), "\"intent\":\"REDACTED\"") {
+		t.Fatalf("expected compact redacted output, got %q", result)
+	}
+}
+
+func TestJSONBytes_PreservesCompactWithTrailingNewline(t *testing.T) {
+	t.Parallel()
+
+	input := []byte("{\"intent\":\"" + highEntropySecret + "\"}\n")
+	result, err := JSONBytes(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.HasSuffix(string(result), "\n") {
+		t.Fatalf("expected trailing newline to be preserved, got %q", result)
+	}
+	if strings.Count(string(result), "\n") != 1 {
+		t.Fatalf("expected compact single-line output with trailing newline, got %q", result)
+	}
+	if !strings.Contains(string(result), "\"intent\":\"REDACTED\"") {
+		t.Fatalf("expected compact redacted output, got %q", result)
+	}
+}
+
 func TestCollectJSONLReplacements_Succeeds(t *testing.T) {
+	t.Parallel()
+
 	obj := map[string]any{
 		"content": "token=" + highEntropySecret,
 	}
@@ -106,6 +257,8 @@ func TestCollectJSONLReplacements_Succeeds(t *testing.T) {
 }
 
 func TestShouldSkipJSONLField(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		key  string
 		want bool
@@ -144,6 +297,8 @@ func TestShouldSkipJSONLField(t *testing.T) {
 }
 
 func TestShouldSkipJSONLField_RedactionBehavior(t *testing.T) {
+	t.Parallel()
+
 	// Verify that secrets in skipped fields are preserved (not redacted).
 	obj := map[string]any{
 		"session_id": highEntropySecret,
@@ -160,6 +315,8 @@ func TestShouldSkipJSONLField_RedactionBehavior(t *testing.T) {
 }
 
 func TestString_PatternDetection(t *testing.T) {
+	t.Parallel()
+
 	// These secrets have entropy below 4.5 so entropy-only detection misses them.
 	// Gitleaks pattern matching should catch them.
 	tests := []struct {
@@ -202,6 +359,8 @@ func TestString_PatternDetection(t *testing.T) {
 }
 
 func TestShouldSkipJSONLObject(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		obj  map[string]any
@@ -249,6 +408,8 @@ func TestShouldSkipJSONLObject(t *testing.T) {
 }
 
 func TestShouldSkipJSONLObject_RedactionBehavior(t *testing.T) {
+	t.Parallel()
+
 	// Verify that secrets inside image objects are NOT redacted.
 	obj := map[string]any{
 		"type": "image",

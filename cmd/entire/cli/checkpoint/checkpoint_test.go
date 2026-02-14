@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -39,6 +40,8 @@ func TestCheckpointType_Values(t *testing.T) {
 }
 
 func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
+	t.Parallel()
+
 	// Create a temp directory for the test
 	tempDir := t.TempDir()
 
@@ -94,6 +97,110 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	// Verify the correct number of entries
 	if len(entries) != 1 {
 		t.Errorf("expected 1 entry, got %d", len(entries))
+	}
+}
+
+func TestCopyMetadataDir_AllowsLeadingDotsInFileName(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	metadataDir := filepath.Join(tempDir, "metadata")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	dotFile := filepath.Join(metadataDir, "..notes.txt")
+	if err := os.WriteFile(dotFile, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("failed to write file with leading dots: %v", err)
+	}
+
+	store := NewGitStore(repo)
+	entries := make(map[string]object.TreeEntry)
+	if err := store.copyMetadataDir(metadataDir, "checkpoint/", entries); err != nil {
+		t.Fatalf("copyMetadataDir() error = %v", err)
+	}
+
+	if _, ok := entries["checkpoint/..notes.txt"]; !ok {
+		t.Error("expected file with leading dots to be included")
+	}
+}
+
+func TestAddDirectoryToEntriesWithAbsPath_AllowsLeadingDotsInFileName(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	entries := make(map[string]object.TreeEntry)
+
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	// Filename that begins with ".." but is still inside the directory.
+	dotFile := filepath.Join(metadataDir, "..notes.txt")
+	if err := os.WriteFile(dotFile, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("failed to write file with leading dots: %v", err)
+	}
+
+	relPath := filepath.ToSlash(filepath.Join(paths.EntireMetadataDir, "test-session"))
+	err = addDirectoryToEntriesWithAbsPath(repo, metadataDir, relPath, entries)
+	if err != nil {
+		t.Fatalf("addDirectoryToEntriesWithAbsPath() error = %v", err)
+	}
+
+	expectedPath := filepath.ToSlash(filepath.Join(relPath, "..notes.txt"))
+	if _, ok := entries[expectedPath]; !ok {
+		t.Errorf("expected file with leading dots to be included: %s", expectedPath)
+	}
+}
+
+func TestAddDirectoryToEntriesWithAbsPath_NormalizesTreePathSeparators(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	entries := make(map[string]object.TreeEntry)
+
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	filePath := filepath.Join(metadataDir, "notes.txt")
+	if err := os.WriteFile(filePath, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("failed to write notes.txt: %v", err)
+	}
+
+	// Simulate a windows-style relative path passed into tree construction.
+	relPath := `checkpoint\metadata\test-session`
+	if err := addDirectoryToEntriesWithAbsPath(repo, metadataDir, relPath, entries); err != nil {
+		t.Fatalf("addDirectoryToEntriesWithAbsPath() error = %v", err)
+	}
+
+	expectedPath := "checkpoint/metadata/test-session/notes.txt"
+	if _, ok := entries[expectedPath]; !ok {
+		t.Fatalf("expected normalized path %q in entries", expectedPath)
+	}
+	for entryPath := range entries {
+		if strings.Contains(entryPath, `\`) {
+			t.Fatalf("entry path should use '/' separators, got %q", entryPath)
+		}
 	}
 }
 
@@ -283,6 +390,32 @@ func readLatestSessionMetadata(t *testing.T, repo *git.Repository, checkpointID 
 	}
 
 	return metadata
+}
+
+func readFileFromCheckpointCommit(t *testing.T, repo *git.Repository, commitHash plumbing.Hash, filePath string) string {
+	t.Helper()
+
+	commit, err := repo.CommitObject(commitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get commit tree: %v", err)
+	}
+
+	file, err := tree.File(filePath)
+	if err != nil {
+		t.Fatalf("failed to find file %s: %v", filePath, err)
+	}
+
+	content, err := file.Contents()
+	if err != nil {
+		t.Fatalf("failed to read file %s: %v", filePath, err)
+	}
+
+	return content
 }
 
 // Note: Tests for Agents array and SessionCount fields have been removed
@@ -2855,6 +2988,727 @@ func TestCopyMetadataDir_RedactsSecrets(t *testing.T) {
 			t.Errorf("%s should contain REDACTED placeholder", path)
 		}
 	}
+}
+
+func TestWriteCommitted_MetadataJSON_RedactsSecrets(t *testing.T) {
+	t.Parallel()
+
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef4")
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID: checkpointID,
+		SessionID:    "redact-metadata-json-session",
+		Strategy:     "manual-commit",
+		Transcript:   []byte(`{"msg":"safe"}`),
+		Summary: &Summary{
+			Intent: highEntropySecret,
+		},
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	metadata := readLatestSessionMetadata(t, repo, checkpointID)
+	if metadata.Summary == nil {
+		t.Fatal("expected summary to be present in session metadata")
+	}
+
+	if strings.Contains(metadata.Summary.Intent, highEntropySecret) {
+		t.Error("session metadata summary intent should not contain the secret after redaction")
+	}
+	if !strings.Contains(metadata.Summary.Intent, "REDACTED") {
+		t.Error("session metadata summary intent should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteCommitted_UpdateSummary_RedactsSecrets(t *testing.T) {
+	t.Parallel()
+
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef5")
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "redact-update-summary-session",
+		Strategy:         "manual-commit",
+		Transcript:       []byte(`{"msg":"safe"}`),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	if err := store.UpdateSummary(context.Background(), checkpointID, &Summary{Intent: highEntropySecret}); err != nil {
+		t.Fatalf("UpdateSummary() error = %v", err)
+	}
+
+	metadata := readLatestSessionMetadata(t, repo, checkpointID)
+	if metadata.Summary == nil {
+		t.Fatal("expected summary to be present in session metadata")
+	}
+	if strings.Contains(metadata.Summary.Intent, highEntropySecret) {
+		t.Error("session metadata summary intent should not contain the secret after redaction")
+	}
+	if !strings.Contains(metadata.Summary.Intent, "REDACTED") {
+		t.Error("session metadata summary intent should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteCommitted_MetadataJSON_PreservesMetadataIDFields(t *testing.T) {
+	t.Parallel()
+
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef6")
+
+	sessionID := "session_" + highEntropySecret
+	toolUseID := "toolu_" + highEntropySecret
+	transcriptIdentifier := "message_" + highEntropySecret
+	transcriptPath := ".claude/projects/" + highEntropySecret + "/transcript.jsonl"
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:                checkpointID,
+		SessionID:                   sessionID,
+		ToolUseID:                   toolUseID,
+		Strategy:                    "manual-commit",
+		Transcript:                  []byte(`{"msg":"safe"}`),
+		CheckpointsCount:            1,
+		TranscriptIdentifierAtStart: transcriptIdentifier,
+		SessionTranscriptPath:       transcriptPath,
+		Summary: &Summary{
+			Intent: highEntropySecret,
+		},
+		AuthorName:  "Test Author",
+		AuthorEmail: "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	metadata := readLatestSessionMetadata(t, repo, checkpointID)
+	if metadata.SessionID != sessionID {
+		t.Errorf("session metadata session_id = %q, want %q", metadata.SessionID, sessionID)
+	}
+	if metadata.ToolUseID != toolUseID {
+		t.Errorf("session metadata tool_use_id = %q, want %q", metadata.ToolUseID, toolUseID)
+	}
+	if metadata.TranscriptIdentifierAtStart != transcriptIdentifier {
+		t.Errorf("session metadata transcript_identifier_at_start = %q, want %q", metadata.TranscriptIdentifierAtStart, transcriptIdentifier)
+	}
+	if metadata.TranscriptPath != transcriptPath {
+		t.Errorf("session metadata transcript_path = %q, want %q", metadata.TranscriptPath, transcriptPath)
+	}
+	if metadata.Summary == nil {
+		t.Fatal("expected summary to be present in session metadata")
+	}
+	if strings.Contains(metadata.Summary.Intent, highEntropySecret) {
+		t.Error("session metadata summary intent should not contain the secret after redaction")
+	}
+	if !strings.Contains(metadata.Summary.Intent, "REDACTED") {
+		t.Error("session metadata summary intent should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteCommitted_UpdateSummary_PreservesMetadataIDFields(t *testing.T) {
+	t.Parallel()
+
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef7")
+
+	sessionID := "session_" + highEntropySecret
+	toolUseID := "toolu_" + highEntropySecret
+	transcriptIdentifier := "message_" + highEntropySecret
+	transcriptPath := ".claude/projects/" + highEntropySecret + "/transcript.jsonl"
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:                checkpointID,
+		SessionID:                   sessionID,
+		ToolUseID:                   toolUseID,
+		Strategy:                    "manual-commit",
+		Transcript:                  []byte(`{"msg":"safe"}`),
+		CheckpointsCount:            1,
+		TranscriptIdentifierAtStart: transcriptIdentifier,
+		SessionTranscriptPath:       transcriptPath,
+		AuthorName:                  "Test Author",
+		AuthorEmail:                 "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	if err := store.UpdateSummary(context.Background(), checkpointID, &Summary{Intent: highEntropySecret}); err != nil {
+		t.Fatalf("UpdateSummary() error = %v", err)
+	}
+
+	metadata := readLatestSessionMetadata(t, repo, checkpointID)
+	if metadata.SessionID != sessionID {
+		t.Errorf("session metadata session_id = %q, want %q", metadata.SessionID, sessionID)
+	}
+	if metadata.ToolUseID != toolUseID {
+		t.Errorf("session metadata tool_use_id = %q, want %q", metadata.ToolUseID, toolUseID)
+	}
+	if metadata.TranscriptIdentifierAtStart != transcriptIdentifier {
+		t.Errorf("session metadata transcript_identifier_at_start = %q, want %q", metadata.TranscriptIdentifierAtStart, transcriptIdentifier)
+	}
+	if metadata.TranscriptPath != transcriptPath {
+		t.Errorf("session metadata transcript_path = %q, want %q", metadata.TranscriptPath, transcriptPath)
+	}
+	if metadata.Summary == nil {
+		t.Fatal("expected summary to be present in session metadata")
+	}
+	if strings.Contains(metadata.Summary.Intent, highEntropySecret) {
+		t.Error("session metadata summary intent should not contain the secret after redaction")
+	}
+	if !strings.Contains(metadata.Summary.Intent, "REDACTED") {
+		t.Error("session metadata summary intent should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteCommitted_TaskSubagentTranscript_FallsBackToPlainTextRedaction(t *testing.T) {
+	t.Parallel()
+
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef8")
+
+	tempDir := t.TempDir()
+	subagentTranscriptPath := filepath.Join(tempDir, "subagent-transcript.jsonl")
+	invalidJSONL := `{"role":"assistant","content":"` + highEntropySecret + `"`
+	if err := os.WriteFile(subagentTranscriptPath, []byte(invalidJSONL), 0o644); err != nil {
+		t.Fatalf("failed to write subagent transcript: %v", err)
+	}
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:           checkpointID,
+		SessionID:              "redact-task-subagent-fallback-session",
+		Strategy:               "manual-commit",
+		Transcript:             []byte(`{"msg":"safe"}`),
+		CheckpointsCount:       1,
+		IsTask:                 true,
+		ToolUseID:              "tool-1",
+		AgentID:                "agent-1",
+		SubagentTranscriptPath: subagentTranscriptPath,
+		AuthorName:             "Test Author",
+		AuthorEmail:            "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get metadata branch reference: %v", err)
+	}
+
+	agentPath := checkpointID.Path() + "/tasks/tool-1/agent-agent-1.jsonl"
+	agentContent := readFileFromCheckpointCommit(t, repo, ref.Hash(), agentPath)
+	if strings.Contains(agentContent, highEntropySecret) {
+		t.Error("subagent transcript should not contain the secret after fallback redaction")
+	}
+	if !strings.Contains(agentContent, "REDACTED") {
+		t.Error("subagent transcript should contain REDACTED placeholder after fallback redaction")
+	}
+}
+
+func TestWriteTemporaryTask_MetadataFiles_RedactSecrets(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit initial tree: %v", err)
+	}
+
+	store := NewGitStore(repo)
+
+	transcriptPath := filepath.Join(tempDir, "task-full.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte(`{"role":"assistant","content":"`+highEntropySecret+`"}`+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write task transcript: %v", err)
+	}
+
+	agentTranscriptPath := filepath.Join(tempDir, "agent-transcript.jsonl")
+	if err := os.WriteFile(agentTranscriptPath, []byte(`{"role":"assistant","content":"agent `+highEntropySecret+`"}`+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write agent transcript: %v", err)
+	}
+
+	commitHash, err := store.WriteTemporaryTask(context.Background(), WriteTemporaryTaskOptions{
+		SessionID:              "redact-temp-task-session",
+		BaseCommit:             initialCommit.String(),
+		ToolUseID:              "tool-1",
+		AgentID:                "agent-1",
+		TranscriptPath:         transcriptPath,
+		SubagentTranscriptPath: agentTranscriptPath,
+		CommitMessage:          "task checkpoint",
+		AuthorName:             "Test",
+		AuthorEmail:            "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporaryTask() error = %v", err)
+	}
+
+	metadataDir := strings.TrimSuffix(paths.EntireMetadataDir, "/") + "/redact-temp-task-session"
+	transcriptFile := metadataDir + "/" + paths.TranscriptFileName
+	subagentFile := strings.TrimSuffix(paths.EntireMetadataDir, "/") + "/redact-temp-task-session/tasks/tool-1/agent-agent-1.jsonl"
+
+	transcriptContent := readFileFromCheckpointCommit(t, repo, commitHash, transcriptFile)
+	if strings.Contains(transcriptContent, highEntropySecret) {
+		t.Error("task transcript should not contain the secret after redaction")
+	}
+	if !strings.Contains(transcriptContent, "REDACTED") {
+		t.Error("task transcript should contain REDACTED placeholder")
+	}
+
+	subagentContent := readFileFromCheckpointCommit(t, repo, commitHash, subagentFile)
+	if strings.Contains(subagentContent, highEntropySecret) {
+		t.Error("subagent transcript should not contain the secret after redaction")
+	}
+	if !strings.Contains(subagentContent, "REDACTED") {
+		t.Error("subagent transcript should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteTemporary_MetadataDir_RedactsSecrets(t *testing.T) {
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
+	}); err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get current working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		t.Chdir(origDir)
+	})
+
+	// Ensure paths.RepoRoot() resolves to this repo in this test.
+	t.Chdir(tempDir)
+
+	store := NewGitStore(repo)
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	fullPath := filepath.Join(metadataDir, "full.jsonl")
+	if err := os.WriteFile(fullPath, []byte(`{"content":"secret=`+highEntropySecret+`"}`+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write full.jsonl: %v", err)
+	}
+
+	notePath := filepath.Join(metadataDir, "notes.txt")
+	if err := os.WriteFile(notePath, []byte("secret="+highEntropySecret), 0644); err != nil {
+		t.Fatalf("failed to write notes.txt: %v", err)
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("failed to get HEAD: %v", err)
+	}
+
+	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "redact-temp-commit-session",
+		BaseCommit:        head.Hash().String(),
+		ModifiedFiles:     []string{"README.md"},
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "checkpoint",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@example.com",
+		IsFirstCheckpoint: false,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() error = %v", err)
+	}
+
+	full := readFileFromCheckpointCommit(t, repo, result.CommitHash, ".entire/metadata/test-session/full.jsonl")
+	if strings.Contains(full, highEntropySecret) {
+		t.Error("full.jsonl should not contain the secret after redaction")
+	}
+	if !strings.Contains(full, "REDACTED") {
+		t.Error("full.jsonl should contain REDACTED placeholder")
+	}
+
+	notes := readFileFromCheckpointCommit(t, repo, result.CommitHash, ".entire/metadata/test-session/notes.txt")
+	if strings.Contains(notes, highEntropySecret) {
+		t.Error("notes.txt should not contain the secret after redaction")
+	}
+	if !strings.Contains(notes, "REDACTED") {
+		t.Error("notes.txt should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteTemporary_MetadataDir_SkipsSymlinks(t *testing.T) {
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
+	}); err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get current working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		t.Chdir(origDir)
+	})
+	t.Chdir(tempDir)
+
+	store := NewGitStore(repo)
+	sessionID := "redact-temp-symlink-session"
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", sessionID)
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	regularFile := filepath.Join(metadataDir, "notes.txt")
+	if err := os.WriteFile(regularFile, []byte("secret="+highEntropySecret), 0644); err != nil {
+		t.Fatalf("failed to write notes.txt: %v", err)
+	}
+
+	sensitiveFile := filepath.Join(tempDir, "sensitive.txt")
+	if err := os.WriteFile(sensitiveFile, []byte("very-secret-data"), 0644); err != nil {
+		t.Fatalf("failed to write sensitive file: %v", err)
+	}
+	symlinkPath := filepath.Join(metadataDir, "sneaky-link")
+	if err := os.Symlink(sensitiveFile, symlinkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("failed to get HEAD: %v", err)
+	}
+
+	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         sessionID,
+		BaseCommit:        head.Hash().String(),
+		ModifiedFiles:     []string{"README.md"},
+		MetadataDir:       filepath.ToSlash(filepath.Join(paths.EntireMetadataDir, sessionID)),
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "checkpoint",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@example.com",
+		IsFirstCheckpoint: false,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() error = %v", err)
+	}
+
+	regular := readFileFromCheckpointCommit(t, repo, result.CommitHash, filepath.ToSlash(filepath.Join(paths.EntireMetadataDir, sessionID, "notes.txt")))
+	if strings.Contains(regular, highEntropySecret) {
+		t.Error("notes.txt should not contain the secret after redaction")
+	}
+	if !strings.Contains(regular, "REDACTED") {
+		t.Error("notes.txt should contain REDACTED placeholder")
+	}
+
+	commit, err := repo.CommitObject(result.CommitHash)
+	if err != nil {
+		t.Fatalf("failed to get checkpoint commit object: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get checkpoint tree: %v", err)
+	}
+	if _, err := tree.File(filepath.ToSlash(filepath.Join(paths.EntireMetadataDir, sessionID, "sneaky-link"))); err == nil {
+		t.Error("sneaky-link should not be included in temporary checkpoint metadata")
+	}
+}
+
+// TestRedactSummary_CoversAllFields guards against Summary fields being added
+// without updating redactSummary(). It uses struct-shape tripwires and
+// reflection to verify that every string field is redacted, no field is
+// silently zeroed, and non-string data is preserved unchanged.
+func TestRedactSummary_CoversAllFields(t *testing.T) {
+	t.Parallel()
+
+	// Tripwire: fail when struct shape changes.
+	assertFieldCount(t, Summary{}, 5, "Summary")
+	assertFieldCount(t, LearningsSummary{}, 3, "LearningsSummary")
+	assertFieldCount(t, CodeLearning{}, 4, "CodeLearning")
+
+	// Auto-populate every field: strings get a secret marker,
+	// ints get a non-zero sentinel, slices get one element.
+	input := &Summary{}
+	fillStructFields(reflect.ValueOf(input).Elem(), highEntropySecret)
+
+	// Sanity: every scalar in the auto-filled input must be non-zero.
+	// Catches fillStructFields silently skipping a new field kind.
+	assertAllScalarsNonZero(t, reflect.ValueOf(input), "input")
+
+	result := redactSummary(input)
+	if result == nil {
+		t.Fatal("redactSummary returned nil for non-nil input")
+	}
+
+	inputStrings := collectStringFields(reflect.ValueOf(input), "")
+	resultStrings := collectStringFields(reflect.ValueOf(result), "")
+
+	// Key sets must match exactly.
+	for path := range inputStrings {
+		if _, ok := resultStrings[path]; !ok {
+			t.Errorf("field %s present in input but missing in result — redactSummary does not handle it", path)
+		}
+	}
+	for path := range resultStrings {
+		if _, ok := inputStrings[path]; !ok {
+			t.Errorf("unexpected field %s in result but not in input", path)
+		}
+	}
+
+	// Every input string must be non-empty (auto-fill sanity check).
+	for path, val := range inputStrings {
+		if val == "" {
+			t.Fatalf("auto-fill bug: field %s is empty in input", path)
+		}
+	}
+
+	// No result string may be empty (silently zeroed) or contain the raw secret.
+	for path, val := range resultStrings {
+		if val == "" {
+			t.Errorf("field %s was silently zeroed — redactSummary does not copy this field", path)
+		}
+		if strings.Contains(val, highEntropySecret) {
+			t.Errorf("field %s still contains raw secret after redaction", path)
+		}
+	}
+
+	// Non-string invariant: only string content may differ.
+	// Deep-copy both, normalize all strings to a fixed token, then DeepEqual.
+	inputNorm := jsonRoundTripSummary(t, input)
+	resultNorm := jsonRoundTripSummary(t, result)
+	setAllStrings(reflect.ValueOf(inputNorm).Elem(), "X")
+	setAllStrings(reflect.ValueOf(resultNorm).Elem(), "X")
+	if !reflect.DeepEqual(inputNorm, resultNorm) {
+		t.Errorf("redactSummary altered non-string data:\n  input  (normalized): %+v\n  result (normalized): %+v", inputNorm, resultNorm)
+	}
+}
+
+func assertFieldCount(t *testing.T, v any, expected int, name string) {
+	t.Helper()
+	actual := reflect.TypeOf(v).NumField()
+	if actual != expected {
+		t.Fatalf("%s has %d fields (expected %d) — update redactSummary() and this test",
+			name, actual, expected)
+	}
+}
+
+// fillStructFields recursively populates every field in a struct with
+// non-zero values: strings → secret, bools → true, ints/uints → 7,
+// floats → 7.5, pointers → allocate and recurse, slices → one element.
+func fillStructFields(v reflect.Value, secret string) {
+	switch v.Kind() {
+	case reflect.Ptr:
+		if v.IsNil() {
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		fillStructFields(v.Elem(), secret)
+	case reflect.Struct:
+		for i := range v.NumField() {
+			fillStructFields(v.Field(i), secret)
+		}
+	case reflect.String:
+		v.SetString(secret)
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(7)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v.SetUint(7)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(7.5)
+	case reflect.Slice:
+		s := reflect.MakeSlice(v.Type(), 1, 1)
+		fillStructFields(s.Index(0), secret)
+		v.Set(s)
+	}
+}
+
+// assertAllScalarsNonZero walks a struct and fatals if any scalar field
+// (string, bool, int, uint, float) is at its zero value. This guards
+// against fillStructFields silently skipping a new field kind.
+func assertAllScalarsNonZero(t *testing.T, v reflect.Value, prefix string) {
+	t.Helper()
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return
+		}
+		v = v.Elem()
+	}
+	switch v.Kind() {
+	case reflect.Struct:
+		tp := v.Type()
+		for i := range tp.NumField() {
+			name := tp.Field(i).Name
+			p := name
+			if prefix != "" {
+				p = prefix + "." + name
+			}
+			assertAllScalarsNonZero(t, v.Field(i), p)
+		}
+	case reflect.Slice:
+		for i := range v.Len() {
+			assertAllScalarsNonZero(t, v.Index(i), fmt.Sprintf("%s[%d]", prefix, i))
+		}
+	case reflect.String:
+		if v.String() == "" {
+			t.Fatalf("auto-fill bug: %s is empty string", prefix)
+		}
+	case reflect.Bool:
+		if !v.Bool() {
+			t.Fatalf("auto-fill bug: %s is false", prefix)
+		}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if v.Int() == 0 {
+			t.Fatalf("auto-fill bug: %s is zero", prefix)
+		}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if v.Uint() == 0 {
+			t.Fatalf("auto-fill bug: %s is zero", prefix)
+		}
+	case reflect.Float32, reflect.Float64:
+		if v.Float() == 0 {
+			t.Fatalf("auto-fill bug: %s is zero", prefix)
+		}
+	}
+}
+
+// collectStringFields recursively extracts all string values keyed by
+// dotted path (e.g. "Learnings.Code[0].Path").
+func collectStringFields(v reflect.Value, prefix string) map[string]string {
+	out := make(map[string]string)
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return out
+		}
+		v = v.Elem()
+	}
+	switch v.Kind() {
+	case reflect.Struct:
+		t := v.Type()
+		for i := range t.NumField() {
+			name := t.Field(i).Name
+			p := name
+			if prefix != "" {
+				p = prefix + "." + name
+			}
+			for k, val := range collectStringFields(v.Field(i), p) {
+				out[k] = val
+			}
+		}
+	case reflect.Slice:
+		for i := range v.Len() {
+			p := fmt.Sprintf("%s[%d]", prefix, i)
+			for k, val := range collectStringFields(v.Index(i), p) {
+				out[k] = val
+			}
+		}
+	case reflect.String:
+		out[prefix] = v.String()
+	}
+	return out
+}
+
+// setAllStrings recursively sets every string field/element to token.
+func setAllStrings(v reflect.Value, token string) {
+	switch v.Kind() {
+	case reflect.Ptr:
+		if !v.IsNil() {
+			setAllStrings(v.Elem(), token)
+		}
+	case reflect.Struct:
+		for i := range v.NumField() {
+			setAllStrings(v.Field(i), token)
+		}
+	case reflect.Slice:
+		for i := range v.Len() {
+			setAllStrings(v.Index(i), token)
+		}
+	case reflect.String:
+		v.SetString(token)
+	}
+}
+
+// jsonRoundTripSummary returns a deep copy of s via JSON round-trip.
+func jsonRoundTripSummary(t *testing.T, s *Summary) *Summary {
+	t.Helper()
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("failed to marshal Summary for deep copy: %v", err)
+	}
+	var cp Summary
+	if err := json.Unmarshal(data, &cp); err != nil {
+		t.Fatalf("failed to unmarshal Summary for deep copy: %v", err)
+	}
+	return &cp
 }
 
 // TestWriteCommitted_CLIVersionField verifies that buildinfo.Version is written

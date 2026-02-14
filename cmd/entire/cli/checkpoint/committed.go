@@ -204,10 +204,17 @@ func (s *GitStore) writeFinalTaskCheckpoint(opts WriteCommittedOptions, taskPath
 	if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 		agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
 		if readErr == nil {
-			agentContent, readErr = redact.JSONLBytes(agentContent)
-		}
-		if readErr == nil {
-			agentBlobHash, agentBlobErr := CreateBlobFromContent(s.repo, agentContent)
+			redactedAgentContent, redactErr := redact.JSONLBytes(agentContent)
+			if redactErr != nil {
+				logging.Warn(context.Background(), "failed to redact subagent transcript as JSONL, falling back to plain text redaction",
+					slog.String("error", redactErr.Error()),
+					slog.String("session_id", opts.SessionID),
+					slog.String("agent_id", opts.AgentID),
+				)
+				redactedAgentContent = redact.Bytes(agentContent)
+			}
+
+			agentBlobHash, agentBlobErr := CreateBlobFromContent(s.repo, redactedAgentContent)
 			if agentBlobErr == nil {
 				agentPath := taskPath + "agent-" + opts.AgentID + ".jsonl"
 				entries[agentPath] = object.TreeEntry{
@@ -346,7 +353,7 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // Deprecated: kept for backward compat
 		TokenUsage:                  opts.TokenUsage,
 		InitialAttribution:          opts.InitialAttribution,
-		Summary:                     opts.Summary,
+		Summary:                     redactSummary(opts.Summary),
 		CLIVersion:                  buildinfo.Version,
 		TranscriptPath:              opts.SessionTranscriptPath,
 	}
@@ -969,7 +976,7 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 	}
 
 	// Update the summary
-	existingMetadata.Summary = summary
+	existingMetadata.Summary = redactSummary(summary)
 
 	// Write updated session metadata
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(existingMetadata, "", "  ")
@@ -1006,6 +1013,48 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 	}
 
 	return nil
+}
+
+func redactSummary(summary *Summary) *Summary {
+	if summary == nil {
+		return nil
+	}
+
+	redacted := &Summary{
+		Intent:  redact.String(summary.Intent),
+		Outcome: redact.String(summary.Outcome),
+		Learnings: LearningsSummary{
+			Repo:     redactStringSlice(summary.Learnings.Repo),
+			Workflow: redactStringSlice(summary.Learnings.Workflow),
+		},
+		Friction:  redactStringSlice(summary.Friction),
+		OpenItems: redactStringSlice(summary.OpenItems),
+	}
+
+	if summary.Learnings.Code != nil {
+		redacted.Learnings.Code = make([]CodeLearning, len(summary.Learnings.Code))
+		for i, learning := range summary.Learnings.Code {
+			redacted.Learnings.Code[i] = CodeLearning{
+				Path:    redact.String(learning.Path),
+				Line:    learning.Line,
+				EndLine: learning.EndLine,
+				Finding: redact.String(learning.Finding),
+			}
+		}
+	}
+
+	return redacted
+}
+
+func redactStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	redacted := make([]string, len(values))
+	for i, value := range values {
+		redacted[i] = redact.String(value)
+	}
+	return redacted
 }
 
 // ensureSessionsBranch ensures the entire/checkpoints/v1 branch exists.
@@ -1113,9 +1162,10 @@ func (s *GitStore) copyMetadataDir(metadataDir, basePath string, entries map[str
 		if err != nil {
 			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
 		}
+		relPath = filepath.Clean(relPath)
 
 		// Prevent path traversal via symlinks pointing outside the metadata dir
-		if strings.HasPrefix(relPath, "..") {
+		if relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("path traversal detected: %s", relPath)
 		}
 

@@ -347,11 +347,20 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 		// Add session transcript (with chunking support for large transcripts)
 		if opts.TranscriptPath != "" {
 			if transcriptContent, readErr := os.ReadFile(opts.TranscriptPath); readErr == nil {
+				redactedTranscriptContent, redactErr := redact.JSONLBytes(transcriptContent)
+				if redactErr != nil {
+					logging.Warn(context.Background(), "failed to redact task transcript as JSONL, falling back to plain text redaction",
+						slog.String("error", redactErr.Error()),
+						slog.String("session_id", opts.SessionID),
+					)
+					redactedTranscriptContent = redact.Bytes(transcriptContent)
+				}
+
 				// Detect agent type from content for proper chunking
-				agentType := agent.DetectAgentTypeFromContent(transcriptContent)
+				agentType := agent.DetectAgentTypeFromContent(redactedTranscriptContent)
 
 				// Chunk if necessary
-				chunks, chunkErr := agent.ChunkTranscript(transcriptContent, agentType)
+				chunks, chunkErr := agent.ChunkTranscript(redactedTranscriptContent, agentType)
 				if chunkErr != nil {
 					logging.Warn(context.Background(), "failed to chunk transcript, checkpoint will be saved without transcript",
 						slog.String("error", chunkErr.Error()),
@@ -382,7 +391,17 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 		// Add subagent transcript if available
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 			if agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath); readErr == nil {
-				if blobHash, blobErr := CreateBlobFromContent(s.repo, agentContent); blobErr == nil {
+				redactedAgentContent, redactErr := redact.JSONLBytes(agentContent)
+				if redactErr != nil {
+					logging.Warn(context.Background(), "failed to redact subagent transcript as JSONL, falling back to plain text redaction",
+						slog.String("error", redactErr.Error()),
+						slog.String("session_id", opts.SessionID),
+						slog.String("agent_id", opts.AgentID),
+					)
+					redactedAgentContent = redact.Bytes(agentContent)
+				}
+
+				if blobHash, blobErr := CreateBlobFromContent(s.repo, redactedAgentContent); blobErr == nil {
 					agentPath := taskMetadataDir + "/agent-" + opts.AgentID + ".jsonl"
 					entries[agentPath] = object.TreeEntry{
 						Name: agentPath,
@@ -880,19 +899,25 @@ func addDirectoryToEntriesWithAbsPath(repo *git.Repository, dirPathAbs, dirPathR
 		if info.IsDir() {
 			return nil
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
 
-		// Calculate relative path within the directory, then join with dirPathRel for tree entry
 		relWithinDir, err := filepath.Rel(dirPathAbs, path)
 		if err != nil {
 			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
 		}
+		relWithinDir = filepath.Clean(relWithinDir)
+		if relWithinDir == ".." || strings.HasPrefix(relWithinDir, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("path traversal detected: %s", relWithinDir)
+		}
 
-		blobHash, mode, err := createBlobFromFile(repo, path)
+		treePath := filepath.ToSlash(filepath.Join(dirPathRel, relWithinDir))
+		treePath = strings.ReplaceAll(treePath, `\`, "/")
+		blobHash, mode, err := createRedactedBlobFromFile(repo, path, treePath)
 		if err != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)
 		}
-
-		treePath := filepath.Join(dirPathRel, relWithinDir)
 		entries[treePath] = object.TreeEntry{
 			Name: treePath,
 			Mode: mode,
