@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 )
 
 // highEntropySecret is a string with Shannon entropy > 4.5 that will trigger redaction.
 const highEntropySecret = "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
+const redactedPlaceholder = "REDACTED"
 
 func TestBytes_NoSecrets(t *testing.T) {
 	input := []byte("hello world, this is normal text")
@@ -115,7 +117,7 @@ func TestJSONBytes_PreservesIDFields(t *testing.T) {
 	if got["session_id"] != idFieldSecret {
 		t.Errorf("session_id should be preserved, got %q", got["session_id"])
 	}
-	if got["intent"] != "REDACTED" {
+	if got["intent"] != redactedPlaceholder {
 		t.Errorf("intent should be redacted, got %q", got["intent"])
 	}
 	if got["agent_id"] != idFieldSecret {
@@ -138,10 +140,10 @@ func TestJSONBytes_DuplicateIDAndPayloadValues(t *testing.T) {
 	if got["session_id"] != dup {
 		t.Errorf("session_id should be preserved, got %q", got["session_id"])
 	}
-	if got["intent"] != "REDACTED" {
+	if got["intent"] != redactedPlaceholder {
 		t.Errorf("intent should be redacted, got %q", got["intent"])
 	}
-	if got["tool"] != "REDACTED" {
+	if got["tool"] != redactedPlaceholder {
 		t.Errorf("tool should be redacted, got %q", got["tool"])
 	}
 }
@@ -150,6 +152,49 @@ func TestJSONBytes_InvalidJSON(t *testing.T) {
 	_, err := JSONBytes([]byte(`{"session":"bad"`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON content")
+	}
+}
+
+func TestJSONBytes_PreservesIndentedFormatting(t *testing.T) {
+	input := []byte("{\n  \"session_id\": \"sess-123\",\n  \"intent\": \"" + highEntropySecret + "\"\n}\n")
+
+	result, err := JSONBytes(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.HasSuffix(string(result), "\n") {
+		t.Fatalf("expected trailing newline to be preserved, got %q", result)
+	}
+	if !strings.Contains(string(result), "\n  \"") {
+		t.Fatalf("expected indented JSON formatting to be preserved, got %q", result)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+	if got["session_id"] != "sess-123" {
+		t.Errorf("session_id should be preserved, got %q", got["session_id"])
+	}
+	if got["intent"] != redactedPlaceholder {
+		t.Errorf("intent should be redacted, got %q", got["intent"])
+	}
+}
+
+func TestJSONBytes_PreservesCompactFormatting(t *testing.T) {
+	input := []byte("{\"intent\":\"" + highEntropySecret + "\"}")
+
+	result, err := JSONBytes(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if strings.Contains(string(result), "\n") {
+		t.Fatalf("expected compact JSON output without newline, got %q", result)
+	}
+	if !strings.Contains(string(result), "\"intent\":\"REDACTED\"") {
+		t.Fatalf("expected compact redacted output, got %q", result)
 	}
 }
 

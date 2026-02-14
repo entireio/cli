@@ -190,7 +190,7 @@ func JSONLContent(content string) (string, error) {
 func JSONContent(content string) (string, error) {
 	var parsed any
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
-		return "", err
+		return "", fmt.Errorf("unmarshal JSON content: %w", err)
 	}
 
 	redacted := redactJSONValue(parsed)
@@ -198,11 +198,7 @@ func JSONContent(content string) (string, error) {
 		return content, nil
 	}
 
-	redactedJSON, err := json.Marshal(redacted)
-	if err != nil {
-		return "", err
-	}
-	return string(redactedJSON), nil
+	return marshalJSONPreservingFormatting(redacted, content)
 }
 
 // redactJSONValue walks parsed JSON and redacts string values while preserving
@@ -233,6 +229,57 @@ func redactJSONValue(v any) any {
 	default:
 		return val
 	}
+}
+
+// marshalJSONPreservingFormatting marshals v while preserving basic formatting
+// characteristics from original (indentation and trailing newline).
+func marshalJSONPreservingFormatting(v any, original string) (string, error) {
+	// Preserve compact style for single-line JSON.
+	if !strings.Contains(original, "\n") {
+		out, err := json.Marshal(v)
+		if err != nil {
+			return "", fmt.Errorf("marshal JSON content: %w", err)
+		}
+		if strings.HasSuffix(original, "\n") {
+			out = append(out, '\n')
+		}
+		return string(out), nil
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	indent := detectJSONIndent(original)
+	if indent == "" {
+		indent = "  "
+	}
+	enc.SetIndent("", indent)
+	if err := enc.Encode(v); err != nil {
+		return "", fmt.Errorf("encode formatted JSON content: %w", err)
+	}
+
+	out := buf.String()
+	if !strings.HasSuffix(original, "\n") {
+		out = strings.TrimSuffix(out, "\n")
+	}
+	return out, nil
+}
+
+// detectJSONIndent returns the leading indentation used by the first indented
+// non-empty line in content.
+func detectJSONIndent(content string) string {
+	lines := strings.Split(content, "\n")
+	for i := 1; i < len(lines); i++ {
+		line := lines[i]
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		trimmed := strings.TrimLeft(line, " \t")
+		if len(trimmed) == len(line) {
+			continue
+		}
+		return line[:len(line)-len(trimmed)]
+	}
+	return ""
 }
 
 // collectJSONLReplacements walks a parsed JSON value and collects unique

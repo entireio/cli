@@ -912,7 +912,8 @@ func addDirectoryToEntriesWithAbsPath(repo *git.Repository, dirPathAbs, dirPathR
 			return fmt.Errorf("path traversal detected: %s", relWithinDir)
 		}
 
-		treePath := filepath.Join(dirPathRel, relWithinDir)
+		treePath := filepath.ToSlash(filepath.Join(dirPathRel, relWithinDir))
+		treePath = strings.ReplaceAll(treePath, `\`, "/")
 		blobHash, mode, err := createRedactedBlobFromFile(repo, path, treePath)
 		if err != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)

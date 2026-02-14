@@ -346,7 +346,7 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // Deprecated: kept for backward compat
 		TokenUsage:                  opts.TokenUsage,
 		InitialAttribution:          opts.InitialAttribution,
-		Summary:                     opts.Summary,
+		Summary:                     redactSummary(opts.Summary),
 		CLIVersion:                  buildinfo.Version,
 		TranscriptPath:              opts.SessionTranscriptPath,
 	}
@@ -354,10 +354,6 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(sessionMetadata, "", "  ")
 	if err != nil {
 		return filePaths, fmt.Errorf("failed to marshal session metadata: %w", err)
-	}
-	metadataJSON, err = redact.JSONBytes(metadataJSON)
-	if err != nil {
-		return filePaths, fmt.Errorf("failed to redact metadata json: %w", err)
 	}
 	metadataHash, err := CreateBlobFromContent(s.repo, metadataJSON)
 	if err != nil {
@@ -973,16 +969,12 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 	}
 
 	// Update the summary
-	existingMetadata.Summary = summary
+	existingMetadata.Summary = redactSummary(summary)
 
 	// Write updated session metadata
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(existingMetadata, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
-	}
-	metadataJSON, err = redact.JSONBytes(metadataJSON)
-	if err != nil {
-		return fmt.Errorf("failed to redact metadata json: %w", err)
 	}
 	metadataHash, err := CreateBlobFromContent(s.repo, metadataJSON)
 	if err != nil {
@@ -1014,6 +1006,48 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 	}
 
 	return nil
+}
+
+func redactSummary(summary *Summary) *Summary {
+	if summary == nil {
+		return nil
+	}
+
+	redacted := &Summary{
+		Intent:  redact.String(summary.Intent),
+		Outcome: redact.String(summary.Outcome),
+		Learnings: LearningsSummary{
+			Repo:     redactStringSlice(summary.Learnings.Repo),
+			Workflow: redactStringSlice(summary.Learnings.Workflow),
+		},
+		Friction:  redactStringSlice(summary.Friction),
+		OpenItems: redactStringSlice(summary.OpenItems),
+	}
+
+	if summary.Learnings.Code != nil {
+		redacted.Learnings.Code = make([]CodeLearning, len(summary.Learnings.Code))
+		for i, learning := range summary.Learnings.Code {
+			redacted.Learnings.Code[i] = CodeLearning{
+				Path:    redact.String(learning.Path),
+				Line:    learning.Line,
+				EndLine: learning.EndLine,
+				Finding: redact.String(learning.Finding),
+			}
+		}
+	}
+
+	return redacted
+}
+
+func redactStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	redacted := make([]string, len(values))
+	for i, value := range values {
+		redacted[i] = redact.String(value)
+	}
+	return redacted
 }
 
 // ensureSessionsBranch ensures the entire/checkpoints/v1 branch exists.

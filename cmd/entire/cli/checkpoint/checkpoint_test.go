@@ -130,6 +130,42 @@ func TestAddDirectoryToEntriesWithAbsPath_AllowsLeadingDotsInFileName(t *testing
 	}
 }
 
+func TestAddDirectoryToEntriesWithAbsPath_NormalizesTreePathSeparators(t *testing.T) {
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	entries := make(map[string]object.TreeEntry)
+
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	filePath := filepath.Join(metadataDir, "notes.txt")
+	if err := os.WriteFile(filePath, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("failed to write notes.txt: %v", err)
+	}
+
+	// Simulate a windows-style relative path passed into tree construction.
+	relPath := `checkpoint\metadata\test-session`
+	if err := addDirectoryToEntriesWithAbsPath(repo, metadataDir, relPath, entries); err != nil {
+		t.Fatalf("addDirectoryToEntriesWithAbsPath() error = %v", err)
+	}
+
+	expectedPath := "checkpoint/metadata/test-session/notes.txt"
+	if _, ok := entries[expectedPath]; !ok {
+		t.Fatalf("expected normalized path %q in entries", expectedPath)
+	}
+	for entryPath := range entries {
+		if strings.Contains(entryPath, `\`) {
+			t.Fatalf("entry path should use '/' separators, got %q", entryPath)
+		}
+	}
+}
+
 // TestWriteCommitted_AgentField verifies that the Agent field is written
 // to both metadata.json and the commit message trailer.
 func TestWriteCommitted_AgentField(t *testing.T) {
@@ -2991,14 +3027,18 @@ func TestWriteCommitted_MetadataJSON_PreservesMetadataIDFields(t *testing.T) {
 
 	sessionID := "session_" + highEntropySecret
 	toolUseID := "toolu_" + highEntropySecret
+	transcriptIdentifier := "message_" + highEntropySecret
+	transcriptPath := ".claude/projects/" + highEntropySecret + "/transcript.jsonl"
 
 	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
-		CheckpointID:     checkpointID,
-		SessionID:        sessionID,
-		ToolUseID:        toolUseID,
-		Strategy:         "manual-commit",
-		Transcript:       []byte(`{"msg":"safe"}`),
-		CheckpointsCount: 1,
+		CheckpointID:                checkpointID,
+		SessionID:                   sessionID,
+		ToolUseID:                   toolUseID,
+		Strategy:                    "manual-commit",
+		Transcript:                  []byte(`{"msg":"safe"}`),
+		CheckpointsCount:            1,
+		TranscriptIdentifierAtStart: transcriptIdentifier,
+		SessionTranscriptPath:       transcriptPath,
 		Summary: &Summary{
 			Intent: highEntropySecret,
 		},
@@ -3015,6 +3055,12 @@ func TestWriteCommitted_MetadataJSON_PreservesMetadataIDFields(t *testing.T) {
 	}
 	if metadata.ToolUseID != toolUseID {
 		t.Errorf("session metadata tool_use_id = %q, want %q", metadata.ToolUseID, toolUseID)
+	}
+	if metadata.TranscriptIdentifierAtStart != transcriptIdentifier {
+		t.Errorf("session metadata transcript_identifier_at_start = %q, want %q", metadata.TranscriptIdentifierAtStart, transcriptIdentifier)
+	}
+	if metadata.TranscriptPath != transcriptPath {
+		t.Errorf("session metadata transcript_path = %q, want %q", metadata.TranscriptPath, transcriptPath)
 	}
 	if metadata.Summary == nil {
 		t.Fatal("expected summary to be present in session metadata")
@@ -3034,16 +3080,20 @@ func TestWriteCommitted_UpdateSummary_PreservesMetadataIDFields(t *testing.T) {
 
 	sessionID := "session_" + highEntropySecret
 	toolUseID := "toolu_" + highEntropySecret
+	transcriptIdentifier := "message_" + highEntropySecret
+	transcriptPath := ".claude/projects/" + highEntropySecret + "/transcript.jsonl"
 
 	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
-		CheckpointID:     checkpointID,
-		SessionID:        sessionID,
-		ToolUseID:        toolUseID,
-		Strategy:         "manual-commit",
-		Transcript:       []byte(`{"msg":"safe"}`),
-		CheckpointsCount: 1,
-		AuthorName:       "Test Author",
-		AuthorEmail:      "test@example.com",
+		CheckpointID:                checkpointID,
+		SessionID:                   sessionID,
+		ToolUseID:                   toolUseID,
+		Strategy:                    "manual-commit",
+		Transcript:                  []byte(`{"msg":"safe"}`),
+		CheckpointsCount:            1,
+		TranscriptIdentifierAtStart: transcriptIdentifier,
+		SessionTranscriptPath:       transcriptPath,
+		AuthorName:                  "Test Author",
+		AuthorEmail:                 "test@example.com",
 	})
 	if err != nil {
 		t.Fatalf("WriteCommitted() error = %v", err)
@@ -3059,6 +3109,12 @@ func TestWriteCommitted_UpdateSummary_PreservesMetadataIDFields(t *testing.T) {
 	}
 	if metadata.ToolUseID != toolUseID {
 		t.Errorf("session metadata tool_use_id = %q, want %q", metadata.ToolUseID, toolUseID)
+	}
+	if metadata.TranscriptIdentifierAtStart != transcriptIdentifier {
+		t.Errorf("session metadata transcript_identifier_at_start = %q, want %q", metadata.TranscriptIdentifierAtStart, transcriptIdentifier)
+	}
+	if metadata.TranscriptPath != transcriptPath {
+		t.Errorf("session metadata transcript_path = %q, want %q", metadata.TranscriptPath, transcriptPath)
 	}
 	if metadata.Summary == nil {
 		t.Fatal("expected summary to be present in session metadata")
