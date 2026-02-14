@@ -97,7 +97,7 @@ Strategies: manual-commit (default), auto-commit`,
 					return NewSilentError(errors.New("wrong agent name"))
 				}
 
-				// Check if the agent binary is installed (skip in test mode)
+				// If agent isn't in PATH, warn but still proceed (hooks are only run when the agent runs).
 				if os.Getenv("ENTIRE_SKIP_AGENT_CHECK") != "1" {
 					installed, err := ag.IsInstalled()
 					if err != nil {
@@ -105,9 +105,8 @@ Strategies: manual-commit (default), auto-commit`,
 					}
 					if !installed {
 						fmt.Fprintf(cmd.ErrOrStderr(),
-							"%s is not installed or not found in PATH.\nInstall it from: %s\n",
+							"Note: %s is not in PATH. Hooks were installed; install it from %s when you're ready to capture sessions.\n",
 							agentName, ag.InstallURL())
-						return NewSilentError(errors.New("agent not installed"))
 					}
 				}
 
