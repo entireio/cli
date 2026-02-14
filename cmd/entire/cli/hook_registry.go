@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codexcli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -189,6 +190,15 @@ func init() {
 			return nil
 		}
 		return handleGeminiNotification()
+	})
+
+	// Register Codex CLI handlers
+	RegisterHookHandler(agent.AgentNameCodex, codexcli.HookNameTurnComplete, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleCodexTurnComplete()
 	})
 }
 
