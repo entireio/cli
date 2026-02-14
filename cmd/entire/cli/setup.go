@@ -547,18 +547,19 @@ func printWrongAgentError(w io.Writer, name string) {
 // If strategyName is provided, it sets the strategy; otherwise uses default.
 func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName string, localDev, forceHooks, skipPushSessions, telemetry bool) error {
 	agentName := ag.Name()
-	// Check if agent supports hooks
-	hookAgent, ok := ag.(agent.HookSupport)
-	if !ok {
-		return fmt.Errorf("agent %s does not support hooks", agentName)
-	}
 
 	fmt.Fprintf(w, "Agent: %s\n\n", ag.Type())
 
-	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := hookAgent.InstallHooks(localDev, forceHooks)
-	if err != nil {
-		return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
+	// Install agent hooks if agent supports them
+	// Some agents (e.g., OpenClaw) use git hooks exclusively and don't have agent-side hooks
+	var installedHooks int
+	hookAgent, ok := ag.(agent.HookSupport)
+	if ok {
+		var err error
+		installedHooks, err = hookAgent.InstallHooks(localDev, forceHooks)
+		if err != nil {
+			return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
+		}
 	}
 
 	// Setup .entire directory
@@ -615,18 +616,24 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
 
-	if installedHooks == 0 {
-		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
-		if agentName == agent.AgentNameGemini {
-			msg += " (Preview)"
+	if ok {
+		// Agent supports hooks - show hook installation status
+		if installedHooks == 0 {
+			msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
+			if agentName == agent.AgentNameGemini {
+				msg += " (Preview)"
+			}
+			fmt.Fprintf(w, "%s\n", msg)
+		} else {
+			msg := fmt.Sprintf("Installed %d hooks for %s", installedHooks, ag.Description())
+			if agentName == agent.AgentNameGemini {
+				msg += " (Preview)"
+			}
+			fmt.Fprintf(w, "%s\n", msg)
 		}
-		fmt.Fprintf(w, "%s\n", msg)
 	} else {
-		msg := fmt.Sprintf("Installed %d hooks for %s", installedHooks, ag.Description())
-		if agentName == agent.AgentNameGemini {
-			msg += " (Preview)"
-		}
-		fmt.Fprintf(w, "%s\n", msg)
+		// Agent uses git hooks only (e.g., OpenClaw)
+		fmt.Fprintf(w, "✓ %s configured (uses git hooks)\n", ag.Description())
 	}
 
 	fmt.Fprintf(w, "✓ Project configured (%s)\n", configDisplayProject)
