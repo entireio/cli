@@ -1,0 +1,1022 @@
+can you run a view agents reviewing different aspects of the code changes in this branch
+
+---
+
+<task-notification>
+<task-id>a3e3b71</task-id>
+<status>completed</status>
+<summary>Agent "Review security aspects" completed</summary>
+<result>Based on my comprehensive review of the security aspects of the code changes in branch `soph/one-to-one-checkpoints` compared to `main`, here is my security analysis:
+
+---
+
+## Security Review: soph/one-to-one-checkpoints Branch
+
+### Summary
+
+I reviewed approximately 4000+ lines of changes that implement a "1:1 checkpoint" model where each commit gets its own unique checkpoint ID, replacing the previous system where checkpoint IDs could be reused across multiple commits. The changes also remove the `ACTIVE_COMMITTED` phase, simplifying the state machine.
+
+---
+
+### Critical Issues
+
+**None found.** The changes maintain or improve security posture.
+
+---
+
+### Important Security Observations
+
+#### 1. Path Traversal Protection - GOOD
+
+**Location:** `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/paths/paths.go:137-146`
+
+The `ToRelativePath()` function properly rejects paths that escape the working directory:
+
+```go
+func ToRelativePath(absPath, cwd string) string {
+    if !filepath.IsAbs(absPath) {
+        return absPath
+    }
+    relPath, err := filepath.Rel(cwd, absPath)
+    if err != nil || strings.HasPrefix(relPath, "..") {
+        return ""  // Properly rejects parent traversal
+    }
+    return relPath
+}
+```
+
+This function is correctly used in the new `extractSessionDataFromLiveTranscript()` and `extractFilesFromLiveTranscript()` methods to normalize paths.
+
+#### 2. Checkpoint ID Validation - GOOD
+
+**Location:** `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/checkpoint/id/id.go`
+
+Checkpoint IDs are validated with a strict regex pattern (`^[0-9a-f]{12}$`) that only allows exactly 12 lowercase hex characters. This prevents:
+- Path injection via checkpoint IDs
+- Invalid ID formats being accepted
+- The `Path()` method safely shards: `a3b2c4d5e6f7` -> `a3/b2c4d5e6f7`
+
+#### 3. Secret Redaction - GOOD
+
+**Location:** `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/strategy/manual_commit_hooks.go:1610-1625`
+
+The new `finalizeAllTurnCheckpoints()` function properly applies secret redaction before writing to the metadata branch:
+
+```go
+// Redact secrets before writing - matches WriteCommitted behavior
+fullTranscript, err = redact.JSONLBytes(fullTranscript)
+// ... error handling ...
+for i, p := range prompts {
+    prompts[i] = redact.String(p)
+}
+contextBytes = redact.Bytes(contextBytes)
+```
+
+This uses the same dual-layer approach (entropy-based + gitleaks pattern-based) as the original WriteCommitted code.
+
+#### 4. File Permission Handling - ACCEPTABLE
+
+New file operations use `0o644` permissions consistently, which is appropriate for non-sensitive metadata files:
+- Test files
+- Transcript copies
+- Session state JSON
+
+#### 5. Input Validation in UpdateCommitted - GOOD
+
+**Location:** `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/checkpoint/committed.go:1020-1023`
+
+The new `UpdateCommitted()` function validates its inputs:
+
+```go
+if opts.CheckpointID.IsEmpty() {
+    return errors.New("invalid update options: checkpoint ID is required")
+}
+```
+
+And properly handles missing session IDs by falling back to the latest session with logging.
+
+---
+
+### Suggestions (Consider)
+
+#### 1. Transcript Path Should Be Validated
+
+**Location:** `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/strategy/manual_commit_condensation.go:396`
+
+The `extractSessionDataFromLiveTranscript()` function reads from `state.TranscriptPath` with only an empty check:
+
+```go
+if state.TranscriptPath == "" {
+    return nil, errors.New("no transcript path in session state")
+}
+liveData, err := os.ReadFile(state.TranscriptPath)
+```
+
+**Rationale:** The TranscriptPath comes from session state which is controlled by the CLI, but consider:
+- Adding a check that the path is within expected directories (e.g., `~/.claude/projects/` for Claude, `~/.gemini/` for Gemini)
+- This would be defense-in-depth against state file tampering
+
+**Impact:** Low - session state is in `.git/entire-sessions/` which is already a trusted location, and only the CLI writes to it.
+
+#### 2. Session ID Fallback Behavior
+
+**Location:** `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/checkpoint/committed.go:1064-1072`
+
+When the session ID is not found, the code falls back to the latest session:
+
+```go
+if sessionIndex == -1 {
+    sessionIndex = len(checkpointSummary.Sessions) - 1
+    logging.Debug(ctx, "UpdateCommitted: session ID not found, falling back to latest", ...)
+}
+```
+
+**Rationale:** This is logged at Debug level. Consider whether Warning level would be more appropriate for diagnosability, since this indicates a potential data mismatch.
+
+---
+
+### Praise
+
+1. **Consistent use of path normalization** - The `paths.ToRelativePath()` function is consistently used when converting absolute paths from transcript analysis to repo-relative paths.
+
+2. **Secret redaction maintained** - The new transcript finalization path properly applies the same redaction logic as the original condensation path, preventing sensitive data leakage.
+
+3. **Checkpoint ID validation** - The strict regex validation prevents any path traversal or injection attacks via checkpoint IDs.
+
+4. **Fail-safe content checking** - The `sessionHasNewContent` logic fails open (assumes new content exists) when checks fail, which prevents silently losing checkpoint data.
+
+5. **Content-aware overlap checking** - The new `filesOverlapWithContent()` function compares file hashes to prevent incorrectly linking commits where user reverted session changes and wrote different content. This is a security improvement that prevents data attribution errors.
+
+---
+
+### Summary
+
+**Verdict: No security concerns blocking merge.**
+
+The changes maintain existing security practices:
+- Path traversal protection via `ToRelativePath()` 
+- Checkpoint ID format validation
+- Secret redaction before persisting to git
+- Appropriate file permissions
+
+The removal of the `ACTIVE_COMMITTED` phase simplifies the state machine, reducing potential for security-relevant bugs in state transitions.
+
+The new `UpdateCommitted()` function properly validates inputs and uses the same git storage patterns as the existing `WriteCommitted()` function.</result>
+</task-notification>
+Full transcript available at: /private/tmp/claude/-Users-soph-Work-entire-devenv-cli/tasks/a3e3b71.output
+
+---
+
+<task-notification>
+<task-id>aef3bf6</task-id>
+<status>completed</status>
+<summary>Agent "Review test coverage" completed</summary>
+<result>I have completed my analysis but am unable to write the review file due to permissions. Let me provide the full review directly in the response:
+
+---
+
+# Review 01 - Test Coverage Analysis
+
+> Status: pending-dev
+> Date: 2026-02-13
+> Reviewer: Code Review Agent
+> Verdict: REQUEST CHANGES
+
+## Summary
+
+This review focuses specifically on test coverage for the "one-to-one checkpoints" feature (branch `soph/one-to-one-checkpoints`). The feature introduces a 1:1 mapping between commits and checkpoints, deferred transcript finalization via `UpdateCommitted`, and carry-forward logic for partial commits.
+
+**Overall Assessment:** The test coverage is **good but has significant gaps** in error handling, edge cases, and some critical integration scenarios. The new integration tests in `deferred_finalization_test.go` are well-structured and test the happy paths effectively. However, several edge cases and error conditions are not tested.
+
+---
+
+## Critical (Must Fix)
+
+### 1. Missing Error Path Tests for UpdateCommitted
+**[/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/checkpoint/committed_update_test.go]**
+
+The `UpdateCommitted` function handles errors in several places (reading existing content, building trees, creating commits), but only `TestUpdateCommitted_NonexistentCheckpoint` and `TestUpdateCommitted_EmptyCheckpointID` test error paths. Missing tests:
+
+- **Corrupted metadata on disk** - What happens if `metadata.json` exists but is malformed JSON?
+- **Race condition with concurrent writes** - Two UpdateCommitted calls for the same checkpoint ID
+- **Disk full / write failure simulation** - Error handling in tree building
+
+Suggested fix: Add test cases:
+```go
+func TestUpdateCommitted_CorruptedMetadata(t *testing.T)
+func TestUpdateCommitted_PartiallyWrittenCheckpoint(t *testing.T)
+```
+
+### 2. Missing Test for HandleTurnEnd with Empty TurnCheckpointIDs
+**[/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/strategy/manual_commit_hooks.go:1562-1567]**
+
+The `HandleTurnEnd` method calls `finalizeAllTurnCheckpoints` which returns early if `TurnCheckpointIDs` is empty, but there's no explicit test verifying this behavior. The early return is correct, but should be tested.
+
+Suggested fix: Add a test in `phase_postcommit_test.go`:
+```go
+func TestHandleTurnEnd_EmptyTurnCheckpointIDs_DoesNothing(t *testing.T)
+```
+
+### 3. Missing Test for Transcript Redaction in Finalization
+**[/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/strategy/manual_commit_hooks.go:1610-1625]**
+
+`finalizeAllTurnCheckpoints` redacts the transcript, prompts, and context before writing. This security-critical behavior has no direct unit test.
+
+Suggested fix: Add test verifying secrets are redacted in the finalized checkpoint content.
+
+---
+
+## Important (Should Fix)
+
+### 4. Incomplete Coverage of `filesOverlapWithContent` Edge Cases
+**[/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/strategy/manual_commit_hooks.go:1683-1800]**
+
+The `filesOverlapWithContent` function has complex logic for modified vs new files with content matching. While `TestShadow_RevertedFiles_ManualEditNoCheckpoint` tests the happy path, these scenarios are missing:
+
+- Parent commit unavailable (orphan commit) - lines 1737-1743
+- Shadow branch exists but file not in shadow tree - lines 1771-1778
+- All files checked but none match (loop exhaustion) - lines 1795-1798
+
+Suggested fix: Add unit tests for `filesOverlapWithContent` with mocked trees.
+
+### 5. Missing Test for `stagedFilesOverlapWithContent` Error Paths
+**[/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/strategy/manual_commit_hooks.go:1810-1915]**
+
+This function has multiple fallback paths when git operations fail (lines 1822-1849). None of these error paths are tested. The function falls back to `hasOverlappingFiles` which is filename-only, but this degraded behavior should be tested.
+
+### 6. Carry-Forward Integration Tests Missing Multi-Turn Scenario
+**[/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/integration_test/deferred_finalization_test.go]**
+
+`TestShadow_CarryForward_ActiveSession` tests partial commit during a single turn, but doesn't test:
+- Multiple turns with carry-forward (prompt -> commit file A -> prompt -> commit file B)
+- Carry-forward after session resume (session ends, resumes, then partial commit)
+
+These are realistic user workflows that should be tested.
+
+### 7. No Flaky Test Protection for Timing-Dependent Tests
+**[/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/integration_test/deferred_finalization_test.go]**
+
+Several tests create transcripts and immediately check state. While `t.Parallel()` is used correctly, there's no retry logic or explicit synchronization for filesystem operations that could be delayed. Consider:
+
+```go
+// Potential flakiness: transcript write may not be visible immediately
+sess.CreateTranscript("Create feature function", []FileChange{...})
+// No sleep or sync before reading state
+```
+
+The tests currently pass, but on a loaded CI system, filesystem caching could cause intermittent failures.
+
+### 8. Missing Test for `sessionHasNewContentInCommittedFiles`
+**[/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/strategy/manual_commit_hooks.go:1014-1105]**
+
+This function is called in PostCommit for ACTIVE sessions (line 554) but has no direct unit test. It's tested implicitly through integration tests, but the edge cases (missing transcript, agent type mismatch, transcript not grown) should have explicit unit tests.
+
+---
+
+## Suggestions (Consider)
+
+### 9. Test Helper Duplication
+**[/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/integration_test/deferred_finalization_test.go:43-59, 246-262, 437-452]**
+
+The `submitWithTranscriptPath` helper is duplicated across multiple test functions. Consider extracting to a shared helper in `test_helpers.go`.
+
+### 10. Phase State Machine Test Coverage
+**[/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/session/phase_test.go]**
+
+The phase tests are comprehensive for the state machine transitions, but the new integration with `TurnCheckpointIDs` is not tested at the unit level. Consider adding:
+```go
+func TestTransitionFromActive_GitCommit_RecordsTurnCheckpointID(t *testing.T)
+```
+
+### 11. Consider Property-Based Testing for Checkpoint ID Generation
+**[/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/checkpoint/id/]**
+
+The checkpoint ID generation is security-sensitive (used for sharding, linking). Consider adding property-based tests to verify:
+- Generated IDs are always 12 hex characters
+- Distribution is uniform across shards
+- No collisions in reasonable sample sizes
+
+---
+
+## Praise
+
+- **Excellent integration test structure** in `deferred_finalization_test.go` - the tests follow realistic user workflows and are well-documented with flow diagrams in comments.
+
+- **Good use of `t.Parallel()`** across all test files, enabling efficient parallel execution.
+
+- **Comprehensive phase state machine tests** in `phase_test.go` - the table-driven tests cover all phase/event combinations and verify backward compatibility.
+
+- **Content-aware overlap tests** (`TestShadow_RevertedFiles_ManualEditNoCheckpoint`) demonstrate good understanding of the security implications of checkpoint linking.
+
+- **Test isolation** - each test creates its own git repo via `t.TempDir()`, preventing cross-test contamination.
+
+---
+
+## Test Coverage Summary
+
+| Component | Coverage Level | Notes |
+|-----------|---------------|-------|
+| `UpdateCommitted` | Good | Happy paths well tested, error paths weak |
+| `finalizeAllTurnCheckpoints` | Partial | Tested via integration, missing unit tests |
+| `filesOverlapWithContent` | Partial | Happy path only, edge cases missing |
+| CarryForward logic | Good | Integration tests comprehensive |
+| Phase transitions | Excellent | Complete table-driven coverage |
+| `PostCommit` hooks | Good | Multiple scenarios tested |
+| Content-aware overlap | Good | Key scenarios covered |
+
+---
+
+## Estimated Effort
+
+- Critical fixes: 4-6 hours
+- Important fixes: 4-6 hours
+- Suggestions: 2-3 hours
+
+**Total: ~1-2 days for complete coverage improvement.**</result>
+</task-notification>
+Full transcript available at: /private/tmp/claude/-Users-soph-Work-entire-devenv-cli/tasks/aef3bf6.output
+
+---
+
+<task-notification>
+<task-id>ae499f1</task-id>
+<status>completed</status>
+<summary>Agent "Review architecture/design" completed</summary>
+<result>I'll provide the architecture review directly in my response since I cannot write to files.
+
+---
+
+# Architecture Review - One-to-One Checkpoints
+
+**Branch:** `soph/one-to-one-checkpoints` vs `main`  
+**Date:** 2026-02-13  
+**Reviewer:** Architecture Review Agent  
+**Verdict:** **APPROVE** with minor suggestions
+
+---
+
+## Summary
+
+This branch implements a **one-to-one checkpoint model** where each git commit gets its own unique checkpoint ID, replacing the previous approach where multiple commits could share the same checkpoint ID. The changes also simplify the state machine by removing the `ACTIVE_COMMITTED` phase and implementing immediate condensation with deferred transcript finalization.
+
+---
+
+## 1. State Machine Simplification
+
+### What Changed
+- **Removed `ACTIVE_COMMITTED` phase entirely** (previously 4 phases, now 3: ACTIVE, IDLE, ENDED)
+- `ACTIVE + GitCommit` now stays `ACTIVE` and triggers immediate `ActionCondense`
+- Removed `ActionMigrateShadowBranch` and `ActionDeferCondensation`
+- Backward-compatible: `PhaseFromString("active_committed")` normalizes to `ACTIVE`
+
+### Architecture Assessment: **Good**
+
+**Strengths:**
+- Simpler state machine with fewer states to reason about
+- Clear separation of concerns: PostCommit does condensation immediately, HandleTurnEnd finalizes with full transcript
+- The state machine in `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/session/phase.go` is now cleaner and more predictable
+
+**Pattern Consistency:**
+The changes align with the existing patterns - the state machine still emits actions that hook handlers dispatch to strategy-specific implementations.
+
+---
+
+## 2. Deferred Finalization Pattern
+
+### How It Works (New Flow)
+
+1. **PostCommit (ACTIVE session)**: Condenses immediately with "provisional" transcript (whatever is available at commit time)
+2. **PostCommit**: Appends checkpoint ID to `state.TurnCheckpointIDs` 
+3. **HandleTurnEnd (Stop hook)**: Reads full transcript from disk, calls `UpdateCommitted()` for each checkpoint ID
+4. **HandleTurnEnd**: Clears `TurnCheckpointIDs` and updates `CheckpointTranscriptStart`
+
+### Architecture Assessment: **Sound**
+
+**Strengths:**
+- **Idempotent**: Each checkpoint ID is generated fresh in PrepareCommitMsg - no reuse from previous commits
+- **Fail-safe**: If HandleTurnEnd fails, the provisional transcript is still valid metadata (better than losing everything)
+- **Clear ownership**: PostCommit owns condensation, HandleTurnEnd owns finalization
+- **Replace semantics**: `UpdateCommitted()` replaces (not appends) the transcript - correct because all checkpoints from the same turn should have identical final transcripts
+
+**Key Files:**
+- `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/strategy/manual_commit_hooks.go` (lines 1562-1675) - HandleTurnEnd and finalizeAllTurnCheckpoints
+- `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/checkpoint/committed.go` - UpdateCommitted implementation
+
+**Potential Edge Case:**
+If a user commits multiple times during a turn then crashes before Stop:
+- Checkpoints have provisional transcripts (partial but valid)
+- TurnCheckpointIDs is persisted to state file
+
+The current implementation clears TurnCheckpointIDs on any failure, which is safe. Consider whether recovery should be attempted on next InitializeSession (see Suggestions).
+
+---
+
+## 3. TurnID Correlation
+
+### What Changed
+New `TurnID` field in session state, generated at turn start and written to `CommittedMetadata.TurnID`.
+
+```go
+// In session/state.go
+TurnID string `json:"turn_id,omitempty"`
+
+// In checkpoint/checkpoint.go  
+TurnID string `json:"turn_id,omitempty"`
+```
+
+### Architecture Assessment: **Appropriate**
+
+This enables future aggregation of related checkpoints (e.g., "show all commits from this turn"). The field is optional and doesn't affect core functionality. Good forward-thinking design.
+
+---
+
+## 4. Checkpoint Store Interface Extension
+
+### What Changed
+Added `UpdateCommitted(ctx, UpdateCommittedOptions) error` to the `Store` interface in `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/checkpoint/checkpoint.go`.
+
+### Architecture Assessment: **Clean**
+
+**Pattern Consistency:**
+- Follows existing pattern of `WriteCommitted` and `ReadCommitted`
+- Options struct pattern matches other methods
+- Error handling with `ErrCheckpointNotFound` is consistent
+
+**Implementation Quality (committed.go lines 1140-1258):**
+- Properly handles multi-session checkpoints (finds correct session index by session ID)
+- Falls back to latest session if ID not found (defensive, with Debug log)
+- Cleans up old chunk files before writing new ones (`replaceTranscript`)
+- Updates content hash for integrity
+
+**Minor Suggestion:** The fallback to latest session logs at Debug level. Consider Warn since it indicates an unexpected mismatch.
+
+---
+
+## 5. Mid-Session Commit Detection (No Shadow Branch)
+
+### Problem
+When user commits mid-turn, `SaveChanges`/`Stop` hasn't been called yet, so there's no shadow branch. The previous code would fail to condense.
+
+### Solution
+New `extractSessionDataFromLiveTranscript()` in `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/strategy/manual_commit_condensation.go` (lines 406-455).
+
+### Architecture Assessment: **Clever Solution**
+
+**Implementation:**
+- Reads transcript directly from `state.TranscriptPath` on disk
+- Reuses existing extraction utilities (`countTranscriptItems`, `extractUserPrompts`, `generateContextFromPrompts`)
+- Normalizes paths consistently with `paths.ToRelativePath`
+- Extracts files from transcript if `state.FilesTouched` is empty
+
+**Minor Note:** Attribution calculation is skipped for mid-session commits (`attribution` is nil). This is fine for initial implementation but should be documented.
+
+---
+
+## 6. Carry-Forward Logic
+
+### What Changed
+After condensation, remaining uncommitted files are carried forward to preserve the ability to link subsequent commits.
+
+```go
+// In manual_commit_hooks.go PostCommit
+remainingFiles := subtractFiles(filesTouchedBefore, committedFileSet)
+if len(remainingFiles) > 0 {
+    s.carryForwardToNewShadowBranch(logCtx, repo, state, remainingFiles)
+}
+```
+
+### Architecture Assessment: **Sound**
+
+**Key Insight:** The 1:1 model means if a user splits work across two commits, each needs its own checkpoint. Carry-forward preserves this capability.
+
+**Pattern Consistency:** Builds on existing shadow branch migration pattern but operates at file-level granularity.
+
+---
+
+## 7. Content-Aware Overlap Check
+
+### What Changed
+New `filesOverlapWithContent()` function compares file hashes between committed content and shadow branch content.
+
+### Architecture Assessment: **Excellent**
+
+**Problem Solved:** Prevents linking commits where user reverted session changes and wrote completely different content. Without this, a manual rewrite would incorrectly get the session's checkpoint ID.
+
+**Implementation (manual_commit_hooks.go lines 1677-1750):**
+- Compares blob hashes (efficient, no content read needed)
+- Falls back to filename-only check if shadow branch inaccessible
+- Well-documented in function comment
+
+**Test Coverage:** `TestShadow_RevertedFiles_ManualEditNoCheckpoint` in deferred_finalization_test.go validates this behavior.
+
+---
+
+## 8. PrepareCommitMsg Simplification
+
+### What Changed
+Removed the complex checkpoint ID reuse logic. Now always generates a fresh checkpoint ID when content exists.
+
+**Before:** Complex logic to determine `hasNewContent`, `reusedSession`, `LastCheckpointID` reuse
+**After:** Simple flow - if sessions have new content, generate fresh ID and add trailer
+
+### Architecture Assessment: **Excellent Simplification**
+
+The previous approach of reusing `LastCheckpointID` for subsequent commits is no longer needed because each commit gets its own checkpoint. This removes significant complexity from PrepareCommitMsg (~80 lines deleted).
+
+---
+
+## 9. Test Coverage
+
+### Assessment: **Comprehensive**
+
+New integration tests in `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/integration_test/deferred_finalization_test.go`:
+- `TestShadow_DeferredTranscriptFinalization` - Full flow: commit during ACTIVE, verify finalization at stop
+- `TestShadow_CarryForward_ActiveSession` - Multiple commits during ACTIVE session
+- `TestShadow_CarryForward_IdleSession` - Split commits from IDLE session  
+- `TestShadow_MultipleCommits_SameActiveTurn` - 3 commits, all finalized
+- `TestShadow_OverlapCheck_UnrelatedCommit` - No trailer for unrelated files
+- `TestShadow_OverlapCheck_PartialOverlap` - Partial overlap still links
+- `TestShadow_SessionDepleted_ManualEditNoCheckpoint` - No trailer after session files committed
+- `TestShadow_RevertedFiles_ManualEditNoCheckpoint` - Content-aware check
+
+New unit tests in `/Users/soph/Work/entire/devenv/cli/cmd/entire/cli/checkpoint/committed_update_test.go`:
+- Full coverage of `UpdateCommitted` including replace semantics, content hash updates, fallback behavior
+
+---
+
+## Suggestions for Improvement
+
+### 1. Document Attribution Gap
+The attribution calculation is skipped for mid-session commits (line 153 in manual_commit_condensation.go). Add a comment or TODO noting this limitation.
+
+### 2. Consider Crash Recovery Path  
+If `TurnCheckpointIDs` is non-empty when InitializeSession runs (from previous crash), consider finalizing those checkpoints rather than clearing them. Currently they're implicitly orphaned.
+
+### 3. Upgrade Log Level for Session ID Fallback
+In `UpdateCommitted()` (committed.go line 195), when falling back to latest session because session ID wasn't found, consider `Warn` instead of `Debug`.
+
+### 4. Integration Test for Crash Recovery
+Add a test that simulates a crash between PostCommit and HandleTurnEnd, then verifies behavior on next session start.
+
+---
+
+## Files Changed Summary (Key Architectural Components)
+
+| File | Change Type | Lines Changed | Notes |
+|------|-------------|---------------|-------|
+| `session/phase.go` | Simplification | -50 | Removed ACTIVE_COMMITTED phase |
+| `session/state.go` | Extension | +15 | Added TurnID, TurnCheckpointIDs |
+| `checkpoint/checkpoint.go` | Interface | +30 | Added UpdateCommittedOptions |
+| `checkpoint/committed.go` | Implementation | +170 | Added UpdateCommitted() |
+| `manual_commit_hooks.go` | Core Logic | +400/-400 | Immediate condensation, HandleTurnEnd finalization, carry-forward |
+| `manual_commit_condensation.go` | Enhancement | +70 | Live transcript extraction |
+| Integration tests | New | +825 | Comprehensive deferred finalization tests |
+
+---
+
+## Verdict: **APPROVE**
+
+The architecture is well-designed:
+- State machine is simpler and easier to reason about (3 states vs 4)
+- Deferred finalization provides correct behavior for mid-turn commits
+- Content-aware overlap prevents incorrect checkpoint linkage
+- 1:1 model is cleaner conceptually - no complex "reuse" logic
+- Test coverage is comprehensive
+
+The implementation follows existing patterns in the codebase (session state, checkpoint store, hook dispatch) and maintains backward compatibility with the `active_committed` phase string.
+
+**Key Design Decisions That Are Correct:**
+1. Immediate condensation + deferred finalization (vs all-deferred)
+2. Replace semantics for transcript updates (vs append)
+3. Content-aware overlap checking (vs filename-only)
+4. Fresh checkpoint ID per commit (vs reuse)</result>
+</task-notification>
+Full transcript available at: /private/tmp/claude/-Users-soph-Work-entire-devenv-cli/tasks/ae499f1.output
+
+---
+
+<task-notification>
+<task-id>a7470ed</task-id>
+<status>completed</status>
+<summary>Agent "Review code correctness" completed</summary>
+<result>Based on my comprehensive review of the changes in branch `soph/one-to-one-checkpoints`, here is my analysis:
+
+---
+
+## Code Review: Branch `soph/one-to-one-checkpoints`
+
+### Summary
+
+This branch implements a significant refactoring of the checkpoint system to move from deferred condensation (ACTIVE_COMMITTED state) to immediate condensation with deferred transcript finalization. The key changes:
+
+1. **Removed `ACTIVE_COMMITTED` phase** - now ACTIVE sessions condense immediately on commit
+2. **Added 1:1 checkpoint model** - each commit gets its own unique checkpoint ID
+3. **Added carry-forward logic** - uncommitted files from partial commits get new shadow branches
+4. **Added content-aware overlap checking** - prevents linking commits where user reverted session changes
+5. **Added deferred transcript finalization** - `HandleTurnEnd` updates provisional transcripts with full content
+
+---
+
+### Critical (Must Fix)
+
+None identified. The code logic appears sound, tests pass, and the state machine changes are well-tested.
+
+---
+
+### Important (Should Fix)
+
+**1. [manual_commit_hooks.go:1685-1800] `filesOverlapWithContent` has no direct unit tests**
+
+The `filesOverlapWithContent` function implements critical business logic for determining whether a commit should be linked to a session. While it is exercised through integration tests, there are no direct unit tests for its various code paths:
+- Modified file detection (always counts as overlap)
+- New file content matching (exact hash match required)
+- Fallback behavior when trees/branches are not accessible
+
+Suggested fix: Add unit tests similar to `TestFilesChangedInCommit` and `TestSubtractFiles` to cover these scenarios explicitly.
+
+**2. [manual_commit_hooks.go:543-555] ACTIVE session `hasNew` check may miss edge cases**
+
+```go
+if state.StepCount > 0 || len(state.FilesTouched) > 0 {
+    hasNew = true
+} else {
+    // No checkpoints and no tracked files - check the live transcript.
+    hasNew = s.sessionHasNewContentInCommittedFiles(state, committedFileSet)
+}
+```
+
+If `StepCount == 0` and `FilesTouched` is empty, but the session has been ACTIVE for a while and the user commits files that were never saved as a checkpoint, the live transcript check relies on the transcript having file modification entries. If the agent modified files via shell commands that aren't in the transcript, this could miss linking the commit.
+
+This is probably acceptable (edge case), but worth documenting in a comment.
+
+**3. [manual_commit_hooks.go:2028-2034] Carry-forward resets `CheckpointTranscriptStart` to 0**
+
+```go
+state.CheckpointTranscriptStart = 0
+```
+
+The comment explains this is intentional ("prompt-level carry-forward means the next condensation re-processes the full transcript"). However, this means if a user makes multiple partial commits in sequence, each checkpoint will contain the full transcript rather than incremental content. This could lead to very large checkpoint files for long sessions.
+
+Suggested consideration: Document this as a known limitation or consider tracking incremental ranges for carry-forward scenarios.
+
+---
+
+### Suggestions (Consider)
+
+**1. [manual_commit_hooks.go:1677-1800] Consider extracting content-aware overlap functions to a separate file**
+
+The `filesOverlapWithContent` and `stagedFilesOverlapWithContent` functions are complex and could benefit from being in their own file (e.g., `content_overlap.go`) with dedicated tests. This would improve code organization and make the test coverage gap more visible.
+
+**2. [session/phase.go:26-38] `PhaseFromString` silently normalizes unknown phases**
+
+```go
+case PhaseActive, "active_committed":
+    // "active_committed" was removed but meant "agent active + commit happened".
+    return PhaseActive
+```
+
+This backward compatibility is good, but consider adding a metric or log when encountering legacy `active_committed` states to track migration progress.
+
+**3. [hooks_claudecode_handlers.go:761-764] `HandleTurnEnd` error handling is silently ignored**
+
+```go
+if err := handler.HandleTurnEnd(turnState); err != nil {
+    fmt.Fprintf(os.Stderr, "Warning: turn-end action dispatch failed: %v\n", err)
+}
+```
+
+Currently `HandleTurnEnd` always returns `nil`, but if the interface contract changes in the future, this error path should perhaps be more prominent or include structured logging.
+
+---
+
+### Praise
+
+1. **Excellent test coverage** - The new integration tests (`deferred_finalization_test.go`) and updated unit tests (`phase_postcommit_test.go`) thoroughly exercise the new 1:1 checkpoint model including edge cases like carry-forward.
+
+2. **Clean state machine simplification** - Removing `ACTIVE_COMMITTED` and using immediate condensation with deferred finalization is a cleaner model that's easier to reason about.
+
+3. **Well-documented code** - The comments throughout explain the "why" behind decisions (e.g., why `CheckpointTranscriptStart = 0` for carry-forward).
+
+4. **Content-aware overlap checking** - The addition of `filesOverlapWithContent` prevents a real bug where reverted-and-replaced files could incorrectly get session context linked.
+
+5. **Backward compatibility** - The `PhaseFromString` function correctly handles migration from old `active_committed` state.
+
+---
+
+### Summary
+
+**Overall assessment: APPROVE**
+
+- All tests pass (unit and integration)
+- Logic is sound and well-tested
+- State machine changes are backward compatible
+- No critical bugs identified
+
+**Key concerns:** None blocking. The suggestions are for improved test coverage and code organization.
+
+**Estimated effort to address feedback:** 2-4 hours (primarily adding unit tests for content-aware overlap functions)</result>
+</task-notification>
+Full transcript available at: /private/tmp/claude/-Users-soph-Work-entire-devenv-cli/tasks/a7470ed.output
+
+---
+
+Given the logic is complex now I'd like to generate an overview of different scenarios ideally with mermaid diagrams:
+
+1. Prompt runs, changes files, prompt finishs, user commits
+2. Prompt runs, changes files, prompt included to commit changes so last action is claude commiting in a single commit, prompt finishs giving a summary, end
+3. Prompt runs, changes files, prompt included to make granular commits, so claude makes multiple commits, prompt finishs giving a summary, end
+4. Prompt runs, changes files, prompt finishs, user decided to split up into multiple commits until everything is commited
+5. Prompt runs, changes files, prompt finishs, user decides to commit a supset, stash/remove other changes, does next prompt
+
+And before you generate this: Can we check what happens in the last case after the next prompt finishs? or basically that as soon as the next prompt makes file changes there is no logic trying to assign it to the prompt before.
+
+---
+
+Can yu clarify this: 
+
+  The safety mechanism: Each checkpoint stores the full session transcript, so when you view the checkpoint for the D, E commit, you see both prompts and can see that D, E were
+  created by Prompt 2, not Prompt 1. There's no "wrong assignment" - it's correct attribution within the session context.
+
+  If user later unstashes B, C and commits them, they'll still get a checkpoint trailer (because they're in FilesTouched), and that checkpoint will also have the full session
+  transcript showing Prompt 1 created them.
+
+---
+
+and you also meant it like that for the second part: 
+
+If user later unstashes B, C and commits them, they'll still get a checkpoint trailer (because they're in FilesTouched), and that checkpoint will also have the full session
+  transcript showing Prompt 1 created them.
+
+right? Like if I commit B, C after Prompt 2 did run, it's having the transcript until prompt 2 attached, we don't go back to prompt 1, right?
+
+---
+
+in which FilesTouched will they be?
+
+---
+
+No I think this is fine and has to much risk of false positive. If the user stashed, run a new prompt that created file changes then any prior stashed files are now forgoten by our logic. This is fine. 
+
+Clarification: If the user stashs, run a second prompt (claude doesn't commit), prompt finishs, and then user unstashs and commits both, we still handle this as if only the files from the second prompt are commited, right?
+
+---
+
+let's add this scenario to the doc with mermaid diagramms, and can you move it to docs/architecture
+
+---
+
+can we do an addition to the doc at the bottom listing known caveats, for example:
+
+1. if prompts end up in multiple commits they have redundant data if looked at them together
+2. doing sums of tokens over multiple commits gets flawed
+3. ... anything to add?
+
+---
+
+can you explain: Session state persists until explicit cleanup
+
+---
+
+We do have some cleanup logic for them, right?
+
+---
+
+yeah but let's confirm: there is entire cleanup, but isn't there also automatic cleanup when we know a session ended or is that not a thing?
+
+---
+
+now can you explain: Content-aware overlap only for new files
+
+---
+
+compare hash <- how is this done?
+
+---
+
+question, so agent generates changes on file a, so that file is modified, not the full diff is commited, when do we stop attribution more changes to that prompt then? what's the end state of the logic? like if the user keeps modifying the same file and keeps making commits, will we just continue attributing that to the prompt?
+
+---
+
+but that means if the agent does multiple large changes in one file, and I split those changes into two commits, the second woulded be attributed anymore?
+
+---
+
+But we have the full diff in the shadow branch. Like can't we figure out if there is line / change overlap with what is in shadow branch?
+
+---
+
+where is filesOverlapWithContent used?
+
+---
+
+yeah let's apply this to carry forward too
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me analyze this conversation chronologically:
+
+1. **Initial Request**: User asked to run multiple review agents on code changes in a branch (`soph/one-to-one-checkpoints`)
+
+2. **Review Phase**: I launched 4 parallel review agents:
+   - Security Review: APPROVE (no concerns)
+   - Test Coverage: REQUEST CHANGES (gaps in error paths, edge cases)
+   - Architecture/Design: APPROVE (simpler state machine, sound design)
+   - Code Correctness: APPROVE (logic sound, all tests pass)
+
+3. **Documentation Request**: User asked for Mermaid diagrams documenting 5 scenarios for the checkpoint system
+
+4. **Scenario 5 Investigation**: Before generating diagrams, user asked to verify scenario 5 (stash files after partial commit, then new prompt). I traced through the code to understand:
+   - What happens to `FilesTouched` when files are stashed
+   - How carry-forward logic works
+   - When files "fall out" of tracking
+
+5. **Documentation Creation**: Created `docs/checkpoint-scenarios.md` with Mermaid diagrams for all 5 scenarios
+
+6. **User Clarifications**:
+   - Asked about transcript attribution (I clarified it's the full session transcript, not per-prompt attribution)
+   - Asked about which `FilesTouched` stashed files end up in
+   - Discovered edge case where files "fall out" if stashed during partial commit
+
+7. **Scenario 6 Addition**: User asked to add scenario for stash → second prompt → unstash → commit all
+
+8. **Document Move**: Moved doc to `docs/architecture/checkpoint-scenarios.md`
+
+9. **Known Caveats Section**: User asked for caveats section. I added 8 caveats initially.
+
+10. **Cleanup Logic Discussion**: User asked about automatic cleanup - I found there IS automatic cleanup during normal operations, not just manual `entire clean`
+
+11. **Caveat Clarifications**: User asked about several caveats, leading to corrections:
+    - Session state cleanup (automatic during normal ops, plus `entire clean`)
+    - Content-aware overlap only for new files
+
+12. **Content-Aware Carry-Forward**: User identified a limitation - if agent makes multiple changes to one file and user splits via `git add -p`, only first commit gets attributed. User suggested using content-aware comparison (hash comparison against shadow branch) for carry-forward, not just file-level subtraction.
+
+13. **Implementation**: I implemented `filesWithRemainingAgentChanges` function and updated carry-forward logic to use content-aware comparison.
+
+Key files modified:
+- `docs/architecture/checkpoint-scenarios.md` - new documentation
+- `cmd/entire/cli/strategy/content_overlap.go` - added `filesWithRemainingAgentChanges` function
+- `cmd/entire/cli/strategy/manual_commit_hooks.go` - updated carry-forward logic
+- `cmd/entire/cli/strategy/content_overlap_test.go` - added tests for new function
+
+The most recent work was adding tests for the new `filesWithRemainingAgentChanges` function. Tests were added but not yet run to verify they pass.
+
+Summary:
+1. Primary Request and Intent:
+   - Run multiple review agents on code changes in branch `soph/one-to-one-checkpoints`
+   - Generate documentation with Mermaid diagrams for checkpoint scenarios
+   - Add known caveats section to documentation
+   - Implement content-aware carry-forward logic so that partial commits (via `git add -p`) of agent changes to a single file still allow subsequent commits to be attributed
+
+2. Key Technical Concepts:
+   - **1:1 Checkpoint Model**: Each commit gets its own unique checkpoint ID
+   - **Shadow Branches**: `entire/<commit-hash>-<worktree-hash>` - temporary storage for checkpoint data
+   - **FilesTouched**: Accumulates files modified during session, cleared after condensation
+   - **Carry-forward Logic**: Uncommitted files get new shadow branch after partial commit
+   - **Content-aware Overlap Detection**: Uses git blob hashes to compare file content
+   - **Deferred Finalization**: PostCommit saves provisional transcript, HandleTurnEnd updates with full transcript
+   - **State Machine Phases**: ACTIVE, IDLE, ENDED (removed ACTIVE_COMMITTED)
+
+3. Files and Code Sections:
+
+   - **`docs/architecture/checkpoint-scenarios.md`** (created and moved from `docs/checkpoint-scenarios.md`)
+     - Comprehensive documentation of checkpoint system behavior
+     - Contains 6 scenarios with Mermaid sequence diagrams
+     - Known caveats section with 8 documented limitations
+     - State machine diagram and summary table
+
+   - **`cmd/entire/cli/strategy/content_overlap.go`** (modified)
+     - Added new function for content-aware carry-forward:
+     ```go
+     // filesWithRemainingAgentChanges returns files from filesTouched that still have
+     // uncommitted agent changes. This is used for carry-forward after partial commits.
+     //
+     // A file has remaining agent changes if:
+     //   - It wasn't committed at all (not in committedFiles), OR
+     //   - It was committed but the committed content doesn't match the shadow branch
+     //     (user committed partial changes, e.g., via git add -p)
+     //
+     // Falls back to file-level subtraction if shadow branch is unavailable.
+     func filesWithRemainingAgentChanges(
+         repo *git.Repository,
+         shadowBranchName string,
+         headCommit *object.Commit,
+         filesTouched []string,
+         committedFiles map[string]struct{},
+     ) []string {
+         // ... implementation comparing commitTree.File(file).Hash vs shadowTree.File(file).Hash
+     }
+
+     // subtractFilesByName returns files from filesTouched that are NOT in committedFiles.
+     // This is a fallback when content-aware comparison isn't possible.
+     func subtractFilesByName(filesTouched []string, committedFiles map[string]struct{}) []string {
+         var remaining []string
+         for _, f := range filesTouched {
+             if _, committed := committedFiles[f]; !committed {
+                 remaining = append(remaining, f)
+             }
+         }
+         return remaining
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/manual_commit_hooks.go`** (modified)
+     - Updated carry-forward logic to use content-aware comparison:
+     ```go
+     // Carry forward remaining uncommitted files so the next commit gets its
+     // own checkpoint ID. This applies to ALL phases — if a user splits their
+     // commit across two `git commit` invocations, each gets a 1:1 checkpoint.
+     // Uses content-aware comparison: if user did `git add -p` and committed
+     // partial changes, the file still has remaining agent changes to carry forward.
+     if condensed {
+         remainingFiles := filesWithRemainingAgentChanges(repo, shadowBranchName, commit, filesTouchedBefore, committedFileSet)
+         logging.Debug(logCtx, "post-commit: carry-forward decision (content-aware)",
+             slog.String("session_id", state.SessionID),
+             slog.Int("files_touched_before", len(filesTouchedBefore)),
+             slog.Int("committed_files", len(committedFileSet)),
+             slog.Int("remaining_files", len(remainingFiles)),
+             slog.Any("remaining", remainingFiles),
+         )
+         if len(remainingFiles) > 0 {
+             s.carryForwardToNewShadowBranch(logCtx, repo, state, remainingFiles)
+         }
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/content_overlap_test.go`** (modified)
+     - Added 4 new tests for `filesWithRemainingAgentChanges`:
+       - `TestFilesWithRemainingAgentChanges_FileNotCommitted`
+       - `TestFilesWithRemainingAgentChanges_FullyCommitted`
+       - `TestFilesWithRemainingAgentChanges_PartialCommit`
+       - `TestFilesWithRemainingAgentChanges_NoShadowBranch`
+
+   - **`cmd/entire/cli/strategy/cleanup.go`** (read only)
+     - Contains `ListOrphanedSessionStates()` and cleanup logic
+     - Session states orphaned when: older than 10 min, no checkpoints, no shadow branch
+
+   - **`cmd/entire/cli/clean.go`** (read only)
+     - `entire clean` command for manual cleanup
+
+4. Errors and fixes:
+   - **Initial diagnostic warnings about duplicate declarations**: Appeared to be transient - build passed successfully
+   - **Caveat #8 was inaccurate**: Originally said "Session state persists until explicit cleanup" but user pointed out there IS automatic cleanup. Fixed to accurately describe automatic cleanup during normal operations plus `entire clean` fallback
+
+5. Problem Solving:
+   - Traced through complex scenario where user stashes files, runs new prompt, then commits - discovered files can "fall out" of tracking if stashed during partial commit
+   - Identified limitation where splitting changes within a single file across commits only attributed first commit
+   - Implemented content-aware solution using git blob hash comparison
+
+6. All user messages:
+   - "can you run a view agents reviewing different aspects of the code changes in this branch"
+   - "Given the logic is complex now I'd like to generate an overview of different scenarios ideally with mermaid diagrams: [5 scenarios listed]... And before you generate this: Can we check what happens in the last case after the next prompt finishs?"
+   - "Can yu clarify this: [quote about safety mechanism and transcript]"
+   - "and you also meant it like that for the second part: [quote about unstashing B, C]... right? Like if I commit B, C after Prompt 2 did run, it's having the transcript until prompt 2 attached, we don't go back to prompt 1, right?"
+   - "in which FilesTouched will they be?"
+   - "No I think this is fine and has to much risk of false positive. If the user stashed, run a new prompt that created file changes then any prior stashed files are now forgoten by our logic. This is fine. Clarification: If the user stashs, run a second prompt (claude doesn't commit), prompt finishs, and then user unstashs and commits both, we still handle this as if only the files from the second prompt are commited, right?"
+   - "let's add this scenario to the doc with mermaid diagramms, and can you move it to docs/architecture"
+   - "can we do an addition to the doc at the bottom listing known caveats, for example: 1. if prompts end up in multiple commits they have redundant data if looked at them together 2. doing sums of tokens over multiple commits gets flawed 3. ... anything to add?"
+   - "can you explain: Session state persists until explicit cleanup"
+   - "We do have some cleanup logic for them, right?"
+   - "yeah but let's confirm: there is entire cleanup, but isn't there also automatic cleanup when we know a session ended or is that not a thing?"
+   - "now can you explain: Content-aware overlap only for new files"
+   - "compare hash <- how is this done?"
+   - "question, so agent generates changes on file a, so that file is modified, not the full diff is commited, when do we stop attribution more changes to that prompt then? what's the end state of the logic? like if the user keeps modifying the same file and keeps making commits, will we just continue attributing that to the prompt?"
+   - "but that means if the agent does multiple large changes in one file, and I split those changes into two commits, the second woulded be attributed anymore?"
+   - "But we have the full diff in the shadow branch. Like can't we figure out if there is line / change overlap with what is in shadow branch?"
+   - "yeah let's apply this to carry forward too"
+   - "where is filesOverlapWithContent used?"
+
+7. Pending Tasks:
+   - Run the new tests to verify they pass
+   - Potentially update documentation to remove/modify the caveat about partial commits (since it's now fixed)
+
+8. Current Work:
+   Implementing content-aware carry-forward logic. Just added tests to `content_overlap_test.go` for the new `filesWithRemainingAgentChanges` function:
+   - `TestFilesWithRemainingAgentChanges_FileNotCommitted`
+   - `TestFilesWithRemainingAgentChanges_FullyCommitted`
+   - `TestFilesWithRemainingAgentChanges_PartialCommit`
+   - `TestFilesWithRemainingAgentChanges_NoShadowBranch`
+
+9. Optional Next Step:
+   Run the new tests to verify the implementation works correctly:
+   ```bash
+   go test ./cmd/entire/cli/strategy/... -run "TestFilesWithRemainingAgentChanges" -v
+   ```
+   
+   User's most recent request: "yeah let's apply this to carry forward too" - I implemented the function and updated the carry-forward logic, then added tests. Tests need to be run to verify.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+But once a new prompt run created file changes, we are not going to use a changes from before that prompt for comparing, right?
+
+---
+
+no, this is fine. 
+
+in scope of the things we did since we updated docs/architecture/checkpoint-scenarios.md can you review if there are new changes needed or if we should cover more scenarios?
