@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "7e72a8d8fdb8",
+  "strategy": "manual-commit",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/architecture/checkpoint-scenarios.md",
+    "docs/checkpoint-scenarios.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7e/72a8d8fdb8/0/metadata.json",
+      "transcript": "/7e/72a8d8fdb8/0/full.jsonl",
+      "context": "/7e/72a8d8fdb8/0/context.md",
+      "content_hash": "/7e/72a8d8fdb8/0/content_hash.txt",
+      "prompt": "/7e/72a8d8fdb8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 6463,
+    "cache_creation_tokens": 127566,
+    "cache_read_tokens": 2524893,
+    "output_tokens": 118,
+    "api_call_count": 38
+  }
+}

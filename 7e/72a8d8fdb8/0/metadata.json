@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "7e72a8d8fdb8",
+  "session_id": "f4237e82-ca7b-48a3-bfed-36548f3e4f6b",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-14T10:38:23.577886Z",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/architecture/checkpoint-scenarios.md",
+    "docs/checkpoint-scenarios.md"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "0b298bf58fb7",
+  "transcript_identifier_at_start": "7bb76752-06f7-4a90-a494-1fc9d0b9b016",
+  "token_usage": {
+    "input_tokens": 6463,
+    "cache_creation_tokens": 127566,
+    "cache_read_tokens": 2524893,
+    "output_tokens": 118,
+    "api_call_count": 38
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-14T10:38:23.252511Z",
+    "agent_lines": 429,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 338,
+    "total_committed": 429,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/f4237e82-ca7b-48a3-bfed-36548f3e4f6b.jsonl"
+}
