@@ -279,3 +279,125 @@ func hasOverlappingFiles(stagedFiles, filesTouched []string) bool {
 	}
 	return false
 }
+
+// filesWithRemainingAgentChanges returns files from filesTouched that still have
+// uncommitted agent changes. This is used for carry-forward after partial commits.
+//
+// A file has remaining agent changes if:
+//   - It wasn't committed at all (not in committedFiles), OR
+//   - It was committed but the committed content doesn't match the shadow branch
+//     (user committed partial changes, e.g., via git add -p)
+//
+// Falls back to file-level subtraction if shadow branch is unavailable.
+func filesWithRemainingAgentChanges(
+	repo *git.Repository,
+	shadowBranchName string,
+	headCommit *object.Commit,
+	filesTouched []string,
+	committedFiles map[string]struct{},
+) []string {
+	logCtx := logging.WithComponent(context.Background(), "checkpoint")
+
+	// Get HEAD commit tree (the committed content)
+	commitTree, err := headCommit.Tree()
+	if err != nil {
+		logging.Debug(logCtx, "filesWithRemainingAgentChanges: failed to get commit tree, falling back to file subtraction",
+			slog.String("error", err.Error()),
+		)
+		return subtractFilesByName(filesTouched, committedFiles)
+	}
+
+	// Get shadow branch tree (the session's full content)
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+	shadowRef, err := repo.Reference(refName, true)
+	if err != nil {
+		logging.Debug(logCtx, "filesWithRemainingAgentChanges: shadow branch not found, falling back to file subtraction",
+			slog.String("branch", shadowBranchName),
+			slog.String("error", err.Error()),
+		)
+		return subtractFilesByName(filesTouched, committedFiles)
+	}
+
+	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
+	if err != nil {
+		logging.Debug(logCtx, "filesWithRemainingAgentChanges: failed to get shadow commit, falling back to file subtraction",
+			slog.String("error", err.Error()),
+		)
+		return subtractFilesByName(filesTouched, committedFiles)
+	}
+
+	shadowTree, err := shadowCommit.Tree()
+	if err != nil {
+		logging.Debug(logCtx, "filesWithRemainingAgentChanges: failed to get shadow tree, falling back to file subtraction",
+			slog.String("error", err.Error()),
+		)
+		return subtractFilesByName(filesTouched, committedFiles)
+	}
+
+	var remaining []string
+
+	for _, filePath := range filesTouched {
+		// If file wasn't committed at all, it definitely has remaining changes
+		if _, wasCommitted := committedFiles[filePath]; !wasCommitted {
+			remaining = append(remaining, filePath)
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not committed, keeping",
+				slog.String("file", filePath),
+			)
+			continue
+		}
+
+		// File was committed - check if committed content matches shadow branch
+		shadowFile, err := shadowTree.File(filePath)
+		if err != nil {
+			// File not in shadow branch - nothing to carry forward for this file
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not in shadow branch, skipping",
+				slog.String("file", filePath),
+			)
+			continue
+		}
+
+		commitFile, err := commitTree.File(filePath)
+		if err != nil {
+			// File not in commit tree (deleted?) - keep it if it's in shadow
+			remaining = append(remaining, filePath)
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not in commit tree but in shadow, keeping",
+				slog.String("file", filePath),
+			)
+			continue
+		}
+
+		// Compare hashes - if different, there are still uncommitted agent changes
+		if commitFile.Hash != shadowFile.Hash {
+			remaining = append(remaining, filePath)
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content mismatch, keeping for carry-forward",
+				slog.String("file", filePath),
+				slog.String("commit_hash", commitFile.Hash.String()[:7]),
+				slog.String("shadow_hash", shadowFile.Hash.String()[:7]),
+			)
+		} else {
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content fully committed",
+				slog.String("file", filePath),
+			)
+		}
+	}
+
+	logging.Debug(logCtx, "filesWithRemainingAgentChanges: result",
+		slog.Int("files_touched", len(filesTouched)),
+		slog.Int("committed_files", len(committedFiles)),
+		slog.Int("remaining_files", len(remaining)),
+	)
+
+	return remaining
+}
+
+// subtractFilesByName returns files from filesTouched that are NOT in committedFiles.
+// This is a fallback when content-aware comparison isn't possible.
+func subtractFilesByName(filesTouched []string, committedFiles map[string]struct{}) []string {
+	var remaining []string
+	for _, f := range filesTouched {
+		if _, committed := committedFiles[f]; !committed {
+			remaining = append(remaining, f)
+		}
+	}
+	return remaining
+}

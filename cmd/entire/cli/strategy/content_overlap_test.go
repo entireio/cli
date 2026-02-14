@@ -206,6 +206,153 @@ func TestFilesOverlapWithContent_NoShadowBranch(t *testing.T) {
 	assert.True(t, result, "Missing shadow branch should fall back to assuming overlap")
 }
 
+// TestFilesWithRemainingAgentChanges_FileNotCommitted tests that files not in the commit
+// are kept in the remaining list.
+func TestFilesWithRemainingAgentChanges_FileNotCommitted(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Create shadow branch with two files
+	createShadowBranchWithContent(t, repo, "abc1234", "e3b0c4", map[string][]byte{
+		"fileA.txt": []byte("content A"),
+		"fileB.txt": []byte("content B"),
+	})
+
+	// Only commit fileA
+	fileA := filepath.Join(dir, "fileA.txt")
+	require.NoError(t, os.WriteFile(fileA, []byte("content A"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("fileA.txt")
+	require.NoError(t, err)
+	headCommit, err := wt.Commit("Add file A only", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	commit, err := repo.CommitObject(headCommit)
+	require.NoError(t, err)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("abc1234", "e3b0c4")
+	committedFiles := map[string]struct{}{"fileA.txt": {}}
+
+	// fileB was not committed - should be in remaining
+	remaining := filesWithRemainingAgentChanges(repo, shadowBranch, commit, []string{"fileA.txt", "fileB.txt"}, committedFiles)
+	assert.Equal(t, []string{"fileB.txt"}, remaining, "Uncommitted file should be in remaining")
+}
+
+// TestFilesWithRemainingAgentChanges_FullyCommitted tests that files committed with
+// matching content are NOT in the remaining list.
+func TestFilesWithRemainingAgentChanges_FullyCommitted(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	content := []byte("exact same content")
+
+	// Create shadow branch with file
+	createShadowBranchWithContent(t, repo, "def5678", "e3b0c4", map[string][]byte{
+		"test.txt": content,
+	})
+
+	// Commit the file with SAME content
+	testFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(testFile, content, 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("test.txt")
+	require.NoError(t, err)
+	headCommit, err := wt.Commit("Add file with same content", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	commit, err := repo.CommitObject(headCommit)
+	require.NoError(t, err)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("def5678", "e3b0c4")
+	committedFiles := map[string]struct{}{"test.txt": {}}
+
+	// File was fully committed - should NOT be in remaining
+	remaining := filesWithRemainingAgentChanges(repo, shadowBranch, commit, []string{"test.txt"}, committedFiles)
+	assert.Empty(t, remaining, "Fully committed file should not be in remaining")
+}
+
+// TestFilesWithRemainingAgentChanges_PartialCommit tests that files committed with
+// different content (partial commit via git add -p) ARE in the remaining list.
+func TestFilesWithRemainingAgentChanges_PartialCommit(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Shadow branch has the full agent content
+	fullContent := []byte("line 1\nline 2\nline 3\nline 4\n")
+	createShadowBranchWithContent(t, repo, "ghi9012", "e3b0c4", map[string][]byte{
+		"test.txt": fullContent,
+	})
+
+	// User commits only partial content (simulating git add -p)
+	partialContent := []byte("line 1\nline 2\n")
+	testFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(testFile, partialContent, 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("test.txt")
+	require.NoError(t, err)
+	headCommit, err := wt.Commit("Partial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	commit, err := repo.CommitObject(headCommit)
+	require.NoError(t, err)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("ghi9012", "e3b0c4")
+	committedFiles := map[string]struct{}{"test.txt": {}}
+
+	// Content doesn't match - file should be in remaining (has more agent changes)
+	remaining := filesWithRemainingAgentChanges(repo, shadowBranch, commit, []string{"test.txt"}, committedFiles)
+	assert.Equal(t, []string{"test.txt"}, remaining, "Partially committed file should be in remaining")
+}
+
+// TestFilesWithRemainingAgentChanges_NoShadowBranch tests fallback to file-level subtraction.
+func TestFilesWithRemainingAgentChanges_NoShadowBranch(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Create a commit without any shadow branch
+	testFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(testFile, []byte("content"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("test.txt")
+	require.NoError(t, err)
+	headCommit, err := wt.Commit("Test commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	commit, err := repo.CommitObject(headCommit)
+	require.NoError(t, err)
+
+	// Non-existent shadow branch should fall back to file-level subtraction
+	committedFiles := map[string]struct{}{"test.txt": {}}
+	remaining := filesWithRemainingAgentChanges(repo, "entire/nonexistent-e3b0c4", commit, []string{"test.txt", "other.txt"}, committedFiles)
+
+	// With file-level subtraction: test.txt is in committedFiles, other.txt is not
+	assert.Equal(t, []string{"other.txt"}, remaining, "Fallback should use file-level subtraction")
+}
+
 // createShadowBranchWithContent creates a shadow branch with the given file contents.
 // This helper directly uses go-git APIs to avoid paths.RepoRoot() dependency.
 //

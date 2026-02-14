@@ -1170,8 +1170,15 @@ func TestPostCommit_IdleSession_DoesNotRecordTurnCheckpointIDs(t *testing.T) {
 
 // setupSessionWithCheckpoint initializes a session and creates one checkpoint
 // on the shadow branch so there is content available for condensation.
+// Also modifies test.txt to "agent modified content" and includes it in the checkpoint,
+// so content-aware carry-forward comparisons work correctly when commitFilesWithTrailer
+// commits the same content.
 func setupSessionWithCheckpoint(t *testing.T, s *ManualCommitStrategy, _ *git.Repository, dir, sessionID string) {
 	t.Helper()
+
+	// Modify test.txt with agent content (same content that commitFilesWithTrailer will commit)
+	testFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(testFile, []byte("agent modified content"), 0o644))
 
 	// Create metadata directory with a transcript file
 	metadataDir := ".entire/metadata/" + sessionID
@@ -1186,9 +1193,10 @@ func setupSessionWithCheckpoint(t *testing.T, s *ManualCommitStrategy, _ *git.Re
 		[]byte(transcript), 0o644))
 
 	// SaveChanges creates the shadow branch and checkpoint
+	// Include test.txt as a modified file so it's saved to the shadow branch
 	err := s.SaveChanges(SaveContext{
 		SessionID:      sessionID,
-		ModifiedFiles:  []string{},
+		ModifiedFiles:  []string{"test.txt"},
 		NewFiles:       []string{},
 		DeletedFiles:   []string{},
 		MetadataDir:    metadataDir,
@@ -1209,15 +1217,17 @@ func commitWithCheckpointTrailer(t *testing.T, repo *git.Repository, dir, checkp
 }
 
 // commitFilesWithTrailer stages the given files and commits with a checkpoint trailer.
-// Files must already exist on disk. A test.txt is also touched to ensure there's always something to commit.
+// Files must already exist on disk. The test.txt file is modified to ensure there's always something to commit.
+// Important: For tests using content-aware carry-forward, call setupSessionWithCheckpointAndFile first
+// so the shadow branch has the same content that will be committed.
 func commitFilesWithTrailer(t *testing.T, repo *git.Repository, dir, checkpointIDStr string, files ...string) {
 	t.Helper()
 
 	cpID := id.MustCheckpointID(checkpointIDStr)
 
-	// Always touch test.txt so the commit is never empty
+	// Modify test.txt with agent-like content that matches what setupSessionWithCheckpointAndFile saves
 	testFile := filepath.Join(dir, "test.txt")
-	content := "updated at " + time.Now().String()
+	content := "agent modified content"
 	require.NoError(t, os.WriteFile(testFile, []byte(content), 0o644))
 
 	wt, err := repo.Worktree()

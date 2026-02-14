@@ -647,9 +647,11 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		// Carry forward remaining uncommitted files so the next commit gets its
 		// own checkpoint ID. This applies to ALL phases — if a user splits their
 		// commit across two `git commit` invocations, each gets a 1:1 checkpoint.
+		// Uses content-aware comparison: if user did `git add -p` and committed
+		// partial changes, the file still has remaining agent changes to carry forward.
 		if condensed {
-			remainingFiles := subtractFiles(filesTouchedBefore, committedFileSet)
-			logging.Debug(logCtx, "post-commit: carry-forward decision",
+			remainingFiles := filesWithRemainingAgentChanges(repo, shadowBranchName, commit, filesTouchedBefore, committedFileSet)
+			logging.Debug(logCtx, "post-commit: carry-forward decision (content-aware)",
 				slog.String("session_id", state.SessionID),
 				slog.Int("files_touched_before", len(filesTouchedBefore)),
 				slog.Int("committed_files", len(committedFileSet)),
