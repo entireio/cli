@@ -462,11 +462,10 @@ type PrePushHandler interface {
 // For example, manual-commit strategy uses this to condense session data
 // that was deferred during ACTIVE_COMMITTED → IDLE transitions.
 type TurnEndHandler interface {
-	// HandleTurnEnd dispatches strategy-specific actions emitted by the
-	// ACTIVE_COMMITTED → IDLE (or other) turn-end transition.
-	// The state has already been updated by ApplyCommonActions; the caller
-	// saves it after this method returns.
-	HandleTurnEnd(state *session.State, actions []session.Action) error
+	// NewTurnEndActionHandler returns an ActionHandler for turn-end transitions.
+	// The caller passes this to TransitionAndLog so strategy-specific actions
+	// (e.g., ActionCondense) are dispatched directly.
+	NewTurnEndActionHandler(state *SessionState) session.ActionHandler
 }
 
 // RestoredSession describes a single session that was restored by RestoreLogsOnly.

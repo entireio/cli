@@ -743,9 +743,8 @@ func TestTurnEnd_ActiveCommitted_ReusesCheckpointID(t *testing.T) {
 
 	// Run TurnEnd
 	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state, result)
-
-	err = s.HandleTurnEnd(state, remaining)
+	handler := s.NewTurnEndActionHandler(state)
+	err = session.ApplyTransition(state, result, handler)
 	require.NoError(t, err)
 
 	// Verify the condensed checkpoint ID matches the commit trailer
@@ -810,9 +809,8 @@ func TestTurnEnd_ConcurrentSession_PreservesShadowBranch(t *testing.T) {
 
 	// First session ends its turn — should NOT delete shadow branch
 	result := session.Transition(state1.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state1, result)
-
-	err = s.HandleTurnEnd(state1, remaining)
+	handler := s.NewTurnEndActionHandler(state1)
+	err = session.ApplyTransition(state1, result, handler)
 	require.NoError(t, err)
 
 	// Shadow branch at the pre-condensation BaseCommit should be preserved
@@ -870,17 +868,17 @@ func TestTurnEnd_ActiveCommitted_CondensesSession(t *testing.T) {
 
 	// Now simulate the TurnEnd transition that the handler dispatches
 	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state, result)
 
 	// Verify the state machine emits ActionCondense
-	require.Contains(t, remaining, session.ActionCondense,
+	require.Contains(t, result.Actions, session.ActionCondense,
 		"ACTIVE_COMMITTED + TurnEnd should emit ActionCondense")
 
-	// Record shadow branch name BEFORE HandleTurnEnd (BaseCommit may change)
+	// Record shadow branch name BEFORE handler runs (BaseCommit may change)
 	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 
-	// Call HandleTurnEnd with the remaining actions
-	err = s.HandleTurnEnd(state, remaining)
+	// Apply transition with turn-end handler
+	handler := s.NewTurnEndActionHandler(state)
+	err = session.ApplyTransition(state, result, handler)
 	require.NoError(t, err)
 
 	// Verify condensation happened: entire/checkpoints/v1 branch should exist
@@ -898,7 +896,7 @@ func TestTurnEnd_ActiveCommitted_CondensesSession(t *testing.T) {
 	assert.Equal(t, 0, state.StepCount,
 		"StepCount should be reset after condensation")
 
-	// Verify phase is IDLE (set by ApplyCommonActions above)
+	// Verify phase is IDLE (set by ApplyTransition above)
 	assert.Equal(t, session.PhaseIdle, state.Phase,
 		"phase should be IDLE after TurnEnd")
 }
@@ -945,11 +943,9 @@ func TestTurnEnd_ActiveCommitted_CondensationFailure_PreservesShadowBranch(t *te
 
 	// Run the transition
 	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state, result)
-
-	// Call HandleTurnEnd — condensation should fail silently
-	err = s.HandleTurnEnd(state, remaining)
-	require.NoError(t, err, "HandleTurnEnd should not return error even when condensation fails")
+	handler := s.NewTurnEndActionHandler(state)
+	err = session.ApplyTransition(state, result, handler)
+	require.NoError(t, err, "ApplyTransition should not return error even when condensation fails")
 
 	// BaseCommit should NOT be updated (condensation failed)
 	assert.Equal(t, originalBaseCommit, state.BaseCommit,
@@ -989,14 +985,10 @@ func TestTurnEnd_Active_NoActions(t *testing.T) {
 
 	// ACTIVE + TurnEnd → IDLE with no strategy-specific actions
 	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state, result)
 
-	// Verify no strategy-specific actions for ACTIVE → IDLE
-	assert.Empty(t, remaining,
-		"ACTIVE + TurnEnd should not emit strategy-specific actions")
-
-	// Call HandleTurnEnd with empty actions — should be a no-op
-	err = s.HandleTurnEnd(state, remaining)
+	// Apply transition — handler won't be called since no strategy actions emitted
+	handler := s.NewTurnEndActionHandler(state)
+	err = session.ApplyTransition(state, result, handler)
 	require.NoError(t, err)
 
 	// Verify state is unchanged
@@ -1077,10 +1069,10 @@ func TestTurnEnd_DeferredCondensation_AttributionUsesOriginalBase(t *testing.T) 
 
 	// Now simulate TurnEnd (agent finishes) — deferred condensation runs
 	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state, result)
-	require.Contains(t, remaining, session.ActionCondense)
+	require.Contains(t, result.Actions, session.ActionCondense)
 
-	err = s.HandleTurnEnd(state, remaining)
+	handler := s.NewTurnEndActionHandler(state)
+	err = session.ApplyTransition(state, result, handler)
 	require.NoError(t, err)
 
 	// After condensation, verify AttributionBaseCommit is updated to match BaseCommit

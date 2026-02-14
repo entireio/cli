@@ -295,17 +295,33 @@ func transitionFromEnded(event Event, ctx TransitionContext) TransitionResult {
 	}
 }
 
-// ApplyCommonActions applies the common (non-strategy-specific) actions from a
-// TransitionResult to the given State. It updates Phase, LastInteractionTime,
-// and EndedAt as indicated by the transition.
-//
-// Returns the subset of actions that require strategy-specific handling
-// (e.g., ActionCondense, ActionMigrateShadowBranch, ActionWarnStaleSession).
-// The caller is responsible for dispatching those.
-func ApplyCommonActions(state *State, result TransitionResult) []Action {
+// ActionHandler defines strategy-specific side effects for state transitions.
+// The compiler enforces that every strategy-specific action has a handler.
+type ActionHandler interface {
+	HandleCondense(state *State) error
+	HandleCondenseIfFilesTouched(state *State) error
+	HandleDiscardIfNoFiles(state *State) error
+	HandleMigrateShadowBranch(state *State) error
+	HandleWarnStaleSession(state *State) error
+}
+
+// NoOpActionHandler is a default ActionHandler where all methods are no-ops.
+// Embed this in handler structs to only override the methods you need.
+type NoOpActionHandler struct{}
+
+func (NoOpActionHandler) HandleCondense(_ *State) error               { return nil }
+func (NoOpActionHandler) HandleCondenseIfFilesTouched(_ *State) error { return nil }
+func (NoOpActionHandler) HandleDiscardIfNoFiles(_ *State) error       { return nil }
+func (NoOpActionHandler) HandleMigrateShadowBranch(_ *State) error    { return nil }
+func (NoOpActionHandler) HandleWarnStaleSession(_ *State) error       { return nil }
+
+// ApplyTransition applies a TransitionResult to state: sets the new phase,
+// handles common actions internally, and calls the ActionHandler for
+// strategy-specific actions. Returns on the first handler error, leaving
+// subsequent actions unexecuted.
+func ApplyTransition(state *State, result TransitionResult, handler ActionHandler) error {
 	state.Phase = result.NewPhase
 
-	var remaining []Action
 	for _, action := range result.Actions {
 		switch action {
 		case ActionUpdateLastInteraction:
@@ -313,13 +329,31 @@ func ApplyCommonActions(state *State, result TransitionResult) []Action {
 			state.LastInteractionTime = &now
 		case ActionClearEndedAt:
 			state.EndedAt = nil
-		case ActionCondense, ActionCondenseIfFilesTouched, ActionDiscardIfNoFiles,
-			ActionMigrateShadowBranch, ActionWarnStaleSession:
-			// Strategy-specific actions — pass through to caller.
-			remaining = append(remaining, action)
+		case ActionCondense:
+			if err := handler.HandleCondense(state); err != nil {
+				return fmt.Errorf("%s: %w", action, err)
+			}
+		case ActionCondenseIfFilesTouched:
+			if err := handler.HandleCondenseIfFilesTouched(state); err != nil {
+				return fmt.Errorf("%s: %w", action, err)
+			}
+		case ActionDiscardIfNoFiles:
+			if err := handler.HandleDiscardIfNoFiles(state); err != nil {
+				return fmt.Errorf("%s: %w", action, err)
+			}
+		case ActionMigrateShadowBranch:
+			if err := handler.HandleMigrateShadowBranch(state); err != nil {
+				return fmt.Errorf("%s: %w", action, err)
+			}
+		case ActionWarnStaleSession:
+			if err := handler.HandleWarnStaleSession(state); err != nil {
+				return fmt.Errorf("%s: %w", action, err)
+			}
+		default:
+			return fmt.Errorf("unhandled action: %s", action)
 		}
 	}
-	return remaining
+	return nil
 }
 
 // MermaidDiagram generates a Mermaid state diagram from the transition table.

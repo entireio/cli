@@ -744,17 +744,14 @@ func transitionSessionTurnEnd(sessionID string) {
 	if turnState == nil {
 		return
 	}
-	remaining := strategy.TransitionAndLog(turnState, session.EventTurnEnd, session.TransitionContext{})
-
-	// Dispatch strategy-specific actions (e.g., ActionCondense for ACTIVE_COMMITTED → IDLE)
-	if len(remaining) > 0 {
-		strat := GetStrategy()
-		if handler, ok := strat.(strategy.TurnEndHandler); ok {
-			if err := handler.HandleTurnEnd(turnState, remaining); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: turn-end action dispatch failed: %v\n", err)
-			}
-		}
+	// Build action handler: strategy provides one if it implements TurnEndHandler,
+	// otherwise use no-op (transition only updates phase + common fields).
+	var handler session.ActionHandler = session.NoOpActionHandler{}
+	strat := GetStrategy()
+	if turnEnd, ok := strat.(strategy.TurnEndHandler); ok {
+		handler = turnEnd.NewTurnEndActionHandler(turnState)
 	}
+	strategy.TransitionAndLog(turnState, session.EventTurnEnd, session.TransitionContext{}, handler)
 
 	if updateErr := strategy.SaveSessionState(turnState); updateErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to update session phase on turn end: %v\n", updateErr)
@@ -771,7 +768,7 @@ func markSessionEnded(sessionID string) error {
 		return nil // No state file, nothing to update
 	}
 
-	strategy.TransitionAndLog(state, session.EventSessionStop, session.TransitionContext{})
+	strategy.TransitionAndLog(state, session.EventSessionStop, session.TransitionContext{}, session.NoOpActionHandler{})
 
 	now := time.Now()
 	state.EndedAt = &now
