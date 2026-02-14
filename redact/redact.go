@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -192,29 +193,57 @@ func JSONContent(content string) (string, error) {
 		return "", err
 	}
 
-	repls := collectJSONLReplacements(parsed)
-	if len(repls) == 0 {
+	redacted := redactJSONValue(parsed)
+	if reflect.DeepEqual(parsed, redacted) {
 		return content, nil
 	}
 
-	result := content
-	for _, r := range repls {
-		origJSON, err := jsonEncodeString(r[0])
-		if err != nil {
-			return "", err
-		}
-		replJSON, err := jsonEncodeString(r[1])
-		if err != nil {
-			return "", err
-		}
-		result = strings.ReplaceAll(result, origJSON, replJSON)
+	redactedJSON, err := json.Marshal(redacted)
+	if err != nil {
+		return "", err
 	}
-	return result, nil
+	return string(redactedJSON), nil
+}
+
+// redactJSONValue walks parsed JSON and redacts string values while preserving
+// skipped keys (e.g. ending in "id") and non-user payload fields.
+func redactJSONValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		if shouldSkipJSONLObject(val) {
+			return val
+		}
+		out := make(map[string]any, len(val))
+		for key, child := range val {
+			if shouldSkipJSONField(key) {
+				out[key] = child
+				continue
+			}
+			out[key] = redactJSONValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, child := range val {
+			out[i] = redactJSONValue(child)
+		}
+		return out
+	case string:
+		return String(val)
+	default:
+		return val
+	}
 }
 
 // collectJSONLReplacements walks a parsed JSON value and collects unique
 // (original, redacted) string pairs for values that need redaction.
 func collectJSONLReplacements(v any) [][2]string {
+	return collectJSONReplacements(v)
+}
+
+// collectJSONReplacements walks a parsed JSON value and collects unique
+// (original, redacted) string pairs for values that need redaction.
+func collectJSONReplacements(v any) [][2]string {
 	seen := make(map[string]bool)
 	var repls [][2]string
 	var walk func(v any)
@@ -225,7 +254,7 @@ func collectJSONLReplacements(v any) [][2]string {
 				return
 			}
 			for k, child := range val {
-				if shouldSkipJSONLField(k) {
+				if shouldSkipJSONField(k) {
 					continue
 				}
 				walk(child)
@@ -249,6 +278,12 @@ func collectJSONLReplacements(v any) [][2]string {
 // shouldSkipJSONLField returns true if a JSON key should be excluded from scanning/redaction.
 // Skips "signature" (exact) and any key ending in "id" (case-insensitive).
 func shouldSkipJSONLField(key string) bool {
+	return shouldSkipJSONField(key)
+}
+
+// shouldSkipJSONField returns true if a JSON key should be excluded from scanning/redaction.
+// Skips "signature" (exact) and any key ending in "id" (case-insensitive).
+func shouldSkipJSONField(key string) bool {
 	if key == "signature" {
 		return true
 	}

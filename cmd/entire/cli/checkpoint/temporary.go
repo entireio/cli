@@ -907,7 +907,8 @@ func addDirectoryToEntriesWithAbsPath(repo *git.Repository, dirPathAbs, dirPathR
 		if err != nil {
 			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
 		}
-		if strings.HasPrefix(relWithinDir, "..") {
+		relWithinDir = filepath.Clean(relWithinDir)
+		if relWithinDir == ".." || strings.HasPrefix(relWithinDir, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("path traversal detected: %s", relWithinDir)
 		}
 

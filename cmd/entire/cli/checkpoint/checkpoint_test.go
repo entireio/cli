@@ -97,6 +97,39 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	}
 }
 
+func TestAddDirectoryToEntriesWithAbsPath_AllowsLeadingDotsInFileName(t *testing.T) {
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	entries := make(map[string]object.TreeEntry)
+
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	// Filename that begins with ".." but is still inside the directory.
+	dotFile := filepath.Join(metadataDir, "..notes.txt")
+	if err := os.WriteFile(dotFile, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("failed to write file with leading dots: %v", err)
+	}
+
+	relPath := filepath.ToSlash(filepath.Join(paths.EntireMetadataDir, "test-session"))
+	err = addDirectoryToEntriesWithAbsPath(repo, metadataDir, relPath, entries)
+	if err != nil {
+		t.Fatalf("addDirectoryToEntriesWithAbsPath() error = %v", err)
+	}
+
+	expectedPath := filepath.ToSlash(filepath.Join(relPath, "..notes.txt"))
+	if _, ok := entries[expectedPath]; !ok {
+		t.Errorf("expected file with leading dots to be included: %s", expectedPath)
+	}
+}
+
 // TestWriteCommitted_AgentField verifies that the Agent field is written
 // to both metadata.json and the commit message trailer.
 func TestWriteCommitted_AgentField(t *testing.T) {

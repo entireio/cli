@@ -2,6 +2,7 @@ package redact
 
 import (
 	"bytes"
+	"encoding/json"
 	"slices"
 	"testing"
 )
@@ -107,9 +108,41 @@ func TestJSONBytes_PreservesIDFields(t *testing.T) {
 		t.Fatal("id field secret should be redacted when not excluded")
 	}
 
-	got := string(result)
-	if got != `{"session_id":"`+idFieldSecret+`","intent":"REDACTED","agent_id":"`+idFieldSecret+`"}` {
-		t.Errorf("got %q, want %q", got, `{"session_id":"`+idFieldSecret+`","intent":"REDACTED","agent_id":"`+idFieldSecret+`"}`)
+	var got map[string]any
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+	if got["session_id"] != idFieldSecret {
+		t.Errorf("session_id should be preserved, got %q", got["session_id"])
+	}
+	if got["intent"] != "REDACTED" {
+		t.Errorf("intent should be redacted, got %q", got["intent"])
+	}
+	if got["agent_id"] != idFieldSecret {
+		t.Errorf("agent_id should be preserved, got %q", got["agent_id"])
+	}
+}
+
+func TestJSONBytes_DuplicateIDAndPayloadValues(t *testing.T) {
+	dup := highEntropySecret
+	input := `{"session_id":"` + dup + `","intent":"` + dup + `","tool":"` + dup + `"}`
+	result, err := JSONBytes([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+
+	if got["session_id"] != dup {
+		t.Errorf("session_id should be preserved, got %q", got["session_id"])
+	}
+	if got["intent"] != "REDACTED" {
+		t.Errorf("intent should be redacted, got %q", got["intent"])
+	}
+	if got["tool"] != "REDACTED" {
+		t.Errorf("tool should be redacted, got %q", got["tool"])
 	}
 }
 
