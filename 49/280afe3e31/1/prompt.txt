@@ -1,0 +1,224 @@
+Implement the following plan:
+
+# Plan: Best-of-Both-Branches with Deferred Transcript Finalization
+
+## Context
+
+Two branches diverged from main to solve checkpoint boundaries:
+- `soph/one-to-one-checkpoints`: removes ACTIVE_COMMITTED, carry-forward, fresh ID per commit
+- `alex/realigning-checkpoint-boundaries`: removes ACTIVE_COMMITTED, trailing transcript, UpdateCommitted
+
+Neither fully satisfies the requirements in `checkpoint-requirements.md`:
+1. Every commit gets its own unique checkpoint ID (1:1)
+2. Every commit with agent-touched files must be traceable
+3. Rebase-safe
+4. Full session transcript captured (prompt to stop event)
+
+The key insight: **condense provisionally at commit time, finalize with full transcript at stop time.** This gives every checkpoint the complete session context.
+
+## What Main Currently Has (that needs changing)
+
+- `PhaseActiveCommitted` (4 phases) → remove, simplify to 3
+- `PendingCheckpointID` on state → remove
+- `ActionMigrateShadowBranch` → remove from state machine, keep migration logic in strategy
+- `handleTurnEndCondense` (deferred condensation) → replace with finalize-all-checkpoints
+- `LastCheckpointID` reuse in PrepareCommitMsg → remove (always fresh ID)
+- `getCondensedFilesTouched` / split-commit reuse logic → remove
+- No carry-forward → add
+- No `UpdateCommitted` on checkpoint store → add
+
+## Implementation Steps
+
+### Step 1: Remove ACTIVE_COMMITTED phase
+
+**Files:** `cmd/entire/cli/session/phase.go`, `cmd/entire/cli/session/phase_test.go`
+
+- Remove `PhaseActiveCommitted` constant
+- Remove from `allPhases`
+- `PhaseFromString("active_committed")` → return `PhaseActive` (backward compat)
+- `IsActive()` → only `p == PhaseActive`
+- Remove `transitionFromActiveCommitted()` function
+- Change `ACTIVE + GitCommit` transition: `→ ACTIVE` with `[ActionCondense, ActionUpdateLastInteraction]`
+- Remove `ActionMigrateShadowBranch` and `ActionDeferCondensation` from actions enum
+- Update `ApplyCommonActions` to not pass through removed actions
+- Update tests in `phase_test.go`
+
+### Step 2: Remove PendingCheckpointID, add TurnCheckpointIDs
+
+**File:** `cmd/entire/cli/session/state.go`
+
+- Remove `PendingCheckpointID string` field
+- Add `TurnCheckpointIDs []string` field (JSON: `turn_checkpoint_ids`)
+  - Tracks all checkpoint IDs condensed during the current turn
+  - Set in PostCommit, consumed in HandleTurnEnd, cleared in InitializeSession
+
+### Step 3: Add UpdateCommitted to checkpoint store
+
+**Files:** `cmd/entire/cli/checkpoint/checkpoint.go`, `cmd/entire/cli/checkpoint/committed.go`
+
+Take from alex's branch (`origin/alex/realigning-checkpoint-boundaries`), modified:
+
+- Add `UpdateCommittedOptions` struct with **replace** semantics (not append):
+  ```
+  CheckpointID, SessionID, Transcript []byte, Prompts []string, Context []byte
+  ```
+- Add `UpdateCommitted(ctx, opts)` to `Store` interface
+- Implement on `GitStore`: find checkpoint by ID, find session slot, **replace** transcript/prompts/context blobs, update content hash, commit
+- Replace semantics are simpler and correct: at stop time we have the full transcript and want every checkpoint to contain it identically
+
+**Test:** `cmd/entire/cli/checkpoint/committed_update_test.go`
+
+### Step 4: Simplify PrepareCommitMsg (always fresh ID)
+
+**File:** `cmd/entire/cli/strategy/manual_commit_hooks.go`
+
+- Remove the entire "no new content — check LastCheckpointID reuse" block (~lines 293-350 on main)
+- If `sessionsWithContent` is empty → return nil (no trailer)
+- Always `id.Generate()` for fresh checkpoint ID
+- Remove `isRestoringExisting` logic and the split `source == "message"` cases
+- Remove `getCondensedFilesTouched()` function
+- Keep `hasOverlappingFiles()` (still used by `sessionHasNewContentFromLiveTranscript`)
+- Simplify `handleAmendCommitMsg`: only restore from `LastCheckpointID` (remove `PendingCheckpointID` path)
+
+### Step 5: Simplify PostCommit (single-pass, record TurnCheckpointIDs)
+
+**File:** `cmd/entire/cli/strategy/manual_commit_hooks.go`
+
+- Remove two-pass architecture (no more `pendingMigration` tracking)
+- For each session, after `condenseAndUpdateState` succeeds:
+  - Append checkpoint ID to `state.TurnCheckpointIDs` (only for ACTIVE phase)
+- Remove `ActionMigrateShadowBranch` dispatch (action no longer exists)
+- Keep shadow branch migration as direct call after condensation (extracted to helper, not state-machine-driven)
+- Keep shadow branch cleanup logic
+
+### Step 6: Add carry-forward for ACTIVE sessions
+
+**File:** `cmd/entire/cli/strategy/manual_commit_hooks.go`
+
+Take from soph's branch:
+
+- Add `filesChangedInCommit(commit)` helper: diffs commit vs parent tree → `map[string]struct{}`
+- Add `subtractFiles(files, exclude)` helper: set difference
+- Add `carryForwardToNewShadowBranch(ctx, repo, state, remainingFiles)`:
+  - Calls `store.WriteTemporary()` with remaining files at new HEAD
+  - Sets `state.FilesTouched = remainingFiles`, `state.StepCount = 1`
+  - Sets `state.LastCheckpointID = ""` (next commit must get fresh ID)
+  - Does NOT reset `CheckpointTranscriptStart` (stop hook handles transcript finalization)
+- In PostCommit loop, after condensation for ACTIVE sessions:
+  ```
+  if condensed && state.Phase.IsActive() {
+      remaining := subtractFiles(filesTouchedBefore, committedFileSet)
+      if len(remaining) > 0 {
+          carryForwardToNewShadowBranch(...)
+      }
+  }
+  ```
+
+### Step 7: Implement HandleTurnEnd finalization
+
+**File:** `cmd/entire/cli/strategy/manual_commit_hooks.go`
+
+Replace `handleTurnEndCondense` with `finalizeAllTurnCheckpoints`:
+
+- If `state.TurnCheckpointIDs` is empty → no-op (no mid-turn commits)
+- Read full transcript from `state.TranscriptPath`
+- Extract prompts, generate context from full transcript
+- For each checkpoint ID in `TurnCheckpointIDs`:
+  - Call `store.UpdateCommitted()` with full transcript (replace)
+- Update `state.CheckpointTranscriptStart` to current transcript length
+- Clear `state.TurnCheckpointIDs`
+- Best-effort: log warnings but don't fail the hook
+
+### Step 8: Clear TurnCheckpointIDs in InitializeSession
+
+**File:** `cmd/entire/cli/strategy/manual_commit_hooks.go`
+
+In `InitializeSession`, where `LastCheckpointID` is cleared:
+- Also clear `state.TurnCheckpointIDs = nil`
+
+### Step 9: Shadow branch migration (from alex's branch)
+
+**File:** `cmd/entire/cli/strategy/manual_commit_migration.go` (new, from alex)
+
+- Extract `migrateShadowBranchIfNeeded()` into its own file (currently inline on main)
+- Called from PostCommit after condensation and from `SaveChanges`/`InitializeSession`
+- Handles HEAD changes from rebase/pull: renames shadow branch ref
+
+### Step 10: Update condenseAndUpdateState
+
+**File:** `cmd/entire/cli/strategy/manual_commit_hooks.go`
+
+- Remove `state.PendingCheckpointID = ""` line
+- Keep setting `state.LastCheckpointID = checkpointID`
+- This is the "provisional" write — full transcript comes at stop time
+
+### Step 11: Update tests
+
+**Modified tests:**
+- `cmd/entire/cli/session/phase_test.go` — remove ACTIVE_COMMITTED tests, update transitions
+- `cmd/entire/cli/strategy/phase_postcommit_test.go` — test immediate condensation, carry-forward, TurnCheckpointIDs recording
+- `cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go` — remove reuse tests, test always-fresh
+- `cmd/entire/cli/strategy/phase_wiring_test.go` — remove ACTIVE_COMMITTED wiring
+- `cmd/entire/cli/phase_wiring_test.go` — remove ACTIVE_COMMITTED from handler dispatch
+- `cmd/entire/cli/doctor_test.go` — remove ACTIVE_COMMITTED classify tests
+- `cmd/entire/cli/strategy/mid_turn_commit_test.go` — delete (replaced by new tests)
+
+**New tests:**
+- `cmd/entire/cli/checkpoint/committed_update_test.go` — UpdateCommitted replace semantics
+- `cmd/entire/cli/strategy/manual_commit_hooks_test.go` or integration test — finalizeAllTurnCheckpoints: multiple checkpoint IDs all updated with full transcript
+- Carry-forward unit tests: `subtractFiles`, `filesChangedInCommit`
+- Integration test: agent commits twice mid-turn → stop → both checkpoints have full transcript
+
+### Step 12: Update CLAUDE.md
+
+- Remove ACTIVE_COMMITTED from phase documentation
+- Document TurnCheckpointIDs and the finalize-at-stop-time approach
+- Document carry-forward behavior
+- Update transition table
+
+## Data Flow Summary
+
+```
+InitializeSession (new prompt)
+  → TurnCheckpointIDs = nil, LastCheckpointID = ""
+
+Agent works, commits A+B (PostCommit, ACTIVE)
+  → PrepareCommitMsg: fresh ID "cp1"
+  → PostCommit: condense provisional transcript → entire/checkpoints/v1
+  → state.TurnCheckpointIDs = ["cp1"]
+  → carry-forward: file C → new shadow branch
+
+Agent continues, commits C (PostCommit, ACTIVE)
+  → PrepareCommitMsg: fresh ID "cp2" (sessionHasNewContent: transcript grew)
+  → PostCommit: condense transcript delta → entire/checkpoints/v1
+  → state.TurnCheckpointIDs = ["cp1", "cp2"]
+
+Agent explains, stop hook fires (HandleTurnEnd)
+  → Read full transcript (prompt to stop)
+  → UpdateCommitted("cp1", fullTranscript)  ← replaces provisional
+  → UpdateCommitted("cp2", fullTranscript)  ← replaces provisional
+  → TurnCheckpointIDs = nil
+
+User splits commits after session (IDLE)
+  → PrepareCommitMsg: fresh ID "cp3"
+  → PostCommit: condense full transcript (already complete) → entire/checkpoints/v1
+  → No TurnCheckpointIDs tracking needed (transcript already finalized)
+```
+
+## Verification
+
+1. `mise run fmt && mise run lint && mise run test:ci` — all pass
+2. Manual test: enable on a repo, make 2 commits in one turn, verify both checkpoints on `entire/checkpoints/v1` have full transcript after stop
+3. Manual test: make a commit in IDLE, verify checkpoint has complete prompt-to-stop transcript
+4. Manual test: amend a commit, verify trailer is preserved
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
+
+---
+
+question: what happens now if I press `ctrl+c` after the agent made the first commit
+
+---
+
+what happens if a push is made by claude in the middle of a turn?

@@ -1,0 +1,45 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "332f7c352062",
+  "session_id": "4ddad80c-b9d6-490f-bd13-3f41ed52caf5",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-13T15:35:53.462327Z",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 7,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/checkpoint/committed_update_test.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/session/phase.go",
+    "cmd/entire/cli/session/phase_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go",
+    "cmd/entire/cli/strategy/strategy.go",
+    "docs/KNOWN_LIMITATIONS.md"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "1ab7a579e834",
+  "transcript_identifier_at_start": "6872cb74-6ccb-451d-b94f-5b3a929fd4e2",
+  "checkpoint_transcript_start": 427,
+  "transcript_lines_at_start": 427,
+  "token_usage": {
+    "input_tokens": 124,
+    "cache_creation_tokens": 136864,
+    "cache_read_tokens": 8549853,
+    "output_tokens": 3399,
+    "api_call_count": 104
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-13T15:35:52.469647Z",
+    "agent_lines": 71,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 71,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/4ddad80c-b9d6-490f-bd13-3f41ed52caf5.jsonl"
+}

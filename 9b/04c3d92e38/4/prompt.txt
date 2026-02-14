@@ -1,0 +1,438 @@
+Implement the following plan:
+
+# OpenClaw Integration Plan
+
+## Context
+
+The CLI currently supports Claude Code and Gemini CLI as agents. The user wants to add OpenClaw as a third agent, following the same patterns. OpenClaw is a self-hosted AI agent gateway that uses TypeScript-based hooks discovered from directories. The integration requires:
+
+1. **Go CLI code** — new agent package + handlers (follows Gemini pattern exactly)
+2. **TypeScript hook handler** — a TS file installed into OpenClaw's hooks directory that shells out to `entire hooks openclaw <verb>` with JSON on stdin
+
+### Hook Event Mapping (Confirmed by user)
+
+| OpenClaw Event | Entire Hook | Equivalent in Claude/Gemini |
+|---|---|---|
+| `agent:bootstrap` | session-start + capture state | SessionStart + UserPromptSubmit/BeforeAgent |
+| `agent:response` | commit checkpoint | Stop/AfterAgent |
+| `command:new` | session-start (new session) | SessionStart |
+| `command:stop` | session-end | SessionEnd |
+| `session:compacted` | pre-compress (backup) | PreCompress |
+
+### Key Differences from Claude/Gemini
+
+- **Hook installation**: TypeScript file in `<workspace>/.openclaw/hooks/` (not settings.json entries)
+- **Transcript format**: JSONL (same as Claude Code — can reuse `CapturePrePromptState`)
+- **No explicit "before next prompt" hook**: `agent:bootstrap` fires once; pre-prompt state must be re-captured after each `agent:response` checkpoint
+- **Session storage**: `~/.openclaw/agents/<agentId>/sessions/<SessionId>.jsonl`
+
+---
+
+## Implementation Steps
+
+### Step 1: Add Agent Constants
+
+**Modify:** `cmd/entire/cli/agent/registry.go`
+
+```go
+AgentNameOpenClaw AgentName = "openclaw"
+AgentTypeOpenClaw AgentType = "OpenClaw"
+```
+
+### Step 2: Create Agent Package
+
+**New directory:** `cmd/entire/cli/agent/openclaw/`
+
+#### 2a. `openclaw/types.go` — OpenClaw-specific types
+
+- `hookEventRaw` — JSON structure from the TypeScript handler (fields: `type`, `action`, `sessionKey`, `timestamp`, `context`)
+- `hookContextRaw` — Context fields (`sessionId`, `sessionFile`, `workspaceDir`, `commandSource`, `senderId`, `responseText`, `toolCalls`, `tokenUsage`)
+- `toolCallRaw` — Tool call structure (`tool`, `args`, `result`, `success`, `durationMs`)
+- `tokenUsageRaw` — Token usage (`input`, `output`)
+- Transcript types: `TranscriptHeader` (first JSONL line, `type=session`), `TranscriptMessage` (subsequent lines, `type=message` with `role` and `content`)
+- `FileModificationTools` — tool names that modify files (`write_file`, `edit_file`, `patch_file`, `create_file`, `delete_file`)
+
+#### 2b. `openclaw/openclaw.go` — Agent implementation
+
+Pattern: Follow `geminicli/gemini.go` exactly.
+
+- `init()`: `agent.Register(agent.AgentNameOpenClaw, NewOpenClawAgent)`
+- `Name()`: `agent.AgentNameOpenClaw`
+- `Type()`: `agent.AgentTypeOpenClaw`
+- `Description()`: `"OpenClaw - Open-source AI agent platform"`
+- `DetectPresence()`: Check for `.openclaw/` directory in repo root
+- `GetHookConfigPath()`: `".openclaw/hooks/"`
+- `SupportsHooks()`: `true`
+- `ParseHookInput()`: Parse `hookEventRaw` from stdin, map to `agent.HookInput`:
+  - `SessionID` from `context.sessionId`
+  - `SessionRef` from `context.sessionFile`
+  - `UserPrompt` empty (OpenClaw doesn't provide it in bootstrap)
+  - Tool fields from `context.toolCalls` for response events
+  - Store OpenClaw-specific fields in `RawData`
+- `GetSessionID()`: Return `input.SessionID`
+- `TransformSessionID()`: Identity function
+- `ExtractAgentSessionID()`: Use `sessionid.ModelSessionID()`
+- `GetSessionDir()`: `~/.openclaw/agents/main/sessions/` with `ENTIRE_TEST_OPENCLAW_SESSION_DIR` override
+- `ReadSession()`: Read JSONL transcript from `SessionRef`
+- `WriteSession()`: Write JSONL to `SessionRef`
+- `FormatResumeCommand()`: `"openclaw --resume " + sessionID`
+- `GetTranscriptPosition()`: Count lines in JSONL (same approach as Claude Code)
+- `ExtractModifiedFilesFromOffset()`: Parse JSONL from offset, extract file paths from tool calls
+- `ChunkTranscript()`: Delegate to `agent.ChunkJSONL()` (same JSONL format as Claude)
+- `ReassembleTranscript()`: Delegate to `agent.ReassembleJSONL()`
+
+#### 2c. `openclaw/hooks.go` — HookSupport + HookHandler
+
+Hook names (subcommands under `entire hooks openclaw`):
+- `HookNameBootstrap = "bootstrap"`
+- `HookNameResponse = "response"`
+- `HookNameCommandNew = "command-new"`
+- `HookNameCommandStop = "command-stop"`
+- `HookNameSessionCompacted = "session-compacted"`
+
+**InstallHooks()** — The unique part:
+1. Determine hooks directory: `<repoRoot>/.openclaw/hooks/` (workspace hooks)
+2. Write an embedded TypeScript handler file (`entire-hook/handler.ts`) using `go:embed`
+3. The TS file contains event handlers that call `entire hooks openclaw <verb>` via `execSync`
+4. If `localDev`, substitute `go run ${OPENCLAW_PROJECT_DIR}/cmd/entire/main.go` for `entire`
+5. Also write a `HOOK.md` file with metadata (name, description, events) as OpenClaw expects
+
+**UninstallHooks()**: Remove the handler directory.
+
+**AreHooksInstalled()**: Check if handler file exists and contains `// Entire Hook Handler` marker.
+
+**GetHookNames()**: Return the 5 hook names.
+
+**GetSupportedHooks()**: Return `HookSessionStart`, `HookSessionEnd`, `HookStop`, `HookUserPromptSubmit`.
+
+#### 2d. `openclaw/transcript.go` — Transcript parsing
+
+- `ExtractModifiedFiles(data []byte) ([]string, error)` — Parse JSONL, find tool calls matching `FileModificationTools`, extract file paths
+- `ExtractAllUserPrompts(data []byte) ([]string, error)` — Extract messages with `role=user`
+- `ExtractLastAssistantMessage(data []byte) (string, error)` — Get last `role=assistant` message
+- `CalculateTokenUsageFromEvent(raw *tokenUsageRaw) *agent.TokenUsage` — Map event token data
+
+#### 2e. `openclaw/hooks_handler.ts` — Embedded TypeScript handler
+
+```typescript
+// Entire Hook Handler - DO NOT EDIT
+// Managed by `entire enable`
+import { execSync } from 'child_process';
+const ENTIRE_CMD = '%%ENTIRE_CMD%%';
+
+const handler = async (event) => {
+  const key = `${event.type}:${event.action}`;
+  const hookMap = {
+    'agent:bootstrap': 'bootstrap',
+    'agent:response': 'response',
+    'command:new': 'command-new',
+    'command:stop': 'command-stop',
+    'session:compacted': 'session-compacted',
+  };
+  const verb = hookMap[key];
+  if (!verb) return;
+  try {
+    execSync(`${ENTIRE_CMD} hooks openclaw ${verb}`, {
+      input: JSON.stringify(event),
+      stdio: ['pipe', 'inherit', 'inherit'],
+      timeout: 30000,
+    });
+  } catch (e) { /* hooks should not block agent */ }
+};
+export default handler;
+```
+
+Also create `openclaw/HOOK.md.tmpl` (embedded) with YAML frontmatter for OpenClaw discovery.
+
+### Step 3: Create Handler File
+
+**New file:** `cmd/entire/cli/hooks_openclaw_handlers.go`
+
+Pattern: Follow `hooks_geminicli_handlers.go`.
+
+- `handleOpenClawBootstrap()` — Calls `handleSessionStartCommon()` + captures pre-prompt state via `CapturePrePromptState()` (reuse existing — JSONL format same as Claude). Also initializes session via `strategy.SessionInitializer`.
+- `handleOpenClawResponse()` — Main checkpoint handler (like `handleGeminiAfterAgent`):
+  1. Parse event → get session ID, transcript path
+  2. Create `openclawSessionContext` struct
+  3. `setupOpenClawSessionDir()` — copy transcript, create session dir
+  4. `extractOpenClawMetadata()` — extract prompts, summary, modified files
+  5. `commitOpenClawSession()` — compute file changes, build `SaveContext`, call `strat.SaveChanges()`
+  6. `transitionSessionTurnEnd(sessionID)`
+  7. Re-capture pre-prompt state for next response (since no "before prompt" hook)
+- `handleOpenClawCommandNew()` — Calls `handleSessionStartCommon()` (same as session-start)
+- `handleOpenClawCommandStop()` — Marks session ended (like `handleGeminiSessionEnd`)
+- `handleOpenClawSessionCompacted()` — Logging only (like `handleGeminiPreCompress`)
+
+**Reusable functions** (no duplication):
+- `handleSessionStartCommon()` from `hooks.go:242` — shared session start logic
+- `CapturePrePromptState()` from `state.go:67` — captures untracked files + JSONL line count
+- `ComputeFileChanges()` from `state.go` — git status for new/deleted files
+- `FilterAndNormalizePaths()` — path normalization
+- `generateCommitMessage()` — commit message from prompt
+- `GetGitAuthor()` — git author info
+- `transitionSessionTurnEnd()` — session phase transition
+- `outputHookResponse()` — JSON response output
+- `markSessionEnded()` — marks session as ENDED
+- `copyFile()` — file copy utility
+
+### Step 4: Register Handlers
+
+**Modify:** `cmd/entire/cli/hook_registry.go`
+
+Add import: `"github.com/entireio/cli/cmd/entire/cli/agent/openclaw"`
+
+Register 5 handlers in `init()`:
+- `(AgentNameOpenClaw, HookNameBootstrap)` → `handleOpenClawBootstrap()`
+- `(AgentNameOpenClaw, HookNameResponse)` → `handleOpenClawResponse()`
+- `(AgentNameOpenClaw, HookNameCommandNew)` → `handleOpenClawCommandNew()`
+- `(AgentNameOpenClaw, HookNameCommandStop)` → `handleOpenClawCommandStop()`
+- `(AgentNameOpenClaw, HookNameSessionCompacted)` → `handleOpenClawSessionCompacted()`
+
+Each wrapped with `IsEnabled()` check.
+
+### Step 5: Add Blank Import
+
+**Modify:** `cmd/entire/cli/hooks_cmd.go`
+
+```go
+_ "github.com/entireio/cli/cmd/entire/cli/agent/openclaw"
+```
+
+### Step 6: Tests
+
+**New files:**
+
+- `cmd/entire/cli/agent/openclaw/openclaw_test.go` — Agent interface tests (ParseHookInput variants, DetectPresence, GetSessionDir, ReadSession, WriteSession, FormatResumeCommand, TranscriptPosition, ChunkTranscript)
+- `cmd/entire/cli/agent/openclaw/hooks_test.go` — Hook management tests (InstallHooks fresh/idempotent/force/localDev, UninstallHooks, AreHooksInstalled, GetHookNames)
+- `cmd/entire/cli/agent/openclaw/transcript_test.go` — Transcript parsing tests (ExtractModifiedFiles, ExtractAllUserPrompts, ExtractLastAssistantMessage, CalculateTokenUsage)
+
+All tests use `t.Parallel()` except those with `t.Chdir()`.
+
+---
+
+## Verification
+
+1. `mise run fmt` — format all new Go files
+2. `mise run lint` — ensure no lint errors
+3. `mise run test` — run unit tests (new openclaw tests must pass)
+4. `mise run test:ci` — run all tests including integration
+5. Manual test: `entire enable --agent openclaw` should install hooks
+6. Verify `entire hooks openclaw bootstrap` accepts JSON on stdin
+7. Verify `.openclaw/hooks/entire-hook/handler.ts` is created correctly
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation to build a comprehensive summary.
+
+1. The user provided a detailed implementation plan for adding OpenClaw as a third agent integration to their CLI tool (which already supports Claude Code and Gemini CLI).
+
+2. I explored the codebase extensively using the Explore agent and direct file reads to understand:
+   - Agent registry pattern (registry.go)
+   - Gemini CLI agent implementation (geminicli/ package)
+   - Hook handlers (hooks_geminicli_handlers.go)
+   - Hook registry (hook_registry.go)
+   - Hooks command (hooks_cmd.go)
+   - Common hooks (hooks.go - handleSessionStartCommon)
+   - State management (state.go)
+   - Agent interfaces (agent.go)
+   - Types (types.go)
+   - Chunking (chunking.go)
+   - Session ID (sessionid.go)
+
+3. I created task tracking with 6 tasks:
+   - Task 1: Add agent constants (COMPLETED)
+   - Task 2: Create openclaw agent package (COMPLETED)
+   - Task 3: Create hook handlers (COMPLETED)
+   - Task 4: Register handlers and add blank import (COMPLETED)
+   - Task 5: Create tests (IN PROGRESS)
+   - Task 6: Run fmt, lint, and tests (PENDING)
+
+4. Files created/modified:
+   - Modified: registry.go - added AgentNameOpenClaw and AgentTypeOpenClaw
+   - Created: cmd/entire/cli/agent/openclaw/types.go
+   - Created: cmd/entire/cli/agent/openclaw/openclaw.go
+   - Created: cmd/entire/cli/agent/openclaw/transcript.go
+   - Created: cmd/entire/cli/agent/openclaw/hooks.go
+   - Created: cmd/entire/cli/agent/openclaw/handler.ts (embedded)
+   - Created: cmd/entire/cli/agent/openclaw/HOOK.md.tmpl (embedded)
+   - Created: cmd/entire/cli/hooks_openclaw_handlers.go
+   - Modified: cmd/entire/cli/hook_registry.go - added OpenClaw handler registrations
+   - Modified: cmd/entire/cli/hooks_cmd.go - added blank import
+   - Created: cmd/entire/cli/agent/openclaw/openclaw_test.go
+   - Created: cmd/entire/cli/agent/openclaw/hooks_test.go
+   - Created: cmd/entire/cli/agent/openclaw/transcript_test.go
+
+5. Lint errors fixed:
+   - `slicescontains` - replaced manual loop with `slices.Contains`
+   - `any` vs `interface{}` - used `any` for local vars
+   - `revive` stuttering - added nolint comment (following GeminiCLIAgent pattern)
+   - `unused-parameter` repoPath - changed to `_`
+   - `gosec` G306 - changed 0o644 to 0o600 for WriteFile
+   - `unparam` - added nolint comments for error returns kept for API consistency
+   - `unused` entireHookPrefixes - removed unused variable
+   - `wrapcheck` - wrapped error from agent.ChunkJSONL
+   - `maintidx` - added nolint to init() function that grew too large with OpenClaw handlers
+   - `goconst` - extracted "message" string to constant `messageTypeMessage`
+
+6. The bootstrap handler had a stdin consumption issue - handleSessionStartCommon() reads stdin, so the second parse would fail. I rewrote it to buffer stdin first with io.ReadAll, then use bytes.NewReader for parsing, and replicate the session start logic inline.
+
+7. Tests were running but there was a FAIL at the end - the output was truncated so I couldn't see which test failed. The last visible output showed all transcript tests and most openclaw tests passing. The test run ended with `FAIL` but the specific failing test wasn't visible in the output.
+
+That's where the conversation stopped - tests were running, some were failing, and I needed to investigate the test failure.
+
+Summary:
+1. Primary Request and Intent:
+   The user asked me to implement an OpenClaw integration plan for their Go CLI tool. The plan adds OpenClaw as a third AI agent (alongside Claude Code and Gemini CLI). The implementation follows the existing Gemini CLI pattern exactly and includes:
+   - Go agent package (`cmd/entire/cli/agent/openclaw/`) with types, agent implementation, hooks, and transcript parsing
+   - A TypeScript hook handler file embedded via `go:embed` that shells out to `entire hooks openclaw <verb>`
+   - Hook handlers in the CLI package (`hooks_openclaw_handlers.go`)
+   - Handler registration in `hook_registry.go` and blank import in `hooks_cmd.go`
+   - Comprehensive tests for all new code
+   - The plan maps OpenClaw events: `agent:bootstrap` → session-start + capture state, `agent:response` → checkpoint commit, `command:new` → session-start, `command:stop` → session-end, `session:compacted` → logging only
+
+2. Key Technical Concepts:
+   - Agent registry pattern with `init()` self-registration and `Factory` functions
+   - Agent interface hierarchy: `Agent`, `HookSupport`, `HookHandler`, `TranscriptAnalyzer`, `TranscriptChunker`
+   - JSONL transcript format (same as Claude Code, different from Gemini's JSON)
+   - Hook handler pattern: handlers in `cli` package registered in `init()` via `RegisterHookHandler`
+   - `handleSessionStartCommon()` shared session-start logic
+   - Pre-prompt state capture via `CapturePrePromptState()` for tracking file changes
+   - Session phase state machine (`session.EventSessionStart`, `session.EventTurnEnd`, etc.)
+   - Strategy pattern for checkpoint saving (`strategy.SaveContext`, `strat.SaveChanges()`)
+   - OpenClaw hook installation via embedded TypeScript file in `.openclaw/hooks/entire-hook/handler.ts`
+   - `go:embed` for handler.ts and HOOK.md.tmpl files
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/agent/registry.go`** (MODIFIED)
+     - Added `AgentNameOpenClaw AgentName = "openclaw"` and `AgentTypeOpenClaw AgentType = "OpenClaw"` constants
+     
+   - **`cmd/entire/cli/agent/openclaw/types.go`** (CREATED)
+     - Defines OpenClaw-specific types: `hookEventRaw`, `hookContextRaw`, `toolCallRaw`, `tokenUsageRaw`
+     - Transcript types: `TranscriptHeader` (first JSONL line), `TranscriptMessage` (subsequent lines)
+     - `transcriptToolCall` for tool calls in transcript messages
+     - `FileModificationTools` = `["write_file", "edit_file", "patch_file", "create_file", "delete_file"]`
+
+   - **`cmd/entire/cli/agent/openclaw/openclaw.go`** (CREATED)
+     - Implements full `Agent`, `TranscriptAnalyzer`, and `TranscriptChunker` interfaces
+     - `init()` registers with `agent.Register(agent.AgentNameOpenClaw, NewOpenClawAgent)`
+     - `DetectPresence()` checks for `.openclaw/` directory
+     - `GetHookConfigPath()` returns `".openclaw/hooks/"`
+     - `ParseHookInput()` parses `hookEventRaw` from stdin, maps to `agent.HookInput`
+     - `GetSessionDir()` returns `~/.openclaw/agents/main/sessions/` with `ENTIRE_TEST_OPENCLAW_SESSION_DIR` override
+     - `ReadSession()`/`WriteSession()` handle JSONL transcript files
+     - `FormatResumeCommand()` returns `"openclaw --resume " + sessionID`
+     - `GetTranscriptPosition()` counts non-empty lines in JSONL
+     - `ExtractModifiedFilesFromOffset()` parses JSONL from offset
+     - `ChunkTranscript()`/`ReassembleTranscript()` delegate to `agent.ChunkJSONL`/`agent.ReassembleJSONL`
+     - Has `//nolint:revive` for stuttering name (follows GeminiCLIAgent pattern)
+     - Has `//nolint:unparam` for ReassembleTranscript error return (interface requirement)
+
+   - **`cmd/entire/cli/agent/openclaw/transcript.go`** (CREATED)
+     - `countLines()` - counts non-empty lines in byte data
+     - `ExtractModifiedFiles()` - parses JSONL, finds tool calls matching FileModificationTools
+     - `extractModifiedFilesFromLines()` - core extraction with line offset support
+     - `isFileModificationTool()` - uses `slices.Contains`
+     - `extractFilePathFromArgs()` - tries `file_path`, `path`, `filename` keys
+     - `ExtractAllUserPrompts()` - extracts messages with `role=user` and `type=message`
+     - `ExtractLastAssistantMessage()` - gets last `role=assistant` message
+     - `CalculateTokenUsageFromEvent()` - maps `tokenUsageRaw` to `agent.TokenUsage`
+     - `ExtractModifiedFilesFromEvent()` - extracts from hook event tool calls
+     - `ExtractLastUserPrompt()` / `FormatAllPrompts()` helper functions
+     - Uses `messageTypeMessage` constant for "message" string (goconst fix)
+
+   - **`cmd/entire/cli/agent/openclaw/hooks.go`** (CREATED)
+     - Implements `HookSupport` and `HookHandler` interfaces
+     - Hook names: `bootstrap`, `response`, `command-new`, `command-stop`, `session-compacted`
+     - `InstallHooks()` creates `.openclaw/hooks/entire-hook/handler.ts` and `HOOK.md` using `go:embed`
+     - Substitutes `%%ENTIRE_CMD%%` placeholder with either `entire` or `go run ${OPENCLAW_PROJECT_DIR}/cmd/entire/main.go`
+     - `isHandlerInstalled()` checks marker + mode (localDev vs production)
+     - `UninstallHooks()` removes the entire handler directory
+     - `AreHooksInstalled()` checks for handler marker in file
+     - `GetSupportedHooks()` returns `HookSessionStart`, `HookSessionEnd`, `HookStop`, `HookUserPromptSubmit`
+     - Compile-time interface assertions: `var _ agent.HookSupport = (*OpenClawAgent)(nil)`
+
+   - **`cmd/entire/cli/agent/openclaw/handler.ts`** (CREATED - embedded)
+     - TypeScript handler with `// Entire Hook Handler` marker
+     - Maps event keys (`agent:bootstrap`, `agent:response`, etc.) to CLI verbs
+     - Calls `execSync` with JSON on stdin, 30s timeout
+     - Catches errors silently (hooks should not block agent)
+
+   - **`cmd/entire/cli/agent/openclaw/HOOK.md.tmpl`** (CREATED - embedded)
+     - YAML frontmatter with name, description, events list
+     - Description text about Entire hook handler
+
+   - **`cmd/entire/cli/hooks_openclaw_handlers.go`** (CREATED)
+     - `handleOpenClawBootstrap()` - Buffers stdin with `io.ReadAll`, parses once, then runs session start logic inline (replicated from `handleSessionStartCommon` to avoid double stdin read), captures pre-prompt state, initializes session
+     - `handleOpenClawResponse()` - Main checkpoint handler: parses input, creates `openclawSessionContext`, calls setup/extract/commit helpers, transitions session ACTIVE→IDLE, re-captures pre-prompt state for next response
+     - `handleOpenClawCommandNew()` - Delegates to `handleSessionStartCommon()`
+     - `handleOpenClawCommandStop()` - Parses session-end input, calls `markSessionEnded()`
+     - `handleOpenClawSessionCompacted()` - Logging only
+     - `openclawSessionContext` struct mirrors `geminiSessionContext`
+     - `setupOpenClawSessionDir()` - creates metadata dir, copies transcript
+     - `extractOpenClawMetadata()` - extracts prompts, summary, modified files, generates commit message
+     - `commitOpenClawSession()` - loads pre-prompt state, computes file changes, creates context file, builds `SaveContext`, calls `strat.SaveChanges()`
+     - `createContextFileForOpenClaw()` - generates context.md
+
+   - **`cmd/entire/cli/hook_registry.go`** (MODIFIED)
+     - Added import for `openclaw` package
+     - Registered 5 OpenClaw handlers in `init()` with `IsEnabled()` checks
+     - Added `maintidx` to the nolint comment on init() since it grew too large
+
+   - **`cmd/entire/cli/hooks_cmd.go`** (MODIFIED)
+     - Added blank import: `_ "github.com/entireio/cli/cmd/entire/cli/agent/openclaw"`
+
+   - **`cmd/entire/cli/agent/openclaw/openclaw_test.go`** (CREATED)
+     - Tests: NewOpenClawAgent, Name, Type, Description, DetectPresence (with/without dir), GetHookConfigPath, SupportsHooks, ParseHookInput (bootstrap, response, empty, invalid JSON), GetSessionID, TransformSessionID, ExtractAgentSessionID, GetSessionDir (override + default), FormatResumeCommand, ReadSession, WriteSession (nil, wrong agent, no ref, no data), GetTranscriptPosition, GetSupportedHooks, ChunkTranscript, ReassembleTranscript
+     - Uses `t.Parallel()` except tests with `t.Chdir()` or `t.Setenv()`
+
+   - **`cmd/entire/cli/agent/openclaw/hooks_test.go`** (CREATED)
+     - Tests: InstallHooks_Fresh, InstallHooks_Idempotent, InstallHooks_Force, InstallHooks_LocalDev, UninstallHooks, UninstallHooks_NothingToUninstall, AreHooksInstalled_NotInstalled, GetHookNames
+     - All use `t.Chdir()` so not parallel
+
+   - **`cmd/entire/cli/agent/openclaw/transcript_test.go`** (CREATED)
+     - Tests: ExtractModifiedFiles (empty, no tools, with tools, dedup, non-mod tools, filename field), ExtractAllUserPrompts (empty, single, multiple, skip empty, skip non-message), ExtractLastAssistantMessage (empty, none, single, multiple), CalculateTokenUsageFromEvent (nil, values), ExtractModifiedFilesFromEvent (empty, with tools), ExtractLastUserPrompt, ExtractModifiedFilesFromOffset, FormatAllPrompts, CountLines
+     - All use `t.Parallel()`
+
+4. Errors and Fixes:
+   - **`slicescontains` lint**: Manual loop in `isFileModificationTool` → replaced with `slices.Contains(FileModificationTools, toolName)` and added `slices` import
+   - **`interface{}` vs `any` lint suggestion**: Changed `map[string]interface{}` to `map[string]any` in local variable `argsMap`. Note: the `agent.HookInput.RawData` field still uses `interface{}` in its type definition (matching existing code)
+   - **`revive` stuttering**: `OpenClawAgent` stutters as `openclaw.OpenClawAgent` → added `//nolint:revive` comment (same pattern as `GeminiCLIAgent`)
+   - **`unused-parameter` repoPath**: `GetSessionDir(repoPath string)` → changed to `GetSessionDir(_ string)`
+   - **`gosec` G306**: `os.WriteFile(path, data, 0o644)` → changed to `0o600`
+   - **`unparam` errors always nil**: `ExtractModifiedFiles`, `ExtractAllUserPrompts`, `ExtractLastAssistantMessage`, `ReassembleTranscript` all return nil error → added `//nolint:unparam` comments for API consistency
+   - **`unused` var**: `entireHookPrefixes` in hooks.go was unused → removed it
+   - **`wrapcheck`**: `return agent.ChunkJSONL(content, maxSize)` → wrapped with `fmt.Errorf("failed to chunk JSONL: %w", err)`
+   - **`maintidx`**: init() in hook_registry.go exceeded maintainability index threshold after adding 5 more handlers → added `maintidx` to existing nolint comment
+   - **`goconst`**: string `"message"` appeared 3 times → extracted to `messageTypeMessage` constant
+   - **`agent.Get()` type mismatch**: `agent.Get(string(agent.AgentNameOpenClaw))` → `agent.Get(agent.AgentNameOpenClaw)` (AgentName is already a string type)
+   - **stdin double-consumption in bootstrap**: `handleSessionStartCommon()` consumes stdin, so second `ParseHookInput` would fail → rewrote bootstrap handler to buffer stdin with `io.ReadAll(os.Stdin)`, parse once with `bytes.NewReader`, and replicate session-start logic inline
+
+5. Problem Solving:
+   - Successfully resolved all lint issues through iterative `golangci-lint run` and fixes
+   - Build compiles cleanly: `go build ./cmd/entire/...` passes
+   - Full lint passes: `golangci-lint run ./cmd/entire/cli/...` returns 0 issues
+   - Tests were run but showed a FAIL — the specific failing test was not visible in the truncated output. The last test output showed many passing tests but ended with `FAIL github.com/entireio/cli/cmd/entire/cli/agent/openclaw 0.598s`
+
+6. All User Messages:
+   - Message 1: "Implement the following plan: [detailed OpenClaw Integration Plan with 6 steps, hook event mapping, implementation details, and verification checklist]" - Also included a reference to a previous plan transcript file.
+
+7. Pending Tasks:
+   - Task 5: Create tests for openclaw package (IN PROGRESS - tests created but failing, need to debug)
+   - Task 6: Run fmt, lint, and tests (PENDING - `mise run fmt && mise run lint && mise run test:ci`)
+   - Full verification per the plan: manual test of `entire enable --agent openclaw`, verify `entire hooks openclaw bootstrap` accepts JSON, verify `.openclaw/hooks/entire-hook/handler.ts` is created correctly
+
+8. Current Work:
+   I had just created all three test files and ran `go test ./cmd/entire/cli/agent/openclaw/... -v -count=1`. The tests showed many individual tests PASSING but the overall result was `FAIL`. The output was truncated at 50 lines and didn't show which specific test(s) failed. The last visible lines showed transcript tests and some openclaw tests passing, but the full failure details were cut off.
+
+9. Optional Next Step:
+   Re-run the tests without truncation to see which test(s) are failing, then fix them. The test run command was `go test ./cmd/entire/cli/agent/openclaw/... -v -count=1` and ended with `FAIL`. I need to see the full output to identify and fix the failing test(s), then proceed to Task 6 (run `mise run fmt && mise run lint && mise run test:ci`).
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gtrrz-victor/.REDACTED.jsonl
+Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.

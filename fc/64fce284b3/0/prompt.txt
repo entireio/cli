@@ -1,0 +1,13 @@
+Add a "--local" option for "entire wingman enable" which adds to the local settings.
+
+---
+
+commit this
+
+---
+
+Can we inject a warning message in the active session that the next prompt will trigger the review to be executed?
+
+---
+
+[Request interrupted by user for tool use]

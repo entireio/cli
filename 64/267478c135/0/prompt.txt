@@ -1,0 +1,9 @@
+I don't see the "Powered by Entire" message anymore in this Claude session, is it enabled?
+
+---
+
+Weird, it was there before and just when starting this session didn't appear.
+
+---
+
+commit this

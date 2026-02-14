@@ -1,0 +1,591 @@
+Implement the following plan:
+
+# Refactor: Condense at Each Commit (Remove Deferred Condensation)
+
+## Context
+
+The manual-commit strategy currently defers condensation when an agent is ACTIVE during a commit. This creates a complex lifecycle involving `PendingCheckpointID`, the `ACTIVE_COMMITTED` phase, `handleTurnEndCondense`, two-pass PostCommit processing, and shadow branch migration — all of which have been a source of bugs (see `soph/fix-issue-with-reusing-checkpoint-id`).
+
+**Goal:** Always condense at commit time, regardless of whether the agent is active. Each commit gets its own checkpoint ID and metadata entry. This eliminates `PendingCheckpointID`, the `ACTIVE_COMMITTED` phase, and the entire deferred condensation flow.
+
+## Branch
+
+Create `soph/single-commit-per-checkpoint` from `main`.
+
+## What Changes
+
+| Before | After |
+|--------|-------|
+| 4 phases (IDLE, ACTIVE, ACTIVE_COMMITTED, ENDED) | 3 phases (IDLE, ACTIVE, ENDED) |
+| ACTIVE + GitCommit → ACTIVE_COMMITTED + Migrate | ACTIVE + GitCommit → ACTIVE + Condense |
+| Condensation at TurnEnd (deferred) | Condensation at commit time (immediate) |
+| PendingCheckpointID lifecycle | Eliminated |
+| Two-pass PostCommit (condense + migrate) | Single-pass PostCommit |
+| handleTurnEndCondense function | Deleted |
+| Multiple commits share one checkpoint ID | Each commit gets unique checkpoint ID |
+
+## What Stays
+
+- `LastCheckpointID` — still used for amend trailer restoration
+- `migrateShadowBranchIfNeeded` — still needed in SaveChanges/InitializeSession for rebase detection
+- `postCommitUpdateBaseCommitOnly` — still needed for commits without trailers
+- Attribution correctness — `BaseCommit` still holds old value when `CondenseSession` runs (updated after)
+- `AttributionBaseCommit` — kept for backward compat (now redundant but harmless)
+
+## Implementation Steps
+
+### Step 1: State Machine (`cmd/entire/cli/session/phase.go`)
+
+- Remove `PhaseActiveCommitted` constant and from `allPhases`
+- `PhaseFromString("active_committed")` → `PhaseActive` (backward compat)
+- `IsActive()`: remove `|| p == PhaseActiveCommitted`
+- Remove `transitionFromActiveCommitted` function entirely
+- Change `transitionFromActive` `EventGitCommit`:
+  ```go
+  return TransitionResult{
+      NewPhase: PhaseActive,
+      Actions:  []Action{ActionCondense, ActionUpdateLastInteraction},
+  }
+  ```
+- Remove `ActionMigrateShadowBranch` constant, its `String()` case, and passthrough in `ApplyCommonActions`
+- Remove `case PhaseActiveCommitted` in `Transition` switch
+
+### Step 2: Session State (`cmd/entire/cli/session/state.go`)
+
+- Remove `PendingCheckpointID string` field from `State` struct (line 62-64)
+- Old state files with this field are silently ignored by Go JSON unmarshaling
+
+### Step 3: PostCommit Simplification (`cmd/entire/cli/strategy/manual_commit_hooks.go`)
+
+- Remove two-pass architecture: delete `pendingMigration` type, `pendingMigrations` slice, Pass 2 loop (lines 644-647, 728-739)
+- Remove `ActionMigrateShadowBranch` case from action dispatch (lines 703-708)
+- Shadow branch cleanup: replace `activeSessionsOnBranch` with `condensedOnBranch` tracking — only preserve branches for ACTIVE sessions that were NOT condensed:
+  ```go
+  condensed := false
+  // ... in ActionCondense: condensed = true
+  if state.Phase.IsActive() && !condensed {
+      uncondensedActiveOnBranch[shadowBranchName] = true
+  }
+  ```
+- In `condenseAndUpdateState` (line 805): remove `state.PendingCheckpointID = ""` (field gone)
+
+### Step 4: PrepareCommitMsg Simplification (`cmd/entire/cli/strategy/manual_commit_hooks.go`)
+
+- `handleAmendCommitMsg`: remove `PendingCheckpointID` check (lines 532-536), only check `LastCheckpointID`
+- Remove `isRestoringExisting` logic checking `PendingCheckpointID` (lines 419-430)
+- Fresh ID generation and `addTrailerForAgentCommit` unchanged (already correct from recent fix)
+
+### Step 5: HandleTurnEnd Simplification (`cmd/entire/cli/strategy/manual_commit_hooks.go`)
+
+- Remove `ActionCondense` dispatch from `HandleTurnEnd` (line 1449)
+- Delete `handleTurnEndCondense` function entirely (lines 1465-1537)
+- Delete `hasOtherActiveSessionsOnBranch` function (lines 1542-1556, only caller was handleTurnEndCondense)
+- `HandleTurnEnd` becomes a no-op (ACTIVE + TurnEnd emits only `ActionUpdateLastInteraction`, handled by `ApplyCommonActions`)
+
+### Step 6: InitializeSession & Other Cleanup
+
+- `InitializeSession` (line 1231-1233): remove `PendingCheckpointID` clearing
+- `manual_commit_git.go` (lines 118-121): remove `PendingCheckpointID` preservation comment
+- `manual_commit_condensation.go` (line 609): remove `state.PendingCheckpointID = ""` in `CondenseSessionByID`
+
+### Step 7: Test Updates
+
+**`session/phase_test.go`:**
+- `TestPhaseFromString`: `"active_committed"` → expect `PhaseActive`
+- `TestPhase_IsActive`: remove ACTIVE_COMMITTED case
+- `TestTransitionFromActive`: GitCommit → ACTIVE + ActionCondense (not ACTIVE_COMMITTED + Migrate)
+- Delete `TestTransitionFromActiveCommitted` entirely
+- Update `TestApplyCommonActions_*` and `TestMermaidDiagram` references
+- Remove `ActionMigrateShadowBranch` from action string tests
+
+**`strategy/phase_postcommit_test.go`:**
+- `TestPostCommit_ActiveSession_NoCondensation` → rewrite as `TestPostCommit_ActiveSession_Condenses`
+- Delete: `TestPostCommit_ActiveSession_SetsPendingCheckpointID`, `TestPostCommit_ActiveCommitted_MigratesShadowBranch`
+- Delete all TurnEnd condensation tests: `TestTurnEnd_ActiveCommitted_*`, `TestTurnEnd_ConcurrentSession_*`
+- Rewrite `TestTurnEnd_DeferredCondensation_AttributionUsesOriginalBase` → `TestPostCommit_ActiveSession_AttributionUsesOriginalBase`
+- Keep `TestTurnEnd_Active_NoActions` (update comment)
+- Add: `TestPostCommit_ActiveSession_CondensationFailure_PreservesShadowBranch`
+
+**`strategy/phase_prepare_commit_msg_test.go`:**
+- Rewrite amend test to use `LastCheckpointID` only (remove `PendingCheckpointID`)
+- Update `ConsecutiveCommits` test: phase → ACTIVE (not ACTIVE_COMMITTED), remove `PendingCheckpointID`
+
+**`strategy/mid_turn_commit_test.go`:**
+- Delete `TestSaveChanges_PreservesPendingCheckpointID`
+
+**`integration_test/phase_transitions_test.go`:**
+- `TestShadow_CommitBeforeStop`: verify immediate condensation (not deferred), phase stays ACTIVE (not ACTIVE_COMMITTED), no condensation at TurnEnd
+
+### Step 8: Documentation Updates
+
+**`docs/architecture/sessions-and-checkpoints.md`:**
+- Remove `PendingCheckpointID` row and deferred condensation sections (added earlier today)
+
+**`CLAUDE.md`:**
+- Remove ACTIVE_COMMITTED from phases, ActionMigrateShadowBranch from actions
+- Update transitions: `ACTIVE + GitCommit → ACTIVE + [ActionCondense]`
+- Remove PendingCheckpointID references throughout
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+## Backward Compatibility
+
+- Old state files with `"pending_checkpoint_id"` → silently ignored
+- Old state files with `"phase": "active_committed"` → mapped to `"active"` via PhaseFromString
+- In-flight ACTIVE_COMMITTED sessions: next commit condenses immediately (one-time migration)
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me go through the conversation chronologically to capture all details:
+
+1. The user provided a detailed implementation plan for a refactor called "Condense at Each Commit (Remove Deferred Condensation)" on branch `soph/single-commit-per-checkpoint` from `main`.
+
+2. The plan involves removing the `ACTIVE_COMMITTED` phase, `PendingCheckpointID`, `ActionMigrateShadowBranch`, deferred condensation flow, and simplifying the state machine from 4 phases to 3.
+
+3. I created the branch `soph/single-commit-per-checkpoint` from `main`.
+
+4. I read all the key files needed for the refactor.
+
+5. I created 6 tasks to track progress.
+
+6. I completed Steps 1-6 of the implementation (source code changes). Now I'm in the middle of Step 7 (test updates).
+
+Let me document all the specific changes made:
+
+**Step 1: State Machine (session/phase.go)**
+- Removed `PhaseActiveCommitted` constant
+- Updated `allPhases` to remove it
+- Updated `PhaseFromString` to map "active_committed" → `PhaseActive` for backward compat
+- Simplified `IsActive()` to just `p == PhaseActive`
+- Removed `ActionMigrateShadowBranch` constant
+- Removed its `String()` case
+- Changed `transitionFromActive` EventGitCommit: now returns `PhaseActive` + `ActionCondense` instead of `PhaseActiveCommitted` + `ActionMigrateShadowBranch`
+- Removed entire `transitionFromActiveCommitted` function
+- Removed `case PhaseActiveCommitted` from `Transition` switch
+- Updated `ApplyCommonActions` to remove `ActionMigrateShadowBranch` from passthrough
+- Updated `MermaidDiagram` to remove ACTIVE_COMMITTED state
+
+**Step 2: Session State (session/state.go)**
+- Removed `PendingCheckpointID string` field from `State` struct
+
+**Step 3: PostCommit Simplification (manual_commit_hooks.go)**
+- Removed two-pass architecture (pendingMigration type, pendingMigrations slice, Pass 2 loop)
+- Removed `ActionMigrateShadowBranch` case from action dispatch
+- Changed `activeSessionsOnBranch` to `uncondensedActiveOnBranch` tracking
+- Added `condensed` flag per session to track whether it was condensed
+- Updated shadow branch cleanup to only preserve for uncondensed active sessions
+
+**Step 4: PrepareCommitMsg Simplification (manual_commit_hooks.go)**
+- `handleAmendCommitMsg`: removed PendingCheckpointID check, only checks LastCheckpointID
+- Removed PendingCheckpointID from hasNewContent ID generation (now always generates fresh)
+- Simplified `isRestoringExisting` to just `!hasNewContent && reusedSession != nil`
+- `addTrailerForAgentCommit`: removed PendingCheckpointID usage, always generates fresh ID
+
+**Step 5: HandleTurnEnd Simplification (manual_commit_hooks.go)**
+- Removed `ActionCondense` dispatch from HandleTurnEnd
+- Deleted `handleTurnEndCondense` function entirely
+- Deleted `hasOtherActiveSessionsOnBranch` function
+- HandleTurnEnd is now a no-op (logs unexpected actions)
+
+**Step 6: Cleanup**
+- `InitializeSession`: removed `PendingCheckpointID` clearing
+- `manual_commit_git.go`: removed PendingCheckpointID preservation comment
+- `manual_commit_condensation.go`: removed `state.PendingCheckpointID = ""` in `CondenseSessionByID`
+- Updated doc comments to reference LastCheckpointID instead of PendingCheckpointID
+
+**Step 7: Test Updates (IN PROGRESS)**
+- I had just read the full phase_test.go file and was about to start making edits to it
+- I also ran a grep to find all remaining references to the old constants in test files
+- The grep showed many test files still reference `PhaseActiveCommitted`, `PendingCheckpointID`, and `ActionMigrateShadowBranch`
+
+Files that still need test updates:
+- `session/phase_test.go` - needs extensive updates
+- `strategy/phase_postcommit_test.go` - needs extensive rewrites
+- `strategy/phase_prepare_commit_msg_test.go` - needs rewrites
+- `strategy/mid_turn_commit_test.go` - delete TestSaveChanges_PreservesPendingCheckpointID
+- `strategy/phase_wiring_test.go` - update PhaseActiveCommitted reference
+- `cli/phase_wiring_test.go` - update PhaseActiveCommitted reference
+- `cli/doctor_test.go` - update PhaseActiveCommitted references
+- `integration_test/phase_transitions_test.go` - update TestShadow_CommitBeforeStop
+
+Also need:
+- Step 8: Documentation updates (CLAUDE.md, sessions-and-checkpoints.md)
+- Step 9: Run fmt, lint, test:ci
+
+Summary:
+1. Primary Request and Intent:
+   The user asked to implement a detailed refactoring plan titled "Condense at Each Commit (Remove Deferred Condensation)" for the manual-commit strategy in a Go CLI codebase. The goal is to always condense at commit time regardless of whether the agent is active, eliminating the `PendingCheckpointID` lifecycle, the `ACTIVE_COMMITTED` phase, `ActionMigrateShadowBranch`, deferred condensation flow (`handleTurnEndCondense`), and the two-pass PostCommit architecture. Each commit should get its own unique checkpoint ID. The branch is `soph/single-commit-per-checkpoint` created from `main`. The user also referenced a previous plan transcript at `/Users/soph/.REDACTED.jsonl`.
+
+2. Key Technical Concepts:
+   - Go session state machine with phases (IDLE, ACTIVE, ENDED — formerly also ACTIVE_COMMITTED)
+   - Shadow branch strategy for checkpoint storage (`entire/<commit-hash>-<worktreeHash>`)
+   - Condensation: copying session data from shadow branches to permanent `entire/checkpoints/v1` branch
+   - Checkpoint ID linking between user commits (via `Entire-Checkpoint` trailer) and metadata
+   - Git hooks: prepare-commit-msg, post-commit, commit-msg
+   - Session state stored in `.git/entire-sessions/<session-id>.json`
+   - Strategy pattern with `ManualCommitStrategy` implementing the `Strategy` interface
+   - `cobra` CLI framework, `go-git` for git operations
+   - Backward compatibility for old state files with `pending_checkpoint_id` and `active_committed` phase
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/session/phase.go`** (MODIFIED - Step 1)
+     - Core state machine. Removed `PhaseActiveCommitted`, `ActionMigrateShadowBranch`, `transitionFromActiveCommitted()`. Changed ACTIVE+GitCommit to emit `ActionCondense` and stay `PhaseActive`.
+     - Key change to `PhaseFromString` for backward compat:
+       ```go
+       case "active_committed":
+           // Backward compat: old state files may have this value.
+           return PhaseActive
+       ```
+     - Key change to `transitionFromActive`:
+       ```go
+       case EventGitCommit:
+           if ctx.IsRebaseInProgress {
+               return TransitionResult{NewPhase: PhaseActive}
+           }
+           return TransitionResult{
+               NewPhase: PhaseActive,
+               Actions:  []Action{ActionCondense, ActionUpdateLastInteraction},
+           }
+       ```
+     - `IsActive()` simplified to `return p == PhaseActive`
+     - `allPhases` reduced to `[]Phase{PhaseIdle, PhaseActive, PhaseEnded}`
+     - Action constants renumbered (ActionMigrateShadowBranch removed, ActionWarnStaleSession takes its iota value)
+
+   - **`cmd/entire/cli/session/state.go`** (MODIFIED - Step 2)
+     - Removed `PendingCheckpointID string` field from `State` struct (was lines 62-64). Old state files with this field are silently ignored by Go JSON unmarshaling.
+
+   - **`cmd/entire/cli/strategy/manual_commit_hooks.go`** (MODIFIED - Steps 3-6)
+     - **PostCommit**: Removed two-pass architecture (`pendingMigration` type, `pendingMigrations` slice, Pass 2 loop). Replaced `activeSessionsOnBranch` with `uncondensedActiveOnBranch` tracking. Added `condensed` flag per session. Removed `ActionMigrateShadowBranch` case (which set `state.PendingCheckpointID`).
+     - **condenseAndUpdateState**: Removed `state.PendingCheckpointID = ""` line.
+     - **handleAmendCommitMsg**: Removed PendingCheckpointID lookup, now only checks `LastCheckpointID`:
+       ```go
+       for _, state := range sessions {
+           if state.BaseCommit != currentHead {
+               continue
+           }
+           if state.LastCheckpointID.IsEmpty() {
+               continue
+           }
+           cpID := state.LastCheckpointID
+           source := "LastCheckpointID"
+       ```
+     - **PrepareCommitMsg hasNewContent block**: Simplified to always generate fresh ID:
+       ```go
+       if hasNewContent {
+           cpID, err := id.Generate()
+           if err != nil {
+               return fmt.Errorf("failed to generate checkpoint ID: %w", err)
+           }
+           checkpointID = cpID
+       }
+       ```
+     - **isRestoringExisting**: Simplified to single expression: `isRestoringExisting := !hasNewContent && reusedSession != nil`
+     - **addTrailerForAgentCommit**: Simplified to always generate fresh ID (removed PendingCheckpointID check).
+     - **HandleTurnEnd**: Removed ActionCondense dispatch. Deleted `handleTurnEndCondense` function entirely (was ~70 lines). Deleted `hasOtherActiveSessionsOnBranch` function entirely.
+     - **InitializeSession**: Removed `state.PendingCheckpointID = ""` clearing.
+     - Updated doc comments to reference LastCheckpointID instead of PendingCheckpointID.
+
+   - **`cmd/entire/cli/strategy/manual_commit_git.go`** (MODIFIED - Step 6)
+     - Removed the 4-line comment about PendingCheckpointID preservation in SaveChanges (was lines 118-121).
+
+   - **`cmd/entire/cli/strategy/manual_commit_condensation.go`** (MODIFIED - Step 6)
+     - Removed `state.PendingCheckpointID = ""` in `CondenseSessionByID` (was line 609).
+
+   - **`cmd/entire/cli/session/phase_test.go`** (READ, NEEDS UPDATE)
+     - Contains tests for `PhaseActiveCommitted`, `ActionMigrateShadowBranch`, `TestTransitionFromActiveCommitted`. All need updating.
+
+   - **`cmd/entire/cli/strategy/phase_postcommit_test.go`** (READ, NEEDS UPDATE)
+     - Contains `TestPostCommit_ActiveSession_NoCondensation` (→ rewrite as Condenses), `TestPostCommit_ActiveSession_SetsPendingCheckpointID` (→ delete), `TestPostCommit_ActiveCommitted_MigratesShadowBranch` (→ delete), all TurnEnd condensation tests (→ delete or rewrite), `TestTurnEnd_DeferredCondensation_AttributionUsesOriginalBase` (→ rewrite as PostCommit attribution test).
+
+   - **`cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go`** (READ, NEEDS UPDATE)
+     - Contains `TestPrepareCommitMsg_AmendRestoresTrailerFromPendingCheckpointID` (→ rewrite with LastCheckpointID), `TestPrepareCommitMsg_NormalCommitUsesPendingCheckpointID` (→ rewrite without PendingCheckpointID).
+
+   - **`cmd/entire/cli/strategy/mid_turn_commit_test.go`** (READ, NEEDS UPDATE)
+     - Contains `TestSaveChanges_PreservesPendingCheckpointID` (→ delete entirely).
+
+   - **`cmd/entire/cli/strategy/phase_wiring_test.go`** (READ line 145-164, NEEDS UPDATE)
+     - Line 154: `state.Phase = session.PhaseActiveCommitted` → change to `session.PhaseActive`
+
+   - **`cmd/entire/cli/phase_wiring_test.go`** (READ line 70-89, NEEDS UPDATE)
+     - Line 80: `Phase: session.PhaseActiveCommitted` → change to `session.PhaseActive`
+
+   - **`cmd/entire/cli/doctor_test.go`** (READ lines 115-153, NEEDS UPDATE)
+     - Two tests reference `session.PhaseActiveCommitted`: `TestClassifySession_ActiveCommittedStale` and `TestClassifySession_ActiveCommittedRecent_Healthy` → change to `session.PhaseActive`
+
+   - **`cmd/entire/cli/integration_test/phase_transitions_test.go`** (READ, NEEDS UPDATE)
+     - `TestShadow_CommitBeforeStop`: Expects `PhaseActiveCommitted` after mid-turn commit and deferred condensation at TurnEnd. Needs rewriting to expect immediate condensation at commit time, phase stays ACTIVE.
+
+   - **`docs/architecture/sessions-and-checkpoints.md`** (EXISTS, NEEDS UPDATE)
+     - Needs removal of PendingCheckpointID sections and deferred condensation documentation.
+
+4. Errors and fixes:
+   - No runtime errors encountered yet. All changes are source-level edits that haven't been compiled/tested yet. The verification step (fmt, lint, test:ci) is pending as Task #6.
+
+5. Problem Solving:
+   - After making all source code changes, ran a grep for `PendingCheckpointID|PhaseActiveCommitted|ActionMigrateShadowBranch` across `*.go` files to identify all remaining references. Found references in test files and a few non-test files (doc comments in manual_commit_hooks.go). Fixed the non-test doc comment references immediately. The test file references are the current work.
+
+6. All user messages:
+   - Message 1: The user provided the full implementation plan with the instruction "Implement the following plan:" followed by the detailed refactoring specification for "Condense at Each Commit (Remove Deferred Condensation)". They also noted: "If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl"
+
+7. Pending Tasks:
+   - **Task #4 (Step 7): Update all tests** - IN PROGRESS. Need to update:
+     - `session/phase_test.go`
+     - `strategy/phase_postcommit_test.go` 
+     - `strategy/phase_prepare_commit_msg_test.go`
+     - `strategy/mid_turn_commit_test.go`
+     - `strategy/phase_wiring_test.go`
+     - `cli/phase_wiring_test.go`
+     - `cli/doctor_test.go`
+     - `integration_test/phase_transitions_test.go`
+   - **Task #5 (Step 8): Update documentation** - PENDING
+     - `CLAUDE.md` - Remove ACTIVE_COMMITTED from phases, ActionMigrateShadowBranch, PendingCheckpointID
+     - `docs/architecture/sessions-and-checkpoints.md` - Remove deferred condensation sections
+   - **Task #6 (Step 9): Run verification** - PENDING
+     - `mise run fmt && mise run lint && mise run test:ci`
+
+8. Current Work:
+   I was in the middle of **Task #4 (Step 7: Update all tests)**. I had just read the full contents of `session/phase_test.go` for the second time (to prepare for editing it) and had identified all the lines that need changing via the grep results. I was about to start editing the test files but the summary was requested before I could make any test edits.
+
+   The grep output showed these remaining references in test files:
+   - `phase_test.go`: Lines 20, 46, 91, 198-199, 226-272 (entire TestTransitionFromActiveCommitted), 471, 490-491, 496-497, 575-576, 580-581, 587-588
+   - `phase_postcommit_test.go`: Lines 56, 227, 566, 583, 674-711 (TestPostCommit_ActiveSession_SetsPendingCheckpointID), 715-754 (TurnEnd tests), 792, 863, 869, 935, 1065
+   - `phase_prepare_commit_msg_test.go`: Lines 54-93, 97-135, 137-183
+   - `mid_turn_commit_test.go`: Lines 159-217 (TestSaveChanges_PreservesPendingCheckpointID)
+   - `phase_wiring_test.go` (strategy): Line 154
+   - `phase_wiring_test.go` (cli): Line 80
+   - `doctor_test.go`: Lines 125, 146
+   - `phase_transitions_test.go` (integration): Lines 158-160
+
+9. Optional Next Step:
+   Continue with Task #4 (Step 7: Update all tests) by editing `session/phase_test.go` first. Per the plan:
+   - `TestPhaseFromString`: `"active_committed"` → expect `PhaseActive`
+   - `TestPhase_IsActive`: remove ACTIVE_COMMITTED case
+   - `TestTransitionFromActive`: GitCommit → ACTIVE + ActionCondense (not ACTIVE_COMMITTED + Migrate)
+   - Delete `TestTransitionFromActiveCommitted` entirely
+   - Update `TestApplyCommonActions_*` and `TestMermaidDiagram` references
+   - Remove `ActionMigrateShadowBranch` from action string tests
+
+   Then proceed to the strategy test files, doctor_test.go, phase_wiring_test.go files, integration test, and finally documentation updates and verification.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation to capture all details:
+
+1. The conversation is a continuation of a previous session that ran out of context. The previous session summary tells us:
+   - Steps 1-6 of source code changes were completed
+   - Step 7 (test updates) was in progress
+   - The branch is `soph/single-commit-per-checkpoint` created from `main`
+
+2. In this continuation, the assistant:
+   - Read all the test files that needed updating
+   - Made edits to `session/phase_test.go`
+   - Made edits to `strategy/phase_postcommit_test.go`
+   - Made edits to `strategy/phase_prepare_commit_msg_test.go`
+   - Made edits to `strategy/mid_turn_commit_test.go`
+   - Made edits to `strategy/phase_wiring_test.go`
+   - Made edits to `cli/phase_wiring_test.go`
+   - Made edits to `cli/doctor_test.go`
+   - Made edits to `integration_test/phase_transitions_test.go`
+   - Fixed remaining comment references in non-test files
+   - Ran compilation check - found two name conflicts
+   - Fixed the name conflicts
+   - Was about to fix the second name conflict (doctor_test.go duplicate) when the summary was requested
+
+Let me track all the specific edits and errors:
+
+**session/phase_test.go edits:**
+- Changed `active_committed` test case to expect `PhaseActive` (backward compat)
+- Removed `active_committed_is_active` from IsActive tests
+- Removed `ActionMigrateShadowBranch` from action string tests
+- Changed GitCommit test case: `PhaseActiveCommitted` + `ActionMigrateShadowBranch` → `PhaseActive` + `ActionCondense`
+- Deleted entire `TestTransitionFromActiveCommitted` function
+- Updated `TestApplyCommonActions_PassesThroughStrategyActions` to use `PhaseActive` instead of `PhaseActiveCommitted`
+- Rewrote `TestApplyCommonActions_MultipleStrategyActions` as `TestApplyCommonActions_ActiveGitCommitCondenses`
+- Updated MermaidDiagram test assertions
+
+**phase_postcommit_test.go edits:**
+- Rewrote `TestPostCommit_ActiveSession_NoCondensation` → `TestPostCommit_ActiveSession_Condenses`
+- Updated `TestPostCommit_ShadowBranch_PreservedWhenActiveSessionExists` assertions
+- Deleted `TestPostCommit_ActiveCommitted_MigratesShadowBranch`
+- Deleted `TestPostCommit_ActiveSession_SetsPendingCheckpointID`
+- Rewrote `TestTurnEnd_ActiveCommitted_ReusesCheckpointID` → `TestPostCommit_ActiveSession_UsesCommitCheckpointID`
+- Deleted `TestTurnEnd_ConcurrentSession_PreservesShadowBranch`
+- Deleted `TestTurnEnd_ActiveCommitted_CondensesSession`
+- Deleted `TestTurnEnd_ActiveCommitted_CondensationFailure_PreservesShadowBranch`
+- Rewrote `TestTurnEnd_DeferredCondensation_AttributionUsesOriginalBase` → `TestPostCommit_ActiveSession_AttributionUsesOriginalBase`
+
+**phase_prepare_commit_msg_test.go edits:**
+- Rewrote `TestPrepareCommitMsg_AmendRestoresTrailerFromPendingCheckpointID` → uses `LastCheckpointID`
+- Rewrote `TestPrepareCommitMsg_AmendNoTrailerNoPendingID` → uses `LastCheckpointID`
+- Rewrote `TestPrepareCommitMsg_NormalCommitUsesPendingCheckpointID` → `TestPrepareCommitMsg_NormalCommitGeneratesFreshID`
+
+**mid_turn_commit_test.go:**
+- Deleted `TestSaveChanges_PreservesPendingCheckpointID` entirely
+
+**phase_wiring_test.go (strategy):**
+- Renamed `TestInitializeSession_ActiveCommittedToActive` → `TestInitializeSession_ReEntryFromIdle`
+
+**phase_wiring_test.go (cli):**
+- Renamed `TestMarkSessionEnded_ActiveCommittedToEnded` → `TestMarkSessionEnded_ActiveToEnded`
+
+**doctor_test.go:**
+- Renamed `TestClassifySession_ActiveCommittedStale` → `TestClassifySession_ActiveStale`
+- Renamed `TestClassifySession_ActiveCommittedRecent_Healthy` → `TestClassifySession_ActiveRecent_Healthy`
+
+**Non-test file comment updates:**
+- `strategy/strategy.go` - Updated TurnEndHandler comments
+- `reset.go` - Updated activeSessionsOnCurrentHead comment
+- `hooks.go` - Updated TODO comment
+- `hooks_claudecode_handlers.go` - Updated multiple comments
+- `doctor.go` - Updated help text
+
+**Errors encountered:**
+1. Edit failed on `TestTurnEnd_ActiveCommitted_ReusesCheckpointID` because the replacement text from a previous deletion changed the surrounding text. Fixed by re-reading the file and using the correct current text.
+2. Compilation error: `TestInitializeSession_IdleToActive` redeclared (already existed at line 40). Fixed by renaming to `TestInitializeSession_ReEntryFromIdle`.
+3. Compilation error: `TestClassifySession_ActiveRecent_Healthy` redeclared (already existed at line 97). This was discovered but NOT YET FIXED when the summary was requested.
+
+The current state: The second name conflict in doctor_test.go has NOT been fixed yet. The duplicate `TestClassifySession_ActiveRecent_Healthy` at lines 97 and 135 needs to be resolved. The tests at line 135 (the ones I renamed from ActiveCommitted) are now redundant since they test the same phase as the existing tests at line 97. They should be deleted since they're duplicates.
+
+Summary:
+1. Primary Request and Intent:
+   The user asked to implement a detailed refactoring plan titled "Condense at Each Commit (Remove Deferred Condensation)" for the manual-commit strategy in a Go CLI codebase. The plan exists at `/Users/soph/.claude/plans/majestic-plotting-valiant.md`. The goal is to always condense at commit time regardless of whether the agent is active, eliminating `PendingCheckpointID`, `ACTIVE_COMMITTED` phase, `ActionMigrateShadowBranch`, deferred condensation flow, and the two-pass PostCommit architecture. The branch is `soph/single-commit-per-checkpoint` created from `main`.
+
+   This is a continuation from a previous session where Steps 1-6 (source code changes) were completed. The current session continues with Step 7 (test updates).
+
+2. Key Technical Concepts:
+   - Go session state machine with phases (IDLE, ACTIVE, ENDED — formerly also ACTIVE_COMMITTED)
+   - Shadow branch strategy for checkpoint storage (`entire/<commit-hash>-<worktreeHash>`)
+   - Condensation: copying session data from shadow branches to permanent `entire/checkpoints/v1` branch
+   - Checkpoint ID linking between user commits (via `Entire-Checkpoint` trailer) and metadata
+   - Git hooks: prepare-commit-msg, post-commit, commit-msg
+   - Session state stored in `.git/entire-sessions/<session-id>.json`
+   - `PendingCheckpointID` lifecycle (being removed)
+   - `LastCheckpointID` (kept, used for amend trailer restoration)
+   - `AttributionBaseCommit` preserved for correct attribution during immediate condensation
+   - Backward compatibility: old state files with `"active_committed"` phase mapped to `"active"` via PhaseFromString
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/session/phase_test.go`** (MODIFIED)
+     - Core state machine test file. Updated to remove all PhaseActiveCommitted, ActionMigrateShadowBranch references.
+     - Key changes: PhaseFromString test maps "active_committed" → PhaseActive; removed TestTransitionFromActiveCommitted entirely; GitCommit test expects PhaseActive + ActionCondense; renamed TestApplyCommonActions_MultipleStrategyActions → TestApplyCommonActions_ActiveGitCommitCondenses; MermaidDiagram test asserts ACTIVE_COMMITTED is NOT present.
+     
+   - **`cmd/entire/cli/strategy/phase_postcommit_test.go`** (HEAVILY MODIFIED)
+     - Tests for PostCommit and TurnEnd behavior. Extensive rewrites.
+     - `TestPostCommit_ActiveSession_NoCondensation` → rewritten as `TestPostCommit_ActiveSession_Condenses` (verifies immediate condensation, phase stays ACTIVE)
+     - `TestPostCommit_ShadowBranch_PreservedWhenActiveSessionExists` assertion changed from PhaseActiveCommitted to PhaseActive
+     - Deleted tests: `TestPostCommit_ActiveCommitted_MigratesShadowBranch`, `TestPostCommit_ActiveSession_SetsPendingCheckpointID`, `TestTurnEnd_ConcurrentSession_PreservesShadowBranch`, `TestTurnEnd_ActiveCommitted_CondensesSession`, `TestTurnEnd_ActiveCommitted_CondensationFailure_PreservesShadowBranch`
+     - Rewritten: `TestTurnEnd_ActiveCommitted_ReusesCheckpointID` → `TestPostCommit_ActiveSession_UsesCommitCheckpointID`; `TestTurnEnd_DeferredCondensation_AttributionUsesOriginalBase` → `TestPostCommit_ActiveSession_AttributionUsesOriginalBase`
+
+   - **`cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go`** (MODIFIED)
+     - `TestPrepareCommitMsg_AmendRestoresTrailerFromPendingCheckpointID` → `TestPrepareCommitMsg_AmendRestoresTrailerFromLastCheckpointID` (uses `state.LastCheckpointID = "abc123def456"` instead of `state.PendingCheckpointID`)
+     - `TestPrepareCommitMsg_AmendNoTrailerNoPendingID` → `TestPrepareCommitMsg_AmendNoTrailerNoLastCheckpointID` (asserts `state.LastCheckpointID.IsEmpty()`)
+     - `TestPrepareCommitMsg_NormalCommitUsesPendingCheckpointID` → `TestPrepareCommitMsg_NormalCommitGeneratesFreshID` (removed PhaseActiveCommitted, removed PendingCheckpointID, expects fresh ID generation)
+
+   - **`cmd/entire/cli/strategy/mid_turn_commit_test.go`** (MODIFIED)
+     - Deleted `TestSaveChanges_PreservesPendingCheckpointID` entirely (PendingCheckpointID no longer exists)
+
+   - **`cmd/entire/cli/strategy/phase_wiring_test.go`** (MODIFIED)
+     - Renamed `TestInitializeSession_ActiveCommittedToActive` → `TestInitializeSession_ReEntryFromIdle` (changed phase from PhaseActiveCommitted to PhaseIdle)
+
+   - **`cmd/entire/cli/phase_wiring_test.go`** (MODIFIED)
+     - Renamed `TestMarkSessionEnded_ActiveCommittedToEnded` → `TestMarkSessionEnded_ActiveToEnded` (changed phase from PhaseActiveCommitted to PhaseActive)
+
+   - **`cmd/entire/cli/doctor_test.go`** (MODIFIED - HAS REMAINING ISSUE)
+     - Renamed `TestClassifySession_ActiveCommittedStale` → `TestClassifySession_ActiveStale`
+     - Renamed `TestClassifySession_ActiveCommittedRecent_Healthy` → `TestClassifySession_ActiveRecent_Healthy` — **BUT this conflicts with existing test at line 97 with same name**
+     - Removed `//nolint:dupl` comment
+
+   - **`cmd/entire/cli/integration_test/phase_transitions_test.go`** (MODIFIED)
+     - Rewrote `TestShadow_CommitBeforeStop` to verify immediate condensation at PostCommit time, phase stays ACTIVE (not ACTIVE_COMMITTED), condensation verified after Phase 3 (commit) not Phase 4 (stop)
+
+   - **`cmd/entire/cli/strategy/strategy.go`** (MODIFIED) - Updated TurnEndHandler doc comments
+   - **`cmd/entire/cli/reset.go`** (MODIFIED) - Updated comment
+   - **`cmd/entire/cli/hooks.go`** (MODIFIED) - Updated TODO comment
+   - **`cmd/entire/cli/hooks_claudecode_handlers.go`** (MODIFIED) - Updated three comments
+   - **`cmd/entire/cli/doctor.go`** (MODIFIED) - Updated help text
+
+4. Errors and fixes:
+   - **Edit failed on TestTurnEnd_ActiveCommitted_ReusesCheckpointID replacement**: The text had been altered by a previous deletion that replaced multi-line content with a comment line. Fixed by re-reading the file to find the actual current text and then editing with the correct old_string.
+   - **Compilation error: TestInitializeSession_IdleToActive redeclared**: I renamed `TestInitializeSession_ActiveCommittedToActive` to `TestInitializeSession_IdleToActive`, but that name already existed at line 40. Fixed by renaming to `TestInitializeSession_ReEntryFromIdle`.
+   - **Compilation error: TestClassifySession_ActiveRecent_Healthy redeclared**: I renamed `TestClassifySession_ActiveCommittedRecent_Healthy` to `TestClassifySession_ActiveRecent_Healthy`, but that name already existed at line 97. **NOT YET FIXED** — discovered right before summary was requested.
+
+5. Problem Solving:
+   - Successfully updated all test files to remove references to PhaseActiveCommitted, PendingCheckpointID, and ActionMigrateShadowBranch
+   - Verified no remaining references in source code via grep (only intentional backward-compat references remain)
+   - Build compiles clean (`go build ./...`), but test compilation has one remaining duplicate name issue in doctor_test.go
+   - The two renamed tests in doctor_test.go (ActiveStale and ActiveRecent_Healthy) are now testing the same phase (PhaseActive) as existing tests, just with different timestamps. The duplicates at lines 115-151 should be deleted since equivalent tests already exist at lines 75-113.
+
+6. All user messages:
+   - Message 1 (carried over from previous session): "Implement the following plan:" with the full refactoring specification for "Condense at Each Commit (Remove Deferred Condensation)". Also noted the plan transcript location.
+   - Message 2 (this session): "This session is being continued from a previous conversation that ran out of context..." with detailed summary of prior work and instruction "Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on."
+
+7. Pending Tasks:
+   - **Fix doctor_test.go duplicate name** — `TestClassifySession_ActiveRecent_Healthy` at line 135 conflicts with existing test at line 97. Need to delete the duplicate tests at lines 115-151 (TestClassifySession_ActiveStale and TestClassifySession_ActiveRecent_Healthy) since they test the same PhaseActive with different parameters as existing tests.
+   - **Task #4 (Step 7): Update all tests** — Nearly complete, just the doctor_test.go fix remaining
+   - **Task #5 (Step 8): Update documentation** — CLAUDE.md and docs/architecture/sessions-and-checkpoints.md
+   - **Task #6 (Step 9): Run verification** — `mise run fmt && mise run lint && mise run test:ci`
+
+8. Current Work:
+   Was fixing test compilation errors found by running `go test -run 'NOMATCH' ./cmd/entire/cli/session/ ./cmd/entire/cli/strategy/ ./cmd/entire/cli/`. Found two name conflicts:
+   1. `TestInitializeSession_IdleToActive` — **FIXED** by renaming to `TestInitializeSession_ReEntryFromIdle`
+   2. `TestClassifySession_ActiveRecent_Healthy` in doctor_test.go — **NOT YET FIXED**
+   
+   The duplicate at line 135 needs to be resolved. Since the renamed tests (from ActiveCommitted → Active) now test identical conditions as existing tests, the duplicates at lines 115-151 should be deleted.
+
+9. Optional Next Step:
+   Fix the remaining compilation error in `cmd/entire/cli/doctor_test.go` by deleting the duplicate tests `TestClassifySession_ActiveStale` (lines 115-133) and `TestClassifySession_ActiveRecent_Healthy` (lines 135-151), since they now test the same `session.PhaseActive` phase as the existing `TestClassifySession_ActiveStale` (lines 75-95) and `TestClassifySession_ActiveRecent_Healthy` (lines 97-113). Then re-run test compilation to verify, proceed to Step 8 (documentation updates) and Step 9 (fmt/lint/test:ci).
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+question: if claude would split up code changes into multiple commits, so basically:
+
+1. generates file changes in 3 files
+2. makes a commit with 2 files
+3. makes a commit with the remaining one file
+
+That wouldn't matter from a shadow branch perspective, since there isn't even one yet if this is one prompt in total right?
+
+---
+
+5. Claude runs git commit (1 file) → post-commit → StepCount=0, no new content → no condensation (nothing to condense)
+
+hmm this is wrong then, we would want the same data as in the other checkpoint just with a new id
+
+---
+
+basically I think what would work best is: 
+
+1. commit is made, condensation happen
+2. are there still files left that were part of the shadow branch?
+-> create a new shadow branch with the files left, but include all metadata from before
+
+Does this make sense?
+
+---
+
+add it to this branch
+
+---
+
+[Request interrupted by user for tool use]

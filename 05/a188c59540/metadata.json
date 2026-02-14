@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "05a188c59540",
+  "strategy": "manual-commit",
+  "branch": "dipree/entire-wingman",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/hooks.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/05/a188c59540/0/metadata.json",
+      "transcript": "/05/a188c59540/0/full.jsonl",
+      "context": "/05/a188c59540/0/context.md",
+      "content_hash": "/05/a188c59540/0/content_hash.txt",
+      "prompt": "/05/a188c59540/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 15,
+    "cache_creation_tokens": 36887,
+    "cache_read_tokens": 461487,
+    "output_tokens": 347,
+    "api_call_count": 11
+  }
+}
