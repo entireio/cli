@@ -167,28 +167,22 @@ func extractGeminiMetadata(ctx *geminiSessionContext) error {
 	return nil
 }
 
-// commitGeminiSession commits the session changes using the strategy.
+// commitGeminiSession commits the session changes using the shared commit pipeline.
+// Gemini has additional enrichment: token usage calculation and per-step transcript tracking.
 func commitGeminiSession(ctx *geminiSessionContext) error {
-	repoRoot, err := paths.RepoRoot()
-	if err != nil {
-		return fmt.Errorf("failed to get repo root: %w", err)
-	}
-
 	preState, err := LoadPrePromptState(ctx.sessionID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load pre-prompt state: %v\n", err)
-	}
-	if preState != nil {
-		fmt.Fprintf(os.Stderr, "Loaded pre-prompt state: %d pre-existing untracked files, start message index: %d\n", len(preState.UntrackedFiles), preState.StartMessageIndex)
+		fmt.Fprintf(os.Stderr, "Warning: failed to load pre-prompt state for Gemini enrichment: %v\n", err)
 	}
 
-	// Get transcript position from pre-prompt state
+	// Gemini-specific: extract transcript position and token usage from pre-prompt state
 	var startMessageIndex int
+	var transcriptIdentifierAtStart string
 	if preState != nil {
 		startMessageIndex = preState.StartMessageIndex
+		transcriptIdentifierAtStart = preState.LastTranscriptIdentifier
 	}
 
-	// Calculate token usage for this prompt/response cycle (Gemini-specific)
 	var tokenUsage *agent.TokenUsage
 	if ctx.transcriptPath != "" {
 		usage, tokenErr := geminicli.CalculateTokenUsageFromFile(ctx.transcriptPath, startMessageIndex)
@@ -201,132 +195,19 @@ func commitGeminiSession(ctx *geminiSessionContext) error {
 		}
 	}
 
-	// Compute new and deleted files (single git status call)
-	changes, err := DetectFileChanges(preState.PreUntrackedFiles())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
-	}
-
-	relModifiedFiles := FilterAndNormalizePaths(ctx.modifiedFiles, repoRoot)
-	var relNewFiles, relDeletedFiles []string
-	if changes != nil {
-		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
-		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
-	}
-
-	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
-	if totalChanges == 0 {
-		fmt.Fprintf(os.Stderr, "No files were modified during this session\n")
-		fmt.Fprintf(os.Stderr, "Skipping commit\n")
-		if cleanupErr := CleanupPrePromptState(ctx.sessionID); cleanupErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", cleanupErr)
-		}
-		return nil
-	}
-
-	logFileChanges(relModifiedFiles, relNewFiles, relDeletedFiles)
-
-	contextFile := filepath.Join(ctx.sessionDirAbs, paths.ContextFileName)
-	if err := createContextFileForGemini(contextFile, ctx.commitMessage, ctx.sessionID, ctx.allPrompts, ctx.summary); err != nil {
-		return fmt.Errorf("failed to create context file: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "Created context file: %s\n", ctx.sessionDir+"/"+paths.ContextFileName)
-
-	author, err := GetGitAuthor()
-	if err != nil {
-		return fmt.Errorf("failed to get git author: %w", err)
-	}
-
-	strat := GetStrategy()
-
-	// Get agent type from the hook agent (determined by which hook command is running)
-	// This is authoritative - if we're in "entire hooks gemini session-end", it's Gemini CLI
-	hookAgent, agentErr := GetCurrentHookAgent()
-	if agentErr != nil {
-		return fmt.Errorf("failed to get agent: %w", agentErr)
-	}
-	agentType := hookAgent.Type()
-
-	// Get transcript identifier at start from pre-prompt state
-	var transcriptIdentifierAtStart string
-	if preState != nil {
-		transcriptIdentifierAtStart = preState.LastTranscriptIdentifier
-	}
-
-	saveCtx := strategy.SaveContext{
-		SessionID:                ctx.sessionID,
-		ModifiedFiles:            relModifiedFiles,
-		NewFiles:                 relNewFiles,
-		DeletedFiles:             relDeletedFiles,
-		MetadataDir:              ctx.sessionDir,
-		MetadataDirAbs:           ctx.sessionDirAbs,
-		CommitMessage:            ctx.commitMessage,
-		TranscriptPath:           ctx.transcriptPath,
-		AuthorName:               author.Name,
-		AuthorEmail:              author.Email,
-		AgentType:                agentType,
-		StepTranscriptStart:      startMessageIndex,
-		StepTranscriptIdentifier: transcriptIdentifierAtStart,
-		TokenUsage:               tokenUsage,
-	}
-
-	if err := strat.SaveChanges(saveCtx); err != nil {
-		return fmt.Errorf("failed to save session: %w", err)
-	}
-
-	if cleanupErr := CleanupPrePromptState(ctx.sessionID); cleanupErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", cleanupErr)
-	}
-
-	fmt.Fprintf(os.Stderr, "Session saved successfully\n")
-	return nil
-}
-
-// logFileChanges logs the modified, new, and deleted files to stderr.
-func logFileChanges(modified, newFiles, deleted []string) {
-	fmt.Fprintf(os.Stderr, "Files modified during session (%d):\n", len(modified))
-	for _, file := range modified {
-		fmt.Fprintf(os.Stderr, "  - %s\n", file)
-	}
-	if len(newFiles) > 0 {
-		fmt.Fprintf(os.Stderr, "New files created (%d):\n", len(newFiles))
-		for _, file := range newFiles {
-			fmt.Fprintf(os.Stderr, "  - %s\n", file)
-		}
-	}
-	if len(deleted) > 0 {
-		fmt.Fprintf(os.Stderr, "Files deleted (%d):\n", len(deleted))
-		for _, file := range deleted {
-			fmt.Fprintf(os.Stderr, "  - %s\n", file)
-		}
-	}
-}
-
-// createContextFileForGemini creates a context.md file for Gemini sessions.
-func createContextFileForGemini(contextFile, commitMessage, sessionID string, prompts []string, summary string) error {
-	var sb strings.Builder
-
-	sb.WriteString("# Session Context\n\n")
-	sb.WriteString(fmt.Sprintf("Session ID: %s\n", sessionID))
-	sb.WriteString(fmt.Sprintf("Commit Message: %s\n\n", commitMessage))
-
-	if len(prompts) > 0 {
-		sb.WriteString("## Prompts\n\n")
-		for i, p := range prompts {
-			sb.WriteString(fmt.Sprintf("### Prompt %d\n\n%s\n\n", i+1, p))
-		}
-	}
-
-	if summary != "" {
-		sb.WriteString("## Summary\n\n")
-		sb.WriteString(summary)
-		sb.WriteString("\n")
-	}
-
-	if err := os.WriteFile(contextFile, []byte(sb.String()), 0o600); err != nil {
-		return fmt.Errorf("failed to write context file: %w", err)
-	}
-	return nil
+	return commitAgentSession(&agentCommitContext{
+		sessionID:                ctx.sessionID,
+		sessionDir:               ctx.sessionDir,
+		sessionDirAbs:            ctx.sessionDirAbs,
+		commitMessage:            ctx.commitMessage,
+		transcriptPath:           ctx.transcriptPath,
+		transcriptModifiedFiles:  ctx.modifiedFiles,
+		prompts:                  ctx.allPrompts,
+		summary:                  ctx.summary,
+		stepTranscriptStart:      startMessageIndex,
+		stepTranscriptIdentifier: transcriptIdentifierAtStart,
+		tokenUsage:               tokenUsage,
+	})
 }
 
 // handleGeminiBeforeTool handles the BeforeTool hook for Gemini CLI.

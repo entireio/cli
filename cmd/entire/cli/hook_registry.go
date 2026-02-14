@@ -9,7 +9,9 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
@@ -190,6 +192,40 @@ func init() {
 		}
 		return handleGeminiNotification()
 	})
+
+	// Register Codex CLI handlers
+	RegisterHookHandler(agent.AgentNameCodex, codex.HookNameAgentTurnComplete, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleCodexAgentTurnComplete()
+	})
+
+	// Register OpenCode handlers
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameSessionCreated, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpenCodeSessionCreated()
+	})
+
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameSessionBusy, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpenCodeSessionBusy()
+	})
+
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameSessionIdle, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpenCodeSessionIdle()
+	})
 }
 
 // agentHookLogCleanup stores the cleanup function for agent hook logging.
@@ -200,6 +236,17 @@ var agentHookLogCleanup func()
 // Set by newAgentHookVerbCmdWithLogging before calling the handler.
 // This allows handlers to know which agent invoked the hook without guessing.
 var currentHookAgentName agent.AgentName
+
+// currentHookArgs stores the positional arguments passed to the currently executing hook command.
+// Some agents (e.g., Codex) pass their payload as a positional argument instead of stdin.
+// Set by newAgentHookVerbCmdWithLogging before calling the handler, cleared with defer.
+var currentHookArgs []string //nolint:gochecknoglobals // same pattern as currentHookAgentName
+
+// GetCurrentHookArgs returns the positional arguments passed to the current hook command.
+// Some agents (e.g., Codex) pass their payload as a positional argument instead of stdin.
+func GetCurrentHookArgs() []string {
+	return currentHookArgs
+}
 
 // GetCurrentHookAgent returns the agent for the currently executing hook.
 // Returns the agent based on the hook command structure (e.g., "entire hooks claude-code ...")
@@ -267,7 +314,8 @@ func newAgentHookVerbCmdWithLogging(agentName agent.AgentName, hookName string) 
 		Use:    hookName,
 		Hidden: true,
 		Short:  "Called on " + hookName,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		Args:   cobra.ArbitraryArgs,
+		RunE: func(_ *cobra.Command, args []string) error {
 			// Skip silently if not in a git repository - hooks shouldn't prevent the agent from working
 			if _, err := paths.RepoRoot(); err != nil {
 				return nil
@@ -299,10 +347,14 @@ func newAgentHookVerbCmdWithLogging(agentName agent.AgentName, hookName string) 
 				return fmt.Errorf("no handler registered for %s/%s", agentName, hookName)
 			}
 
-			// Set the current hook agent so handlers can retrieve it
+			// Set the current hook agent and args so handlers can retrieve them
 			// without guessing from directory presence
 			currentHookAgentName = agentName
-			defer func() { currentHookAgentName = "" }()
+			currentHookArgs = args
+			defer func() {
+				currentHookAgentName = ""
+				currentHookArgs = nil
+			}()
 
 			hookErr := handler()
 

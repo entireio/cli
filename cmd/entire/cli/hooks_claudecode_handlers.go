@@ -732,35 +732,6 @@ func handleClaudeCodeSessionEnd() error {
 	return nil
 }
 
-// transitionSessionTurnEnd fires EventTurnEnd to move the session from
-// ACTIVE → IDLE (or ACTIVE_COMMITTED → IDLE). Best-effort: logs warnings
-// on failure rather than returning errors.
-func transitionSessionTurnEnd(sessionID string) {
-	turnState, loadErr := strategy.LoadSessionState(sessionID)
-	if loadErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load session state for turn end: %v\n", loadErr)
-		return
-	}
-	if turnState == nil {
-		return
-	}
-	remaining := strategy.TransitionAndLog(turnState, session.EventTurnEnd, session.TransitionContext{})
-
-	// Dispatch strategy-specific actions (e.g., ActionCondense for ACTIVE_COMMITTED → IDLE)
-	if len(remaining) > 0 {
-		strat := GetStrategy()
-		if handler, ok := strat.(strategy.TurnEndHandler); ok {
-			if err := handler.HandleTurnEnd(turnState, remaining); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: turn-end action dispatch failed: %v\n", err)
-			}
-		}
-	}
-
-	if updateErr := strategy.SaveSessionState(turnState); updateErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to update session phase on turn end: %v\n", updateErr)
-	}
-}
-
 // markSessionEnded transitions the session to ENDED phase via the state machine.
 func markSessionEnded(sessionID string) error {
 	state, err := strategy.LoadSessionState(sessionID)

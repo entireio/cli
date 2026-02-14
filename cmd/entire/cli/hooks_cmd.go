@@ -4,7 +4,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	// Import agents to ensure they are registered before we iterate
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 
 	"github.com/spf13/cobra"
 )

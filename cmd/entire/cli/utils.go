@@ -38,6 +38,13 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// fileExistsAndIsRegular checks if a path exists and is a regular file (not a directory).
+// Use this instead of fileExists when the caller needs an actual file (e.g., for reading/copying).
+func fileExistsAndIsRegular(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
 // copyFile copies a file from src to dst
 func copyFile(src, dst string) error {
 	input, err := os.ReadFile(src) //nolint:gosec // Reading from controlled git metadata path
