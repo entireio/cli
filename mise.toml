@@ -94,3 +94,15 @@ fi
 echo "Checking staged files for duplication..."
 git diff --cached --name-only -z --diff-filter=ACM | grep -z '\\.go$' | xargs -0 golangci-lint run --enable-only dupl --new=false --max-issues-per-linter=0 --max-same-issues=0
 """
+
+[tasks."test:e2e"]
+description = "Run E2E tests with real agent calls (requires claude CLI)"
+run = "go test -tags=e2e -timeout=30m -v ./cmd/entire/cli/e2e_test/..."
+
+[tasks."test:e2e:claude"]
+description = "Run E2E tests with Claude Code (haiku model)"
+run = "E2E_AGENT=claude-code go test -tags=e2e -timeout=30m -v ./cmd/entire/cli/e2e_test/..."
+
+[tasks."test:e2e:gemini"]
+description = "Run E2E tests with Gemini CLI (when implemented)"
+run = "E2E_AGENT=gemini-cli go test -tags=e2e -timeout=30m -v ./cmd/entire/cli/e2e_test/..."
