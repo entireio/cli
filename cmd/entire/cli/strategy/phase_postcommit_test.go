@@ -20,6 +20,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testSessionTranscript = `{"type":"human","message":{"content":"test prompt"}}
+{"type":"assistant","message":{"content":"test response"}}
+`
+
 // TestPostCommit_ActiveSession_NoCondensation verifies that PostCommit on an
 // ACTIVE session transitions to ACTIVE_COMMITTED without condensing.
 // The shadow branch must be preserved because the session is still active.
@@ -1256,9 +1260,7 @@ func setupSessionWithFileChange(t *testing.T, s *ManualCommitStrategy, _ *git.Re
 	metadataDirAbs := filepath.Join(dir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
 
-	transcript := `{"type":"human","message":{"content":"test prompt"}}
-{"type":"assistant","message":{"content":"test response"}}
-`
+	transcript := testSessionTranscript
 	require.NoError(t, os.WriteFile(
 		filepath.Join(metadataDirAbs, paths.TranscriptFileName),
 		[]byte(transcript), 0o644))
@@ -1288,9 +1290,7 @@ func setupSessionWithCheckpoint(t *testing.T, s *ManualCommitStrategy, _ *git.Re
 	metadataDirAbs := filepath.Join(dir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
 
-	transcript := `{"type":"human","message":{"content":"test prompt"}}
-{"type":"assistant","message":{"content":"test response"}}
-`
+	transcript := testSessionTranscript
 	require.NoError(t, os.WriteFile(
 		filepath.Join(metadataDirAbs, paths.TranscriptFileName),
 		[]byte(transcript), 0o644))

@@ -285,6 +285,32 @@ func readLatestSessionMetadata(t *testing.T, repo *git.Repository, checkpointID 
 	return metadata
 }
 
+func readFileFromCheckpointCommit(t *testing.T, repo *git.Repository, commitHash plumbing.Hash, filePath string) string {
+	t.Helper()
+
+	commit, err := repo.CommitObject(commitHash)
+	if err != nil {
+		t.Fatalf("failed to get commit object: %v", err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get commit tree: %v", err)
+	}
+
+	file, err := tree.File(filePath)
+	if err != nil {
+		t.Fatalf("failed to find file %s: %v", filePath, err)
+	}
+
+	content, err := file.Contents()
+	if err != nil {
+		t.Fatalf("failed to read file %s: %v", filePath, err)
+	}
+
+	return content
+}
+
 // Note: Tests for Agents array and SessionCount fields have been removed
 // as those fields were removed from CommittedMetadata in the simplification.
 
@@ -2854,6 +2880,336 @@ func TestCopyMetadataDir_RedactsSecrets(t *testing.T) {
 		if !strings.Contains(content, "REDACTED") {
 			t.Errorf("%s should contain REDACTED placeholder", path)
 		}
+	}
+}
+
+func TestWriteCommitted_MetadataJSON_RedactsSecrets(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef4")
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID: checkpointID,
+		SessionID:    "redact-metadata-json-session",
+		Strategy:     "manual-commit",
+		Transcript:   []byte(`{"msg":"safe"}`),
+		Summary: &Summary{
+			Intent: highEntropySecret,
+		},
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	metadata := readLatestSessionMetadata(t, repo, checkpointID)
+	if metadata.Summary == nil {
+		t.Fatal("expected summary to be present in session metadata")
+	}
+
+	if strings.Contains(metadata.Summary.Intent, highEntropySecret) {
+		t.Error("session metadata summary intent should not contain the secret after redaction")
+	}
+	if !strings.Contains(metadata.Summary.Intent, "REDACTED") {
+		t.Error("session metadata summary intent should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteCommitted_UpdateSummary_RedactsSecrets(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef5")
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "redact-update-summary-session",
+		Strategy:         "manual-commit",
+		Transcript:       []byte(`{"msg":"safe"}`),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	if err := store.UpdateSummary(context.Background(), checkpointID, &Summary{Intent: highEntropySecret}); err != nil {
+		t.Fatalf("UpdateSummary() error = %v", err)
+	}
+
+	metadata := readLatestSessionMetadata(t, repo, checkpointID)
+	if metadata.Summary == nil {
+		t.Fatal("expected summary to be present in session metadata")
+	}
+	if strings.Contains(metadata.Summary.Intent, highEntropySecret) {
+		t.Error("session metadata summary intent should not contain the secret after redaction")
+	}
+	if !strings.Contains(metadata.Summary.Intent, "REDACTED") {
+		t.Error("session metadata summary intent should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteTemporaryTask_MetadataFiles_RedactSecrets(t *testing.T) {
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit initial tree: %v", err)
+	}
+
+	store := NewGitStore(repo)
+
+	transcriptPath := filepath.Join(tempDir, "task-full.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte(`{"role":"assistant","content":"`+highEntropySecret+`"}`+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write task transcript: %v", err)
+	}
+
+	agentTranscriptPath := filepath.Join(tempDir, "agent-transcript.jsonl")
+	if err := os.WriteFile(agentTranscriptPath, []byte(`{"role":"assistant","content":"agent `+highEntropySecret+`"}`+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write agent transcript: %v", err)
+	}
+
+	commitHash, err := store.WriteTemporaryTask(context.Background(), WriteTemporaryTaskOptions{
+		SessionID:              "redact-temp-task-session",
+		BaseCommit:             initialCommit.String(),
+		ToolUseID:              "tool-1",
+		AgentID:                "agent-1",
+		TranscriptPath:         transcriptPath,
+		SubagentTranscriptPath: agentTranscriptPath,
+		CommitMessage:          "task checkpoint",
+		AuthorName:             "Test",
+		AuthorEmail:            "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporaryTask() error = %v", err)
+	}
+
+	metadataDir := strings.TrimSuffix(paths.EntireMetadataDir, "/") + "/redact-temp-task-session"
+	transcriptFile := metadataDir + "/" + paths.TranscriptFileName
+	subagentFile := strings.TrimSuffix(paths.EntireMetadataDir, "/") + "/redact-temp-task-session/tasks/tool-1/agent-agent-1.jsonl"
+
+	transcriptContent := readFileFromCheckpointCommit(t, repo, commitHash, transcriptFile)
+	if strings.Contains(transcriptContent, highEntropySecret) {
+		t.Error("task transcript should not contain the secret after redaction")
+	}
+	if !strings.Contains(transcriptContent, "REDACTED") {
+		t.Error("task transcript should contain REDACTED placeholder")
+	}
+
+	subagentContent := readFileFromCheckpointCommit(t, repo, commitHash, subagentFile)
+	if strings.Contains(subagentContent, highEntropySecret) {
+		t.Error("subagent transcript should not contain the secret after redaction")
+	}
+	if !strings.Contains(subagentContent, "REDACTED") {
+		t.Error("subagent transcript should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteTemporary_MetadataDir_RedactsSecrets(t *testing.T) {
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
+	}); err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get current working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		t.Chdir(origDir)
+	})
+
+	// Ensure paths.RepoRoot() resolves to this repo in this test.
+	t.Chdir(tempDir)
+
+	store := NewGitStore(repo)
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", "test-session")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	fullPath := filepath.Join(metadataDir, "full.jsonl")
+	if err := os.WriteFile(fullPath, []byte(`{"content":"secret=`+highEntropySecret+`"}`+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write full.jsonl: %v", err)
+	}
+
+	notePath := filepath.Join(metadataDir, "notes.txt")
+	if err := os.WriteFile(notePath, []byte("secret="+highEntropySecret), 0644); err != nil {
+		t.Fatalf("failed to write notes.txt: %v", err)
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("failed to get HEAD: %v", err)
+	}
+
+	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         "redact-temp-commit-session",
+		BaseCommit:        head.Hash().String(),
+		ModifiedFiles:     []string{"README.md"},
+		MetadataDir:       ".entire/metadata/test-session",
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "checkpoint",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@example.com",
+		IsFirstCheckpoint: false,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() error = %v", err)
+	}
+
+	full := readFileFromCheckpointCommit(t, repo, result.CommitHash, ".entire/metadata/test-session/full.jsonl")
+	if strings.Contains(full, highEntropySecret) {
+		t.Error("full.jsonl should not contain the secret after redaction")
+	}
+	if !strings.Contains(full, "REDACTED") {
+		t.Error("full.jsonl should contain REDACTED placeholder")
+	}
+
+	notes := readFileFromCheckpointCommit(t, repo, result.CommitHash, ".entire/metadata/test-session/notes.txt")
+	if strings.Contains(notes, highEntropySecret) {
+		t.Error("notes.txt should not contain the secret after redaction")
+	}
+	if !strings.Contains(notes, "REDACTED") {
+		t.Error("notes.txt should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteTemporary_MetadataDir_SkipsSymlinks(t *testing.T) {
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
+	}); err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get current working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		t.Chdir(origDir)
+	})
+	t.Chdir(tempDir)
+
+	store := NewGitStore(repo)
+	sessionID := "redact-temp-symlink-session"
+	metadataDir := filepath.Join(tempDir, ".entire", "metadata", sessionID)
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	regularFile := filepath.Join(metadataDir, "notes.txt")
+	if err := os.WriteFile(regularFile, []byte("secret="+highEntropySecret), 0644); err != nil {
+		t.Fatalf("failed to write notes.txt: %v", err)
+	}
+
+	sensitiveFile := filepath.Join(tempDir, "sensitive.txt")
+	if err := os.WriteFile(sensitiveFile, []byte("very-secret-data"), 0644); err != nil {
+		t.Fatalf("failed to write sensitive file: %v", err)
+	}
+	symlinkPath := filepath.Join(metadataDir, "sneaky-link")
+	if err := os.Symlink(sensitiveFile, symlinkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("failed to get HEAD: %v", err)
+	}
+
+	result, err := store.WriteTemporary(context.Background(), WriteTemporaryOptions{
+		SessionID:         sessionID,
+		BaseCommit:        head.Hash().String(),
+		ModifiedFiles:     []string{"README.md"},
+		MetadataDir:       filepath.ToSlash(filepath.Join(paths.EntireMetadataDir, sessionID)),
+		MetadataDirAbs:    metadataDir,
+		CommitMessage:     "checkpoint",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@example.com",
+		IsFirstCheckpoint: false,
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporary() error = %v", err)
+	}
+
+	regular := readFileFromCheckpointCommit(t, repo, result.CommitHash, filepath.ToSlash(filepath.Join(paths.EntireMetadataDir, sessionID, "notes.txt")))
+	if strings.Contains(regular, highEntropySecret) {
+		t.Error("notes.txt should not contain the secret after redaction")
+	}
+	if !strings.Contains(regular, "REDACTED") {
+		t.Error("notes.txt should contain REDACTED placeholder")
+	}
+
+	commit, err := repo.CommitObject(result.CommitHash)
+	if err != nil {
+		t.Fatalf("failed to get checkpoint commit object: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get checkpoint tree: %v", err)
+	}
+	if _, err := tree.File(filepath.ToSlash(filepath.Join(paths.EntireMetadataDir, sessionID, "sneaky-link"))); err == nil {
+		t.Error("sneaky-link should not be included in temporary checkpoint metadata")
 	}
 }
 

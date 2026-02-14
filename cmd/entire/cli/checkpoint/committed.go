@@ -355,6 +355,7 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 	if err != nil {
 		return filePaths, fmt.Errorf("failed to marshal session metadata: %w", err)
 	}
+	metadataJSON = redact.Bytes(metadataJSON)
 	metadataHash, err := CreateBlobFromContent(s.repo, metadataJSON)
 	if err != nil {
 		return filePaths, err
@@ -976,6 +977,7 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
+	metadataJSON = redact.Bytes(metadataJSON)
 	metadataHash, err := CreateBlobFromContent(s.repo, metadataJSON)
 	if err != nil {
 		return fmt.Errorf("failed to create metadata blob: %w", err)
