@@ -198,6 +198,12 @@ func stagedFilesOverlapWithContent(repo *git.Repository, shadowTree *object.Tree
 		return hasOverlappingFiles(stagedFiles, filesTouched)
 	}
 
+	// Build a map of index entries for O(1) lookup (avoid O(n*m) nested loop)
+	indexEntries := make(map[string]plumbing.Hash, len(idx.Entries))
+	for _, entry := range idx.Entries {
+		indexEntries[entry.Name] = entry.Hash
+	}
+
 	// Check each staged file
 	for _, stagedPath := range stagedFiles {
 		if !touchedSet[stagedPath] {
@@ -217,16 +223,7 @@ func stagedFilesOverlapWithContent(repo *git.Repository, shadowTree *object.Tree
 		}
 
 		// For new files, check content against shadow branch
-		// Find the index entry to get the staged file's hash
-		var stagedHash plumbing.Hash
-		found := false
-		for _, entry := range idx.Entries {
-			if entry.Name == stagedPath {
-				stagedHash = entry.Hash
-				found = true
-				break
-			}
-		}
+		stagedHash, found := indexEntries[stagedPath]
 		if !found {
 			continue // Not in index (shouldn't happen but be safe)
 		}

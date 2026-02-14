@@ -353,6 +353,152 @@ func TestFilesWithRemainingAgentChanges_NoShadowBranch(t *testing.T) {
 	assert.Equal(t, []string{"other.txt"}, remaining, "Fallback should use file-level subtraction")
 }
 
+// TestStagedFilesOverlapWithContent_ModifiedFile tests that a modified file
+// (exists in HEAD) always counts as overlap.
+func TestStagedFilesOverlapWithContent_ModifiedFile(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Initial file is created by setupGitRepo
+	// Modify it and stage
+	testFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(testFile, []byte("modified content"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("test.txt")
+	require.NoError(t, err)
+
+	// Create shadow branch (content doesn't matter for modified files)
+	createShadowBranchWithContent(t, repo, "abc1234", "e3b0c4", map[string][]byte{
+		"test.txt": []byte("shadow content"),
+	})
+
+	// Get shadow tree
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("abc1234", "e3b0c4")
+	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
+	require.NoError(t, err)
+	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
+	require.NoError(t, err)
+	shadowTree, err := shadowCommit.Tree()
+	require.NoError(t, err)
+
+	// Modified file should count as overlap regardless of content
+	result := stagedFilesOverlapWithContent(repo, shadowTree, []string{"test.txt"}, []string{"test.txt"})
+	assert.True(t, result, "Modified file should always count as overlap")
+}
+
+// TestStagedFilesOverlapWithContent_NewFile_ContentMatch tests that a new file
+// with matching content counts as overlap.
+func TestStagedFilesOverlapWithContent_NewFile_ContentMatch(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Create a NEW file (doesn't exist in HEAD)
+	content := []byte("new file content")
+	newFile := filepath.Join(dir, "newfile.txt")
+	require.NoError(t, os.WriteFile(newFile, content, 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("newfile.txt")
+	require.NoError(t, err)
+
+	// Create shadow branch with SAME content
+	createShadowBranchWithContent(t, repo, "def5678", "e3b0c4", map[string][]byte{
+		"newfile.txt": content,
+	})
+
+	// Get shadow tree
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("def5678", "e3b0c4")
+	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
+	require.NoError(t, err)
+	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
+	require.NoError(t, err)
+	shadowTree, err := shadowCommit.Tree()
+	require.NoError(t, err)
+
+	// New file with matching content should count as overlap
+	result := stagedFilesOverlapWithContent(repo, shadowTree, []string{"newfile.txt"}, []string{"newfile.txt"})
+	assert.True(t, result, "New file with matching content should count as overlap")
+}
+
+// TestStagedFilesOverlapWithContent_NewFile_ContentMismatch tests that a new file
+// with different content does NOT count as overlap (reverted & replaced scenario).
+func TestStagedFilesOverlapWithContent_NewFile_ContentMismatch(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Create a NEW file with different content than shadow branch
+	newFile := filepath.Join(dir, "newfile.txt")
+	require.NoError(t, os.WriteFile(newFile, []byte("user replaced content"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("newfile.txt")
+	require.NoError(t, err)
+
+	// Create shadow branch with DIFFERENT content (agent's original)
+	createShadowBranchWithContent(t, repo, "ghi9012", "e3b0c4", map[string][]byte{
+		"newfile.txt": []byte("agent original content"),
+	})
+
+	// Get shadow tree
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("ghi9012", "e3b0c4")
+	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
+	require.NoError(t, err)
+	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
+	require.NoError(t, err)
+	shadowTree, err := shadowCommit.Tree()
+	require.NoError(t, err)
+
+	// New file with different content should NOT count as overlap
+	result := stagedFilesOverlapWithContent(repo, shadowTree, []string{"newfile.txt"}, []string{"newfile.txt"})
+	assert.False(t, result, "New file with mismatched content should not count as overlap")
+}
+
+// TestStagedFilesOverlapWithContent_NoOverlap tests that non-overlapping files
+// return false.
+func TestStagedFilesOverlapWithContent_NoOverlap(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Stage a file NOT in filesTouched
+	otherFile := filepath.Join(dir, "other.txt")
+	require.NoError(t, os.WriteFile(otherFile, []byte("other content"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("other.txt")
+	require.NoError(t, err)
+
+	// Create shadow branch
+	createShadowBranchWithContent(t, repo, "jkl3456", "e3b0c4", map[string][]byte{
+		"session.txt": []byte("session content"),
+	})
+
+	// Get shadow tree
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("jkl3456", "e3b0c4")
+	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
+	require.NoError(t, err)
+	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
+	require.NoError(t, err)
+	shadowTree, err := shadowCommit.Tree()
+	require.NoError(t, err)
+
+	// Staged file "other.txt" is not in filesTouched "session.txt"
+	result := stagedFilesOverlapWithContent(repo, shadowTree, []string{"other.txt"}, []string{"session.txt"})
+	assert.False(t, result, "Non-overlapping files should return false")
+}
+
 // createShadowBranchWithContent creates a shadow branch with the given file contents.
 // This helper directly uses go-git APIs to avoid paths.RepoRoot() dependency.
 //

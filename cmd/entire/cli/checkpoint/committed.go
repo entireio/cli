@@ -1074,15 +1074,20 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 	sessionPath := fmt.Sprintf("%s%d/", basePath, sessionIndex)
 
 	// Replace transcript (full replace, not append)
+	// Apply redaction as safety net (caller should redact, but we ensure it here)
 	if len(opts.Transcript) > 0 {
-		if err := s.replaceTranscript(opts.Transcript, opts.Agent, sessionPath, entries); err != nil {
+		transcript, err := redact.JSONLBytes(opts.Transcript)
+		if err != nil {
+			return fmt.Errorf("failed to redact transcript secrets: %w", err)
+		}
+		if err := s.replaceTranscript(transcript, opts.Agent, sessionPath, entries); err != nil {
 			return fmt.Errorf("failed to replace transcript: %w", err)
 		}
 	}
 
-	// Replace prompts
+	// Replace prompts (apply redaction as safety net)
 	if len(opts.Prompts) > 0 {
-		promptContent := strings.Join(opts.Prompts, "\n\n---\n\n")
+		promptContent := redact.String(strings.Join(opts.Prompts, "\n\n---\n\n"))
 		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
 		if err != nil {
 			return fmt.Errorf("failed to create prompt blob: %w", err)
@@ -1094,9 +1099,9 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 		}
 	}
 
-	// Replace context
+	// Replace context (apply redaction as safety net)
 	if len(opts.Context) > 0 {
-		contextBlob, err := CreateBlobFromContent(s.repo, opts.Context)
+		contextBlob, err := CreateBlobFromContent(s.repo, redact.Bytes(opts.Context))
 		if err != nil {
 			return fmt.Errorf("failed to create context blob: %w", err)
 		}

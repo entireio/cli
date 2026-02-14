@@ -3,10 +3,6 @@
 package integration
 
 import (
-	"bytes"
-	"encoding/json"
-	"os"
-	"os/exec"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -36,27 +32,10 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 
 	sess := env.NewSession()
 
-	// Pass transcript path in the hook input so it's stored in session state
-	// (needed for mid-session commit detection via live transcript)
-	submitWithTranscriptPath := func(sessionID, transcriptPath string) {
-		t.Helper()
-		input := map[string]string{
-			"session_id":      sessionID,
-			"transcript_path": transcriptPath,
-		}
-		inputJSON, _ := json.Marshal(input)
-		cmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
-		cmd.Dir = env.RepoDir
-		cmd.Stdin = bytes.NewReader(inputJSON)
-		cmd.Env = append(os.Environ(),
-			"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
-		)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("user-prompt-submit failed: %v\nOutput: %s", err, output)
-		}
+	// Start session with transcript path (needed for mid-session commit detection via live transcript)
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("user-prompt-submit failed: %v", err)
 	}
-
-	submitWithTranscriptPath(sess.ID, sess.TranscriptPath)
 
 	// Verify session is ACTIVE
 	state, err := env.GetSessionState(sess.ID)
@@ -106,7 +85,9 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 	// ========================================
 	t.Log("Phase 2: Start new turn, create more work")
 
-	submitWithTranscriptPath(sess.ID, sess.TranscriptPath)
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("user-prompt-submit failed: %v", err)
+	}
 
 	state, err = env.GetSessionState(sess.ID)
 	if err != nil {
