@@ -81,6 +81,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newHooksCmd())
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newExplainCmd())
+	cmd.AddCommand(newInsightsCmd())
 	cmd.AddCommand(newDebugCmd())
 	cmd.AddCommand(newDoctorCmd())
 	cmd.AddCommand(newSendAnalyticsCmd())
