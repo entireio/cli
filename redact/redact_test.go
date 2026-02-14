@@ -93,6 +93,33 @@ func TestJSONLContent_InvalidJSONLine(t *testing.T) {
 	}
 }
 
+func TestJSONBytes_PreservesIDFields(t *testing.T) {
+	idFieldSecret := highEntropySecret + "-session-id"
+	intentSecret := highEntropySecret
+	input := `{"session_id":"` + idFieldSecret + `","intent":"` + intentSecret + `","agent_id":"` + idFieldSecret + `"}`
+	result, err := JSONBytes([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// If this field were not considered ID-like, it would be redacted.
+	if String(idFieldSecret) == idFieldSecret {
+		t.Fatal("id field secret should be redacted when not excluded")
+	}
+
+	got := string(result)
+	if got != `{"session_id":"`+idFieldSecret+`","intent":"REDACTED","agent_id":"`+idFieldSecret+`"}` {
+		t.Errorf("got %q, want %q", got, `{"session_id":"`+idFieldSecret+`","intent":"REDACTED","agent_id":"`+idFieldSecret+`"}`)
+	}
+}
+
+func TestJSONBytes_InvalidJSON(t *testing.T) {
+	_, err := JSONBytes([]byte(`{"session":"bad"`))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON content")
+	}
+}
+
 func TestCollectJSONLReplacements_Succeeds(t *testing.T) {
 	obj := map[string]any{
 		"content": "token=" + highEntropySecret,

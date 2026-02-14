@@ -2951,6 +2951,93 @@ func TestWriteCommitted_UpdateSummary_RedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestWriteCommitted_MetadataJSON_PreservesMetadataIDFields(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef6")
+
+	sessionID := "session_" + highEntropySecret
+	toolUseID := "toolu_" + highEntropySecret
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        sessionID,
+		ToolUseID:        toolUseID,
+		Strategy:         "manual-commit",
+		Transcript:       []byte(`{"msg":"safe"}`),
+		CheckpointsCount: 1,
+		Summary: &Summary{
+			Intent: highEntropySecret,
+		},
+		AuthorName:  "Test Author",
+		AuthorEmail: "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	metadata := readLatestSessionMetadata(t, repo, checkpointID)
+	if metadata.SessionID != sessionID {
+		t.Errorf("session metadata session_id = %q, want %q", metadata.SessionID, sessionID)
+	}
+	if metadata.ToolUseID != toolUseID {
+		t.Errorf("session metadata tool_use_id = %q, want %q", metadata.ToolUseID, toolUseID)
+	}
+	if metadata.Summary == nil {
+		t.Fatal("expected summary to be present in session metadata")
+	}
+	if strings.Contains(metadata.Summary.Intent, highEntropySecret) {
+		t.Error("session metadata summary intent should not contain the secret after redaction")
+	}
+	if !strings.Contains(metadata.Summary.Intent, "REDACTED") {
+		t.Error("session metadata summary intent should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteCommitted_UpdateSummary_PreservesMetadataIDFields(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef7")
+
+	sessionID := "session_" + highEntropySecret
+	toolUseID := "toolu_" + highEntropySecret
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        sessionID,
+		ToolUseID:        toolUseID,
+		Strategy:         "manual-commit",
+		Transcript:       []byte(`{"msg":"safe"}`),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	if err := store.UpdateSummary(context.Background(), checkpointID, &Summary{Intent: highEntropySecret}); err != nil {
+		t.Fatalf("UpdateSummary() error = %v", err)
+	}
+
+	metadata := readLatestSessionMetadata(t, repo, checkpointID)
+	if metadata.SessionID != sessionID {
+		t.Errorf("session metadata session_id = %q, want %q", metadata.SessionID, sessionID)
+	}
+	if metadata.ToolUseID != toolUseID {
+		t.Errorf("session metadata tool_use_id = %q, want %q", metadata.ToolUseID, toolUseID)
+	}
+	if metadata.Summary == nil {
+		t.Fatal("expected summary to be present in session metadata")
+	}
+	if strings.Contains(metadata.Summary.Intent, highEntropySecret) {
+		t.Error("session metadata summary intent should not contain the secret after redaction")
+	}
+	if !strings.Contains(metadata.Summary.Intent, "REDACTED") {
+		t.Error("session metadata summary intent should contain REDACTED placeholder")
+	}
+}
+
 func TestWriteTemporaryTask_MetadataFiles_RedactSecrets(t *testing.T) {
 	tempDir := t.TempDir()
 

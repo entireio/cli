@@ -128,6 +128,20 @@ func JSONLBytes(b []byte) ([]byte, error) {
 	return []byte(redacted), nil
 }
 
+// JSONBytes is a convenience wrapper around JSONContent for []byte content.
+// JSON content is redacted with JSON-aware field skipping (e.g. keys ending in "id").
+func JSONBytes(b []byte) ([]byte, error) {
+	s := string(b)
+	redacted, err := JSONContent(s)
+	if err != nil {
+		return nil, err
+	}
+	if redacted == s {
+		return b, nil
+	}
+	return []byte(redacted), nil
+}
+
 // JSONLContent parses each line as JSON to determine which string values
 // need redaction, then performs targeted replacements on the raw JSON bytes.
 // Lines with no secrets are returned unchanged, preserving original formatting.
@@ -168,6 +182,34 @@ func JSONLContent(content string) (string, error) {
 		b.WriteString(result)
 	}
 	return b.String(), nil
+}
+
+// JSONContent parses a JSON string and redacts string values while skipping
+// identifier fields (keys ending in "id") and non-user payload fields.
+func JSONContent(content string) (string, error) {
+	var parsed any
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+		return "", err
+	}
+
+	repls := collectJSONLReplacements(parsed)
+	if len(repls) == 0 {
+		return content, nil
+	}
+
+	result := content
+	for _, r := range repls {
+		origJSON, err := jsonEncodeString(r[0])
+		if err != nil {
+			return "", err
+		}
+		replJSON, err := jsonEncodeString(r[1])
+		if err != nil {
+			return "", err
+		}
+		result = strings.ReplaceAll(result, origJSON, replJSON)
+	}
+	return result, nil
 }
 
 // collectJSONLReplacements walks a parsed JSON value and collects unique
