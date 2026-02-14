@@ -75,8 +75,10 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
 
 	// Read existing settings if they exist
-	var settings ClaudeSettings
 	var rawSettings map[string]json.RawMessage
+
+	// rawHooks preserves unknown hook types (e.g., "Notification", "SubagentStop")
+	var rawHooks map[string]json.RawMessage
 
 	// rawPermissions preserves unknown permission fields (e.g., "ask")
 	var rawPermissions map[string]json.RawMessage
@@ -87,7 +89,7 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 			return 0, fmt.Errorf("failed to parse existing settings.json: %w", err)
 		}
 		if hooksRaw, ok := rawSettings["hooks"]; ok {
-			if err := json.Unmarshal(hooksRaw, &settings.Hooks); err != nil {
+			if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
 				return 0, fmt.Errorf("failed to parse hooks in settings.json: %w", err)
 			}
 		}
@@ -100,18 +102,30 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		rawSettings = make(map[string]json.RawMessage)
 	}
 
+	if rawHooks == nil {
+		rawHooks = make(map[string]json.RawMessage)
+	}
 	if rawPermissions == nil {
 		rawPermissions = make(map[string]json.RawMessage)
 	}
 
+	// Parse only the hook types we need to modify
+	var sessionStart, sessionEnd, stop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
+	parseHookType(rawHooks, "SessionStart", &sessionStart)
+	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
+	parseHookType(rawHooks, "Stop", &stop)
+	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
+	parseHookType(rawHooks, "PreToolUse", &preToolUse)
+	parseHookType(rawHooks, "PostToolUse", &postToolUse)
+
 	// If force is true, remove all existing Entire hooks first
 	if force {
-		settings.Hooks.SessionStart = removeEntireHooks(settings.Hooks.SessionStart)
-		settings.Hooks.SessionEnd = removeEntireHooks(settings.Hooks.SessionEnd)
-		settings.Hooks.Stop = removeEntireHooks(settings.Hooks.Stop)
-		settings.Hooks.UserPromptSubmit = removeEntireHooks(settings.Hooks.UserPromptSubmit)
-		settings.Hooks.PreToolUse = removeEntireHooksFromMatchers(settings.Hooks.PreToolUse)
-		settings.Hooks.PostToolUse = removeEntireHooksFromMatchers(settings.Hooks.PostToolUse)
+		sessionStart = removeEntireHooks(sessionStart)
+		sessionEnd = removeEntireHooks(sessionEnd)
+		stop = removeEntireHooks(stop)
+		userPromptSubmit = removeEntireHooks(userPromptSubmit)
+		preToolUse = removeEntireHooksFromMatchers(preToolUse)
+		postToolUse = removeEntireHooksFromMatchers(postToolUse)
 	}
 
 	// Define hook commands
@@ -137,32 +151,32 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	count := 0
 
 	// Add hooks if they don't exist
-	if !hookCommandExists(settings.Hooks.SessionStart, sessionStartCmd) {
-		settings.Hooks.SessionStart = addHookToMatcher(settings.Hooks.SessionStart, "", sessionStartCmd)
+	if !hookCommandExists(sessionStart, sessionStartCmd) {
+		sessionStart = addHookToMatcher(sessionStart, "", sessionStartCmd)
 		count++
 	}
-	if !hookCommandExists(settings.Hooks.SessionEnd, sessionEndCmd) {
-		settings.Hooks.SessionEnd = addHookToMatcher(settings.Hooks.SessionEnd, "", sessionEndCmd)
+	if !hookCommandExists(sessionEnd, sessionEndCmd) {
+		sessionEnd = addHookToMatcher(sessionEnd, "", sessionEndCmd)
 		count++
 	}
-	if !hookCommandExists(settings.Hooks.Stop, stopCmd) {
-		settings.Hooks.Stop = addHookToMatcher(settings.Hooks.Stop, "", stopCmd)
+	if !hookCommandExists(stop, stopCmd) {
+		stop = addHookToMatcher(stop, "", stopCmd)
 		count++
 	}
-	if !hookCommandExists(settings.Hooks.UserPromptSubmit, userPromptSubmitCmd) {
-		settings.Hooks.UserPromptSubmit = addHookToMatcher(settings.Hooks.UserPromptSubmit, "", userPromptSubmitCmd)
+	if !hookCommandExists(userPromptSubmit, userPromptSubmitCmd) {
+		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd)
 		count++
 	}
-	if !hookCommandExistsWithMatcher(settings.Hooks.PreToolUse, "Task", preTaskCmd) {
-		settings.Hooks.PreToolUse = addHookToMatcher(settings.Hooks.PreToolUse, "Task", preTaskCmd)
+	if !hookCommandExistsWithMatcher(preToolUse, "Task", preTaskCmd) {
+		preToolUse = addHookToMatcher(preToolUse, "Task", preTaskCmd)
 		count++
 	}
-	if !hookCommandExistsWithMatcher(settings.Hooks.PostToolUse, "Task", postTaskCmd) {
-		settings.Hooks.PostToolUse = addHookToMatcher(settings.Hooks.PostToolUse, "Task", postTaskCmd)
+	if !hookCommandExistsWithMatcher(postToolUse, "Task", postTaskCmd) {
+		postToolUse = addHookToMatcher(postToolUse, "Task", postTaskCmd)
 		count++
 	}
-	if !hookCommandExistsWithMatcher(settings.Hooks.PostToolUse, "TodoWrite", postTodoCmd) {
-		settings.Hooks.PostToolUse = addHookToMatcher(settings.Hooks.PostToolUse, "TodoWrite", postTodoCmd)
+	if !hookCommandExistsWithMatcher(postToolUse, "TodoWrite", postTodoCmd) {
+		postToolUse = addHookToMatcher(postToolUse, "TodoWrite", postTodoCmd)
 		count++
 	}
 
@@ -188,8 +202,16 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		return 0, nil // All hooks and permissions already installed
 	}
 
+	// Marshal modified hook types back to rawHooks
+	marshalHookType(rawHooks, "SessionStart", sessionStart)
+	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
+	marshalHookType(rawHooks, "Stop", stop)
+	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
+	marshalHookType(rawHooks, "PreToolUse", preToolUse)
+	marshalHookType(rawHooks, "PostToolUse", postToolUse)
+
 	// Marshal hooks and update raw settings
-	hooksJSON, err := json.Marshal(settings.Hooks)
+	hooksJSON, err := json.Marshal(rawHooks)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
@@ -219,6 +241,29 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	return count, nil
 }
 
+// parseHookType parses a specific hook type from rawHooks into the target slice.
+// Silently ignores parse errors (leaves target unchanged).
+func parseHookType(rawHooks map[string]json.RawMessage, hookType string, target *[]ClaudeHookMatcher) {
+	if data, ok := rawHooks[hookType]; ok {
+		//nolint:errcheck,gosec // Intentionally ignoring parse errors - leave target as nil/empty
+		json.Unmarshal(data, target)
+	}
+}
+
+// marshalHookType marshals a hook type back to rawHooks.
+// If the slice is empty, removes the key from rawHooks.
+func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, matchers []ClaudeHookMatcher) {
+	if len(matchers) == 0 {
+		delete(rawHooks, hookType)
+		return
+	}
+	data, err := json.Marshal(matchers)
+	if err != nil {
+		return // Silently ignore marshal errors (shouldn't happen)
+	}
+	rawHooks[hookType] = data
+}
+
 // UninstallHooks removes Entire hooks from Claude Code settings.
 func (c *ClaudeCodeAgent) UninstallHooks() error {
 	// Use repo root to find .claude directory when run from a subdirectory
@@ -237,20 +282,41 @@ func (c *ClaudeCodeAgent) UninstallHooks() error {
 		return fmt.Errorf("failed to parse settings.json: %w", err)
 	}
 
-	var settings ClaudeSettings
+	// rawHooks preserves unknown hook types (e.g., "Notification", "SubagentStop")
+	var rawHooks map[string]json.RawMessage
 	if hooksRaw, ok := rawSettings["hooks"]; ok {
-		if err := json.Unmarshal(hooksRaw, &settings.Hooks); err != nil {
+		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
 			return fmt.Errorf("failed to parse hooks: %w", err)
 		}
 	}
+	if rawHooks == nil {
+		rawHooks = make(map[string]json.RawMessage)
+	}
+
+	// Parse only the hook types we need to modify
+	var sessionStart, sessionEnd, stop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
+	parseHookType(rawHooks, "SessionStart", &sessionStart)
+	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
+	parseHookType(rawHooks, "Stop", &stop)
+	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
+	parseHookType(rawHooks, "PreToolUse", &preToolUse)
+	parseHookType(rawHooks, "PostToolUse", &postToolUse)
 
 	// Remove Entire hooks from all hook types
-	settings.Hooks.SessionStart = removeEntireHooks(settings.Hooks.SessionStart)
-	settings.Hooks.SessionEnd = removeEntireHooks(settings.Hooks.SessionEnd)
-	settings.Hooks.Stop = removeEntireHooks(settings.Hooks.Stop)
-	settings.Hooks.UserPromptSubmit = removeEntireHooks(settings.Hooks.UserPromptSubmit)
-	settings.Hooks.PreToolUse = removeEntireHooksFromMatchers(settings.Hooks.PreToolUse)
-	settings.Hooks.PostToolUse = removeEntireHooksFromMatchers(settings.Hooks.PostToolUse)
+	sessionStart = removeEntireHooks(sessionStart)
+	sessionEnd = removeEntireHooks(sessionEnd)
+	stop = removeEntireHooks(stop)
+	userPromptSubmit = removeEntireHooks(userPromptSubmit)
+	preToolUse = removeEntireHooksFromMatchers(preToolUse)
+	postToolUse = removeEntireHooksFromMatchers(postToolUse)
+
+	// Marshal modified hook types back to rawHooks
+	marshalHookType(rawHooks, "SessionStart", sessionStart)
+	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
+	marshalHookType(rawHooks, "Stop", stop)
+	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
+	marshalHookType(rawHooks, "PreToolUse", preToolUse)
+	marshalHookType(rawHooks, "PostToolUse", postToolUse)
 
 	// Also remove the metadata deny rule from permissions
 	var rawPermissions map[string]json.RawMessage
@@ -295,12 +361,16 @@ func (c *ClaudeCodeAgent) UninstallHooks() error {
 		}
 	}
 
-	// Marshal hooks back
-	hooksJSON, err := json.Marshal(settings.Hooks)
-	if err != nil {
-		return fmt.Errorf("failed to marshal hooks: %w", err)
+	// Marshal hooks back (preserving unknown hook types)
+	if len(rawHooks) > 0 {
+		hooksJSON, err := json.Marshal(rawHooks)
+		if err != nil {
+			return fmt.Errorf("failed to marshal hooks: %w", err)
+		}
+		rawSettings["hooks"] = hooksJSON
+	} else {
+		delete(rawSettings, "hooks")
 	}
-	rawSettings["hooks"] = hooksJSON
 
 	// Write back
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")

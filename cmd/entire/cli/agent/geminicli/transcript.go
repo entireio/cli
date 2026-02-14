@@ -212,6 +212,36 @@ func GetLastMessageIDFromFile(path string) (string, error) {
 	return GetLastMessageID(data)
 }
 
+// SliceFromMessage returns a Gemini transcript scoped to messages starting from
+// startMessageIndex. This is the Gemini equivalent of transcript.SliceFromLine —
+// for Gemini's single JSON blob, scoping is done by message index rather than line offset.
+// Returns the original data if startMessageIndex <= 0.
+// Returns nil if startMessageIndex exceeds the number of messages.
+func SliceFromMessage(data []byte, startMessageIndex int) []byte {
+	if len(data) == 0 || startMessageIndex <= 0 {
+		return data
+	}
+
+	t, err := ParseTranscript(data)
+	if err != nil {
+		return nil
+	}
+
+	if startMessageIndex >= len(t.Messages) {
+		return nil
+	}
+
+	scoped := &GeminiTranscript{
+		Messages: t.Messages[startMessageIndex:],
+	}
+
+	out, err := json.Marshal(scoped)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
 // CalculateTokenUsage calculates token usage from a Gemini transcript.
 // This is specific to Gemini's API format where each message may have a tokens object
 // with input, output, cached, thoughts, tool, and total counts.

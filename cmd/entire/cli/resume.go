@@ -433,13 +433,11 @@ func resumeSession(sessionID string, checkpointID id.CheckpointID, force bool) e
 			fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
 		}
 		for i, sess := range sessions {
-			sessAg, agErr := strategy.ResolveAgentForRewind(sess.Agent)
-			if agErr != nil {
-				fmt.Fprintf(os.Stderr, "  Warning: could not resolve agent %q for session %s, skipping\n", sess.Agent, sess.SessionID)
-				continue
+			sessionAgent, err := strategy.ResolveAgentForRewind(sess.Agent)
+			if err != nil {
+				return fmt.Errorf("failed to resolve agent for session %s: %w", sess.SessionID, err)
 			}
-			agentSID := sessAg.ExtractAgentSessionID(sess.SessionID)
-			cmd := sessAg.FormatResumeCommand(agentSID)
+			cmd := sessionAgent.FormatResumeCommand(sess.SessionID)
 
 			if len(sessions) > 1 {
 				if i == len(sessions)-1 {
@@ -475,7 +473,6 @@ func resumeSession(sessionID string, checkpointID id.CheckpointID, force bool) e
 // Always overwrites existing session logs to ensure consistency with checkpoint state.
 // If force is false, prompts for confirmation when local log has newer timestamps.
 func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, checkpointID id.CheckpointID, repoRoot string, force bool) error {
-	agentSessionID := ag.ExtractAgentSessionID(sessionID)
 	sessionLogPath, err := resolveTranscriptPath(sessionID, ag)
 	if err != nil {
 		return fmt.Errorf("failed to resolve transcript path: %w", err)
@@ -487,7 +484,7 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, 
 		)
 		fmt.Fprintf(os.Stderr, "Session '%s' found in commit trailer but session log not available\n", sessionID)
 		fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
-		fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(agentSessionID))
+		fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(sessionID))
 		return nil
 	}
 
@@ -500,7 +497,7 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, 
 			)
 			fmt.Fprintf(os.Stderr, "Session '%s' found in commit trailer but session log not available\n", sessionID)
 			fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
-			fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(agentSessionID))
+			fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(sessionID))
 			return nil
 		}
 		logging.Error(ctx, "resume session failed",
@@ -542,7 +539,7 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, 
 
 	// Create an AgentSession with the native data
 	agentSession := &agent.AgentSession{
-		SessionID:  agentSessionID,
+		SessionID:  sessionID,
 		AgentName:  ag.Name(),
 		RepoPath:   repoRoot,
 		SessionRef: sessionLogPath,
@@ -567,7 +564,7 @@ func resumeSingleSession(ctx context.Context, ag agent.Agent, sessionID string, 
 	fmt.Fprintf(os.Stderr, "Session restored to: %s\n", sessionLogPath)
 	fmt.Fprintf(os.Stderr, "Session: %s\n", sessionID)
 	fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
-	fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(agentSessionID))
+	fmt.Fprintf(os.Stderr, "  %s\n", ag.FormatResumeCommand(sessionID))
 
 	return nil
 }

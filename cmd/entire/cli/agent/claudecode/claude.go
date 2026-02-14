@@ -15,7 +15,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/sessionid"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -173,19 +172,6 @@ func (c *ClaudeCodeAgent) ParseHookInput(hookType agent.HookType, reader io.Read
 // GetSessionID extracts the session ID from hook input.
 func (c *ClaudeCodeAgent) GetSessionID(input *agent.HookInput) string {
 	return input.SessionID
-}
-
-// TransformSessionID converts a Claude session ID to an Entire session ID.
-// This is now an identity function - the agent session ID IS the Entire session ID.
-func (c *ClaudeCodeAgent) TransformSessionID(agentSessionID string) string {
-	return agentSessionID
-}
-
-// ExtractAgentSessionID extracts the Claude session ID from an Entire session ID.
-// Since Entire session ID = agent session ID (identity), this returns the input unchanged.
-// For backwards compatibility with legacy date-prefixed IDs, it strips the prefix if present.
-func (c *ClaudeCodeAgent) ExtractAgentSessionID(entireSessionID string) string {
-	return sessionid.ModelSessionID(entireSessionID)
 }
 
 // ResolveSessionFile returns the path to a Claude session file.

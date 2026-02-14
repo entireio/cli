@@ -319,7 +319,7 @@ func (env *TestEnv) initEntireInternal(strategyName string, agentName agent.Agen
 	// Write settings.json
 	settings := map[string]any{
 		"strategy":  strategyName,
-		"local_dev": true, // Use go run for hooks in tests
+		"local_dev": true, // Note: git-triggered hooks won't work (path is relative); tests call hooks via getTestBinary() instead
 	}
 	// Only add agent if specified (otherwise defaults to claude-code)
 	if agentName != "" {

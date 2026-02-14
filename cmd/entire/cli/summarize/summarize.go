@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
@@ -17,18 +19,19 @@ import (
 //
 // Parameters:
 //   - ctx: context for cancellation
-//   - transcriptBytes: raw transcript bytes (JSONL format)
+//   - transcriptBytes: raw transcript bytes (JSONL or JSON format depending on agent)
 //   - filesTouched: list of files modified during the session
+//   - agentType: the agent type to determine transcript format
 //   - generator: summary generator to use (if nil, uses default ClaudeGenerator)
 //
 // Returns nil, error if transcript is empty or cannot be parsed.
-func GenerateFromTranscript(ctx context.Context, transcriptBytes []byte, filesTouched []string, generator Generator) (*checkpoint.Summary, error) {
+func GenerateFromTranscript(ctx context.Context, transcriptBytes []byte, filesTouched []string, agentType agent.AgentType, generator Generator) (*checkpoint.Summary, error) {
 	if len(transcriptBytes) == 0 {
 		return nil, errors.New("empty transcript")
 	}
 
 	// Build condensed transcript for summarization
-	condensed, err := BuildCondensedTranscriptFromBytes(transcriptBytes)
+	condensed, err := BuildCondensedTranscriptFromBytes(transcriptBytes, agentType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)
 	}
@@ -108,12 +111,70 @@ var minimalDetailTools = map[string]bool{
 
 // BuildCondensedTranscriptFromBytes parses transcript bytes and extracts a condensed view.
 // This is a convenience function that combines parsing and condensing.
-func BuildCondensedTranscriptFromBytes(content []byte) ([]Entry, error) {
+// The agentType parameter determines which parser to use (Claude JSONL vs Gemini JSON).
+func BuildCondensedTranscriptFromBytes(content []byte, agentType agent.AgentType) ([]Entry, error) {
+	switch agentType {
+	case agent.AgentTypeGemini:
+		return buildCondensedTranscriptFromGemini(content)
+	case agent.AgentTypeClaudeCode, agent.AgentTypeUnknown:
+		// Claude format - fall through to shared logic below
+	}
+	// Claude format (JSONL) - handles Claude Code, Unknown, and any future agent types
 	lines, err := transcript.ParseFromBytes(content)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)
 	}
 	return BuildCondensedTranscript(lines), nil
+}
+
+// buildCondensedTranscriptFromGemini parses Gemini JSON transcript and extracts a condensed view.
+func buildCondensedTranscriptFromGemini(content []byte) ([]Entry, error) {
+	geminiTranscript, err := geminicli.ParseTranscript(content)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Gemini transcript: %w", err)
+	}
+
+	var entries []Entry
+	for _, msg := range geminiTranscript.Messages {
+		switch msg.Type {
+		case geminicli.MessageTypeUser:
+			if msg.Content != "" {
+				entries = append(entries, Entry{
+					Type:    EntryTypeUser,
+					Content: msg.Content,
+				})
+			}
+		case geminicli.MessageTypeGemini:
+			// Add assistant content
+			if msg.Content != "" {
+				entries = append(entries, Entry{
+					Type:    EntryTypeAssistant,
+					Content: msg.Content,
+				})
+			}
+			// Add tool calls
+			for _, tc := range msg.ToolCalls {
+				entries = append(entries, Entry{
+					Type:       EntryTypeTool,
+					ToolName:   tc.Name,
+					ToolDetail: extractGeminiToolDetail(tc.Args),
+				})
+			}
+		}
+	}
+
+	return entries, nil
+}
+
+// extractGeminiToolDetail extracts an appropriate detail string from Gemini tool args.
+func extractGeminiToolDetail(args map[string]interface{}) string {
+	// Check common fields in order of preference
+	for _, key := range []string{"description", "command", "file_path", "path", "pattern"} {
+		if v, ok := args[key].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // BuildCondensedTranscript extracts a condensed view of the transcript.

@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/entireio/cli/cmd/entire/cli/sessionid"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -200,7 +199,6 @@ func (r *HookRunner) runHookInRepoDir(hookName string, inputJSON []byte) error {
 // Session represents a simulated Claude Code session.
 type Session struct {
 	ID                string // Raw model session ID (e.g., "test-session-1")
-	EntireID          string // Entire session ID with date prefix (e.g., "2025-12-02-test-session-1")
 	TranscriptPath    string
 	TranscriptBuilder *TranscriptBuilder
 	env               *TestEnv
@@ -218,12 +216,11 @@ func (env *TestEnv) NewSession() *Session {
 
 	env.SessionCounter++
 	sessionID := fmt.Sprintf("test-session-%d", env.SessionCounter)
-	entireID := sessionid.EntireSessionID(sessionID)
+
 	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", sessionID+".jsonl")
 
 	return &Session{
 		ID:                sessionID,
-		EntireID:          entireID,
 		TranscriptPath:    transcriptPath,
 		TranscriptBuilder: NewTranscriptBuilder(),
 		env:               env,
@@ -331,9 +328,7 @@ func (env *TestEnv) ClearSessionState(sessionID string) error {
 	env.T.Helper()
 
 	// Session state is stored in .git/entire-sessions/<session-id>.json
-	// Use sessionid.EntireSessionID to get the full session ID with date prefix
-	entireSessionID := sessionid.EntireSessionID(sessionID)
-	stateFile := filepath.Join(env.RepoDir, ".git", "entire-sessions", entireSessionID+".json")
+	stateFile := filepath.Join(env.RepoDir, ".git", "entire-sessions", sessionID+".json")
 
 	if err := os.Remove(stateFile); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to clear session state: %w", err)
@@ -421,8 +416,7 @@ func (env *TestEnv) SimulateSessionStartWithOutput(sessionID string) HookOutput 
 func (env *TestEnv) GetSessionState(sessionID string) (*strategy.SessionState, error) {
 	env.T.Helper()
 
-	entireSessionID := sessionid.EntireSessionID(sessionID)
-	stateFile := filepath.Join(env.RepoDir, ".git", "entire-sessions", entireSessionID+".json")
+	stateFile := filepath.Join(env.RepoDir, ".git", "entire-sessions", sessionID+".json")
 
 	data, err := os.ReadFile(stateFile)
 	if os.IsNotExist(err) {
@@ -590,7 +584,6 @@ func (r *GeminiHookRunner) SimulateGeminiSessionEnd(sessionID, transcriptPath st
 // GeminiSession represents a simulated Gemini CLI session.
 type GeminiSession struct {
 	ID             string // Raw model session ID (e.g., "gemini-session-1")
-	EntireID       string // Entire session ID with date prefix (e.g., "2025-12-02-gemini-session-1")
 	TranscriptPath string
 	env            *TestEnv
 }
@@ -601,12 +594,10 @@ func (env *TestEnv) NewGeminiSession() *GeminiSession {
 
 	env.SessionCounter++
 	sessionID := fmt.Sprintf("gemini-session-%d", env.SessionCounter)
-	entireID := sessionid.EntireSessionID(sessionID)
 	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", sessionID+".json")
 
 	return &GeminiSession{
 		ID:             sessionID,
-		EntireID:       entireID,
 		TranscriptPath: transcriptPath,
 		env:            env,
 	}

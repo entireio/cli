@@ -338,7 +338,7 @@ func TestResume_MultipleSessionsOnBranch(t *testing.T) {
 
 	// The resume command shows the session from the last commit,
 	// which should be session2 (the most recent one)
-	if !strings.Contains(output, session2.ID) && !strings.Contains(output, session2.EntireID) {
+	if !strings.Contains(output, session2.ID) {
 		t.Logf("Note: Expected session2 ID in output, but this depends on checkpoint lookup")
 	}
 }
@@ -519,7 +519,10 @@ func (env *TestEnv) GitMerge(branchName string) {
 	env.T.Helper()
 
 	ctx := env.T.Context()
-	cmd := exec.CommandContext(ctx, "git", "merge", branchName, "-m", "Merge branch '"+branchName+"'")
+	// Use --no-verify to skip hooks - the hooks use local_dev paths that don't work
+	// from test temp directories. This is fine since we're testing merge behavior,
+	// not hook execution during merge.
+	cmd := exec.CommandContext(ctx, "git", "merge", branchName, "-m", "Merge branch '"+branchName+"'", "--no-verify")
 	cmd.Dir = env.RepoDir
 
 	output, err := cmd.CombinedOutput()

@@ -57,9 +57,6 @@ func TestAgentStrategyComposition(t *testing.T) {
 			t.Error("agent.ReadSession() should compute ModifiedFiles")
 		}
 
-		// Transform session ID (agent-specific)
-		entireSessionID := ag.TransformSessionID(session.ID)
-
 		// Simulate session flow: UserPromptSubmit → make changes → Stop
 		if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
 			t.Fatalf("SimulateUserPromptSubmit error = %v", err)
@@ -74,9 +71,6 @@ func TestAgentStrategyComposition(t *testing.T) {
 		if len(points) == 0 {
 			t.Fatal("expected at least 1 rewind point after Stop hook")
 		}
-
-		// Verify session ID in checkpoint matches transformed ID
-		t.Logf("Created checkpoint with session ID: %s (transformed: %s)", session.ID, entireSessionID)
 	})
 }
 
@@ -85,24 +79,12 @@ func TestAgentSessionIDTransformation(t *testing.T) {
 	t.Parallel()
 
 	RunForAllStrategies(t, func(t *testing.T, env *TestEnv, strategyName string) {
-		ag, _ := agent.Get("claude-code")
-
 		// Create session and simulate full flow
 		session := env.NewSession()
 		env.WriteFile("test.go", "package main")
 		transcriptPath := session.CreateTranscript("Test", []FileChange{
 			{Path: "test.go", Content: "package main"},
 		})
-
-		// Transform session ID
-		entireSessionID := ag.TransformSessionID(session.ID)
-
-		// Verify round-trip
-		extractedID := ag.ExtractAgentSessionID(entireSessionID)
-		if extractedID != session.ID {
-			t.Errorf("ExtractAgentSessionID(TransformSessionID(%q)) = %q, want %q",
-				session.ID, extractedID, session.ID)
-		}
 
 		// Simulate hooks
 		env.SimulateUserPromptSubmit(session.ID)
