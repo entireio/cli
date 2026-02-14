@@ -1,0 +1,35 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "bccb77bb88fa",
+  "strategy": "manual-commit",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/e2e_test/agent_runner.go",
+    "cmd/entire/cli/e2e_test/assertions.go",
+    "cmd/entire/cli/e2e_test/prompts.go",
+    "cmd/entire/cli/e2e_test/scenario_agent_commit_test.go",
+    "cmd/entire/cli/e2e_test/scenario_basic_workflow_test.go",
+    "cmd/entire/cli/e2e_test/scenario_checkpoint_test.go",
+    "cmd/entire/cli/e2e_test/scenario_rewind_test.go",
+    "cmd/entire/cli/e2e_test/setup_test.go",
+    "cmd/entire/cli/e2e_test/testenv.go",
+    "mise.toml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/bc/cb77bb88fa/0/metadata.json",
+      "transcript": "/bc/cb77bb88fa/0/full.jsonl",
+      "context": "/bc/cb77bb88fa/0/context.md",
+      "content_hash": "/bc/cb77bb88fa/0/content_hash.txt",
+      "prompt": "/bc/cb77bb88fa/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2012,
+    "cache_creation_tokens": 136966,
+    "cache_read_tokens": 5044321,
+    "output_tokens": 118,
+    "api_call_count": 46
+  }
+}
