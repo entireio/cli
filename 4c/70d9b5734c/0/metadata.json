@@ -1,0 +1,33 @@
+{
+  "cli_version": "v0.4.4-34-gc899b591-dirty",
+  "checkpoint_id": "4c70d9b5734c",
+  "session_id": "c010174c-a7cd-4bcc-b7d4-61258d6c463f",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-15T09:50:07.379569Z",
+  "branch": "alex/fix-gemini-checkpointing",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/geminicli/transcript.go",
+    "cmd/entire/cli/agent/geminicli/transcript_test.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "c9698f46c5e2",
+  "token_usage": {
+    "input_tokens": 36,
+    "cache_creation_tokens": 75913,
+    "cache_read_tokens": 2813946,
+    "output_tokens": 4448,
+    "api_call_count": 32
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-15T09:50:07.022482Z",
+    "agent_lines": 222,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 222,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-alex-workspace-cli--worktrees-3/c010174c-a7cd-4bcc-b7d4-61258d6c463f.jsonl"
+}

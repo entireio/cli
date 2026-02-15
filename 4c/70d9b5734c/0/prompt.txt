@@ -1,0 +1,72 @@
+Implement the following plan:
+
+# Fix Gemini Transcript Parsing for Checkpointing
+
+## Context
+
+Gemini checkpointing is broken because `GeminiMessage.Content` is defined as `string`, but actual Gemini CLI transcripts use different formats for the `content` field:
+- **User messages**: `"content": [{"text": "the prompt"}]` (array of objects)
+- **Gemini messages**: `"content": "response text"` (string)
+
+`json.Unmarshal` fails when encountering an array where a string is expected, causing `ParseTranscript()` to return an error. This cascades through the entire checkpoint pipeline:
+
+1. `countTranscriptItems()` returns 0 for Gemini transcripts
+2. `prepare-commit-msg` hook sees "no content to link" and skips adding the `Entire-Checkpoint` trailer
+3. `post-commit` hook sees no trailer and skips condensation
+4. Session data is never condensed to `entire/checkpoints/v1`
+
+All existing tests use simplified `"content": "string"` format that doesn't match the real Gemini CLI output.
+
+## Fix
+
+### Step 1: Add custom `UnmarshalJSON` to `GeminiMessage`
+
+**File**: `cmd/entire/cli/agent/geminicli/transcript.go`
+
+Add a custom unmarshaler that handles both content formats:
+- If `content` is a string: use directly
+- If `content` is an array of `[{"text": "..."}]`: extract text parts and join with newlines
+- If `content` is absent/null: leave as empty string
+
+This is the cleanest approach because all existing code accessing `msg.Content` continues to work without changes.
+
+### Step 2: Add tests for the real Gemini transcript format
+
+**File**: `cmd/entire/cli/agent/geminicli/transcript_test.go`
+
+Add test cases using the actual Gemini transcript format with array-based content for user messages. Tests should cover:
+- `ParseTranscript` with mixed content types (array for user, string for gemini)
+- `ExtractAllUserPrompts` with array-based user content
+- `ExtractLastUserPrompt` with array-based user content
+- `ExtractModifiedFiles` with real Gemini transcript format
+- `countTranscriptItems` in `manual_commit_condensation.go` returning correct count
+
+### Step 3: Update existing test fixtures
+
+**Files**: `cmd/entire/cli/agent/geminicli/transcript_test.go`, `cmd/entire/cli/agent/geminicli/gemini_test.go`
+
+Update existing test data to include at least some tests with the real array format to prevent regression.
+
+### Step 4: Add a strategy-level regression test
+
+**File**: `cmd/entire/cli/strategy/manual_commit_hooks.go` tests or new test
+
+Add a test that reproduces the original bug: `sessionHasNewContent` with a Gemini transcript containing array-content user messages should return `true`, not `false`.
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+Specifically verify:
+- `go test ./cmd/entire/cli/agent/geminicli/... -run TestParseTranscript` passes with new array-content format
+- `go test ./cmd/entire/cli/strategy/... -run TestSessionHasNewContent` passes with Gemini transcripts
+- All existing tests still pass (the fix is backward-compatible with string content)
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+
+---
+
+commit this, push and open a draft PR
