@@ -1,0 +1,36 @@
+{
+  "cli_version": "v0.4.4-29-gcdc5c7ee-dirty",
+  "checkpoint_id": "184069756ffc",
+  "session_id": "e8811ad6-93d9-4ee6-997d-2447a5d496f3",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-15T08:07:33.364037Z",
+  "branch": "alex/ent-297-fix-subagent-only-changes-checkpointing",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "c2638b550dd1",
+  "transcript_identifier_at_start": "accb1a32-0c98-410e-b4ce-fa44931f7d6a",
+  "checkpoint_transcript_start": 810,
+  "transcript_lines_at_start": 810,
+  "token_usage": {
+    "input_tokens": 72,
+    "cache_creation_tokens": 157292,
+    "cache_read_tokens": 4564590,
+    "output_tokens": 741,
+    "api_call_count": 44
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-15T08:07:32.511714Z",
+    "agent_lines": 0,
+    "human_added": 313,
+    "human_modified": 11,
+    "human_removed": 0,
+    "total_committed": 313,
+    "agent_percentage": 0
+  },
+  "transcript_path": ".claude/projects/-Users-alex-workspace-cli--worktrees-2/e8811ad6-93d9-4ee6-997d-2447a5d496f3.jsonl"
+}
