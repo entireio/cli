@@ -344,6 +344,7 @@ func TestDetermineSettingsTarget_SettingsNotExists_NoFlags(t *testing.T) {
 }
 
 func TestRunEnableWithStrategy_PreservesExistingSettings(t *testing.T) {
+	t.Setenv("ENTIRE_SKIP_AGENT_CHECK", "1")
 	setupTestRepo(t)
 
 	// Create initial settings with strategy_options (like push enabled)
@@ -358,8 +359,8 @@ func TestRunEnableWithStrategy_PreservesExistingSettings(t *testing.T) {
 	writeSettings(t, initialSettings)
 
 	// Run enable with a different strategy
-	var stdout bytes.Buffer
-	err := runEnableWithStrategy(&stdout, "auto-commit", false, false, false, true, false, false, false)
+	var stdout, stderr bytes.Buffer
+	err := runEnableWithStrategy(&stdout, &stderr, "auto-commit", false, false, false, true, false, false, false)
 	if err != nil {
 		t.Fatalf("runEnableWithStrategy() error = %v", err)
 	}
@@ -388,6 +389,7 @@ func TestRunEnableWithStrategy_PreservesExistingSettings(t *testing.T) {
 }
 
 func TestRunEnableWithStrategy_PreservesLocalSettings(t *testing.T) {
+	t.Setenv("ENTIRE_SKIP_AGENT_CHECK", "1")
 	setupTestRepo(t)
 
 	// Create project settings
@@ -402,8 +404,8 @@ func TestRunEnableWithStrategy_PreservesLocalSettings(t *testing.T) {
 	writeLocalSettings(t, localSettings)
 
 	// Run enable with --local flag
-	var stdout bytes.Buffer
-	err := runEnableWithStrategy(&stdout, "auto-commit", false, false, true, false, false, false, false)
+	var stdout, stderr bytes.Buffer
+	err := runEnableWithStrategy(&stdout, &stderr, "auto-commit", false, false, true, false, false, false, false)
 	if err != nil {
 		t.Fatalf("runEnableWithStrategy() error = %v", err)
 	}
@@ -876,5 +878,66 @@ func TestEnableCmd_AgentFlagEmptyValue(t *testing.T) {
 	}
 	if strings.Contains(output, "flag needs an argument") {
 		t.Error("should not contain default cobra/pflag error message")
+	}
+}
+
+func TestAgentInstallURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		agent   string
+		wantURL string
+	}{
+		{
+			name:    "claude-code",
+			agent:   "claude-code",
+			wantURL: "https://docs.anthropic.com/en/docs/claude-code",
+		},
+		{
+			name:    "gemini",
+			agent:   "gemini",
+			wantURL: "https://github.com/google-gemini/gemini-cli",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ag, err := agent.Get(agent.AgentName(tt.agent))
+			if err != nil {
+				t.Fatalf("agent.Get(%q): %v", tt.agent, err)
+			}
+			got := ag.InstallURL()
+			if got != tt.wantURL {
+				t.Errorf("InstallURL() = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestFindInstalledAgent_ReturnsAgent(t *testing.T) {
+	t.Parallel()
+
+	var stderrBuf bytes.Buffer
+	ag, err := findInstalledAgent(&stderrBuf)
+
+	// This test is environment-dependent:
+	// - If claude or gemini is installed, ag should be non-nil
+	// - If neither is installed, err should be non-nil with helpful message on stderr
+	if ag != nil {
+		// Agent was found - verify it has a valid name
+		if ag.Name() == "" {
+			t.Error("findInstalledAgent() returned agent with empty name")
+		}
+	} else {
+		// No agent found - verify helpful error message was printed to stderr
+		if err == nil {
+			t.Error("findInstalledAgent() returned nil agent and nil error")
+		}
+		output := stderrBuf.String()
+		if !strings.Contains(output, "No AI agents with hook support found in PATH") {
+			t.Errorf("expected helpful error message on stderr, got: %s", output)
+		}
 	}
 }

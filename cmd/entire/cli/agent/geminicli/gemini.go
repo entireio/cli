@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"time"
@@ -26,7 +27,11 @@ func init() {
 // GeminiCLIAgent implements the Agent interface for Gemini CLI.
 //
 //nolint:revive // GeminiCLIAgent is clearer than Agent in this context
-type GeminiCLIAgent struct{}
+type GeminiCLIAgent struct {
+	// LookPath checks if a binary exists in PATH. Defaults to exec.LookPath when nil.
+	// Exported for testing.
+	LookPath func(file string) (string, error)
+}
 
 func NewGeminiCLIAgent() agent.Agent {
 	return &GeminiCLIAgent{}
@@ -68,6 +73,27 @@ func (g *GeminiCLIAgent) DetectPresence() (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// IsInstalled checks if the `gemini` binary is available in PATH.
+func (g *GeminiCLIAgent) IsInstalled() (bool, error) {
+	lookPath := g.LookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	_, err := lookPath("gemini")
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("look path gemini: %w", err)
+	}
+	return true, nil
+}
+
+// InstallURL returns the installation documentation URL for Gemini CLI.
+func (g *GeminiCLIAgent) InstallURL() string {
+	return "https://github.com/google-gemini/gemini-cli"
 }
 
 // GetHookConfigPath returns the path to Gemini's hook config file.

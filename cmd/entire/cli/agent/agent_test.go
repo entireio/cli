@@ -24,10 +24,9 @@ func (m *mockAgent) SupportsHooks() bool           { return false }
 func (m *mockAgent) ParseHookInput(_ HookType, _ io.Reader) (*HookInput, error) {
 	return nil, nil
 }
-func (m *mockAgent) GetSessionID(_ *HookInput) string         { return "" }
-func (m *mockAgent) TransformSessionID(agentID string) string { return agentID }
-func (m *mockAgent) ProtectedDirs() []string                  { return nil }
-func (m *mockAgent) GetSessionDir(_ string) (string, error)   { return "", nil }
+func (m *mockAgent) GetSessionID(_ *HookInput) string       { return "" }
+func (m *mockAgent) ProtectedDirs() []string                { return nil }
+func (m *mockAgent) GetSessionDir(_ string) (string, error) { return "", nil }
 func (m *mockAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 	return sessionDir + "/" + agentSessionID + ".jsonl"
 }
@@ -36,6 +35,8 @@ func (m *mockAgent) ResolveSessionFile(sessionDir, agentSessionID string) string
 func (m *mockAgent) ReadSession(_ *HookInput) (*AgentSession, error) { return nil, nil }
 func (m *mockAgent) WriteSession(_ *AgentSession) error              { return nil }
 func (m *mockAgent) FormatResumeCommand(_ string) string             { return "" }
+func (m *mockAgent) IsInstalled() (bool, error)                      { return false, nil }
+func (m *mockAgent) InstallURL() string                              { return "" }
 
 // mockHookSupport implements both Agent and HookSupport interfaces.
 type mockHookSupport struct {

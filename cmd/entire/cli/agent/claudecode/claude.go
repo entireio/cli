@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"time"
@@ -24,7 +25,11 @@ func init() {
 // ClaudeCodeAgent implements the Agent interface for Claude Code.
 //
 //nolint:revive // ClaudeCodeAgent is clearer than Agent in this context
-type ClaudeCodeAgent struct{}
+type ClaudeCodeAgent struct {
+	// lookPath checks if a binary exists in PATH. Defaults to exec.LookPath when nil.
+	// Exported for testing.
+	LookPath func(file string) (string, error)
+}
 
 // NewClaudeCodeAgent creates a new Claude Code agent instance.
 func NewClaudeCodeAgent() agent.Agent {
@@ -67,6 +72,27 @@ func (c *ClaudeCodeAgent) DetectPresence() (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// IsInstalled checks if the `claude` binary is available in PATH.
+func (c *ClaudeCodeAgent) IsInstalled() (bool, error) {
+	lookPath := c.LookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	_, err := lookPath("claude")
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("look path claude: %w", err)
+	}
+	return true, nil
+}
+
+// InstallURL returns the installation documentation URL for Claude Code.
+func (c *ClaudeCodeAgent) InstallURL() string {
+	return "https://docs.anthropic.com/en/docs/claude-code"
 }
 
 // GetHookConfigPath returns the path to Claude's hook config file.

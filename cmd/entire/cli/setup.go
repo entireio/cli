@@ -96,13 +96,27 @@ Strategies: manual-commit (default), auto-commit`,
 					printWrongAgentError(cmd.ErrOrStderr(), agentName)
 					return NewSilentError(errors.New("wrong agent name"))
 				}
+
+				// If agent isn't in PATH, warn but still proceed (hooks are only run when the agent runs).
+				if os.Getenv("ENTIRE_SKIP_AGENT_CHECK") != "1" {
+					installed, err := ag.IsInstalled()
+					if err != nil {
+						return fmt.Errorf("error checking if %s is installed: %w", agentName, err)
+					}
+					if !installed {
+						fmt.Fprintf(cmd.ErrOrStderr(),
+							"Note: %s is not in PATH. Hooks were installed; install it from %s when you're ready to capture sessions.\n",
+							agentName, ag.InstallURL())
+					}
+				}
+
 				return setupAgentHooksNonInteractive(cmd.OutOrStdout(), ag, strategyFlag, localDev, forceHooks, skipPushSessions, telemetry)
 			}
 			// If strategy is specified via flag, skip interactive selection
 			if strategyFlag != "" {
-				return runEnableWithStrategy(cmd.OutOrStdout(), strategyFlag, localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
+				return runEnableWithStrategy(cmd.OutOrStdout(), cmd.ErrOrStderr(), strategyFlag, localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
 			}
-			return runEnableInteractive(cmd.OutOrStdout(), localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
+			return runEnableInteractive(cmd.OutOrStdout(), cmd.ErrOrStderr(), localDev, ignoreUntracked, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
 		},
 	}
 
@@ -221,7 +235,7 @@ func isFullyEnabled() (enabled bool, agentDesc string, configPath string) {
 // runEnableWithStrategy enables Entire with a specified strategy (non-interactive).
 // The selectedStrategy can be either a display name (manual-commit, auto-commit)
 // or an internal name (manual-commit, auto-commit).
-func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
+func runEnableWithStrategy(w, errW io.Writer, selectedStrategy string, localDev, _, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
 	// Map the strategy to internal name if it's a display name
 	internalStrategy := selectedStrategy
 	if mapped, ok := strategyDisplayToInternal[selectedStrategy]; ok {
@@ -234,17 +248,16 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 		return fmt.Errorf("unknown strategy: %s (use manual-commit or auto-commit)", selectedStrategy)
 	}
 
-	// Detect default agent
-	ag := agent.Default()
-	agentType := string(agent.AgentTypeClaudeCode)
-	if ag != nil {
-		agentType = string(ag.Type())
+	// Find an installed agent
+	ag, err := findInstalledAgent(errW)
+	if err != nil {
+		return err
 	}
-	fmt.Fprintf(w, "Agent: %s (use --agent to change)\n\n", agentType)
+	fmt.Fprintf(w, "Agent: %s (use --agent to change)\n\n", ag.Type())
 
-	// Setup Claude Code hooks (agent hooks don't depend on settings)
-	if _, err := setupClaudeCodeHook(localDev, forceHooks); err != nil {
-		return fmt.Errorf("failed to setup Claude Code hooks: %w", err)
+	// Setup agent hooks (agent hooks don't depend on settings)
+	if _, err := setupAgentHooks(ag, localDev, forceHooks); err != nil {
+		return fmt.Errorf("failed to setup agent hooks: %w", err)
 	}
 
 	// Setup .entire directory
@@ -320,7 +333,7 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 }
 
 // runEnableInteractive runs the interactive enable flow.
-func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
+func runEnableInteractive(w, errW io.Writer, localDev, _, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
 	// Check if already fully enabled — show summary and return early.
 	// Skip early return if any configuration flags are set (user wants to reconfigure).
 	hasConfigFlags := forceHooks || skipPushSessions || !telemetry || useLocalSettings || useProjectSettings || localDev
@@ -334,17 +347,16 @@ func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProject
 		}
 	}
 
-	// Detect default agent
-	ag := agent.Default()
-	agentType := string(agent.AgentTypeClaudeCode)
-	if ag != nil {
-		agentType = string(ag.Type())
+	// Find an installed agent
+	ag, err := findInstalledAgent(errW)
+	if err != nil {
+		return err
 	}
-	fmt.Fprintf(w, "Agent: %s (use --agent to change)\n\n", agentType)
+	fmt.Fprintf(w, "Agent: %s (use --agent to change)\n\n", ag.Type())
 
-	// Setup Claude Code hooks (agent hooks don't depend on settings)
-	if _, err := setupClaudeCodeHook(localDev, forceHooks); err != nil {
-		return fmt.Errorf("failed to setup Claude Code hooks: %w", err)
+	// Setup agent hooks (agent hooks don't depend on settings)
+	if _, err := setupAgentHooks(ag, localDev, forceHooks); err != nil {
+		return fmt.Errorf("failed to setup agent hooks: %w", err)
 	}
 
 	// Setup .entire directory
@@ -495,25 +507,110 @@ func checkDisabledGuard(w io.Writer) bool {
 	return false
 }
 
-// setupClaudeCodeHook sets up Claude Code hooks.
-// This is a convenience wrapper that uses the agent package.
-// Returns the number of hooks installed (0 if already installed).
-func setupClaudeCodeHook(localDev, forceHooks bool) (int, error) { //nolint:unparam // already present in codebase
-	ag, err := agent.Get(agent.AgentNameClaudeCode)
+// isInstalledWithHookSupport returns true if the agent is installed (binary in PATH)
+// and implements HookSupport, so we can install hooks for it.
+// Returns (false, err) when IsInstalled() returns an unexpected OS error, so callers
+// can propagate it instead of showing a generic "not found" message.
+func isInstalledWithHookSupport(ag agent.Agent) (bool, error) {
+	if _, ok := ag.(agent.HookSupport); !ok {
+		return false, nil
+	}
+	installed, err := ag.IsInstalled()
 	if err != nil {
-		return 0, fmt.Errorf("failed to get claude-code agent: %w", err)
+		return false, fmt.Errorf("checking installation status: %w", err)
+	}
+	return installed, nil
+}
+
+// findInstalledAgentFn is the function used to find an installed agent.
+// It can be overridden in tests to return a mock agent.
+var findInstalledAgentFn = findInstalledAgentImpl
+
+// findInstalledAgent calls the findInstalledAgentFn function variable.
+// This indirection allows tests to mock the agent detection.
+func findInstalledAgent(errW io.Writer) (agent.Agent, error) {
+	return findInstalledAgentFn(errW)
+}
+
+// findInstalledAgentImpl returns the first installed agent that supports hooks.
+// It tries the default agent first, then checks all registered agents.
+// Only agents that are both installed (binary in PATH) and implement HookSupport
+// are returned, so the enable flow can always install hooks.
+// Returns the agent and nil error if found, or nil agent and an error with
+// helpful install instructions written to errW (stderr). OS errors from
+// IsInstalled() (e.g. permission errors on PATH) are propagated to the caller.
+//
+// If ENTIRE_SKIP_AGENT_CHECK=1 is set (used by integration tests), the default
+// agent is returned without checking if it's installed.
+func findInstalledAgentImpl(errW io.Writer) (agent.Agent, error) {
+	// Allow tests to skip the agent check
+	if os.Getenv("ENTIRE_SKIP_AGENT_CHECK") == "1" {
+		ag := agent.Default()
+		if ag != nil {
+			return ag, nil
+		}
+	}
+	var firstErr error
+
+	// Try the default agent first
+	ag := agent.Default()
+	if ag != nil {
+		ok, err := isInstalledWithHookSupport(ag)
+		if err != nil {
+			firstErr = err
+		} else if ok {
+			return ag, nil
+		}
 	}
 
+	// Check all registered agents
+	for _, name := range agent.List() {
+		a, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		ok, err := isInstalledWithHookSupport(a)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else if ok {
+			return a, nil
+		}
+	}
+
+	// If we hit an OS error while checking, propagate it
+	if firstErr != nil {
+		return nil, fmt.Errorf("error checking if agent is installed: %w", firstErr)
+	}
+
+	// No hook-supporting agents found - provide helpful error to stderr
+	fmt.Fprintln(errW, "No AI agents with hook support found in PATH.")
+	fmt.Fprintln(errW)
+	fmt.Fprintln(errW, "Please install one of the following:")
+	for _, name := range agent.List() {
+		a, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(errW, "  - %s: %s\n", a.Description(), a.InstallURL())
+	}
+	return nil, NewSilentError(errors.New("no agents installed"))
+}
+
+// setupAgentHooks installs hooks for the given agent if it supports them.
+// Returns the number of hooks installed.
+//
+//nolint:unparam // count is returned for API consistency with InstallHooks
+func setupAgentHooks(ag agent.Agent, localDev, forceHooks bool) (int, error) {
 	hookAgent, ok := ag.(agent.HookSupport)
 	if !ok {
-		return 0, errors.New("claude-code agent does not support hooks")
+		return 0, nil // Agent doesn't support hooks, not an error
 	}
-
 	count, err := hookAgent.InstallHooks(localDev, forceHooks)
 	if err != nil {
-		return 0, fmt.Errorf("failed to install claude-code hooks: %w", err)
+		return 0, fmt.Errorf("failed to install hooks for %s: %w", ag.Name(), err)
 	}
-
 	return count, nil
 }
 

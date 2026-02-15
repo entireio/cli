@@ -3,8 +3,10 @@ package geminicli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +16,63 @@ import (
 
 // Test constants
 const testSessionID = "abc123"
+
+func TestIsInstalled_Found(t *testing.T) {
+	t.Parallel()
+
+	ag := &GeminiCLIAgent{
+		LookPath: func(file string) (string, error) {
+			if file == "gemini" {
+				return "/usr/bin/gemini", nil
+			}
+			return "", exec.ErrNotFound
+		},
+	}
+	installed, err := ag.IsInstalled()
+
+	if err != nil {
+		t.Fatalf("IsInstalled() error = %v", err)
+	}
+	if !installed {
+		t.Error("IsInstalled() = false, want true")
+	}
+}
+
+func TestIsInstalled_NotFound(t *testing.T) {
+	t.Parallel()
+
+	ag := &GeminiCLIAgent{
+		LookPath: func(_ string) (string, error) {
+			return "", exec.ErrNotFound
+		},
+	}
+	installed, err := ag.IsInstalled()
+
+	if err != nil {
+		t.Fatalf("IsInstalled() error = %v", err)
+	}
+	if installed {
+		t.Error("IsInstalled() = true, want false")
+	}
+}
+
+func TestIsInstalled_OSError(t *testing.T) {
+	t.Parallel()
+
+	ag := &GeminiCLIAgent{
+		LookPath: func(_ string) (string, error) {
+			return "", errors.New("permission denied")
+		},
+	}
+	installed, err := ag.IsInstalled()
+
+	if err == nil {
+		t.Fatal("IsInstalled() should return error for OS errors")
+	}
+	if installed {
+		t.Error("IsInstalled() = true, want false on error")
+	}
+}
 
 func TestNewGeminiCLIAgent(t *testing.T) {
 	ag := NewGeminiCLIAgent()

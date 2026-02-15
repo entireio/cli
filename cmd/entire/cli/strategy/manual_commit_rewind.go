@@ -792,7 +792,7 @@ func ResolveAgentForRewind(agentType agent.AgentType) (agent.Agent, error) {
 // ResolveSessionFilePath determines the correct file path for an agent's session transcript.
 // Checks session state for transcript_path first (needed for agents like Gemini that store
 // transcripts at paths that GetSessionDir can't reconstruct, e.g. SHA-256 hashed directories).
-// Falls back to the agent's ExtractAgentSessionID + ResolveSessionFile with fallbackSessionDir.
+// Falls back to the agent's ResolveSessionFile with fallbackSessionDir.
 func ResolveSessionFilePath(sessionID string, ag agent.Agent, fallbackSessionDir string) string {
 	state, err := LoadSessionState(sessionID)
 	if err == nil && state != nil && state.TranscriptPath != "" {
