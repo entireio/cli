@@ -1,0 +1,19 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "d38f8f80fa82",
+  "strategy": "manual-commit",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/e2e_test/scenario_rewind_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d3/8f8f80fa82/0/metadata.json",
+      "transcript": "/d3/8f8f80fa82/0/full.jsonl",
+      "context": "",
+      "content_hash": "/d3/8f8f80fa82/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
