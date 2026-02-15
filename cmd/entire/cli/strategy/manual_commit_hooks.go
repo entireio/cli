@@ -1101,24 +1101,45 @@ func addCheckpointTrailer(message string, checkpointID id.CheckpointID) string {
 	// Otherwise, add a blank line first
 	lines := strings.Split(strings.TrimRight(message, "\n"), "\n")
 
-	// Check if last non-empty, non-comment line looks like a trailer
-	// Git comment lines start with # and may contain ": " (e.g., "# Changes to be committed:")
+	// Check if the message already ends with a trailer paragraph.
+	// Git trailers must be in a separate paragraph (preceded by a blank line).
+	// A single-paragraph message (e.g., just a subject line) cannot have trailers,
+	// even if the subject contains ": " (like conventional commits: "docs: Add foo").
+	//
+	// Scan from the bottom: find the last paragraph of non-comment content,
+	// then check if it looks like trailers AND has a blank line above it.
 	hasTrailers := false
-	for i := len(lines) - 1; i >= 0; i-- {
+	i := len(lines) - 1
+
+	// Skip trailing comment lines
+	for i >= 0 && strings.HasPrefix(strings.TrimSpace(lines[i]), "#") {
+		i--
+	}
+
+	// Check if the last non-comment line looks like a trailer
+	if i >= 0 {
 		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			break
+		if line != "" && strings.Contains(line, ": ") {
+			// Found a trailer-like line. Now scan upward past the trailer block
+			// to verify there's a blank line (paragraph separator) above it.
+			for i > 0 {
+				i--
+				above := strings.TrimSpace(lines[i])
+				if strings.HasPrefix(above, "#") {
+					continue
+				}
+				if above == "" {
+					// Blank line found above trailer block — real trailers
+					hasTrailers = true
+					break
+				}
+				if !strings.Contains(above, ": ") {
+					// Non-trailer, non-blank line — this is message body, not trailers
+					break
+				}
+				// Another trailer-like line, keep scanning upward
+			}
 		}
-		// Skip git comment lines
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.Contains(line, ": ") {
-			hasTrailers = true
-			break
-		}
-		// Non-comment, non-trailer line found - no existing trailers
-		break
 	}
 
 	if hasTrailers {
