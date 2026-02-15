@@ -3,7 +3,7 @@
   "checkpoint_id": "57f1f346970c",
   "strategy": "manual-commit",
   "branch": "soph/1to1-bugs-found-by-e2e",
-  "checkpoints_count": 1,
+  "checkpoints_count": 4,
   "files_touched": [
     "cmd/entire/cli/strategy/auto_commit.go"
   ],
@@ -14,6 +14,20 @@
       "context": "",
       "content_hash": "/57/f1f346970c/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/57/f1f346970c/1/metadata.json",
+      "transcript": "/57/f1f346970c/1/full.jsonl",
+      "context": "/57/f1f346970c/1/context.md",
+      "content_hash": "/57/f1f346970c/1/content_hash.txt",
+      "prompt": "/57/f1f346970c/1/prompt.txt"
     }
-  ]
+  ],
+  "token_usage": {
+    "input_tokens": 240,
+    "cache_creation_tokens": 147330,
+    "cache_read_tokens": 3407327,
+    "output_tokens": 81,
+    "api_call_count": 29
+  }
 }
