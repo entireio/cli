@@ -1,0 +1,37 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "a61fbcc4a89f",
+  "session_id": "4a364c97-9dde-4a98-a973-26edea2c0e8b",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-15T09:34:26.686857Z",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/e2e_test/testenv.go",
+    "cmd/entire/cli/integration_test/deferred_finalization_test.go",
+    "cmd/entire/cli/integration_test/testenv.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "f272f06f5529",
+  "transcript_identifier_at_start": "d01133c2-5336-465a-8170-aa412595cd92",
+  "token_usage": {
+    "input_tokens": 2825,
+    "cache_creation_tokens": 896953,
+    "cache_read_tokens": 32347053,
+    "output_tokens": 1560,
+    "api_call_count": 340
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-15T09:34:24.642456Z",
+    "agent_lines": 115,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 115,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/4a364c97-9dde-4a98-a973-26edea2c0e8b.jsonl"
+}
