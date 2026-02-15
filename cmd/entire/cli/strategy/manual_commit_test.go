@@ -1850,6 +1850,19 @@ func TestCountTranscriptItems(t *testing.T) {
 			content:   "",
 			expected:  0,
 		},
+		{
+			name:      "Gemini JSON with array content (real format)",
+			agentType: agent.AgentTypeGemini,
+			content: `{
+				"messages": [
+					{"type": "user", "content": [{"text": "Hello"}]},
+					{"type": "gemini", "content": "Hi there!"},
+					{"type": "user", "content": [{"text": "Do something"}]},
+					{"type": "gemini", "content": "Done!"}
+				]
+			}`,
+			expected: 4,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1916,6 +1929,19 @@ func TestExtractUserPrompts(t *testing.T) {
 			agentType: agent.AgentTypeClaudeCode,
 			content:   "",
 			expected:  nil,
+		},
+		{
+			name:      "Gemini array content (real format)",
+			agentType: agent.AgentTypeGemini,
+			content: `{
+				"messages": [
+					{"type": "user", "content": [{"text": "Create a file"}]},
+					{"type": "gemini", "content": "Done!"},
+					{"type": "user", "content": [{"text": "Edit the file"}]},
+					{"type": "gemini", "content": "Updated!"}
+				]
+			}`,
+			expected: []string{"Create a file", "Edit the file"},
 		},
 	}
 

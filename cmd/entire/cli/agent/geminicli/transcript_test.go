@@ -183,6 +183,90 @@ func TestExtractModifiedFiles_ReplaceTool(t *testing.T) {
 	}
 }
 
+func TestParseTranscript_ArrayContent(t *testing.T) {
+	t.Parallel()
+
+	// Real Gemini CLI format: user messages have array content, gemini messages have string content
+	data := []byte(`{
+  "messages": [
+    {"type": "user", "content": [{"text": "hello world"}]},
+    {"type": "gemini", "content": "hi there"},
+    {"type": "user", "content": [{"text": "do something"}]},
+    {"type": "gemini", "content": "sure thing"}
+  ]
+}`)
+
+	transcript, err := ParseTranscript(data)
+	if err != nil {
+		t.Fatalf("ParseTranscript() error = %v", err)
+	}
+
+	if len(transcript.Messages) != 4 {
+		t.Fatalf("ParseTranscript() got %d messages, want 4", len(transcript.Messages))
+	}
+
+	// User messages should have extracted text from array
+	if transcript.Messages[0].Content != "hello world" {
+		t.Errorf("Message 0 content = %q, want %q", transcript.Messages[0].Content, "hello world")
+	}
+	if transcript.Messages[2].Content != "do something" {
+		t.Errorf("Message 2 content = %q, want %q", transcript.Messages[2].Content, "do something")
+	}
+
+	// Gemini messages should have string content as-is
+	if transcript.Messages[1].Content != "hi there" {
+		t.Errorf("Message 1 content = %q, want %q", transcript.Messages[1].Content, "hi there")
+	}
+	if transcript.Messages[3].Content != "sure thing" {
+		t.Errorf("Message 3 content = %q, want %q", transcript.Messages[3].Content, "sure thing")
+	}
+}
+
+func TestParseTranscript_ArrayContentMultipleParts(t *testing.T) {
+	t.Parallel()
+
+	// Array content with multiple text parts should be joined with newlines
+	data := []byte(`{
+  "messages": [
+    {"type": "user", "content": [{"text": "part one"}, {"text": "part two"}]}
+  ]
+}`)
+
+	transcript, err := ParseTranscript(data)
+	if err != nil {
+		t.Fatalf("ParseTranscript() error = %v", err)
+	}
+
+	if len(transcript.Messages) != 1 {
+		t.Fatalf("ParseTranscript() got %d messages, want 1", len(transcript.Messages))
+	}
+
+	want := "part one\npart two"
+	if transcript.Messages[0].Content != want {
+		t.Errorf("Content = %q, want %q", transcript.Messages[0].Content, want)
+	}
+}
+
+func TestParseTranscript_NullContent(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{
+  "messages": [
+    {"type": "user", "content": null},
+    {"type": "gemini", "content": "response"}
+  ]
+}`)
+
+	transcript, err := ParseTranscript(data)
+	if err != nil {
+		t.Fatalf("ParseTranscript() error = %v", err)
+	}
+
+	if transcript.Messages[0].Content != "" {
+		t.Errorf("Content = %q, want empty string", transcript.Messages[0].Content)
+	}
+}
+
 func TestExtractLastUserPrompt(t *testing.T) {
 	t.Parallel()
 
@@ -199,6 +283,15 @@ func TestExtractLastUserPrompt(t *testing.T) {
 				{"type": "user", "content": "second"}
 			]}`,
 			want: "second",
+		},
+		{
+			name: "array content",
+			data: `{"messages": [
+				{"type": "user", "content": [{"text": "first prompt"}]},
+				{"type": "gemini", "content": "response"},
+				{"type": "user", "content": [{"text": "second prompt"}]}
+			]}`,
+			want: "second prompt",
 		},
 		{
 			name: "only one user message",
@@ -415,6 +508,59 @@ func TestGetLastMessageIDFromFile(t *testing.T) {
 			t.Error("GetLastMessageIDFromFile() expected error for invalid JSON")
 		}
 	})
+}
+
+func TestExtractAllUserPrompts_ArrayContent(t *testing.T) {
+	t.Parallel()
+
+	// Real Gemini format with array content for user messages
+	data := []byte(`{
+  "messages": [
+    {"type": "user", "content": [{"text": "first prompt"}]},
+    {"type": "gemini", "content": "response 1"},
+    {"type": "user", "content": [{"text": "second prompt"}]},
+    {"type": "gemini", "content": "response 2"}
+  ]
+}`)
+
+	prompts, err := ExtractAllUserPrompts(data)
+	if err != nil {
+		t.Fatalf("ExtractAllUserPrompts() error = %v", err)
+	}
+
+	if len(prompts) != 2 {
+		t.Fatalf("ExtractAllUserPrompts() got %d prompts, want 2", len(prompts))
+	}
+
+	if prompts[0] != "first prompt" {
+		t.Errorf("prompts[0] = %q, want %q", prompts[0], "first prompt")
+	}
+	if prompts[1] != "second prompt" {
+		t.Errorf("prompts[1] = %q, want %q", prompts[1], "second prompt")
+	}
+}
+
+func TestExtractModifiedFiles_ArrayContent(t *testing.T) {
+	t.Parallel()
+
+	// Real Gemini transcript format: user messages have array content
+	data := []byte(`{
+  "messages": [
+    {"type": "user", "content": [{"text": "create a file"}]},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "foo.go"}}]},
+    {"type": "user", "content": [{"text": "edit the file"}]},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "edit_file", "args": {"file_path": "bar.go"}}]}
+  ]
+}`)
+
+	files, err := ExtractModifiedFiles(data)
+	if err != nil {
+		t.Fatalf("ExtractModifiedFiles() error = %v", err)
+	}
+
+	if len(files) != 2 {
+		t.Errorf("ExtractModifiedFiles() got %d files, want 2", len(files))
+	}
 }
 
 func TestExtractModifiedFilesFromTranscript(t *testing.T) {
