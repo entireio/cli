@@ -57,6 +57,13 @@ type State struct {
 	// nil means the session is still active or was not cleanly closed.
 	EndedAt *time.Time `json:"ended_at,omitempty"`
 
+	// AgentPID is the process ID of the agent that owns this session.
+	// Set to os.Getppid() in InitializeSession (the hook handler's parent is the agent).
+	// Refreshed on every TurnStart to handle agent process restarts.
+	// Zero means unknown (pre-upgrade sessions or non-agent sessions).
+	// Used by PrepareCommitMsg to match the committing session via PPID chain walking.
+	AgentPID int `json:"agent_pid,omitempty"`
+
 	// Phase is the lifecycle stage of this session (see phase.go).
 	// Empty means idle (backward compat with pre-state-machine files).
 	Phase Phase `json:"phase,omitempty"`

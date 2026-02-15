@@ -271,11 +271,38 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(commitMsgFile string, source str
 	// prompts and the content detection can miss mid-session work (no shadow
 	// branch yet, transcript analysis may fail). Generate a checkpoint ID and
 	// add the trailer directly.
+	//
+	// With concurrent sessions, we must pick the correct one. Strategy:
+	// 1. Try PID chain matching (deterministic — walks PPID chain to find the agent)
+	// 2. Fall back to most recent LastInteractionTime (better than random os.ReadDir order)
 	if !hasTTY() {
+		activeSessions := make([]*SessionState, 0, len(sessions))
 		for _, state := range sessions {
 			if state.Phase.IsActive() {
-				return s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source)
+				activeSessions = append(activeSessions, state)
 			}
+		}
+
+		if len(activeSessions) > 0 {
+			var selected *SessionState
+
+			// Try PID-based matching first
+			selected = findSessionByPIDChain(activeSessions)
+			if selected != nil {
+				logging.Debug(logCtx, "prepare-commit-msg: session matched via pid-chain",
+					slog.String("session_id", selected.SessionID),
+					slog.Int("agent_pid", selected.AgentPID),
+				)
+			} else {
+				// Fall back to most recently interacted session
+				sortSessionsByLastInteraction(activeSessions)
+				selected = activeSessions[0]
+				logging.Debug(logCtx, "prepare-commit-msg: session matched via last-interaction-fallback",
+					slog.String("session_id", selected.SessionID),
+				)
+			}
+
+			return s.addTrailerForAgentCommit(logCtx, commitMsgFile, selected, source)
 		}
 	}
 
@@ -291,6 +318,11 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(commitMsgFile string, source str
 		)
 		return nil
 	}
+
+	// Sort sessions by most recent interaction so the first entry is deterministic
+	// when multiple sessions have content. This prevents os.ReadDir ordering from
+	// picking a random session.
+	sortSessionsByLastInteraction(sessionsWithContent)
 
 	// Read current commit message
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
@@ -1343,6 +1375,13 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 			return fmt.Errorf("failed to generate turn ID: %w", err)
 		}
 		state.TurnID = turnID.String()
+
+		// Record the agent's PID for deterministic session matching in PrepareCommitMsg.
+		// The hook handler's parent process is the agent (claude-code invokes
+		// "entire hooks claude-code user-prompt-submit" as a child process).
+		// Refreshed on every turn start to handle agent process restarts (session
+		// resume with a different PID).
+		state.AgentPID = os.Getppid()
 
 		// Backfill AgentType if empty or set to the generic default "Agent"
 		if !isSpecificAgentType(state.AgentType) && agentType != "" {

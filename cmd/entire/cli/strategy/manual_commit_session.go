@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -233,6 +234,7 @@ func (s *ManualCommitStrategy) initializeSession(repo *git.Repository, sessionID
 		WorktreeID:            worktreeID,
 		StartedAt:             now,
 		LastInteractionTime:   &now,
+		AgentPID:              os.Getppid(),
 		TurnID:                turnID.String(),
 		StepCount:             0,
 		UntrackedFilesAtStart: untrackedFiles,
