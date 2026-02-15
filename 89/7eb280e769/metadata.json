@@ -101,6 +101,13 @@
       "context": "/89/7eb280e769/12/context.md",
       "content_hash": "/89/7eb280e769/12/content_hash.txt",
       "prompt": "/89/7eb280e769/12/prompt.txt"
+    },
+    {
+      "metadata": "/89/7eb280e769/13/metadata.json",
+      "transcript": "/89/7eb280e769/13/full.jsonl",
+      "context": "/89/7eb280e769/13/context.md",
+      "content_hash": "/89/7eb280e769/13/content_hash.txt",
+      "prompt": "/89/7eb280e769/13/prompt.txt"
     }
   ],
   "token_usage": {
