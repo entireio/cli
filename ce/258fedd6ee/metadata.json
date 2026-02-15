@@ -1,0 +1,19 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "ce258fedd6ee",
+  "strategy": "manual-commit",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ce/258fedd6ee/0/metadata.json",
+      "transcript": "/ce/258fedd6ee/0/full.jsonl",
+      "context": "",
+      "content_hash": "/ce/258fedd6ee/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
