@@ -380,3 +380,60 @@ func TestFindMostRecentSession_FallsBackWhenNoWorktreeMatch(t *testing.T) {
 		t.Logf("cleanup warning: %v", err)
 	}
 }
+
+// TestFindMostRecentSession_ConcurrentSameWorktree verifies that with multiple
+// concurrent sessions in the same worktree, FindMostRecentSession returns the
+// session with the most recent LastInteractionTime. This is the deterministic
+// behavior that replaces the previous nondeterministic os.ReadDir order.
+func TestFindMostRecentSession_ConcurrentSameWorktree(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	resolvedDir, err := GetWorktreePath()
+	if err != nil {
+		t.Fatalf("GetWorktreePath() error = %v", err)
+	}
+
+	older := time.Now().Add(-10 * time.Minute)
+	newer := time.Now()
+
+	// Session A: older interaction
+	sessionA := &SessionState{
+		SessionID:           "concurrent-session-a",
+		BaseCommit:          "abc1234",
+		WorktreePath:        resolvedDir,
+		StartedAt:           older,
+		LastInteractionTime: &older,
+		Phase:               "active",
+	}
+
+	// Session B: more recent interaction
+	sessionB := &SessionState{
+		SessionID:           "concurrent-session-b",
+		BaseCommit:          "abc1234",
+		WorktreePath:        resolvedDir,
+		StartedAt:           newer,
+		LastInteractionTime: &newer,
+		Phase:               "active",
+	}
+
+	if err := SaveSessionState(sessionA); err != nil {
+		t.Fatalf("SaveSessionState() error = %v", err)
+	}
+	if err := SaveSessionState(sessionB); err != nil {
+		t.Fatalf("SaveSessionState() error = %v", err)
+	}
+
+	// FindMostRecentSession should deterministically return session B
+	// (most recently interacted), not depend on os.ReadDir ordering.
+	result := FindMostRecentSession()
+	if result != "concurrent-session-b" {
+		t.Errorf("FindMostRecentSession() = %q, want %q (should select most recently interacted session)",
+			result, "concurrent-session-b")
+	}
+}
