@@ -70,6 +70,7 @@ Fires every time the user submits a prompt. Prepares the repository state tracki
 3.  **Initialize Session Strategy**:
     - For strategies that implement `SessionInitializer`, calls `InitializeSession()`.
     - **Manual-commit strategy**: Creates or validates the shadow branch (`entire/<HEAD-hash[:7]>`), saves session state to `.git/entire-sessions/<session-id>.json` with `BaseCommit`, `WorktreePath`, and `AgentType`.
+    - Records `AgentPID` (the agent process's PID via `os.Getppid()`) on every turn start. This enables deterministic session matching in `PrepareCommitMsg` when multiple concurrent sessions exist — the hook walks the PPID chain to find which agent initiated the commit (see [Session Identification via AgentPID](sessions-and-checkpoints.md#session-identification-via-agentpid)).
     - Handles shadow branch conflicts (from other worktrees) and session ID conflicts with appropriate error messages and recovery options.
 
 ### `Stop`
