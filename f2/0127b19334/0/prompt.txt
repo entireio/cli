@@ -1,0 +1,385 @@
+can we rebase our branch onto `soph/one-to-one-checkpoints` instead of main please?
+
+---
+
+push it with force-with-lease, then update the PR to have a different target please?
+
+---
+
+alright, that new branch altered the state lifecycle, removing ACTIVE_COMMITTED and pulling forward some shadow operations.
+
+can we check that our stuff works with it please? we need to ensure the shadow operations are wired through to take into account the subagent file operations
+
+---
+
+Q: are there redundant changes from our branch now that can be deleted?a
+
+---
+
+[Request interrupted by user]
+
+---
+
+Q: are there redundant changes from our branch now that can be deleted?
+
+Yes, let's fix the gaps - they should be straighforward?
+
+---
+
+... do we have this code block copied multiple times now?
+
+---
+
+commit, but let's debug afterwards;
+
+manual testing is showing:
+1. code commit made by subagent
+2. checkpoint trailer added
+3. but no checkpoint (or follow up 'trailing transcript' commit)
+4. turn end noted
+
+{"time":"2026-02-15T15:05:29.111156+11:00","level":"INFO","msg":"session-start","component":"hooks","agent":"claude-code","hook":"session-start","hook_type":"agent","model_session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","transcript_path":"/Users/alex/.REDACTED.jsonl"}
+{"time":"2026-02-15T15:05:29.393686+11:00","level":"INFO","msg":"user-prompt-submit","component":"hooks","agent":"claude-code","hook":"user-prompt-submit","hook_type":"agent","model_session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","transcript_path":"/Users/alex/.REDACTED.jsonl"}
+{"time":"2026-02-15T15:05:29.482999+11:00","level":"INFO","msg":"phase transition","component":"session","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","event":"TurnStart","from":"","to":"active"}
+{"time":"2026-02-15T15:05:33.719364+11:00","level":"INFO","msg":"post-todo","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","component":"hooks","agent":"claude-code","hook":"post-todo","hook_type":"subagent","model_session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","transcript_path":"/Users/alex/.REDACTED.jsonl","tool_use_id":"toolu_01KSL9QqYN9rX8NXtbyX5ngw"}
+{"time":"2026-02-15T15:05:38.189851+11:00","level":"INFO","msg":"pre-task","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","component":"hooks","agent":"claude-code","hook":"pre-task","hook_type":"subagent","model_session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","transcript_path":"/Users/alex/.REDACTED.jsonl","tool_use_id":"REDACTED"}
+{"time":"2026-02-15T15:05:52.351689+11:00","level":"INFO","msg":"prepare-commit-msg: agent commit trailer added","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","component":"checkpoint","strategy":"manual-commit","source":"message","checkpoint_id":"71714d3bd362","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3"}
+{"time":"2026-02-15T15:05:58.532372+11:00","level":"INFO","msg":"post-task","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","component":"hooks","agent":"claude-code","hook":"post-task","hook_type":"subagent","tool_use_id":"REDACTED","agent_id":"a8e7bf9","subagent_type":"general-purpose"}
+{"time":"2026-02-15T15:05:59.84962+11:00","level":"INFO","msg":"post-todo","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","component":"hooks","agent":"claude-code","hook":"post-todo","hook_type":"subagent","model_session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","transcript_path":"/Users/alex/.REDACTED.jsonl","tool_use_id":"REDACTED"}
+{"time":"2026-02-15T15:06:01.465967+11:00","level":"INFO","msg":"stop","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","component":"hooks","agent":"claude-code","hook":"stop","hook_type":"agent","model_session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","transcript_path":"/Users/alex/.REDACTED.jsonl"}
+{"time":"2026-02-15T15:06:04.484321+11:00","level":"WARN","msg":"transcript flush sentinel not found within timeout, proceeding","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","component":"hooks","timeout":3000000000}
+{"time":"2026-02-15T15:06:04.553485+11:00","level":"INFO","msg":"checkpoint saved","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","component":"checkpoint","strategy":"manual-commit","checkpoint_type":"session","checkpoint_count":1,"modified_files":1,"new_files":0,"deleted_files":0,"shadow_branch":"entire/8b56120-e3b0c4","branch_created":true}
+{"time":"2026-02-15T15:06:04.561337+11:00","level":"INFO","msg":"phase transition","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","component":"session","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","event":"TurnEnd","from":"active","to":"idle"}
+{"time":"2026-02-15T15:06:04.609951+11:00","level":"INFO","msg":"session-end","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","component":"hooks","agent":"claude-code","hook":"session-end","hook_type":"agent","model_session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3"}
+{"time":"2026-02-15T15:06:04.618379+11:00","level":"INFO","msg":"phase transition","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","component":"session","session_id":"b1a154f4-85be-46d0-90db-8dbc7733cbf3","event":"SessionStop","from":"idle","to":"ended"}
+
+
+* commit 73e26a3e28002a1a0b4e0b39e6ef5b70591b6871 (entire/8b56120-e3b0c4)
+  Author: Alex Ong <alex@entire.io>
+  Date:   Sun Feb 15 15:06:04 2026 +1100
+  
+      Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-
+      
+      Entire-Metadata: .entire/metadata/b1a154f4-85be-46d0-90db-8dbc7733cbf3
+      Entire-Session: b1a154f4-85be-46d0-90db-8dbc7733cbf3
+      Entire-Strategy: manual-commit
+  
+* commit 8b56120cab78addc8744d58b2ac1357ca15186a0 (HEAD -> main)
+| Author: Alex Ong <alex@entire.io>
+| Date:   Sun Feb 15 15:05:52 2026 +1100
+| 
+|     Add documentation about the color red
+|     
+|     Create a comprehensive markdown file covering the history, psychology, cultural significance, and practical applications of the color red.
+|     
+|     Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>
+|     Entire-Checkpoint: 71714d3bd362
+| 
+* commit fe1c1c3933f95e99f16618a1efa241abdd37b78d
+  Author: Alex Ong <alex@entire.io>
+  Date:   Sun Feb 15 15:05:26 2026 +1100
+  
+      initial commit
+  
+* commit d262221707c671423406a7082a7e138b7574c5ad (entire/checkpoints/v1)
+  Author: Alex Ong <alex@entire.io>
+  Date:   Sun Feb 15 15:05:26 2026 +1100
+  
+      Initialize metadata branch
+      
+      This branch stores session metadata for the auto-commit strategy.
+
+---
+
+still not quite right
+{"time":"2026-02-15T15:23:26.325729+11:00","level":"DEBUG","msg":"hook invoked","component":"hooks","agent":"claude-code","hook":"session-start","hook_type":"agent","strategy":"manual-commit"}
+{"time":"2026-02-15T15:23:26.325868+11:00","level":"INFO","msg":"session-start","component":"hooks","agent":"claude-code","hook":"session-start","hook_type":"agent","model_session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","transcript_path":"/Users/alex/.REDACTED.jsonl"}
+{"time":"2026-02-15T15:23:26.410639+11:00","level":"DEBUG","msg":"hook completed","component":"hooks","agent":"claude-code","duration_ms":84,"hook":"session-start","hook_type":"agent","strategy":"manual-commit","success":true}
+{"time":"2026-02-15T15:23:26.460148+11:00","level":"DEBUG","msg":"hook invoked","component":"hooks","agent":"claude-code","hook":"user-prompt-submit","hook_type":"agent","strategy":"manual-commit"}
+{"time":"2026-02-15T15:23:26.460296+11:00","level":"INFO","msg":"user-prompt-submit","component":"hooks","agent":"claude-code","hook":"user-prompt-submit","hook_type":"agent","model_session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","transcript_path":"/Users/alex/.REDACTED.jsonl"}
+{"time":"2026-02-15T15:23:26.577136+11:00","level":"INFO","msg":"phase transition","component":"session","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","event":"TurnStart","from":"","to":"active"}
+{"time":"2026-02-15T15:23:26.577167+11:00","level":"DEBUG","msg":"prompt attribution: no shadow branch yet (first checkpoint)","component":"attribution","shadow_branch":"entire/f69b13f-e3b0c4"}
+{"time":"2026-02-15T15:23:26.578459+11:00","level":"DEBUG","msg":"hook completed","component":"hooks","agent":"claude-code","duration_ms":118,"hook":"user-prompt-submit","hook_type":"agent","strategy":"manual-commit","success":true}
+{"time":"2026-02-15T15:23:28.954908+11:00","level":"DEBUG","msg":"hook invoked","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","hook":"pre-task","hook_type":"subagent","strategy":"manual-commit"}
+{"time":"2026-02-15T15:23:28.954969+11:00","level":"INFO","msg":"pre-task","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","hook":"pre-task","hook_type":"subagent","model_session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","transcript_path":"/Users/alex/.REDACTED.jsonl","tool_use_id":"toolu_01RdQdtjm1hJ9qtpvM8WLJ2t"}
+{"time":"2026-02-15T15:23:28.965143+11:00","level":"DEBUG","msg":"hook completed","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","duration_ms":10,"hook":"pre-task","hook_type":"subagent","strategy":"manual-commit","success":true}
+{"time":"2026-02-15T15:23:47.717357+11:00","level":"DEBUG","msg":"prepare-commit-msg hook invoked","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","hook":"prepare-commit-msg","hook_type":"git","strategy":"manual-commit","source":"message"}
+{"time":"2026-02-15T15:23:47.734843+11:00","level":"INFO","msg":"prepare-commit-msg: agent commit trailer added","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"checkpoint","strategy":"manual-commit","source":"message","checkpoint_id":"76246f7e8dc1","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9"}
+{"time":"2026-02-15T15:23:47.734966+11:00","level":"DEBUG","msg":"prepare-commit-msg hook completed","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","duration_ms":17,"hook":"prepare-commit-msg","hook_type":"git","strategy":"manual-commit","success":true,"source":"message"}
+{"time":"2026-02-15T15:23:47.870386+11:00","level":"DEBUG","msg":"commit-msg hook invoked","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","hook":"commit-msg","hook_type":"git","strategy":"manual-commit"}
+{"time":"2026-02-15T15:23:47.870435+11:00","level":"DEBUG","msg":"commit-msg hook completed","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","duration_ms":0,"hook":"commit-msg","hook_type":"git","strategy":"manual-commit","success":true}
+{"time":"2026-02-15T15:23:48.006515+11:00","level":"DEBUG","msg":"post-commit hook invoked","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","hook":"post-commit","hook_type":"git","strategy":"manual-commit"}
+{"time":"2026-02-15T15:23:48.026286+11:00","level":"DEBUG","msg":"phase unchanged","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"session","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","event":"GitCommit","phase":"active"}
+{"time":"2026-02-15T15:23:48.0264+11:00","level":"DEBUG","msg":"post-commit: carry-forward prep","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"checkpoint","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","is_active":true,"transcript_path":"/Users/alex/.REDACTED.jsonl","files_touched_before":0,"files":null}
+{"time":"2026-02-15T15:23:48.026405+11:00","level":"DEBUG","msg":"post-commit: updated BaseCommit","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"checkpoint","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","new_head":"a26f0d1"}
+{"time":"2026-02-15T15:23:48.026677+11:00","level":"DEBUG","msg":"post-commit hook completed","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","duration_ms":20,"hook":"post-commit","hook_type":"git","strategy":"manual-commit","success":true}
+{"time":"2026-02-15T15:23:53.194551+11:00","level":"DEBUG","msg":"hook invoked","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","hook":"post-task","hook_type":"subagent","strategy":"manual-commit"}
+{"time":"2026-02-15T15:23:53.194634+11:00","level":"INFO","msg":"post-task","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","hook":"post-task","hook_type":"subagent","tool_use_id":"toolu_01RdQdtjm1hJ9qtpvM8WLJ2t","agent_id":"a6397ad","subagent_type":"general-purpose"}
+{"time":"2026-02-15T15:23:53.204497+11:00","level":"DEBUG","msg":"hook completed","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","duration_ms":9,"hook":"post-task","hook_type":"subagent","strategy":"manual-commit","success":true}
+{"time":"2026-02-15T15:23:54.786857+11:00","level":"DEBUG","msg":"hook invoked","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","hook":"stop","hook_type":"agent","strategy":"manual-commit"}
+{"time":"2026-02-15T15:23:54.786921+11:00","level":"INFO","msg":"stop","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","hook":"stop","hook_type":"agent","model_session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","transcript_path":"/Users/alex/.REDACTED.jsonl"}
+{"time":"2026-02-15T15:23:57.808503+11:00","level":"WARN","msg":"transcript flush sentinel not found within timeout, proceeding","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","timeout":3000000000}
+{"time":"2026-02-15T15:23:57.882586+11:00","level":"DEBUG","msg":"prompt attribution at checkpoint save","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"attribution","checkpoint_number":1,"user_added":84,"user_removed":0,"agent_added":0,"agent_removed":0,"session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9"}
+{"time":"2026-02-15T15:23:57.895617+11:00","level":"INFO","msg":"checkpoint saved","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"checkpoint","strategy":"manual-commit","checkpoint_type":"session","checkpoint_count":1,"modified_files":1,"new_files":0,"deleted_files":0,"shadow_branch":"entire/a26f0d1-e3b0c4","branch_created":true}
+{"time":"2026-02-15T15:23:57.904391+11:00","level":"INFO","msg":"phase transition","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"session","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","event":"TurnEnd","from":"active","to":"idle"}
+{"time":"2026-02-15T15:23:57.920646+11:00","level":"DEBUG","msg":"hook completed","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","duration_ms":3133,"hook":"stop","hook_type":"agent","strategy":"manual-commit","success":true}
+{"time":"2026-02-15T15:23:57.958133+11:00","level":"DEBUG","msg":"hook invoked","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","hook":"session-end","hook_type":"agent","strategy":"manual-commit"}
+{"time":"2026-02-15T15:23:57.958177+11:00","level":"INFO","msg":"session-end","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","hook":"session-end","hook_type":"agent","model_session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9"}
+{"time":"2026-02-15T15:23:57.966179+11:00","level":"INFO","msg":"phase transition","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"session","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","event":"SessionStop","from":"idle","to":"ended"}
+{"time":"2026-02-15T15:23:57.981452+11:00","level":"DEBUG","msg":"hook completed","session_id":"f382705f-c053-4e53-aa58-ec8bf42f6df9","component":"hooks","agent":"claude-code","duration_ms":23,"hook":"session-end","hook_type":"agent","strategy":"manual-commit","success":true}
+
+
+* commit 964e67444c7de709ab65dc6d4720dfaaa7de7023 (entire/a26f0d1-e3b0c4)
+  Author: Alex Ong <alex@entire.io>
+  Date:   Sun Feb 15 15:23:57 2026 +1100
+  
+      Use a subagent: make me a md file about the colour red in docs/, then co
+      
+      Entire-Metadata: .entire/metadata/f382705f-c053-4e53-aa58-ec8bf42f6df9
+      Entire-Session: f382705f-c053-4e53-aa58-ec8bf42f6df9
+      Entire-Strategy: manual-commit
+  
+* commit a26f0d1a54ea355ee58afecff8af55f76dd47e3f (HEAD -> main)
+| Author: Alex Ong <alex@entire.io>
+| Date:   Sun Feb 15 15:23:47 2026 +1100
+| 
+|     Add comprehensive documentation about the color red
+|     
+|     Includes information on:
+|     - Physical properties in the visible spectrum
+|     - Cultural and symbolic meanings across traditions
+|     - Common uses in design, safety, and everyday applications
+|     - Detailed exploration of different red shades and variations
+|     
+|     Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>
+|     Entire-Checkpoint: 76246f7e8dc1
+| 
+* commit f69b13f2b7a6393bf72786f00b6891e2b8b31f2e
+  Author: Alex Ong <alex@entire.io>
+  Date:   Sun Feb 15 15:23:23 2026 +1100
+  
+      initial commit
+  
+* commit d49d2c3c21fb4bff689dd4d48865e548e4f02874 (entire/checkpoints/v1)
+  Author: Alex Ong <alex@entire.io>
+  Date:   Sun Feb 15 15:23:23 2026 +1100
+  
+      Initialize metadata branch
+      
+      This branch stores session metadata for the auto-commit strategy.
+
+---
+
+the alternative is that the human has made some changes yeah? can we tell if those changes preceded the userPromptSubmit?
+
+---
+
+how is the pre-commit deciding how to add the trailer?
+
+---
+
+so ACTIVE AND trailer exists on commit => condense?
+
+the current behaviour exists to try and filter pure human commits right? so if the trailer is already on there...
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. **Rebase request**: User asked to rebase `alex/ent-297-fix-subagent-only-changes-checkpointing` onto `soph/one-to-one-checkpoints` instead of main. Successfully completed with no conflicts. 5 commits rebased.
+
+2. **Push and PR update**: User asked to force-push and update PR #323 target from main to `soph/one-to-one-checkpoints`. Done.
+
+3. **Compatibility check**: User explained the base branch altered the state lifecycle (removed ACTIVE_COMMITTED, pulled forward shadow operations) and asked to check our subagent file operations work with it.
+
+4. **Investigation**: Two explore agents were launched to understand both sides. Found two gaps:
+   - `extractFilesFromLiveTranscript()` - used for carry-forward, only checks main transcript
+   - `sessionHasNewContentInCommittedFiles()` - used for PostCommit ACTIVE sessions, only checks main transcript
+   - `sessionHasNewContentFromLiveTranscript()` was already fixed by our commits
+
+5. **Initial fixes**: Added subagent extraction to both gap functions. Tests passed.
+
+6. **User noticed code duplication**: "do we have this code block copied multiple times now?" - Three copies of the subagent extraction + normalization pattern.
+
+7. **Refactor**: Extracted shared helper `extractModifiedFilesFromLiveTranscript(state, offset)` and two thin wrappers:
+   - `extractFilesFromLiveTranscript` (offset 0, for carry-forward)
+   - `extractNewModifiedFilesFromLiveTranscript` (with transcript growth check, for content detection)
+   - Several lint errors during refactor: unused `analyzer` variable, `unparam` (error return always nil), had to change signature to drop error return.
+
+8. **Commit**: "Extract shared helper for subagent-aware live transcript file extraction"
+
+9. **User asked to debug**: Manual testing showing checkpoint trailer added but no checkpoint created. User provided full logs.
+
+10. **First debug round** (before DEBUG logs): Analyzed that PostCommit likely ran but `hasNew` was false due to missing subagent detection. Found third gap: `extractSessionDataFromLiveTranscript` in condensation code also only checked main transcript. Fixed it to use the shared helper. Committed.
+
+11. **Second debug round** (with DEBUG logs): User provided full DEBUG logs showing:
+    - PostCommit DID run
+    - `files_touched_before=0, files=null` - extractFilesFromLiveTranscript found nothing
+    - Just updated BaseCommit, no condensation
+    - Root cause: **timing issue** - subagent still running at PostCommit time, transcript data not available yet
+
+12. **Discussed fix options**: 
+    - User asked about pre-task file as evidence
+    - User asked about checking if changes preceded UserPromptSubmit
+    - User asked how prepare-commit-msg decides to add trailer
+
+13. **Key insight**: prepare-commit-msg adds trailer via two paths:
+    - No TTY (agent/subagent): `addTrailerForAgentCommit` - added unconditionally for ACTIVE sessions
+    - TTY (human): content detection via `filterSessionsWithNewContent`
+    - Both paths already validate the commit. PostCommit should trust this.
+
+14. **Final fix**: For ACTIVE sessions in PostCommit, set `hasNew = true` unconditionally. Removed `sessionHasNewContentInCommittedFiles` (now unused). Updated stale comment reference.
+
+15. **Still need to commit** this last change and run tests.
+
+Key files modified:
+- `cmd/entire/cli/strategy/manual_commit_hooks.go` - main hooks file, most changes
+- `cmd/entire/cli/strategy/manual_commit_condensation.go` - extractSessionDataFromLiveTranscript fix
+
+The branch has these commits on top of `soph/one-to-one-checkpoints`:
+1. Original 5 commits (ExtractAllModifiedFiles, Stop hook, sessionHasNewContentFromLiveTranscript fix, integration test, PR review nits)
+2. "Extract shared helper for subagent-aware live transcript file extraction" (refactor)
+3. "Fix extractSessionDataFromLiveTranscript to include subagent files" (condensation fix)
+4. UNCOMMITTED: PostCommit ACTIVE session hasNew=true fix + removal of sessionHasNewContentInCommittedFiles
+
+Summary:
+1. Primary Request and Intent:
+   - Rebase branch `alex/ent-297-fix-subagent-only-changes-checkpointing` onto `soph/one-to-one-checkpoints` (instead of main)
+   - Force-push and update PR #323 target branch
+   - Verify subagent file operations work with the new base branch's 1:1 checkpoint model (which removed `ACTIVE_COMMITTED` phase and pulled forward shadow operations)
+   - Fix any gaps found in the integration
+   - Debug a manual test failure where checkpoint trailer is added but no checkpoint/condensation occurs for subagent-committed code
+
+2. Key Technical Concepts:
+   - **1:1 Checkpoint Model** (`soph/one-to-one-checkpoints`): Each user commit gets exactly one checkpoint. Condensation happens immediately in PostCommit (not deferred to TurnEnd). Remaining files carry forward to new shadow branches.
+   - **Session Phase State Machine**: Simplified from `ACTIVE/ACTIVE_COMMITTED/IDLE/ENDED` to `ACTIVE/IDLE/ENDED`. No more deferred condensation.
+   - **Subagent File Extraction**: `ExtractAllModifiedFiles()` reads both main and subagent transcripts. Subagent transcripts live at `<transcriptDir>/<sessionID>/subagents/agent-<agentID>.jsonl`.
+   - **Timing Issue**: At PostCommit time during a mid-subagent commit, the subagent transcript isn't available yet (no `tool_result` with `agentId:` in main transcript, subagent file may not exist).
+   - **PrepareCommitMsg Fast Path**: `!hasTTY() && state.Phase.IsActive()` → trailer added unconditionally (agent/subagent committing). TTY path → content detection first. Both paths validate before adding trailer.
+   - **PostCommit Trust Model**: Since PrepareCommitMsg already validates, PostCommit should trust the trailer for ACTIVE sessions rather than re-validating via transcript analysis (which breaks for mid-subagent commits).
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/strategy/manual_commit_hooks.go`** — Main hooks file, most heavily modified
+     - **Shared helper extracted** (`extractModifiedFilesFromLiveTranscript`): Handles agent lookup, TranscriptAnalyzer cast, main transcript extraction, subagent augmentation via `claudecode.ExtractAllModifiedFiles`, and path normalization. Replaces 3 duplicated code blocks.
+     ```go
+     func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(state *SessionState, offset int) []string {
+         // ... agent lookup, analyzer cast ...
+         modifiedFiles, _, err := analyzer.ExtractModifiedFilesFromOffset(state.TranscriptPath, offset)
+         // ... subagent augmentation ...
+         if state.AgentType == agent.AgentTypeClaudeCode {
+             subagentsDir := filepath.Join(filepath.Dir(state.TranscriptPath), state.SessionID, "subagents")
+             allFiles, extractErr := claudecode.ExtractAllModifiedFiles(state.TranscriptPath, offset, subagentsDir)
+             if extractErr == nil && len(allFiles) > len(modifiedFiles) {
+                 modifiedFiles = allFiles
+             }
+         }
+         // ... path normalization ...
+         return modifiedFiles
+     }
+     ```
+     - **Thin wrappers**:
+     ```go
+     func (s *ManualCommitStrategy) extractFilesFromLiveTranscript(state *SessionState) []string {
+         return s.extractModifiedFilesFromLiveTranscript(state, 0)
+     }
+     
+     func (s *ManualCommitStrategy) extractNewModifiedFilesFromLiveTranscript(state *SessionState) ([]string, bool) {
+         // ... transcript growth check via analyzer.GetTranscriptPosition ...
+         return s.extractModifiedFilesFromLiveTranscript(state, state.CheckpointTranscriptStart), true
+     }
+     ```
+     - **PostCommit ACTIVE session fix** (UNCOMMITTED): Changed from re-validating via transcript to trusting PrepareCommitMsg's trailer decision:
+     ```go
+     // BEFORE (broken for subagent commits):
+     if state.Phase.IsActive() {
+         if state.StepCount > 0 || len(state.FilesTouched) > 0 {
+             hasNew = true
+         } else {
+             hasNew = s.sessionHasNewContentInCommittedFiles(state, committedFileSet)
+         }
+     }
+     
+     // AFTER:
+     if state.Phase.IsActive() {
+         hasNew = true
+     }
+     ```
+     - **Removed `sessionHasNewContentInCommittedFiles`** — now unused since ACTIVE sessions unconditionally set `hasNew = true`
+     - **Stale comment reference** at line ~946 still mentions `sessionHasNewContentInCommittedFiles` in the doc comment for `extractNewModifiedFilesFromLiveTranscript`
+
+   - **`cmd/entire/cli/strategy/manual_commit_condensation.go`** — Condensation logic
+     - **`extractSessionDataFromLiveTranscript`** fixed to use shared helper instead of duplicating extraction:
+     ```go
+     // BEFORE (28 lines of duplicated extraction + normalization):
+     ag, agErr := agent.GetByAgentType(state.AgentType)
+     if agErr == nil {
+         if analyzer, ok := ag.(agent.TranscriptAnalyzer); ok {
+             modifiedFiles, _, extractErr := analyzer.ExtractModifiedFilesFromOffset(...)
+             // ... normalize ...
+         }
+     }
+     
+     // AFTER (2 lines):
+     if len(state.FilesTouched) > 0 {
+         data.FilesTouched = state.FilesTouched
+     } else {
+         data.FilesTouched = s.extractModifiedFilesFromLiveTranscript(state, state.CheckpointTranscriptStart)
+     }
+     ```
+
+   - **`cmd/entire/cli/strategy/mid_turn_commit_test.go`** — Unit test for subagent content detection (existing from our branch)
+   - **`cmd/entire/cli/hooks_claudecode_handlers.go`** — Stop hook handler (existing fix from our branch, uses `ExtractAllModifiedFiles`)
+   - **`cmd/entire/cli/agent/claudecode/transcript.go`** — `ExtractAllModifiedFiles` function (existing from our branch)
+
+4. Errors and Fixes:
+   - **Unused `analyzer` variable**: After refactoring `sessionHasNewContentInCommittedFiles` to use `extractNewModifiedFilesFromLiveTranscript`, the agent lookup + analyzer cast was left behind. Fixed by removing the dead code.
+   - **`unparam` lint error**: `extractModifiedFilesFromLiveTranscript` had `([]string, error)` return but error was always nil. Fixed by dropping the error return to just `[]string`.
+   - **`return nil, nil` → `return nil`**: After changing the signature, all multi-value returns needed updating.
+   - **Unused function lint**: After removing the ACTIVE session transcript check, `sessionHasNewContentInCommittedFiles` became unused. Fixed by deleting it.
+   - **User feedback on duplication**: User asked "do we have this code block copied multiple times now?" prompting the refactor to extract the shared helper.
+   - **User feedback on debugging**: User pushed back on blindly trusting ACTIVE sessions, asking "are we sure we have zero indication of subagent activity?" — leading to analysis of pre-task files, pre-prompt state, and ultimately the prepare-commit-msg fast path logic as the validation source.
+
+5. Problem Solving:
+   - **Gap 1 (extractFilesFromLiveTranscript)**: Missing subagent files in carry-forward computation → Fixed with shared helper
+   - **Gap 2 (sessionHasNewContentInCommittedFiles)**: Missing subagent files in PostCommit content detection → Fixed, then function removed entirely
+   - **Gap 3 (extractSessionDataFromLiveTranscript)**: Missing subagent files in condensation data → Fixed with shared helper
+   - **Timing issue (root cause of manual test failure)**: At PostCommit time during mid-subagent commit, subagent transcript data is unavailable because: (a) no `tool_result` with `agentId:` in main transcript yet, (b) subagent transcript file may not exist. Fix: trust PrepareCommitMsg's trailer decision for ACTIVE sessions.
+
+6. All User Messages:
+   - "can we rebase our branch onto `soph/one-to-one-checkpoints` instead of main please?"
+   - "push it with force-with-lease, then update the PR to have a different target please?"
+   - "alright, that new branch altered the state lifecycle, removing ACTIVE_COMMITTED and pulling forward some shadow operations. can we check that our stuff works with it please? we need to ensure the shadow operations are wired through to take into account the subagent file operations"
+   - "... do we have this code block copied multiple times now?"
+   - "commit, but let's debug afterwards; manual testing is showing: 1. code commit made by subagent 2. checkpoint trailer added 3. but no checkpoint (or follow up 'trailing transcript' commit) 4. turn end noted" [with full logs and git log]
+   - "logs were running default in the test repo, not DEBUG. I'll change it for the next test run"
+   - "still not quite right" [with full DEBUG logs showing PostCommit running but skipping condensation]
+   - "before we do this - are we sure we have zero indication of subagent activity?"
+   - "the alternative is that the human has made some changes yeah? can we tell if those changes preceded the userPromptSubmit?"
+   - "how is the pre-commit deciding how to add the trailer?"
+   - "so ACTIVE AND trailer exists on commit => condense? the current behaviour exists to try and filter pure human commits right? so if the trailer is already on there..."
+
+7. Pending Tasks:
+   - **Commit the PostCommit fix**: The change to `manual_commit_hooks.go` (ACTIVE sessions trust trailer, removal of `sessionHasNewContentInCommittedFiles`) is uncommitted
+   - **Run tests**: Need to run `mise run test:ci` before committing
+   - **Clean up stale comment**: Line ~946 comment for `extractNewModifiedFilesFromLiveTranscript` still references `sessionHasNewContentInCommittedFiles`
+   - **User should re-test manually** after pushing the fix
+
+8. Current Work:
+   The PostCommit fix has been applied but NOT committed. The edit simplifies ACTIVE session handling in PostCommit from transcript-based re-validation to trusting PrepareCommitMsg's trailer decision:
+   ```go
+   var hasNew bool
+   if state.Phase.IsActive() {
+       hasNew = true
+   } else {
+   ```
+   `sessionHasNewContentInCommittedFiles` has been deleted (was only caller). Lint passes (0 issues). Tests have NOT been run yet for this change.
+
+9. Optional Next Step:
+   Run `mise run test:ci`, fix the stale comment reference, and commit. The user's last explicit direction was confirming the approach: "so ACTIVE AND trailer exists on commit => condense?" — and the fix has been applied but needs verification and committing. The user also said at the start of this debugging session: "commit, but let's debug afterwards" — so committing after tests pass is expected.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/alex/.REDACTED.jsonl
+Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.

@@ -1,0 +1,29 @@
+{
+  "cli_version": "v0.4.4-24-g97fb2a99-dirty",
+  "checkpoint_id": "1274eaa17eb8",
+  "strategy": "manual-commit",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/checkpoint/committed_update_test.go",
+    "cmd/entire/cli/strategy/common.go",
+    "docs/reviews/review-01.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/12/74eaa17eb8/0/metadata.json",
+      "transcript": "/12/74eaa17eb8/0/full.jsonl",
+      "context": "/12/74eaa17eb8/0/context.md",
+      "content_hash": "/12/74eaa17eb8/0/content_hash.txt",
+      "prompt": "/12/74eaa17eb8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 74,
+    "cache_creation_tokens": 189288,
+    "cache_read_tokens": 5480996,
+    "output_tokens": 866,
+    "api_call_count": 65
+  }
+}

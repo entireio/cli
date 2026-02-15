@@ -1,0 +1,27 @@
+{
+  "cli_version": "v0.4.4-34-gc899b591-dirty",
+  "checkpoint_id": "3820a5a1b66e",
+  "strategy": "manual-commit",
+  "branch": "alex/fix-gemini-checkpointing",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/38/20a5a1b66e/0/metadata.json",
+      "transcript": "/38/20a5a1b66e/0/full.jsonl",
+      "context": "/38/20a5a1b66e/0/context.md",
+      "content_hash": "/38/20a5a1b66e/0/content_hash.txt",
+      "prompt": "/38/20a5a1b66e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 25,
+    "cache_creation_tokens": 49932,
+    "cache_read_tokens": 3264141,
+    "output_tokens": 4109,
+    "api_call_count": 23
+  }
+}
