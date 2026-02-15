@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	settings_pkg "github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/charmbracelet/huh"
@@ -608,6 +609,17 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 
 	if err := SaveEntireSettings(settings); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
+	}
+
+	// Clear stale enabled:false in settings.local.json left by a prior "entire disable"
+	localPath, pathErr := paths.AbsPath(EntireSettingsLocalFile)
+	if pathErr == nil {
+		if ls, err := settings_pkg.LoadFromFile(localPath); err == nil && !ls.Enabled {
+			ls.Enabled = true
+			if err := SaveEntireSettingsLocal(ls); err != nil {
+				return fmt.Errorf("failed to clear stale local settings: %w", err)
+			}
+		}
 	}
 
 	// Install git hooks AFTER saving settings (InstallGitHook reads local_dev from settings)
