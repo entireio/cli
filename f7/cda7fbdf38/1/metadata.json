@@ -1,0 +1,35 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "f7cda7fbdf38",
+  "session_id": "4a364c97-9dde-4a98-a973-26edea2c0e8b",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-15T15:58:38.261182Z",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/e2e_test/scenario_checkpoint_workflows_test.go",
+    "cmd/entire/cli/e2e_test/testenv.go"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "6b7d535120f0",
+  "transcript_identifier_at_start": "5635755d-4fec-4ac5-b706-3c59ba7166a0",
+  "checkpoint_transcript_start": 4414,
+  "transcript_lines_at_start": 4414,
+  "token_usage": {
+    "input_tokens": 2468,
+    "cache_creation_tokens": 397349,
+    "cache_read_tokens": 31035424,
+    "output_tokens": 939,
+    "api_call_count": 305
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-15T15:58:34.091361Z",
+    "agent_lines": 0,
+    "human_added": 123,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 123,
+    "agent_percentage": 0
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/4a364c97-9dde-4a98-a973-26edea2c0e8b.jsonl"
+}
