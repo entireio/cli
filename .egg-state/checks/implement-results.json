@@ -1,0 +1,30 @@
+{
+  "all_passed": false,
+  "checks": [
+    {
+      "name": "go test ./...",
+      "passed": false,
+      "output": "Most packages pass. 2 packages failed due to sandbox environment limitations: (1) strategy: TestGetGitDirInPath_Worktree, TestGetGitDirInPath_RegularRepo, TestHandleTurnEnd_PartialFailure - git init fails in test temp dirs; (2) redactengine: TestDetectSecrets - gitleaks binary not found. These are environment issues, not code defects. 30+ packages pass successfully."
+    },
+    {
+      "name": "gofmt",
+      "passed": true,
+      "output": "No formatting issues found."
+    },
+    {
+      "name": "go vet",
+      "passed": true,
+      "output": "No issues found."
+    },
+    {
+      "name": "go mod tidy",
+      "passed": true,
+      "output": "go.mod and go.sum are clean, no changes needed."
+    },
+    {
+      "name": "golangci-lint",
+      "passed": false,
+      "output": "Could not run: golangci-lint v2.1.6 (built with Go 1.24) is incompatible with project's Go 1.25.6 toolchain. Error: the Go language version used to build golangci-lint is lower than the targeted Go version."
+    }
+  ]
+}
