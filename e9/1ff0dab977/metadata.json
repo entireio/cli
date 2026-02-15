@@ -1,0 +1,26 @@
+{
+  "cli_version": "v0.4.4-24-g97fb2a99-dirty",
+  "checkpoint_id": "e91ff0dab977",
+  "strategy": "manual-commit",
+  "branch": "alex/ent-297-fix-subagent-only-changes-checkpointing",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_condensation.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e9/1ff0dab977/0/metadata.json",
+      "transcript": "/e9/1ff0dab977/0/full.jsonl",
+      "context": "/e9/1ff0dab977/0/context.md",
+      "content_hash": "/e9/1ff0dab977/0/content_hash.txt",
+      "prompt": "/e9/1ff0dab977/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 23,
+    "cache_creation_tokens": 18003,
+    "cache_read_tokens": 2958030,
+    "output_tokens": 370,
+    "api_call_count": 23
+  }
+}
