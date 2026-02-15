@@ -1108,6 +1108,19 @@ func removeAgentHooks(w io.Writer) error {
 		}
 	}
 
+	// Remove Codex CLI hooks
+	codexAgent, err := agent.Get(agent.AgentNameCodex)
+	if err == nil {
+		if hookAgent, ok := codexAgent.(agent.HookSupport); ok {
+			wasInstalled := hookAgent.AreHooksInstalled()
+			if err := hookAgent.UninstallHooks(); err != nil {
+				errs = append(errs, err)
+			} else if wasInstalled {
+				fmt.Fprintln(w, "  Removed Codex CLI hooks")
+			}
+		}
+	}
+
 	return errors.Join(errs...)
 }
 
