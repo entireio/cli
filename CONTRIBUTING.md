@@ -8,6 +8,21 @@ Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
 
 ---
 
+## Before You Code: Discuss First
+
+The fastest way to get a contribution merged is to align with maintainers before writing code. Please **open an issue first** using our [issue templates](https://github.com/entireio/cli/issues/new/choose) and wait for maintainer feedback before starting implementation.
+
+### Contribution Workflow
+
+1. **Open an issue** describing the problem or feature
+2. **Wait for maintainer feedback** -- we may have relevant context or plans
+3. **Get approval** before starting implementation
+4. **Submit your PR** referencing the approved issue
+5. **Address all feedback** including automated Copilot comments
+6. **Maintainer review and merge**
+
+---
+
 ## First-Time Contributors
 
 New to the project? Welcome! Here's how to get started:
@@ -225,23 +240,55 @@ These are Go implementations that integrate Entire with different AI coding tool
 
 ## Submitting a Pull Request
 
-### Prerequisites
+### Before You Submit
 
-1. **Install Entire** - Install the latest version of the Entire CLI (see [installation docs](https://docs.entire.io/cli/installation)), verify with `entire version`. Entire is already configured in the repository, so no need to run `entire enable`
-2. **Pass linting** - Run `mise run lint` (includes golangci-lint, gofmt, gomod, shellcheck)
-3. **Pass tests** - Run `mise run test` to verify your changes
-4. **Add tests** - Include tests for new Go code and functionality
-5. **Include checkpoint trailers** - All commits must have Entire checkpoint trailers from your sessions
+- **Related issue exists and is approved** -- Your PR references an issue where a maintainer has acknowledged the approach. (Exceptions: documentation fixes, typo corrections, and `good-first-issue` items.)
+- **Linting passes** -- Run `mise run lint` (includes golangci-lint, gofmt, gomod, shellcheck)
+- **Tests pass** -- Run `mise run test` to verify your changes
+- **Tests included** -- New Go code and functionality should have accompanying tests
+- **Entire checkpoint trailers included** -- See [Using Entire While Contributing](#using-entire-while-contributing) below
+
+PRs that skip these steps are likely to be closed without merge.
 
 ### Submitting
 
 1. **Push** your branch to your fork
 2. **Open a PR** against the `main` branch
-3. **Fill out** the PR template with:
-   - Clear description of changes
-   - Related issue numbers
-   - Testing done
-4. **Wait for review** - maintainers will provide feedback
+3. **Describe your changes** -- Link the related issue, summarize what changed and what testing you did
+4. **Address Copilot feedback** -- See [Responding to Automated Review](#responding-to-automated-review)
+5. **Wait for maintainer review**
+
+---
+
+## Responding to Automated Review
+
+Co-pilot agent reviews every PR and provides feedback on code quality, potential bugs, and project conventions.
+
+**Read and respond to every Copilot comment.** PRs with unaddressed Copilot feedback will not move to maintainer review.
+
+- **Fixed** -- Push a commit addressing the issue.
+- **Disagree** -- Reply explaining your reasoning. The Copilot isn't always right.
+- **Question** -- Ask for clarification. We're happy to help.
+
+Addressing Copilot feedback upfront is the fastest path to maintainer review.
+
+---
+
+## Using Entire While Contributing
+
+We use Entire on Entire. When contributing, install the Entire CLI and let it capture your coding sessions -- this gives us valuable dogfooding data and helps improve the tool.
+
+### Setup
+
+Install the latest version of the Entire CLI (see [installation docs](https://docs.entire.io/cli/installation)) and verify with `entire version`. Entire is already configured in this repository, so there's no need to run `entire enable`.
+
+### Checkpoint Trailers
+
+All commits should include `Entire-Checkpoint` trailers from your sessions. These are added automatically by the `prepare-commit-msg` hook when Entire is enabled. The trailers link your commits to session metadata on the `entire/checkpoints/v1` branch.
+
+### Sessions Branch
+
+When you push your PR branch, Entire can automatically push the `entire/checkpoints/v1` branch alongside it (if `push_sessions` is enabled in your settings). Include this in your PR so maintainers can review the session context behind your changes.
 
 ---
 
