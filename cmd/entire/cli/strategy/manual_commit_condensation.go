@@ -110,7 +110,7 @@ func (s *ManualCommitStrategy) getCheckpointLog(checkpointID id.CheckpointID) ([
 //
 // For mid-session commits (no Stop/SaveChanges called yet), the shadow branch may not exist.
 // In this case, data is extracted from the live transcript instead.
-func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointID id.CheckpointID, state *SessionState) (*CondenseResult, error) {
+func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointID id.CheckpointID, state *SessionState, committedFiles map[string]struct{}) (*CondenseResult, error) {
 	// Get shadow branch (may not exist for mid-session commits)
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
@@ -139,6 +139,32 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		sessionData, err = s.extractSessionDataFromLiveTranscript(state)
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session data from live transcript: %w", err)
+		}
+	}
+
+	// For 1:1 checkpoint model: filter files_touched to only include files actually
+	// committed in this specific commit. This ensures each checkpoint represents
+	// exactly the files in that commit, not all files mentioned in the transcript.
+	if len(committedFiles) > 0 {
+		if len(sessionData.FilesTouched) > 0 {
+			// Filter to intersection of transcript-extracted files and committed files
+			filtered := make([]string, 0, len(sessionData.FilesTouched))
+			for _, f := range sessionData.FilesTouched {
+				if _, ok := committedFiles[f]; ok {
+					filtered = append(filtered, f)
+				}
+			}
+			sessionData.FilesTouched = filtered
+		}
+
+		// If extraction failed or returned empty, use committedFiles as fallback.
+		// This handles mid-session commits where transcript parsing may not find files
+		// but we know what was committed.
+		if len(sessionData.FilesTouched) == 0 {
+			sessionData.FilesTouched = make([]string, 0, len(committedFiles))
+			for f := range committedFiles {
+				sessionData.FilesTouched = append(sessionData.FilesTouched, f)
+			}
 		}
 	}
 
@@ -674,7 +700,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(sessionID string) error {
 	}
 
 	// Condense the session
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		return fmt.Errorf("failed to condense session: %w", err)
 	}

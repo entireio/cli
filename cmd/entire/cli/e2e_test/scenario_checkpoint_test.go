@@ -93,6 +93,10 @@ func TestE2E_AutoCommitStrategy(t *testing.T) {
 
 	env := NewFeatureBranchEnv(t, "auto-commit")
 
+	// Count commits before agent action
+	commitsBefore := env.GetCommitCount()
+	t.Logf("Commits before: %d", commitsBefore)
+
 	// 1. Agent creates a file
 	t.Log("Step 1: Agent creating file with auto-commit strategy")
 	result, err := env.RunAgent(PromptCreateHelloGo.Prompt)
@@ -100,19 +104,37 @@ func TestE2E_AutoCommitStrategy(t *testing.T) {
 	AssertAgentSuccess(t, result, err)
 
 	// 2. Verify file exists
-	require.True(t, env.FileExists("hello.go"))
+	require.True(t, env.FileExists("hello.go"), "hello.go should exist")
+	AssertHelloWorldProgram(t, env, "hello.go")
 
 	// 3. With auto-commit, commits are created automatically
-	// Check if commits were made with checkpoint trailers
-	commitMsg := env.GetCommitMessage(env.GetHeadHash())
-	t.Logf("Latest commit message: %s", commitMsg)
+	commitsAfter := env.GetCommitCount()
+	t.Logf("Commits after: %d", commitsAfter)
+	assert.Greater(t, commitsAfter, commitsBefore, "Auto-commit should create at least one commit")
 
-	// 4. Verify metadata branch exists
-	if env.BranchExists("entire/checkpoints/v1") {
-		t.Log("Metadata branch exists (auto-commit creates it)")
-	}
+	// 4. Verify checkpoint trailer in commit history
+	checkpointID, err := env.GetLatestCheckpointIDFromHistory()
+	require.NoError(t, err, "Should find checkpoint ID in commit history")
+	require.NotEmpty(t, checkpointID, "Commit should have Entire-Checkpoint trailer")
+	t.Logf("Checkpoint ID: %s", checkpointID)
 
-	// 5. Check for rewind points
+	// Verify checkpoint ID format (12 hex characters)
+	assert.Len(t, checkpointID, 12, "Checkpoint ID should be 12 characters")
+
+	// 5. Verify metadata branch exists
+	assert.True(t, env.BranchExists("entire/checkpoints/v1"),
+		"entire/checkpoints/v1 branch should exist")
+
+	// 6. Check for rewind points
 	points := env.GetRewindPoints()
+	assert.GreaterOrEqual(t, len(points), 1, "Should have at least 1 rewind point")
 	t.Logf("Found %d rewind points", len(points))
+
+	// 7. Validate checkpoint has proper metadata on entire/checkpoints/v1
+	env.ValidateCheckpoint(CheckpointValidation{
+		CheckpointID:              checkpointID,
+		Strategy:                  "auto-commit",
+		FilesTouched:              []string{"hello.go"},
+		ExpectedTranscriptContent: []string{"hello.go"},
+	})
 }

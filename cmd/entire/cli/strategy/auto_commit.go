@@ -256,12 +256,15 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository
 	}
 
 	// Write committed checkpoint using the checkpoint store
+	// Pass TranscriptPath so writeTranscript generates content_hash.txt
+	transcriptPath := filepath.Join(ctx.MetadataDirAbs, paths.TranscriptFileName)
 	err = store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
 		CheckpointID:                checkpointID,
 		SessionID:                   sessionID,
 		Strategy:                    StrategyNameAutoCommit, // Use new strategy name
 		Branch:                      branchName,
 		MetadataDir:                 ctx.MetadataDirAbs, // Copy all files from metadata dir
+		TranscriptPath:              transcriptPath,     // For content hash generation
 		AuthorName:                  ctx.AuthorName,
 		AuthorEmail:                 ctx.AuthorEmail,
 		Agent:                       ctx.AgentType,

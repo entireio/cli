@@ -607,7 +607,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 					shouldCondense = filesOverlapWithContent(repo, shadowBranchName, commit, state.FilesTouched)
 				}
 				if shouldCondense {
-					condensed = s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete)
+					condensed = s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete, committedFileSet)
 					// condenseAndUpdateState updates BaseCommit on success.
 					// On failure, BaseCommit is preserved so the shadow branch remains accessible.
 				} else {
@@ -619,7 +619,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 				// but hasNew is an additional content-level check (transcript has
 				// new content beyond what was previously condensed).
 				if len(state.FilesTouched) > 0 && hasNew {
-					condensed = s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete)
+					condensed = s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete, committedFileSet)
 					// On failure, BaseCommit is preserved (same as ActionCondense).
 				} else {
 					s.updateBaseCommitIfChanged(logCtx, state, newHead)
@@ -711,8 +711,9 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	head *plumbing.Reference,
 	shadowBranchName string,
 	shadowBranchesToDelete map[string]struct{},
+	committedFiles map[string]struct{},
 ) bool {
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, committedFiles)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[entire] Warning: condensation failed for session %s: %v\n",
 			state.SessionID, err)
@@ -884,15 +885,47 @@ func (s *ManualCommitStrategy) sessionHasNewContent(repo *git.Repository, state 
 			// Shadow branch has files from carry-forward - check if staged files overlap
 			// AND have matching content (content-aware check).
 			stagedFiles := getStagedFiles(repo)
-			result := stagedFilesOverlapWithContent(repo, tree, stagedFiles, state.FilesTouched)
-			return result, nil
+			if len(stagedFiles) > 0 {
+				// PrepareCommitMsg context: check staged files overlap with content
+				result := stagedFilesOverlapWithContent(repo, tree, stagedFiles, state.FilesTouched)
+				return result, nil
+			}
+			// PostCommit context: no staged files, but we have carry-forward files.
+			// Return true and let the caller do the overlap check with committed files.
+			return true, nil
 		}
 		// No transcript and no FilesTouched - fall back to live transcript check
 		return s.sessionHasNewContentFromLiveTranscript(repo, state)
 	}
 
-	// Has new content if there are more lines than already condensed
-	return transcriptLines > state.CheckpointTranscriptStart, nil
+	// Check if there's new content to condense. Two cases:
+	// 1. Transcript has grown since last condensation (new prompts/responses)
+	// 2. FilesTouched has files not yet committed (carry-forward scenario)
+	//
+	// For PrepareCommitMsg context, we verify staged files overlap with session's files
+	// using content-aware matching to detect reverted files.
+	// For PostCommit context, getStagedFiles() is empty (files already committed),
+	// so we return true and let the caller do the overlap check via filesOverlapWithContent.
+
+	hasTranscriptGrowth := transcriptLines > state.CheckpointTranscriptStart
+	hasUncommittedFiles := len(state.FilesTouched) > 0
+
+	if !hasTranscriptGrowth && !hasUncommittedFiles {
+		return false, nil // No new content and no carry-forward files
+	}
+
+	// Check if staged files overlap with session's files with content-aware matching.
+	// This is primarily for PrepareCommitMsg; in PostCommit, stagedFiles is empty.
+	stagedFiles := getStagedFiles(repo)
+	if len(stagedFiles) > 0 {
+		return stagedFilesOverlapWithContent(repo, tree, stagedFiles, state.FilesTouched), nil
+	}
+
+	// No staged files - either PostCommit context or edge case.
+	// Return transcript growth status. For PostCommit with hasTranscriptFile=true,
+	// if there's no transcript growth, the session hasn't done new work since last checkpoint.
+	// (Carry-forward creates a shadow branch WITHOUT transcript, handled in the block above.)
+	return hasTranscriptGrowth, nil
 }
 
 // sessionHasNewContentFromLiveTranscript checks if a session has new content

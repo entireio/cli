@@ -1158,7 +1158,7 @@ func TestShadowStrategy_FilesTouched_OnlyModifiedFiles(t *testing.T) {
 
 	// Now condense the session
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -1510,7 +1510,7 @@ func TestShadowStrategy_CondenseSession_EphemeralBranchTrailer(t *testing.T) {
 
 	// Condense the session
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
-	_, err = s.CondenseSession(repo, checkpointID, state)
+	_, err = s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -2034,7 +2034,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 
 	// Condense the session - this should calculate InitialAttribution
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -2366,7 +2366,7 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 
 	// === CONDENSE AND VERIFY ATTRIBUTION ===
 	checkpointID := id.MustCheckpointID("b2c3d4e5f6a7")
-	result, err := s.CondenseSession(repo, checkpointID, state2)
+	result, err := s.CondenseSession(repo, checkpointID, state2, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -2541,7 +2541,7 @@ func TestCondenseSession_PrefersLiveTranscript(t *testing.T) {
 
 	// Condense — this should read the live transcript, not the shadow branch copy
 	checkpointID := id.MustCheckpointID("b2c3d4e5f6a1")
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -2661,7 +2661,7 @@ func TestCondenseSession_GeminiTranscript(t *testing.T) {
 
 	// Condense the session
 	checkpointID := id.MustCheckpointID("aabbcc112233")
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -2889,7 +2889,7 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 
 	// Condense the session - this should calculate token usage ONLY from message index 2 onwards
 	checkpointID := id.MustCheckpointID("ddeeff998877")
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}

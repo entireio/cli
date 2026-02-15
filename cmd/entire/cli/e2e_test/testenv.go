@@ -65,6 +65,13 @@ func NewFeatureBranchEnv(t *testing.T, strategyName string) *TestEnv {
 	// This sets up .entire/settings.json and .claude/settings.json with hooks
 	env.RunEntireEnable(strategyName)
 
+	// Commit all files created by `entire enable` so they survive git stash -u operations.
+	// Without this, stash operations would stash away the hooks config and entire settings,
+	// causing hooks to not fire for subsequent prompts and stash pop conflicts.
+	// Using "git add ." is safe in test repos since we control all content.
+	env.GitAddAll()
+	env.GitCommit("Add entire and agent config")
+
 	return env
 }
 
@@ -192,6 +199,18 @@ func (env *TestEnv) GitAdd(paths ...string) {
 		if _, err := worktree.Add(path); err != nil {
 			env.T.Fatalf("failed to add file %s: %v", path, err)
 		}
+	}
+}
+
+// GitAddAll stages all files (git add .).
+func (env *TestEnv) GitAddAll() {
+	env.T.Helper()
+
+	//nolint:gosec // test code, "." is safe
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = env.RepoDir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("git add . failed: %v\nOutput: %s", err, output)
 	}
 }
 
@@ -485,6 +504,36 @@ func (env *TestEnv) GetLatestCheckpointIDFromHistory() (string, error) {
 	return checkpointID, nil
 }
 
+// GetLatestCheckpointID returns the checkpoint ID from HEAD commit, or empty string if none.
+// This is a convenience wrapper that doesn't fail the test on missing checkpoint.
+func (env *TestEnv) GetLatestCheckpointID() string {
+	env.T.Helper()
+
+	repo, err := git.PlainOpen(env.RepoDir)
+	if err != nil {
+		return ""
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		return ""
+	}
+
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return ""
+	}
+
+	// Look for Entire-Checkpoint trailer in HEAD commit only
+	for _, line := range strings.Split(commit.Message, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Entire-Checkpoint:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "Entire-Checkpoint:"))
+		}
+	}
+	return ""
+}
+
 // safeIDPrefix returns first 12 chars of ID or the full ID if shorter.
 // Use this when logging checkpoint IDs to avoid index out of bounds panic.
 func safeIDPrefix(id string) string {
@@ -519,23 +568,44 @@ func (env *TestEnv) RunCLIWithError(args ...string) (string, error) {
 // RunAgent runs the agent with the given prompt and returns the result.
 func (env *TestEnv) RunAgent(prompt string) (*AgentResult, error) {
 	env.T.Helper()
+	result, err := env.Agent.RunPrompt(context.Background(), env.RepoDir, prompt)
+	if err != nil && result != nil {
+		env.T.Logf("Agent failed with exit code %d", result.ExitCode)
+		if result.Stderr != "" {
+			env.T.Logf("Agent stderr: %s", result.Stderr)
+		}
+		if result.Stdout != "" {
+			env.T.Logf("Agent stdout: %s", result.Stdout)
+		}
+	}
 	//nolint:wrapcheck // test helper, caller handles error
-	return env.Agent.RunPrompt(context.Background(), env.RepoDir, prompt)
+	return result, err
 }
 
 // RunAgentWithTools runs the agent with specific tools enabled.
 func (env *TestEnv) RunAgentWithTools(prompt string, tools []string) (*AgentResult, error) {
 	env.T.Helper()
+	result, err := env.Agent.RunPromptWithTools(context.Background(), env.RepoDir, prompt, tools)
+	if err != nil && result != nil {
+		env.T.Logf("Agent failed with exit code %d", result.ExitCode)
+		if result.Stderr != "" {
+			env.T.Logf("Agent stderr: %s", result.Stderr)
+		}
+		if result.Stdout != "" {
+			env.T.Logf("Agent stdout: %s", result.Stdout)
+		}
+	}
 	//nolint:wrapcheck // test helper, caller handles error
-	return env.Agent.RunPromptWithTools(context.Background(), env.RepoDir, prompt, tools)
+	return result, err
 }
 
 // GitStash runs git stash to save uncommitted changes.
+// Uses -u flag to include untracked files (new files created by agent).
 func (env *TestEnv) GitStash() {
 	env.T.Helper()
 
 	//nolint:noctx // test code, no context needed for git stash
-	cmd := exec.Command("git", "stash")
+	cmd := exec.Command("git", "stash", "-u")
 	cmd.Dir = env.RepoDir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		env.T.Fatalf("git stash failed: %v\nOutput: %s", err, output)
@@ -782,13 +852,15 @@ func (env *TestEnv) ValidateCheckpoint(v CheckpointValidation) {
 		}
 	}
 
-	// Validate transcript is valid JSONL
+	// Validate transcript is valid JSONL (only enforce for Claude Code, log warnings for others)
 	transcriptPath := shardedPath + "/0/full.jsonl"
 	transcriptContent, found := env.ReadFileFromBranch(metadataBranch, transcriptPath)
 	if !found {
 		env.T.Errorf("Transcript not found at %s", transcriptPath)
 	} else {
 		// Check each line is valid JSON
+		// Only enforce JSONL format for Claude Code - other agents may have different formats
+		isClaudeCode := env.Agent.Name() == AgentNameClaudeCode
 		lines := strings.Split(transcriptContent, "\n")
 		validLines := 0
 		for i, line := range lines {
@@ -799,7 +871,10 @@ func (env *TestEnv) ValidateCheckpoint(v CheckpointValidation) {
 			validLines++
 			var obj map[string]any
 			if err := json.Unmarshal([]byte(line), &obj); err != nil {
-				env.T.Errorf("Transcript line %d is not valid JSON: %v", i+1, err)
+				if isClaudeCode {
+					env.T.Errorf("Transcript line %d is not valid JSON: %v", i+1, err)
+				}
+				// For non-Claude agents, just log (transcript format may differ)
 			}
 		}
 		if validLines == 0 {

@@ -59,7 +59,13 @@ func TestE2E_RewindToCheckpoint(t *testing.T) {
 	assert.NotContains(t, restoredContent, "E2E Test", "Should not contain modified message")
 }
 
-// TestE2E_RewindAfterCommit tests rewinding to a checkpoint after user commits.
+// TestE2E_RewindAfterCommit tests that pre-commit checkpoint IDs become invalid after commit.
+//
+// Expected behavior:
+// 1. Before commit: checkpoints are on shadow branch with shadow branch commit IDs
+// 2. After commit: shadow branch is condensed and deleted
+// 3. New logs-only checkpoints appear with DIFFERENT IDs (user commit hashes)
+// 4. Attempting to rewind using the old shadow branch ID fails with "not found"
 func TestE2E_RewindAfterCommit(t *testing.T) {
 	t.Parallel()
 
@@ -71,53 +77,54 @@ func TestE2E_RewindAfterCommit(t *testing.T) {
 	require.NoError(t, err)
 	AssertAgentSuccess(t, result, err)
 
-	// Get checkpoint before commit
+	// Get checkpoint before commit - this is a shadow branch commit ID
 	pointsBefore := env.GetRewindPoints()
-	require.GreaterOrEqual(t, len(pointsBefore), 1)
+	require.GreaterOrEqual(t, len(pointsBefore), 1, "Should have checkpoint before commit")
 	preCommitPointID := pointsBefore[0].ID
+	t.Logf("Pre-commit checkpoint ID (shadow branch): %s", safeIDPrefix(preCommitPointID))
 
-	// 2. User commits
-	t.Log("Step 2: Committing")
+	// Verify this point is NOT logs-only (it's on shadow branch)
+	assert.False(t, pointsBefore[0].IsLogsOnly, "Pre-commit checkpoint should NOT be logs-only")
+
+	// 2. User commits - this condenses and deletes the shadow branch
+	t.Log("Step 2: Committing (triggers condensation)")
 	env.GitCommitWithShadowHooks("Add hello world", "hello.go")
 
-	// 3. Agent modifies file (new session)
-	t.Log("Step 3: Modifying file after commit")
-	result, err = env.RunAgent(PromptModifyHelloGo.Prompt)
-	require.NoError(t, err)
-	AssertAgentSuccess(t, result, err)
+	// 3. Verify checkpoint was created
+	checkpointID, err := env.GetLatestCheckpointIDFromHistory()
+	require.NoError(t, err, "Should find checkpoint in commit history")
+	t.Logf("Committed checkpoint ID: %s", checkpointID)
 
-	modifiedContent := env.ReadFile("hello.go")
-	require.Contains(t, modifiedContent, "E2E Test")
+	// 4. Get rewind points after commit
+	t.Log("Step 3: Getting rewind points after commit")
+	pointsAfter := env.GetRewindPoints()
+	t.Logf("Found %d rewind points after commit", len(pointsAfter))
 
-	// 4. Get rewind points - should include both pre and post commit points
-	t.Log("Step 4: Getting rewind points")
-	points := env.GetRewindPoints()
-	t.Logf("Found %d rewind points", len(points))
-	for i, p := range points {
-		t.Logf("  Point %d: %s (logs_only=%v, condensation_id=%s)",
+	// Find the logs-only point (should be from the user commit)
+	var logsOnlyPoint *RewindPoint
+	for i, p := range pointsAfter {
+		t.Logf("  Point %d: ID=%s, IsLogsOnly=%v, CondensationID=%s",
 			i, safeIDPrefix(p.ID), p.IsLogsOnly, p.CondensationID)
+		if p.IsLogsOnly {
+			pointCopy := p
+			logsOnlyPoint = &pointCopy
+		}
 	}
+	require.NotNil(t, logsOnlyPoint, "Should have a logs-only point after commit")
 
-	// 5. Rewind to pre-commit checkpoint
-	// After commit, the pre-commit checkpoint becomes logs-only because the shadow branch
-	// is condensed. Rewinding to a logs-only point should fail with a clear error.
-	t.Log("Step 5: Attempting rewind to pre-commit (logs-only) checkpoint")
+	// The logs-only point should have a DIFFERENT ID than the pre-commit shadow branch ID
+	assert.NotEqual(t, preCommitPointID, logsOnlyPoint.ID,
+		"Logs-only point ID should differ from shadow branch ID")
+
+	// 5. Attempt to rewind to the OLD shadow branch ID - should fail
+	t.Log("Step 4: Attempting rewind to old shadow branch ID (should fail)")
 	err = env.Rewind(preCommitPointID)
 
-	// Verify the current file state regardless of rewind result
-	currentContent := env.ReadFile("hello.go")
-
-	if err != nil {
-		// Rewind failed as expected for logs-only checkpoint
-		t.Logf("Rewind to logs-only point failed as expected: %v", err)
-		// File should still have the modifications since rewind failed
-		assert.Contains(t, currentContent, "E2E Test",
-			"File should still have modifications after logs-only rewind failure")
-	} else {
-		// If rewind succeeded, the file might have been restored
-		// This could happen if the rewind point wasn't actually logs-only
-		t.Log("Rewind succeeded - checkpoint may not have been logs-only")
-	}
+	// The old shadow branch was deleted, so the ID is no longer valid
+	assert.Error(t, err, "Rewind to deleted shadow branch ID should fail")
+	assert.Contains(t, err.Error(), "not found",
+		"Error should indicate the rewind point was not found")
+	t.Logf("Rewind correctly failed: %v", err)
 }
 
 // TestE2E_RewindMultipleFiles tests rewinding changes across multiple files.
