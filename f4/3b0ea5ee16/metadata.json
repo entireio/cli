@@ -1,0 +1,23 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "f43b0ea5ee16",
+  "strategy": "manual-commit",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gemini/settings.json",
+    "cmd/entire/cli/e2e_test/agent_runner.go",
+    "cmd/entire/cli/e2e_test/scenario_subagent_test.go",
+    "cmd/entire/cli/e2e_test/testenv.go",
+    "mise.toml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f4/3b0ea5ee16/0/metadata.json",
+      "transcript": "/f4/3b0ea5ee16/0/full.jsonl",
+      "context": "",
+      "content_hash": "/f4/3b0ea5ee16/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
