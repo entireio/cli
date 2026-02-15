@@ -1155,7 +1155,7 @@ func countCommitsBetween(repo *git.Repository, ancestor, descendant plumbing.Has
 	count := 0
 	current := descendant
 
-	for count < 1000 { // Safety limit
+	for count < strategy.MaxCommitTraversalDepth { // Safety limit
 		if current == ancestor {
 			return count, nil
 		}

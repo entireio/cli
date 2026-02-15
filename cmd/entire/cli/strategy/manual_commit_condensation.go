@@ -616,9 +616,10 @@ func generateContextFromPrompts(prompts []string) []byte {
 
 	for i, prompt := range prompts {
 		// Truncate very long prompts for readability
+		const maxDisplayPromptLen = 500
 		displayPrompt := prompt
-		if len(displayPrompt) > 500 {
-			displayPrompt = displayPrompt[:500] + "..."
+		if len(displayPrompt) > maxDisplayPromptLen {
+			displayPrompt = displayPrompt[:maxDisplayPromptLen] + "..."
 		}
 		buf.WriteString(fmt.Sprintf("### Prompt %d\n\n", i+1))
 		buf.WriteString(displayPrompt)

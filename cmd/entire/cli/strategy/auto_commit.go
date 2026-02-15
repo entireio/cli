@@ -1076,8 +1076,8 @@ func (s *AutoCommitStrategy) findReferencedCheckpoints(repo *git.Repository) map
 		count := 0
 		_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best effort
 			count++
-			if count > 1000 {
-				return errors.New("limit reached")
+			if count > MaxCommitTraversalDepth {
+				return errStop
 			}
 			if visited[c.Hash] {
 				return nil

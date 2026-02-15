@@ -22,6 +22,11 @@ var secretPattern = regexp.MustCompile(`[A-Za-z0-9/+_=-]{10,}`)
 // and tokens which tend to have entropy well above 5.0.
 const entropyThreshold = 4.5
 
+
+// RedactedPlaceholder is the replacement text used for redacted secrets.
+const RedactedPlaceholder = "REDACTED"
+
+// String replaces high-entropy strings matching secretPattern with REDACTED.
 var (
 	gitleaksDetector     *detect.Detector
 	gitleaksDetectorOnce sync.Once
@@ -98,7 +103,7 @@ func String(s string) string {
 	prev := 0
 	for _, r := range merged {
 		b.WriteString(s[prev:r.start])
-		b.WriteString("REDACTED")
+		b.WriteString(RedactedPlaceholder)
 		prev = r.end
 	}
 	b.WriteString(s[prev:])
