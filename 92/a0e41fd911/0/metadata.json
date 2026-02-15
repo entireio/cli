@@ -1,0 +1,21 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "92a0e41fd911",
+  "session_id": "2026-01-06-3a782158-6c7c-4d4d-9c73-eae031da5b18",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-15T17:22:34.909035Z",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/content_overlap.go"
+  ],
+  "initial_attribution": {
+    "calculated_at": "2026-02-15T17:22:34.530479Z",
+    "agent_lines": 4,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 4,
+    "agent_percentage": 100
+  }
+}
