@@ -1,0 +1,148 @@
+Implement the following plan:
+
+# Plan: `entire wingman agent` Command
+
+## Context
+
+Wingman currently hardcodes `claude` CLI and `sonnet` model for reviews. This change adds multi-agent support so users can choose which CLI tool and model performs wingman reviews (e.g., codex, gemini-cli). It also fixes a bug where `wingman enable`/`disable` overwrites agent/model settings.
+
+## Files to Modify/Create
+
+| File | Action |
+|------|--------|
+| `cmd/entire/cli/settings/settings.go` | Add `GetWingmanAgent()` and `GetWingmanModel()` methods |
+| `cmd/entire/cli/wingman_agents.go` | **NEW** — Agent registry + resolve logic |
+| `cmd/entire/cli/wingman.go` | Add `agent`/`config` subcommands, fix enable/disable merge bug |
+| `cmd/entire/cli/wingman_review.go` | Replace hardcoded CLI calls with registry lookups |
+| `cmd/entire/cli/wingman_agents_test.go` | **NEW** — Registry + command tests |
+| `cmd/entire/cli/wingman_test.go` | Add tests for enable/disable preserving settings |
+
+## Implementation Steps
+
+### 1. Settings helpers (`settings/settings.go`)
+
+Add two methods to `EntireSettings` (after `IsWingmanEnabled()` ~line 280):
+
+- `GetWingmanAgent() string` — reads `strategy_options.wingman.agent`, returns `""` if missing
+- `GetWingmanModel() string` — reads `strategy_options.wingman.model`, returns `""` if missing
+
+Same pattern as `IsWingmanEnabled()`: nil-safe map traversal with type assertions.
+
+### 2. Agent registry (`wingman_agents.go` — new file)
+
+Define a `WingmanAgentDef` struct:
+```go
+type WingmanAgentDef struct {
+    Name         string
+    Binary       string       // CLI binary name
+    Models       []string     // display order
+    DefaultModel string
+    BuildReviewArgs func(model string) []string
+    BuildApplyArgs  func() []string
+}
+```
+
+Registry is a package-level `var wingmanAgents = []WingmanAgentDef{...}` with three entries:
+- `claude-code` → binary `claude`, models `[haiku, sonnet, opus]`, default `sonnet`
+  - ReviewArgs: `--print --output-format json --model <m> --setting-sources "" --allowedTools Read,Glob,Grep --permission-mode bypassPermissions`
+  - ApplyArgs: `--continue --print --setting-sources "" --permission-mode acceptEdits`
+- `codex` → binary `codex`, models `[o3-mini, o3, o4-mini]`, default `o3`
+- `gemini-cli` → binary `gemini`, models `[flash, pro]`, default `flash`
+
+Helper functions:
+- `getWingmanAgentDef(name) *WingmanAgentDef`
+- `isValidWingmanModel(def, model) bool`
+- `resolveWingmanAgent(s *settings.EntireSettings) (*WingmanAgentDef, string)` — takes settings to avoid loading from disk (important for detached subprocess which runs from `/`)
+
+### 3. WingmanPayload change (`wingman.go` + `wingman_review.go`)
+
+Add `Agent` and `Model` fields to `WingmanPayload` so the detached subprocess doesn't need to re-load settings (it runs from `/` where `git rev-parse` fails).
+
+In `triggerWingmanReview()`: resolve agent/model from settings and capture in payload before spawning.
+
+In `runWingmanReview()` / `callClaudeForReview()` / `triggerAutoApply()`: use payload's agent/model to look up registry def.
+
+### 4. Fix enable/disable merge bug (`wingman.go`)
+
+Add helper:
+```go
+func updateWingmanOpts(s *settings.EntireSettings, updates map[string]any)
+```
+Loads existing `wingman` map, applies updates, writes back. Used by enable (`"enabled": true`), disable (`"enabled": false`), and agent set (`"agent"`, `"model"`).
+
+Replace current `s.StrategyOptions["wingman"] = map[string]any{"enabled": true}` with `updateWingmanOpts(s, ...)` in both enable and disable.
+
+### 5. `wingman agent` command (`wingman.go`)
+
+Register `newWingmanAgentCmd()` in `newWingmanCmd()`.
+
+- **0 args**: `runWingmanAgentList(cmd)` — prints agents table with `(default)` markers and `Current: <agent> <model>` footer
+- **1 arg**: `runWingmanAgentSet(cmd, agent, "", useLocal)` — validates agent, resets model to default
+- **2 args**: `runWingmanAgentSet(cmd, agent, model, useLocal)` — validates both
+
+Set uses `updateWingmanOpts(s, map[string]any{"agent": name, "model": model})`.
+
+Supports `--local` flag like enable/disable.
+
+### 6. `wingman config` command (`wingman.go`)
+
+Simple read-only subcommand showing:
+```
+Wingman: enabled
+Agent:   claude-code
+Model:   sonnet
+```
+
+### 7. Replace hardcoded CLI calls (`wingman_review.go`)
+
+**`callClaudeForReview(repoRoot, prompt, agentDef, model)`** — takes agent def and model as params instead of using constants. Builds `exec.CommandContext(ctx, agentDef.Binary, agentDef.BuildReviewArgs(model)...)`. Error messages use `agentDef.Binary` instead of hardcoded `"claude"`.
+
+**`triggerAutoApply(repoRoot, agentDef)`** — takes agent def. Uses `agentDef.BuildApplyArgs()` + appends `wingmanApplyInstruction`.
+
+**`runWingmanReview()`** — resolves agent def from payload's Agent/Model fields, passes to both functions. Log line uses resolved agent name.
+
+Keep `wingmanReviewModel` constant for backward compatibility (used as the default in the claude-code registry entry).
+
+### 8. Tests
+
+**`wingman_agents_test.go`** (new):
+- `TestGetWingmanAgentDef_Known` / `_Unknown`
+- `TestIsValidWingmanModel`
+- `TestResolveWingmanAgent_Defaults` / `_FromSettings`
+- `TestWingmanAgentList_Output` — cobra command test
+- `TestWingmanAgentSet_InvalidAgent` / `_InvalidModel` / `_Success`
+- `TestUpdateWingmanOpts_PreservesExisting`
+
+**`wingman_test.go`** (modify):
+- `TestWingmanEnable_PreservesAgentModel` — set agent/model, run enable, verify agent/model preserved
+- `TestWingmanDisable_PreservesAgentModel` — same for disable
+- `TestWingmanPayload_RoundTrip` — update to include Agent/Model fields
+- `TestWingmanConfig_Output` — verify config subcommand output
+
+**`settings/settings_test.go`** or inline in `wingman_test.go`:
+- `TestGetWingmanAgent` / `TestGetWingmanModel` table-driven tests
+
+## Verification
+
+1. `mise run fmt && mise run lint` — passes
+2. `mise run test` — all unit tests pass
+3. `mise run test:ci` — all tests including integration pass
+4. Manual verification:
+   - `entire wingman agent` — lists agents with current selection
+   - `entire wingman agent codex` — sets agent to codex with default o3 model
+   - `entire wingman agent claude-code opus` — sets specific model
+   - `entire wingman agent claude-code gpt-4` — errors with valid options
+   - `entire wingman agent unknown` — errors with valid agent list
+   - `entire wingman config` — shows current config
+   - `entire wingman enable` then `entire wingman agent codex` then `entire wingman disable` then check settings.json still has agent=codex
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/dip/.REDACTED.jsonl
+
+---
+
+Create a branch based out of the current one and commit.
+
+---
+
+Summarize real quick what you did

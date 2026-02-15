@@ -1,0 +1,17 @@
+can you review the branch and especially the new integration tests
+
+---
+
+Can you go through all issues, and for Critical 2 it might be worth to add also tests?
+
+---
+
+[Request interrupted by user]
+
+---
+
+Can you go through all issues, and for Critical 2 it might be worth to add also a e2e test
+
+---
+
+where do you get the `v0.3.0` from? Currently we are at 0.4.4 and this branch would remove `active_commited`, right?

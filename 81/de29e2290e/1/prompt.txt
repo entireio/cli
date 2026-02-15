@@ -1,0 +1,22 @@
+Seeing this in cd ../entire.io. What's the problem? Investigate dip@dip entire.io % tail -f .entire/logs/wingman.log
+2026-02-13T08:45:11+01:00 [wingman] calling claude CLI (model=sonnet, timeout=5m0s)
+2026-02-13T08:45:11+01:00 [wingman] ERROR claude CLI failed after 59ms: claude CLI failed (exit 1): Error: Claude Code cannot be launched inside another Claude Code session.
+Nested sessions share runtime resources and will crash all active sessions.
+To bypass this check, unset the CLAUDECODE environment variable.
+
+2026-02-13T08:45:11+01:00 [wingman] lock file removed
+failed to get review from Claude: claude CLI failed (exit 1): Error: Claude Code cannot be launched inside another Claude Code session.
+Nested sessions share runtime resources and will crash all active sessions.
+To bypass this check, unset the CLAUDECODE environment variable.
+
+---
+
+Update the @docs/architecture/wingman.md with the latest changes that have been made. E.g. the Configuartion isn't complete.
+
+---
+
+The Session-end hook (triggerWingmanAutoApplyOnSessionEnd) never actually worked, but I also think it's a weird scenario, so let's just remove that entirely. If the session is closed and there's a REVIEW.md it either gets picked up by another main session or it goes stale and will be removed. What do you think?
+
+---
+
+Commit

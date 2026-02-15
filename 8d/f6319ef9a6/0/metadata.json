@@ -1,0 +1,40 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "8df6319ef9a6",
+  "session_id": "8ab54260-6692-4888-96a3-c08408c85fb4",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-14T15:29:19.433234Z",
+  "branch": "soph/real-e2e-tests",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "cmd/entire/cli/e2e_test/agent_runner.go",
+    "cmd/entire/cli/e2e_test/assertions.go",
+    "cmd/entire/cli/e2e_test/prompts.go",
+    "cmd/entire/cli/e2e_test/scenario_agent_commit_test.go",
+    "cmd/entire/cli/e2e_test/scenario_basic_workflow_test.go",
+    "cmd/entire/cli/e2e_test/scenario_checkpoint_test.go",
+    "cmd/entire/cli/e2e_test/scenario_rewind_test.go",
+    "cmd/entire/cli/e2e_test/setup_test.go",
+    "cmd/entire/cli/e2e_test/testenv.go",
+    "cmd/entire/cli/testutil/testutil.go",
+    "mise.toml"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 2173,
+    "cache_creation_tokens": 78172,
+    "cache_read_tokens": 3945552,
+    "output_tokens": 145,
+    "api_call_count": 49
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-14T15:29:19.130213Z",
+    "agent_lines": 363,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 363,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/8ab54260-6692-4888-96a3-c08408c85fb4.jsonl"
+}

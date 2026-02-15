@@ -1,0 +1,52 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "bccb77bb88fa",
+  "strategy": "manual-commit",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/e2e_test/agent_runner.go",
+    "cmd/entire/cli/e2e_test/assertions.go",
+    "cmd/entire/cli/e2e_test/prompts.go",
+    "cmd/entire/cli/e2e_test/scenario_agent_commit_test.go",
+    "cmd/entire/cli/e2e_test/scenario_basic_workflow_test.go",
+    "cmd/entire/cli/e2e_test/scenario_checkpoint_test.go",
+    "cmd/entire/cli/e2e_test/scenario_rewind_test.go",
+    "cmd/entire/cli/e2e_test/setup_test.go",
+    "cmd/entire/cli/e2e_test/testenv.go",
+    "cmd/entire/cli/integration_test/deferred_finalization_test.go",
+    "cmd/entire/cli/integration_test/hooks.go",
+    "cmd/entire/cli/integration_test/phase_transitions_test.go",
+    "cmd/entire/cli/strategy/content_overlap.go",
+    "cmd/entire/cli/strategy/content_overlap_test.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go",
+    "docs/architecture/checkpoint-scenarios.md",
+    "docs/checkpoint-scenarios.md",
+    "mise.toml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/bc/cb77bb88fa/0/metadata.json",
+      "transcript": "/bc/cb77bb88fa/0/full.jsonl",
+      "context": "/bc/cb77bb88fa/0/context.md",
+      "content_hash": "/bc/cb77bb88fa/0/content_hash.txt",
+      "prompt": "/bc/cb77bb88fa/0/prompt.txt"
+    },
+    {
+      "metadata": "/bc/cb77bb88fa/1/metadata.json",
+      "transcript": "/bc/cb77bb88fa/1/full.jsonl",
+      "context": "/bc/cb77bb88fa/1/context.md",
+      "content_hash": "/bc/cb77bb88fa/1/content_hash.txt",
+      "prompt": "/bc/cb77bb88fa/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3535,
+    "cache_creation_tokens": 188936,
+    "cache_read_tokens": 7655120,
+    "output_tokens": 168,
+    "api_call_count": 68
+  }
+}

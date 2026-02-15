@@ -1,0 +1,210 @@
+Implement the following plan:
+
+# Fix E2E Test Issues
+
+## Summary
+Fix all critical and important issues identified in the code review of the `soph/real-e2e-tests` branch.
+
+## Issues to Fix
+
+### Critical Issues
+
+1. **Array index out of bounds risk** - Multiple places slice `p.ID[:12]` without checking length
+2. **GetLatestCheckpointIDFromHistory error handling** - Returns empty string silently instead of error
+3. **GitCommitWithShadowHooks missing environment** - Hook commands don't include project directory env vars
+
+### Important Issues
+
+4. **Code duplication** - Extract shared test utilities to a new `testutil` package
+5. **Gemini runner not implemented** - Update mise.toml description to be clearer
+6. **PATH modification in TestMain** - Document the pattern (acceptable for test packages)
+7. **TestE2E_RewindAfterCommit swallows errors** - Add proper assertions
+
+---
+
+## Implementation Plan
+
+### 1. Create shared testutil package
+
+**Create:** `cmd/entire/cli/testutil/testutil.go`
+
+Extract shared code from both `integration_test/testenv.go` and `e2e_test/testenv.go`:
+
+```go
+package testutil
+
+// Functions to extract:
+// - InitRepo(t, repoDir) - git init with config
+// - WriteFile(t, repoDir, path, content)
+// - ReadFile(t, repoDir, path) string
+// - TryReadFile(t, repoDir, path) string
+// - FileExists(repoDir, path) bool
+// - GitAdd(t, repoDir, paths...)
+// - GitCommit(t, repoDir, message)
+// - GitCheckoutNewBranch(t, repoDir, branchName)
+// - GetHeadHash(t, repoDir) string
+// - BranchExists(t, repoDir, branchName) bool
+// - GetCommitMessage(t, repoDir, hash) string
+// - GetLatestCheckpointIDFromHistory(t, repoDir) (string, error)  // Returns error instead of empty string
+
+// Types to extract:
+// - RewindPoint struct
+```
+
+The package will NOT have build tags, making it usable by both integration and e2e tests.
+
+### 2. Fix GetLatestCheckpointIDFromHistory
+
+**File:** `cmd/entire/cli/testutil/testutil.go` (new)
+
+Return `(string, error)` instead of just `string`:
+- Return error if no checkpoint ID found
+- Use `trailers.ParseCheckpoint()` like integration tests do (consistent parsing)
+
+**Update callers in e2e_test:**
+- `scenario_checkpoint_test.go:42,75` - Handle error properly
+
+### 3. Fix ID slicing without length check
+
+**File:** `cmd/entire/cli/e2e_test/scenario_checkpoint_test.go`
+- Lines 34, 56: Add `safeIDPrefix()` helper or inline check
+
+**File:** `cmd/entire/cli/e2e_test/scenario_rewind_test.go`
+- Lines 29, 98: Same fix
+
+**Create helper:**
+```go
+// safeIDPrefix returns first 12 chars of ID or the full ID if shorter
+func safeIDPrefix(id string) string {
+    if len(id) >= 12 {
+        return id[:12]
+    }
+    return id
+}
+```
+
+### 4. Fix GitCommitWithShadowHooks missing environment
+
+**File:** `cmd/entire/cli/e2e_test/testenv.go`
+
+Lines 277 and 313: Add environment variables for project directories.
+
+Change:
+```go
+prepCmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=1")
+```
+
+To:
+```go
+prepCmd.Env = append(os.Environ(),
+    "ENTIRE_TEST_TTY=1",
+    "ENTIRE_TEST_CLAUDE_PROJECT_DIR="+filepath.Join(env.RepoDir, ".claude"),
+    "ENTIRE_TEST_GEMINI_PROJECT_DIR="+filepath.Join(env.RepoDir, ".gemini"),
+)
+```
+
+Same for postCmd (line 313).
+
+### 5. Fix TestE2E_RewindAfterCommit error handling
+
+**File:** `cmd/entire/cli/e2e_test/scenario_rewind_test.go`
+
+Lines 102-108: Replace silent error swallowing with proper assertion:
+
+```go
+// Option A: If logs-only rewind is expected to succeed
+err = env.Rewind(preCommitPointID)
+require.NoError(t, err, "Rewind should succeed even for logs-only points")
+
+// Option B: If logs-only rewind failure is acceptable, verify the file state
+err = env.Rewind(preCommitPointID)
+if err != nil {
+    t.Logf("Rewind to logs-only point: %v", err)
+    // Verify file was NOT restored (expected for logs-only)
+    assert.Contains(t, env.ReadFile("hello.go"), "E2E Test",
+        "File should still have modifications after logs-only rewind failure")
+} else {
+    // Verify file WAS restored
+    // (add assertion based on expected behavior)
+}
+```
+
+### 6. Update mise.toml Gemini task description
+
+**File:** `mise.toml`
+
+Line 107: Change description from:
+```
+description = "Run E2E tests with Gemini CLI (when implemented)"
+```
+To:
+```
+description = "Run E2E tests with Gemini CLI (runner not yet implemented - will skip)"
+```
+
+### 7. Document PATH modification (no code change)
+
+The PATH modification in `setup_test.go` is actually a standard Go testing pattern:
+- TestMain runs once before any tests
+- It builds the binary and adds to PATH
+- Tests run with the modified PATH
+- Cleanup happens after all tests complete
+
+This is safe because:
+- Test packages run in isolation
+- The binary path is unique per test run (temp dir)
+- Go test framework handles the lifecycle correctly
+
+**No code change needed** - this is an acceptable pattern. Add a comment explaining why:
+
+```go
+// Add binary to PATH so hooks can find it.
+// This is safe because:
+// 1. TestMain runs before any tests (no parallel conflict)
+// 2. Each test package gets its own TestMain execution
+// 3. PATH is restored in the same TestMain after m.Run()
+```
+
+---
+
+## Files to Create/Modify
+
+### Create
+- `cmd/entire/cli/testutil/testutil.go` - Shared test utilities
+
+### Modify
+- `cmd/entire/cli/e2e_test/testenv.go` - Use testutil, fix env vars
+- `cmd/entire/cli/e2e_test/setup_test.go` - Add explanatory comment
+- `cmd/entire/cli/e2e_test/scenario_checkpoint_test.go` - Fix ID slicing
+- `cmd/entire/cli/e2e_test/scenario_rewind_test.go` - Fix ID slicing, fix error handling
+- `cmd/entire/cli/integration_test/testenv.go` - Use testutil (reduce duplication)
+- `mise.toml` - Update Gemini task description
+
+---
+
+## Verification
+
+1. Run `mise run fmt && mise run lint` - no errors
+2. Run `mise run test` - unit tests pass
+3. Run `mise run test:integration` - integration tests pass
+4. Run `mise run test:e2e` (if Claude available) - e2e tests pass
+5. Verify no regression in test coverage
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
+
+---
+
+Tools passed as comma-joined string instead of separate arguments
+
+High Severity
+
+The Claude CLI --allowedTools flag expects each tool as a separate space-separated argument (e.g., --allowedTools "Edit" "Read" "Bash"), but the code joins all tools with commas into a single argument via strings.Join(tools, ","). This produces --allowedTools "Edit,Read,Write,Bash,Glob,Grep" which the CLI won't parse correctly. The existing shell script in scripts/test-attribution-e2e.sh correctly uses space-separated tools. The tools should be appended as individual args instead.
+
+---
+
+Variable named README but creates DOCS.md file
+
+Low Severity
+
+PromptCreateREADME has the comment "creates a simple README file" and Name: "CreateREADME", but the prompt actually creates DOCS.md and ExpectedFiles lists "DOCS.md". This was likely changed to avoid conflicting with the README.md created in NewFeatureBranchEnv, but the variable name, comment, and Name field were not updated to match, making this misleading for future use.

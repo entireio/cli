@@ -1,0 +1,40 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "bccb77bb88fa",
+  "session_id": "ee5c333e-c930-416a-bbba-e1bcbccf3794",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-14T14:59:43.384394Z",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/e2e_test/agent_runner.go",
+    "cmd/entire/cli/e2e_test/assertions.go",
+    "cmd/entire/cli/e2e_test/prompts.go",
+    "cmd/entire/cli/e2e_test/scenario_agent_commit_test.go",
+    "cmd/entire/cli/e2e_test/scenario_basic_workflow_test.go",
+    "cmd/entire/cli/e2e_test/scenario_checkpoint_test.go",
+    "cmd/entire/cli/e2e_test/scenario_rewind_test.go",
+    "cmd/entire/cli/e2e_test/setup_test.go",
+    "cmd/entire/cli/e2e_test/testenv.go",
+    "mise.toml"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "ce6b3861ef67",
+  "token_usage": {
+    "input_tokens": 2012,
+    "cache_creation_tokens": 136966,
+    "cache_read_tokens": 5044321,
+    "output_tokens": 118,
+    "api_call_count": 46
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-14T14:59:42.849577Z",
+    "agent_lines": 1615,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1615,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/ee5c333e-c930-416a-bbba-e1bcbccf3794.jsonl"
+}

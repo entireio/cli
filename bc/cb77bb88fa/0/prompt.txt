@@ -1,0 +1,691 @@
+Implement the following plan:
+
+# E2E Testing Framework with Real Agent Calls
+
+## Summary
+
+Create a Go-based E2E testing framework that invokes real agent CLIs (Claude Code with haiku, potentially Gemini CLI later) to test the Entire CLI's checkpoint system. This replaces the bash script `scripts/test-attribution-e2e.sh` with proper Go tests.
+
+**Key insight**: The CLI already has multi-agent support via the `agent.Agent` interface (see `cmd/entire/cli/agent/agent.go`). The e2e framework should follow this pattern with an `AgentRunner` interface.
+
+## Directory Structure
+
+```
+cmd/entire/cli/e2e_test/
+├── setup_test.go                   # TestMain: builds binary, checks agent availability
+├── testenv.go                      # E2ETestEnv: standalone env with AgentRunner
+├── agent_runner.go                 # AgentRunner interface + ClaudeCodeRunner impl
+├── prompts.go                      # Deterministic prompt templates
+├── assertions.go                   # Verification helpers
+├── scenario_basic_workflow_test.go # P0: Basic prompt→changes→commit
+├── scenario_checkpoint_test.go     # P0: Checkpoint metadata verification
+├── scenario_rewind_test.go         # P0: Rewind functionality
+└── scenario_agent_commit_test.go   # P1: Agent commits during turn
+```
+
+## Key Components
+
+### 1. AgentRunner Interface (`agent_runner.go`)
+
+Multi-agent design following the existing `agent.Agent` pattern:
+
+```go
+// AgentRunner abstracts invoking a coding agent for e2e tests
+type AgentRunner interface {
+    // Name returns the agent name (e.g., "claude-code", "gemini-cli")
+    Name() string
+
+    // IsAvailable checks if the agent CLI is installed and authenticated
+    IsAvailable() (bool, error)
+
+    // RunPrompt executes a prompt and returns the result
+    RunPrompt(ctx context.Context, prompt string) (*AgentResult, error)
+
+    // RunPromptWithTools executes with specific allowed tools
+    RunPromptWithTools(ctx context.Context, prompt string, tools []string) (*AgentResult, error)
+}
+
+// AgentResult holds the result of an agent invocation
+type AgentResult struct {
+    Stdout   string
+    Stderr   string
+    ExitCode int
+    Duration time.Duration
+}
+```
+
+### 2. ClaudeCodeRunner (implements AgentRunner)
+
+```go
+type ClaudeCodeRunner struct {
+    RepoDir      string
+    Model        string        // Default: "haiku"
+    Timeout      time.Duration // Default: 2m
+    AllowedTools []string      // Default: ["Edit", "Read", "Write", "Bash"]
+    T            *testing.T
+}
+
+func (r *ClaudeCodeRunner) IsAvailable() (bool, error) {
+    // Check: claude CLI in PATH
+    if _, err := exec.LookPath("claude"); err != nil {
+        return false, fmt.Errorf("claude CLI not found: %w", err)
+    }
+    // Check: claude is authenticated (try --version or similar non-auth command)
+    cmd := exec.Command("claude", "--version")
+    if err := cmd.Run(); err != nil {
+        return false, fmt.Errorf("claude CLI not working: %w", err)
+    }
+    return true, nil
+}
+```
+
+Invokes Claude with: `claude --model haiku -p "..." --allowedTools Edit,Read,Write,Bash`
+
+### 3. Future: GeminiCLIRunner (placeholder)
+
+```go
+// GeminiCLIRunner can be added later following same pattern
+type GeminiCLIRunner struct {
+    RepoDir string
+    // ... gemini-specific config
+}
+```
+
+### 2. E2ETestEnv (`testenv.go`)
+
+Standalone test environment (copies helpers from integration_test to avoid import dependency):
+
+```go
+type E2ETestEnv struct {
+    T                *testing.T
+    RepoDir          string
+    ClaudeProjectDir string
+    Claude           *ClaudeRunner
+    SessionCounter   int
+}
+
+// Helper methods copied from integration_test/testenv.go:
+// - InitRepo(), WriteFile(), ReadFile(), FileExists()
+// - GitAdd(), GitCommit(), GitCommitWithShadowHooks()
+// - GetHeadHash(), GetRewindPoints(), Rewind()
+// - BranchExists(), FileExistsInBranch(), etc.
+
+func NewE2EFeatureBranchEnv(t *testing.T, strategy string) *E2ETestEnv
+```
+
+### 3. Deterministic Prompts (`prompts.go`)
+
+Predefined prompts with predictable outcomes:
+
+```go
+var PromptCreateHelloGo = PromptTemplate{
+    Name: "CreateHelloGo",
+    Prompt: `Create a file called hello.go with a simple Go program that prints
+             "Hello, World!". Use package main, a main function, and fmt.Println.
+             Do not add comments or extra functionality.`,
+    ExpectedFiles: []string{"hello.go"},
+}
+```
+
+## Test Scenarios (Priority Order)
+
+### P0: Basic Workflow
+```go
+func TestE2E_BasicWorkflow(t *testing.T) {
+    env := NewE2EFeatureBranchEnv(t, "manual-commit")
+
+    // 1. Claude creates a file
+    _, err := env.Claude.RunPrompt(ctx, PromptCreateHelloGo.Prompt)
+    require.NoError(t, err)
+
+    // 2. Verify file exists with expected content
+    require.True(t, env.FileExists("hello.go"))
+    assert.Contains(t, env.ReadFile("hello.go"), "Hello, World!")
+
+    // 3. Verify rewind points exist
+    points := env.GetRewindPoints()
+    assert.GreaterOrEqual(t, len(points), 1)
+
+    // 4. User commits
+    env.GitCommitWithShadowHooks("Add hello world", "hello.go")
+
+    // 5. Verify checkpoint created
+    checkpointID := env.GetLatestCheckpointIDFromHistory()
+    assert.NotEmpty(t, checkpointID)
+}
+```
+
+### P0: Rewind Functionality
+```go
+func TestE2E_RewindToCheckpoint(t *testing.T) {
+    // Create checkpoint 1
+    // Create checkpoint 2 (modifies same file)
+    // Rewind to checkpoint 1
+    // Verify file content restored
+}
+```
+
+### P1: Agent Commits During Turn
+```go
+func TestE2E_AgentCommitsDuringTurn(t *testing.T) {
+    // Prompt Claude to make changes AND commit them
+    // Verify deferred finalization works
+}
+```
+
+## Configuration
+
+### Environment Variables
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `E2E_AGENT` | Agent to test with | `claude-code` |
+| `E2E_CLAUDE_MODEL` | Claude model to use | `haiku` |
+| `E2E_TIMEOUT` | Per-prompt timeout | `2m` |
+
+**Note**: Claude Code CLI uses OAuth authentication (via `claude login`), NOT the `ANTHROPIC_API_KEY` environment variable. Tests skip gracefully if the agent CLI isn't available or authenticated.
+
+### TestMain (`setup_test.go`)
+
+```go
+func TestMain(m *testing.M) {
+    // Determine which agent to test (default: claude-code)
+    agentName := os.Getenv("E2E_AGENT")
+    if agentName == "" {
+        agentName = "claude-code"
+    }
+
+    // Check if agent is available (CLI exists and is authenticated)
+    runner := NewAgentRunner(agentName, nil)
+    available, err := runner.IsAvailable()
+    if !available {
+        fmt.Printf("Agent %s not available (%v), skipping E2E tests\n", agentName, err)
+        os.Exit(0) // Exit 0 to not fail CI
+    }
+
+    // Build entire binary (same as integration tests)
+    tmpDir, _ := os.MkdirTemp("", "entire-e2e-*")
+    testBinaryPath = filepath.Join(tmpDir, "entire")
+    // ... build binary ...
+
+    // Add to PATH so hooks find it
+    os.Setenv("PATH", tmpDir+":"+os.Getenv("PATH"))
+
+    code := m.Run()
+    os.RemoveAll(tmpDir)
+    os.Exit(code)
+}
+```
+
+### mise.toml Task
+
+```toml
+[tasks."test:e2e"]
+description = "Run E2E tests with real agent calls (requires claude or gemini CLI)"
+run = "go test -tags=e2e -timeout=30m -v ./cmd/entire/cli/e2e_test/..."
+
+[tasks."test:e2e:claude"]
+description = "Run E2E tests with Claude Code"
+run = "E2E_AGENT=claude-code go test -tags=e2e -timeout=30m -v ./cmd/entire/cli/e2e_test/..."
+
+[tasks."test:e2e:gemini"]
+description = "Run E2E tests with Gemini CLI (when implemented)"
+run = "E2E_AGENT=gemini-cli go test -tags=e2e -timeout=30m -v ./cmd/entire/cli/e2e_test/..."
+```
+
+## Handling Non-Determinism
+
+1. **Specific prompts**: Use precise language ("create file X" not "implement feature")
+2. **Flexible verification**: Use regex patterns instead of exact string matching
+3. **Retry logic**: Retry flaky tests up to 3 times with backoff
+
+```go
+func VerifyHelloWorld(t *testing.T, content string) {
+    assert.Contains(t, content, "package main")
+    assert.Regexp(t, `func\s+main\s*\(\s*\)`, content)
+    assert.Regexp(t, `(?i)hello.+world`, content)  // Case insensitive
+}
+```
+
+## Design Decisions
+
+1. **Separate directory**: `e2e_test/` is separate from `integration_test/` for cleaner separation
+2. **Standalone helpers**: Copy git helpers from `integration_test/testenv.go` rather than importing to avoid build tag conflicts
+3. **Tool restrictions**: Use `--allowedTools` with specific list for more realistic testing (not bypass mode)
+4. **Multi-agent ready**: `AgentRunner` interface allows adding Gemini CLI support later (follows existing `agent.Agent` pattern)
+
+## Related Work
+
+- **[claude-code-mcp](https://github.com/steipete/claude-code-mcp)**: Uses mock Claude CLI for CI, real CLI for local tests
+- **[claude-code-test-runner](https://github.com/firstloophq/claude-code-test-runner)**: Natural language test definitions with Playwright MCP
+- **Existing multi-agent support**: `cmd/entire/cli/agent/agent.go` defines `Agent` interface with Claude Code and Gemini implementations
+
+## Files to Modify
+
+1. **Create** `cmd/entire/cli/e2e_test/` directory and all files
+2. **Modify** `mise.toml` - Add `test:e2e` task
+3. **Optional** Deprecate `scripts/test-attribution-e2e.sh` (keep for now as reference)
+
+## Verification
+
+After implementation:
+1. Run `ANTHROPIC_API_KEY=xxx mise run test:e2e`
+2. Verify tests pass with haiku model
+3. Verify checkpoints are created
+4. Verify rewind works
+5. Check cost is reasonable (< $0.01 per suite run)
+
+## Cost Estimate
+
+| Test | Est. Tokens | Cost (haiku) |
+|------|-------------|--------------|
+| Basic Workflow | ~700 | ~$0.0004 |
+| Checkpoint Verify | ~700 | ~$0.0004 |
+| Rewind Test | ~1400 | ~$0.0008 |
+
+**Total per suite: < $0.01**
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/soph/.REDACTED.jsonl
+
+---
+
+=== RUN   TestE2E_AgentCommitsDuringTurn
+=== PAUSE TestE2E_AgentCommitsDuringTurn
+=== RUN   TestE2E_MultipleAgentSessions
+=== PAUSE TestE2E_MultipleAgentSessions
+=== RUN   TestE2E_BasicWorkflow
+=== PAUSE TestE2E_BasicWorkflow
+=== RUN   TestE2E_MultipleChanges
+=== PAUSE TestE2E_MultipleChanges
+=== RUN   TestE2E_CheckpointMetadata
+=== PAUSE TestE2E_CheckpointMetadata
+=== RUN   TestE2E_CheckpointIDFormat
+=== PAUSE TestE2E_CheckpointIDFormat
+=== RUN   TestE2E_AutoCommitStrategy
+=== PAUSE TestE2E_AutoCommitStrategy
+=== RUN   TestE2E_RewindToCheckpoint
+=== PAUSE TestE2E_RewindToCheckpoint
+=== RUN   TestE2E_RewindAfterCommit
+=== PAUSE TestE2E_RewindAfterCommit
+=== RUN   TestE2E_RewindMultipleFiles
+=== PAUSE TestE2E_RewindMultipleFiles
+=== CONT  TestE2E_AgentCommitsDuringTurn
+=== CONT  TestE2E_CheckpointIDFormat
+=== CONT  TestE2E_MultipleChanges
+=== CONT  TestE2E_CheckpointMetadata
+=== CONT  TestE2E_RewindToCheckpoint
+=== CONT  TestE2E_AutoCommitStrategy
+=== CONT  TestE2E_BasicWorkflow
+=== CONT  TestE2E_MultipleAgentSessions
+=== NAME  TestE2E_RewindToCheckpoint
+    scenario_rewind_test.go:19: Step 1: Creating first file
+=== NAME  TestE2E_BasicWorkflow
+    scenario_basic_workflow_test.go:20: Step 1: Running agent to create hello.go
+=== NAME  TestE2E_AgentCommitsDuringTurn
+    scenario_agent_commit_test.go:19: Step 1: Agent creating file
+=== NAME  TestE2E_MultipleChanges
+    scenario_basic_workflow_test.go:62: Step 1: Creating first file
+=== NAME  TestE2E_CheckpointMetadata
+    scenario_checkpoint_test.go:19: Step 1: Agent creating file
+=== NAME  TestE2E_MultipleAgentSessions
+    scenario_agent_commit_test.go:74: Session 1: Creating hello.go
+=== NAME  TestE2E_AutoCommitStrategy
+    scenario_checkpoint_test.go:95: Step 1: Agent creating file with auto-commit strategy
+=== NAME  TestE2E_BasicWorkflow
+    scenario_basic_workflow_test.go:24: Agent completed in 8.631253625s
+    scenario_basic_workflow_test.go:27: Step 2: Verifying file was created
+=== NAME  TestE2E_MultipleChanges
+    scenario_basic_workflow_test.go:69: Step 2: Creating second file
+=== NAME  TestE2E_BasicWorkflow
+    scenario_basic_workflow_test.go:32: Step 3: Checking for rewind points
+=== NAME  TestE2E_CheckpointMetadata
+    scenario_checkpoint_test.go:26: Step 2: Checking session rewind points
+=== NAME  TestE2E_BasicWorkflow
+    scenario_basic_workflow_test.go:34:
+                Error Trace:    /Users/soph/Work/entire/devenv/cli/cmd/entire/cli/e2e_test/scenario_basic_workflow_test.go:34
+                Error:          "0" is not greater than or equal to "1"
+                Test:           TestE2E_BasicWorkflow
+                Messages:       Should have at least 1 rewind point
+    scenario_basic_workflow_test.go:40: Step 4: Committing changes with hooks
+=== NAME  TestE2E_CheckpointMetadata
+    scenario_checkpoint_test.go:28:
+                Error Trace:    /Users/soph/Work/entire/devenv/cli/cmd/entire/cli/e2e_test/scenario_checkpoint_test.go:28
+                Error:          "0" is not greater than or equal to "1"
+                Test:           TestE2E_CheckpointMetadata
+                Messages:       Should have rewind points before commit
+=== NAME  TestE2E_RewindToCheckpoint
+    scenario_rewind_test.go:27:
+                Error Trace:    /Users/soph/Work/entire/devenv/cli/cmd/entire/cli/e2e_test/scenario_rewind_test.go:27
+                Error:          "0" is not greater than or equal to "1"
+                Test:           TestE2E_RewindToCheckpoint
+--- FAIL: TestE2E_CheckpointMetadata (8.78s)
+=== CONT  TestE2E_RewindMultipleFiles
+--- FAIL: TestE2E_RewindToCheckpoint (8.79s)
+=== CONT  TestE2E_RewindAfterCommit
+=== NAME  TestE2E_RewindMultipleFiles
+    scenario_rewind_test.go:118: Step 1: Creating first file
+=== NAME  TestE2E_RewindAfterCommit
+    scenario_rewind_test.go:69: Step 1: Creating file
+=== NAME  TestE2E_CheckpointIDFormat
+    scenario_checkpoint_test.go:76:
+                Error Trace:    /Users/soph/Work/entire/devenv/cli/cmd/entire/cli/e2e_test/scenario_checkpoint_test.go:76
+                Error:          Should NOT be empty, but was
+                Test:           TestE2E_CheckpointIDFormat
+--- FAIL: TestE2E_CheckpointIDFormat (8.86s)
+=== NAME  TestE2E_BasicWorkflow
+    scenario_basic_workflow_test.go:44: Step 5: Verifying checkpoint
+    scenario_basic_workflow_test.go:46:
+                Error Trace:    /Users/soph/Work/entire/devenv/cli/cmd/entire/cli/e2e_test/scenario_basic_workflow_test.go:46
+                Error:          Should NOT be empty, but was
+                Test:           TestE2E_BasicWorkflow
+                Messages:       Commit should have Entire-Checkpoint trailer
+    scenario_basic_workflow_test.go:47: Checkpoint ID:
+    scenario_basic_workflow_test.go:50: Step 6: Checking metadata branch
+    scenario_basic_workflow_test.go:51:
+                Error Trace:    /Users/soph/Work/entire/devenv/cli/cmd/entire/cli/e2e_test/scenario_basic_workflow_test.go:51
+                Error:          Should be true
+                Test:           TestE2E_BasicWorkflow
+                Messages:       entire/checkpoints/v1 branch should exist
+--- FAIL: TestE2E_BasicWorkflow (8.89s)
+=== NAME  TestE2E_AgentCommitsDuringTurn
+    scenario_agent_commit_test.go:26: Step 2: Agent committing changes
+=== NAME  TestE2E_MultipleAgentSessions
+    scenario_agent_commit_test.go:80: After session 1: 0 rewind points
+    scenario_agent_commit_test.go:86: Session 2: Creating calc.go
+=== NAME  TestE2E_AutoCommitStrategy
+    scenario_checkpoint_test.go:106: Latest commit message: Initial commit
+    scenario_checkpoint_test.go:115: Found 0 rewind points
+--- PASS: TestE2E_AutoCommitStrategy (13.48s)
+=== NAME  TestE2E_MultipleChanges
+    scenario_basic_workflow_test.go:76: Step 3: Checking rewind points
+    scenario_basic_workflow_test.go:78:
+                Error Trace:    /Users/soph/Work/entire/devenv/cli/cmd/entire/cli/e2e_test/scenario_basic_workflow_test.go:78
+                Error:          "0" is not greater than or equal to "2"
+                Test:           TestE2E_MultipleChanges
+                Messages:       Should have at least 2 rewind points
+    scenario_basic_workflow_test.go:81: Step 4: Committing all changes
+=== NAME  TestE2E_RewindMultipleFiles
+    scenario_rewind_test.go:125:
+                Error Trace:    /Users/soph/Work/entire/devenv/cli/cmd/entire/cli/e2e_test/scenario_rewind_test.go:125
+                Error:          "0" is not greater than or equal to "1"
+                Test:           TestE2E_RewindMultipleFiles
+--- FAIL: TestE2E_RewindMultipleFiles (6.82s)
+=== NAME  TestE2E_MultipleChanges
+    scenario_basic_workflow_test.go:86:
+                Error Trace:    /Users/soph/Work/entire/devenv/cli/cmd/entire/cli/e2e_test/scenario_basic_workflow_test.go:86
+                Error:          Should NOT be empty, but was
+                Test:           TestE2E_MultipleChanges
+--- FAIL: TestE2E_MultipleChanges (15.66s)
+=== NAME  TestE2E_RewindAfterCommit
+    scenario_rewind_test.go:76:
+                Error Trace:    /Users/soph/Work/entire/devenv/cli/cmd/entire/cli/e2e_test/scenario_rewind_test.go:76
+                Error:          "0" is not greater than or equal to "1"
+                Test:           TestE2E_RewindAfterCommit
+--- FAIL: TestE2E_RewindAfterCommit (7.70s)
+=== NAME  TestE2E_AgentCommitsDuringTurn
+    scenario_agent_commit_test.go:36: Agent commit output: Done! I've successfully staged and committed the hello.go file with the message "Add hello world via agent". The commit was created with hash 0f0352d on the feature/e2e-test branch.
+    scenario_agent_commit_test.go:39: Step 3: Verifying commit was made
+    scenario_agent_commit_test.go:41: HEAD commit message: Add hello world via agent
+    scenario_agent_commit_test.go:47: Step 4: Checking rewind points
+    scenario_agent_commit_test.go:49: Found 0 rewind points after agent commit
+    scenario_agent_commit_test.go:52: Step 5: Agent making another change
+=== NAME  TestE2E_MultipleAgentSessions
+    scenario_agent_commit_test.go:92: After session 2: 0 rewind points
+    scenario_agent_commit_test.go:98: Session 3: Adding multiply function
+=== NAME  TestE2E_AgentCommitsDuringTurn
+    scenario_agent_commit_test.go:59: Step 6: User committing second change
+    scenario_agent_commit_test.go:64: Final checkpoint ID:
+--- PASS: TestE2E_AgentCommitsDuringTurn (24.07s)
+=== NAME  TestE2E_MultipleAgentSessions
+    scenario_agent_commit_test.go:110: Final verification
+    scenario_agent_commit_test.go:112:
+                Error Trace:    /Users/soph/Work/entire/devenv/cli/cmd/entire/cli/e2e_test/scenario_agent_commit_test.go:112
+                Error:          Should NOT be empty, but was
+                Test:           TestE2E_MultipleAgentSessions
+                Messages:       Should have checkpoint in final commit
+--- FAIL: TestE2E_MultipleAgentSessions (26.62s)
+FAIL
+FAIL    github.com/entireio/cli/cmd/entire/cli/e2e_test 28.889s
+FAIL
+[test:e2e] ERROR task failed
+
+---
+
+[Request interrupted by user]
+
+---
+
+you just should run `entire enable --telemetry false --agent claude` that will setup everything
+
+---
+
+[test:e2e] $ go test -tags=e2e -timeout=30m -v ./cmd/entire/cli/e2e_test/...
+=== RUN   TestE2E_AgentCommitsDuringTurn
+=== PAUSE TestE2E_AgentCommitsDuringTurn
+=== RUN   TestE2E_MultipleAgentSessions
+=== PAUSE TestE2E_MultipleAgentSessions
+=== RUN   TestE2E_BasicWorkflow
+=== PAUSE TestE2E_BasicWorkflow
+=== RUN   TestE2E_MultipleChanges
+=== PAUSE TestE2E_MultipleChanges
+=== RUN   TestE2E_CheckpointMetadata
+=== PAUSE TestE2E_CheckpointMetadata
+=== RUN   TestE2E_CheckpointIDFormat
+=== PAUSE TestE2E_CheckpointIDFormat
+=== RUN   TestE2E_AutoCommitStrategy
+=== PAUSE TestE2E_AutoCommitStrategy
+=== RUN   TestE2E_RewindToCheckpoint
+=== PAUSE TestE2E_RewindToCheckpoint
+=== RUN   TestE2E_RewindAfterCommit
+=== PAUSE TestE2E_RewindAfterCommit
+=== RUN   TestE2E_RewindMultipleFiles
+=== PAUSE TestE2E_RewindMultipleFiles
+=== CONT  TestE2E_AgentCommitsDuringTurn
+=== CONT  TestE2E_CheckpointIDFormat
+=== CONT  TestE2E_RewindAfterCommit
+=== CONT  TestE2E_CheckpointMetadata
+=== CONT  TestE2E_MultipleChanges
+=== CONT  TestE2E_BasicWorkflow
+=== CONT  TestE2E_MultipleAgentSessions
+=== CONT  TestE2E_RewindToCheckpoint
+    scenario_rewind_test.go:16: entire enable output: Agent: Claude Code
+
+        Installed 7 hooks for Claude Code - Anthropic's CLI coding assistant
+        ✓ Project configured (.entire/settings.json)
+        ✓ Created orphan branch 'entire/checkpoints/v1' for session metadata
+
+        Ready.
+    scenario_rewind_test.go:19: Step 1: Creating first file
+=== NAME  TestE2E_CheckpointMetadata
+    scenario_checkpoint_test.go:16: entire enable output: Agent: Claude Code
+
+        Installed 7 hooks for Claude Code - Anthropic's CLI coding assistant
+        ✓ Project configured (.entire/settings.json)
+        ✓ Created orphan branch 'entire/checkpoints/v1' for session metadata
+
+        Ready.
+    scenario_checkpoint_test.go:19: Step 1: Agent creating file
+=== NAME  TestE2E_CheckpointIDFormat
+    scenario_checkpoint_test.go:64: entire enable output: Agent: Claude Code
+
+        Installed 7 hooks for Claude Code - Anthropic's CLI coding assistant
+        ✓ Project configured (.entire/settings.json)
+        ✓ Created orphan branch 'entire/checkpoints/v1' for session metadata
+
+        Ready.
+=== NAME  TestE2E_MultipleAgentSessions
+    scenario_agent_commit_test.go:71: entire enable output: Agent: Claude Code
+
+        Installed 7 hooks for Claude Code - Anthropic's CLI coding assistant
+        ✓ Project configured (.entire/settings.json)
+        ✓ Created orphan branch 'entire/checkpoints/v1' for session metadata
+
+        Ready.
+    scenario_agent_commit_test.go:74: Session 1: Creating hello.go
+=== NAME  TestE2E_BasicWorkflow
+    scenario_basic_workflow_test.go:17: entire enable output: Agent: Claude Code
+
+        Installed 7 hooks for Claude Code - Anthropic's CLI coding assistant
+        ✓ Project configured (.entire/settings.json)
+        ✓ Created orphan branch 'entire/checkpoints/v1' for session metadata
+
+        Ready.
+    scenario_basic_workflow_test.go:20: Step 1: Running agent to create hello.go
+=== NAME  TestE2E_MultipleChanges
+    scenario_basic_workflow_test.go:59: entire enable output: Agent: Claude Code
+
+        Installed 7 hooks for Claude Code - Anthropic's CLI coding assistant
+        ✓ Project configured (.entire/settings.json)
+        ✓ Created orphan branch 'entire/checkpoints/v1' for session metadata
+
+        Ready.
+    scenario_basic_workflow_test.go:62: Step 1: Creating first file
+=== NAME  TestE2E_RewindAfterCommit
+    scenario_rewind_test.go:66: entire enable output: Agent: Claude Code
+
+        Installed 7 hooks for Claude Code - Anthropic's CLI coding assistant
+        ✓ Project configured (.entire/settings.json)
+        ✓ Created orphan branch 'entire/checkpoints/v1' for session metadata
+
+        Ready.
+    scenario_rewind_test.go:69: Step 1: Creating file
+=== NAME  TestE2E_AgentCommitsDuringTurn
+    scenario_agent_commit_test.go:16: entire enable output: Agent: Claude Code
+
+        Installed 7 hooks for Claude Code - Anthropic's CLI coding assistant
+        ✓ Project configured (.entire/settings.json)
+        ✓ Created orphan branch 'entire/checkpoints/v1' for session metadata
+
+        Ready.
+    scenario_agent_commit_test.go:19: Step 1: Agent creating file
+=== NAME  TestE2E_CheckpointMetadata
+    scenario_checkpoint_test.go:26: Step 2: Checking session rewind points
+    scenario_checkpoint_test.go:33: Rewind point 0: ID=05b56ee34407, MetadataDir=.entire/metadata/7f731a76-743b-4b43-abce-c004e1ddb9b2, Message=Create a file called config.json with this exact content:
+    scenario_checkpoint_test.go:38: Step 3: Committing changes
+=== NAME  TestE2E_RewindAfterCommit
+    scenario_rewind_test.go:80: Step 2: Committing
+=== NAME  TestE2E_MultipleAgentSessions
+    scenario_agent_commit_test.go:80: After session 1: 1 rewind points
+=== NAME  TestE2E_BasicWorkflow
+    scenario_basic_workflow_test.go:24: Agent completed in 13.565417167s
+    scenario_basic_workflow_test.go:27: Step 2: Verifying file was created
+    scenario_basic_workflow_test.go:32: Step 3: Checking for rewind points
+    scenario_basic_workflow_test.go:36: Found 1 rewind point(s), first: Create a file called hello.go with a simple Go program that prints "Hell
+    scenario_basic_workflow_test.go:40: Step 4: Committing changes with hooks
+=== NAME  TestE2E_CheckpointMetadata
+    scenario_checkpoint_test.go:44: Checkpoint ID: 9d7fc26f51e8
+    scenario_checkpoint_test.go:51: Step 4: Checking post-commit rewind points
+=== NAME  TestE2E_RewindAfterCommit
+    scenario_rewind_test.go:84: Step 3: Modifying file after commit
+=== NAME  TestE2E_AgentCommitsDuringTurn
+    scenario_agent_commit_test.go:26: Step 2: Agent committing changes
+=== NAME  TestE2E_MultipleAgentSessions
+    scenario_agent_commit_test.go:86: Session 2: Creating calc.go
+=== NAME  TestE2E_CheckpointMetadata
+    scenario_checkpoint_test.go:55: Post-commit point 0: ID=93a877c22033, IsLogsOnly=true, CondensationID=9d7fc26f51e8
+--- PASS: TestE2E_CheckpointMetadata (14.22s)
+=== CONT  TestE2E_RewindMultipleFiles
+=== NAME  TestE2E_BasicWorkflow
+    scenario_basic_workflow_test.go:44: Step 5: Verifying checkpoint
+    scenario_basic_workflow_test.go:47: Checkpoint ID: e0f6a9780112
+    scenario_basic_workflow_test.go:50: Step 6: Checking metadata branch
+--- PASS: TestE2E_BasicWorkflow (14.25s)
+=== CONT  TestE2E_AutoCommitStrategy
+=== NAME  TestE2E_RewindMultipleFiles
+    scenario_rewind_test.go:115: entire enable output: Agent: Claude Code
+
+        Installed 7 hooks for Claude Code - Anthropic's CLI coding assistant
+        ✓ Project configured (.entire/settings.json)
+        ✓ Created orphan branch 'entire/checkpoints/v1' for session metadata
+
+        Ready.
+    scenario_rewind_test.go:118: Step 1: Creating first file
+=== NAME  TestE2E_AutoCommitStrategy
+    scenario_checkpoint_test.go:92: entire enable output: Agent: Claude Code
+
+        Installed 7 hooks for Claude Code - Anthropic's CLI coding assistant
+        ✓ Project configured (.entire/settings.json)
+        ✓ Created orphan branch 'entire/checkpoints/v1' for session metadata
+
+        Ready.
+    scenario_checkpoint_test.go:95: Step 1: Agent creating file with auto-commit strategy
+=== NAME  TestE2E_MultipleChanges
+    scenario_basic_workflow_test.go:69: Step 2: Creating second file
+--- PASS: TestE2E_CheckpointIDFormat (14.66s)
+=== NAME  TestE2E_RewindToCheckpoint
+    scenario_rewind_test.go:29: First checkpoint: bccbacabdcc9
+    scenario_rewind_test.go:35: Step 2: Modifying file
+=== NAME  TestE2E_MultipleChanges
+    scenario_basic_workflow_test.go:76: Step 3: Checking rewind points
+    scenario_basic_workflow_test.go:81: Step 4: Committing all changes
+=== NAME  TestE2E_RewindMultipleFiles
+    scenario_rewind_test.go:128: Step 2: Creating second file
+=== NAME  TestE2E_AutoCommitStrategy
+    scenario_checkpoint_test.go:106: Latest commit message: Create a file called hello.go with a simple Go program that prints "Hell
+
+        Entire-Checkpoint: c6eaef269436
+    scenario_checkpoint_test.go:110: Metadata branch exists (auto-commit creates it)
+    scenario_checkpoint_test.go:115: Found 1 rewind points
+--- PASS: TestE2E_AutoCommitStrategy (12.40s)
+--- PASS: TestE2E_MultipleChanges (26.66s)
+=== NAME  TestE2E_MultipleAgentSessions
+    scenario_agent_commit_test.go:92: After session 2: 2 rewind points
+    scenario_agent_commit_test.go:98: Session 3: Adding multiply function
+=== NAME  TestE2E_RewindAfterCommit
+    scenario_rewind_test.go:93: Step 4: Getting rewind points
+    scenario_rewind_test.go:95: Found 2 rewind points
+    scenario_rewind_test.go:97:   Point 0: 7dccd889b1aa (logs_only=false, condensation_id=)
+    scenario_rewind_test.go:97:   Point 1: f709179174c8 (logs_only=true, condensation_id=09c3972f10b4)
+    scenario_rewind_test.go:102: Step 5: Rewinding to pre-commit checkpoint
+    scenario_rewind_test.go:107: Rewind result: rewind failed: rewind point not found: 96d69a4ebee323af8c20c0d3940207566e6744db
+         (may be expected for logs-only points)
+--- PASS: TestE2E_RewindAfterCommit (28.82s)
+=== NAME  TestE2E_AgentCommitsDuringTurn
+    scenario_agent_commit_test.go:36: Agent commit output: Done! The hello.go file has been successfully staged and committed with the message "Add hello world via agent". The commit SHA is 75f1fb4.
+    scenario_agent_commit_test.go:39: Step 3: Verifying commit was made
+    scenario_agent_commit_test.go:41: HEAD commit message: Add hello world via agent
+
+        Entire-Checkpoint: a303ff2cc945
+    scenario_agent_commit_test.go:47: Step 4: Checking rewind points
+    scenario_agent_commit_test.go:49: Found 1 rewind points after agent commit
+    scenario_agent_commit_test.go:52: Step 5: Agent making another change
+=== NAME  TestE2E_RewindToCheckpoint
+    scenario_rewind_test.go:48: Now have 2 checkpoints
+    scenario_rewind_test.go:51: Step 3: Rewinding to first checkpoint
+    scenario_rewind_test.go:52: Rewind output: [entire] Reset shadow branch entire/d40b41a-e3b0c4 to checkpoint bccbaca
+          Restored: .claude/settings.json
+          Restored: README.md
+          Restored: hello.go
+
+        Restored files from shadow commit bccbaca
+
+        Writing transcript to: /Users/soph/.REDACTED.jsonl
+        Rewound to bccbaca. claude -r db1f7eeb-c9a3-4082-b843-a48cc05368a1
+    scenario_rewind_test.go:56: Step 4: Verifying content restored
+--- PASS: TestE2E_RewindToCheckpoint (30.06s)
+=== NAME  TestE2E_RewindMultipleFiles
+    scenario_rewind_test.go:138: Step 3: Rewinding to after first file
+    scenario_rewind_test.go:139: Rewind output:
+        Warning: The following untracked files will be DELETED:
+          - calc.go
+
+        [entire] Reset shadow branch entire/d7b78a5-e3b0c4 to checkpoint 1deeca9
+          Deleted: calc.go
+          Restored: .claude/settings.json
+          Restored: README.md
+          Restored: hello.go
+
+        Restored files from shadow commit 1deeca9
+
+        Writing transcript to: /Users/soph/.REDACTED.jsonl
+        Rewound to 1deeca9. claude -r 83c55401-bc52-42c5-bb9f-aadb346c7241
+--- PASS: TestE2E_RewindMultipleFiles (21.89s)
+=== NAME  TestE2E_MultipleAgentSessions
+    scenario_agent_commit_test.go:110: Final verification
+--- PASS: TestE2E_MultipleAgentSessions (38.91s)
+=== NAME  TestE2E_AgentCommitsDuringTurn
+    scenario_agent_commit_test.go:59: Step 6: User committing second change
+    scenario_agent_commit_test.go:64: Final checkpoint ID: 180431deb4a2
+--- PASS: TestE2E_AgentCommitsDuringTurn (39.25s)
+PASS
+ok      github.com/entireio/cli/cmd/entire/cli/e2e_test 41.069s

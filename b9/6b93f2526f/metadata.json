@@ -1,0 +1,66 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b96b93f2526f",
+  "strategy": "manual-commit",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 17,
+  "files_touched": [
+    "CLAUDE.md",
+    "carry-forward-design.md",
+    "checkpoint-approaches.md",
+    "cmd/entire/cli/checkpoint/checkpoint.go",
+    "cmd/entire/cli/checkpoint/committed.go",
+    "cmd/entire/cli/doctor.go",
+    "cmd/entire/cli/doctor_test.go",
+    "cmd/entire/cli/hooks.go",
+    "cmd/entire/cli/hooks_claudecode_handlers.go",
+    "cmd/entire/cli/integration_test/last_checkpoint_id_test.go",
+    "cmd/entire/cli/integration_test/phase_transitions_test.go",
+    "cmd/entire/cli/phase_wiring_test.go",
+    "cmd/entire/cli/reset.go",
+    "cmd/entire/cli/session/phase.go",
+    "cmd/entire/cli/session/phase_test.go",
+    "cmd/entire/cli/session/state.go",
+    "cmd/entire/cli/strategy/auto_commit.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_git.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_session.go",
+    "cmd/entire/cli/strategy/mid_turn_commit_test.go",
+    "cmd/entire/cli/strategy/phase_postcommit_test.go",
+    "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go",
+    "cmd/entire/cli/strategy/phase_wiring_test.go",
+    "cmd/entire/cli/strategy/strategy.go",
+    "docs/architecture/sessions-and-checkpoints.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b9/6b93f2526f/0/metadata.json",
+      "transcript": "/b9/6b93f2526f/0/full.jsonl",
+      "context": "/b9/6b93f2526f/0/context.md",
+      "content_hash": "/b9/6b93f2526f/0/content_hash.txt",
+      "prompt": "/b9/6b93f2526f/0/prompt.txt"
+    },
+    {
+      "metadata": "/b9/6b93f2526f/1/metadata.json",
+      "transcript": "/b9/6b93f2526f/1/full.jsonl",
+      "context": "/b9/6b93f2526f/1/context.md",
+      "content_hash": "/b9/6b93f2526f/1/content_hash.txt",
+      "prompt": "/b9/6b93f2526f/1/prompt.txt"
+    },
+    {
+      "metadata": "/b9/6b93f2526f/2/metadata.json",
+      "transcript": "/b9/6b93f2526f/2/full.jsonl",
+      "context": "/b9/6b93f2526f/2/context.md",
+      "content_hash": "/b9/6b93f2526f/2/content_hash.txt",
+      "prompt": "/b9/6b93f2526f/2/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4271,
+    "cache_creation_tokens": 1565600,
+    "cache_read_tokens": 53103115,
+    "output_tokens": 17629,
+    "api_call_count": 461
+  }
+}
