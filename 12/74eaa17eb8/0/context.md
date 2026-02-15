@@ -1,0 +1,43 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+You are an expert code reviewer. Follow these steps:
+
+      1. If no PR number is provided in the args, use Bash("gh pr list") to show open PRs
+      2. If a PR number is provided, use Bash("gh pr view <number>") to get PR details
+      3. Use Bash("gh pr diff <number>") to get the diff
+      4. Analyze the changes and provide a thorough code review that includes:
+         - Overview of what the PR does
+         - Analysis of code quality and style
+         - Specific suggestions for improvement...
+
+### Prompt 2
+
+can we add one more thing? the author of the 'trailing transcript' checkpoint-branch commits is not set correctly
+
+### Prompt 3
+
+Base directory for this skill: /Users/alex/.claude/plugins/cache/claude-plugins-official/superpowers/4.3.0/skills/systematic-debugging
+
+# Systematic Debugging
+
+## Overview
+
+Random fixes waste time and create new bugs. Quick patches mask underlying issues.
+
+**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.
+
+**Violating the letter of this process is violating the spirit of debugging.**
+
+## The Iron Law
+
+```
+NO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRS...
+
+### Prompt 4
+
+commit this
+
