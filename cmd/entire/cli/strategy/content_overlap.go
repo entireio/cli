@@ -454,13 +454,16 @@ func subtractFilesByName(filesTouched []string, committedFiles map[string]struct
 }
 
 // hasSignificantContentOverlap checks if two file contents share significant lines.
-// Returns true if the contents share at least one non-trivial line.
+// Returns true if the contents share at least 2 non-trivial lines.
 // This distinguishes partial staging (user kept some agent content) from
 // "reverted and replaced" (user wrote completely different content).
 //
-// The function filters out trivial lines (boilerplate like package declarations,
-// import statements, empty braces, etc.) because these commonly appear in many
-// files and don't indicate meaningful overlap.
+// We require at least 2 matching lines because a single match (like "package main")
+// is likely common boilerplate, not evidence that user kept agent work.
+//
+// The function filters out trivial lines (short lines < 10 chars like braces,
+// empty lines, etc.) because these commonly appear in many files and don't
+// indicate meaningful overlap.
 func hasSignificantContentOverlap(stagedContent, shadowContent string) bool {
 	// Build set of significant lines from shadow (agent) content
 	shadowLines := extractSignificantLines(shadowContent)
@@ -468,25 +471,21 @@ func hasSignificantContentOverlap(stagedContent, shadowContent string) bool {
 	// Build set of significant lines from staged (user) content
 	stagedLines := extractSignificantLines(stagedContent)
 
-	// If both have no significant lines, hashes differ so no meaningful overlap
-	if len(shadowLines) == 0 && len(stagedLines) == 0 {
+	// If either has no significant lines, no meaningful overlap possible
+	if len(shadowLines) == 0 || len(stagedLines) == 0 {
 		return false
 	}
 
-	// If shadow has significant lines but staged doesn't, no overlap
-	if len(shadowLines) > 0 && len(stagedLines) == 0 {
-		return false
-	}
-
-	// If shadow has no significant lines but staged does, no overlap
-	if len(shadowLines) == 0 && len(stagedLines) > 0 {
-		return false
-	}
-
-	// Check if any staged line matches a shadow line
+	// Count matching lines - require at least 2 to count as overlap.
+	// A single match (e.g., "package main") is likely boilerplate, not
+	// evidence that user kept agent work.
+	matchCount := 0
 	for line := range stagedLines {
 		if shadowLines[line] {
-			return true
+			matchCount++
+			if matchCount >= 2 {
+				return true
+			}
 		}
 	}
 

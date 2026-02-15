@@ -263,8 +263,8 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository
 		SessionID:                   sessionID,
 		Strategy:                    StrategyNameAutoCommit, // Use new strategy name
 		Branch:                      branchName,
-		MetadataDir:                 ctx.MetadataDirAbs,  // Copy all files from metadata dir
-		TranscriptPath:              transcriptPath,      // For content hash generation
+		MetadataDir:                 ctx.MetadataDirAbs, // Copy all files from metadata dir
+		TranscriptPath:              transcriptPath,     // For content hash generation
 		AuthorName:                  ctx.AuthorName,
 		AuthorEmail:                 ctx.AuthorEmail,
 		Agent:                       ctx.AgentType,

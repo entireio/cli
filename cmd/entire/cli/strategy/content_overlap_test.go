@@ -703,6 +703,7 @@ x`,
 }
 
 // TestHasSignificantContentOverlap tests the content overlap detection logic.
+// We require at least 2 matching significant lines to count as overlap.
 func TestHasSignificantContentOverlap(t *testing.T) {
 	t.Parallel()
 
@@ -713,10 +714,16 @@ func TestHasSignificantContentOverlap(t *testing.T) {
 		wantOverlap   bool
 	}{
 		{
-			name:          "both have matching significant lines",
-			stagedContent: "this is a significant line\nshort",
-			shadowContent: "this is a significant line\nother",
+			name:          "two matching significant lines - overlap",
+			stagedContent: "this is a significant line\nanother matching line here\nshort",
+			shadowContent: "this is a significant line\nanother matching line here\nother",
 			wantOverlap:   true,
+		},
+		{
+			name:          "only one matching significant line - no overlap",
+			stagedContent: "this is a significant line\ncompletely different staged",
+			shadowContent: "this is a significant line\ncompletely different shadow",
+			wantOverlap:   false,
 		},
 		{
 			name:          "no matching significant lines",
@@ -749,9 +756,15 @@ func TestHasSignificantContentOverlap(t *testing.T) {
 			wantOverlap:   false,
 		},
 		{
-			name:          "partial match - some lines overlap",
-			stagedContent: "unique staged line here\nshared significant line",
-			shadowContent: "unique shadow line here\nshared significant line",
+			name:          "single shared line like package main - no overlap (boilerplate)",
+			stagedContent: "package main\nfunc NewImplementation() {}",
+			shadowContent: "package main\nfunc OriginalCode() {}",
+			wantOverlap:   false,
+		},
+		{
+			name:          "multiple shared lines - overlap (user kept agent work)",
+			stagedContent: "package main\nfunc SharedFunction() {\nreturn nil",
+			shadowContent: "package main\nfunc SharedFunction() {\nreturn nil",
 			wantOverlap:   true,
 		},
 	}
