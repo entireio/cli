@@ -1,0 +1,34 @@
+{
+  "cli_version": "v0.4.4-27-g017c4686",
+  "checkpoint_id": "f449058a5889",
+  "session_id": "4de02c81-2bd4-4ea2-9370-f1f32de9248e",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-15T05:16:49.520115Z",
+  "branch": "soph/one-to-one-checkpoints",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/reviews/review-01.md"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "be4eb95b859b",
+  "transcript_identifier_at_start": "f024b3ce-32e6-490a-92b9-51366522b3b4",
+  "checkpoint_transcript_start": 628,
+  "transcript_lines_at_start": 628,
+  "token_usage": {
+    "input_tokens": 40,
+    "cache_creation_tokens": 24398,
+    "cache_read_tokens": 4589020,
+    "output_tokens": 2776,
+    "api_call_count": 35
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-15T05:16:48.228172Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 88,
+    "human_removed": 102,
+    "total_committed": 88,
+    "agent_percentage": 0
+  },
+  "transcript_path": ".claude/projects/-Users-alex-workspace-cli/4de02c81-2bd4-4ea2-9370-f1f32de9248e.jsonl"
+}
