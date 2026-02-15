@@ -427,3 +427,49 @@ func CalculateTotalTokenUsage(transcriptPath string, startLine int, subagentsDir
 
 	return mainUsage, nil
 }
+
+// ExtractAllModifiedFiles extracts files modified by both the main agent and
+// any subagents spawned via the Task tool. It parses the main transcript from
+// startLine, collects modified files from the main agent, then reads each
+// subagent's transcript from subagentsDir to collect their modified files too.
+// The result is a deduplicated list of all modified file paths.
+func ExtractAllModifiedFiles(transcriptPath string, startLine int, subagentsDir string) ([]string, error) {
+	if transcriptPath == "" {
+		return nil, nil
+	}
+
+	// Parse main transcript once
+	transcript, err := parseTranscriptFromLine(transcriptPath, startLine)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
+	// Collect modified files from main agent
+	fileSet := make(map[string]bool)
+	var files []string
+	for _, f := range ExtractModifiedFiles(transcript) {
+		if !fileSet[f] {
+			fileSet[f] = true
+			files = append(files, f)
+		}
+	}
+
+	// Find spawned subagents and collect their modified files
+	agentIDs := ExtractSpawnedAgentIDs(transcript)
+	for agentID := range agentIDs {
+		agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
+		agentTranscript, err := parseTranscriptFromLine(agentPath, 0)
+		if err != nil {
+			// Subagent transcript may not exist yet or may have been cleaned up
+			continue
+		}
+		for _, f := range ExtractModifiedFiles(agentTranscript) {
+			if !fileSet[f] {
+				fileSet[f] = true
+				files = append(files, f)
+			}
+		}
+	}
+
+	return files, nil
+}

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -536,23 +537,15 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		//
 		// For ACTIVE sessions: the commit has a checkpoint trailer (verified above),
 		// meaning PrepareCommitMsg already determined this commit is session-related.
-		// We trust that and assume hasNew = true, bypassing sessionHasNewContent which
-		// would incorrectly return false (uses getStagedFiles, but files are no longer
-		// staged after the commit).
+		// The trailer is only added when either:
+		//   - No TTY (agent/subagent committing) — added unconditionally
+		//   - TTY (human committing) — added after content detection confirmed agent work
+		// In both cases, PrepareCommitMsg already validated this commit. We trust
+		// that decision here. Transcript-based re-validation is unreliable because
+		// subagent transcripts may not be available yet (subagent still running).
 		var hasNew bool
 		if state.Phase.IsActive() {
-			// For ACTIVE sessions, check if this session has any content to condense.
-			// A session with no checkpoints (StepCount=0) and no files touched may exist
-			// concurrently with other sessions that DO have content.
-			// We only condense if this session actually has work.
-			if state.StepCount > 0 || len(state.FilesTouched) > 0 {
-				hasNew = true
-			} else {
-				// No checkpoints and no tracked files - check the live transcript.
-				// Use sessionHasNewContentInCommittedFiles because staged files are empty
-				// after the commit (files have already been committed).
-				hasNew = s.sessionHasNewContentInCommittedFiles(state, committedFileSet)
-			}
+			hasNew = true
 		} else {
 			var contentErr error
 			hasNew, contentErr = s.sessionHasNewContent(repo, state)
@@ -911,79 +904,9 @@ func (s *ManualCommitStrategy) sessionHasNewContent(repo *git.Repository, state 
 func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(repo *git.Repository, state *SessionState) (bool, error) {
 	logCtx := logging.WithComponent(context.Background(), "checkpoint")
 
-	// Need both transcript path and agent type to analyze
-	if state.TranscriptPath == "" || state.AgentType == "" {
-		logging.Debug(logCtx, "live transcript check: missing transcript path or agent type",
-			slog.String("session_id", state.SessionID),
-			slog.String("transcript_path", state.TranscriptPath),
-			slog.String("agent_type", string(state.AgentType)),
-		)
+	modifiedFiles, ok := s.extractNewModifiedFilesFromLiveTranscript(state)
+	if !ok || len(modifiedFiles) == 0 {
 		return false, nil
-	}
-
-	// Get the agent for transcript analysis
-	ag, err := agent.GetByAgentType(state.AgentType)
-	if err != nil {
-		return false, nil //nolint:nilerr // Unknown agent type, fail gracefully
-	}
-
-	// Cast to TranscriptAnalyzer
-	analyzer, ok := ag.(agent.TranscriptAnalyzer)
-	if !ok {
-		return false, nil // Agent doesn't support transcript analysis
-	}
-
-	// Get current transcript position
-	currentPos, err := analyzer.GetTranscriptPosition(state.TranscriptPath)
-	if err != nil {
-		return false, nil //nolint:nilerr // Error reading transcript, fail gracefully
-	}
-
-	// Check if transcript has grown since last condensation
-	if currentPos <= state.CheckpointTranscriptStart {
-		logging.Debug(logCtx, "live transcript check: no new content",
-			slog.String("session_id", state.SessionID),
-			slog.Int("current_pos", currentPos),
-			slog.Int("start_offset", state.CheckpointTranscriptStart),
-		)
-		return false, nil // No new content
-	}
-
-	// Transcript has grown - check if there are file modifications in the new portion
-	modifiedFiles, _, err := analyzer.ExtractModifiedFilesFromOffset(state.TranscriptPath, state.CheckpointTranscriptStart)
-	if err != nil {
-		return false, nil //nolint:nilerr // Error parsing transcript, fail gracefully
-	}
-
-	// No file modifications means no new content to checkpoint
-	if len(modifiedFiles) == 0 {
-		logging.Debug(logCtx, "live transcript check: transcript grew but no file modifications",
-			slog.String("session_id", state.SessionID),
-		)
-		return false, nil
-	}
-
-	// Normalize modified files from absolute to repo-relative paths.
-	// Transcript tool_use entries contain absolute paths (e.g., /Users/alex/project/src/main.go)
-	// but getStagedFiles returns repo-relative paths (e.g., src/main.go).
-	// Use state.WorktreePath (already resolved) to avoid an extra git subprocess.
-	basePath := state.WorktreePath
-	if basePath == "" {
-		if wp, wpErr := GetWorktreePath(); wpErr == nil {
-			basePath = wp
-		}
-	}
-	if basePath != "" {
-		normalized := make([]string, 0, len(modifiedFiles))
-		for _, f := range modifiedFiles {
-			if rel := paths.ToRelativePath(f, basePath); rel != "" {
-				normalized = append(normalized, rel)
-			} else {
-				// Already relative or outside repo — keep as-is
-				normalized = append(normalized, f)
-			}
-		}
-		modifiedFiles = normalized
 	}
 
 	logging.Debug(logCtx, "live transcript check: found file modifications",
@@ -1012,162 +935,106 @@ func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(repo *git.
 	return true, nil
 }
 
-// sessionHasNewContentInCommittedFiles checks if a session has content that overlaps with
-// the committed files. This is used in PostCommit for ACTIVE sessions where staged files
-// are empty (already committed). Uses the live transcript to extract modified files and
-// compares against the committed file set.
-//
-// KNOWN LIMITATION: This function relies on transcript analysis to detect file modifications.
-// If the agent makes file modifications via shell commands (e.g., `sed`, `mv`, `cp`) that
-// aren't captured in the transcript's file modification tracking, those modifications may
-// not be detected. This is an acceptable edge case because:
-// 1. Most agent file modifications use the Write/Edit tools which are tracked
-// 2. Shell-based modifications are relatively rare in practice
-// 3. The consequence (missing a checkpoint trailer) is minor - the transcript is still saved
-func (s *ManualCommitStrategy) sessionHasNewContentInCommittedFiles(state *SessionState, committedFiles map[string]struct{}) bool {
-	logCtx := logging.WithComponent(context.Background(), "checkpoint")
-
-	// Need both transcript path and agent type to analyze
-	if state.TranscriptPath == "" || state.AgentType == "" {
-		logging.Debug(logCtx, "committed files check: missing transcript path or agent type",
-			slog.String("session_id", state.SessionID),
-			slog.String("transcript_path", state.TranscriptPath),
-			slog.String("agent_type", string(state.AgentType)),
-		)
-		return false
-	}
-
-	// Get the agent for transcript analysis
-	ag, err := agent.GetByAgentType(state.AgentType)
-	if err != nil {
-		return false // Unknown agent type, fail gracefully
-	}
-
-	// Cast to TranscriptAnalyzer
-	analyzer, ok := ag.(agent.TranscriptAnalyzer)
-	if !ok {
-		return false // Agent doesn't support transcript analysis
-	}
-
-	// Get current transcript position
-	currentPos, err := analyzer.GetTranscriptPosition(state.TranscriptPath)
-	if err != nil {
-		return false // Error reading transcript, fail gracefully
-	}
-
-	// Check if transcript has grown since last condensation
-	if currentPos <= state.CheckpointTranscriptStart {
-		logging.Debug(logCtx, "committed files check: no new content",
-			slog.String("session_id", state.SessionID),
-			slog.Int("current_pos", currentPos),
-			slog.Int("start_offset", state.CheckpointTranscriptStart),
-		)
-		return false // No new content
-	}
-
-	// Transcript has grown - check if there are file modifications in the new portion
-	modifiedFiles, _, err := analyzer.ExtractModifiedFilesFromOffset(state.TranscriptPath, state.CheckpointTranscriptStart)
-	if err != nil {
-		return false // Error parsing transcript, fail gracefully
-	}
-
-	// No file modifications means no new content to checkpoint
-	if len(modifiedFiles) == 0 {
-		logging.Debug(logCtx, "committed files check: transcript grew but no file modifications",
-			slog.String("session_id", state.SessionID),
-		)
-		return false
-	}
-
-	// Normalize modified files from absolute to repo-relative paths.
-	basePath := state.WorktreePath
-	if basePath == "" {
-		if wp, wpErr := GetWorktreePath(); wpErr == nil {
-			basePath = wp
-		}
-	}
-	if basePath != "" {
-		normalized := make([]string, 0, len(modifiedFiles))
-		for _, f := range modifiedFiles {
-			if rel := paths.ToRelativePath(f, basePath); rel != "" {
-				normalized = append(normalized, rel)
-			} else {
-				normalized = append(normalized, f)
-			}
-		}
-		modifiedFiles = normalized
-	}
-
-	logging.Debug(logCtx, "committed files check: found file modifications",
-		slog.String("session_id", state.SessionID),
-		slog.Int("modified_files", len(modifiedFiles)),
-		slog.Int("committed_files", len(committedFiles)),
-	)
-
-	// Check if any modified files overlap with committed files
-	for _, f := range modifiedFiles {
-		if _, ok := committedFiles[f]; ok {
-			return true
-		}
-	}
-
-	logging.Debug(logCtx, "committed files check: no overlap between committed and modified files",
-		slog.String("session_id", state.SessionID),
-	)
-	return false
-}
-
 // extractFilesFromLiveTranscript extracts modified file paths from the live transcript.
 // Returns empty slice if extraction fails (fail-open behavior for hooks).
 // Extracts ALL files from the transcript (offset 0) because this is used for carry-forward
 // computation which needs to know all files touched, not just new ones.
 func (s *ManualCommitStrategy) extractFilesFromLiveTranscript(state *SessionState) []string {
+	return s.extractModifiedFilesFromLiveTranscript(state, 0)
+}
+
+// extractNewModifiedFilesFromLiveTranscript extracts modified files from the live
+// transcript that are NEW since the last condensation. Returns the normalized file list
+// and whether the extraction succeeded. Used by sessionHasNewContentFromLiveTranscript
+// to detect agent work.
+func (s *ManualCommitStrategy) extractNewModifiedFilesFromLiveTranscript(state *SessionState) ([]string, bool) {
 	logCtx := logging.WithComponent(context.Background(), "checkpoint")
 
 	if state.TranscriptPath == "" || state.AgentType == "" {
-		logging.Debug(logCtx, "extractFilesFromLiveTranscript: missing path or agent type",
-			slog.String("transcript_path", state.TranscriptPath),
-			slog.String("agent_type", string(state.AgentType)),
+		return nil, false
+	}
+
+	ag, err := agent.GetByAgentType(state.AgentType)
+	if err != nil {
+		return nil, false
+	}
+
+	analyzer, ok := ag.(agent.TranscriptAnalyzer)
+	if !ok {
+		return nil, false
+	}
+
+	// Check if transcript has grown since last condensation
+	currentPos, err := analyzer.GetTranscriptPosition(state.TranscriptPath)
+	if err != nil {
+		return nil, false
+	}
+	if currentPos <= state.CheckpointTranscriptStart {
+		logging.Debug(logCtx, "live transcript check: no new content",
+			slog.String("session_id", state.SessionID),
+			slog.Int("current_pos", currentPos),
+			slog.Int("start_offset", state.CheckpointTranscriptStart),
 		)
+		return nil, true // No new content, but extraction succeeded
+	}
+
+	return s.extractModifiedFilesFromLiveTranscript(state, state.CheckpointTranscriptStart), true
+}
+
+// extractModifiedFilesFromLiveTranscript extracts modified files from the live transcript
+// (including subagent transcripts) starting from the given offset, and normalizes them
+// to repo-relative paths. Returns the normalized file list.
+func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(state *SessionState, offset int) []string {
+	logCtx := logging.WithComponent(context.Background(), "checkpoint")
+
+	if state.TranscriptPath == "" || state.AgentType == "" {
 		return nil
 	}
 
 	ag, err := agent.GetByAgentType(state.AgentType)
 	if err != nil {
-		logging.Debug(logCtx, "extractFilesFromLiveTranscript: agent not found",
-			slog.String("agent_type", string(state.AgentType)),
-			slog.String("error", err.Error()),
-		)
 		return nil
 	}
 
 	analyzer, ok := ag.(agent.TranscriptAnalyzer)
 	if !ok {
-		logging.Debug(logCtx, "extractFilesFromLiveTranscript: agent is not a TranscriptAnalyzer",
-			slog.String("agent_type", string(state.AgentType)),
-		)
 		return nil
 	}
 
-	// Extract ALL files from transcript (offset 0) for carry-forward computation.
-	// state.CheckpointTranscriptStart may already be updated after condensation,
-	// but carry-forward needs to know all files touched to compute remaining files.
-	modifiedFiles, _, err := analyzer.ExtractModifiedFilesFromOffset(state.TranscriptPath, 0)
-	if err != nil || len(modifiedFiles) == 0 {
-		logging.Debug(logCtx, "extractFilesFromLiveTranscript: no files extracted",
-			slog.String("transcript_path", state.TranscriptPath),
-			slog.Int("files_count", len(modifiedFiles)),
-			slog.Any("error", err),
-		)
+	var modifiedFiles []string
+
+	// For Claude Code, use ExtractAllModifiedFiles which parses the main transcript
+	// AND subagent transcripts in a single pass, avoiding redundant parsing.
+	if state.AgentType == agent.AgentTypeClaudeCode {
+		subagentsDir := filepath.Join(filepath.Dir(state.TranscriptPath), state.SessionID, "subagents")
+		allFiles, extractErr := claudecode.ExtractAllModifiedFiles(state.TranscriptPath, offset, subagentsDir)
+		if extractErr != nil {
+			logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: extraction failed",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", extractErr.Error()),
+			)
+		} else {
+			modifiedFiles = allFiles
+		}
+	} else {
+		files, _, err := analyzer.ExtractModifiedFilesFromOffset(state.TranscriptPath, offset)
+		if err != nil {
+			logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: main transcript extraction failed",
+				slog.String("transcript_path", state.TranscriptPath),
+				slog.Any("error", err),
+			)
+		} else {
+			modifiedFiles = files
+		}
+	}
+
+	if len(modifiedFiles) == 0 {
 		return nil
 	}
 
-	logging.Debug(logCtx, "extractFilesFromLiveTranscript: files extracted",
-		slog.Int("files_count", len(modifiedFiles)),
-		slog.Any("files", modifiedFiles),
-	)
-
-	// Normalize to repo-relative paths
+	// Normalize to repo-relative paths.
+	// Transcript tool_use entries contain absolute paths (e.g., /Users/alex/project/src/main.go)
+	// but getStagedFiles/committedFiles use repo-relative paths (e.g., src/main.go).
 	basePath := state.WorktreePath
 	if basePath == "" {
 		if wp, wpErr := GetWorktreePath(); wpErr == nil {
