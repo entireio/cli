@@ -3,7 +3,7 @@
   "checkpoint_id": "ce258fedd6ee",
   "strategy": "manual-commit",
   "branch": "soph/1to1-bugs-found-by-e2e",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
     "CLAUDE.md"
   ],
@@ -14,6 +14,20 @@
       "context": "",
       "content_hash": "/ce/258fedd6ee/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/ce/258fedd6ee/1/metadata.json",
+      "transcript": "/ce/258fedd6ee/1/full.jsonl",
+      "context": "/ce/258fedd6ee/1/context.md",
+      "content_hash": "/ce/258fedd6ee/1/content_hash.txt",
+      "prompt": "/ce/258fedd6ee/1/prompt.txt"
     }
-  ]
+  ],
+  "token_usage": {
+    "input_tokens": 8379,
+    "cache_creation_tokens": 85969,
+    "cache_read_tokens": 760998,
+    "output_tokens": 30,
+    "api_call_count": 11
+  }
 }

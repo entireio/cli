@@ -1,0 +1,5 @@
+can you review the e2e integration tests in cmd/entire/cli/e2e_test if they are testing the right things and are in line with other documentation in the repo?
+
+---
+
+yeah let's update CLAUDE.md but make sure that claude should ask or specifically be told to run the e2e tests since they consume tokens
