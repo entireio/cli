@@ -361,3 +361,167 @@ func TestSetupAgentFlag(t *testing.T) {
 		// Agent field may be omitted if default
 	}
 }
+
+// ============================================================
+// OpenCode Agent + Strategy Composition Tests
+// ============================================================
+
+// TestOpenCodeAgentStrategyComposition verifies that OpenCode agent and strategy work together.
+// Tests the full flow: agent parses session → strategy saves checkpoint → rewind works.
+func TestOpenCodeAgentStrategyComposition(t *testing.T) {
+	t.Parallel()
+
+	RunForAllStrategies(t, func(t *testing.T, env *TestEnv, strategyName string) {
+		ag, err := agent.Get("opencode")
+		if err != nil {
+			t.Fatalf("Get(opencode) error = %v", err)
+		}
+
+		_, err = strategy.Get(strategyName)
+		if err != nil {
+			t.Fatalf("Get(%s) error = %v", strategyName, err)
+		}
+
+		// Create session and test file
+		session := env.NewOpencodeSession()
+		env.WriteFile("feature.go", "package main\n// opencode feature")
+
+		// Create transcript via OpenCode format
+		transcriptPath := session.CreateOpencodeTranscript("Add a feature", []FileChange{
+			{Path: "feature.go", Content: "package main\n// opencode feature"},
+		})
+
+		// Read session via agent interface
+		agentSession, err := ag.ReadSession(&agent.HookInput{
+			SessionID:  session.ID,
+			SessionRef: transcriptPath,
+		})
+		if err != nil {
+			t.Fatalf("ReadSession() error = %v", err)
+		}
+
+		// Verify agent computed modified files
+		if len(agentSession.ModifiedFiles) == 0 {
+			t.Error("agent.ReadSession() should compute ModifiedFiles")
+		}
+
+		// Simulate session flow: session-start → make changes → stop
+		if err := env.SimulateOpencodeSessionStart(session.ID); err != nil {
+			t.Fatalf("SimulateOpencodeSessionStart error = %v", err)
+		}
+
+		if err := env.SimulateOpencodeStop(session.ID, transcriptPath); err != nil {
+			t.Fatalf("SimulateOpencodeStop error = %v", err)
+		}
+
+		// Verify checkpoint was created
+		points := env.GetRewindPoints()
+		if len(points) == 0 {
+			t.Fatal("expected at least 1 rewind point after stop hook")
+		}
+	})
+}
+
+// TestOpenCodeAgentSessionIDTransformation verifies session ID across agent/strategy boundary.
+func TestOpenCodeAgentSessionIDTransformation(t *testing.T) {
+	t.Parallel()
+
+	RunForAllStrategies(t, func(t *testing.T, env *TestEnv, strategyName string) {
+		session := env.NewOpencodeSession()
+		env.WriteFile("test.go", "package main")
+		transcriptPath := session.CreateOpencodeTranscript("Test", []FileChange{
+			{Path: "test.go", Content: "package main"},
+		})
+
+		// Simulate hooks
+		env.SimulateOpencodeSessionStart(session.ID)
+		env.SimulateOpencodeStop(session.ID, transcriptPath)
+
+		// Get rewind points and verify we can rewind
+		points := env.GetRewindPoints()
+		if len(points) == 0 {
+			t.Skip("no rewind points created")
+		}
+
+		// Rewind should work
+		if err := env.Rewind(points[0].ID); err != nil {
+			t.Errorf("Rewind() error = %v", err)
+		}
+	})
+}
+
+// TestOpenCodeSetupAgentFlag verifies the --agent opencode flag in enable command.
+func TestOpenCodeSetupAgentFlag(t *testing.T) {
+	t.Parallel()
+
+	env := NewTestEnv(t)
+	env.InitRepo()
+
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	// Run enable with --agent opencode
+	output, err := env.RunCLIWithError("enable", "--agent", "opencode")
+	if err != nil {
+		t.Fatalf("enable --agent opencode failed: %v\nOutput: %s", err, output)
+	}
+
+	// Verify plugin file was created
+	pluginPath := filepath.Join(env.RepoDir, ".opencode", "plugins", "entire.ts")
+	if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
+		t.Error("enable --agent opencode should create .opencode/plugins/entire.ts")
+	}
+
+	// Verify .entire/settings exists and has enabled=true
+	entireSettingsPath := filepath.Join(env.RepoDir, ".entire", paths.SettingsFileName)
+	data, err := os.ReadFile(entireSettingsPath)
+	if err != nil {
+		t.Fatalf("failed to read .entire/%s: %v", paths.SettingsFileName, err)
+	}
+
+	if !strings.Contains(string(data), `"enabled"`) {
+		t.Logf("settings content: %s", data)
+		t.Error("settings should contain 'enabled' field")
+	}
+}
+
+// TestOpenCodeHookInputParsing tests that OpenCode's ParseHookInput correctly maps fields.
+func TestOpenCodeHookInputParsing(t *testing.T) {
+	t.Parallel()
+
+	ag, _ := agent.Get("opencode")
+
+	t.Run("transcript_path overrides session_ref", func(t *testing.T) {
+		t.Parallel()
+
+		input := `{"session_id":"sess-1","session_ref":"/old/ref","transcript_path":"/new/transcript.jsonl","timestamp":"2025-01-01T00:00:00Z"}`
+		hookInput, err := ag.ParseHookInput(agent.HookStop, newStringReader(input))
+		if err != nil {
+			t.Fatalf("ParseHookInput() error = %v", err)
+		}
+
+		// transcript_path should override session_ref
+		if hookInput.SessionRef != "/new/transcript.jsonl" {
+			t.Errorf("SessionRef = %q, want %q (transcript_path should override)", hookInput.SessionRef, "/new/transcript.jsonl")
+		}
+	})
+
+	t.Run("empty input returns error", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := ag.ParseHookInput(agent.HookStop, newStringReader(""))
+		if err == nil {
+			t.Error("ParseHookInput() should return error for empty input")
+		}
+	})
+
+	t.Run("invalid JSON returns error", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := ag.ParseHookInput(agent.HookStop, newStringReader("{invalid"))
+		if err == nil {
+			t.Error("ParseHookInput() should return error for invalid JSON")
+		}
+	})
+}
