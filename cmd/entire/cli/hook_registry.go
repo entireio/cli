@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
@@ -43,7 +44,7 @@ func GetHookHandler(agentName agent.AgentName, hookName string) HookHandlerFunc 
 // init registers Claude Code hook handlers.
 // Each handler checks if Entire is enabled before executing.
 //
-//nolint:gochecknoinits // Hook handler registration at startup is the intended pattern
+//nolint:gochecknoinits,maintidx // Hook handler registration at startup is the intended pattern; complexity is inherent to registering all agent handlers
 func init() {
 	// Register Claude Code handlers
 	RegisterHookHandler(agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, func() error {
@@ -190,6 +191,39 @@ func init() {
 		}
 		return handleGeminiNotification()
 	})
+
+	// Register OpenCode handlers
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameSessionStart, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpencodeSessionStart()
+	})
+
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameStop, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpencodeStop()
+	})
+
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameTaskStart, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpencodeTaskStart()
+	})
+
+	RegisterHookHandler(agent.AgentNameOpenCode, opencode.HookNameTaskComplete, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleOpencodeTaskComplete()
+	})
 }
 
 // agentHookLogCleanup stores the cleanup function for agent hook logging.
@@ -255,6 +289,8 @@ func getHookType(hookName string) string {
 		return "subagent"
 	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
 		return "tool"
+	case opencode.HookNameTaskStart, opencode.HookNameTaskComplete:
+		return "subagent"
 	default:
 		return "agent"
 	}

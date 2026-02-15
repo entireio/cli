@@ -116,6 +116,8 @@ func BuildCondensedTranscriptFromBytes(content []byte, agentType agent.AgentType
 	switch agentType {
 	case agent.AgentTypeGemini:
 		return buildCondensedTranscriptFromGemini(content)
+	case agent.AgentTypeOpenCode:
+		return nil, fmt.Errorf("condensed transcript not yet supported for %s", agentType)
 	case agent.AgentTypeClaudeCode, agent.AgentTypeUnknown:
 		// Claude format - fall through to shared logic below
 	}
