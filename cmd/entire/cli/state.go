@@ -190,6 +190,78 @@ func CaptureGeminiPrePromptState(sessionID, transcriptPath string) error {
 	return nil
 }
 
+// CaptureOpencodePrePromptState captures current untracked files and transcript position
+// before a prompt for OpenCode sessions. OpenCode uses JSONL transcripts, so position
+// is the line count and the last entry's info.id.
+func CaptureOpencodePrePromptState(sessionID, transcriptPath string) error {
+	if sessionID == "" {
+		sessionID = unknownSessionID
+	}
+
+	// Get absolute path for tmp directory
+	tmpDirAbs, err := paths.AbsPath(paths.EntireTmpDir)
+	if err != nil {
+		tmpDirAbs = paths.EntireTmpDir // Fallback to relative
+	}
+
+	// Create tmp directory if it doesn't exist
+	if err := os.MkdirAll(tmpDirAbs, 0o750); err != nil {
+		return fmt.Errorf("failed to create tmp directory: %w", err)
+	}
+
+	// Get list of untracked files (excluding .entire directory itself)
+	untrackedFiles, err := getUntrackedFilesForState()
+	if err != nil {
+		return fmt.Errorf("failed to get untracked files: %w", err)
+	}
+
+	// Get transcript position (line count and last entry ID) for OpenCode JSONL
+	var lineCount int
+	var lastEntryID string
+	if transcriptPath != "" {
+		if data, readErr := os.ReadFile(transcriptPath); readErr == nil && len(data) > 0 { //nolint:gosec // Reading from controlled transcript path
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				lineCount++
+				var entry struct {
+					Info struct {
+						ID string `json:"id"`
+					} `json:"info"`
+				}
+				if jsonErr := json.Unmarshal([]byte(line), &entry); jsonErr == nil && entry.Info.ID != "" {
+					lastEntryID = entry.Info.ID
+				}
+			}
+		}
+	}
+
+	// Create state file
+	stateFile := prePromptStateFile(sessionID)
+	state := PrePromptState{
+		SessionID:                sessionID,
+		Timestamp:                time.Now().UTC().Format(time.RFC3339),
+		UntrackedFiles:           untrackedFiles,
+		StepTranscriptStart:      lineCount,
+		LastTranscriptIdentifier: lastEntryID,
+	}
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal state: %w", err)
+	}
+
+	if err := os.WriteFile(stateFile, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write state file: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Captured OpenCode state before prompt: %d untracked files, transcript line: %d (last entry id: %s)\n", len(untrackedFiles), lineCount, lastEntryID)
+	return nil
+}
+
 // LoadPrePromptState loads previously captured state.
 // Returns nil if no state file exists.
 func LoadPrePromptState(sessionID string) (*PrePromptState, error) {
