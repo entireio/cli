@@ -1,10 +1,13 @@
 package strategy
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -1033,5 +1036,205 @@ func TestAutoCommitStrategy_SaveChanges_NoChangesSkipped(t *testing.T) {
 	if sessionsRefAfter.Hash() != sessionsCommitBefore {
 		t.Errorf("entire/checkpoints/v1 should not have new commits when no code changes, before=%s after=%s",
 			sessionsCommitBefore, sessionsRefAfter.Hash())
+	}
+}
+
+// initGitRepoWithCLI initializes a git repo using the CLI and configures user identity.
+// Returns the repo directory. This is needed for tests that exercise git CLI code paths
+// (like commitWithCLI), since repos created with go-git's PlainInit may not have the
+// full config that the git CLI expects.
+func initGitRepoWithCLI(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "init")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git init failed: %v", err)
+	}
+
+	cmd = exec.CommandContext(ctx, "git", "config", "user.email", "test@test.com")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git config user.email failed: %v", err)
+	}
+
+	cmd = exec.CommandContext(ctx, "git", "config", "user.name", "Test User")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git config user.name failed: %v", err)
+	}
+
+	// Disable GPG signing by default for test isolation
+	cmd = exec.CommandContext(ctx, "git", "config", "commit.gpgsign", "false")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git config commit.gpgsign failed: %v", err)
+	}
+
+	return dir
+}
+
+func TestShouldSignCommits_Disabled(t *testing.T) {
+	dir := initGitRepoWithCLI(t)
+	t.Chdir(dir)
+
+	if shouldSignCommits() {
+		t.Error("shouldSignCommits() = true, want false when gpgsign is disabled")
+	}
+}
+
+func TestShouldSignCommits_Enabled(t *testing.T) {
+	dir := initGitRepoWithCLI(t)
+	t.Chdir(dir)
+
+	// Enable signing
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "config", "commit.gpgsign", "true")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git config commit.gpgsign failed: %v", err)
+	}
+
+	if !shouldSignCommits() {
+		t.Error("shouldSignCommits() = false, want true when gpgsign is enabled")
+	}
+}
+
+func TestCommitWithCLI_CreatesCommit(t *testing.T) {
+	dir := initGitRepoWithCLI(t)
+	t.Chdir(dir)
+
+	// Create initial commit via CLI
+	ctx := context.Background()
+	readmeFile := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	cmd := exec.CommandContext(ctx, "git", "add", ".")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git add failed: %v", err)
+	}
+	cmd = exec.CommandContext(ctx, "git", "commit", "-m", "initial")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git commit failed: %v", err)
+	}
+
+	// Open repo with go-git for commitWithCLI
+	repo, err := git.PlainOpenWithOptions(dir, &git.PlainOpenOptions{
+		EnableDotGitCommonDir: true,
+	})
+	if err != nil {
+		t.Fatalf("failed to open repo: %v", err)
+	}
+
+	headBefore, err := repo.Head()
+	if err != nil {
+		t.Fatalf("failed to get HEAD: %v", err)
+	}
+
+	// Create a new file and stage it
+	testFile := filepath.Join(dir, "test.go")
+	if err := os.WriteFile(testFile, []byte("package main"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	if _, err := worktree.Add("test.go"); err != nil {
+		t.Fatalf("failed to add test file: %v", err)
+	}
+
+	// Commit via CLI
+	author := &object.Signature{
+		Name:  "Test User",
+		Email: "test@test.com",
+		When:  time.Now(),
+	}
+	commitHash, err := commitWithCLI(repo, "test commit via CLI", author)
+	if err != nil {
+		t.Fatalf("commitWithCLI() error = %v", err)
+	}
+
+	// Verify a new commit was created
+	if commitHash == headBefore.Hash() {
+		t.Error("commitWithCLI() returned same hash as HEAD before, expected new commit")
+	}
+	if commitHash == plumbing.ZeroHash {
+		t.Error("commitWithCLI() returned zero hash")
+	}
+
+	// Verify the commit message and author via git log
+	cmd = exec.CommandContext(ctx, "git", "log", "-1", "--format=%s%n%an%n%ae")
+	cmd.Dir = dir
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git log failed: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("unexpected git log output: %q", string(output))
+	}
+	if lines[0] != "test commit via CLI" {
+		t.Errorf("commit subject = %q, want %q", lines[0], "test commit via CLI")
+	}
+	if lines[1] != "Test User" {
+		t.Errorf("commit author name = %q, want %q", lines[1], "Test User")
+	}
+	if lines[2] != "test@test.com" {
+		t.Errorf("commit author email = %q, want %q", lines[2], "test@test.com")
+	}
+}
+
+func TestCommitWithCLI_EmptyCommit(t *testing.T) {
+	dir := initGitRepoWithCLI(t)
+	t.Chdir(dir)
+
+	// Create initial commit via CLI
+	ctx := context.Background()
+	readmeFile := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	cmd := exec.CommandContext(ctx, "git", "add", ".")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git add failed: %v", err)
+	}
+	cmd = exec.CommandContext(ctx, "git", "commit", "-m", "initial")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git commit failed: %v", err)
+	}
+
+	// Open repo with go-git
+	repo, err := git.PlainOpenWithOptions(dir, &git.PlainOpenOptions{
+		EnableDotGitCommonDir: true,
+	})
+	if err != nil {
+		t.Fatalf("failed to open repo: %v", err)
+	}
+
+	headBefore, err := repo.Head()
+	if err != nil {
+		t.Fatalf("failed to get HEAD: %v", err)
+	}
+
+	// Attempt commit with no staged changes — should return HEAD hash, no error
+	author := &object.Signature{
+		Name:  "Test User",
+		Email: "test@test.com",
+		When:  time.Now(),
+	}
+	commitHash, err := commitWithCLI(repo, "empty commit", author)
+	if err != nil {
+		t.Fatalf("commitWithCLI() error = %v, want nil for empty commit", err)
+	}
+	if commitHash != headBefore.Hash() {
+		t.Errorf("commitWithCLI() = %s, want HEAD %s for empty commit", commitHash, headBefore.Hash())
 	}
 }
