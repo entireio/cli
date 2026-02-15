@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "897eb280e769",
+  "session_id": "2026-01-20-eb4bcc15-3ff5-4d73-bac5-9bc1d786b2bb",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-15T14:18:19.79642Z",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/e2e_test/testenv.go",
+    "cmd/entire/cli/strategy/content_overlap.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/e2e_test/scenario_checkpoint_workflows_test.go"
+  ],
+  "agent": "Claude Code",
+  "checkpoint_transcript_start": 1144,
+  "transcript_lines_at_start": 1144,
+  "initial_attribution": {
+    "calculated_at": "2026-02-15T14:18:19.777133Z",
+    "agent_lines": 3101,
+    "human_added": 12722,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 15823,
+    "agent_percentage": 19.598053466472855
+  }
+}

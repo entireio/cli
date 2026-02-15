@@ -73,6 +73,13 @@
       "context": "",
       "content_hash": "/89/7eb280e769/8/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/89/7eb280e769/9/metadata.json",
+      "transcript": "/89/7eb280e769/9/full.jsonl",
+      "context": "",
+      "content_hash": "/89/7eb280e769/9/content_hash.txt",
+      "prompt": ""
     }
   ]
 }
