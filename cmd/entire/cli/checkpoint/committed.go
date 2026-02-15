@@ -26,6 +26,7 @@ import (
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -339,6 +340,7 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 		CheckpointsCount:            opts.CheckpointsCount,
 		FilesTouched:                opts.FilesTouched,
 		Agent:                       opts.Agent,
+		TurnID:                      opts.TurnID,
 		IsTask:                      opts.IsTask,
 		ToolUseID:                   opts.ToolUseID,
 		TranscriptIdentifierAtStart: opts.TranscriptIdentifierAtStart,
@@ -992,7 +994,7 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 		return err
 	}
 
-	authorName, authorEmail := getGitAuthorFromRepo(s.repo)
+	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 	commitMsg := fmt.Sprintf("Update summary for checkpoint %s (session: %s)", checkpointID, existingMetadata.SessionID)
 	newCommitHash, err := s.createCommit(newTreeHash, ref.Hash(), commitMsg, authorName, authorEmail)
 	if err != nil {
@@ -1003,6 +1005,178 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 	newRef := plumbing.NewHashReference(refName, newCommitHash)
 	if err := s.repo.Storer.SetReference(newRef); err != nil {
 		return fmt.Errorf("failed to set branch reference: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateCommitted replaces the transcript, prompts, and context for an existing
+// committed checkpoint. Uses replace semantics: the full session transcript is
+// written, replacing whatever was stored at initial condensation time.
+//
+// This is called at stop time to finalize all checkpoints from the current turn
+// with the complete session transcript (from prompt to stop event).
+//
+// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
+func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOptions) error {
+	if opts.CheckpointID.IsEmpty() {
+		return errors.New("invalid update options: checkpoint ID is required")
+	}
+
+	// Ensure sessions branch exists
+	if err := s.ensureSessionsBranch(); err != nil {
+		return fmt.Errorf("failed to ensure sessions branch: %w", err)
+	}
+
+	// Get current branch tip and flatten tree
+	ref, entries, err := s.getSessionsBranchEntries()
+	if err != nil {
+		return err
+	}
+
+	// Read root CheckpointSummary to find the session slot
+	basePath := opts.CheckpointID.Path() + "/"
+	rootMetadataPath := basePath + paths.MetadataFileName
+	entry, exists := entries[rootMetadataPath]
+	if !exists {
+		return ErrCheckpointNotFound
+	}
+
+	checkpointSummary, err := s.readSummaryFromBlob(entry.Hash)
+	if err != nil {
+		return fmt.Errorf("failed to read checkpoint summary: %w", err)
+	}
+	if len(checkpointSummary.Sessions) == 0 {
+		return ErrCheckpointNotFound
+	}
+
+	// Find session index matching opts.SessionID
+	sessionIndex := -1
+	for i := range len(checkpointSummary.Sessions) {
+		metaPath := fmt.Sprintf("%s%d/%s", basePath, i, paths.MetadataFileName)
+		if metaEntry, metaExists := entries[metaPath]; metaExists {
+			meta, metaErr := s.readMetadataFromBlob(metaEntry.Hash)
+			if metaErr == nil && meta.SessionID == opts.SessionID {
+				sessionIndex = i
+				break
+			}
+		}
+	}
+	if sessionIndex == -1 {
+		// Fall back to latest session; log so mismatches are diagnosable.
+		sessionIndex = len(checkpointSummary.Sessions) - 1
+		logging.Debug(ctx, "UpdateCommitted: session ID not found, falling back to latest",
+			slog.String("session_id", opts.SessionID),
+			slog.String("checkpoint_id", string(opts.CheckpointID)),
+			slog.Int("fallback_index", sessionIndex),
+		)
+	}
+
+	sessionPath := fmt.Sprintf("%s%d/", basePath, sessionIndex)
+
+	// Replace transcript (full replace, not append)
+	// Apply redaction as safety net (caller should redact, but we ensure it here)
+	if len(opts.Transcript) > 0 {
+		transcript, err := redact.JSONLBytes(opts.Transcript)
+		if err != nil {
+			return fmt.Errorf("failed to redact transcript secrets: %w", err)
+		}
+		if err := s.replaceTranscript(transcript, opts.Agent, sessionPath, entries); err != nil {
+			return fmt.Errorf("failed to replace transcript: %w", err)
+		}
+	}
+
+	// Replace prompts (apply redaction as safety net)
+	if len(opts.Prompts) > 0 {
+		promptContent := redact.String(strings.Join(opts.Prompts, "\n\n---\n\n"))
+		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
+		if err != nil {
+			return fmt.Errorf("failed to create prompt blob: %w", err)
+		}
+		entries[sessionPath+paths.PromptFileName] = object.TreeEntry{
+			Name: sessionPath + paths.PromptFileName,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		}
+	}
+
+	// Replace context (apply redaction as safety net)
+	if len(opts.Context) > 0 {
+		contextBlob, err := CreateBlobFromContent(s.repo, redact.Bytes(opts.Context))
+		if err != nil {
+			return fmt.Errorf("failed to create context blob: %w", err)
+		}
+		entries[sessionPath+paths.ContextFileName] = object.TreeEntry{
+			Name: sessionPath + paths.ContextFileName,
+			Mode: filemode.Regular,
+			Hash: contextBlob,
+		}
+	}
+
+	// Build and commit
+	newTreeHash, err := BuildTreeFromEntries(s.repo, entries)
+	if err != nil {
+		return err
+	}
+
+	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+	commitMsg := fmt.Sprintf("Finalize transcript for Checkpoint: %s", opts.CheckpointID)
+	newCommitHash, err := s.createCommit(newTreeHash, ref.Hash(), commitMsg, authorName, authorEmail)
+	if err != nil {
+		return err
+	}
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	newRef := plumbing.NewHashReference(refName, newCommitHash)
+	if err := s.repo.Storer.SetReference(newRef); err != nil {
+		return fmt.Errorf("failed to set branch reference: %w", err)
+	}
+
+	return nil
+}
+
+// replaceTranscript writes the full transcript content, replacing any existing transcript.
+// Also removes any chunk files from a previous write and updates the content hash.
+func (s *GitStore) replaceTranscript(transcript []byte, agentType agent.AgentType, sessionPath string, entries map[string]object.TreeEntry) error {
+	// Remove existing transcript files (base + any chunks)
+	transcriptBase := sessionPath + paths.TranscriptFileName
+	for key := range entries {
+		if key == transcriptBase || strings.HasPrefix(key, transcriptBase+".") {
+			delete(entries, key)
+		}
+	}
+
+	// Chunk the transcript (matches writeTranscript behavior)
+	chunks, err := agent.ChunkTranscript(transcript, agentType)
+	if err != nil {
+		return fmt.Errorf("failed to chunk transcript: %w", err)
+	}
+
+	// Write chunk files
+	for i, chunk := range chunks {
+		chunkPath := sessionPath + agent.ChunkFileName(paths.TranscriptFileName, i)
+		blobHash, err := CreateBlobFromContent(s.repo, chunk)
+		if err != nil {
+			return fmt.Errorf("failed to create transcript blob: %w", err)
+		}
+		entries[chunkPath] = object.TreeEntry{
+			Name: chunkPath,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		}
+	}
+
+	// Update content hash
+	contentHash := fmt.Sprintf("sha256:%x", sha256.Sum256(transcript))
+	hashBlob, err := CreateBlobFromContent(s.repo, []byte(contentHash))
+	if err != nil {
+		return fmt.Errorf("failed to create content hash blob: %w", err)
+	}
+	hashPath := sessionPath + paths.ContentHashFileName
+	entries[hashPath] = object.TreeEntry{
+		Name: hashPath,
+		Mode: filemode.Regular,
+		Hash: hashBlob,
 	}
 
 	return nil
@@ -1022,7 +1196,7 @@ func (s *GitStore) ensureSessionsBranch() error {
 		return err
 	}
 
-	authorName, authorEmail := getGitAuthorFromRepo(s.repo)
+	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 	commitHash, err := s.createCommit(emptyTreeHash, plumbing.ZeroHash, "Initialize sessions branch", authorName, authorEmail)
 	if err != nil {
 		return err
@@ -1186,13 +1360,27 @@ func createRedactedBlobFromFile(repo *git.Repository, filePath, treePath string)
 	return hash, mode, nil
 }
 
-// getGitAuthorFromRepo retrieves the git user.name and user.email from the repository config.
-func getGitAuthorFromRepo(repo *git.Repository) (name, email string) {
+// GetGitAuthorFromRepo retrieves the git user.name and user.email,
+// checking both the repository-local config and the global ~/.gitconfig.
+func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 	// Get repository config (includes local settings)
 	cfg, err := repo.Config()
 	if err == nil {
 		name = cfg.User.Name
 		email = cfg.User.Email
+	}
+
+	// If not found in local config, try global config
+	if name == "" || email == "" {
+		globalCfg, err := config.LoadConfig(config.GlobalScope)
+		if err == nil {
+			if name == "" {
+				name = globalCfg.User.Name
+			}
+			if email == "" {
+				email = globalCfg.User.Email
+			}
+		}
 	}
 
 	// Provide sensible defaults if git user is not configured

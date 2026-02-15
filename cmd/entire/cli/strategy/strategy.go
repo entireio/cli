@@ -458,15 +458,15 @@ type PrePushHandler interface {
 }
 
 // TurnEndHandler is an optional interface for strategies that need to
-// handle deferred actions when an agent turn ends.
-// For example, manual-commit strategy uses this to condense session data
-// that was deferred during ACTIVE_COMMITTED → IDLE transitions.
+// perform work when an agent turn ends (ACTIVE → IDLE).
+// For example, manual-commit strategy uses this to finalize checkpoints
+// with the full session transcript.
 type TurnEndHandler interface {
-	// HandleTurnEnd dispatches strategy-specific actions emitted by the
-	// ACTIVE_COMMITTED → IDLE (or other) turn-end transition.
-	// The state has already been updated by ApplyCommonActions; the caller
-	// saves it after this method returns.
-	HandleTurnEnd(state *session.State, actions []session.Action) error
+	// HandleTurnEnd performs strategy-specific cleanup at the end of a turn.
+	// Work items are read from state (e.g. TurnCheckpointIDs), not from the
+	// action list. The state has already been updated by ApplyCommonActions;
+	// the caller saves it after this method returns.
+	HandleTurnEnd(state *session.State) error
 }
 
 // RestoredSession describes a single session that was restored by RestoreLogsOnly.

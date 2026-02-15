@@ -101,6 +101,12 @@ type Store interface {
 
 	// ListCommitted lists all committed checkpoints.
 	ListCommitted(ctx context.Context) ([]CommittedInfo, error)
+
+	// UpdateCommitted replaces the transcript, prompts, and context for an existing
+	// committed checkpoint. Used at stop time to finalize checkpoints with the full
+	// session transcript (prompt to stop event).
+	// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
+	UpdateCommitted(ctx context.Context, opts UpdateCommittedOptions) error
 }
 
 // WriteTemporaryResult contains the result of writing a temporary checkpoint.
@@ -255,6 +261,9 @@ type WriteCommittedOptions struct {
 	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
 	Agent agent.AgentType
 
+	// TurnID correlates checkpoints from the same agent turn.
+	TurnID string
+
 	// Transcript position at checkpoint start - tracks what was added during this checkpoint
 	TranscriptIdentifierAtStart string // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
 	CheckpointTranscriptStart   int    // Transcript line offset at start of this checkpoint's data
@@ -281,6 +290,30 @@ type WriteCommittedOptions struct {
 	// Persisted in CommittedMetadata so restore can write the transcript back to
 	// the correct location without reconstructing agent-specific paths.
 	SessionTranscriptPath string
+}
+
+// UpdateCommittedOptions contains options for updating an existing committed checkpoint.
+// Uses replace semantics: the transcript, prompts, and context are fully replaced,
+// not appended. At stop time we have the complete session transcript and want every
+// checkpoint to contain it identically.
+type UpdateCommittedOptions struct {
+	// CheckpointID identifies the checkpoint to update
+	CheckpointID id.CheckpointID
+
+	// SessionID identifies which session slot to update within the checkpoint
+	SessionID string
+
+	// Transcript is the full session transcript (replaces existing)
+	Transcript []byte
+
+	// Prompts contains all user prompts (replaces existing)
+	Prompts []string
+
+	// Context is the updated context.md content (replaces existing)
+	Context []byte
+
+	// Agent identifies the agent type (needed for transcript chunking)
+	Agent agent.AgentType
 }
 
 // CommittedInfo contains summary information about a committed checkpoint.
@@ -344,6 +377,11 @@ type CommittedMetadata struct {
 
 	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
 	Agent agent.AgentType `json:"agent,omitempty"`
+
+	// TurnID correlates checkpoints from the same agent turn.
+	// When a turn's work spans multiple commits, each gets its own checkpoint
+	// but they share the same TurnID for future aggregation/deduplication.
+	TurnID string `json:"turn_id,omitempty"`
 
 	// Task checkpoint fields (only populated for task checkpoints)
 	IsTask    bool   `json:"is_task,omitempty"`

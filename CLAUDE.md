@@ -327,7 +327,7 @@ All strategies implement:
 
 Sessions track their lifecycle through phases managed by a state machine in `session/phase.go`:
 
-**Phases:** `ACTIVE`, `ACTIVE_COMMITTED`, `IDLE`, `ENDED`
+**Phases:** `ACTIVE`, `IDLE`, `ENDED`
 
 **Events:**
 - `TurnStart` - Agent begins a turn (UserPromptSubmit hook)
@@ -339,12 +339,11 @@ Sessions track their lifecycle through phases managed by a state machine in `ses
 **Key transitions:**
 - `IDLE + TurnStart → ACTIVE` - Agent starts working
 - `ACTIVE + TurnEnd → IDLE` - Agent finishes turn
-- `ACTIVE + GitCommit → ACTIVE_COMMITTED` - User commits while agent is working (condensation deferred)
-- `ACTIVE_COMMITTED + TurnEnd → IDLE` - Agent finishes after commit (condense now)
+- `ACTIVE + GitCommit → ACTIVE` - User commits while agent is working (condense immediately)
 - `IDLE + GitCommit → IDLE` - User commits between turns (condense immediately)
 - `ENDED + GitCommit → ENDED` - Post-session commit (condense if files touched)
 
-The state machine emits **actions** (e.g., `ActionCondense`, `ActionMigrateShadowBranch`, `ActionDeferCondensation`) that hook handlers dispatch to strategy-specific implementations.
+The state machine emits **actions** (e.g., `ActionCondense`, `ActionUpdateLastInteraction`) that hook handlers dispatch to strategy-specific implementations.
 
 #### Metadata Structure
 
@@ -426,17 +425,17 @@ Both strategies use a **12-hex-char random checkpoint ID** (e.g., `a3b2c4d5e6f7`
 **Bidirectional linking:**
 
 ```
-User commit → Metadata (two approaches):
-  Approach 1: Extract "Entire-Checkpoint: a3b2c4d5e6f7" trailer
-              → Look up a3/b2c4d5e6f7/ directory on entire/checkpoints/v1 branch
-
-  Approach 2: Extract "Entire-Checkpoint: a3b2c4d5e6f7" trailer
-              → Search entire/checkpoints/v1 commit history for "Checkpoint: a3b2c4d5e6f7" subject
+User commit → Metadata:
+  Extract "Entire-Checkpoint: a3b2c4d5e6f7" trailer
+  → Read a3/b2c4d5e6f7/ directory from entire/checkpoints/v1 tree at HEAD
 
 Metadata → User commits:
   Given checkpoint ID a3b2c4d5e6f7
   → Search user branch history for commits with "Entire-Checkpoint: a3b2c4d5e6f7" trailer
 ```
+
+Note: Commit subjects on `entire/checkpoints/v1` (e.g., `Checkpoint: a3b2c4d5e6f7`) are
+for human readability in `git log` only. The CLI always reads from the tree at HEAD.
 
 **Example:**
 ```

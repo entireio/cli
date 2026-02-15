@@ -68,28 +68,6 @@ func TestMarkSessionEnded_IdleToEnded(t *testing.T) {
 	require.NotNil(t, loaded.EndedAt)
 }
 
-// TestMarkSessionEnded_ActiveCommittedToEnded verifies ACTIVE_COMMITTED → ENDED.
-func TestMarkSessionEnded_ActiveCommittedToEnded(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	t.Chdir(dir)
-
-	state := &strategy.SessionState{
-		SessionID:  "test-session-end-ac",
-		BaseCommit: "abc123",
-		StartedAt:  time.Now(),
-		Phase:      session.PhaseActiveCommitted,
-	}
-	err := strategy.SaveSessionState(state)
-	require.NoError(t, err)
-
-	err = markSessionEnded("test-session-end-ac")
-	require.NoError(t, err)
-
-	loaded, err := strategy.LoadSessionState("test-session-end-ac")
-	require.NoError(t, err)
-	assert.Equal(t, session.PhaseEnded, loaded.Phase)
-}
-
 // TestMarkSessionEnded_AlreadyEndedIsNoop verifies ENDED → ENDED (no-op).
 func TestMarkSessionEnded_AlreadyEndedIsNoop(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)

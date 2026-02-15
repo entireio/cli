@@ -11,51 +11,44 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// TestShadowStrategy_LastCheckpointID_ReusedAcrossCommits tests that when a user
-// commits Claude's work across multiple commits without entering new prompts,
-// all commits reference the same checkpoint ID.
+// TestShadowStrategy_OneCheckpointPerCommit tests the 1:1 checkpoint model:
+// each commit gets its own unique checkpoint ID. When a session touches multiple
+// files and the user splits them across commits (IDLE session), only the first
+// commit gets a checkpoint trailer (via condensation). The second commit has no
+// associated session data to condense.
 //
 // Flow:
-// 1. Claude session edits files A and B
-// 2. User commits file A (with hooks) → condensation, LastCheckpointID saved
-// 3. User commits file B (with hooks) → no new content, reuses LastCheckpointID
-// 4. Both commits should have the same Entire-Checkpoint trailer
-func TestShadowStrategy_LastCheckpointID_ReusedAcrossCommits(t *testing.T) {
+// 1. Claude session edits files A and B, then stops (IDLE)
+// 2. User commits file A → condensation → unique checkpoint ID #1
+// 3. User commits file B → no session content to condense → no trailer
+func TestShadowStrategy_OneCheckpointPerCommit(t *testing.T) {
 	t.Parallel()
 
-	// Only test manual-commit strategy since this is shadow-specific behavior
 	env := NewFeatureBranchEnv(t, strategy.StrategyNameManualCommit)
 
-	// Create a session
 	session := env.NewSession()
 
-	// Simulate user prompt submit (initializes session)
 	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	// Create two files as if Claude wrote them
 	env.WriteFile("fileA.txt", "content from Claude for file A")
 	env.WriteFile("fileB.txt", "content from Claude for file B")
 
-	// Create transcript that shows Claude created both files
 	session.CreateTranscript("Create files A and B", []FileChange{
 		{Path: "fileA.txt", Content: "content from Claude for file A"},
 		{Path: "fileB.txt", Content: "content from Claude for file B"},
 	})
 
-	// Simulate stop (creates checkpoint on shadow branch)
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	// Get HEAD before first commit
 	headBefore := env.GetHeadHash()
 
-	// First commit: only file A (with shadow hooks - will trigger condensation)
+	// First commit: file A (triggers condensation)
 	env.GitCommitWithShadowHooks("Add file A from Claude session", "fileA.txt")
 
-	// Get the checkpoint ID from first commit
 	firstCommitHash := env.GetHeadHash()
 	if firstCommitHash == headBefore {
 		t.Fatal("First commit was not created")
@@ -66,44 +59,31 @@ func TestShadowStrategy_LastCheckpointID_ReusedAcrossCommits(t *testing.T) {
 	}
 	t.Logf("First commit checkpoint ID: %s", firstCheckpointID)
 
-	// Verify LastCheckpointID was saved in session state
-	state, err := env.GetSessionState(session.ID)
-	if err != nil {
-		t.Fatalf("Failed to get session state: %v", err)
-	}
-	if state == nil {
-		t.Fatal("Session state should exist after first commit")
-	}
-	if state.LastCheckpointID.String() != firstCheckpointID {
-		t.Errorf("Session state LastCheckpointID = %q, want %q", state.LastCheckpointID, firstCheckpointID)
+	// Verify checkpoint exists on entire/checkpoints/v1
+	checkpointPath := paths.CheckpointPath(id.MustCheckpointID(firstCheckpointID))
+	if !env.FileExistsInBranch(paths.MetadataBranchName, checkpointPath+"/"+paths.MetadataFileName) {
+		t.Errorf("Checkpoint metadata should exist at %s on %s branch",
+			checkpointPath, paths.MetadataBranchName)
 	}
 
-	// Second commit: file B (with hooks, but no new Claude activity)
-	// Should reuse the same checkpoint ID
+	// Second commit: file B (IDLE session, no carry-forward → no trailer)
 	env.GitCommitWithShadowHooks("Add file B from Claude session", "fileB.txt")
 
-	// Get the checkpoint ID from second commit
 	secondCommitHash := env.GetHeadHash()
 	if secondCommitHash == firstCommitHash {
 		t.Fatal("Second commit was not created")
 	}
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
-	if secondCheckpointID == "" {
-		t.Fatal("Second commit should have Entire-Checkpoint trailer")
-	}
-	t.Logf("Second commit checkpoint ID: %s", secondCheckpointID)
 
-	// Both commits should have the SAME checkpoint ID
-	if firstCheckpointID != secondCheckpointID {
-		t.Errorf("Checkpoint IDs should match across commits:\n  First:  %s\n  Second: %s",
-			firstCheckpointID, secondCheckpointID)
-	}
-
-	// Verify the checkpoint exists on entire/checkpoints/v1 branch
-	checkpointPath := paths.CheckpointPath(id.MustCheckpointID(firstCheckpointID))
-	if !env.FileExistsInBranch(paths.MetadataBranchName, checkpointPath+"/"+paths.MetadataFileName) {
-		t.Errorf("Checkpoint metadata should exist at %s on %s branch",
-			checkpointPath, paths.MetadataBranchName)
+	// In the 1:1 model, the second commit should NOT have a checkpoint trailer
+	// because the session was IDLE (no carry-forward for idle sessions).
+	if secondCheckpointID != "" {
+		t.Logf("Note: second commit has checkpoint ID %s (carry-forward may have activated)", secondCheckpointID)
+		// If carry-forward is implemented for idle sessions in the future,
+		// this assertion can be changed. For now, verify they're different.
+		if firstCheckpointID == secondCheckpointID {
+			t.Error("If both commits have trailers, they must have DIFFERENT checkpoint IDs (1:1 model)")
+		}
 	}
 }
 
@@ -215,13 +195,10 @@ func TestShadowStrategy_LastCheckpointID_NotSetWithoutCondensation(t *testing.T)
 	}
 }
 
-// TestShadowStrategy_LastCheckpointID_IgnoresOldSessions tests that when multiple
-// old sessions exist in the worktree, only the current session (matching BaseCommit)
-// is used for checkpoint ID reuse.
-//
-// This reproduces the bug where old session states from previous days would cause
-// different checkpoint IDs to be used when making multiple commits from a new session.
-func TestShadowStrategy_LastCheckpointID_IgnoresOldSessions(t *testing.T) {
+// TestShadowStrategy_NewSessionIgnoresOldCheckpointIDs tests that when multiple
+// sessions exist in the worktree, each session's commits get their own unique
+// checkpoint IDs. Old session checkpoint IDs are never reused by new sessions.
+func TestShadowStrategy_NewSessionIgnoresOldCheckpointIDs(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t, strategy.StrategyNameManualCommit)
@@ -232,7 +209,6 @@ func TestShadowStrategy_LastCheckpointID_IgnoresOldSessions(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit (old session) failed: %v", err)
 	}
 
-	// Old session modifies a file
 	env.WriteFile("old.txt", "old session content")
 	oldSession.CreateTranscript("Create old file", []FileChange{
 		{Path: "old.txt", Content: "old session content"},
@@ -250,7 +226,7 @@ func TestShadowStrategy_LastCheckpointID_IgnoresOldSessions(t *testing.T) {
 	}
 	t.Logf("Old session checkpoint ID: %s", oldCheckpointID)
 
-	// Make an intermediate commit (moves HEAD forward, creates new base for new session)
+	// Make an intermediate commit (moves HEAD forward)
 	env.WriteFile("intermediate.txt", "unrelated change")
 	env.GitAdd("intermediate.txt")
 	env.GitCommit("Intermediate commit (no session)")
@@ -261,53 +237,26 @@ func TestShadowStrategy_LastCheckpointID_IgnoresOldSessions(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit (new session) failed: %v", err)
 	}
 
-	// New session modifies two files
 	env.WriteFile("fileA.txt", "new session file A")
-	env.WriteFile("fileB.txt", "new session file B")
-	newSession.CreateTranscript("Create new files A and B", []FileChange{
+	newSession.CreateTranscript("Create new file A", []FileChange{
 		{Path: "fileA.txt", Content: "new session file A"},
-		{Path: "fileB.txt", Content: "new session file B"},
 	})
 
 	if err := env.SimulateStop(newSession.ID, newSession.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop (new session) failed: %v", err)
 	}
 
-	// At this point, we have TWO session state files:
-	// - Old session: BaseCommit = old HEAD, LastCheckpointID = oldCheckpointID
-	// - New session: BaseCommit = current HEAD, FilesTouched = ["fileA.txt", "fileB.txt"]
-
-	// First commit from new session
+	// Commit from new session
 	env.GitCommitWithShadowHooks("Add file A from new session", "fileA.txt")
-	firstCheckpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
-	if firstCheckpointID == "" {
-		t.Fatal("First commit should have checkpoint ID")
+	newCheckpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	if newCheckpointID == "" {
+		t.Fatal("New session commit should have checkpoint ID")
 	}
-	t.Logf("First new session checkpoint ID: %s", firstCheckpointID)
+	t.Logf("New session checkpoint ID: %s", newCheckpointID)
 
-	// CRITICAL: First checkpoint should NOT be the old session's checkpoint
-	if firstCheckpointID == oldCheckpointID {
-		t.Errorf("First new session commit reused old session checkpoint ID %s (should generate new ID)",
-			oldCheckpointID)
-	}
-
-	// Second commit from new session
-	env.GitCommitWithShadowHooks("Add file B from new session", "fileB.txt")
-	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
-	if secondCheckpointID == "" {
-		t.Fatal("Second commit should have checkpoint ID")
-	}
-	t.Logf("Second new session checkpoint ID: %s", secondCheckpointID)
-
-	// CRITICAL: Both commits from new session should have SAME checkpoint ID
-	if firstCheckpointID != secondCheckpointID {
-		t.Errorf("New session commits should have same checkpoint ID:\n  First:  %s\n  Second: %s",
-			firstCheckpointID, secondCheckpointID)
-	}
-
-	// CRITICAL: Neither should be the old session's checkpoint ID
-	if secondCheckpointID == oldCheckpointID {
-		t.Errorf("Second new session commit reused old session checkpoint ID %s",
+	// CRITICAL: New session checkpoint should NOT be the old session's checkpoint
+	if newCheckpointID == oldCheckpointID {
+		t.Errorf("New session commit reused old session checkpoint ID %s (should generate new ID)",
 			oldCheckpointID)
 	}
 }
@@ -363,82 +312,59 @@ func TestShadowStrategy_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
 	}
 }
 
-// TestShadowStrategy_BaseCommitUpdatedOnReuse tests that BaseCommit is updated
-// even when a commit reuses a previous checkpoint ID (no new content to condense).
-// This prevents the stale BaseCommit bug where subsequent commits would fall back
-// to old sessions because no sessions matched the current HEAD.
-func TestShadowStrategy_BaseCommitUpdatedOnReuse(t *testing.T) {
+// TestShadowStrategy_BaseCommitUpdatedAfterCondensation tests that BaseCommit
+// is updated to the new HEAD after condensation. This is essential for the 1:1
+// checkpoint model where each commit gets its own unique checkpoint.
+func TestShadowStrategy_BaseCommitUpdatedAfterCondensation(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t, strategy.StrategyNameManualCommit)
 
-	// Create a session
 	session := env.NewSession()
 
 	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	// Claude creates two files
-	env.WriteFile("fileA.txt", "content A")
-	env.WriteFile("fileB.txt", "content B")
+	env.WriteFile("feature.go", "package main\nfunc Feature() {}\n")
 
-	session.CreateTranscript("Create files A and B", []FileChange{
-		{Path: "fileA.txt", Content: "content A"},
-		{Path: "fileB.txt", Content: "content B"},
+	session.CreateTranscript("Create feature file", []FileChange{
+		{Path: "feature.go", Content: "package main\nfunc Feature() {}\n"},
 	})
 
-	// Stop (creates checkpoint on shadow branch)
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	// First commit: file A (with hooks - triggers condensation)
-	env.GitCommitWithShadowHooks("Add file A", "fileA.txt")
-	firstCommitHash := env.GetHeadHash()
-	firstCheckpointID := env.GetCheckpointIDFromCommitMessage(firstCommitHash)
-	t.Logf("First commit (condensed): %s, checkpoint: %s", firstCommitHash[:7], firstCheckpointID)
-
-	// Get session state after first commit
-	state, err := env.GetSessionState(session.ID)
+	// Get BaseCommit before commit
+	stateBefore, err := env.GetSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("Failed to get session state: %v", err)
 	}
-	baseCommitAfterFirst := state.BaseCommit
-	t.Logf("BaseCommit after first commit: %s", baseCommitAfterFirst[:7])
+	baseCommitBefore := stateBefore.BaseCommit
 
-	// Verify BaseCommit matches first commit
-	if !strings.HasPrefix(firstCommitHash, baseCommitAfterFirst) {
-		t.Errorf("BaseCommit after first commit should match HEAD: got %s, want prefix of %s",
-			baseCommitAfterFirst[:7], firstCommitHash[:7])
+	// Commit with hooks (triggers condensation)
+	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	commitHash := env.GetHeadHash()
+
+	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
+	if checkpointID == "" {
+		t.Fatal("Commit should have Entire-Checkpoint trailer")
 	}
+	t.Logf("Commit: %s, checkpoint: %s", commitHash[:7], checkpointID)
 
-	// Second commit: file B (reuse - no new content to condense)
-	env.GitCommitWithShadowHooks("Add file B", "fileB.txt")
-	secondCommitHash := env.GetHeadHash()
-	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
-	t.Logf("Second commit (reuse): %s, checkpoint: %s", secondCommitHash[:7], secondCheckpointID)
-
-	// Verify checkpoint IDs match (reuse is correct)
-	if firstCheckpointID != secondCheckpointID {
-		t.Errorf("Second commit should reuse first checkpoint ID: got %s, want %s",
-			secondCheckpointID, firstCheckpointID)
-	}
-
-	// CRITICAL: Get session state after second commit
-	// BaseCommit should be updated to second commit hash, not stay at first commit
-	state, err = env.GetSessionState(session.ID)
+	// BaseCommit should advance from pre-commit value to new HEAD
+	stateAfter, err := env.GetSessionState(session.ID)
 	if err != nil {
-		t.Fatalf("Failed to get session state after second commit: %v", err)
+		t.Fatalf("Failed to get session state after commit: %v", err)
 	}
-	baseCommitAfterSecond := state.BaseCommit
-	t.Logf("BaseCommit after second commit: %s", baseCommitAfterSecond[:7])
 
-	// REGRESSION TEST: BaseCommit must be updated even without condensation
-	// Before the fix, BaseCommit stayed at firstCommitHash after reuse commits
-	if !strings.HasPrefix(secondCommitHash, baseCommitAfterSecond) {
-		t.Errorf("BaseCommit after reuse commit should match HEAD: got %s, want prefix of %s\n"+
-			"This is a regression: BaseCommit was not updated after commit without condensation",
-			baseCommitAfterSecond[:7], secondCommitHash[:7])
+	if stateAfter.BaseCommit == baseCommitBefore {
+		t.Error("BaseCommit should have changed after condensation")
+	}
+
+	if !strings.HasPrefix(commitHash, stateAfter.BaseCommit) {
+		t.Errorf("BaseCommit should match HEAD: got %s, want prefix of %s",
+			stateAfter.BaseCommit[:7], commitHash[:7])
 	}
 }

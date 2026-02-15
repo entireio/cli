@@ -280,7 +280,7 @@ func handleSessionStartCommon() error {
 
 	// Fire EventSessionStart for the current session (if state exists).
 	// This handles ENDED → IDLE (re-entering a session).
-	// TODO(ENT-221): dispatch ActionWarnStaleSession for ACTIVE/ACTIVE_COMMITTED sessions.
+	// TODO(ENT-221): dispatch ActionWarnStaleSession for ACTIVE sessions.
 	if state, loadErr := strategy.LoadSessionState(input.SessionID); loadErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load session state on start: %v\n", loadErr)
 	} else if state != nil {

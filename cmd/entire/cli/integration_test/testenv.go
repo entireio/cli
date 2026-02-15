@@ -3,6 +3,8 @@
 package integration
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -1313,6 +1315,243 @@ func CheckpointSummaryPath(checkpointID string) string {
 // SessionMetadataPath returns the path to the session-level metadata.json for a checkpoint.
 func SessionMetadataPath(checkpointID string) string {
 	return SessionFilePath(checkpointID, paths.MetadataFileName)
+}
+
+// CheckpointValidation contains expected values for checkpoint validation.
+type CheckpointValidation struct {
+	// CheckpointID is the expected checkpoint ID
+	CheckpointID string
+
+	// SessionID is the expected session ID
+	SessionID string
+
+	// Strategy is the expected strategy name
+	Strategy string
+
+	// FilesTouched are the expected files in files_touched
+	FilesTouched []string
+
+	// ExpectedPrompts are strings that should appear in prompt.txt
+	ExpectedPrompts []string
+
+	// ExpectedTranscriptContent are strings that should appear in full.jsonl
+	ExpectedTranscriptContent []string
+
+	// CheckpointsCount is the expected checkpoint count (0 means don't validate)
+	CheckpointsCount int
+}
+
+// ValidateCheckpoint performs comprehensive validation of a checkpoint on the metadata branch.
+// It validates:
+// - Root metadata.json (CheckpointSummary) structure and expected fields
+// - Session metadata.json (CommittedMetadata) structure and expected fields
+// - Transcript file (full.jsonl) is valid JSONL and contains expected content
+// - Content hash file (content_hash.txt) matches SHA256 of transcript
+// - Prompt file (prompt.txt) contains expected prompts
+func (env *TestEnv) ValidateCheckpoint(v CheckpointValidation) {
+	env.T.Helper()
+
+	// Validate root metadata.json (CheckpointSummary)
+	env.validateCheckpointSummary(v)
+
+	// Validate session metadata.json (CommittedMetadata)
+	env.validateSessionMetadata(v)
+
+	// Validate transcript is valid JSONL
+	env.validateTranscriptJSONL(v.CheckpointID, v.ExpectedTranscriptContent)
+
+	// Validate content hash matches transcript
+	env.validateContentHash(v.CheckpointID)
+
+	// Validate prompt.txt contains expected prompts
+	if len(v.ExpectedPrompts) > 0 {
+		env.validatePromptContent(v.CheckpointID, v.ExpectedPrompts)
+	}
+}
+
+// validateCheckpointSummary validates the root metadata.json (CheckpointSummary).
+func (env *TestEnv) validateCheckpointSummary(v CheckpointValidation) {
+	env.T.Helper()
+
+	summaryPath := CheckpointSummaryPath(v.CheckpointID)
+	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, summaryPath)
+	if !found {
+		env.T.Fatalf("CheckpointSummary not found at %s", summaryPath)
+	}
+
+	var summary checkpoint.CheckpointSummary
+	if err := json.Unmarshal([]byte(content), &summary); err != nil {
+		env.T.Fatalf("Failed to parse CheckpointSummary: %v\nContent: %s", err, content)
+	}
+
+	// Validate checkpoint_id
+	if summary.CheckpointID.String() != v.CheckpointID {
+		env.T.Errorf("CheckpointSummary.CheckpointID = %q, want %q", summary.CheckpointID, v.CheckpointID)
+	}
+
+	// Validate strategy
+	if v.Strategy != "" && summary.Strategy != v.Strategy {
+		env.T.Errorf("CheckpointSummary.Strategy = %q, want %q", summary.Strategy, v.Strategy)
+	}
+
+	// Validate sessions array is populated
+	if len(summary.Sessions) == 0 {
+		env.T.Error("CheckpointSummary.Sessions should have at least one entry")
+	}
+
+	// Validate files_touched
+	if len(v.FilesTouched) > 0 {
+		touchedSet := make(map[string]bool)
+		for _, f := range summary.FilesTouched {
+			touchedSet[f] = true
+		}
+		for _, expected := range v.FilesTouched {
+			if !touchedSet[expected] {
+				env.T.Errorf("CheckpointSummary.FilesTouched missing %q, got %v", expected, summary.FilesTouched)
+			}
+		}
+	}
+
+	// Validate checkpoints_count
+	if v.CheckpointsCount > 0 && summary.CheckpointsCount != v.CheckpointsCount {
+		env.T.Errorf("CheckpointSummary.CheckpointsCount = %d, want %d", summary.CheckpointsCount, v.CheckpointsCount)
+	}
+}
+
+// validateSessionMetadata validates the session-level metadata.json (CommittedMetadata).
+func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
+	env.T.Helper()
+
+	metadataPath := SessionMetadataPath(v.CheckpointID)
+	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, metadataPath)
+	if !found {
+		env.T.Fatalf("Session metadata not found at %s", metadataPath)
+	}
+
+	var metadata checkpoint.CommittedMetadata
+	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
+		env.T.Fatalf("Failed to parse CommittedMetadata: %v\nContent: %s", err, content)
+	}
+
+	// Validate checkpoint_id
+	if metadata.CheckpointID.String() != v.CheckpointID {
+		env.T.Errorf("CommittedMetadata.CheckpointID = %q, want %q", metadata.CheckpointID, v.CheckpointID)
+	}
+
+	// Validate session_id
+	if v.SessionID != "" && metadata.SessionID != v.SessionID {
+		env.T.Errorf("CommittedMetadata.SessionID = %q, want %q", metadata.SessionID, v.SessionID)
+	}
+
+	// Validate strategy
+	if v.Strategy != "" && metadata.Strategy != v.Strategy {
+		env.T.Errorf("CommittedMetadata.Strategy = %q, want %q", metadata.Strategy, v.Strategy)
+	}
+
+	// Validate created_at is not zero
+	if metadata.CreatedAt.IsZero() {
+		env.T.Error("CommittedMetadata.CreatedAt should not be zero")
+	}
+
+	// Validate files_touched
+	if len(v.FilesTouched) > 0 {
+		touchedSet := make(map[string]bool)
+		for _, f := range metadata.FilesTouched {
+			touchedSet[f] = true
+		}
+		for _, expected := range v.FilesTouched {
+			if !touchedSet[expected] {
+				env.T.Errorf("CommittedMetadata.FilesTouched missing %q, got %v", expected, metadata.FilesTouched)
+			}
+		}
+	}
+
+	// Validate checkpoints_count
+	if v.CheckpointsCount > 0 && metadata.CheckpointsCount != v.CheckpointsCount {
+		env.T.Errorf("CommittedMetadata.CheckpointsCount = %d, want %d", metadata.CheckpointsCount, v.CheckpointsCount)
+	}
+}
+
+// validateTranscriptJSONL validates that full.jsonl exists and is valid JSONL.
+func (env *TestEnv) validateTranscriptJSONL(checkpointID string, expectedContent []string) {
+	env.T.Helper()
+
+	transcriptPath := SessionFilePath(checkpointID, paths.TranscriptFileName)
+	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, transcriptPath)
+	if !found {
+		env.T.Fatalf("Transcript not found at %s", transcriptPath)
+	}
+
+	// Validate it's valid JSONL (each non-empty line should be valid JSON)
+	lines := strings.Split(content, "\n")
+	validLines := 0
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		validLines++
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			env.T.Errorf("Transcript line %d is not valid JSON: %v\nLine: %s", i+1, err, line)
+		}
+	}
+
+	if validLines == 0 {
+		env.T.Error("Transcript is empty (no valid JSONL lines)")
+	}
+
+	// Validate expected content appears in transcript
+	for _, expected := range expectedContent {
+		if !strings.Contains(content, expected) {
+			env.T.Errorf("Transcript should contain %q", expected)
+		}
+	}
+}
+
+// validateContentHash validates that content_hash.txt matches the SHA256 of the transcript.
+func (env *TestEnv) validateContentHash(checkpointID string) {
+	env.T.Helper()
+
+	// Read transcript
+	transcriptPath := SessionFilePath(checkpointID, paths.TranscriptFileName)
+	transcript, found := env.ReadFileFromBranch(paths.MetadataBranchName, transcriptPath)
+	if !found {
+		env.T.Fatalf("Transcript not found at %s", transcriptPath)
+	}
+
+	// Read content hash
+	hashPath := SessionFilePath(checkpointID, "content_hash.txt")
+	storedHash, found := env.ReadFileFromBranch(paths.MetadataBranchName, hashPath)
+	if !found {
+		env.T.Fatalf("Content hash not found at %s", hashPath)
+	}
+	storedHash = strings.TrimSpace(storedHash)
+
+	// Calculate expected hash with sha256: prefix (matches format in committed.go)
+	hash := sha256.Sum256([]byte(transcript))
+	expectedHash := "sha256:" + hex.EncodeToString(hash[:])
+
+	if storedHash != expectedHash {
+		env.T.Errorf("Content hash mismatch:\n  stored:   %s\n  expected: %s", storedHash, expectedHash)
+	}
+}
+
+// validatePromptContent validates that prompt.txt contains the expected prompts.
+func (env *TestEnv) validatePromptContent(checkpointID string, expectedPrompts []string) {
+	env.T.Helper()
+
+	promptPath := SessionFilePath(checkpointID, paths.PromptFileName)
+	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, promptPath)
+	if !found {
+		env.T.Fatalf("Prompt file not found at %s", promptPath)
+	}
+
+	for _, expected := range expectedPrompts {
+		if !strings.Contains(content, expected) {
+			env.T.Errorf("Prompt file should contain %q\nContent: %s", expected, content)
+		}
+	}
 }
 
 func findModuleRoot() string {

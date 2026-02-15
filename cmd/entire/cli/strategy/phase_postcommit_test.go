@@ -20,10 +20,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPostCommit_ActiveSession_NoCondensation verifies that PostCommit on an
-// ACTIVE session transitions to ACTIVE_COMMITTED without condensing.
-// The shadow branch must be preserved because the session is still active.
-func TestPostCommit_ActiveSession_NoCondensation(t *testing.T) {
+// TestPostCommit_ActiveSession_CondensesImmediately verifies that PostCommit on
+// an ACTIVE session condenses immediately and stays ACTIVE.
+// With the 1:1 checkpoint model, each commit gets its own checkpoint right away.
+func TestPostCommit_ActiveSession_CondensesImmediately(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
@@ -49,20 +49,21 @@ func TestPostCommit_ActiveSession_NoCondensation(t *testing.T) {
 	err = s.PostCommit()
 	require.NoError(t, err)
 
-	// Verify phase transitioned to ACTIVE_COMMITTED
+	// Verify phase stays ACTIVE (immediate condensation, no deferred phase)
 	state, err = s.loadSessionState(sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	assert.Equal(t, session.PhaseActiveCommitted, state.Phase,
-		"ACTIVE session should transition to ACTIVE_COMMITTED on GitCommit")
+	assert.Equal(t, session.PhaseActive, state.Phase,
+		"ACTIVE session should stay ACTIVE after immediate condensation on GitCommit")
 
-	// Verify shadow branch is NOT deleted (session is still active).
-	// After PostCommit, BaseCommit is updated to new HEAD, so use the current state.
-	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranch)
-	_, err = repo.Reference(refName, true)
-	assert.NoError(t, err,
-		"shadow branch should be preserved when session is still active")
+	// Verify condensation happened: the entire/checkpoints/v1 branch should exist
+	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after immediate condensation")
+	assert.NotNil(t, sessionsRef)
+
+	// Verify StepCount was reset to 0 by condensation
+	assert.Equal(t, 0, state.StepCount,
+		"StepCount should be reset after immediate condensation")
 }
 
 // TestPostCommit_IdleSession_Condenses verifies that PostCommit on an IDLE
@@ -85,6 +86,7 @@ func TestPostCommit_IdleSession_Condenses(t *testing.T) {
 	require.NoError(t, err)
 	state.Phase = session.PhaseIdle
 	state.LastInteractionTime = nil
+	state.FilesTouched = []string{"test.txt"}
 	require.NoError(t, s.saveSessionState(state))
 
 	// Record shadow branch name before PostCommit
@@ -170,10 +172,12 @@ func TestPostCommit_RebaseDuringActive_SkipsTransition(t *testing.T) {
 		"shadow branch should be preserved during rebase")
 }
 
-// TestPostCommit_ShadowBranch_PreservedWhenActiveSessionExists verifies that
-// the shadow branch is preserved when ANY session on it is still active,
-// even if another session on the same branch is IDLE and gets condensed.
-func TestPostCommit_ShadowBranch_PreservedWhenActiveSessionExists(t *testing.T) {
+// TestPostCommit_ShadowBranch_PreservedWhenUncondensedActiveSessionExists verifies that
+// the shadow branch is preserved when an ACTIVE session that was NOT condensed
+// (e.g., it has no new content) still shares the branch with another session.
+// Both sessions condense immediately on GitCommit, but the branch is only deleted
+// when ALL sessions on it have been condensed.
+func TestPostCommit_ShadowBranch_PreservedWhenUncondensedActiveSessionExists(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
@@ -197,10 +201,13 @@ func TestPostCommit_ShadowBranch_PreservedWhenActiveSessionExists(t *testing.T) 
 	// Set idle session to IDLE phase
 	idleState.Phase = session.PhaseIdle
 	idleState.LastInteractionTime = nil
+	idleState.FilesTouched = []string{"test.txt"}
 	require.NoError(t, s.saveSessionState(idleState))
 
-	// Create a second session with the SAME base commit and worktree (concurrent session)
-	// Save the active session with ACTIVE phase and some checkpoints
+	// Create a second session with the SAME base commit and worktree (concurrent session).
+	// This session is ACTIVE but has NO checkpoints (StepCount=0, no shadow branch content).
+	// Because it has no new content, it will NOT be condensed, and its shadow branch must
+	// be preserved so it can save checkpoints later.
 	now := time.Now()
 	activeState := &SessionState{
 		SessionID:           activeSessionID,
@@ -210,9 +217,12 @@ func TestPostCommit_ShadowBranch_PreservedWhenActiveSessionExists(t *testing.T) 
 		StartedAt:           now,
 		Phase:               session.PhaseActive,
 		LastInteractionTime: &now,
-		StepCount:           1,
+		StepCount:           0,
 	}
 	require.NoError(t, s.saveSessionState(activeState))
+
+	// Record shadow branch name before PostCommit
+	shadowBranch := getShadowBranchNameForCommit(baseCommit, worktreeID)
 
 	// Create a commit WITH the checkpoint trailer
 	commitWithCheckpointTrailer(t, repo, dir, "d4e5f6a1b2c3")
@@ -221,11 +231,11 @@ func TestPostCommit_ShadowBranch_PreservedWhenActiveSessionExists(t *testing.T) 
 	err = s.PostCommit()
 	require.NoError(t, err)
 
-	// Verify the ACTIVE session's phase is now ACTIVE_COMMITTED
+	// Verify the ACTIVE session stays ACTIVE (immediate condensation model)
 	activeState, err = s.loadSessionState(activeSessionID)
 	require.NoError(t, err)
-	assert.Equal(t, session.PhaseActiveCommitted, activeState.Phase,
-		"ACTIVE session should transition to ACTIVE_COMMITTED on GitCommit")
+	assert.Equal(t, session.PhaseActive, activeState.Phase,
+		"ACTIVE session should stay ACTIVE after GitCommit")
 
 	// Verify the IDLE session actually condensed (entire/checkpoints/v1 branch should exist)
 	idleState, err = s.loadSessionState(idleSessionID)
@@ -238,13 +248,12 @@ func TestPostCommit_ShadowBranch_PreservedWhenActiveSessionExists(t *testing.T) 
 	assert.Equal(t, 0, idleState.StepCount,
 		"IDLE session StepCount should be reset after condensation")
 
-	// Verify shadow branch is NOT deleted because the ACTIVE session still needs it.
-	// After PostCommit, BaseCommit is updated to new HEAD via migration.
-	newShadowBranch := getShadowBranchNameForCommit(activeState.BaseCommit, activeState.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(newShadowBranch)
+	// Verify shadow branch is preserved because the ACTIVE session was not condensed
+	// (it had no new content) and still needs the branch for future checkpoints.
+	refName := plumbing.NewBranchReferenceName(shadowBranch)
 	_, err = repo.Reference(refName, true)
 	assert.NoError(t, err,
-		"shadow branch should be preserved when an active session still exists on it")
+		"shadow branch should be preserved when an uncondensed active session still exists on it")
 }
 
 // TestPostCommit_CondensationFailure_PreservesShadowBranch verifies that when
@@ -267,6 +276,7 @@ func TestPostCommit_CondensationFailure_PreservesShadowBranch(t *testing.T) {
 	require.NoError(t, err)
 	state.Phase = session.PhaseIdle
 	state.LastInteractionTime = nil
+	state.FilesTouched = []string{"test.txt"}
 	require.NoError(t, s.saveSessionState(state))
 
 	// Record original BaseCommit and StepCount before corruption
@@ -544,74 +554,6 @@ func TestPostCommit_EndedSession_NoFilesTouched_Discards(t *testing.T) {
 		"ENDED session should stay ENDED on discard path")
 }
 
-// TestPostCommit_ActiveCommitted_MigratesShadowBranch verifies that an
-// ACTIVE_COMMITTED session receiving another commit migrates the shadow branch
-// to the new HEAD and stays in ACTIVE_COMMITTED.
-func TestPostCommit_ActiveCommitted_MigratesShadowBranch(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-postcommit-ac-migrate"
-
-	// Initialize session and save a checkpoint
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
-
-	// Set phase to ACTIVE_COMMITTED
-	state, err := s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	state.Phase = session.PhaseActiveCommitted
-	require.NoError(t, s.saveSessionState(state))
-
-	// Record original shadow branch name and BaseCommit
-	originalShadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	originalStepCount := state.StepCount
-
-	// Create a commit with the checkpoint trailer
-	commitWithCheckpointTrailer(t, repo, dir, "d4e5f6a1b2c4")
-
-	// Run PostCommit
-	err = s.PostCommit()
-	require.NoError(t, err)
-
-	// Verify phase stays ACTIVE_COMMITTED
-	state, err = s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	assert.Equal(t, session.PhaseActiveCommitted, state.Phase,
-		"ACTIVE_COMMITTED session should stay ACTIVE_COMMITTED on subsequent commit")
-
-	// Verify BaseCommit updated to new HEAD
-	head, err := repo.Head()
-	require.NoError(t, err)
-	assert.Equal(t, head.Hash().String(), state.BaseCommit,
-		"BaseCommit should be updated to new HEAD after migration")
-
-	// Verify new shadow branch exists at new HEAD hash
-	newShadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	newRefName := plumbing.NewBranchReferenceName(newShadowBranch)
-	_, err = repo.Reference(newRefName, true)
-	require.NoError(t, err,
-		"new shadow branch should exist after migration")
-
-	// Verify original shadow branch no longer exists (was migrated/renamed)
-	oldRefName := plumbing.NewBranchReferenceName(originalShadowBranch)
-	_, err = repo.Reference(oldRefName, true)
-	require.Error(t, err,
-		"original shadow branch should no longer exist after migration")
-
-	// StepCount unchanged (no condensation)
-	assert.Equal(t, originalStepCount, state.StepCount,
-		"StepCount should be unchanged - no condensation for ACTIVE_COMMITTED")
-
-	// entire/checkpoints/v1 branch should NOT exist (no condensation)
-	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.Error(t, err,
-		"entire/checkpoints/v1 branch should NOT exist - no condensation for ACTIVE_COMMITTED")
-}
-
 // TestPostCommit_CondensationFailure_EndedSession_PreservesShadowBranch verifies
 // that when condensation fails for an ENDED session with files touched,
 // BaseCommit is preserved (not updated).
@@ -671,298 +613,6 @@ func TestPostCommit_CondensationFailure_EndedSession_PreservesShadowBranch(t *te
 		"ENDED session should stay ENDED when condensation fails")
 }
 
-// TestPostCommit_ActiveSession_SetsPendingCheckpointID verifies that PostCommit
-// stores PendingCheckpointID when transitioning ACTIVE → ACTIVE_COMMITTED.
-// This ensures HandleTurnEnd can reuse the same checkpoint ID that's in the
-// commit trailer, rather than generating a mismatched one.
-func TestPostCommit_ActiveSession_SetsPendingCheckpointID(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-postcommit-pending-cpid"
-
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
-
-	// Set phase to ACTIVE (agent mid-turn)
-	state, err := s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	state.Phase = session.PhaseActive
-	state.PendingCheckpointID = "" // Ensure it starts empty
-	require.NoError(t, s.saveSessionState(state))
-
-	// Create a commit with a known checkpoint ID
-	commitWithCheckpointTrailer(t, repo, dir, "a1b2c3d4e5f6")
-
-	// Run PostCommit
-	err = s.PostCommit()
-	require.NoError(t, err)
-
-	// Verify phase transitioned to ACTIVE_COMMITTED
-	state, err = s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	require.Equal(t, session.PhaseActiveCommitted, state.Phase)
-
-	// Verify PendingCheckpointID was stored from the commit trailer
-	assert.Equal(t, "a1b2c3d4e5f6", state.PendingCheckpointID,
-		"PendingCheckpointID should be set to the commit's checkpoint ID for deferred condensation")
-}
-
-// TestTurnEnd_ActiveCommitted_ReusesCheckpointID verifies that HandleTurnEnd
-// uses PendingCheckpointID (set by PostCommit) rather than generating a new one.
-// This ensures the condensed metadata matches the commit trailer.
-func TestTurnEnd_ActiveCommitted_ReusesCheckpointID(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-turnend-reuses-cpid"
-
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
-
-	// Simulate PostCommit: transition to ACTIVE_COMMITTED with PendingCheckpointID
-	state, err := s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	state.Phase = session.PhaseActive
-	require.NoError(t, s.saveSessionState(state))
-
-	commitWithCheckpointTrailer(t, repo, dir, "d4e5f6a1b2c3")
-
-	err = s.PostCommit()
-	require.NoError(t, err)
-
-	state, err = s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	require.Equal(t, "d4e5f6a1b2c3", state.PendingCheckpointID)
-
-	// Run TurnEnd
-	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state, result)
-
-	err = s.HandleTurnEnd(state, remaining)
-	require.NoError(t, err)
-
-	// Verify the condensed checkpoint ID matches the commit trailer
-	// The LastCheckpointID is set by condenseAndUpdateState on success
-	assert.Equal(t, id.CheckpointID("d4e5f6a1b2c3"), state.LastCheckpointID,
-		"condensation should use PendingCheckpointID, not generate a new one")
-}
-
-// TestTurnEnd_ConcurrentSession_PreservesShadowBranch verifies that
-// HandleTurnEnd does NOT delete the shadow branch when another active
-// session shares it.
-func TestTurnEnd_ConcurrentSession_PreservesShadowBranch(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	s := &ManualCommitStrategy{}
-	sessionID1 := "test-turnend-concurrent-1"
-	sessionID2 := "test-turnend-concurrent-2"
-
-	// Initialize first session and save a checkpoint
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID1)
-
-	// Get worktree info from first session
-	state1, err := s.loadSessionState(sessionID1)
-	require.NoError(t, err)
-	worktreePath := state1.WorktreePath
-	baseCommit := state1.BaseCommit
-	worktreeID := state1.WorktreeID
-
-	// Transition first session through PostCommit to ACTIVE_COMMITTED
-	state1.Phase = session.PhaseActive
-	require.NoError(t, s.saveSessionState(state1))
-
-	commitWithCheckpointTrailer(t, repo, dir, "e5f6a1b2c3d4")
-
-	err = s.PostCommit()
-	require.NoError(t, err)
-
-	state1, err = s.loadSessionState(sessionID1)
-	require.NoError(t, err)
-	require.Equal(t, session.PhaseActiveCommitted, state1.Phase)
-
-	// Create a second session with the SAME base commit and worktree (concurrent)
-	now := time.Now()
-	state2 := &SessionState{
-		SessionID:           sessionID2,
-		BaseCommit:          state1.BaseCommit, // Same base commit (post-migration)
-		WorktreePath:        worktreePath,
-		WorktreeID:          worktreeID,
-		StartedAt:           now,
-		Phase:               session.PhaseActive,
-		LastInteractionTime: &now,
-		StepCount:           1,
-	}
-	require.NoError(t, s.saveSessionState(state2))
-
-	// Record shadow branch name (shared by both sessions)
-	shadowBranch := getShadowBranchNameForCommit(state1.BaseCommit, state1.WorktreeID)
-
-	// First session ends its turn — should NOT delete shadow branch
-	result := session.Transition(state1.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state1, result)
-
-	err = s.HandleTurnEnd(state1, remaining)
-	require.NoError(t, err)
-
-	// Shadow branch at the pre-condensation BaseCommit should be preserved
-	// because session2 is still active on it.
-	refName := plumbing.NewBranchReferenceName(shadowBranch)
-	_, err = repo.Reference(refName, true)
-	require.NoError(t, err,
-		"shadow branch should be preserved when another active session shares it")
-
-	// Condensation still succeeded for session1
-	assert.Equal(t, 0, state1.StepCount,
-		"StepCount should be reset after condensation")
-	assert.Equal(t, session.PhaseIdle, state1.Phase,
-		"first session should be IDLE after turn end")
-
-	// Second session is still active and unaffected
-	state2, err = s.loadSessionState(sessionID2)
-	require.NoError(t, err)
-	assert.Equal(t, session.PhaseActive, state2.Phase,
-		"second session should still be ACTIVE")
-	_ = baseCommit // used for documentation
-}
-
-// TestTurnEnd_ActiveCommitted_CondensesSession verifies that HandleTurnEnd
-// with ActionCondense (from ACTIVE_COMMITTED → IDLE) condenses the session
-// to entire/checkpoints/v1 and cleans up the shadow branch.
-func TestTurnEnd_ActiveCommitted_CondensesSession(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-turnend-condenses"
-
-	// Initialize session and save a checkpoint so there is shadow branch content
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
-
-	// Simulate PostCommit: create a commit with trailer and transition to ACTIVE_COMMITTED
-	state, err := s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	state.Phase = session.PhaseActive
-	require.NoError(t, s.saveSessionState(state))
-
-	commitWithCheckpointTrailer(t, repo, dir, "a1b2c3d4e5f6")
-
-	// Run PostCommit so phase transitions to ACTIVE_COMMITTED and PendingCheckpointID is set
-	err = s.PostCommit()
-	require.NoError(t, err)
-
-	state, err = s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	require.Equal(t, session.PhaseActiveCommitted, state.Phase)
-
-	// Now simulate the TurnEnd transition that the handler dispatches
-	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state, result)
-
-	// Verify the state machine emits ActionCondense
-	require.Contains(t, remaining, session.ActionCondense,
-		"ACTIVE_COMMITTED + TurnEnd should emit ActionCondense")
-
-	// Record shadow branch name BEFORE HandleTurnEnd (BaseCommit may change)
-	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-
-	// Call HandleTurnEnd with the remaining actions
-	err = s.HandleTurnEnd(state, remaining)
-	require.NoError(t, err)
-
-	// Verify condensation happened: entire/checkpoints/v1 branch should exist
-	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after turn-end condensation")
-	assert.NotNil(t, sessionsRef)
-
-	// Verify shadow branch IS deleted after condensation
-	refName := plumbing.NewBranchReferenceName(shadowBranch)
-	_, err = repo.Reference(refName, true)
-	require.Error(t, err,
-		"shadow branch should be deleted after turn-end condensation")
-
-	// Verify StepCount was reset by condensation
-	assert.Equal(t, 0, state.StepCount,
-		"StepCount should be reset after condensation")
-
-	// Verify phase is IDLE (set by ApplyCommonActions above)
-	assert.Equal(t, session.PhaseIdle, state.Phase,
-		"phase should be IDLE after TurnEnd")
-}
-
-// TestTurnEnd_ActiveCommitted_CondensationFailure_PreservesShadowBranch verifies
-// that when HandleTurnEnd condensation fails, BaseCommit is NOT updated and
-// the shadow branch is preserved.
-func TestTurnEnd_ActiveCommitted_CondensationFailure_PreservesShadowBranch(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-turnend-condense-fail"
-
-	// Initialize session and save a checkpoint
-	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
-
-	// Simulate PostCommit: transition to ACTIVE_COMMITTED
-	state, err := s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	state.Phase = session.PhaseActive
-	require.NoError(t, s.saveSessionState(state))
-
-	commitWithCheckpointTrailer(t, repo, dir, "b2c3d4e5f6a1")
-
-	err = s.PostCommit()
-	require.NoError(t, err)
-
-	state, err = s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	require.Equal(t, session.PhaseActiveCommitted, state.Phase)
-
-	// Record original BaseCommit before corruption
-	originalBaseCommit := state.BaseCommit
-	originalStepCount := state.StepCount
-
-	// Corrupt shadow branch by pointing it at ZeroHash
-	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	corruptRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), plumbing.ZeroHash)
-	require.NoError(t, repo.Storer.SetReference(corruptRef))
-
-	// Run the transition
-	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state, result)
-
-	// Call HandleTurnEnd — condensation should fail silently
-	err = s.HandleTurnEnd(state, remaining)
-	require.NoError(t, err, "HandleTurnEnd should not return error even when condensation fails")
-
-	// BaseCommit should NOT be updated (condensation failed)
-	assert.Equal(t, originalBaseCommit, state.BaseCommit,
-		"BaseCommit should NOT be updated when condensation fails")
-	assert.Equal(t, originalStepCount, state.StepCount,
-		"StepCount should NOT be reset when condensation fails")
-
-	// entire/checkpoints/v1 branch should NOT exist (condensation failed)
-	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	assert.Error(t, err,
-		"entire/checkpoints/v1 branch should NOT exist when condensation fails")
-}
-
 // TestTurnEnd_Active_NoActions verifies that HandleTurnEnd with no actions
 // is a no-op (normal ACTIVE → IDLE transition has no strategy-specific actions).
 func TestTurnEnd_Active_NoActions(t *testing.T) {
@@ -995,8 +645,8 @@ func TestTurnEnd_Active_NoActions(t *testing.T) {
 	assert.Empty(t, remaining,
 		"ACTIVE + TurnEnd should not emit strategy-specific actions")
 
-	// Call HandleTurnEnd with empty actions — should be a no-op
-	err = s.HandleTurnEnd(state, remaining)
+	// Call HandleTurnEnd — should be a no-op (no TurnCheckpointIDs)
+	err = s.HandleTurnEnd(state)
 	require.NoError(t, err)
 
 	// Verify state is unchanged
@@ -1011,97 +661,6 @@ func TestTurnEnd_Active_NoActions(t *testing.T) {
 	_, err = repo.Reference(refName, true)
 	assert.NoError(t, err,
 		"shadow branch should still exist after no-op turn end")
-}
-
-// TestTurnEnd_DeferredCondensation_AttributionUsesOriginalBase verifies that
-// deferred condensation (ACTIVE_COMMITTED → IDLE) uses AttributionBaseCommit
-// instead of BaseCommit for attribution, so the diff is non-zero.
-//
-// Scenario: agent modifies a file, user commits mid-turn, then turn ends.
-// Without the fix, BaseCommit is updated to the new HEAD by PostCommit migration,
-// so baseTree == headTree and attribution shows zero changes.
-// With the fix, AttributionBaseCommit preserves the original base commit.
-func TestTurnEnd_DeferredCondensation_AttributionUsesOriginalBase(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "test-deferred-attribution"
-
-	// Initialize session and save a checkpoint that includes a modified file.
-	// The "agent" modifies test.txt before saving the checkpoint.
-	setupSessionWithFileChange(t, s, repo, dir, sessionID)
-
-	// Record the original base commit (commit A)
-	state, err := s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	originalBaseCommit := state.BaseCommit
-
-	// Verify AttributionBaseCommit is set at session init
-	assert.Equal(t, originalBaseCommit, state.AttributionBaseCommit,
-		"AttributionBaseCommit should equal BaseCommit at session start")
-
-	// Set phase to ACTIVE (simulating agent mid-turn)
-	state.Phase = session.PhaseActive
-	state.FilesTouched = []string{"test.txt"}
-	require.NoError(t, s.saveSessionState(state))
-
-	// User commits (creates commit B). This triggers PostCommit which:
-	// - Transitions ACTIVE → ACTIVE_COMMITTED (defers condensation)
-	// - Migrates shadow branch to new HEAD
-	// - Updates BaseCommit to new HEAD
-	commitWithCheckpointTrailer(t, repo, dir, "a1b2c3d4e5f6")
-
-	err = s.PostCommit()
-	require.NoError(t, err)
-
-	// Reload state and verify the key invariant:
-	// BaseCommit has moved to the new HEAD, but AttributionBaseCommit stays at original
-	state, err = s.loadSessionState(sessionID)
-	require.NoError(t, err)
-	require.Equal(t, session.PhaseActiveCommitted, state.Phase)
-
-	head, err := repo.Head()
-	require.NoError(t, err)
-	newHeadHash := head.Hash().String()
-
-	assert.Equal(t, newHeadHash, state.BaseCommit,
-		"BaseCommit should be updated to new HEAD after migration")
-	assert.Equal(t, originalBaseCommit, state.AttributionBaseCommit,
-		"AttributionBaseCommit should still point to original base (commit A)")
-	assert.NotEqual(t, state.BaseCommit, state.AttributionBaseCommit,
-		"BaseCommit and AttributionBaseCommit should diverge after mid-turn commit")
-
-	// Now simulate TurnEnd (agent finishes) — deferred condensation runs
-	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state, result)
-	require.Contains(t, remaining, session.ActionCondense)
-
-	err = s.HandleTurnEnd(state, remaining)
-	require.NoError(t, err)
-
-	// After condensation, verify AttributionBaseCommit is updated to match BaseCommit
-	assert.Equal(t, state.BaseCommit, state.AttributionBaseCommit,
-		"AttributionBaseCommit should be updated after successful condensation")
-
-	// Verify condensation actually happened
-	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/sessions branch should exist after deferred condensation")
-
-	// Read back the committed metadata and verify attribution is non-zero.
-	// The agent modified test.txt (added a line), so AgentLines should be > 0.
-	store := checkpoint.NewGitStore(repo)
-	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
-	content, err := store.ReadSessionContent(context.Background(), cpID, 0)
-	require.NoError(t, err, "should be able to read condensed session content")
-	require.NotNil(t, content)
-	require.NotNil(t, content.Metadata.InitialAttribution,
-		"condensed metadata should include attribution")
-	assert.Positive(t, content.Metadata.InitialAttribution.TotalCommitted,
-		"attribution TotalCommitted should be non-zero (agent modified test.txt)")
 }
 
 // TestPostCommit_FilesTouched_ResetsAfterCondensation verifies that FilesTouched
@@ -1157,9 +716,9 @@ func TestPostCommit_FilesTouched_ResetsAfterCondensation(t *testing.T) {
 	assert.ElementsMatch(t, []string{"A.txt", "B.txt"}, state.FilesTouched,
 		"FilesTouched should contain A.txt and B.txt before first condensation")
 
-	// --- Commit and condense (round 1) ---
+	// --- Commit A.txt, B.txt and condense (round 1) ---
 	checkpointID1 := "a1a2a3a4a5a6"
-	commitWithCheckpointTrailer(t, repo, dir, checkpointID1)
+	commitFilesWithTrailer(t, repo, dir, checkpointID1, "A.txt", "B.txt")
 
 	err = s.PostCommit()
 	require.NoError(t, err)
@@ -1181,7 +740,7 @@ func TestPostCommit_FilesTouched_ResetsAfterCondensation(t *testing.T) {
 	state, err = s.loadSessionState(sessionID)
 	require.NoError(t, err)
 	assert.Nil(t, state.FilesTouched,
-		"FilesTouched should be nil after condensation")
+		"FilesTouched should be nil after condensation (all files were committed)")
 
 	// --- Round 2: Save checkpoint touching files C.txt and D.txt ---
 
@@ -1224,9 +783,9 @@ func TestPostCommit_FilesTouched_ResetsAfterCondensation(t *testing.T) {
 	assert.ElementsMatch(t, []string{"C.txt", "D.txt"}, state.FilesTouched,
 		"FilesTouched should only contain C.txt and D.txt after reset")
 
-	// --- Commit and condense (round 2) ---
+	// --- Commit C.txt, D.txt and condense (round 2) ---
 	checkpointID2 := "b1b2b3b4b5b6"
-	commitWithCheckpointTrailer(t, repo, dir, checkpointID2)
+	commitFilesWithTrailer(t, repo, dir, checkpointID2, "C.txt", "D.txt")
 
 	err = s.PostCommit()
 	require.NoError(t, err)
@@ -1240,48 +799,468 @@ func TestPostCommit_FilesTouched_ResetsAfterCondensation(t *testing.T) {
 		"Second condensation should only contain C.txt and D.txt, not accumulated files from first condensation")
 }
 
-// setupSessionWithFileChange is like setupSessionWithCheckpoint but also modifies
-// test.txt so the shadow branch checkpoint includes actual file changes.
-// This enables attribution testing: the diff between base commit and the
-// checkpoint/HEAD shows real line changes.
-func setupSessionWithFileChange(t *testing.T, s *ManualCommitStrategy, _ *git.Repository, dir, sessionID string) {
-	t.Helper()
+// TestSubtractFiles verifies that subtractFiles correctly removes files present
+// in the exclude set and preserves files not in it.
+func TestSubtractFiles(t *testing.T) {
+	t.Parallel()
 
-	// Modify test.txt to simulate agent work (adds lines relative to initial commit)
-	testFile := filepath.Join(dir, "test.txt")
-	require.NoError(t, os.WriteFile(testFile, []byte("initial content\nagent added line\n"), 0o644))
+	tests := []struct {
+		name     string
+		files    []string
+		exclude  map[string]struct{}
+		expected []string
+	}{
+		{
+			name:     "no overlap",
+			files:    []string{"a.txt", "b.txt"},
+			exclude:  map[string]struct{}{"c.txt": {}},
+			expected: []string{"a.txt", "b.txt"},
+		},
+		{
+			name:     "full overlap",
+			files:    []string{"a.txt", "b.txt"},
+			exclude:  map[string]struct{}{"a.txt": {}, "b.txt": {}},
+			expected: nil,
+		},
+		{
+			name:     "partial overlap",
+			files:    []string{"a.txt", "b.txt", "c.txt"},
+			exclude:  map[string]struct{}{"b.txt": {}},
+			expected: []string{"a.txt", "c.txt"},
+		},
+		{
+			name:     "empty files",
+			files:    []string{},
+			exclude:  map[string]struct{}{"a.txt": {}},
+			expected: nil,
+		},
+		{
+			name:     "empty exclude",
+			files:    []string{"a.txt", "b.txt"},
+			exclude:  map[string]struct{}{},
+			expected: []string{"a.txt", "b.txt"},
+		},
+	}
 
-	// Create metadata directory with a transcript file
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := subtractFiles(tt.files, tt.exclude)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestFilesChangedInCommit verifies that filesChangedInCommit correctly extracts
+// the set of files changed in a commit by diffing against its parent.
+func TestFilesChangedInCommit(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	// Create files and commit them
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "file1.txt"), []byte("content1"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "file2.txt"), []byte("content2"), 0o644))
+	_, err = wt.Add("file1.txt")
+	require.NoError(t, err)
+	_, err = wt.Add("file2.txt")
+	require.NoError(t, err)
+
+	commitHash, err := wt.Commit("add files", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+
+	changed := filesChangedInCommit(commit)
+	assert.Contains(t, changed, "file1.txt")
+	assert.Contains(t, changed, "file2.txt")
+	// test.txt was in the initial commit, not this one
+	assert.NotContains(t, changed, "test.txt")
+}
+
+// TestFilesChangedInCommit_InitialCommit verifies that filesChangedInCommit
+// handles the initial commit (no parent) by listing all files.
+func TestFilesChangedInCommit_InitialCommit(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+
+	cfg, err := repo.Config()
+	require.NoError(t, err)
+	cfg.User.Name = "Test"
+	cfg.User.Email = "test@test.com"
+	require.NoError(t, repo.SetConfig(cfg))
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "init.txt"), []byte("initial"), 0o644))
+	_, err = wt.Add("init.txt")
+	require.NoError(t, err)
+
+	commitHash, err := wt.Commit("initial", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+
+	changed := filesChangedInCommit(commit)
+	assert.Contains(t, changed, "init.txt")
+	assert.Len(t, changed, 1)
+}
+
+// TestPostCommit_ActiveSession_CarryForward_PartialCommit verifies that when an
+// ACTIVE session has touched files A, B, C but only A and B are committed, the
+// remaining file C is carried forward to a new shadow branch.
+func TestPostCommit_ActiveSession_CarryForward_PartialCommit(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-carry-forward-partial"
+
+	// Create metadata directory with transcript
 	metadataDir := ".entire/metadata/" + sessionID
 	metadataDirAbs := filepath.Join(dir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
 
-	transcript := `{"type":"human","message":{"content":"test prompt"}}
-{"type":"assistant","message":{"content":"test response"}}
+	transcript := `{"type":"human","message":{"content":"create files A B C"}}
+{"type":"assistant","message":{"content":"creating files"}}
 `
 	require.NoError(t, os.WriteFile(
 		filepath.Join(metadataDirAbs, paths.TranscriptFileName),
 		[]byte(transcript), 0o644))
 
-	// SaveChanges creates the shadow branch and checkpoint
-	err := s.SaveChanges(SaveContext{
+	// Create all three files
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "A.txt"), []byte("file A"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "B.txt"), []byte("file B"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "C.txt"), []byte("file C"), 0o644))
+
+	// Save checkpoint with all three files
+	err = s.SaveChanges(SaveContext{
 		SessionID:      sessionID,
-		ModifiedFiles:  []string{"test.txt"},
-		NewFiles:       []string{},
+		ModifiedFiles:  []string{},
+		NewFiles:       []string{"A.txt", "B.txt", "C.txt"},
 		DeletedFiles:   []string{},
 		MetadataDir:    metadataDir,
 		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 1",
+		CommitMessage:  "Checkpoint: files A, B, C",
 		AuthorName:     "Test",
 		AuthorEmail:    "test@test.com",
 	})
-	require.NoError(t, err, "SaveChanges should succeed to create shadow branch content")
+	require.NoError(t, err)
+
+	// Set phase to ACTIVE (agent mid-turn)
+	state, err := s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseActive
+	require.NoError(t, s.saveSessionState(state))
+
+	// Verify FilesTouched contains all three files
+	assert.ElementsMatch(t, []string{"A.txt", "B.txt", "C.txt"}, state.FilesTouched)
+
+	// Commit ONLY A.txt and B.txt (not C.txt) with checkpoint trailer
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("A.txt")
+	require.NoError(t, err)
+	_, err = wt.Add("B.txt")
+	require.NoError(t, err)
+
+	cpID := "cf1cf2cf3cf4"
+	commitMsg := "commit A and B\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
+	_, err = wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// Run PostCommit
+	err = s.PostCommit()
+	require.NoError(t, err)
+
+	// Verify session stayed ACTIVE
+	state, err = s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, session.PhaseActive, state.Phase)
+
+	// Verify carry-forward: FilesTouched should now only contain C.txt
+	assert.Equal(t, []string{"C.txt"}, state.FilesTouched,
+		"carry-forward should preserve only the uncommitted file C.txt")
+
+	// Verify StepCount was set to 1 (carry-forward creates a new checkpoint)
+	assert.Equal(t, 1, state.StepCount,
+		"carry-forward should set StepCount to 1")
+
+	// Verify CheckpointTranscriptStart was reset to 0 (prompt-level carry-forward)
+	assert.Equal(t, 0, state.CheckpointTranscriptStart,
+		"carry-forward should reset CheckpointTranscriptStart to 0 for full transcript reprocessing")
+
+	// Verify LastCheckpointID was cleared (next commit generates fresh ID)
+	assert.Empty(t, state.LastCheckpointID,
+		"carry-forward should clear LastCheckpointID")
+
+	// Verify a new shadow branch exists at the new HEAD
+	newShadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(newShadowBranch), true)
+	assert.NoError(t, err,
+		"carry-forward should create a new shadow branch at the new HEAD")
+}
+
+// TestPostCommit_ActiveSession_CarryForward_AllCommitted verifies that when an
+// ACTIVE session's files are ALL included in the commit, no carry-forward occurs.
+func TestPostCommit_ActiveSession_CarryForward_AllCommitted(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-carry-forward-all"
+
+	// Initialize session and save a checkpoint with files A and B
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	transcript := `{"type":"human","message":{"content":"create files A B"}}
+{"type":"assistant","message":{"content":"creating files"}}
+`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(metadataDirAbs, paths.TranscriptFileName),
+		[]byte(transcript), 0o644))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "A.txt"), []byte("file A"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "B.txt"), []byte("file B"), 0o644))
+
+	err = s.SaveChanges(SaveContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{},
+		NewFiles:       []string{"A.txt", "B.txt"},
+		DeletedFiles:   []string{},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint: files A, B",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	})
+	require.NoError(t, err)
+
+	// Set phase to ACTIVE
+	state, err := s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseActive
+	require.NoError(t, s.saveSessionState(state))
+
+	// Commit ALL files (A.txt and B.txt) with checkpoint trailer
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("A.txt")
+	require.NoError(t, err)
+	_, err = wt.Add("B.txt")
+	require.NoError(t, err)
+
+	cpID := "cf5cf6cf7cf8"
+	commitMsg := "commit A and B\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
+	_, err = wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// Run PostCommit
+	err = s.PostCommit()
+	require.NoError(t, err)
+
+	// Verify session stayed ACTIVE
+	state, err = s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, session.PhaseActive, state.Phase)
+
+	// Verify NO carry-forward: FilesTouched should be nil (all condensed, nothing remaining)
+	assert.Nil(t, state.FilesTouched,
+		"when all files are committed, no carry-forward should occur (FilesTouched cleared by condensation)")
+
+	// Verify StepCount was reset to 0 by condensation (not 1 from carry-forward)
+	assert.Equal(t, 0, state.StepCount,
+		"without carry-forward, StepCount should be reset to 0 by condensation")
+}
+
+// TestPostCommit_ActiveSession_RecordsTurnCheckpointIDs verifies that PostCommit
+// records the checkpoint ID in TurnCheckpointIDs for ACTIVE sessions.
+// This enables HandleTurnEnd to finalize all checkpoints with the full transcript.
+func TestPostCommit_ActiveSession_RecordsTurnCheckpointIDs(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-turn-checkpoint-ids"
+
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	// Set phase to ACTIVE (simulating agent mid-turn)
+	state, err := s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseActive
+	state.TurnCheckpointIDs = nil // Start clean
+	require.NoError(t, s.saveSessionState(state))
+
+	// Create first commit with checkpoint trailer
+	commitWithCheckpointTrailer(t, repo, dir, "a1b2c3d4e5f6")
+
+	err = s.PostCommit()
+	require.NoError(t, err)
+
+	// Verify TurnCheckpointIDs was populated
+	state, err = s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a1b2c3d4e5f6"}, state.TurnCheckpointIDs,
+		"TurnCheckpointIDs should contain the checkpoint ID after condensation")
+}
+
+// TestPostCommit_IdleSession_DoesNotRecordTurnCheckpointIDs verifies that PostCommit
+// does NOT record TurnCheckpointIDs for IDLE sessions.
+func TestPostCommit_IdleSession_DoesNotRecordTurnCheckpointIDs(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-idle-no-turn-ids"
+
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	// Set phase to IDLE with files touched so overlap check passes
+	state, err := s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseIdle
+	state.FilesTouched = []string{"test.txt"}
+	require.NoError(t, s.saveSessionState(state))
+
+	commitWithCheckpointTrailer(t, repo, dir, "c3d4e5f6a1b2")
+
+	err = s.PostCommit()
+	require.NoError(t, err)
+
+	// Verify TurnCheckpointIDs was NOT set (IDLE sessions don't need finalization)
+	state, err = s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	assert.Empty(t, state.TurnCheckpointIDs,
+		"TurnCheckpointIDs should not be populated for IDLE sessions")
+}
+
+// TestHandleTurnEnd_PartialFailure verifies that HandleTurnEnd continues
+// processing remaining checkpoints when one UpdateCommitted call fails.
+// This locks the best-effort behavior: valid checkpoints get finalized even
+// when one checkpoint ID is invalid or missing from entire/checkpoints/v1.
+func TestHandleTurnEnd_PartialFailure(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-partial-failure"
+
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	// Set phase to ACTIVE and create a transcript file with updated content
+	state, err := s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseActive
+	state.TurnCheckpointIDs = nil
+	require.NoError(t, s.saveSessionState(state))
+
+	// First commit → creates real checkpoint on entire/checkpoints/v1
+	commitWithCheckpointTrailer(t, repo, dir, "a1b2c3d4e5f6")
+	require.NoError(t, s.PostCommit())
+
+	// Write new content and create a second real checkpoint
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "second.txt"), []byte("second file"), 0o644))
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID) // refresh shadow branch
+	state, err = s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseActive
+	// Preserve TurnCheckpointIDs from the first commit
+	state.TurnCheckpointIDs = []string{"a1b2c3d4e5f6"}
+	require.NoError(t, s.saveSessionState(state))
+
+	commitFilesWithTrailer(t, repo, dir, "b2c3d4e5f6a1", "second.txt")
+	require.NoError(t, s.PostCommit())
+
+	// Verify we now have 2 real checkpoint IDs
+	state, err = s.loadSessionState(sessionID)
+	require.NoError(t, err)
+	require.Len(t, state.TurnCheckpointIDs, 2,
+		"Should have 2 real checkpoint IDs after 2 mid-turn commits")
+
+	// Inject a fake 3rd checkpoint ID that doesn't exist on entire/checkpoints/v1
+	state.TurnCheckpointIDs = append(state.TurnCheckpointIDs, "ffffffffffff")
+
+	// Write a full transcript file for HandleTurnEnd to read
+	fullTranscript := `{"type":"human","message":{"content":"build something"}}
+{"type":"assistant","message":{"content":"done building"}}
+{"type":"human","message":{"content":"now test it"}}
+{"type":"assistant","message":{"content":"tests pass"}}
+`
+	transcriptPath := filepath.Join(dir, ".entire", "metadata", sessionID, "full_transcript.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptPath), 0o755))
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(fullTranscript), 0o644))
+	state.TranscriptPath = transcriptPath
+	require.NoError(t, s.saveSessionState(state))
+
+	// Call HandleTurnEnd — should NOT return error (best-effort)
+	err = s.HandleTurnEnd(state)
+	require.NoError(t, err,
+		"HandleTurnEnd should return nil even with partial failures (best-effort)")
+
+	// TurnCheckpointIDs should be cleared regardless of partial failure
+	assert.Empty(t, state.TurnCheckpointIDs,
+		"TurnCheckpointIDs should be cleared after HandleTurnEnd, even with errors")
+
+	// Verify the 2 valid checkpoints were finalized with the full transcript
+	store := checkpoint.NewGitStore(repo)
+	for _, cpIDStr := range []string{"a1b2c3d4e5f6", "b2c3d4e5f6a1"} {
+		cpID := id.MustCheckpointID(cpIDStr)
+		content, readErr := store.ReadSessionContent(context.Background(), cpID, 0)
+		require.NoError(t, readErr,
+			"Should be able to read finalized checkpoint %s", cpIDStr)
+		assert.Contains(t, string(content.Transcript), "now test it",
+			"Checkpoint %s should contain the full transcript (including later messages)", cpIDStr)
+	}
 }
 
 // setupSessionWithCheckpoint initializes a session and creates one checkpoint
 // on the shadow branch so there is content available for condensation.
+// Also modifies test.txt to "agent modified content" and includes it in the checkpoint,
+// so content-aware carry-forward comparisons work correctly when commitFilesWithTrailer
+// commits the same content.
 func setupSessionWithCheckpoint(t *testing.T, s *ManualCommitStrategy, _ *git.Repository, dir, sessionID string) {
 	t.Helper()
+
+	// Modify test.txt with agent content (same content that commitFilesWithTrailer will commit)
+	testFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(testFile, []byte("agent modified content"), 0o644))
 
 	// Create metadata directory with a transcript file
 	metadataDir := ".entire/metadata/" + sessionID
@@ -1296,9 +1275,10 @@ func setupSessionWithCheckpoint(t *testing.T, s *ManualCommitStrategy, _ *git.Re
 		[]byte(transcript), 0o644))
 
 	// SaveChanges creates the shadow branch and checkpoint
+	// Include test.txt as a modified file so it's saved to the shadow branch
 	err := s.SaveChanges(SaveContext{
 		SessionID:      sessionID,
-		ModifiedFiles:  []string{},
+		ModifiedFiles:  []string{"test.txt"},
 		NewFiles:       []string{},
 		DeletedFiles:   []string{},
 		MetadataDir:    metadataDir,
@@ -1315,12 +1295,21 @@ func setupSessionWithCheckpoint(t *testing.T, s *ManualCommitStrategy, _ *git.Re
 // after PrepareCommitMsg adds the trailer and the user completes the commit.
 func commitWithCheckpointTrailer(t *testing.T, repo *git.Repository, dir, checkpointIDStr string) {
 	t.Helper()
+	commitFilesWithTrailer(t, repo, dir, checkpointIDStr, "test.txt")
+}
+
+// commitFilesWithTrailer stages the given files and commits with a checkpoint trailer.
+// Files must already exist on disk. The test.txt file is modified to ensure there's always something to commit.
+// Important: For tests using content-aware carry-forward, call setupSessionWithCheckpointAndFile first
+// so the shadow branch has the same content that will be committed.
+func commitFilesWithTrailer(t *testing.T, repo *git.Repository, dir, checkpointIDStr string, files ...string) {
+	t.Helper()
 
 	cpID := id.MustCheckpointID(checkpointIDStr)
 
-	// Modify a file so there is something to commit
+	// Modify test.txt with agent-like content that matches what setupSessionWithCheckpointAndFile saves
 	testFile := filepath.Join(dir, "test.txt")
-	content := "updated at " + time.Now().String()
+	content := "agent modified content"
 	require.NoError(t, os.WriteFile(testFile, []byte(content), 0o644))
 
 	wt, err := repo.Worktree()
@@ -1328,6 +1317,10 @@ func commitWithCheckpointTrailer(t *testing.T, repo *git.Repository, dir, checkp
 
 	_, err = wt.Add("test.txt")
 	require.NoError(t, err)
+	for _, f := range files {
+		_, err = wt.Add(f)
+		require.NoError(t, err)
+	}
 
 	commitMsg := "test commit\n\n" + trailers.CheckpointTrailerKey + ": " + cpID.String() + "\n"
 	_, err = wt.Commit(commitMsg, &git.CommitOptions{

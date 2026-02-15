@@ -17,7 +17,7 @@ func TestPhaseFromString(t *testing.T) {
 		want  Phase
 	}{
 		{name: "active", input: "active", want: PhaseActive},
-		{name: "active_committed", input: "active_committed", want: PhaseActiveCommitted},
+		{name: "active_committed", input: "active_committed", want: PhaseActive},
 		{name: "idle", input: "idle", want: PhaseIdle},
 		{name: "ended", input: "ended", want: PhaseEnded},
 		{name: "empty_string_defaults_to_idle", input: "", want: PhaseIdle},
@@ -43,7 +43,6 @@ func TestPhase_IsActive(t *testing.T) {
 		want  bool
 	}{
 		{name: "active_is_active", phase: PhaseActive, want: true},
-		{name: "active_committed_is_active", phase: PhaseActiveCommitted, want: true},
 		{name: "idle_is_not_active", phase: PhaseIdle, want: false},
 		{name: "ended_is_not_active", phase: PhaseEnded, want: false},
 	}
@@ -88,7 +87,6 @@ func TestAction_String(t *testing.T) {
 		{ActionCondense, "Condense"},
 		{ActionCondenseIfFilesTouched, "CondenseIfFilesTouched"},
 		{ActionDiscardIfNoFiles, "DiscardIfNoFiles"},
-		{ActionMigrateShadowBranch, "MigrateShadowBranch"},
 		{ActionWarnStaleSession, "WarnStaleSession"},
 		{ActionClearEndedAt, "ClearEndedAt"},
 		{ActionUpdateLastInteraction, "UpdateLastInteraction"},
@@ -192,81 +190,32 @@ func TestTransitionFromActive(t *testing.T) {
 			wantActions: []Action{ActionUpdateLastInteraction},
 		},
 		{
-			name:        "GitCommit_transitions_to_ACTIVE_COMMITTED",
+			name:        "GitCommit_condenses_immediately",
 			current:     PhaseActive,
 			event:       EventGitCommit,
-			wantPhase:   PhaseActiveCommitted,
-			wantActions: []Action{ActionMigrateShadowBranch, ActionUpdateLastInteraction},
-		},
-		{
-			name:        "GitCommit_rebase_skips_everything",
-			current:     PhaseActive,
-			event:       EventGitCommit,
-			ctx:         TransitionContext{IsRebaseInProgress: true},
 			wantPhase:   PhaseActive,
-			wantActions: nil,
-		},
-		{
-			name:        "SessionStop_transitions_to_ENDED",
-			current:     PhaseActive,
-			event:       EventSessionStop,
-			wantPhase:   PhaseEnded,
-			wantActions: []Action{ActionUpdateLastInteraction},
-		},
-		{
-			name:        "SessionStart_warns_stale_session",
-			current:     PhaseActive,
-			event:       EventSessionStart,
-			wantPhase:   PhaseActive,
-			wantActions: []Action{ActionWarnStaleSession},
-		},
-	})
-}
-
-func TestTransitionFromActiveCommitted(t *testing.T) {
-	t.Parallel()
-	runTransitionTests(t, []transitionCase{
-		{
-			name:        "TurnEnd_transitions_to_IDLE_with_condense",
-			current:     PhaseActiveCommitted,
-			event:       EventTurnEnd,
-			wantPhase:   PhaseIdle,
 			wantActions: []Action{ActionCondense, ActionUpdateLastInteraction},
 		},
 		{
-			name:        "GitCommit_stays_with_migrate",
-			current:     PhaseActiveCommitted,
-			event:       EventGitCommit,
-			wantPhase:   PhaseActiveCommitted,
-			wantActions: []Action{ActionMigrateShadowBranch, ActionUpdateLastInteraction},
-		},
-		{
 			name:        "GitCommit_rebase_skips_everything",
-			current:     PhaseActiveCommitted,
+			current:     PhaseActive,
 			event:       EventGitCommit,
 			ctx:         TransitionContext{IsRebaseInProgress: true},
-			wantPhase:   PhaseActiveCommitted,
+			wantPhase:   PhaseActive,
 			wantActions: nil,
 		},
 		{
-			name:        "TurnStart_transitions_to_ACTIVE",
-			current:     PhaseActiveCommitted,
-			event:       EventTurnStart,
-			wantPhase:   PhaseActive,
-			wantActions: []Action{ActionUpdateLastInteraction},
-		},
-		{
 			name:        "SessionStop_transitions_to_ENDED",
-			current:     PhaseActiveCommitted,
+			current:     PhaseActive,
 			event:       EventSessionStop,
 			wantPhase:   PhaseEnded,
 			wantActions: []Action{ActionUpdateLastInteraction},
 		},
 		{
 			name:        "SessionStart_warns_stale_session",
-			current:     PhaseActiveCommitted,
+			current:     PhaseActive,
 			event:       EventSessionStart,
-			wantPhase:   PhaseActiveCommitted,
+			wantPhase:   PhaseActive,
 			wantActions: []Action{ActionWarnStaleSession},
 		},
 	})
@@ -468,7 +417,7 @@ func TestApplyCommonActions_ClearsEndedAt(t *testing.T) {
 func TestApplyCommonActions_PassesThroughStrategyActions(t *testing.T) {
 	t.Parallel()
 
-	state := &State{Phase: PhaseActiveCommitted}
+	state := &State{Phase: PhaseActive}
 	result := TransitionResult{
 		NewPhase: PhaseIdle,
 		Actions:  []Action{ActionCondense, ActionUpdateLastInteraction},
@@ -487,14 +436,14 @@ func TestApplyCommonActions_MultipleStrategyActions(t *testing.T) {
 
 	state := &State{Phase: PhaseActive}
 	result := TransitionResult{
-		NewPhase: PhaseActiveCommitted,
-		Actions:  []Action{ActionMigrateShadowBranch, ActionUpdateLastInteraction},
+		NewPhase: PhaseActive,
+		Actions:  []Action{ActionCondense, ActionUpdateLastInteraction},
 	}
 
 	remaining := ApplyCommonActions(state, result)
 
-	assert.Equal(t, []Action{ActionMigrateShadowBranch}, remaining)
-	assert.Equal(t, PhaseActiveCommitted, state.Phase)
+	assert.Equal(t, []Action{ActionCondense}, remaining)
+	assert.Equal(t, PhaseActive, state.Phase)
 }
 
 func TestApplyCommonActions_WarnStaleSessionPassedThrough(t *testing.T) {
@@ -572,19 +521,18 @@ func TestMermaidDiagram(t *testing.T) {
 	assert.Contains(t, diagram, "stateDiagram-v2")
 	assert.Contains(t, diagram, "IDLE")
 	assert.Contains(t, diagram, "ACTIVE")
-	assert.Contains(t, diagram, "ACTIVE_COMMITTED")
 	assert.Contains(t, diagram, "ENDED")
+	assert.NotContains(t, diagram, "ACTIVE_COMMITTED")
 
 	// Verify key transitions are present.
 	assert.Contains(t, diagram, "idle --> active")
-	assert.Contains(t, diagram, "active --> active_committed")
-	assert.Contains(t, diagram, "active_committed --> idle")
+	assert.Contains(t, diagram, "active --> active") // ACTIVE+GitCommit stays ACTIVE
 	assert.Contains(t, diagram, "ended --> idle")
 	assert.Contains(t, diagram, "ended --> active")
 
 	// Verify actions appear in labels.
 	assert.Contains(t, diagram, "Condense")
-	assert.Contains(t, diagram, "MigrateShadowBranch")
 	assert.Contains(t, diagram, "ClearEndedAt")
 	assert.Contains(t, diagram, "WarnStaleSession")
+	assert.NotContains(t, diagram, "MigrateShadowBranch")
 }
