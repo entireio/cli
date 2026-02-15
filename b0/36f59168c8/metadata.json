@@ -1,0 +1,20 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b036f59168c8",
+  "strategy": "manual-commit",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/content_overlap.go",
+    "cmd/entire/cli/strategy/content_overlap_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b0/36f59168c8/0/metadata.json",
+      "transcript": "/b0/36f59168c8/0/full.jsonl",
+      "context": "",
+      "content_hash": "/b0/36f59168c8/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
