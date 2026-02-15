@@ -1,0 +1,19 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "57f1f346970c",
+  "strategy": "manual-commit",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/auto_commit.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/57/f1f346970c/0/metadata.json",
+      "transcript": "/57/f1f346970c/0/full.jsonl",
+      "context": "",
+      "content_hash": "/57/f1f346970c/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
