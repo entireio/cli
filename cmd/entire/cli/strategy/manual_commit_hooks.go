@@ -781,7 +781,15 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 }
 
 // updateBaseCommitIfChanged updates BaseCommit to newHead if it changed.
+// Only updates ACTIVE sessions. IDLE/ENDED sessions should NOT have their
+// BaseCommit updated, as this would cause them to be incorrectly associated
+// with a new shadow branch and potentially condensed on future commits.
 func (s *ManualCommitStrategy) updateBaseCommitIfChanged(logCtx context.Context, state *SessionState, newHead string) {
+	// Only update ACTIVE sessions. IDLE/ENDED sessions are kept around for
+	// LastCheckpointID reuse and should not be advanced to HEAD.
+	if !state.Phase.IsActive() {
+		return
+	}
 	if state.BaseCommit != newHead {
 		state.BaseCommit = newHead
 		logging.Debug(logCtx, "post-commit: updated BaseCommit",

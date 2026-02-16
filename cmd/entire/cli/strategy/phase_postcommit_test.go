@@ -313,10 +313,13 @@ func TestPostCommit_CondensationFailure_PreservesShadowBranch(t *testing.T) {
 		"phase should remain IDLE when condensation fails")
 }
 
-// TestPostCommit_IdleSession_NoNewContent_UpdatesBaseCommit verifies that when
+// TestPostCommit_IdleSession_NoNewContent_PreservesBaseCommit verifies that when
 // an IDLE session has no new transcript content since last condensation,
-// PostCommit skips condensation but still updates BaseCommit.
-func TestPostCommit_IdleSession_NoNewContent_UpdatesBaseCommit(t *testing.T) {
+// PostCommit skips condensation and does NOT update BaseCommit.
+//
+// This prevents the bug where old IDLE sessions would have their BaseCommit
+// incorrectly updated, causing them to be condensed on future commits.
+func TestPostCommit_IdleSession_NoNewContent_PreservesBaseCommit(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
@@ -337,27 +340,23 @@ func TestPostCommit_IdleSession_NoNewContent_UpdatesBaseCommit(t *testing.T) {
 	state.CheckpointTranscriptStart = 2 // Transcript has exactly 2 lines
 	require.NoError(t, s.saveSessionState(state))
 
-	// Record shadow branch name
+	// Record shadow branch name and original BaseCommit
 	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	originalBaseCommit := state.BaseCommit
 	originalStepCount := state.StepCount
 
 	// Create a commit with the checkpoint trailer
 	commitWithCheckpointTrailer(t, repo, dir, "f6a1b2c3d4e5")
 
-	// Get new HEAD hash for comparison
-	head, err := repo.Head()
-	require.NoError(t, err)
-	newHeadHash := head.Hash().String()
-
 	// Run PostCommit
 	err = s.PostCommit()
 	require.NoError(t, err)
 
-	// Verify BaseCommit was updated to new HEAD
+	// Verify BaseCommit was NOT updated (IDLE sessions don't get BaseCommit updated)
 	state, err = s.loadSessionState(sessionID)
 	require.NoError(t, err)
-	assert.Equal(t, newHeadHash, state.BaseCommit,
-		"BaseCommit should be updated to new HEAD when no new content")
+	assert.Equal(t, originalBaseCommit, state.BaseCommit,
+		"BaseCommit should NOT be updated for IDLE session with no new content")
 
 	// Shadow branch should still exist (not deleted, no condensation)
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
@@ -433,7 +432,10 @@ func TestPostCommit_EndedSession_FilesTouched_Condenses(t *testing.T) {
 
 // TestPostCommit_EndedSession_FilesTouched_NoNewContent verifies that an ENDED
 // session with files touched but no new transcript content skips condensation
-// and updates BaseCommit via fallthrough.
+// and does NOT update BaseCommit.
+//
+// This prevents the bug where old ENDED sessions would have their BaseCommit
+// incorrectly updated, causing them to be condensed on future commits.
 func TestPostCommit_EndedSession_FilesTouched_NoNewContent(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
@@ -457,17 +459,13 @@ func TestPostCommit_EndedSession_FilesTouched_NoNewContent(t *testing.T) {
 	state.CheckpointTranscriptStart = 2 // Transcript has exactly 2 lines
 	require.NoError(t, s.saveSessionState(state))
 
-	// Record shadow branch name and original StepCount
+	// Record shadow branch name, original BaseCommit, and StepCount
 	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	originalBaseCommit := state.BaseCommit
 	originalStepCount := state.StepCount
 
 	// Create a commit with the checkpoint trailer
 	commitWithCheckpointTrailer(t, repo, dir, "b2c3d4e5f6a2")
-
-	// Get new HEAD hash
-	head, err := repo.Head()
-	require.NoError(t, err)
-	newHeadHash := head.Hash().String()
 
 	// Run PostCommit
 	err = s.PostCommit()
@@ -484,11 +482,11 @@ func TestPostCommit_EndedSession_FilesTouched_NoNewContent(t *testing.T) {
 	require.NoError(t, err,
 		"shadow branch should still exist when no condensation happened")
 
-	// BaseCommit should be updated to new HEAD via fallthrough
+	// BaseCommit should NOT be updated (ENDED sessions don't get BaseCommit updated)
 	state, err = s.loadSessionState(sessionID)
 	require.NoError(t, err)
-	assert.Equal(t, newHeadHash, state.BaseCommit,
-		"BaseCommit should be updated to new HEAD via fallthrough")
+	assert.Equal(t, originalBaseCommit, state.BaseCommit,
+		"BaseCommit should NOT be updated for ENDED session with no new content")
 
 	// StepCount unchanged
 	assert.Equal(t, originalStepCount, state.StepCount,
@@ -496,7 +494,10 @@ func TestPostCommit_EndedSession_FilesTouched_NoNewContent(t *testing.T) {
 }
 
 // TestPostCommit_EndedSession_NoFilesTouched_Discards verifies that an ENDED
-// session with no files touched takes the discard path, updating BaseCommit.
+// session with no files touched takes the discard path and does NOT update BaseCommit.
+//
+// This prevents the bug where old ENDED sessions would have their BaseCommit
+// incorrectly updated, causing them to be condensed on future commits.
 func TestPostCommit_EndedSession_NoFilesTouched_Discards(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
@@ -519,16 +520,12 @@ func TestPostCommit_EndedSession_NoFilesTouched_Discards(t *testing.T) {
 	state.FilesTouched = nil // No files touched
 	require.NoError(t, s.saveSessionState(state))
 
-	// Record original StepCount
+	// Record original BaseCommit and StepCount
+	originalBaseCommit := state.BaseCommit
 	originalStepCount := state.StepCount
 
 	// Create a commit with the checkpoint trailer
 	commitWithCheckpointTrailer(t, repo, dir, "c3d4e5f6a1b3")
-
-	// Get new HEAD hash
-	head, err := repo.Head()
-	require.NoError(t, err)
-	newHeadHash := head.Hash().String()
 
 	// Run PostCommit
 	err = s.PostCommit()
@@ -539,11 +536,11 @@ func TestPostCommit_EndedSession_NoFilesTouched_Discards(t *testing.T) {
 	require.Error(t, err,
 		"entire/checkpoints/v1 branch should NOT exist for discard path")
 
-	// BaseCommit should be updated to new HEAD
+	// BaseCommit should NOT be updated (ENDED sessions don't get BaseCommit updated)
 	state, err = s.loadSessionState(sessionID)
 	require.NoError(t, err)
-	assert.Equal(t, newHeadHash, state.BaseCommit,
-		"BaseCommit should be updated to new HEAD on discard path")
+	assert.Equal(t, originalBaseCommit, state.BaseCommit,
+		"BaseCommit should NOT be updated for ENDED session on discard path")
 
 	// StepCount unchanged
 	assert.Equal(t, originalStepCount, state.StepCount,
@@ -1330,4 +1327,163 @@ func commitFilesWithTrailer(t *testing.T, repo *git.Repository, dir, checkpointI
 		},
 	})
 	require.NoError(t, err, "commit with checkpoint trailer should succeed")
+}
+
+// TestPostCommit_OldIdleSession_BaseCommitNotUpdated verifies that when an IDLE
+// session from a previous commit exists, and a NEW session makes a commit, the
+// old IDLE session's BaseCommit is NOT updated to the new HEAD.
+//
+// This is a regression test for the bug where old sessions (IDLE/ENDED) would
+// have their BaseCommit updated, causing them to be incorrectly condensed on
+// future commits because their BaseCommit matched the new shadow branch.
+func TestPostCommit_OldIdleSession_BaseCommitNotUpdated(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+
+	// --- Create an old IDLE session from a previous commit ---
+	oldSessionID := "old-idle-session"
+	setupSessionWithCheckpoint(t, s, repo, dir, oldSessionID)
+
+	oldState, err := s.loadSessionState(oldSessionID)
+	require.NoError(t, err)
+	oldState.Phase = session.PhaseIdle
+	oldState.FilesTouched = []string{"old-file.txt"} // Has files touched (important for bug)
+	require.NoError(t, s.saveSessionState(oldState))
+
+	// Record the old session's BaseCommit BEFORE the new commit
+	oldSessionOriginalBaseCommit := oldState.BaseCommit
+
+	// Create a commit to move HEAD forward (simulating old session was condensed)
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "unrelated.txt"), []byte("unrelated"), 0o644))
+	_, err = wt.Add("unrelated.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("unrelated commit without trailer", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// --- Create a NEW ACTIVE session at the new HEAD ---
+	newSessionID := "new-active-session"
+	setupSessionWithCheckpoint(t, s, repo, dir, newSessionID)
+
+	newState, err := s.loadSessionState(newSessionID)
+	require.NoError(t, err)
+	newState.Phase = session.PhaseActive
+	require.NoError(t, s.saveSessionState(newState))
+
+	// --- Commit from the new session ---
+	commitWithCheckpointTrailer(t, repo, dir, "a1b2c3d4e5f6")
+
+	// Get new HEAD for comparison
+	head, err := repo.Head()
+	require.NoError(t, err)
+	newHead := head.Hash().String()
+
+	// Run PostCommit
+	err = s.PostCommit()
+	require.NoError(t, err)
+
+	// --- Verify: old IDLE session's BaseCommit should NOT be updated ---
+	oldState, err = s.loadSessionState(oldSessionID)
+	require.NoError(t, err)
+	assert.Equal(t, oldSessionOriginalBaseCommit, oldState.BaseCommit,
+		"OLD IDLE session's BaseCommit should NOT be updated when a different session commits")
+	assert.NotEqual(t, newHead, oldState.BaseCommit,
+		"OLD IDLE session's BaseCommit should NOT match new HEAD")
+
+	// New ACTIVE session's BaseCommit SHOULD be updated (it was condensed)
+	newState, err = s.loadSessionState(newSessionID)
+	require.NoError(t, err)
+	assert.Equal(t, newHead, newState.BaseCommit,
+		"NEW ACTIVE session's BaseCommit should be updated after condensation")
+}
+
+// TestPostCommit_OldEndedSession_BaseCommitNotUpdated verifies that when an ENDED
+// session from a previous commit exists (with no new content to condense), and a
+// NEW session makes a commit, the old ENDED session's BaseCommit is NOT updated.
+//
+// This simulates the scenario where:
+// 1. Old session ran and was already condensed (no new transcript content)
+// 2. Old session is now ENDED
+// 3. New session commits
+// 4. Old ENDED session should NOT have BaseCommit updated
+func TestPostCommit_OldEndedSession_BaseCommitNotUpdated(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+
+	// --- Create an old ENDED session that has NO new content to condense ---
+	oldSessionID := "old-ended-session"
+	setupSessionWithCheckpoint(t, s, repo, dir, oldSessionID)
+
+	oldState, err := s.loadSessionState(oldSessionID)
+	require.NoError(t, err)
+	now := time.Now()
+	oldState.Phase = session.PhaseEnded
+	oldState.EndedAt = &now
+	oldState.FilesTouched = []string{"old-file.txt"} // Has files touched
+	// Mark transcript as fully condensed (no new content since last checkpoint)
+	// The transcript has 2 lines, so CheckpointTranscriptStart=2 means no new content
+	oldState.CheckpointTranscriptStart = 2
+	require.NoError(t, s.saveSessionState(oldState))
+
+	// Record the old session's BaseCommit BEFORE the new commit
+	oldSessionOriginalBaseCommit := oldState.BaseCommit
+
+	// Create a commit to move HEAD forward
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "unrelated.txt"), []byte("unrelated"), 0o644))
+	_, err = wt.Add("unrelated.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("unrelated commit without trailer", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// --- Create a NEW ACTIVE session at the new HEAD ---
+	newSessionID := "new-active-session"
+	setupSessionWithCheckpoint(t, s, repo, dir, newSessionID)
+
+	newState, err := s.loadSessionState(newSessionID)
+	require.NoError(t, err)
+	newState.Phase = session.PhaseActive
+	require.NoError(t, s.saveSessionState(newState))
+
+	// --- Commit from the new session ---
+	commitWithCheckpointTrailer(t, repo, dir, "b1c2d3e4f5a6")
+
+	// Get new HEAD for comparison
+	head, err := repo.Head()
+	require.NoError(t, err)
+	newHead := head.Hash().String()
+
+	// Run PostCommit
+	err = s.PostCommit()
+	require.NoError(t, err)
+
+	// --- Verify: old ENDED session's BaseCommit should NOT be updated ---
+	oldState, err = s.loadSessionState(oldSessionID)
+	require.NoError(t, err)
+	assert.Equal(t, oldSessionOriginalBaseCommit, oldState.BaseCommit,
+		"OLD ENDED session's BaseCommit should NOT be updated when a different session commits")
+	assert.NotEqual(t, newHead, oldState.BaseCommit,
+		"OLD ENDED session's BaseCommit should NOT match new HEAD")
+
+	// New ACTIVE session's BaseCommit SHOULD be updated
+	newState, err = s.loadSessionState(newSessionID)
+	require.NoError(t, err)
+	assert.Equal(t, newHead, newState.BaseCommit,
+		"NEW ACTIVE session's BaseCommit should be updated after condensation")
 }
