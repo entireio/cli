@@ -221,8 +221,15 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 	}
 	fmt.Fprintf(os.Stderr, "Extracted summary to: %s\n", sessionDir+"/"+paths.SummaryFileName)
 
-	// Get modified files from transcript
-	modifiedFiles := extractModifiedFiles(transcript)
+	// Get modified files from transcript (main agent + subagents).
+	// Subagent transcripts live in <transcriptDir>/<modelSessionID>/subagents/
+	subagentsDir := filepath.Join(filepath.Dir(transcriptPath), input.SessionID, "subagents")
+	modifiedFiles, subagentErr := claudecode.ExtractAllModifiedFiles(transcriptPath, transcriptOffset, subagentsDir)
+	if subagentErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to extract modified files with subagents: %v\n", subagentErr)
+		// Fall back to main transcript only
+		modifiedFiles = extractModifiedFiles(transcript)
+	}
 
 	// Generate commit message from last user prompt
 	lastPrompt := ""
@@ -321,11 +328,9 @@ func commitWithMetadata() error { //nolint:maintidx // already present in codeba
 	// Calculate token usage for this checkpoint (Claude Code specific)
 	var tokenUsage *agent.TokenUsage
 	if transcriptPath != "" {
-		// Subagents are stored in a subagents/ directory next to the main transcript
-		subagentsDir := filepath.Join(filepath.Dir(transcriptPath), sessionID, "subagents")
-		usage, err := claudecode.CalculateTotalTokenUsage(transcriptPath, transcriptLinesAtStart, subagentsDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to calculate token usage: %v\n", err)
+		usage, tokenErr := claudecode.CalculateTotalTokenUsage(transcriptPath, transcriptLinesAtStart, subagentsDir)
+		if tokenErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to calculate token usage: %v\n", tokenErr)
 		} else {
 			tokenUsage = usage
 		}

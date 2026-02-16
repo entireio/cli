@@ -84,7 +84,7 @@ func (s *AutoCommitStrategy) getCheckpointStore() (*checkpoint.GitStore, error) 
 // NewAutoCommitStrategy creates a new AutoCommitStrategy instance
 //
 
-func NewAutoCommitStrategy() Strategy { //nolint:ireturn // already present in codebase
+func NewAutoCommitStrategy() Strategy { //nolint:ireturn // factory returns interface by design
 	return &AutoCommitStrategy{}
 }
 

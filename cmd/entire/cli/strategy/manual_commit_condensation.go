@@ -410,34 +410,8 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(state *Sessi
 	if len(state.FilesTouched) > 0 {
 		data.FilesTouched = state.FilesTouched
 	} else {
-		// Extract modified files from transcript
-		ag, agErr := agent.GetByAgentType(state.AgentType)
-		if agErr == nil {
-			if analyzer, ok := ag.(agent.TranscriptAnalyzer); ok {
-				modifiedFiles, _, extractErr := analyzer.ExtractModifiedFilesFromOffset(state.TranscriptPath, state.CheckpointTranscriptStart)
-				if extractErr == nil && len(modifiedFiles) > 0 {
-					// Normalize to repo-relative paths
-					basePath := state.WorktreePath
-					if basePath == "" {
-						if wp, wpErr := GetWorktreePath(); wpErr == nil {
-							basePath = wp
-						}
-					}
-					if basePath != "" {
-						normalized := make([]string, 0, len(modifiedFiles))
-						for _, f := range modifiedFiles {
-							if rel := paths.ToRelativePath(f, basePath); rel != "" {
-								normalized = append(normalized, rel)
-							} else {
-								normalized = append(normalized, f)
-							}
-						}
-						modifiedFiles = normalized
-					}
-					data.FilesTouched = modifiedFiles
-				}
-			}
-		}
+		// Use the shared helper which includes subagent transcripts
+		data.FilesTouched = s.extractModifiedFilesFromLiveTranscript(state, state.CheckpointTranscriptStart)
 	}
 
 	// Calculate token usage from the extracted transcript portion
