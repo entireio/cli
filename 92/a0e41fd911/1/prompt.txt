@@ -1,0 +1,99 @@
+can you review the e2e integration tests in cmd/entire/cli/e2e_test if they are testing the right things and are in line with other documentation in the repo?
+
+---
+
+yeah let's update CLAUDE.md but make sure that claude should ask or specifically be told to run the e2e tests since they consume tokens
+
+---
+
+2. Strengthen auto-commit tests - Add ValidateCheckpoint calls
+
+---
+
+3. Make logs-only rewind test deterministic - Assert specific expected behavior
+
+---
+
+4. Consider adding worktree e2e test if this is a critical path 
+
+This is a good point, can you check which are worth to ask? And give me suggestions first?
+
+---
+
+yes, do 1
+
+---
+
+=== NAME  TestE2E_AutoCommitStrategy
+    scenario_checkpoint_test.go:112: Commits after: 3
+    scenario_checkpoint_test.go:119: Checkpoint ID: 66259f1a9213
+    scenario_checkpoint_test.go:131: Found 1 rewind points
+    scenario_checkpoint_test.go:134: Content hash not found at 66/259f1a9213/0/content_hash.txt
+--- FAIL: TestE2E_AutoCommitStrategy (13.84s)
+
+---
+
+yes
+
+---
+
+The extractSignificantLines and isTrivialLine helper functions also lack unit tests. These functions contain hardcoded thresholds and pattern matching logic that could have edge cases or language-specific issues.
+
+Consider testing:
+
+Different line lengths around the 10-character threshold
+Various trivial patterns (comments, function declarations, returns)
+Edge cases with lines that start with trivial prefixes but contain significant content
+Non-Go languages to ensure the trivial patterns don't cause false negatives
+
+I think this is good feedback, we assumed go but it can be any language. I don't think unit tests are the solution here. Any other ideas?
+
+---
+
+yes
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Can we just make this proper unit tests for the method? that tests it too and we can just keep them
+
+---
+
+where is the short line filtering?
+
+---
+
+wondering: even if it's more then 5 chars and it's alphanumeric it's probably fine? (thinking about "return" in ruby, not sure if there are other default one lines in other languages) but then also if there are more then 8 or even 10 chars that are all none alphanumeric, that's probably also worth keeping?
+
+---
+
+also wondering: this should be maybe a solved problem, can you check if there is anything preexisting?
+
+---
+
+yeah let's do length only
+
+---
+
+what is the test coverage now for isTrivialLine and extractSignificantLines and hasSignificantContentOverlap
+
+---
+
+yes
+
+---
+
+yes
+
+---
+
+Missing shadow file treated as session overlap
+
+Medium Severity
+
+stagedFilesOverlapWithContent now returns true when a staged file is in filesTouched but missing from the shadow tree. That treats missing shadow content as a positive match, so commits can be linked to a session even when the file’s prior session content no longer exists.
+
+on cmd/entire/cli/strategy/content_overlap.go 245

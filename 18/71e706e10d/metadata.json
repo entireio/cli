@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "1871e706e10d",
+  "strategy": "manual-commit",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/e2e_test/testenv.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/18/71e706e10d/0/metadata.json",
+      "transcript": "/18/71e706e10d/0/full.jsonl",
+      "context": "/18/71e706e10d/0/context.md",
+      "content_hash": "/18/71e706e10d/0/content_hash.txt",
+      "prompt": "/18/71e706e10d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3875,
+    "cache_creation_tokens": 1136756,
+    "cache_read_tokens": 43079407,
+    "output_tokens": 1993,
+    "api_call_count": 469
+  }
+}

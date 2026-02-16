@@ -1,0 +1,33 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "f7a71cacaeea",
+  "strategy": "manual-commit",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/strategy/content_overlap_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f7/a71cacaeea/0/metadata.json",
+      "transcript": "/f7/a71cacaeea/0/full.jsonl",
+      "context": "",
+      "content_hash": "/f7/a71cacaeea/0/content_hash.txt",
+      "prompt": ""
+    },
+    {
+      "metadata": "/f7/a71cacaeea/1/metadata.json",
+      "transcript": "/f7/a71cacaeea/1/full.jsonl",
+      "context": "/f7/a71cacaeea/1/context.md",
+      "content_hash": "/f7/a71cacaeea/1/content_hash.txt",
+      "prompt": "/f7/a71cacaeea/1/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 86,
+    "cache_creation_tokens": 9185,
+    "cache_read_tokens": 1412069,
+    "output_tokens": 29,
+    "api_call_count": 10
+  }
+}

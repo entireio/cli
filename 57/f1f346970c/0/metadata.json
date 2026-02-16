@@ -1,0 +1,21 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "57f1f346970c",
+  "session_id": "2026-01-06-3a782158-6c7c-4d4d-9c73-eae031da5b18",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-15T16:31:56.194462Z",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/auto_commit.go"
+  ],
+  "initial_attribution": {
+    "calculated_at": "2026-02-15T16:31:55.975739Z",
+    "agent_lines": 4,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 4,
+    "agent_percentage": 100
+  }
+}

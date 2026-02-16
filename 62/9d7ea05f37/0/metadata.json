@@ -1,0 +1,35 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "629d7ea05f37",
+  "session_id": "4a364c97-9dde-4a98-a973-26edea2c0e8b",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-15T10:20:41.171238Z",
+  "branch": "soph/1to1-bugs-found-by-e2e",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "cmd/entire/cli/strategy/content_overlap.go",
+    "cmd/entire/cli/strategy/manual_commit_condensation.go",
+    "cmd/entire/cli/strategy/manual_commit_hooks.go",
+    "cmd/entire/cli/strategy/manual_commit_test.go"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "d1afce2682bf",
+  "transcript_identifier_at_start": "d01133c2-5336-465a-8170-aa412595cd92",
+  "token_usage": {
+    "input_tokens": 3607,
+    "cache_creation_tokens": 1108020,
+    "cache_read_tokens": 39945712,
+    "output_tokens": 1886,
+    "api_call_count": 436
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-15T10:20:38.542299Z",
+    "agent_lines": 185,
+    "human_added": 311,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 496,
+    "agent_percentage": 37.29838709677419
+  },
+  "transcript_path": ".claude/projects/-Users-soph-Work-entire-devenv-cli/4a364c97-9dde-4a98-a973-26edea2c0e8b.jsonl"
+}
