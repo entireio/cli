@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
@@ -42,6 +43,57 @@ func ParseFromBytes(content []byte) ([]Line, error) {
 	}
 
 	return lines, nil
+}
+
+// ParseFromFileAtLine reads and parses a transcript file starting from a specific line.
+// Uses bufio.Reader to handle arbitrarily long lines (no size limit).
+// Returns:
+//   - lines: parsed transcript lines from startLine onwards (malformed lines skipped)
+//   - totalLines: total number of lines in the file (including malformed ones)
+//   - error: any error encountered during reading
+//
+// The startLine parameter is 0-indexed (startLine=0 reads from the beginning).
+// This is useful for incremental parsing when you've already processed some lines.
+func ParseFromFileAtLine(path string, startLine int) ([]Line, int, error) {
+	file, err := os.Open(path) //nolint:gosec // path is a controlled transcript file path
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to open transcript: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	var lines []Line
+	reader := bufio.NewReader(file)
+
+	totalLines := 0
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return nil, 0, fmt.Errorf("failed to read transcript: %w", err)
+		}
+
+		// Handle empty line or EOF without content
+		if len(lineBytes) == 0 {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+
+		// Count all lines for totalLines, but only parse after startLine
+		if totalLines >= startLine {
+			var line Line
+			if err := json.Unmarshal(lineBytes, &line); err == nil {
+				lines = append(lines, line)
+			}
+		}
+		totalLines++
+
+		if err == io.EOF {
+			break
+		}
+	}
+
+	return lines, totalLines, nil
 }
 
 // SliceFromLine returns the content starting from line number `startLine` (0-indexed).

@@ -932,6 +932,69 @@ func TestAddCheckpointTrailerWithComment_NoPrompt(t *testing.T) {
 	}
 }
 
+func TestAddCheckpointTrailer_ConventionalCommitSubject(t *testing.T) {
+	t.Parallel()
+
+	// Regression: single-line conventional commit subjects like "docs: Add foo"
+	// contain ": " which falsely triggered the "already has trailers" detection,
+	// causing the trailer to be appended without a blank line separator.
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{
+			name:    "conventional commit docs",
+			message: "docs: Add red.md with information about the color red\n",
+		},
+		{
+			name:    "conventional commit feat",
+			message: "feat: Add new login flow\n",
+		},
+		{
+			name:    "conventional commit fix with scope",
+			message: "fix(auth): Resolve token expiry issue\n",
+		},
+		{
+			name:    "single line no newline",
+			message: "docs: Add something",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := addCheckpointTrailer(tt.message, testTrailerCheckpointID)
+
+			// The trailer must be separated from the subject by a blank line
+			if !strings.Contains(result, "\n\n"+trailers.CheckpointTrailerKey+":") {
+				t.Errorf("addCheckpointTrailer() trailer not separated by blank line from subject.\ngot: %q", result)
+			}
+		})
+	}
+}
+
+func TestAddCheckpointTrailer_ExistingTrailers(t *testing.T) {
+	t.Parallel()
+
+	// When a message already has trailers (in a separate paragraph), the
+	// new trailer should be appended directly (no extra blank line).
+	message := "feat: Add login\n\nSigned-off-by: Test User <test@example.com>\n"
+	result := addCheckpointTrailer(message, testTrailerCheckpointID)
+
+	// Should NOT add a double blank line before our trailer
+	if strings.Contains(result, "\n\n"+trailers.CheckpointTrailerKey) {
+		t.Errorf("addCheckpointTrailer() added extra blank line before existing trailer block.\ngot: %q", result)
+	}
+
+	// Should contain both trailers
+	if !strings.Contains(result, "Signed-off-by:") {
+		t.Errorf("addCheckpointTrailer() lost existing trailer.\ngot: %q", result)
+	}
+	if !strings.Contains(result, trailers.CheckpointTrailerKey+":") {
+		t.Errorf("addCheckpointTrailer() missing our trailer.\ngot: %q", result)
+	}
+}
+
 func TestCheckpointInfo_JSONRoundTrip(t *testing.T) {
 	original := CheckpointInfo{
 		CheckpointID:     "a1b2c3d4e5f6",
@@ -1158,7 +1221,7 @@ func TestShadowStrategy_FilesTouched_OnlyModifiedFiles(t *testing.T) {
 
 	// Now condense the session
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -1479,7 +1542,6 @@ func TestShadowStrategy_CondenseSession_EphemeralBranchTrailer(t *testing.T) {
 		t.Fatalf("failed to create metadata dir: %v", err)
 	}
 
-	//nolint:goconst // test data repeated across test functions
 	transcript := `{"type":"human","message":{"content":"test prompt"}}
 {"type":"assistant","message":{"content":"test response"}}
 `
@@ -1511,7 +1573,7 @@ func TestShadowStrategy_CondenseSession_EphemeralBranchTrailer(t *testing.T) {
 
 	// Condense the session
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
-	_, err = s.CondenseSession(repo, checkpointID, state)
+	_, err = s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -1851,6 +1913,19 @@ func TestCountTranscriptItems(t *testing.T) {
 			content:   "",
 			expected:  0,
 		},
+		{
+			name:      "Gemini JSON with array content (real format)",
+			agentType: agent.AgentTypeGemini,
+			content: `{
+				"messages": [
+					{"type": "user", "content": [{"text": "Hello"}]},
+					{"type": "gemini", "content": "Hi there!"},
+					{"type": "user", "content": [{"text": "Do something"}]},
+					{"type": "gemini", "content": "Done!"}
+				]
+			}`,
+			expected: 4,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1917,6 +1992,19 @@ func TestExtractUserPrompts(t *testing.T) {
 			agentType: agent.AgentTypeClaudeCode,
 			content:   "",
 			expected:  nil,
+		},
+		{
+			name:      "Gemini array content (real format)",
+			agentType: agent.AgentTypeGemini,
+			content: `{
+				"messages": [
+					{"type": "user", "content": [{"text": "Create a file"}]},
+					{"type": "gemini", "content": "Done!"},
+					{"type": "user", "content": [{"text": "Edit the file"}]},
+					{"type": "gemini", "content": "Updated!"}
+				]
+			}`,
+			expected: []string{"Create a file", "Edit the file"},
 		},
 	}
 
@@ -2035,7 +2123,7 @@ func TestCondenseSession_IncludesInitialAttribution(t *testing.T) {
 
 	// Condense the session - this should calculate InitialAttribution
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -2367,7 +2455,7 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 
 	// === CONDENSE AND VERIFY ATTRIBUTION ===
 	checkpointID := id.MustCheckpointID("b2c3d4e5f6a7")
-	result, err := s.CondenseSession(repo, checkpointID, state2)
+	result, err := s.CondenseSession(repo, checkpointID, state2, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -2542,7 +2630,7 @@ func TestCondenseSession_PrefersLiveTranscript(t *testing.T) {
 
 	// Condense — this should read the live transcript, not the shadow branch copy
 	checkpointID := id.MustCheckpointID("b2c3d4e5f6a1")
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -2662,7 +2750,7 @@ func TestCondenseSession_GeminiTranscript(t *testing.T) {
 
 	// Condense the session
 	checkpointID := id.MustCheckpointID("aabbcc112233")
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}
@@ -2890,7 +2978,7 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 
 	// Condense the session - this should calculate token usage ONLY from message index 2 onwards
 	checkpointID := id.MustCheckpointID("ddeeff998877")
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		t.Fatalf("CondenseSession() error = %v", err)
 	}

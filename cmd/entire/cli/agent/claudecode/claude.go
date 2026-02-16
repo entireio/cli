@@ -14,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -188,7 +189,7 @@ func (c *ClaudeCodeAgent) ReadSession(input *agent.HookInput) (*agent.AgentSessi
 	}
 
 	// Parse to extract computed fields
-	lines, err := ParseTranscript(data)
+	lines, err := transcript.ParseFromBytes(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)
 	}
@@ -246,7 +247,7 @@ func (c *ClaudeCodeAgent) GetLastUserPrompt(session *agent.AgentSession) string 
 		return ""
 	}
 
-	lines, err := ParseTranscript(session.NativeData)
+	lines, err := transcript.ParseFromBytes(session.NativeData)
 	if err != nil {
 		return ""
 	}
@@ -280,7 +281,7 @@ func (c *ClaudeCodeAgent) TruncateAtUUID(session *agent.AgentSession, uuid strin
 	}
 
 	// Parse, truncate, re-serialize
-	lines, err := ParseTranscript(session.NativeData)
+	lines, err := transcript.ParseFromBytes(session.NativeData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)
 	}
@@ -311,7 +312,7 @@ func (c *ClaudeCodeAgent) FindCheckpointUUID(session *agent.AgentSession, toolUs
 		return "", false
 	}
 
-	lines, err := ParseTranscript(session.NativeData)
+	lines, err := transcript.ParseFromBytes(session.NativeData)
 	if err != nil {
 		return "", false
 	}

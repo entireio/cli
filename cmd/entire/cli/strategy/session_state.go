@@ -167,16 +167,26 @@ func FindMostRecentSession() string {
 	return ""
 }
 
-// TransitionAndLog runs a session phase transition, applies common actions, logs the
-// transition, and returns any remaining strategy-specific actions.
+// TransitionAndLog runs a session phase transition, applies actions via the
+// handler, and logs the transition. Returns the first handler error from
+// ApplyTransition (if any) so callers can surface it. The error is also
+// logged internally for diagnostics.
 // This is the single entry point for all state machine transitions to ensure
 // consistent logging of phase changes.
-func TransitionAndLog(state *SessionState, event session.Event, ctx session.TransitionContext) []session.Action {
+func TransitionAndLog(state *SessionState, event session.Event, ctx session.TransitionContext, handler session.ActionHandler) error {
 	oldPhase := state.Phase
 	result := session.Transition(oldPhase, event, ctx)
-	remaining := session.ApplyCommonActions(state, result)
-
 	logCtx := logging.WithComponent(context.Background(), "session")
+
+	handlerErr := session.ApplyTransition(state, result, handler)
+	if handlerErr != nil {
+		logging.Error(logCtx, "action handler error during transition",
+			slog.String("session_id", state.SessionID),
+			slog.String("event", event.String()),
+			slog.Any("error", handlerErr),
+		)
+	}
+
 	if result.NewPhase != oldPhase {
 		logging.Info(logCtx, "phase transition",
 			slog.String("session_id", state.SessionID),
@@ -192,7 +202,10 @@ func TransitionAndLog(state *SessionState, event session.Event, ctx session.Tran
 		)
 	}
 
-	return remaining
+	if handlerErr != nil {
+		return fmt.Errorf("transition %s: %w", event, handlerErr)
+	}
+	return nil
 }
 
 // ClearSessionState removes the session state file for the given session ID.

@@ -279,14 +279,15 @@ The checkpoint ID is the **stable identifier** that links user commits to metada
 ```
 User commit → Metadata:
   1. Extract "Entire-Checkpoint: a3b2c4d5e6f7" from commit message
-  2. Look up metadata:
-     - Approach A: Read entire/checkpoints/v1 tree at a3/b2c4d5e6f7/
-     - Approach B: Search git log entire/checkpoints/v1 for "Checkpoint: a3b2c4d5e6f7"
+  2. Read entire/checkpoints/v1 tree at a3/b2c4d5e6f7/
 
 Metadata → User commits:
   Given checkpoint ID a3b2c4d5e6f7
   → Search branch history for commits with "Entire-Checkpoint: a3b2c4d5e6f7"
 ```
+
+Note: Commit subjects on `entire/checkpoints/v1` (e.g., `Checkpoint: a3b2c4d5e6f7`)
+are for human readability in `git log` only. The CLI always reads from the tree at HEAD.
 
 **Example Flow:**
 

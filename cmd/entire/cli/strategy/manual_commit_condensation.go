@@ -107,25 +107,65 @@ func (s *ManualCommitStrategy) getCheckpointLog(checkpointID id.CheckpointID) ([
 // checkpointID is the 12-hex-char value from the Entire-Checkpoint trailer.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
 // Uses checkpoint.GitStore.WriteCommitted for the git operations.
-func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointID id.CheckpointID, state *SessionState) (*CondenseResult, error) {
-	// Get shadow branch
+//
+// For mid-session commits (no Stop/SaveChanges called yet), the shadow branch may not exist.
+// In this case, data is extracted from the live transcript instead.
+func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointID id.CheckpointID, state *SessionState, committedFiles map[string]struct{}) (*CondenseResult, error) {
+	// Get shadow branch (may not exist for mid-session commits)
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return nil, fmt.Errorf("shadow branch not found: %w", err)
+	hasShadowBranch := err == nil
+
+	var sessionData *ExtractedSessionData
+	if hasShadowBranch {
+		// Extract session data from the shadow branch (with live transcript fallback).
+		// Use tracked files from session state instead of collecting all files from tree.
+		// Pass agent type to handle different transcript formats (JSONL for Claude, JSON for Gemini).
+		// Pass live transcript path so condensation reads the current file rather than a
+		// potentially stale shadow branch copy (SaveChanges may have been skipped if the
+		// last turn had no code changes).
+		// Pass CheckpointTranscriptStart for accurate token calculation (line offset for Claude, message index for Gemini).
+		sessionData, err = s.extractSessionData(repo, ref.Hash(), state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract session data: %w", err)
+		}
+	} else {
+		// No shadow branch: mid-session commit before Stop/SaveChanges.
+		// Extract data directly from live transcript.
+		if state.TranscriptPath == "" {
+			return nil, errors.New("shadow branch not found and no live transcript available")
+		}
+		sessionData, err = s.extractSessionDataFromLiveTranscript(state)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract session data from live transcript: %w", err)
+		}
 	}
 
-	// Extract session data from the shadow branch (with live transcript fallback).
-	// Use tracked files from session state instead of collecting all files from tree.
-	// Pass agent type to handle different transcript formats (JSONL for Claude, JSON for Gemini).
-	// Pass live transcript path so condensation reads the current file rather than a
-	// potentially stale shadow branch copy (SaveChanges may have been skipped if the
-	// last turn had no code changes).
-	// Pass CheckpointTranscriptStart for accurate token calculation (line offset for Claude, message index for Gemini).
-	sessionData, err := s.extractSessionData(repo, ref.Hash(), state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart)
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract session data: %w", err)
+	// For 1:1 checkpoint model: filter files_touched to only include files actually
+	// committed in this specific commit. This ensures each checkpoint represents
+	// exactly the files in that commit, not all files mentioned in the transcript.
+	if len(committedFiles) > 0 {
+		if len(sessionData.FilesTouched) > 0 {
+			// Filter to intersection of transcript-extracted files and committed files
+			filtered := make([]string, 0, len(sessionData.FilesTouched))
+			for _, f := range sessionData.FilesTouched {
+				if _, ok := committedFiles[f]; ok {
+					filtered = append(filtered, f)
+				}
+			}
+			sessionData.FilesTouched = filtered
+		}
+
+		// If extraction failed or returned empty, use committedFiles as fallback.
+		// This handles mid-session commits where transcript parsing may not find files
+		// but we know what was committed.
+		if len(sessionData.FilesTouched) == 0 {
+			sessionData.FilesTouched = make([]string, 0, len(committedFiles))
+			for f := range committedFiles {
+				sessionData.FilesTouched = append(sessionData.FilesTouched, f)
+			}
+		}
 	}
 
 	// Get checkpoint store
@@ -136,7 +176,11 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-	attribution := calculateSessionAttributions(repo, ref, sessionData, state)
+	// Attribution calculation requires shadow branch reference; skip if mid-session commit
+	var attribution *cpkg.InitialAttribution
+	if hasShadowBranch {
+		attribution = calculateSessionAttributions(repo, ref, sessionData, state)
+	}
 	// Get current branch name
 	branchName := GetCurrentBranchName(repo)
 
@@ -185,6 +229,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		AuthorName:                  authorName,
 		AuthorEmail:                 authorEmail,
 		Agent:                       state.AgentType,
+		TurnID:                      state.TurnID,
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
@@ -361,6 +406,48 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 	return data, nil
 }
 
+// extractSessionDataFromLiveTranscript extracts session data directly from the live transcript file.
+// This is used for mid-session commits where no shadow branch exists yet.
+func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(state *SessionState) (*ExtractedSessionData, error) {
+	data := &ExtractedSessionData{}
+
+	// Read the live transcript
+	if state.TranscriptPath == "" {
+		return nil, errors.New("no transcript path in session state")
+	}
+
+	liveData, err := os.ReadFile(state.TranscriptPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read live transcript: %w", err)
+	}
+
+	if len(liveData) == 0 {
+		return nil, errors.New("live transcript is empty")
+	}
+
+	fullTranscript := string(liveData)
+	data.Transcript = liveData
+	data.FullTranscriptLines = countTranscriptItems(state.AgentType, fullTranscript)
+	data.Prompts = extractUserPrompts(state.AgentType, fullTranscript)
+	data.Context = generateContextFromPrompts(data.Prompts)
+
+	// Extract files from transcript since state.FilesTouched may be empty for mid-session commits
+	// (no SaveChanges/Stop has been called yet to populate it)
+	if len(state.FilesTouched) > 0 {
+		data.FilesTouched = state.FilesTouched
+	} else {
+		// Use the shared helper which includes subagent transcripts
+		data.FilesTouched = s.extractModifiedFilesFromLiveTranscript(state, state.CheckpointTranscriptStart)
+	}
+
+	// Calculate token usage from the extracted transcript portion
+	if len(data.Transcript) > 0 {
+		data.TokenUsage = calculateTokenUsage(state.AgentType, data.Transcript, state.CheckpointTranscriptStart)
+	}
+
+	return data, nil
+}
+
 // countTranscriptItems counts lines (JSONL) or messages (JSON) in a transcript.
 // For Claude Code and JSONL-based agents, this counts lines.
 // For Gemini CLI and JSON-based agents, this counts messages.
@@ -447,7 +534,7 @@ func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int
 	}
 
 	// Claude Code and other JSONL-based agents
-	lines, err := claudecode.ParseTranscript(data)
+	lines, err := transcript.ParseFromBytes(data)
 	if err != nil || len(lines) == 0 {
 		return &agent.TokenUsage{}
 	}
@@ -587,7 +674,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(sessionID string) error {
 	}
 
 	// Condense the session
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		return fmt.Errorf("failed to condense session: %w", err)
 	}
@@ -603,7 +690,6 @@ func (s *ManualCommitStrategy) CondenseSessionByID(sessionID string) error {
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
 	state.Phase = session.PhaseIdle
 	state.LastCheckpointID = checkpointID
-	state.PendingCheckpointID = "" // Clear after condensation (amend handler uses LastCheckpointID)
 	state.AttributionBaseCommit = state.BaseCommit
 	state.PromptAttributions = nil
 	state.PendingPromptAttribution = nil

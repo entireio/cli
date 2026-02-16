@@ -15,7 +15,8 @@ This repo contains the CLI for Entire.
 - `entire/cli/strategy`: strategy implementations - see section below
 - `entire/cli/checkpoint`: checkpoint storage abstractions (temporary and committed)
 - `entire/cli/session`: session state management
-- `entire/cli/integration_test`: integration tests
+- `entire/cli/integration_test`: integration tests (simulated hooks)
+- `entire/cli/e2e_test`: E2E tests with real agent calls (see E2E Tests section)
 
 ## Tech Stack
 
@@ -41,6 +42,30 @@ mise run test:ci
 ```
 
 Integration tests use the `//go:build integration` build tag and are located in `cmd/entire/cli/integration_test/`.
+
+### Running E2E Tests (Only When Explicitly Requested)
+
+**IMPORTANT: Do NOT run E2E tests proactively.** E2E tests make real API calls to Claude Code, which consume tokens and cost money. Only run them when the user explicitly asks for E2E testing.
+
+```bash
+# Requires Claude Code to be installed and authenticated
+E2E_AGENT=claude-code go test -tags=e2e ./cmd/entire/cli/e2e_test/...
+
+# Run a specific test
+E2E_AGENT=claude-code go test -tags=e2e -run TestE2E_BasicWorkflow ./cmd/entire/cli/e2e_test/...
+```
+
+E2E tests:
+- Use the `//go:build e2e` build tag
+- Located in `cmd/entire/cli/e2e_test/`
+- Test real agent interactions (Claude Code creating files, committing, etc.)
+- Validate checkpoint scenarios documented in `docs/architecture/checkpoint-scenarios.md`
+- Support multiple agents via `E2E_AGENT` env var (currently `claude-code`, `gemini-cli` stub)
+
+**Environment variables:**
+- `E2E_AGENT` - Agent to test with (default: `claude-code`)
+- `E2E_CLAUDE_MODEL` - Claude model to use (default: `haiku` for cost efficiency)
+- `E2E_TIMEOUT` - Timeout per prompt (default: `2m`)
 
 ### Test Parallelization
 
@@ -327,7 +352,7 @@ All strategies implement:
 
 Sessions track their lifecycle through phases managed by a state machine in `session/phase.go`:
 
-**Phases:** `ACTIVE`, `ACTIVE_COMMITTED`, `IDLE`, `ENDED`
+**Phases:** `ACTIVE`, `IDLE`, `ENDED`
 
 **Events:**
 - `TurnStart` - Agent begins a turn (UserPromptSubmit hook)
@@ -339,12 +364,11 @@ Sessions track their lifecycle through phases managed by a state machine in `ses
 **Key transitions:**
 - `IDLE + TurnStart → ACTIVE` - Agent starts working
 - `ACTIVE + TurnEnd → IDLE` - Agent finishes turn
-- `ACTIVE + GitCommit → ACTIVE_COMMITTED` - User commits while agent is working (condensation deferred)
-- `ACTIVE_COMMITTED + TurnEnd → IDLE` - Agent finishes after commit (condense now)
+- `ACTIVE + GitCommit → ACTIVE` - User commits while agent is working (condense immediately)
 - `IDLE + GitCommit → IDLE` - User commits between turns (condense immediately)
 - `ENDED + GitCommit → ENDED` - Post-session commit (condense if files touched)
 
-The state machine emits **actions** (e.g., `ActionCondense`, `ActionMigrateShadowBranch`, `ActionDeferCondensation`) that hook handlers dispatch to strategy-specific implementations.
+The state machine emits **actions** (e.g., `ActionCondense`, `ActionUpdateLastInteraction`) that hook handlers dispatch to strategy-specific implementations.
 
 #### Metadata Structure
 
@@ -426,17 +450,17 @@ Both strategies use a **12-hex-char random checkpoint ID** (e.g., `a3b2c4d5e6f7`
 **Bidirectional linking:**
 
 ```
-User commit → Metadata (two approaches):
-  Approach 1: Extract "Entire-Checkpoint: a3b2c4d5e6f7" trailer
-              → Look up a3/b2c4d5e6f7/ directory on entire/checkpoints/v1 branch
-
-  Approach 2: Extract "Entire-Checkpoint: a3b2c4d5e6f7" trailer
-              → Search entire/checkpoints/v1 commit history for "Checkpoint: a3b2c4d5e6f7" subject
+User commit → Metadata:
+  Extract "Entire-Checkpoint: a3b2c4d5e6f7" trailer
+  → Read a3/b2c4d5e6f7/ directory from entire/checkpoints/v1 tree at HEAD
 
 Metadata → User commits:
   Given checkpoint ID a3b2c4d5e6f7
   → Search user branch history for commits with "Entire-Checkpoint: a3b2c4d5e6f7" trailer
 ```
+
+Note: Commit subjects on `entire/checkpoints/v1` (e.g., `Checkpoint: a3b2c4d5e6f7`) are
+for human readability in `git log` only. The CLI always reads from the tree at HEAD.
 
 **Example:**
 ```
