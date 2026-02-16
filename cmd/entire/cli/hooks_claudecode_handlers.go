@@ -749,7 +749,9 @@ func transitionSessionTurnEnd(sessionID string) {
 	if turnState == nil {
 		return
 	}
-	strategy.TransitionAndLog(turnState, session.EventTurnEnd, session.TransitionContext{})
+	if err := strategy.TransitionAndLog(turnState, session.EventTurnEnd, session.TransitionContext{}, session.NoOpActionHandler{}); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: turn-end transition failed: %v\n", err)
+	}
 
 	// Always dispatch to strategy for turn-end handling. The strategy reads
 	// work items from state (e.g. TurnCheckpointIDs), not the action list.
@@ -775,7 +777,9 @@ func markSessionEnded(sessionID string) error {
 		return nil // No state file, nothing to update
 	}
 
-	strategy.TransitionAndLog(state, session.EventSessionStop, session.TransitionContext{})
+	if transErr := strategy.TransitionAndLog(state, session.EventSessionStop, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: session stop transition failed: %v\n", transErr)
+	}
 
 	now := time.Now()
 	state.EndedAt = &now

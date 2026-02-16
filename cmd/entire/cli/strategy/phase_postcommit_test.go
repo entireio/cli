@@ -639,11 +639,10 @@ func TestTurnEnd_Active_NoActions(t *testing.T) {
 
 	// ACTIVE + TurnEnd → IDLE with no strategy-specific actions
 	result := session.Transition(state.Phase, session.EventTurnEnd, session.TransitionContext{})
-	remaining := session.ApplyCommonActions(state, result)
 
-	// Verify no strategy-specific actions for ACTIVE → IDLE
-	assert.Empty(t, remaining,
-		"ACTIVE + TurnEnd should not emit strategy-specific actions")
+	// Apply transition with no-op handler (no strategy actions for ACTIVE → IDLE)
+	err = session.ApplyTransition(state, result, session.NoOpActionHandler{})
+	require.NoError(t, err)
 
 	// Call HandleTurnEnd — should be a no-op (no TurnCheckpointIDs)
 	err = s.HandleTurnEnd(state)

@@ -464,7 +464,7 @@ type PrePushHandler interface {
 type TurnEndHandler interface {
 	// HandleTurnEnd performs strategy-specific cleanup at the end of a turn.
 	// Work items are read from state (e.g. TurnCheckpointIDs), not from the
-	// action list. The state has already been updated by ApplyCommonActions;
+	// action list. The state has already been updated by ApplyTransition;
 	// the caller saves it after this method returns.
 	HandleTurnEnd(state *session.State) error
 }

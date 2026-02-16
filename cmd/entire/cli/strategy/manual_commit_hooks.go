@@ -494,9 +494,73 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(logCtx context.Context, comm
 //
 // Shadow branches are only deleted when ALL sessions sharing the branch are non-active
 // and were condensed during this PostCommit.
+
+// postCommitActionHandler implements session.ActionHandler for PostCommit.
+// Each session in the loop gets its own handler with per-session context.
+// Handler methods use the *State parameter from ApplyTransition (same pointer
+// as the state being transitioned) rather than capturing state separately.
+type postCommitActionHandler struct {
+	s                      *ManualCommitStrategy
+	logCtx                 context.Context
+	repo                   *git.Repository
+	checkpointID           id.CheckpointID
+	head                   *plumbing.Reference
+	commit                 *object.Commit
+	newHead                string
+	shadowBranchName       string
+	shadowBranchesToDelete map[string]struct{}
+	committedFileSet       map[string]struct{}
+	hasNew                 bool
+
+	// Output: set by handler methods, read by caller after TransitionAndLog.
+	condensed bool
+}
+
+func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
+	// For ACTIVE sessions, any commit during the turn is session-related.
+	// For IDLE/ENDED sessions (e.g., carry-forward), also require that the
+	// committed files overlap with the session's remaining files AND have
+	// matching content — otherwise an unrelated commit (or a commit with
+	// completely replaced content) would incorrectly get this session's checkpoint.
+	shouldCondense := h.hasNew
+	if shouldCondense && !state.Phase.IsActive() {
+		shouldCondense = filesOverlapWithContent(h.repo, h.shadowBranchName, h.commit, state.FilesTouched)
+	}
+	if shouldCondense {
+		h.condensed = h.s.condenseAndUpdateState(h.logCtx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete, h.committedFileSet)
+	} else {
+		h.s.updateBaseCommitIfChanged(h.logCtx, state, h.newHead)
+	}
+	return nil
+}
+
+func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.State) error {
+	if len(state.FilesTouched) > 0 && h.hasNew {
+		h.condensed = h.s.condenseAndUpdateState(h.logCtx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete, h.committedFileSet)
+	} else {
+		h.s.updateBaseCommitIfChanged(h.logCtx, state, h.newHead)
+	}
+	return nil
+}
+
+func (h *postCommitActionHandler) HandleDiscardIfNoFiles(state *session.State) error {
+	if len(state.FilesTouched) == 0 {
+		logging.Debug(h.logCtx, "post-commit: skipping empty ended session (no files to condense)",
+			slog.String("session_id", state.SessionID),
+		)
+	}
+	h.s.updateBaseCommitIfChanged(h.logCtx, state, h.newHead)
+	return nil
+}
+
+func (h *postCommitActionHandler) HandleWarnStaleSession(_ *session.State) error {
+	// Not produced by EventGitCommit; no-op for exhaustiveness.
+	return nil
+}
+
 // During rebase/cherry-pick/revert operations, phase transitions are skipped entirely.
 //
-//nolint:unparam,maintidx // error return required by interface but hooks must return nil; maintidx: complex but already well-structured
+//nolint:unparam // error return required by interface but hooks must return nil
 func (s *ManualCommitStrategy) PostCommit() error {
 	logCtx := logging.WithComponent(context.Background(), "checkpoint")
 
@@ -591,11 +655,8 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		}
 		transitionCtx.HasFilesTouched = len(state.FilesTouched) > 0
 
-		// Run the state machine transition
-		remaining := TransitionAndLog(state, session.EventGitCommit, transitionCtx)
-
-		// Save FilesTouched BEFORE the action loop — condensation clears it,
-		// but we need the original list for carry-forward computation.
+		// Save FilesTouched BEFORE TransitionAndLog — the handler's condensation
+		// clears it, but we need the original list for carry-forward computation.
 		// For mid-session commits (ACTIVE, no shadow branch), state.FilesTouched may be empty
 		// because no SaveChanges/Stop has been called yet. Extract files from transcript.
 		filesTouchedBefore := make([]string, len(state.FilesTouched))
@@ -612,55 +673,22 @@ func (s *ManualCommitStrategy) PostCommit() error {
 			slog.Any("files", filesTouchedBefore),
 		)
 
-		condensed := false
-
-		// Dispatch strategy-specific actions.
-		// Each branch handles its own BaseCommit update so there is no
-		// fallthrough conditional at the end. On condensation failure,
-		// BaseCommit is intentionally NOT updated to preserve access to
-		// the shadow branch (which is named after the old BaseCommit).
-		for _, action := range remaining {
-			switch action {
-			case session.ActionCondense:
-				// For ACTIVE sessions, any commit during the turn is session-related.
-				// For IDLE/ENDED sessions (e.g., carry-forward), also require that the
-				// committed files overlap with the session's remaining files AND have
-				// matching content — otherwise an unrelated commit (or a commit with
-				// completely replaced content) would incorrectly get this session's checkpoint.
-				shouldCondense := hasNew
-				if shouldCondense && !state.Phase.IsActive() {
-					shouldCondense = filesOverlapWithContent(repo, shadowBranchName, commit, state.FilesTouched)
-				}
-				if shouldCondense {
-					condensed = s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete, committedFileSet)
-					// condenseAndUpdateState updates BaseCommit on success.
-					// On failure, BaseCommit is preserved so the shadow branch remains accessible.
-				} else {
-					// No new content or unrelated commit — just update BaseCommit
-					s.updateBaseCommitIfChanged(logCtx, state, newHead)
-				}
-			case session.ActionCondenseIfFilesTouched:
-				// The state machine already gates this action on HasFilesTouched,
-				// but hasNew is an additional content-level check (transcript has
-				// new content beyond what was previously condensed).
-				if len(state.FilesTouched) > 0 && hasNew {
-					condensed = s.condenseAndUpdateState(logCtx, repo, checkpointID, state, head, shadowBranchName, shadowBranchesToDelete, committedFileSet)
-					// On failure, BaseCommit is preserved (same as ActionCondense).
-				} else {
-					s.updateBaseCommitIfChanged(logCtx, state, newHead)
-				}
-			case session.ActionDiscardIfNoFiles:
-				if len(state.FilesTouched) == 0 {
-					logging.Debug(logCtx, "post-commit: skipping empty ended session (no files to condense)",
-						slog.String("session_id", state.SessionID),
-					)
-				}
-				s.updateBaseCommitIfChanged(logCtx, state, newHead)
-			case session.ActionClearEndedAt, session.ActionUpdateLastInteraction:
-				// Handled by session.ApplyCommonActions above
-			case session.ActionWarnStaleSession:
-				// Not produced by EventGitCommit; listed for switch exhaustiveness
-			}
+		// Run the state machine transition with handler for strategy-specific actions.
+		handler := &postCommitActionHandler{
+			s:                      s,
+			logCtx:                 logCtx,
+			repo:                   repo,
+			checkpointID:           checkpointID,
+			head:                   head,
+			commit:                 commit,
+			newHead:                newHead,
+			shadowBranchName:       shadowBranchName,
+			shadowBranchesToDelete: shadowBranchesToDelete,
+			committedFileSet:       committedFileSet,
+			hasNew:                 hasNew,
+		}
+		if err := TransitionAndLog(state, session.EventGitCommit, transitionCtx, handler); err != nil {
+			fmt.Fprintf(os.Stderr, "[entire] Warning: post-commit action handler error: %v\n", err)
 		}
 
 		// Record checkpoint ID for ACTIVE sessions so HandleTurnEnd can finalize
@@ -668,7 +696,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		// NOTE: This check runs AFTER TransitionAndLog updated the phase. It relies on
 		// ACTIVE + GitCommit → ACTIVE (phase stays ACTIVE). If that state machine
 		// transition ever changed, this guard would silently stop recording IDs.
-		if condensed && state.Phase.IsActive() {
+		if handler.condensed && state.Phase.IsActive() {
 			state.TurnCheckpointIDs = append(state.TurnCheckpointIDs, checkpointID.String())
 		}
 
@@ -677,7 +705,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		// commit across two `git commit` invocations, each gets a 1:1 checkpoint.
 		// Uses content-aware comparison: if user did `git add -p` and committed
 		// partial changes, the file still has remaining agent changes to carry forward.
-		if condensed {
+		if handler.condensed {
 			remainingFiles := filesWithRemainingAgentChanges(repo, shadowBranchName, commit, filesTouchedBefore, committedFileSet)
 			logging.Debug(logCtx, "post-commit: carry-forward decision (content-aware)",
 				slog.String("session_id", state.SessionID),
@@ -698,7 +726,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 
 		// Only preserve shadow branch for active sessions that were NOT condensed.
 		// Condensed sessions already have their data on entire/checkpoints/v1.
-		if state.Phase.IsActive() && !condensed {
+		if state.Phase.IsActive() && !handler.condensed {
 			uncondensedActiveOnBranch[shadowBranchName] = true
 		}
 	}
@@ -1287,8 +1315,10 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 	}
 
 	if state != nil && state.BaseCommit != "" {
-		// Session is fully initialized — apply phase transition for TurnStart
-		TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{})
+		// Session is fully initialized — apply phase transition for TurnStart.
+		if transErr := TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+			fmt.Fprintf(os.Stderr, "[entire] Warning: turn start transition failed: %v\n", transErr)
+		}
 
 		// Generate a new TurnID for each turn (correlates carry-forward checkpoints)
 		turnID, err := id.Generate()
@@ -1353,8 +1383,10 @@ func (s *ManualCommitStrategy) InitializeSession(sessionID string, agentType age
 		return fmt.Errorf("failed to initialize session: %w", err)
 	}
 
-	// Apply phase transition: new session starts as ACTIVE
-	TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{})
+	// Apply phase transition: new session starts as ACTIVE.
+	if transErr := TransitionAndLog(state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: turn start transition failed: %v\n", transErr)
+	}
 
 	// Calculate attribution for pre-prompt edits
 	// This captures any user edits made before the first prompt
