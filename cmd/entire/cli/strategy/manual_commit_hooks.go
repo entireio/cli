@@ -547,6 +547,13 @@ func (s *ManualCommitStrategy) PostCommit() error {
 			// We only condense if this session actually has work.
 			if state.StepCount > 0 || len(state.FilesTouched) > 0 {
 				hasNew = true
+			} else if state.TranscriptPath != "" {
+				// Agent committed mid-turn before SaveChanges ran.
+				// PrepareCommitMsg already validated this commit is session-related
+				// (added trailer via addTrailerForAgentCommit fast path).
+				// Trust it — the condensation code handles "no shadow branch"
+				// by reading the live transcript directly.
+				hasNew = true
 			} else {
 				// No checkpoints and no tracked files - check the live transcript.
 				// Use sessionHasNewContentInCommittedFiles because staged files are empty
