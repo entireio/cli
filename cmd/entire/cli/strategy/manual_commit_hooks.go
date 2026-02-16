@@ -541,11 +541,13 @@ func (s *ManualCommitStrategy) PostCommit() error {
 		//   - No TTY (agent/subagent committing) — added unconditionally
 		//   - TTY (human committing) — added after content detection confirmed agent work
 		// In both cases, PrepareCommitMsg already validated this commit. We trust
-		// that decision here. Transcript-based re-validation is unreliable because
-		// subagent transcripts may not be available yet (subagent still running).
+		// that decision here and skip transcript-based re-validation (unreliable because
+		// subagent transcripts may not be available yet).
+		// However, we still guard on StepCount/FilesTouched to avoid condensing
+		// empty concurrent sessions that happen to be ACTIVE when another session commits.
 		var hasNew bool
 		if state.Phase.IsActive() {
-			hasNew = true
+			hasNew = state.StepCount > 0 || len(state.FilesTouched) > 0
 		} else {
 			var contentErr error
 			hasNew, contentErr = s.sessionHasNewContent(repo, state)
