@@ -20,6 +20,7 @@ import (
 // TestGetParentPIDLinux_CurrentProcess verifies that getParentPIDLinux returns
 // the correct parent PID for the current process by cross-checking with os.Getppid().
 func TestGetParentPIDLinux_CurrentProcess(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux-only test")
 	}
@@ -33,6 +34,7 @@ func TestGetParentPIDLinux_CurrentProcess(t *testing.T) {
 // TestGetParentPIDLinux_PID1 verifies that getParentPIDLinux can read PID 1 (init/systemd).
 // PID 1's parent is typically 0 on Linux.
 func TestGetParentPIDLinux_PID1(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux-only test")
 	}
@@ -46,6 +48,7 @@ func TestGetParentPIDLinux_PID1(t *testing.T) {
 // TestGetParentPIDLinux_NonExistentPID verifies that getParentPIDLinux returns
 // an error for a PID that doesn't exist.
 func TestGetParentPIDLinux_NonExistentPID(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux-only test")
 	}
@@ -62,6 +65,7 @@ func TestGetParentPIDLinux_NonExistentPID(t *testing.T) {
 // If comm contains ')', a naive parser would split at the wrong position.
 // We use strings.LastIndex(")") to handle this.
 func TestGetParentPIDLinux_ProcessWithParensInName(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux-only test")
 	}
@@ -77,6 +81,7 @@ func TestGetParentPIDLinux_ProcessWithParensInName(t *testing.T) {
 // TestGetParentPID_Dispatch verifies that getParentPID dispatches correctly
 // based on the OS and returns consistent results with os.Getppid().
 func TestGetParentPID_Dispatch(t *testing.T) {
+	t.Parallel()
 	ppid, err := getParentPID(os.Getpid())
 	require.NoError(t, err)
 	assert.Equal(t, os.Getppid(), ppid,
@@ -86,6 +91,7 @@ func TestGetParentPID_Dispatch(t *testing.T) {
 // TestGetParentPID_InvalidPID verifies that getParentPID returns an error
 // for an invalid PID.
 func TestGetParentPID_InvalidPID(t *testing.T) {
+	t.Parallel()
 	_, err := getParentPID(99999999)
 	assert.Error(t, err,
 		"getParentPID should return an error for a non-existent PID")
@@ -99,6 +105,7 @@ func TestGetParentPID_InvalidPID(t *testing.T) {
 // share the same AgentPID, the first one in the list is returned (map iteration
 // order means last-wins for map building, so last session with the same PID wins).
 func TestFindSessionByPIDChain_DuplicatePIDs(t *testing.T) {
+	t.Parallel()
 	myPID := os.Getpid()
 
 	sessionA := &SessionState{
@@ -120,6 +127,7 @@ func TestFindSessionByPIDChain_DuplicatePIDs(t *testing.T) {
 // TestFindSessionByPIDChain_AllZeroPIDs verifies that when all sessions have
 // AgentPID=0 (pre-upgrade sessions), nil is returned.
 func TestFindSessionByPIDChain_AllZeroPIDs(t *testing.T) {
+	t.Parallel()
 	sessions := []*SessionState{
 		{SessionID: "zero-a", AgentPID: 0},
 		{SessionID: "zero-b", AgentPID: 0},
@@ -133,6 +141,7 @@ func TestFindSessionByPIDChain_AllZeroPIDs(t *testing.T) {
 // TestFindSessionByPIDChain_MixedZeroAndValid verifies that sessions with
 // AgentPID=0 are skipped but valid PIDs are still checked.
 func TestFindSessionByPIDChain_MixedZeroAndValid(t *testing.T) {
+	t.Parallel()
 	myPID := os.Getpid()
 
 	sessions := []*SessionState{
@@ -149,6 +158,7 @@ func TestFindSessionByPIDChain_MixedZeroAndValid(t *testing.T) {
 // TestFindSessionByPIDChain_SingleSession verifies correct behavior with a
 // single session that matches.
 func TestFindSessionByPIDChain_SingleSession(t *testing.T) {
+	t.Parallel()
 	myPID := os.Getpid()
 
 	session := &SessionState{
@@ -164,6 +174,7 @@ func TestFindSessionByPIDChain_SingleSession(t *testing.T) {
 // TestFindSessionByPIDChain_NegativePID verifies that negative PIDs are treated
 // as non-matching (they would never appear in a PPID chain walk).
 func TestFindSessionByPIDChain_NegativePID(t *testing.T) {
+	t.Parallel()
 	session := &SessionState{
 		SessionID: "negative-pid",
 		AgentPID:  -1,
@@ -180,6 +191,7 @@ func TestFindSessionByPIDChain_NegativePID(t *testing.T) {
 // TestSortSessionsByLastInteraction_SingleElement verifies that sorting a
 // single-element slice doesn't panic and preserves the element.
 func TestSortSessionsByLastInteraction_SingleElement(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	sessions := []*SessionState{
 		{SessionID: "only-one", LastInteractionTime: &now},
@@ -192,6 +204,7 @@ func TestSortSessionsByLastInteraction_SingleElement(t *testing.T) {
 // TestSortSessionsByLastInteraction_EqualTimestamps verifies that sessions
 // with equal timestamps don't cause issues (sort stability).
 func TestSortSessionsByLastInteraction_EqualTimestamps(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	sessions := []*SessionState{
 		{SessionID: "a", LastInteractionTime: &now},
@@ -207,6 +220,7 @@ func TestSortSessionsByLastInteraction_EqualTimestamps(t *testing.T) {
 // TestSortSessionsByLastInteraction_MixedNilAndValues verifies correct ordering
 // when some sessions have timestamps and others don't, in various positions.
 func TestSortSessionsByLastInteraction_MixedNilAndValues(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	older := now.Add(-5 * time.Minute)
 
@@ -230,6 +244,7 @@ func TestSortSessionsByLastInteraction_MixedNilAndValues(t *testing.T) {
 // TestSortSessionsByLastInteraction_Empty verifies that sorting an empty
 // slice doesn't panic.
 func TestSortSessionsByLastInteraction_Empty(t *testing.T) {
+	t.Parallel()
 	var sessions []*SessionState
 	// Should not panic
 	sortSessionsByLastInteraction(sessions)
@@ -243,6 +258,7 @@ func TestSortSessionsByLastInteraction_Empty(t *testing.T) {
 // TestAgentPID_PersistsAcrossSaveLoad verifies that the AgentPID field
 // correctly round-trips through JSON serialization in the session state store.
 func TestAgentPID_PersistsAcrossSaveLoad(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Create a state store backed by a temp directory
@@ -285,6 +301,7 @@ func TestAgentPID_PersistsAcrossSaveLoad(t *testing.T) {
 // TestAgentPID_OmittedWhenZero verifies that AgentPID is omitted from JSON
 // when it's zero (omitempty behavior for backward compatibility).
 func TestAgentPID_OmittedWhenZero(t *testing.T) {
+	t.Parallel()
 	// Manually check the JSON tag
 	// The State struct has: AgentPID int `json:"agent_pid,omitempty"`
 	// In Go, omitempty for int means it's omitted when 0.
@@ -369,6 +386,7 @@ func TestInitializeSession_RefreshesAgentPIDOnTurnStart(t *testing.T) {
 // current process eventually reaches PID 1 (init) or a process whose parent
 // is itself (PID 0 on Linux).
 func TestGetParentPID_WalksToInit(t *testing.T) {
+	t.Parallel()
 	pid := os.Getpid()
 	visited := make(map[int]bool)
 	depth := 0
@@ -408,6 +426,7 @@ func TestGetParentPID_WalksToInit(t *testing.T) {
 // TestGetParentPIDLinux_ParsesStatCorrectly verifies that getParentPIDLinux
 // reads /proc/<pid>/stat for a real process and produces a positive integer.
 func TestGetParentPIDLinux_ParsesStatCorrectly(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux-only test")
 	}
@@ -433,6 +452,7 @@ func TestGetParentPIDLinux_ParsesStatCorrectly(t *testing.T) {
 // We test this by reading PID 1's stat file, which often has a simple name
 // like "(systemd)" or "(init)".
 func TestGetParentPIDLinux_ProcStatWithSpacesInComm(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux-only test")
 	}
@@ -458,6 +478,7 @@ func TestGetParentPIDLinux_ProcStatWithSpacesInComm(t *testing.T) {
 // TestGetParentPID_ZeroPID verifies that requesting parent of PID 0 returns
 // an error (PID 0 is the kernel scheduler, doesn't have a /proc entry).
 func TestGetParentPID_ZeroPID(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux-only test")
 	}
@@ -468,6 +489,7 @@ func TestGetParentPID_ZeroPID(t *testing.T) {
 
 // TestGetParentPID_NegativePID verifies that a negative PID returns an error.
 func TestGetParentPID_NegativePID(t *testing.T) {
+	t.Parallel()
 	_, err := getParentPID(-1)
 	assert.Error(t, err, "negative PID should return an error")
 }
@@ -479,6 +501,7 @@ func TestGetParentPID_NegativePID(t *testing.T) {
 // TestFindSessionByPIDChain_MaxDepthSafety verifies that the PPID chain walk
 // terminates even if it doesn't find a matching session (bounded by maxDepth=20).
 func TestFindSessionByPIDChain_MaxDepthSafety(t *testing.T) {
+	t.Parallel()
 	// Create a session with a PID that won't match any ancestor
 	session := &SessionState{
 		SessionID: "unreachable",
@@ -523,6 +546,7 @@ func TestInitializeSession_NewSessionHasAgentPIDInState(t *testing.T) {
 // TestGetParentPIDLinux_SelfStat verifies that /proc/self/stat returns the
 // same result as /proc/<our-pid>/stat (consistency check).
 func TestGetParentPIDLinux_SelfStat(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux-only test")
 	}

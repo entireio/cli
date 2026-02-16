@@ -24,7 +24,9 @@ import (
 //
 // Returns nil if no session matches any ancestor PID.
 func findSessionByPIDChain(sessions []*SessionState) *SessionState {
-	// Build a set of agent PIDs for O(1) lookup
+	// Build a set of agent PIDs for O(1) lookup.
+	// If multiple sessions share the same PID (shouldn't happen in practice — an agent
+	// process can only own one session), the last one in the slice wins (map overwrite).
 	pidToSession := make(map[int]*SessionState)
 	for _, s := range sessions {
 		if s.AgentPID == 0 {

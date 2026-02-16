@@ -12,6 +12,7 @@ import (
 // TestFindSessionByPIDChain_MatchesCurrentProcess creates a session with AgentPID
 // matching a known ancestor PID of the test process and verifies it is returned.
 func TestFindSessionByPIDChain_MatchesCurrentProcess(t *testing.T) {
+	t.Parallel()
 	// The test process's own PID is an ancestor from the hook's perspective.
 	// In production, the hook process walks up to find the agent PID.
 	// Here, we set AgentPID to the current process's PID which will be found
@@ -35,6 +36,7 @@ func TestFindSessionByPIDChain_MatchesCurrentProcess(t *testing.T) {
 // TestFindSessionByPIDChain_MatchesParentPID verifies that the walker matches
 // against parent PIDs, not just the current process.
 func TestFindSessionByPIDChain_MatchesParentPID(t *testing.T) {
+	t.Parallel()
 	parentPID := os.Getppid()
 
 	session := &SessionState{
@@ -50,6 +52,7 @@ func TestFindSessionByPIDChain_MatchesParentPID(t *testing.T) {
 // TestFindSessionByPIDChain_NoMatch creates sessions with non-matching PIDs
 // and verifies nil is returned.
 func TestFindSessionByPIDChain_NoMatch(t *testing.T) {
+	t.Parallel()
 	sessionA := &SessionState{
 		SessionID: "session-a",
 		AgentPID:  99999998, // Unlikely to match any real ancestor
@@ -66,6 +69,7 @@ func TestFindSessionByPIDChain_NoMatch(t *testing.T) {
 // TestFindSessionByPIDChain_SkipsZeroPID verifies that sessions with AgentPID=0
 // (pre-upgrade sessions) are skipped by the PID chain walker.
 func TestFindSessionByPIDChain_SkipsZeroPID(t *testing.T) {
+	t.Parallel()
 	sessionA := &SessionState{
 		SessionID: "pre-upgrade-session",
 		AgentPID:  0, // Pre-upgrade, should be skipped
@@ -78,6 +82,7 @@ func TestFindSessionByPIDChain_SkipsZeroPID(t *testing.T) {
 // TestFindSessionByPIDChain_EmptySessions verifies that an empty session list
 // returns nil without error.
 func TestFindSessionByPIDChain_EmptySessions(t *testing.T) {
+	t.Parallel()
 	result := findSessionByPIDChain(nil)
 	assert.Nil(t, result, "should return nil for empty session list")
 
@@ -88,6 +93,7 @@ func TestFindSessionByPIDChain_EmptySessions(t *testing.T) {
 // TestSortSessionsByLastInteraction verifies that sessions are sorted by
 // LastInteractionTime in descending order (most recent first).
 func TestSortSessionsByLastInteraction(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	older := now.Add(-10 * time.Minute)
 	oldest := now.Add(-20 * time.Minute)
@@ -108,6 +114,7 @@ func TestSortSessionsByLastInteraction(t *testing.T) {
 // TestSortSessionsByLastInteraction_NilTimestamps verifies that sessions
 // with nil LastInteractionTime sort last.
 func TestSortSessionsByLastInteraction_NilTimestamps(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	older := now.Add(-10 * time.Minute)
 
@@ -127,6 +134,7 @@ func TestSortSessionsByLastInteraction_NilTimestamps(t *testing.T) {
 // TestSortSessionsByLastInteraction_AllNil verifies sort stability when
 // all sessions have nil LastInteractionTime.
 func TestSortSessionsByLastInteraction_AllNil(t *testing.T) {
+	t.Parallel()
 	sessions := []*SessionState{
 		{SessionID: "a", LastInteractionTime: nil},
 		{SessionID: "b", LastInteractionTime: nil},
