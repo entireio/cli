@@ -371,6 +371,24 @@ Multiple AI sessions can run concurrently on the same base commit:
 3. **Identification** - Each checkpoint is tagged with its session ID; rewind UI shows session prompt
 4. **Condensation** - On commit, all sessions are condensed together with archived subfolders
 
+### Session Identification via AgentPID
+
+When multiple sessions run concurrently, `PrepareCommitMsg` must assign the checkpoint trailer to the correct session (the one that initiated the commit). The `AgentPID` field in session state enables this:
+
+**How it works:**
+
+1. **PID recording** — `InitializeSession` sets `state.AgentPID = os.Getppid()` on every `TurnStart` event. The hook handler process is a child of the agent, so its PPID is the agent's PID. Refreshing on every turn handles agent process restarts.
+
+2. **PID chain matching** — `PrepareCommitMsg` calls `findSessionByPIDChain()`, which walks the current process's PPID chain (up to 20 levels) and matches against active sessions' `AgentPID` values. The hook process → git → agent process chain typically resolves in 2–3 steps.
+
+3. **Fallback** — When PID matching fails (pre-upgrade sessions with `AgentPID=0`, or unusual process hierarchies), sessions are sorted by `LastInteractionTime` descending and the most recently interacted session is selected. This is deterministic and strictly better than the previous `os.ReadDir` ordering.
+
+**Platform-specific PPID lookup:**
+- **Linux:** Reads `/proc/<pid>/stat` (field 4 = PPID). Sub-millisecond.
+- **macOS:** Uses `ps -o ppid= -p <pid>`. ~5ms per call.
+
+**Backward compatibility:** The `AgentPID` field uses `json:"agent_pid,omitempty"`. Pre-upgrade session state files deserialize with `AgentPID=0`, which is treated as "unknown" — PID matching skips these sessions and falls through to the `LastInteractionTime` sort.
+
 ### Conflict Handling
 
 | Scenario | Behavior |

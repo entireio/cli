@@ -1,0 +1,267 @@
+{
+  "schemaVersion": "1.0",
+  "issue": {
+    "number": 338,
+    "title": "Issue #338",
+    "url": "https://github.com/entireio/cli/issues/338"
+  },
+  "pipeline_id": null,
+  "current_phase": "refine",
+  "acceptance_criteria": [],
+  "phases": [
+    {
+      "id": "phase-1",
+      "name": "Core PID Infrastructure",
+      "status": "pending",
+      "review_cycles": 0,
+      "max_cycles": 3,
+      "escalated": false,
+      "escalation_reason": null,
+      "tasks": [
+        {
+          "id": "task-1-1",
+          "description": "Add AgentPID int field to session.State struct with omitempty JSON tag",
+          "status": "pending",
+          "commit": null,
+          "checkpoint_id": null,
+          "notes": "",
+          "acceptance_criteria": "State struct has AgentPID field; existing session JSON deserializes without error; AgentPID=0 means unknown",
+          "files_affected": [
+            "cmd/entire/cli/session/state.go"
+          ],
+          "review_cycles": 0,
+          "max_cycles": 3,
+          "escalated": false
+        },
+        {
+          "id": "task-1-2",
+          "description": "Create pid_matching.go with findSessionByPIDChain (PPID walker with platform-specific implementations) and sortSessionsByLastInteraction helper",
+          "status": "pending",
+          "commit": null,
+          "checkpoint_id": null,
+          "notes": "",
+          "acceptance_criteria": "Both functions exist with correct signatures; PPID walker gated on runtime.GOOS for Linux (/proc) and macOS (ps command); sort orders by LastInteractionTime descending",
+          "files_affected": [
+            "cmd/entire/cli/strategy/pid_matching.go"
+          ],
+          "review_cycles": 0,
+          "max_cycles": 3,
+          "escalated": false
+        },
+        {
+          "id": "task-1-3",
+          "description": "Set state.AgentPID = os.Getppid() in InitializeSession for both new and resumed sessions",
+          "status": "pending",
+          "commit": null,
+          "checkpoint_id": null,
+          "notes": "",
+          "acceptance_criteria": "After InitializeSession, session state file on disk contains non-zero agent_pid field",
+          "files_affected": [
+            "cmd/entire/cli/strategy/manual_commit_hooks.go"
+          ],
+          "review_cycles": 0,
+          "max_cycles": 3,
+          "escalated": false
+        }
+      ],
+      "review_feedback": []
+    },
+    {
+      "id": "phase-2",
+      "name": "Integration and Tests",
+      "status": "pending",
+      "review_cycles": 0,
+      "max_cycles": 3,
+      "escalated": false,
+      "escalation_reason": null,
+      "tasks": [
+        {
+          "id": "task-2-1",
+          "description": "Write unit tests for findSessionByPIDChain and sortSessionsByLastInteraction covering match, no-match, zero-PID, and sort ordering",
+          "status": "pending",
+          "commit": null,
+          "checkpoint_id": null,
+          "notes": "",
+          "acceptance_criteria": "All unit tests pass in pid_matching_test.go",
+          "files_affected": [
+            "cmd/entire/cli/strategy/pid_matching_test.go"
+          ],
+          "review_cycles": 0,
+          "max_cycles": 3,
+          "escalated": false
+        },
+        {
+          "id": "task-2-2",
+          "description": "Update PrepareCommitMsg agent fast-path to use findSessionByPIDChain first then sortSessionsByLastInteraction fallback; update human path to sort sessionsWithContent by LastInteractionTime; add debug logging for which strategy was used",
+          "status": "pending",
+          "commit": null,
+          "checkpoint_id": null,
+          "notes": "",
+          "acceptance_criteria": "With two active sessions, PrepareCommitMsg selects the session whose agent PID is in the hook's ancestor chain; falls back to most-recent-interaction when PID matching unavailable",
+          "files_affected": [
+            "cmd/entire/cli/strategy/manual_commit_hooks.go"
+          ],
+          "review_cycles": 0,
+          "max_cycles": 3,
+          "escalated": false
+        },
+        {
+          "id": "task-2-3",
+          "description": "Write integration test in phase_prepare_commit_msg_test.go creating two concurrent sessions and verifying correct session selection for both PID-match and fallback scenarios",
+          "status": "pending",
+          "commit": null,
+          "checkpoint_id": null,
+          "notes": "",
+          "acceptance_criteria": "Integration tests pass for PID-match and LastInteractionTime-fallback scenarios",
+          "files_affected": [
+            "cmd/entire/cli/strategy/phase_prepare_commit_msg_test.go"
+          ],
+          "review_cycles": 0,
+          "max_cycles": 3,
+          "escalated": false
+        }
+      ],
+      "review_feedback": []
+    },
+    {
+      "id": "phase-3",
+      "name": "Polish",
+      "status": "pending",
+      "review_cycles": 0,
+      "max_cycles": 3,
+      "escalated": false,
+      "escalation_reason": null,
+      "tasks": [
+        {
+          "id": "task-3-1",
+          "description": "Verify FindMostRecentSession correctly selects by LastInteractionTime with concurrent sessions; add test to session_state_test.go if not already covered",
+          "status": "pending",
+          "commit": null,
+          "checkpoint_id": null,
+          "notes": "",
+          "acceptance_criteria": "FindMostRecentSession returns session with most recent LastInteractionTime; test confirms this",
+          "files_affected": [
+            "cmd/entire/cli/strategy/session_state.go",
+            "cmd/entire/cli/strategy/session_state_test.go"
+          ],
+          "review_cycles": 0,
+          "max_cycles": 3,
+          "escalated": false
+        },
+        {
+          "id": "task-3-2",
+          "description": "Update sessions-and-checkpoints.md to document AgentPID field, PID-based matching in PrepareCommitMsg, and LastInteractionTime fallback",
+          "status": "pending",
+          "commit": null,
+          "checkpoint_id": null,
+          "notes": "",
+          "acceptance_criteria": "Documentation accurately describes concurrent session handling",
+          "files_affected": [
+            "docs/architecture/sessions-and-checkpoints.md"
+          ],
+          "review_cycles": 0,
+          "max_cycles": 3,
+          "escalated": false
+        }
+      ],
+      "review_feedback": []
+    }
+  ],
+  "decisions": [],
+  "workflow_owner": null,
+  "audit_log": [],
+  "refine_review_cycles": 0,
+  "refine_review_feedback": "",
+  "plan_review_cycles": 0,
+  "plan_review_feedback": "",
+  "pr": null,
+  "feedback": null,
+  "phase_configs": null,
+  "agent_executions": [
+    {
+      "role": "coder",
+      "status": "complete",
+      "started_at": "2026-02-15T22:50:00.652576Z",
+      "completed_at": "2026-02-15T23:19:10.627875Z",
+      "commit": null,
+      "checkpoint_id": null,
+      "outputs": {},
+      "error": null,
+      "retry_count": 0,
+      "conflicts": []
+    },
+    {
+      "role": "tester",
+      "status": "complete",
+      "started_at": "2026-02-15T23:00:17.700286Z",
+      "completed_at": "2026-02-15T23:07:34.825176Z",
+      "commit": null,
+      "checkpoint_id": null,
+      "outputs": {},
+      "error": null,
+      "retry_count": 0,
+      "conflicts": []
+    },
+    {
+      "role": "documenter",
+      "status": "complete",
+      "started_at": "2026-02-15T23:00:17.700864Z",
+      "completed_at": "2026-02-15T23:04:53.838598Z",
+      "commit": null,
+      "checkpoint_id": null,
+      "outputs": {},
+      "error": null,
+      "retry_count": 0,
+      "conflicts": []
+    },
+    {
+      "role": "integrator",
+      "status": "complete",
+      "started_at": "2026-02-15T23:07:34.830718Z",
+      "completed_at": "2026-02-15T23:12:26.465213Z",
+      "commit": null,
+      "checkpoint_id": null,
+      "outputs": {},
+      "error": null,
+      "retry_count": 0,
+      "conflicts": []
+    },
+    {
+      "role": "reviewer_unified",
+      "status": "complete",
+      "started_at": null,
+      "completed_at": "2026-02-15T23:23:05.371504Z",
+      "commit": null,
+      "checkpoint_id": null,
+      "outputs": {},
+      "error": null,
+      "retry_count": 0,
+      "conflicts": []
+    },
+    {
+      "role": "reviewer_contract",
+      "status": "complete",
+      "started_at": null,
+      "completed_at": "2026-02-15T23:23:43.654698Z",
+      "commit": null,
+      "checkpoint_id": null,
+      "outputs": {},
+      "error": null,
+      "retry_count": 0,
+      "conflicts": []
+    },
+    {
+      "role": "reviewer_code",
+      "status": "complete",
+      "started_at": null,
+      "completed_at": "2026-02-15T23:24:42.635376Z",
+      "commit": null,
+      "checkpoint_id": null,
+      "outputs": {},
+      "error": null,
+      "retry_count": 0,
+      "conflicts": []
+    }
+  ],
+  "multi_agent_config": null
+}

@@ -110,6 +110,7 @@ sequenceDiagram
 
 ### Key Points
 - Agent commits detected by no TTY → fast path adds trailer directly
+- **Concurrent session matching**: With multiple active sessions, PrepareCommitMsg uses PID-chain walking to match the committing session (see [Session Identification via AgentPID](sessions-and-checkpoints.md#session-identification-via-agentpid)). Falls back to `LastInteractionTime` sort for pre-upgrade sessions.
 - **Deferred finalization**: PostCommit saves provisional transcript, HandleTurnEnd updates with full transcript
 - TurnCheckpointIDs tracks mid-turn checkpoints for finalization at stop
 
