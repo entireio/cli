@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/contenthash"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -79,6 +80,18 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 		slog.Int("agent_removed", promptAttr.AgentLinesRemoved),
 		slog.String("session_id", sessionID))
 
+	// Compute content hash for rebase resilience (non-blocking)
+	repoRoot := paths.RepoRootOr(".")
+	contentHash, contentHashErr := contenthash.ComputeContentHashForChanges(&contenthash.FileChanges{
+		Modified: ctx.ModifiedFiles,
+		New:      ctx.NewFiles,
+		Deleted:  ctx.DeletedFiles,
+	}, repoRoot)
+	if contentHashErr != nil {
+		logging.Warn(context.Background(), "failed to compute content hash",
+			slog.String("error", contentHashErr.Error()))
+	}
+
 	// Use WriteTemporary to create the checkpoint
 	isFirstCheckpointOfSession := state.StepCount == 0
 	result, err := store.WriteTemporary(context.Background(), checkpoint.WriteTemporaryOptions{
@@ -94,6 +107,7 @@ func (s *ManualCommitStrategy) SaveChanges(ctx SaveContext) error {
 		AuthorName:        ctx.AuthorName,
 		AuthorEmail:       ctx.AuthorEmail,
 		IsFirstCheckpoint: isFirstCheckpointOfSession,
+		CommitContentHash: contenthash.FormatContentHash(contentHash),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to write temporary checkpoint: %w", err)
@@ -225,6 +239,18 @@ func (s *ManualCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) err
 		ctx.SessionID,
 	)
 
+	// Compute content hash for rebase resilience (non-blocking)
+	repoRoot := paths.RepoRootOr(".")
+	taskContentHash, taskContentHashErr := contenthash.ComputeContentHashForChanges(&contenthash.FileChanges{
+		Modified: ctx.ModifiedFiles,
+		New:      ctx.NewFiles,
+		Deleted:  ctx.DeletedFiles,
+	}, repoRoot)
+	if taskContentHashErr != nil {
+		logging.Warn(context.Background(), "failed to compute content hash for task",
+			slog.String("error", taskContentHashErr.Error()))
+	}
+
 	// Use WriteTemporaryTask to create the checkpoint
 	_, err = store.WriteTemporaryTask(context.Background(), checkpoint.WriteTemporaryTaskOptions{
 		SessionID:              ctx.SessionID,
@@ -245,6 +271,7 @@ func (s *ManualCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) err
 		IncrementalSequence:    ctx.IncrementalSequence,
 		IncrementalType:        ctx.IncrementalType,
 		IncrementalData:        ctx.IncrementalData,
+		CommitContentHash:      contenthash.FormatContentHash(taskContentHash),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to write task checkpoint: %w", err)

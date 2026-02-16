@@ -614,6 +614,36 @@ func (env *TestEnv) GitCheckoutNewBranch(branchName string) {
 	}
 }
 
+// GetDefaultBranch returns the default (initial) branch name.
+// go-git defaults to "master" unless the user's git config specifies init.defaultBranch.
+func (env *TestEnv) GetDefaultBranch() string {
+	env.T.Helper()
+
+	repo, err := git.PlainOpen(env.RepoDir)
+	if err != nil {
+		env.T.Fatalf("failed to open git repo: %v", err)
+	}
+
+	refs, err := repo.Branches()
+	if err != nil {
+		env.T.Fatalf("failed to list branches: %v", err)
+	}
+
+	var defaultBranch string
+	_ = refs.ForEach(func(ref *plumbing.Reference) error {
+		name := ref.Name().Short()
+		if name == "main" || name == "master" {
+			defaultBranch = name
+		}
+		return nil
+	})
+
+	if defaultBranch == "" {
+		env.T.Fatal("could not find default branch (main or master)")
+	}
+	return defaultBranch
+}
+
 // GetCurrentBranch returns the current branch name.
 func (env *TestEnv) GetCurrentBranch() string {
 	env.T.Helper()

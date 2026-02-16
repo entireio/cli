@@ -152,6 +152,10 @@ type WriteTemporaryOptions struct {
 	// IsFirstCheckpoint indicates if this is the first checkpoint of the session
 	// When true, all working directory files are captured (not just modified)
 	IsFirstCheckpoint bool
+
+	// CommitContentHash is a content-based hash of the changed files.
+	// Unlike tree hashes, this survives rebases because it's computed from file content, not git objects.
+	CommitContentHash string
 }
 
 // ReadTemporaryResult contains the result of reading a temporary checkpoint.
@@ -207,6 +211,10 @@ type WriteCommittedOptions struct {
 	// CommitTreeHash is the git tree hash of HEAD at condensation time.
 	// Used as a content-addressable anchor for re-linking after history rewrites (rebase, squash).
 	CommitTreeHash string
+
+	// CommitContentHash is a content-based hash of the changed files.
+	// Unlike tree hashes, this survives rebases because it's computed from file content, not git objects.
+	CommitContentHash string
 
 	// Transcript is the session transcript content (full.jsonl)
 	Transcript []byte
@@ -337,15 +345,16 @@ type SessionContent struct {
 
 // CommittedMetadata contains the metadata stored in metadata.json for each checkpoint.
 type CommittedMetadata struct {
-	CLIVersion       string          `json:"cli_version,omitempty"`
-	CheckpointID     id.CheckpointID `json:"checkpoint_id"`
-	SessionID        string          `json:"session_id"`
-	Strategy         string          `json:"strategy"`
-	CreatedAt        time.Time       `json:"created_at"`
-	Branch           string          `json:"branch,omitempty"`           // Branch where checkpoint was created (empty if detached HEAD)
-	CommitTreeHash   string          `json:"commit_tree_hash,omitempty"` // Git tree hash of HEAD at condensation time
-	CheckpointsCount int             `json:"checkpoints_count"`
-	FilesTouched     []string        `json:"files_touched"`
+	CLIVersion        string          `json:"cli_version,omitempty"`
+	CheckpointID      id.CheckpointID `json:"checkpoint_id"`
+	SessionID         string          `json:"session_id"`
+	Strategy          string          `json:"strategy"`
+	CreatedAt         time.Time       `json:"created_at"`
+	Branch            string          `json:"branch,omitempty"`              // Branch where checkpoint was created (empty if detached HEAD)
+	CommitTreeHash    string          `json:"commit_tree_hash,omitempty"`    // Git tree hash of HEAD at condensation time
+	CommitContentHash string          `json:"commit_content_hash,omitempty"` // Content-based hash of changed files (rebase-resilient)
+	CheckpointsCount  int             `json:"checkpoints_count"`
+	FilesTouched      []string        `json:"files_touched"`
 
 	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
 	Agent agent.AgentType `json:"agent,omitempty"`
@@ -417,15 +426,16 @@ type SessionFilePaths struct {
 //
 //nolint:revive // Named CheckpointSummary to avoid conflict with existing Summary struct
 type CheckpointSummary struct {
-	CLIVersion       string             `json:"cli_version,omitempty"`
-	CheckpointID     id.CheckpointID    `json:"checkpoint_id"`
-	Strategy         string             `json:"strategy"`
-	Branch           string             `json:"branch,omitempty"`
-	CommitTreeHash   string             `json:"commit_tree_hash,omitempty"`
-	CheckpointsCount int                `json:"checkpoints_count"`
-	FilesTouched     []string           `json:"files_touched"`
-	Sessions         []SessionFilePaths `json:"sessions"`
-	TokenUsage       *agent.TokenUsage  `json:"token_usage,omitempty"`
+	CLIVersion        string             `json:"cli_version,omitempty"`
+	CheckpointID      id.CheckpointID    `json:"checkpoint_id"`
+	Strategy          string             `json:"strategy"`
+	Branch            string             `json:"branch,omitempty"`
+	CommitTreeHash    string             `json:"commit_tree_hash,omitempty"`
+	CommitContentHash string             `json:"commit_content_hash,omitempty"`
+	CheckpointsCount  int                `json:"checkpoints_count"`
+	FilesTouched      []string           `json:"files_touched"`
+	Sessions          []SessionFilePaths `json:"sessions"`
+	TokenUsage        *agent.TokenUsage  `json:"token_usage,omitempty"`
 }
 
 // Summary contains AI-generated summary of a checkpoint.
@@ -553,6 +563,10 @@ type WriteTemporaryTaskOptions struct {
 
 	// IncrementalData is the tool_input payload for this checkpoint
 	IncrementalData []byte
+
+	// CommitContentHash is a content-based hash of the changed files.
+	// Unlike tree hashes, this survives rebases because it's computed from file content, not git objects.
+	CommitContentHash string
 }
 
 // TemporaryCheckpointInfo contains information about a single commit on a shadow branch.

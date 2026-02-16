@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/buildinfo"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/contenthash"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -250,6 +251,18 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository
 	// Combine all file changes into FilesTouched (same as manual-commit)
 	filesTouched := mergeFilesTouched(nil, ctx.ModifiedFiles, ctx.NewFiles, ctx.DeletedFiles)
 
+	// Compute content hash for rebase resilience (non-blocking)
+	repoRoot := paths.RepoRootOr(".")
+	contentHash, contentHashErr := contenthash.ComputeContentHashForChanges(&contenthash.FileChanges{
+		Modified: ctx.ModifiedFiles,
+		New:      ctx.NewFiles,
+		Deleted:  ctx.DeletedFiles,
+	}, repoRoot)
+	if contentHashErr != nil {
+		logging.Warn(context.Background(), "failed to compute content hash",
+			slog.String("error", contentHashErr.Error()))
+	}
+
 	// Write committed checkpoint using the checkpoint store
 	err = store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
 		CheckpointID:                checkpointID,
@@ -257,6 +270,7 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository
 		Strategy:                    StrategyNameAutoCommit, // Use new strategy name
 		Branch:                      branchName,
 		CommitTreeHash:              commitTreeHash,
+		CommitContentHash:           contenthash.FormatContentHash(contentHash),
 		MetadataDir:                 ctx.MetadataDirAbs, // Copy all files from metadata dir
 		AuthorName:                  ctx.AuthorName,
 		AuthorEmail:                 ctx.AuthorEmail,
@@ -509,6 +523,19 @@ func (s *AutoCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) error
 		return fmt.Errorf("failed to generate checkpoint ID: %w", err)
 	}
 
+	// Compute content hash for rebase resilience (non-blocking)
+	repoRoot := paths.RepoRootOr(".")
+	taskContentHash, taskContentHashErr := contenthash.ComputeContentHashForChanges(&contenthash.FileChanges{
+		Modified: ctx.ModifiedFiles,
+		New:      ctx.NewFiles,
+		Deleted:  ctx.DeletedFiles,
+	}, repoRoot)
+	if taskContentHashErr != nil {
+		logging.Warn(context.Background(), "failed to compute content hash for task",
+			slog.String("error", taskContentHashErr.Error()))
+	}
+	formattedContentHash := contenthash.FormatContentHash(taskContentHash)
+
 	// Step 1: Commit code changes to active branch with checkpoint ID trailer
 	// We do code first to avoid orphaned metadata if this step fails.
 	_, err = s.commitTaskCodeToActive(repo, ctx, cpID)
@@ -517,7 +544,7 @@ func (s *AutoCommitStrategy) SaveTaskCheckpoint(ctx TaskCheckpointContext) error
 	}
 
 	// Step 2: Commit task metadata to entire/checkpoints/v1 branch at sharded path
-	_, err = s.commitTaskMetadataToMetadataBranch(repo, ctx, cpID)
+	_, err = s.commitTaskMetadataToMetadataBranch(repo, ctx, cpID, formattedContentHash)
 	if err != nil {
 		return fmt.Errorf("failed to commit task metadata to entire/checkpoints/v1 branch: %w", err)
 	}
@@ -619,7 +646,7 @@ func (s *AutoCommitStrategy) commitTaskCodeToActive(repo *git.Repository, ctx Ta
 // Returns the metadata commit hash.
 // When IsIncremental is true, only writes the incremental checkpoint file, skipping transcripts.
 // Uses checkpoint.WriteCommitted for git operations.
-func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(repo *git.Repository, ctx TaskCheckpointContext, checkpointID id.CheckpointID) (plumbing.Hash, error) {
+func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(repo *git.Repository, ctx TaskCheckpointContext, checkpointID id.CheckpointID, contentHash string) (plumbing.Hash, error) {
 	store, err := s.getCheckpointStore()
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to get checkpoint store: %w", err)
@@ -656,6 +683,7 @@ func (s *AutoCommitStrategy) commitTaskMetadataToMetadataBranch(repo *git.Reposi
 		Strategy:               StrategyNameAutoCommit,
 		Branch:                 branchName,
 		CommitTreeHash:         commitTreeHash,
+		CommitContentHash:      contentHash,
 		IsTask:                 true,
 		ToolUseID:              ctx.ToolUseID,
 		AgentID:                ctx.AgentID,

@@ -337,6 +337,7 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 		CreatedAt:                   time.Now().UTC(),
 		Branch:                      opts.Branch,
 		CommitTreeHash:              opts.CommitTreeHash,
+		CommitContentHash:           opts.CommitContentHash,
 		CheckpointsCount:            opts.CheckpointsCount,
 		FilesTouched:                opts.FilesTouched,
 		Agent:                       opts.Agent,
@@ -380,15 +381,16 @@ func (s *GitStore) writeCheckpointSummary(opts WriteCommittedOptions, basePath s
 	}
 
 	summary := CheckpointSummary{
-		CheckpointID:     opts.CheckpointID,
-		CLIVersion:       buildinfo.Version,
-		Strategy:         opts.Strategy,
-		Branch:           opts.Branch,
-		CommitTreeHash:   opts.CommitTreeHash,
-		CheckpointsCount: checkpointsCount,
-		FilesTouched:     filesTouched,
-		Sessions:         sessions,
-		TokenUsage:       tokenUsage,
+		CheckpointID:      opts.CheckpointID,
+		CLIVersion:        buildinfo.Version,
+		Strategy:          opts.Strategy,
+		Branch:            opts.Branch,
+		CommitTreeHash:    opts.CommitTreeHash,
+		CommitContentHash: opts.CommitContentHash,
+		CheckpointsCount:  checkpointsCount,
+		FilesTouched:      filesTouched,
+		Sessions:          sessions,
+		TokenUsage:        tokenUsage,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
