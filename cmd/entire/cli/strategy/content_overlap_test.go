@@ -579,3 +579,255 @@ func createShadowBranchWithContent(t *testing.T, repo *git.Repository, baseCommi
 	err = repo.Storer.SetReference(newRef)
 	require.NoError(t, err)
 }
+
+// TestExtractSignificantLines tests the line extraction with length-based filtering.
+// Lines must be >= 10 characters after trimming whitespace.
+func TestExtractSignificantLines(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		content  string
+		wantKeys []string // lines that should be in the result
+		wantNot  []string // lines that should NOT be in the result
+	}{
+		{
+			name: "go function",
+			content: `package main
+
+func hello() {
+	fmt.Println("hello world")
+	return
+}`,
+			wantKeys: []string{
+				"package main",               // 12 chars
+				"func hello() {",             // 14 chars
+				`fmt.Println("hello world")`, // 26 chars
+			},
+			wantNot: []string{
+				"}",      // 1 char
+				"return", // 6 chars
+			},
+		},
+		{
+			name: "python function",
+			content: `def calculate(x, y):
+    result = x + y
+    print(f"Result: {result}")
+    return result`,
+			wantKeys: []string{
+				"def calculate(x, y):",       // 20 chars
+				"result = x + y",             // 14 chars
+				`print(f"Result: {result}")`, // 25 chars
+				"return result",              // 13 chars
+			},
+			wantNot: []string{},
+		},
+		{
+			name: "javascript",
+			content: `const handler = async (req) => {
+  const data = await fetch(url);
+  return data.json();
+};`,
+			wantKeys: []string{
+				"const handler = async (req) => {", // 32 chars
+				"const data = await fetch(url);",   // 30 chars
+				"return data.json();",              // 19 chars
+			},
+			wantNot: []string{
+				"};", // 2 chars
+			},
+		},
+		{
+			name: "short lines filtered",
+			content: `a = 1
+b = 2
+longVariableName = 42`,
+			wantKeys: []string{
+				"longVariableName = 42", // 21 chars
+			},
+			wantNot: []string{
+				"a = 1", // 5 chars
+				"b = 2", // 5 chars
+			},
+		},
+		{
+			name: "structural lines filtered by length",
+			content: `{
+  });
+  ]);
+  },
+}`,
+			wantKeys: []string{},
+			wantNot: []string{
+				"{",   // 1 char
+				"});", // 3 chars
+				"]);", // 3 chars
+				"},",  // 2 chars
+				"}",   // 1 char
+			},
+		},
+		{
+			name: "regex and special chars kept if long enough",
+			content: `short
+/^[a-z0-9]+@[a-z]+\.[a-z]{2,}$/
+x`,
+			wantKeys: []string{
+				"/^[a-z0-9]+@[a-z]+\\.[a-z]{2,}$/", // 32 chars - kept even though mostly non-alpha
+			},
+			wantNot: []string{
+				"short", // 5 chars
+				"x",     // 1 char
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := extractSignificantLines(tt.content)
+
+			for _, want := range tt.wantKeys {
+				if !result[want] {
+					t.Errorf("extractSignificantLines() missing expected line: %q", want)
+				}
+			}
+
+			for _, notWant := range tt.wantNot {
+				if result[notWant] {
+					t.Errorf("extractSignificantLines() should not contain: %q", notWant)
+				}
+			}
+		})
+	}
+}
+
+// TestHasSignificantContentOverlap tests the content overlap detection logic.
+// We require at least 2 matching significant lines to count as overlap.
+func TestHasSignificantContentOverlap(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		stagedContent string
+		shadowContent string
+		wantOverlap   bool
+	}{
+		{
+			name:          "two matching significant lines - overlap",
+			stagedContent: "this is a significant line\nanother matching line here\nshort",
+			shadowContent: "this is a significant line\nanother matching line here\nother",
+			wantOverlap:   true,
+		},
+		{
+			name:          "only one matching significant line - no overlap",
+			stagedContent: "this is a significant line\ncompletely different staged",
+			shadowContent: "this is a significant line\ncompletely different shadow",
+			wantOverlap:   false,
+		},
+		{
+			name:          "no matching significant lines",
+			stagedContent: "completely different content here",
+			shadowContent: "this is the shadow content now",
+			wantOverlap:   false,
+		},
+		{
+			name:          "both have only short lines - no significant content",
+			stagedContent: "a = 1\nb = 2\nc = 3",
+			shadowContent: "x = 1\ny = 2\nz = 3",
+			wantOverlap:   false,
+		},
+		{
+			name:          "shadow has significant lines but staged has none",
+			stagedContent: "a = 1\nb = 2",
+			shadowContent: "this is significant content from shadow",
+			wantOverlap:   false,
+		},
+		{
+			name:          "staged has significant lines but shadow has none",
+			stagedContent: "this is significant content from staged",
+			shadowContent: "x = 1\ny = 2",
+			wantOverlap:   false,
+		},
+		{
+			name:          "empty strings",
+			stagedContent: "",
+			shadowContent: "",
+			wantOverlap:   false,
+		},
+		{
+			name:          "single shared line like package main - no overlap (boilerplate)",
+			stagedContent: "package main\nfunc NewImplementation() {}",
+			shadowContent: "package main\nfunc OriginalCode() {}",
+			wantOverlap:   false,
+		},
+		{
+			name:          "multiple shared lines - overlap (user kept agent work)",
+			stagedContent: "package main\nfunc SharedFunction() {\nreturn nil",
+			shadowContent: "package main\nfunc SharedFunction() {\nreturn nil",
+			wantOverlap:   true,
+		},
+		{
+			name:          "very small file with single match - overlap (small file exception)",
+			stagedContent: "this is a unique line here\nshort",
+			shadowContent: "this is a unique line here\nshort",
+			wantOverlap:   true, // Shadow has only 1 significant line, so 1 match counts
+		},
+		{
+			name:          "very small file no match - no overlap",
+			stagedContent: "completely different staged content",
+			shadowContent: "short",
+			wantOverlap:   false, // Shadow is very small but no matching lines
+		},
+		{
+			name:          "large staged vs very small shadow with single match - overlap",
+			stagedContent: "line one here\nline two here\nline three here\nshared content line",
+			shadowContent: "shared content line\nshort",
+			wantOverlap:   true, // Shadow has only 1 significant line, so 1 match counts
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := hasSignificantContentOverlap(tt.stagedContent, tt.shadowContent)
+			if got != tt.wantOverlap {
+				t.Errorf("hasSignificantContentOverlap() = %v, want %v", got, tt.wantOverlap)
+			}
+		})
+	}
+}
+
+// TestTrimLine tests whitespace trimming from lines.
+func TestTrimLine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{"no whitespace", "hello", "hello"},
+		{"leading spaces", "   hello", "hello"},
+		{"trailing spaces", "hello   ", "hello"},
+		{"both leading and trailing spaces", "   hello   ", "hello"},
+		{"leading tabs", "\t\thello", "hello"},
+		{"trailing tabs", "hello\t\t", "hello"},
+		{"mixed whitespace", " \t hello \t ", "hello"},
+		{"only spaces", "     ", ""},
+		{"only tabs", "\t\t\t", ""},
+		{"empty string", "", ""},
+		{"spaces in middle preserved", "hello world", "hello world"},
+		{"tabs in middle preserved", "hello\tworld", "hello\tworld"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := trimLine(tt.line)
+			if got != tt.want {
+				t.Errorf("trimLine(%q) = %q, want %q", tt.line, got, tt.want)
+			}
+		})
+	}
+}

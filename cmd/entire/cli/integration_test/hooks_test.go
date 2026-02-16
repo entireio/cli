@@ -125,6 +125,106 @@ func TestSession_CreateTranscript(t *testing.T) {
 	})
 }
 
+// TestHookRunner_SimulateStop_SubagentOnlyChanges tests that the stop hook correctly
+// creates a checkpoint when ONLY subagents (spawned via Task tool) modify files.
+// This is a regression test for ENT-297 where subagent file modifications were invisible
+// to checkpoint detection because ExtractModifiedFiles only looked at the main transcript.
+// The fix (ExtractAllModifiedFiles) also reads subagent transcript files.
+func TestHookRunner_SimulateStop_SubagentOnlyChanges(t *testing.T) {
+	t.Parallel()
+	RunForAllStrategiesWithRepoEnv(t, func(t *testing.T, env *TestEnv, strategyName string) {
+		// Create a session
+		session := env.NewSession()
+
+		// Simulate user prompt submit first (captures pre-prompt state)
+		err := env.SimulateUserPromptSubmit(session.ID)
+		if err != nil {
+			t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+		}
+
+		// Record initial state for comparison
+		commitsBefore := env.GetGitLog()
+
+		// Create a file on disk (simulating what a subagent would write)
+		env.WriteFile("subagent_output.go", "package main\n\nfunc SubagentWork() {}\n")
+
+		// Build the main transcript manually. The main transcript contains ONLY
+		// a Task tool call (no Write/Edit). All file modifications happened in
+		// the subagent.
+		mainTranscript := NewTranscriptBuilder()
+		mainTranscript.AddUserMessage("Create a function in a new file")
+		mainTranscript.AddAssistantMessage("I'll delegate this to a subagent.")
+
+		// Add Task tool use
+		taskToolUseID := mainTranscript.AddTaskToolUse("", "Create the function")
+
+		// Add Task tool result with agentId
+		agentID := "sub123abc"
+		mainTranscript.AddTaskToolResult(taskToolUseID, agentID)
+
+		mainTranscript.AddAssistantMessage("The subagent completed the task.")
+
+		// Write the main transcript
+		if err := mainTranscript.WriteToFile(session.TranscriptPath); err != nil {
+			t.Fatalf("failed to write main transcript: %v", err)
+		}
+
+		// Create the subagent transcript file in the directory structure the Stop hook expects:
+		// <transcriptDir>/<modelSessionID>/subagents/agent-<agentID>.jsonl
+		transcriptDir := filepath.Dir(session.TranscriptPath)
+		subagentsDir := filepath.Join(transcriptDir, session.ID, "subagents")
+		subagentTranscriptPath := filepath.Join(subagentsDir, "agent-"+agentID+".jsonl")
+
+		// Build the subagent transcript with Write tool calls
+		subagentTranscript := NewTranscriptBuilder()
+		subagentTranscript.AddUserMessage("Create a function in a new file")
+		absFilePath := filepath.Join(env.RepoDir, "subagent_output.go")
+		toolID := subagentTranscript.AddToolUse("Write", absFilePath, "package main\n\nfunc SubagentWork() {}\n")
+		subagentTranscript.AddToolResult(toolID)
+		subagentTranscript.AddAssistantMessage("Done, I created the function.")
+
+		if err := subagentTranscript.WriteToFile(subagentTranscriptPath); err != nil {
+			t.Fatalf("failed to write subagent transcript: %v", err)
+		}
+
+		// Simulate stop - this should NOT error and should create a checkpoint
+		err = env.SimulateStop(session.ID, session.TranscriptPath)
+		if err != nil {
+			t.Fatalf("SimulateStop failed: %v", err)
+		}
+
+		// Verify checkpoint was created based on strategy type
+		switch strategyName {
+		case strategy.StrategyNameAutoCommit:
+			// Auto-commit creates a new commit on the active branch
+			commitsAfter := env.GetGitLog()
+			if len(commitsAfter) <= len(commitsBefore) {
+				t.Errorf("auto-commit: expected new commit to be created; commits before=%d, after=%d",
+					len(commitsBefore), len(commitsAfter))
+			}
+
+		case strategy.StrategyNameManualCommit:
+			// Manual-commit stores checkpoint data on the shadow branch
+			shadowBranch := env.GetShadowBranchName()
+			if !env.BranchExists(shadowBranch) {
+				t.Errorf("manual-commit: shadow branch %s should exist after checkpoint", shadowBranch)
+			}
+
+			// Verify session state was updated with checkpoint count
+			state, stateErr := env.GetSessionState(session.ID)
+			if stateErr != nil {
+				t.Fatalf("failed to get session state: %v", stateErr)
+			}
+			if state == nil {
+				t.Fatal("manual-commit: session state should exist after checkpoint")
+			}
+			if state.StepCount == 0 {
+				t.Error("manual-commit: session state should have non-zero step count")
+			}
+		}
+	})
+}
+
 // TestUserPromptSubmit_ReinstallsOverwrittenHooks verifies that EnsureSetup is called
 // during user-prompt-submit (start of turn) and reinstalls hooks that were overwritten
 // by third-party tools like lefthook. This ensures hooks are in place before any

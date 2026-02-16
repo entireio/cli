@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -2141,7 +2142,7 @@ func TestScopeTranscriptForCheckpoint_SlicesTranscript(t *testing.T) {
 	scoped := scopeTranscriptForCheckpoint(fullTranscript, 2, agent.AgentTypeClaudeCode)
 
 	// Parse the scoped transcript to verify content
-	lines, err := parseTranscriptFromBytes(scoped)
+	lines, err := transcript.ParseFromBytes(scoped)
 	if err != nil {
 		t.Fatalf("failed to parse scoped transcript: %v", err)
 	}
@@ -2162,14 +2163,14 @@ func TestScopeTranscriptForCheckpoint_SlicesTranscript(t *testing.T) {
 }
 
 func TestScopeTranscriptForCheckpoint_ZeroLinesReturnsAll(t *testing.T) {
-	transcript := []byte(`{"type":"user","uuid":"u1","message":{"content":"prompt 1"}}
+	transcriptData := []byte(`{"type":"user","uuid":"u1","message":{"content":"prompt 1"}}
 {"type":"user","uuid":"u2","message":{"content":"prompt 2"}}
 `)
 
 	// With linesAtStart=0, should return full transcript
-	scoped := scopeTranscriptForCheckpoint(transcript, 0, agent.AgentTypeClaudeCode)
+	scoped := scopeTranscriptForCheckpoint(transcriptData, 0, agent.AgentTypeClaudeCode)
 
-	lines, err := parseTranscriptFromBytes(scoped)
+	lines, err := transcript.ParseFromBytes(scoped)
 	if err != nil {
 		t.Fatalf("failed to parse scoped transcript: %v", err)
 	}

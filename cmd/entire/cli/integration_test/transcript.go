@@ -140,7 +140,7 @@ func (b *TranscriptBuilder) AddTaskToolResult(toolUseID, agentID string) string 
 				{
 					"type":        "tool_result",
 					"tool_use_id": toolUseID,
-					"content":     "Task completed by agent " + agentID,
+					"content":     "agentId: " + agentID,
 				},
 			},
 		},

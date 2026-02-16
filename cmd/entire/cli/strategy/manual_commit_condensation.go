@@ -110,7 +110,7 @@ func (s *ManualCommitStrategy) getCheckpointLog(checkpointID id.CheckpointID) ([
 //
 // For mid-session commits (no Stop/SaveChanges called yet), the shadow branch may not exist.
 // In this case, data is extracted from the live transcript instead.
-func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointID id.CheckpointID, state *SessionState) (*CondenseResult, error) {
+func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointID id.CheckpointID, state *SessionState, committedFiles map[string]struct{}) (*CondenseResult, error) {
 	// Get shadow branch (may not exist for mid-session commits)
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
@@ -139,6 +139,32 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		sessionData, err = s.extractSessionDataFromLiveTranscript(state)
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session data from live transcript: %w", err)
+		}
+	}
+
+	// For 1:1 checkpoint model: filter files_touched to only include files actually
+	// committed in this specific commit. This ensures each checkpoint represents
+	// exactly the files in that commit, not all files mentioned in the transcript.
+	if len(committedFiles) > 0 {
+		if len(sessionData.FilesTouched) > 0 {
+			// Filter to intersection of transcript-extracted files and committed files
+			filtered := make([]string, 0, len(sessionData.FilesTouched))
+			for _, f := range sessionData.FilesTouched {
+				if _, ok := committedFiles[f]; ok {
+					filtered = append(filtered, f)
+				}
+			}
+			sessionData.FilesTouched = filtered
+		}
+
+		// If extraction failed or returned empty, use committedFiles as fallback.
+		// This handles mid-session commits where transcript parsing may not find files
+		// but we know what was committed.
+		if len(sessionData.FilesTouched) == 0 {
+			sessionData.FilesTouched = make([]string, 0, len(committedFiles))
+			for f := range committedFiles {
+				sessionData.FilesTouched = append(sessionData.FilesTouched, f)
+			}
 		}
 	}
 
@@ -410,34 +436,8 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(state *Sessi
 	if len(state.FilesTouched) > 0 {
 		data.FilesTouched = state.FilesTouched
 	} else {
-		// Extract modified files from transcript
-		ag, agErr := agent.GetByAgentType(state.AgentType)
-		if agErr == nil {
-			if analyzer, ok := ag.(agent.TranscriptAnalyzer); ok {
-				modifiedFiles, _, extractErr := analyzer.ExtractModifiedFilesFromOffset(state.TranscriptPath, state.CheckpointTranscriptStart)
-				if extractErr == nil && len(modifiedFiles) > 0 {
-					// Normalize to repo-relative paths
-					basePath := state.WorktreePath
-					if basePath == "" {
-						if wp, wpErr := GetWorktreePath(); wpErr == nil {
-							basePath = wp
-						}
-					}
-					if basePath != "" {
-						normalized := make([]string, 0, len(modifiedFiles))
-						for _, f := range modifiedFiles {
-							if rel := paths.ToRelativePath(f, basePath); rel != "" {
-								normalized = append(normalized, rel)
-							} else {
-								normalized = append(normalized, f)
-							}
-						}
-						modifiedFiles = normalized
-					}
-					data.FilesTouched = modifiedFiles
-				}
-			}
-		}
+		// Use the shared helper which includes subagent transcripts
+		data.FilesTouched = s.extractModifiedFilesFromLiveTranscript(state, state.CheckpointTranscriptStart)
 	}
 
 	// Calculate token usage from the extracted transcript portion
@@ -534,7 +534,7 @@ func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int
 	}
 
 	// Claude Code and other JSONL-based agents
-	lines, err := claudecode.ParseTranscript(data)
+	lines, err := transcript.ParseFromBytes(data)
 	if err != nil || len(lines) == 0 {
 		return &agent.TokenUsage{}
 	}
@@ -674,7 +674,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(sessionID string) error {
 	}
 
 	// Condense the session
-	result, err := s.CondenseSession(repo, checkpointID, state)
+	result, err := s.CondenseSession(repo, checkpointID, state, nil)
 	if err != nil {
 		return fmt.Errorf("failed to condense session: %w", err)
 	}

@@ -95,3 +95,20 @@ var PromptCommitChanges = PromptTemplate{
 Use git add and git commit commands.`,
 	ExpectedFiles: []string{},
 }
+
+// PromptUseTaskTool instructs Claude to use the Task tool to spawn a subagent.
+// This is used to test subagent/task checkpoint creation.
+var PromptUseTaskTool = PromptTemplate{
+	Name: "UseTaskTool",
+	Prompt: `You MUST use the Task tool to delegate the following work to a subagent.
+Do NOT do the work yourself - you MUST spawn a subagent using the Task tool.
+
+Task to delegate: Create a file called "subagent_output.txt" containing the text "Created by subagent".
+
+Requirements:
+- Use the Task tool with subagent_type="Bash" or subagent_type="general-purpose"
+- The subagent should create the file
+- Wait for the subagent to complete
+- Do not create any other files yourself`,
+	ExpectedFiles: []string{"subagent_output.txt"},
+}

@@ -15,7 +15,8 @@ This repo contains the CLI for Entire.
 - `entire/cli/strategy`: strategy implementations - see section below
 - `entire/cli/checkpoint`: checkpoint storage abstractions (temporary and committed)
 - `entire/cli/session`: session state management
-- `entire/cli/integration_test`: integration tests
+- `entire/cli/integration_test`: integration tests (simulated hooks)
+- `entire/cli/e2e_test`: E2E tests with real agent calls (see E2E Tests section)
 
 ## Tech Stack
 
@@ -41,6 +42,30 @@ mise run test:ci
 ```
 
 Integration tests use the `//go:build integration` build tag and are located in `cmd/entire/cli/integration_test/`.
+
+### Running E2E Tests (Only When Explicitly Requested)
+
+**IMPORTANT: Do NOT run E2E tests proactively.** E2E tests make real API calls to Claude Code, which consume tokens and cost money. Only run them when the user explicitly asks for E2E testing.
+
+```bash
+# Requires Claude Code to be installed and authenticated
+E2E_AGENT=claude-code go test -tags=e2e ./cmd/entire/cli/e2e_test/...
+
+# Run a specific test
+E2E_AGENT=claude-code go test -tags=e2e -run TestE2E_BasicWorkflow ./cmd/entire/cli/e2e_test/...
+```
+
+E2E tests:
+- Use the `//go:build e2e` build tag
+- Located in `cmd/entire/cli/e2e_test/`
+- Test real agent interactions (Claude Code creating files, committing, etc.)
+- Validate checkpoint scenarios documented in `docs/architecture/checkpoint-scenarios.md`
+- Support multiple agents via `E2E_AGENT` env var (currently `claude-code`, `gemini-cli` stub)
+
+**Environment variables:**
+- `E2E_AGENT` - Agent to test with (default: `claude-code`)
+- `E2E_CLAUDE_MODEL` - Claude model to use (default: `haiku` for cost efficiency)
+- `E2E_TIMEOUT` - Timeout per prompt (default: `2m`)
 
 ### Test Parallelization
 

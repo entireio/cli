@@ -172,12 +172,12 @@ func TestPostCommit_RebaseDuringActive_SkipsTransition(t *testing.T) {
 		"shadow branch should be preserved during rebase")
 }
 
-// TestPostCommit_ShadowBranch_PreservedWhenUncondensedActiveSessionExists verifies that
-// the shadow branch is preserved when an ACTIVE session that was NOT condensed
-// (e.g., it has no new content) still shares the branch with another session.
-// Both sessions condense immediately on GitCommit, but the branch is only deleted
-// when ALL sessions on it have been condensed.
-func TestPostCommit_ShadowBranch_PreservedWhenUncondensedActiveSessionExists(t *testing.T) {
+// TestPostCommit_ActiveSessionAlwaysCondenses verifies that an ACTIVE session
+// is always condensed on GitCommit, even when it has no checkpoints or tracked files.
+// This is because PrepareCommitMsg already validated the trailer, so PostCommit
+// trusts that decision rather than re-validating via transcript analysis (which is
+// unreliable when subagents are still running).
+func TestPostCommit_ActiveSessionAlwaysCondenses(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
@@ -206,8 +206,8 @@ func TestPostCommit_ShadowBranch_PreservedWhenUncondensedActiveSessionExists(t *
 
 	// Create a second session with the SAME base commit and worktree (concurrent session).
 	// This session is ACTIVE but has NO checkpoints (StepCount=0, no shadow branch content).
-	// Because it has no new content, it will NOT be condensed, and its shadow branch must
-	// be preserved so it can save checkpoints later.
+	// Despite having no content, it WILL be condensed because ACTIVE sessions always
+	// condense — PrepareCommitMsg already validated the trailer.
 	now := time.Now()
 	activeState := &SessionState{
 		SessionID:           activeSessionID,
@@ -237,23 +237,23 @@ func TestPostCommit_ShadowBranch_PreservedWhenUncondensedActiveSessionExists(t *
 	assert.Equal(t, session.PhaseActive, activeState.Phase,
 		"ACTIVE session should stay ACTIVE after GitCommit")
 
-	// Verify the IDLE session actually condensed (entire/checkpoints/v1 branch should exist)
+	// Verify both sessions condensed (entire/checkpoints/v1 branch should exist)
 	idleState, err = s.loadSessionState(idleSessionID)
 	require.NoError(t, err)
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after IDLE session condensation")
+	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensation")
 	require.NotNil(t, sessionsRef)
 
 	// Verify IDLE session's StepCount was reset by condensation
 	assert.Equal(t, 0, idleState.StepCount,
 		"IDLE session StepCount should be reset after condensation")
 
-	// Verify shadow branch is preserved because the ACTIVE session was not condensed
-	// (it had no new content) and still needs the branch for future checkpoints.
+	// Verify shadow branch is cleaned up because ALL sessions condensed
+	// (both IDLE and ACTIVE were condensed on this commit)
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
 	_, err = repo.Reference(refName, true)
-	assert.NoError(t, err,
-		"shadow branch should be preserved when an uncondensed active session still exists on it")
+	assert.Error(t, err,
+		"shadow branch should be deleted when all sessions have been condensed")
 }
 
 // TestPostCommit_CondensationFailure_PreservesShadowBranch verifies that when

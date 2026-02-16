@@ -9,14 +9,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
 // AgentNameClaudeCode is the name for Claude Code agent.
 const AgentNameClaudeCode = "claude-code"
 
-// AgentNameGeminiCLI is the name for Gemini CLI agent.
-const AgentNameGeminiCLI = "gemini-cli"
+// AgentNameGemini is the name for Gemini CLI agent.
+const AgentNameGemini = "gemini"
 
 // AgentRunner abstracts invoking a coding agent for e2e tests.
 // This follows the multi-agent pattern from cmd/entire/cli/agent/agent.go.
@@ -55,7 +56,7 @@ func NewAgentRunner(name string, config AgentRunnerConfig) AgentRunner {
 	switch name {
 	case AgentNameClaudeCode:
 		return NewClaudeCodeRunner(config)
-	case AgentNameGeminiCLI:
+	case AgentNameGemini:
 		return NewGeminiCLIRunner(config)
 	default:
 		// Return a runner that reports as unavailable
@@ -200,25 +201,43 @@ func (r *ClaudeCodeRunner) RunPromptWithTools(ctx context.Context, workDir strin
 }
 
 // GeminiCLIRunner implements AgentRunner for Gemini CLI.
-// This is a placeholder for future implementation.
+// See: https://github.com/google-gemini/gemini-cli
 type GeminiCLIRunner struct {
+	Model   string
 	Timeout time.Duration
 }
 
 // NewGeminiCLIRunner creates a new Gemini CLI runner with the given config.
 func NewGeminiCLIRunner(config AgentRunnerConfig) *GeminiCLIRunner {
+	model := config.Model
+	if model == "" {
+		model = os.Getenv("E2E_GEMINI_MODEL")
+		// Default to gemini-2.5-flash if not specified
+		if model == "" {
+			model = "gemini-2.5-flash"
+		}
+	}
+
 	timeout := config.Timeout
 	if timeout == 0 {
-		timeout = 2 * time.Minute
+		if envTimeout := os.Getenv("E2E_TIMEOUT"); envTimeout != "" {
+			if parsed, err := time.ParseDuration(envTimeout); err == nil {
+				timeout = parsed
+			}
+		}
+		if timeout == 0 {
+			timeout = 2 * time.Minute
+		}
 	}
 
 	return &GeminiCLIRunner{
+		Model:   model,
 		Timeout: timeout,
 	}
 }
 
 func (r *GeminiCLIRunner) Name() string {
-	return AgentNameGeminiCLI
+	return AgentNameGemini
 }
 
 // IsAvailable checks if Gemini CLI is installed and authenticated.
@@ -228,7 +247,7 @@ func (r *GeminiCLIRunner) IsAvailable() (bool, error) {
 		return false, fmt.Errorf("gemini CLI not found in PATH: %w", err)
 	}
 
-	// Check if gemini is working
+	// Check if gemini is working (--version doesn't require auth)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -244,8 +263,64 @@ func (r *GeminiCLIRunner) RunPrompt(ctx context.Context, workDir string, prompt 
 	return r.RunPromptWithTools(ctx, workDir, prompt, nil)
 }
 
-func (r *GeminiCLIRunner) RunPromptWithTools(_ context.Context, _ string, _ string, _ []string) (*AgentResult, error) {
-	// Gemini CLI implementation would go here
-	// For now, return an error indicating it's not fully implemented
-	return nil, errors.New("gemini CLI runner not yet implemented")
+func (r *GeminiCLIRunner) RunPromptWithTools(ctx context.Context, workDir string, prompt string, tools []string) (*AgentResult, error) {
+	// Build command: gemini -m <model> -p "<prompt>" --approval-mode auto_edit --allowed-tools <tools>
+	// --approval-mode auto_edit: auto-approves edit tools (write_file, replace) while prompting for others
+	// --allowed-tools: comma-separated list of tools that bypass confirmation (e.g., git commands)
+	args := []string{
+		"-m", r.Model,
+		"-p", prompt,
+		"--approval-mode", "auto_edit",
+	}
+
+	// Add default git tools that should be allowed without confirmation
+	defaultAllowedTools := []string{
+		"ShellTool(git status)",
+		"ShellTool(git add)",
+		"ShellTool(git commit)",
+		"ShellTool(git diff)",
+		"ShellTool(git log)",
+	}
+
+	// Merge with any additional tools passed in
+	allTools := append(defaultAllowedTools, tools...)
+	if len(allTools) > 0 {
+		args = append(args, "--allowed-tools", strings.Join(allTools, ","))
+	}
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
+	defer cancel()
+
+	//nolint:gosec // args are constructed from trusted config, not user input
+	cmd := exec.CommandContext(ctx, "gemini", args...)
+	cmd.Dir = workDir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	start := time.Now()
+	err := cmd.Run()
+	duration := time.Since(start)
+
+	result := &AgentResult{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		Duration: duration,
+	}
+
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			result.ExitCode = -1
+		}
+		//nolint:wrapcheck // error is from exec.Run, caller can check ExitCode in result
+		return result, err
+	}
+
+	result.ExitCode = 0
+	return result, nil
 }

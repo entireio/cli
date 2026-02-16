@@ -42,3 +42,13 @@ git config gc.auto 0
 ```
 
 **Tracked in:** [ENT-241](https://linear.app/entirehq/issue/ENT-241)
+
+### Concurrent ACTIVE Sessions May Produce Spurious Checkpoints
+
+When multiple sessions are ACTIVE in the same directory and one session's agent (or subagent) makes a commit, **all** ACTIVE sessions are condensed — including sessions that didn't contribute to the commit. This can produce checkpoint entries with minimal content (e.g., just the initial prompt) linked to a commit the session didn't work on.
+
+**Why:** PostCommit sets `hasNew=true` for all ACTIVE sessions. We cannot re-validate via transcript analysis because subagent file modifications live in a separate transcript from the main agent's. Attempting to re-validate causes subagent commits to skip condensation entirely (data loss), which is worse than a spurious empty checkpoint.
+
+**Impact:** Cosmetic — extra metadata entries on `entire/checkpoints/v1` with minimal content. No data loss or corruption.
+
+**Workaround:** Use separate git worktrees for concurrent sessions. Each worktree gets its own shadow branch namespace, so sessions in different worktrees don't interfere.

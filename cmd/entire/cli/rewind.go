@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/transcript"
 
 	"github.com/charmbracelet/huh"
 	"github.com/go-git/go-git/v5"
@@ -746,7 +747,7 @@ func resolveTranscriptPath(sessionID string, agent agentpkg.Agent) (string, erro
 // restoreTaskCheckpointTranscript restores a truncated transcript for a task checkpoint.
 // Uses GetTaskCheckpointTranscript to fetch the transcript from the strategy.
 //
-// NOTE: The transcript parsing/truncation/writing pipeline (parseTranscriptFromBytes,
+// NOTE: The transcript parsing/truncation/writing pipeline (transcript.ParseFromBytes,
 // TruncateTranscriptAtUUID, writeTranscript) assumes Claude's JSONL format.
 // This is acceptable because task checkpoints are currently only created by Claude Code's
 // PostToolUse hook. If other agents gain sub-agent support, this will need a
@@ -759,13 +760,13 @@ func restoreTaskCheckpointTranscript(strat strategy.Strategy, point strategy.Rew
 	}
 
 	// Parse the transcript
-	transcript, err := parseTranscriptFromBytes(content)
+	parsed, err := transcript.ParseFromBytes(content)
 	if err != nil {
 		return fmt.Errorf("failed to parse transcript: %w", err)
 	}
 
 	// Truncate at checkpoint UUID
-	truncated := TruncateTranscriptAtUUID(transcript, checkpointUUID)
+	truncated := TruncateTranscriptAtUUID(parsed, checkpointUUID)
 
 	sessionFile, err := resolveTranscriptPath(sessionID, agent)
 	if err != nil {

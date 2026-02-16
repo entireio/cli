@@ -12,13 +12,6 @@ import (
 	"testing"
 )
 
-// testBinaryPath holds the path to the CLI binary built once in TestMain.
-// All tests share this binary to avoid repeated builds.
-var testBinaryPath string
-
-// defaultAgent holds the agent to test with, determined in TestMain.
-var defaultAgent string
-
 // TestMain builds the CLI binary once and checks agent availability before running tests.
 func TestMain(m *testing.M) {
 	// Determine which agent to test with
@@ -74,15 +67,6 @@ func TestMain(m *testing.M) {
 	os.Setenv("PATH", origPath)
 	os.RemoveAll(tmpDir)
 	os.Exit(code)
-}
-
-// getTestBinary returns the path to the shared test binary.
-// It panics if TestMain hasn't run (testBinaryPath is empty).
-func getTestBinary() string {
-	if testBinaryPath == "" {
-		panic("testBinaryPath not set - TestMain must run before tests")
-	}
-	return testBinaryPath
 }
 
 // findModuleRoot finds the Go module root by walking up from the current file.

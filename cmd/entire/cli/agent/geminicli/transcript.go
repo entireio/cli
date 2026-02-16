@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
@@ -28,6 +29,55 @@ type GeminiMessage struct {
 	Type      string           `json:"type"`         // MessageTypeUser or MessageTypeGemini
 	Content   string           `json:"content,omitempty"`
 	ToolCalls []GeminiToolCall `json:"toolCalls,omitempty"`
+}
+
+// UnmarshalJSON handles both string and array content formats in Gemini transcripts.
+// User messages use: "content": [{"text": "..."}] (array of objects)
+// Gemini messages use: "content": "response text" (string)
+func (m *GeminiMessage) UnmarshalJSON(data []byte) error {
+	// Use an alias to avoid infinite recursion
+	type Alias GeminiMessage
+	aux := &struct {
+		*Alias
+
+		Content json.RawMessage `json:"content,omitempty"`
+	}{
+		Alias: (*Alias)(m),
+	}
+
+	if err := json.Unmarshal(data, aux); err != nil {
+		return fmt.Errorf("failed to unmarshal message: %w", err)
+	}
+
+	if len(aux.Content) == 0 || string(aux.Content) == "null" {
+		m.Content = ""
+		return nil
+	}
+
+	// Try string first (most common for gemini messages)
+	var strContent string
+	if err := json.Unmarshal(aux.Content, &strContent); err == nil {
+		m.Content = strContent
+		return nil
+	}
+
+	// Try array of objects with "text" fields (user messages)
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(aux.Content, &parts); err == nil {
+		var texts []string
+		for _, p := range parts {
+			if p.Text != "" {
+				texts = append(texts, p.Text)
+			}
+		}
+		m.Content = strings.Join(texts, "\n")
+		return nil
+	}
+
+	// Unknown format - leave content empty
+	return nil
 }
 
 // GeminiToolCall represents a tool call in a gemini message

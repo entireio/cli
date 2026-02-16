@@ -1,6 +1,5 @@
 {
   "hooks": {
-    "enabled": true,
     "SessionStart": [
       {
         "hooks": [
