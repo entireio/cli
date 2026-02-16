@@ -26,13 +26,22 @@ import (
 func findSessionByPIDChain(sessions []*SessionState) *SessionState {
 	// Build a set of agent PIDs for O(1) lookup.
 	// If multiple sessions share the same PID (shouldn't happen in practice — an agent
-	// process can only own one session), the last one in the slice wins (map overwrite).
+	// process can only own one session), keep the most recently interacted one so the
+	// result is deterministic regardless of input slice order.
 	pidToSession := make(map[int]*SessionState)
 	for _, s := range sessions {
 		if s.AgentPID == 0 {
 			continue // Skip pre-upgrade sessions
 		}
-		pidToSession[s.AgentPID] = s
+		if existing, ok := pidToSession[s.AgentPID]; ok {
+			// Duplicate PID: keep the session with the more recent LastInteractionTime
+			if s.LastInteractionTime != nil &&
+				(existing.LastInteractionTime == nil || s.LastInteractionTime.After(*existing.LastInteractionTime)) {
+				pidToSession[s.AgentPID] = s
+			}
+		} else {
+			pidToSession[s.AgentPID] = s
+		}
 	}
 	if len(pidToSession) == 0 {
 		return nil

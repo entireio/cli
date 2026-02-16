@@ -102,26 +102,37 @@ func TestGetParentPID_InvalidPID(t *testing.T) {
 // ============================================================================
 
 // TestFindSessionByPIDChain_DuplicatePIDs verifies that when multiple sessions
-// share the same AgentPID, the first one in the list is returned (map iteration
-// order means last-wins for map building, so last session with the same PID wins).
+// share the same AgentPID, the one with the most recent LastInteractionTime wins,
+// regardless of slice position.
 func TestFindSessionByPIDChain_DuplicatePIDs(t *testing.T) {
 	t.Parallel()
 	myPID := os.Getpid()
 
+	older := time.Now().Add(-10 * time.Minute)
+	newer := time.Now()
+
 	sessionA := &SessionState{
-		SessionID: "session-dup-a",
-		AgentPID:  myPID,
+		SessionID:           "session-dup-a",
+		AgentPID:            myPID,
+		LastInteractionTime: &newer, // More recent
 	}
 	sessionB := &SessionState{
-		SessionID: "session-dup-b",
-		AgentPID:  myPID, // Same PID as session A
+		SessionID:           "session-dup-b",
+		AgentPID:            myPID, // Same PID as session A
+		LastInteractionTime: &older,
 	}
 
+	// Session A is first in slice and has newer time — should win
 	result := findSessionByPIDChain([]*SessionState{sessionA, sessionB})
 	require.NotNil(t, result, "should find a session matching the current PID")
-	// When building pidToSession map, the last session with the same PID wins
-	assert.Equal(t, "session-dup-b", result.SessionID,
-		"when duplicate PIDs exist, the last session in the list wins (map overwrite)")
+	assert.Equal(t, "session-dup-a", result.SessionID,
+		"when duplicate PIDs exist, the session with the most recent LastInteractionTime wins")
+
+	// Reverse slice order — session A should STILL win (deterministic, not order-dependent)
+	result = findSessionByPIDChain([]*SessionState{sessionB, sessionA})
+	require.NotNil(t, result, "should find a session matching the current PID")
+	assert.Equal(t, "session-dup-a", result.SessionID,
+		"result should be deterministic regardless of input slice order")
 }
 
 // TestFindSessionByPIDChain_AllZeroPIDs verifies that when all sessions have
