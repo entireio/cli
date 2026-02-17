@@ -41,7 +41,7 @@ func TestPersistentPostRun_ParentHiddenWalk(t *testing.T) {
 	tests := []struct {
 		name       string
 		buildTree  func() *cobra.Command // returns the leaf command to test
-		wantHidden bool
+		wantSkip   bool
 	}{
 		{
 			name: "leaf hidden",
@@ -51,7 +51,7 @@ func TestPersistentPostRun_ParentHiddenWalk(t *testing.T) {
 				root.AddCommand(child)
 				return child
 			},
-			wantHidden: true,
+			wantSkip: true,
 		},
 		{
 			name: "parent hidden, leaf visible",
@@ -63,7 +63,7 @@ func TestPersistentPostRun_ParentHiddenWalk(t *testing.T) {
 				parent.AddCommand(leaf)
 				return leaf
 			},
-			wantHidden: true,
+			wantSkip: true,
 		},
 		{
 			name: "grandparent hidden, leaf visible",
@@ -77,7 +77,7 @@ func TestPersistentPostRun_ParentHiddenWalk(t *testing.T) {
 				parent.AddCommand(leaf)
 				return leaf
 			},
-			wantHidden: true,
+			wantSkip: true,
 		},
 		{
 			name: "no hidden ancestor",
@@ -89,7 +89,17 @@ func TestPersistentPostRun_ParentHiddenWalk(t *testing.T) {
 				parent.AddCommand(leaf)
 				return leaf
 			},
-			wantHidden: false,
+			wantSkip: false,
+		},
+		{
+			name: "completion command",
+			buildTree: func() *cobra.Command {
+				root := &cobra.Command{Use: "root"}
+				completion := &cobra.Command{Use: "completion"}
+				root.AddCommand(completion)
+				return completion
+			},
+			wantSkip: true,
 		},
 	}
 
@@ -98,17 +108,9 @@ func TestPersistentPostRun_ParentHiddenWalk(t *testing.T) {
 			t.Parallel()
 			cmd := tt.buildTree()
 
-			// Replicate the parent-walk logic from PersistentPostRun
-			gotHidden := false
-			for c := cmd; c != nil; c = c.Parent() {
-				if c.Hidden {
-					gotHidden = true
-					break
-				}
-			}
-
-			if gotHidden != tt.wantHidden {
-				t.Errorf("isHidden = %v, want %v", gotHidden, tt.wantHidden)
+			gotSkip := shouldSkipPersistentPostRun(cmd)
+			if gotSkip != tt.wantSkip {
+				t.Errorf("shouldSkipPersistentPostRun() = %v, want %v", gotSkip, tt.wantSkip)
 			}
 		})
 	}

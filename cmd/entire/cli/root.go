@@ -39,11 +39,8 @@ func NewRootCmd() *cobra.Command {
 			HiddenDefaultCmd: true,
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
-			// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)
-			for c := cmd; c != nil; c = c.Parent() {
-				if c.Hidden {
-					return
-				}
+			if shouldSkipPersistentPostRun(cmd) {
+				return
 			}
 
 			// Load settings once for telemetry and version check
@@ -90,6 +87,17 @@ func NewRootCmd() *cobra.Command {
 	cmd.SetHelpCommand(NewHelpCmd(cmd))
 
 	return cmd
+}
+
+func shouldSkipPersistentPostRun(cmd *cobra.Command) bool {
+	// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)
+	// and for shell completion generation where output must remain clean.
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Hidden || c.Name() == "completion" {
+			return true
+		}
+	}
+	return false
 }
 
 func newVersionCmd() *cobra.Command {
