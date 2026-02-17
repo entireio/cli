@@ -176,11 +176,10 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-	// Attribution calculation requires shadow branch reference; skip if mid-session commit
-	var attribution *cpkg.InitialAttribution
-	if hasShadowBranch {
-		attribution = calculateSessionAttributions(repo, ref, sessionData, state)
-	}
+	// Calculate attribution. When no shadow branch exists (agent committed mid-turn
+	// before SaveChanges), pass nil ref — the function uses HEAD as the shadow tree
+	// since the agent's commit IS HEAD (no user edits between agent work and commit).
+	attribution := calculateSessionAttributions(repo, ref, sessionData, state)
 	// Get current branch name
 	branchName := GetCurrentBranchName(repo)
 
@@ -253,93 +252,111 @@ func calculateSessionAttributions(repo *git.Repository, shadowRef *plumbing.Refe
 	// Calculate initial attribution using accumulated prompt attribution data.
 	// This uses user edits captured at each prompt start (before agent works),
 	// plus any user edits after the final checkpoint (shadow → head).
+	//
+	// When shadowRef is nil (agent committed mid-turn before SaveChanges),
+	// HEAD is used as the shadow tree. This is correct because the agent's
+	// commit IS HEAD — there are no user edits between agent work and commit.
 	logCtx := logging.WithComponent(context.Background(), "attribution")
-	var attribution *cpkg.InitialAttribution
+
 	headRef, headErr := repo.Head()
 	if headErr != nil {
 		logging.Debug(logCtx, "attribution skipped: failed to get HEAD",
 			slog.String("error", headErr.Error()))
-	} else {
-		headCommit, commitErr := repo.CommitObject(headRef.Hash())
-		if commitErr != nil {
-			logging.Debug(logCtx, "attribution skipped: failed to get HEAD commit",
-				slog.String("error", commitErr.Error()))
-		} else {
-			headTree, treeErr := headCommit.Tree()
-			if treeErr != nil {
-				logging.Debug(logCtx, "attribution skipped: failed to get HEAD tree",
-					slog.String("error", treeErr.Error()))
-			} else {
-				// Get shadow branch tree (checkpoint tree - what the agent wrote)
-				shadowCommit, shadowErr := repo.CommitObject(shadowRef.Hash())
-				if shadowErr != nil {
-					logging.Debug(logCtx, "attribution skipped: failed to get shadow commit",
-						slog.String("error", shadowErr.Error()),
-						slog.String("shadow_ref", shadowRef.Hash().String()))
-				} else {
-					shadowTree, shadowTreeErr := shadowCommit.Tree()
-					if shadowTreeErr != nil {
-						logging.Debug(logCtx, "attribution skipped: failed to get shadow tree",
-							slog.String("error", shadowTreeErr.Error()))
-					} else {
-						// Get base tree (state before session started)
-						var baseTree *object.Tree
-						attrBase := state.AttributionBaseCommit
-						if attrBase == "" {
-							attrBase = state.BaseCommit // backward compat
-						}
-						if baseCommit, baseErr := repo.CommitObject(plumbing.NewHash(attrBase)); baseErr == nil {
-							if tree, baseTErr := baseCommit.Tree(); baseTErr == nil {
-								baseTree = tree
-							} else {
-								logging.Debug(logCtx, "attribution: base tree unavailable",
-									slog.String("error", baseTErr.Error()))
-							}
-						} else {
-							logging.Debug(logCtx, "attribution: base commit unavailable",
-								slog.String("error", baseErr.Error()),
-								slog.String("attribution_base", attrBase))
-						}
-
-						// Log accumulated prompt attributions for debugging
-						var totalUserAdded, totalUserRemoved int
-						for i, pa := range state.PromptAttributions {
-							totalUserAdded += pa.UserLinesAdded
-							totalUserRemoved += pa.UserLinesRemoved
-							logging.Debug(logCtx, "prompt attribution data",
-								slog.Int("checkpoint", pa.CheckpointNumber),
-								slog.Int("user_added", pa.UserLinesAdded),
-								slog.Int("user_removed", pa.UserLinesRemoved),
-								slog.Int("agent_added", pa.AgentLinesAdded),
-								slog.Int("agent_removed", pa.AgentLinesRemoved),
-								slog.Int("index", i))
-						}
-
-						attribution = CalculateAttributionWithAccumulated(
-							baseTree,
-							shadowTree,
-							headTree,
-							sessionData.FilesTouched,
-							state.PromptAttributions,
-						)
-
-						if attribution != nil {
-							logging.Info(logCtx, "attribution calculated",
-								slog.Int("agent_lines", attribution.AgentLines),
-								slog.Int("human_added", attribution.HumanAdded),
-								slog.Int("human_modified", attribution.HumanModified),
-								slog.Int("human_removed", attribution.HumanRemoved),
-								slog.Int("total_committed", attribution.TotalCommitted),
-								slog.Float64("agent_percentage", attribution.AgentPercentage),
-								slog.Int("accumulated_user_added", totalUserAdded),
-								slog.Int("accumulated_user_removed", totalUserRemoved),
-								slog.Int("files_touched", len(sessionData.FilesTouched)))
-						}
-					}
-				}
-			}
-		}
+		return nil
 	}
+
+	headCommit, commitErr := repo.CommitObject(headRef.Hash())
+	if commitErr != nil {
+		logging.Debug(logCtx, "attribution skipped: failed to get HEAD commit",
+			slog.String("error", commitErr.Error()))
+		return nil
+	}
+
+	headTree, treeErr := headCommit.Tree()
+	if treeErr != nil {
+		logging.Debug(logCtx, "attribution skipped: failed to get HEAD tree",
+			slog.String("error", treeErr.Error()))
+		return nil
+	}
+
+	// Get shadow tree: from shadow branch if available, otherwise HEAD (agent committed directly).
+	var shadowTree *object.Tree
+	if shadowRef != nil {
+		shadowCommit, shadowErr := repo.CommitObject(shadowRef.Hash())
+		if shadowErr != nil {
+			logging.Debug(logCtx, "attribution skipped: failed to get shadow commit",
+				slog.String("error", shadowErr.Error()),
+				slog.String("shadow_ref", shadowRef.Hash().String()))
+			return nil
+		}
+		var shadowTreeErr error
+		shadowTree, shadowTreeErr = shadowCommit.Tree()
+		if shadowTreeErr != nil {
+			logging.Debug(logCtx, "attribution skipped: failed to get shadow tree",
+				slog.String("error", shadowTreeErr.Error()))
+			return nil
+		}
+	} else {
+		// No shadow branch: agent committed mid-turn. Use HEAD as shadow
+		// because the agent's work is the commit itself.
+		logging.Debug(logCtx, "attribution: using HEAD as shadow (no shadow branch)")
+		shadowTree = headTree
+	}
+
+	// Get base tree (state before session started)
+	var baseTree *object.Tree
+	attrBase := state.AttributionBaseCommit
+	if attrBase == "" {
+		attrBase = state.BaseCommit // backward compat
+	}
+	if baseCommit, baseErr := repo.CommitObject(plumbing.NewHash(attrBase)); baseErr == nil {
+		if tree, baseTErr := baseCommit.Tree(); baseTErr == nil {
+			baseTree = tree
+		} else {
+			logging.Debug(logCtx, "attribution: base tree unavailable",
+				slog.String("error", baseTErr.Error()))
+		}
+	} else {
+		logging.Debug(logCtx, "attribution: base commit unavailable",
+			slog.String("error", baseErr.Error()),
+			slog.String("attribution_base", attrBase))
+	}
+
+	// Log accumulated prompt attributions for debugging
+	var totalUserAdded, totalUserRemoved int
+	for i, pa := range state.PromptAttributions {
+		totalUserAdded += pa.UserLinesAdded
+		totalUserRemoved += pa.UserLinesRemoved
+		logging.Debug(logCtx, "prompt attribution data",
+			slog.Int("checkpoint", pa.CheckpointNumber),
+			slog.Int("user_added", pa.UserLinesAdded),
+			slog.Int("user_removed", pa.UserLinesRemoved),
+			slog.Int("agent_added", pa.AgentLinesAdded),
+			slog.Int("agent_removed", pa.AgentLinesRemoved),
+			slog.Int("index", i))
+	}
+
+	attribution := CalculateAttributionWithAccumulated(
+		baseTree,
+		shadowTree,
+		headTree,
+		sessionData.FilesTouched,
+		state.PromptAttributions,
+	)
+
+	if attribution != nil {
+		logging.Info(logCtx, "attribution calculated",
+			slog.Int("agent_lines", attribution.AgentLines),
+			slog.Int("human_added", attribution.HumanAdded),
+			slog.Int("human_modified", attribution.HumanModified),
+			slog.Int("human_removed", attribution.HumanRemoved),
+			slog.Int("total_committed", attribution.TotalCommitted),
+			slog.Float64("agent_percentage", attribution.AgentPercentage),
+			slog.Int("accumulated_user_added", totalUserAdded),
+			slog.Int("accumulated_user_removed", totalUserRemoved),
+			slog.Int("files_touched", len(sessionData.FilesTouched)))
+	}
+
 	return attribution
 }
 

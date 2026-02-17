@@ -162,11 +162,13 @@ func NewRepoEnv(t *testing.T, strategy string) *TestEnv {
 }
 
 // NewRepoWithCommit creates a TestEnv with a git repo, Entire, and an initial commit.
-// The initial commit contains a README.md file.
+// The initial commit contains a README.md and .gitignore (excluding .entire/).
 func NewRepoWithCommit(t *testing.T, strategy string) *TestEnv {
 	t.Helper()
 	env := NewRepoEnv(t, strategy)
+	env.WriteFile(".gitignore", ".entire/\n")
 	env.WriteFile("README.md", "# Test Repository")
+	env.GitAdd(".gitignore")
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	return env

@@ -1111,6 +1111,77 @@ func TestCalculateAttributionWithAccumulated_MixedModifications(t *testing.T) {
 	}
 }
 
+// TestCalculateAttributionWithAccumulated_UncommittedWorktreeFiles tests the bug where
+// files in the worktree but NOT in the commit inflate the attribution calculation.
+//
+// Bug scenario:
+// 1. Agent creates docs/example.md (17 lines)
+// 2. .claude/settings.json (84 lines) exists in worktree from agent setup
+// 3. calculatePromptAttributionAtStart captures .claude/settings.json as user change
+// 4. User commits only docs/example.md (git add docs/ && git commit)
+// 5. BUG: accumulatedUserAdded=84 inflates totalUserAdded and totalCommitted
+// 6. Result: agentPercentage = 17/101 = 16.8% instead of 100%
+func TestCalculateAttributionWithAccumulated_UncommittedWorktreeFiles(t *testing.T) {
+	t.Parallel()
+
+	// Base: empty tree (initial --allow-empty commit)
+	baseTree := buildTestTree(t, nil)
+
+	// Shadow (agent checkpoint): agent created example.md
+	agentContent := "# Software Testing\n\nSoftware testing is a critical part of the development process.\n\n## Types of Testing\n\n- Unit testing\n- Integration testing\n- End-to-end testing\n\n## Best Practices\n\nWrite tests early.\nAutomate where possible.\nTest edge cases.\nReview test coverage.\n"
+	shadowTree := buildTestTree(t, map[string]string{
+		"example.md": agentContent,
+	})
+
+	// Head (committed): same file, only example.md was committed
+	// .claude/settings.json is NOT in the head tree (not committed)
+	headTree := buildTestTree(t, map[string]string{
+		"example.md": agentContent,
+	})
+
+	filesTouched := []string{"example.md"}
+
+	// PromptAttribution captured .claude/settings.json (84 lines) as user change
+	// at prompt start, because it was in the worktree but not in the base tree.
+	// This is the root cause of the bug: these 84 lines are never committed.
+	promptAttributions := []PromptAttribution{
+		{
+			CheckpointNumber: 1,
+			UserLinesAdded:   84,
+			UserLinesRemoved: 0,
+			UserAddedPerFile: map[string]int{".claude/settings.json": 84},
+		},
+	}
+
+	result := CalculateAttributionWithAccumulated(
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+	)
+
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	agentLines := countLinesStr(agentContent)
+	t.Logf("Agent content has %d lines", agentLines)
+	t.Logf("Attribution: agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
+		result.AgentLines, result.HumanAdded, result.TotalCommitted, result.AgentPercentage)
+
+	// Expected: agent created 100% of committed content
+	// .claude/settings.json should NOT affect attribution since it was never committed
+	if result.AgentLines != agentLines {
+		t.Errorf("AgentLines = %d, want %d", result.AgentLines, agentLines)
+	}
+	if result.HumanAdded != 0 {
+		t.Errorf("HumanAdded = %d, want 0 (.claude/settings.json was never committed)", result.HumanAdded)
+	}
+	if result.TotalCommitted != agentLines {
+		t.Errorf("TotalCommitted = %d, want %d (only agent-created file was committed)", result.TotalCommitted, agentLines)
+	}
+	if result.AgentPercentage != 100.0 {
+		t.Errorf("AgentPercentage = %.1f%%, want 100.0%% (agent created all committed content)", result.AgentPercentage)
+	}
+}
+
 // TestCalculatePromptAttribution_PopulatesPerFile verifies that CalculatePromptAttribution
 // correctly populates the UserAddedPerFile map.
 func TestCalculatePromptAttribution_PopulatesPerFile(t *testing.T) {
