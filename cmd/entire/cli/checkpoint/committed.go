@@ -1242,10 +1242,11 @@ func createRedactedBlobFromFile(repo *git.Repository, filePath, treePath string)
 	}
 
 	if strings.HasSuffix(treePath, ".jsonl") {
-		content, err = redact.JSONLBytes(content)
-		if err != nil {
-			return plumbing.ZeroHash, 0, fmt.Errorf("failed to redact secrets: %w", err)
+		redacted, jsonlErr := redact.JSONLBytes(content)
+		if jsonlErr != nil {
+			redacted = redact.Bytes(content)
 		}
+		content = redacted
 	} else {
 		content = redact.Bytes(content)
 	}
