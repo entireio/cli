@@ -307,10 +307,7 @@ func filterTaskCheckpoints(points []RewindPoint) []RewindPoint {
 func TestRewind_MultipleNewFiles(t *testing.T) {
 	t.Parallel()
 	RunForAllStrategies(t, func(t *testing.T, env *TestEnv, strategyName string) {
-		// Add .gitignore to the repo
-		env.WriteFile(".gitignore", ".entire/\n")
-		env.GitAdd(".gitignore")
-		env.GitCommit("Add gitignore")
+		// .gitignore for .entire/ is set up by NewRepoWithCommit()
 
 		// Use same session for all checkpoints (works for all strategies)
 		session := env.NewSession()
@@ -384,10 +381,7 @@ func TestRewind_MultipleNewFiles(t *testing.T) {
 func TestRewind_MultipleConsecutive(t *testing.T) {
 	t.Parallel()
 	RunForAllStrategies(t, func(t *testing.T, env *TestEnv, strategyName string) {
-		// Add .gitignore to the repo
-		env.WriteFile(".gitignore", ".entire/\n")
-		env.GitAdd(".gitignore")
-		env.GitCommit("Add gitignore")
+		// .gitignore for .entire/ is set up by NewRepoWithCommit()
 
 		// Use same session for all checkpoints (works for all strategies)
 		session := env.NewSession()

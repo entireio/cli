@@ -20,7 +20,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -1449,41 +1448,12 @@ func getSessionDescriptionFromTree(tree *object.Tree, metadataDir string) string
 	return NoDescription
 }
 
-// GetGitAuthorFromRepo retrieves the git user.name and user.email from the repository config.
-// It checks local config first, then falls back to global config.
-// Returns ("Unknown", "unknown@local") if no user is configured - this allows
-// operations to proceed even without git user config, which is especially useful
-// for internal metadata commits on branches like entire/checkpoints/v1.
+// GetGitAuthorFromRepo retrieves the git user.name and user.email,
+// checking both the repository-local config and the global ~/.gitconfig.
+// Delegates to checkpoint.GetGitAuthorFromRepo — this wrapper exists so
+// callers within the strategy package don't need a qualified import.
 func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
-	// Get repository config (includes local settings)
-	cfg, err := repo.Config()
-	if err == nil {
-		name = cfg.User.Name
-		email = cfg.User.Email
-	}
-
-	// If not found in local config, try global config
-	if name == "" || email == "" {
-		globalCfg, err := config.LoadConfig(config.GlobalScope)
-		if err == nil {
-			if name == "" {
-				name = globalCfg.User.Name
-			}
-			if email == "" {
-				email = globalCfg.User.Email
-			}
-		}
-	}
-
-	// Provide sensible defaults if git user is not configured
-	if name == "" {
-		name = "Unknown"
-	}
-	if email == "" {
-		email = "unknown@local"
-	}
-
-	return name, email
+	return checkpoint.GetGitAuthorFromRepo(repo)
 }
 
 // GetCurrentBranchName returns the short name of the current branch if HEAD points to a branch.

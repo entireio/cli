@@ -9,6 +9,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/transcript"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/spf13/cobra"
@@ -169,11 +170,11 @@ func printTranscriptChanges(w io.Writer, transcriptPath, currentSession, repoRoo
 	var modifiedFromTranscript, newFiles, deletedFiles []string
 
 	// Parse transcript
-	transcript, err := parseTranscript(transcriptPath)
-	if err != nil {
-		fmt.Fprintf(w, "  Error parsing transcript: %v\n", err)
+	parsed, _, parseErr := transcript.ParseFromFileAtLine(transcriptPath, 0)
+	if parseErr != nil {
+		fmt.Fprintf(w, "  Error parsing transcript: %v\n", parseErr)
 	} else {
-		modifiedFromTranscript = extractModifiedFiles(transcript)
+		modifiedFromTranscript = extractModifiedFiles(parsed)
 		fmt.Fprintf(w, "  Found %d modified files in transcript\n", len(modifiedFromTranscript))
 	}
 	// Compute new and deleted files (single git status call)

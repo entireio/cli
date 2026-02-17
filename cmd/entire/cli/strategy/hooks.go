@@ -40,6 +40,13 @@ func GetGitDir() (string, error) {
 	return getGitDirInPath(".")
 }
 
+// GetHooksDir returns the active hooks directory path.
+// This respects core.hooksPath and correctly resolves to the common hooks
+// directory when called from a linked worktree.
+func GetHooksDir() (string, error) {
+	return getHooksDirInPath(".")
+}
+
 // getGitDirInPath returns the git directory for a repository at the given path.
 // It delegates to `git rev-parse --git-dir` to leverage git's own validation.
 func getGitDirInPath(dir string) (string, error) {
@@ -62,29 +69,50 @@ func getGitDirInPath(dir string) (string, error) {
 	return filepath.Clean(gitDir), nil
 }
 
+// getHooksDirInPath returns the active hooks directory for a repository at the given path.
+// It delegates to `git rev-parse --git-path hooks` so Git resolves:
+// - linked-worktree common hooks directory
+// - core.hooksPath (relative or absolute)
+func getHooksDirInPath(dir string) (string, error) {
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-path", "hooks")
+	cmd.Dir = dir
+	output, err := cmd.Output()
+	if err != nil {
+		return "", errors.New("not a git repository")
+	}
+
+	hooksDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(hooksDir) {
+		hooksDir = filepath.Join(dir, hooksDir)
+	}
+
+	return filepath.Clean(hooksDir), nil
+}
+
 // IsGitHookInstalled checks if all generic Entire CLI hooks are installed.
 func IsGitHookInstalled() bool {
-	gitDir, err := GetGitDir()
+	hooksDir, err := GetHooksDir()
 	if err != nil {
 		return false
 	}
-	return isGitHookInstalledInGitDir(gitDir)
+	return isGitHookInstalledInHooksDir(hooksDir)
 }
 
 // IsGitHookInstalledInDir checks if all Entire CLI hooks are installed in the given repo directory.
 // This is useful for tests that need to check hooks without changing the working directory.
 func IsGitHookInstalledInDir(repoDir string) bool {
-	gitDir, err := getGitDirInPath(repoDir)
+	hooksDir, err := getHooksDirInPath(repoDir)
 	if err != nil {
 		return false
 	}
-	return isGitHookInstalledInGitDir(gitDir)
+	return isGitHookInstalledInHooksDir(hooksDir)
 }
 
-// isGitHookInstalledInGitDir checks if all hooks are installed in the given .git directory.
-func isGitHookInstalledInGitDir(gitDir string) bool {
+// isGitHookInstalledInHooksDir checks if all hooks are installed in the given hooks directory.
+func isGitHookInstalledInHooksDir(hooksDir string) bool {
 	for _, hook := range gitHookNames {
-		hookPath := filepath.Join(gitDir, "hooks", hook)
+		hookPath := filepath.Join(hooksDir, hook)
 		data, err := os.ReadFile(hookPath) //nolint:gosec // Path is constructed from constants
 		if err != nil {
 			return false
@@ -139,25 +167,16 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 // If silent is true, no output is printed (except backup notifications, which always print).
 // Returns the number of hooks that were installed (0 if all already up to date).
 func InstallGitHook(silent bool) (int, error) {
-	gitDir, err := GetGitDir()
+	hooksDir, err := GetHooksDir()
 	if err != nil {
 		return 0, err
 	}
 
-	hooksDir := filepath.Join(gitDir, "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil { //nolint:gosec // Git hooks require executable permissions
 		return 0, fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
-	// Determine command prefix based on local_dev setting
-	var cmdPrefix string
-	if isLocalDev() {
-		cmdPrefix = "go run ./cmd/entire/main.go"
-	} else {
-		cmdPrefix = "entire"
-	}
-
-	specs := buildHookSpecs(cmdPrefix)
+	specs := buildHookSpecs(hookCmdPrefix())
 	installedCount := 0
 
 	for _, spec := range specs {
@@ -222,12 +241,11 @@ func writeHookFile(path, content string) (bool, error) {
 // If a .pre-entire backup exists, it is restored.
 // Returns the number of hooks removed.
 func RemoveGitHook() (int, error) {
-	gitDir, err := GetGitDir()
+	hooksDir, err := GetHooksDir()
 	if err != nil {
 		return 0, err
 	}
 
-	hooksDir := filepath.Join(gitDir, "hooks")
 	removed := 0
 	var removeErrors []string
 
@@ -276,6 +294,15 @@ if [ -x "$_entire_hook_dir/%s%s" ]; then
     "$_entire_hook_dir/%s%s" "$@"
 fi
 `, chainComment, hookName, backupSuffix, hookName, backupSuffix)
+}
+
+// hookCmdPrefix returns the command prefix for hook scripts and warning messages.
+// Returns "go run ./cmd/entire/main.go" when local_dev is enabled, "entire" otherwise.
+func hookCmdPrefix() string {
+	if isLocalDev() {
+		return "go run ./cmd/entire/main.go"
+	}
+	return "entire"
 }
 
 // isLocalDev reads the local_dev setting from .entire/settings.json

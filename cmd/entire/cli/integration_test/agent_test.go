@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // TestAgentDetection verifies agent detection and default behavior.
@@ -372,7 +373,7 @@ func TestClaudeCodeHelperMethods(t *testing.T) {
 		}
 
 		// Parse the truncated native data to verify
-		lines, _ := claudecode.ParseTranscript(truncated.NativeData)
+		lines, _ := transcript.ParseFromBytes(truncated.NativeData)
 		if len(lines) != 2 {
 			t.Errorf("truncated transcript has %d lines, want 2", len(lines))
 		}

@@ -290,6 +290,70 @@ func DetectFileChanges(previouslyUntracked []string) (*FileChanges, error) {
 	return &changes, nil
 }
 
+// filterToUncommittedFiles removes files from the list that are already committed to HEAD
+// with matching content. This prevents re-adding files that an agent committed mid-turn
+// (already condensed by PostCommit) back to FilesTouched via SaveChanges. Files not in
+// HEAD or with different content in the working tree are kept. Fails open: if any git
+// operation errors, returns the original list unchanged.
+func filterToUncommittedFiles(files []string, repoRoot string) []string {
+	if len(files) == 0 {
+		return files
+	}
+
+	repo, err := openRepository()
+	if err != nil {
+		return files // fail open
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		return files // fail open (empty repo, detached HEAD, etc.)
+	}
+
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return files // fail open
+	}
+
+	headTree, err := commit.Tree()
+	if err != nil {
+		return files // fail open
+	}
+
+	var result []string
+	for _, relPath := range files {
+		headFile, err := headTree.File(relPath)
+		if err != nil {
+			// File not in HEAD — it's uncommitted
+			result = append(result, relPath)
+			continue
+		}
+
+		// File is in HEAD — compare content with working tree
+		absPath := filepath.Join(repoRoot, relPath)
+		workingContent, err := os.ReadFile(absPath) //nolint:gosec // path from controlled source
+		if err != nil {
+			// Can't read working tree file (deleted?) — keep it
+			result = append(result, relPath)
+			continue
+		}
+
+		headContent, err := headFile.Contents()
+		if err != nil {
+			result = append(result, relPath)
+			continue
+		}
+
+		if string(workingContent) != headContent {
+			// Working tree differs from HEAD — uncommitted changes
+			result = append(result, relPath)
+		}
+		// else: content matches HEAD — already committed, skip
+	}
+
+	return result
+}
+
 // FilterAndNormalizePaths converts absolute paths to relative and filters out
 // infrastructure paths and paths outside the repo.
 func FilterAndNormalizePaths(files []string, cwd string) []string {

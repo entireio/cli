@@ -673,44 +673,20 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 		t.Fatal("entire/checkpoints/v1 branch should exist after condensation")
 	}
 
-	// Verify root metadata.json (CheckpointSummary) exists
-	summaryPath := CheckpointSummaryPath(checkpointID)
-	if !env.FileExistsInBranch(paths.MetadataBranchName, summaryPath) {
-		t.Errorf("root metadata.json should exist at %s", summaryPath)
-	}
+	// Comprehensive checkpoint validation
+	env.ValidateCheckpoint(CheckpointValidation{
+		CheckpointID:    checkpointID,
+		SessionID:       session.ID,
+		Strategy:        strategy.StrategyNameManualCommit,
+		FilesTouched:    []string{"main.go"},
+		ExpectedPrompts: []string{"Create main.go with hello world"},
+		ExpectedTranscriptContent: []string{
+			"Create main.go with hello world",
+			"main.go",
+		},
+	})
 
-	// Verify transcript file exists in session subdirectory (new format: 0/full.jsonl)
-	transcriptPath := SessionFilePath(checkpointID, paths.TranscriptFileName)
-	if !env.FileExistsInBranch(paths.MetadataBranchName, transcriptPath) {
-		t.Errorf("Transcript (%s) should exist at %s", paths.TranscriptFileName, transcriptPath)
-	} else {
-		t.Log("✓ Transcript file exists in checkpoint")
-	}
-
-	// Verify content_hash.txt exists in session subdirectory
-	hashPath := SessionFilePath(checkpointID, "content_hash.txt")
-	if !env.FileExistsInBranch(paths.MetadataBranchName, hashPath) {
-		t.Errorf("content_hash.txt should exist at %s", hashPath)
-	}
-
-	// Verify root metadata.json can be read and parsed as CheckpointSummary
-	summaryContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, summaryPath)
-	if !found {
-		t.Fatal("root metadata.json should be readable")
-	}
-	var summary checkpoint.CheckpointSummary
-	if err := json.Unmarshal([]byte(summaryContent), &summary); err != nil {
-		t.Fatalf("failed to parse root metadata.json as CheckpointSummary: %v", err)
-	}
-
-	// Verify Sessions array is populated
-	if len(summary.Sessions) == 0 {
-		t.Errorf("CheckpointSummary.Sessions should have at least one entry")
-	} else {
-		t.Logf("✓ CheckpointSummary has %d session(s)", len(summary.Sessions))
-	}
-
-	// Verify agent field is in session-level metadata (not root summary)
+	// Additionally verify agent field in session metadata
 	sessionMetadataPath := SessionFilePath(checkpointID, paths.MetadataFileName)
 	sessionMetadataContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, sessionMetadataPath)
 	if !found {

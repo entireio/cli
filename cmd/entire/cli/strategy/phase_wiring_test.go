@@ -33,6 +33,8 @@ func TestInitializeSession_SetsPhaseActive(t *testing.T) {
 		"InitializeSession should set phase to ACTIVE")
 	require.NotNil(t, state.LastInteractionTime,
 		"InitializeSession should set LastInteractionTime")
+	assert.NotEmpty(t, state.TurnID,
+		"InitializeSession should set TurnID")
 }
 
 // TestInitializeSession_IdleToActive verifies a second call (existing IDLE session)
@@ -134,35 +136,6 @@ func TestInitializeSession_EndedToActive(t *testing.T) {
 	assert.Nil(t, state.EndedAt,
 		"EndedAt should be cleared when re-entering ENDED session")
 	require.NotNil(t, state.LastInteractionTime)
-}
-
-// TestInitializeSession_ActiveCommittedToActive verifies Ctrl-C recovery
-// after a mid-session commit: ACTIVE_COMMITTED → ACTIVE.
-func TestInitializeSession_ActiveCommittedToActive(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	s := &ManualCommitStrategy{}
-
-	// First call initializes
-	err := s.InitializeSession("test-session-ac-recovery", "Claude Code", "", "")
-	require.NoError(t, err)
-
-	// Manually set to ACTIVE_COMMITTED
-	state, err := s.loadSessionState("test-session-ac-recovery")
-	require.NoError(t, err)
-	state.Phase = session.PhaseActiveCommitted
-	err = s.saveSessionState(state)
-	require.NoError(t, err)
-
-	// Call InitializeSession again - should transition ACTIVE_COMMITTED → ACTIVE
-	err = s.InitializeSession("test-session-ac-recovery", "Claude Code", "", "")
-	require.NoError(t, err)
-
-	state, err = s.loadSessionState("test-session-ac-recovery")
-	require.NoError(t, err)
-	assert.Equal(t, session.PhaseActive, state.Phase,
-		"should transition from ACTIVE_COMMITTED to ACTIVE")
 }
 
 // TestInitializeSession_EmptyPhaseBackwardCompat verifies that sessions

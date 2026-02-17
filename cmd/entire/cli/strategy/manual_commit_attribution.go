@@ -230,25 +230,41 @@ func CalculateAttributionWithAccumulated(
 	}
 
 	// Separate accumulated edits by file type using per-file tracking data.
-	// This is precise because accumulatedUserAddedPerFile tells us exactly which files
-	// the user edited between checkpoints.
-	var accumulatedToAgentFiles, accumulatedToNonAgentFiles int
+	// Only count changes to files that are actually committed:
+	// - Agent-touched files (filesTouched)
+	// - Non-agent files that appear in the commit (base→head diff)
+	// Files not in either set are worktree-only changes (e.g., .claude/settings.json)
+	// that should not affect attribution.
+	committedNonAgentSet := make(map[string]struct{}, len(nonAgentFiles))
+	for _, f := range nonAgentFiles {
+		if !slices.Contains(filesTouched, f) {
+			committedNonAgentSet[f] = struct{}{}
+		}
+	}
+
+	var accumulatedToAgentFiles, accumulatedToCommittedNonAgentFiles int
 	for filePath, added := range accumulatedUserAddedPerFile {
 		if slices.Contains(filesTouched, filePath) {
 			accumulatedToAgentFiles += added
-		} else {
-			accumulatedToNonAgentFiles += added
+		} else if _, ok := committedNonAgentSet[filePath]; ok {
+			accumulatedToCommittedNonAgentFiles += added
 		}
+		// else: file not committed (worktree-only), excluded from attribution
 	}
 
 	// Agent work = (base→shadow for agent files) - (accumulated user edits to agent files only)
 	totalAgentAdded := max(0, totalAgentAndUserWork-accumulatedToAgentFiles)
 
 	// Post-checkpoint edits to non-agent files = total edits - accumulated portion (never negative)
-	postToNonAgentFiles := max(0, allUserEditsToNonAgentFiles-accumulatedToNonAgentFiles)
+	postToNonAgentFiles := max(0, allUserEditsToNonAgentFiles-accumulatedToCommittedNonAgentFiles)
 
-	// Total user contribution = accumulated (all files) + post-checkpoint (agent files) + post-checkpoint (non-agent files)
-	totalUserAdded := accumulatedUserAdded + postCheckpointUserAdded + postToNonAgentFiles
+	// Total user contribution = accumulated (committed files only) + post-checkpoint edits
+	relevantAccumulatedUser := accumulatedToAgentFiles + accumulatedToCommittedNonAgentFiles
+	totalUserAdded := relevantAccumulatedUser + postCheckpointUserAdded + postToNonAgentFiles
+	// TODO: accumulatedUserRemoved also includes removals from uncommitted files,
+	// but we don't have per-file tracking for removals yet. In practice, removals
+	// from uncommitted files are rare and the impact is minor (could slightly reduce
+	// totalCommitted via pureUserRemoved). Add UserRemovedPerFile if this becomes an issue.
 	totalUserRemoved := accumulatedUserRemoved + postCheckpointUserRemoved
 
 	// Estimate modified lines (user changed existing lines)

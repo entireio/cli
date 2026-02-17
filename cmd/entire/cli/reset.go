@@ -161,7 +161,7 @@ func runResetSession(cmd *cobra.Command, resetter strategy.SessionResetter, sess
 }
 
 // activeSessionsOnCurrentHead returns sessions on the current HEAD
-// that are in an active phase (ACTIVE or ACTIVE_COMMITTED).
+// that are in an active phase (ACTIVE).
 func activeSessionsOnCurrentHead() ([]*session.State, error) {
 	repo, err := openRepository()
 	if err != nil {

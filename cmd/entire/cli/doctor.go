@@ -28,7 +28,7 @@ func newDoctorCmd() *cobra.Command {
 		Long: `Scan for stuck or problematic sessions and offer to fix them.
 
 A session is considered stuck if:
-  - It is in ACTIVE or ACTIVE_COMMITTED phase with no interaction for over 1 hour
+  - It is in ACTIVE phase with no interaction for over 1 hour
   - It is in ENDED phase with uncondensed checkpoint data on a shadow branch
 
 For each stuck session, you can choose to:

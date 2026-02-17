@@ -84,7 +84,7 @@ func (s *AutoCommitStrategy) getCheckpointStore() (*checkpoint.GitStore, error) 
 // NewAutoCommitStrategy creates a new AutoCommitStrategy instance
 //
 
-func NewAutoCommitStrategy() Strategy { //nolint:ireturn // already present in codebase
+func NewAutoCommitStrategy() Strategy { //nolint:ireturn // factory returns interface by design
 	return &AutoCommitStrategy{}
 }
 
@@ -249,16 +249,26 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository
 	// Combine all file changes into FilesTouched (same as manual-commit)
 	filesTouched := mergeFilesTouched(nil, ctx.ModifiedFiles, ctx.NewFiles, ctx.DeletedFiles)
 
+	// Load TurnID from session state (correlates checkpoints from the same turn)
+	var turnID string
+	if state, loadErr := LoadSessionState(sessionID); loadErr == nil && state != nil {
+		turnID = state.TurnID
+	}
+
 	// Write committed checkpoint using the checkpoint store
+	// Pass TranscriptPath so writeTranscript generates content_hash.txt
+	transcriptPath := filepath.Join(ctx.MetadataDirAbs, paths.TranscriptFileName)
 	err = store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
 		CheckpointID:                checkpointID,
 		SessionID:                   sessionID,
 		Strategy:                    StrategyNameAutoCommit, // Use new strategy name
 		Branch:                      branchName,
 		MetadataDir:                 ctx.MetadataDirAbs, // Copy all files from metadata dir
+		TranscriptPath:              transcriptPath,     // For content hash generation
 		AuthorName:                  ctx.AuthorName,
 		AuthorEmail:                 ctx.AuthorEmail,
 		Agent:                       ctx.AgentType,
+		TurnID:                      turnID,
 		TranscriptIdentifierAtStart: ctx.StepTranscriptIdentifier,
 		CheckpointTranscriptStart:   ctx.StepTranscriptStart,
 		TokenUsage:                  ctx.TokenUsage,
@@ -930,6 +940,14 @@ func (s *AutoCommitStrategy) InitializeSession(sessionID string, agentType agent
 		now := time.Now()
 		existing.LastInteractionTime = &now
 
+		// Generate a new TurnID for each turn (correlates carry-forward checkpoints)
+		turnID, err := id.Generate()
+		if err != nil {
+			return fmt.Errorf("failed to generate turn ID: %w", err)
+		}
+		existing.TurnID = turnID.String()
+		existing.TurnCheckpointIDs = nil
+
 		// Backfill FirstPrompt if empty (for sessions
 		// created before the first_prompt field was added, or resumed sessions)
 		if existing.FirstPrompt == "" && userPrompt != "" {
@@ -942,6 +960,12 @@ func (s *AutoCommitStrategy) InitializeSession(sessionID string, agentType agent
 		return nil
 	}
 
+	// Generate TurnID for the first turn
+	turnID, err := id.Generate()
+	if err != nil {
+		return fmt.Errorf("failed to generate turn ID: %w", err)
+	}
+
 	// Create new session state
 	now := time.Now()
 	state := &SessionState{
@@ -950,6 +974,7 @@ func (s *AutoCommitStrategy) InitializeSession(sessionID string, agentType agent
 		BaseCommit:          baseCommit,
 		StartedAt:           now,
 		LastInteractionTime: &now,
+		TurnID:              turnID.String(),
 		StepCount:           0,
 		// CheckpointTranscriptStart defaults to 0 (start from beginning of transcript)
 		FilesTouched:   []string{},

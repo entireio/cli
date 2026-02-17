@@ -306,6 +306,7 @@ func runEnableWithStrategy(w io.Writer, selectedStrategy string, localDev, _, us
 	if _, err := strategy.InstallGitHook(true); err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
+	strategy.CheckAndWarnHookManagers(w)
 	fmt.Fprintln(w, "✓ Hooks installed")
 	fmt.Fprintf(w, "✓ Project configured (%s)\n", configDisplay)
 
@@ -404,6 +405,7 @@ func runEnableInteractive(w io.Writer, localDev, _, useLocalSettings, useProject
 	if _, err := strategy.InstallGitHook(true); err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
+	strategy.CheckAndWarnHookManagers(w)
 	fmt.Fprintln(w, "✓ Hooks installed")
 
 	configDisplay := configDisplayProject
@@ -614,6 +616,7 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 	if _, err := strategy.InstallGitHook(true); err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
+	strategy.CheckAndWarnHookManagers(w)
 
 	if installedHooks == 0 {
 		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
@@ -716,6 +719,7 @@ func setupGitHook() error {
 	if err != nil {
 		return fmt.Errorf("failed to install git hook: %w", err)
 	}
+	strategy.CheckAndWarnHookManagers(os.Stderr)
 	return nil
 }
 

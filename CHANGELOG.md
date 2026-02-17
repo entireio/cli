@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.5] - 2026-02-17
+
+### Added
+
+- Detect external hook managers (Husky, Lefthook, Overcommit) and warn during `entire enable` ([#373](https://github.com/entireio/cli/pull/373))
+- New E2E test workflow running on merge to main ([#350](https://github.com/entireio/cli/pull/350), [#351](https://github.com/entireio/cli/pull/351))
+- Subagent file modifications are now properly detected ([#323](https://github.com/entireio/cli/pull/323))
+- Content-aware carry-forward for 1:1 checkpoint-to-commit mapping ([#325](https://github.com/entireio/cli/pull/325))
+
+### Changed
+
+- Consolidated duplicate JSONL transcript parsers into a shared `transcript` package ([#346](https://github.com/entireio/cli/pull/346))
+- Replaced `ApplyCommonActions` with `ActionHandler` interface for cleaner hook dispatch ([#332](https://github.com/entireio/cli/pull/332))
+
+### Fixed
+
+- Extra shadow branches accumulating when agent commits some files and user commits the rest ([#367](https://github.com/entireio/cli/pull/367))
+- Attribution calculation for worktree inflation and mid-turn agent commits ([#366](https://github.com/entireio/cli/pull/366))
+- All IDLE sessions being incorrectly added to a checkpoint ([#359](https://github.com/entireio/cli/pull/359))
+- Hook directory resolution now uses `git --git-path hooks` for correctness ([#355](https://github.com/entireio/cli/pull/355))
+- Gemini transcript parsing: array content format and trailer blank line separation for single-line commits ([#342](https://github.com/entireio/cli/pull/342))
+
+### Docs
+
+- Added concurrent ACTIVE sessions limitation to contributing guide ([#326](https://github.com/entireio/cli/pull/326))
+
+### Thanks
+
+Thanks to @AlienKevin for contributing to this release!
+
 ## [0.4.4] - 2026-02-13
 
 ### Added

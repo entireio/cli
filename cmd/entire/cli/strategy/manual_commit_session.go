@@ -8,6 +8,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/buildinfo"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v5"
@@ -215,6 +216,12 @@ func (s *ManualCommitStrategy) initializeSession(repo *git.Repository, sessionID
 		untrackedFiles = nil
 	}
 
+	// Generate TurnID for the first turn
+	turnID, err := id.Generate()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate turn ID: %w", err)
+	}
+
 	now := time.Now()
 	headHash := head.Hash().String()
 	state := &SessionState{
@@ -226,6 +233,7 @@ func (s *ManualCommitStrategy) initializeSession(repo *git.Repository, sessionID
 		WorktreeID:            worktreeID,
 		StartedAt:             now,
 		LastInteractionTime:   &now,
+		TurnID:                turnID.String(),
 		StepCount:             0,
 		UntrackedFilesAtStart: untrackedFiles,
 		AgentType:             agentType,
