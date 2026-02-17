@@ -455,6 +455,29 @@ func (env *TestEnv) GetSessionState(sessionID string) (*strategy.SessionState, e
 	return &state, nil
 }
 
+// WriteSessionState writes the session state for the given session ID.
+// This is useful for tests that need to manipulate session state directly.
+func (env *TestEnv) WriteSessionState(sessionID string, state *strategy.SessionState) error {
+	env.T.Helper()
+
+	stateDir := filepath.Join(env.RepoDir, ".git", "entire-sessions")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create session state dir: %w", err)
+	}
+
+	stateFile := filepath.Join(stateDir, sessionID+".json")
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal session state: %w", err)
+	}
+
+	if err := os.WriteFile(stateFile, data, 0o644); err != nil {
+		return fmt.Errorf("failed to write session state: %w", err)
+	}
+	return nil
+}
+
 // GeminiHookRunner executes Gemini CLI hooks in the test environment.
 type GeminiHookRunner struct {
 	RepoDir          string
