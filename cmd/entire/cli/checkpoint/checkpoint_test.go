@@ -2971,3 +2971,554 @@ func TestWriteCommitted_CLIVersionField(t *testing.T) {
 		t.Errorf("CommittedMetadata.CLIVersion = %q, want %q", sessionMetadata.CLIVersion, buildinfo.Version)
 	}
 }
+
+func TestRedactSummary_Nil(t *testing.T) {
+	t.Parallel()
+	result := redactSummary(nil)
+	if result != nil {
+		t.Error("redactSummary(nil) should return nil")
+	}
+}
+
+func TestRedactSummary_WithSecrets(t *testing.T) {
+	t.Parallel()
+	summary := &Summary{
+		Intent:  "Set API_KEY=" + highEntropySecret,
+		Outcome: "Configured key " + highEntropySecret + " successfully",
+		Friction: []string{
+			"Had to find " + highEntropySecret + " in env",
+			"No issues here",
+		},
+		OpenItems: []string{
+			"Rotate " + highEntropySecret,
+		},
+		Learnings: LearningsSummary{
+			Repo: []string{
+				"Found secret " + highEntropySecret + " in config",
+			},
+			Workflow: []string{
+				"Use vault for " + highEntropySecret,
+			},
+			Code: []CodeLearning{
+				{
+					Path:    "config/secrets.go",
+					Line:    42,
+					EndLine: 50,
+					Finding: "Key " + highEntropySecret + " is hardcoded",
+				},
+			},
+		},
+	}
+
+	result := redactSummary(summary)
+
+	// Verify secrets are removed from all text fields
+	if strings.Contains(result.Intent, highEntropySecret) {
+		t.Error("Intent should not contain the secret")
+	}
+	if !strings.Contains(result.Intent, "REDACTED") {
+		t.Error("Intent should contain REDACTED placeholder")
+	}
+
+	if strings.Contains(result.Outcome, highEntropySecret) {
+		t.Error("Outcome should not contain the secret")
+	}
+
+	if strings.Contains(result.Friction[0], highEntropySecret) {
+		t.Error("Friction[0] should not contain the secret")
+	}
+	if result.Friction[1] != "No issues here" {
+		t.Errorf("Friction[1] should be unchanged, got %q", result.Friction[1])
+	}
+
+	if strings.Contains(result.OpenItems[0], highEntropySecret) {
+		t.Error("OpenItems[0] should not contain the secret")
+	}
+
+	if strings.Contains(result.Learnings.Repo[0], highEntropySecret) {
+		t.Error("Learnings.Repo[0] should not contain the secret")
+	}
+
+	if strings.Contains(result.Learnings.Workflow[0], highEntropySecret) {
+		t.Error("Learnings.Workflow[0] should not contain the secret")
+	}
+
+	// Verify CodeLearning structural fields preserved, Finding redacted
+	cl := result.Learnings.Code[0]
+	if cl.Path != "config/secrets.go" {
+		t.Errorf("CodeLearning.Path should be preserved, got %q", cl.Path)
+	}
+	if cl.Line != 42 {
+		t.Errorf("CodeLearning.Line should be preserved, got %d", cl.Line)
+	}
+	if cl.EndLine != 50 {
+		t.Errorf("CodeLearning.EndLine should be preserved, got %d", cl.EndLine)
+	}
+	if strings.Contains(cl.Finding, highEntropySecret) {
+		t.Error("CodeLearning.Finding should not contain the secret")
+	}
+	if !strings.Contains(cl.Finding, "REDACTED") {
+		t.Error("CodeLearning.Finding should contain REDACTED placeholder")
+	}
+
+	// Verify original is not mutated
+	if !strings.Contains(summary.Intent, highEntropySecret) {
+		t.Error("original Summary.Intent should not be mutated")
+	}
+}
+
+func TestRedactSummary_NoSecrets(t *testing.T) {
+	t.Parallel()
+	summary := &Summary{
+		Intent:    "Fix a bug",
+		Outcome:   "Bug fixed",
+		Friction:  []string{"None"},
+		OpenItems: []string{},
+		Learnings: LearningsSummary{
+			Repo:     []string{"Found the pattern"},
+			Workflow: []string{"Use TDD"},
+			Code: []CodeLearning{
+				{Path: "main.go", Line: 1, Finding: "Good code"},
+			},
+		},
+	}
+
+	result := redactSummary(summary)
+
+	if result.Intent != "Fix a bug" {
+		t.Errorf("Intent should be unchanged, got %q", result.Intent)
+	}
+	if result.Outcome != "Bug fixed" {
+		t.Errorf("Outcome should be unchanged, got %q", result.Outcome)
+	}
+	if result.Learnings.Code[0].Finding != "Good code" {
+		t.Errorf("Finding should be unchanged, got %q", result.Learnings.Code[0].Finding)
+	}
+}
+
+func TestRedactStringSlice_NilAndEmpty(t *testing.T) {
+	t.Parallel()
+
+	// nil input should return nil (not empty slice)
+	if result := redactStringSlice(nil); result != nil {
+		t.Errorf("redactStringSlice(nil) should return nil, got %v", result)
+	}
+
+	// empty slice should return empty slice (not nil)
+	result := redactStringSlice([]string{})
+	if result == nil {
+		t.Error("redactStringSlice([]string{}) should return empty slice, not nil")
+	}
+	if len(result) != 0 {
+		t.Errorf("redactStringSlice([]string{}) should return empty slice, got len %d", len(result))
+	}
+}
+
+func TestRedactCodeLearnings_NilAndEmpty(t *testing.T) {
+	t.Parallel()
+
+	// nil input should return nil
+	if result := redactCodeLearnings(nil); result != nil {
+		t.Errorf("redactCodeLearnings(nil) should return nil, got %v", result)
+	}
+
+	// empty slice should return empty slice
+	result := redactCodeLearnings([]CodeLearning{})
+	if result == nil {
+		t.Error("redactCodeLearnings([]CodeLearning{}) should return empty slice, not nil")
+	}
+	if len(result) != 0 {
+		t.Errorf("expected len 0, got %d", len(result))
+	}
+}
+
+func TestWriteCommitted_RedactsSummarySecrets(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef7")
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "redact-summary-session",
+		Strategy:         "manual-commit",
+		Transcript:       []byte(`{"msg":"safe"}` + "\n"),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+		Summary: &Summary{
+			Intent:  "Used key " + highEntropySecret + " to auth",
+			Outcome: "Authenticated with " + highEntropySecret,
+		},
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	content, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
+	}
+
+	if content.Metadata.Summary == nil {
+		t.Fatal("Summary should not be nil")
+	}
+	if strings.Contains(content.Metadata.Summary.Intent, highEntropySecret) {
+		t.Error("Summary.Intent should not contain the secret after redaction")
+	}
+	if !strings.Contains(content.Metadata.Summary.Intent, "REDACTED") {
+		t.Error("Summary.Intent should contain REDACTED placeholder")
+	}
+	if strings.Contains(content.Metadata.Summary.Outcome, highEntropySecret) {
+		t.Error("Summary.Outcome should not contain the secret after redaction")
+	}
+}
+
+func TestUpdateSummary_RedactsSecrets(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef8")
+
+	// First write a checkpoint without a summary
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:     checkpointID,
+		SessionID:        "update-summary-session",
+		Strategy:         "manual-commit",
+		Transcript:       []byte(`{"msg":"safe"}` + "\n"),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	// Now update the summary with a secret
+	err = store.UpdateSummary(context.Background(), checkpointID, &Summary{
+		Intent:  "Rotated key " + highEntropySecret,
+		Outcome: "Done",
+	})
+	if err != nil {
+		t.Fatalf("UpdateSummary() error = %v", err)
+	}
+
+	content, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
+	}
+
+	if content.Metadata.Summary == nil {
+		t.Fatal("Summary should not be nil after update")
+	}
+	if strings.Contains(content.Metadata.Summary.Intent, highEntropySecret) {
+		t.Error("Updated Summary.Intent should not contain the secret")
+	}
+	if !strings.Contains(content.Metadata.Summary.Intent, "REDACTED") {
+		t.Error("Updated Summary.Intent should contain REDACTED placeholder")
+	}
+}
+
+func TestWriteCommitted_SubagentTranscript_JSONLFallback(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	checkpointID := id.MustCheckpointID("aabbccddeef9")
+
+	// Create a temp file with invalid JSONL containing a secret
+	tmpDir := t.TempDir()
+	transcriptPath := filepath.Join(tmpDir, "agent.jsonl")
+	invalidJSONL := "this is not valid JSON but has a secret " + highEntropySecret + " in it"
+	if err := os.WriteFile(transcriptPath, []byte(invalidJSONL), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID:           checkpointID,
+		SessionID:              "jsonl-fallback-session",
+		Strategy:               "manual-commit",
+		Transcript:             []byte(`{"msg":"safe"}` + "\n"),
+		CheckpointsCount:       1,
+		AuthorName:             "Test Author",
+		AuthorEmail:            "test@example.com",
+		IsTask:                 true,
+		ToolUseID:              "toolu_test123",
+		AgentID:                "agent1",
+		SubagentTranscriptPath: transcriptPath,
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	// Read back the subagent transcript from the tree
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get branch ref: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("failed to get commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	agentPath := checkpointID.Path() + "/tasks/toolu_test123/agent-agent1.jsonl"
+	file, err := tree.File(agentPath)
+	if err != nil {
+		t.Fatalf("subagent transcript should exist at %s (JSONL fallback should not drop it): %v", agentPath, err)
+	}
+
+	content, err := file.Contents()
+	if err != nil {
+		t.Fatalf("failed to read subagent transcript: %v", err)
+	}
+
+	// Verify the transcript was stored (not dropped) and secret was redacted
+	if content == "" {
+		t.Error("subagent transcript should not be empty")
+	}
+	if strings.Contains(content, highEntropySecret) {
+		t.Error("subagent transcript should not contain the secret after fallback redaction")
+	}
+	if !strings.Contains(content, "REDACTED") {
+		t.Error("subagent transcript should contain REDACTED from fallback redaction")
+	}
+}
+
+func TestWriteTemporaryTask_SubagentTranscript_RedactsSecrets(t *testing.T) {
+	// Cannot use t.Parallel() because t.Chdir is required for paths.RepoRoot()
+	tempDir := t.TempDir()
+
+	// Initialize a git repository with an initial commit
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	readmeFile := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readmeFile, []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := worktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	})
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	t.Chdir(tempDir)
+
+	// Create a temp file with invalid JSONL containing a secret
+	transcriptPath := filepath.Join(tempDir, "agent-transcript.jsonl")
+	invalidJSONL := "this is not valid JSON but has a secret " + highEntropySecret + " in it"
+	if err := os.WriteFile(transcriptPath, []byte(invalidJSONL), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	store := NewGitStore(repo)
+	baseCommit := initialCommit.String()
+
+	_, err = store.WriteTemporaryTask(context.Background(), WriteTemporaryTaskOptions{
+		SessionID:              "test-session",
+		BaseCommit:             baseCommit,
+		ToolUseID:              "toolu_test456",
+		AgentID:                "agent1",
+		SubagentTranscriptPath: transcriptPath,
+		CheckpointUUID:         "test-uuid",
+		CommitMessage:          "Task checkpoint",
+		AuthorName:             "Test",
+		AuthorEmail:            "test@test.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteTemporaryTask() error = %v", err)
+	}
+
+	// Find the shadow branch and read the subagent transcript
+	shadowBranch := ShadowBranchNameForCommit(baseCommit, "")
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
+	if err != nil {
+		t.Fatalf("failed to get shadow branch ref: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("failed to get commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	agentPath := paths.EntireMetadataDir + "/test-session/tasks/toolu_test456/agent-agent1.jsonl"
+	file, err := tree.File(agentPath)
+	if err != nil {
+		t.Fatalf("subagent transcript should exist at %s: %v", agentPath, err)
+	}
+
+	content, err := file.Contents()
+	if err != nil {
+		t.Fatalf("failed to read subagent transcript: %v", err)
+	}
+
+	// Verify the transcript was stored (not dropped) and secret was redacted
+	if content == "" {
+		t.Error("subagent transcript should not be empty")
+	}
+	if strings.Contains(content, highEntropySecret) {
+		t.Error("subagent transcript on shadow branch should not contain the secret after redaction")
+	}
+	if !strings.Contains(content, "REDACTED") {
+		t.Error("subagent transcript on shadow branch should contain REDACTED")
+	}
+}
+
+func TestAddDirectoryToEntries_PathTraversal(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create a directory structure where the relative path could escape
+	metadataDir := filepath.Join(tempDir, "metadata")
+	subDir := filepath.Join(metadataDir, "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("failed to create dirs: %v", err)
+	}
+
+	// Create a regular file — should be included
+	regularFile := filepath.Join(subDir, "data.txt")
+	if err := os.WriteFile(regularFile, []byte("safe content"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	entries := make(map[string]object.TreeEntry)
+	err = addDirectoryToEntriesWithAbsPath(repo, metadataDir, ".entire/metadata/session", entries)
+	if err != nil {
+		t.Fatalf("addDirectoryToEntriesWithAbsPath failed: %v", err)
+	}
+
+	// Verify the regular file was included with correct path
+	expectedPath := filepath.ToSlash(filepath.Join(".entire/metadata/session", "sub", "data.txt"))
+	if _, ok := entries[expectedPath]; !ok {
+		t.Errorf("expected entry at %q, got entries: %v", expectedPath, entries)
+	}
+}
+
+func TestAddDirectoryToEntries_SkipsSymlinks(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create metadata directory
+	metadataDir := filepath.Join(tempDir, "metadata")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+
+	// Create a regular file
+	regularFile := filepath.Join(metadataDir, "regular.txt")
+	if err := os.WriteFile(regularFile, []byte("regular content"), 0o644); err != nil {
+		t.Fatalf("failed to create regular file: %v", err)
+	}
+
+	// Create a sensitive file outside the metadata directory
+	sensitiveFile := filepath.Join(tempDir, "sensitive.txt")
+	if err := os.WriteFile(sensitiveFile, []byte("SECRET DATA"), 0o644); err != nil {
+		t.Fatalf("failed to create sensitive file: %v", err)
+	}
+
+	// Create a symlink inside metadata directory pointing to the sensitive file
+	symlinkPath := filepath.Join(metadataDir, "sneaky-link")
+	if err := os.Symlink(sensitiveFile, symlinkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	entries := make(map[string]object.TreeEntry)
+	err = addDirectoryToEntriesWithAbsPath(repo, metadataDir, "checkpoint/", entries)
+	if err != nil {
+		t.Fatalf("addDirectoryToEntriesWithAbsPath failed: %v", err)
+	}
+
+	// Verify regular file was included
+	if _, ok := entries["checkpoint/regular.txt"]; !ok {
+		t.Error("regular.txt should be included in entries")
+	}
+
+	// Verify symlink was NOT included
+	if _, ok := entries["checkpoint/sneaky-link"]; ok {
+		t.Error("symlink should NOT be included in entries — this would allow reading files outside the metadata directory")
+	}
+
+	if len(entries) != 1 {
+		t.Errorf("expected 1 entry, got %d", len(entries))
+	}
+}
+
+func TestAddDirectoryToEntries_SkipsSymlinkedDirectories(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	// Create metadata directory with a regular file
+	metadataDir := filepath.Join(tempDir, "metadata")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create metadata dir: %v", err)
+	}
+	regularFile := filepath.Join(metadataDir, "regular.txt")
+	if err := os.WriteFile(regularFile, []byte("regular content"), 0o644); err != nil {
+		t.Fatalf("failed to create regular file: %v", err)
+	}
+
+	// Create an external directory with sensitive files
+	externalDir := filepath.Join(tempDir, "external-secrets")
+	if err := os.MkdirAll(externalDir, 0o755); err != nil {
+		t.Fatalf("failed to create external dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(externalDir, "secret.txt"), []byte("SECRET DATA"), 0o644); err != nil {
+		t.Fatalf("failed to create secret file: %v", err)
+	}
+
+	// Create a symlink to the external directory inside metadata
+	symlinkDir := filepath.Join(metadataDir, "evil-dir-link")
+	if err := os.Symlink(externalDir, symlinkDir); err != nil {
+		t.Fatalf("failed to create directory symlink: %v", err)
+	}
+
+	entries := make(map[string]object.TreeEntry)
+	err = addDirectoryToEntriesWithAbsPath(repo, metadataDir, "checkpoint/", entries)
+	if err != nil {
+		t.Fatalf("addDirectoryToEntriesWithAbsPath failed: %v", err)
+	}
+
+	// Verify regular file was included
+	if _, ok := entries["checkpoint/regular.txt"]; !ok {
+		t.Error("regular.txt should be included in entries")
+	}
+
+	// Verify files from the symlinked directory were NOT included
+	if _, ok := entries["checkpoint/evil-dir-link/secret.txt"]; ok {
+		t.Error("files inside symlinked directory should NOT be included — this would allow reading files outside the metadata directory")
+	}
+
+	if len(entries) != 1 {
+		t.Errorf("expected 1 entry (regular.txt only), got %d: %v", len(entries), entries)
+	}
+}

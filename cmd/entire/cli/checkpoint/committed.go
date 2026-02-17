@@ -204,9 +204,18 @@ func (s *GitStore) writeFinalTaskCheckpoint(opts WriteCommittedOptions, taskPath
 	if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 		agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
 		if readErr == nil {
-			agentContent, readErr = redact.JSONLBytes(agentContent)
-		}
-		if readErr == nil {
+			// Try JSONL-aware redaction first; fall back to plain string redaction
+			// if the content is not valid JSONL (avoids silently dropping the transcript).
+			redacted, jsonlErr := redact.JSONLBytes(agentContent)
+			if jsonlErr != nil {
+				logging.Warn(context.Background(), "subagent transcript is not valid JSONL, falling back to plain redaction",
+					slog.String("path", opts.SubagentTranscriptPath),
+					slog.String("error", jsonlErr.Error()),
+				)
+				redacted = redact.Bytes(agentContent)
+			}
+			agentContent = redacted
+
 			agentBlobHash, agentBlobErr := CreateBlobFromContent(s.repo, agentContent)
 			if agentBlobErr == nil {
 				agentPath := taskPath + "agent-" + opts.AgentID + ".jsonl"
@@ -346,7 +355,7 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // Deprecated: kept for backward compat
 		TokenUsage:                  opts.TokenUsage,
 		InitialAttribution:          opts.InitialAttribution,
-		Summary:                     opts.Summary,
+		Summary:                     redactSummary(opts.Summary),
 		CLIVersion:                  buildinfo.Version,
 		TranscriptPath:              opts.SessionTranscriptPath,
 	}
@@ -582,6 +591,56 @@ func mergeFilesTouched(existing, additional []string) []string {
 
 	sort.Strings(result)
 	return result
+}
+
+// redactSummary returns a copy of the summary with text fields redacted.
+// Structural fields (Path, Line, EndLine) are preserved.
+// NOTE: When adding new text fields to Summary, LearningsSummary, or CodeLearning,
+// update this function to include them in redaction.
+func redactSummary(s *Summary) *Summary {
+	if s == nil {
+		return nil
+	}
+	return &Summary{
+		Intent:    redact.String(s.Intent),
+		Outcome:   redact.String(s.Outcome),
+		Friction:  redactStringSlice(s.Friction),
+		OpenItems: redactStringSlice(s.OpenItems),
+		Learnings: LearningsSummary{
+			Repo:     redactStringSlice(s.Learnings.Repo),
+			Workflow: redactStringSlice(s.Learnings.Workflow),
+			Code:     redactCodeLearnings(s.Learnings.Code),
+		},
+	}
+}
+
+// redactStringSlice applies redact.String to each element.
+func redactStringSlice(ss []string) []string {
+	if ss == nil {
+		return nil
+	}
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = redact.String(s)
+	}
+	return out
+}
+
+// redactCodeLearnings redacts only the Finding field, preserving Path/Line/EndLine.
+func redactCodeLearnings(cls []CodeLearning) []CodeLearning {
+	if cls == nil {
+		return nil
+	}
+	out := make([]CodeLearning, len(cls))
+	for i, cl := range cls {
+		out[i] = CodeLearning{
+			Path:    cl.Path,
+			Line:    cl.Line,
+			EndLine: cl.EndLine,
+			Finding: redact.String(cl.Finding),
+		}
+	}
+	return out
 }
 
 // readMetadataFromBlob reads CommittedMetadata from a blob hash.
@@ -969,7 +1028,7 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 	}
 
 	// Update the summary
-	existingMetadata.Summary = summary
+	existingMetadata.Summary = redactSummary(summary)
 
 	// Write updated session metadata
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(existingMetadata, "", "  ")
@@ -1097,14 +1156,26 @@ func (s *GitStore) copyMetadataDir(metadataDir, basePath string, entries map[str
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			return nil
-		}
 
 		// Skip symlinks to prevent reading files outside the metadata directory.
 		// A symlink could point to sensitive files (e.g., /etc/passwd) which would
 		// then be captured in the checkpoint and stored in git history.
-		if info.Mode()&os.ModeSymlink != 0 {
+		// NOTE: filepath.Walk uses os.Stat (follows symlinks), so info.Mode() never
+		// reports ModeSymlink. We use os.Lstat to check the entry itself.
+		// This check MUST come before IsDir() because Walk follows symlinked
+		// directories and would recurse into them otherwise.
+		linfo, lstatErr := os.Lstat(path)
+		if lstatErr != nil {
+			return fmt.Errorf("failed to lstat %s: %w", path, lstatErr)
+		}
+		if linfo.Mode()&os.ModeSymlink != 0 {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if info.IsDir() {
 			return nil
 		}
 
@@ -1125,8 +1196,8 @@ func (s *GitStore) copyMetadataDir(metadataDir, basePath string, entries map[str
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)
 		}
 
-		// Store at checkpoint path
-		fullPath := basePath + relPath
+		// Store at checkpoint path (use forward slashes for git tree compatibility on Windows)
+		fullPath := basePath + filepath.ToSlash(relPath)
 		entries[fullPath] = object.TreeEntry{
 			Name: fullPath,
 			Mode: mode,

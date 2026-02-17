@@ -382,6 +382,15 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 		// Add subagent transcript if available
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 			if agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath); readErr == nil {
+				redacted, jsonlErr := redact.JSONLBytes(agentContent)
+				if jsonlErr != nil {
+					logging.Warn(context.Background(), "subagent transcript is not valid JSONL, falling back to plain redaction",
+						slog.String("path", opts.SubagentTranscriptPath),
+						slog.String("error", jsonlErr.Error()),
+					)
+					redacted = redact.Bytes(agentContent)
+				}
+				agentContent = redacted
 				if blobHash, blobErr := CreateBlobFromContent(s.repo, agentContent); blobErr == nil {
 					agentPath := taskMetadataDir + "/agent-" + opts.AgentID + ".jsonl"
 					entries[agentPath] = object.TreeEntry{
@@ -877,6 +886,25 @@ func addDirectoryToEntriesWithAbsPath(repo *git.Repository, dirPathAbs, dirPathR
 		if err != nil {
 			return err
 		}
+
+		// Skip symlinks to prevent reading files outside the metadata directory.
+		// A symlink could point to sensitive files (e.g., /etc/passwd) which would
+		// then be captured in the checkpoint and stored in git history.
+		// NOTE: filepath.Walk uses os.Stat (follows symlinks), so info.Mode() never
+		// reports ModeSymlink. We use os.Lstat to check the entry itself.
+		// This check MUST come before IsDir() because Walk follows symlinked
+		// directories and would recurse into them otherwise.
+		linfo, lstatErr := os.Lstat(path)
+		if lstatErr != nil {
+			return fmt.Errorf("failed to lstat %s: %w", path, lstatErr)
+		}
+		if linfo.Mode()&os.ModeSymlink != 0 {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
 		if info.IsDir() {
 			return nil
 		}
@@ -887,12 +915,17 @@ func addDirectoryToEntriesWithAbsPath(repo *git.Repository, dirPathAbs, dirPathR
 			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
 		}
 
-		blobHash, mode, err := createBlobFromFile(repo, path)
+		// Prevent path traversal via symlinks pointing outside the metadata dir
+		if strings.HasPrefix(relWithinDir, "..") {
+			return fmt.Errorf("path traversal detected: %s", relWithinDir)
+		}
+
+		treePath := filepath.ToSlash(filepath.Join(dirPathRel, relWithinDir))
+
+		blobHash, mode, err := createRedactedBlobFromFile(repo, path, treePath)
 		if err != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)
 		}
-
-		treePath := filepath.Join(dirPathRel, relWithinDir)
 		entries[treePath] = object.TreeEntry{
 			Name: treePath,
 			Mode: mode,
