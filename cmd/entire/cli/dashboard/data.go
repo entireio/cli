@@ -79,7 +79,7 @@ func loadSettingsCmd() tea.Msg {
 }
 
 // getConfiguredStrategy loads settings and returns the configured strategy.
-func getConfiguredStrategy() strategy.Strategy { //nolint:ireturn // factory pattern
+func getConfiguredStrategy() strategy.Strategy {
 	s, err := settings.Load()
 	if err != nil {
 		return strategy.Default()

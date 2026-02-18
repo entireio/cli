@@ -65,7 +65,7 @@ func IsEnabled() (bool, error) {
 // GetStrategy returns the configured strategy instance.
 // Falls back to default if the configured strategy is not found.
 //
-//nolint:ireturn // Factory pattern requires returning the interface
+
 func GetStrategy() strategy.Strategy {
 	s, err := settings.Load()
 	if err != nil {
