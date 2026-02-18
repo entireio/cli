@@ -59,6 +59,9 @@ type EntireSettings struct {
 	// nil = not asked yet (show prompt), true = opted in, false = opted out
 	Telemetry *bool `json:"telemetry,omitempty"`
 
+	// Redaction configures PII redaction behavior for transcripts and metadata.
+	Redaction *RedactionSettings `json:"redaction,omitempty"`
+
 	// CommitLinking controls how commits are linked to agent sessions.
 	// "always" = auto-link without prompting, "prompt" = ask on each commit.
 	// Defaults to "prompt" (preserves existing user behavior).
@@ -71,6 +74,21 @@ type EntireSettings struct {
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
+}
+
+// RedactionSettings configures redaction behavior beyond the default secret detection.
+type RedactionSettings struct {
+	PII *PIISettings `json:"pii,omitempty"`
+}
+
+// PIISettings configures PII detection categories.
+// When Enabled is true, email and phone default to true; address defaults to false.
+type PIISettings struct {
+	Enabled        bool              `json:"enabled"`
+	Email          *bool             `json:"email,omitempty"`
+	Phone          *bool             `json:"phone,omitempty"`
+	Address        *bool             `json:"address,omitempty"`
+	CustomPatterns map[string]string `json:"custom_patterns,omitempty"`
 }
 
 // GetCommitLinking returns the effective commit linking mode.
@@ -235,6 +253,16 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		settings.Telemetry = &t
 	}
 
+	// Merge redaction sub-fields if present (field-level, not wholesale replace).
+	if redactionRaw, ok := raw["redaction"]; ok {
+		if settings.Redaction == nil {
+			settings.Redaction = &RedactionSettings{}
+		}
+		if err := mergeRedaction(settings.Redaction, redactionRaw); err != nil {
+			return fmt.Errorf("parsing redaction field: %w", err)
+		}
+	}
+
 	// Override commit_linking if present and non-empty
 	if commitLinkingRaw, ok := raw["commit_linking"]; ok {
 		var cl string
@@ -260,6 +288,74 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		settings.ExternalAgents = ea
 	}
 
+	return nil
+}
+
+// mergeRedaction merges redaction overrides into existing RedactionSettings.
+// Only fields present in the override JSON are applied.
+func mergeRedaction(dst *RedactionSettings, data json.RawMessage) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parsing redaction: %w", err)
+	}
+	if piiRaw, ok := raw["pii"]; ok {
+		if dst.PII == nil {
+			dst.PII = &PIISettings{}
+		}
+		if err := mergePIISettings(dst.PII, piiRaw); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mergePIISettings merges PII overrides into existing PIISettings.
+// Only fields present in the override JSON are applied; missing fields
+// are preserved from the base settings.
+func mergePIISettings(dst *PIISettings, data json.RawMessage) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parsing pii: %w", err)
+	}
+	if v, ok := raw["enabled"]; ok {
+		if err := json.Unmarshal(v, &dst.Enabled); err != nil {
+			return fmt.Errorf("parsing pii.enabled: %w", err)
+		}
+	}
+	if v, ok := raw["email"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err != nil {
+			return fmt.Errorf("parsing pii.email: %w", err)
+		}
+		dst.Email = &b
+	}
+	if v, ok := raw["phone"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err != nil {
+			return fmt.Errorf("parsing pii.phone: %w", err)
+		}
+		dst.Phone = &b
+	}
+	if v, ok := raw["address"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err != nil {
+			return fmt.Errorf("parsing pii.address: %w", err)
+		}
+		dst.Address = &b
+	}
+	if v, ok := raw["custom_patterns"]; ok {
+		var cp map[string]string
+		if err := json.Unmarshal(v, &cp); err != nil {
+			return fmt.Errorf("parsing pii.custom_patterns: %w", err)
+		}
+		if dst.CustomPatterns == nil {
+			dst.CustomPatterns = cp
+		} else {
+			for k, val := range cp {
+				dst.CustomPatterns[k] = val
+			}
+		}
+	}
 	return nil
 }
 

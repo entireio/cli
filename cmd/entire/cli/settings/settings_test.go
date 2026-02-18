@@ -60,6 +60,7 @@ func TestLoad_AcceptsValidKeys(t *testing.T) {
 		"log_level": "debug",
 		"strategy_options": {"key": "value"},
 		"telemetry": true,
+		"redaction": {"pii": {"enabled": true, "email": true, "phone": false}},
 		"external_agents": true
 	}`
 	if err := os.WriteFile(settingsFile, []byte(settingsContent), 0644); err != nil {
@@ -89,6 +90,21 @@ func TestLoad_AcceptsValidKeys(t *testing.T) {
 	}
 	if settings.Telemetry == nil || !*settings.Telemetry {
 		t.Error("expected telemetry to be true")
+	}
+	if settings.Redaction == nil {
+		t.Fatal("expected redaction to be non-nil")
+	}
+	if settings.Redaction.PII == nil {
+		t.Fatal("expected redaction.pii to be non-nil")
+	}
+	if !settings.Redaction.PII.Enabled {
+		t.Error("expected redaction.pii.enabled to be true")
+	}
+	if settings.Redaction.PII.Email == nil || !*settings.Redaction.PII.Email {
+		t.Error("expected redaction.pii.email to be true")
+	}
+	if settings.Redaction.PII.Phone == nil || *settings.Redaction.PII.Phone {
+		t.Error("expected redaction.pii.phone to be false")
 	}
 }
 
@@ -130,6 +146,121 @@ func TestLoad_LocalSettingsRejectsUnknownKeys(t *testing.T) {
 		t.Error("expected error for unknown key in local settings, got nil")
 	} else if !containsUnknownField(err.Error()) {
 		t.Errorf("expected unknown field error, got: %v", err)
+	}
+}
+
+func TestLoad_MissingRedactionIsNil(t *testing.T) {
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	settingsFile := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatalf("failed to create .git directory: %v", err)
+	}
+	t.Chdir(tmpDir)
+
+	settings, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if settings.Redaction != nil {
+		t.Error("expected redaction to be nil when not in settings")
+	}
+}
+
+func TestLoad_LocalOverridesRedaction(t *testing.T) {
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	// Base settings: PII disabled
+	settingsFile := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true, "redaction": {"pii": {"enabled": false}}}`), 0o644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+
+	// Local override: PII enabled with custom patterns
+	localFile := filepath.Join(entireDir, "settings.local.json")
+	localContent := `{"redaction": {"pii": {"enabled": true, "custom_patterns": {"employee_id": "EMP-\\d{6}"}}}}`
+	if err := os.WriteFile(localFile, []byte(localContent), 0o644); err != nil {
+		t.Fatalf("failed to write local settings file: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatalf("failed to create .git directory: %v", err)
+	}
+	t.Chdir(tmpDir)
+
+	settings, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if settings.Redaction == nil || settings.Redaction.PII == nil {
+		t.Fatal("expected redaction.pii to be non-nil after local override")
+	}
+	if !settings.Redaction.PII.Enabled {
+		t.Error("expected local override to enable PII")
+	}
+	if settings.Redaction.PII.CustomPatterns == nil {
+		t.Fatal("expected custom_patterns to be non-nil")
+	}
+	if settings.Redaction.PII.CustomPatterns["employee_id"] != `EMP-\d{6}` {
+		t.Errorf("expected employee_id pattern, got %v", settings.Redaction.PII.CustomPatterns)
+	}
+}
+
+func TestLoad_LocalMergesRedactionSubfields(t *testing.T) {
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	// Base: PII enabled with email=true, phone=true
+	baseContent := `{"enabled":true,"redaction":{"pii":{"enabled":true,"email":true,"phone":true}}}`
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(baseContent), 0o644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+
+	// Local: adds custom_patterns only — should NOT erase email/phone from base
+	localContent := `{"redaction":{"pii":{"enabled":true,"custom_patterns":{"ssn":"\\d{3}-\\d{2}-\\d{4}"}}}}`
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(localContent), 0o644); err != nil {
+		t.Fatalf("failed to write local settings file: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatalf("failed to create .git directory: %v", err)
+	}
+	t.Chdir(tmpDir)
+
+	settings, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if settings.Redaction == nil || settings.Redaction.PII == nil {
+		t.Fatal("expected redaction.pii to be non-nil")
+	}
+	// email and phone from base should survive local merge
+	if settings.Redaction.PII.Email == nil || !*settings.Redaction.PII.Email {
+		t.Error("expected email=true from base to survive local merge")
+	}
+	if settings.Redaction.PII.Phone == nil || !*settings.Redaction.PII.Phone {
+		t.Error("expected phone=true from base to survive local merge")
+	}
+	// custom_patterns from local should be present
+	if settings.Redaction.PII.CustomPatterns == nil {
+		t.Fatal("expected custom_patterns from local to be present")
+	}
+	if _, ok := settings.Redaction.PII.CustomPatterns["ssn"]; !ok {
+		t.Error("expected ssn pattern from local override")
 	}
 }
 

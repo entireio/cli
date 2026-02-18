@@ -895,6 +895,8 @@ func addDirectoryToEntriesWithAbsPath(repo *git.Repository, dirPathAbs, dirPathR
 
 		treePath := filepath.ToSlash(filepath.Join(dirPathRel, relWithinDir))
 
+		// Use redacted blob creation for metadata files (transcripts, prompts, etc.)
+		// to ensure PII and secrets are redacted before writing to git.
 		blobHash, mode, err := createRedactedBlobFromFile(repo, path, treePath)
 		if err != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, err)

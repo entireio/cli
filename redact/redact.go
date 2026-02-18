@@ -47,14 +47,23 @@ func getDetector() *detect.Detector {
 // region represents a byte range to redact.
 type region struct{ start, end int }
 
-// String replaces secrets in s with "REDACTED" using layered detection:
+// taggedRegion extends region with a label for typed replacement tokens.
+// Empty label = secret (produces "REDACTED"). Non-empty = PII (produces "[REDACTED_<LABEL>]").
+type taggedRegion struct {
+	region
+
+	label string
+}
+
+// String replaces secrets and PII in s using layered detection:
 // 1. Entropy-based: high-entropy alphanumeric sequences (threshold 4.5)
 // 2. Pattern-based: gitleaks regex rules (180+ known secret formats)
-// A string is redacted if EITHER method flags it.
+// 3. PII detection: email, phone, address patterns (only when configured via ConfigurePII)
+// A string is redacted if ANY method flags it.
 func String(s string) string {
-	var regions []region
+	var regions []taggedRegion
 
-	// 1. Entropy-based detection.
+	// 1. Entropy-based detection (secrets — always on).
 	for _, loc := range secretPattern.FindAllStringIndex(s, -1) {
 		start, end := loc[0], loc[1]
 
@@ -75,11 +84,11 @@ func String(s string) string {
 		}
 
 		if shannonEntropy(s[start:end]) > entropyThreshold {
-			regions = append(regions, region{start, end})
+			regions = append(regions, taggedRegion{region: region{start, end}})
 		}
 	}
 
-	// 2. Pattern-based detection via gitleaks.
+	// 2. Pattern-based detection via gitleaks (secrets — always on).
 	if d := getDetector(); d != nil {
 		for _, f := range d.DetectString(s) {
 			if f.Secret == "" {
@@ -92,11 +101,14 @@ func String(s string) string {
 					break
 				}
 				absIdx := searchFrom + idx
-				regions = append(regions, region{absIdx, absIdx + len(f.Secret)})
+				regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(f.Secret)}})
 				searchFrom = absIdx + len(f.Secret)
 			}
 		}
 	}
+
+	// 3. PII detection (opt-in — only runs when configured).
+	regions = append(regions, detectPII(getPIIConfig(), s)...)
 
 	if len(regions) == 0 {
 		return s
@@ -104,15 +116,22 @@ func String(s string) string {
 
 	// Merge overlapping regions and build result.
 	sort.Slice(regions, func(i, j int) bool {
-		return regions[i].start < regions[j].start
+		if regions[i].start != regions[j].start {
+			return regions[i].start < regions[j].start
+		}
+		if regions[i].end != regions[j].end {
+			return regions[i].end > regions[j].end // larger region first
+		}
+		return regions[i].label < regions[j].label // deterministic tie-break
 	})
-	merged := []region{regions[0]}
+	merged := []taggedRegion{regions[0]}
 	for _, r := range regions[1:] {
 		last := &merged[len(merged)-1]
 		if r.start <= last.end {
 			if r.end > last.end {
 				last.end = r.end
 			}
+			// Keep the existing label (first/larger region wins)
 		} else {
 			merged = append(merged, r)
 		}
@@ -122,7 +141,7 @@ func String(s string) string {
 	prev := 0
 	for _, r := range merged {
 		b.WriteString(s[prev:r.start])
-		b.WriteString(RedactedPlaceholder)
+		b.WriteString(replacementToken(r.label))
 		prev = r.end
 	}
 	b.WriteString(s[prev:])

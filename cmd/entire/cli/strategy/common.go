@@ -21,7 +21,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -274,6 +276,38 @@ var (
 	protectedDirsOnce  sync.Once
 	protectedDirsCache []string
 )
+
+var initRedactionOnce sync.Once
+
+// EnsureRedactionConfigured loads PII redaction settings and configures the
+// redact package. No-op if PII is not enabled in settings.
+// Must be called at each process entry point before checkpoint writes
+// (e.g., hook PersistentPreRunE, doctor PreRun).
+func EnsureRedactionConfigured() {
+	initRedactionOnce.Do(func() {
+		ctx := context.Background()
+		s, err := settings.Load(ctx)
+		if err != nil {
+			logCtx := logging.WithComponent(ctx, "redaction")
+			logging.Warn(logCtx, "failed to load settings for PII redaction", slog.String("error", err.Error()))
+			return
+		}
+		if s.Redaction == nil || s.Redaction.PII == nil || !s.Redaction.PII.Enabled {
+			return
+		}
+		pii := s.Redaction.PII
+		cfg := redact.PIIConfig{
+			Enabled:        true,
+			Categories:     make(map[redact.PIICategory]bool),
+			CustomPatterns: pii.CustomPatterns,
+		}
+		// Email and phone default to true when PII is enabled; address defaults to false.
+		cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
+		cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
+		cfg.Categories[redact.PIIAddress] = pii.Address != nil && *pii.Address
+		redact.ConfigurePII(cfg)
+	})
+}
 
 // resolveAgentType picks the best agent type from the context and existing state.
 // Priority: existing state > context value.
