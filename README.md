@@ -281,7 +281,7 @@ If you run into any issues with Gemini CLI integration, please [open an issue](h
 
 **Your session transcripts are stored in your git repository** on the `entire/checkpoints/v1` branch. If your repository is public, this data is visible to anyone.
 
-Entire automatically redacts detected secrets (API keys, tokens, credentials) before committing, but redaction is best-effort. See [docs/security-and-privacy.md](docs/security-and-privacy.md) for details.
+Entire automatically redacts detected secrets (API keys, tokens, credentials) when writing to `entire/checkpoints/v1`, but redaction is best-effort. Temporary shadow branches used during a session may contain unredacted data and should not be pushed. See [docs/security-and-privacy.md](docs/security-and-privacy.md) for details.
 
 ## Troubleshooting
 
