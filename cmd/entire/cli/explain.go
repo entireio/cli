@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -320,7 +321,12 @@ func generateCheckpointSummary(w, _ io.Writer, store *checkpoint.GitStore, check
 	ctx := context.Background()
 	logging.Info(ctx, "generating checkpoint summary")
 
-	summary, err := summarize.GenerateFromTranscript(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent, nil)
+	s, sErr := settings.Load()
+	if sErr != nil {
+		s = nil
+	}
+	gen := summarize.ResolveGenerator(s)
+	summary, err := summarize.GenerateFromTranscript(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent, gen)
 	if err != nil {
 		return fmt.Errorf("failed to generate summary: %w", err)
 	}

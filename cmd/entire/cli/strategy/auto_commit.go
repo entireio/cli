@@ -18,6 +18,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5"
@@ -258,6 +260,29 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository
 	// Write committed checkpoint using the checkpoint store
 	// Pass TranscriptPath so writeTranscript generates content_hash.txt
 	transcriptPath := filepath.Join(ctx.MetadataDirAbs, paths.TranscriptFileName)
+
+	// Generate summary if summarization is enabled (non-blocking)
+	var cpSummary *checkpoint.Summary
+	if settings.IsSummarizeEnabled() {
+		if transcriptBytes, readErr := os.ReadFile(transcriptPath); readErr == nil && len(transcriptBytes) > 0 { //nolint:gosec // path computed from session metadata
+			scoped := summarize.ScopeTranscript(transcriptBytes, ctx.StepTranscriptStart, ctx.AgentType)
+			if len(scoped) > 0 {
+				s, sErr := settings.Load()
+				if sErr != nil {
+					s = nil
+				}
+				gen := summarize.ResolveGenerator(s)
+				sumCtx := logging.WithComponent(context.Background(), "summarize")
+				var genErr error
+				cpSummary, genErr = summarize.GenerateFromTranscript(sumCtx, scoped, filesTouched, ctx.AgentType, gen)
+				if genErr != nil {
+					logging.Warn(sumCtx, "auto-commit summary generation failed",
+						slog.String("session_id", sessionID),
+						slog.String("error", genErr.Error()))
+				}
+			}
+		}
+	}
 	err = store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
 		CheckpointID:                checkpointID,
 		SessionID:                   sessionID,
@@ -274,6 +299,7 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository
 		TokenUsage:                  ctx.TokenUsage,
 		CheckpointsCount:            1,            // Each auto-commit checkpoint = 1
 		FilesTouched:                filesTouched, // Track modified files (same as manual-commit)
+		Summary:                     cpSummary,
 	})
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to write committed checkpoint: %w", err)

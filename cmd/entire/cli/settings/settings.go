@@ -213,6 +213,60 @@ func applyDefaults(settings *EntireSettings) {
 	}
 }
 
+// summarizeOpts extracts the summarize sub-map from strategy_options, or returns nil.
+func (s *EntireSettings) summarizeOpts() map[string]any {
+	if s.StrategyOptions == nil {
+		return nil
+	}
+	opts, ok := s.StrategyOptions["summarize"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return opts
+}
+
+// SummarizeProvider returns the configured summarization provider name.
+// Returns empty string if not set (caller should default to Claude).
+func (s *EntireSettings) SummarizeProvider() string {
+	opts := s.summarizeOpts()
+	if opts == nil {
+		return ""
+	}
+	provider, ok := opts["provider"].(string)
+	if !ok {
+		return ""
+	}
+	return provider
+}
+
+// SummarizeModel returns the configured model for the summarization provider.
+// Returns empty string if not set (caller should use the provider's default).
+func (s *EntireSettings) SummarizeModel() string {
+	opts := s.summarizeOpts()
+	if opts == nil {
+		return ""
+	}
+	model, ok := opts["model"].(string)
+	if !ok {
+		return ""
+	}
+	return model
+}
+
+// SummarizeAPIKey returns the configured API key for the summarization provider.
+// Returns empty string if not set.
+func (s *EntireSettings) SummarizeAPIKey() string {
+	opts := s.summarizeOpts()
+	if opts == nil {
+		return ""
+	}
+	apiKey, ok := opts["api_key"].(string)
+	if !ok {
+		return ""
+	}
+	return apiKey
+}
+
 // IsSummarizeEnabled checks if auto-summarize is enabled in settings.
 // Returns false by default if settings cannot be loaded or the key is missing.
 func IsSummarizeEnabled() bool {

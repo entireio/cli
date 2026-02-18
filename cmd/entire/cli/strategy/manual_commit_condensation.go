@@ -199,8 +199,13 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 			scopedTranscript = transcript.SliceFromLine(sessionData.Transcript, state.CheckpointTranscriptStart)
 		}
 		if len(scopedTranscript) > 0 {
+			s, sErr := settings.Load()
+			if sErr != nil {
+				s = nil
+			}
+			gen := summarize.ResolveGenerator(s)
 			var err error
-			summary, err = summarize.GenerateFromTranscript(summarizeCtx, scopedTranscript, sessionData.FilesTouched, state.AgentType, nil)
+			summary, err = summarize.GenerateFromTranscript(summarizeCtx, scopedTranscript, sessionData.FilesTouched, state.AgentType, gen)
 			if err != nil {
 				logging.Warn(summarizeCtx, "summary generation failed",
 					slog.String("session_id", state.SessionID),

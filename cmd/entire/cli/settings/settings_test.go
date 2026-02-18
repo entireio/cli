@@ -135,6 +135,66 @@ func TestLoad_LocalSettingsRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
+func TestSummarizeProvider_Empty(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{}
+	if got := s.SummarizeProvider(); got != "" {
+		t.Errorf("expected empty provider, got %q", got)
+	}
+}
+
+func TestSummarizeProvider_Set(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{
+		StrategyOptions: map[string]any{
+			"summarize": map[string]any{"provider": "openai"},
+		},
+	}
+	if got := s.SummarizeProvider(); got != "openai" {
+		t.Errorf("expected provider openai, got %q", got)
+	}
+}
+
+func TestSummarizeModel_Empty(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{}
+	if got := s.SummarizeModel(); got != "" {
+		t.Errorf("expected empty model, got %q", got)
+	}
+}
+
+func TestSummarizeModel_Set(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{
+		StrategyOptions: map[string]any{
+			"summarize": map[string]any{"model": "gpt-5-mini"},
+		},
+	}
+	if got := s.SummarizeModel(); got != "gpt-5-mini" {
+		t.Errorf("expected model gpt-5-mini, got %q", got)
+	}
+}
+
+func TestSummarizeAPIKey_Empty(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{}
+	if got := s.SummarizeAPIKey(); got != "" {
+		t.Errorf("expected empty api_key, got %q", got)
+	}
+}
+
+func TestSummarizeAPIKey_Set(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{
+		StrategyOptions: map[string]any{
+			"summarize": map[string]any{"api_key": "sk-test"},
+		},
+	}
+	if got := s.SummarizeAPIKey(); got != "sk-test" {
+		t.Errorf("expected api_key sk-test, got %q", got)
+	}
+}
+
 // containsUnknownField checks if the error message indicates an unknown field
 func containsUnknownField(msg string) bool {
 	// Go's json package reports unknown fields with this message format
