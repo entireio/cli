@@ -76,8 +76,8 @@ type builtinPIIPattern struct {
 // builtinPIIPatterns returns the default PII detection patterns.
 func builtinPIIPatterns() []builtinPIIPattern {
 	return []builtinPIIPattern{
-		// Email: standard format
-		{PIIEmail, "EMAIL", `[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`},
+		// Email: standard format with word boundaries to reduce false positives
+		{PIIEmail, "EMAIL", `\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`},
 		// Phone: US formats (xxx-xxx-xxxx, (xxx) xxx-xxxx, +1xxxxxxxxxx, etc.)
 		{PIIPhone, "PHONE", `(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}`},
 		// Address: US street address patterns (123 Main St, 456 Elm Avenue, etc.)
