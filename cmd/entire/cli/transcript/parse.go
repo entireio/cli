@@ -96,6 +96,34 @@ func ParseFromFileAtLine(path string, startLine int) ([]Line, int, error) {
 	return lines, totalLines, nil
 }
 
+// CountLines counts the number of lines in a transcript file without parsing JSON.
+// This is much faster than ParseFromFileAtLine when only the line count is needed.
+func CountLines(path string) (int, error) {
+	file, err := os.Open(path) //nolint:gosec // path is a controlled transcript file path
+	if err != nil {
+		return 0, fmt.Errorf("failed to open transcript: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	count := 0
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := file.Read(buf)
+		for i := range n {
+			if buf[i] == '\n' {
+				count++
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return 0, fmt.Errorf("failed to read transcript: %w", readErr)
+		}
+	}
+	return count, nil
+}
+
 // SliceFromLine returns the content starting from line number `startLine` (0-indexed).
 // This is used to extract only the checkpoint-specific portion of a cumulative transcript.
 // For example, if startLine is 2, lines 0 and 1 are skipped and the result starts at line 2.

@@ -27,8 +27,11 @@ func (s *ManualCommitStrategy) SaveStep(ctx StepContext) error {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
 
-	// Extract session ID from metadata dir
-	sessionID := filepath.Base(ctx.MetadataDir)
+	// Extract session ID: prefer explicit SessionID, fall back to metadata dir basename
+	sessionID := ctx.SessionID
+	if sessionID == "" {
+		sessionID = filepath.Base(ctx.MetadataDir)
+	}
 
 	// Load or initialize session state
 	state, err := s.loadSessionState(sessionID)

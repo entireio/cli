@@ -317,11 +317,21 @@ func runRewindInteractive() error { //nolint:maintidx // already present in code
 	}
 
 	if !restored {
-		// Fall back to local file
+		// Fall back to local file: try the metadata dir copy first, then the live transcript
 		if err := restoreSessionTranscript(transcriptFile, sessionID, agent); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to restore session transcript: %v\n", err)
-			fmt.Fprintf(os.Stderr, "  Source: %s\n", transcriptFile)
-			fmt.Fprintf(os.Stderr, "  Session ID: %s\n", sessionID)
+			// Metadata dir may not have a transcript (optimized stop hook skips copy).
+			// Try the live transcript path from session state.
+			liveTranscriptPath := strategy.ResolveSessionFilePath(sessionID, agent, "")
+			if liveTranscriptPath != "" && liveTranscriptPath != transcriptFile {
+				if liveErr := restoreSessionTranscript(liveTranscriptPath, sessionID, agent); liveErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to restore session transcript: %v\n", liveErr)
+				} else {
+					restored = true
+				}
+			}
+			if !restored {
+				fmt.Fprintf(os.Stderr, "Warning: failed to restore session transcript: %v\n", err)
+			}
 		}
 	}
 

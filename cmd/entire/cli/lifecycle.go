@@ -126,7 +126,7 @@ func handleLifecycleTurnStart(ag agent.Agent, event *agent.Event) error {
 	}
 
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
-	if err := CapturePrePromptState(ag, sessionID, event.SessionRef); err != nil {
+	if err := CapturePrePromptState(ag, sessionID, event.SessionRef, event.Prompt); err != nil {
 		return err
 	}
 

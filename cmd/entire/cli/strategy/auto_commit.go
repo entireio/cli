@@ -240,8 +240,11 @@ func (s *AutoCommitStrategy) commitMetadataToMetadataBranch(repo *git.Repository
 		return plumbing.ZeroHash, fmt.Errorf("failed to get checkpoint store: %w", err)
 	}
 
-	// Extract session ID from metadata dir
-	sessionID := filepath.Base(ctx.MetadataDir)
+	// Extract session ID: prefer explicit SessionID, fall back to metadata dir basename
+	sessionID := ctx.SessionID
+	if sessionID == "" {
+		sessionID = filepath.Base(ctx.MetadataDir)
+	}
 
 	// Get current branch name
 	branchName := GetCurrentBranchName(repo)

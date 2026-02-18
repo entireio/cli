@@ -23,6 +23,10 @@ type PrePromptState struct {
 	Timestamp      string   `json:"timestamp"`
 	UntrackedFiles []string `json:"untracked_files"`
 
+	// UserPrompt is the user's prompt text, stored at prompt submit time.
+	// Used by the stop hook to generate commit messages without transcript parsing.
+	UserPrompt string `json:"user_prompt,omitempty"`
+
 	// TranscriptOffset is the unified transcript position when this state was captured.
 	// For Claude Code (JSONL), this is the line count.
 	// For Gemini CLI (JSON), this is the message count.
@@ -89,7 +93,7 @@ func (s *PrePromptState) normalizePrePromptState() {
 // The sessionRef parameter is optional — if empty, transcript position won't be captured.
 //
 // Works correctly from any subdirectory within the repository.
-func CapturePrePromptState(ag agent.Agent, sessionID, sessionRef string) error {
+func CapturePrePromptState(ag agent.Agent, sessionID, sessionRef, userPrompt string) error {
 	if sessionID == "" {
 		sessionID = unknownSessionID
 	}
@@ -128,6 +132,7 @@ func CapturePrePromptState(ag agent.Agent, sessionID, sessionRef string) error {
 		SessionID:        sessionID,
 		Timestamp:        time.Now().UTC().Format(time.RFC3339),
 		UntrackedFiles:   untrackedFiles,
+		UserPrompt:       userPrompt,
 		TranscriptOffset: transcriptOffset,
 	}
 
@@ -228,7 +233,12 @@ func DetectFileChanges(previouslyUntracked []string) (*FileChanges, error) {
 		switch {
 		case st.Worktree == git.Untracked:
 			if preExisting != nil {
-				if !preExisting[file] {
+				if preExisting[file] {
+					// Pre-existing untracked file still present: treat as modified.
+					// Git status can't distinguish content changes in untracked files,
+					// but the strategy's tree hash dedup will skip if nothing actually changed.
+					changes.Modified = append(changes.Modified, file)
+				} else {
 					changes.New = append(changes.New, file)
 				}
 			} else {

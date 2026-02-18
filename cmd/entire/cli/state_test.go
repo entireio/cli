@@ -335,7 +335,7 @@ func TestPrePromptState_WithTranscriptPosition(t *testing.T) {
 	ag := claudecode.NewClaudeCodeAgent()
 
 	// Capture state with transcript path using Claude agent (JSONL format)
-	if err := CapturePrePromptState(ag, sessionID, transcriptPath); err != nil {
+	if err := CapturePrePromptState(ag, sessionID, transcriptPath, ""); err != nil {
 		t.Fatalf("CapturePrePromptState() error = %v", err)
 	}
 
@@ -367,7 +367,7 @@ func TestPrePromptState_WithEmptyTranscriptPath(t *testing.T) {
 	ag := claudecode.NewClaudeCodeAgent()
 
 	// Capture state with empty transcript path
-	if err := CapturePrePromptState(ag, sessionID, ""); err != nil {
+	if err := CapturePrePromptState(ag, sessionID, "", ""); err != nil {
 		t.Fatalf("CapturePrePromptState() error = %v", err)
 	}
 
@@ -403,7 +403,7 @@ func TestPrePromptState_WithSummaryOnlyTranscript(t *testing.T) {
 	ag := claudecode.NewClaudeCodeAgent()
 
 	// Capture state
-	if err := CapturePrePromptState(ag, sessionID, transcriptPath); err != nil {
+	if err := CapturePrePromptState(ag, sessionID, transcriptPath, ""); err != nil {
 		t.Fatalf("CapturePrePromptState() error = %v", err)
 	}
 
