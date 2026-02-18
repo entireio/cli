@@ -19,6 +19,7 @@ With Entire, you can:
   - [Strategies](#strategies)
 - [Commands Reference](#commands-reference)
 - [Configuration](#configuration)
+- [Security & Privacy](#security--privacy)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 - [Getting Help](#getting-help)
@@ -275,6 +276,12 @@ entire enable --agent gemini
 All commands (`rewind`, `status`, `doctor`, etc.) work the same regardless of which agent is configured.
 
 If you run into any issues with Gemini CLI integration, please [open an issue](https://github.com/entireio/cli/issues).
+
+## Security & Privacy
+
+**Your session transcripts are stored in your git repository** on the `entire/checkpoints/v1` branch. If your repository is public, this data is visible to anyone.
+
+Entire automatically redacts detected secrets (API keys, tokens, credentials) before committing, but redaction is best-effort. See [docs/security-and-privacy.md](docs/security-and-privacy.md) for details.
 
 ## Troubleshooting
 
