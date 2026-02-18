@@ -286,28 +286,22 @@ func (s *GitStore) WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTa
 	return commitHash, nil
 }
 
-// addTaskMetadataToTree adds task checkpoint metadata to a git tree.
+// addTaskMetadataToTree adds task checkpoint metadata to a git tree using incremental updates.
+// Only the metadata paths are modified; unchanged subtrees are reused by hash reference.
 // When IsIncremental is true, only adds the incremental checkpoint file.
 func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteTemporaryTaskOptions) (plumbing.Hash, error) {
-	// Get base tree and flatten it
-	baseTree, err := s.repo.TreeObject(baseTreeHash)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to get base tree: %w", err)
-	}
-
-	entries := make(map[string]object.TreeEntry)
-	if err := FlattenTree(s.repo, baseTree, "", entries); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to flatten tree: %w", err)
-	}
-
 	// Compute metadata paths
 	sessionMetadataDir := paths.EntireMetadataDir + "/" + opts.SessionID
 	taskMetadataDir := sessionMetadataDir + "/tasks/" + opts.ToolUseID
+
+	// Build change tree with metadata additions
+	changes := newChangeTree()
 
 	if opts.IsIncremental {
 		// Incremental checkpoint: only add the checkpoint file
 		// Use proper JSON marshaling to handle nil/empty IncrementalData correctly
 		var incData []byte
+		var err error
 		if opts.IncrementalData != nil {
 			incData, err = redact.JSONLBytes(opts.IncrementalData)
 			if err != nil {
@@ -336,11 +330,7 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 		}
 		cpFilename := fmt.Sprintf("%03d-%s.json", opts.IncrementalSequence, opts.ToolUseID)
 		cpPath := taskMetadataDir + "/checkpoints/" + cpFilename
-		entries[cpPath] = object.TreeEntry{
-			Name: cpPath,
-			Mode: filemode.Regular,
-			Hash: cpBlobHash,
-		}
+		changes.addFile(cpPath, cpBlobHash, filemode.Regular)
 	} else {
 		// Final checkpoint: add transcripts and checkpoint.json
 
@@ -369,11 +359,7 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 							)
 							continue
 						}
-						entries[chunkPath] = object.TreeEntry{
-							Name: chunkPath,
-							Mode: filemode.Regular,
-							Hash: blobHash,
-						}
+						changes.addFile(chunkPath, blobHash, filemode.Regular)
 					}
 				}
 			}
@@ -393,11 +379,7 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 				agentContent = redacted
 				if blobHash, blobErr := CreateBlobFromContent(s.repo, agentContent); blobErr == nil {
 					agentPath := taskMetadataDir + "/agent-" + opts.AgentID + ".jsonl"
-					entries[agentPath] = object.TreeEntry{
-						Name: agentPath,
-						Mode: filemode.Regular,
-						Hash: blobHash,
-					}
+					changes.addFile(agentPath, blobHash, filemode.Regular)
 				}
 			}
 		}
@@ -415,15 +397,11 @@ func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteT
 			return plumbing.ZeroHash, fmt.Errorf("failed to create checkpoint blob: %w", err)
 		}
 		checkpointPath := taskMetadataDir + "/checkpoint.json"
-		entries[checkpointPath] = object.TreeEntry{
-			Name: checkpointPath,
-			Mode: filemode.Regular,
-			Hash: blobHash,
-		}
+		changes.addFile(checkpointPath, blobHash, filemode.Regular)
 	}
 
-	// Build new tree from entries
-	return BuildTreeFromEntries(s.repo, entries)
+	// Apply changes incrementally to the base tree
+	return applyChangesToTree(s.repo, baseTreeHash, changes)
 }
 
 // ListTemporaryCheckpoints lists all checkpoint commits on a shadow branch.
@@ -693,7 +671,9 @@ func (s *GitStore) getOrCreateShadowBranch(branchName string) (plumbing.Hash, pl
 	return plumbing.ZeroHash, headCommit.TreeHash, nil
 }
 
-// buildTreeWithChanges builds a git tree with the given changes.
+// buildTreeWithChanges builds a git tree with the given changes using incremental tree updates.
+// Only directories containing changes are rebuilt; unchanged subtrees are reused by hash reference.
+// This is O(changed_files * tree_depth) instead of O(total_files_in_repo).
 // metadataDir is the relative path for git tree entries, metadataDirAbs is the absolute path
 // for filesystem operations (needed when CLI is run from a subdirectory).
 func (s *GitStore) buildTreeWithChanges(
@@ -710,54 +690,41 @@ func (s *GitStore) buildTreeWithChanges(
 		return plumbing.ZeroHash, fmt.Errorf("failed to get repo root: %w", err)
 	}
 
-	// Get the base tree
-	baseTree, err := s.repo.TreeObject(baseTreeHash)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to get base tree: %w", err)
-	}
+	// Build change tree with all modifications
+	changes := newChangeTree()
 
-	// Flatten existing tree
-	entries := make(map[string]object.TreeEntry)
-	if err := FlattenTree(s.repo, baseTree, "", entries); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to flatten base tree: %w", err)
-	}
-
-	// Remove deleted files
+	// Record deleted files
 	for _, file := range deletedFiles {
-		delete(entries, file)
+		changes.deleteFile(file)
 	}
 
-	// Add/update modified files
+	// Record modified/new files (read content and create blobs)
 	for _, file := range modifiedFiles {
-		// Resolve path relative to repo root for filesystem operations
 		absPath := filepath.Join(repoRoot, file)
 		if !fileExists(absPath) {
-			delete(entries, file)
+			// File no longer exists, treat as deletion
+			changes.deleteFile(file)
 			continue
 		}
 
-		blobHash, mode, err := createBlobFromFile(s.repo, absPath)
-		if err != nil {
+		blobHash, mode, blobErr := createBlobFromFile(s.repo, absPath)
+		if blobErr != nil {
 			// Skip files that can't be staged (may have been deleted since detection)
 			continue
 		}
 
-		entries[file] = object.TreeEntry{
-			Name: file,
-			Mode: mode,
-			Hash: blobHash,
-		}
+		changes.addFile(file, blobHash, mode)
 	}
 
 	// Add metadata directory files
 	if metadataDir != "" && metadataDirAbs != "" {
-		if err := addDirectoryToEntriesWithAbsPath(s.repo, metadataDirAbs, metadataDir, entries); err != nil {
+		if err := addDirectoryToChangeTree(s.repo, metadataDirAbs, metadataDir, changes); err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to add metadata directory: %w", err)
 		}
 	}
 
-	// Build tree
-	return BuildTreeFromEntries(s.repo, entries)
+	// Apply changes incrementally to the base tree
+	return applyChangesToTree(s.repo, baseTreeHash, changes)
 }
 
 // createCommit creates a commit object.
@@ -938,7 +905,6 @@ func addDirectoryToEntriesWithAbsPath(repo *git.Repository, dirPathAbs, dirPathR
 	}
 	return nil
 }
-
 // treeNode represents a node in our tree structure.
 type treeNode struct {
 	entries map[string]*treeNode // subdirectories

@@ -339,6 +339,13 @@ func CalculateTotalTokenUsage(transcriptPath string, startLine int, subagentsDir
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)
 	}
 
+	return CalculateTotalTokenUsageFromLines(parsed, subagentsDir)
+}
+
+// CalculateTotalTokenUsageFromLines calculates token usage from pre-parsed transcript lines,
+// including subagents. This avoids re-parsing the transcript file when lines have already been parsed.
+// Subagent transcripts are still read from subagentsDir.
+func CalculateTotalTokenUsageFromLines(parsed []TranscriptLine, subagentsDir string) (*agent.TokenUsage, error) {
 	// Calculate token usage from parsed transcript
 	mainUsage := CalculateTokenUsage(parsed)
 
@@ -385,6 +392,14 @@ func ExtractAllModifiedFiles(transcriptPath string, startLine int, subagentsDir 
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)
 	}
 
+	return ExtractAllModifiedFilesFromLines(parsed, subagentsDir)
+}
+
+// ExtractAllModifiedFilesFromLines extracts files modified by both the main agent and
+// any subagents spawned via the Task tool, using pre-parsed transcript lines.
+// This avoids re-parsing the transcript file when lines have already been parsed.
+// Subagent transcripts are still read from subagentsDir.
+func ExtractAllModifiedFilesFromLines(parsed []TranscriptLine, subagentsDir string) ([]string, error) {
 	// Collect modified files from main agent
 	fileSet := make(map[string]bool)
 	var files []string
