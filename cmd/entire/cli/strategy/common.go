@@ -466,6 +466,10 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) agent.Agent
 	}
 
 	// Fall back to detecting agent from config files (shadow branches don't have metadata.json)
+	// Check for OpenCode config
+	if _, err := tree.Tree(".opencode"); err == nil {
+		return agent.AgentTypeOpenCode
+	}
 	// Check for Gemini config
 	if _, err := tree.File(".gemini/settings.json"); err == nil {
 		return agent.AgentTypeGemini

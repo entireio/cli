@@ -178,7 +178,7 @@ To completely remove Entire integrations from this repository, use --uninstall:
   - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
   - Session state files (.git/entire-sessions/)
   - Shadow branches (entire/<hash>)
-  - Agent hooks (Claude Code, Gemini CLI)`,
+  - Agent hooks (Claude Code, Gemini CLI, OpenCode)`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if uninstall {
 				return runUninstall(cmd.OutOrStdout(), cmd.ErrOrStderr(), force)
@@ -1070,11 +1070,12 @@ func runUninstall(w, errW io.Writer, force bool) error {
 	gitHooksInstalled := strategy.IsGitHookInstalled()
 	claudeHooksInstalled := checkClaudeCodeHooksInstalled()
 	geminiHooksInstalled := checkGeminiCLIHooksInstalled()
+	opencodeHooksInstalled := checkOpenCodeHooksInstalled()
 	entireDirExists := checkEntireDirExists()
 
 	// Check if there's anything to uninstall
 	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
-		shadowBranchCount == 0 && !claudeHooksInstalled && !geminiHooksInstalled {
+		shadowBranchCount == 0 && !claudeHooksInstalled && !geminiHooksInstalled && !opencodeHooksInstalled {
 		fmt.Fprintln(w, "Entire is not installed in this repository.")
 		return nil
 	}
@@ -1094,13 +1095,18 @@ func runUninstall(w, errW io.Writer, force bool) error {
 		if shadowBranchCount > 0 {
 			fmt.Fprintf(w, "  - Shadow branches (%d)\n", shadowBranchCount)
 		}
-		switch {
-		case claudeHooksInstalled && geminiHooksInstalled:
-			fmt.Fprintln(w, "  - Agent hooks (Claude Code, Gemini CLI)")
-		case claudeHooksInstalled:
-			fmt.Fprintln(w, "  - Agent hooks (Claude Code)")
-		case geminiHooksInstalled:
-			fmt.Fprintln(w, "  - Agent hooks (Gemini CLI)")
+		var agentNames []string
+		if claudeHooksInstalled {
+			agentNames = append(agentNames, "Claude Code")
+		}
+		if geminiHooksInstalled {
+			agentNames = append(agentNames, "Gemini CLI")
+		}
+		if opencodeHooksInstalled {
+			agentNames = append(agentNames, "OpenCode")
+		}
+		if len(agentNames) > 0 {
+			fmt.Fprintf(w, "  - Agent hooks (%s)\n", strings.Join(agentNames, ", "))
 		}
 		fmt.Fprintln(w)
 
@@ -1215,6 +1221,19 @@ func checkGeminiCLIHooksInstalled() bool {
 	return hookAgent.AreHooksInstalled()
 }
 
+// checkOpenCodeHooksInstalled checks if OpenCode hooks are installed.
+func checkOpenCodeHooksInstalled() bool {
+	ag, err := agent.Get(agent.AgentNameOpenCode)
+	if err != nil {
+		return false
+	}
+	hookAgent, ok := ag.(agent.HookSupport)
+	if !ok {
+		return false
+	}
+	return hookAgent.AreHooksInstalled()
+}
+
 // checkEntireDirExists checks if the .entire directory exists.
 func checkEntireDirExists() bool {
 	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
@@ -1251,6 +1270,19 @@ func removeAgentHooks(w io.Writer) error {
 				errs = append(errs, err)
 			} else if wasInstalled {
 				fmt.Fprintln(w, "  Removed Gemini CLI hooks")
+			}
+		}
+	}
+
+	// Remove OpenCode hooks
+	opencodeAgent, err := agent.Get(agent.AgentNameOpenCode)
+	if err == nil {
+		if hookAgent, ok := opencodeAgent.(agent.HookSupport); ok {
+			wasInstalled := hookAgent.AreHooksInstalled()
+			if err := hookAgent.UninstallHooks(); err != nil {
+				errs = append(errs, err)
+			} else if wasInstalled {
+				fmt.Fprintln(w, "  Removed OpenCode hooks")
 			}
 		}
 	}

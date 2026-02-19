@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
@@ -116,6 +117,8 @@ func BuildCondensedTranscriptFromBytes(content []byte, agentType agent.AgentType
 	switch agentType {
 	case agent.AgentTypeGemini:
 		return buildCondensedTranscriptFromGemini(content)
+	case agent.AgentTypeOpenCode:
+		return buildCondensedTranscriptFromOpenCode(content)
 	case agent.AgentTypeClaudeCode, agent.AgentTypeUnknown:
 		// Claude format - fall through to shared logic below
 	}
@@ -164,6 +167,55 @@ func buildCondensedTranscriptFromGemini(content []byte) ([]Entry, error) {
 	}
 
 	return entries, nil
+}
+
+// buildCondensedTranscriptFromOpenCode parses OpenCode JSON transcript and extracts a condensed view.
+func buildCondensedTranscriptFromOpenCode(content []byte) ([]Entry, error) {
+	ocTranscript, err := opencode.ParseTranscript(content)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse OpenCode transcript: %w", err)
+	}
+
+	var entries []Entry
+	for _, msg := range ocTranscript.Messages {
+		switch msg.Role {
+		case "user":
+			if msg.Content != "" {
+				entries = append(entries, Entry{
+					Type:    EntryTypeUser,
+					Content: msg.Content,
+				})
+			}
+		case "assistant":
+			if msg.Content != "" {
+				entries = append(entries, Entry{
+					Type:    EntryTypeAssistant,
+					Content: msg.Content,
+				})
+			}
+			for _, part := range msg.Parts {
+				if part.Type == "tool" && part.State != nil {
+					entries = append(entries, Entry{
+						Type:       EntryTypeTool,
+						ToolName:   part.Tool,
+						ToolDetail: extractOpenCodeToolDetail(part.State.Input),
+					})
+				}
+			}
+		}
+	}
+
+	return entries, nil
+}
+
+// extractOpenCodeToolDetail extracts an appropriate detail string from OpenCode tool input.
+func extractOpenCodeToolDetail(input map[string]interface{}) string {
+	for _, key := range []string{"description", "command", "file_path", "path", "pattern"} {
+		if v, ok := input[key].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // extractGeminiToolDetail extracts an appropriate detail string from Gemini tool args.

@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -473,6 +474,15 @@ func countTranscriptItems(agentType agent.AgentType, content string) int {
 		return 0
 	}
 
+	// OpenCode uses JSON with messages array (like Gemini)
+	if agentType == agent.AgentTypeOpenCode {
+		t, err := opencode.ParseTranscript([]byte(content))
+		if err == nil && t != nil {
+			return len(t.Messages)
+		}
+		return 0
+	}
+
 	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
 	if agentType == agent.AgentTypeGemini || agentType == agent.AgentTypeUnknown {
 		transcript, err := geminicli.ParseTranscript([]byte(content))
@@ -499,6 +509,21 @@ func countTranscriptItems(agentType agent.AgentType, content string) int {
 // Returns prompts with IDE context tags stripped (e.g., <ide_opened_file>).
 func extractUserPrompts(agentType agent.AgentType, content string) []string {
 	if content == "" {
+		return nil
+	}
+
+	// OpenCode uses JSON with messages array
+	if agentType == agent.AgentTypeOpenCode {
+		prompts, err := opencode.ExtractAllUserPrompts([]byte(content))
+		if err == nil && len(prompts) > 0 {
+			cleaned := make([]string, 0, len(prompts))
+			for _, prompt := range prompts {
+				if stripped := textutil.StripIDEContextTags(prompt); stripped != "" {
+					cleaned = append(cleaned, stripped)
+				}
+			}
+			return cleaned
+		}
 		return nil
 	}
 
@@ -533,6 +558,11 @@ func extractUserPrompts(agentType agent.AgentType, content string) []string {
 func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int) *agent.TokenUsage {
 	if len(data) == 0 {
 		return &agent.TokenUsage{}
+	}
+
+	// OpenCode uses JSON with token info on assistant messages
+	if agentType == agent.AgentTypeOpenCode {
+		return opencode.CalculateTokenUsageFromBytes(data, startOffset)
 	}
 
 	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
