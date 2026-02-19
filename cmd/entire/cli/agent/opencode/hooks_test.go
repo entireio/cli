@@ -12,6 +12,8 @@ import (
 // Compile-time check
 var _ agent.HookSupport = (*OpenCodeAgent)(nil)
 
+// Note: Hook tests cannot use t.Parallel() because t.Chdir() modifies process state.
+
 func TestInstallHooks_FreshInstall(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)

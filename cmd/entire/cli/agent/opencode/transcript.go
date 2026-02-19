@@ -85,6 +85,39 @@ func (a *OpenCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffset 
 	return files, len(t.Messages), nil
 }
 
+// ExtractModifiedFiles extracts modified file paths from raw transcript bytes.
+// This is the bytes-based equivalent of ExtractModifiedFilesFromOffset, used by ReadSession.
+func ExtractModifiedFiles(data []byte) ([]string, error) {
+	t, err := ParseTranscript(data)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]bool)
+	var files []string
+
+	for _, msg := range t.Messages {
+		if msg.Role != roleAssistant {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part.Type != "tool" || part.State == nil {
+				continue
+			}
+			if !slices.Contains(FileModificationTools, part.Tool) {
+				continue
+			}
+			filePath := extractFilePathFromInput(part.State.Input)
+			if filePath != "" && !seen[filePath] {
+				seen[filePath] = true
+				files = append(files, filePath)
+			}
+		}
+	}
+
+	return files, nil
+}
+
 // extractFilePathFromInput extracts the file path from a tool's input map.
 func extractFilePathFromInput(input map[string]interface{}) string {
 	for _, key := range []string{"file_path", "path", "file", "filename"} {

@@ -31,7 +31,7 @@ func NewOpenCodeAgent() agent.Agent {
 func (a *OpenCodeAgent) Name() agent.AgentName   { return agent.AgentNameOpenCode }
 func (a *OpenCodeAgent) Type() agent.AgentType   { return agent.AgentTypeOpenCode }
 func (a *OpenCodeAgent) Description() string     { return "OpenCode - AI-powered terminal coding agent" }
-func (a *OpenCodeAgent) IsPreview() bool          { return true }
+func (a *OpenCodeAgent) IsPreview() bool         { return true }
 func (a *OpenCodeAgent) ProtectedDirs() []string { return []string{".opencode"} }
 
 func (a *OpenCodeAgent) DetectPresence() (bool, error) {
@@ -75,44 +75,54 @@ func (a *OpenCodeAgent) ChunkTranscript(content []byte, maxSize int) ([][]byte, 
 		return chunks, nil
 	}
 
-	// Split messages across chunks
+	if len(transcript.Messages) == 0 {
+		return [][]byte{content}, nil
+	}
+
+	// Pre-marshal each message to avoid O(n²) re-serialization.
+	// Track running size and split at chunk boundaries (same approach as Gemini).
 	var chunks [][]byte
 	var currentMessages []Message
+	baseSize := len(fmt.Sprintf(`{"session_id":%q,"messages":[]}`, transcript.SessionID))
+	currentSize := baseSize
 
 	for _, msg := range transcript.Messages {
-		currentMessages = append(currentMessages, msg)
-		chunk := Transcript{
-			SessionID: transcript.SessionID,
-			Messages:  currentMessages,
-		}
-		data, err := json.Marshal(chunk)
+		msgBytes, err := json.Marshal(msg)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal transcript chunk: %w", err)
+			continue // Skip messages that fail to marshal
 		}
-		if len(data) > maxSize && len(currentMessages) > 1 {
-			// Remove last message and save chunk
-			currentMessages = currentMessages[:len(currentMessages)-1]
-			chunk.Messages = currentMessages
-			data, err = json.Marshal(chunk)
-			if err != nil {
-				return nil, fmt.Errorf("failed to marshal transcript chunk: %w", err)
+		msgSize := len(msgBytes) + 1 // +1 for comma separator
+
+		if currentSize+msgSize > maxSize && len(currentMessages) > 0 {
+			// Save current chunk
+			chunkData, marshalErr := json.Marshal(Transcript{
+				SessionID: transcript.SessionID,
+				Messages:  currentMessages,
+			})
+			if marshalErr != nil {
+				return nil, fmt.Errorf("failed to marshal transcript chunk: %w", marshalErr)
 			}
-			chunks = append(chunks, data)
-			currentMessages = []Message{msg}
+			chunks = append(chunks, chunkData)
+
+			// Start new chunk
+			currentMessages = nil
+			currentSize = baseSize
 		}
+
+		currentMessages = append(currentMessages, msg)
+		currentSize += msgSize
 	}
 
 	// Save remaining messages
 	if len(currentMessages) > 0 {
-		chunk := Transcript{
+		chunkData, err := json.Marshal(Transcript{
 			SessionID: transcript.SessionID,
 			Messages:  currentMessages,
-		}
-		data, err := json.Marshal(chunk)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal final transcript chunk: %w", err)
 		}
-		chunks = append(chunks, data)
+		chunks = append(chunks, chunkData)
 	}
 
 	return chunks, nil
@@ -182,11 +192,20 @@ func (a *OpenCodeAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session: %w", err)
 	}
+
+	// Parse to extract computed fields
+	modifiedFiles, err := ExtractModifiedFiles(data)
+	if err != nil {
+		// Non-fatal: we can still return the session without modified files
+		modifiedFiles = nil
+	}
+
 	return &agent.AgentSession{
-		AgentName:  a.Name(),
-		SessionID:  input.SessionID,
-		SessionRef: input.SessionRef,
-		NativeData: data,
+		AgentName:     a.Name(),
+		SessionID:     input.SessionID,
+		SessionRef:    input.SessionRef,
+		NativeData:    data,
+		ModifiedFiles: modifiedFiles,
 	}, nil
 }
 

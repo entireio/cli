@@ -160,7 +160,7 @@ func buildCondensedTranscriptFromGemini(content []byte) ([]Entry, error) {
 				entries = append(entries, Entry{
 					Type:       EntryTypeTool,
 					ToolName:   tc.Name,
-					ToolDetail: extractGeminiToolDetail(tc.Args),
+					ToolDetail: extractGenericToolDetail(tc.Args),
 				})
 			}
 		}
@@ -198,7 +198,7 @@ func buildCondensedTranscriptFromOpenCode(content []byte) ([]Entry, error) {
 					entries = append(entries, Entry{
 						Type:       EntryTypeTool,
 						ToolName:   part.Tool,
-						ToolDetail: extractOpenCodeToolDetail(part.State.Input),
+						ToolDetail: extractGenericToolDetail(part.State.Input),
 					})
 				}
 			}
@@ -208,21 +208,11 @@ func buildCondensedTranscriptFromOpenCode(content []byte) ([]Entry, error) {
 	return entries, nil
 }
 
-// extractOpenCodeToolDetail extracts an appropriate detail string from OpenCode tool input.
-func extractOpenCodeToolDetail(input map[string]interface{}) string {
+// extractGenericToolDetail extracts an appropriate detail string from a tool's input/args map.
+// Checks common fields in order of preference. Used by both OpenCode and Gemini condensation.
+func extractGenericToolDetail(input map[string]interface{}) string {
 	for _, key := range []string{"description", "command", "file_path", "path", "pattern"} {
 		if v, ok := input[key].(string); ok && v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// extractGeminiToolDetail extracts an appropriate detail string from Gemini tool args.
-func extractGeminiToolDetail(args map[string]interface{}) string {
-	// Check common fields in order of preference
-	for _, key := range []string{"description", "command", "file_path", "path", "pattern"} {
-		if v, ok := args[key].(string); ok && v != "" {
 			return v
 		}
 	}
