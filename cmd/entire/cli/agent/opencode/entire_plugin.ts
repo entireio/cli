@@ -3,13 +3,15 @@
 // Do not edit manually — changes will be overwritten on next install.
 // Requires Bun runtime (used by OpenCode's plugin system for loading ESM plugins).
 import type { Plugin } from "@opencode-ai/plugin"
+import { tmpdir } from "node:os"
 
 export const EntirePlugin: Plugin = async ({ client, directory, $ }) => {
   const ENTIRE_CMD = "__ENTIRE_CMD__"
-  // Store transcripts outside the repo (matches Go SanitizePathForOpenCode).
-  const home = Bun.env.HOME ?? ""
+  // Store transcripts in a temp directory — these are ephemeral handoff files
+  // between the plugin and the Go hook handler. Once checkpointed, the data
+  // lives on git refs and the file is disposable.
   const sanitized = directory.replace(/[^a-zA-Z0-9]/g, "-")
-  const transcriptDir = `${home}/.opencode/sessions/entire/${sanitized}`
+  const transcriptDir = `${tmpdir()}/entire-opencode/${sanitized}`
   const seenUserMessages = new Set<string>()
 
   // In-memory stores — used to write transcripts without relying on the SDK API,

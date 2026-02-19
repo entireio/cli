@@ -177,21 +177,18 @@ func (a *OpenCodeAgent) GetSessionID(input *agent.HookInput) string {
 }
 
 // GetSessionDir returns the directory where Entire stores OpenCode session transcripts.
-// Transcripts are stored outside the repo at ~/.opencode/sessions/entire/<sanitized-path>/
-// to avoid polluting the working tree and checkpoint metadata.
+// Transcripts are ephemeral handoff files between the TS plugin and the Go hook handler.
+// Once checkpointed, the data lives on git refs and the file is disposable.
+// Stored in os.TempDir()/entire-opencode/<sanitized-path>/ to avoid squatting on
+// OpenCode's own directories (~/.opencode/ is project-level, not home-level).
 func (a *OpenCodeAgent) GetSessionDir(repoPath string) (string, error) {
 	// Check for test environment override
 	if override := os.Getenv("ENTIRE_TEST_OPENCODE_PROJECT_DIR"); override != "" {
 		return override, nil
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-
 	projectDir := SanitizePathForOpenCode(repoPath)
-	return filepath.Join(homeDir, ".opencode", "sessions", "entire", projectDir), nil
+	return filepath.Join(os.TempDir(), "entire-opencode", projectDir), nil
 }
 
 func (a *OpenCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {

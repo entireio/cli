@@ -11,7 +11,7 @@ func TestParseHookEvent_SessionStart(t *testing.T) {
 	t.Parallel()
 
 	ag := &OpenCodeAgent{}
-	input := `{"session_id": "sess-abc123", "transcript_path": "/tmp/project/.opencode/sessions/entire/sess-abc123.json"}`
+	input := `{"session_id": "sess-abc123", "transcript_path": "/tmp/entire-opencode/-project/sess-abc123.json"}`
 
 	event, err := ag.ParseHookEvent(HookNameSessionStart, strings.NewReader(input))
 
@@ -27,7 +27,7 @@ func TestParseHookEvent_SessionStart(t *testing.T) {
 	if event.SessionID != "sess-abc123" {
 		t.Errorf("expected session_id 'sess-abc123', got %q", event.SessionID)
 	}
-	if event.SessionRef != "/tmp/project/.opencode/sessions/entire/sess-abc123.json" {
+	if event.SessionRef != "/tmp/entire-opencode/-project/sess-abc123.json" {
 		t.Errorf("unexpected session ref: %q", event.SessionRef)
 	}
 }
