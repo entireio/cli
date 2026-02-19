@@ -8,70 +8,82 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
-// Compile-time checks
-var (
-	_ agent.TranscriptAnalyzer = (*OpenCodeAgent)(nil)
-	_ agent.TokenCalculator    = (*OpenCodeAgent)(nil)
-)
-
-const testTranscriptJSON = `{
-	"session_id": "test-session",
-	"messages": [
-		{
-			"id": "msg-1",
-			"role": "user",
-			"content": "Fix the bug in main.go",
-			"time": {"created": 1708300000}
-		},
-		{
-			"id": "msg-2",
-			"role": "assistant",
-			"content": "I'll fix the bug.",
-			"time": {"created": 1708300001, "completed": 1708300005},
-			"tokens": {"input": 150, "output": 80, "reasoning": 10, "cache": {"read": 5, "write": 15}},
-			"cost": 0.003,
-			"parts": [
-				{"type": "text", "text": "I'll fix the bug."},
-				{"type": "tool", "tool": "edit_file", "callID": "call-1",
-					"state": {"status": "completed", "input": {"file_path": "main.go"}, "output": "Applied edit"}}
-			]
-		},
-		{
-			"id": "msg-3",
-			"role": "user",
-			"content": "Also fix util.go",
-			"time": {"created": 1708300010}
-		},
-		{
-			"id": "msg-4",
-			"role": "assistant",
-			"content": "Done fixing util.go.",
-			"time": {"created": 1708300011, "completed": 1708300015},
-			"tokens": {"input": 200, "output": 100, "reasoning": 5, "cache": {"read": 10, "write": 20}},
-			"cost": 0.005,
-			"parts": [
-				{"type": "tool", "tool": "write_file", "callID": "call-2",
-					"state": {"status": "completed", "input": {"file_path": "util.go"}, "output": "File written"}},
-				{"type": "text", "text": "Done fixing util.go."}
-			]
-		}
-	]
-}`
+// testTranscriptJSONL is a JSONL transcript with 4 messages (one per line).
+const testTranscriptJSONL = `{"id":"msg-1","role":"user","content":"Fix the bug in main.go","time":{"created":1708300000}}
+{"id":"msg-2","role":"assistant","content":"I'll fix the bug.","time":{"created":1708300001,"completed":1708300005},"tokens":{"input":150,"output":80,"reasoning":10,"cache":{"read":5,"write":15}},"cost":0.003,"parts":[{"type":"text","text":"I'll fix the bug."},{"type":"tool","tool":"edit","callID":"call-1","state":{"status":"completed","input":{"file_path":"main.go"},"output":"Applied edit"}}]}
+{"id":"msg-3","role":"user","content":"Also fix util.go","time":{"created":1708300010}}
+{"id":"msg-4","role":"assistant","content":"Done fixing util.go.","time":{"created":1708300011,"completed":1708300015},"tokens":{"input":200,"output":100,"reasoning":5,"cache":{"read":10,"write":20}},"cost":0.005,"parts":[{"type":"tool","tool":"write","callID":"call-2","state":{"status":"completed","input":{"file_path":"util.go"},"output":"File written"}},{"type":"text","text":"Done fixing util.go."}]}
+`
 
 func writeTestTranscript(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "test-session.json")
+	path := filepath.Join(dir, "test-session.jsonl")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("failed to write test transcript: %v", err)
 	}
 	return path
 }
 
+func TestParseMessages(t *testing.T) {
+	t.Parallel()
+
+	messages, err := ParseMessages([]byte(testTranscriptJSONL))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(messages))
+	}
+	if messages[0].ID != "msg-1" {
+		t.Errorf("expected first message ID 'msg-1', got %q", messages[0].ID)
+	}
+	if messages[0].Role != "user" {
+		t.Errorf("expected first message role 'user', got %q", messages[0].Role)
+	}
+}
+
+func TestParseMessages_Empty(t *testing.T) {
+	t.Parallel()
+
+	messages, err := ParseMessages(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if messages != nil {
+		t.Errorf("expected nil for nil data, got %d messages", len(messages))
+	}
+
+	messages, err = ParseMessages([]byte(""))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if messages != nil {
+		t.Errorf("expected nil for empty data, got %d messages", len(messages))
+	}
+}
+
+func TestParseMessages_InvalidLines(t *testing.T) {
+	t.Parallel()
+
+	// Invalid lines are silently skipped
+	data := "not json\n{\"id\":\"msg-1\",\"role\":\"user\",\"content\":\"hello\"}\n"
+	messages, err := ParseMessages([]byte(data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 valid message, got %d", len(messages))
+	}
+	if messages[0].Content != "hello" {
+		t.Errorf("expected content 'hello', got %q", messages[0].Content)
+	}
+}
+
 func TestGetTranscriptPosition(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	path := writeTestTranscript(t, testTranscriptJSON)
+	path := writeTestTranscript(t, testTranscriptJSONL)
 
 	pos, err := ag.GetTranscriptPosition(path)
 	if err != nil {
@@ -86,7 +98,7 @@ func TestGetTranscriptPosition_NonexistentFile(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
 
-	pos, err := ag.GetTranscriptPosition("/nonexistent/path.json")
+	pos, err := ag.GetTranscriptPosition("/nonexistent/path.jsonl")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -98,7 +110,7 @@ func TestGetTranscriptPosition_NonexistentFile(t *testing.T) {
 func TestExtractModifiedFilesFromOffset(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	path := writeTestTranscript(t, testTranscriptJSON)
+	path := writeTestTranscript(t, testTranscriptJSONL)
 
 	// From offset 0 — should get both main.go and util.go
 	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
@@ -131,7 +143,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 func TestExtractPrompts(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	path := writeTestTranscript(t, testTranscriptJSON)
+	path := writeTestTranscript(t, testTranscriptJSONL)
 
 	// From offset 0 — both prompts
 	prompts, err := ag.ExtractPrompts(path, 0)
@@ -161,7 +173,7 @@ func TestExtractPrompts(t *testing.T) {
 func TestExtractSummary(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	path := writeTestTranscript(t, testTranscriptJSON)
+	path := writeTestTranscript(t, testTranscriptJSONL)
 
 	summary, err := ag.ExtractSummary(path)
 	if err != nil {
@@ -175,7 +187,7 @@ func TestExtractSummary(t *testing.T) {
 func TestExtractSummary_EmptyTranscript(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	path := writeTestTranscript(t, `{"session_id": "empty", "messages": []}`)
+	path := writeTestTranscript(t, "")
 
 	summary, err := ag.ExtractSummary(path)
 	if err != nil {
@@ -189,7 +201,7 @@ func TestExtractSummary_EmptyTranscript(t *testing.T) {
 func TestCalculateTokenUsage(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	path := writeTestTranscript(t, testTranscriptJSON)
+	path := writeTestTranscript(t, testTranscriptJSONL)
 
 	// From offset 0 — both assistant messages
 	usage, err := ag.CalculateTokenUsage(path, 0)
@@ -219,7 +231,7 @@ func TestCalculateTokenUsage(t *testing.T) {
 func TestCalculateTokenUsage_FromOffset(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	path := writeTestTranscript(t, testTranscriptJSON)
+	path := writeTestTranscript(t, testTranscriptJSONL)
 
 	usage, err := ag.CalculateTokenUsage(path, 2)
 	if err != nil {
@@ -240,7 +252,7 @@ func TestCalculateTokenUsage_NonexistentFile(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
 
-	usage, err := ag.CalculateTokenUsage("/nonexistent/path.json", 0)
+	usage, err := ag.CalculateTokenUsage("/nonexistent/path.jsonl", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -249,79 +261,10 @@ func TestCalculateTokenUsage_NonexistentFile(t *testing.T) {
 	}
 }
 
-func TestSliceFromMessage_ReturnsFullWhenZeroOffset(t *testing.T) {
-	t.Parallel()
-	data := []byte(testTranscriptJSON)
-
-	result := SliceFromMessage(data, 0)
-	if string(result) != string(data) {
-		t.Error("expected full transcript returned for offset 0")
-	}
-}
-
-func TestSliceFromMessage_SlicesFromOffset(t *testing.T) {
-	t.Parallel()
-	data := []byte(testTranscriptJSON)
-
-	// Offset 2 should return messages starting from index 2 (msg-3, msg-4)
-	result := SliceFromMessage(data, 2)
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-
-	parsed, err := ParseTranscript(result)
-	if err != nil {
-		t.Fatalf("failed to parse sliced transcript: %v", err)
-	}
-	if len(parsed.Messages) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(parsed.Messages))
-	}
-	if parsed.Messages[0].ID != "msg-3" {
-		t.Errorf("expected first message ID 'msg-3', got %q", parsed.Messages[0].ID)
-	}
-	if parsed.SessionID != "test-session" {
-		t.Errorf("expected session ID preserved, got %q", parsed.SessionID)
-	}
-}
-
-func TestSliceFromMessage_OffsetBeyondLength(t *testing.T) {
-	t.Parallel()
-	data := []byte(testTranscriptJSON)
-
-	result := SliceFromMessage(data, 100)
-	if result != nil {
-		t.Errorf("expected nil for offset beyond message count, got %d bytes", len(result))
-	}
-}
-
-func TestSliceFromMessage_EmptyData(t *testing.T) {
-	t.Parallel()
-
-	result := SliceFromMessage(nil, 0)
-	if result != nil {
-		t.Errorf("expected nil for nil data, got %d bytes", len(result))
-	}
-
-	// []byte{} with offset 0 returns the input as-is (passthrough)
-	result = SliceFromMessage([]byte{}, 0)
-	if len(result) != 0 {
-		t.Errorf("expected empty bytes, got %d bytes", len(result))
-	}
-}
-
-func TestSliceFromMessage_InvalidJSON(t *testing.T) {
-	t.Parallel()
-
-	result := SliceFromMessage([]byte("not json"), 1)
-	if result != nil {
-		t.Errorf("expected nil for invalid JSON, got %d bytes", len(result))
-	}
-}
-
 func TestChunkTranscript_SmallContent(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	content := []byte(testTranscriptJSON)
+	content := []byte(testTranscriptJSONL)
 
 	// maxSize larger than content — should return single chunk
 	chunks, err := ag.ChunkTranscript(content, len(content)+1000)
@@ -339,10 +282,10 @@ func TestChunkTranscript_SmallContent(t *testing.T) {
 func TestChunkTranscript_SplitsLargeContent(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	content := []byte(testTranscriptJSON)
+	content := []byte(testTranscriptJSONL)
 
-	// Use a small maxSize to force splitting (each message is ~200-300 bytes)
-	chunks, err := ag.ChunkTranscript(content, 350)
+	// Use a maxSize that fits individual lines but forces splitting (assistant lines are ~370-400 bytes)
+	chunks, err := ag.ChunkTranscript(content, 500)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -350,16 +293,13 @@ func TestChunkTranscript_SplitsLargeContent(t *testing.T) {
 		t.Fatalf("expected multiple chunks for small maxSize, got %d", len(chunks))
 	}
 
-	// Each chunk should be valid JSON
+	// Each chunk should contain valid JSONL
 	for i, chunk := range chunks {
-		parsed, parseErr := ParseTranscript(chunk)
+		messages, parseErr := ParseMessages(chunk)
 		if parseErr != nil {
 			t.Fatalf("chunk %d: failed to parse: %v", i, parseErr)
 		}
-		if parsed.SessionID != "test-session" {
-			t.Errorf("chunk %d: expected session_id 'test-session', got %q", i, parsed.SessionID)
-		}
-		if len(parsed.Messages) == 0 {
+		if len(messages) == 0 {
 			t.Errorf("chunk %d: expected at least 1 message", i)
 		}
 	}
@@ -368,10 +308,10 @@ func TestChunkTranscript_SplitsLargeContent(t *testing.T) {
 func TestChunkTranscript_RoundTrip(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	content := []byte(testTranscriptJSON)
+	content := []byte(testTranscriptJSONL)
 
-	// Split into chunks
-	chunks, err := ag.ChunkTranscript(content, 350)
+	// Split into chunks (maxSize must fit individual JSONL lines)
+	chunks, err := ag.ChunkTranscript(content, 500)
 	if err != nil {
 		t.Fatalf("chunk error: %v", err)
 	}
@@ -383,46 +323,42 @@ func TestChunkTranscript_RoundTrip(t *testing.T) {
 	}
 
 	// Parse both and compare messages
-	original, parseErr := ParseTranscript(content)
+	original, parseErr := ParseMessages(content)
 	if parseErr != nil {
 		t.Fatalf("failed to parse original: %v", parseErr)
 	}
-	result, parseErr := ParseTranscript(reassembled)
+	result, parseErr := ParseMessages(reassembled)
 	if parseErr != nil {
 		t.Fatalf("failed to parse reassembled: %v", parseErr)
 	}
 
-	if result.SessionID != original.SessionID {
-		t.Errorf("session_id mismatch: %q vs %q", result.SessionID, original.SessionID)
+	if len(result) != len(original) {
+		t.Fatalf("message count mismatch: %d vs %d", len(result), len(original))
 	}
-	if len(result.Messages) != len(original.Messages) {
-		t.Fatalf("message count mismatch: %d vs %d", len(result.Messages), len(original.Messages))
-	}
-	for i, msg := range result.Messages {
-		if msg.ID != original.Messages[i].ID {
-			t.Errorf("message %d: ID mismatch %q vs %q", i, msg.ID, original.Messages[i].ID)
+	for i, msg := range result {
+		if msg.ID != original[i].ID {
+			t.Errorf("message %d: ID mismatch %q vs %q", i, msg.ID, original[i].ID)
 		}
 	}
 }
 
-func TestChunkTranscript_EmptyMessages(t *testing.T) {
+func TestChunkTranscript_EmptyContent(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	content := []byte(`{"session_id": "empty", "messages": []}`)
 
-	chunks, err := ag.ChunkTranscript(content, 100)
+	chunks, err := ag.ChunkTranscript([]byte(""), 100)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(chunks) != 1 {
-		t.Fatalf("expected 1 chunk for empty messages, got %d", len(chunks))
+	if len(chunks) != 0 {
+		t.Fatalf("expected 0 chunks for empty content, got %d", len(chunks))
 	}
 }
 
 func TestReassembleTranscript_SingleChunk(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}
-	content := []byte(testTranscriptJSON)
+	content := []byte(testTranscriptJSONL)
 
 	result, err := ag.ReassembleTranscript([][]byte{content})
 	if err != nil {
@@ -441,15 +377,15 @@ func TestReassembleTranscript_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != nil {
-		t.Errorf("expected nil for empty chunks, got %d bytes", len(result))
+	if len(result) != 0 {
+		t.Errorf("expected empty result for nil chunks, got %d bytes", len(result))
 	}
 }
 
 func TestExtractModifiedFiles(t *testing.T) {
 	t.Parallel()
 
-	files, err := ExtractModifiedFiles([]byte(testTranscriptJSON))
+	files, err := ExtractModifiedFiles([]byte(testTranscriptJSONL))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -463,3 +399,7 @@ func TestExtractModifiedFiles(t *testing.T) {
 		t.Errorf("expected second file 'util.go', got %q", files[1])
 	}
 }
+
+// Compile-time interface checks are in transcript.go.
+// Verify the unused import guard by referencing the agent package.
+var _ = agent.AgentNameOpenCode

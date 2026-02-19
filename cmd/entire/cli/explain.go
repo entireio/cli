@@ -13,7 +13,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
-	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -537,9 +536,7 @@ func scopeTranscriptForCheckpoint(fullTranscript []byte, startOffset int, agentT
 	switch agentType {
 	case agent.AgentTypeGemini:
 		return geminicli.SliceFromMessage(fullTranscript, startOffset)
-	case agent.AgentTypeOpenCode:
-		return opencode.SliceFromMessage(fullTranscript, startOffset)
-	case agent.AgentTypeClaudeCode, agent.AgentTypeUnknown:
+	case agent.AgentTypeClaudeCode, agent.AgentTypeOpenCode, agent.AgentTypeUnknown:
 		return transcript.SliceFromLine(fullTranscript, startOffset)
 	}
 	return transcript.SliceFromLine(fullTranscript, startOffset)
@@ -1539,13 +1536,7 @@ func transcriptOffset(transcriptBytes []byte, agentType agent.AgentType) int {
 			return 0
 		}
 		return len(t.Messages)
-	case agent.AgentTypeOpenCode:
-		t, err := opencode.ParseTranscript(transcriptBytes)
-		if err != nil {
-			return 0
-		}
-		return len(t.Messages)
-	case agent.AgentTypeClaudeCode, agent.AgentTypeUnknown:
+	case agent.AgentTypeClaudeCode, agent.AgentTypeOpenCode, agent.AgentTypeUnknown:
 		return countLines(transcriptBytes)
 	}
 	return countLines(transcriptBytes)

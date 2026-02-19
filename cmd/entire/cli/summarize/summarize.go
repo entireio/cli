@@ -112,7 +112,7 @@ var minimalDetailTools = map[string]bool{
 
 // BuildCondensedTranscriptFromBytes parses transcript bytes and extracts a condensed view.
 // This is a convenience function that combines parsing and condensing.
-// The agentType parameter determines which parser to use (Claude JSONL vs Gemini JSON).
+// The agentType parameter determines which parser to use (Claude/OpenCode JSONL vs Gemini JSON).
 func BuildCondensedTranscriptFromBytes(content []byte, agentType agent.AgentType) ([]Entry, error) {
 	switch agentType {
 	case agent.AgentTypeGemini:
@@ -169,15 +169,15 @@ func buildCondensedTranscriptFromGemini(content []byte) ([]Entry, error) {
 	return entries, nil
 }
 
-// buildCondensedTranscriptFromOpenCode parses OpenCode JSON transcript and extracts a condensed view.
+// buildCondensedTranscriptFromOpenCode parses OpenCode JSONL transcript and extracts a condensed view.
 func buildCondensedTranscriptFromOpenCode(content []byte) ([]Entry, error) {
-	ocTranscript, err := opencode.ParseTranscript(content)
+	messages, err := opencode.ParseMessages(content)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse OpenCode transcript: %w", err)
 	}
 
 	var entries []Entry
-	for _, msg := range ocTranscript.Messages {
+	for _, msg := range messages {
 		switch msg.Role {
 		case "user":
 			if msg.Content != "" {

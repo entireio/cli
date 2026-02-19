@@ -696,15 +696,10 @@ func TestGenerateFromTranscript_NilGenerator(t *testing.T) {
 }
 
 func TestBuildCondensedTranscriptFromBytes_OpenCodeUserAndAssistant(t *testing.T) {
-	ocJSON := `{
-		"session_id": "test-session",
-		"messages": [
-			{"id": "msg-1", "role": "user", "content": "Fix the bug in main.go", "time": {"created": 1708300000}},
-			{"id": "msg-2", "role": "assistant", "content": "I'll fix the bug.", "time": {"created": 1708300001}}
-		]
-	}`
+	ocJSONL := "{\"id\":\"msg-1\",\"role\":\"user\",\"content\":\"Fix the bug in main.go\",\"time\":{\"created\":1708300000}}\n" +
+		"{\"id\":\"msg-2\",\"role\":\"assistant\",\"content\":\"I'll fix the bug.\",\"time\":{\"created\":1708300001}}\n"
 
-	entries, err := BuildCondensedTranscriptFromBytes([]byte(ocJSON), agent.AgentTypeOpenCode)
+	entries, err := BuildCondensedTranscriptFromBytes([]byte(ocJSONL), agent.AgentTypeOpenCode)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -729,23 +724,10 @@ func TestBuildCondensedTranscriptFromBytes_OpenCodeUserAndAssistant(t *testing.T
 }
 
 func TestBuildCondensedTranscriptFromBytes_OpenCodeToolCalls(t *testing.T) {
-	ocJSON := `{
-		"session_id": "test-session",
-		"messages": [
-			{"id": "msg-1", "role": "user", "content": "Edit main.go", "time": {"created": 1708300000}},
-			{"id": "msg-2", "role": "assistant", "content": "Editing now.", "time": {"created": 1708300001},
-				"parts": [
-					{"type": "text", "text": "Editing now."},
-					{"type": "tool", "tool": "edit_file", "callID": "call-1",
-						"state": {"status": "completed", "input": {"file_path": "main.go"}, "output": "Applied"}},
-					{"type": "tool", "tool": "run_command", "callID": "call-2",
-						"state": {"status": "completed", "input": {"command": "go test ./..."}, "output": "PASS"}}
-				]
-			}
-		]
-	}`
+	ocJSONL := "{\"id\":\"msg-1\",\"role\":\"user\",\"content\":\"Edit main.go\",\"time\":{\"created\":1708300000}}\n" +
+		"{\"id\":\"msg-2\",\"role\":\"assistant\",\"content\":\"Editing now.\",\"time\":{\"created\":1708300001},\"parts\":[{\"type\":\"text\",\"text\":\"Editing now.\"},{\"type\":\"tool\",\"tool\":\"edit\",\"callID\":\"call-1\",\"state\":{\"status\":\"completed\",\"input\":{\"file_path\":\"main.go\"},\"output\":\"Applied\"}},{\"type\":\"tool\",\"tool\":\"bash\",\"callID\":\"call-2\",\"state\":{\"status\":\"completed\",\"input\":{\"command\":\"go test ./...\"},\"output\":\"PASS\"}}]}\n"
 
-	entries, err := BuildCondensedTranscriptFromBytes([]byte(ocJSON), agent.AgentTypeOpenCode)
+	entries, err := BuildCondensedTranscriptFromBytes([]byte(ocJSONL), agent.AgentTypeOpenCode)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -758,15 +740,15 @@ func TestBuildCondensedTranscriptFromBytes_OpenCodeToolCalls(t *testing.T) {
 	if entries[2].Type != EntryTypeTool {
 		t.Errorf("entry 2: expected type %s, got %s", EntryTypeTool, entries[2].Type)
 	}
-	if entries[2].ToolName != "edit_file" {
-		t.Errorf("entry 2: expected tool name edit_file, got %s", entries[2].ToolName)
+	if entries[2].ToolName != "edit" {
+		t.Errorf("entry 2: expected tool name edit, got %s", entries[2].ToolName)
 	}
 	if entries[2].ToolDetail != "main.go" {
 		t.Errorf("entry 2: expected tool detail main.go, got %s", entries[2].ToolDetail)
 	}
 
-	if entries[3].ToolName != "run_command" {
-		t.Errorf("entry 3: expected tool name run_command, got %s", entries[3].ToolName)
+	if entries[3].ToolName != "bash" {
+		t.Errorf("entry 3: expected tool name bash, got %s", entries[3].ToolName)
 	}
 	if entries[3].ToolDetail != "go test ./..." {
 		t.Errorf("entry 3: expected tool detail 'go test ./...', got %s", entries[3].ToolDetail)
@@ -774,16 +756,11 @@ func TestBuildCondensedTranscriptFromBytes_OpenCodeToolCalls(t *testing.T) {
 }
 
 func TestBuildCondensedTranscriptFromBytes_OpenCodeSkipsEmptyContent(t *testing.T) {
-	ocJSON := `{
-		"session_id": "test-session",
-		"messages": [
-			{"id": "msg-1", "role": "user", "content": "", "time": {"created": 1708300000}},
-			{"id": "msg-2", "role": "assistant", "content": "", "time": {"created": 1708300001}},
-			{"id": "msg-3", "role": "user", "content": "Real prompt", "time": {"created": 1708300010}}
-		]
-	}`
+	ocJSONL := "{\"id\":\"msg-1\",\"role\":\"user\",\"content\":\"\",\"time\":{\"created\":1708300000}}\n" +
+		"{\"id\":\"msg-2\",\"role\":\"assistant\",\"content\":\"\",\"time\":{\"created\":1708300001}}\n" +
+		"{\"id\":\"msg-3\",\"role\":\"user\",\"content\":\"Real prompt\",\"time\":{\"created\":1708300010}}\n"
 
-	entries, err := BuildCondensedTranscriptFromBytes([]byte(ocJSON), agent.AgentTypeOpenCode)
+	entries, err := BuildCondensedTranscriptFromBytes([]byte(ocJSONL), agent.AgentTypeOpenCode)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -796,10 +773,14 @@ func TestBuildCondensedTranscriptFromBytes_OpenCodeSkipsEmptyContent(t *testing.
 	}
 }
 
-func TestBuildCondensedTranscriptFromBytes_OpenCodeInvalidJSON(t *testing.T) {
-	_, err := BuildCondensedTranscriptFromBytes([]byte(`not json`), agent.AgentTypeOpenCode)
-	if err == nil {
-		t.Error("expected error for invalid OpenCode JSON")
+func TestBuildCondensedTranscriptFromBytes_OpenCodeInvalidJSONL(t *testing.T) {
+	// Invalid JSONL lines are silently skipped, producing 0 entries (not an error).
+	entries, err := BuildCondensedTranscriptFromBytes([]byte("not json\n"), agent.AgentTypeOpenCode)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries for invalid JSONL, got %d", len(entries))
 	}
 }
 

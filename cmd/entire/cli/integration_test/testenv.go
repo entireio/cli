@@ -44,11 +44,12 @@ func getTestBinary() string {
 
 // TestEnv manages an isolated test environment for integration tests.
 type TestEnv struct {
-	T                *testing.T
-	RepoDir          string
-	ClaudeProjectDir string
-	GeminiProjectDir string
-	SessionCounter   int
+	T                  *testing.T
+	RepoDir            string
+	ClaudeProjectDir   string
+	GeminiProjectDir   string
+	OpenCodeProjectDir string
+	SessionCounter     int
 }
 
 // NewTestEnv creates a new isolated test environment.
@@ -73,16 +74,21 @@ func NewTestEnv(t *testing.T) *TestEnv {
 	if resolved, err := filepath.EvalSymlinks(geminiProjectDir); err == nil {
 		geminiProjectDir = resolved
 	}
+	openCodeProjectDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(openCodeProjectDir); err == nil {
+		openCodeProjectDir = resolved
+	}
 
 	env := &TestEnv{
-		T:                t,
-		RepoDir:          repoDir,
-		ClaudeProjectDir: claudeProjectDir,
-		GeminiProjectDir: geminiProjectDir,
+		T:                  t,
+		RepoDir:            repoDir,
+		ClaudeProjectDir:   claudeProjectDir,
+		GeminiProjectDir:   geminiProjectDir,
+		OpenCodeProjectDir: openCodeProjectDir,
 	}
 
 	// Note: Don't use t.Setenv here - it's incompatible with t.Parallel()
-	// CLI commands receive ENTIRE_TEST_CLAUDE_PROJECT_DIR or ENTIRE_TEST_GEMINI_PROJECT_DIR via cmd.Env instead
+	// CLI commands receive ENTIRE_TEST_*_PROJECT_DIR via cmd.Env instead
 
 	return env
 }
@@ -103,11 +109,12 @@ func (env *TestEnv) Cleanup() {
 }
 
 // cliEnv returns the environment variables for CLI execution.
-// Includes both Claude and Gemini project dirs so tests work for any agent.
+// Includes Claude, Gemini, and OpenCode project dirs so tests work for any agent.
 func (env *TestEnv) cliEnv() []string {
 	return append(os.Environ(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
+		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_TEST_TTY=0", // Prevent interactive prompts from blocking in tests
 	)
 }
@@ -287,24 +294,25 @@ func (env *TestEnv) InitEntire(strategyName string) {
 // InitEntireWithOptions initializes the .entire directory with the specified strategy and options.
 func (env *TestEnv) InitEntireWithOptions(strategyName string, strategyOptions map[string]any) {
 	env.T.Helper()
-	env.initEntireInternal(strategyName, "", strategyOptions)
+	env.initEntireInternal(strategyName, strategyOptions)
 }
 
 // InitEntireWithAgent initializes an Entire test environment with a specific agent.
-// If agentName is empty, defaults to claude-code.
-func (env *TestEnv) InitEntireWithAgent(strategyName string, agentName agent.AgentName) {
+// The agent name is for test documentation only — the CLI resolves the agent from
+// hook commands and checkpoint metadata, not from settings.json.
+func (env *TestEnv) InitEntireWithAgent(strategyName string, _ agent.AgentName) {
 	env.T.Helper()
-	env.initEntireInternal(strategyName, agentName, nil)
+	env.initEntireInternal(strategyName, nil)
 }
 
 // InitEntireWithAgentAndOptions initializes Entire with the specified strategy, agent, and options.
-func (env *TestEnv) InitEntireWithAgentAndOptions(strategyName string, agentName agent.AgentName, strategyOptions map[string]any) {
+func (env *TestEnv) InitEntireWithAgentAndOptions(strategyName string, _ agent.AgentName, strategyOptions map[string]any) {
 	env.T.Helper()
-	env.initEntireInternal(strategyName, agentName, strategyOptions)
+	env.initEntireInternal(strategyName, strategyOptions)
 }
 
 // initEntireInternal is the common implementation for InitEntire variants.
-func (env *TestEnv) initEntireInternal(strategyName string, agentName agent.AgentName, strategyOptions map[string]any) {
+func (env *TestEnv) initEntireInternal(strategyName string, strategyOptions map[string]any) {
 	env.T.Helper()
 
 	// Create .entire directory structure
@@ -320,13 +328,12 @@ func (env *TestEnv) initEntireInternal(strategyName string, agentName agent.Agen
 	}
 
 	// Write settings.json
+	// Note: The agent name is NOT stored in settings.json — the CLI determines
+	// the agent from installed hooks (detect presence) or checkpoint metadata.
+	// The settings parser uses DisallowUnknownFields(), so only recognized fields are allowed.
 	settings := map[string]any{
 		"strategy":  strategyName,
 		"local_dev": true, // Note: git-triggered hooks won't work (path is relative); tests call hooks via getTestBinary() instead
-	}
-	// Only add agent if specified (otherwise defaults to claude-code)
-	if agentName != "" {
-		settings["agent"] = string(agentName)
 	}
 	if strategyOptions != nil {
 		settings["strategy_options"] = strategyOptions

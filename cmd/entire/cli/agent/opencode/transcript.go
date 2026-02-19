@@ -1,8 +1,11 @@
 package opencode
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 
@@ -15,43 +18,60 @@ var (
 	_ agent.TokenCalculator    = (*OpenCodeAgent)(nil)
 )
 
-// ParseTranscript parses raw JSON content into a transcript structure.
-func ParseTranscript(data []byte) (*Transcript, error) {
-	var t Transcript
-	if err := json.Unmarshal(data, &t); err != nil {
-		return nil, fmt.Errorf("failed to parse opencode transcript: %w", err)
+// ParseMessages parses JSONL content (one Message per line) into a slice of Messages.
+func ParseMessages(data []byte) ([]Message, error) {
+	if len(data) == 0 {
+		return nil, nil
 	}
-	return &t, nil
+
+	var messages []Message
+	reader := bufio.NewReader(bytes.NewReader(data))
+
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("failed to read opencode transcript: %w", err)
+		}
+
+		if len(bytes.TrimSpace(lineBytes)) > 0 {
+			var msg Message
+			if jsonErr := json.Unmarshal(lineBytes, &msg); jsonErr == nil {
+				messages = append(messages, msg)
+			}
+		}
+
+		if err == io.EOF {
+			break
+		}
+	}
+
+	return messages, nil
 }
 
-// parseTranscriptFile reads and parses a transcript JSON file.
-func parseTranscriptFile(path string) (*Transcript, error) {
+// parseMessagesFromFile reads and parses a JSONL transcript file.
+func parseMessagesFromFile(path string) ([]Message, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // Path from agent hook
 	if err != nil {
 		return nil, err //nolint:wrapcheck // Callers check os.IsNotExist on this error
 	}
-	var t Transcript
-	if err := json.Unmarshal(data, &t); err != nil {
-		return nil, fmt.Errorf("failed to parse opencode transcript: %w", err)
-	}
-	return &t, nil
+	return ParseMessages(data)
 }
 
-// GetTranscriptPosition returns the number of messages in the transcript.
+// GetTranscriptPosition returns the number of JSONL lines in the transcript.
 func (a *OpenCodeAgent) GetTranscriptPosition(path string) (int, error) {
-	t, err := parseTranscriptFile(path)
+	messages, err := parseMessagesFromFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
 		}
 		return 0, err
 	}
-	return len(t.Messages), nil
+	return len(messages), nil
 }
 
 // ExtractModifiedFilesFromOffset extracts files modified by tool calls from the given message offset.
 func (a *OpenCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) ([]string, int, error) {
-	t, err := parseTranscriptFile(path)
+	messages, err := parseMessagesFromFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, 0, nil
@@ -62,8 +82,8 @@ func (a *OpenCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffset 
 	seen := make(map[string]bool)
 	var files []string
 
-	for i := startOffset; i < len(t.Messages); i++ {
-		msg := t.Messages[i]
+	for i := startOffset; i < len(messages); i++ {
+		msg := messages[i]
 		if msg.Role != roleAssistant {
 			continue
 		}
@@ -82,13 +102,13 @@ func (a *OpenCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffset 
 		}
 	}
 
-	return files, len(t.Messages), nil
+	return files, len(messages), nil
 }
 
-// ExtractModifiedFiles extracts modified file paths from raw transcript bytes.
+// ExtractModifiedFiles extracts modified file paths from raw JSONL transcript bytes.
 // This is the bytes-based equivalent of ExtractModifiedFilesFromOffset, used by ReadSession.
 func ExtractModifiedFiles(data []byte) ([]string, error) {
-	t, err := ParseTranscript(data)
+	messages, err := ParseMessages(data)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +116,7 @@ func ExtractModifiedFiles(data []byte) ([]string, error) {
 	seen := make(map[string]bool)
 	var files []string
 
-	for _, msg := range t.Messages {
+	for _, msg := range messages {
 		if msg.Role != roleAssistant {
 			continue
 		}
@@ -132,7 +152,7 @@ func extractFilePathFromInput(input map[string]interface{}) string {
 
 // ExtractPrompts extracts user prompt strings from the transcript starting at the given offset.
 func (a *OpenCodeAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
-	t, err := parseTranscriptFile(sessionRef)
+	messages, err := parseMessagesFromFile(sessionRef)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -141,8 +161,8 @@ func (a *OpenCodeAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]str
 	}
 
 	var prompts []string
-	for i := fromOffset; i < len(t.Messages); i++ {
-		msg := t.Messages[i]
+	for i := fromOffset; i < len(messages); i++ {
+		msg := messages[i]
 		if msg.Role == roleUser && msg.Content != "" {
 			prompts = append(prompts, msg.Content)
 		}
@@ -153,7 +173,7 @@ func (a *OpenCodeAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]str
 
 // ExtractSummary extracts the last assistant message content as a summary.
 func (a *OpenCodeAgent) ExtractSummary(sessionRef string) (string, error) {
-	t, err := parseTranscriptFile(sessionRef)
+	messages, err := parseMessagesFromFile(sessionRef)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
@@ -161,8 +181,8 @@ func (a *OpenCodeAgent) ExtractSummary(sessionRef string) (string, error) {
 		return "", err
 	}
 
-	for i := len(t.Messages) - 1; i >= 0; i-- {
-		msg := t.Messages[i]
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
 		if msg.Role == roleAssistant && msg.Content != "" {
 			return msg.Content, nil
 		}
@@ -171,44 +191,16 @@ func (a *OpenCodeAgent) ExtractSummary(sessionRef string) (string, error) {
 	return "", nil
 }
 
-// SliceFromMessage returns a JSON transcript containing only messages from startMessageIndex onward.
-// This is used by explain to scope a full transcript to a specific checkpoint's portion.
-func SliceFromMessage(data []byte, startMessageIndex int) []byte {
-	if len(data) == 0 || startMessageIndex <= 0 {
-		return data
-	}
-
-	t, err := ParseTranscript(data)
-	if err != nil {
-		return nil
-	}
-
-	if startMessageIndex >= len(t.Messages) {
-		return nil
-	}
-
-	scoped := &Transcript{
-		SessionID: t.SessionID,
-		Messages:  t.Messages[startMessageIndex:],
-	}
-
-	out, err := json.Marshal(scoped)
-	if err != nil {
-		return nil
-	}
-	return out
-}
-
-// ExtractAllUserPrompts extracts all user prompts from raw transcript bytes.
+// ExtractAllUserPrompts extracts all user prompts from raw JSONL transcript bytes.
 // This is a package-level function used by the condensation path.
 func ExtractAllUserPrompts(data []byte) ([]string, error) {
-	t, err := ParseTranscript(data)
+	messages, err := ParseMessages(data)
 	if err != nil {
 		return nil, err
 	}
 
 	var prompts []string
-	for _, msg := range t.Messages {
+	for _, msg := range messages {
 		if msg.Role == roleUser && msg.Content != "" {
 			prompts = append(prompts, msg.Content)
 		}
@@ -216,17 +208,18 @@ func ExtractAllUserPrompts(data []byte) ([]string, error) {
 	return prompts, nil
 }
 
-// CalculateTokenUsageFromBytes computes token usage from raw transcript bytes starting at the given message offset.
+// CalculateTokenUsageFromBytes computes token usage from raw JSONL transcript bytes
+// starting at the given message offset.
 // This is a package-level function used by the condensation path (which has bytes, not a file path).
 func CalculateTokenUsageFromBytes(data []byte, startMessageIndex int) *agent.TokenUsage {
-	t, err := ParseTranscript(data)
-	if err != nil || t == nil {
+	messages, err := ParseMessages(data)
+	if err != nil || messages == nil {
 		return &agent.TokenUsage{}
 	}
 
 	usage := &agent.TokenUsage{}
-	for i := startMessageIndex; i < len(t.Messages); i++ {
-		msg := t.Messages[i]
+	for i := startMessageIndex; i < len(messages); i++ {
+		msg := messages[i]
 		if msg.Role != roleAssistant || msg.Tokens == nil {
 			continue
 		}
@@ -242,7 +235,7 @@ func CalculateTokenUsageFromBytes(data []byte, startMessageIndex int) *agent.Tok
 
 // CalculateTokenUsage computes token usage from assistant messages starting at the given offset.
 func (a *OpenCodeAgent) CalculateTokenUsage(sessionRef string, fromOffset int) (*agent.TokenUsage, error) {
-	t, err := parseTranscriptFile(sessionRef)
+	messages, err := parseMessagesFromFile(sessionRef)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil //nolint:nilnil // nil usage for nonexistent file is expected
@@ -251,8 +244,8 @@ func (a *OpenCodeAgent) CalculateTokenUsage(sessionRef string, fromOffset int) (
 	}
 
 	usage := &agent.TokenUsage{}
-	for i := fromOffset; i < len(t.Messages); i++ {
-		msg := t.Messages[i]
+	for i := fromOffset; i < len(messages); i++ {
+		msg := messages[i]
 		if msg.Role != roleAssistant || msg.Tokens == nil {
 			continue
 		}

@@ -2,7 +2,6 @@
 package opencode
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -61,99 +60,17 @@ func (a *OpenCodeAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 }
 
 func (a *OpenCodeAgent) ChunkTranscript(content []byte, maxSize int) ([][]byte, error) {
-	// OpenCode uses JSON format (like Gemini). Parse and split by messages.
-	if len(content) <= maxSize {
-		return [][]byte{content}, nil
+	// OpenCode uses JSONL (one message per line) — use the shared JSONL chunker.
+	chunks, err := agent.ChunkJSONL(content, maxSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to chunk opencode transcript: %w", err)
 	}
-
-	var transcript Transcript
-	if err := json.Unmarshal(content, &transcript); err != nil {
-		// Fallback to JSONL chunking if not valid JSON
-		chunks, chunkErr := agent.ChunkJSONL(content, maxSize)
-		if chunkErr != nil {
-			return nil, fmt.Errorf("failed to chunk transcript as JSONL: %w", chunkErr)
-		}
-		return chunks, nil
-	}
-
-	if len(transcript.Messages) == 0 {
-		return [][]byte{content}, nil
-	}
-
-	// Pre-marshal each message to avoid O(n²) re-serialization.
-	// Track running size and split at chunk boundaries (same approach as Gemini).
-	var chunks [][]byte
-	var currentMessages []Message
-	baseSize := len(fmt.Sprintf(`{"session_id":%q,"messages":[]}`, transcript.SessionID))
-	currentSize := baseSize
-
-	for _, msg := range transcript.Messages {
-		msgBytes, err := json.Marshal(msg)
-		if err != nil {
-			continue // Skip messages that fail to marshal
-		}
-		msgSize := len(msgBytes) + 1 // +1 for comma separator
-
-		if currentSize+msgSize > maxSize && len(currentMessages) > 0 {
-			// Save current chunk
-			chunkData, marshalErr := json.Marshal(Transcript{
-				SessionID: transcript.SessionID,
-				Messages:  currentMessages,
-			})
-			if marshalErr != nil {
-				return nil, fmt.Errorf("failed to marshal transcript chunk: %w", marshalErr)
-			}
-			chunks = append(chunks, chunkData)
-
-			// Start new chunk
-			currentMessages = nil
-			currentSize = baseSize
-		}
-
-		currentMessages = append(currentMessages, msg)
-		currentSize += msgSize
-	}
-
-	// Save remaining messages
-	if len(currentMessages) > 0 {
-		chunkData, err := json.Marshal(Transcript{
-			SessionID: transcript.SessionID,
-			Messages:  currentMessages,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal final transcript chunk: %w", err)
-		}
-		chunks = append(chunks, chunkData)
-	}
-
 	return chunks, nil
 }
 
 func (a *OpenCodeAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
-	if len(chunks) == 0 {
-		return nil, nil
-	}
-	if len(chunks) == 1 {
-		return chunks[0], nil
-	}
-
-	var combined Transcript
-	for i, chunk := range chunks {
-		var t Transcript
-		if err := json.Unmarshal(chunk, &t); err != nil {
-			return nil, fmt.Errorf("failed to parse transcript chunk %d: %w", i, err)
-		}
-		if i == 0 {
-			combined.SessionID = t.SessionID
-		}
-		combined.Messages = append(combined.Messages, t.Messages...)
-	}
-
-	data, err := json.Marshal(combined)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal reassembled transcript: %w", err)
-	}
-	return data, nil
+	// JSONL reassembly is simple concatenation.
+	return agent.ReassembleJSONL(chunks), nil
 }
 
 // --- Legacy methods ---
@@ -192,7 +109,7 @@ func (a *OpenCodeAgent) GetSessionDir(repoPath string) (string, error) {
 }
 
 func (a *OpenCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	return filepath.Join(sessionDir, agentSessionID+".json")
+	return filepath.Join(sessionDir, agentSessionID+".jsonl")
 }
 
 func (a *OpenCodeAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {

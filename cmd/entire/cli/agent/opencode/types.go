@@ -13,7 +13,7 @@ type turnStartRaw struct {
 	Prompt         string `json:"prompt"`
 }
 
-// --- Transcript types (JSON format, similar to Gemini CLI) ---
+// --- Transcript types (JSONL format — one Message per line) ---
 
 // Message role constants.
 const (
@@ -21,13 +21,7 @@ const (
 	roleUser      = "user"
 )
 
-// Transcript represents the full transcript JSON written by the plugin.
-type Transcript struct {
-	SessionID string    `json:"session_id"`
-	Messages  []Message `json:"messages"`
-}
-
-// Message represents a single message in the transcript.
+// Message represents a single message (one line) in the JSONL transcript.
 type Message struct {
 	ID      string  `json:"id"`
 	Role    string  `json:"role"` // "user" or "assistant"
@@ -75,10 +69,12 @@ type ToolState struct {
 }
 
 // FileModificationTools are tools in OpenCode that modify files on disk.
+// These match the actual tool names from OpenCode's source:
+//   - edit:  internal/llm/tools/edit.go  (EditToolName)
+//   - write: internal/llm/tools/write.go (WriteToolName)
+//   - patch: internal/llm/tools/patch.go (PatchToolName)
 var FileModificationTools = []string{
-	"edit_file",
+	"edit",
 	"write",
-	"write_file",
-	"create_file",
 	"patch",
 }

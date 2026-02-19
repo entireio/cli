@@ -474,15 +474,6 @@ func countTranscriptItems(agentType agent.AgentType, content string) int {
 		return 0
 	}
 
-	// OpenCode uses JSON with messages array (like Gemini)
-	if agentType == agent.AgentTypeOpenCode {
-		t, err := opencode.ParseTranscript([]byte(content))
-		if err == nil && t != nil {
-			return len(t.Messages)
-		}
-		return 0
-	}
-
 	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
 	if agentType == agent.AgentTypeGemini || agentType == agent.AgentTypeUnknown {
 		transcript, err := geminicli.ParseTranscript([]byte(content))
@@ -512,7 +503,7 @@ func extractUserPrompts(agentType agent.AgentType, content string) []string {
 		return nil
 	}
 
-	// OpenCode uses JSON with messages array
+	// OpenCode uses JSONL with a different per-line schema than Claude Code
 	if agentType == agent.AgentTypeOpenCode {
 		prompts, err := opencode.ExtractAllUserPrompts([]byte(content))
 		if err == nil && len(prompts) > 0 {
@@ -560,7 +551,7 @@ func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int
 		return &agent.TokenUsage{}
 	}
 
-	// OpenCode uses JSON with token info on assistant messages
+	// OpenCode uses JSONL with token info on assistant messages (different schema from Claude Code)
 	if agentType == agent.AgentTypeOpenCode {
 		return opencode.CalculateTokenUsageFromBytes(data, startOffset)
 	}

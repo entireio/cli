@@ -46,7 +46,7 @@ export const EntirePlugin: Plugin = async ({ client, directory, $ }) => {
       .join("\n")
   }
 
-  /** Format a message for the transcript using its accumulated parts. */
+  /** Format a message object from its accumulated parts. */
   function formatMessageFromStore(msg: any) {
     const parts = partStore.get(msg.id) ?? []
     return {
@@ -86,20 +86,17 @@ export const EntirePlugin: Plugin = async ({ client, directory, $ }) => {
   }
 
   /**
-   * Write transcript from in-memory stores (messageStore + partStore).
+   * Write transcript as JSONL (one message per line) from in-memory stores.
    * This does NOT call the SDK API, so it works even during shutdown.
    */
   async function writeTranscriptFromMemory(sessionID: string): Promise<string> {
-    const transcriptPath = `${transcriptDir}/${sessionID}.json`
+    const transcriptPath = `${transcriptDir}/${sessionID}.jsonl`
     try {
       const messages = Array.from(messageStore.values())
         .sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
 
-      const transcript = {
-        session_id: sessionID,
-        messages: messages.map(formatMessageFromStore),
-      }
-      await Bun.write(transcriptPath, JSON.stringify(transcript))
+      const lines = messages.map(msg => JSON.stringify(formatMessageFromStore(msg)))
+      await Bun.write(transcriptPath, lines.join("\n") + "\n")
     } catch {
       // Silently ignore write failures
     }
@@ -108,20 +105,19 @@ export const EntirePlugin: Plugin = async ({ client, directory, $ }) => {
 
   /**
    * Try to fetch messages via the SDK API (returns messages with parts inline)
-   * and write transcript. Falls back to in-memory stores if the API is unavailable.
+   * and write transcript as JSONL. Falls back to in-memory stores if the API is unavailable.
    */
   async function writeTranscriptWithFallback(sessionID: string): Promise<string> {
-    const transcriptPath = `${transcriptDir}/${sessionID}.json`
+    const transcriptPath = `${transcriptDir}/${sessionID}.jsonl`
     try {
       const response = await client.session.message.list({ path: { id: sessionID } })
       // API returns Array<{ info: Message, parts: Array<Part> }>
       const items = response.data ?? []
 
-      const transcript = {
-        session_id: sessionID,
-        messages: items.map((item: any) => formatMessageFromAPI(item.info, item.parts ?? [])),
-      }
-      await Bun.write(transcriptPath, JSON.stringify(transcript))
+      const lines = items.map((item: any) =>
+        JSON.stringify(formatMessageFromAPI(item.info, item.parts ?? []))
+      )
+      await Bun.write(transcriptPath, lines.join("\n") + "\n")
       return transcriptPath
     } catch {
       // API unavailable (likely shutting down) — fall back to in-memory stores
@@ -138,7 +134,7 @@ export const EntirePlugin: Plugin = async ({ client, directory, $ }) => {
           currentSessionID = session.id
           await callHook("session-start", {
             session_id: session.id,
-            transcript_path: `${transcriptDir}/${session.id}.json`,
+            transcript_path: `${transcriptDir}/${session.id}.jsonl`,
           })
           break
         }
@@ -175,7 +171,7 @@ export const EntirePlugin: Plugin = async ({ client, directory, $ }) => {
             if (sessionID) {
               await callHook("turn-start", {
                 session_id: sessionID,
-                transcript_path: `${transcriptDir}/${sessionID}.json`,
+                transcript_path: `${transcriptDir}/${sessionID}.jsonl`,
                 prompt: part.text ?? "",
               })
             }
@@ -199,7 +195,7 @@ export const EntirePlugin: Plugin = async ({ client, directory, $ }) => {
           if (!sessionID) break
           await callHook("compaction", {
             session_id: sessionID,
-            transcript_path: `${transcriptDir}/${sessionID}.json`,
+            transcript_path: `${transcriptDir}/${sessionID}.jsonl`,
           })
           break
         }
@@ -217,7 +213,7 @@ export const EntirePlugin: Plugin = async ({ client, directory, $ }) => {
           currentSessionID = null
           await callHook("session-end", {
             session_id: session.id,
-            transcript_path: `${transcriptDir}/${session.id}.json`,
+            transcript_path: `${transcriptDir}/${session.id}.jsonl`,
           })
           break
         }

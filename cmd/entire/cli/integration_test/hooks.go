@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
@@ -750,4 +751,232 @@ func (env *TestEnv) SimulateGeminiSessionEnd(sessionID, transcriptPath string) e
 	env.T.Helper()
 	runner := NewGeminiHookRunner(env.RepoDir, env.GeminiProjectDir, env.T)
 	return runner.SimulateGeminiSessionEnd(sessionID, transcriptPath)
+}
+
+// --- OpenCode Hook Runner ---
+
+// OpenCodeHookRunner executes OpenCode hooks in the test environment.
+type OpenCodeHookRunner struct {
+	RepoDir            string
+	OpenCodeProjectDir string
+	T                  interface {
+		Helper()
+		Fatalf(format string, args ...interface{})
+		Logf(format string, args ...interface{})
+	}
+}
+
+// NewOpenCodeHookRunner creates a new OpenCode hook runner for the given repo directory.
+func NewOpenCodeHookRunner(repoDir, openCodeProjectDir string, t interface {
+	Helper()
+	Fatalf(format string, args ...interface{})
+	Logf(format string, args ...interface{})
+}) *OpenCodeHookRunner {
+	return &OpenCodeHookRunner{
+		RepoDir:            repoDir,
+		OpenCodeProjectDir: openCodeProjectDir,
+		T:                  t,
+	}
+}
+
+func (r *OpenCodeHookRunner) runOpenCodeHookWithInput(hookName string, input interface{}) error {
+	r.T.Helper()
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("failed to marshal hook input: %w", err)
+	}
+
+	return r.runOpenCodeHookInRepoDir(hookName, inputJSON)
+}
+
+func (r *OpenCodeHookRunner) runOpenCodeHookInRepoDir(hookName string, inputJSON []byte) error {
+	// Command structure: entire hooks opencode <hook-name>
+	cmd := exec.Command(getTestBinary(), "hooks", "opencode", hookName)
+	cmd.Dir = r.RepoDir
+	cmd.Stdin = bytes.NewReader(inputJSON)
+	cmd.Env = append(os.Environ(),
+		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+r.OpenCodeProjectDir,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("hook %s failed: %w\nInput: %s\nOutput: %s",
+			hookName, err, inputJSON, output)
+	}
+
+	r.T.Logf("OpenCode hook %s output: %s", hookName, output)
+	return nil
+}
+
+// SimulateOpenCodeSessionStart simulates the session-start hook for OpenCode.
+func (r *OpenCodeHookRunner) SimulateOpenCodeSessionStart(sessionID, transcriptPath string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	}
+
+	return r.runOpenCodeHookWithInput("session-start", input)
+}
+
+// SimulateOpenCodeTurnStart simulates the turn-start hook for OpenCode.
+// This is equivalent to Claude Code's UserPromptSubmit.
+func (r *OpenCodeHookRunner) SimulateOpenCodeTurnStart(sessionID, transcriptPath, prompt string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+		"prompt":          prompt,
+	}
+
+	return r.runOpenCodeHookWithInput("turn-start", input)
+}
+
+// SimulateOpenCodeTurnEnd simulates the turn-end hook for OpenCode.
+// This is equivalent to Claude Code's Stop hook.
+func (r *OpenCodeHookRunner) SimulateOpenCodeTurnEnd(sessionID, transcriptPath string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	}
+
+	return r.runOpenCodeHookWithInput("turn-end", input)
+}
+
+// SimulateOpenCodeSessionEnd simulates the session-end hook for OpenCode.
+func (r *OpenCodeHookRunner) SimulateOpenCodeSessionEnd(sessionID, transcriptPath string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	}
+
+	return r.runOpenCodeHookWithInput("session-end", input)
+}
+
+// OpenCodeSession represents a simulated OpenCode session.
+type OpenCodeSession struct {
+	ID             string // Raw session ID (e.g., "opencode-session-1")
+	TranscriptPath string
+	env            *TestEnv
+	msgCounter     int
+}
+
+// NewOpenCodeSession creates a new simulated OpenCode session.
+func (env *TestEnv) NewOpenCodeSession() *OpenCodeSession {
+	env.T.Helper()
+
+	env.SessionCounter++
+	sessionID := fmt.Sprintf("opencode-session-%d", env.SessionCounter)
+	transcriptPath := filepath.Join(env.OpenCodeProjectDir, sessionID+".jsonl")
+
+	return &OpenCodeSession{
+		ID:             sessionID,
+		TranscriptPath: transcriptPath,
+		env:            env,
+	}
+}
+
+// CreateOpenCodeTranscript creates an OpenCode JSONL transcript file for the session.
+// Each line is a JSON message in OpenCode's format (id, role, content, time, tokens, parts).
+func (s *OpenCodeSession) CreateOpenCodeTranscript(prompt string, changes []FileChange) string {
+	var lines []string
+
+	// User message
+	s.msgCounter++
+	userMsg := map[string]interface{}{
+		"id":      fmt.Sprintf("msg-%d", s.msgCounter),
+		"role":    "user",
+		"content": prompt,
+		"time":    map[string]interface{}{"created": 1708300000 + s.msgCounter},
+	}
+	userJSON, _ := json.Marshal(userMsg)
+	lines = append(lines, string(userJSON))
+
+	// Assistant message with tool calls for file changes
+	s.msgCounter++
+	var parts []map[string]interface{}
+	parts = append(parts, map[string]interface{}{
+		"type": "text",
+		"text": "I'll help you with that.",
+	})
+	for i, change := range changes {
+		parts = append(parts, map[string]interface{}{
+			"type":   "tool",
+			"tool":   "write",
+			"callID": fmt.Sprintf("call-%d", i+1),
+			"state": map[string]interface{}{
+				"status": "completed",
+				"input":  map[string]string{"file_path": change.Path},
+				"output": "File written: " + change.Path,
+			},
+		})
+	}
+
+	asstMsg := map[string]interface{}{
+		"id":      fmt.Sprintf("msg-%d", s.msgCounter),
+		"role":    "assistant",
+		"content": "Done!",
+		"time": map[string]interface{}{
+			"created":   1708300000 + s.msgCounter,
+			"completed": 1708300000 + s.msgCounter + 5,
+		},
+		"tokens": map[string]interface{}{
+			"input":     150,
+			"output":    80,
+			"reasoning": 10,
+			"cache":     map[string]int{"read": 5, "write": 15},
+		},
+		"cost":  0.003,
+		"parts": parts,
+	}
+	asstJSON, _ := json.Marshal(asstMsg)
+	lines = append(lines, string(asstJSON))
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(s.TranscriptPath), 0o755); err != nil {
+		s.env.T.Fatalf("failed to create transcript dir: %v", err)
+	}
+
+	// Write JSONL transcript (one message per line)
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(s.TranscriptPath, []byte(content), 0o644); err != nil {
+		s.env.T.Fatalf("failed to write transcript: %v", err)
+	}
+
+	return s.TranscriptPath
+}
+
+// SimulateOpenCodeSessionStart is a convenience method on TestEnv.
+func (env *TestEnv) SimulateOpenCodeSessionStart(sessionID, transcriptPath string) error {
+	env.T.Helper()
+	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
+	return runner.SimulateOpenCodeSessionStart(sessionID, transcriptPath)
+}
+
+// SimulateOpenCodeTurnStart is a convenience method on TestEnv.
+func (env *TestEnv) SimulateOpenCodeTurnStart(sessionID, transcriptPath, prompt string) error {
+	env.T.Helper()
+	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
+	return runner.SimulateOpenCodeTurnStart(sessionID, transcriptPath, prompt)
+}
+
+// SimulateOpenCodeTurnEnd is a convenience method on TestEnv.
+func (env *TestEnv) SimulateOpenCodeTurnEnd(sessionID, transcriptPath string) error {
+	env.T.Helper()
+	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
+	return runner.SimulateOpenCodeTurnEnd(sessionID, transcriptPath)
+}
+
+// SimulateOpenCodeSessionEnd is a convenience method on TestEnv.
+func (env *TestEnv) SimulateOpenCodeSessionEnd(sessionID, transcriptPath string) error {
+	env.T.Helper()
+	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
+	return runner.SimulateOpenCodeSessionEnd(sessionID, transcriptPath)
 }
