@@ -99,6 +99,16 @@ func applyChangesToTree(repo *git.Repository, baseTreeHash plumbing.Hash, change
 					Hash: newSubHash,
 				})
 				processedDirs[entry.Name] = true
+			} else if fileChange, ok := changes.files[entry.Name]; ok {
+				// Type conflict: base has dir, changes has file → replace dir with file
+				if !fileChange.delete {
+					newEntries = append(newEntries, object.TreeEntry{
+						Name: entry.Name,
+						Mode: fileChange.mode,
+						Hash: fileChange.hash,
+					})
+				}
+				processedFiles[entry.Name] = true
 			} else {
 				// No changes in this directory, keep as-is
 				newEntries = append(newEntries, entry)
@@ -115,6 +125,20 @@ func applyChangesToTree(repo *git.Repository, baseTreeHash plumbing.Hash, change
 				}
 				// If delete: don't add to newEntries
 				processedFiles[entry.Name] = true
+			} else if dirChanges, ok := changes.dirs[entry.Name]; ok {
+				// Type conflict: base has file, changes has dir → replace file with dir
+				newSubHash, subErr := createTreeFromChanges(repo, dirChanges)
+				if subErr != nil {
+					return plumbing.ZeroHash, subErr
+				}
+				if newSubHash != plumbing.ZeroHash {
+					newEntries = append(newEntries, object.TreeEntry{
+						Name: entry.Name,
+						Mode: filemode.Dir,
+						Hash: newSubHash,
+					})
+				}
+				processedDirs[entry.Name] = true
 			} else {
 				// No change, keep as-is
 				newEntries = append(newEntries, entry)
@@ -139,6 +163,10 @@ func applyChangesToTree(repo *git.Repository, baseTreeHash plumbing.Hash, change
 			newSubHash, subErr := createTreeFromChanges(repo, dirChanges)
 			if subErr != nil {
 				return plumbing.ZeroHash, subErr
+			}
+			// Skip empty trees (e.g., all changes were deletions for non-existent paths)
+			if newSubHash == plumbing.ZeroHash {
+				continue
 			}
 			newEntries = append(newEntries, object.TreeEntry{
 				Name: name,
@@ -172,11 +200,20 @@ func createTreeFromChanges(repo *git.Repository, changes *changeTree) (plumbing.
 		if err != nil {
 			return plumbing.ZeroHash, err
 		}
+		// Skip empty subtrees (all files were deletions)
+		if subHash == plumbing.ZeroHash {
+			continue
+		}
 		entries = append(entries, object.TreeEntry{
 			Name: name,
 			Mode: filemode.Dir,
 			Hash: subHash,
 		})
+	}
+
+	// If all entries were deletions, don't create an empty tree
+	if len(entries) == 0 {
+		return plumbing.ZeroHash, nil
 	}
 
 	sortTreeEntries(entries)
@@ -219,7 +256,7 @@ func addDirectoryToChangeTree(repo *git.Repository, dirPathAbs, dirPathRel strin
 		}
 
 		// Use forward slashes for git tree paths
-		treePath := dirPathRel + "/" + filepath.ToSlash(relWithinDir)
+		treePath := filepath.ToSlash(dirPathRel) + "/" + filepath.ToSlash(relWithinDir)
 		ct.addFile(treePath, blobHash, mode)
 		return nil
 	})
