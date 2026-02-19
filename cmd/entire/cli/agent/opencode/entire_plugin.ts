@@ -6,7 +6,10 @@ import type { Plugin } from "@opencode-ai/plugin"
 
 export const EntirePlugin: Plugin = async ({ client, directory, $ }) => {
   const ENTIRE_CMD = "__ENTIRE_CMD__"
-  const transcriptDir = `${directory}/.opencode/sessions/entire`
+  // Store transcripts outside the repo (matches Go SanitizePathForOpenCode).
+  const home = Bun.env.HOME ?? ""
+  const sanitized = directory.replace(/[^a-zA-Z0-9]/g, "-")
+  const transcriptDir = `${home}/.opencode/sessions/entire/${sanitized}`
   const seenUserMessages = new Set<string>()
 
   // In-memory stores — used to write transcripts without relying on the SDK API,

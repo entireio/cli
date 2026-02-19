@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -175,9 +176,22 @@ func (a *OpenCodeAgent) GetSessionID(input *agent.HookInput) string {
 	return input.SessionID
 }
 
+// GetSessionDir returns the directory where Entire stores OpenCode session transcripts.
+// Transcripts are stored outside the repo at ~/.opencode/sessions/entire/<sanitized-path>/
+// to avoid polluting the working tree and checkpoint metadata.
 func (a *OpenCodeAgent) GetSessionDir(repoPath string) (string, error) {
-	// OpenCode transcript files are written by the plugin to .opencode/sessions/entire/
-	return filepath.Join(repoPath, ".opencode", "sessions", "entire"), nil
+	// Check for test environment override
+	if override := os.Getenv("ENTIRE_TEST_OPENCODE_PROJECT_DIR"); override != "" {
+		return override, nil
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	projectDir := SanitizePathForOpenCode(repoPath)
+	return filepath.Join(homeDir, ".opencode", "sessions", "entire", projectDir), nil
 }
 
 func (a *OpenCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
@@ -232,4 +246,13 @@ func (a *OpenCodeAgent) WriteSession(session *agent.AgentSession) error {
 
 func (a *OpenCodeAgent) FormatResumeCommand(sessionID string) string {
 	return "opencode --session " + sessionID
+}
+
+// nonAlphanumericRegex matches any non-alphanumeric character.
+var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
+
+// SanitizePathForOpenCode converts a path to a safe directory name.
+// Replaces any non-alphanumeric character with a dash (same approach as Claude/Gemini).
+func SanitizePathForOpenCode(path string) string {
+	return nonAlphanumericRegex.ReplaceAllString(path, "-")
 }
