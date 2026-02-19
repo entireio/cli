@@ -110,6 +110,12 @@ func (s *ManualCommitStrategy) SaveStep(ctx StepContext) error {
 			slog.String("shadow_branch", shadowBranchName),
 		)
 		fmt.Fprintf(os.Stderr, "Skipped checkpoint (no changes since last checkpoint)\n")
+		if ctx.TranscriptLeafID != "" && state.TranscriptLeafID != ctx.TranscriptLeafID {
+			state.TranscriptLeafID = ctx.TranscriptLeafID
+			if saveErr := s.saveSessionState(state); saveErr != nil {
+				return fmt.Errorf("failed to save session state after skipped checkpoint: %w", saveErr)
+			}
+		}
 		return nil
 	}
 
@@ -134,6 +140,10 @@ func (s *ManualCommitStrategy) SaveStep(ctx StepContext) error {
 	// Accumulate token usage
 	if ctx.TokenUsage != nil {
 		state.TokenUsage = accumulateTokenUsage(state.TokenUsage, ctx.TokenUsage)
+	}
+
+	if ctx.TranscriptLeafID != "" {
+		state.TranscriptLeafID = ctx.TranscriptLeafID
 	}
 
 	// Save updated state

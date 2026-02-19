@@ -94,6 +94,7 @@ const (
 	AgentNameClaudeCode AgentName = "claude-code"
 	AgentNameGemini     AgentName = "gemini"
 	AgentNameOpenCode   AgentName = "opencode"
+	AgentNamePi         AgentName = "pi"
 )
 
 // Agent type constants (type identifiers stored in metadata/trailers)
@@ -101,6 +102,7 @@ const (
 	AgentTypeClaudeCode AgentType = "Claude Code"
 	AgentTypeGemini     AgentType = "Gemini CLI"
 	AgentTypeOpenCode   AgentType = "OpenCode"
+	AgentTypePi         AgentType = "Pi Coding Agent"
 	AgentTypeUnknown    AgentType = "Agent" // Fallback for backwards compatibility
 )
 

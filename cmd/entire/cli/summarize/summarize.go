@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
@@ -119,6 +120,8 @@ func BuildCondensedTranscriptFromBytes(content []byte, agentType agent.AgentType
 		return buildCondensedTranscriptFromGemini(content)
 	case agent.AgentTypeOpenCode:
 		return buildCondensedTranscriptFromOpenCode(content)
+	case agent.AgentTypePi:
+		return buildCondensedTranscriptFromPi(content)
 	case agent.AgentTypeClaudeCode, agent.AgentTypeUnknown:
 		// Claude format - fall through to shared logic below
 	}
@@ -128,6 +131,63 @@ func BuildCondensedTranscriptFromBytes(content []byte, agentType agent.AgentType
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)
 	}
 	return BuildCondensedTranscript(lines), nil
+}
+
+// buildCondensedTranscriptFromPi parses Pi JSONL transcript and extracts a condensed view.
+func buildCondensedTranscriptFromPi(content []byte) ([]Entry, error) {
+	entries, err := pi.ParseTranscript(content)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Pi transcript: %w", err)
+	}
+
+	var condensed []Entry
+	for _, entry := range entries {
+		if entry.Type != "message" || entry.Message == nil {
+			continue
+		}
+
+		msg := entry.Message
+		switch msg.Role {
+		case "user":
+			if text, ok := msg.Content.(string); ok && strings.TrimSpace(text) != "" {
+				condensed = append(condensed, Entry{
+					Type:    EntryTypeUser,
+					Content: strings.TrimSpace(text),
+				})
+			}
+		case "assistant":
+			blocks, ok := msg.Content.([]interface{})
+			if !ok {
+				continue
+			}
+			for _, block := range blocks {
+				b, ok := block.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				switch b["type"] {
+				case "text":
+					text, _ := b["text"].(string)
+					if strings.TrimSpace(text) != "" {
+						condensed = append(condensed, Entry{
+							Type:    EntryTypeAssistant,
+							Content: strings.TrimSpace(text),
+						})
+					}
+				case "toolCall":
+					toolName, _ := b["name"].(string)
+					args, _ := b["arguments"].(map[string]interface{})
+					condensed = append(condensed, Entry{
+						Type:       EntryTypeTool,
+						ToolName:   toolName,
+						ToolDetail: extractGenericToolDetail(args),
+					})
+				}
+			}
+		}
+	}
+
+	return condensed, nil
 }
 
 // buildCondensedTranscriptFromGemini parses Gemini JSON transcript and extracts a condensed view.
