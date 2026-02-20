@@ -336,8 +336,6 @@ func (s *StateStore) RemoveAll() error {
 
 // List returns all session states.
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
-	_ = ctx // Reserved for future use
-
 	entries, err := os.ReadDir(s.stateDir)
 	if os.IsNotExist(err) {
 		return nil, nil
