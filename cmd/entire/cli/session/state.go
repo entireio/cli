@@ -21,6 +21,10 @@ import (
 const (
 	// SessionStateDirName is the directory name for session state files within git common dir.
 	SessionStateDirName = "entire-sessions"
+
+	// StaleSessionThreshold is the duration after which an ended session is considered stale
+	// and will be automatically deleted during load/list operations.
+	StaleSessionThreshold = 24 * time.Hour
 )
 
 // State represents the state of an active session.
@@ -205,6 +209,12 @@ func (s *State) NormalizeAfterLoad() {
 	}
 }
 
+// IsStale returns true when the session has ended and the time since it ended
+// exceeds StaleSessionThreshold. Active sessions (EndedAt == nil) are never stale.
+func (s *State) IsStale() bool {
+	return s.EndedAt != nil && time.Since(*s.EndedAt) > StaleSessionThreshold
+}
+
 // StateStore provides low-level operations for managing session state files.
 //
 // StateStore is a primitive for session state persistence. It is NOT the same as
@@ -336,6 +346,8 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 		return nil, fmt.Errorf("failed to read session state directory: %w", err)
 	}
 
+	logCtx := logging.WithComponent(ctx, "session")
+
 	var states []*State
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
@@ -351,6 +363,14 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 			continue // Skip corrupted state files
 		}
 		if state == nil {
+			continue
+		}
+
+		if state.IsStale() {
+			logging.Info(logCtx, "deleting stale session state",
+				slog.String("session_id", sessionID),
+			)
+			_ = s.Clear(ctx, sessionID) //nolint:errcheck // best-effort cleanup of stale session
 			continue
 		}
 

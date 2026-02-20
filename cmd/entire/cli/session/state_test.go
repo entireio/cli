@@ -1,8 +1,12 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,4 +121,78 @@ func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
 			assert.Equal(t, 0, state.TranscriptLinesAtStart, "deprecated field should be cleared")
 		})
 	}
+}
+
+func TestState_IsStale(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil_EndedAt_is_not_stale", func(t *testing.T) {
+		t.Parallel()
+		state := &State{EndedAt: nil}
+		assert.False(t, state.IsStale())
+	})
+
+	t.Run("recently_ended_is_not_stale", func(t *testing.T) {
+		t.Parallel()
+		recent := time.Now().Add(-1 * time.Hour)
+		state := &State{EndedAt: &recent}
+		assert.False(t, state.IsStale())
+	})
+
+	t.Run("ended_over_24h_ago_is_stale", func(t *testing.T) {
+		t.Parallel()
+		old := time.Now().Add(-25 * time.Hour)
+		state := &State{EndedAt: &old}
+		assert.True(t, state.IsStale())
+	})
+
+	t.Run("ended_exactly_at_threshold_is_not_stale", func(t *testing.T) {
+		t.Parallel()
+		// time.Since will be slightly over threshold due to execution time,
+		// but a value well within threshold should not be stale
+		recent := time.Now().Add(-23 * time.Hour)
+		state := &State{EndedAt: &recent}
+		assert.False(t, state.IsStale())
+	})
+}
+
+func TestStateStore_List_DeletesStaleSession(t *testing.T) {
+	t.Parallel()
+
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+	ctx := context.Background()
+
+	// Create an active session (no EndedAt)
+	active := &State{
+		SessionID:  "active-session",
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}
+	require.NoError(t, store.Save(ctx, active))
+
+	// Create a stale session (ended >24h ago)
+	staleEnded := time.Now().Add(-48 * time.Hour)
+	stale := &State{
+		SessionID:  "stale-session",
+		BaseCommit: "def456",
+		StartedAt:  time.Now().Add(-72 * time.Hour),
+		EndedAt:    &staleEnded,
+	}
+	require.NoError(t, store.Save(ctx, stale))
+
+	// List should return only the active session
+	states, err := store.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, states, 1)
+	assert.Equal(t, "active-session", states[0].SessionID)
+
+	// Stale session file should be deleted from disk
+	_, err = os.Stat(filepath.Join(stateDir, "stale-session.json"))
+	assert.True(t, os.IsNotExist(err), "stale session file should be deleted")
+
+	// Active session file should still exist
+	_, err = os.Stat(filepath.Join(stateDir, "active-session.json"))
+	assert.NoError(t, err, "active session file should still exist")
 }

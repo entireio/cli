@@ -415,3 +415,53 @@ func TestTransitionAndLog_ReturnsHandlerError(t *testing.T) {
 		t.Error("TransitionAndLog() should return handler error")
 	}
 }
+
+// TestLoadSessionState_DeletesStaleSession tests that LoadSessionState returns (nil, nil)
+// for a stale session and deletes the file from disk.
+func TestLoadSessionState_DeletesStaleSession(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	// Create a stale session (ended >24h ago)
+	staleEnded := time.Now().Add(-48 * time.Hour)
+	state := &SessionState{
+		SessionID:  "stale-load-test",
+		BaseCommit: "abc123def456",
+		StartedAt:  time.Now().Add(-72 * time.Hour),
+		EndedAt:    &staleEnded,
+		StepCount:  5,
+	}
+
+	err = SaveSessionState(state)
+	if err != nil {
+		t.Fatalf("SaveSessionState() error = %v", err)
+	}
+
+	// Verify file exists before load
+	stateFile, err := sessionStateFile("stale-load-test")
+	if err != nil {
+		t.Fatalf("sessionStateFile() error = %v", err)
+	}
+	if _, err := os.Stat(stateFile); err != nil {
+		t.Fatalf("state file should exist before load: %v", err)
+	}
+
+	// Load should return (nil, nil) for stale session
+	loaded, err := LoadSessionState("stale-load-test")
+	if err != nil {
+		t.Errorf("LoadSessionState() error = %v, want nil for stale session", err)
+	}
+	if loaded != nil {
+		t.Error("LoadSessionState() returned non-nil for stale session")
+	}
+
+	// File should be deleted from disk
+	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+		t.Error("stale session file should be deleted after LoadSessionState()")
+	}
+}

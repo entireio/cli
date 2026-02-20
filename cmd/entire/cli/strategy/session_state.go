@@ -62,6 +62,16 @@ func LoadSessionState(sessionID string) (*SessionState, error) {
 		return nil, fmt.Errorf("failed to unmarshal session state: %w", err)
 	}
 	state.NormalizeAfterLoad()
+
+	if state.IsStale() {
+		logCtx := logging.WithComponent(context.Background(), "session")
+		logging.Info(logCtx, "deleting stale session state",
+			slog.String("session_id", sessionID),
+		)
+		_ = ClearSessionState(sessionID) //nolint:errcheck // best-effort cleanup of stale session
+		return nil, nil                  //nolint:nilnil // stale session treated as not found
+	}
+
 	return &state, nil
 }
 
