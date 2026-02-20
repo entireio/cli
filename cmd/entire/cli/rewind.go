@@ -683,24 +683,7 @@ func restoreSessionTranscriptFromStrategy(cpID id.CheckpointID, sessionID string
 	// If export data is available (e.g., OpenCode), use WriteSession which handles
 	// both file writing and native storage import (SQLite for OpenCode).
 	if len(exportData) > 0 {
-		sessionFile, err := resolveTranscriptPath(sessionID, agent)
-		if err != nil {
-			return "", err
-		}
-		if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
-			return "", fmt.Errorf("failed to create agent session directory: %w", err)
-		}
-		agentSession := &agentpkg.AgentSession{
-			SessionID:  sessionID,
-			AgentName:  agent.Name(),
-			SessionRef: sessionFile,
-			NativeData: content,
-			ExportData: exportData,
-		}
-		if err := agent.WriteSession(agentSession); err != nil {
-			return "", fmt.Errorf("failed to write session: %w", err)
-		}
-		return sessionID, nil
+		return writeSessionWithExportData(content, exportData, sessionID, agent)
 	}
 
 	return writeTranscriptToAgentSession(content, sessionID, agent)
@@ -731,30 +714,37 @@ func restoreSessionTranscriptFromShadow(commitHash, metadataDir, sessionID strin
 	// Read export data from shadow branch tree if available (e.g., OpenCode export JSON).
 	exportData := store.GetExportDataFromCommit(hash, metadataDir)
 
-	// If export data is available, use WriteSession which handles both file writing
-	// and native storage import (SQLite for OpenCode).
+	// If export data is available (e.g., OpenCode), use WriteSession which handles
+	// both file writing and native storage import (SQLite for OpenCode).
 	if len(exportData) > 0 {
-		sessionFile, err := resolveTranscriptPath(sessionID, agent)
-		if err != nil {
-			return "", err
-		}
-		if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
-			return "", fmt.Errorf("failed to create agent session directory: %w", err)
-		}
-		agentSession := &agentpkg.AgentSession{
-			SessionID:  sessionID,
-			AgentName:  agent.Name(),
-			SessionRef: sessionFile,
-			NativeData: content,
-			ExportData: exportData,
-		}
-		if err := agent.WriteSession(agentSession); err != nil {
-			return "", fmt.Errorf("failed to write session: %w", err)
-		}
-		return sessionID, nil
+		return writeSessionWithExportData(content, exportData, sessionID, agent)
 	}
 
 	return writeTranscriptToAgentSession(content, sessionID, agent)
+}
+
+// writeSessionWithExportData writes session content using the agent's WriteSession method,
+// which handles both file writing and native storage import (e.g., SQLite for OpenCode).
+// Used when export data is available for agents with non-file-based storage.
+func writeSessionWithExportData(content, exportData []byte, sessionID string, agent agentpkg.Agent) (string, error) {
+	sessionFile, err := resolveTranscriptPath(sessionID, agent)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
+		return "", fmt.Errorf("failed to create agent session directory: %w", err)
+	}
+	agentSession := &agentpkg.AgentSession{
+		SessionID:  sessionID,
+		AgentName:  agent.Name(),
+		SessionRef: sessionFile,
+		NativeData: content,
+		ExportData: exportData,
+	}
+	if err := agent.WriteSession(agentSession); err != nil {
+		return "", fmt.Errorf("failed to write session: %w", err)
+	}
+	return sessionID, nil
 }
 
 // writeTranscriptToAgentSession writes transcript content to the agent's session storage.
