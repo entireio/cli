@@ -65,7 +65,7 @@ func LoadSessionState(sessionID string) (*SessionState, error) {
 
 	if state.IsStale() {
 		logCtx := logging.WithComponent(context.Background(), "session")
-		logging.Info(logCtx, "deleting stale session state",
+		logging.Debug(logCtx, "deleting stale session state",
 			slog.String("session_id", sessionID),
 		)
 		_ = ClearSessionState(sessionID) //nolint:errcheck // best-effort cleanup of stale session
