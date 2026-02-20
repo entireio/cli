@@ -367,7 +367,7 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 		}
 
 		if state.IsStale() {
-			logging.Info(logCtx, "deleting stale session state",
+			logging.Debug(logCtx, "deleting stale session state",
 				slog.String("session_id", sessionID),
 			)
 			_ = s.Clear(ctx, sessionID) //nolint:errcheck // best-effort cleanup of stale session
