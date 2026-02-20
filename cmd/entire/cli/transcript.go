@@ -273,7 +273,6 @@ func resolveTranscriptPath(sessionID string, agent agentpkg.Agent) (string, erro
 	return agent.ResolveSessionFile(sessionDir, sessionID), nil
 }
 
-
 // AgentTranscriptPath returns the path to a subagent's transcript file.
 // Subagent transcripts are stored as agent-{agentId}.jsonl in the same directory
 // as the main transcript.

@@ -905,6 +905,7 @@ func addDirectoryToEntriesWithAbsPath(repo *git.Repository, dirPathAbs, dirPathR
 	}
 	return nil
 }
+
 // treeNode represents a node in our tree structure.
 type treeNode struct {
 	entries map[string]*treeNode // subdirectories

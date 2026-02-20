@@ -236,11 +236,32 @@ func storeTree(repo *git.Repository, entries []object.TreeEntry) (plumbing.Hash,
 
 // addDirectoryToChangeTree walks a filesystem directory and adds all files to a changeTree.
 // dirPathAbs is the absolute path for reading files, dirPathRel is the git tree path prefix.
+// Files are redacted before storage (JSONL-aware for transcripts, plain string for others).
+// Symlinks are skipped to prevent capturing files outside the metadata directory.
 func addDirectoryToChangeTree(repo *git.Repository, dirPathAbs, dirPathRel string, ct *changeTree) error {
 	err := filepath.Walk(dirPathAbs, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
+
+		// Skip symlinks to prevent reading files outside the metadata directory.
+		// A symlink could point to sensitive files (e.g., /etc/passwd) which would
+		// then be captured in the checkpoint and stored in git history.
+		// NOTE: filepath.Walk uses os.Stat (follows symlinks), so info.Mode() never
+		// reports ModeSymlink. We use os.Lstat to check the entry itself.
+		// This check MUST come before IsDir() because Walk follows symlinked
+		// directories and would recurse into them otherwise.
+		linfo, lstatErr := os.Lstat(path)
+		if lstatErr != nil {
+			return fmt.Errorf("failed to lstat %s: %w", path, lstatErr)
+		}
+		if linfo.Mode()&os.ModeSymlink != 0 {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
 		if info.IsDir() {
 			return nil
 		}
@@ -250,13 +271,20 @@ func addDirectoryToChangeTree(repo *git.Repository, dirPathAbs, dirPathRel strin
 			return fmt.Errorf("failed to get relative path for %s: %w", path, relErr)
 		}
 
-		blobHash, mode, blobErr := createBlobFromFile(repo, path)
-		if blobErr != nil {
-			return fmt.Errorf("failed to create blob for %s: %w", path, blobErr)
+		// Prevent path traversal via symlinks pointing outside the metadata dir
+		if strings.HasPrefix(relWithinDir, "..") {
+			return fmt.Errorf("path traversal detected: %s", relWithinDir)
 		}
 
 		// Use forward slashes for git tree paths
 		treePath := filepath.ToSlash(dirPathRel) + "/" + filepath.ToSlash(relWithinDir)
+
+		// Use redacted blob creation to strip secrets from transcripts and other metadata
+		blobHash, mode, blobErr := createRedactedBlobFromFile(repo, path, treePath)
+		if blobErr != nil {
+			return fmt.Errorf("failed to create blob for %s: %w", path, blobErr)
+		}
+
 		ct.addFile(treePath, blobHash, mode)
 		return nil
 	})
