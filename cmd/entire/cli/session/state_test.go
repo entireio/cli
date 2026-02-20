@@ -139,7 +139,7 @@ func TestState_IsStale(t *testing.T) {
 		assert.False(t, state.IsStale())
 	})
 
-	t.Run("ended_25h_ago_is_stale", func(t *testing.T) {
+	t.Run("ended_over_24h_ago_is_stale", func(t *testing.T) {
 		t.Parallel()
 		old := time.Now().Add(-25 * time.Hour)
 		state := &State{EndedAt: &old}
