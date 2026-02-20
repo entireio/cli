@@ -144,14 +144,14 @@ func (a *OpenCodeAgent) WriteSession(session *agent.AgentSession) error {
 		return fmt.Errorf("failed to write session data: %w", err)
 	}
 
-	// 2. If we have export data, import the session into OpenCode's SQLite.
+	// 2. If we have export data, import the session into OpenCode.
 	//    This enables `opencode -s <id>` for both resume and rewind.
 	if len(session.ExportData) == 0 {
-		return nil // No export data — skip SQLite import (graceful degradation)
+		return nil // No export data — skip import (graceful degradation)
 	}
 
-	if err := a.importSessionIntoSQLite(session.SessionID, session.ExportData); err != nil {
-		// Non-fatal: SQLite import is best-effort. The JSONL file is written,
+	if err := a.importSessionIntoOpenCode(session.SessionID, session.ExportData); err != nil {
+		// Non-fatal: import is best-effort. The JSONL file is written,
 		// and the user can always run `opencode import <file>` manually.
 		fmt.Fprintf(os.Stderr, "warning: could not import session into OpenCode: %v\n", err)
 	}
@@ -159,18 +159,17 @@ func (a *OpenCodeAgent) WriteSession(session *agent.AgentSession) error {
 	return nil
 }
 
-// importSessionIntoSQLite writes the export JSON to a temp file and runs
-// `opencode import` to restore the session into OpenCode's SQLite database.
-// For rewind (session already exists), messages are deleted first so the
-// reimport replaces them with the checkpoint-state messages.
-func (a *OpenCodeAgent) importSessionIntoSQLite(sessionID string, exportData []byte) error {
-	// If the session already exists in SQLite, delete its messages first.
+// importSessionIntoOpenCode writes the export JSON to a temp file and runs
+// `opencode import` to restore the session into OpenCode's database.
+// For rewind (session already exists), the session is deleted first so the
+// reimport replaces it with the checkpoint-state messages.
+func (a *OpenCodeAgent) importSessionIntoOpenCode(sessionID string, exportData []byte) error {
+	// Delete the session first so reimport replaces it cleanly.
 	// opencode import uses ON CONFLICT DO NOTHING, so existing messages
 	// would be skipped without this step (breaking rewind).
-	if sessionExistsInSQLite(sessionID) {
-		if err := deleteMessagesFromSQLite(sessionID); err != nil {
-			return fmt.Errorf("failed to clear existing messages: %w", err)
-		}
+	// runOpenCodeSessionDelete treats "not found" as success.
+	if err := runOpenCodeSessionDelete(sessionID); err != nil {
+		return fmt.Errorf("failed to delete existing session: %w", err)
 	}
 
 	// Write export JSON to a temp file for opencode import
