@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -37,42 +36,19 @@ func sessionStateFile(sessionID string) (string, error) {
 }
 
 // LoadSessionState loads the session state for the given session ID.
-// Returns (nil, nil) when session file doesn't exist (not an error condition).
+// Returns (nil, nil) when session file doesn't exist or session is stale (not an error condition).
+// Stale sessions are automatically deleted by the underlying StateStore.
 func LoadSessionState(sessionID string) (*SessionState, error) {
-	// Validate session ID to prevent path traversal
-	if err := validation.ValidateSessionID(sessionID); err != nil {
-		return nil, fmt.Errorf("invalid session ID: %w", err)
-	}
-
-	stateFile, err := sessionStateFile(sessionID)
+	store, err := session.NewStateStore()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get session state file path: %w", err)
+		return nil, fmt.Errorf("failed to create state store: %w", err)
 	}
 
-	data, err := os.ReadFile(stateFile) //nolint:gosec // stateFile is derived from sessionID, not user input
-	if os.IsNotExist(err) {
-		return nil, nil //nolint:nilnil // nil,nil indicates session not found (expected case)
-	}
+	state, err := store.Load(context.Background(), sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read session state: %w", err)
+		return nil, fmt.Errorf("failed to load session state: %w", err)
 	}
-
-	var state SessionState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal session state: %w", err)
-	}
-	state.NormalizeAfterLoad()
-
-	if state.IsStale() {
-		logCtx := logging.WithComponent(context.Background(), "session")
-		logging.Debug(logCtx, "deleting stale session state",
-			slog.String("session_id", sessionID),
-		)
-		_ = ClearSessionState(sessionID) //nolint:errcheck // best-effort cleanup of stale session
-		return nil, nil                  //nolint:nilnil // stale session treated as not found
-	}
-
-	return &state, nil
+	return state, nil
 }
 
 // SaveSessionState saves the session state atomically.

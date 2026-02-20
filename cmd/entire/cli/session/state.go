@@ -247,10 +247,9 @@ func NewStateStoreWithDir(stateDir string) *StateStore {
 }
 
 // Load loads the session state for the given session ID.
-// Returns (nil, nil) when session file doesn't exist (not an error condition).
+// Returns (nil, nil) when session file doesn't exist or session is stale (not an error condition).
+// Stale sessions (ended longer than StaleSessionThreshold ago) are automatically deleted.
 func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error) {
-	_ = ctx // Reserved for future use
-
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return nil, fmt.Errorf("invalid session ID: %w", err)
@@ -271,6 +270,16 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 		return nil, fmt.Errorf("failed to unmarshal session state: %w", err)
 	}
 	state.NormalizeAfterLoad()
+
+	if state.IsStale() {
+		logCtx := logging.WithComponent(ctx, "session")
+		logging.Debug(logCtx, "deleting stale session state",
+			slog.String("session_id", sessionID),
+		)
+		_ = s.Clear(ctx, sessionID) //nolint:errcheck // best-effort cleanup of stale session
+		return nil, nil             //nolint:nilnil // stale session treated as not found
+	}
+
 	return &state, nil
 }
 
@@ -344,8 +353,6 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 		return nil, fmt.Errorf("failed to read session state directory: %w", err)
 	}
 
-	logCtx := logging.WithComponent(ctx, "session")
-
 	var states []*State
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
@@ -361,15 +368,7 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 			continue // Skip corrupted state files
 		}
 		if state == nil {
-			continue
-		}
-
-		if state.IsStale() {
-			logging.Debug(logCtx, "deleting stale session state",
-				slog.String("session_id", sessionID),
-			)
-			_ = s.Clear(ctx, sessionID) //nolint:errcheck // best-effort cleanup of stale session
-			continue
+			continue // Not found or stale (Load handles cleanup)
 		}
 
 		states = append(states, state)

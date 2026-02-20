@@ -157,6 +157,52 @@ func TestState_IsStale(t *testing.T) {
 	})
 }
 
+func TestStateStore_Load_DeletesStaleSession(t *testing.T) {
+	t.Parallel()
+
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+	ctx := context.Background()
+
+	// Create a stale session (ended >24h ago)
+	staleEnded := time.Now().Add(-48 * time.Hour)
+	stale := &State{
+		SessionID:  "stale-session",
+		BaseCommit: "def456",
+		StartedAt:  time.Now().Add(-72 * time.Hour),
+		EndedAt:    &staleEnded,
+	}
+	require.NoError(t, store.Save(ctx, stale))
+
+	// Verify file exists before load
+	stateFile := filepath.Join(stateDir, "stale-session.json")
+	_, err := os.Stat(stateFile)
+	require.NoError(t, err, "state file should exist before load")
+
+	// Load should return (nil, nil) for stale session
+	loaded, err := store.Load(ctx, "stale-session")
+	require.NoError(t, err, "Load should not return error for stale session")
+	assert.Nil(t, loaded, "Load should return nil for stale session")
+
+	// File should be deleted from disk
+	_, err = os.Stat(stateFile)
+	assert.True(t, os.IsNotExist(err), "stale session file should be deleted after Load")
+
+	// Create an active session (no EndedAt) to verify non-stale sessions still work
+	active := &State{
+		SessionID:  "active-session",
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}
+	require.NoError(t, store.Save(ctx, active))
+
+	loaded, err = store.Load(ctx, "active-session")
+	require.NoError(t, err)
+	assert.NotNil(t, loaded, "Load should return state for active session")
+	assert.Equal(t, "active-session", loaded.SessionID)
+}
+
 func TestStateStore_List_DeletesStaleSession(t *testing.T) {
 	t.Parallel()
 
