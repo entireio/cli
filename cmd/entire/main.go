@@ -1,25 +1,18 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/entireio/cli/cmd/entire/cli"
 	"github.com/spf13/cobra"
 )
 
 func main() {
-	// Create context that cancels on interrupt signals
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-
-	// Create and execute root command
 	rootCmd := cli.NewRootCmd()
-	err := rootCmd.ExecuteContext(ctx)
+	err := rootCmd.Execute()
 
 	if err != nil {
 		var silent *cli.SilentError
@@ -33,10 +26,8 @@ func main() {
 			fmt.Fprintln(rootCmd.OutOrStderr(), err)
 		}
 
-		cancel()
 		os.Exit(1)
 	}
-	cancel() // Cleanup on successful exit
 }
 
 func showSuggestion(cmd *cobra.Command, err error) {
