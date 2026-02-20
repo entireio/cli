@@ -466,9 +466,9 @@ func TestAreHooksInstalled(t *testing.T) {
 	}
 }
 
-func TestGetHookNames(t *testing.T) {
+func TestHookNames(t *testing.T) {
 	agent := &GeminiCLIAgent{}
-	names := agent.GetHookNames()
+	names := agent.HookNames()
 
 	expected := []string{
 		HookNameSessionStart,
@@ -485,12 +485,12 @@ func TestGetHookNames(t *testing.T) {
 	}
 
 	if len(names) != len(expected) {
-		t.Errorf("GetHookNames() returned %d names, want %d", len(names), len(expected))
+		t.Errorf("HookNames() returned %d names, want %d", len(names), len(expected))
 	}
 
 	for i, name := range expected {
 		if names[i] != name {
-			t.Errorf("GetHookNames()[%d] = %q, want %q", i, names[i], name)
+			t.Errorf("HookNames()[%d] = %q, want %q", i, names[i], name)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	// Import agents to ensure they are registered before we iterate
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 
 	"github.com/spf13/cobra"
 )
@@ -21,15 +22,12 @@ func newHooksCmd() *cobra.Command {
 	cmd.AddCommand(newHooksGitCmd())
 
 	// Dynamically add agent hook subcommands
-	// Each agent that implements HookHandler gets its own subcommand tree
 	for _, agentName := range agent.List() {
 		ag, err := agent.Get(agentName)
 		if err != nil {
 			continue
 		}
-		if handler, ok := ag.(agent.HookHandler); ok {
-			cmd.AddCommand(newAgentHooksCmd(agentName, handler))
-		}
+		cmd.AddCommand(newAgentHooksCmd(agentName, ag))
 	}
 
 	return cmd

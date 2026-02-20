@@ -69,12 +69,6 @@ type Agent interface {
 
 	// --- Legacy methods (will move to optional interfaces in Phase 4) ---
 
-	// SupportsHooks returns true if agent supports lifecycle hooks.
-	SupportsHooks() bool
-
-	// ParseHookInput parses hook callback input from stdin.
-	ParseHookInput(hookType HookType, reader io.Reader) (*HookInput, error)
-
 	// GetSessionID extracts session ID from hook input.
 	GetSessionID(input *HookInput) string
 
@@ -111,19 +105,6 @@ type HookSupport interface {
 
 	// AreHooksInstalled checks if hooks are currently installed
 	AreHooksInstalled() bool
-
-	// GetSupportedHooks returns the hook types this agent supports
-	GetSupportedHooks() []HookType
-}
-
-// HookHandler is implemented by agents that define their own hook vocabulary.
-// HookNames() is now part of the core Agent interface.
-// This interface is kept for backward compatibility during migration.
-type HookHandler interface {
-	Agent
-
-	// GetHookNames returns the hook verbs this agent supports.
-	GetHookNames() []string
 }
 
 // FileWatcher is implemented by agents that use file-based detection.

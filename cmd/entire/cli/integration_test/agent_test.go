@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode" // Register OpenCode agent
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
@@ -817,4 +818,298 @@ func TestGeminiCLIHelperMethods(t *testing.T) {
 		}
 	})
 
+}
+
+// --- OpenCode Agent Tests ---
+
+// TestOpenCodeAgentDetection verifies OpenCode agent detection and default behavior.
+func TestOpenCodeAgentDetection(t *testing.T) {
+
+	t.Run("opencode agent is registered", func(t *testing.T) {
+		t.Parallel()
+
+		agents := agent.List()
+		found := false
+		for _, name := range agents {
+			if name == "opencode" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("agent.List() = %v, want to contain 'opencode'", agents)
+		}
+	})
+
+	t.Run("opencode detects presence when .opencode exists", func(t *testing.T) {
+		// Not parallel - uses os.Chdir which is process-global
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		// Create .opencode directory
+		opencodeDir := filepath.Join(env.RepoDir, ".opencode")
+		if err := os.MkdirAll(opencodeDir, 0o755); err != nil {
+			t.Fatalf("failed to create .opencode dir: %v", err)
+		}
+
+		// Change to repo dir for detection
+		oldWd, _ := os.Getwd()
+		if err := os.Chdir(env.RepoDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+		defer func() { _ = os.Chdir(oldWd) }()
+
+		ag, err := agent.Get("opencode")
+		if err != nil {
+			t.Fatalf("Get(opencode) error = %v", err)
+		}
+
+		present, err := ag.DetectPresence()
+		if err != nil {
+			t.Fatalf("DetectPresence() error = %v", err)
+		}
+		if !present {
+			t.Error("DetectPresence() = false, want true when .opencode exists")
+		}
+	})
+
+	t.Run("opencode detects presence when opencode.json exists", func(t *testing.T) {
+		// Not parallel - uses os.Chdir which is process-global
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		// Create opencode.json config file
+		configPath := filepath.Join(env.RepoDir, "opencode.json")
+		if err := os.WriteFile(configPath, []byte(`{}`), 0o644); err != nil {
+			t.Fatalf("failed to write opencode.json: %v", err)
+		}
+
+		// Change to repo dir for detection
+		oldWd, _ := os.Getwd()
+		if err := os.Chdir(env.RepoDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+		defer func() { _ = os.Chdir(oldWd) }()
+
+		ag, err := agent.Get("opencode")
+		if err != nil {
+			t.Fatalf("Get(opencode) error = %v", err)
+		}
+
+		present, err := ag.DetectPresence()
+		if err != nil {
+			t.Fatalf("DetectPresence() error = %v", err)
+		}
+		if !present {
+			t.Error("DetectPresence() = false, want true when opencode.json exists")
+		}
+	})
+}
+
+// TestOpenCodeHookInstallation verifies hook installation via OpenCode agent interface.
+// Not parallel - uses os.Chdir which is process-global.
+func TestOpenCodeHookInstallation(t *testing.T) {
+
+	t.Run("installs plugin file", func(t *testing.T) {
+		// Not parallel - uses os.Chdir
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		oldWd, _ := os.Getwd()
+		if err := os.Chdir(env.RepoDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+		defer func() { _ = os.Chdir(oldWd) }()
+
+		ag, err := agent.Get("opencode")
+		if err != nil {
+			t.Fatalf("Get(opencode) error = %v", err)
+		}
+
+		hookAgent, ok := ag.(agent.HookSupport)
+		if !ok {
+			t.Fatal("opencode agent does not implement HookSupport")
+		}
+
+		count, err := hookAgent.InstallHooks(false, false)
+		if err != nil {
+			t.Fatalf("InstallHooks() error = %v", err)
+		}
+
+		// Should install 1 plugin file
+		if count != 1 {
+			t.Errorf("InstallHooks() count = %d, want 1", count)
+		}
+
+		// Verify hooks are installed
+		if !hookAgent.AreHooksInstalled() {
+			t.Error("AreHooksInstalled() = false after InstallHooks()")
+		}
+
+		// Verify plugin file was created
+		pluginPath := filepath.Join(env.RepoDir, ".opencode", "plugins", "entire.ts")
+		if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
+			t.Error("entire.ts plugin was not created")
+		}
+	})
+
+	t.Run("idempotent - second install returns 0", func(t *testing.T) {
+		// Not parallel - uses os.Chdir
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		oldWd, _ := os.Getwd()
+		if err := os.Chdir(env.RepoDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+		defer func() { _ = os.Chdir(oldWd) }()
+
+		ag, _ := agent.Get("opencode")
+		hookAgent := ag.(agent.HookSupport)
+
+		// First install
+		_, err := hookAgent.InstallHooks(false, false)
+		if err != nil {
+			t.Fatalf("first InstallHooks() error = %v", err)
+		}
+
+		// Second install should be idempotent
+		count, err := hookAgent.InstallHooks(false, false)
+		if err != nil {
+			t.Fatalf("second InstallHooks() error = %v", err)
+		}
+		if count != 0 {
+			t.Errorf("second InstallHooks() count = %d, want 0 (idempotent)", count)
+		}
+	})
+}
+
+// TestOpenCodeSessionOperations verifies ReadSession/WriteSession via OpenCode agent interface.
+func TestOpenCodeSessionOperations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ReadSession parses JSONL transcript and computes ModifiedFiles", func(t *testing.T) {
+		t.Parallel()
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		// Create an OpenCode JSONL transcript file
+		transcriptPath := filepath.Join(env.RepoDir, "test-transcript.jsonl")
+		transcriptContent := `{"id":"msg-1","role":"user","content":"Fix the bug","time":{"created":1708300000}}
+{"id":"msg-2","role":"assistant","content":"I'll fix it.","time":{"created":1708300001,"completed":1708300005},"tokens":{"input":100,"output":50,"reasoning":5,"cache":{"read":3,"write":10}},"parts":[{"type":"text","text":"I'll fix it."},{"type":"tool","tool":"write","callID":"call-1","state":{"status":"completed","input":{"file_path":"main.go"},"output":"written"}}]}
+{"id":"msg-3","role":"user","content":"Also fix util.go","time":{"created":1708300010}}
+{"id":"msg-4","role":"assistant","content":"Done.","time":{"created":1708300011,"completed":1708300015},"tokens":{"input":120,"output":60,"reasoning":3,"cache":{"read":5,"write":12}},"parts":[{"type":"tool","tool":"edit","callID":"call-2","state":{"status":"completed","input":{"file_path":"util.go"},"output":"edited"}}]}
+`
+		if err := os.WriteFile(transcriptPath, []byte(transcriptContent), 0o644); err != nil {
+			t.Fatalf("failed to write transcript: %v", err)
+		}
+
+		ag, _ := agent.Get("opencode")
+		session, err := ag.ReadSession(&agent.HookInput{
+			SessionID:  "test-session",
+			SessionRef: transcriptPath,
+		})
+		if err != nil {
+			t.Fatalf("ReadSession() error = %v", err)
+		}
+
+		// Verify session metadata
+		if session.SessionID != "test-session" {
+			t.Errorf("SessionID = %q, want %q", session.SessionID, "test-session")
+		}
+		if session.AgentName != "opencode" {
+			t.Errorf("AgentName = %q, want %q", session.AgentName, "opencode")
+		}
+
+		// Verify NativeData is populated
+		if len(session.NativeData) == 0 {
+			t.Error("NativeData is empty, want transcript content")
+		}
+
+		// Verify ModifiedFiles computed from tool calls
+		if len(session.ModifiedFiles) != 2 {
+			t.Errorf("ModifiedFiles = %v, want 2 files (main.go, util.go)", session.ModifiedFiles)
+		}
+	})
+
+	t.Run("WriteSession writes NativeData to file", func(t *testing.T) {
+		t.Parallel()
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		ag, _ := agent.Get("opencode")
+
+		// First read a session
+		srcPath := filepath.Join(env.RepoDir, "src.jsonl")
+		srcContent := `{"id":"msg-1","role":"user","content":"hello","time":{"created":1708300000}}
+`
+		if err := os.WriteFile(srcPath, []byte(srcContent), 0o644); err != nil {
+			t.Fatalf("failed to write source: %v", err)
+		}
+
+		session, _ := ag.ReadSession(&agent.HookInput{
+			SessionID:  "test",
+			SessionRef: srcPath,
+		})
+
+		// Write to a new location
+		dstPath := filepath.Join(env.RepoDir, "dst.jsonl")
+		session.SessionRef = dstPath
+
+		if err := ag.WriteSession(session); err != nil {
+			t.Fatalf("WriteSession() error = %v", err)
+		}
+
+		// Verify file was written
+		data, err := os.ReadFile(dstPath)
+		if err != nil {
+			t.Fatalf("failed to read destination: %v", err)
+		}
+		if string(data) != srcContent {
+			t.Errorf("written content = %q, want %q", string(data), srcContent)
+		}
+	})
+}
+
+// TestOpenCodeHelperMethods verifies OpenCode-specific helper methods.
+func TestOpenCodeHelperMethods(t *testing.T) {
+	t.Parallel()
+
+	t.Run("FormatResumeCommand returns opencode -s", func(t *testing.T) {
+		t.Parallel()
+
+		ag, _ := agent.Get("opencode")
+		cmd := ag.FormatResumeCommand("abc123")
+
+		if cmd != "opencode -s abc123" {
+			t.Errorf("FormatResumeCommand() = %q, want %q", cmd, "opencode -s abc123")
+		}
+	})
+
+	t.Run("ProtectedDirs includes .opencode", func(t *testing.T) {
+		t.Parallel()
+
+		ag, _ := agent.Get("opencode")
+		dirs := ag.ProtectedDirs()
+
+		found := false
+		for _, d := range dirs {
+			if d == ".opencode" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("ProtectedDirs() = %v, want to contain '.opencode'", dirs)
+		}
+	})
+
+	t.Run("IsPreview returns true", func(t *testing.T) {
+		t.Parallel()
+
+		ag, _ := agent.Get("opencode")
+		if !ag.IsPreview() {
+			t.Error("IsPreview() = false, want true")
+		}
+	})
 }

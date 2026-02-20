@@ -178,6 +178,51 @@ func TestFilesOverlapWithContent_FileNotInCommit(t *testing.T) {
 	assert.True(t, result, "File in commit with matching content should count as overlap")
 }
 
+// TestFilesOverlapWithContent_DeletedFile tests that a deleted file
+// (existed in parent, not in HEAD) DOES count as overlap.
+// The agent's action of deleting the file is being committed.
+func TestFilesOverlapWithContent_DeletedFile(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Create and commit a file that will be deleted
+	toDelete := filepath.Join(dir, "to_delete.txt")
+	require.NoError(t, os.WriteFile(toDelete, []byte("content to delete"), 0o644))
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("to_delete.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("Add file to delete", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// Create shadow branch (simulating agent work that includes the deletion)
+	createShadowBranchWithContent(t, repo, "del1234", "e3b0c4", map[string][]byte{
+		"other.txt": []byte("other content"),
+	})
+
+	// Delete the file and commit the deletion
+	_, err = wt.Remove("to_delete.txt")
+	require.NoError(t, err)
+	deleteCommit, err := wt.Commit("Delete file", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	commit, err := repo.CommitObject(deleteCommit)
+	require.NoError(t, err)
+
+	// Test: deleted file in filesTouched should count as overlap
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("del1234", "e3b0c4")
+	result := filesOverlapWithContent(repo, shadowBranch, commit, []string{"to_delete.txt"})
+	assert.True(t, result, "Deleted file should count as overlap (agent's deletion being committed)")
+}
+
 // TestFilesOverlapWithContent_NoShadowBranch tests fallback when shadow branch doesn't exist.
 func TestFilesOverlapWithContent_NoShadowBranch(t *testing.T) {
 	t.Parallel()
@@ -497,6 +542,58 @@ func TestStagedFilesOverlapWithContent_NoOverlap(t *testing.T) {
 	// Staged file "other.txt" is not in filesTouched "session.txt"
 	result := stagedFilesOverlapWithContent(repo, shadowTree, []string{"other.txt"}, []string{"session.txt"})
 	assert.False(t, result, "Non-overlapping files should return false")
+}
+
+// TestStagedFilesOverlapWithContent_DeletedFile tests that a deleted file
+// (exists in HEAD but staged for deletion) DOES count as overlap.
+// The agent's action of deleting the file is being committed, so the session
+// context should be linked to this commit.
+func TestStagedFilesOverlapWithContent_DeletedFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+
+	// Create and commit a file that will be deleted
+	filePath := filepath.Join(dir, "to_delete.txt")
+	err = os.WriteFile(filePath, []byte("original content"), 0644)
+	require.NoError(t, err)
+	_, err = worktree.Add("to_delete.txt")
+	require.NoError(t, err)
+	_, err = worktree.Commit("Add to_delete.txt", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@test.com",
+			When:  time.Now(),
+		},
+	})
+	require.NoError(t, err)
+
+	// Create shadow branch (simulating agent work on the file)
+	createShadowBranchWithContent(t, repo, "mno7890", "e3b0c4", map[string][]byte{
+		"to_delete.txt": []byte("agent modified content"),
+	})
+
+	// Stage the file for deletion (git rm)
+	_, err = worktree.Remove("to_delete.txt")
+	require.NoError(t, err)
+
+	// Get shadow tree
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("mno7890", "e3b0c4")
+	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
+	require.NoError(t, err)
+	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
+	require.NoError(t, err)
+	shadowTree, err := shadowCommit.Tree()
+	require.NoError(t, err)
+
+	// Deleted file SHOULD count as overlap - the agent's deletion is being committed
+	result := stagedFilesOverlapWithContent(repo, shadowTree, []string{"to_delete.txt"}, []string{"to_delete.txt"})
+	assert.True(t, result, "Deleted file should count as overlap (agent's deletion being committed)")
 }
 
 // createShadowBranchWithContent creates a shadow branch with the given file contents.

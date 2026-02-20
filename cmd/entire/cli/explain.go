@@ -533,8 +533,11 @@ func getAssociatedCommits(repo *git.Repository, checkpointID id.CheckpointID, se
 // For Claude Code (JSONL), the offset is a line number and we slice by line.
 // For Gemini (single JSON blob), the offset is a message index and we slice by message.
 func scopeTranscriptForCheckpoint(fullTranscript []byte, startOffset int, agentType agent.AgentType) []byte {
-	if agentType == agent.AgentTypeGemini {
+	switch agentType {
+	case agent.AgentTypeGemini:
 		return geminicli.SliceFromMessage(fullTranscript, startOffset)
+	case agent.AgentTypeClaudeCode, agent.AgentTypeOpenCode, agent.AgentTypeUnknown:
+		return transcript.SliceFromLine(fullTranscript, startOffset)
 	}
 	return transcript.SliceFromLine(fullTranscript, startOffset)
 }
@@ -1526,12 +1529,15 @@ func countLines(content []byte) int {
 // transcriptOffset returns the appropriate offset for scoping a transcript.
 // For Claude Code (JSONL), this is the line count. For Gemini (JSON), this is the message count.
 func transcriptOffset(transcriptBytes []byte, agentType agent.AgentType) int {
-	if agentType == agent.AgentTypeGemini {
+	switch agentType {
+	case agent.AgentTypeGemini:
 		t, err := geminicli.ParseTranscript(transcriptBytes)
 		if err != nil {
 			return 0
 		}
 		return len(t.Messages)
+	case agent.AgentTypeClaudeCode, agent.AgentTypeOpenCode, agent.AgentTypeUnknown:
+		return countLines(transcriptBytes)
 	}
 	return countLines(transcriptBytes)
 }

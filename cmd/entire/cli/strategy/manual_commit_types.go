@@ -62,4 +62,5 @@ type ExtractedSessionData struct {
 	Context             []byte   // Generated context.md content
 	FilesTouched        []string
 	TokenUsage          *agent.TokenUsage // Token usage calculated from transcript (since CheckpointTranscriptStart)
+	ExportData          []byte            // Agent-specific export data (e.g., OpenCode SQLite export)
 }

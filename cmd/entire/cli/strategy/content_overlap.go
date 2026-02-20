@@ -98,11 +98,19 @@ func filesOverlapWithContent(repo *git.Repository, shadowBranchName string, head
 		// Get file from HEAD tree (the committed content)
 		headFile, err := headTree.File(filePath)
 		if err != nil {
-			// File not in HEAD commit. This happens when:
-			// - The session created/modified the file but user deleted it before committing
-			// - The file was staged as a deletion (git rm)
-			// In both cases, the session's work on this file is not in the commit,
-			// so it doesn't contribute to overlap. Continue checking other files.
+			// File not in HEAD commit. Check if this is a deletion (existed in parent).
+			// Deletions count as overlap because the agent's action (deleting the file)
+			// is being committed - we want the session context linked to this commit.
+			if parentTree != nil {
+				if _, parentErr := parentTree.File(filePath); parentErr == nil {
+					// File existed in parent but not in HEAD - this is a deletion
+					logging.Debug(logCtx, "filesOverlapWithContent: deleted file counts as overlap",
+						slog.String("file", filePath),
+					)
+					return true
+				}
+			}
+			// File didn't exist in parent either - not a deletion, skip
 			continue
 		}
 
@@ -220,6 +228,8 @@ func stagedFilesOverlapWithContent(repo *git.Repository, shadowTree *object.Tree
 		isModified := headErr == nil
 
 		// Modified files always count as overlap (user edited session's work)
+		// This includes deletions - if file exists in HEAD and is being deleted,
+		// that's the agent's work being committed.
 		if isModified {
 			logging.Debug(logCtx, "stagedFilesOverlapWithContent: modified file counts as overlap",
 				slog.String("file", stagedPath),

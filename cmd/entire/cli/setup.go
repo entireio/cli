@@ -96,24 +96,11 @@ Strategies: manual-commit (default), auto-commit`,
 					printWrongAgentError(cmd.ErrOrStderr(), agentName)
 					return NewSilentError(errors.New("wrong agent name"))
 				}
+				// --agent is a targeted operation: set up this specific agent without
+				// affecting other agents. Unlike the interactive path, it does not
+				// uninstall hooks for other previously-enabled agents.
 				return setupAgentHooksNonInteractive(cmd.OutOrStdout(), ag, strategyFlag, localDev, forceHooks, skipPushSessions, telemetry)
 			}
-			// Check if already fully enabled before prompting for agents.
-			// Only applies to interactive path (no --strategy flag) with no config flags.
-			if strategyFlag == "" {
-				hasConfigFlags := forceHooks || skipPushSessions || !telemetry || useLocalSettings || useProjectSettings || localDev
-				if !hasConfigFlags {
-					if fullyEnabled, agentDesc, configPath := isFullyEnabled(); fullyEnabled {
-						w := cmd.OutOrStdout()
-						fmt.Fprintln(w, "Already enabled. Everything looks good.")
-						fmt.Fprintln(w)
-						fmt.Fprintf(w, "  Agent: %s\n", agentDesc)
-						fmt.Fprintf(w, "  Config: %s\n", configPath)
-						return nil
-					}
-				}
-			}
-
 			// Detect or prompt for agents
 			agents, err := detectOrSelectAgent(cmd.OutOrStdout(), nil)
 			if err != nil {
@@ -178,7 +165,7 @@ To completely remove Entire integrations from this repository, use --uninstall:
   - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
   - Session state files (.git/entire-sessions/)
   - Shadow branches (entire/<hash>)
-  - Agent hooks (Claude Code, Gemini CLI)`,
+  - Agent hooks`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if uninstall {
 				return runUninstall(cmd.OutOrStdout(), cmd.ErrOrStderr(), force)
@@ -192,51 +179,6 @@ To completely remove Entire integrations from this repository, use --uninstall:
 	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
 
 	return cmd
-}
-
-// isFullyEnabled checks whether Entire is already fully set up.
-// Returns whether it's fully enabled, and if so, the agent type display name and config file path.
-func isFullyEnabled() (enabled bool, agentDesc string, configPath string) {
-	// Check settings exist and Enabled == true
-	s, err := LoadEntireSettings()
-	if err != nil || !s.Enabled {
-		return false, "", ""
-	}
-
-	// Check any agent hooks installed (not just Claude Code — works with Gemini too)
-	installedAgents := GetAgentsWithHooksInstalled()
-	if len(installedAgents) == 0 {
-		return false, "", ""
-	}
-
-	// Check git hooks installed
-	if !strategy.IsGitHookInstalled() {
-		return false, "", ""
-	}
-
-	// Check .entire directory exists
-	if !checkEntireDirExists() {
-		return false, "", ""
-	}
-
-	// Determine agent description from first installed agent
-	desc := string(installedAgents[0]) // fallback to agent name
-	if ag, err := agent.Get(installedAgents[0]); err == nil {
-		desc = string(ag.Type())
-	}
-
-	// Determine config path - check if local settings exists, otherwise show project settings
-	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir
-	}
-	configDisplay := configDisplayProject
-	localSettingsPath := filepath.Join(entireDirAbs, "settings.local.json")
-	if _, err := os.Stat(localSettingsPath); err == nil {
-		configDisplay = configDisplayLocal
-	}
-
-	return true, desc, configDisplay
 }
 
 // runEnableWithStrategy enables Entire with a specified strategy (non-interactive).
@@ -254,6 +196,11 @@ func runEnableWithStrategy(w io.Writer, agents []agent.Agent, selectedStrategy s
 	strat, err := strategy.Get(internalStrategy)
 	if err != nil {
 		return fmt.Errorf("unknown strategy: %s (use manual-commit or auto-commit)", selectedStrategy)
+	}
+
+	// Uninstall hooks for agents that were previously active but are no longer selected
+	if err := uninstallDeselectedAgentHooks(w, agents); err != nil {
+		return fmt.Errorf("failed to clean up deselected agents: %w", err)
 	}
 
 	// Setup agent hooks for all selected agents
@@ -338,8 +285,12 @@ func runEnableWithStrategy(w io.Writer, agents []agent.Agent, selectedStrategy s
 
 // runEnableInteractive runs the interactive enable flow.
 // agents must be provided by the caller (via detectOrSelectAgent).
-// The isFullyEnabled check is handled by the caller before agent detection.
 func runEnableInteractive(w io.Writer, agents []agent.Agent, localDev, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
+	// Uninstall hooks for agents that were previously active but are no longer selected
+	if err := uninstallDeselectedAgentHooks(w, agents); err != nil {
+		return fmt.Errorf("failed to clean up deselected agents: %w", err)
+	}
+
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
 		if _, err := setupAgentHooks(ag, localDev, forceHooks); err != nil {
@@ -496,6 +447,42 @@ func checkDisabledGuard(w io.Writer) bool {
 	return false
 }
 
+// uninstallDeselectedAgentHooks removes hooks for agents that were previously
+// installed but are not in the selected list. This handles the case where a user
+// re-runs `entire enable` and deselects an agent.
+func uninstallDeselectedAgentHooks(w io.Writer, selectedAgents []agent.Agent) error {
+	installedNames := GetAgentsWithHooksInstalled()
+	if len(installedNames) == 0 {
+		return nil
+	}
+
+	selectedSet := make(map[agent.AgentName]struct{}, len(selectedAgents))
+	for _, ag := range selectedAgents {
+		selectedSet[ag.Name()] = struct{}{}
+	}
+
+	var errs []error
+	for _, name := range installedNames {
+		if _, selected := selectedSet[name]; selected {
+			continue
+		}
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		hookAgent, ok := ag.(agent.HookSupport)
+		if !ok {
+			continue
+		}
+		if err := hookAgent.UninstallHooks(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to uninstall %s hooks: %w", ag.Type(), err))
+		} else {
+			fmt.Fprintf(w, "Removed %s hooks\n", ag.Type())
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // setupAgentHooks sets up hooks for a given agent.
 // Returns the number of hooks installed (0 if already installed).
 func setupAgentHooks(ag agent.Agent, localDev, forceHooks bool) (int, error) { //nolint:unparam // return value used by setupAgentHooksNonInteractive
@@ -514,40 +501,59 @@ func setupAgentHooks(ag agent.Agent, localDev, forceHooks bool) (int, error) { /
 
 // detectOrSelectAgent tries to auto-detect agents, or prompts the user to select.
 // Returns the detected/selected agents and any error.
-// When exactly one agent is detected, it is used automatically.
-// When multiple agents are detected, the user is prompted to confirm.
-// If no agent is detected and no TTY is available, falls back to the default agent.
+//
+// On first run (no hooks installed):
+//   - Single detected agent: used automatically
+//   - Multiple/no detected agents: interactive multi-select prompt
+//
+// On re-run (hooks already installed):
+//   - Always shows the interactive multi-select
+//   - Pre-selects only agents that have hooks installed (respects prior deselection)
 //
 // selectFn overrides the interactive prompt for testing. When nil, the real form is used.
 // It receives available agent names and returns the selected names.
 func detectOrSelectAgent(w io.Writer, selectFn func(available []string) ([]string, error)) ([]agent.Agent, error) {
-	// Try auto-detection first
+	// Check for agents with hooks already installed (re-run detection)
+	installedAgentNames := GetAgentsWithHooksInstalled()
+	hasInstalledHooks := len(installedAgentNames) > 0
+
+	// Try auto-detection
 	detected := agent.DetectAll()
 
-	switch {
-	case len(detected) == 1:
-		// Single agent detected — use it directly
-		fmt.Fprintf(w, "Detected agent: %s\n\n", detected[0].Type())
-		return detected, nil
+	// First run: use existing auto-detect shortcuts
+	if !hasInstalledHooks {
+		switch {
+		case len(detected) == 1:
+			fmt.Fprintf(w, "Detected agent: %s\n\n", detected[0].Type())
+			return detected, nil
 
-	case len(detected) > 1:
-		// Multiple agents detected — prompt the user to confirm which to enable
-		agentTypes := make([]string, 0, len(detected))
-		for _, ag := range detected {
-			agentTypes = append(agentTypes, string(ag.Type()))
+		case len(detected) > 1:
+			agentTypes := make([]string, 0, len(detected))
+			for _, ag := range detected {
+				agentTypes = append(agentTypes, string(ag.Type()))
+			}
+			fmt.Fprintf(w, "Detected multiple agents: %s\n", strings.Join(agentTypes, ", "))
+			fmt.Fprintln(w)
 		}
-		fmt.Fprintf(w, "Detected multiple agents: %s\n", strings.Join(agentTypes, ", "))
-		fmt.Fprintln(w)
-		// Fall through to the interactive multi-select below
 	}
 
-	// No agent detected (or multiple detected) — check if we can prompt interactively
+	// Check if we can prompt interactively
 	if !canPromptInteractively() {
+		if hasInstalledHooks {
+			// Re-run without TTY — keep currently installed agents
+			agents := make([]agent.Agent, 0, len(installedAgentNames))
+			for _, name := range installedAgentNames {
+				ag, err := agent.Get(name)
+				if err != nil {
+					continue
+				}
+				agents = append(agents, ag)
+			}
+			return agents, nil
+		}
 		if len(detected) > 0 {
-			// Multiple agents detected but no TTY — use all of them
 			return detected, nil
 		}
-		// No TTY available (e.g., running in CI or tests) - fall back to default agent
 		defaultAgent := agent.Default()
 		if defaultAgent == nil {
 			return nil, errors.New("no default agent available")
@@ -556,17 +562,24 @@ func detectOrSelectAgent(w io.Writer, selectFn func(available []string) ([]strin
 		return []agent.Agent{defaultAgent}, nil
 	}
 
-	if len(detected) == 0 {
-		// Show message only when nothing was detected
+	if !hasInstalledHooks && len(detected) == 0 {
 		fmt.Fprintln(w, "No agent configuration detected (e.g., .claude or .gemini directory).")
 		fmt.Fprintln(w, "This is normal - some agents don't require a config directory.")
 		fmt.Fprintln(w)
 	}
 
-	// Build a set of detected agent names for pre-selection
-	detectedSet := make(map[agent.AgentName]struct{}, len(detected))
-	for _, ag := range detected {
-		detectedSet[ag.Name()] = struct{}{}
+	// Build pre-selection set.
+	// On re-run: only pre-select agents with hooks installed (respect prior deselection).
+	// On first run: pre-select all detected agents.
+	preSelectedSet := make(map[agent.AgentName]struct{})
+	if hasInstalledHooks {
+		for _, name := range installedAgentNames {
+			preSelectedSet[name] = struct{}{}
+		}
+	} else {
+		for _, ag := range detected {
+			preSelectedSet[ag.Name()] = struct{}{}
+		}
 	}
 
 	// Build options from registered agents
@@ -581,12 +594,8 @@ func detectOrSelectAgent(w io.Writer, selectFn func(available []string) ([]strin
 		if _, ok := ag.(agent.HookSupport); !ok {
 			continue
 		}
-		label := string(ag.Type())
-		if name == agent.DefaultAgentName {
-			label += " (default)"
-		}
-		opt := huh.NewOption(label, string(name))
-		if _, isDetected := detectedSet[name]; isDetected {
+		opt := huh.NewOption(string(ag.Type()), string(name))
+		if _, isPreSelected := preSelectedSet[name]; isPreSelected {
 			opt = opt.Selected(true)
 		}
 		options = append(options, opt)
@@ -609,6 +618,9 @@ func detectOrSelectAgent(w io.Writer, selectFn func(available []string) ([]strin
 		if err != nil {
 			return nil, err
 		}
+		if len(selectedAgentNames) == 0 {
+			return nil, errors.New("no agents selected")
+		}
 	} else {
 		form := NewAccessibleForm(
 			huh.NewGroup(
@@ -616,16 +628,18 @@ func detectOrSelectAgent(w io.Writer, selectFn func(available []string) ([]strin
 					Title("Which agents are you using?").
 					Description("Use space to select, enter to confirm.").
 					Options(options...).
+					Validate(func(selected []string) error {
+						if len(selected) == 0 {
+							return errors.New("please select at least one agent")
+						}
+						return nil
+					}).
 					Value(&selectedAgentNames),
 			),
 		)
 		if err := form.Run(); err != nil {
 			return nil, fmt.Errorf("agent selection cancelled: %w", err)
 		}
-	}
-
-	if len(selectedAgentNames) == 0 {
-		return nil, errors.New("no agents selected")
 	}
 
 	selectedAgents := make([]agent.Agent, 0, len(selectedAgentNames))
@@ -1068,13 +1082,12 @@ func runUninstall(w, errW io.Writer, force bool) error {
 	sessionStateCount := countSessionStates()
 	shadowBranchCount := countShadowBranches()
 	gitHooksInstalled := strategy.IsGitHookInstalled()
-	claudeHooksInstalled := checkClaudeCodeHooksInstalled()
-	geminiHooksInstalled := checkGeminiCLIHooksInstalled()
+	agentsWithInstalledHooks := GetAgentsWithHooksInstalled()
 	entireDirExists := checkEntireDirExists()
 
 	// Check if there's anything to uninstall
 	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
-		shadowBranchCount == 0 && !claudeHooksInstalled && !geminiHooksInstalled {
+		shadowBranchCount == 0 && len(agentsWithInstalledHooks) == 0 {
 		fmt.Fprintln(w, "Entire is not installed in this repository.")
 		return nil
 	}
@@ -1094,13 +1107,14 @@ func runUninstall(w, errW io.Writer, force bool) error {
 		if shadowBranchCount > 0 {
 			fmt.Fprintf(w, "  - Shadow branches (%d)\n", shadowBranchCount)
 		}
-		switch {
-		case claudeHooksInstalled && geminiHooksInstalled:
-			fmt.Fprintln(w, "  - Agent hooks (Claude Code, Gemini CLI)")
-		case claudeHooksInstalled:
-			fmt.Fprintln(w, "  - Agent hooks (Claude Code)")
-		case geminiHooksInstalled:
-			fmt.Fprintln(w, "  - Agent hooks (Gemini CLI)")
+		if len(agentsWithInstalledHooks) > 0 {
+			displayNames := make([]string, 0, len(agentsWithInstalledHooks))
+			for _, name := range agentsWithInstalledHooks {
+				if ag, err := agent.Get(name); err == nil {
+					displayNames = append(displayNames, string(ag.Type()))
+				}
+			}
+			fmt.Fprintf(w, "  - Agent hooks (%s)\n", strings.Join(displayNames, ", "))
 		}
 		fmt.Fprintln(w)
 
@@ -1189,32 +1203,6 @@ func countShadowBranches() int {
 	return len(branches)
 }
 
-// checkClaudeCodeHooksInstalled checks if Claude Code hooks are installed.
-func checkClaudeCodeHooksInstalled() bool {
-	ag, err := agent.Get(agent.AgentNameClaudeCode)
-	if err != nil {
-		return false
-	}
-	hookAgent, ok := ag.(agent.HookSupport)
-	if !ok {
-		return false
-	}
-	return hookAgent.AreHooksInstalled()
-}
-
-// checkGeminiCLIHooksInstalled checks if Gemini CLI hooks are installed.
-func checkGeminiCLIHooksInstalled() bool {
-	ag, err := agent.Get(agent.AgentNameGemini)
-	if err != nil {
-		return false
-	}
-	hookAgent, ok := ag.(agent.HookSupport)
-	if !ok {
-		return false
-	}
-	return hookAgent.AreHooksInstalled()
-}
-
 // checkEntireDirExists checks if the .entire directory exists.
 func checkEntireDirExists() bool {
 	entireDirAbs, err := paths.AbsPath(paths.EntireDir)
@@ -1228,33 +1216,22 @@ func checkEntireDirExists() bool {
 // removeAgentHooks removes hooks from all agents that support hooks.
 func removeAgentHooks(w io.Writer) error {
 	var errs []error
-
-	// Remove Claude Code hooks
-	claudeAgent, err := agent.Get(agent.AgentNameClaudeCode)
-	if err == nil {
-		if hookAgent, ok := claudeAgent.(agent.HookSupport); ok {
-			wasInstalled := hookAgent.AreHooksInstalled()
-			if err := hookAgent.UninstallHooks(); err != nil {
-				errs = append(errs, err)
-			} else if wasInstalled {
-				fmt.Fprintln(w, "  Removed Claude Code hooks")
-			}
+	for _, name := range agent.List() {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		hs, ok := ag.(agent.HookSupport)
+		if !ok {
+			continue
+		}
+		wasInstalled := hs.AreHooksInstalled()
+		if err := hs.UninstallHooks(); err != nil {
+			errs = append(errs, err)
+		} else if wasInstalled {
+			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
 		}
 	}
-
-	// Remove Gemini CLI hooks
-	geminiAgent, err := agent.Get(agent.AgentNameGemini)
-	if err == nil {
-		if hookAgent, ok := geminiAgent.(agent.HookSupport); ok {
-			wasInstalled := hookAgent.AreHooksInstalled()
-			if err := hookAgent.UninstallHooks(); err != nil {
-				errs = append(errs, err)
-			} else if wasInstalled {
-				fmt.Fprintln(w, "  Removed Gemini CLI hooks")
-			}
-		}
-	}
-
 	return errors.Join(errs...)
 }
 

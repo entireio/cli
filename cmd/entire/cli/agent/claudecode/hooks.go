@@ -13,11 +13,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// Ensure ClaudeCodeAgent implements HookSupport and HookHandler
-var (
-	_ agent.HookSupport = (*ClaudeCodeAgent)(nil)
-	_ agent.HookHandler = (*ClaudeCodeAgent)(nil)
-)
+// Ensure ClaudeCodeAgent implements HookSupport
+var _ agent.HookSupport = (*ClaudeCodeAgent)(nil)
 
 // Claude Code hook names - these become subcommands under `entire hooks claude-code`
 const (
@@ -36,20 +33,6 @@ const ClaudeSettingsFileName = "settings.json"
 
 // metadataDenyRule blocks Claude from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
-
-// GetHookNames returns the hook verbs Claude Code supports.
-// These become subcommands: entire hooks claude-code <verb>
-func (c *ClaudeCodeAgent) GetHookNames() []string {
-	return []string{
-		HookNameSessionStart,
-		HookNameSessionEnd,
-		HookNameStop,
-		HookNameUserPromptSubmit,
-		HookNamePreTask,
-		HookNamePostTask,
-		HookNamePostTodo,
-	}
-}
 
 // entireHookPrefixes are command prefixes that identify Entire hooks (both old and new formats)
 var entireHookPrefixes = []string{
@@ -409,18 +392,6 @@ func (c *ClaudeCodeAgent) AreHooksInstalled() bool {
 		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claudecode stop") ||
 		hookCommandExists(settings.Hooks.Stop, "entire rewind claude-hook --stop") ||
 		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go rewind claude-hook --stop")
-}
-
-// GetSupportedHooks returns the hook types Claude Code supports.
-func (c *ClaudeCodeAgent) GetSupportedHooks() []agent.HookType {
-	return []agent.HookType{
-		agent.HookSessionStart,
-		agent.HookSessionEnd,
-		agent.HookUserPromptSubmit,
-		agent.HookStop,
-		agent.HookPreToolUse,
-		agent.HookPostToolUse,
-	}
 }
 
 // Helper functions for hook management

@@ -3352,3 +3352,233 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 		t.Error("Prompts should contain second prompt")
 	}
 }
+
+// TestCondenseSession_FilesTouchedFallback_EmptyState verifies that when state.FilesTouched
+// is empty (mid-session commit before SaveStep), the fallback to committedFiles works.
+// This is the legitimate use case for the fallback.
+func TestCondenseSession_FilesTouchedFallback_EmptyState(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create initial commit
+	initialHash, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author:            &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+		AllowEmptyCommits: true,
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// Create a file and commit it (simulating agent mid-turn commit)
+	agentFile := filepath.Join(dir, "agent.go")
+	if err := os.WriteFile(agentFile, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := worktree.Add("agent.go"); err != nil {
+		t.Fatalf("failed to stage file: %v", err)
+	}
+	if _, err = worktree.Commit("Add agent.go", &git.CommitOptions{
+		Author: &object.Signature{Name: "Agent", Email: "agent@test.com", When: time.Now()},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	// Create live transcript (required when no shadow branch)
+	transcriptDir := filepath.Join(dir, ".claude", "projects", "test")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("failed to create transcript dir: %v", err)
+	}
+	transcriptFile := filepath.Join(transcriptDir, "session.jsonl")
+	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human","message":{"content":"create agent.go"}}
+{"type":"assistant","message":{"content":"Done"}}
+`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Session state with EMPTY FilesTouched (mid-session commit scenario)
+	state := &SessionState{
+		SessionID:      "test-empty-files",
+		BaseCommit:     initialHash.String(),
+		FilesTouched:   []string{}, // Empty - no SaveStep called yet
+		TranscriptPath: transcriptFile,
+		AgentType:      "Claude Code",
+	}
+
+	s := &ManualCommitStrategy{}
+	checkpointID := id.MustCheckpointID("fa11bac00001")
+
+	// Condense with committedFiles - should fallback since FilesTouched is empty
+	committedFiles := map[string]struct{}{"agent.go": {}}
+	result, err := s.CondenseSession(repo, checkpointID, state, committedFiles)
+	if err != nil {
+		t.Fatalf("CondenseSession() error = %v", err)
+	}
+
+	// Read metadata and verify files_touched contains the committed file (fallback worked)
+	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get sessions branch: %v", err)
+	}
+	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())
+	if err != nil {
+		t.Fatalf("failed to get sessions commit: %v", err)
+	}
+	tree, err := sessionsCommit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	metadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
+	metadataFile, err := tree.File(metadataPath)
+	if err != nil {
+		t.Fatalf("failed to find metadata: %v", err)
+	}
+	content, err := metadataFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read metadata: %v", err)
+	}
+
+	var metadata struct {
+		FilesTouched []string `json:"files_touched"`
+	}
+	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
+		t.Fatalf("failed to parse metadata: %v", err)
+	}
+
+	// Verify fallback worked - files_touched should contain agent.go
+	if len(metadata.FilesTouched) != 1 || metadata.FilesTouched[0] != "agent.go" {
+		t.Errorf("files_touched = %v, want [agent.go] (fallback should apply when FilesTouched is empty)",
+			metadata.FilesTouched)
+	}
+
+	t.Logf("Fallback worked: files_touched = %v, result = %+v", metadata.FilesTouched, result)
+}
+
+// TestCondenseSession_FilesTouchedNoFallback_NoOverlap verifies that when state.FilesTouched
+// has files but none overlap with committedFiles, we do NOT fallback to committedFiles.
+// This prevents the bug where unrelated sessions get incorrect files_touched.
+func TestCondenseSession_FilesTouchedNoFallback_NoOverlap(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Create initial commit
+	initialHash, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author:            &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+		AllowEmptyCommits: true,
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// Create files for both the session's work and the committed file
+	sessionFile := filepath.Join(dir, "session_file.go")
+	if err := os.WriteFile(sessionFile, []byte("package session\n"), 0o644); err != nil {
+		t.Fatalf("failed to write session file: %v", err)
+	}
+	committedFile := filepath.Join(dir, "other_file.go")
+	if err := os.WriteFile(committedFile, []byte("package other\n"), 0o644); err != nil {
+		t.Fatalf("failed to write committed file: %v", err)
+	}
+
+	// Only commit the "other" file (not the session's file)
+	if _, err := worktree.Add("other_file.go"); err != nil {
+		t.Fatalf("failed to stage file: %v", err)
+	}
+	if _, err = worktree.Commit("Add other_file.go", &git.CommitOptions{
+		Author: &object.Signature{Name: "Human", Email: "human@test.com", When: time.Now()},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	// Create live transcript
+	transcriptDir := filepath.Join(dir, ".claude", "projects", "test")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("failed to create transcript dir: %v", err)
+	}
+	transcriptFile := filepath.Join(transcriptDir, "session.jsonl")
+	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human","message":{"content":"work on session_file.go"}}
+{"type":"assistant","message":{"content":"Done"}}
+`), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Session state with FilesTouched that does NOT overlap with committedFiles
+	state := &SessionState{
+		SessionID:      "test-no-overlap",
+		BaseCommit:     initialHash.String(),
+		FilesTouched:   []string{"session_file.go"}, // Does NOT overlap with other_file.go
+		TranscriptPath: transcriptFile,
+		AgentType:      "Claude Code",
+	}
+
+	s := &ManualCommitStrategy{}
+	checkpointID := id.MustCheckpointID("00001a000001")
+
+	// Condense with committedFiles that don't overlap
+	committedFiles := map[string]struct{}{"other_file.go": {}}
+	result, err := s.CondenseSession(repo, checkpointID, state, committedFiles)
+	if err != nil {
+		t.Fatalf("CondenseSession() error = %v", err)
+	}
+
+	// Read metadata and verify files_touched is EMPTY (no fallback applied)
+	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get sessions branch: %v", err)
+	}
+	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())
+	if err != nil {
+		t.Fatalf("failed to get sessions commit: %v", err)
+	}
+	tree, err := sessionsCommit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	metadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
+	metadataFile, err := tree.File(metadataPath)
+	if err != nil {
+		t.Fatalf("failed to find metadata: %v", err)
+	}
+	content, err := metadataFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read metadata: %v", err)
+	}
+
+	var metadata struct {
+		FilesTouched []string `json:"files_touched"`
+	}
+	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
+		t.Fatalf("failed to parse metadata: %v", err)
+	}
+
+	// Verify NO fallback - files_touched should be EMPTY, NOT contain other_file.go
+	// This is the key fix: session had files (session_file.go) but none overlapped,
+	// so we should NOT fallback to committedFiles (other_file.go)
+	if len(metadata.FilesTouched) != 0 {
+		t.Errorf("files_touched = %v, want [] (should NOT fallback when session had files but no overlap)",
+			metadata.FilesTouched)
+	}
+
+	t.Logf("No fallback applied: files_touched = %v (correctly empty), result = %+v", metadata.FilesTouched, result)
+}

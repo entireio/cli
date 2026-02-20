@@ -376,6 +376,19 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 	}
 	filePaths.Metadata = "/" + sessionPath + paths.MetadataFileName
 
+	// Write export data (optional — for agents with non-file storage, e.g., OpenCode)
+	if len(opts.ExportData) > 0 {
+		exportHash, err := CreateBlobFromContent(s.repo, opts.ExportData)
+		if err != nil {
+			return filePaths, fmt.Errorf("failed to create export data blob: %w", err)
+		}
+		entries[sessionPath+paths.ExportDataFileName] = object.TreeEntry{
+			Name: sessionPath + paths.ExportDataFileName,
+			Mode: filemode.Regular,
+			Hash: exportHash,
+		}
+	}
+
 	return filePaths, nil
 }
 
@@ -798,6 +811,13 @@ func (s *GitStore) ReadSessionContent(ctx context.Context, checkpointID id.Check
 		}
 	}
 
+	// Read export data (optional — only present for agents with non-file storage, e.g., OpenCode)
+	if file, fileErr := sessionTree.File(paths.ExportDataFileName); fileErr == nil {
+		if content, contentErr := file.Contents(); contentErr == nil {
+			result.ExportData = []byte(content)
+		}
+	}
+
 	return result, nil
 }
 
@@ -953,22 +973,23 @@ func (s *GitStore) GetTranscript(ctx context.Context, checkpointID id.Checkpoint
 	return content.Transcript, nil
 }
 
-// GetSessionLog retrieves the session transcript and session ID for a checkpoint.
+// GetSessionLog retrieves the session transcript, session ID, and export data for a checkpoint.
 // This is the primary method for looking up session logs by checkpoint ID.
+// The export data is optional — only present for agents with non-file storage (e.g., OpenCode).
 // Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
 // Returns ErrNoTranscript if the checkpoint exists but has no transcript.
-func (s *GitStore) GetSessionLog(cpID id.CheckpointID) ([]byte, string, error) {
+func (s *GitStore) GetSessionLog(cpID id.CheckpointID) ([]byte, string, []byte, error) {
 	content, err := s.ReadLatestSessionContent(context.Background(), cpID)
 	if err != nil {
 		if errors.Is(err, ErrCheckpointNotFound) {
-			return nil, "", ErrCheckpointNotFound
+			return nil, "", nil, ErrCheckpointNotFound
 		}
-		return nil, "", fmt.Errorf("failed to read checkpoint: %w", err)
+		return nil, "", nil, fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 	if len(content.Transcript) == 0 {
-		return nil, "", ErrNoTranscript
+		return nil, "", nil, ErrNoTranscript
 	}
-	return content.Transcript, content.Metadata.SessionID, nil
+	return content.Transcript, content.Metadata.SessionID, content.ExportData, nil
 }
 
 // LookupSessionLog is a convenience function that opens the repository and retrieves
@@ -976,10 +997,10 @@ func (s *GitStore) GetSessionLog(cpID id.CheckpointID) ([]byte, string, error) {
 // don't already have a GitStore instance.
 // Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
 // Returns ErrNoTranscript if the checkpoint exists but has no transcript.
-func LookupSessionLog(cpID id.CheckpointID) ([]byte, string, error) {
+func LookupSessionLog(cpID id.CheckpointID) ([]byte, string, []byte, error) {
 	repo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to open git repository: %w", err)
+		return nil, "", nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
 	store := NewGitStore(repo)
 	return store.GetSessionLog(cpID)

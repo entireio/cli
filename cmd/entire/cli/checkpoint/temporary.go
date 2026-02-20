@@ -609,6 +609,29 @@ func (s *GitStore) GetTranscriptFromCommit(commitHash plumbing.Hash, metadataDir
 	return nil, ErrNoTranscript
 }
 
+// GetExportDataFromCommit reads the export data file from a commit tree's metadata directory.
+// Returns nil if not found (most agents don't produce export data).
+func (s *GitStore) GetExportDataFromCommit(commitHash plumbing.Hash, metadataDir string) []byte {
+	commit, err := s.repo.CommitObject(commitHash)
+	if err != nil {
+		return nil
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil
+	}
+	exportPath := metadataDir + "/" + paths.ExportDataFileName
+	file, err := tree.File(exportPath)
+	if err != nil {
+		return nil
+	}
+	content, err := file.Contents()
+	if err != nil {
+		return nil
+	}
+	return []byte(content)
+}
+
 // ShadowBranchExists checks if a shadow branch exists for the given base commit and worktree.
 // worktreeID should be empty for main worktree or the internal git worktree name for linked worktrees.
 func (s *GitStore) ShadowBranchExists(baseCommit, worktreeID string) bool {

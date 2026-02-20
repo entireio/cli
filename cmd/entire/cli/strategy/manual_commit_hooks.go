@@ -38,6 +38,15 @@ func hasTTY() bool {
 	if v := os.Getenv("ENTIRE_TEST_TTY"); v != "" {
 		return v == "1"
 	}
+
+	// Gemini CLI sets GEMINI_CLI=1 when running shell commands.
+	// Gemini subprocesses may have access to the user's TTY, but they can't
+	// actually respond to interactive prompts. Treat them as non-TTY.
+	// See: https://geminicli.com/docs/tools/shell/
+	if os.Getenv("GEMINI_CLI") != "" {
+		return false
+	}
+
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		return false
@@ -55,6 +64,13 @@ func askConfirmTTY(prompt string, context string, defaultYes bool) bool {
 	// ENTIRE_TEST_TTY=1 simulates "a human is present" for the hasTTY() check
 	// but we can't actually read from the TTY in tests.
 	if os.Getenv("ENTIRE_TEST_TTY") != "" {
+		return defaultYes
+	}
+
+	// Gemini CLI sets GEMINI_CLI=1 when running shell commands (including git commit).
+	// The agent can't respond to TTY prompts, so use the default to avoid hanging.
+	// See: https://geminicli.com/docs/tools/shell/
+	if os.Getenv("GEMINI_CLI") != "" {
 		return defaultYes
 	}
 
@@ -479,21 +495,14 @@ type postCommitActionHandler struct {
 	shadowBranchesToDelete map[string]struct{}
 	committedFileSet       map[string]struct{}
 	hasNew                 bool
+	filesTouchedBefore     []string
 
 	// Output: set by handler methods, read by caller after TransitionAndLog.
 	condensed bool
 }
 
 func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
-	// For ACTIVE sessions, any commit during the turn is session-related.
-	// For IDLE/ENDED sessions (e.g., carry-forward), also require that the
-	// committed files overlap with the session's remaining files AND have
-	// matching content — otherwise an unrelated commit (or a commit with
-	// completely replaced content) would incorrectly get this session's checkpoint.
-	shouldCondense := h.hasNew
-	if shouldCondense && !state.Phase.IsActive() {
-		shouldCondense = filesOverlapWithContent(h.repo, h.shadowBranchName, h.commit, state.FilesTouched)
-	}
+	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive())
 
 	logging.Debug(h.logCtx, "post-commit: HandleCondense decision",
 		slog.String("session_id", state.SessionID),
@@ -512,7 +521,7 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 }
 
 func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.State) error {
-	shouldCondense := len(state.FilesTouched) > 0 && h.hasNew
+	shouldCondense := len(state.FilesTouched) > 0 && h.shouldCondenseWithOverlapCheck(state.Phase.IsActive())
 
 	logging.Debug(h.logCtx, "post-commit: HandleCondenseIfFilesTouched decision",
 		slog.String("session_id", state.SessionID),
@@ -529,6 +538,47 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 		h.s.updateBaseCommitIfChanged(h.logCtx, state, h.newHead)
 	}
 	return nil
+}
+
+// shouldCondenseWithOverlapCheck returns true if the session should be condensed
+// into this commit. Requires both that hasNew is true AND that the session's files
+// overlap with the committed files with matching content.
+//
+// This prevents stale sessions (ACTIVE sessions where the agent was killed, or
+// ENDED/IDLE sessions with carry-forward files) from being condensed into every
+// unrelated commit.
+//
+// filesTouchedBefore is populated from:
+//   - state.FilesTouched for IDLE/ENDED sessions (set via SaveStep/SaveTaskStep -> mergeFilesTouched)
+//   - transcript extraction for ACTIVE sessions when FilesTouched is empty
+//
+// When filesTouchedBefore is empty:
+//   - For ACTIVE sessions: fail-open (trust hasNew) because the agent may be
+//     mid-turn before any files are saved to state.
+//   - For IDLE/ENDED sessions: return false because there are no files to
+//     overlap with the commit.
+func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool) bool {
+	if !h.hasNew {
+		return false
+	}
+	if len(h.filesTouchedBefore) == 0 {
+		return isActive // ACTIVE: fail-open; IDLE/ENDED: no files = no overlap
+	}
+	// Only check files that were actually changed in this commit.
+	// Without this, files that exist in the tree but weren't changed
+	// would pass the "modified file" check in filesOverlapWithContent
+	// (because the file exists in the parent tree), causing stale
+	// sessions to be incorrectly condensed.
+	var committedTouchedFiles []string
+	for _, f := range h.filesTouchedBefore {
+		if _, ok := h.committedFileSet[f]; ok {
+			committedTouchedFiles = append(committedTouchedFiles, f)
+		}
+	}
+	if len(committedTouchedFiles) == 0 {
+		return false
+	}
+	return filesOverlapWithContent(h.repo, h.shadowBranchName, h.commit, committedTouchedFiles)
 }
 
 func (h *postCommitActionHandler) HandleDiscardIfNoFiles(state *session.State) error {
@@ -674,6 +724,7 @@ func (s *ManualCommitStrategy) PostCommit() error {
 			shadowBranchesToDelete: shadowBranchesToDelete,
 			committedFileSet:       committedFileSet,
 			hasNew:                 hasNew,
+			filesTouchedBefore:     filesTouchedBefore,
 		}
 
 		if err := TransitionAndLog(state, session.EventGitCommit, transitionCtx, handler); err != nil {

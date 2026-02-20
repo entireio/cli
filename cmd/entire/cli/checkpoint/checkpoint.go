@@ -278,6 +278,11 @@ type WriteCommittedOptions struct {
 	// comparing checkpoint tree (agent work) to committed tree (may include human edits)
 	InitialAttribution *InitialAttribution
 
+	// ExportData is optional agent-specific export data (e.g., OpenCode SQLite export).
+	// When present, it is stored as export.json in the checkpoint tree and restored
+	// during resume/rewind so agents with non-file storage can re-import sessions.
+	ExportData []byte
+
 	// Summary is an optional AI-generated summary for this checkpoint.
 	// This field may be nil when:
 	//   - summarization is disabled in settings
@@ -357,6 +362,12 @@ type SessionContent struct {
 
 	// Context is the context.md content
 	Context string
+
+	// ExportData holds the agent's native export format (e.g., OpenCode export JSON).
+	// Used by agents whose primary storage isn't file-based (OpenCode uses SQLite).
+	// At resume/rewind time, this is imported back into the agent's storage.
+	// Empty for agents where the transcript file is sufficient (Claude, Gemini).
+	ExportData []byte
 }
 
 // CommittedMetadata contains the metadata stored in metadata.json for each checkpoint.

@@ -1,7 +1,5 @@
 package geminicli
 
-import "encoding/json"
-
 // GeminiSettings represents the .gemini/settings.json structure
 type GeminiSettings struct {
 	HooksConfig GeminiHooksConfig `json:"hooksConfig,omitempty"`
@@ -63,18 +61,6 @@ type agentHookInputRaw struct {
 	HookEventName  string `json:"hook_event_name"`
 	Timestamp      string `json:"timestamp"`
 	Prompt         string `json:"prompt,omitempty"` // User's prompt (BeforeAgent only)
-}
-
-// toolHookInputRaw is the JSON structure from BeforeTool/AfterTool hooks
-type toolHookInputRaw struct {
-	SessionID      string          `json:"session_id"`
-	TranscriptPath string          `json:"transcript_path"`
-	Cwd            string          `json:"cwd"`
-	HookEventName  string          `json:"hook_event_name"`
-	Timestamp      string          `json:"timestamp"`
-	ToolName       string          `json:"tool_name"`
-	ToolInput      json.RawMessage `json:"tool_input"`
-	ToolResponse   json.RawMessage `json:"tool_response,omitempty"` // Only for AfterTool
 }
 
 // Tool names used in Gemini CLI that modify files

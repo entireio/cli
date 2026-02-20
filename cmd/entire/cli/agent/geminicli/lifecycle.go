@@ -16,9 +16,21 @@ var (
 )
 
 // HookNames returns the hook verbs Gemini CLI supports.
-// Delegates to GetHookNames for backward compatibility.
+// These become subcommands: entire hooks gemini <verb>
 func (g *GeminiCLIAgent) HookNames() []string {
-	return g.GetHookNames()
+	return []string{
+		HookNameSessionStart,
+		HookNameSessionEnd,
+		HookNameBeforeAgent,
+		HookNameAfterAgent,
+		HookNameBeforeModel,
+		HookNameAfterModel,
+		HookNameBeforeToolSelection,
+		HookNameBeforeTool,
+		HookNameAfterTool,
+		HookNamePreCompress,
+		HookNameNotification,
+	}
 }
 
 // ParseHookEvent translates a Gemini CLI hook into a normalized lifecycle Event.

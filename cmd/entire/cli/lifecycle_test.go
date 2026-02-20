@@ -31,15 +31,9 @@ func (m *mockLifecycleAgent) Type() agent.AgentType                  { return m.
 func (m *mockLifecycleAgent) Description() string                    { return "Mock agent for lifecycle tests" }
 func (m *mockLifecycleAgent) IsPreview() bool                        { return false }
 func (m *mockLifecycleAgent) DetectPresence() (bool, error)          { return false, nil }
-func (m *mockLifecycleAgent) SupportsHooks() bool                    { return true }
 func (m *mockLifecycleAgent) ProtectedDirs() []string                { return nil }
 func (m *mockLifecycleAgent) HookNames() []string                    { return nil }
 func (m *mockLifecycleAgent) GetSessionID(_ *agent.HookInput) string { return "" }
-
-//nolint:nilnil // Mock implementation
-func (m *mockLifecycleAgent) ParseHookInput(_ agent.HookType, _ io.Reader) (*agent.HookInput, error) {
-	return nil, nil
-}
 
 //nolint:nilnil // Mock implementation
 func (m *mockLifecycleAgent) ParseHookEvent(_ string, _ io.Reader) (*agent.Event, error) {

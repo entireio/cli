@@ -25,9 +25,17 @@ var (
 )
 
 // HookNames returns the hook verbs Claude Code supports.
-// This is the new Agent interface method; delegates to GetHookNames for backward compatibility.
+// These become subcommands: entire hooks claude-code <verb>
 func (c *ClaudeCodeAgent) HookNames() []string {
-	return c.GetHookNames()
+	return []string{
+		HookNameSessionStart,
+		HookNameSessionEnd,
+		HookNameStop,
+		HookNameUserPromptSubmit,
+		HookNamePreTask,
+		HookNamePostTask,
+		HookNamePostTodo,
+	}
 }
 
 // ParseHookEvent translates a Claude Code hook into a normalized lifecycle Event.

@@ -465,14 +465,20 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) agent.Agent
 		}
 	}
 
-	// Fall back to detecting agent from config files (shadow branches don't have metadata.json)
-	// Check for Gemini config
+	// Fall back to detecting agent from config files (shadow branches don't have metadata.json).
+	// Order: Gemini (most specific check), Claude (established default), OpenCode (newest/preview).
 	if _, err := tree.File(".gemini/settings.json"); err == nil {
 		return agent.AgentTypeGemini
 	}
-	// Check for Claude config (either settings.local.json or settings.json in .claude/)
 	if _, err := tree.Tree(".claude"); err == nil {
 		return agent.AgentTypeClaudeCode
+	}
+	// OpenCode: .opencode directory or opencode.json config
+	if _, err := tree.Tree(".opencode"); err == nil {
+		return agent.AgentTypeOpenCode
+	}
+	if _, err := tree.File("opencode.json"); err == nil {
+		return agent.AgentTypeOpenCode
 	}
 
 	return agent.AgentTypeUnknown

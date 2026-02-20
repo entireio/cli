@@ -206,6 +206,17 @@ func handleLifecycleTurnEnd(ag agent.Agent, event *agent.Event) error {
 	}
 	fmt.Fprintf(os.Stderr, "Copied transcript to: %s\n", sessionDir+"/"+paths.TranscriptFileName)
 
+	// Copy export JSON if it exists alongside the transcript (written by OpenCode plugin).
+	// This is used by `opencode import` during resume/rewind to restore the session
+	// into OpenCode's SQLite database with the original session ID.
+	exportSrc := strings.TrimSuffix(transcriptRef, filepath.Ext(transcriptRef)) + ".export.json"
+	if exportData, readErr := os.ReadFile(exportSrc); readErr == nil { //nolint:gosec // Path derived from agent hook
+		exportDest := filepath.Join(sessionDirAbs, paths.ExportDataFileName)
+		if writeErr := os.WriteFile(exportDest, exportData, 0o600); writeErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to write export data: %v\n", writeErr)
+		}
+	}
+
 	// Load pre-prompt state (captured on TurnStart)
 	preState, err := LoadPrePromptState(sessionID)
 	if err != nil {

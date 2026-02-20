@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -146,7 +147,12 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 	// committed in this specific commit. This ensures each checkpoint represents
 	// exactly the files in that commit, not all files mentioned in the transcript.
 	if len(committedFiles) > 0 {
-		if len(sessionData.FilesTouched) > 0 {
+		// Track if we had files before filtering to distinguish between:
+		// - Session had files but none were committed (don't fallback)
+		// - Session had no files to begin with (mid-session commit, fallback OK)
+		hadFilesBeforeFiltering := len(sessionData.FilesTouched) > 0
+
+		if hadFilesBeforeFiltering {
 			// Filter to intersection of transcript-extracted files and committed files
 			filtered := make([]string, 0, len(sessionData.FilesTouched))
 			for _, f := range sessionData.FilesTouched {
@@ -157,10 +163,12 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 			sessionData.FilesTouched = filtered
 		}
 
-		// If extraction failed or returned empty, use committedFiles as fallback.
-		// This handles mid-session commits where transcript parsing may not find files
-		// but we know what was committed.
-		if len(sessionData.FilesTouched) == 0 {
+		// Only use committedFiles as fallback for genuine mid-session commits where
+		// no files were tracked yet (extraction returned empty). Do NOT fallback when
+		// the session had files that simply didn't overlap with the commit - that
+		// indicates an unrelated session that shouldn't have its files_touched
+		// overwritten with unrelated committed files.
+		if len(sessionData.FilesTouched) == 0 && !hadFilesBeforeFiltering {
 			sessionData.FilesTouched = make([]string, 0, len(committedFiles))
 			for f := range committedFiles {
 				sessionData.FilesTouched = append(sessionData.FilesTouched, f)
@@ -232,6 +240,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
+		ExportData:                  sessionData.ExportData,
 		InitialAttribution:          attribution,
 		Summary:                     summary,
 	}); err != nil {
@@ -414,6 +423,16 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 	// Use tracked files from session state (not all files in tree)
 	data.FilesTouched = filesTouched
 
+	// Read export data from local metadata directory (e.g., OpenCode SQLite export).
+	// This is written by lifecycle.go during TurnEnd and must be stored in the
+	// committed checkpoint so resume/rewind can re-import the session.
+	exportRelPath := metadataDir + "/" + paths.ExportDataFileName
+	if exportAbsPath, absErr := paths.AbsPath(exportRelPath); absErr == nil {
+		if exportBytes, readErr := os.ReadFile(exportAbsPath); readErr == nil && len(exportBytes) > 0 { //nolint:gosec // path from session metadata
+			data.ExportData = exportBytes
+		}
+	}
+
 	// Calculate token usage from the extracted transcript portion
 	if len(data.Transcript) > 0 {
 		data.TokenUsage = calculateTokenUsage(agentType, data.Transcript, checkpointTranscriptStart)
@@ -454,6 +473,15 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(state *Sessi
 	} else {
 		// Use the shared helper which includes subagent transcripts
 		data.FilesTouched = s.extractModifiedFilesFromLiveTranscript(state, state.CheckpointTranscriptStart)
+	}
+
+	// Read export data from local metadata directory
+	metadataDir := paths.SessionMetadataDirFromSessionID(state.SessionID)
+	exportRelPath := metadataDir + "/" + paths.ExportDataFileName
+	if exportAbsPath, absErr := paths.AbsPath(exportRelPath); absErr == nil {
+		if exportBytes, readErr := os.ReadFile(exportAbsPath); readErr == nil && len(exportBytes) > 0 { //nolint:gosec // path from session metadata
+			data.ExportData = exportBytes
+		}
 	}
 
 	// Calculate token usage from the extracted transcript portion
@@ -502,6 +530,21 @@ func extractUserPrompts(agentType agent.AgentType, content string) []string {
 		return nil
 	}
 
+	// OpenCode uses JSONL with a different per-line schema than Claude Code
+	if agentType == agent.AgentTypeOpenCode {
+		prompts, err := opencode.ExtractAllUserPrompts([]byte(content))
+		if err == nil && len(prompts) > 0 {
+			cleaned := make([]string, 0, len(prompts))
+			for _, prompt := range prompts {
+				if stripped := textutil.StripIDEContextTags(prompt); stripped != "" {
+					cleaned = append(cleaned, stripped)
+				}
+			}
+			return cleaned
+		}
+		return nil
+	}
+
 	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
 	if agentType == agent.AgentTypeGemini || agentType == agent.AgentTypeUnknown {
 		prompts, err := geminicli.ExtractAllUserPrompts([]byte(content))
@@ -533,6 +576,11 @@ func extractUserPrompts(agentType agent.AgentType, content string) []string {
 func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int) *agent.TokenUsage {
 	if len(data) == 0 {
 		return &agent.TokenUsage{}
+	}
+
+	// OpenCode uses JSONL with token info on assistant messages (different schema from Claude Code)
+	if agentType == agent.AgentTypeOpenCode {
+		return opencode.CalculateTokenUsageFromBytes(data, startOffset)
 	}
 
 	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown

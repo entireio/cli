@@ -44,9 +44,9 @@ func GetCurrentHookAgent() (agent.Agent, error) {
 	return ag, nil
 }
 
-// newAgentHooksCmd creates a hooks subcommand for an agent that implements HookHandler.
+// newAgentHooksCmd creates a hooks subcommand for an agent.
 // It dynamically creates subcommands for each hook the agent supports.
-func newAgentHooksCmd(agentName agent.AgentName, handler agent.HookHandler) *cobra.Command {
+func newAgentHooksCmd(agentName agent.AgentName, handler agent.Agent) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    string(agentName),
 		Short:  handler.Description() + " hook handlers",
@@ -63,7 +63,7 @@ func newAgentHooksCmd(agentName agent.AgentName, handler agent.HookHandler) *cob
 		},
 	}
 
-	for _, hookName := range handler.GetHookNames() {
+	for _, hookName := range handler.HookNames() {
 		cmd.AddCommand(newAgentHookVerbCmdWithLogging(agentName, hookName))
 	}
 

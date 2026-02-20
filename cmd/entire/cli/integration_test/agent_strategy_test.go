@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,125 +208,6 @@ func TestAgentFormatResumeCommand(t *testing.T) {
 	if cmd != expected {
 		t.Errorf("FormatResumeCommand() = %q, want %q", cmd, expected)
 	}
-}
-
-// TestAgentHookParsing verifies hook input parsing via agent interface.
-func TestAgentHookParsing(t *testing.T) {
-	t.Parallel()
-
-	ag, _ := agent.Get("claude-code")
-
-	tests := []struct {
-		name     string
-		hookType agent.HookType
-		input    string
-		wantID   string
-		wantRef  string
-	}{
-		{
-			name:     "SessionStart",
-			hookType: agent.HookSessionStart,
-			input:    `{"session_id":"sess-123","transcript_path":"/tmp/transcript.jsonl"}`,
-			wantID:   "sess-123",
-			wantRef:  "/tmp/transcript.jsonl",
-		},
-		{
-			name:     "UserPromptSubmit",
-			hookType: agent.HookUserPromptSubmit,
-			input:    `{"session_id":"sess-456","transcript_path":""}`,
-			wantID:   "sess-456",
-			wantRef:  "",
-		},
-		{
-			name:     "Stop",
-			hookType: agent.HookStop,
-			input:    `{"session_id":"sess-789","transcript_path":"/path/to/transcript.jsonl"}`,
-			wantID:   "sess-789",
-			wantRef:  "/path/to/transcript.jsonl",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			reader := newStringReader(tt.input)
-			hookInput, err := ag.ParseHookInput(tt.hookType, reader)
-			if err != nil {
-				t.Fatalf("ParseHookInput() error = %v", err)
-			}
-
-			if hookInput.SessionID != tt.wantID {
-				t.Errorf("SessionID = %q, want %q", hookInput.SessionID, tt.wantID)
-			}
-			if hookInput.SessionRef != tt.wantRef {
-				t.Errorf("SessionRef = %q, want %q", hookInput.SessionRef, tt.wantRef)
-			}
-		})
-	}
-}
-
-// TestAgentPrePostToolHookParsing verifies PreToolUse and PostToolUse hook parsing.
-func TestAgentPrePostToolHookParsing(t *testing.T) {
-	t.Parallel()
-
-	ag, _ := agent.Get("claude-code")
-
-	t.Run("PreToolUse", func(t *testing.T) {
-		t.Parallel()
-
-		input := `{"session_id":"sess-123","transcript_path":"/tmp/t.jsonl","tool_use_id":"tool-456","tool_input":{"prompt":"test"}}`
-		reader := newStringReader(input)
-
-		hookInput, err := ag.ParseHookInput(agent.HookPreToolUse, reader)
-		if err != nil {
-			t.Fatalf("ParseHookInput(PreToolUse) error = %v", err)
-		}
-
-		if hookInput.ToolUseID != "tool-456" {
-			t.Errorf("ToolUseID = %q, want %q", hookInput.ToolUseID, "tool-456")
-		}
-	})
-
-	t.Run("PostToolUse with agent ID", func(t *testing.T) {
-		t.Parallel()
-
-		input := `{"session_id":"sess-123","transcript_path":"/tmp/t.jsonl","tool_use_id":"tool-789","tool_input":{},"tool_response":{"agentId":"agent-abc"}}`
-		reader := newStringReader(input)
-
-		hookInput, err := ag.ParseHookInput(agent.HookPostToolUse, reader)
-		if err != nil {
-			t.Fatalf("ParseHookInput(PostToolUse) error = %v", err)
-		}
-
-		if hookInput.ToolUseID != "tool-789" {
-			t.Errorf("ToolUseID = %q, want %q", hookInput.ToolUseID, "tool-789")
-		}
-
-		// Agent ID should be in RawData
-		if agentID, ok := hookInput.RawData["agent_id"]; !ok || agentID != "agent-abc" {
-			t.Errorf("RawData[agent_id] = %v, want %q", agentID, "agent-abc")
-		}
-	})
-}
-
-// stringReader implements io.Reader for test strings
-type stringReader struct {
-	data []byte
-	pos  int
-}
-
-func newStringReader(s string) *stringReader {
-	return &stringReader{data: []byte(s)}
-}
-
-func (r *stringReader) Read(p []byte) (n int, err error) {
-	if r.pos >= len(r.data) {
-		return 0, io.EOF
-	}
-	n = copy(p, r.data[r.pos:])
-	r.pos += n
-	return n, nil
 }
 
 // TestSetupAgentFlag verifies the --agent flag in enable command.

@@ -679,12 +679,20 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) ([
 			continue
 		}
 
-		if writeErr := os.WriteFile(sessionFile, content.Transcript, 0o600); writeErr != nil {
+		agentSession := &agent.AgentSession{
+			SessionID:  sessionID,
+			AgentName:  sessionAgent.Name(),
+			RepoPath:   repoRoot,
+			SessionRef: sessionFile,
+			NativeData: content.Transcript,
+			ExportData: content.ExportData,
+		}
+		if writeErr := sessionAgent.WriteSession(agentSession); writeErr != nil {
 			if totalSessions > 1 {
-				fmt.Fprintf(os.Stderr, "    Warning: failed to write transcript: %v\n", writeErr)
+				fmt.Fprintf(os.Stderr, "    Warning: failed to write session: %v\n", writeErr)
 				continue
 			}
-			return nil, fmt.Errorf("failed to write transcript: %w", writeErr)
+			return nil, fmt.Errorf("failed to write session: %w", writeErr)
 		}
 
 		restored = append(restored, RestoredSession{

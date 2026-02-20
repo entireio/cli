@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -71,82 +70,6 @@ func (g *GeminiCLIAgent) DetectPresence() (bool, error) {
 		return true, nil
 	}
 	return false, nil
-}
-
-// SupportsHooks returns true as Gemini CLI supports lifecycle hooks.
-func (g *GeminiCLIAgent) SupportsHooks() bool {
-	return true
-}
-
-// ParseHookInput parses Gemini CLI hook input from stdin.
-func (g *GeminiCLIAgent) ParseHookInput(hookType agent.HookType, reader io.Reader) (*agent.HookInput, error) {
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read input: %w", err)
-	}
-
-	if len(data) == 0 {
-		return nil, errors.New("empty input")
-	}
-
-	input := &agent.HookInput{
-		HookType:  hookType,
-		Timestamp: time.Now(),
-		RawData:   make(map[string]interface{}),
-	}
-
-	// Parse based on hook type
-	switch hookType {
-	case agent.HookSessionStart, agent.HookSessionEnd, agent.HookStop:
-		var raw sessionInfoRaw
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("failed to parse session info: %w", err)
-		}
-		input.SessionID = raw.SessionID
-		input.SessionRef = raw.TranscriptPath
-		// Store Gemini-specific fields in RawData
-		input.RawData["cwd"] = raw.Cwd
-		input.RawData["hook_event_name"] = raw.HookEventName
-		if raw.Source != "" {
-			input.RawData["source"] = raw.Source
-		}
-		if raw.Reason != "" {
-			input.RawData["reason"] = raw.Reason
-		}
-
-	case agent.HookUserPromptSubmit:
-		// BeforeAgent is Gemini's equivalent to Claude's UserPromptSubmit
-		// It provides the user's prompt in the "prompt" field
-		var raw agentHookInputRaw
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("failed to parse agent hook input: %w", err)
-		}
-		input.SessionID = raw.SessionID
-		input.SessionRef = raw.TranscriptPath
-		input.RawData["cwd"] = raw.Cwd
-		input.RawData["hook_event_name"] = raw.HookEventName
-		if raw.Prompt != "" {
-			input.UserPrompt = raw.Prompt
-			input.RawData["prompt"] = raw.Prompt
-		}
-
-	case agent.HookPreToolUse, agent.HookPostToolUse:
-		var raw toolHookInputRaw
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("failed to parse tool hook input: %w", err)
-		}
-		input.SessionID = raw.SessionID
-		input.SessionRef = raw.TranscriptPath
-		input.ToolName = raw.ToolName
-		input.ToolInput = raw.ToolInput
-		if hookType == agent.HookPostToolUse {
-			input.ToolResponse = raw.ToolResponse
-		}
-		input.RawData["cwd"] = raw.Cwd
-		input.RawData["hook_event_name"] = raw.HookEventName
-	}
-
-	return input, nil
 }
 
 // GetSessionID extracts the session ID from hook input.

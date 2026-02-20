@@ -18,12 +18,7 @@ func (m *mockAgent) Type() AgentType               { return mockAgentType }
 func (m *mockAgent) Description() string           { return "Mock agent for testing" }
 func (m *mockAgent) IsPreview() bool               { return false }
 func (m *mockAgent) DetectPresence() (bool, error) { return false, nil }
-func (m *mockAgent) SupportsHooks() bool           { return false }
 
-//nolint:nilnil // Mock implementation
-func (m *mockAgent) ParseHookInput(_ HookType, _ io.Reader) (*HookInput, error) {
-	return nil, nil
-}
 func (m *mockAgent) GetSessionID(_ *HookInput) string { return "" }
 func (m *mockAgent) ProtectedDirs() []string          { return nil }
 func (m *mockAgent) HookNames() []string              { return nil }
@@ -61,7 +56,6 @@ var _ HookSupport = (*mockHookSupport)(nil) // Compile-time interface check
 func (m *mockHookSupport) InstallHooks(_, _ bool) (int, error) { return 0, nil }
 func (m *mockHookSupport) UninstallHooks() error               { return nil }
 func (m *mockHookSupport) AreHooksInstalled() bool             { return false }
-func (m *mockHookSupport) GetSupportedHooks() []HookType       { return nil }
 
 // mockFileWatcher implements both Agent and FileWatcher interfaces.
 type mockFileWatcher struct {

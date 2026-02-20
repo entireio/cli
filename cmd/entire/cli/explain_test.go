@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -2487,8 +2488,24 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 }
 
 func TestRunExplain_SessionFlagFiltersListView(t *testing.T) {
-	// Test that --session alone (without --checkpoint or --commit) filters the list view
-	// This is a unit test for the routing logic
+	// Test that --session alone (without --checkpoint or --commit) filters the list view.
+	// This is a unit test for the routing logic.
+	// Use a fresh git repo so we don't walk the real repo's shadow branches (which is slow).
+	tmp := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test User"},
+		{"commit", "--allow-empty", "-m", "init"},
+	} {
+		cmd := exec.CommandContext(context.Background(), "git", args...)
+		cmd.Dir = tmp
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	t.Chdir(tmp)
+
 	var buf, errBuf bytes.Buffer
 
 	// When session is specified alone, it should NOT error for mutual exclusivity

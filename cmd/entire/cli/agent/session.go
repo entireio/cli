@@ -26,6 +26,12 @@ type AgentSession struct {
 	//   - Aider: Markdown content
 	NativeData []byte
 
+	// ExportData holds the session in the agent's native export/import format.
+	// Used by agents whose primary storage isn't file-based (e.g., OpenCode uses SQLite).
+	// At resume/rewind time, this data is imported back into the agent's storage.
+	// Optional — nil for agents where NativeData is sufficient (Claude, Gemini).
+	ExportData []byte
+
 	// Computed fields - populated by the agent when reading
 	ModifiedFiles []string
 	NewFiles      []string
