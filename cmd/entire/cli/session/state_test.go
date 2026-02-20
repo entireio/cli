@@ -146,11 +146,12 @@ func TestState_IsStale(t *testing.T) {
 		assert.True(t, state.IsStale())
 	})
 
-	t.Run("ended_exactly_at_threshold_is_not_stale", func(t *testing.T) {
+	t.Run("ended_just_under_threshold_is_not_stale", func(t *testing.T) {
 		t.Parallel()
-		// time.Since will be slightly over threshold due to execution time,
-		// but a value well within threshold should not be stale
-		recent := time.Now().Add(-23 * time.Hour)
+		// A session that ended just under the staleness threshold should not be stale.
+		// Use StaleSessionThreshold rather than a magic number so the test stays in sync
+		// if the threshold changes.
+		recent := time.Now().Add(-1 * (StaleSessionThreshold - time.Hour))
 		state := &State{EndedAt: &recent}
 		assert.False(t, state.IsStale())
 	})
