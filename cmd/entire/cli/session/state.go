@@ -24,7 +24,7 @@ const (
 
 	// StaleSessionThreshold is the duration after which an ended session is considered stale
 	// and will be automatically deleted during load/list operations.
-	StaleSessionThreshold = 24 * time.Hour
+	StaleSessionThreshold = 12 * time.Hour
 )
 
 // State represents the state of an active session.
