@@ -126,23 +126,23 @@ func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
 func TestState_IsStale(t *testing.T) {
 	t.Parallel()
 
-	t.Run("nil_EndedAt_is_not_stale", func(t *testing.T) {
+	t.Run("nil_LastInteractionTime_is_not_stale", func(t *testing.T) {
 		t.Parallel()
-		state := &State{EndedAt: nil}
+		state := &State{LastInteractionTime: nil}
 		assert.False(t, state.IsStale())
 	})
 
-	t.Run("recently_ended_is_not_stale", func(t *testing.T) {
+	t.Run("recently_interacted_is_not_stale", func(t *testing.T) {
 		t.Parallel()
 		recent := time.Now().Add(-1 * time.Hour)
-		state := &State{EndedAt: &recent}
+		state := &State{LastInteractionTime: &recent}
 		assert.False(t, state.IsStale())
 	})
 
-	t.Run("ended_over_24h_ago_is_stale", func(t *testing.T) {
+	t.Run("ended_over_2wk_ago_is_stale", func(t *testing.T) {
 		t.Parallel()
-		old := time.Now().Add(-25 * time.Hour)
-		state := &State{EndedAt: &old}
+		old := time.Now().Add(-14 * 24 * time.Hour)
+		state := &State{LastInteractionTime: &old}
 		assert.True(t, state.IsStale())
 	})
 
@@ -152,7 +152,7 @@ func TestState_IsStale(t *testing.T) {
 		// Use StaleSessionThreshold rather than a magic number so the test stays in sync
 		// if the threshold changes.
 		recent := time.Now().Add(-1 * (StaleSessionThreshold - time.Hour))
-		state := &State{EndedAt: &recent}
+		state := &State{LastInteractionTime: &recent}
 		assert.False(t, state.IsStale())
 	})
 }
@@ -165,13 +165,13 @@ func TestStateStore_Load_DeletesStaleSession(t *testing.T) {
 	store := NewStateStoreWithDir(stateDir)
 	ctx := context.Background()
 
-	// Create a stale session (ended >24h ago)
-	staleEnded := time.Now().Add(-48 * time.Hour)
+	// Create a stale session (ended >1wk ago)
+	staleInteracted := time.Now().Add(-2 * 7 * 24 * time.Hour)
 	stale := &State{
-		SessionID:  "stale-session",
-		BaseCommit: "def456",
-		StartedAt:  time.Now().Add(-72 * time.Hour),
-		EndedAt:    &staleEnded,
+		SessionID:           "stale-session",
+		BaseCommit:          "def456",
+		StartedAt:           time.Now().Add(-3 * 7 * 24 * time.Hour),
+		LastInteractionTime: &staleInteracted,
 	}
 	require.NoError(t, store.Save(ctx, stale))
 
@@ -189,7 +189,7 @@ func TestStateStore_Load_DeletesStaleSession(t *testing.T) {
 	_, err = os.Stat(stateFile)
 	assert.True(t, os.IsNotExist(err), "stale session file should be deleted after Load")
 
-	// Create an active session (no EndedAt) to verify non-stale sessions still work
+	// Create an active session (no LastInteractionTime) to verify non-stale sessions still work
 	active := &State{
 		SessionID:  "active-session",
 		BaseCommit: "abc123",
@@ -211,7 +211,7 @@ func TestStateStore_List_DeletesStaleSession(t *testing.T) {
 	store := NewStateStoreWithDir(stateDir)
 	ctx := context.Background()
 
-	// Create an active session (no EndedAt)
+	// Create an active session (no LastInteractionTime)
 	active := &State{
 		SessionID:  "active-session",
 		BaseCommit: "abc123",
@@ -219,13 +219,13 @@ func TestStateStore_List_DeletesStaleSession(t *testing.T) {
 	}
 	require.NoError(t, store.Save(ctx, active))
 
-	// Create a stale session (ended >24h ago)
-	staleEnded := time.Now().Add(-48 * time.Hour)
+	// Create a stale session (ended >2wk ago)
+	staleInteracted := time.Now().Add(-2 * 7 * 24 * time.Hour)
 	stale := &State{
-		SessionID:  "stale-session",
-		BaseCommit: "def456",
-		StartedAt:  time.Now().Add(-72 * time.Hour),
-		EndedAt:    &staleEnded,
+		SessionID:           "stale-session",
+		BaseCommit:          "def456",
+		StartedAt:           time.Now().Add(-3 * 7 * 24 * time.Hour),
+		LastInteractionTime: &staleInteracted,
 	}
 	require.NoError(t, store.Save(ctx, stale))
 
