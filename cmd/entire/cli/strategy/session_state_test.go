@@ -427,14 +427,14 @@ func TestLoadSessionState_DeletesStaleSession(t *testing.T) {
 
 	t.Chdir(dir)
 
-	// Create a stale session (ended >24h ago)
-	staleEnded := time.Now().Add(-48 * time.Hour)
+	// Create a stale session (ended >2wk ago)
+	staleInteracted := time.Now().Add(-2 * 7 * 24 * time.Hour)
 	state := &SessionState{
-		SessionID:  "stale-load-test",
-		BaseCommit: "abc123def456",
-		StartedAt:  time.Now().Add(-72 * time.Hour),
-		EndedAt:    &staleEnded,
-		StepCount:  5,
+		SessionID:           "stale-load-test",
+		BaseCommit:          "abc123def456",
+		StartedAt:           time.Now().Add(-3 * 7 * 24 * time.Hour),
+		LastInteractionTime: &staleInteracted,
+		StepCount:           5,
 	}
 
 	err = SaveSessionState(state)
