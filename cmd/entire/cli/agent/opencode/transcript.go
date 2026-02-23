@@ -139,8 +139,10 @@ func ExtractModifiedFiles(data []byte) ([]string, error) {
 }
 
 // extractFilePathFromInput extracts the file path from a tool's input map.
+// OpenCode tools use camelCase keys (filePath) while the Go convention is snake_case (file_path).
+// Check both to handle current and future key naming.
 func extractFilePathFromInput(input map[string]interface{}) string {
-	for _, key := range []string{"file_path", "path", "file", "filename"} {
+	for _, key := range []string{"filePath", "file_path", "path", "file", "filename"} {
 		if v, ok := input[key]; ok {
 			if s, ok := v.(string); ok && s != "" {
 				return s

@@ -387,8 +387,16 @@ func explainTemporaryCheckpoint(w io.Writer, repo *git.Repository, store *checkp
 		return "", false
 	}
 
-	// Read agent type from shadow branch metadata (stored during checkpoint creation)
-	agentType := strategy.ReadAgentTypeFromTree(shadowTree, tc.MetadataDir)
+	// Read agent type: prefer session state (authoritative) over tree heuristic.
+	// Tree-based detection is ambiguous when a repo has multiple agent config dirs
+	// (e.g., both .claude/ and .opencode/).
+	agentType := agent.AgentTypeUnknown
+	if sessionState, stateErr := strategy.LoadSessionState(tc.SessionID); stateErr == nil && sessionState != nil && sessionState.AgentType != "" {
+		agentType = sessionState.AgentType
+	}
+	if agentType == agent.AgentTypeUnknown || agentType == "" {
+		agentType = strategy.ReadAgentTypeFromTree(shadowTree, tc.MetadataDir)
+	}
 
 	// Handle raw transcript output
 	if rawTranscript {

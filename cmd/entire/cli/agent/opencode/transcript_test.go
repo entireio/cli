@@ -400,6 +400,50 @@ func TestExtractModifiedFiles(t *testing.T) {
 	}
 }
 
+// testTranscriptCamelCaseJSONL uses camelCase "filePath" keys (as produced by OpenCode SDK)
+// instead of snake_case "file_path". Both should be handled by extractFilePathFromInput.
+const testTranscriptCamelCaseJSONL = `{"id":"msg-1","role":"user","content":"Fix the bug","time":{"created":1708300000}}
+{"id":"msg-2","role":"assistant","content":"Fixing.","time":{"created":1708300001,"completed":1708300005},"tokens":{"input":100,"output":50,"reasoning":0,"cache":{"read":0,"write":0}},"cost":0.001,"parts":[{"type":"tool","tool":"edit","callID":"call-1","state":{"status":"completed","input":{"filePath":"src/app.ts"},"output":"Applied edit"}},{"type":"tool","tool":"write","callID":"call-2","state":{"status":"completed","input":{"filePath":"src/new.ts"},"output":"File written"}}]}
+`
+
+func TestExtractModifiedFiles_CamelCaseFilePath(t *testing.T) {
+	t.Parallel()
+
+	files, err := ExtractModifiedFiles([]byte(testTranscriptCamelCaseJSONL))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files from camelCase filePath, got %d: %v", len(files), files)
+	}
+	if files[0] != "src/app.ts" {
+		t.Errorf("expected first file 'src/app.ts', got %q", files[0])
+	}
+	if files[1] != "src/new.ts" {
+		t.Errorf("expected second file 'src/new.ts', got %q", files[1])
+	}
+}
+
+func TestExtractModifiedFilesFromOffset_CamelCaseFilePath(t *testing.T) {
+	t.Parallel()
+	ag := &OpenCodeAgent{}
+	path := writeTestTranscript(t, testTranscriptCamelCaseJSONL)
+
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pos != 2 {
+		t.Errorf("expected position 2, got %d", pos)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files from camelCase filePath, got %d: %v", len(files), files)
+	}
+	if files[0] != "src/app.ts" {
+		t.Errorf("expected first file 'src/app.ts', got %q", files[0])
+	}
+}
+
 // Compile-time interface checks are in transcript.go.
 // Verify the unused import guard by referencing the agent package.
 var _ = agent.AgentNameOpenCode
