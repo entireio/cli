@@ -4,7 +4,59 @@
 // Requires Bun runtime (used by OpenCode's plugin system for loading ESM plugins).
 import type { Plugin } from "@opencode-ai/plugin"
 
-export const EntirePlugin: Plugin = async ({ $, directory }) => {
+// Spawns a child process connected to the parent via stdin pipe.
+// When the parent exits (including SIGKILL), the pipe closes and the child
+// calls `entire hooks opencode session-end` for every tracked session.
+function spawnCleanupWatcher(entireCmd: string) {
+  const script = `
+    const { execFileSync } = require("child_process");
+    const cmd = ${JSON.stringify(entireCmd)};
+    const sessions = new Set();
+    let buf = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      buf += chunk;
+      let i;
+      while ((i = buf.indexOf("\\n")) !== -1) {
+        try {
+          const msg = JSON.parse(buf.slice(0, i));
+          if (msg.type === "track") sessions.add(msg.id);
+          else if (msg.type === "untrack") sessions.delete(msg.id);
+        } catch {}
+        buf = buf.slice(i + 1);
+      }
+    });
+    process.stdin.on("end", () => {
+      for (const id of sessions) {
+        try {
+          execFileSync(cmd, ["hooks", "opencode", "session-end"], {
+            input: JSON.stringify({ session_id: id }),
+            timeout: 1000,
+          });
+        } catch {}
+      }
+    });
+  `;
+
+  try {
+    const child = Bun.spawn(["node", "-e", script], {
+      stdin: "pipe",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    const send = (type: string, id: string) => {
+      try { child.stdin.write(JSON.stringify({ type, id }) + "\n"); child.stdin.flush(); } catch { }
+    };
+    return {
+      track: (id: string) => send("track", id),
+      untrack: (id: string) => send("untrack", id),
+    };
+  } catch {
+    return { track: () => { }, untrack: () => { } };
+  }
+}
+
+export const EntirePlugin: Plugin = async ({ $ }) => {
   const ENTIRE_CMD = "__ENTIRE_CMD__"
   // Track seen user messages to fire turn-start only once per message
   const seenUserMessages = new Set<string>()
@@ -12,6 +64,7 @@ export const EntirePlugin: Plugin = async ({ $, directory }) => {
   let currentSessionID: string | null = null
   // In-memory store for message metadata (role, tokens, etc.)
   const messageStore = new Map<string, any>()
+  const watcher = spawnCleanupWatcher(ENTIRE_CMD)
 
   /**
    * Pipe JSON payload to an entire hooks command.
@@ -38,6 +91,7 @@ export const EntirePlugin: Plugin = async ({ $, directory }) => {
             messageStore.clear()
           }
           currentSessionID = session.id
+          watcher.track(session.id)
           await callHook("session-start", {
             session_id: session.id,
           })
@@ -99,6 +153,7 @@ export const EntirePlugin: Plugin = async ({ $, directory }) => {
           await callHook("session-end", {
             session_id: session.id,
           })
+          watcher.untrack(session.id)
           break
         }
       }
