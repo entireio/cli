@@ -209,10 +209,11 @@ func (s *State) NormalizeAfterLoad() {
 	}
 }
 
-// IsStale returns true when the session has ended and the time since it ended
-// exceeds StaleSessionThreshold. Active sessions (EndedAt == nil) are never stale.
+// IsStale returns true when the last time a session saw interaction exceeds StaleSessionThreshold.
+// If LastInteractionTime isn't set, we don't consider a session stale to avoid aggressively
+// deleting things.
 func (s *State) IsStale() bool {
-	return s.EndedAt != nil && time.Since(*s.EndedAt) > StaleSessionThreshold
+	return s.LastInteractionTime != nil && time.Since(*s.LastInteractionTime) > StaleSessionThreshold
 }
 
 // StateStore provides low-level operations for managing session state files.
