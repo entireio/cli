@@ -1,6 +1,6 @@
 # Entire CLI
 
-Entire hooks into your git workflow to capture AI agent sessions throughout development. Sessions are indexed alongside commits, creating a searchable record of how code was written in your repo.
+Entire hooks into your Git workflow to capture AI agent sessions as you work. Sessions are indexed alongside commits, creating a searchable record of how code was written in your repo.
 
 With Entire, you can:
 
@@ -58,7 +58,7 @@ entire enable
 
 This installs agent and git hooks to work with your AI agent (Claude Code or Gemini CLI). The hooks capture session data at specific points in your workflow. Your code commits stay clean—all session metadata is stored on a separate `entire/checkpoints/v1` branch.
 
-Checkpoint creation depends on your chosen strategy (default is `manual-commit`):
+**When checkpoints are created** depends on your chosen strategy (default is `manual-commit`):
 - **Manual-commit**: Checkpoints are created when you or the agent make a git commit
 - **Auto-commit**: Checkpoints are created after each agent response
 
@@ -180,7 +180,7 @@ Multiple AI sessions can run on the same commit. If you start a second session w
 
 | Flag                   | Description                                                        |
 |------------------------|--------------------------------------------------------------------|
-| `--agent <name>`       | AI agent to set up hooks for: `claude-code` (default) or `gemini`   |
+| `--agent <name>`       | AI agent to install hooks for: `claude-code` (default) or `gemini` |
 | `--force`, `-f`        | Force reinstall hooks (removes existing Entire hooks first)        |
 | `--local`              | Write settings to `settings.local.json` instead of `settings.json` |
 | `--project`            | Write settings to `settings.json` even if it already exists        |
