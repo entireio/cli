@@ -105,7 +105,7 @@ func TestDetectPII_EmailRegions(t *testing.T) {
 	if len(regions) != 1 {
 		t.Fatalf("expected 1 region, got %d", len(regions))
 	}
-	if regions[0].label != "EMAIL" {
+	if regions[0].label != labelEmail {
 		t.Errorf("expected label EMAIL, got %q", regions[0].label)
 	}
 	got := input[regions[0].start:regions[0].end]
@@ -124,7 +124,7 @@ func TestDetectPII_PhoneRegions(t *testing.T) {
 	if len(regions) != 1 {
 		t.Fatalf("expected 1 region, got %d", len(regions))
 	}
-	if regions[0].label != "PHONE" {
+	if regions[0].label != labelPhone {
 		t.Errorf("expected label PHONE, got %q", regions[0].label)
 	}
 }
@@ -139,7 +139,7 @@ func TestDetectPII_AddressRegions(t *testing.T) {
 	if len(regions) != 1 {
 		t.Fatalf("expected 1 region, got %d", len(regions))
 	}
-	if regions[0].label != "ADDRESS" {
+	if regions[0].label != labelAddress {
 		t.Errorf("expected label ADDRESS, got %q", regions[0].label)
 	}
 }
@@ -152,13 +152,13 @@ func TestDetectPII_CategoryToggle(t *testing.T) {
 	}
 	regions := detectPII(cfg, "email user@example.com phone 555-123-4567")
 	for _, r := range regions {
-		if r.label == "PHONE" {
+		if r.label == labelPhone {
 			t.Errorf("phone should not be detected when category is disabled")
 		}
 	}
 	hasEmail := false
 	for _, r := range regions {
-		if r.label == "EMAIL" {
+		if r.label == labelEmail {
 			hasEmail = true
 		}
 	}
@@ -322,9 +322,9 @@ func TestPII_ReplacementTokenFormat(t *testing.T) {
 		want  string
 	}{
 		{"", "REDACTED"},
-		{"EMAIL", "[REDACTED_EMAIL]"},
-		{"PHONE", "[REDACTED_PHONE]"},
-		{"ADDRESS", "[REDACTED_ADDRESS]"},
+		{labelEmail, "[REDACTED_EMAIL]"},
+		{labelPhone, "[REDACTED_PHONE]"},
+		{labelAddress, "[REDACTED_ADDRESS]"},
 		{"EMPLOYEE_ID", "[REDACTED_EMPLOYEE_ID]"},
 	}
 	for _, tt := range tests {
@@ -335,5 +335,226 @@ func TestPII_ReplacementTokenFormat(t *testing.T) {
 				t.Errorf("replacementToken(%q) = %q, want %q", tt.label, got, tt.want)
 			}
 		})
+	}
+}
+
+// =============================================================================
+// Level 2 additions: edge cases and contracts
+// =============================================================================
+
+func TestDetectPII_EmptyString(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true, PIIPhone: true},
+	}
+	regions := detectPII(cfg, "")
+	if len(regions) != 0 {
+		t.Errorf("expected nil regions for empty string, got %d", len(regions))
+	}
+}
+
+func TestDetectPII_InvalidAndValidCustomPatterns(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{},
+		CustomPatterns: map[string]string{
+			"bad":         "[invalid",
+			"employee_id": `EMP-\d{6}`,
+		},
+	}
+	regions := detectPII(cfg, "employee EMP-123456 joined")
+	if len(regions) != 1 {
+		t.Fatalf("expected 1 region (valid pattern should still fire despite invalid sibling), got %d", len(regions))
+	}
+	if regions[0].label != "EMPLOYEE_ID" {
+		t.Errorf("expected label EMPLOYEE_ID, got %q", regions[0].label)
+	}
+}
+
+// =============================================================================
+// Level 2: Email allowlist tests (TDD — these FAIL until allowlist is implemented)
+// =============================================================================
+
+func TestDetectPII_AllowlistedEmails(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	}
+	// These emails appear constantly in coding transcripts and are non-sensitive.
+	allowlisted := []string{
+		"noreply@github.com",
+		"user@users.noreply.github.com",
+		"dependabot@users.noreply.github.com",
+		"actions@github.com",
+		"someone@noreply.github.com",
+		"Noreply@GitHub.com", // case-insensitive
+	}
+	for _, email := range allowlisted {
+		input := "from " + email + " to"
+		regions := detectPII(cfg, input)
+		for _, r := range regions {
+			matched := input[r.start:r.end]
+			if r.label == labelEmail && matched == email {
+				t.Errorf("allowlisted email %q should NOT be detected as PII", email)
+			}
+		}
+	}
+
+	// Regular emails should still be detected.
+	regions := detectPII(cfg, "contact user@example.com for info")
+	hasEmail := false
+	for _, r := range regions {
+		if r.label == labelEmail {
+			hasEmail = true
+		}
+	}
+	if !hasEmail {
+		t.Error("non-allowlisted email should still be detected")
+	}
+}
+
+func TestDetectPII_GitAuthorNoreplyNotRedacted(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	}
+	// Simulates git log output — noreply addresses should not be redacted
+	input := "Author: Bot <noreply@github.com>\nCo-Authored-By: User <user@users.noreply.github.com>"
+	regions := detectPII(cfg, input)
+	for _, r := range regions {
+		if r.label == labelEmail {
+			t.Errorf("noreply email in git author line should NOT be detected, but matched %q", input[r.start:r.end])
+		}
+	}
+}
+
+// =============================================================================
+// Level 3 additions: #471 regression safety WITH PII enabled
+// =============================================================================
+
+func TestPIIEnabled_FilePathsStillPreserved(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true, PIIPhone: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	paths := []string{
+		"/tmp/TestE2E_Something3407889464/001/controller.go",
+		"/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/TestE2E_Something/controller",
+		"/Users/peytonmontei/.claude/projects/something.jsonl",
+		"/tmp/test/controller.go\n/tmp/test/model.go\n/tmp/test/view.go",
+	}
+	for _, p := range paths {
+		got := String(p)
+		if got != p {
+			t.Errorf("file path should NOT be redacted with PII enabled\n  input: %q\n  got:   %q", p, got)
+		}
+	}
+}
+
+func TestPIIEnabled_JSONEscapesStillPreserved(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true, PIIPhone: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	tests := []string{
+		`controller.go\nmodel.go\nview.go`,
+		`something.go\tanother.go`,
+		`C:\\Users\\test\\file.go`,
+	}
+	for _, input := range tests {
+		got := String(input)
+		if got != input {
+			t.Errorf("JSON escape should NOT be corrupted with PII enabled\n  input: %q\n  got:   %q", input, got)
+		}
+	}
+}
+
+func TestPIIEnabled_JSONLPathFieldsStillSkipped(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	input := `{"file_path":"/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/test/controller.go","cwd":"/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/test","content":"normal text here"}`
+	got, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(got, "REDACTED") {
+		t.Errorf("JSONL path fields should NOT be redacted with PII enabled, got: %s", got)
+	}
+}
+
+func TestPIIEnabled_SecretPatternExcludesSlash(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true, PIIPhone: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	// This path was being redacted when / was in secretPattern
+	input := "/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/TestE2E_Something/controller"
+	got := String(input)
+	if got != input {
+		t.Errorf("path with slashes should NOT be redacted\n  input: %q\n  got:   %q", input, got)
+	}
+}
+
+// =============================================================================
+// Level 3 additions: overlap and JSONL interaction
+// =============================================================================
+
+func TestPIIIntegration_OverlappingSecretAndPII(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	// Secret and email adjacent (not overlapping) — both should be redacted
+	input := "key=" + highEntropySecret + " user@example.com"
+	got := String(input)
+	if strings.Contains(got, highEntropySecret) {
+		t.Error("secret should be redacted")
+	}
+	if strings.Contains(got, "user@example.com") {
+		t.Error("email should be redacted")
+	}
+	if !strings.Contains(got, "REDACTED") {
+		t.Error("expected at least one REDACTED token")
+	}
+	if !strings.Contains(got, "[REDACTED_EMAIL]") {
+		t.Error("expected [REDACTED_EMAIL] token")
+	}
+}
+
+func TestPIIIntegration_JSONLSkippedFieldWithEmail(t *testing.T) {
+	ConfigurePII(PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{PIIEmail: true},
+	})
+	t.Cleanup(resetPIIConfig)
+
+	// Email in file_path field should NOT be redacted (field is skipped).
+	// Email in content field SHOULD be redacted.
+	input := `{"file_path":"user@example.com/project/file.go","content":"contact admin@test.org"}`
+	got, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "user@example.com") {
+		t.Errorf("email in file_path should NOT be redacted, got: %s", got)
+	}
+	if strings.Contains(got, "admin@test.org") {
+		t.Errorf("email in content should be redacted, got: %s", got)
 	}
 }

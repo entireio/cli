@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -13,6 +14,13 @@ const (
 	PIIEmail   PIICategory = "email"
 	PIIPhone   PIICategory = "phone"
 	PIIAddress PIICategory = "address"
+)
+
+// Label constants used in replacement tokens and pattern matching.
+const (
+	labelEmail   = "EMAIL"
+	labelPhone   = "PHONE"
+	labelAddress = "ADDRESS"
 )
 
 // PIIConfig controls which PII categories are detected and redacted.
@@ -68,7 +76,7 @@ func getPIIConfig() *PIIConfig {
 
 // Pre-compiled builtin PII regexes.
 var (
-	emailRegex   = regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`)
+	emailRegex = regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`)
 	// phoneRegex uses three branches to avoid false-positives on dotted-decimal
 	// strings like version numbers (1.234.567.8901) and IPs (192.168.001.0001).
 	// Dots are only allowed as separators when preceded by +1 (unambiguous intl prefix).
@@ -85,6 +93,41 @@ var (
 	addressRegex = regexp.MustCompile(`\d{1,5}\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*\s+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Ln|Lane|Rd|Road|Ct|Court|Pl(?:ace)?|Way|Cir(?:cle)?|Ter(?:race)?|Pkwy|Parkway)\.?`)
 )
 
+// emailAllowPatterns are email patterns that should NOT be treated as PII.
+// These appear frequently in coding transcripts (git authors, bot accounts)
+// and are public metadata rather than private information.
+// Entries starting with "@" match the email suffix; entries ending with "@"
+// match the email prefix. All comparisons are case-insensitive.
+var emailAllowPatterns = []string{
+	"noreply@",                  // Generic noreply addresses
+	"actions@",                  // GitHub Actions bot
+	"@users.noreply.github.com", // GitHub user noreply
+	"@noreply.github.com",       // GitHub noreply
+}
+
+// isAllowlistedEmail returns true if the email matches a known non-sensitive pattern.
+func isAllowlistedEmail(email string) bool {
+	lower := strings.ToLower(email)
+	for _, pattern := range emailAllowPatterns {
+		lp := strings.ToLower(pattern)
+		switch {
+		case strings.HasPrefix(pattern, "@"):
+			if strings.HasSuffix(lower, lp) {
+				return true
+			}
+		case strings.HasSuffix(pattern, "@"):
+			if strings.HasPrefix(lower, lp) {
+				return true
+			}
+		default:
+			if lower == lp {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // builtinPIIPattern associates a compiled regex with a category and label.
 type builtinPIIPattern struct {
 	category PIICategory
@@ -94,9 +137,9 @@ type builtinPIIPattern struct {
 
 // builtinPIIPatterns is the set of default PII detection patterns.
 var builtinPIIPatterns = []builtinPIIPattern{
-	{PIIEmail, "EMAIL", emailRegex},
-	{PIIPhone, "PHONE", phoneRegex},
-	{PIIAddress, "ADDRESS", addressRegex},
+	{PIIEmail, labelEmail, emailRegex},
+	{PIIPhone, labelPhone, phoneRegex},
+	{PIIAddress, labelAddress, addressRegex},
 }
 
 // detectPII returns tagged regions for PII matches in s.
@@ -113,6 +156,10 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 	var regions []taggedRegion
 	for _, p := range patterns {
 		for _, loc := range p.regex.FindAllStringIndex(s, -1) {
+			// Skip allowlisted email addresses (noreply, bot accounts, etc.).
+			if p.label == labelEmail && isAllowlistedEmail(s[loc[0]:loc[1]]) {
+				continue
+			}
 			regions = append(regions, taggedRegion{
 				region: region{loc[0], loc[1]},
 				label:  p.label,
@@ -135,7 +182,8 @@ func compilePIIPatterns(cfg *PIIConfig) []piiPattern {
 	for label, pattern := range cfg.CustomPatterns {
 		compiled, err := regexp.Compile(pattern)
 		if err != nil {
-			continue // skip invalid custom patterns silently
+			slog.Warn("skipping invalid custom PII pattern", slog.String("label", label), slog.String("error", err.Error()))
+			continue
 		}
 		patterns = append(patterns, piiPattern{regex: compiled, label: strings.ToUpper(label)})
 	}
