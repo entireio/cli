@@ -77,7 +77,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	}
 
 	// Build informational message
-	message := "\n\nPowered by Entire:\n  This conversation will be linked to your next commit."
+	message := "\n\nPowered by Entire:\n  This conversation will be linked to your next commit.\n  Tip: Use /entire-digest for your team's activity highlights."
 
 	// Check for concurrent sessions and append count if any
 	_, countSessionsSpan := perf.Start(ctx, "count_active_sessions")

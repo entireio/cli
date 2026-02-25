@@ -107,7 +107,7 @@ func (g *ClaudeGenerator) Generate(ctx context.Context, input Input) (*checkpoin
 	// git hooks set GIT_DIR which lets Claude Code find the repo regardless of cwd.
 	// This also prevents recursive triggering of Entire's own git hooks.
 	cmd.Dir = os.TempDir()
-	cmd.Env = stripGitEnv(os.Environ())
+	cmd.Env = stripSessionEnv(os.Environ())
 
 	// Pass prompt via stdin
 	cmd.Stdin = strings.NewReader(prompt)
@@ -159,14 +159,16 @@ func buildSummarizationPrompt(transcriptText string) string {
 	return fmt.Sprintf(summarizationPromptTemplate, transcriptText)
 }
 
-// stripGitEnv returns a copy of env with all GIT_* variables removed.
-// This prevents a subprocess from discovering or modifying the parent's git repo.
-func stripGitEnv(env []string) []string {
+// stripSessionEnv returns a copy of env with GIT_*, CLAUDECODE*, and CLAUDE_CODE_* variables removed.
+// Stripping GIT_* prevents a subprocess from discovering the parent's git repo.
+// Stripping CLAUDE_CODE_*/CLAUDECODE allows the Claude CLI subprocess to run inside a Claude Code session.
+func stripSessionEnv(env []string) []string {
 	filtered := make([]string, 0, len(env))
 	for _, e := range env {
-		if !strings.HasPrefix(e, "GIT_") {
-			filtered = append(filtered, e)
+		if strings.HasPrefix(e, "GIT_") || strings.HasPrefix(e, "CLAUDECODE") || strings.HasPrefix(e, "CLAUDE_CODE_") {
+			continue
 		}
+		filtered = append(filtered, e)
 	}
 	return filtered
 }

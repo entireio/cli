@@ -110,6 +110,18 @@ type HookSupport interface {
 	AreHooksInstalled(ctx context.Context) bool
 }
 
+// SkillInstaller is implemented by agents that support installing skills (e.g., SKILL.md files).
+// This optional interface allows agents like Claude Code to install skill definitions
+// that enable slash-command invocation of Entire features from within the agent.
+type SkillInstaller interface {
+	// InstallSkills installs agent-specific skills (e.g., /digest).
+	// If force is true, overwrites existing skill files.
+	InstallSkills(localDev bool, force bool) error
+
+	// UninstallSkills removes installed skill files.
+	UninstallSkills() error
+}
+
 // FileWatcher is implemented by agents that use file-based detection.
 // Agents like Aider that don't support hooks can use file watching
 // to detect session activity.

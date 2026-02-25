@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
@@ -654,5 +655,137 @@ func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 		if err := json.Unmarshal(rawHooks["Stop"], &stopMatchers); err == nil && len(stopMatchers) > 0 {
 			t.Errorf("Stop hook should have been removed")
 		}
+	}
+}
+
+func TestInstallSkills_FreshInstall(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &ClaudeCodeAgent{}
+	err := ag.InstallSkills(false, false)
+	if err != nil {
+		t.Fatalf("InstallSkills() error = %v", err)
+	}
+
+	skillPath := filepath.Join(tempDir, ".claude", "skills", "entire-digest", "SKILL.md")
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("failed to read SKILL.md: %v", err)
+	}
+
+	content := string(data)
+	if len(content) == 0 {
+		t.Error("SKILL.md is empty")
+	}
+	if !strings.Contains(content, "name: entire-digest") {
+		t.Error("SKILL.md missing name frontmatter")
+	}
+	if !strings.Contains(content, "entire digest") {
+		t.Error("SKILL.md missing entire digest command reference")
+	}
+}
+
+func TestInstallSkills_Idempotent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &ClaudeCodeAgent{}
+
+	// First install
+	if err := ag.InstallSkills(false, false); err != nil {
+		t.Fatalf("first InstallSkills() error = %v", err)
+	}
+
+	// Get file info after first install
+	skillPath := filepath.Join(tempDir, ".claude", "skills", "entire-digest", "SKILL.md")
+	info1, err := os.Stat(skillPath)
+	if err != nil {
+		t.Fatalf("failed to stat SKILL.md after first install: %v", err)
+	}
+
+	// Second install (should skip because file exists)
+	if err := ag.InstallSkills(false, false); err != nil {
+		t.Fatalf("second InstallSkills() error = %v", err)
+	}
+
+	info2, err := os.Stat(skillPath)
+	if err != nil {
+		t.Fatalf("failed to stat SKILL.md after second install: %v", err)
+	}
+
+	// File should not have been rewritten
+	if info1.ModTime() != info2.ModTime() {
+		t.Error("SKILL.md was rewritten on second install (should be idempotent)")
+	}
+}
+
+func TestInstallSkills_ForceOverwrites(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &ClaudeCodeAgent{}
+
+	// First install
+	if err := ag.InstallSkills(false, false); err != nil {
+		t.Fatalf("first InstallSkills() error = %v", err)
+	}
+
+	// Write custom content to simulate user modification
+	skillPath := filepath.Join(tempDir, ".claude", "skills", "entire-digest", "SKILL.md")
+	if err := os.WriteFile(skillPath, []byte("custom content"), 0o644); err != nil {
+		t.Fatalf("failed to write custom content: %v", err)
+	}
+
+	// Force install should overwrite
+	if err := ag.InstallSkills(false, true); err != nil {
+		t.Fatalf("force InstallSkills() error = %v", err)
+	}
+
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("failed to read SKILL.md: %v", err)
+	}
+
+	if string(data) == "custom content" {
+		t.Error("force install did not overwrite custom content")
+	}
+}
+
+func TestUninstallSkills(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &ClaudeCodeAgent{}
+
+	// Install first
+	if err := ag.InstallSkills(false, false); err != nil {
+		t.Fatalf("InstallSkills() error = %v", err)
+	}
+
+	skillDir := filepath.Join(tempDir, ".claude", "skills", "entire-digest")
+	if _, err := os.Stat(skillDir); os.IsNotExist(err) {
+		t.Fatal("skill directory should exist after install")
+	}
+
+	// Uninstall
+	if err := ag.UninstallSkills(); err != nil {
+		t.Fatalf("UninstallSkills() error = %v", err)
+	}
+
+	if _, err := os.Stat(skillDir); !os.IsNotExist(err) {
+		t.Error("skill directory should be removed after uninstall")
+	}
+}
+
+func TestUninstallSkills_NoDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &ClaudeCodeAgent{}
+
+	// Should not error when no skill directory exists
+	if err := ag.UninstallSkills(); err != nil {
+		t.Fatalf("UninstallSkills() should not error when no directory: %v", err)
 	}
 }

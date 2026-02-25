@@ -55,17 +55,21 @@ func TestClaudeGenerator_GitIsolation(t *testing.T) {
 	}
 }
 
-func TestStripGitEnv(t *testing.T) {
+func TestStripSessionEnv(t *testing.T) {
 	env := []string{
 		"HOME=/Users/test",
 		"GIT_DIR=/repo/.git",
 		"PATH=/usr/bin",
 		"GIT_WORK_TREE=/repo",
 		"GIT_INDEX_FILE=/repo/.git/index",
+		"CLAUDECODE=1",
+		"CLAUDECODE_SESSION_ID=abc123",
+		"CLAUDE_CODE_ENTRYPOINT=cli",
+		"CLAUDE_CODE_SESSION_ACCESS_TOKEN=sk-test",
 		"SHELL=/bin/zsh",
 	}
 
-	filtered := stripGitEnv(env)
+	filtered := stripSessionEnv(env)
 
 	expected := []string{
 		"HOME=/Users/test",

@@ -374,6 +374,11 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, localDev, forceHooks b
 		return 0, fmt.Errorf("failed to install %s hooks: %w", ag.Name(), err)
 	}
 
+	// Install skills if supported (best-effort, don't fail on error)
+	if skillAgent, ok := hookAgent.(agent.SkillInstaller); ok {
+		_ = skillAgent.InstallSkills(localDev, forceHooks)
+	}
+
 	return count, nil
 }
 
@@ -600,6 +605,13 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	installedHooks, err := hookAgent.InstallHooks(ctx, opts.LocalDev, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
+	}
+
+	// Install agent skills (e.g., /digest) if supported
+	if skillAgent, ok := hookAgent.(agent.SkillInstaller); ok {
+		if err := skillAgent.InstallSkills(opts.LocalDev, opts.ForceHooks); err != nil {
+			fmt.Fprintf(w, "Warning: failed to install skills: %v\n", err)
+		}
 	}
 
 	// Setup .entire directory
@@ -1097,6 +1109,12 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 			errs = append(errs, err)
 		} else if wasInstalled {
 			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+		}
+		// Remove skills if supported
+		if skillAgent, ok := hs.(agent.SkillInstaller); ok {
+			if err := skillAgent.UninstallSkills(); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return errors.Join(errs...)
