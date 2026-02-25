@@ -454,7 +454,7 @@ func TestRemoveAgentHooks_RemovesPiHooks(t *testing.T) {
 		t.Fatalf("expected pi scaffold to be removed")
 	}
 
-	if !strings.Contains(stdout.String(), "Removed Pi hooks") {
+	if !strings.Contains(stdout.String(), "Removed Pi Coding Agent hooks") {
 		t.Fatalf("expected output to mention Pi hook removal, got: %s", stdout.String())
 	}
 }
@@ -489,10 +489,10 @@ export default function() {}
 	}
 
 	output := stdout.String()
-	if strings.Contains(output, "Removed Pi hooks") {
+	if strings.Contains(output, "Removed Pi Coding Agent hooks") {
 		t.Fatalf("unexpected removed message for unmanaged hooks: %s", output)
 	}
-	if !strings.Contains(output, "Preserved unmanaged Pi hooks") {
+	if !strings.Contains(output, "Preserved unmanaged Pi Coding Agent hooks") {
 		t.Fatalf("expected preserved unmanaged message, got: %s", output)
 	}
 }

@@ -1067,7 +1067,11 @@ func removeAgentHooks(w io.Writer) error {
 		if err := hs.UninstallHooks(); err != nil {
 			errs = append(errs, err)
 		} else if wasInstalled {
-			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+			if hs.AreHooksInstalled() {
+				fmt.Fprintf(w, "  Preserved unmanaged %s hooks\n", ag.Type())
+			} else {
+				fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+			}
 		}
 	}
 	return errors.Join(errs...)

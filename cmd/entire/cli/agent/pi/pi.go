@@ -51,9 +51,9 @@ func (p *PiAgent) IsPreview() bool { return false }
 
 // DetectPresence checks if Pi is configured in the repository.
 func (p *PiAgent) DetectPresence() (bool, error) {
-	// Get repo root to check for .pi directory
+	// Get worktree root to check for .pi directory
 	// This is needed because the CLI may be run from a subdirectory
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		// Not in a git repo, fall back to CWD-relative check
 		repoRoot = "."

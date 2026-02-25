@@ -184,12 +184,12 @@ func (p *PiAgent) GetSupportedHooks() []agent.HookType {
 }
 
 func getRepoRootOrCWD() (string, error) {
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err == nil {
 		return repoRoot, nil
 	}
 
-	cwd, cwdErr := os.Getwd() //nolint:forbidigo // Intentional fallback when RepoRoot() fails (tests, non-git dirs)
+	cwd, cwdErr := os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests, non-git dirs)
 	if cwdErr != nil {
 		return "", fmt.Errorf("failed to determine repository path: %w", cwdErr)
 	}
