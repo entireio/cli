@@ -2019,6 +2019,62 @@ func TestExtractUserPrompts(t *testing.T) {
 	}
 }
 
+func TestExtractUserPromptsWithLeaf_Pi(t *testing.T) {
+	content := `{"type":"message","id":"1","parentId":null,"message":{"role":"user","content":"root prompt"}}
+{"type":"message","id":"2","parentId":"1","message":{"role":"assistant","content":[{"type":"text","text":"branch point"}]}}
+{"type":"message","id":"left","parentId":"2","message":{"role":"user","content":"left prompt"}}
+{"type":"message","id":"right","parentId":"2","message":{"role":"user","content":"right prompt"}}`
+
+	left := extractUserPromptsWithLeaf(agent.AgentTypePi, content, "left")
+	if len(left) != 2 || left[0] != "root prompt" || left[1] != "left prompt" {
+		t.Fatalf("left branch prompts = %#v, want %#v", left, []string{"root prompt", "left prompt"})
+	}
+
+	right := extractUserPromptsWithLeaf(agent.AgentTypePi, content, "right")
+	if len(right) != 2 || right[0] != "root prompt" || right[1] != "right prompt" {
+		t.Fatalf("right branch prompts = %#v, want %#v", right, []string{"root prompt", "right prompt"})
+	}
+}
+
+func TestCalculateTokenUsageWithLeaf_Pi(t *testing.T) {
+	content := []byte(`{"type":"message","id":"1","parentId":null,"message":{"role":"user","content":"root prompt"}}
+{"type":"message","id":"2","parentId":"1","message":{"role":"assistant","usage":{"input_tokens":5,"output_tokens":1}}}
+{"type":"message","id":"3","parentId":"1","message":{"role":"assistant","usage":{"input_tokens":7,"output_tokens":2}}}`)
+
+	left := calculateTokenUsageWithLeaf(agent.AgentTypePi, content, 0, "2")
+	if left.APICallCount != 1 || left.InputTokens != 5 || left.OutputTokens != 1 {
+		t.Fatalf("left usage = %+v, want api=1 input=5 output=1", left)
+	}
+
+	right := calculateTokenUsageWithLeaf(agent.AgentTypePi, content, 0, "3")
+	if right.APICallCount != 1 || right.InputTokens != 7 || right.OutputTokens != 2 {
+		t.Fatalf("right usage = %+v, want api=1 input=7 output=2", right)
+	}
+}
+
+func TestEffectiveTranscriptLeafID(t *testing.T) {
+	t.Run("pi active ignores persisted leaf", func(t *testing.T) {
+		got := effectiveTranscriptLeafID(agent.AgentTypePi, " leaf-123 ", true)
+		if got != "" {
+			t.Fatalf("effectiveTranscriptLeafID() = %q, want empty", got)
+		}
+	})
+
+	t.Run("pi idle uses persisted leaf", func(t *testing.T) {
+		got := effectiveTranscriptLeafID(agent.AgentTypePi, " leaf-123 ", false)
+		if got != "leaf-123" {
+			t.Fatalf("effectiveTranscriptLeafID() = %q, want %q", got, "leaf-123")
+		}
+	})
+
+	t.Run("non-pi preserves trimmed leaf", func(t *testing.T) {
+		got := effectiveTranscriptLeafID(agent.AgentTypeClaudeCode, " leaf-123 ", true)
+		if got != "leaf-123" {
+			t.Fatalf("effectiveTranscriptLeafID() = %q, want %q", got, "leaf-123")
+		}
+	})
+}
+
 // TestCondenseSession_IncludesInitialAttribution verifies that when manual-commit
 // condenses a session, it calculates InitialAttribution by comparing the shadow branch
 // (agent work) to HEAD (what was committed).

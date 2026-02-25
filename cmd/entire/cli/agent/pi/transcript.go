@@ -25,14 +25,15 @@ const (
 
 // TranscriptEntry represents one JSONL row in a Pi transcript.
 type TranscriptEntry struct {
-	Type     string             `json:"type"`
-	ID       string             `json:"id,omitempty"`
-	UUID     string             `json:"uuid,omitempty"`
-	ParentID *string            `json:"parentId,omitempty"`
-	Message  *TranscriptMessage `json:"message,omitempty"`
-	Summary  string             `json:"summary,omitempty"`
-	Content  interface{}        `json:"content,omitempty"`
-	Display  bool               `json:"display,omitempty"`
+	Type      string             `json:"type"`
+	ID        string             `json:"id,omitempty"`
+	UUID      string             `json:"uuid,omitempty"`
+	ParentID  *string            `json:"parentId,omitempty"`
+	Timestamp string             `json:"timestamp,omitempty"`
+	Message   *TranscriptMessage `json:"message,omitempty"`
+	Summary   string             `json:"summary,omitempty"`
+	Content   interface{}        `json:"content,omitempty"`
+	Display   bool               `json:"display,omitempty"`
 }
 
 // EntryID returns the best available identifier for this entry.
@@ -49,6 +50,9 @@ type TranscriptMessage struct {
 	Content    interface{}            `json:"content,omitempty"`
 	ToolName   string                 `json:"toolName,omitempty"`
 	ToolCallID string                 `json:"toolCallId,omitempty"`
+	Provider   string                 `json:"provider,omitempty"`
+	ModelID    string                 `json:"modelId,omitempty"`
+	Model      string                 `json:"model,omitempty"`
 	Details    interface{}            `json:"details,omitempty"`
 	Usage      map[string]interface{} `json:"usage,omitempty"`
 	Tokens     map[string]interface{} `json:"tokens,omitempty"`

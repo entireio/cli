@@ -261,7 +261,10 @@ func TestProtectedDirs(t *testing.T) {
 func TestReadSession(t *testing.T) {
 	dir := t.TempDir()
 	transcriptPath := filepath.Join(dir, "session.jsonl")
-	content := `{"type":"message","id":"1","message":{"role":"assistant","content":[{"type":"toolCall","name":"write","arguments":{"path":"foo.go"}}]}}
+	content := `{"type":"message","id":"1","timestamp":"2026-02-20T10:00:00Z","message":{"role":"user","content":"create foo"}}
+{"type":"message","id":"2","timestamp":"2026-02-20T10:00:01Z","message":{"role":"assistant","provider":"openai","modelId":"gpt-5","usage":{"input_tokens":11,"output_tokens":5,"cost":{"total":0.01}},"content":[{"type":"text","text":"writing foo.go"},{"type":"toolCall","name":"write","arguments":{"path":"foo.go"}}]}}
+{"type":"message","id":"3","timestamp":"2026-02-20T10:00:02Z","message":{"role":"toolResult","toolName":"write","details":{"path":"foo.go"}}}
+{"type":"compaction","id":"4","timestamp":"2026-02-20T10:00:03Z","summary":"Compacted old context"}
 `
 	if err := os.WriteFile(transcriptPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("failed to write transcript: %v", err)
@@ -284,6 +287,37 @@ func TestReadSession(t *testing.T) {
 	}
 	if len(session.ModifiedFiles) != 1 || session.ModifiedFiles[0] != "foo.go" {
 		t.Fatalf("ModifiedFiles = %#v, want [foo.go]", session.ModifiedFiles)
+	}
+	if len(session.Entries) != 4 {
+		t.Fatalf("Entries len = %d, want 4", len(session.Entries))
+	}
+	if session.StartTime.IsZero() {
+		t.Fatal("StartTime should be populated from transcript timestamps")
+	}
+	if session.Entries[0].Type != agent.EntryUser || session.Entries[0].Content != "create foo" {
+		t.Fatalf("first entry = %#v, want user entry with content", session.Entries[0])
+	}
+	if session.Entries[1].Type != agent.EntryAssistant {
+		t.Fatalf("second entry type = %q, want %q", session.Entries[1].Type, agent.EntryAssistant)
+	}
+	meta, ok := session.Entries[1].ToolOutput.(map[string]interface{})
+	if !ok {
+		t.Fatalf("assistant entry metadata missing, got %#v", session.Entries[1].ToolOutput)
+	}
+	if meta["provider"] != "openai" {
+		t.Fatalf("assistant provider metadata = %#v, want openai", meta["provider"])
+	}
+	if meta["model_id"] != "gpt-5" {
+		t.Fatalf("assistant model metadata = %#v, want gpt-5", meta["model_id"])
+	}
+	if session.Entries[2].Type != agent.EntryTool || session.Entries[2].ToolName != "write" {
+		t.Fatalf("third entry = %#v, want tool entry for write", session.Entries[2])
+	}
+	if len(session.Entries[2].FilesAffected) != 1 || session.Entries[2].FilesAffected[0] != "foo.go" {
+		t.Fatalf("tool files affected = %#v, want [foo.go]", session.Entries[2].FilesAffected)
+	}
+	if session.Entries[3].Type != agent.EntrySystem || session.Entries[3].Content != "Compacted old context" {
+		t.Fatalf("fourth entry = %#v, want compaction summary system entry", session.Entries[3])
 	}
 }
 
@@ -346,9 +380,14 @@ func TestWriteSession_Errors(t *testing.T) {
 
 func TestFormatResumeCommand(t *testing.T) {
 	ag := &PiAgent{}
-	cmd := ag.FormatResumeCommand("abc")
-	if !strings.Contains(cmd, "pi") {
-		t.Fatalf("FormatResumeCommand() = %q, expected to contain 'pi'", cmd)
+	cmd := ag.FormatResumeCommand("abc123")
+	if cmd != "pi --session abc123" {
+		t.Fatalf("FormatResumeCommand() = %q, want %q", cmd, "pi --session abc123")
+	}
+
+	fallback := ag.FormatResumeCommand("")
+	if fallback != "pi --resume" {
+		t.Fatalf("FormatResumeCommand(empty) = %q, want %q", fallback, "pi --resume")
 	}
 }
 

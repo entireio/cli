@@ -6,16 +6,23 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // Compile-time interface assertions for new lifecycle interfaces.
 var (
 	_ agent.TranscriptAnalyzer = (*PiAgent)(nil)
 	_ agent.TokenCalculator    = (*PiAgent)(nil)
+)
+
+const (
+	turnEndTranscriptWaitTimeout  = 5 * time.Second
+	turnEndTranscriptPollInterval = 50 * time.Millisecond
 )
 
 // HookNames returns the hook verbs Pi supports.
@@ -57,6 +64,11 @@ func (p *PiAgent) ParseHookEvent(hookName string, stdin io.Reader) (*agent.Event
 func (p *PiAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
 	if err != nil {
+		// Graceful degradation: if Pi is shutting down and transcript is unavailable,
+		// continue hook lifecycle with empty transcript instead of failing hard.
+		if os.IsNotExist(err) {
+			return []byte{}, nil
+		}
 		return nil, fmt.Errorf("failed to read transcript: %w", err)
 	}
 	return data, nil
@@ -145,10 +157,20 @@ func (p *PiAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 		return nil, err
 	}
 
+	transcriptRef, ensureErr := ensureTurnEndTranscriptPath(raw.SessionID, raw.TranscriptPath)
+	if ensureErr != nil {
+		return nil, ensureErr
+	}
+	if strings.TrimSpace(raw.TranscriptPath) != "" {
+		// Pi may emit stop before transcript bytes are fully flushed.
+		// Wait briefly for non-empty content; continue even on timeout.
+		_ = waitForNonEmptyFile(transcriptRef, turnEndTranscriptWaitTimeout, turnEndTranscriptPollInterval)
+	}
+
 	event := &agent.Event{
 		Type:       agent.TurnEnd,
 		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
+		SessionRef: transcriptRef,
 		Timestamp:  time.Now(),
 	}
 	if leafID := strings.TrimSpace(raw.LeafID); leafID != "" {
@@ -181,6 +203,80 @@ func (p *PiAgent) parseCompaction(stdin io.Reader) (*agent.Event, error) {
 		SessionRef: raw.TranscriptPath,
 		Timestamp:  time.Now(),
 	}, nil
+}
+
+func ensureTurnEndTranscriptPath(sessionID, transcriptPath string) (string, error) {
+	return ensureTurnEndTranscriptPathInRoot(sessionID, transcriptPath, "")
+}
+
+func ensureTurnEndTranscriptPathInRoot(sessionID, transcriptPath, repoRoot string) (string, error) {
+	root := strings.TrimSpace(repoRoot)
+	if root == "" {
+		root = "."
+		if detectedRoot, err := paths.WorktreeRoot(); err == nil && strings.TrimSpace(detectedRoot) != "" {
+			root = detectedRoot
+		}
+	}
+
+	resolvedPath := strings.TrimSpace(transcriptPath)
+	if resolvedPath == "" {
+		resolvedPath = filepath.Join(root, ".entire", "tmp", sanitizeSessionIDForFileName(sessionID)+".jsonl")
+	} else if !filepath.IsAbs(resolvedPath) {
+		resolvedPath = filepath.Join(root, resolvedPath)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(resolvedPath), 0o750); err != nil {
+		return "", fmt.Errorf("failed to prepare transcript directory: %w", err)
+	}
+
+	if _, err := os.Stat(resolvedPath); err != nil {
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("failed to stat transcript file: %w", err)
+		}
+		file, createErr := os.OpenFile(resolvedPath, os.O_CREATE|os.O_WRONLY, 0o600)
+		if createErr != nil {
+			return "", fmt.Errorf("failed to create transcript file: %w", createErr)
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			return "", fmt.Errorf("failed to close transcript file: %w", closeErr)
+		}
+	}
+
+	return resolvedPath, nil
+}
+
+func sanitizeSessionIDForFileName(sessionID string) string {
+	trimmed := strings.TrimSpace(sessionID)
+	if trimmed == "" {
+		return "unknown-session"
+	}
+	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-")
+	return replacer.Replace(trimmed)
+}
+
+func waitForNonEmptyFile(path string, timeout, pollInterval time.Duration) bool {
+	resolvedPath := strings.TrimSpace(path)
+	if resolvedPath == "" {
+		return false
+	}
+	if timeout <= 0 {
+		timeout = turnEndTranscriptWaitTimeout
+	}
+	if pollInterval <= 0 {
+		pollInterval = turnEndTranscriptPollInterval
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		info, err := os.Stat(resolvedPath)
+		if err == nil && info.Size() > 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 // readAndParse reads stdin and unmarshals JSON into the given type.

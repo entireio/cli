@@ -13,7 +13,7 @@ func TestSetupPiHooks_ScaffoldsManagedExtension(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	env.InitRepo()
-	env.InitEntire("manual-commit")
+	env.InitEntire()
 
 	env.WriteFile("README.md", "# Test")
 	env.GitAdd("README.md")
@@ -38,7 +38,7 @@ func TestSetupPiHooks_ScaffoldContainsAllRequiredHookCommands(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	env.InitRepo()
-	env.InitEntire("manual-commit")
+	env.InitEntire()
 
 	env.WriteFile("README.md", "# Test")
 	env.GitAdd("README.md")
@@ -92,7 +92,7 @@ func TestSetupPiHooks_EnableIsIdempotent(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	env.InitRepo()
-	env.InitEntire("manual-commit")
+	env.InitEntire()
 
 	env.WriteFile("README.md", "# Test")
 	env.GitAdd("README.md")
@@ -125,7 +125,7 @@ func TestSetupPiHooks_EnableFailsForUnmanagedPrimaryExtensionWithoutForce(t *tes
 	t.Parallel()
 	env := NewTestEnv(t)
 	env.InitRepo()
-	env.InitEntire("manual-commit")
+	env.InitEntire()
 
 	env.WriteFile("README.md", "# Test")
 	env.GitAdd("README.md")
@@ -165,7 +165,7 @@ func TestSetupPiHooks_ForceOverwritesExistingUserExtension(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	env.InitRepo()
-	env.InitEntire("manual-commit")
+	env.InitEntire()
 
 	env.WriteFile("README.md", "# Test")
 	env.GitAdd("README.md")
@@ -202,7 +202,7 @@ func TestSetupPiHooks_DisableUninstallRemovesManagedExtension(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	env.InitRepo()
-	env.InitEntire("manual-commit")
+	env.InitEntire()
 
 	env.WriteFile("README.md", "# Test")
 	env.GitAdd("README.md")
@@ -234,7 +234,7 @@ func TestSetupPiHooks_DisableUninstallPreservesUnmanagedExtension(t *testing.T) 
 	t.Parallel()
 	env := NewTestEnv(t)
 	env.InitRepo()
-	env.InitEntire("manual-commit")
+	env.InitEntire()
 
 	env.WriteFile("README.md", "# Test")
 	env.GitAdd("README.md")

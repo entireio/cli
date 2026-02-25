@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -118,6 +119,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)
 	ref, err := repo.Reference(refName, true)
 	hasShadowBranch := err == nil
+	effectiveLeafID := effectiveTranscriptLeafID(state.AgentType, state.TranscriptLeafID, state.Phase.IsActive())
 
 	var sessionData *ExtractedSessionData
 	if hasShadowBranch {
@@ -128,7 +130,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		// potentially stale shadow branch copy (SaveStep may have been skipped if the
 		// last turn had no code changes).
 		// Pass CheckpointTranscriptStart for accurate token calculation (line offset for Claude, message index for Gemini).
-		sessionData, err = s.extractSessionData(repo, ref.Hash(), state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.Phase.IsActive())
+		sessionData, err = s.extractSessionData(repo, ref.Hash(), state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, effectiveLeafID, state.Phase.IsActive())
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session data: %w", err)
 		}
@@ -144,7 +146,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		if state.Phase.IsActive() {
 			prepareTranscriptIfNeeded(state.AgentType, state.TranscriptPath)
 		}
-		sessionData, err = s.extractSessionDataFromLiveTranscript(state)
+		sessionData, err = s.extractSessionDataFromLiveTranscript(state, effectiveLeafID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session data from live transcript: %w", err)
 		}
@@ -396,7 +398,7 @@ func calculateSessionAttributions(repo *git.Repository, shadowRef *plumbing.Refe
 // This handles the case where SaveStep was skipped (no code changes) but the transcript
 // continued growing — the shadow branch copy would be stale.
 // checkpointTranscriptStart is the line offset (Claude) or message index (Gemini) where the current checkpoint began.
-func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType agent.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
+func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType agent.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, transcriptLeafID string, isActive bool) (*ExtractedSessionData, error) {
 	commit, err := repo.CommitObject(shadowRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commit object: %w", err)
@@ -443,7 +445,7 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 	if fullTranscript != "" {
 		data.Transcript = []byte(fullTranscript)
 		data.FullTranscriptLines = countTranscriptItems(agentType, fullTranscript)
-		data.Prompts = extractUserPrompts(agentType, fullTranscript)
+		data.Prompts = extractUserPromptsWithLeaf(agentType, fullTranscript, transcriptLeafID)
 		data.Context = generateContextFromPrompts(data.Prompts)
 	}
 
@@ -452,15 +454,27 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 
 	// Calculate token usage from the extracted transcript portion
 	if len(data.Transcript) > 0 {
-		data.TokenUsage = calculateTokenUsage(agentType, data.Transcript, checkpointTranscriptStart)
+		data.TokenUsage = calculateTokenUsageWithLeaf(agentType, data.Transcript, checkpointTranscriptStart, transcriptLeafID)
 	}
 
 	return data, nil
 }
 
+// effectiveTranscriptLeafID returns the transcript leaf scope used for extraction.
+// PI sessions in ACTIVE phase intentionally avoid persisted leaf scoping and instead
+// resolve the current active branch from the live transcript to avoid stale leaf IDs
+// after no-change turns.
+func effectiveTranscriptLeafID(agentType agent.AgentType, transcriptLeafID string, isActive bool) string {
+	trimmedLeafID := strings.TrimSpace(transcriptLeafID)
+	if agentType == agent.AgentTypePi && isActive {
+		return ""
+	}
+	return trimmedLeafID
+}
+
 // extractSessionDataFromLiveTranscript extracts session data directly from the live transcript file.
 // This is used for mid-session commits where no shadow branch exists yet.
-func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(state *SessionState) (*ExtractedSessionData, error) {
+func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(state *SessionState, transcriptLeafID string) (*ExtractedSessionData, error) {
 	data := &ExtractedSessionData{}
 
 	// Read the live transcript
@@ -480,7 +494,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(state *Sessi
 	fullTranscript := string(liveData)
 	data.Transcript = liveData
 	data.FullTranscriptLines = countTranscriptItems(state.AgentType, fullTranscript)
-	data.Prompts = extractUserPrompts(state.AgentType, fullTranscript)
+	data.Prompts = extractUserPromptsWithLeaf(state.AgentType, fullTranscript, transcriptLeafID)
 	data.Context = generateContextFromPrompts(data.Prompts)
 
 	// Extract files from transcript since state.FilesTouched may be empty for mid-session commits
@@ -494,7 +508,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(state *Sessi
 
 	// Calculate token usage from the extracted transcript portion
 	if len(data.Transcript) > 0 {
-		data.TokenUsage = calculateTokenUsage(state.AgentType, data.Transcript, state.CheckpointTranscriptStart)
+		data.TokenUsage = calculateTokenUsageWithLeaf(state.AgentType, data.Transcript, state.CheckpointTranscriptStart, transcriptLeafID)
 	}
 
 	return data, nil
@@ -543,8 +557,23 @@ func countTranscriptItems(agentType agent.AgentType, content string) int {
 // extractUserPrompts extracts all user prompts from transcript content.
 // Returns prompts with IDE context tags stripped (e.g., <ide_opened_file>).
 func extractUserPrompts(agentType agent.AgentType, content string) []string {
+	return extractUserPromptsWithLeaf(agentType, content, "")
+}
+
+// extractUserPromptsWithLeaf extracts all user prompts from transcript content.
+// For Pi tree-based transcripts, prompts are scoped to the active leaf when provided.
+func extractUserPromptsWithLeaf(agentType agent.AgentType, content string, leafID string) []string {
 	if content == "" {
 		return nil
+	}
+
+	trimmedLeafID := strings.TrimSpace(leafID)
+	if agentType == agent.AgentTypePi {
+		entries, err := pi.ParseTranscriptWithLeaf([]byte(content), trimmedLeafID)
+		if err != nil {
+			return nil
+		}
+		return pi.ExtractAllUserPromptsFromEntries(entries)
 	}
 
 	// OpenCode uses JSONL with a different per-line schema than Claude Code
@@ -591,8 +620,20 @@ func extractUserPrompts(agentType agent.AgentType, content string) []string {
 // where the current checkpoint began, allowing calculation for only the portion
 // of the transcript since the last checkpoint.
 func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int) *agent.TokenUsage {
+	return calculateTokenUsageWithLeaf(agentType, data, startOffset, "")
+}
+
+// calculateTokenUsageWithLeaf calculates token usage from raw transcript data.
+// For Pi tree-based transcripts, usage is scoped to the active leaf when provided.
+// startOffset is the line number (JSONL) or message index (JSON) where the current
+// checkpoint began, allowing calculation for only the portion since the last checkpoint.
+func calculateTokenUsageWithLeaf(agentType agent.AgentType, data []byte, startOffset int, leafID string) *agent.TokenUsage {
 	if len(data) == 0 {
 		return &agent.TokenUsage{}
+	}
+
+	if agentType == agent.AgentTypePi {
+		return pi.CalculateTokenUsageFromTranscriptWithLeaf(data, startOffset, strings.TrimSpace(leafID))
 	}
 
 	// OpenCode uses JSONL with token info on assistant messages (different schema from Claude Code)

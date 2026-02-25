@@ -1234,6 +1234,21 @@ func (r *PiHookRunner) SimulatePiSessionSwitch(previousSessionID, newSessionID, 
 	return nil
 }
 
+// SimulatePiSessionFork simulates Pi's session_fork lifecycle mapping:
+// session-end(parent) then session-start(child).
+func (r *PiHookRunner) SimulatePiSessionFork(parentSessionID, childSessionID, parentTranscriptPath string) error {
+	r.T.Helper()
+
+	if err := r.SimulatePiSessionEnd(parentSessionID, parentTranscriptPath); err != nil {
+		return fmt.Errorf("session-fork: session-end failed: %w", err)
+	}
+	if err := r.SimulatePiSessionStart(childSessionID); err != nil {
+		return fmt.Errorf("session-fork: session-start failed: %w", err)
+	}
+
+	return nil
+}
+
 // PiSession represents a simulated Pi session.
 type PiSession struct {
 	ID             string
@@ -1397,4 +1412,11 @@ func (env *TestEnv) SimulatePiSessionSwitch(previousSessionID, newSessionID, pre
 	env.T.Helper()
 	runner := NewPiHookRunner(env.RepoDir, env.T)
 	return runner.SimulatePiSessionSwitch(previousSessionID, newSessionID, previousTranscriptPath)
+}
+
+// SimulatePiSessionFork is a convenience method on TestEnv.
+func (env *TestEnv) SimulatePiSessionFork(parentSessionID, childSessionID, parentTranscriptPath string) error {
+	env.T.Helper()
+	runner := NewPiHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePiSessionFork(parentSessionID, childSessionID, parentTranscriptPath)
 }

@@ -365,6 +365,10 @@ func handleLifecycleTurnEnd(ag agent.Agent, event *agent.Event) error {
 	}
 
 	// Build fully-populated step context and delegate to strategy
+	leafID := ""
+	if event.Metadata != nil {
+		leafID = strings.TrimSpace(event.Metadata["leaf_id"])
+	}
 	ctx := strategy.StepContext{
 		SessionID:                sessionID,
 		ModifiedFiles:            relModifiedFiles,
@@ -379,6 +383,7 @@ func handleLifecycleTurnEnd(ag agent.Agent, event *agent.Event) error {
 		AgentType:                agentType,
 		StepTranscriptIdentifier: transcriptIdentifierAtStart,
 		StepTranscriptStart:      transcriptLinesAtStart,
+		TranscriptLeafID:         leafID,
 		TokenUsage:               tokenUsage,
 	}
 

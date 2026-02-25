@@ -1665,7 +1665,8 @@ func (s *ManualCommitStrategy) getLastPrompt(repo *git.Repository, state *Sessio
 	// Extract session data to get prompts for commit message generation
 	// Pass agent type to handle different transcript formats (JSONL for Claude, JSON for Gemini)
 	// Pass 0 for checkpointTranscriptStart since we're extracting all prompts, not calculating token usage
-	sessionData, err := s.extractSessionData(repo, ref.Hash(), state.SessionID, nil, state.AgentType, "", 0, state.Phase.IsActive())
+	effectiveLeafID := effectiveTranscriptLeafID(state.AgentType, state.TranscriptLeafID, state.Phase.IsActive())
+	sessionData, err := s.extractSessionData(repo, ref.Hash(), state.SessionID, nil, state.AgentType, "", 0, effectiveLeafID, state.Phase.IsActive())
 	if err != nil || len(sessionData.Prompts) == 0 {
 		return ""
 	}
@@ -1747,7 +1748,8 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(state *SessionState) i
 	}
 
 	// Extract prompts and context from the full transcript
-	prompts := extractUserPrompts(state.AgentType, string(fullTranscript))
+	effectiveLeafID := effectiveTranscriptLeafID(state.AgentType, state.TranscriptLeafID, state.Phase.IsActive())
+	prompts := extractUserPromptsWithLeaf(state.AgentType, string(fullTranscript), effectiveLeafID)
 	contextBytes := generateContextFromPrompts(prompts)
 
 	// Redact secrets before writing — matches WriteCommitted behavior.

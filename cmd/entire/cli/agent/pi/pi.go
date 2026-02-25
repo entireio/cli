@@ -202,14 +202,24 @@ func (p *PiAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, erro
 
 	// Parse to extract computed fields
 	modifiedFiles := p.extractModifiedFiles(data)
+	entries := p.extractSessionEntries(data)
+
+	startTime := time.Now()
+	for _, entry := range entries {
+		if !entry.Timestamp.IsZero() {
+			startTime = entry.Timestamp
+			break
+		}
+	}
 
 	return &agent.AgentSession{
 		SessionID:     input.SessionID,
 		AgentName:     p.Name(),
 		SessionRef:    input.SessionRef,
-		StartTime:     time.Now(),
+		StartTime:     startTime,
 		NativeData:    data,
 		ModifiedFiles: modifiedFiles,
+		Entries:       entries,
 	}, nil
 }
 
@@ -239,8 +249,13 @@ func (p *PiAgent) WriteSession(session *agent.AgentSession) error {
 }
 
 // FormatResumeCommand returns the command to resume a pi session.
-func (p *PiAgent) FormatResumeCommand(_ string) string {
-	return "pi  # then use /resume to select session"
+func (p *PiAgent) FormatResumeCommand(sessionID string) string {
+	trimmedSessionID := strings.TrimSpace(sessionID)
+	if trimmedSessionID == "" {
+		return "pi --resume"
+	}
+	// Pi accepts session ID prefixes via --session and resolves them to session files.
+	return "pi --session " + trimmedSessionID
 }
 
 // GetLastUserPrompt extracts the last user prompt from the session.
@@ -416,6 +431,129 @@ func (p *PiAgent) FindCheckpointUUID(session *agent.AgentSession, toolCallID str
 // This helper is used by tests and callers that already have transcript content loaded.
 func (p *PiAgent) CalculateTokenUsageFromBytes(transcript []byte) *agent.TokenUsage {
 	return CalculateTokenUsageFromTranscript(transcript, 0)
+}
+
+func (p *PiAgent) extractSessionEntries(data []byte) []agent.SessionEntry {
+	parsed, err := ParseTranscript(data)
+	if err != nil {
+		return nil
+	}
+
+	entries := make([]agent.SessionEntry, 0, len(parsed))
+	for _, entry := range parsed {
+		mapped, ok := mapTranscriptEntry(entry)
+		if ok {
+			entries = append(entries, mapped)
+		}
+	}
+
+	return entries
+}
+
+func mapTranscriptEntry(entry TranscriptEntry) (agent.SessionEntry, bool) {
+	mapped := agent.SessionEntry{
+		UUID:      entry.EntryID(),
+		Timestamp: parseEntryTimestamp(entry.Timestamp),
+	}
+
+	if entry.Type == entryTypeMessage && entry.Message != nil {
+		return mapMessageEntry(mapped, *entry.Message)
+	}
+
+	switch entry.Type {
+	case "compaction", "branch_summary", "custom", "custom_message", "label", "session_info", "thinking_level_change", "model_change":
+		mapped.Type = agent.EntrySystem
+		if entry.Summary != "" {
+			mapped.Content = entry.Summary
+		} else {
+			mapped.Content = contentToString(entry.Content)
+		}
+		return mapped, true
+	default:
+		return agent.SessionEntry{}, false
+	}
+}
+
+func mapMessageEntry(base agent.SessionEntry, message TranscriptMessage) (agent.SessionEntry, bool) {
+	switch message.Role {
+	case roleUser:
+		base.Type = agent.EntryUser
+		base.Content = joinTextContent(message.Content)
+		return base, true
+
+	case roleAssistant:
+		base.Type = agent.EntryAssistant
+		base.Content = joinTextContent(message.Content)
+		base.FilesAffected = extractModifiedFilesFromAssistantContent(message.Content)
+
+		meta := make(map[string]interface{})
+		if message.Provider != "" {
+			meta["provider"] = message.Provider
+		}
+		if message.ModelID != "" {
+			meta["model_id"] = message.ModelID
+		}
+		if message.Model != "" {
+			meta["model"] = message.Model
+		}
+		if len(message.Usage) > 0 {
+			meta["usage"] = message.Usage
+		}
+		if len(message.Tokens) > 0 {
+			meta["tokens"] = message.Tokens
+		}
+		if len(meta) > 0 {
+			base.ToolOutput = meta
+		}
+		return base, true
+
+	case roleToolResult, "bashExecution":
+		base.Type = agent.EntryTool
+		base.ToolName = message.ToolName
+		base.ToolInput = message.Content
+		base.ToolOutput = message.Details
+		base.Content = joinTextContent(message.Content)
+		if path := extractPathFromAny(message.Details); path != "" {
+			base.FilesAffected = []string{path}
+		}
+		return base, true
+
+	default:
+		base.Type = agent.EntrySystem
+		base.Content = joinTextContent(message.Content)
+		if base.Content == "" && message.ToolName != "" {
+			base.Content = message.ToolName
+		}
+		return base, true
+	}
+}
+
+func parseEntryTimestamp(raw string) time.Time {
+	if raw == "" {
+		return time.Time{}
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return ts
+	}
+	if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+		return ts
+	}
+	return time.Time{}
+}
+
+func contentToString(content interface{}) string {
+	switch v := content.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	default:
+		bytes, err := json.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return string(bytes)
+	}
 }
 
 // extractModifiedFiles parses JSONL and extracts modified file paths.
