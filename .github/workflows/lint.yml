@@ -33,3 +33,4 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: 'v2.10.1'
+          debug: 'clean'
