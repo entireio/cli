@@ -6,6 +6,7 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/kiro"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 
 	"github.com/spf13/cobra"

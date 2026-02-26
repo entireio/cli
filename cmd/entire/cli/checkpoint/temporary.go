@@ -538,7 +538,7 @@ func (s *GitStore) ListAllTemporaryCheckpoints(ctx context.Context, sessionID st
 		branchCheckpoints, branchErr := s.listCheckpointsForBranch(ctx, branch.BranchName, sessionID, limit)
 		if branchErr != nil {
 			if errors.Is(branchErr, context.Canceled) || errors.Is(branchErr, context.DeadlineExceeded) {
-				return nil, branchErr //nolint:wrapcheck // Propagating context cancellation
+				return nil, branchErr
 			}
 			continue // Skip branches we can't read
 		}

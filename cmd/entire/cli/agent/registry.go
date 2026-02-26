@@ -107,6 +107,7 @@ const (
 	AgentNameClaudeCode AgentName = "claude-code"
 	AgentNameCursor     AgentName = "cursor"
 	AgentNameGemini     AgentName = "gemini"
+	AgentNameKiro       AgentName = "kiro"
 	AgentNameOpenCode   AgentName = "opencode"
 )
 
@@ -115,6 +116,7 @@ const (
 	AgentTypeClaudeCode AgentType = "Claude Code"
 	AgentTypeCursor     AgentType = "Cursor"
 	AgentTypeGemini     AgentType = "Gemini CLI"
+	AgentTypeKiro       AgentType = "Kiro"
 	AgentTypeOpenCode   AgentType = "OpenCode"
 	AgentTypeUnknown    AgentType = "Agent" // Fallback for backwards compatibility
 )

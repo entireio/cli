@@ -28,6 +28,8 @@ func TestMain(m *testing.M) {
 	// Resolve the entire binary (builds from source if E2E_ENTIRE_BIN is unset).
 	entireBin := entire.BinPath()
 
+	os.Setenv("PATH", filepath.Dir(entireBin)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	// Preflight: verify required dependencies before running any tests.
 	var missing []string
 	for _, bin := range []string{"git", "tmux"} {
