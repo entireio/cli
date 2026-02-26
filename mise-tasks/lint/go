@@ -1,6 +1,10 @@
 #!/bin/sh
 #MISE description="Lint go"
 
+
+# I want to see the version and verify the config of golangci-lint even though CI uses the fancy
+# golangci/golangci-lint-action plugin.
+golangci-lint version
 golangci-lint config verify
 
 # If we're in CI, we rely on golangci/golangci-lint-action@v9 defined in .github/workflows/lint.yml
