@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -1165,7 +1166,7 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 		if len(state.FilesTouched) > 0 {
 			// Shadow branch has files from carry-forward - check if staged files overlap
 			// AND have matching content (content-aware check).
-			stagedFiles := getStagedFiles(repo)
+			stagedFiles := getStagedFiles(ctx)
 			if len(stagedFiles) > 0 {
 				// PrepareCommitMsg context: check staged files overlap with content
 				result := stagedFilesOverlapWithContent(ctx, repo, tree, stagedFiles, state.FilesTouched)
@@ -1218,7 +1219,7 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 
 	// Check if staged files overlap with session's files with content-aware matching.
 	// This is primarily for PrepareCommitMsg; in PostCommit, stagedFiles is empty.
-	stagedFiles := getStagedFiles(repo)
+	stagedFiles := getStagedFiles(ctx)
 	if len(stagedFiles) > 0 {
 		result := stagedFilesOverlapWithContent(ctx, repo, tree, stagedFiles, state.FilesTouched)
 		logging.Debug(logCtx, "sessionHasNewContent: staged files overlap check",
@@ -1270,7 +1271,7 @@ func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(ctx contex
 	// Check if any modified files overlap with currently staged files
 	// This ensures we only add checkpoint trailers to commits that include
 	// files the agent actually modified
-	stagedFiles := getStagedFiles(repo)
+	stagedFiles := getStagedFiles(ctx)
 
 	logging.Debug(logCtx, "live transcript check: comparing staged vs modified",
 		slog.String("session_id", state.SessionID),
@@ -1815,23 +1816,21 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 	return result
 }
 
-// getStagedFiles returns a list of files staged for commit.
-func getStagedFiles(repo *git.Repository) []string {
-	worktree, err := repo.Worktree()
+// getStagedFiles returns a list of files staged for commit using native git CLI.
+// Uses git diff --cached which is much faster than go-git's worktree.Status()
+// on large repositories (O(staged files) vs O(all files in working tree)).
+func getStagedFiles(ctx context.Context) []string {
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only")
+	output, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
 
-	status, err := worktree.Status()
-	if err != nil {
-		return nil
-	}
-
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	var staged []string
-	for path, fileStatus := range status {
-		// Check if file is staged (in index)
-		if fileStatus.Staging != git.Unmodified && fileStatus.Staging != git.Untracked {
-			staged = append(staged, path)
+	for _, line := range lines {
+		if line != "" {
+			staged = append(staged, line)
 		}
 	}
 	return staged
