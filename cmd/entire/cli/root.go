@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"runtime"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
@@ -38,6 +40,14 @@ func NewRootCmd() *cobra.Command {
 		// Hide completion command from help but keep it functional
 		CompletionOptions: cobra.CompletionOptions{
 			HiddenDefaultCmd: true,
+		},
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			// Configure custom branch/commit prefixes from settings.
+			// Silently uses defaults if settings can't be loaded (e.g., not in a repo).
+			if s, err := settings.Load(cmd.Context()); err == nil {
+				checkpoint.ConfigureBranchPrefix(s.GetBranchPrefix())
+				checkpoint.ConfigureCommitPrefix(s.GetCommitPrefix())
+			}
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
 			// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)

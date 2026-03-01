@@ -689,13 +689,17 @@ func (s *GitStore) readMetadataFromBlob(hash plumbing.Hash) (*CommittedMetadata,
 }
 
 // buildCommitMessage constructs the commit message with proper trailers.
-// The commit subject is always "Checkpoint: <id>" for consistency.
+// The commit subject uses the configured CommitPrefix (default "Checkpoint") followed by the ID.
 // If CommitSubject is provided (e.g., for task checkpoints), it's included in the body.
 func (s *GitStore) buildCommitMessage(opts WriteCommittedOptions, taskMetadataPath string) string {
 	var commitMsg strings.Builder
 
-	// Subject line is always the checkpoint ID for consistent formatting
-	fmt.Fprintf(&commitMsg, "Checkpoint: %s\n\n", opts.CheckpointID)
+	// Subject line uses configured prefix for consistent formatting
+	prefix := opts.CommitPrefix
+	if prefix == "" {
+		prefix = CommitPrefix
+	}
+	fmt.Fprintf(&commitMsg, "%s: %s\n\n", prefix, opts.CheckpointID)
 
 	// Include custom description in body if provided (e.g., task checkpoint details)
 	if opts.CommitSubject != "" {
@@ -1239,7 +1243,7 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 	}
 
 	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-	commitMsg := fmt.Sprintf("Finalize transcript for Checkpoint: %s", opts.CheckpointID)
+	commitMsg := fmt.Sprintf("Finalize transcript for %s: %s", CommitPrefix, opts.CheckpointID)
 	newCommitHash, err := s.createCommit(newTreeHash, parentHash, commitMsg, authorName, authorEmail)
 	if err != nil {
 		return err

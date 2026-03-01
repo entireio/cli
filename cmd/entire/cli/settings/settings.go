@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -28,6 +29,14 @@ const (
 	CommitLinkingAlways = "always"
 	// CommitLinkingPrompt prompts the user on each commit (default for existing users).
 	CommitLinkingPrompt = "prompt"
+)
+
+// Default prefix constants.
+const (
+	// DefaultBranchPrefix is the default prefix for all Entire branches.
+	DefaultBranchPrefix = "entire/"
+	// DefaultCommitPrefix is the default prefix for checkpoint commit subjects.
+	DefaultCommitPrefix = "Checkpoint"
 )
 
 // EntireSettings represents the .entire/settings.json configuration
@@ -63,6 +72,17 @@ type EntireSettings struct {
 	// Defaults to "prompt" (preserves existing user behavior).
 	CommitLinking string `json:"commit_linking,omitempty"`
 
+	// BranchPrefix is the prefix for all Entire-managed branches.
+	// Affects shadow branches (e.g., "<prefix><hash>") and the metadata branch
+	// (e.g., "<prefix>checkpoints/v1"). Must end with "/".
+	// Defaults to "entire/".
+	BranchPrefix string `json:"branch_prefix,omitempty"`
+
+	// CommitPrefix is the prefix for checkpoint commit subjects on the metadata branch.
+	// Format: "<commit_prefix>: <checkpoint-id>".
+	// Defaults to "Checkpoint".
+	CommitPrefix string `json:"commit_prefix,omitempty"`
+
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
@@ -76,6 +96,30 @@ func (s *EntireSettings) GetCommitLinking() string {
 		return s.CommitLinking
 	}
 	return CommitLinkingPrompt
+}
+
+// GetBranchPrefix returns the effective branch prefix.
+// Returns the explicit value if set, otherwise defaults to "entire/".
+func (s *EntireSettings) GetBranchPrefix() string {
+	if s.BranchPrefix != "" {
+		return s.BranchPrefix
+	}
+	return DefaultBranchPrefix
+}
+
+// GetCommitPrefix returns the effective commit subject prefix.
+// Returns the explicit value if set, otherwise defaults to "Checkpoint".
+func (s *EntireSettings) GetCommitPrefix() string {
+	if s.CommitPrefix != "" {
+		return s.CommitPrefix
+	}
+	return DefaultCommitPrefix
+}
+
+// GetMetadataBranchName returns the metadata branch name derived from the branch prefix.
+// Default: "entire/checkpoints/v1".
+func (s *EntireSettings) GetMetadataBranchName() string {
+	return s.GetBranchPrefix() + "checkpoints/v1"
 }
 
 // Load loads the Entire settings from .entire/settings.json,
@@ -146,6 +190,10 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 	// Validate commit_linking if set
 	if settings.CommitLinking != "" && settings.CommitLinking != CommitLinkingAlways && settings.CommitLinking != CommitLinkingPrompt {
 		return nil, fmt.Errorf("invalid commit_linking value %q: must be %q or %q", settings.CommitLinking, CommitLinkingAlways, CommitLinkingPrompt)
+	}
+
+	if err := validateBranchPrefix(settings.BranchPrefix); err != nil {
+		return nil, err
 	}
 
 	return settings, nil
@@ -246,6 +294,49 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		}
 	}
 
+	// Override branch_prefix if present and non-empty
+	if branchPrefixRaw, ok := raw["branch_prefix"]; ok {
+		var bp string
+		if err := json.Unmarshal(branchPrefixRaw, &bp); err != nil {
+			return fmt.Errorf("parsing branch_prefix field: %w", err)
+		}
+		if bp != "" {
+			if err := validateBranchPrefix(bp); err != nil {
+				return err
+			}
+			settings.BranchPrefix = bp
+		}
+	}
+
+	// Override commit_prefix if present and non-empty
+	if commitPrefixRaw, ok := raw["commit_prefix"]; ok {
+		var cp string
+		if err := json.Unmarshal(commitPrefixRaw, &cp); err != nil {
+			return fmt.Errorf("parsing commit_prefix field: %w", err)
+		}
+		if cp != "" {
+			settings.CommitPrefix = cp
+		}
+	}
+
+	return nil
+}
+
+// validateBranchPrefix validates the branch_prefix setting.
+// It must end with "/" and not contain invalid git ref characters.
+func validateBranchPrefix(prefix string) error {
+	if prefix == "" {
+		return nil
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		return fmt.Errorf("invalid branch_prefix %q: must end with \"/\"", prefix)
+	}
+	if strings.Contains(prefix, "..") {
+		return fmt.Errorf("invalid branch_prefix %q: must not contain \"..\"", prefix)
+	}
+	if strings.ContainsAny(prefix, " ~^:?*[\\") {
+		return fmt.Errorf("invalid branch_prefix %q: contains invalid git ref characters", prefix)
+	}
 	return nil
 }
 

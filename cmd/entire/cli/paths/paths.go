@@ -33,8 +33,25 @@ const (
 	SettingsFileName         = "settings.json"
 )
 
-// MetadataBranchName is the orphan branch used by manual-commit strategy to store metadata
-const MetadataBranchName = "entire/checkpoints/v1"
+// DefaultMetadataBranchName is the default orphan branch used by manual-commit strategy to store metadata.
+const DefaultMetadataBranchName = "entire/checkpoints/v1"
+
+// MetadataBranchName is the active metadata branch name.
+// Defaults to DefaultMetadataBranchName ("entire/checkpoints/v1").
+// Override via ConfigureBranchPrefix() to use a custom prefix from settings.
+var MetadataBranchName = DefaultMetadataBranchName
+
+// MetadataBranchNameFromPrefix returns the metadata branch name for a given branch prefix.
+// Example: "jfrog/" → "jfrog/checkpoints/v1"
+func MetadataBranchNameFromPrefix(branchPrefix string) string {
+	return branchPrefix + "checkpoints/v1"
+}
+
+// ConfigureBranchPrefix sets the active metadata branch name based on the given prefix.
+// Call this early during CLI startup with the branch_prefix from settings.
+func ConfigureBranchPrefix(branchPrefix string) {
+	MetadataBranchName = branchPrefix + "checkpoints/v1"
+}
 
 // CheckpointPath returns the sharded storage path for a checkpoint ID.
 // Uses first 2 characters as shard (256 buckets), remaining as folder name.

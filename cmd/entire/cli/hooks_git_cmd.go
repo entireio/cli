@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -97,6 +98,11 @@ func newHooksGitCmd() *cobra.Command {
 			if !settings.IsSetUpAndEnabled(ctx) {
 				gitHooksDisabled = true
 				return nil
+			}
+			// Configure custom branch/commit prefixes from settings.
+			if s, err := settings.Load(ctx); err == nil {
+				checkpoint.ConfigureBranchPrefix(s.GetBranchPrefix())
+				checkpoint.ConfigureCommitPrefix(s.GetCommitPrefix())
 			}
 			hookLogCleanup = initHookLogging(ctx)
 			return nil

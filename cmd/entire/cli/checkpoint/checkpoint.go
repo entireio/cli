@@ -259,6 +259,10 @@ type WriteCommittedOptions struct {
 	// Commit message fields (used for task checkpoints)
 	CommitSubject string // Subject line for the metadata commit (overrides default)
 
+	// CommitPrefix is the prefix for checkpoint commit subjects (e.g., "Checkpoint" → "Checkpoint: <id>").
+	// Defaults to "Checkpoint" if empty.
+	CommitPrefix string
+
 	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
 	Agent types.AgentType
 

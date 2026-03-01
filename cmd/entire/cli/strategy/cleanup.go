@@ -51,24 +51,26 @@ type CleanupResult struct {
 	FailedCheckpoints []string // Checkpoints that failed to delete
 }
 
-// shadowBranchPattern matches shadow branch names in both old and new formats:
-//   - Old format: entire/<commit[:7+]>
-//   - New format: entire/<commit[:7+]>-<worktreeHash[:6]>
-//
-// The pattern requires at least 7 hex characters for the commit, optionally followed
-// by a dash and exactly 6 hex characters for the worktree hash.
-var shadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}(-[0-9a-fA-F]{6})?$`)
+// shadowBranchSuffixPattern matches the suffix after the branch prefix in shadow branch names.
+// Requires at least 7 hex characters for the commit hash, optionally followed by
+// a dash and exactly 6 hex characters for the worktree hash.
+var shadowBranchSuffixPattern = regexp.MustCompile(`^[0-9a-fA-F]{7,}(-[0-9a-fA-F]{6})?$`)
 
 // IsShadowBranch returns true if the branch name matches the shadow branch pattern.
-// Shadow branches have the format "entire/<commit-hash>-<worktree-hash>" where the
+// Shadow branches have the format "<prefix><commit-hash>-<worktree-hash>" where the
 // commit hash is at least 7 hex characters and worktree hash is 6 hex characters.
-// The "entire/checkpoints/v1" branch is NOT a shadow branch.
+// The metadata branch (e.g. "entire/checkpoints/v1") is NOT a shadow branch.
 func IsShadowBranch(branchName string) bool {
-	// Explicitly exclude entire/checkpoints/v1
+	// Explicitly exclude the metadata branch
 	if branchName == paths.MetadataBranchName {
 		return false
 	}
-	return shadowBranchPattern.MatchString(branchName)
+	prefix := checkpoint.ShadowBranchPrefix
+	if !strings.HasPrefix(branchName, prefix) {
+		return false
+	}
+	suffix := strings.TrimPrefix(branchName, prefix)
+	return shadowBranchSuffixPattern.MatchString(suffix)
 }
 
 // ListShadowBranches returns all shadow branches in the repository.

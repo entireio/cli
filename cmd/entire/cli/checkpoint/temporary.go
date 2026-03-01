@@ -31,16 +31,40 @@ import (
 )
 
 const (
-	// ShadowBranchPrefix is the prefix for shadow branches.
-	ShadowBranchPrefix = "entire/"
+	// DefaultShadowBranchPrefix is the default prefix for shadow branches.
+	DefaultShadowBranchPrefix = "entire/"
 
 	// ShadowBranchHashLength is the number of hex characters used in shadow branch names.
-	// Shadow branches are named "entire/<hash>" using the first 7 characters of the commit hash.
+	// Shadow branches are named "<prefix><hash>" using the first 7 characters of the commit hash.
 	ShadowBranchHashLength = 7
 
 	// WorktreeIDHashLength is the number of hex characters used for worktree ID hash.
 	WorktreeIDHashLength = 6
 )
+
+var (
+	// ShadowBranchPrefix is the active prefix for shadow branches.
+	// Defaults to DefaultShadowBranchPrefix ("entire/").
+	// Override via ConfigureBranchPrefix() to use a custom prefix from settings.
+	ShadowBranchPrefix = DefaultShadowBranchPrefix
+
+	// CommitPrefix is the active prefix for checkpoint commit subjects.
+	// Defaults to "Checkpoint". Override via ConfigureCommitPrefix().
+	CommitPrefix = "Checkpoint"
+)
+
+// ConfigureBranchPrefix sets the active shadow branch prefix from settings.
+// Call this early during CLI startup with the branch_prefix from settings.
+func ConfigureBranchPrefix(branchPrefix string) {
+	ShadowBranchPrefix = branchPrefix
+	paths.ConfigureBranchPrefix(branchPrefix)
+}
+
+// ConfigureCommitPrefix sets the active commit subject prefix from settings.
+// Call this early during CLI startup with the commit_prefix from settings.
+func ConfigureCommitPrefix(commitPrefix string) {
+	CommitPrefix = commitPrefix
+}
 
 // HashWorktreeID returns a short hash of the worktree identifier.
 // Used to create unique shadow branch names per worktree.

@@ -13,8 +13,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/spf13/cobra"
@@ -53,6 +55,11 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 		Short:  handler.Description() + " hook handlers",
 		Hidden: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			// Configure custom branch/commit prefixes from settings.
+			if s, err := settings.Load(cmd.Context()); err == nil {
+				checkpoint.ConfigureBranchPrefix(s.GetBranchPrefix())
+				checkpoint.ConfigureCommitPrefix(s.GetCommitPrefix())
+			}
 			agentHookLogCleanup = initHookLogging(cmd.Context())
 			return nil
 		},
