@@ -1,5 +1,7 @@
 # Entire CLI
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/entireio/cli)
+
 Entire hooks into your Git workflow to capture AI agent sessions as you work. Sessions are indexed alongside commits, creating a searchable record of how code was written in your repo.
 
 With Entire, you can:
