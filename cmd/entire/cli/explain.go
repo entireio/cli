@@ -550,7 +550,7 @@ func scopeTranscriptForCheckpoint(fullTranscript []byte, startOffset int, agentT
 			return nil
 		}
 		return scoped
-	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeUnknown:
+	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
 		return transcript.SliceFromLine(fullTranscript, startOffset)
 	}
 	return transcript.SliceFromLine(fullTranscript, startOffset)
@@ -1574,7 +1574,7 @@ func transcriptOffset(transcriptBytes []byte, agentType types.AgentType) int {
 			return 0
 		}
 		return len(t.Messages)
-	case agent.AgentTypeClaudeCode, agent.AgentTypeOpenCode, agent.AgentTypeCursor, agent.AgentTypeUnknown:
+	case agent.AgentTypeClaudeCode, agent.AgentTypeOpenCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
 		return countLines(transcriptBytes)
 	}
 	return countLines(transcriptBytes)

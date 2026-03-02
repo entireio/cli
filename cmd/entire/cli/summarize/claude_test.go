@@ -209,7 +209,7 @@ func TestClaudeGenerator_ValidResponse(t *testing.T) {
 		t.Errorf("unexpected repo learnings: %v", summary.Learnings.Repo)
 	}
 
-	if len(summary.Learnings.Code) != 1 || summary.Learnings.Code[0].Path != "main.go" {
+	if len(summary.Learnings.Code) != 1 || summary.Learnings.Code[0].Path != testMainGoFile {
 		t.Errorf("unexpected code learnings: %v", summary.Learnings.Code)
 	}
 

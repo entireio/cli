@@ -51,6 +51,14 @@ func hasTTY() bool {
 		return false
 	}
 
+	// GIT_TERMINAL_PROMPT=0 disables git's own terminal prompts.
+	// Factory AI Droid (and other non-interactive environments like CI) set this.
+	// Since we run as a git hook, respect it — if the environment doesn't want
+	// git prompting, our hook shouldn't prompt either.
+	if os.Getenv("GIT_TERMINAL_PROMPT") == "0" {
+		return false
+	}
+
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		return false

@@ -752,6 +752,364 @@ func (env *TestEnv) SimulateGeminiSessionEnd(sessionID, transcriptPath string) e
 	return runner.SimulateGeminiSessionEnd(sessionID, transcriptPath)
 }
 
+// --- Factory AI Droid Hook Runner ---
+
+// FactoryDroidHookRunner executes Factory AI Droid hooks in the test environment.
+type FactoryDroidHookRunner struct {
+	RepoDir string
+	T       interface {
+		Helper()
+		Fatalf(format string, args ...interface{})
+		Logf(format string, args ...interface{})
+	}
+}
+
+// NewFactoryDroidHookRunner creates a new Factory Droid hook runner.
+func NewFactoryDroidHookRunner(repoDir string, t interface {
+	Helper()
+	Fatalf(format string, args ...interface{})
+	Logf(format string, args ...interface{})
+}) *FactoryDroidHookRunner {
+	return &FactoryDroidHookRunner{
+		RepoDir: repoDir,
+		T:       t,
+	}
+}
+
+// runDroidHookWithInput runs a Factory Droid hook with the given input.
+func (r *FactoryDroidHookRunner) runDroidHookWithInput(hookName string, input interface{}) error {
+	r.T.Helper()
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("failed to marshal hook input: %w", err)
+	}
+
+	return r.runDroidHookInRepoDir(hookName, inputJSON)
+}
+
+func (r *FactoryDroidHookRunner) runDroidHookInRepoDir(hookName string, inputJSON []byte) error {
+	cmd := exec.Command(getTestBinary(), "hooks", "factoryai-droid", hookName)
+	cmd.Dir = r.RepoDir
+	cmd.Stdin = bytes.NewReader(inputJSON)
+	cmd.Env = os.Environ()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("hook %s failed: %w\nInput: %s\nOutput: %s",
+			hookName, err, inputJSON, output)
+	}
+
+	r.T.Logf("Droid hook %s output: %s", hookName, output)
+	return nil
+}
+
+// runDroidHookWithOutput runs a Factory Droid hook and returns both stdout and stderr separately.
+func (r *FactoryDroidHookRunner) runDroidHookWithOutput(hookName string, inputJSON []byte) HookOutput {
+	cmd := exec.Command(getTestBinary(), "hooks", "factoryai-droid", hookName)
+	cmd.Dir = r.RepoDir
+	cmd.Stdin = bytes.NewReader(inputJSON)
+	cmd.Env = os.Environ()
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	return HookOutput{
+		Stdout: stdout.Bytes(),
+		Stderr: stderr.Bytes(),
+		Err:    err,
+	}
+}
+
+// SimulateUserPromptSubmit simulates the UserPromptSubmit hook for Factory Droid.
+func (r *FactoryDroidHookRunner) SimulateUserPromptSubmit(sessionID string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+		"prompt":          "test prompt",
+	}
+
+	return r.runDroidHookWithInput("user-prompt-submit", input)
+}
+
+// SimulateUserPromptSubmitWithOutput simulates the UserPromptSubmit hook and returns the output.
+func (r *FactoryDroidHookRunner) SimulateUserPromptSubmitWithOutput(sessionID string) HookOutput {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+		"prompt":          "test prompt",
+	}
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return HookOutput{Err: fmt.Errorf("failed to marshal hook input: %w", err)}
+	}
+
+	return r.runDroidHookWithOutput("user-prompt-submit", inputJSON)
+}
+
+// SimulateStop simulates the Stop hook for Factory Droid.
+func (r *FactoryDroidHookRunner) SimulateStop(sessionID, transcriptPath string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	}
+
+	return r.runDroidHookWithInput("stop", input)
+}
+
+// SimulateSessionStart simulates the SessionStart hook for Factory Droid.
+func (r *FactoryDroidHookRunner) SimulateSessionStart(sessionID string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+	}
+
+	return r.runDroidHookWithInput("session-start", input)
+}
+
+// SimulateSessionStartWithOutput simulates the SessionStart hook and returns the output.
+func (r *FactoryDroidHookRunner) SimulateSessionStartWithOutput(sessionID string) HookOutput {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+	}
+
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return HookOutput{Err: fmt.Errorf("failed to marshal hook input: %w", err)}
+	}
+
+	return r.runDroidHookWithOutput("session-start", inputJSON)
+}
+
+// SimulateSessionEnd simulates the SessionEnd hook for Factory Droid.
+func (r *FactoryDroidHookRunner) SimulateSessionEnd(sessionID, transcriptPath string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	}
+
+	return r.runDroidHookWithInput("session-end", input)
+}
+
+// SimulatePreTask simulates the PreToolUse[Task] hook for Factory Droid.
+func (r *FactoryDroidHookRunner) SimulatePreTask(sessionID, transcriptPath, toolUseID string) error {
+	r.T.Helper()
+
+	input := map[string]interface{}{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+		"tool_use_id":     toolUseID,
+		"tool_input": map[string]string{
+			"subagent_type": "general-purpose",
+			"description":   "test task",
+		},
+	}
+
+	return r.runDroidHookWithInput("pre-tool-use", input)
+}
+
+// SimulatePostTask simulates the PostToolUse[Task] hook for Factory Droid.
+func (r *FactoryDroidHookRunner) SimulatePostTask(input PostTaskInput) error {
+	r.T.Helper()
+
+	hookInput := map[string]interface{}{
+		"session_id":      input.SessionID,
+		"transcript_path": input.TranscriptPath,
+		"tool_use_id":     input.ToolUseID,
+		"tool_input":      map[string]string{},
+		"tool_response": map[string]string{
+			"agentId": input.AgentID,
+		},
+	}
+
+	return r.runDroidHookWithInput("post-tool-use", hookInput)
+}
+
+// FactoryDroidSession represents a simulated Factory AI Droid session.
+type FactoryDroidSession struct {
+	ID             string
+	TranscriptPath string
+	env            *TestEnv
+}
+
+// NewFactoryDroidSession creates a new simulated Factory Droid session.
+func (env *TestEnv) NewFactoryDroidSession() *FactoryDroidSession {
+	env.T.Helper()
+
+	env.SessionCounter++
+	sessionID := fmt.Sprintf("droid-session-%d", env.SessionCounter)
+	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", sessionID+".jsonl")
+
+	return &FactoryDroidSession{
+		ID:             sessionID,
+		TranscriptPath: transcriptPath,
+		env:            env,
+	}
+}
+
+// CreateDroidTranscript creates a Droid-envelope JSONL transcript file.
+// Droid wraps messages as {"type":"message","id":"...","message":{"role":"...","content":[...]}},
+// unlike Claude Code which uses {"type":"assistant","uuid":"...","message":{"content":[...]}}.
+func (s *FactoryDroidSession) CreateDroidTranscript(prompt string, changes []FileChange) string {
+	var lines []map[string]interface{}
+
+	// User message with prompt
+	lines = append(lines, map[string]interface{}{
+		"type": "message",
+		"id":   "m1",
+		"message": map[string]interface{}{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{"type": "text", "text": prompt},
+			},
+		},
+	})
+
+	// Assistant message with tool uses
+	assistantContent := []interface{}{
+		map[string]interface{}{"type": "text", "text": "I'll help you with that."},
+	}
+	for i, change := range changes {
+		assistantContent = append(assistantContent, map[string]interface{}{
+			"type":  "tool_use",
+			"id":    fmt.Sprintf("toolu_%d", i+1),
+			"name":  "Write",
+			"input": map[string]string{"file_path": change.Path, "content": change.Content},
+		})
+	}
+	lines = append(lines, map[string]interface{}{
+		"type": "message",
+		"id":   "m2",
+		"message": map[string]interface{}{
+			"role":    "assistant",
+			"content": assistantContent,
+		},
+	})
+
+	// Tool results
+	toolResultContent := make([]map[string]interface{}, 0, len(changes))
+	for i := range changes {
+		toolResultContent = append(toolResultContent, map[string]interface{}{
+			"type":        "tool_result",
+			"tool_use_id": fmt.Sprintf("toolu_%d", i+1),
+			"content":     "Success",
+		})
+	}
+	lines = append(lines, map[string]interface{}{
+		"type": "message",
+		"id":   "m3",
+		"message": map[string]interface{}{
+			"role":    "user",
+			"content": toolResultContent,
+		},
+	})
+
+	// Final assistant message
+	lines = append(lines, map[string]interface{}{
+		"type": "message",
+		"id":   "m4",
+		"message": map[string]interface{}{
+			"role": "assistant",
+			"content": []map[string]interface{}{
+				{"type": "text", "text": "Done!"},
+			},
+		},
+	})
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(s.TranscriptPath), 0o755); err != nil {
+		s.env.T.Fatalf("failed to create transcript dir: %v", err)
+	}
+
+	// Write as JSONL
+	file, err := os.Create(s.TranscriptPath)
+	if err != nil {
+		s.env.T.Fatalf("failed to create transcript file: %v", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	encoder := json.NewEncoder(file)
+	for _, line := range lines {
+		if err := encoder.Encode(line); err != nil {
+			s.env.T.Fatalf("failed to encode transcript line: %v", err)
+		}
+	}
+
+	return s.TranscriptPath
+}
+
+// SimulateFactoryDroidUserPromptSubmit is a convenience method on TestEnv.
+func (env *TestEnv) SimulateFactoryDroidUserPromptSubmit(sessionID string) error {
+	env.T.Helper()
+	runner := NewFactoryDroidHookRunner(env.RepoDir, env.T)
+	return runner.SimulateUserPromptSubmit(sessionID)
+}
+
+// SimulateFactoryDroidUserPromptSubmitWithOutput is a convenience method on TestEnv.
+func (env *TestEnv) SimulateFactoryDroidUserPromptSubmitWithOutput(sessionID string) HookOutput {
+	env.T.Helper()
+	runner := NewFactoryDroidHookRunner(env.RepoDir, env.T)
+	return runner.SimulateUserPromptSubmitWithOutput(sessionID)
+}
+
+// SimulateFactoryDroidStop is a convenience method on TestEnv.
+func (env *TestEnv) SimulateFactoryDroidStop(sessionID, transcriptPath string) error {
+	env.T.Helper()
+	runner := NewFactoryDroidHookRunner(env.RepoDir, env.T)
+	return runner.SimulateStop(sessionID, transcriptPath)
+}
+
+// SimulateFactoryDroidSessionStart is a convenience method on TestEnv.
+func (env *TestEnv) SimulateFactoryDroidSessionStart(sessionID string) error {
+	env.T.Helper()
+	runner := NewFactoryDroidHookRunner(env.RepoDir, env.T)
+	return runner.SimulateSessionStart(sessionID)
+}
+
+// SimulateFactoryDroidSessionStartWithOutput is a convenience method on TestEnv.
+func (env *TestEnv) SimulateFactoryDroidSessionStartWithOutput(sessionID string) HookOutput {
+	env.T.Helper()
+	runner := NewFactoryDroidHookRunner(env.RepoDir, env.T)
+	return runner.SimulateSessionStartWithOutput(sessionID)
+}
+
+// SimulateFactoryDroidSessionEnd is a convenience method on TestEnv.
+func (env *TestEnv) SimulateFactoryDroidSessionEnd(sessionID, transcriptPath string) error {
+	env.T.Helper()
+	runner := NewFactoryDroidHookRunner(env.RepoDir, env.T)
+	return runner.SimulateSessionEnd(sessionID, transcriptPath)
+}
+
+// SimulateFactoryDroidPreTask is a convenience method on TestEnv.
+func (env *TestEnv) SimulateFactoryDroidPreTask(sessionID, transcriptPath, toolUseID string) error {
+	env.T.Helper()
+	runner := NewFactoryDroidHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePreTask(sessionID, transcriptPath, toolUseID)
+}
+
+// SimulateFactoryDroidPostTask is a convenience method on TestEnv.
+func (env *TestEnv) SimulateFactoryDroidPostTask(input PostTaskInput) error {
+	env.T.Helper()
+	runner := NewFactoryDroidHookRunner(env.RepoDir, env.T)
+	return runner.SimulatePostTask(input)
+}
+
 // --- OpenCode Hook Runner ---
 
 // OpenCodeHookRunner executes OpenCode hooks in the test environment.

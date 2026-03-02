@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
@@ -230,21 +229,4 @@ func logPostTaskHookContext(w io.Writer, input *PostTaskHookInput, subagentTrans
 	} else {
 		_, _ = fmt.Fprintln(w, "  Subagent Transcript: (none)")
 	}
-}
-
-// hookResponse represents a JSON response.
-// Used to control whether Agent continues processing the prompt.
-type hookResponse struct {
-	SystemMessage string `json:"systemMessage,omitempty"`
-}
-
-// outputHookResponse outputs a JSON response to stdout
-func outputHookResponse(reason string) error {
-	resp := hookResponse{
-		SystemMessage: reason,
-	}
-	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
-		return fmt.Errorf("failed to encode hook response: %w", err)
-	}
-	return nil
 }

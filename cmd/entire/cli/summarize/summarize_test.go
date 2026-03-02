@@ -11,6 +11,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
+const testMainGoFile = "main.go"
+
 func TestBuildCondensedTranscript_UserPrompts(t *testing.T) {
 	lines := []transcript.Line{
 		{
@@ -759,7 +761,7 @@ func TestBuildCondensedTranscriptFromBytes_OpenCodeToolCalls(t *testing.T) {
 	if entries[2].ToolName != "edit" {
 		t.Errorf("entry 2: expected tool name edit, got %s", entries[2].ToolName)
 	}
-	if entries[2].ToolDetail != "main.go" {
+	if entries[2].ToolDetail != testMainGoFile {
 		t.Errorf("entry 2: expected tool detail main.go, got %s", entries[2].ToolDetail)
 	}
 
@@ -870,6 +872,70 @@ func TestBuildCondensedTranscriptFromBytes_CursorNoToolUseBlocks(t *testing.T) {
 		if e.Type == EntryTypeTool {
 			t.Errorf("entry %d: unexpected tool entry in Cursor transcript", i)
 		}
+	}
+}
+
+func TestBuildCondensedTranscriptFromBytes_DroidUserAndAssistant(t *testing.T) {
+	// Droid uses an envelope: {"type":"message","id":"...","message":{"role":"...","content":[...]}}
+	droidJSONL := strings.Join([]string{
+		`{"type":"session_start","session":{"session_id":"s1"}}`,
+		`{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"Help me write a Go function"}]}}`,
+		`{"type":"message","id":"m2","message":{"role":"assistant","content":[{"type":"text","text":"Sure, here is a function."}]}}`,
+		`{"type":"message","id":"m3","message":{"role":"assistant","content":[{"type":"tool_use","name":"Write","input":{"file_path":"main.go","content":"package main"}}]}}`,
+	}, "\n") + "\n"
+
+	entries, err := BuildCondensedTranscriptFromBytes([]byte(droidJSONL), agent.AgentTypeFactoryAIDroid)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// session_start is skipped; expect: user + assistant text + tool
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+
+	if entries[0].Type != EntryTypeUser {
+		t.Errorf("entry 0: expected type %s, got %s", EntryTypeUser, entries[0].Type)
+	}
+	if entries[0].Content != "Help me write a Go function" {
+		t.Errorf("entry 0: unexpected content: %s", entries[0].Content)
+	}
+
+	if entries[1].Type != EntryTypeAssistant {
+		t.Errorf("entry 1: expected type %s, got %s", EntryTypeAssistant, entries[1].Type)
+	}
+	if entries[1].Content != "Sure, here is a function." {
+		t.Errorf("entry 1: unexpected content: %s", entries[1].Content)
+	}
+
+	if entries[2].Type != EntryTypeTool {
+		t.Errorf("entry 2: expected type %s, got %s", EntryTypeTool, entries[2].Type)
+	}
+	if entries[2].ToolName != "Write" {
+		t.Errorf("entry 2: expected tool name Write, got %s", entries[2].ToolName)
+	}
+	if entries[2].ToolDetail != testMainGoFile {
+		t.Errorf("entry 2: expected tool detail main.go, got %s", entries[2].ToolDetail)
+	}
+}
+
+func TestBuildCondensedTranscriptFromBytes_DroidMalformedInput(t *testing.T) {
+	// Completely invalid content should return an error from the Droid parser
+	_, err := BuildCondensedTranscriptFromBytes([]byte("not valid jsonl at all{{{"), agent.AgentTypeFactoryAIDroid)
+	// Droid parser is lenient — malformed lines are skipped. With no valid messages,
+	// it returns an empty slice (not an error).
+	if err != nil {
+		t.Fatalf("unexpected error for malformed Droid input: %v", err)
+	}
+}
+
+func TestBuildCondensedTranscriptFromBytes_DroidEmptyTranscript(t *testing.T) {
+	entries, err := BuildCondensedTranscriptFromBytes([]byte(""), agent.AgentTypeFactoryAIDroid)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries for empty Droid transcript, got %d", len(entries))
 	}
 }
 

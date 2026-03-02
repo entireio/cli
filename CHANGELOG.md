@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.9] - 2026-03-02
+
+### Added
+
+- Factory AI Droid agent integration with full checkpoint, resume, rewind, and session transcript support ([#435](https://github.com/entireio/cli/pull/435), [#552](https://github.com/entireio/cli/pull/552))
+- `--absolute-git-hook-path` flag for `entire enable` to set up git hooks with absolute paths to the entire binary ([#495](https://github.com/entireio/cli/pull/495))
+- Architecture tests enforcing agent package boundaries ([#569](https://github.com/entireio/cli/pull/569))
+
+### Changed
+
+- Improved TTY handling consolidated into a single location ([#543](https://github.com/entireio/cli/pull/543))
+- Simplified PATH setup message in install script ([#566](https://github.com/entireio/cli/pull/566))
+- Skip version check for dev builds instead of all prereleases ([#401](https://github.com/entireio/cli/pull/401))
+- Skip fully-condensed ENDED sessions in PostCommit to avoid redundant work ([#556](https://github.com/entireio/cli/pull/556), [#568](https://github.com/entireio/cli/pull/568))
+- Don't update LastInteraction when only git hooks were triggered ([#550](https://github.com/entireio/cli/pull/550))
+
+### Fixed
+
+- `entire explain` hanging on repos with many checkpoints ([#551](https://github.com/entireio/cli/pull/551))
+- `prepare-commit-msg` hook performance for large repos ([#553](https://github.com/entireio/cli/pull/553))
+- Don't wait for sessions older than 120s during transcript flush ([#545](https://github.com/entireio/cli/pull/545))
+
+### Housekeeping
+
+- Updated agent-integration skill docs ([#555](https://github.com/entireio/cli/pull/555))
+
 ## [0.4.8] - 2026-02-27
 
 ### Added

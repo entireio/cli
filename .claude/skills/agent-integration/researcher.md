@@ -8,7 +8,7 @@ Assess whether a target AI coding agent's hook/lifecycle model is compatible wit
 
 Read `docs/architecture/agent-guide.md` to understand what Entire expects from agents: EventType names, required interfaces, hook patterns, and lifecycle flow. This gives you the vocabulary to map the target agent's native hooks to Entire's event model.
 
-**Do NOT read other internal Entire source files** (`agent.go`, `event.go`, `hook_registry.go`, `lifecycle.go`, or reference implementations). The implementer handles those.
+You may also reference `cmd/entire/cli/agent/agent.go` and `cmd/entire/cli/agent/event.go` for exact interface signatures and EventType constants. Prefer `agent-guide.md` as the primary source, but the source files are the ground truth if the guide is out of date. Avoid reading other internal files (`hook_registry.go`, `lifecycle.go`, strategy code) — the implementer handles those, and architecture tests enforce this boundary at the code level.
 
 ### Phase 2: Static Capability Checks
 
@@ -158,4 +158,4 @@ If blocked at any point (auth, sandbox, binary not found):
 - **Non-destructive.** All artifacts go under `.entire/tmp/` (gitignored). The one-pager goes in the agent package directory.
 - **Agent-specific scripts.** Adapt based on Phase 2 findings, not a generic template.
 - **Ask, don't assume.** If the hook mechanism is unclear, ask the user.
-- **External focus.** Do not read internal Entire source files beyond `agent-guide.md`. The implementer reads those.
+- **External focus.** Prefer `agent-guide.md` for Entire's expectations. You may reference `agent.go` and `event.go` for exact names, but avoid deeper internals — architecture tests enforce the boundary at the code level.

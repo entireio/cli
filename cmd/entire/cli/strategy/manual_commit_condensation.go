@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -247,7 +248,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 					slog.String("error", sliceErr.Error()))
 			}
 			scopedTranscript = scoped
-		case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeUnknown:
+		case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
 			scopedTranscript = transcript.SliceFromLine(sessionData.Transcript, state.CheckpointTranscriptStart)
 		}
 		if len(scopedTranscript) > 0 {
@@ -595,6 +596,26 @@ func countTranscriptItems(agentType types.AgentType, content string) int {
 func extractUserPrompts(agentType types.AgentType, content string) []string {
 	if content == "" {
 		return nil
+	}
+
+	// Droid has its own envelope format — use its parser to normalize first
+	if agentType == agent.AgentTypeFactoryAIDroid {
+		lines, _, err := factoryaidroid.ParseDroidTranscriptFromBytes([]byte(content), 0)
+		if err != nil {
+			return nil
+		}
+		var prompts []string
+		for _, line := range lines {
+			if line.Type != transcript.TypeUser {
+				continue
+			}
+			if text := transcript.ExtractUserContent(line.Message); text != "" {
+				if stripped := textutil.StripIDEContextTags(text); stripped != "" {
+					prompts = append(prompts, stripped)
+				}
+			}
+		}
+		return prompts
 	}
 
 	// OpenCode uses JSONL with a different per-line schema than Claude Code
