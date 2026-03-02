@@ -383,6 +383,12 @@ func TestPostFileEdit_NoSession(t *testing.T) {
 	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
 		t.Error("session state file should not be created for a nonexistent session")
 	}
+
+	// Verify no orphan edits file was created
+	editsFile := filepath.Join(env.RepoDir, ".git", "entire-sessions", "nonexistent-session-edits.jsonl")
+	if _, err := os.Stat(editsFile); !os.IsNotExist(err) {
+		t.Error("edits file should not be created when no session state exists")
+	}
 }
 
 // TestPostFileEdit_PathOutsideRepo verifies that file paths outside the repo

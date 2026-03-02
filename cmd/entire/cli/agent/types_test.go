@@ -30,7 +30,7 @@ func TestCountLines(t *testing.T) {
 	}
 }
 
-func TestNewFileEdit(t *testing.T) {
+func TestFileEditFields(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	edit := FileEdit{

@@ -47,7 +47,7 @@ func (s *StateStore) AppendFileEdit(sessionID string, edit agent.FileEdit) error
 }
 
 // ReadFileEdits reads all FileEdit records from the session's edit log.
-// Returns empty slice (not error) if the log doesn't exist.
+// Returns (nil, nil) if the log doesn't exist.
 func (s *StateStore) ReadFileEdits(sessionID string) ([]agent.FileEdit, error) {
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return nil, fmt.Errorf("invalid session ID: %w", err)

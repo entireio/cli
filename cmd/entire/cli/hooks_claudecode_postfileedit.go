@@ -5,7 +5,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -32,7 +31,7 @@ func handleClaudeCodePostFileEdit(ctx context.Context) error {
 func handleClaudeCodePostFileEditFromReader(ctx context.Context, reader io.Reader) error {
 	input, err := parseFileEditHookInput(reader)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[entire] warning: failed to parse post-file-edit input: %v\n", err)
+		logging.Warn(ctx, "failed to parse post-file-edit input", slog.Any("error", err))
 		return nil
 	}
 
@@ -43,10 +42,24 @@ func handleClaudeCodePostFileEditFromReader(ctx context.Context, reader io.Reade
 		slog.String("session_id", input.SessionID),
 	)
 
+	// Verify session state exists before writing any files to avoid orphan edits
+	state, err := strategy.LoadSessionState(ctx, input.SessionID)
+	if err != nil {
+		logging.Warn(ctx, "failed to load session state for file edit",
+			slog.String("session_id", input.SessionID),
+			slog.Any("error", err),
+		)
+		return nil
+	}
+	if state == nil {
+		// No active session state - skip to avoid creating orphan edit logs
+		return nil
+	}
+
 	// Normalize path relative to repo root
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[entire] warning: failed to get repo root: %v\n", err)
+		logging.Warn(ctx, "failed to get repo root for file edit", slog.Any("error", err))
 		return nil
 	}
 
@@ -54,7 +67,7 @@ func handleClaudeCodePostFileEditFromReader(ctx context.Context, reader io.Reade
 	if !filepath.IsAbs(absPath) {
 		absPath = filepath.Join(repoRoot, absPath)
 	}
-	relPath := paths.ToRelativePath(absPath, repoRoot)
+	relPath := filepath.ToSlash(paths.ToRelativePath(absPath, repoRoot))
 	if relPath == "" {
 		// Path is outside repo, skip silently
 		return nil
@@ -83,28 +96,19 @@ func handleClaudeCodePostFileEditFromReader(ctx context.Context, reader io.Reade
 	// Append to JSONL edit log
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[entire] warning: failed to create state store: %v\n", err)
+		logging.Warn(ctx, "failed to create state store for file edit", slog.Any("error", err))
 		return nil
 	}
 	if err := store.AppendFileEdit(input.SessionID, edit); err != nil {
-		fmt.Fprintf(os.Stderr, "[entire] warning: failed to append file edit: %v\n", err)
+		logging.Warn(ctx, "failed to append file edit", slog.Any("error", err))
 		// Continue to try updating FilesTouched even if JSONL append fails
 	}
 
 	// Merge into FilesTouched in session state
-	state, err := strategy.LoadSessionState(ctx, input.SessionID)
-	if err != nil {
-		// Load error - not fatal, skip FilesTouched update
-		return nil //nolint:nilerr // non-fatal: don't block agent on state load failure
-	}
-	if state == nil {
-		// No active session state - not fatal
-		return nil
-	}
 	if !slices.Contains(state.FilesTouched, relPath) {
 		state.FilesTouched = append(state.FilesTouched, relPath)
 		if err := strategy.SaveSessionState(ctx, state); err != nil {
-			fmt.Fprintf(os.Stderr, "[entire] warning: failed to save session state: %v\n", err)
+			logging.Warn(ctx, "failed to save session state after file edit", slog.Any("error", err))
 		}
 	}
 
