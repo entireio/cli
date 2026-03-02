@@ -102,6 +102,14 @@ func init() {
 		return handleClaudeCodePostTodo()
 	})
 
+	RegisterHookHandler(agent.AgentNameClaudeCode, claudecode.HookNamePostFileEdit, func() error {
+		enabled, err := IsEnabled()
+		if err == nil && !enabled {
+			return nil
+		}
+		return handleClaudeCodePostFileEdit()
+	})
+
 	// Register Gemini CLI handlers
 	RegisterHookHandler(agent.AgentNameGemini, geminicli.HookNameSessionStart, func() error {
 		enabled, err := IsEnabled()
@@ -253,7 +261,7 @@ func getHookType(hookName string) string {
 	switch hookName {
 	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo:
 		return "subagent"
-	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
+	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool, claudecode.HookNamePostFileEdit:
 		return "tool"
 	default:
 		return "agent"
