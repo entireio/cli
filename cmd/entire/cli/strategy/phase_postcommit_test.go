@@ -1680,18 +1680,19 @@ func TestPostCommit_EndedSessionCarryForward_NotCondensedIntoUnrelatedCommit(t *
 		"New ACTIVE session BaseCommit should be updated after condensation")
 }
 
-// TestPostCommit_StaleActiveSession_NotCondensed verifies that a stale ACTIVE
-// session (agent killed without Stop hook) is NOT condensed into an unrelated
-// commit from a different session.
+// TestPostCommit_StaleActiveSession_CondensedAlongside verifies that a stale ACTIVE
+// session (agent killed without Stop hook) IS condensed alongside the new session
+// when the commit has a checkpoint trailer.
 //
-// Root cause: when an agent is killed without the Stop hook firing, its session
-// remains in ACTIVE phase permanently. Previously, PostCommit unconditionally
-// set hasNew=true for ACTIVE sessions and skipped the filesOverlapWithContent
-// check, so stale ACTIVE sessions got condensed into every commit.
+// Background: when an agent is killed without the Stop hook firing, its session
+// remains in ACTIVE phase permanently. ACTIVE sessions fail-open in the overlap
+// check to prevent orphaned checkpoint trailers (where PrepareCommitMsg adds a
+// trailer but PostCommit never creates the matching metadata).
 //
-// The fix applies the overlap check to ALL sessions (including ACTIVE) using
-// filesTouchedBefore, so stale sessions with unrelated files are filtered out.
-func TestPostCommit_StaleActiveSession_NotCondensed(t *testing.T) {
+// The tradeoff: stale sessions may be condensed into unrelated commits as a side
+// effect, attaching extra metadata. This is acceptable because orphaned checkpoints
+// (data loss) are worse than extra metadata (data duplication).
+func TestPostCommit_StaleActiveSession_CondensedAlongside(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
@@ -1712,9 +1713,6 @@ func TestPostCommit_StaleActiveSession_NotCondensed(t *testing.T) {
 	// but the new commit will modify a different file.
 	staleState.FilesTouched = []string{"test.txt"}
 	require.NoError(t, s.saveSessionState(context.Background(), staleState))
-
-	staleOriginalBaseCommit := staleState.BaseCommit
-	staleOriginalStepCount := staleState.StepCount
 
 	// Move HEAD forward with an unrelated commit (no trailer)
 	wt, err := repo.Worktree()
@@ -1783,40 +1781,124 @@ func TestPostCommit_StaleActiveSession_NotCondensed(t *testing.T) {
 	err = s.PostCommit(context.Background())
 	require.NoError(t, err)
 
-	// --- Verify: stale ACTIVE session was NOT condensed ---
+	// --- Verify: stale ACTIVE session WAS condensed (fail-open for ACTIVE) ---
 	staleState, err = s.loadSessionState(context.Background(), staleSessionID)
 	require.NoError(t, err)
 
-	// StepCount should be unchanged (not reset by condensation)
-	assert.Equal(t, staleOriginalStepCount, staleState.StepCount,
-		"Stale ACTIVE session StepCount should NOT be reset (no condensation)")
+	// StepCount is 1 after condensation because carry-forward writes remaining
+	// files to the new shadow branch (condensation resets to 0, then carry-forward sets to 1).
+	assert.Equal(t, 1, staleState.StepCount,
+		"Stale ACTIVE session StepCount should be 1 (condensed + carry-forward)")
 
-	// BaseCommit IS updated for ACTIVE sessions (updateBaseCommitIfChanged)
+	// BaseCommit updated to new HEAD
 	assert.Equal(t, newHead, staleState.BaseCommit,
-		"Stale ACTIVE session BaseCommit should be updated (ACTIVE sessions always get BaseCommit updated)")
-	assert.NotEqual(t, staleOriginalBaseCommit, staleState.BaseCommit,
-		"Stale ACTIVE session BaseCommit should have changed")
+		"Stale ACTIVE session BaseCommit should be updated after condensation")
 
 	// Phase stays ACTIVE
 	assert.Equal(t, session.PhaseActive, staleState.Phase,
 		"Stale ACTIVE session should remain ACTIVE")
 
-	// --- Verify: new ACTIVE session WAS condensed ---
+	// --- Verify: new ACTIVE session WAS also condensed ---
 	newState, err = s.loadSessionState(context.Background(), newSessionID)
 	require.NoError(t, err)
 
-	// StepCount reset to 0 by condensation
-	assert.Equal(t, 0, newState.StepCount,
-		"New ACTIVE session StepCount should be reset by condensation")
+	// StepCount may be 0 (no carry-forward) or 1 (carry-forward for remaining files)
+	assert.LessOrEqual(t, newState.StepCount, 1,
+		"New ACTIVE session StepCount should be 0 or 1 after condensation")
 
 	// BaseCommit updated to new HEAD
 	assert.Equal(t, newHead, newState.BaseCommit,
 		"New ACTIVE session BaseCommit should be updated after condensation")
 
-	// Verify entire/checkpoints/v1 exists (new session was condensed)
+	// Verify entire/checkpoints/v1 exists (both sessions were condensed)
 	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err,
-		"entire/checkpoints/v1 should exist (new session was condensed)")
+		"entire/checkpoints/v1 should exist (sessions were condensed)")
+}
+
+// TestPostCommit_ActiveSession_CommitsFileNotInFilesTouched_Condenses verifies that
+// an ACTIVE session is condensed when the agent commits a file that isn't yet tracked
+// in FilesTouched.
+//
+// This reproduces a real bug: during an active turn, the agent creates and commits a
+// new file before SaveStep records it in FilesTouched. The carry-forward set from the
+// previous checkpoint contains different files (e.g., from a subagent). The overlap
+// check in shouldCondenseWithOverlapCheck found no intersection between the committed
+// files and FilesTouched, so it returned false — leaving an orphaned checkpoint ID
+// in the commit trailer with no corresponding metadata on entire/checkpoints/v1.
+//
+// The fix: when committedTouchedFiles is empty for an ACTIVE session, fail-open
+// (return true) instead of returning false. ACTIVE sessions may have stale
+// FilesTouched that doesn't include files the agent is working on mid-turn.
+func TestPostCommit_ActiveSession_CommitsFileNotInFilesTouched_Condenses(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+
+	// --- Create an ACTIVE session with a checkpoint ---
+	sessionID := "active-mid-turn-session"
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseActive
+	// Simulate carry-forward: previous checkpoint touched test.txt, but the agent
+	// is now working on a completely different file mid-turn. FilesTouched only
+	// contains the carry-forward files from the last SaveStep/SaveTaskStep.
+	state.FilesTouched = []string{"test.txt"}
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// --- Agent creates and commits a NEW file not in FilesTouched ---
+	// This is the key scenario: the agent writes new-agent-work.txt mid-turn,
+	// then commits it. SaveStep hasn't run yet, so FilesTouched is stale.
+	newFile := filepath.Join(dir, "new-agent-work.txt")
+	require.NoError(t, os.WriteFile(newFile, []byte("agent created this mid-turn"), 0o644))
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("new-agent-work.txt")
+	require.NoError(t, err)
+
+	cpID := "ba1ba2ba3ba4"
+	commitMsg := "add new agent work\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
+	_, err = wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	newHead := head.Hash().String()
+
+	// Run PostCommit
+	err = s.PostCommit(context.Background())
+	require.NoError(t, err)
+
+	// --- Verify: ACTIVE session WAS condensed ---
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+
+	// StepCount is 1 after condensation because carry-forward writes remaining
+	// files to the new shadow branch (condensation resets to 0, then carry-forward sets to 1).
+	assert.Equal(t, 1, state.StepCount,
+		"ACTIVE session should be condensed even when committed file is not in FilesTouched")
+
+	// BaseCommit updated to new HEAD
+	assert.Equal(t, newHead, state.BaseCommit,
+		"ACTIVE session BaseCommit should be updated after condensation")
+
+	// Phase stays ACTIVE
+	assert.Equal(t, session.PhaseActive, state.Phase,
+		"ACTIVE session should remain ACTIVE")
+
+	// Verify entire/checkpoints/v1 exists (session was condensed)
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err,
+		"entire/checkpoints/v1 should exist — checkpoint must not be orphaned")
 }
 
 // TestPostCommit_IdleSessionEmptyFilesTouched_NotCondensed verifies that an IDLE

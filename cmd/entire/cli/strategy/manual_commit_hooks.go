@@ -638,19 +638,20 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 // into this commit. Requires both that hasNew is true AND that the session's files
 // overlap with the committed files with matching content.
 //
-// This prevents stale sessions (ACTIVE sessions where the agent was killed, or
-// ENDED/IDLE sessions with carry-forward files) from being condensed into every
-// unrelated commit.
+// This prevents IDLE/ENDED sessions with carry-forward files from being condensed
+// into every unrelated commit.
+//
+// For ACTIVE sessions, we fail-open when file overlap cannot be confirmed. This is
+// because the agent may commit files mid-turn before SaveStep records them in
+// FilesTouched, causing the overlap check to see stale data. Failing closed in this
+// case orphans the checkpoint trailer (metadata never written to entire/checkpoints/v1).
+// The tradeoff: stale ACTIVE sessions (agent killed without Stop hook) may be
+// condensed into unrelated commits as a side effect. This is acceptable because
+// orphaned checkpoints (data loss) are worse than extra metadata (data duplication).
 //
 // filesTouchedBefore is populated from:
 //   - state.FilesTouched for IDLE/ENDED sessions (set via SaveStep/SaveTaskStep -> mergeFilesTouched)
 //   - transcript extraction for ACTIVE sessions when FilesTouched is empty
-//
-// When filesTouchedBefore is empty:
-//   - For ACTIVE sessions: fail-open (trust hasNew) because the agent may be
-//     mid-turn before any files are saved to state.
-//   - For IDLE/ENDED sessions: return false because there are no files to
-//     overlap with the commit.
 func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool) bool {
 	if !h.hasNew {
 		return false
@@ -670,7 +671,10 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool) 
 		}
 	}
 	if len(committedTouchedFiles) == 0 {
-		return false
+		// ACTIVE sessions fail-open: the agent may have committed files mid-turn
+		// that aren't yet in FilesTouched (SaveStep hasn't run). Without this,
+		// the checkpoint trailer added by PrepareCommitMsg would be orphaned.
+		return isActive
 	}
 	return filesOverlapWithContent(h.ctx, h.repo, h.shadowBranchName, h.commit, committedTouchedFiles, overlapOpts{
 		headTree:      h.headTree,
