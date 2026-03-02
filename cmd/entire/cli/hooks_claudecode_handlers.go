@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -696,6 +697,99 @@ func handleClaudeCodePostTask() error {
 
 	// Cleanup pre-task state (ignore error - cleanup is best-effort)
 	_ = CleanupPreTaskState(input.ToolUseID) //nolint:errcheck // best-effort cleanup
+
+	return nil
+}
+
+// handleClaudeCodePostFileEdit handles the PostToolUse[Write|Edit] hook.
+// Updates FilesTouched in session state and appends to the file edits log.
+// This runs on every file-modifying tool call to keep FilesTouched current
+// throughout the turn (fixing the orphaned checkpoint bug).
+func handleClaudeCodePostFileEdit() error {
+	input, err := parseFileEditHookInput(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("failed to parse PostToolUse file edit input: %w", err)
+	}
+
+	ag, err := GetCurrentHookAgent()
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	logCtx := logging.WithAgent(logging.WithComponent(context.Background(), "hooks"), ag.Name())
+	logging.Debug(logCtx, "post-file-edit",
+		slog.String("hook", "post-file-edit"),
+		slog.String("tool_name", input.ToolName),
+		slog.String("file_path", input.FilePath),
+		slog.Int("lines_added", input.LinesAdded),
+		slog.Int("lines_removed", input.LinesRemoved),
+	)
+
+	sessionID := input.SessionID
+	if sessionID == "" {
+		return nil // No session context
+	}
+
+	// Normalize file path to repo-relative
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		return fmt.Errorf("failed to get repo root: %w", err)
+	}
+	relPath := paths.ToRelativePath(input.FilePath, repoRoot)
+	if relPath == "" {
+		// Path is outside repo or couldn't be resolved, skip
+		return nil
+	}
+
+	// Determine action from tool name
+	var action agent.FileEditAction
+	switch input.ToolName {
+	case "Write":
+		action = agent.FileEditActionWrite
+	default:
+		action = agent.FileEditActionEdit
+	}
+
+	// Build the FileEdit record
+	edit := agent.FileEdit{
+		FilePath:     relPath,
+		Action:       action,
+		ToolName:     input.ToolName,
+		LinesAdded:   input.LinesAdded,
+		LinesRemoved: input.LinesRemoved,
+		Timestamp:    time.Now(),
+	}
+
+	// Append to JSONL log (fast, append-only)
+	store, err := session.NewStateStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to create state store: %v\n", err)
+		return nil // Non-fatal
+	}
+	if err := store.AppendFileEdit(sessionID, edit); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to append file edit: %v\n", err)
+		// Continue to update FilesTouched even if JSONL append fails
+	}
+
+	// Merge file path into FilesTouched in session state
+	state, err := strategy.LoadSessionState(sessionID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load session state: %v\n", err)
+		return nil // Non-fatal: session state may not exist yet
+	}
+	if state == nil {
+		return nil // Session not initialized yet, skip
+	}
+
+	// Check if file is already tracked
+	if slices.Contains(state.FilesTouched, relPath) {
+		return nil // Already tracked
+	}
+	state.FilesTouched = append(state.FilesTouched, relPath)
+
+	if err := strategy.SaveSessionState(state); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to save session state: %v\n", err)
+	}
 
 	return nil
 }
