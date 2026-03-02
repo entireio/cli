@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 )
 
 // FileEditHookInput represents parsed input from PostToolUse[Write|Edit] hooks.
@@ -56,7 +57,7 @@ func parseFileEditHookInput(r io.Reader) (*FileEditHookInput, error) {
 	}
 
 	switch raw.ToolName {
-	case "Write":
+	case claudecode.ToolWrite:
 		var input fileEditToolInputWrite
 		if err := json.Unmarshal(raw.ToolInput, &input); err != nil {
 			return nil, fmt.Errorf("failed to parse Write tool_input: %w", err)
@@ -64,7 +65,7 @@ func parseFileEditHookInput(r io.Reader) (*FileEditHookInput, error) {
 		result.FilePath = input.FilePath
 		result.LinesAdded = agent.CountLines(input.Content)
 		result.LinesRemoved = 0
-	case "Edit":
+	case claudecode.ToolEdit:
 		var input fileEditToolInputEdit
 		if err := json.Unmarshal(raw.ToolInput, &input); err != nil {
 			return nil, fmt.Errorf("failed to parse Edit tool_input: %w", err)

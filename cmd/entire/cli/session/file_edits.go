@@ -28,7 +28,7 @@ func (s *StateStore) AppendFileEdit(sessionID string, edit agent.FileEdit) error
 	}
 
 	path := s.fileEditsPath(sessionID)
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // G304: path built from validated session ID
 	if err != nil {
 		return fmt.Errorf("failed to open file edits log: %w", err)
 	}
@@ -54,7 +54,7 @@ func (s *StateStore) ReadFileEdits(sessionID string) ([]agent.FileEdit, error) {
 	}
 
 	path := s.fileEditsPath(sessionID)
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G304: path built from validated session ID
 	if os.IsNotExist(err) {
 		return nil, nil
 	}

@@ -744,7 +744,7 @@ func handleClaudeCodePostFileEdit() error {
 	// Determine action from tool name
 	var action agent.FileEditAction
 	switch input.ToolName {
-	case "Write":
+	case claudecode.ToolWrite:
 		action = agent.FileEditActionWrite
 	default:
 		action = agent.FileEditActionEdit

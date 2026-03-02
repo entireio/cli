@@ -47,4 +47,16 @@ func TestNewFileEdit(t *testing.T) {
 	if edit.Action != FileEditActionEdit {
 		t.Errorf("Action = %q, want %q", edit.Action, FileEditActionEdit)
 	}
+	if edit.ToolName != "Edit" {
+		t.Errorf("ToolName = %q, want %q", edit.ToolName, "Edit")
+	}
+	if edit.LinesAdded != 5 {
+		t.Errorf("LinesAdded = %d, want %d", edit.LinesAdded, 5)
+	}
+	if edit.LinesRemoved != 2 {
+		t.Errorf("LinesRemoved = %d, want %d", edit.LinesRemoved, 2)
+	}
+	if !edit.Timestamp.Equal(now) {
+		t.Errorf("Timestamp = %v, want %v", edit.Timestamp, now)
+	}
 }
