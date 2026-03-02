@@ -55,7 +55,7 @@ func TestSetupClaudeHooks_AddsAllRequiredHooks(t *testing.T) {
 	// Read the generated settings.json
 	settings := readClaudeSettings(t, env)
 
-	// Verify all 6 hooks exist
+	// Verify all required hooks exist
 	if len(settings.Hooks.SessionStart) == 0 {
 		t.Error("SessionStart hook should exist")
 	}
@@ -73,6 +73,12 @@ func TestSetupClaudeHooks_AddsAllRequiredHooks(t *testing.T) {
 	}
 	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "TodoWrite") {
 		t.Error("PostToolUse[TodoWrite] hook should exist")
+	}
+	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Write") {
+		t.Error("PostToolUse[Write] hook should exist")
+	}
+	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Edit") {
+		t.Error("PostToolUse[Edit] hook should exist")
 	}
 }
 

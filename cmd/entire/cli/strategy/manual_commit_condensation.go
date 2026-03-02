@@ -265,6 +265,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		}
 	}
 
+	// Load file edits from session state store
+	fileEdits := loadFileEditsForCondensation(ctx, state.SessionID)
+
 	// Write checkpoint metadata using the checkpoint store
 	if err := store.WriteCommitted(ctx, cpkg.WriteCommittedOptions{
 		CheckpointID:                checkpointID,
@@ -286,9 +289,13 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TokenUsage:                  sessionData.TokenUsage,
 		InitialAttribution:          attribution,
 		Summary:                     summary,
+		FileEdits:                   fileEdits,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
 	}
+
+	// Clear file edits after successful condensation
+	clearFileEditsAfterCondensation(ctx, state.SessionID, fileEdits)
 
 	return &CondenseResult{
 		CheckpointID:         checkpointID,
@@ -826,4 +833,46 @@ func (s *ManualCommitStrategy) cleanupShadowBranchIfUnused(ctx context.Context, 
 		return fmt.Errorf("failed to remove shadow branch: %w", err)
 	}
 	return nil
+}
+
+// loadFileEditsForCondensation reads file edit records from the session state store.
+// Returns nil if the state store cannot be created or no edits exist.
+func loadFileEditsForCondensation(ctx context.Context, sessionID string) []agent.FileEdit {
+	stateStore, err := session.NewStateStore(ctx)
+	if err != nil {
+		logging.Warn(ctx, "failed to create state store for file edits",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+
+	edits, err := stateStore.ReadFileEdits(sessionID)
+	if err != nil {
+		logging.Warn(ctx, "failed to read file edits",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+	return edits
+}
+
+// clearFileEditsAfterCondensation removes the file edits log after successful condensation.
+func clearFileEditsAfterCondensation(ctx context.Context, sessionID string, fileEdits []agent.FileEdit) {
+	if len(fileEdits) == 0 {
+		return
+	}
+
+	stateStore, err := session.NewStateStore(ctx)
+	if err != nil {
+		logging.Warn(ctx, "failed to create state store to clear file edits",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
+		return
+	}
+
+	if clearErr := stateStore.ClearFileEdits(sessionID); clearErr != nil {
+		logging.Warn(ctx, "failed to clear file edits after condensation",
+			slog.String("session_id", sessionID),
+			slog.String("error", clearErr.Error()))
+	}
 }

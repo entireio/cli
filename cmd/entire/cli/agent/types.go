@@ -1,6 +1,9 @@
 package agent
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // HookType represents agent lifecycle events
 type HookType string
@@ -58,4 +61,37 @@ type TokenUsage struct {
 	APICallCount int `json:"api_call_count"`
 	// SubagentTokens contains token usage from spawned subagents (if any)
 	SubagentTokens *TokenUsage `json:"subagent_tokens,omitempty"`
+}
+
+// FileEditAction represents the type of file edit operation.
+type FileEditAction string
+
+const (
+	// FileEditActionWrite represents a file write (new content).
+	FileEditActionWrite FileEditAction = "write"
+	// FileEditActionEdit represents a file edit (modification).
+	FileEditActionEdit FileEditAction = "edit"
+)
+
+// FileEdit represents a single file edit operation performed by an agent tool.
+type FileEdit struct {
+	FilePath     string         `json:"file_path"`
+	Action       FileEditAction `json:"action"`
+	ToolName     string         `json:"tool_name"`
+	LinesAdded   int            `json:"lines_added"`
+	LinesRemoved int            `json:"lines_removed"`
+	Timestamp    time.Time      `json:"timestamp"`
+}
+
+// CountLines counts the number of lines in a string.
+// Returns 0 for empty strings, otherwise counts newline-separated lines.
+func CountLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := strings.Count(s, "\n")
+	if !strings.HasSuffix(s, "\n") {
+		n++
+	}
+	return n
 }

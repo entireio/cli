@@ -286,6 +286,10 @@ type WriteCommittedOptions struct {
 	//   - the transcript was empty or too short to summarize
 	//   - the checkpoint predates the summarization feature
 	Summary *Summary
+
+	// FileEdits contains file edit operations recorded during the session.
+	// Written as file_edits.jsonl in the checkpoint's session subdirectory.
+	FileEdits []agent.FileEdit
 }
 
 // UpdateCommittedOptions contains options for updating an existing committed checkpoint.

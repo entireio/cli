@@ -35,6 +35,7 @@ func (c *ClaudeCodeAgent) HookNames() []string {
 		HookNamePreTask,
 		HookNamePostTask,
 		HookNamePostTodo,
+		HookNamePostFileEdit,
 	}
 }
 
@@ -56,6 +57,9 @@ func (c *ClaudeCodeAgent) ParseHookEvent(_ context.Context, hookName string, std
 		return c.parseSubagentEnd(stdin)
 	case HookNamePostTodo:
 		// PostTodo is Claude-specific; handled outside the generic dispatcher.
+		return nil, nil //nolint:nilnil // nil event = no lifecycle action
+	case HookNamePostFileEdit:
+		// PostFileEdit is Claude-specific; handled outside the generic dispatcher.
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action

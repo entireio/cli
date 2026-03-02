@@ -79,6 +79,8 @@ func getHookType(hookName string) string {
 	switch hookName {
 	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo:
 		return "subagent"
+	case claudecode.HookNamePostFileEdit:
+		return "tool"
 	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
 		return "tool"
 	default:
@@ -144,12 +146,16 @@ func newAgentHookVerbCmdWithLogging(agentName types.AgentName, hookName string) 
 				return fmt.Errorf("failed to parse hook event: %w", parseErr)
 			}
 
-			if event != nil {
-				// Lifecycle event — use the generic dispatcher
+			switch {
+			case event != nil:
+				// Lifecycle event -- use the generic dispatcher
 				hookErr = DispatchLifecycleEvent(ctx, ag, event)
-			} else if agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNamePostTodo {
+			case agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNamePostTodo:
 				// PostTodo is Claude-specific: creates incremental checkpoints during subagent execution
 				hookErr = handleClaudeCodePostTodo(ctx)
+			case agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNamePostFileEdit:
+				// PostFileEdit updates FilesTouched in real-time for mid-turn commits
+				hookErr = handleClaudeCodePostFileEdit(ctx)
 			}
 			// Other pass-through hooks (nil event, no special handling) are no-ops
 

@@ -415,6 +415,30 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 	}
 	filePaths.Metadata = "/" + sessionPath + paths.MetadataFileName
 
+	// Write file edits JSONL if present
+	if len(opts.FileEdits) > 0 {
+		var editLines []byte
+		for _, edit := range opts.FileEdits {
+			line, err := json.Marshal(edit)
+			if err != nil {
+				continue
+			}
+			editLines = append(editLines, line...)
+			editLines = append(editLines, '\n')
+		}
+		if len(editLines) > 0 {
+			editsBlobHash, err := CreateBlobFromContent(s.repo, editLines)
+			if err != nil {
+				return filePaths, fmt.Errorf("store file_edits blob: %w", err)
+			}
+			entries[sessionPath+paths.FileEditsFileName] = object.TreeEntry{
+				Name: sessionPath + paths.FileEditsFileName,
+				Mode: filemode.Regular,
+				Hash: editsBlobHash,
+			}
+		}
+	}
+
 	return filePaths, nil
 }
 
