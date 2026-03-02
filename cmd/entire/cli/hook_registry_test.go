@@ -42,6 +42,10 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	if err := gitConfigName.Run(); err != nil {
 		t.Fatalf("failed to configure git user.name: %v", err)
 	}
+	gitConfigGPGSign := exec.CommandContext(context.Background(), "git", "config", "commit.gpgsign", "false")
+	if err := gitConfigGPGSign.Run(); err != nil {
+		t.Fatalf("failed to configure git commit.gpgsign: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# Test"), 0o644); err != nil {
 		t.Fatalf("failed to create README: %v", err)
 	}
@@ -256,6 +260,10 @@ func TestHookCommand_SetsCurrentHookAgentName(t *testing.T) {
 	gitConfigName := exec.CommandContext(context.Background(), "git", "config", "user.name", "Test User")
 	if err := gitConfigName.Run(); err != nil {
 		t.Fatalf("failed to configure git user.name: %v", err)
+	}
+	gitConfigGPGSign := exec.CommandContext(context.Background(), "git", "config", "commit.gpgsign", "false")
+	if err := gitConfigGPGSign.Run(); err != nil {
+		t.Fatalf("failed to configure git commit.gpgsign: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# Test"), 0o644); err != nil {
 		t.Fatalf("failed to create README: %v", err)
