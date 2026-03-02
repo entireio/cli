@@ -17,7 +17,6 @@ import (
 // TestAgentDetection verifies agent detection and default behavior.
 // Not parallel - contains subtests that use os.Chdir which is process-global.
 func TestAgentDetection(t *testing.T) {
-
 	t.Run("defaults to claude-code when nothing configured", func(t *testing.T) {
 		t.Parallel()
 		env := NewTestEnv(t)
@@ -118,9 +117,9 @@ func TestAgentHookInstallation(t *testing.T) {
 			t.Fatalf("InstallHooks() error = %v", err)
 		}
 
-		// Should install 7 hooks: SessionStart, SessionEnd, Stop, UserPromptSubmit, PreToolUse[Task], PostToolUse[Task], PostToolUse[TodoWrite]
-		if count != 7 {
-			t.Errorf("InstallHooks() count = %d, want 7", count)
+		// Should install 9 hooks: SessionStart, SessionEnd, Stop, UserPromptSubmit, PreToolUse[Task], PostToolUse[Task], PostToolUse[TodoWrite], PostToolUse[Write], PostToolUse[Edit]
+		if count != 9 {
+			t.Errorf("InstallHooks() count = %d, want 9", count)
 		}
 
 		// Verify hooks are installed
@@ -410,13 +409,11 @@ func TestClaudeCodeHelperMethods(t *testing.T) {
 			t.Errorf("FindCheckpointUUID() uuid = %q, want %q", uuid, "u1")
 		}
 	})
-
 }
 
 // TestGeminiCLIAgentDetection verifies Gemini CLI agent detection.
 // Not parallel - contains subtests that use os.Chdir which is process-global.
 func TestGeminiCLIAgentDetection(t *testing.T) {
-
 	t.Run("gemini agent is registered", func(t *testing.T) {
 		t.Parallel()
 
