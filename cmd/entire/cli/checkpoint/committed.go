@@ -330,6 +330,30 @@ func (s *GitStore) writeSessionToSubdirectory(opts WriteCommittedOptions, sessio
 		filePaths.Context = "/" + sessionPath + paths.ContextFileName
 	}
 
+	// Write file_edits.jsonl if there are file edits
+	if len(opts.FileEdits) > 0 {
+		var editsBuf bytes.Buffer
+		for _, edit := range opts.FileEdits {
+			line, err := json.Marshal(edit)
+			if err != nil {
+				continue // Skip malformed edits
+			}
+			editsBuf.Write(line)
+			editsBuf.WriteByte('\n')
+		}
+		if editsBuf.Len() > 0 {
+			editsBlobHash, err := CreateBlobFromContent(s.repo, editsBuf.Bytes())
+			if err != nil {
+				return filePaths, err
+			}
+			entries[sessionPath+paths.FileEditsFileName] = object.TreeEntry{
+				Name: sessionPath + paths.FileEditsFileName,
+				Mode: filemode.Regular,
+				Hash: editsBlobHash,
+			}
+		}
+	}
+
 	// Write session-level metadata.json (CommittedMetadata with all fields including initial_attribution)
 	sessionMetadata := CommittedMetadata{
 		CheckpointID:                opts.CheckpointID,

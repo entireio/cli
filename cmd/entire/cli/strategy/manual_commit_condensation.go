@@ -214,6 +214,16 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		}
 	}
 
+	// Load file edits from JSONL log
+	var fileEdits []agent.FileEdit
+	stateStore, storeErr := session.NewStateStore()
+	if storeErr == nil {
+		edits, readErr := stateStore.ReadFileEdits(state.SessionID)
+		if readErr == nil {
+			fileEdits = edits
+		}
+	}
+
 	// Write checkpoint metadata using the checkpoint store
 	if err := store.WriteCommitted(context.Background(), cpkg.WriteCommittedOptions{
 		CheckpointID:                checkpointID,
@@ -236,8 +246,14 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		InitialAttribution:          attribution,
 		Summary:                     summary,
 		SessionTranscriptPath:       homeRelativePath(state.TranscriptPath),
+		FileEdits:                   fileEdits,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
+	}
+
+	// Clear file edits log after successful condensation
+	if storeErr == nil {
+		_ = stateStore.ClearFileEdits(state.SessionID) //nolint:errcheck // best-effort cleanup
 	}
 
 	return &CondenseResult{

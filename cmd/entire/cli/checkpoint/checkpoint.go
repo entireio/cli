@@ -290,6 +290,10 @@ type WriteCommittedOptions struct {
 	// Persisted in CommittedMetadata so restore can write the transcript back to
 	// the correct location without reconstructing agent-specific paths.
 	SessionTranscriptPath string
+
+	// FileEdits contains the file edit log entries for this session's checkpoint.
+	// When non-empty, stored as file_edits.jsonl in the session's checkpoint directory.
+	FileEdits []agent.FileEdit
 }
 
 // UpdateCommittedOptions contains options for updating an existing committed checkpoint.
