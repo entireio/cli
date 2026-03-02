@@ -28,6 +28,7 @@ const (
 	HookNamePreTask          = "pre-task"
 	HookNamePostTask         = "post-task"
 	HookNamePostTodo         = "post-todo"
+	HookNamePostFileEdit     = "post-file-edit"
 )
 
 // ClaudeSettingsFileName is the settings file used by Claude Code.
@@ -48,6 +49,7 @@ func (c *ClaudeCodeAgent) GetHookNames() []string {
 		HookNamePreTask,
 		HookNamePostTask,
 		HookNamePostTodo,
+		HookNamePostFileEdit,
 	}
 }
 
@@ -129,7 +131,7 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	}
 
 	// Define hook commands
-	var sessionStartCmd, sessionEndCmd, stopCmd, userPromptSubmitCmd, preTaskCmd, postTaskCmd, postTodoCmd string
+	var sessionStartCmd, sessionEndCmd, stopCmd, userPromptSubmitCmd, preTaskCmd, postTaskCmd, postTodoCmd, postFileEditCmd string
 	if localDev {
 		sessionStartCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code session-start"
 		sessionEndCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code session-end"
@@ -138,6 +140,7 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		preTaskCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code pre-task"
 		postTaskCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-task"
 		postTodoCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-todo"
+		postFileEditCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-file-edit"
 	} else {
 		sessionStartCmd = "entire hooks claude-code session-start"
 		sessionEndCmd = "entire hooks claude-code session-end"
@@ -146,6 +149,7 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 		preTaskCmd = "entire hooks claude-code pre-task"
 		postTaskCmd = "entire hooks claude-code post-task"
 		postTodoCmd = "entire hooks claude-code post-todo"
+		postFileEditCmd = "entire hooks claude-code post-file-edit"
 	}
 
 	count := 0
@@ -177,6 +181,14 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, "TodoWrite", postTodoCmd) {
 		postToolUse = addHookToMatcher(postToolUse, "TodoWrite", postTodoCmd)
+		count++
+	}
+	if !hookCommandExistsWithMatcher(postToolUse, "Write", postFileEditCmd) {
+		postToolUse = addHookToMatcher(postToolUse, "Write", postFileEditCmd)
+		count++
+	}
+	if !hookCommandExistsWithMatcher(postToolUse, "Edit", postFileEditCmd) {
+		postToolUse = addHookToMatcher(postToolUse, "Edit", postFileEditCmd)
 		count++
 	}
 
