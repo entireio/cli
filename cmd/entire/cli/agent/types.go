@@ -1,6 +1,9 @@
 package agent
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // HookType represents agent lifecycle events
 type HookType string
@@ -33,6 +36,48 @@ type HookInput struct {
 
 	// RawData preserves agent-specific data for extension
 	RawData map[string]interface{}
+}
+
+// FileEditAction represents the type of file edit operation.
+type FileEditAction string
+
+const (
+	// FileEditActionWrite represents a Write tool operation (create or overwrite).
+	FileEditActionWrite FileEditAction = "write"
+	// FileEditActionEdit represents an Edit tool operation (modify existing file).
+	FileEditActionEdit FileEditAction = "edit"
+)
+
+// FileEdit represents a single file modification by an agent tool.
+// Stored in append-only JSONL logs per session for real-time file tracking
+// and future attribution computation.
+type FileEdit struct {
+	// FilePath is the repo-relative path to the modified file.
+	FilePath string `json:"file_path"`
+	// Action is the type of edit (write or edit).
+	Action FileEditAction `json:"action"`
+	// ToolName is the agent tool that performed the edit (e.g., "Write", "Edit").
+	ToolName string `json:"tool_name"`
+	// LinesAdded is the number of lines added by this edit.
+	LinesAdded int `json:"lines_added"`
+	// LinesRemoved is the number of lines removed by this edit.
+	LinesRemoved int `json:"lines_removed"`
+	// Timestamp is when the edit occurred.
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// CountLines counts the number of lines in a string.
+// Empty string returns 0. A string with no newlines returns 1.
+// Trailing newlines are not counted as an additional line.
+func CountLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := strings.Count(s, "\n")
+	if !strings.HasSuffix(s, "\n") {
+		n++
+	}
+	return n
 }
 
 // SessionChange represents detected session activity (for FileWatcher)
