@@ -148,7 +148,7 @@ func (d *Droid) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 	cmd := exec.CommandContext(ctx, d.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	cmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0")
+	cmd.Env = filterEnv(os.Environ(), "ENTIRE_TEST_TTY")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -180,7 +180,7 @@ func (d *Droid) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 
 func (d *Droid) StartSession(ctx context.Context, dir string) (Session, error) {
 	name := fmt.Sprintf("droid-test-%d", time.Now().UnixNano())
-	s, err := NewTmuxSession(name, dir, nil, "env", "ENTIRE_TEST_TTY=0", d.Binary(), "--model", defaultDroidModel, "--skip-permissions-unsafe")
+	s, err := NewTmuxSession(name, dir, []string{"ENTIRE_TEST_TTY"}, d.Binary(), "--model", defaultDroidModel, "--skip-permissions-unsafe")
 	if err != nil {
 		return nil, err
 	}

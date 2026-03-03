@@ -1685,12 +1685,10 @@ func TestPostCommit_EndedSessionCarryForward_NotCondensedIntoUnrelatedCommit(t *
 // commit from a different session.
 //
 // Root cause: when an agent is killed without the Stop hook firing, its session
-// remains in ACTIVE phase permanently. Previously, PostCommit unconditionally
-// set hasNew=true for ACTIVE sessions and skipped the filesOverlapWithContent
-// check, so stale ACTIVE sessions got condensed into every commit.
-//
-// The fix applies the overlap check to ALL sessions (including ACTIVE) using
-// filesTouchedBefore, so stale sessions with unrelated files are filtered out.
+// remains in ACTIVE phase permanently. The overlap check prevents stale sessions
+// with unrelated files from being condensed. The isRecentInteraction guard
+// ensures that genuinely-active sessions (recent LastInteractionTime) skip the
+// overlap check, while stale sessions (old/nil LastInteractionTime) must pass it.
 func TestPostCommit_StaleActiveSession_NotCondensed(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
@@ -1711,6 +1709,9 @@ func TestPostCommit_StaleActiveSession_NotCondensed(t *testing.T) {
 	// The stale session touched "test.txt" (set by setupSessionWithCheckpoint)
 	// but the new commit will modify a different file.
 	staleState.FilesTouched = []string{"test.txt"}
+	// Stale session: LastInteractionTime is old (agent was killed days ago)
+	staleTime := time.Now().Add(-48 * time.Hour)
+	staleState.LastInteractionTime = &staleTime
 	require.NoError(t, s.saveSessionState(context.Background(), staleState))
 
 	staleOriginalBaseCommit := staleState.BaseCommit
@@ -1760,6 +1761,9 @@ func TestPostCommit_StaleActiveSession_NotCondensed(t *testing.T) {
 	newState, err := s.loadSessionState(context.Background(), newSessionID)
 	require.NoError(t, err)
 	newState.Phase = session.PhaseActive
+	// New session has recent interaction (agent is genuinely running)
+	now := time.Now()
+	newState.LastInteractionTime = &now
 	require.NoError(t, s.saveSessionState(context.Background(), newState))
 
 	// --- Commit ONLY new-feature.txt (not test.txt) with checkpoint trailer ---
@@ -2142,4 +2146,103 @@ func TestPostCommit_NonEndedSession_NotMarkedFullyCondensed(t *testing.T) {
 				"%s sessions must never be marked FullyCondensed", phase)
 		})
 	}
+}
+
+// TestPostCommit_ActiveSession_DifferentFilesThanCommit_ShouldCondense verifies
+// that when an ACTIVE session's Turn 1 touched file A (e.g., a cache file) but
+// Turn 2 commits different files B and C, condensation still happens.
+//
+// This is a regression test for the bug where shouldCondenseWithOverlapCheck
+// incorrectly skipped condensation because filesTouchedBefore (from Turn 1)
+// didn't overlap with the committed files (from Turn 2). ACTIVE sessions with a
+// recent LastInteractionTime should condense when hasNew is true — the overlap
+// check is only meaningful for IDLE/ENDED sessions and stale ACTIVE sessions.
+func TestPostCommit_ActiveSession_DifferentFilesThanCommit_ShouldCondense(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-active-different-files"
+
+	// --- Turn 1: Save checkpoint touching a cache file (not what will be committed) ---
+	// Write the cache file so SaveStep can snapshot it
+	cacheFile := filepath.Join(dir, ".gitstats_cache.sqlite3")
+	require.NoError(t, os.WriteFile(cacheFile, []byte("cache data"), 0o644))
+
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	transcript := `{"type":"human","message":{"content":"analyze git stats"}}
+{"type":"assistant","message":{"content":"analyzing stats, creating cache"}}
+`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(metadataDirAbs, paths.TranscriptFileName),
+		[]byte(transcript), 0o644))
+
+	err = s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{},
+		NewFiles:       []string{".gitstats_cache.sqlite3"},
+		DeletedFiles:   []string{},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint: cache created",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	})
+	require.NoError(t, err)
+
+	// Set phase to ACTIVE (agent mid-turn) with recent interaction
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseActive
+	// FilesTouched reflects Turn 1's cache file — NOT the files about to be committed
+	state.FilesTouched = []string{".gitstats_cache.sqlite3"}
+	now := time.Now()
+	state.LastInteractionTime = &now
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// --- Turn 2: Agent commits DIFFERENT files (README.md, org_commit_activity.py) ---
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Git Stats"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "org_commit_activity.py"), []byte("print('hello')"), 0o644))
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("README.md")
+	require.NoError(t, err)
+	_, err = wt.Add("org_commit_activity.py")
+	require.NoError(t, err)
+
+	cpID := "d1d2d3d4d5d6"
+	commitMsg := "Add git stats tools\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
+	_, err = wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// --- Run PostCommit ---
+	err = s.PostCommit(context.Background())
+	require.NoError(t, err)
+
+	// --- Verify condensation happened ---
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+
+	// StepCount should be 1 because carry-forward created a new checkpoint for
+	// .gitstats_cache.sqlite3 which was NOT committed (remaining agent work)
+	assert.Equal(t, 1, state.StepCount,
+		"ACTIVE session StepCount should be 1 (carry-forward for uncommitted cache file)")
+
+	// Phase stays ACTIVE
+	assert.Equal(t, session.PhaseActive, state.Phase,
+		"ACTIVE session should stay ACTIVE after condensation")
+
+	// entire/checkpoints/v1 branch should exist
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err,
+		"entire/checkpoints/v1 should exist — ACTIVE session with different files must still condense")
 }

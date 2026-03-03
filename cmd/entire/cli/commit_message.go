@@ -1,13 +1,17 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
-// generateCommitMessage creates a commit message from the user's original prompt
-func generateCommitMessage(originalPrompt string) string {
+// generateCommitMessage creates a commit message from the user's original prompt.
+// If the prompt is empty or cleans to empty, falls back to "<agentType> session updates".
+func generateCommitMessage(originalPrompt string, agentType types.AgentType) string {
 	if originalPrompt != "" {
 		cleaned := cleanPromptForCommit(originalPrompt)
 		if cleaned != "" {
@@ -15,7 +19,10 @@ func generateCommitMessage(originalPrompt string) string {
 		}
 	}
 
-	return "Claude Code session updates"
+	if agentType == "" {
+		agentType = agent.AgentTypeUnknown
+	}
+	return fmt.Sprintf("%s session updates", agentType)
 }
 
 // cleanPromptForCommit cleans up a user prompt to make it suitable as a commit message

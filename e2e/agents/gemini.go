@@ -86,7 +86,7 @@ func (g *Gemini) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 	cmd := exec.CommandContext(promptCtx, g.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	cmd.Env = append(os.Environ(), "ACCESSIBLE=1", "ENTIRE_TEST_TTY=0")
+	cmd.Env = append(filterEnv(os.Environ(), "ENTIRE_TEST_TTY"), "ACCESSIBLE=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -125,7 +125,7 @@ func (g *Gemini) StartSession(ctx context.Context, dir string) (Session, error) 
 	name := fmt.Sprintf("gemini-test-%d", time.Now().UnixNano())
 	// Unset CI and GITHUB_ACTIONS so gemini doesn't force headless mode —
 	// it checks both in isHeadlessMode() and skips interactive TUI entirely.
-	s, err := NewTmuxSession(name, dir, []string{"CI", "GITHUB_ACTIONS"}, "env", "ACCESSIBLE=1", "ENTIRE_TEST_TTY=0", g.Binary(), "--model", geminiDefaultModel, "-y")
+	s, err := NewTmuxSession(name, dir, []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY"}, "env", "ACCESSIBLE=1", g.Binary(), "--model", geminiDefaultModel, "-y")
 	if err != nil {
 		return nil, err
 	}

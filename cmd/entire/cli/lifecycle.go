@@ -289,7 +289,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if len(allPrompts) > 0 {
 		lastPrompt = allPrompts[len(allPrompts)-1]
 	}
-	commitMessage := generateCommitMessage(lastPrompt)
+	commitMessage := generateCommitMessage(lastPrompt, ag.Type())
 	logging.Debug(logCtx, "using commit message",
 		slog.Int("message_length", len(commitMessage)))
 

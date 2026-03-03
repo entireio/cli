@@ -203,6 +203,70 @@ func TestHookRunner_SimulateStop_SubagentOnlyChanges(t *testing.T) {
 	}
 }
 
+// TestHookRunner_SimulateStop_GitStatusMergesWithTranscript verifies that
+// handleLifecycleTurnEnd always consults git status and merges those files with
+// transcript-extracted files. This guards against a regression where someone makes
+// git status conditional on transcript parsing failing.
+//
+// Scenario:
+//   - Transcript references file A (via tool_use block)
+//   - File B is a tracked file modified on disk but NOT mentioned in transcript
+//   - After stop, FilesTouched must contain both A and B
+func TestHookRunner_SimulateStop_GitStatusMergesWithTranscript(t *testing.T) {
+	t.Parallel()
+	env := NewRepoWithCommit(t)
+
+	// Create a tracked file that we'll modify later (not mentioned in transcript).
+	// It must be committed first so git status reports it as "modified" (not "untracked").
+	env.WriteFile("tracked-only.txt", "original content")
+	env.GitAdd("tracked-only.txt")
+	env.GitCommit("add tracked file")
+
+	session := env.NewSession()
+
+	// Capture pre-prompt state
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+
+	// Modify the tracked file on disk (git status will see this as modified)
+	env.WriteFile("tracked-only.txt", "modified content")
+
+	// Create a file that IS mentioned in the transcript
+	env.WriteFile("transcript-file.txt", "created by agent")
+
+	// Build transcript that only mentions transcript-file.txt
+	session.CreateTranscript("Create a file", []FileChange{
+		{Path: "transcript-file.txt", Content: "created by agent"},
+	})
+
+	// Simulate stop
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	// Verify FilesTouched contains BOTH files
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("failed to get session state: %v", err)
+	}
+	if state == nil {
+		t.Fatal("session state should exist after checkpoint")
+	}
+
+	filesTouched := make(map[string]bool)
+	for _, f := range state.FilesTouched {
+		filesTouched[f] = true
+	}
+
+	if !filesTouched["transcript-file.txt"] {
+		t.Errorf("FilesTouched should contain transcript-extracted file 'transcript-file.txt', got %v", state.FilesTouched)
+	}
+	if !filesTouched["tracked-only.txt"] {
+		t.Errorf("FilesTouched should contain git-status-detected file 'tracked-only.txt', got %v", state.FilesTouched)
+	}
+}
+
 // TestUserPromptSubmit_ReinstallsOverwrittenHooks verifies that EnsureSetup is called
 // during user-prompt-submit (start of turn) and reinstalls hooks that were overwritten
 // by third-party tools like lefthook. This ensures hooks are in place before any

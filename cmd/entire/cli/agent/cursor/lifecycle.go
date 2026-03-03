@@ -44,10 +44,6 @@ func (c *CursorAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 	return data, nil
 }
 
-// Note: CursorAgent does NOT implement TranscriptAnalyzer. Cursor's transcript
-// format does not contain tool_use blocks that would allow extracting modified
-// files. File detection relies on git status instead.
-
 // --- Internal hook parsing functions ---
 
 // resolveTranscriptRef returns the transcript path from the hook input, or computes
