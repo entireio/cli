@@ -446,7 +446,7 @@ func TestReassembleTranscript_EmptyChunks(t *testing.T) {
 
 // --- DetectPresence ---
 
-func TestDetectPresence_NoGithubHooksDir(t *testing.T) {
+func TestDetectPresence_NoGitHubHooksDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
@@ -462,7 +462,7 @@ func TestDetectPresence_NoGithubHooksDir(t *testing.T) {
 	}
 }
 
-func TestDetectPresence_WithGithubHooksDirButNoEntireJSON(t *testing.T) {
+func TestDetectPresence_WithGitHubHooksDirButNoEntireJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
