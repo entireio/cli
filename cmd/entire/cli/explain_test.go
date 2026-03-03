@@ -2489,7 +2489,6 @@ func TestRunExplain_SessionFlagFiltersListView(t *testing.T) {
 		{"init"},
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test User"},
-		{"config", "commit.gpgsign", "false"},
 		{"commit", "--allow-empty", "-m", "init"},
 	} {
 		cmd := exec.CommandContext(context.Background(), "git", args...)
