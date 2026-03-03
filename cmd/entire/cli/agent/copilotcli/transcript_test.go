@@ -5,8 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+)
 
-	"github.com/entireio/cli/cmd/entire/cli/agent"
+const (
+	testFileHello       = "/tmp/test/hello.txt"
+	testPromptCreateTxt = "create hello.txt"
 )
 
 // testJSONLLines returns JSONL lines matching the real Copilot CLI transcript format
@@ -32,17 +35,6 @@ func writeTestJSONL(t *testing.T, lines []string) string {
 	return path
 }
 
-// TestCopilotImplementsTranscriptAnalyzer is a compile-time interface check.
-// The var _ check in transcript.go is the real guard; this test makes it visible
-// in test output.
-func TestCopilotImplementsTranscriptAnalyzer(t *testing.T) {
-	t.Parallel()
-	var a agent.Agent = &CopilotCLIAgent{}
-	if _, ok := a.(agent.TranscriptAnalyzer); !ok {
-		t.Fatal("CopilotCLIAgent must implement agent.TranscriptAnalyzer")
-	}
-}
-
 func TestExtractModifiedFilesFromEvents(t *testing.T) {
 	t.Parallel()
 
@@ -54,8 +46,8 @@ func TestExtractModifiedFilesFromEvents(t *testing.T) {
 		if len(files) != 1 {
 			t.Fatalf("expected 1 file, got %d: %v", len(files), files)
 		}
-		if files[0] != "/tmp/test/hello.txt" {
-			t.Errorf("expected '/tmp/test/hello.txt', got %q", files[0])
+		if files[0] != testFileHello {
+			t.Errorf("expected %q, got %q", testFileHello, files[0])
 		}
 	})
 
@@ -80,8 +72,8 @@ func TestExtractModifiedFilesFromEvents(t *testing.T) {
 		if len(files) != 2 {
 			t.Fatalf("expected 2 deduplicated files, got %d: %v", len(files), files)
 		}
-		if files[0] != "/tmp/test/hello.txt" {
-			t.Errorf("expected first file '/tmp/test/hello.txt', got %q", files[0])
+		if files[0] != testFileHello {
+			t.Errorf("expected first file %q, got %q", testFileHello, files[0])
 		}
 		if files[1] != "/tmp/test/world.txt" {
 			t.Errorf("expected second file '/tmp/test/world.txt', got %q", files[1])
@@ -91,19 +83,6 @@ func TestExtractModifiedFilesFromEvents(t *testing.T) {
 
 func TestExtractPromptsFromEvents(t *testing.T) {
 	t.Parallel()
-
-	t.Run("extracts user messages", func(t *testing.T) {
-		t.Parallel()
-		content := strings.Join(testJSONLLines, "\n") + "\n"
-		events := parseEventsFromBytes([]byte(content))
-		prompts := extractPromptsFromEvents(events)
-		if len(prompts) != 1 {
-			t.Fatalf("expected 1 prompt, got %d: %v", len(prompts), prompts)
-		}
-		if prompts[0] != "create hello.txt" {
-			t.Errorf("expected 'create hello.txt', got %q", prompts[0])
-		}
-	})
 
 	t.Run("multi-turn conversation", func(t *testing.T) {
 		t.Parallel()
@@ -116,8 +95,8 @@ func TestExtractPromptsFromEvents(t *testing.T) {
 		if len(prompts) != 2 {
 			t.Fatalf("expected 2 prompts, got %d: %v", len(prompts), prompts)
 		}
-		if prompts[0] != "create hello.txt" {
-			t.Errorf("expected first prompt 'create hello.txt', got %q", prompts[0])
+		if prompts[0] != testPromptCreateTxt {
+			t.Errorf("expected first prompt %q, got %q", testPromptCreateTxt, prompts[0])
 		}
 		if prompts[1] != "now delete it" {
 			t.Errorf("expected second prompt 'now delete it', got %q", prompts[1])
@@ -127,16 +106,6 @@ func TestExtractPromptsFromEvents(t *testing.T) {
 
 func TestExtractSummaryFromEvents(t *testing.T) {
 	t.Parallel()
-
-	t.Run("returns last assistant text", func(t *testing.T) {
-		t.Parallel()
-		content := strings.Join(testJSONLLines, "\n") + "\n"
-		events := parseEventsFromBytes([]byte(content))
-		summary := extractSummaryFromEvents(events)
-		if summary != "Created hello.txt." {
-			t.Errorf("expected 'Created hello.txt.', got %q", summary)
-		}
-	})
 
 	t.Run("empty events returns empty string", func(t *testing.T) {
 		t.Parallel()
@@ -209,8 +178,8 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 		if len(files) != 1 {
 			t.Fatalf("expected 1 file, got %d: %v", len(files), files)
 		}
-		if files[0] != "/tmp/test/hello.txt" {
-			t.Errorf("expected '/tmp/test/hello.txt', got %q", files[0])
+		if files[0] != testFileHello {
+			t.Errorf("expected %q, got %q", testFileHello, files[0])
 		}
 	})
 
@@ -264,8 +233,8 @@ func TestExtractPrompts(t *testing.T) {
 		if len(prompts) != 1 {
 			t.Fatalf("expected 1 prompt, got %d: %v", len(prompts), prompts)
 		}
-		if prompts[0] != "create hello.txt" {
-			t.Errorf("expected 'create hello.txt', got %q", prompts[0])
+		if prompts[0] != testPromptCreateTxt {
+			t.Errorf("expected %q, got %q", testPromptCreateTxt, prompts[0])
 		}
 	})
 
@@ -311,4 +280,71 @@ func TestExtractSummary_EmptyTranscript(t *testing.T) {
 	if summary != "" {
 		t.Errorf("expected empty summary, got %q", summary)
 	}
+}
+
+func TestParseEventsFromBytes_MalformedLines(t *testing.T) {
+	t.Parallel()
+	lines := []string{
+		`{"type":"user.message","data":{"content":"hello"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		`THIS IS NOT JSON`,
+		`{"type":"user.message","data":{"content":"world"},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":""}`,
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	events := parseEventsFromBytes([]byte(content))
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events (malformed line skipped), got %d", len(events))
+	}
+	if events[0].Type != eventTypeUserMessage {
+		t.Errorf("expected first event type %q, got %q", eventTypeUserMessage, events[0].Type)
+	}
+	if events[1].Type != eventTypeUserMessage {
+		t.Errorf("expected second event type %q, got %q", eventTypeUserMessage, events[1].Type)
+	}
+}
+
+func TestExtractSummary_SkipsEmptyContentAssistantMessages(t *testing.T) {
+	t.Parallel()
+	// Simulates -p (headless) mode where assistant.message has content: ""
+	// and tool requests but no text. Summary should fall back to the earlier
+	// assistant message that has text.
+	lines := []string{
+		`{"type":"assistant.message","data":{"content":"I'll create that file.","toolRequests":[{"toolCallId":"tc1"}]},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		`{"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"tc2"}]},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":""}`,
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	events := parseEventsFromBytes([]byte(content))
+	summary := extractSummaryFromEvents(events)
+	if summary != "I'll create that file." {
+		t.Errorf("expected summary from earlier message, got %q", summary)
+	}
+}
+
+func TestExtractModifiedFilesFromEvents_EmptyAndMalformedFilePaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty filePaths string", func(t *testing.T) {
+		t.Parallel()
+		lines := []string{
+			`{"type":"tool.execution_complete","data":{"toolCallId":"tc1","toolTelemetry":{"properties":{"filePaths":""},"metrics":{"linesAdded":0,"linesRemoved":0}}},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		}
+		content := strings.Join(lines, "\n") + "\n"
+		events := parseEventsFromBytes([]byte(content))
+		files := extractModifiedFilesFromEvents(events)
+		if len(files) != 0 {
+			t.Errorf("expected 0 files for empty filePaths, got %d: %v", len(files), files)
+		}
+	})
+
+	t.Run("malformed filePaths JSON", func(t *testing.T) {
+		t.Parallel()
+		lines := []string{
+			`{"type":"tool.execution_complete","data":{"toolCallId":"tc1","toolTelemetry":{"properties":{"filePaths":"not-valid-json"},"metrics":{"linesAdded":1,"linesRemoved":0}}},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		}
+		content := strings.Join(lines, "\n") + "\n"
+		events := parseEventsFromBytes([]byte(content))
+		files := extractModifiedFilesFromEvents(events)
+		if len(files) != 0 {
+			t.Errorf("expected 0 files for malformed filePaths, got %d: %v", len(files), files)
+		}
+	})
 }

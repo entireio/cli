@@ -102,7 +102,7 @@ Each line has: `type`, `data`, `id` (UUID), `timestamp` (ISO 8601), `parentId`
 - `user.message` — User messages (`content`, `transformedContent`, `attachments`, `interactionId`)
 - `assistant.turn_start` — Start of assistant turn (`turnId`, `interactionId`)
 - `assistant.message` — Assistant response (`content`, `toolRequests[]`, `reasoningText`)
-- `tool.execution_complete` — Tool result (`toolCallId`, `toolTelemetry.metrics.filePaths[]`, `linesAdded`, `linesRemoved`)
+- `tool.execution_complete` — Tool result (`toolCallId`, `toolTelemetry.properties.filePaths` (JSON-encoded string array), `linesAdded`, `linesRemoved`)
 - `assistant.turn_end` — End of assistant turn (`turnId`)
 
 **Example entries:**
@@ -116,7 +116,7 @@ Each line has: `type`, `data`, `id` (UUID), `timestamp` (ISO 8601), `parentId`
 
 ### Tool Usage in Transcripts
 
-The `assistant.message` entries have a `toolRequests` array with tool call IDs. After each tool executes, a `tool.execution_complete` event is emitted with `toolTelemetry.metrics.filePaths[]` listing files modified by that tool call. The `TranscriptAnalyzer` implementation uses these `filePaths` to extract modified files for checkpoint metadata.
+The `assistant.message` entries have a `toolRequests` array with tool call IDs. After each tool executes, a `tool.execution_complete` event is emitted with `toolTelemetry.properties.filePaths`, where `filePaths` is a string containing a JSON array of file paths modified by that tool call. The `TranscriptAnalyzer` implementation parses this `filePaths` property to extract modified files for checkpoint metadata.
 
 **Note:** Token usage is NOT available in the Copilot CLI JSONL format. The transcript events do not include input/output token counts or cost information, so `TokenCalculator` is not implemented.
 
