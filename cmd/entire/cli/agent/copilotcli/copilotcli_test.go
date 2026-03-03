@@ -450,6 +450,8 @@ func TestDetectPresence_NoGithubHooksDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
+	initGitRepo(t, tmpDir)
+
 	ag := &CopilotCLIAgent{}
 	present, err := ag.DetectPresence(context.Background())
 	if err != nil {
@@ -460,7 +462,7 @@ func TestDetectPresence_NoGithubHooksDir(t *testing.T) {
 	}
 }
 
-func TestDetectPresence_WithGithubHooksDir(t *testing.T) {
+func TestDetectPresence_WithGithubHooksDirButNoEntireJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
@@ -468,7 +470,6 @@ func TestDetectPresence_WithGithubHooksDir(t *testing.T) {
 		t.Fatalf("failed to create .github/hooks: %v", err)
 	}
 
-	// DetectPresence uses paths.WorktreeRoot(), which needs a git repo.
 	initGitRepo(t, tmpDir)
 
 	ag := &CopilotCLIAgent{}
@@ -476,8 +477,41 @@ func TestDetectPresence_WithGithubHooksDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DetectPresence() error = %v", err)
 	}
+	if present {
+		t.Error("DetectPresence() = true, want false (no entire.json)")
+	}
+}
+
+func TestDetectPresence_WithEntireHooks(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	initGitRepo(t, tmpDir)
+
+	hooksPath := filepath.Join(tmpDir, ".github", "hooks")
+	if err := os.MkdirAll(hooksPath, 0o755); err != nil {
+		t.Fatalf("failed to create .github/hooks: %v", err)
+	}
+
+	entireJSON := `{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {"type": "command", "bash": "entire hooks copilot-cli session-start"}
+    ]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(hooksPath, "entire.json"), []byte(entireJSON), 0o644); err != nil {
+		t.Fatalf("failed to write entire.json: %v", err)
+	}
+
+	ag := &CopilotCLIAgent{}
+	present, err := ag.DetectPresence(context.Background())
+	if err != nil {
+		t.Fatalf("DetectPresence() error = %v", err)
+	}
 	if !present {
-		t.Error("DetectPresence() = false, want true")
+		t.Error("DetectPresence() = false, want true (entire.json has Entire hooks)")
 	}
 }
 

@@ -11,7 +11,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -47,18 +46,10 @@ func (c *CopilotCLIAgent) Description() string {
 // IsPreview returns true because this is a new integration.
 func (c *CopilotCLIAgent) IsPreview() bool { return true }
 
-// DetectPresence checks if Copilot CLI hooks are configured in the repository.
+// DetectPresence checks if Entire hooks are installed in the Copilot CLI config.
+// Delegates to AreHooksInstalled which checks .github/hooks/entire.json for Entire hook entries.
 func (c *CopilotCLIAgent) DetectPresence(ctx context.Context) (bool, error) {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		worktreeRoot = "."
-	}
-
-	hooksDir := filepath.Join(worktreeRoot, ".github", "hooks")
-	if _, err := os.Stat(hooksDir); err == nil {
-		return true, nil
-	}
-	return false, nil
+	return c.AreHooksInstalled(ctx), nil
 }
 
 // GetSessionID extracts the session ID from hook input.

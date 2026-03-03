@@ -154,7 +154,8 @@ Position = line count (JSONL format). Use `agent.ChunkJSONL()` / `agent.Reassemb
 ## Presence Detection
 
 - No repo-level `.copilot/` directory (unlike other agents)
-- Check for `.github/hooks/entire.json` containing copilot-cli hooks
+- `DetectPresence` delegates to `AreHooksInstalled`, which reads `.github/hooks/entire.json` and checks if any hook entry has an Entire command prefix (`entire ` or `go run ${COPILOT_PROJECT_DIR}/cmd/entire/main.go `)
+- Simply having a `.github/hooks/` directory is NOT sufficient -- the directory must contain `entire.json` with Entire hook entries
 - Alternative: check for `copilot` binary in PATH
 
 ## Protected Directories
