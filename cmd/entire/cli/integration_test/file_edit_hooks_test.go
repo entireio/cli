@@ -122,8 +122,8 @@ func TestPostFileEdit_CreatesEditLog(t *testing.T) {
 	if edit.ToolName != "Write" {
 		t.Errorf("edit.ToolName = %q, want %q", edit.ToolName, "Write")
 	}
-	if edit.LinesAdded < 1 {
-		t.Errorf("edit.LinesAdded = %d, want > 0", edit.LinesAdded)
+	if edit.LinesAdded != 7 {
+		t.Errorf("edit.LinesAdded = %d, want 7", edit.LinesAdded)
 	}
 	if edit.LinesRemoved != 0 {
 		t.Errorf("edit.LinesRemoved = %d, want 0", edit.LinesRemoved)
@@ -431,5 +431,51 @@ func TestPostFileEdit_PathOutsideRepo(t *testing.T) {
 	}
 	if len(state.FilesTouched) != 0 {
 		t.Errorf("FilesTouched = %v, want empty (outside-repo path should be skipped)", state.FilesTouched)
+	}
+}
+
+// TestPostFileEdit_RelativePath verifies that relative file paths are correctly
+// normalized to repo-relative paths by the post-file-edit hook.
+func TestPostFileEdit_RelativePath(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	sessionID := "test-session-edit-7"
+
+	// Start a session turn
+	if err := env.SimulateUserPromptSubmit(sessionID); err != nil {
+		t.Fatalf("user-prompt-submit failed: %v", err)
+	}
+
+	// Use a relative path (not absolute) — the hook should join it with repo root
+	hookInput := map[string]interface{}{
+		"session_id":  sessionID,
+		"tool_name":   "Write",
+		"tool_use_id": "toolu_write_rel",
+		"tool_input": map[string]interface{}{
+			"file_path": "src/main.go",
+			"content":   "package main\n",
+		},
+	}
+	inputJSON, _ := json.Marshal(hookInput)
+
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, t)
+	if err := runner.runHookInRepoDir("post-file-edit", inputJSON); err != nil {
+		t.Fatalf("post-file-edit hook should not error for relative path, got: %v", err)
+	}
+
+	// Verify FilesTouched contains the repo-relative path
+	state, err := env.GetSessionState(sessionID)
+	if err != nil {
+		t.Fatalf("failed to get session state: %v", err)
+	}
+	if state == nil {
+		t.Fatal("session state is nil")
+	}
+	if len(state.FilesTouched) != 1 {
+		t.Fatalf("FilesTouched has %d entries, want 1", len(state.FilesTouched))
+	}
+	if state.FilesTouched[0] != "src/main.go" {
+		t.Errorf("FilesTouched[0] = %q, want %q", state.FilesTouched[0], "src/main.go")
 	}
 }

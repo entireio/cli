@@ -421,6 +421,9 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 		for _, edit := range opts.FileEdits {
 			line, err := json.Marshal(edit)
 			if err != nil {
+				logging.Warn(ctx, "failed to marshal file edit, skipping",
+					slog.String("file_path", edit.FilePath),
+					slog.String("error", err.Error()))
 				continue
 			}
 			editLines = append(editLines, line...)

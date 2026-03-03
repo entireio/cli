@@ -7,7 +7,6 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"slices"
 	"time"
@@ -20,18 +19,16 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// handleClaudeCodePostFileEdit handles the PostToolUse[Write|Edit] hook.
-// It tracks file edits in real-time for mid-turn commit attribution.
+// handleClaudeCodePostFileEditFromReader handles the post-file-edit hook, which fires
+// after Claude Code's Write or Edit tool invocations. It tracks file edits in real-time
+// for mid-turn commit attribution.
 // All errors are non-fatal: logged as warnings and return nil.
-func handleClaudeCodePostFileEdit(ctx context.Context) error {
-	return handleClaudeCodePostFileEditFromReader(ctx, os.Stdin)
-}
-
-// handleClaudeCodePostFileEditFromReader is the testable version that accepts an io.Reader.
+//
+//nolint:unparam // Always returns nil by design (non-fatal hook); error return required by hook dispatch interface.
 func handleClaudeCodePostFileEditFromReader(ctx context.Context, reader io.Reader) error {
 	input, err := parseFileEditHookInput(reader)
 	if err != nil {
-		logging.Warn(ctx, "failed to parse post-file-edit input", slog.Any("error", err))
+		logging.Warn(ctx, "failed to parse post-file-edit input", slog.String("error", err.Error()))
 		return nil
 	}
 
@@ -47,19 +44,21 @@ func handleClaudeCodePostFileEditFromReader(ctx context.Context, reader io.Reade
 	if err != nil {
 		logging.Warn(ctx, "failed to load session state for file edit",
 			slog.String("session_id", input.SessionID),
-			slog.Any("error", err),
+			slog.String("error", err.Error()),
 		)
 		return nil
 	}
 	if state == nil {
-		// No active session state - skip to avoid creating orphan edit logs
+		logging.Debug(ctx, "no active session state for file edit, skipping",
+			slog.String("session_id", input.SessionID),
+		)
 		return nil
 	}
 
 	// Normalize path relative to repo root
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		logging.Warn(ctx, "failed to get repo root for file edit", slog.Any("error", err))
+		logging.Warn(ctx, "failed to get repo root for file edit", slog.String("error", err.Error()))
 		return nil
 	}
 
@@ -69,7 +68,10 @@ func handleClaudeCodePostFileEditFromReader(ctx context.Context, reader io.Reade
 	}
 	relPath := filepath.ToSlash(paths.ToRelativePath(absPath, repoRoot))
 	if relPath == "" {
-		// Path is outside repo, skip silently
+		logging.Debug(ctx, "file edit path outside repo, skipping",
+			slog.String("abs_path", absPath),
+			slog.String("repo_root", repoRoot),
+		)
 		return nil
 	}
 
@@ -81,6 +83,8 @@ func handleClaudeCodePostFileEditFromReader(ctx context.Context, reader io.Reade
 	case claudecode.ToolEdit:
 		action = agent.FileEditActionEdit
 	default:
+		// Unreachable: parseFileEditHookInput rejects unsupported tools.
+		// Use the tool name directly as a defensive fallback.
 		action = agent.FileEditAction(input.ToolName)
 	}
 
@@ -96,11 +100,11 @@ func handleClaudeCodePostFileEditFromReader(ctx context.Context, reader io.Reade
 	// Append to JSONL edit log
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
-		logging.Warn(ctx, "failed to create state store for file edit", slog.Any("error", err))
+		logging.Warn(ctx, "failed to create state store for file edit", slog.String("error", err.Error()))
 		return nil
 	}
 	if err := store.AppendFileEdit(input.SessionID, edit); err != nil {
-		logging.Warn(ctx, "failed to append file edit", slog.Any("error", err))
+		logging.Warn(ctx, "failed to append file edit", slog.String("error", err.Error()))
 		// Continue to try updating FilesTouched even if JSONL append fails
 	}
 
@@ -108,7 +112,7 @@ func handleClaudeCodePostFileEditFromReader(ctx context.Context, reader io.Reade
 	if !slices.Contains(state.FilesTouched, relPath) {
 		state.FilesTouched = append(state.FilesTouched, relPath)
 		if err := strategy.SaveSessionState(ctx, state); err != nil {
-			logging.Warn(ctx, "failed to save session state after file edit", slog.Any("error", err))
+			logging.Warn(ctx, "failed to save session state after file edit", slog.String("error", err.Error()))
 		}
 	}
 

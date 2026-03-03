@@ -288,6 +288,7 @@ type WriteCommittedOptions struct {
 	Summary *Summary
 
 	// FileEdits contains file edit operations recorded during the session.
+	// Populated from the session-level edit log recorded by the post-file-edit hook.
 	// Written as file_edits.jsonl in the checkpoint's session subdirectory.
 	FileEdits []agent.FileEdit
 }

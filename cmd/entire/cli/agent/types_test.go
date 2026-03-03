@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -30,10 +31,10 @@ func TestCountLines(t *testing.T) {
 	}
 }
 
-func TestFileEditFields(t *testing.T) {
+func TestFileEdit_JSONRoundTrip(t *testing.T) {
 	t.Parallel()
-	now := time.Now()
-	edit := FileEdit{
+	now := time.Now().Truncate(time.Millisecond) // JSON loses sub-ms precision
+	original := FileEdit{
 		FilePath:     "cmd/main.go",
 		Action:       FileEditActionEdit,
 		ToolName:     "Edit",
@@ -41,22 +42,33 @@ func TestFileEditFields(t *testing.T) {
 		LinesRemoved: 2,
 		Timestamp:    now,
 	}
-	if edit.FilePath != "cmd/main.go" {
-		t.Errorf("FilePath = %q, want %q", edit.FilePath, "cmd/main.go")
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
 	}
-	if edit.Action != FileEditActionEdit {
-		t.Errorf("Action = %q, want %q", edit.Action, FileEditActionEdit)
+
+	var decoded FileEdit
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if edit.ToolName != "Edit" {
-		t.Errorf("ToolName = %q, want %q", edit.ToolName, "Edit")
+
+	if decoded.FilePath != original.FilePath {
+		t.Errorf("FilePath = %q, want %q", decoded.FilePath, original.FilePath)
 	}
-	if edit.LinesAdded != 5 {
-		t.Errorf("LinesAdded = %d, want %d", edit.LinesAdded, 5)
+	if decoded.Action != original.Action {
+		t.Errorf("Action = %q, want %q", decoded.Action, original.Action)
 	}
-	if edit.LinesRemoved != 2 {
-		t.Errorf("LinesRemoved = %d, want %d", edit.LinesRemoved, 2)
+	if decoded.ToolName != original.ToolName {
+		t.Errorf("ToolName = %q, want %q", decoded.ToolName, original.ToolName)
 	}
-	if !edit.Timestamp.Equal(now) {
-		t.Errorf("Timestamp = %v, want %v", edit.Timestamp, now)
+	if decoded.LinesAdded != original.LinesAdded {
+		t.Errorf("LinesAdded = %d, want %d", decoded.LinesAdded, original.LinesAdded)
+	}
+	if decoded.LinesRemoved != original.LinesRemoved {
+		t.Errorf("LinesRemoved = %d, want %d", decoded.LinesRemoved, original.LinesRemoved)
+	}
+	if !decoded.Timestamp.Equal(original.Timestamp) {
+		t.Errorf("Timestamp = %v, want %v", decoded.Timestamp, original.Timestamp)
 	}
 }

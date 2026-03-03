@@ -1,6 +1,6 @@
 // hook_registry.go provides hook command registration for agents.
 // The lifecycle dispatcher (DispatchLifecycleEvent) handles all lifecycle events.
-// PostTodo is the only hook that's handled directly (not via lifecycle dispatcher).
+// PostTodo and PostFileEdit are handled directly (not via lifecycle dispatcher).
 package cli
 
 import (
@@ -90,7 +90,7 @@ func getHookType(hookName string) string {
 
 // newAgentHookVerbCmdWithLogging creates a command for a specific hook verb with structured logging.
 // It uses the lifecycle dispatcher (ParseHookEvent → DispatchLifecycleEvent) as the primary path.
-// PostTodo is handled directly as it's Claude-specific and not part of the lifecycle dispatcher.
+// PostTodo and PostFileEdit are handled directly as they're Claude-specific and not part of the lifecycle dispatcher.
 func newAgentHookVerbCmdWithLogging(agentName types.AgentName, hookName string) *cobra.Command {
 	return &cobra.Command{
 		Use:    hookName,
@@ -155,7 +155,7 @@ func newAgentHookVerbCmdWithLogging(agentName types.AgentName, hookName string) 
 				hookErr = handleClaudeCodePostTodo(ctx)
 			case agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNamePostFileEdit:
 				// PostFileEdit updates FilesTouched in real-time for mid-turn commits
-				hookErr = handleClaudeCodePostFileEdit(ctx)
+				hookErr = handleClaudeCodePostFileEditFromReader(ctx, cmd.InOrStdin())
 			}
 			// Other pass-through hooks (nil event, no special handling) are no-ops
 

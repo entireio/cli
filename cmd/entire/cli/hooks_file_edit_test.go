@@ -103,3 +103,31 @@ func TestParseFileEditHookInput_InvalidJSON(t *testing.T) {
 		t.Error("expected error for invalid JSON")
 	}
 }
+
+func TestParseFileEditHookInput_MissingSessionID(t *testing.T) {
+	t.Parallel()
+	input := `{
+		"session_id": "",
+		"tool_name": "Write",
+		"tool_use_id": "toolu_123",
+		"tool_input": {"file_path": "/tmp/test.go", "content": "hello\n"}
+	}`
+	_, err := parseFileEditHookInput(strings.NewReader(input))
+	if err == nil {
+		t.Error("expected error for missing session_id")
+	}
+}
+
+func TestParseFileEditHookInput_MissingFilePath(t *testing.T) {
+	t.Parallel()
+	input := `{
+		"session_id": "test-session",
+		"tool_name": "Write",
+		"tool_use_id": "toolu_123",
+		"tool_input": {"file_path": "", "content": "hello\n"}
+	}`
+	_, err := parseFileEditHookInput(strings.NewReader(input))
+	if err == nil {
+		t.Error("expected error for missing file_path")
+	}
+}

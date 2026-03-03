@@ -10,7 +10,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 )
 
-// FileEditHookInput represents parsed input from PostToolUse[Write|Edit] hooks.
+// FileEditHookInput represents parsed input from the post-file-edit hook.
+// Populated exclusively by parseFileEditHookInput.
 type FileEditHookInput struct {
 	SessionID    string
 	ToolName     string
@@ -33,8 +34,9 @@ type fileEditToolInputEdit struct {
 	NewString string `json:"new_string"`
 }
 
-// parseFileEditHookInput parses PostToolUse[Write|Edit] hook input from reader.
-// Extracts file path and computes line counts from the tool payload.
+// parseFileEditHookInput parses post-file-edit hook input from reader.
+// Extracts session context, file path, tool info, and computes line counts from the tool payload.
+// Uses SubagentCheckpointHookInput as the raw JSON shape (superset containing the needed fields).
 func parseFileEditHookInput(r io.Reader) (*FileEditHookInput, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -49,6 +51,10 @@ func parseFileEditHookInput(r io.Reader) (*FileEditHookInput, error) {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
+	if raw.SessionID == "" {
+		return nil, errors.New("missing session_id in hook input")
+	}
+
 	result := &FileEditHookInput{
 		SessionID: raw.SessionID,
 		ToolName:  raw.ToolName,
@@ -61,6 +67,9 @@ func parseFileEditHookInput(r io.Reader) (*FileEditHookInput, error) {
 		if err := json.Unmarshal(raw.ToolInput, &input); err != nil {
 			return nil, fmt.Errorf("failed to parse Write tool_input: %w", err)
 		}
+		if input.FilePath == "" {
+			return nil, errors.New("missing file_path in Write tool_input")
+		}
 		result.FilePath = input.FilePath
 		result.LinesAdded = agent.CountLines(input.Content)
 		result.LinesRemoved = 0
@@ -68,6 +77,9 @@ func parseFileEditHookInput(r io.Reader) (*FileEditHookInput, error) {
 		var input fileEditToolInputEdit
 		if err := json.Unmarshal(raw.ToolInput, &input); err != nil {
 			return nil, fmt.Errorf("failed to parse Edit tool_input: %w", err)
+		}
+		if input.FilePath == "" {
+			return nil, errors.New("missing file_path in Edit tool_input")
 		}
 		result.FilePath = input.FilePath
 		result.LinesAdded = agent.CountLines(input.NewString)

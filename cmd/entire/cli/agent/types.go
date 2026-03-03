@@ -67,20 +67,23 @@ type TokenUsage struct {
 type FileEditAction string
 
 const (
-	// FileEditActionWrite represents a file write (new content).
+	// FileEditActionWrite represents a file write operation (creating or overwriting a file).
 	FileEditActionWrite FileEditAction = "write"
-	// FileEditActionEdit represents a file edit (modification).
+	// FileEditActionEdit represents a file edit operation (modifying part of an existing file).
 	FileEditActionEdit FileEditAction = "edit"
 )
 
 // FileEdit represents a single file edit operation performed by an agent tool.
 type FileEdit struct {
-	FilePath     string         `json:"file_path"`
-	Action       FileEditAction `json:"action"`
-	ToolName     string         `json:"tool_name"`
-	LinesAdded   int            `json:"lines_added"`
-	LinesRemoved int            `json:"lines_removed"`
-	Timestamp    time.Time      `json:"timestamp"`
+	// FilePath is the edited file path, repo-relative with forward slashes (e.g., "cmd/main.go").
+	FilePath string `json:"file_path"`
+	// Action is the normalized edit action derived from ToolName.
+	Action FileEditAction `json:"action"`
+	// ToolName is the raw agent tool name (e.g., "Write", "Edit") for provenance.
+	ToolName     string    `json:"tool_name"`
+	LinesAdded   int       `json:"lines_added"`
+	LinesRemoved int       `json:"lines_removed"`
+	Timestamp    time.Time `json:"timestamp"`
 }
 
 // CountLines counts the number of lines in a string.
