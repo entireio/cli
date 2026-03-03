@@ -1,0 +1,281 @@
+package copilotcli
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+)
+
+// Compile-time interface check.
+var _ agent.TranscriptAnalyzer = (*CopilotCLIAgent)(nil)
+
+// copilotEvent is a single line in events.jsonl.
+type copilotEvent struct {
+	Type      string          `json:"type"`
+	Data      json.RawMessage `json:"data"`
+	ID        string          `json:"id"`
+	Timestamp string          `json:"timestamp"`
+	ParentID  string          `json:"parentId"`
+}
+
+const (
+	eventTypeUserMessage  = "user.message"
+	eventTypeAssistantMsg = "assistant.message"
+	eventTypeToolExecDone = "tool.execution_complete"
+)
+
+// userMessageData is the data payload for user.message events.
+// IMPORTANT: The field is "content", not "message" — verified from real Copilot JSONL.
+type userMessageData struct {
+	Content string `json:"content"`
+}
+
+type assistantMessageData struct {
+	Content string `json:"content"`
+}
+
+type toolExecCompleteData struct {
+	ToolCallID    string        `json:"toolCallId"`
+	ToolTelemetry toolTelemetry `json:"toolTelemetry"`
+}
+
+type toolTelemetry struct {
+	Metrics    toolMetrics    `json:"metrics"`
+	Properties toolProperties `json:"properties"`
+}
+
+type toolMetrics struct {
+	LinesAdded   int `json:"linesAdded"`
+	LinesRemoved int `json:"linesRemoved"`
+}
+
+// toolProperties contains string-encoded metadata from tool execution.
+// filePaths is a JSON-encoded string array, e.g. "[\"path/to/file.txt\"]".
+type toolProperties struct {
+	FilePaths string `json:"filePaths"`
+}
+
+// parseEventsFromBytes scans JSONL data and returns all parsed events.
+// Malformed lines are silently skipped.
+func parseEventsFromBytes(data []byte) []copilotEvent {
+	return parseEventsFromOffset(data, 0)
+}
+
+// parseEventsFromOffset scans JSONL data and returns events starting after
+// the first startOffset lines. Malformed lines are silently skipped.
+func parseEventsFromOffset(data []byte, startOffset int) []copilotEvent {
+	var events []copilotEvent
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, bufio.MaxScanTokenSize), 10*1024*1024) // 10 MB max line
+	lineNum := 0
+
+	for scanner.Scan() {
+		lineNum++
+		if lineNum <= startOffset {
+			continue
+		}
+
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var ev copilotEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue // skip malformed lines
+		}
+		events = append(events, ev)
+	}
+
+	return events
+}
+
+// extractModifiedFilesFromEvents collects file paths from tool.execution_complete
+// events and returns a deduplicated list.
+func extractModifiedFilesFromEvents(events []copilotEvent) []string {
+	seen := make(map[string]bool)
+	var files []string
+
+	for i := range events {
+		if events[i].Type != eventTypeToolExecDone {
+			continue
+		}
+
+		var data toolExecCompleteData
+		if err := json.Unmarshal(events[i].Data, &data); err != nil {
+			continue
+		}
+
+		// filePaths is a JSON-encoded string array in properties, e.g. "[\"path/to/file\"]"
+		if data.ToolTelemetry.Properties.FilePaths == "" {
+			continue
+		}
+		var paths []string
+		if err := json.Unmarshal([]byte(data.ToolTelemetry.Properties.FilePaths), &paths); err != nil {
+			continue
+		}
+		for _, fp := range paths {
+			if fp != "" && !seen[fp] {
+				seen[fp] = true
+				files = append(files, fp)
+			}
+		}
+	}
+
+	return files
+}
+
+// extractPromptsFromEvents collects content from user.message events.
+func extractPromptsFromEvents(events []copilotEvent) []string {
+	var prompts []string
+
+	for i := range events {
+		if events[i].Type != eventTypeUserMessage {
+			continue
+		}
+
+		var data userMessageData
+		if err := json.Unmarshal(events[i].Data, &data); err != nil {
+			continue
+		}
+
+		if data.Content != "" {
+			prompts = append(prompts, data.Content)
+		}
+	}
+
+	return prompts
+}
+
+// extractSummaryFromEvents returns the content of the last assistant.message event.
+func extractSummaryFromEvents(events []copilotEvent) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != eventTypeAssistantMsg {
+			continue
+		}
+
+		var data assistantMessageData
+		if err := json.Unmarshal(events[i].Data, &data); err != nil {
+			continue
+		}
+
+		if data.Content != "" {
+			return data.Content
+		}
+	}
+
+	return ""
+}
+
+// GetTranscriptPosition returns the current line count of a Copilot CLI transcript.
+// Copilot CLI uses JSONL format, so position is the number of lines.
+// This is a lightweight operation that only counts lines without parsing JSON.
+// Uses bufio.Reader to handle arbitrarily long lines (no size limit).
+// Returns 0 if the file doesn't exist or is empty.
+func (c *CopilotCLIAgent) GetTranscriptPosition(path string) (int, error) {
+	if path == "" {
+		return 0, nil
+	}
+
+	file, err := os.Open(path) //nolint:gosec // Path comes from Copilot CLI transcript location
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to open transcript file: %w", err)
+	}
+	defer file.Close()
+
+	reader := bufio.NewReader(file)
+	lineCount := 0
+
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if readErr != nil {
+			if readErr == io.EOF {
+				if len(line) > 0 {
+					lineCount++ // Count final line without trailing newline
+				}
+				break
+			}
+			return 0, fmt.Errorf("failed to read transcript: %w", readErr)
+		}
+		lineCount++
+	}
+
+	return lineCount, nil
+}
+
+// ExtractModifiedFilesFromOffset extracts files modified since a given line number.
+// For Copilot CLI (JSONL format), offset is the starting line number.
+// Uses bufio.Reader to handle arbitrarily long lines (no size limit).
+// Returns:
+//   - files: list of file paths modified by Copilot (from tool.execution_complete events)
+//   - currentPosition: total number of lines in the file
+//   - error: any error encountered during reading
+func (c *CopilotCLIAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error) {
+	if path == "" {
+		return nil, 0, nil
+	}
+
+	file, openErr := os.Open(path) //nolint:gosec // Path comes from Copilot CLI transcript location
+	if openErr != nil {
+		return nil, 0, fmt.Errorf("failed to open transcript file: %w", openErr)
+	}
+	defer file.Close()
+
+	reader := bufio.NewReader(file)
+	var events []copilotEvent
+	lineNum := 0
+
+	for {
+		lineData, readErr := reader.ReadBytes('\n')
+		if readErr != nil && readErr != io.EOF {
+			return nil, 0, fmt.Errorf("failed to read transcript: %w", readErr)
+		}
+
+		if len(lineData) > 0 {
+			lineNum++
+			if lineNum > startOffset {
+				var ev copilotEvent
+				if parseErr := json.Unmarshal(lineData, &ev); parseErr == nil {
+					events = append(events, ev)
+				}
+				// Skip malformed lines silently
+			}
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+	}
+
+	return extractModifiedFilesFromEvents(events), lineNum, nil
+}
+
+// ExtractPrompts extracts user prompts from the transcript starting at the given offset.
+func (c *CopilotCLIAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
+	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
+	if err != nil {
+		return nil, fmt.Errorf("failed to read transcript: %w", err)
+	}
+
+	events := parseEventsFromOffset(data, fromOffset)
+	return extractPromptsFromEvents(events), nil
+}
+
+// ExtractSummary extracts the last assistant message as a session summary.
+func (c *CopilotCLIAgent) ExtractSummary(sessionRef string) (string, error) {
+	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
+	if err != nil {
+		return "", fmt.Errorf("failed to read transcript: %w", err)
+	}
+
+	events := parseEventsFromBytes(data)
+	return extractSummaryFromEvents(events), nil
+}

@@ -102,6 +102,7 @@ Each line has: `type`, `data`, `id` (UUID), `timestamp` (ISO 8601), `parentId`
 - `user.message` — User messages (`content`, `transformedContent`, `attachments`, `interactionId`)
 - `assistant.turn_start` — Start of assistant turn (`turnId`, `interactionId`)
 - `assistant.message` — Assistant response (`content`, `toolRequests[]`, `reasoningText`)
+- `tool.execution_complete` — Tool result (`toolCallId`, `toolTelemetry.metrics.filePaths[]`, `linesAdded`, `linesRemoved`)
 - `assistant.turn_end` — End of assistant turn (`turnId`)
 
 **Example entries:**
@@ -115,11 +116,21 @@ Each line has: `type`, `data`, `id` (UUID), `timestamp` (ISO 8601), `parentId`
 
 ### Tool Usage in Transcripts
 
-The `assistant.message` entries have a `toolRequests` array. When the agent uses tools (edit_file, write_file, shell, etc.), these will contain tool call details. Exact schema TBD — needs a session with actual tool usage.
+The `assistant.message` entries have a `toolRequests` array with tool call IDs. After each tool executes, a `tool.execution_complete` event is emitted with `toolTelemetry.metrics.filePaths[]` listing files modified by that tool call. The `TranscriptAnalyzer` implementation uses these `filePaths` to extract modified files for checkpoint metadata.
+
+**Note:** Token usage is NOT available in the Copilot CLI JSONL format. The transcript events do not include input/output token counts or cost information, so `TokenCalculator` is not implemented.
 
 ### Transcript Position
 
 Position = line count (JSONL format). Use `agent.ChunkJSONL()` / `agent.ReassembleJSONL()` for chunking.
+
+### TranscriptAnalyzer
+
+The `TranscriptAnalyzer` interface is implemented for Copilot CLI, providing:
+- `GetTranscriptPosition` — counts JSONL lines (lightweight, no JSON parsing)
+- `ExtractModifiedFilesFromOffset` — collects `filePaths` from `tool.execution_complete` events after a given line offset
+- `ExtractPrompts` — collects `content` from `user.message` events
+- `ExtractSummary` — returns the `content` of the last `assistant.message` event
 
 ## Session State Directory
 
