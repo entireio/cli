@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/go-git/go-git/v5"
@@ -2493,6 +2494,7 @@ func TestRunExplain_SessionFlagFiltersListView(t *testing.T) {
 	} {
 		cmd := exec.CommandContext(context.Background(), "git", args...)
 		cmd.Dir = tmp
+		cmd.Env = testutil.GitIsolatedEnv()
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
