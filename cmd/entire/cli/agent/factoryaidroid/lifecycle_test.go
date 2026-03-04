@@ -50,6 +50,38 @@ func TestParseHookEvent_TurnStart(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_TurnStart_IncludesModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &FactoryAIDroidAgent{}
+	input := `{"session_id": "sess-m", "transcript_path": "/tmp/t.jsonl", "prompt": "hi", "model": "gpt-4o"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameUserPromptSubmit, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Model != "gpt-4o" {
+		t.Errorf("expected model 'gpt-4o', got %q", event.Model)
+	}
+}
+
+func TestParseHookEvent_TurnStart_EmptyModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &FactoryAIDroidAgent{}
+	input := `{"session_id": "sess-nm", "transcript_path": "/tmp/t.jsonl", "prompt": "hi"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameUserPromptSubmit, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Model != "" {
+		t.Errorf("expected empty model, got %q", event.Model)
+	}
+}
+
 // TestParseHookEvent_TurnStart_SessionStartFormat verifies that parseTurnStart
 // handles SessionStart-format stdin (no "prompt" field). This happens when
 // user-prompt-submit is installed on the SessionStart event type to ensure

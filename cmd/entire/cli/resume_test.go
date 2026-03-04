@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -267,12 +268,17 @@ func TestRunResume_UncommittedChanges(t *testing.T) {
 	}
 }
 
-// createCheckpointOnMetadataBranch creates a checkpoint on the entire/checkpoints/v1 branch.
-// Returns the checkpoint ID.
+// createCheckpointOnMetadataBranch creates a checkpoint on the entire/checkpoints/v1 branch
+// with a default checkpoint ID ("abc123def456") and default timestamp.
 func createCheckpointOnMetadataBranch(t *testing.T, repo *git.Repository, sessionID string) id.CheckpointID {
 	t.Helper()
+	return createCheckpointOnMetadataBranchFull(t, repo, sessionID, id.MustCheckpointID("abc123def456"), time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+}
 
-	checkpointID := id.MustCheckpointID("abc123def456") // Fixed ID for testing
+// createCheckpointOnMetadataBranchFull creates a checkpoint on the entire/checkpoints/v1 branch
+// with a caller-specified checkpoint ID and timestamp.
+func createCheckpointOnMetadataBranchFull(t *testing.T, repo *git.Repository, sessionID string, checkpointID id.CheckpointID, createdAt time.Time) id.CheckpointID {
+	t.Helper()
 
 	// Get existing metadata branch or create it
 	if err := strategy.EnsureMetadataBranch(repo); err != nil {
@@ -294,8 +300,8 @@ func createCheckpointOnMetadataBranch(t *testing.T, repo *git.Repository, sessio
 	metadataJSON := fmt.Sprintf(`{
   "checkpoint_id": %q,
   "session_id": %q,
-  "created_at": "2025-01-01T00:00:00Z"
-}`, checkpointID.String(), sessionID)
+  "created_at": %q
+}`, checkpointID.String(), sessionID, createdAt.Format(time.RFC3339))
 
 	// Create blob for metadata
 	blob := repo.Storer.NewEncodedObject()
@@ -430,6 +436,270 @@ func createCheckpointOnMetadataBranch(t *testing.T, repo *git.Repository, sessio
 	}
 
 	return checkpointID
+}
+
+func TestDeduplicateSessions(t *testing.T) {
+	t.Parallel()
+
+	t0 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	t1 := t0.Add(1 * time.Hour)
+	t2 := t0.Add(2 * time.Hour)
+
+	t.Run("no duplicates keeps all", func(t *testing.T) {
+		t.Parallel()
+		existing := []strategy.RestoredSession{
+			{SessionID: "s1", CreatedAt: t0},
+		}
+		incoming := []strategy.RestoredSession{
+			{SessionID: "s2", CreatedAt: t1},
+		}
+		got := deduplicateSessions(existing, incoming)
+		if len(got) != 2 {
+			t.Fatalf("got %d sessions, want 2", len(got))
+		}
+		if got[0].SessionID != "s1" || got[1].SessionID != "s2" {
+			t.Errorf("got [%s, %s], want [s1, s2]", got[0].SessionID, got[1].SessionID)
+		}
+	})
+
+	t.Run("duplicate keeps newer", func(t *testing.T) {
+		t.Parallel()
+		existing := []strategy.RestoredSession{
+			{SessionID: "s1", Prompt: "old", CreatedAt: t0},
+		}
+		incoming := []strategy.RestoredSession{
+			{SessionID: "s1", Prompt: "new", CreatedAt: t1},
+		}
+		got := deduplicateSessions(existing, incoming)
+		if len(got) != 1 {
+			t.Fatalf("got %d sessions, want 1", len(got))
+		}
+		if got[0].Prompt != "new" {
+			t.Errorf("got prompt %q, want %q", got[0].Prompt, "new")
+		}
+	})
+
+	t.Run("duplicate keeps existing when newer", func(t *testing.T) {
+		t.Parallel()
+		existing := []strategy.RestoredSession{
+			{SessionID: "s1", Prompt: "newer", CreatedAt: t1},
+		}
+		incoming := []strategy.RestoredSession{
+			{SessionID: "s1", Prompt: "older", CreatedAt: t0},
+		}
+		got := deduplicateSessions(existing, incoming)
+		if len(got) != 1 {
+			t.Fatalf("got %d sessions, want 1", len(got))
+		}
+		if got[0].Prompt != "newer" {
+			t.Errorf("got prompt %q, want %q", got[0].Prompt, "newer")
+		}
+	})
+
+	t.Run("three occurrences keeps latest", func(t *testing.T) {
+		t.Parallel()
+		// This is the case the bug affected: after replacing once, the seen map
+		// must reflect the updated CreatedAt so the third occurrence compares correctly.
+		batch1 := []strategy.RestoredSession{
+			{SessionID: "s1", Prompt: "oldest", CreatedAt: t0},
+		}
+		batch2 := []strategy.RestoredSession{
+			{SessionID: "s1", Prompt: "newest", CreatedAt: t2},
+		}
+		batch3 := []strategy.RestoredSession{
+			{SessionID: "s1", Prompt: "middle", CreatedAt: t1},
+		}
+		result := deduplicateSessions(nil, batch1)
+		result = deduplicateSessions(result, batch2)
+		result = deduplicateSessions(result, batch3)
+		if len(result) != 1 {
+			t.Fatalf("got %d sessions, want 1", len(result))
+		}
+		if result[0].Prompt != "newest" {
+			t.Errorf("got prompt %q, want %q", result[0].Prompt, "newest")
+		}
+	})
+
+	t.Run("mixed unique and duplicate", func(t *testing.T) {
+		t.Parallel()
+		existing := []strategy.RestoredSession{
+			{SessionID: "s1", Prompt: "s1-old", CreatedAt: t0},
+			{SessionID: "s2", Prompt: "s2-only", CreatedAt: t0},
+		}
+		incoming := []strategy.RestoredSession{
+			{SessionID: "s1", Prompt: "s1-new", CreatedAt: t1},
+			{SessionID: "s3", Prompt: "s3-only", CreatedAt: t1},
+		}
+		got := deduplicateSessions(existing, incoming)
+		if len(got) != 3 {
+			t.Fatalf("got %d sessions, want 3", len(got))
+		}
+		if got[0].Prompt != "s1-new" {
+			t.Errorf("s1: got prompt %q, want %q", got[0].Prompt, "s1-new")
+		}
+		if got[1].SessionID != "s2" {
+			t.Errorf("got[1].SessionID = %q, want %q", got[1].SessionID, "s2")
+		}
+		if got[2].SessionID != "s3" {
+			t.Errorf("got[2].SessionID = %q, want %q", got[2].SessionID, "s3")
+		}
+	})
+}
+
+// TestResumeMultipleCheckpoints_SortsByCreatedAt verifies that resumeMultipleCheckpoints
+// sorts checkpoints by CreatedAt ascending before restoring, so that the newest checkpoint
+// writes last and wins on disk. This fixes the git CLI squash merge bug where trailers
+// appear in reverse chronological order (newest first).
+func TestResumeMultipleCheckpoints_SortsByCreatedAt(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+
+	// Create checkpoints with different timestamps.
+	// Simulate git CLI squash merge order: newest first in the commit message.
+	t1 := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC) // oldest
+	t2 := time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC)
+	t3 := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC) // newest
+
+	cpID1 := createCheckpointOnMetadataBranchFull(t, repo, "session-oldest", id.MustCheckpointID("aaa111bbb222"), t1)
+	cpID2 := createCheckpointOnMetadataBranchFull(t, repo, "session-middle", id.MustCheckpointID("ccc333ddd444"), t2)
+	cpID3 := createCheckpointOnMetadataBranchFull(t, repo, "session-newest", id.MustCheckpointID("eee555fff666"), t3)
+
+	metadataTree, err := strategy.GetMetadataBranchTree(repo)
+	if err != nil {
+		t.Fatalf("Failed to get metadata branch tree: %v", err)
+	}
+
+	// Pass checkpoint IDs in reverse chronological order (newest first),
+	// simulating git CLI squash merge trailer order.
+	reverseOrderIDs := []id.CheckpointID{cpID3, cpID2, cpID1}
+	checkpoints := collectCheckpointsByAge(metadataTree, reverseOrderIDs)
+
+	// Verify: after sorting, oldest is first, newest is last
+	if len(checkpoints) != 3 {
+		t.Fatalf("got %d checkpoints, want 3", len(checkpoints))
+	}
+	if checkpoints[0].CheckpointID.String() != cpID1.String() {
+		t.Errorf("checkpoints[0] = %s (want oldest %s)", checkpoints[0].CheckpointID, cpID1)
+	}
+	if checkpoints[1].CheckpointID.String() != cpID2.String() {
+		t.Errorf("checkpoints[1] = %s (want middle %s)", checkpoints[1].CheckpointID, cpID2)
+	}
+	if checkpoints[2].CheckpointID.String() != cpID3.String() {
+		t.Errorf("checkpoints[2] = %s (want newest %s)", checkpoints[2].CheckpointID, cpID3)
+	}
+
+	// Verify timestamps are actually ascending
+	if !checkpoints[0].CreatedAt.Before(checkpoints[1].CreatedAt) {
+		t.Errorf("checkpoints[0].CreatedAt (%v) should be before checkpoints[1].CreatedAt (%v)",
+			checkpoints[0].CreatedAt, checkpoints[1].CreatedAt)
+	}
+	if !checkpoints[1].CreatedAt.Before(checkpoints[2].CreatedAt) {
+		t.Errorf("checkpoints[1].CreatedAt (%v) should be before checkpoints[2].CreatedAt (%v)",
+			checkpoints[1].CreatedAt, checkpoints[2].CreatedAt)
+	}
+}
+
+func TestFindCheckpointInHistory_MultipleCheckpoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
+
+	// Create a commit that simulates a squash merge with multiple checkpoint trailers
+	testFile := filepath.Join(tmpDir, "squash.txt")
+	if err := os.WriteFile(testFile, []byte("squash content"), 0o644); err != nil {
+		t.Fatalf("Failed to write file: %v", err)
+	}
+	if _, err := w.Add("squash.txt"); err != nil {
+		t.Fatalf("Failed to add file: %v", err)
+	}
+
+	squashMsg := "Soph/test branch (#2)\n* random_letter script\n\nEntire-Checkpoint: 0aa0814d9839\n\n* random color\n\nEntire-Checkpoint: 33fb587b6fbb\n"
+	_, err := w.Commit(squashMsg, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create squash commit: %v", err)
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("Failed to get HEAD: %v", err)
+	}
+	headCommit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatalf("Failed to get HEAD commit: %v", err)
+	}
+
+	result := findCheckpointInHistory(headCommit, nil)
+
+	if len(result.checkpointIDs) != 2 {
+		t.Fatalf("findCheckpointInHistory() returned %d checkpoint IDs, want 2", len(result.checkpointIDs))
+	}
+	if result.checkpointIDs[0].String() != "0aa0814d9839" {
+		t.Errorf("checkpointIDs[0] = %q, want %q", result.checkpointIDs[0].String(), "0aa0814d9839")
+	}
+	if result.checkpointIDs[1].String() != "33fb587b6fbb" {
+		t.Errorf("checkpointIDs[1] = %q, want %q", result.checkpointIDs[1].String(), "33fb587b6fbb")
+	}
+	if result.newerCommitsExist {
+		t.Error("newerCommitsExist should be false when HEAD has the checkpoints")
+	}
+}
+
+func TestFindBranchCheckpoint_SquashMergeMultipleCheckpoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
+
+	// Create two checkpoints on metadata branch with different session IDs
+	sessionID1 := "2025-01-01-session-one"
+	cpID1 := createCheckpointOnMetadataBranch(t, repo, sessionID1)
+
+	sessionID2 := "2025-01-01-session-two"
+	cpID2 := createCheckpointOnMetadataBranchFull(t, repo, sessionID2, id.MustCheckpointID("def456abc123"), time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	// Create a squash merge commit with both checkpoint trailers
+	testFile := filepath.Join(tmpDir, "squash.txt")
+	if err := os.WriteFile(testFile, []byte("squash content"), 0o644); err != nil {
+		t.Fatalf("Failed to write file: %v", err)
+	}
+	if _, err := w.Add("squash.txt"); err != nil {
+		t.Fatalf("Failed to add file: %v", err)
+	}
+
+	squashMsg := fmt.Sprintf("Squash merge (#1)\n* first feature\n\nEntire-Checkpoint: %s\n\n* second feature\n\nEntire-Checkpoint: %s\n",
+		cpID1.String(), cpID2.String())
+	_, err := w.Commit(squashMsg, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create squash commit: %v", err)
+	}
+
+	// Verify findBranchCheckpoints returns both checkpoint IDs
+	result, err := findBranchCheckpoints(repo, "master")
+	if err != nil {
+		t.Fatalf("findBranchCheckpoints() error = %v", err)
+	}
+	if len(result.checkpointIDs) != 2 {
+		t.Fatalf("findBranchCheckpoints() returned %d checkpoint IDs, want 2", len(result.checkpointIDs))
+	}
+	if result.checkpointIDs[0].String() != cpID1.String() {
+		t.Errorf("checkpointIDs[0] = %q, want %q", result.checkpointIDs[0].String(), cpID1.String())
+	}
+	if result.checkpointIDs[1].String() != cpID2.String() {
+		t.Errorf("checkpointIDs[1] = %q, want %q", result.checkpointIDs[1].String(), cpID2.String())
+	}
 }
 
 func TestCheckRemoteMetadata_MetadataExistsOnRemote(t *testing.T) {

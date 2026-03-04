@@ -125,6 +125,10 @@ type State struct {
 	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Gemini CLI", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
 
+	// ModelName is the LLM model used in this session (e.g., "claude-sonnet-4-20250514", "gpt-4o").
+	// Set from hook data when the agent provides it.
+	ModelName string `json:"model_name,omitempty"`
+
 	// Token usage tracking (accumulated across all checkpoints in this session)
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 

@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/trail"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
 
@@ -1015,6 +1016,16 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 		return false
 	}
 
+	// Link checkpoint to trail (best-effort)
+	branchName := GetCurrentBranchName(repo)
+	if branchName != "" && branchName != GetDefaultBranchName(repo) {
+		store := trail.NewStore(repo)
+		existing, findErr := store.FindByBranch(branchName)
+		if findErr == nil && existing != nil {
+			appendCheckpointToExistingTrail(store, existing.TrailID, result.CheckpointID, head.Hash(), result.Prompts)
+		}
+	}
+
 	// Track this shadow branch for cleanup
 	shadowBranchesToDelete[shadowBranchName] = struct{}{}
 
@@ -1664,7 +1675,7 @@ func addCheckpointTrailerWithComment(message string, checkpointID id.CheckpointI
 // agentType is the human-readable name of the agent (e.g., "Claude Code").
 // transcriptPath is the path to the live transcript file (for mid-session commit detection).
 // userPrompt is the user's prompt text (stored truncated as FirstPrompt for display).
-func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath string, userPrompt string) error {
+func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID string, agentType types.AgentType, transcriptPath string, userPrompt string, model string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
@@ -1694,6 +1705,11 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		// Set AgentType from hook context if not yet set
 		if state.AgentType == "" && agentType != "" {
 			state.AgentType = agentType
+		}
+
+		// Update ModelName if provided (model can change between turns)
+		if model != "" {
+			state.ModelName = model
 		}
 
 		// Backfill FirstPrompt if empty (for sessions created before the first_prompt field was added)
@@ -1735,7 +1751,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	// Continue below to properly initialize it
 
 	// Initialize new session
-	state, err = s.initializeSession(ctx, repo, sessionID, agentType, transcriptPath, userPrompt)
+	state, err = s.initializeSession(ctx, repo, sessionID, agentType, transcriptPath, userPrompt, model)
 	if err != nil {
 		return fmt.Errorf("failed to initialize session: %w", err)
 	}
@@ -2229,4 +2245,29 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 		slog.String("session_id", state.SessionID),
 		slog.Int("remaining_files", len(remainingFiles)),
 	)
+}
+
+// appendCheckpointToExistingTrail links a checkpoint to the given trail.
+// Best-effort: silently returns on any error (trails are non-critical metadata).
+func appendCheckpointToExistingTrail(store *trail.Store, trailID trail.ID, cpID id.CheckpointID, commitSHA plumbing.Hash, prompts []string) {
+	var summary *string
+	if len(prompts) > 0 {
+		s := truncateForSummary(prompts[len(prompts)-1], 200)
+		summary = &s
+	}
+
+	//nolint:errcheck,gosec // best-effort: trail checkpoint linking is non-critical
+	store.AddCheckpoint(trailID, trail.CheckpointRef{
+		CheckpointID: cpID.String(),
+		CommitSHA:    commitSHA.String(),
+		CreatedAt:    time.Now().UTC(),
+		Summary:      summary,
+	})
+}
+
+// truncateForSummary takes the first line of s and truncates to maxLen runes.
+func truncateForSummary(s string, maxLen int) string {
+	line, _, _ := strings.Cut(s, "\n")
+	line = strings.TrimSpace(line)
+	return stringutil.TruncateRunes(line, maxLen, "...")
 }

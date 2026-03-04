@@ -67,11 +67,63 @@ func TestParseHookEvent_TurnStart(t *testing.T) {
 	}
 }
 
-// TestParseHookEvent_TurnEnd is skipped because it requires `opencode export` to be available.
-// The TurnEnd handler calls `opencode export` to fetch the transcript, which won't work in unit tests.
-// Integration tests cover the full TurnEnd flow.
-func TestParseHookEvent_TurnEnd_RequiresOpenCode(t *testing.T) {
-	t.Skip("TurnEnd requires opencode CLI - tested in integration tests")
+func TestParseHookEvent_TurnStart_IncludesModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &OpenCodeAgent{}
+	input := `{"session_id": "sess-model", "prompt": "hello", "model": "claude-sonnet-4-20250514"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameTurnStart, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Model != "claude-sonnet-4-20250514" {
+		t.Errorf("expected model 'claude-sonnet-4-20250514', got %q", event.Model)
+	}
+}
+
+func TestParseHookEvent_TurnStart_EmptyModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &OpenCodeAgent{}
+	// Model field absent — should parse as empty string
+	input := `{"session_id": "sess-no-model", "prompt": "hello"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameTurnStart, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Model != "" {
+		t.Errorf("expected empty model, got %q", event.Model)
+	}
+}
+
+func TestParseHookEvent_TurnEnd(t *testing.T) {
+	t.Parallel()
+
+	ag := &OpenCodeAgent{}
+	input := `{"session_id": "sess-2"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameTurnEnd, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event == nil {
+		t.Fatal("expected event, got nil")
+	}
+	if event.Type != agent.TurnEnd {
+		t.Errorf("expected TurnEnd, got %v", event.Type)
+	}
+	if event.SessionID != "sess-2" {
+		t.Errorf("expected session_id 'sess-2', got %q", event.SessionID)
+	}
+	// SessionRef is computed from session_id, should end with .json (same pattern as TurnStart)
+	if !strings.HasSuffix(event.SessionRef, "sess-2.json") {
+		t.Errorf("expected session ref to end with 'sess-2.json', got %q", event.SessionRef)
+	}
 }
 
 func TestParseHookEvent_Compaction(t *testing.T) {
@@ -210,12 +262,9 @@ func TestHookNames(t *testing.T) {
 func TestPrepareTranscript_AlwaysRefreshesTranscript(t *testing.T) {
 	t.Parallel()
 
-	// PrepareTranscript should always call fetchAndCacheExport to get fresh data,
-	// even when the file exists. This ensures resumed sessions get updated transcripts.
-	// In production, fetchAndCacheExport calls `opencode export`.
-	// In mock mode (ENTIRE_TEST_OPENCODE_MOCK_EXPORT=1), it reads from .entire/tmp/.
-	// Without mock mode and without opencode CLI, it will fail - which is expected.
-
+	// PrepareTranscript should always attempt to refresh via fetchAndCacheExport,
+	// even when the file already exists. Without opencode CLI or mock mode,
+	// this means it must return an error (proving it tried to refresh).
 	tmpDir := t.TempDir()
 	transcriptPath := filepath.Join(tmpDir, "sess-123.json")
 
@@ -227,15 +276,13 @@ func TestPrepareTranscript_AlwaysRefreshesTranscript(t *testing.T) {
 	ag := &OpenCodeAgent{}
 	err := ag.PrepareTranscript(context.Background(), transcriptPath)
 
-	// Without ENTIRE_TEST_OPENCODE_MOCK_EXPORT and without opencode CLI installed,
-	// PrepareTranscript will fail because fetchAndCacheExport can't run `opencode export`.
-	// This is expected behavior - the point is that it TRIES to refresh, not that it no-ops.
+	// Without opencode CLI, fetchAndCacheExport must fail — proving it attempted a refresh
+	// rather than short-circuiting because the file exists.
 	if err == nil {
-		// If no error, either opencode CLI is installed or mock mode is enabled
-		t.Log("PrepareTranscript succeeded (opencode CLI available or mock mode enabled)")
-	} else {
-		// Expected: fails because we're not in mock mode and opencode CLI isn't installed
-		t.Logf("PrepareTranscript attempted refresh and failed (expected without opencode CLI): %v", err)
+		t.Fatal("expected error (refresh attempt should fail without opencode CLI), got nil")
+	}
+	if !strings.Contains(err.Error(), "opencode export failed") {
+		t.Errorf("expected 'opencode export failed' error, got: %v", err)
 	}
 }
 
@@ -257,11 +304,11 @@ func TestPrepareTranscript_ErrorOnInvalidPath(t *testing.T) {
 func TestPrepareTranscript_ErrorOnBrokenSymlink(t *testing.T) {
 	t.Parallel()
 
-	// Create a broken symlink to test non-IsNotExist error handling
+	// Broken symlinks cause os.Stat to return a non-IsNotExist error.
+	// PrepareTranscript should surface this as a stat error.
 	tmpDir := t.TempDir()
 	transcriptPath := filepath.Join(tmpDir, "broken-link.json")
 
-	// Create symlink pointing to non-existent target
 	if err := os.Symlink("/nonexistent/target", transcriptPath); err != nil {
 		t.Skipf("cannot create symlink (permission denied?): %v", err)
 	}
@@ -269,20 +316,8 @@ func TestPrepareTranscript_ErrorOnBrokenSymlink(t *testing.T) {
 	ag := &OpenCodeAgent{}
 	err := ag.PrepareTranscript(context.Background(), transcriptPath)
 
-	// Broken symlinks cause os.Stat to return a specific error (not IsNotExist).
-	// The function should return a wrapped error explaining the issue.
-	// Note: On some systems, symlink to nonexistent target returns IsNotExist,
-	// so we accept either behavior here.
-	switch {
-	case err != nil && strings.Contains(err.Error(), "failed to stat OpenCode transcript path"):
-		// Good: proper error handling for broken symlink
-		t.Logf("Got expected stat error for broken symlink: %v", err)
-	case err != nil:
-		// Also acceptable: fetchAndCacheExport fails for other reasons
-		t.Logf("Got error (acceptable): %v", err)
-	default:
-		// Unexpected: should have gotten an error
-		t.Log("No error returned - symlink may have been treated as non-existent")
+	if err == nil {
+		t.Fatal("expected error for broken symlink, got nil")
 	}
 }
 
@@ -298,5 +333,37 @@ func TestPrepareTranscript_ErrorOnEmptySessionID(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "empty session ID") {
 		t.Errorf("expected 'empty session ID' error, got: %v", err)
+	}
+}
+
+func TestParseHookEvent_TurnStart_InvalidSessionID(t *testing.T) {
+	t.Parallel()
+
+	ag := &OpenCodeAgent{}
+	input := `{"session_id": "../escape", "prompt": "hello"}`
+
+	_, err := ag.ParseHookEvent(context.Background(), HookNameTurnStart, strings.NewReader(input))
+
+	if err == nil {
+		t.Fatal("expected error for path-traversal session ID")
+	}
+	if !strings.Contains(err.Error(), "contains path separators") {
+		t.Errorf("expected 'contains path separators' error, got: %v", err)
+	}
+}
+
+func TestParseHookEvent_TurnEnd_InvalidSessionID(t *testing.T) {
+	t.Parallel()
+
+	ag := &OpenCodeAgent{}
+	input := `{"session_id": "../escape"}`
+
+	_, err := ag.ParseHookEvent(context.Background(), HookNameTurnEnd, strings.NewReader(input))
+
+	if err == nil {
+		t.Fatal("expected error for path-traversal session ID")
+	}
+	if !strings.Contains(err.Error(), "contains path separators") {
+		t.Errorf("expected 'contains path separators' error, got: %v", err)
 	}
 }

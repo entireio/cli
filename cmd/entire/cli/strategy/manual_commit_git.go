@@ -37,7 +37,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	// Initialize if state is nil OR BaseCommit is empty (can happen with partial state from warnings)
 	if state == nil || state.BaseCommit == "" {
 		agentType := resolveAgentType(step.AgentType, state)
-		state, err = s.initializeSession(ctx, repo, sessionID, agentType, "", "") // No transcript/prompt in fallback
+		state, err = s.initializeSession(ctx, repo, sessionID, agentType, "", "", "") // No transcript/prompt/model in fallback
 		if err != nil {
 			return fmt.Errorf("failed to initialize session: %w", err)
 		}
@@ -175,7 +175,7 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 	state, err := s.loadSessionState(ctx, step.SessionID)
 	if err != nil || state == nil || state.BaseCommit == "" {
 		agentType := resolveAgentType(step.AgentType, state)
-		state, err = s.initializeSession(ctx, repo, step.SessionID, agentType, "", "") // No transcript/prompt in fallback
+		state, err = s.initializeSession(ctx, repo, step.SessionID, agentType, "", "", "") // No transcript/prompt/model in fallback
 		if err != nil {
 			return fmt.Errorf("failed to initialize session for task checkpoint: %w", err)
 		}

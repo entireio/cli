@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        agent: [claude-code, opencode, gemini-cli, factoryai-droid]
+        agent: [claude-code, opencode, gemini-cli, factoryai-droid, cursor-cli]
 
     steps:
       - name: Checkout repository
@@ -36,6 +36,7 @@ jobs:
             claude-code) curl -fsSL https://claude.ai/install.sh | bash ;;
             opencode)    curl -fsSL https://opencode.ai/install | bash ;;
             gemini-cli)  npm install -g @google/gemini-cli ;;
+            cursor-cli)  curl https://cursor.com/install -fsS | bash ;;
             factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
           esac
           echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -44,6 +45,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
         run: go run ./e2e/bootstrap
 
@@ -51,6 +53,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
           E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'gemini-cli' && '6' || matrix.agent == 'factoryai-droid' && '1' || '' }}
         run: mise run test:e2e --agent ${{ matrix.agent }}

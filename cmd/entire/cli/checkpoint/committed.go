@@ -1553,6 +1553,40 @@ func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 	return name, email
 }
 
+// CreateCommit creates a git commit object with the given tree, parent, message, and author.
+// If parentHash is ZeroHash, the commit is created without a parent (orphan commit).
+func CreateCommit(repo *git.Repository, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
+	now := time.Now()
+	sig := object.Signature{
+		Name:  authorName,
+		Email: authorEmail,
+		When:  now,
+	}
+
+	commit := &object.Commit{
+		TreeHash:  treeHash,
+		Author:    sig,
+		Committer: sig,
+		Message:   message,
+	}
+
+	if parentHash != plumbing.ZeroHash {
+		commit.ParentHashes = []plumbing.Hash{parentHash}
+	}
+
+	obj := repo.Storer.NewEncodedObject()
+	if err := commit.Encode(obj); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to encode commit: %w", err)
+	}
+
+	hash, err := repo.Storer.SetEncodedObject(obj)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to store commit: %w", err)
+	}
+
+	return hash, nil
+}
+
 // readTranscriptFromTree reads a transcript from a git tree, handling both chunked and non-chunked formats.
 // It checks for chunk files first (.001, .002, etc.), then falls back to the base file.
 // The agentType is used for reassembling chunks in the correct format.

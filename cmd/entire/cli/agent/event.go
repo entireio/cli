@@ -77,6 +77,10 @@ type Event struct {
 	// Prompt is the user's prompt text (populated on TurnStart events).
 	Prompt string
 
+	// Model is the LLM model identifier (e.g., "claude-sonnet-4-20250514").
+	// Populated on TurnStart events when the agent provides model info.
+	Model string
+
 	// Timestamp is when the event occurred.
 	Timestamp time.Time
 

@@ -64,8 +64,8 @@ var shadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}(-[0-9a-fA-
 // commit hash is at least 7 hex characters and worktree hash is 6 hex characters.
 // The "entire/checkpoints/v1" branch is NOT a shadow branch.
 func IsShadowBranch(branchName string) bool {
-	// Explicitly exclude entire/checkpoints/v1
-	if branchName == paths.MetadataBranchName {
+	// Explicitly exclude metadata and trails branches
+	if branchName == paths.MetadataBranchName || branchName == paths.TrailsBranchName {
 		return false
 	}
 	return shadowBranchPattern.MatchString(branchName)

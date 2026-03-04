@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -76,7 +77,7 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 		// Run prepare-commit-msg
 		prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
 		prepCmd.Dir = env.RepoDir
-		prepCmd.Env = append(gitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
 		prepOutput, prepErr := prepCmd.CombinedOutput()
 		t.Logf("prepare-commit-msg output: %s (err: %v)", prepOutput, prepErr)
 
@@ -365,7 +366,7 @@ func TestShadow_CarryForward_ActiveSession(t *testing.T) {
 	// indicate a regression in carry-forward cleanup.
 	branchesAfterAll := env.ListBranchesWithPrefix("entire/")
 	for _, b := range branchesAfterAll {
-		if b != paths.MetadataBranchName {
+		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
 			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
 		}
 	}
@@ -576,7 +577,7 @@ func TestShadow_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 	// No shadow branches should remain after all files are committed
 	branchesAfter := env.ListBranchesWithPrefix("entire/")
 	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName {
+		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
 			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
 		}
 	}
@@ -1180,7 +1181,7 @@ func TestShadow_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
 	// No shadow branches should remain
 	branchesAfter := env.ListBranchesWithPrefix("entire/")
 	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName {
+		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
 			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
 		}
 	}
@@ -1274,7 +1275,7 @@ func TestShadow_DeletedFiles_CheckpointAndCarryForward(t *testing.T) {
 	// doesn't produce full metadata (known limitation).
 	branchesAfter := env.ListBranchesWithPrefix("entire/")
 	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName {
+		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
 			t.Logf("Shadow branch remaining after commits (may be expected for deleted files): %s", b)
 		}
 	}
@@ -1368,7 +1369,7 @@ func TestShadow_CarryForward_ModifiedExistingFiles(t *testing.T) {
 	// No shadow branches should remain
 	branchesAfter := env.ListBranchesWithPrefix("entire/")
 	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName {
+		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
 			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
 		}
 	}

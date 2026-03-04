@@ -1141,3 +1141,111 @@ func TestCalculateTotalTokenUsageFromTranscript_WithSubagentFiles(t *testing.T) 
 		t.Errorf("subagent APICallCount = %d, want 2", usage.SubagentTokens.APICallCount)
 	}
 }
+
+func TestCleanModelName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "custom prefix stripped",
+			raw:  "custom:Gemini-2.5-Pro-0",
+			want: "Gemini-2.5-Pro-0",
+		},
+		{
+			name: "no prefix unchanged",
+			raw:  "claude-opus-4-6",
+			want: "claude-opus-4-6",
+		},
+		{
+			name: "empty string",
+			raw:  "",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := cleanModelName(tt.raw)
+			if got != tt.want {
+				t.Errorf("cleanModelName(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractModelFromTranscript_SettingsFile(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	transcriptPath := tmpDir + "/session.jsonl"
+	settingsPath := tmpDir + "/session.settings.json"
+
+	// Write a transcript file (content doesn't matter for model extraction)
+	if err := os.WriteFile(transcriptPath, []byte(`{"type":"session_start"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Write the settings file with the model
+	settingsData := `{"model":"custom:Gemini-2.5-Pro-0","reasoningEffort":"none"}`
+	if err := os.WriteFile(settingsPath, []byte(settingsData), 0o644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	model := ExtractModelFromTranscript(transcriptPath)
+	if model != "Gemini-2.5-Pro-0" {
+		t.Errorf("ExtractModelFromTranscript() = %q, want %q", model, "Gemini-2.5-Pro-0")
+	}
+}
+
+func TestExtractModelFromTranscript_NoCustomPrefix(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	transcriptPath := tmpDir + "/session.jsonl"
+	settingsPath := tmpDir + "/session.settings.json"
+
+	if err := os.WriteFile(transcriptPath, []byte(`{"type":"session_start"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	settingsData := `{"model":"claude-opus-4-6"}`
+	if err := os.WriteFile(settingsPath, []byte(settingsData), 0o644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	model := ExtractModelFromTranscript(transcriptPath)
+	if model != "claude-opus-4-6" {
+		t.Errorf("ExtractModelFromTranscript() = %q, want %q", model, "claude-opus-4-6")
+	}
+}
+
+func TestExtractModelFromTranscript_NoSettingsFile(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	transcriptPath := tmpDir + "/session.jsonl"
+
+	// Write transcript but no settings file
+	if err := os.WriteFile(transcriptPath, []byte(`{"type":"session_start"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	model := ExtractModelFromTranscript(transcriptPath)
+	if model != "" {
+		t.Errorf("ExtractModelFromTranscript() = %q, want empty", model)
+	}
+}
+
+func TestExtractModelFromTranscript_EmptyPath(t *testing.T) {
+	t.Parallel()
+
+	model := ExtractModelFromTranscript("")
+	if model != "" {
+		t.Errorf("ExtractModelFromTranscript(\"\") = %q, want empty", model)
+	}
+}

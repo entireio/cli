@@ -192,7 +192,7 @@ func (s *ManualCommitStrategy) CountOtherActiveSessionsWithCheckpoints(ctx conte
 // agentType is the human-readable name of the agent (e.g., "Claude Code").
 // transcriptPath is the path to the live transcript file (for mid-session commit detection).
 // userPrompt is the user's prompt text (stored truncated as FirstPrompt for display).
-func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.Repository, sessionID string, agentType types.AgentType, transcriptPath string, userPrompt string) (*SessionState, error) {
+func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.Repository, sessionID string, agentType types.AgentType, transcriptPath string, userPrompt string, model string) (*SessionState, error) {
 	head, err := repo.Head()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get HEAD: %w", err)
@@ -237,6 +237,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		StepCount:             0,
 		UntrackedFilesAtStart: untrackedFiles,
 		AgentType:             agentType,
+		ModelName:             model,
 		TranscriptPath:        transcriptPath,
 		FirstPrompt:           truncatePromptForStorage(userPrompt),
 	}

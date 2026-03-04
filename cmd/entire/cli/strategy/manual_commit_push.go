@@ -13,5 +13,8 @@ import (
 //   - "prompt" (default): ask user with option to enable auto
 //   - "false"/"off"/"no": never push
 func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error {
-	return pushSessionsBranchCommon(ctx, remote, paths.MetadataBranchName)
+	if err := pushSessionsBranchCommon(ctx, remote, paths.MetadataBranchName); err != nil {
+		return err
+	}
+	return PushTrailsBranch(ctx, remote)
 }

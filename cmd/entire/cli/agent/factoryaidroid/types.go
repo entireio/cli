@@ -41,6 +41,15 @@ type userPromptSubmitRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
 	Prompt         string `json:"prompt"`
+	Model          string `json:"model"`
+}
+
+// stopRaw is the JSON structure from Stop hooks.
+// Extends sessionInfoRaw with model info captured during the turn.
+type stopRaw struct {
+	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
+	Model          string `json:"model"`
 }
 
 // taskHookInputRaw is the JSON structure from PreToolUse[Task] hook.

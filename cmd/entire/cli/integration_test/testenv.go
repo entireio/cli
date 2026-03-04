@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v5"
@@ -107,35 +108,11 @@ func (env *TestEnv) Cleanup() {
 	// No-op - temp dirs are cleaned up by t.TempDir()
 }
 
-// gitIsolatedEnv returns os.Environ() with git isolation variables set.
-// This prevents user/system git config (global gitignore, aliases, etc.) from
-// affecting test behavior. Use this for any exec.Command that runs git or the
-// CLI binary in integration tests.
-//
-// See https://git-scm.com/docs/git#Documentation/git.txt-GITCONFIGGLOBAL
-//
-// Existing GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM entries are filtered out before
-// appending overrides to ensure they take effect regardless of parent env.
-func gitIsolatedEnv() []string {
-	env := os.Environ()
-	filtered := make([]string, 0, len(env)+2)
-	for _, e := range env {
-		if strings.HasPrefix(e, "GIT_CONFIG_GLOBAL=") || strings.HasPrefix(e, "GIT_CONFIG_SYSTEM=") {
-			continue
-		}
-		filtered = append(filtered, e)
-	}
-	return append(filtered,
-		"GIT_CONFIG_GLOBAL=/dev/null", // Isolate from user's global git config (e.g. global gitignore)
-		"GIT_CONFIG_SYSTEM=/dev/null", // Isolate from system git config
-	)
-}
-
 // cliEnv returns the environment variables for CLI execution.
 // Includes Claude, Gemini, and OpenCode project dirs so tests work for any agent.
-// Delegates to gitIsolatedEnv() for git config isolation.
+// Delegates to testutil.GitIsolatedEnv() for git config isolation.
 func (env *TestEnv) cliEnv() []string {
-	return append(gitIsolatedEnv(),
+	return append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
@@ -499,6 +476,42 @@ func (env *TestEnv) GitCommitWithMultipleSessions(message string, sessionIDs []s
 	}
 }
 
+// GitCommitWithMultipleCheckpoints creates a commit with multiple Entire-Checkpoint trailers.
+// This simulates a GitHub squash merge commit where multiple individual commits with
+// checkpoint trailers are combined into a single commit message.
+func (env *TestEnv) GitCommitWithMultipleCheckpoints(message string, checkpointIDs []string) {
+	env.T.Helper()
+
+	// Format message with multiple checkpoint trailers (simulating squash merge format)
+	var sb strings.Builder
+	sb.WriteString(message)
+	sb.WriteString("\n\n")
+	for _, cpID := range checkpointIDs {
+		sb.WriteString("Entire-Checkpoint: " + cpID + "\n")
+	}
+
+	repo, err := git.PlainOpen(env.RepoDir)
+	if err != nil {
+		env.T.Fatalf("failed to open git repo: %v", err)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		env.T.Fatalf("failed to get worktree: %v", err)
+	}
+
+	_, err = worktree.Commit(sb.String(), &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+			When:  time.Now(),
+		},
+	})
+	if err != nil {
+		env.T.Fatalf("failed to commit: %v", err)
+	}
+}
+
 // GetHeadHash returns the current HEAD commit hash.
 func (env *TestEnv) GetHeadHash() string {
 	env.T.Helper()
@@ -580,7 +593,7 @@ func (env *TestEnv) GitCheckoutNewBranch(branchName string) {
 
 	cmd := exec.Command("git", "checkout", "-b", branchName)
 	cmd.Dir = env.RepoDir
-	cmd.Env = gitIsolatedEnv()
+	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		env.T.Fatalf("failed to checkout new branch %s: %v\nOutput: %s", branchName, err, output)
 	}
@@ -912,11 +925,11 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 	if simulateTTY {
 		// Simulate human at terminal: ENTIRE_TEST_TTY=1 makes hasTTY() return true
 		// and askConfirmTTY() return defaultYes without reading from /dev/tty.
-		prepCmd.Env = append(gitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
 	} else {
 		// Simulate agent: ENTIRE_TEST_TTY=0 makes hasTTY() return false,
 		// triggering the fast path that adds trailers for ACTIVE sessions.
-		prepCmd.Env = append(gitIsolatedEnv(), "ENTIRE_TEST_TTY=0")
+		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=0")
 	}
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)
@@ -982,7 +995,7 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 	// Set ENTIRE_TEST_TTY=1 to simulate human (amend is always a human operation).
 	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "commit")
 	prepCmd.Dir = env.RepoDir
-	prepCmd.Env = append(gitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+	prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg (amend) output: %s", output)
 	}
@@ -1046,7 +1059,7 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 	// the user removes the trailer before committing).
 	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile)
 	prepCmd.Dir = env.RepoDir
-	prepCmd.Env = append(gitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+	prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)
 	}
@@ -1112,7 +1125,7 @@ func (env *TestEnv) GitRm(paths ...string) {
 	args := append([]string{"rm", "--"}, paths...)
 	cmd := exec.Command("git", args...)
 	cmd.Dir = env.RepoDir
-	cmd.Env = gitIsolatedEnv()
+	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		env.T.Fatalf("git rm failed: %v\nOutput: %s", err, output)
 	}
@@ -1140,9 +1153,9 @@ func (env *TestEnv) gitCommitStagedWithShadowHooks(message string, simulateTTY b
 	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
 	prepCmd.Dir = env.RepoDir
 	if simulateTTY {
-		prepCmd.Env = append(gitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
 	} else {
-		prepCmd.Env = append(gitIsolatedEnv(), "ENTIRE_TEST_TTY=0")
+		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=0")
 	}
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)

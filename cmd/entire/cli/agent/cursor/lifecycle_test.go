@@ -65,6 +65,38 @@ func TestParseHookEvent_TurnStart(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_TurnStart_IncludesModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &CursorAgent{}
+	input := `{"conversation_id": "sess-m", "transcript_path": "/tmp/t.jsonl", "prompt": "hi", "model": "gpt-4o"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameBeforeSubmitPrompt, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Model != "gpt-4o" {
+		t.Errorf("expected model 'gpt-4o', got %q", event.Model)
+	}
+}
+
+func TestParseHookEvent_TurnStart_EmptyModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &CursorAgent{}
+	input := `{"conversation_id": "sess-nm", "transcript_path": "/tmp/t.jsonl", "prompt": "hi"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameBeforeSubmitPrompt, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Model != "" {
+		t.Errorf("expected empty model, got %q", event.Model)
+	}
+}
+
 func TestParseHookEvent_TurnStart_CLINoTranscriptPath(t *testing.T) {
 	// Cannot use t.Parallel() because of t.Setenv
 	ag := &CursorAgent{}

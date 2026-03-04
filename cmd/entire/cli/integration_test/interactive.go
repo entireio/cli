@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // RunCommandInteractive executes a CLI command with a pty, allowing interactive
@@ -22,7 +23,7 @@ func (env *TestEnv) RunCommandInteractive(args []string, respond func(ptyFile *o
 
 	cmd := exec.Command(getTestBinary(), args...)
 	cmd.Dir = env.RepoDir
-	cmd.Env = append(gitIsolatedEnv(),
+	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 		"TERM=xterm",
 		"ACCESSIBLE=1", // Required: makes huh read from stdin instead of /dev/tty

@@ -214,6 +214,65 @@ func TestHandleLifecycleTurnEnd_NonexistentTranscript(t *testing.T) {
 	}
 }
 
+// mockPreparerAgent is a mock that implements TranscriptPreparer.
+// It creates the transcript file when PrepareTranscript is called,
+// simulating OpenCode's lazy-fetch behavior.
+type mockPreparerAgent struct {
+	mockLifecycleAgent
+
+	prepareTranscriptCalled bool
+}
+
+var _ agent.TranscriptPreparer = (*mockPreparerAgent)(nil)
+
+func (m *mockPreparerAgent) PrepareTranscript(_ context.Context, sessionRef string) error {
+	m.prepareTranscriptCalled = true
+	// Create the file (simulating opencode export writing to disk)
+	if err := os.MkdirAll(filepath.Dir(sessionRef), 0o750); err != nil {
+		return err
+	}
+	return os.WriteFile(sessionRef, m.transcriptData, 0o600)
+}
+
+func TestHandleLifecycleTurnEnd_PreparerCreatesFile(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir()
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	setupGitRepoWithCommit(t, tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	// Transcript file does NOT exist yet — PrepareTranscript should create it
+	transcriptPath := filepath.Join(tmpDir, ".entire", "tmp", "sess-lazy.json")
+
+	ag := &mockPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-preparer",
+			agentType:      "Mock Preparer Agent",
+			transcriptData: []byte(`{"type":"user","message":"test"}`),
+		},
+	}
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "sess-lazy",
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleTurnEnd(context.Background(), ag, event)
+
+	// PrepareTranscript should have been called
+	if !ag.prepareTranscriptCalled {
+		t.Error("expected PrepareTranscript to be called")
+	}
+
+	// The handler may fail later (no strategy state, etc), but it should NOT
+	// fail with "transcript file not found" — that was the bug.
+	if err != nil && strings.Contains(err.Error(), "transcript file not found") {
+		t.Errorf("handler failed with 'transcript file not found' — PrepareTranscript was not called before fileExists check: %v", err)
+	}
+}
+
 func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir()
 	tmpDir := t.TempDir()

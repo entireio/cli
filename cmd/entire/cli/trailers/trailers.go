@@ -138,6 +138,32 @@ func ParseCheckpoint(commitMessage string) (checkpointID.CheckpointID, bool) {
 	return checkpointID.EmptyCheckpointID, false
 }
 
+// ParseAllCheckpoints extracts all checkpoint IDs from a commit message.
+// Returns a slice of CheckpointIDs (may be empty if none found).
+// Duplicate IDs are deduplicated while preserving order.
+// This is useful for squash merge commits that contain multiple Entire-Checkpoint trailers.
+func ParseAllCheckpoints(commitMessage string) []checkpointID.CheckpointID {
+	matches := checkpointTrailerRegex.FindAllStringSubmatch(commitMessage, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	ids := make([]checkpointID.CheckpointID, 0, len(matches))
+	for _, match := range matches {
+		if len(match) > 1 {
+			idStr := strings.TrimSpace(match[1])
+			if !seen[idStr] {
+				if cpID, err := checkpointID.NewCheckpointID(idStr); err == nil {
+					seen[idStr] = true
+					ids = append(ids, cpID)
+				}
+			}
+		}
+	}
+	return ids
+}
+
 // ParseAllSessions extracts all session IDs from a commit message.
 // Returns a slice of session IDs (may be empty if none found).
 // Duplicate session IDs are deduplicated while preserving order.

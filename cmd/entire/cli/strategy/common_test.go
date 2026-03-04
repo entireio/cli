@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -1004,6 +1005,7 @@ func initBareWithMetadataBranch(t *testing.T) string {
 	run := func(dir string, args ...string) {
 		cmd := exec.CommandContext(context.Background(), "git", args...)
 		cmd.Dir = dir
+		cmd.Env = testutil.GitIsolatedEnv()
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
 		}

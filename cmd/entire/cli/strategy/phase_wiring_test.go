@@ -23,7 +23,7 @@ func TestInitializeSession_SetsPhaseActive(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 
-	err := s.InitializeSession(context.Background(), "test-session-phase-1", "Claude Code", "", "")
+	err := s.InitializeSession(context.Background(), "test-session-phase-1", "Claude Code", "", "", "")
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(context.Background(), "test-session-phase-1")
@@ -47,7 +47,7 @@ func TestInitializeSession_IdleToActive(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	// First call initializes
-	err := s.InitializeSession(context.Background(), "test-session-idle", "Claude Code", "", "")
+	err := s.InitializeSession(context.Background(), "test-session-idle", "Claude Code", "", "", "")
 	require.NoError(t, err)
 
 	// Manually set to IDLE (simulating post-Stop state)
@@ -59,7 +59,7 @@ func TestInitializeSession_IdleToActive(t *testing.T) {
 	require.NoError(t, err)
 
 	// Second call should transition IDLE → ACTIVE
-	err = s.InitializeSession(context.Background(), "test-session-idle", "Claude Code", "", "")
+	err = s.InitializeSession(context.Background(), "test-session-idle", "Claude Code", "", "", "")
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState(context.Background(), "test-session-idle")
@@ -77,7 +77,7 @@ func TestInitializeSession_ActiveToActive_CtrlCRecovery(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	// First call
-	err := s.InitializeSession(context.Background(), "test-session-ctrlc", "Claude Code", "", "")
+	err := s.InitializeSession(context.Background(), "test-session-ctrlc", "Claude Code", "", "", "")
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(context.Background(), "test-session-ctrlc")
@@ -92,7 +92,7 @@ func TestInitializeSession_ActiveToActive_CtrlCRecovery(t *testing.T) {
 	time.Sleep(time.Millisecond)
 
 	// Second call (Ctrl-C recovery) - should stay ACTIVE with updated time
-	err = s.InitializeSession(context.Background(), "test-session-ctrlc", "Claude Code", "", "")
+	err = s.InitializeSession(context.Background(), "test-session-ctrlc", "Claude Code", "", "", "")
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState(context.Background(), "test-session-ctrlc")
@@ -114,7 +114,7 @@ func TestInitializeSession_EndedToActive(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	// First call initializes
-	err := s.InitializeSession(context.Background(), "test-session-ended-reenter", "Claude Code", "", "")
+	err := s.InitializeSession(context.Background(), "test-session-ended-reenter", "Claude Code", "", "", "")
 	require.NoError(t, err)
 
 	// Manually set to ENDED
@@ -127,7 +127,7 @@ func TestInitializeSession_EndedToActive(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call InitializeSession again - should transition ENDED → ACTIVE
-	err = s.InitializeSession(context.Background(), "test-session-ended-reenter", "Claude Code", "", "")
+	err = s.InitializeSession(context.Background(), "test-session-ended-reenter", "Claude Code", "", "", "")
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState(context.Background(), "test-session-ended-reenter")
@@ -148,7 +148,7 @@ func TestInitializeSession_EmptyPhaseBackwardCompat(t *testing.T) {
 	s := &ManualCommitStrategy{}
 
 	// First call initializes
-	err := s.InitializeSession(context.Background(), "test-session-empty-phase", "Claude Code", "", "")
+	err := s.InitializeSession(context.Background(), "test-session-empty-phase", "Claude Code", "", "", "")
 	require.NoError(t, err)
 
 	// Manually clear the phase (simulating pre-state-machine file)
@@ -159,7 +159,7 @@ func TestInitializeSession_EmptyPhaseBackwardCompat(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call again - empty phase treated as IDLE → should go to ACTIVE
-	err = s.InitializeSession(context.Background(), "test-session-empty-phase", "Claude Code", "", "")
+	err = s.InitializeSession(context.Background(), "test-session-empty-phase", "Claude Code", "", "", "")
 	require.NoError(t, err)
 
 	state, err = s.loadSessionState(context.Background(), "test-session-empty-phase")
@@ -211,7 +211,7 @@ func TestInitializeSession_SetsCLIVersion(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 
-	err := s.InitializeSession(context.Background(), "test-session-cli-version", "Claude Code", "", "")
+	err := s.InitializeSession(context.Background(), "test-session-cli-version", "Claude Code", "", "", "")
 	require.NoError(t, err)
 
 	state, err := s.loadSessionState(context.Background(), "test-session-cli-version")
@@ -220,6 +220,85 @@ func TestInitializeSession_SetsCLIVersion(t *testing.T) {
 
 	assert.Equal(t, versioninfo.Version, state.CLIVersion,
 		"InitializeSession should set CLIVersion to versioninfo.Version")
+}
+
+// TestInitializeSession_SetsModelName verifies that InitializeSession
+// persists the model name in the session state.
+func TestInitializeSession_SetsModelName(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	err := s.InitializeSession(context.Background(), "test-session-model", "OpenCode", "", "", "claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	state, err := s.loadSessionState(context.Background(), "test-session-model")
+	require.NoError(t, err)
+	require.NotNil(t, state)
+
+	assert.Equal(t, "claude-sonnet-4-20250514", state.ModelName,
+		"InitializeSession should set ModelName from model parameter")
+}
+
+// TestInitializeSession_UpdatesModelOnSubsequentTurn verifies that model
+// is updated when the user switches models between turns.
+func TestInitializeSession_UpdatesModelOnSubsequentTurn(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	// First turn with model A
+	err := s.InitializeSession(context.Background(), "test-session-model-update", "OpenCode", "", "", "gpt-4o")
+	require.NoError(t, err)
+
+	state, err := s.loadSessionState(context.Background(), "test-session-model-update")
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4o", state.ModelName)
+
+	// Transition to idle so second InitializeSession can transition back to active
+	state.Phase = session.PhaseIdle
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// Second turn with model B — should update
+	err = s.InitializeSession(context.Background(), "test-session-model-update", "OpenCode", "", "", "claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	state, err = s.loadSessionState(context.Background(), "test-session-model-update")
+	require.NoError(t, err)
+	assert.Equal(t, "claude-sonnet-4-20250514", state.ModelName,
+		"InitializeSession should update ModelName when model changes between turns")
+}
+
+// TestInitializeSession_EmptyModelDoesNotOverwrite verifies that an empty
+// model parameter does not clear a previously set model name.
+func TestInitializeSession_EmptyModelDoesNotOverwrite(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	// First turn with a model
+	err := s.InitializeSession(context.Background(), "test-session-model-keep", "OpenCode", "", "", "gpt-4o")
+	require.NoError(t, err)
+
+	state, err := s.loadSessionState(context.Background(), "test-session-model-keep")
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4o", state.ModelName)
+
+	// Transition to idle
+	state.Phase = session.PhaseIdle
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// Second turn with empty model — should preserve existing
+	err = s.InitializeSession(context.Background(), "test-session-model-keep", "OpenCode", "", "", "")
+	require.NoError(t, err)
+
+	state, err = s.loadSessionState(context.Background(), "test-session-model-keep")
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4o", state.ModelName,
+		"InitializeSession should not clear ModelName when model parameter is empty")
 }
 
 // writeTestFile is a helper to create a test file with given content.

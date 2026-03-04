@@ -40,6 +40,37 @@ func TestParseHookEvent_SessionStart(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_SessionStart_WithModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"session_id": "test-session-456", "transcript_path": "/tmp/transcript.jsonl", "model": "claude-opus-4-6"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event == nil {
+		t.Fatal("expected event, got nil")
+	}
+	if event.Type != agent.SessionStart {
+		t.Errorf("expected event type %v, got %v", agent.SessionStart, event.Type)
+	}
+	if event.SessionID != "test-session-456" {
+		t.Errorf("expected session_id 'test-session-456', got %q", event.SessionID)
+	}
+	if event.SessionRef != "/tmp/transcript.jsonl" {
+		t.Errorf("expected session_ref '/tmp/transcript.jsonl', got %q", event.SessionRef)
+	}
+	if event.Model != "claude-opus-4-6" {
+		t.Errorf("expected model 'claude-opus-4-6', got %q", event.Model)
+	}
+	if event.Timestamp.IsZero() {
+		t.Error("expected non-zero timestamp")
+	}
+}
+
 func TestParseHookEvent_TurnStart(t *testing.T) {
 	t.Parallel()
 

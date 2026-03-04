@@ -52,7 +52,9 @@ type CondenseResult struct {
 	SessionID            string
 	CheckpointsCount     int
 	FilesTouched         []string
-	TotalTranscriptLines int // Total lines in transcript after this condensation
+	Prompts              []string // User prompts from the condensed session
+	TotalTranscriptLines int      // Total lines in transcript after this condensation
+	Transcript           []byte   // Raw transcript bytes for downstream consumers (trail title generation)
 }
 
 // ExtractedSessionData contains data extracted from a shadow branch.

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 )
@@ -488,7 +489,7 @@ func (env *TestEnv) RunResume(branchName string) (string, error) {
 	ctx := env.T.Context()
 	cmd := exec.CommandContext(ctx, getTestBinary(), "resume", branchName)
 	cmd.Dir = env.RepoDir
-	cmd.Env = append(gitIsolatedEnv(),
+	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 	)
 	// Detach from controlling terminal so huh can't open /dev/tty for interactive prompts
@@ -505,7 +506,7 @@ func (env *TestEnv) RunResumeForce(branchName string) (string, error) {
 	ctx := env.T.Context()
 	cmd := exec.CommandContext(ctx, getTestBinary(), "resume", "--force", branchName)
 	cmd.Dir = env.RepoDir
-	cmd.Env = append(gitIsolatedEnv(),
+	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 	)
 
@@ -1068,6 +1069,114 @@ func TestResume_LocalLogNoTimestamp(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "Create hello method") {
 		t.Errorf("restored log should contain checkpoint transcript, got: %s", string(data))
+	}
+}
+
+// TestResume_SquashMergeMultipleCheckpoints tests resume when a squash merge commit
+// contains multiple Entire-Checkpoint trailers from different sessions/commits.
+// This simulates the GitHub squash merge workflow where:
+// 1. Developer creates feature branch with multiple commits, each with its own checkpoint
+// 2. PR is squash-merged to main, combining all commit messages (and their checkpoint trailers)
+// 3. Feature branch is deleted
+// 4. Running "entire resume main" should discover and restore all sessions from the squash commit
+func TestResume_SquashMergeMultipleCheckpoints(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	// === Session 1: First piece of work on feature branch ===
+	session1 := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session1.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit session1 failed: %v", err)
+	}
+
+	content1 := "puts 'hello world'"
+	env.WriteFile("hello.rb", content1)
+
+	session1.CreateTranscript(
+		"Create hello script",
+		[]FileChange{{Path: "hello.rb", Content: content1}},
+	)
+	if err := env.SimulateStop(session1.ID, session1.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop session1 failed: %v", err)
+	}
+
+	// Commit session 1 (triggers condensation → checkpoint 1 on entire/checkpoints/v1)
+	env.GitCommitWithShadowHooks("Create hello script", "hello.rb")
+	checkpointID1 := env.GetLatestCheckpointID()
+	t.Logf("Session 1 checkpoint: %s", checkpointID1)
+
+	// === Session 2: Second piece of work on feature branch ===
+	session2 := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session2.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit session2 failed: %v", err)
+	}
+
+	content2 := "puts 'goodbye world'"
+	env.WriteFile("goodbye.rb", content2)
+
+	session2.CreateTranscript(
+		"Create goodbye script",
+		[]FileChange{{Path: "goodbye.rb", Content: content2}},
+	)
+	if err := env.SimulateStop(session2.ID, session2.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop session2 failed: %v", err)
+	}
+
+	// Commit session 2 (triggers condensation → checkpoint 2 on entire/checkpoints/v1)
+	env.GitCommitWithShadowHooks("Create goodbye script", "goodbye.rb")
+	checkpointID2 := env.GetLatestCheckpointID()
+	t.Logf("Session 2 checkpoint: %s", checkpointID2)
+
+	// Verify we got two different checkpoint IDs
+	if checkpointID1 == checkpointID2 {
+		t.Fatalf("expected different checkpoint IDs, got same: %s", checkpointID1)
+	}
+
+	// === Simulate squash merge: switch to master, create squash commit ===
+	env.GitCheckoutBranch(masterBranch)
+
+	// Write the combined file changes (as if squash merged)
+	env.WriteFile("hello.rb", content1)
+	env.WriteFile("goodbye.rb", content2)
+	env.GitAdd("hello.rb")
+	env.GitAdd("goodbye.rb")
+
+	// Create squash merge commit with both checkpoint trailers in the message
+	// This mimics GitHub's squash merge format: PR title + individual commit messages
+	env.GitCommitWithMultipleCheckpoints(
+		"Feature branch (#1)\n\n* Create hello script\n\n* Create goodbye script",
+		[]string{checkpointID1, checkpointID2},
+	)
+
+	// Remove local session logs (simulating a fresh machine or deleted local state)
+	if err := os.RemoveAll(env.ClaudeProjectDir); err != nil {
+		t.Fatalf("failed to remove Claude project dir: %v", err)
+	}
+
+	// === Run resume on master ===
+	output, err := env.RunResume(masterBranch)
+	if err != nil {
+		t.Fatalf("resume failed: %v\nOutput: %s", err, output)
+	}
+
+	t.Logf("Resume output:\n%s", output)
+
+	// Should restore both sessions (multi-checkpoint path)
+	if !strings.Contains(output, "Restored 2 sessions") {
+		t.Errorf("expected 'Restored 2 sessions' in output, got: %s", output)
+	}
+
+	// Should contain resume commands for both sessions
+	if !strings.Contains(output, session1.ID) {
+		t.Errorf("expected session1 ID %s in output, got: %s", session1.ID, output)
+	}
+	if !strings.Contains(output, session2.ID) {
+		t.Errorf("expected session2 ID %s in output, got: %s", session2.ID, output)
+	}
+
+	// Should contain claude -r commands
+	if !strings.Contains(output, "claude -r") {
+		t.Errorf("expected 'claude -r' in output, got: %s", output)
 	}
 }
 

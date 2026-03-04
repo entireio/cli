@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v5"
@@ -28,6 +29,12 @@ func pushSessionsBranchCommon(ctx context.Context, remote, branchName string) er
 		return nil
 	}
 
+	return pushBranchIfNeeded(ctx, remote, branchName)
+}
+
+// pushBranchIfNeeded pushes a branch to the remote if it has unpushed changes.
+// Does not check any settings — callers are responsible for gating.
+func pushBranchIfNeeded(ctx context.Context, remote, branchName string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
@@ -47,7 +54,7 @@ func pushSessionsBranchCommon(ctx context.Context, remote, branchName string) er
 		return nil
 	}
 
-	return doPushSessionsBranch(ctx, remote, branchName)
+	return doPushBranch(ctx, remote, branchName)
 }
 
 // hasUnpushedSessionsCommon checks if the local branch differs from the remote.
@@ -76,9 +83,9 @@ func isPushSessionsDisabled(ctx context.Context) bool {
 	return s.IsPushSessionsDisabled()
 }
 
-// doPushSessionsBranch pushes the sessions branch to the remote.
-func doPushSessionsBranch(ctx context.Context, remote, branchName string) error {
-	fmt.Fprintf(os.Stderr, "[entire] Pushing session logs to %s...\n", remote)
+// doPushBranch pushes the given branch to the remote with fetch+merge recovery.
+func doPushBranch(ctx context.Context, remote, branchName string) error {
+	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...\n", branchName, remote)
 
 	// Try pushing first
 	if err := tryPushSessionsCommon(ctx, remote, branchName); err == nil {
@@ -86,16 +93,16 @@ func doPushSessionsBranch(ctx context.Context, remote, branchName string) error 
 	}
 
 	// Push failed - likely non-fast-forward. Try to fetch and merge.
-	fmt.Fprintf(os.Stderr, "[entire] Syncing with remote session logs...\n")
+	fmt.Fprintf(os.Stderr, "[entire] Syncing %s with remote...\n", branchName)
 
 	if err := fetchAndMergeSessionsCommon(ctx, remote, branchName); err != nil {
-		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync sessions: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", branchName, err)
 		return nil // Don't fail the main push
 	}
 
 	// Try pushing again after merge
 	if err := tryPushSessionsCommon(ctx, remote, branchName); err != nil {
-		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push sessions after sync: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", branchName, err)
 	}
 
 	return nil
@@ -199,6 +206,12 @@ func fetchAndMergeSessionsCommon(ctx context.Context, remote, branchName string)
 	}
 
 	return nil
+}
+
+// PushTrailsBranch pushes the entire/trails/v1 branch to the remote.
+// Trails are always pushed regardless of the push_sessions setting.
+func PushTrailsBranch(ctx context.Context, remote string) error {
+	return pushBranchIfNeeded(ctx, remote, paths.TrailsBranchName)
 }
 
 // createMergeCommitCommon creates a merge commit with multiple parents.

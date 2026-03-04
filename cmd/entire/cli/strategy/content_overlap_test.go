@@ -663,6 +663,135 @@ func TestFilesWithRemainingAgentChanges_CacheEquivalence(t *testing.T) {
 	assert.NotContains(t, resultWith, "fileA.txt")
 }
 
+// TestFilesWithRemainingAgentChanges_PhantomFile tests that files tracked in
+// filesTouched but not present in the shadow branch tree are skipped. This
+// happens when an agent's transcript references a file path (e.g. via a
+// write_file tool call) that was never actually created on disk — for example
+// when Gemini tries to write src/types.go but creates src/types/types.go
+// instead. Without this check, phantom files cause infinite carry-forward.
+func TestFilesWithRemainingAgentChanges_PhantomFile(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Shadow branch only contains the REAL file (buildTreeWithChanges skips
+	// non-existent files, so the phantom path is never in the tree).
+	createShadowBranchWithContent(t, repo, "phn1234", "e3b0c4", map[string][]byte{
+		"src/types/types.go": []byte("package types\n\ntype User struct{}\n"),
+	})
+
+	// Create the real file on disk and commit it.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src", "types"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "types", "types.go"),
+		[]byte("package types\n\ntype User struct{}\n"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("src/types/types.go")
+	require.NoError(t, err)
+	headCommit, err := wt.Commit("Add types.go", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	commit, err := repo.CommitObject(headCommit)
+	require.NoError(t, err)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("phn1234", "e3b0c4")
+	committedFiles := map[string]struct{}{"src/types/types.go": {}}
+
+	// filesTouched includes both the real path and a phantom path.
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranch, commit,
+		[]string{"src/types.go", "src/types/types.go"}, committedFiles)
+
+	// src/types.go is not committed AND not in shadow tree → skip.
+	// src/types/types.go is committed with matching content → skip.
+	assert.Empty(t, remaining, "Phantom files not in shadow tree should not be carried forward")
+}
+
+// TestFilesWithRemainingAgentChanges_UncommittedDeletion verifies that an
+// agent-deleted file that the user didn't commit is correctly skipped.
+// The file won't be in the shadow tree (buildTreeWithChanges excludes files
+// missing from disk), so the "not in shadow tree" guard handles it.
+// Carrying it forward would be a no-op — buildTreeWithChanges would just
+// record another deletion since there's nothing on disk to snapshot.
+func TestFilesWithRemainingAgentChanges_UncommittedDeletion(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Create a file that the agent will "delete"
+	targetFile := filepath.Join(dir, "to_delete.txt")
+	require.NoError(t, os.WriteFile(targetFile, []byte("will be deleted"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("to_delete.txt")
+	require.NoError(t, err)
+	baseCommitHash, err := wt.Commit("Add file that agent will delete", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// Build shadow branch WITHOUT to_delete.txt (agent deleted it on disk,
+	// so buildTreeWithChanges excluded it from the shadow tree).
+	shadowBranchName := checkpoint.ShadowBranchNameForCommit("del1234", "e3b0c4")
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+
+	baseCommit, err := repo.CommitObject(baseCommitHash)
+	require.NoError(t, err)
+	baseTree, err := baseCommit.Tree()
+	require.NoError(t, err)
+
+	entries := make(map[string]object.TreeEntry)
+	err = checkpoint.FlattenTree(repo, baseTree, "", entries)
+	require.NoError(t, err)
+	delete(entries, "to_delete.txt")
+
+	treeHash, err := checkpoint.BuildTreeFromEntries(repo, entries)
+	require.NoError(t, err)
+
+	shadowCommitObj := &object.Commit{
+		Author:    object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+		Committer: object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+		Message:   "Shadow checkpoint (agent deleted to_delete.txt)",
+		TreeHash:  treeHash,
+	}
+	encodedObj := repo.Storer.NewEncodedObject()
+	err = shadowCommitObj.Encode(encodedObj)
+	require.NoError(t, err)
+	shadowHash, err := repo.Storer.SetEncodedObject(encodedObj)
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, shadowHash)))
+
+	// Delete file on disk (agent did this) but user doesn't commit the deletion
+	require.NoError(t, os.Remove(targetFile))
+
+	// User commits something else
+	otherFile := filepath.Join(dir, "other.txt")
+	require.NoError(t, os.WriteFile(otherFile, []byte("other changes"), 0o644))
+	_, err = wt.Add("other.txt")
+	require.NoError(t, err)
+	userCommitHash, err := wt.Commit("User commit (not including deletion)", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	userCommit, err := repo.CommitObject(userCommitHash)
+	require.NoError(t, err)
+
+	committedFiles := map[string]struct{}{"other.txt": {}}
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranchName, userCommit,
+		[]string{"to_delete.txt", "other.txt"}, committedFiles)
+
+	// to_delete.txt is correctly skipped: it's not in the shadow tree because
+	// the agent deleted it from disk. Carrying it forward would be pointless —
+	// buildTreeWithChanges would just see the file is missing and record a no-op.
+	assert.Empty(t, remaining, "Deleted file not in shadow tree should not be carried forward")
+}
+
 // TestStagedFilesOverlapWithContent_ModifiedFile tests that a modified file
 // (exists in HEAD) always counts as overlap.
 func TestStagedFilesOverlapWithContent_ModifiedFile(t *testing.T) {

@@ -279,6 +279,47 @@ func ExtractSpawnedAgentIDs(transcriptLines []TranscriptLine) map[string]string 
 	return agentIDs
 }
 
+// droidSettings represents the .settings.json file that Factory AI Droid
+// stores alongside each session transcript JSONL.
+type droidSettings struct {
+	Model string `json:"model"`
+}
+
+// ExtractModelFromTranscript extracts the LLM model name from the Factory AI Droid
+// session settings file. Factory AI Droid stores a .settings.json file alongside
+// each transcript JSONL (e.g., <session-id>.settings.json next to <session-id>.jsonl).
+// The settings file contains the actual model being used, unlike the transcript's
+// system-reminder text which can be stale after provider switches.
+// Returns empty string if the settings file cannot be read or has no model.
+func ExtractModelFromTranscript(transcriptPath string) string {
+	if transcriptPath == "" {
+		return ""
+	}
+
+	settingsPath := strings.TrimSuffix(transcriptPath, ".jsonl") + ".settings.json"
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // Path derived from agent hook input
+	if err != nil {
+		return ""
+	}
+
+	var settings droidSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return ""
+	}
+
+	return cleanModelName(settings.Model)
+}
+
+// cleanModelName normalizes a Factory AI Droid model identifier into a display name.
+// For example, "custom:Gemini-2.5-Pro-0" becomes "Gemini-2.5-Pro-0".
+func cleanModelName(raw string) string {
+	// Strip known prefixes that Factory AI Droid adds to model identifiers
+	if after, found := strings.CutPrefix(raw, "custom:"); found {
+		return after
+	}
+	return raw
+}
+
 // extractAgentIDFromText extracts an agent ID from text containing "agentId: <id>".
 func extractAgentIDFromText(text string) string {
 	const prefix = "agentId: "

@@ -186,19 +186,28 @@ func (f *FactoryAIDroidAgent) parseTurnStart(stdin io.Reader) (*agent.Event, err
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
 		Prompt:     raw.Prompt,
+		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
 }
 
 func (f *FactoryAIDroidAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
+	raw, err := agent.ReadAndParseHookInput[stopRaw](stdin)
 	if err != nil {
 		return nil, err
 	}
+
+	model := raw.Model
+	// If model not provided in hook payload, extract from transcript
+	if model == "" && raw.TranscriptPath != "" {
+		model = ExtractModelFromTranscript(raw.TranscriptPath)
+	}
+
 	return &agent.Event{
 		Type:       agent.TurnEnd,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		Model:      model,
 		Timestamp:  time.Now(),
 	}, nil
 }

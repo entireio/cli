@@ -13,10 +13,11 @@ import (
 // Used to validate IDs that will be used in file paths.
 var pathSafeRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
-// ValidateSessionID validates that a session ID doesn't contain path separators.
+// ValidateSessionID validates that a session ID doesn't contain path separators
+// or other unsafe characters for use in file paths.
 // This prevents path traversal attacks when session IDs are used in file paths.
 func ValidateSessionID(id string) error {
-	if id == "" {
+	if strings.TrimSpace(id) == "" {
 		return errors.New("session ID cannot be empty")
 	}
 	if strings.ContainsAny(id, "/\\") {
