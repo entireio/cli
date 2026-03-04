@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v5"
 )
 
@@ -52,7 +53,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	// Initialize repo using git command (not go-git) to avoid setting local config
 	cmd := exec.Command("git", "init")
 	cmd.Dir = env.RepoDir
-	cmd.Env = gitIsolatedEnv()
+	cmd.Env = testutil.GitIsolatedEnv()
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git init failed: %v", err)
 	}
@@ -60,7 +61,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	// Disable GPG signing for test commits
 	configCmd := exec.Command("git", "config", "commit.gpgsign", "false")
 	configCmd.Dir = env.RepoDir
-	configCmd.Env = gitIsolatedEnv()
+	configCmd.Env = testutil.GitIsolatedEnv()
 	if err := configCmd.Run(); err != nil {
 		t.Fatalf("git config commit.gpgsign failed: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 
 	addCmd := exec.Command("git", "add", "README.md")
 	addCmd.Dir = env.RepoDir
-	addCmd.Env = gitIsolatedEnv()
+	addCmd.Env = testutil.GitIsolatedEnv()
 	if err := addCmd.Run(); err != nil {
 		t.Fatalf("git add failed: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	// Use environment variables to set author and committer (works in CI without global config)
 	commitCmd := exec.Command("git", "commit", "-m", "Initial")
 	commitCmd.Dir = env.RepoDir
-	commitCmd.Env = append(gitIsolatedEnv(),
+	commitCmd.Env = append(testutil.GitIsolatedEnv(),
 		"GIT_AUTHOR_NAME=Test User",
 		"GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=Test User",
@@ -96,7 +97,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	// Create feature branch
 	branchCmd := exec.Command("git", "checkout", "-b", "feature/test")
 	branchCmd.Dir = env.RepoDir
-	branchCmd.Env = gitIsolatedEnv()
+	branchCmd.Env = testutil.GitIsolatedEnv()
 	if err := branchCmd.Run(); err != nil {
 		t.Fatalf("git checkout -b failed: %v", err)
 	}
@@ -248,12 +249,12 @@ func TestGetGitAuthorRemovingLocalConfig(t *testing.T) {
 
 	addCmd := exec.Command("git", "add", "README.md")
 	addCmd.Dir = env.RepoDir
-	addCmd.Env = gitIsolatedEnv()
+	addCmd.Env = testutil.GitIsolatedEnv()
 	addCmd.Run()
 
 	commitCmd := exec.Command("git", "commit", "-m", "Initial")
 	commitCmd.Dir = env.RepoDir
-	commitCmd.Env = append(gitIsolatedEnv(),
+	commitCmd.Env = append(testutil.GitIsolatedEnv(),
 		"GIT_AUTHOR_NAME=Test User",
 		"GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=Test User",
@@ -264,7 +265,7 @@ func TestGetGitAuthorRemovingLocalConfig(t *testing.T) {
 	// Create feature branch
 	branchCmd := exec.Command("git", "checkout", "-b", "feature/test")
 	branchCmd.Dir = env.RepoDir
-	branchCmd.Env = gitIsolatedEnv()
+	branchCmd.Env = testutil.GitIsolatedEnv()
 	branchCmd.Run()
 
 	env.WriteFile("test.txt", "content")

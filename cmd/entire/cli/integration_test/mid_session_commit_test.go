@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // TestShadowStrategy_MidSessionCommit_FromTranscript tests that when Claude commits
@@ -38,7 +39,7 @@ func TestShadowStrategy_MidSessionCommit_FromTranscript(t *testing.T) {
 	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
 	cmd.Dir = env.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
-	cmd.Env = append(gitIsolatedEnv(),
+	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 	)
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -151,7 +152,7 @@ func TestShadowStrategy_MidSessionCommit_NoTrailerForUnrelatedFile(t *testing.T)
 	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
 	cmd.Dir = env.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
-	cmd.Env = append(gitIsolatedEnv(),
+	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 	)
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -233,7 +234,7 @@ func TestShadowStrategy_MidSessionCommit_FilesTouchedFallback(t *testing.T) {
 	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", "user-prompt-submit")
 	cmd.Dir = env.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
-	cmd.Env = append(gitIsolatedEnv(),
+	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 	)
 	if output, err := cmd.CombinedOutput(); err != nil {

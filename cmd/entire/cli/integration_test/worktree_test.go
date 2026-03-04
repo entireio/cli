@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
@@ -32,7 +33,7 @@ func TestWorktreeOpenRepository(t *testing.T) {
 
 	cmd := exec.Command("git", "worktree", "add", worktreeDir, "-b", "test-branch")
 	cmd.Dir = env.RepoDir
-	cmd.Env = gitIsolatedEnv()
+	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed to create worktree: %v\nOutput: %s", err, output)
 	}
