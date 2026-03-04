@@ -41,6 +41,9 @@ brew install entireio/tap/entire
 # Or install via Go
 go install github.com/entireio/cli/cmd/entire@latest
 
+# Or ask OpenCode to install Entire on Windows (paste as one line)
+Install Entire CLI on this Windows machine by running powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://entire.io/install.ps1 | iex", then refresh PATH and verify with entire version.
+
 # Enable in your project
 cd your-project && entire enable
 
