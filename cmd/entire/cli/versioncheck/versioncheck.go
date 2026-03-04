@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -245,6 +246,10 @@ func isOutdated(current, latest string) bool {
 
 // updateCommand returns the appropriate update instruction based on how the binary was installed.
 func updateCommand() string {
+	if runtime.GOOS == "windows" {
+		return "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://entire.io/install.ps1 | iex\""
+	}
+
 	execPath, err := os.Executable()
 	if err != nil {
 		return "curl -fsSL https://entire.io/install.sh | bash"

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -240,6 +241,11 @@ func TestUpdateCommand(t *testing.T) {
 		"brew upgrade entire":                            true,
 		"curl -fsSL https://entire.io/install.sh | bash": true,
 	}
+	if runtime.GOOS == "windows" {
+		validCommands = map[string]bool{
+			"powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://entire.io/install.ps1 | iex\"": true,
+		}
+	}
 
 	if !validCommands[cmd] {
 		t.Errorf("updateCommand() = %q, want one of %v", cmd, validCommands)
@@ -253,6 +259,7 @@ func setupCheckAndNotifyTest(t *testing.T, serverURL string) (*cobra.Command, *b
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
 
 	origURL := githubAPIURL
 	githubAPIURL = serverURL
