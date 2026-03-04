@@ -108,8 +108,10 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 
 // condenseOpts provides pre-resolved git objects to avoid redundant reads.
 type condenseOpts struct {
-	shadowRef *plumbing.Reference // Pre-resolved shadow branch ref (nil = resolve from repo)
-	headTree  *object.Tree        // Pre-resolved HEAD tree (passed through to calculateSessionAttributions)
+	shadowRef      *plumbing.Reference // Pre-resolved shadow branch ref (nil = resolve from repo)
+	headTree       *object.Tree        // Pre-resolved HEAD tree (passed through to calculateSessionAttributions)
+	repoDir        string              // Repository worktree path for git CLI commands
+	headCommitHash string              // HEAD commit hash (passed through for attribution)
 }
 
 // CondenseSession condenses a session's shadow branch to permanent storage.
@@ -141,27 +143,15 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	var sessionData *ExtractedSessionData
 	if hasShadowBranch {
-		// Extract session data from the shadow branch (with live transcript fallback).
-		// Use tracked files from session state instead of collecting all files from tree.
-		// Pass agent type to handle different transcript formats (JSONL for Claude, JSON for Gemini).
-		// Pass live transcript path so condensation reads the current file rather than a
-		// potentially stale shadow branch copy (SaveStep may have been skipped if the
-		// last turn had no code changes).
-		// Pass CheckpointTranscriptStart for accurate token calculation (line offset for Claude, message index for Gemini).
 		var extractErr error
 		sessionData, extractErr = s.extractSessionData(ctx, repo, ref.Hash(), state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.Phase.IsActive())
 		if extractErr != nil {
 			return nil, fmt.Errorf("failed to extract session data: %w", extractErr)
 		}
 	} else {
-		// No shadow branch: mid-session commit before Stop/SaveStep.
-		// Extract data directly from live transcript.
 		if state.TranscriptPath == "" {
 			return nil, errors.New("shadow branch not found and no live transcript available")
 		}
-		// Ensure transcript file exists (OpenCode creates it lazily via `opencode export`).
-		// Only wait for flush when the session is active — for idle/ended sessions the
-		// transcript is already fully flushed (the Stop hook completed the flush).
 		if state.Phase.IsActive() {
 			prepareTranscriptIfNeeded(ctx, ag, state.TranscriptPath)
 		}
@@ -176,13 +166,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// committed in this specific commit. This ensures each checkpoint represents
 	// exactly the files in that commit, not all files mentioned in the transcript.
 	if len(committedFiles) > 0 {
-		// Track if we had files before filtering to distinguish between:
-		// - Session had files but none were committed (don't fallback)
-		// - Session had no files to begin with (mid-session commit, fallback OK)
 		hadFilesBeforeFiltering := len(sessionData.FilesTouched) > 0
 
 		if hadFilesBeforeFiltering {
-			// Filter to intersection of transcript-extracted files and committed files
 			filtered := make([]string, 0, len(sessionData.FilesTouched))
 			for _, f := range sessionData.FilesTouched {
 				if _, ok := committedFiles[f]; ok {
@@ -192,11 +178,6 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 			sessionData.FilesTouched = filtered
 		}
 
-		// Only use committedFiles as fallback for genuine mid-session commits where
-		// no files were tracked yet (extraction returned empty). Do NOT fallback when
-		// the session had files that simply didn't overlap with the commit - that
-		// indicates an unrelated session that shouldn't have its files_touched
-		// overwritten with unrelated committed files.
 		if len(sessionData.FilesTouched) == 0 && !hadFilesBeforeFiltering {
 			sessionData.FilesTouched = make([]string, 0, len(committedFiles))
 			for f := range committedFiles {
@@ -213,12 +194,20 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	// Get author info
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-	// Calculate attribution. When no shadow branch exists (agent committed mid-turn
-	// before SaveStep), pass nil ref — the function uses HEAD as the shadow tree
-	// since the agent's commit IS HEAD (no user edits between agent work and commit).
+
+	// Determine attribution base commit
+	attrBase := state.AttributionBaseCommit
+	if attrBase == "" {
+		attrBase = state.BaseCommit
+	}
+
 	attribution := calculateSessionAttributions(ctx, repo, ref, sessionData, state, attributionOpts{
-		headTree: o.headTree,
+		headTree:              o.headTree,
+		repoDir:               o.repoDir,
+		attributionBaseCommit: attrBase,
+		headCommitHash:        o.headCommitHash,
 	})
+
 	// Get current branch name
 	branchName := GetCurrentBranchName(repo)
 
@@ -227,9 +216,6 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if settings.IsSummarizeEnabled(ctx) && len(sessionData.Transcript) > 0 {
 		summarizeCtx := logging.WithComponent(ctx, "summarize")
 
-		// Scope transcript to this checkpoint's portion.
-		// For Claude Code (JSONL), CheckpointTranscriptStart is a line offset.
-		// For Gemini/OpenCode (JSON), CheckpointTranscriptStart is a message index.
 		var scopedTranscript []byte
 		switch state.AgentType {
 		case agent.AgentTypeGemini:
@@ -258,7 +244,6 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 				logging.Warn(summarizeCtx, "summary generation failed",
 					slog.String("session_id", state.SessionID),
 					slog.String("error", err.Error()))
-				// Continue without summary - non-blocking
 			} else {
 				logging.Info(summarizeCtx, "summary generated",
 					slog.String("session_id", state.SessionID))
@@ -311,8 +296,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 // attributionOpts provides pre-resolved git objects to avoid redundant reads.
 type attributionOpts struct {
-	headTree   *object.Tree // HEAD commit tree (already resolved by PostCommit)
-	shadowTree *object.Tree // Shadow branch tree (already resolved by PostCommit)
+	headTree              *object.Tree // HEAD commit tree (already resolved by PostCommit)
+	shadowTree            *object.Tree // Shadow branch tree (already resolved by PostCommit)
+	repoDir               string       // Repository worktree path for git CLI commands
+	attributionBaseCommit string       // Base commit hash for non-agent file detection (empty = fall back to go-git tree walk)
+	headCommitHash        string       // HEAD commit hash for non-agent file detection (empty = fall back to go-git tree walk)
 }
 
 func calculateSessionAttributions(ctx context.Context, repo *git.Repository, shadowRef *plumbing.Reference, sessionData *ExtractedSessionData, state *SessionState, opts ...attributionOpts) *cpkg.InitialAttribution {
@@ -421,6 +409,9 @@ func calculateSessionAttributions(ctx context.Context, repo *git.Repository, sha
 		headTree,
 		sessionData.FilesTouched,
 		state.PromptAttributions,
+		o.repoDir,
+		o.attributionBaseCommit,
+		o.headCommitHash,
 	)
 
 	if attribution != nil {

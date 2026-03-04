@@ -280,7 +280,7 @@ func TestCalculateAttributionWithAccumulated_BasicCase(t *testing.T) {
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions, "", "", "",
 	)
 
 	if result == nil {
@@ -339,7 +339,7 @@ func TestCalculateAttributionWithAccumulated_BugScenario(t *testing.T) {
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions, "", "", "",
 	)
 
 	if result == nil {
@@ -398,7 +398,7 @@ func TestCalculateAttributionWithAccumulated_DeletionOnly(t *testing.T) {
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions, "", "", "",
 	)
 
 	if result == nil {
@@ -449,7 +449,7 @@ func TestCalculateAttributionWithAccumulated_NoUserEdits(t *testing.T) {
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions, "", "", "",
 	)
 
 	if result == nil {
@@ -503,7 +503,7 @@ func TestCalculateAttributionWithAccumulated_NoAgentWork(t *testing.T) {
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions, "", "", "",
 	)
 
 	if result == nil {
@@ -559,7 +559,7 @@ func TestCalculateAttributionWithAccumulated_UserRemovesAllAgentLines(t *testing
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions, "", "", "",
 	)
 
 	if result == nil {
@@ -630,7 +630,7 @@ func TestCalculateAttributionWithAccumulated_WithPromptAttributions(t *testing.T
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions, "", "", "",
 	)
 
 	if result == nil {
@@ -675,7 +675,7 @@ func TestCalculateAttributionWithAccumulated_EmptyFilesTouched(t *testing.T) {
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, []string{}, []PromptAttribution{},
+		baseTree, shadowTree, headTree, []string{}, []PromptAttribution{}, "", "", "",
 	)
 
 	if result != nil {
@@ -729,7 +729,7 @@ func TestCalculateAttributionWithAccumulated_UserEditsNonAgentFile(t *testing.T)
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions, "", "", "",
 	)
 
 	if result == nil {
@@ -773,50 +773,47 @@ func TestCalculateAttributionWithAccumulated_UserEditsNonAgentFile(t *testing.T)
 	}
 }
 
-// TestGetAllChangedFilesBetweenTrees tests the hash-based file change detection.
-func TestGetAllChangedFilesBetweenTrees(t *testing.T) {
+// newTestTreeBuilder creates an independent in-memory storage and returns a
+// createTree helper that is safe to use from a single goroutine.
+//
+//nolint:errcheck // Test helper - errors would cause test failures anyway
+func newTestTreeBuilder() func(files map[string]string) *object.Tree {
 	storer := memory.NewStorage()
-
-	// Helper to create a blob and return its hash
-	//nolint:errcheck // Test helper - errors would cause test failures anyway
-	createBlob := func(content string) plumbing.Hash {
-		blob := storer.NewEncodedObject()
-		blob.SetType(plumbing.BlobObject)
-		writer, _ := blob.Writer()
-		_, _ = writer.Write([]byte(content))
-		_ = writer.Close()
-		hash, _ := storer.SetEncodedObject(blob)
-		return hash
-	}
-
-	// Helper to create a tree from file entries
-	//nolint:errcheck // Test helper - errors would cause test failures anyway
-	createTree := func(files map[string]string) *object.Tree {
+	return func(files map[string]string) *object.Tree {
 		var entries []object.TreeEntry
 		for name, content := range files {
+			blob := storer.NewEncodedObject()
+			blob.SetType(plumbing.BlobObject)
+			writer, _ := blob.Writer()
+			_, _ = writer.Write([]byte(content))
+			_ = writer.Close()
+			hash, _ := storer.SetEncodedObject(blob)
 			entries = append(entries, object.TreeEntry{
 				Name: name,
 				Mode: 0o100644,
-				Hash: createBlob(content),
+				Hash: hash,
 			})
 		}
-		// Sort entries by name (git requirement)
 		sort.Slice(entries, func(i, j int) bool {
 			return entries[i].Name < entries[j].Name
 		})
-
 		tree := &object.Tree{Entries: entries}
 		treeObj := storer.NewEncodedObject()
 		_ = tree.Encode(treeObj)
-		hash, _ := storer.SetEncodedObject(treeObj)
-
-		// Re-decode to get proper Tree object with hash
-		decodedTree, _ := object.GetTree(storer, hash)
+		treeHash, _ := storer.SetEncodedObject(treeObj)
+		decodedTree, _ := object.GetTree(storer, treeHash)
 		return decodedTree
 	}
+}
+
+// TestGetAllChangedFilesBetweenTreesSlow tests the go-git tree walk fallback
+// used by CondenseSessionByID (doctor command) when commit hashes are unavailable.
+func TestGetAllChangedFilesBetweenTreesSlow(t *testing.T) {
+	t.Parallel()
 
 	t.Run("both trees nil", func(t *testing.T) {
-		result, err := getAllChangedFilesBetweenTrees(context.Background(), nil, nil)
+		t.Parallel()
+		result, err := getAllChangedFilesBetweenTreesSlow(context.Background(), nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -826,12 +823,14 @@ func TestGetAllChangedFilesBetweenTrees(t *testing.T) {
 	})
 
 	t.Run("tree1 nil (all files added)", func(t *testing.T) {
+		t.Parallel()
+		createTree := newTestTreeBuilder()
 		tree2 := createTree(map[string]string{
 			testFile1:  "content1",
 			"file2.go": "content2",
 		})
 
-		result, err := getAllChangedFilesBetweenTrees(context.Background(), nil, tree2)
+		result, err := getAllChangedFilesBetweenTreesSlow(context.Background(), nil, tree2)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -846,11 +845,13 @@ func TestGetAllChangedFilesBetweenTrees(t *testing.T) {
 	})
 
 	t.Run("tree2 nil (all files deleted)", func(t *testing.T) {
+		t.Parallel()
+		createTree := newTestTreeBuilder()
 		tree1 := createTree(map[string]string{
 			testFile1: "content1",
 		})
 
-		result, err := getAllChangedFilesBetweenTrees(context.Background(), tree1, nil)
+		result, err := getAllChangedFilesBetweenTreesSlow(context.Background(), tree1, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -861,6 +862,8 @@ func TestGetAllChangedFilesBetweenTrees(t *testing.T) {
 	})
 
 	t.Run("identical trees (no changes)", func(t *testing.T) {
+		t.Parallel()
+		createTree := newTestTreeBuilder()
 		tree1 := createTree(map[string]string{
 			testFile1:  "same content",
 			"file2.go": "also same",
@@ -870,7 +873,7 @@ func TestGetAllChangedFilesBetweenTrees(t *testing.T) {
 			"file2.go": "also same",
 		})
 
-		result, err := getAllChangedFilesBetweenTrees(context.Background(), tree1, tree2)
+		result, err := getAllChangedFilesBetweenTreesSlow(context.Background(), tree1, tree2)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -881,6 +884,8 @@ func TestGetAllChangedFilesBetweenTrees(t *testing.T) {
 	})
 
 	t.Run("one file modified", func(t *testing.T) {
+		t.Parallel()
+		createTree := newTestTreeBuilder()
 		tree1 := createTree(map[string]string{
 			testFile1:      "original",
 			"unchanged.go": "stays same",
@@ -890,7 +895,7 @@ func TestGetAllChangedFilesBetweenTrees(t *testing.T) {
 			"unchanged.go": "stays same",
 		})
 
-		result, err := getAllChangedFilesBetweenTrees(context.Background(), tree1, tree2)
+		result, err := getAllChangedFilesBetweenTreesSlow(context.Background(), tree1, tree2)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -901,6 +906,8 @@ func TestGetAllChangedFilesBetweenTrees(t *testing.T) {
 	})
 
 	t.Run("file added and deleted", func(t *testing.T) {
+		t.Parallel()
+		createTree := newTestTreeBuilder()
 		tree1 := createTree(map[string]string{
 			"deleted.go": "will be removed",
 			"stays.go":   "unchanged",
@@ -910,7 +917,7 @@ func TestGetAllChangedFilesBetweenTrees(t *testing.T) {
 			"stays.go": "unchanged",
 		})
 
-		result, err := getAllChangedFilesBetweenTrees(context.Background(), tree1, tree2)
+		result, err := getAllChangedFilesBetweenTreesSlow(context.Background(), tree1, tree2)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1029,7 +1036,7 @@ func TestCalculateAttributionWithAccumulated_UserSelfModification(t *testing.T) 
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions, "", "", "",
 	)
 
 	if result == nil {
@@ -1102,7 +1109,7 @@ func TestCalculateAttributionWithAccumulated_MixedModifications(t *testing.T) {
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions, "", "", "",
 	)
 
 	if result == nil {
@@ -1185,7 +1192,7 @@ func TestCalculateAttributionWithAccumulated_UncommittedWorktreeFiles(t *testing
 
 	result := CalculateAttributionWithAccumulated(
 		context.Background(),
-		baseTree, shadowTree, headTree, filesTouched, promptAttributions,
+		baseTree, shadowTree, headTree, filesTouched, promptAttributions, "", "", "",
 	)
 
 	if result == nil {

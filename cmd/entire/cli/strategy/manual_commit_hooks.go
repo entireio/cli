@@ -19,6 +19,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitops"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -580,6 +581,7 @@ type postCommitActionHandler struct {
 	head                   *plumbing.Reference
 	commit                 *object.Commit
 	newHead                string
+	repoDir                string
 	shadowBranchName       string
 	shadowBranchesToDelete map[string]struct{}
 	committedFileSet       map[string]struct{}
@@ -612,8 +614,10 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 
 	if shouldCondense {
 		h.condensed = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete, h.committedFileSet, condenseOpts{
-			shadowRef: h.shadowRef,
-			headTree:  h.headTree,
+			shadowRef:      h.shadowRef,
+			headTree:       h.headTree,
+			repoDir:        h.repoDir,
+			headCommitHash: h.newHead,
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead)
@@ -636,8 +640,10 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 
 	if shouldCondense {
 		h.condensed = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete, h.committedFileSet, condenseOpts{
-			shadowRef: h.shadowRef,
-			headTree:  h.headTree,
+			shadowRef:      h.shadowRef,
+			headTree:       h.headTree,
+			repoDir:        h.repoDir,
+			headCommitHash: h.newHead,
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead)
@@ -782,8 +788,8 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 
 	// Pre-resolve HEAD tree and parent tree once for the entire PostCommit.
 	// These are immutable within this hook invocation and used by multiple
-	// per-session functions (filesChangedInCommit, filesOverlapWithContent,
-	// filesWithRemainingAgentChanges, calculateSessionAttributions).
+	// per-session functions (filesOverlapWithContent, filesWithRemainingAgentChanges,
+	// calculateSessionAttributions).
 	var headTree *object.Tree
 	if t, err := commit.Tree(); err == nil {
 		headTree = t
@@ -797,7 +803,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 		}
 	}
 
-	committedFileSet := filesChangedInCommit(commit, headTree, parentTree)
+	committedFileSet := filesChangedInCommit(ctx, worktreePath, commit)
 
 	for _, state := range sessions {
 		// Skip fully-condensed ended sessions — no work remains.
@@ -806,7 +812,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 			continue
 		}
 		s.postCommitProcessSession(ctx, repo, state, &transitionCtx, checkpointID,
-			head, commit, newHead, headTree, parentTree, committedFileSet,
+			head, commit, newHead, worktreePath, headTree, parentTree, committedFileSet,
 			shadowBranchesToDelete, uncondensedActiveOnBranch)
 	}
 
@@ -846,6 +852,7 @@ func (s *ManualCommitStrategy) postCommitProcessSession(
 	head *plumbing.Reference,
 	commit *object.Commit,
 	newHead string,
+	repoDir string,
 	headTree, parentTree *object.Tree,
 	committedFileSet map[string]struct{},
 	shadowBranchesToDelete map[string]struct{},
@@ -923,6 +930,7 @@ func (s *ManualCommitStrategy) postCommitProcessSession(
 		head:                   head,
 		commit:                 commit,
 		newHead:                newHead,
+		repoDir:                repoDir,
 		shadowBranchName:       shadowBranchName,
 		shadowBranchesToDelete: shadowBranchesToDelete,
 		committedFileSet:       committedFileSet,
@@ -2124,52 +2132,20 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	return errCount
 }
 
-// filesChangedInCommit returns the set of files changed in a commit by diffing against its parent.
-// When headTree and parentTree are provided, they are used directly to avoid redundant reads.
-func filesChangedInCommit(commit *object.Commit, headTree, parentTree *object.Tree) map[string]struct{} {
-	result := make(map[string]struct{})
-
-	commitTree := headTree
-	if commitTree == nil {
-		var err error
-		commitTree, err = commit.Tree()
-		if err != nil {
-			return result
-		}
+// filesChangedInCommit returns the set of files changed in a commit using git diff-tree.
+// Uses the git CLI for faster performance vs go-git tree walks (lower constant factors).
+func filesChangedInCommit(ctx context.Context, repoDir string, commit *object.Commit) map[string]struct{} {
+	var parentHash string
+	if commit.NumParents() > 0 {
+		parentHash = commit.ParentHashes[0].String()
 	}
-
-	if parentTree == nil && commit.NumParents() > 0 {
-		parent, err := commit.Parent(0)
-		if err != nil {
-			return result
-		}
-		parentTree, err = parent.Tree()
-		if err != nil {
-			return result
-		}
-	}
-
-	if parentTree == nil {
-		// Initial commit — all files are new
-		if iterErr := commitTree.Files().ForEach(func(f *object.File) error {
-			result[f.Name] = struct{}{}
-			return nil
-		}); iterErr != nil {
-			return result
-		}
-		return result
-	}
-
-	changes, err := parentTree.Diff(commitTree)
+	result, err := gitops.DiffTreeFiles(ctx, repoDir, parentHash, commit.Hash.String())
 	if err != nil {
-		return result
-	}
-	for _, change := range changes {
-		name := change.To.Name
-		if name == "" {
-			name = change.From.Name
-		}
-		result[name] = struct{}{}
+		logging.Warn(ctx, "post-commit: git diff-tree failed; condensation and carry-forward may be affected",
+			slog.String("commit", commit.Hash.String()),
+			slog.String("error", err.Error()),
+		)
+		return make(map[string]struct{})
 	}
 	return result
 }

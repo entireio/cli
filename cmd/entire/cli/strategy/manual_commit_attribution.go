@@ -2,24 +2,39 @@ package strategy
 
 import (
 	"context"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitops"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
-// getAllChangedFilesBetweenTrees returns a list of all files that differ between two trees.
-// This includes files that were added, modified, or deleted in either tree.
-// Uses git blob hashes for efficient comparison without reading file contents.
-func getAllChangedFilesBetweenTrees(ctx context.Context, tree1, tree2 *object.Tree) ([]string, error) {
+// getAllChangedFiles returns all files that changed between the attribution base
+// and HEAD. When commit hashes and repoDir are provided, uses fast git diff-tree CLI;
+// otherwise falls back to go-git tree walk (used by CondenseSessionByID / doctor command).
+func getAllChangedFiles(ctx context.Context, baseTree, headTree *object.Tree, repoDir, baseCommitHash, headCommitHash string) ([]string, error) {
+	// Fast path: use git diff-tree when commit hashes are available
+	if baseCommitHash != "" && headCommitHash != "" {
+		return gitops.DiffTreeFileList(ctx, repoDir, baseCommitHash, headCommitHash) //nolint:wrapcheck // Propagating gitops error
+	}
+
+	// Slow path: go-git tree walk (CondenseSessionByID fallback)
+	return getAllChangedFilesBetweenTreesSlow(ctx, baseTree, headTree)
+}
+
+// getAllChangedFilesBetweenTreesSlow returns a list of all files that differ between two trees.
+// This is the slow fallback path using go-git tree walks, used only when commit hashes
+// are not available (e.g., CondenseSessionByID / doctor command).
+func getAllChangedFilesBetweenTreesSlow(ctx context.Context, tree1, tree2 *object.Tree) ([]string, error) {
 	if tree1 == nil && tree2 == nil {
 		return nil, nil
 	}
 
-	// Build hash maps for each tree - O(n) iteration, no content reading
 	tree1Hashes := make(map[string]string)
 	tree2Hashes := make(map[string]string)
 
@@ -47,17 +62,14 @@ func getAllChangedFilesBetweenTrees(ctx context.Context, tree1, tree2 *object.Tr
 		}
 	}
 
-	// Find changed files by comparing hashes (much faster than content comparison)
 	var changed []string
 
-	// Check files in tree1 - either modified or deleted in tree2
 	for path, hash1 := range tree1Hashes {
 		if hash2, exists := tree2Hashes[path]; !exists || hash1 != hash2 {
 			changed = append(changed, path)
 		}
 	}
 
-	// Check files only in tree2 (added files)
 	for path := range tree2Hashes {
 		if _, exists := tree1Hashes[path]; !exists {
 			changed = append(changed, path)
@@ -167,6 +179,9 @@ func countLinesStr(content string) int {
 // 4. Estimate user self-modifications vs agent modifications using per-file tracking
 // 5. Compute percentages
 //
+// attributionBaseCommit and headCommitHash are optional commit hashes for fast non-agent
+// file detection via git diff-tree. When empty, falls back to go-git tree walk.
+//
 // Note: Binary files (detected by null bytes) are silently excluded from attribution
 // calculations since line-based diffing only applies to text files.
 //
@@ -178,6 +193,9 @@ func CalculateAttributionWithAccumulated(
 	headTree *object.Tree,
 	filesTouched []string,
 	promptAttributions []PromptAttribution,
+	repoDir string,
+	attributionBaseCommit string,
+	headCommitHash string,
 ) *checkpoint.InitialAttribution {
 	if len(filesTouched) == 0 {
 		return nil
@@ -226,12 +244,16 @@ func CalculateAttributionWithAccumulated(
 
 	// Calculate total user edits to non-agent files (files not in filesTouched)
 	// These files are not in the shadow tree, so base→head captures ALL their user edits
-	nonAgentFiles, err := getAllChangedFilesBetweenTrees(ctx, baseTree, headTree)
+	allChangedFiles, err := getAllChangedFiles(ctx, baseTree, headTree, repoDir, attributionBaseCommit, headCommitHash)
 	if err != nil {
+		logging.Warn(logging.WithComponent(ctx, "attribution"),
+			"attribution: failed to enumerate changed files",
+			slog.String("error", err.Error()),
+		)
 		return nil
 	}
 	var allUserEditsToNonAgentFiles int
-	for _, filePath := range nonAgentFiles {
+	for _, filePath := range allChangedFiles {
 		if slices.Contains(filesTouched, filePath) {
 			continue // Skip agent-touched files
 		}
@@ -248,8 +270,8 @@ func CalculateAttributionWithAccumulated(
 	// - Non-agent files that appear in the commit (base→head diff)
 	// Files not in either set are worktree-only changes (e.g., .claude/settings.json)
 	// that should not affect attribution.
-	committedNonAgentSet := make(map[string]struct{}, len(nonAgentFiles))
-	for _, f := range nonAgentFiles {
+	committedNonAgentSet := make(map[string]struct{}, len(allChangedFiles))
+	for _, f := range allChangedFiles {
 		if !slices.Contains(filesTouched, f) {
 			committedNonAgentSet[f] = struct{}{}
 		}
