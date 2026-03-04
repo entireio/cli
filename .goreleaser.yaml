@@ -13,6 +13,7 @@ builds:
     goos:
       - darwin
       - linux
+      - windows
     goarch:
       - amd64
       - arm64
@@ -38,6 +39,9 @@ notarize:
 archives:
   - formats:
       - tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
     name_template: "entire_{{ .Os }}_{{ .Arch }}"
     files:
       - src: completions/*

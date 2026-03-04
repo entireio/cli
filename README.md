@@ -28,7 +28,7 @@ With Entire, you can:
 ## Requirements
 
 - Git
-- macOS or Linux (Windows via WSL)
+- macOS, Linux, or Windows
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [OpenCode](https://opencode.ai/docs/cli/), or [Cursor](https://www.cursor.com/) installed and authenticated
 
 ## Quick Start
