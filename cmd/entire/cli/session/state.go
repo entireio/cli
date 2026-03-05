@@ -225,11 +225,17 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 	}
 }
 
-// IsStale returns true when the last time a session saw interaction exceeds StaleSessionThreshold.
-// If LastInteractionTime isn't set, we don't consider a session stale to avoid aggressively
-// deleting things.
+// IsStale returns true when a session hasn't seen interaction for longer than
+// StaleSessionThreshold. Falls back to StartedAt when LastInteractionTime is
+// nil (sessions created before interaction tracking was added).
 func (s *State) IsStale() bool {
-	return s.LastInteractionTime != nil && time.Since(*s.LastInteractionTime) > StaleSessionThreshold
+	var since time.Duration
+	if s.LastInteractionTime != nil {
+		since = time.Since(*s.LastInteractionTime)
+	} else {
+		since = time.Since(s.StartedAt)
+	}
+	return since > StaleSessionThreshold
 }
 
 // StateStore provides low-level operations for managing session state files.

@@ -3546,7 +3546,7 @@ func TestCondenseSession_FilesTouchedNoFallback_NoOverlap(t *testing.T) {
 }
 
 // TestExtractFilesFromLiveTranscript_RespectsOffset verifies that after condensation
-// sets CheckpointTranscriptStart = N, extractFilesFromLiveTranscript only returns
+// sets CheckpointTranscriptStart = N, resolveFilesTouched only returns
 // files from messages at index N and beyond, not from the beginning.
 //
 // This is a regression test for a bug where compaction events (pre-compress hooks)
@@ -3591,15 +3591,90 @@ func TestExtractFilesFromLiveTranscript_RespectsOffset(t *testing.T) {
 	}
 
 	// With correct offset (4): should only find green.md
-	files := s.extractFilesFromLiveTranscript(context.Background(), state)
+	files := s.resolveFilesTouched(context.Background(), state)
 	if len(files) != 1 || files[0] != "docs/green.md" {
-		t.Errorf("extractFilesFromLiveTranscript(offset=4) = %v, want [docs/green.md]", files)
+		t.Errorf("resolveFilesTouched(offset=4) = %v, want [docs/green.md]", files)
 	}
 
 	// With reset offset (0): would incorrectly find all 3 files (the bug)
 	state.CheckpointTranscriptStart = 0
-	allFiles := s.extractFilesFromLiveTranscript(context.Background(), state)
+	allFiles := s.resolveFilesTouched(context.Background(), state)
 	if len(allFiles) != 3 {
-		t.Errorf("extractFilesFromLiveTranscript(offset=0) got %d files, want 3: %v", len(allFiles), allFiles)
+		t.Errorf("resolveFilesTouched(offset=0) got %d files, want 3: %v", len(allFiles), allFiles)
 	}
+}
+
+// TestResolveFilesTouched_PrefersStateFallsBackToTranscript verifies the two-tier
+// resolution in resolveFilesTouched: state.FilesTouched is preferred (returns a copy),
+// and transcript extraction is only used as a fallback when FilesTouched is empty.
+func TestResolveFilesTouched_PrefersStateFallsBackToTranscript(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	// Gemini transcript containing a file write
+	transcript := `{
+  "messages": [
+    {"type": "user", "content": [{"text": "create file"}]},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "from-transcript.txt"}}]}
+  ]
+}`
+	transcriptPath := filepath.Join(dir, "transcript.json")
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	t.Run("prefers FilesTouched over transcript", func(t *testing.T) {
+		state := &SessionState{
+			SessionID:      "test-prefers-state",
+			TranscriptPath: transcriptPath,
+			AgentType:      agent.AgentTypeGemini,
+			WorktreePath:   dir,
+			FilesTouched:   []string{"from-hook.txt"},
+		}
+		files := s.resolveFilesTouched(context.Background(), state)
+		if len(files) != 1 || files[0] != "from-hook.txt" {
+			t.Errorf("resolveFilesTouched with FilesTouched = %v, want [from-hook.txt]", files)
+		}
+	})
+
+	t.Run("returns copy of FilesTouched", func(t *testing.T) {
+		state := &SessionState{
+			SessionID:    "test-copy",
+			FilesTouched: []string{"a.txt", "b.txt"},
+		}
+		files := s.resolveFilesTouched(context.Background(), state)
+		// Mutating returned slice should not affect state
+		files[0] = "mutated.txt"
+		if state.FilesTouched[0] != "a.txt" {
+			t.Errorf("resolveFilesTouched did not return a copy; state.FilesTouched[0] = %q", state.FilesTouched[0])
+		}
+	})
+
+	t.Run("falls back to transcript when FilesTouched is empty", func(t *testing.T) {
+		state := &SessionState{
+			SessionID:      "test-fallback",
+			TranscriptPath: transcriptPath,
+			AgentType:      agent.AgentTypeGemini,
+			WorktreePath:   dir,
+			FilesTouched:   nil,
+		}
+		files := s.resolveFilesTouched(context.Background(), state)
+		if len(files) != 1 || files[0] != "from-transcript.txt" {
+			t.Errorf("resolveFilesTouched with empty FilesTouched = %v, want [from-transcript.txt]", files)
+		}
+	})
+
+	t.Run("returns nil when both sources are empty", func(t *testing.T) {
+		state := &SessionState{
+			SessionID:    "test-empty",
+			FilesTouched: nil,
+			// No transcript path — extraction will return nil
+		}
+		files := s.resolveFilesTouched(context.Background(), state)
+		if files != nil {
+			t.Errorf("resolveFilesTouched with no sources = %v, want nil", files)
+		}
+	})
 }

@@ -56,8 +56,8 @@ func TestResumeFromFeatureBranch(t *testing.T) {
 
 // TestResumeSquashMergeMultipleCheckpoints: two agent prompts on a feature
 // branch each get their own commit and checkpoint. The feature branch is
-// squash-merged to main and `entire resume` should find and restore both
-// sessions. Tests both squash merge message formats:
+// squash-merged to main and `entire resume` should restore only the latest
+// checkpoint (by CreatedAt), skipping older ones. Tests both squash merge message formats:
 //
 //   - GitHub format: trailers appear at the top level in the commit body
 //     (e.g. "* Add red doc\n\nEntire-Checkpoint: aaa\n\n* Add blue doc\n\nEntire-Checkpoint: bbb")
@@ -122,8 +122,8 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 
 		out, err := entire.Resume(s.Dir, mainBranch)
 		require.NoError(t, err, "github format: entire resume failed: %s", out)
-		assert.Contains(t, out, "Restored 2 sessions",
-			"github format: squash merge should restore 2 sessions")
+		assert.Contains(t, out, "older checkpoints skipped",
+			"github format: squash merge should skip older checkpoints")
 
 		// Reset main to before the squash merge for the next format test.
 		s.Git(t, "reset", "--hard", mainHead)
@@ -154,8 +154,8 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 
 		out, err = entire.Resume(s.Dir, mainBranch)
 		require.NoError(t, err, "git-cli format: entire resume failed: %s", out)
-		assert.Contains(t, out, "Restored 2 sessions",
-			"git-cli format: squash merge should restore 2 sessions")
+		assert.Contains(t, out, "older checkpoints skipped",
+			"git-cli format: squash merge should skip older checkpoints")
 	})
 }
 

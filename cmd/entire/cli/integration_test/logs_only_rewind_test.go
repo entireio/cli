@@ -456,6 +456,134 @@ func TestLogsOnlyRewind_MultipleCommits(t *testing.T) {
 	}
 }
 
+// TestLogsOnlyRewind_SquashMergeMultipleCheckpoints verifies that when a squash
+// merge commit contains multiple Entire-Checkpoint trailers, the rewind list
+// shows a single logs-only point for the latest checkpoint (by creation time),
+// consistent with how `entire resume` handles squash merges.
+func TestLogsOnlyRewind_SquashMergeMultipleCheckpoints(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	// === Session 1: First piece of work ===
+	session1 := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session1.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit session1 failed: %v", err)
+	}
+
+	content1 := "puts 'hello world'"
+	env.WriteFile("hello.rb", content1)
+	session1.CreateTranscript(
+		"Create hello script",
+		[]FileChange{{Path: "hello.rb", Content: content1}},
+	)
+	if err := env.SimulateStop(session1.ID, session1.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop session1 failed: %v", err)
+	}
+
+	// Commit session 1 (triggers condensation → checkpoint 1)
+	env.GitCommitWithShadowHooks("Create hello script", "hello.rb")
+	checkpointID1 := env.GetLatestCheckpointID()
+	t.Logf("Session 1 checkpoint: %s", checkpointID1)
+
+	// Clear session state to avoid concurrent session warning
+	if err := env.ClearSessionState(session1.ID); err != nil {
+		t.Fatalf("ClearSessionState failed: %v", err)
+	}
+
+	// === Session 2: Second piece of work ===
+	session2 := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session2.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit session2 failed: %v", err)
+	}
+
+	content2 := "puts 'goodbye world'"
+	env.WriteFile("goodbye.rb", content2)
+	session2.CreateTranscript(
+		"Create goodbye script",
+		[]FileChange{{Path: "goodbye.rb", Content: content2}},
+	)
+	if err := env.SimulateStop(session2.ID, session2.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop session2 failed: %v", err)
+	}
+
+	// Commit session 2 (triggers condensation → checkpoint 2)
+	env.GitCommitWithShadowHooks("Create goodbye script", "goodbye.rb")
+	checkpointID2 := env.GetLatestCheckpointID()
+	t.Logf("Session 2 checkpoint: %s", checkpointID2)
+
+	if checkpointID1 == checkpointID2 {
+		t.Fatalf("expected different checkpoint IDs, got same: %s", checkpointID1)
+	}
+
+	// === Simulate squash merge: switch to master, create squash commit ===
+	env.GitCheckoutBranch(masterBranch)
+
+	env.WriteFile("hello.rb", content1)
+	env.WriteFile("goodbye.rb", content2)
+	env.GitAdd("hello.rb")
+	env.GitAdd("goodbye.rb")
+
+	// Create squash merge commit with both checkpoint trailers
+	env.GitCommitWithMultipleCheckpoints(
+		"Feature branch (#1)\n\n* Create hello script\n\n* Create goodbye script",
+		[]string{checkpointID1, checkpointID2},
+	)
+	squashCommitHash := env.GetHeadHash()
+	t.Logf("Squash merge commit: %s", squashCommitHash[:7])
+
+	// === Verify rewind shows a single logs-only point for the latest checkpoint ===
+	points := env.GetRewindPoints()
+	logsOnlyPoints := filterLogsOnlyPoints(points)
+
+	// Should have exactly 1 logs-only point for the squash commit
+	squashPoints := make([]RewindPoint, 0)
+	for _, p := range logsOnlyPoints {
+		if p.ID == squashCommitHash {
+			squashPoints = append(squashPoints, p)
+		}
+	}
+
+	if len(squashPoints) != 1 {
+		t.Fatalf("expected exactly 1 logs-only point for squash commit, got %d", len(squashPoints))
+	}
+
+	// The point should reference the LATEST checkpoint (checkpoint 2), not the first
+	if squashPoints[0].CondensationID != checkpointID2 {
+		t.Errorf("squash merge rewind point should use latest checkpoint ID %s, got %s",
+			checkpointID2, squashPoints[0].CondensationID)
+	}
+
+	// Verify logs-only restore works for the squash merge point
+	if err := env.RewindLogsOnly(squashCommitHash); err != nil {
+		t.Fatalf("RewindLogsOnly for squash commit failed: %v", err)
+	}
+
+	// Verify transcript was restored
+	entries, err := os.ReadDir(env.ClaudeProjectDir)
+	if err != nil {
+		t.Fatalf("Failed to read Claude project dir: %v", err)
+	}
+
+	var transcriptFile string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".jsonl") {
+			transcriptFile = filepath.Join(env.ClaudeProjectDir, entry.Name())
+			break
+		}
+	}
+
+	if transcriptFile == "" {
+		t.Fatal("Expected transcript to be restored after logs-only rewind of squash merge commit")
+	}
+
+	// Verify the restored transcript belongs to session 2 (the latest checkpoint),
+	// not session 1. Session 2's transcript contains "goodbye" content.
+	transcriptContent := env.ReadFileAbsolute(transcriptFile)
+	if !strings.Contains(transcriptContent, "goodbye") {
+		t.Errorf("Restored transcript should contain session 2 content ('goodbye'), got: %s", transcriptContent)
+	}
+}
+
 // filterLogsOnlyPoints returns only logs-only points from the rewind points.
 func filterLogsOnlyPoints(points []RewindPoint) []RewindPoint {
 	var logsOnly []RewindPoint

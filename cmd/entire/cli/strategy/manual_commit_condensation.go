@@ -505,14 +505,8 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	data.FullTranscriptLines = countTranscriptItems(state.AgentType, fullTranscript)
 	data.Prompts = readPromptsFromFilesystem(ctx, state.SessionID)
 
-	// Extract files from transcript since state.FilesTouched may be empty for mid-session commits
-	// (no SaveStep/Stop has been called yet to populate it)
-	if len(state.FilesTouched) > 0 {
-		data.FilesTouched = state.FilesTouched
-	} else {
-		// Use the shared helper which includes subagent transcripts
-		data.FilesTouched = s.extractModifiedFilesFromLiveTranscript(ctx, state, state.CheckpointTranscriptStart)
-	}
+	// Resolve files touched: prefers hook-populated state, falls back to transcript extraction
+	data.FilesTouched = s.resolveFilesTouched(ctx, state)
 
 	// Calculate token usage from the extracted transcript portion
 	if len(data.Transcript) > 0 {

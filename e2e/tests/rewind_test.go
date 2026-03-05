@@ -4,6 +4,7 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -146,5 +147,79 @@ func TestRewindMultipleFiles(t *testing.T) {
 		_, statErr := os.Stat(filepath.Join(s.Dir, "docs", "changelog.md"))
 		assert.True(t, os.IsNotExist(statErr),
 			"docs/changelog.md should not exist after rewind, stat error: %v", statErr)
+	})
+}
+
+// TestRewindSquashMergeMultipleCheckpoints: when a squash merge commit contains
+// multiple Entire-Checkpoint trailers, `entire rewind --list` should show a
+// single logs-only point using the latest checkpoint. Logs-only restore should
+// succeed and return the most recent session's transcript.
+func TestRewindSquashMergeMultipleCheckpoints(t *testing.T) {
+	testutil.ForEachAgent(t, 5*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
+		mainBranch := testutil.GitOutput(t, s.Dir, "branch", "--show-current")
+
+		// Commit files from `entire enable` so main has a clean working tree.
+		s.Git(t, "add", ".")
+		s.Git(t, "commit", "-m", "Enable entire")
+
+		// Create feature branch with two agent-assisted commits.
+		s.Git(t, "checkout", "-b", "feature")
+
+		_, err := s.RunPrompt(t, ctx,
+			"create a file at docs/red.md with a paragraph about the colour red. Do not ask for confirmation, just make the change.")
+		if err != nil {
+			t.Fatalf("prompt 1 failed: %v", err)
+		}
+
+		s.Git(t, "add", ".")
+		s.Git(t, "commit", "-m", "Add red doc")
+		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		cp1Ref := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
+
+		_, err = s.RunPrompt(t, ctx,
+			"create a file at docs/blue.md with a paragraph about the colour blue. Do not ask for confirmation, just make the change.")
+		if err != nil {
+			t.Fatalf("prompt 2 failed: %v", err)
+		}
+
+		s.Git(t, "add", ".")
+		s.Git(t, "commit", "-m", "Add blue doc")
+		testutil.WaitForCheckpointAdvanceFrom(t, s.Dir, cp1Ref, 15*time.Second)
+
+		// Record checkpoint IDs from both feature branch commits.
+		cpID1 := testutil.GetCheckpointTrailer(t, s.Dir, "HEAD~1")
+		cpID2 := testutil.GetCheckpointTrailer(t, s.Dir, "HEAD")
+		require.NotEmpty(t, cpID1, "first commit should have checkpoint trailer")
+		require.NotEmpty(t, cpID2, "second commit should have checkpoint trailer")
+		require.NotEqual(t, cpID1, cpID2, "checkpoint IDs should be distinct")
+
+		// Squash merge onto main with both checkpoint trailers in the message.
+		s.Git(t, "checkout", mainBranch)
+		s.Git(t, "merge", "--squash", "feature")
+		squashMsg := fmt.Sprintf(
+			"Squash merge feature (#1)\n\n* Add red doc\n\nEntire-Checkpoint: %s\n\n* Add blue doc\n\nEntire-Checkpoint: %s",
+			cpID1, cpID2,
+		)
+		s.Git(t, "commit", "-m", squashMsg)
+		squashHash := testutil.GitOutput(t, s.Dir, "rev-parse", "HEAD")
+
+		// Rewind list should show exactly one logs-only point for the squash commit,
+		// using the latest checkpoint (cpID2).
+		points := entire.RewindList(t, s.Dir)
+
+		var squashPoints []entire.RewindPoint
+		for _, p := range points {
+			if p.ID == squashHash && p.IsLogsOnly {
+				squashPoints = append(squashPoints, p)
+			}
+		}
+		require.Len(t, squashPoints, 1,
+			"expected exactly 1 logs-only rewind point for squash commit")
+		assert.Equal(t, cpID2, squashPoints[0].CondensationID,
+			"squash merge rewind point should use the latest checkpoint ID")
+
+		// Logs-only restore should succeed.
+		err = entire.RewindLogsOnly(t, s.Dir, squashHash)
+		require.NoError(t, err, "logs-only rewind of squash merge commit should succeed")
 	})
 }

@@ -173,6 +173,7 @@ func (c *CursorAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 		TaskDescription: raw.Task,
 		Timestamp:       time.Now(),
 		SubagentID:      raw.SubagentID,
+		ModifiedFiles:   raw.ModifiedFiles,
 	}
 	return event, nil
 }

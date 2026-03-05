@@ -309,6 +309,7 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 		"transcript_path": "/tmp/main.jsonl",
 		"subagent_id":     "sub_xyz789",
 		"task":            "task done",
+		"modified_files":  []string{"src/foo.ts", "src/bar.ts"},
 	}
 	inputBytes, marshalErr := json.Marshal(inputData)
 	if marshalErr != nil {
@@ -328,6 +329,12 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 	}
 	if event.ToolUseID != "sub_xyz789" {
 		t.Errorf("expected tool_use_id 'sub_xyz789', got %q", event.ToolUseID)
+	}
+	if len(event.ModifiedFiles) != 2 {
+		t.Fatalf("expected 2 modified files, got %d", len(event.ModifiedFiles))
+	}
+	if event.ModifiedFiles[0] != "src/foo.ts" || event.ModifiedFiles[1] != "src/bar.ts" {
+		t.Errorf("expected modified files [src/foo.ts, src/bar.ts], got %v", event.ModifiedFiles)
 	}
 }
 

@@ -344,6 +344,7 @@ func TestHandleLifecycleCompaction_PreservesTranscriptOffset(t *testing.T) {
 	// Create session state with non-zero transcript offset (set by prior condensation)
 	sessionState := &strategy.SessionState{
 		SessionID:                 sessionID,
+		StartedAt:                 time.Now(),
 		CheckpointTranscriptStart: 50,
 	}
 	if err := strategy.SaveSessionState(context.Background(), sessionState); err != nil {

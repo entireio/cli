@@ -1839,12 +1839,78 @@ func TestPostCommit_IdleSessionEmptyFilesTouched_NotCondensed(t *testing.T) {
 	// BaseCommit is NOT updated for non-ACTIVE sessions (updateBaseCommitIfChanged skips them)
 }
 
+// TestPostCommit_IdleSession_NoTranscriptFallbackForCarryForward verifies that
+// carry-forward computation for IDLE sessions does NOT fall back to transcript
+// extraction. Only ACTIVE sessions (mid-session commits before Stop) should parse
+// the transcript, because IDLE sessions have FilesTouched populated by SaveStep.
+//
+// Regression test: resolveFilesTouched unconditionally falls back to transcript
+// extraction, but the PostCommit call site must gate it on IsActive().
+func TestPostCommit_IdleSession_NoTranscriptFallbackForCarryForward(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+
+	// Create an IDLE session with checkpoint
+	sessionID := "idle-transcript-guard"
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseIdle
+	// Clear FilesTouched to simulate the edge case
+	state.FilesTouched = nil
+	// Set transcript info so transcript extraction WOULD find files if called
+	state.AgentType = agent.AgentTypeGemini
+	transcriptPath := filepath.Join(dir, "idle-transcript.json")
+	transcript := `{
+  "messages": [
+    {"type": "user", "content": [{"text": "create file"}]},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "` + filepath.Join(dir, "test.txt") + `"}}]}
+  ]
+}`
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(transcript), 0o644))
+	state.TranscriptPath = transcriptPath
+	state.CheckpointTranscriptStart = 0
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	originalStepCount := state.StepCount
+
+	// Commit the file the transcript references — if transcript extraction
+	// ran, it would find overlap and trigger condensation
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("committed"), 0o644))
+	_, err = wt.Add("test.txt")
+	require.NoError(t, err)
+
+	cpID := "a1a2a3a4a5a6"
+	commitMsg := "commit test.txt\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
+	_, err = wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// Run PostCommit
+	err = s.PostCommit(context.Background())
+	require.NoError(t, err)
+
+	// Verify: IDLE session was NOT condensed (transcript fallback was skipped)
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, originalStepCount, state.StepCount,
+		"IDLE session should NOT be condensed via transcript fallback — only ACTIVE sessions get transcript extraction for carry-forward")
+}
+
 // TestPostCommit_IdleSession_SkipsSentinelWait is a regression test verifying that
 // PostCommit for an IDLE session with AgentType=ClaudeCode and a TranscriptPath
 // completes quickly without hitting the 3s sentinel timeout in PrepareTranscript.
 //
-// Before the fix, extractNewModifiedFilesFromLiveTranscript and
-// extractModifiedFilesFromLiveTranscript called PrepareTranscript unconditionally,
+// Before the fix, the transcript extraction functions called PrepareTranscript unconditionally,
 // which triggered waitForTranscriptFlush (3s timeout) even for idle/ended sessions
 // where the transcript was already fully flushed.
 //

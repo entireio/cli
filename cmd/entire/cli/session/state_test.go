@@ -127,9 +127,23 @@ func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
 func TestState_IsStale(t *testing.T) {
 	t.Parallel()
 
-	t.Run("nil_LastInteractionTime_is_not_stale", func(t *testing.T) {
+	t.Run("nil_LastInteractionTime_falls_back_to_StartedAt", func(t *testing.T) {
 		t.Parallel()
-		state := &State{LastInteractionTime: nil}
+		// Started 48 days ago, no interaction time — should be stale
+		state := &State{
+			StartedAt:           time.Now().Add(-48 * 24 * time.Hour),
+			LastInteractionTime: nil,
+		}
+		assert.True(t, state.IsStale())
+	})
+
+	t.Run("nil_LastInteractionTime_recent_start_is_not_stale", func(t *testing.T) {
+		t.Parallel()
+		// Started 1 hour ago, no interaction time — not stale
+		state := &State{
+			StartedAt:           time.Now().Add(-1 * time.Hour),
+			LastInteractionTime: nil,
+		}
 		assert.False(t, state.IsStale())
 	})
 
@@ -140,20 +154,26 @@ func TestState_IsStale(t *testing.T) {
 		assert.False(t, state.IsStale())
 	})
 
-	t.Run("ended_over_2wk_ago_is_stale", func(t *testing.T) {
+	t.Run("old_interaction_is_stale", func(t *testing.T) {
 		t.Parallel()
 		old := time.Now().Add(-14 * 24 * time.Hour)
 		state := &State{LastInteractionTime: &old}
 		assert.True(t, state.IsStale())
 	})
 
-	t.Run("ended_just_under_threshold_is_not_stale", func(t *testing.T) {
+	t.Run("just_under_threshold_is_not_stale", func(t *testing.T) {
 		t.Parallel()
-		// A session that ended just under the staleness threshold should not be stale.
-		// Use StaleSessionThreshold rather than a magic number so the test stays in sync
-		// if the threshold changes.
 		recent := time.Now().Add(-1 * (StaleSessionThreshold - time.Hour))
 		state := &State{LastInteractionTime: &recent}
+		assert.False(t, state.IsStale())
+	})
+
+	t.Run("nil_LastInteractionTime_just_under_threshold_is_not_stale", func(t *testing.T) {
+		t.Parallel()
+		state := &State{
+			StartedAt:           time.Now().Add(-1 * (StaleSessionThreshold - time.Hour)),
+			LastInteractionTime: nil,
+		}
 		assert.False(t, state.IsStale())
 	})
 }
@@ -202,6 +222,36 @@ func TestStateStore_Load_DeletesStaleSession(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, loaded, "Load should return state for active session")
 	assert.Equal(t, "active-session", loaded.SessionID)
+}
+
+func TestStateStore_Load_DeletesStaleSession_NilLastInteraction(t *testing.T) {
+	t.Parallel()
+
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+	ctx := context.Background()
+
+	// Exact production scenario: session created before interaction tracking,
+	// so LastInteractionTime is nil and StartedAt is old.
+	immortal := &State{
+		SessionID:           "immortal-session",
+		BaseCommit:          "abc123",
+		StartedAt:           time.Now().Add(-48 * 24 * time.Hour),
+		LastInteractionTime: nil,
+	}
+	require.NoError(t, store.Save(ctx, immortal))
+
+	stateFile := filepath.Join(stateDir, "immortal-session.json")
+	_, err := os.Stat(stateFile)
+	require.NoError(t, err, "state file should exist before load")
+
+	loaded, err := store.Load(ctx, "immortal-session")
+	require.NoError(t, err)
+	assert.Nil(t, loaded, "Load should return nil for session with nil LastInteractionTime and old StartedAt")
+
+	_, err = os.Stat(stateFile)
+	assert.True(t, os.IsNotExist(err), "immortal session file should be deleted after Load")
 }
 
 func TestStateStore_List_DeletesStaleSession(t *testing.T) {
