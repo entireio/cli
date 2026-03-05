@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/denisbrodbeck/machineid"
+	"github.com/entireio/cli/cmd/entire/cli/platform"
 	"github.com/posthog/posthog-go"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -69,6 +70,7 @@ func BuildEventPayload(cmd *cobra.Command, agent string, isEntireEnabled bool, v
 		"cli_version":     version,
 		"os":              runtime.GOOS,
 		"arch":            runtime.GOARCH,
+		"os_variant":      platform.OSVariant(),
 	}
 
 	if len(flags) > 0 {

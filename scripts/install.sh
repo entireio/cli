@@ -55,6 +55,21 @@ detect_os() {
     esac
 }
 
+is_wsl() {
+    # Fast env-based checks
+    if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" || -n "${WSLENV:-}" ]]; then
+        return 0
+    fi
+    # /proc markers
+    if [[ -f /proc/version ]] && grep -qi microsoft /proc/version 2>/dev/null; then
+        return 0
+    fi
+    if [[ -f /proc/sys/kernel/osrelease ]] && grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
 detect_arch() {
     local arch
     arch="$(uname -m)"
@@ -125,7 +140,11 @@ main() {
     local os arch
     os=$(detect_os)
     arch=$(detect_arch)
-    info "Detected platform: ${os}/${arch}"
+    if is_wsl; then
+        info "Detected platform: ${os}/${arch} (WSL)"
+    else
+        info "Detected platform: ${os}/${arch}"
+    fi
 
     info "Fetching latest version..."
     local version

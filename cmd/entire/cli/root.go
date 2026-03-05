@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"runtime"
 
+	"github.com/entireio/cli/cmd/entire/cli/platform"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
@@ -96,8 +97,15 @@ func NewRootCmd() *cobra.Command {
 }
 
 func versionString() string {
-	return fmt.Sprintf("Entire CLI %s (%s)\nGo version: %s\nOS/Arch: %s/%s\n",
-		versioninfo.Version, versioninfo.Commit, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	variant := platform.OSVariant()
+	osArch := fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
+
+	if variant != runtime.GOOS {
+		osArch = fmt.Sprintf("%s (%s)", osArch, variant)
+	}
+
+	return fmt.Sprintf("Entire CLI %s (%s)\nGo version: %s\nOS/Arch: %s\n",
+		versioninfo.Version, versioninfo.Commit, runtime.Version(), osArch)
 }
 
 func newVersionCmd() *cobra.Command {
