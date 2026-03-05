@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
 var procVersionPath = "/proc/version"
@@ -79,7 +81,7 @@ func WslpathWindows(linuxPath string) (string, error) {
 	if linuxPath == "" {
 		return "", os.ErrNotExist
 	}
-	
+
 	cmd := exec.Command("wslpath", "-w", linuxPath)
 	out, err := cmd.Output()
 	if err != nil {
@@ -98,7 +100,7 @@ func WslpathLinux(winPath string) (string, error) {
 	if winPath == "" {
 		return "", os.ErrNotExist
 	}
-	
+
 	cmd := exec.Command("wslpath", "-u", winPath)
 	out, err := cmd.Output()
 	if err != nil {
@@ -109,7 +111,7 @@ func WslpathLinux(winPath string) (string, error) {
 	if s == "" {
 		return "", os.ErrNotExist
 	}
-	
+
 	return s, nil
 }
 
@@ -146,7 +148,7 @@ func WindowsPathCandidatesFromWSLPath(linuxPath string) []string {
 		cands = append(cands, `\\wsl.localhost`+win[len(`\\wsl$`):])
 	}
 
-	return uniqueStrings(cands)
+	return stringutil.UniqueStrings(cands)
 }
 
 // HomeDirCandidates returns a list of "home" directories to try, in priority order.
@@ -166,7 +168,7 @@ func HomeDirCandidates() []string {
 		out = append(out, linuxHome)
 	}
 
-	return uniqueStrings(out)
+	return stringutil.UniqueStrings(out)
 }
 
 // WindowsHomeDir returns the Windows user home directory accessible from WSL.
@@ -252,21 +254,4 @@ func windowsHomeDirFallback() (string, error) {
 	}
 
 	return "", os.ErrNotExist
-}
-
-func uniqueStrings(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if s == "" {
-			continue
-		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-
-	return out
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/platform"
+	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -108,7 +109,7 @@ func (c *CursorAgent) GetSessionDir(repoPath string) (string, error) {
 	for _, home := range homeDirs {
 		for _, proj := range projectDirs {
 			p := filepath.Join(home, ".cursor", "projects", proj, "agent-transcripts")
-			if dirExists(p) {
+			if agent.DirExists(p) {
 				return p, nil
 			}
 		}
@@ -200,26 +201,5 @@ func cursorProjectDirCandidates(repoPath string) []string {
 			cands = append(cands, sanitizePathForCursor(win))
 		}
 	}
-	return uniqueStrings(cands)
-}
-
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-func uniqueStrings(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if s == "" {
-			continue
-		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
+	return stringutil.UniqueStrings(cands)
 }

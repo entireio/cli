@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/platform"
+	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
@@ -112,7 +113,7 @@ func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
 	for _, home := range homeDirs {
 		for _, proj := range projectDirs {
 			p := filepath.Join(home, ".claude", "projects", proj)
-			if dirExists(p) {
+			if agent.DirExists(p) {
 				return p, nil
 			}
 		}
@@ -388,26 +389,5 @@ func claudeProjectDirCandidates(repoPath string) []string {
 			cands = append(cands, SanitizePathForClaude(win))
 		}
 	}
-	return uniqueStrings(cands)
-}
-
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-func uniqueStrings(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if s == "" {
-			continue
-		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
+	return stringutil.UniqueStrings(cands)
 }

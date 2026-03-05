@@ -45,3 +45,21 @@ func CapitalizeFirst(s string) string {
 	}
 	return string(unicode.ToUpper(r)) + s[size:]
 }
+
+// UniqueStrings deduplicates a string slice, preserving order and skipping empty strings.
+func UniqueStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+
+	return out
+}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/platform"
+	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
 // Directory constants
@@ -176,7 +177,7 @@ func GetClaudeProjectDir(repoPath string) (string, error) {
 			projectDirs = append(projectDirs, SanitizePathForClaude(win))
 		}
 	}
-	projectDirs = uniqueStrings(projectDirs)
+	projectDirs = stringutil.UniqueStrings(projectDirs)
 
 	for _, home := range homeDirs {
 		for _, proj := range projectDirs {
@@ -214,20 +215,4 @@ func ExtractSessionIDFromTranscriptPath(transcriptPath string) string {
 		}
 	}
 	return ""
-}
-
-func uniqueStrings(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if s == "" {
-			continue
-		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
 }
