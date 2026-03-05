@@ -244,10 +244,12 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		AuthorName:                  authorName,
 		AuthorEmail:                 authorEmail,
 		Agent:                       state.AgentType,
+		Model:                       state.ModelName,
 		TurnID:                      state.TurnID,
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
+		SessionMetrics:              buildSessionMetrics(state),
 		InitialAttribution:          attribution,
 		Summary:                     summary,
 	}); err != nil {
@@ -263,6 +265,20 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TotalTranscriptLines: sessionData.FullTranscriptLines,
 		Transcript:           sessionData.Transcript,
 	}, nil
+}
+
+// buildSessionMetrics creates a SessionMetrics from session state if any metrics are available.
+// Returns nil if no hook-provided metrics exist (e.g., for agents that don't report them).
+func buildSessionMetrics(state *SessionState) *cpkg.SessionMetrics {
+	if state.SessionDurationMs == 0 && state.SessionTurnCount == 0 && state.ContextTokens == 0 && state.ContextWindowSize == 0 {
+		return nil
+	}
+	return &cpkg.SessionMetrics{
+		DurationMs:        state.SessionDurationMs,
+		TurnCount:         state.SessionTurnCount,
+		ContextTokens:     state.ContextTokens,
+		ContextWindowSize: state.ContextWindowSize,
+	}
 }
 
 // attributionOpts provides pre-resolved git objects to avoid redundant reads.

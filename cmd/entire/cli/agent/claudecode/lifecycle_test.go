@@ -40,11 +40,11 @@ func TestParseHookEvent_SessionStart(t *testing.T) {
 	}
 }
 
-func TestParseHookEvent_SessionStart_WithModel(t *testing.T) {
+func TestParseHookEvent_SessionStart_IncludesModel(t *testing.T) {
 	t.Parallel()
 
 	ag := &ClaudeCodeAgent{}
-	input := `{"session_id": "test-session-456", "transcript_path": "/tmp/transcript.jsonl", "model": "claude-opus-4-6"}`
+	input := `{"session_id": "model-session", "transcript_path": "/tmp/t.jsonl", "model": "claude-sonnet-4-20250514"}`
 
 	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader(input))
 
@@ -55,19 +55,29 @@ func TestParseHookEvent_SessionStart_WithModel(t *testing.T) {
 		t.Fatal("expected event, got nil")
 	}
 	if event.Type != agent.SessionStart {
-		t.Errorf("expected event type %v, got %v", agent.SessionStart, event.Type)
+		t.Errorf("expected SessionStart, got %v", event.Type)
 	}
-	if event.SessionID != "test-session-456" {
-		t.Errorf("expected session_id 'test-session-456', got %q", event.SessionID)
+	if event.Model != "claude-sonnet-4-20250514" {
+		t.Errorf("expected model 'claude-sonnet-4-20250514', got %q", event.Model)
 	}
-	if event.SessionRef != "/tmp/transcript.jsonl" {
-		t.Errorf("expected session_ref '/tmp/transcript.jsonl', got %q", event.SessionRef)
+}
+
+func TestParseHookEvent_SessionStart_EmptyModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"session_id": "no-model-session", "transcript_path": "/tmp/t.jsonl"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if event.Model != "claude-opus-4-6" {
-		t.Errorf("expected model 'claude-opus-4-6', got %q", event.Model)
+	if event == nil {
+		t.Fatal("expected event, got nil")
 	}
-	if event.Timestamp.IsZero() {
-		t.Error("expected non-zero timestamp")
+	if event.Model != "" {
+		t.Errorf("expected empty model, got %q", event.Model)
 	}
 }
 

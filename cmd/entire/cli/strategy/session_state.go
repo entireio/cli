@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -196,6 +197,76 @@ func TransitionAndLog(goCtx context.Context, state *SessionState, event session.
 	return nil
 }
 
+// StoreModelHint writes the LLM model name to a lightweight hint file
+// (.git/entire-sessions/{session_id}.model) for cross-process persistence.
+//
+// Why a separate file instead of SessionState?
+//
+// SessionState requires BaseCommit (used for shadow branch naming, checkpoint
+// writing, doctor classification, etc.) and is only created during TurnStart
+// when the git repo is fully inspected. Some agents report the model on earlier
+// hooks that fire as separate CLI processes before TurnStart:
+//
+//   - Claude Code sends "model" on SessionStart (before any TurnStart)
+//   - Gemini CLI sends "llm_request.model" on BeforeModel (after TurnStart,
+//     so handleLifecycleModelUpdate writes to SessionState directly when it
+//     exists and only falls back to this hint file otherwise)
+//
+// The hint is read by handleLifecycleTurnStart/TurnEnd when event.Model is
+// empty, passed to InitializeSession, and persisted in state.ModelName. After
+// that the hint file is redundant — it sits unused until ClearSessionState
+// removes it alongside the session state file.
+func StoreModelHint(ctx context.Context, sessionID, model string) error {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return fmt.Errorf("invalid session ID: %w", err)
+	}
+	if model == "" {
+		return nil
+	}
+
+	stateDir, err := getSessionStateDir(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get session state directory: %w", err)
+	}
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		return fmt.Errorf("failed to create session state directory: %w", err)
+	}
+
+	hintFile := filepath.Join(stateDir, sessionID+".model")
+	if err := os.WriteFile(hintFile, []byte(model), 0o600); err != nil {
+		return fmt.Errorf("failed to write model hint file: %w", err)
+	}
+	return nil
+}
+
+// LoadModelHint reads the LLM model name from the hint file for the given session.
+// Returns empty string if the hint file doesn't exist or can't be read.
+func LoadModelHint(ctx context.Context, sessionID string) string {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return ""
+	}
+
+	stateDir, err := getSessionStateDir(ctx)
+	if err != nil {
+		logging.Warn(logging.WithComponent(ctx, "session"), "failed to resolve state dir for model hint",
+			slog.String("session_id", sessionID),
+			slog.Any("error", err))
+		return ""
+	}
+
+	hintPath := filepath.Join(stateDir, sessionID+".model")
+	data, err := os.ReadFile(hintPath) //nolint:gosec // sessionID is validated above
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logging.Warn(logging.WithComponent(ctx, "session"), "failed to read model hint file",
+				slog.String("path", hintPath),
+				slog.Any("error", err))
+		}
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // ClearSessionState removes the session state file for the given session ID.
 func ClearSessionState(ctx context.Context, sessionID string) error {
 	// Validate session ID to prevent path traversal
@@ -203,16 +274,16 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
 
-	stateFile, err := sessionStateFile(ctx, sessionID)
+	stateDir, err := getSessionStateDir(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get session state file path: %w", err)
+		return fmt.Errorf("failed to get session state directory: %w", err)
 	}
 
-	if err := os.Remove(stateFile); err != nil {
-		if os.IsNotExist(err) {
-			return nil // Already gone, not an error
-		}
-		return fmt.Errorf("failed to remove session state file: %w", err)
+	// Remove all files for this session (state .json, .model hint, any future hint files).
+	matches, _ := filepath.Glob(filepath.Join(stateDir, sessionID+".*")) //nolint:errcheck // pattern is always valid
+	for _, f := range matches {
+		_ = os.Remove(f)
 	}
+
 	return nil
 }

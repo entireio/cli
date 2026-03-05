@@ -1160,7 +1160,7 @@ func checkClaudeCodeHooksInstalled() bool {
 	if err != nil {
 		return false
 	}
-	hookAgent, ok := ag.(agent.HookSupport)
+	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
 		return false
 	}
@@ -1173,7 +1173,7 @@ func checkGeminiCLIHooksInstalled() bool {
 	if err != nil {
 		return false
 	}
-	hookAgent, ok := ag.(agent.HookSupport)
+	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
 		return false
 	}

@@ -273,6 +273,7 @@ func (c *CursorAgent) UninstallHooks(ctx context.Context) error {
 	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
 		return fmt.Errorf("failed to write "+HooksFileName+": %w", err)
 	}
+
 	return nil
 }
 

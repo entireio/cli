@@ -52,12 +52,16 @@ func List() []types.AgentName {
 	return names
 }
 
+// StringList returns user-facing agent names, excluding test-only agents.
 func StringList() []string {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 
 	names := make([]string, 0, len(registry))
-	for name := range registry {
+	for name, factory := range registry {
+		if to, ok := factory().(TestOnly); ok && to.IsTestOnly() {
+			continue
+		}
 		names = append(names, string(name))
 	}
 	slices.Sort(names)

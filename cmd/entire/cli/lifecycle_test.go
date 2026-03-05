@@ -499,6 +499,18 @@ func TestDispatchLifecycleEvent_RoutesToCorrectHandler(t *testing.T) {
 			sessionID:   "test",
 			expectError: false, // Succeeds when run from a valid git repo
 		},
+		{
+			name:        "ModelUpdate with empty model is no-op",
+			eventType:   agent.ModelUpdate,
+			sessionID:   "test",
+			expectError: false,
+		},
+		{
+			name:        "ModelUpdate with empty session ID is no-op",
+			eventType:   agent.ModelUpdate,
+			sessionID:   "",
+			expectError: false,
+		},
 	}
 
 	for _, tc := range testCases {

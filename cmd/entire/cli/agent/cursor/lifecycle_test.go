@@ -208,6 +208,9 @@ func TestParseHookEvent_TurnEnd_CLINoTranscriptPath(t *testing.T) {
 	if event.SessionRef != transcriptFile {
 		t.Errorf("expected computed session_ref %q, got %q", transcriptFile, event.SessionRef)
 	}
+	if event.TurnCount != 3 {
+		t.Errorf("expected TurnCount 3, got %d", event.TurnCount)
+	}
 }
 
 func TestParseHookEvent_SessionEnd_CLINoTranscriptPath(t *testing.T) {
@@ -243,6 +246,9 @@ func TestParseHookEvent_SessionEnd_CLINoTranscriptPath(t *testing.T) {
 	}
 	if event.SessionRef != transcriptFile {
 		t.Errorf("expected computed session_ref %q, got %q", transcriptFile, event.SessionRef)
+	}
+	if event.DurationMs != 45000 {
+		t.Errorf("expected DurationMs 45000, got %d", event.DurationMs)
 	}
 }
 
@@ -335,6 +341,34 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 	}
 	if event.ModifiedFiles[0] != "src/foo.ts" || event.ModifiedFiles[1] != "src/bar.ts" {
 		t.Errorf("expected modified files [src/foo.ts, src/bar.ts], got %v", event.ModifiedFiles)
+	}
+}
+
+func TestParseHookEvent_PreCompact(t *testing.T) {
+	t.Parallel()
+
+	ag := &CursorAgent{}
+	input := `{"conversation_id": "compact-session", "transcript_path": "/tmp/compact.jsonl", "context_tokens": 8500, "context_window_size": 16000}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNamePreCompact, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event == nil {
+		t.Fatal("expected event, got nil")
+	}
+	if event.Type != agent.Compaction {
+		t.Errorf("expected event type %v, got %v", agent.Compaction, event.Type)
+	}
+	if event.SessionID != "compact-session" {
+		t.Errorf("expected session_id 'compact-session', got %q", event.SessionID)
+	}
+	if event.ContextTokens != 8500 {
+		t.Errorf("expected ContextTokens 8500, got %d", event.ContextTokens)
+	}
+	if event.ContextWindowSize != 16000 {
+		t.Errorf("expected ContextWindowSize 16000, got %d", event.ContextWindowSize)
 	}
 }
 

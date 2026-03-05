@@ -132,6 +132,12 @@ type State struct {
 	// Token usage tracking (accumulated across all checkpoints in this session)
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 
+	// Hook-provided session metrics (for agents like Cursor that report via hooks)
+	SessionDurationMs int64 `json:"session_duration_ms,omitempty"`
+	SessionTurnCount  int   `json:"session_turn_count,omitempty"`
+	ContextTokens     int   `json:"context_tokens,omitempty"`
+	ContextWindowSize int   `json:"context_window_size,omitempty"`
+
 	// Deprecated: TranscriptLinesAtStart is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.
 	TranscriptLinesAtStart int `json:"transcript_lines_at_start,omitempty"`
@@ -346,14 +352,12 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
 
-	stateFile := s.stateFilePath(sessionID)
-
-	if err := os.Remove(stateFile); err != nil {
-		if os.IsNotExist(err) {
-			return nil // Already gone, not an error
-		}
-		return fmt.Errorf("failed to remove session state file: %w", err)
+	// Remove all files for this session (state .json, .model hint, any future hint files).
+	matches, _ := filepath.Glob(filepath.Join(s.stateDir, sessionID+".*")) //nolint:errcheck // pattern is always valid
+	for _, f := range matches {
+		_ = os.Remove(f)
 	}
+
 	return nil
 }
 

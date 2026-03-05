@@ -49,7 +49,9 @@ func (g *GeminiCLIAgent) ParseHookEvent(_ context.Context, hookName string, stdi
 		return g.parseSessionEnd(stdin)
 	case HookNamePreCompress:
 		return g.parseCompaction(stdin)
-	case HookNameBeforeTool, HookNameAfterTool, HookNameBeforeModel,
+	case HookNameBeforeModel:
+		return g.parseBeforeModel(stdin)
+	case HookNameBeforeTool, HookNameAfterTool,
 		HookNameAfterModel, HookNameBeforeToolSelection, HookNameNotification:
 		// Acknowledged hooks with no lifecycle action
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action
@@ -155,6 +157,23 @@ func (g *GeminiCLIAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, error) 
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
 		Timestamp:  time.Now(),
+	}, nil
+}
+
+func (g *GeminiCLIAgent) parseBeforeModel(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[beforeModelRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	model := raw.LLMRequest.Model
+	if model == "" {
+		return nil, nil //nolint:nilnil // no model info → no lifecycle action
+	}
+	return &agent.Event{
+		Type:      agent.ModelUpdate,
+		SessionID: raw.SessionID,
+		Model:     model,
+		Timestamp: time.Now(),
 	}, nil
 }
 

@@ -86,7 +86,7 @@ func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
 		if err != nil {
 			continue
 		}
-		if hs, ok := ag.(agent.HookSupport); ok && hs.AreHooksInstalled(ctx) {
+		if hs, ok := agent.AsHookSupport(ag); ok && hs.AreHooksInstalled(ctx) {
 			installed = append(installed, name)
 		}
 	}

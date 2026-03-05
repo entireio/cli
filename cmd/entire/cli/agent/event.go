@@ -34,6 +34,12 @@ const (
 
 	// SubagentEnd indicates a subagent (task) has completed.
 	SubagentEnd
+
+	// ModelUpdate indicates the agent reported the LLM model being used.
+	// This fires on hooks that carry model info but have no other lifecycle action
+	// (e.g., Gemini CLI's BeforeModel). The framework stores the model as a hint
+	// for subsequent TurnStart/TurnEnd events in the same session.
+	ModelUpdate
 )
 
 // String returns a human-readable name for the event type.
@@ -53,6 +59,8 @@ func (e EventType) String() string {
 		return "SubagentStart"
 	case SubagentEnd:
 		return "SubagentEnd"
+	case ModelUpdate:
+		return "ModelUpdate"
 	default:
 		return "Unknown"
 	}
@@ -78,7 +86,8 @@ type Event struct {
 	Prompt string
 
 	// Model is the LLM model identifier (e.g., "claude-sonnet-4-20250514").
-	// Populated on TurnStart events when the agent provides model info.
+	// Populated on SessionStart (Claude Code), ModelUpdate (Gemini CLI BeforeModel),
+	// and TurnStart/TurnEnd events when the agent provides model info.
 	Model string
 
 	// Timestamp is when the event occurred.
@@ -107,6 +116,12 @@ type Event struct {
 
 	// ResponseMessage is an optional message to display to the user via the agent.
 	ResponseMessage string
+
+	// Hook-provided session metrics (populated by agents that report these via hooks).
+	DurationMs        int64 // Session duration from agent hook (e.g., Cursor SessionEnd)
+	TurnCount         int   // Number of agent turns/loops (e.g., Cursor Stop hook)
+	ContextTokens     int   // Context window tokens used (e.g., Cursor PreCompact hook)
+	ContextWindowSize int   // Total context window size (e.g., Cursor PreCompact hook)
 
 	// Metadata holds agent-specific state that the framework stores and makes available
 	// on subsequent events. Examples: Pi's activeLeafId, Cursor's is_background_agent.

@@ -177,6 +177,22 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset(t *testing.T) {
 	}
 }
 
+func TestCursorAgent_ExtractModifiedFilesFromOffset_NonexistentFile(t *testing.T) {
+	t.Parallel()
+	ag := &CursorAgent{}
+
+	files, pos, err := ag.ExtractModifiedFilesFromOffset("/nonexistent/path.jsonl", 0)
+	if err != nil {
+		t.Fatalf("ExtractModifiedFilesFromOffset() error = %v, want nil", err)
+	}
+	if files != nil {
+		t.Errorf("ExtractModifiedFilesFromOffset() files = %v, want nil", files)
+	}
+	if pos != 0 {
+		t.Errorf("ExtractModifiedFilesFromOffset() pos = %d, want 0", pos)
+	}
+}
+
 func TestCursorAgent_ExtractModifiedFilesFromOffset_EmptyPath(t *testing.T) {
 	t.Parallel()
 	ag := &CursorAgent{}

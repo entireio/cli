@@ -46,7 +46,22 @@ mise run test:integration
 mise run test:ci
 ```
 
-Integration tests use the `//go:build integration` build tag and are located in `cmd/entire/cli/integration_test/`.
+This runs unit tests, integration tests, and the E2E canary (Vogon agent) in sequence. Integration tests use the `//go:build integration` build tag and are located in `cmd/entire/cli/integration_test/`.
+
+### Running E2E Canary Tests (Vogon Agent)
+
+The Vogon agent is a deterministic fake agent that exercises the full E2E test suite without making any API calls. Named after the Vogons from The Hitchhiker's Guide to the Galaxy — bureaucratic, procedural, and deterministic to a fault.
+
+```bash
+mise run test:e2e:canary           # Run all E2E tests with the Vogon agent
+mise run test:e2e:canary TestFoo   # Run a specific test
+```
+
+- **Runs as part of `test:ci`** — canary failures block merges
+- **No API calls, no cost** — safe to run freely, unlike real agent E2E tests
+- **If a canary test fails, the bug is in the CLI or test infrastructure**, not in an agent
+- Located in `e2e/vogon/` (binary) and `cmd/entire/cli/agent/vogon/` (Agent interface)
+- The binary parses prompts via regex, creates/modifies/deletes files, and fires lifecycle hooks
 
 ### Running E2E Tests (Only When Explicitly Requested)
 
@@ -64,9 +79,9 @@ E2E tests:
 - Use the `//go:build e2e` build tag
 - Located in `e2e/tests/`
 - See [`e2e/README.md`](e2e/README.md) for full documentation (structure, debugging, adding agents)
-- Test real agent interactions (Claude Code, Gemini CLI, OpenCode, or Cursor creating files, committing, etc.)
+- Test real agent interactions (Claude Code, Gemini CLI, OpenCode, Cursor, or Vogon creating files, committing, etc.)
 - Validate checkpoint scenarios documented in `docs/architecture/checkpoint-scenarios.md`
-- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini`, `opencode`, `cursor`)
+- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini`, `opencode`, `cursor`, `vogon`)
 
 **Environment variables:**
 

@@ -2,6 +2,7 @@ package cursor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,16 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
+
+// intFromJSON safely converts a json.Number to int64, returning 0 for
+// empty or non-numeric values (hook payloads may omit optional fields).
+func intFromJSON(n json.Number) int64 {
+	v, err := n.Int64()
+	if err != nil {
+		return 0
+	}
+	return v
+}
 
 // ParseHookEvent translates a Cursor hook into a normalized lifecycle Event.
 // Returns nil if the hook has no lifecycle significance.
@@ -106,6 +117,7 @@ func (c *CursorAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent
 		SessionID:  raw.ConversationID,
 		SessionRef: c.resolveTranscriptRef(ctx, raw.ConversationID, raw.TranscriptPath),
 		Model:      raw.Model,
+		TurnCount:  int(intFromJSON(raw.LoopCount)),
 		Timestamp:  time.Now(),
 	}, nil
 }
@@ -119,6 +131,7 @@ func (c *CursorAgent) parseSessionEnd(ctx context.Context, stdin io.Reader) (*ag
 		Type:       agent.SessionEnd,
 		SessionID:  raw.ConversationID,
 		SessionRef: c.resolveTranscriptRef(ctx, raw.ConversationID, raw.TranscriptPath),
+		DurationMs: intFromJSON(raw.DurationMs),
 		Timestamp:  time.Now(),
 	}, nil
 }
@@ -129,10 +142,12 @@ func (c *CursorAgent) parsePreCompact(stdin io.Reader) (*agent.Event, error) {
 		return nil, err
 	}
 	return &agent.Event{
-		Type:       agent.Compaction,
-		SessionID:  raw.ConversationID,
-		SessionRef: raw.TranscriptPath,
-		Timestamp:  time.Now(),
+		Type:              agent.Compaction,
+		SessionID:         raw.ConversationID,
+		SessionRef:        raw.TranscriptPath,
+		ContextTokens:     int(intFromJSON(raw.ContextTokens)),
+		ContextWindowSize: int(intFromJSON(raw.ContextWindowSize)),
+		Timestamp:         time.Now(),
 	}, nil
 }
 

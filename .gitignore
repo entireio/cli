@@ -36,6 +36,7 @@ go.work.sum
 
 # Binary output (only in root)
 /entire
+/vogon
 /testreport
 
 # Build output directory

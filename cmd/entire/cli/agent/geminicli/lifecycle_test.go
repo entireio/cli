@@ -148,13 +148,61 @@ func TestParseHookEvent_Compaction(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_BeforeModel_ReturnsModelUpdate(t *testing.T) {
+	t.Parallel()
+
+	ag := &GeminiCLIAgent{}
+	input := `{
+		"session_id": "model-sess",
+		"transcript_path": "/tmp/t.json",
+		"llm_request": {"model": "gemini-2.5-pro"}
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameBeforeModel, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event == nil {
+		t.Fatal("expected event, got nil")
+	}
+	if event.Type != agent.ModelUpdate {
+		t.Errorf("expected ModelUpdate, got %v", event.Type)
+	}
+	if event.SessionID != "model-sess" {
+		t.Errorf("expected session_id 'model-sess', got %q", event.SessionID)
+	}
+	if event.Model != "gemini-2.5-pro" {
+		t.Errorf("expected model 'gemini-2.5-pro', got %q", event.Model)
+	}
+}
+
+func TestParseHookEvent_BeforeModel_EmptyModel_ReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	ag := &GeminiCLIAgent{}
+	input := `{
+		"session_id": "no-model-sess",
+		"transcript_path": "/tmp/t.json",
+		"llm_request": {"model": ""}
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameBeforeModel, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event != nil {
+		t.Errorf("expected nil event for empty model, got %+v", event)
+	}
+}
+
 func TestParseHookEvent_PassThroughHooks_ReturnNil(t *testing.T) {
 	t.Parallel()
 
 	passThroughHooks := []string{
 		HookNameBeforeTool,
 		HookNameAfterTool,
-		HookNameBeforeModel,
 		HookNameAfterModel,
 		HookNameBeforeToolSelection,
 		HookNameNotification,
@@ -272,8 +320,8 @@ func TestParseHookEvent_AllLifecycleHooks(t *testing.T) {
 		},
 		{
 			hookName:      HookNameBeforeModel,
-			expectNil:     true,
-			inputTemplate: `{"session_id": "s8", "transcript_path": "/t"}`,
+			expectedType:  agent.ModelUpdate,
+			inputTemplate: `{"session_id": "s8", "transcript_path": "/t", "llm_request": {"model": "gemini-2.5-pro"}}`,
 		},
 		{
 			hookName:      HookNameAfterModel,

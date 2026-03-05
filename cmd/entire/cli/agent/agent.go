@@ -189,6 +189,13 @@ type HookResponseWriter interface {
 	WriteHookResponse(message string) error
 }
 
+// TestOnly is implemented by agents that exist solely for testing (e.g., the Vogon canary agent).
+// These agents are excluded from the user-facing agent selection in `entire enable`.
+type TestOnly interface {
+	Agent
+	IsTestOnly() bool
+}
+
 // SubagentAwareExtractor provides methods for extracting files and tokens including subagents.
 // Agents that support spawning subagents (like Claude Code's Task tool) should implement this
 // to ensure subagent contributions are included in checkpoints.

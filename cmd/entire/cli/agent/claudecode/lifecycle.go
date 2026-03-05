@@ -97,7 +97,7 @@ func (c *ClaudeCodeAgent) CalculateTokenUsage(transcriptData []byte, fromOffset 
 // --- Internal hook parsing functions ---
 
 func (c *ClaudeCodeAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionStartRaw](stdin)
+	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
 	if err != nil {
 		return nil, err
 	}
@@ -105,8 +105,8 @@ func (c *ClaudeCodeAgent) parseSessionStart(stdin io.Reader) (*agent.Event, erro
 		Type:       agent.SessionStart,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
-		Timestamp:  time.Now(),
 		Model:      raw.Model,
+		Timestamp:  time.Now(),
 	}, nil
 }
 
