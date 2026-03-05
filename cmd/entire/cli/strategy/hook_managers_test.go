@@ -147,6 +147,146 @@ func TestDetectHookManagers_LefthookDedup(t *testing.T) {
 	}
 }
 
+func TestDetectHookManagers_Hk(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "hk.pkl"), []byte(""), 0o644); err != nil {
+		t.Fatalf("failed to create hk.pkl: %v", err)
+	}
+
+	managers := detectHookManagers(tmpDir)
+	if len(managers) != 1 {
+		t.Fatalf("expected 1 manager, got %d", len(managers))
+	}
+	if managers[0].Name != "hk" {
+		t.Errorf("expected hk, got %s", managers[0].Name)
+	}
+	if managers[0].ConfigPath != "hk.pkl" {
+		t.Errorf("expected hk.pkl, got %s", managers[0].ConfigPath)
+	}
+	if managers[0].OverwritesHooks {
+		t.Error("hk should have OverwritesHooks=false")
+	}
+}
+
+func TestDetectHookManagers_HkConfigDir(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".config"), 0o755); err != nil {
+		t.Fatalf("failed to create .config/: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".config", "hk.pkl"), []byte(""), 0o644); err != nil {
+		t.Fatalf("failed to create .config/hk.pkl: %v", err)
+	}
+
+	managers := detectHookManagers(tmpDir)
+	if len(managers) != 1 {
+		t.Fatalf("expected 1 manager, got %d", len(managers))
+	}
+	if managers[0].Name != "hk" {
+		t.Errorf("expected hk, got %s", managers[0].Name)
+	}
+	if managers[0].ConfigPath != ".config/hk.pkl" {
+		t.Errorf("expected .config/hk.pkl, got %s", managers[0].ConfigPath)
+	}
+}
+
+func TestDetectHookManagers_HkLocal(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "hk.local.pkl"), []byte(""), 0o644); err != nil {
+		t.Fatalf("failed to create hk.local.pkl: %v", err)
+	}
+
+	managers := detectHookManagers(tmpDir)
+	if len(managers) != 1 {
+		t.Fatalf("expected 1 manager, got %d", len(managers))
+	}
+	if managers[0].Name != "hk" {
+		t.Errorf("expected hk, got %s", managers[0].Name)
+	}
+	if managers[0].ConfigPath != "hk.local.pkl" {
+		t.Errorf("expected hk.local.pkl, got %s", managers[0].ConfigPath)
+	}
+}
+
+func TestDetectHookManagers_HkConfigDirLocal(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".config"), 0o755); err != nil {
+		t.Fatalf("failed to create .config/: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".config", "hk.local.pkl"), []byte(""), 0o644); err != nil {
+		t.Fatalf("failed to create .config/hk.local.pkl: %v", err)
+	}
+
+	managers := detectHookManagers(tmpDir)
+	if len(managers) != 1 {
+		t.Fatalf("expected 1 manager, got %d", len(managers))
+	}
+	if managers[0].Name != "hk" {
+		t.Errorf("expected hk, got %s", managers[0].Name)
+	}
+	if managers[0].ConfigPath != ".config/hk.local.pkl" {
+		t.Errorf("expected .config/hk.local.pkl, got %s", managers[0].ConfigPath)
+	}
+}
+
+func TestDetectHookManagers_HkDedup(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	// Both hk.pkl and hk.local.pkl present — should only report once, with highest precedence
+	if err := os.WriteFile(filepath.Join(tmpDir, "hk.pkl"), []byte(""), 0o644); err != nil {
+		t.Fatalf("failed to create hk.pkl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "hk.local.pkl"), []byte(""), 0o644); err != nil {
+		t.Fatalf("failed to create hk.local.pkl: %v", err)
+	}
+
+	managers := detectHookManagers(tmpDir)
+	if len(managers) != 1 {
+		t.Fatalf("expected 1 manager (dedup), got %d", len(managers))
+	}
+	if managers[0].Name != "hk" {
+		t.Errorf("expected hk, got %s", managers[0].Name)
+	}
+	if managers[0].ConfigPath != "hk.local.pkl" {
+		t.Errorf("expected hk.local.pkl (highest precedence), got %s", managers[0].ConfigPath)
+	}
+}
+
+func TestDetectHookManagers_HkDedupConfigDir(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".config"), 0o755); err != nil {
+		t.Fatalf("failed to create .config/: %v", err)
+	}
+	// Both .config/hk.pkl and .config/hk.local.pkl present
+	if err := os.WriteFile(filepath.Join(tmpDir, ".config", "hk.pkl"), []byte(""), 0o644); err != nil {
+		t.Fatalf("failed to create .config/hk.pkl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".config", "hk.local.pkl"), []byte(""), 0o644); err != nil {
+		t.Fatalf("failed to create .config/hk.local.pkl: %v", err)
+	}
+
+	managers := detectHookManagers(tmpDir)
+	if len(managers) != 1 {
+		t.Fatalf("expected 1 manager (dedup), got %d", len(managers))
+	}
+	if managers[0].Name != "hk" {
+		t.Errorf("expected hk, got %s", managers[0].Name)
+	}
+	if managers[0].ConfigPath != ".config/hk.local.pkl" {
+		t.Errorf("expected .config/hk.local.pkl (highest precedence), got %s", managers[0].ConfigPath)
+	}
+}
+
 func TestDetectHookManagers_PreCommit(t *testing.T) {
 	t.Parallel()
 

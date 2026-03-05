@@ -13,7 +13,7 @@ import (
 
 // hookManager describes an external hook manager detected in a repository.
 type hookManager struct {
-	Name            string // "Husky", "Lefthook", "pre-commit", "Overcommit"
+	Name            string // "Husky", "Lefthook", "pre-commit", "Overcommit", "hk"
 	ConfigPath      string // relative path that triggered detection (e.g., ".husky/")
 	OverwritesHooks bool   // true if the tool will overwrite Entire's hooks on reinstall
 }
@@ -27,6 +27,12 @@ func detectHookManagers(repoRoot string) []hookManager {
 		{"Husky", ".husky/", true},
 		{"pre-commit", ".pre-commit-config.yaml", false},
 		{"Overcommit", ".overcommit.yml", false},
+	}
+
+	// hk: explicit precedence order matching hk's discovery
+	// (hk.local.pkl > .config/hk.local.pkl > hk.pkl > .config/hk.pkl)
+	for _, name := range []string{"hk.local.pkl", ".config/hk.local.pkl", "hk.pkl", ".config/hk.pkl"} {
+		checks = append(checks, hookManager{"hk", name, false})
 	}
 
 	// Lefthook supports {.,}lefthook{,-local}.{yml,yaml,json,toml}
