@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/platform"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
@@ -58,7 +59,7 @@ func TestVersionFlag_ContainsExpectedInfo(t *testing.T) {
 	}{
 		{"version number", versioninfo.Version},
 		{"go version", runtime.Version()},
-		{"os", runtime.GOOS},
+		{"os", platform.OSVariant()},
 		{"arch", runtime.GOARCH},
 	}
 	for _, c := range checks {
