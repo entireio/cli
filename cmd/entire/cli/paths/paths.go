@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/platform"
 )
 
 // Directory constants
@@ -156,13 +157,37 @@ func GetClaudeProjectDir(repoPath string) (string, error) {
 		return override, nil
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+	homeDirs := platform.HomeDirCandidates()
+	if len(homeDirs) == 0 {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to get home directory: %w", err)
+		}
+		homeDirs = []string{home}
 	}
 
-	projectDir := SanitizePathForClaude(repoPath)
-	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
+	// Candidates matter on WSL because Windows-native Claude uses Windows path strings.
+	projectDirs := []string{SanitizePathForClaude(repoPath)}
+	if strings.HasPrefix(repoPath, "/") {
+		projectDirs = append(projectDirs, SanitizePathForClaude(strings.TrimLeft(repoPath, "/")))
+	}
+	if platform.IsWSL() {
+		for _, win := range platform.WindowsPathCandidatesFromWSLPath(repoPath) {
+			projectDirs = append(projectDirs, SanitizePathForClaude(win))
+		}
+	}
+	projectDirs = uniqueStrings(projectDirs)
+
+	for _, home := range homeDirs {
+		for _, proj := range projectDirs {
+			p := filepath.Join(home, ".claude", "projects", proj)
+			if info, err := os.Stat(p); err == nil && info.IsDir() {
+				return p, nil
+			}
+		}
+	}
+
+	return filepath.Join(homeDirs[0], ".claude", "projects", projectDirs[0]), nil
 }
 
 // SessionMetadataDirFromSessionID returns the path to a session's metadata directory
@@ -189,4 +214,20 @@ func ExtractSessionIDFromTranscriptPath(transcriptPath string) string {
 		}
 	}
 	return ""
+}
+
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }

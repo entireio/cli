@@ -11,11 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/platform"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
@@ -95,13 +97,29 @@ func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
 		return override, nil
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+	homeDirs := platform.HomeDirCandidates()
+	if len(homeDirs) == 0 {
+		// fallback
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to get home directory: %w", err)
+		}
+		homeDirs = []string{home}
 	}
 
-	projectDir := SanitizePathForClaude(repoPath)
-	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
+	projectDirs := claudeProjectDirCandidates(repoPath)
+	// Try to find an existing directory first (important on WSL due to path-shape differences).
+	for _, home := range homeDirs {
+		for _, proj := range projectDirs {
+			p := filepath.Join(home, ".claude", "projects", proj)
+			if dirExists(p) {
+				return p, nil
+			}
+		}
+	}
+
+	// Default to the first candidate.
+	return filepath.Join(homeDirs[0], ".claude", "projects", projectDirs[0]), nil
 }
 
 // ReadSession reads a session from Claude's storage (JSONL transcript file).
@@ -356,4 +374,40 @@ func (c *ClaudeCodeAgent) ChunkTranscript(_ context.Context, content []byte, max
 
 func (c *ClaudeCodeAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 	return agent.ReassembleJSONL(chunks), nil
+}
+
+func claudeProjectDirCandidates(repoPath string) []string {
+	cands := []string{SanitizePathForClaude(repoPath)}
+	if strings.HasPrefix(repoPath, "/") {
+		// Claude's sanitize keeps leading "/" (becomes leading "-").
+		// Some environments may store without it, so try both.
+		cands = append(cands, SanitizePathForClaude(strings.TrimLeft(repoPath, "/")))
+	}
+	if platform.IsWSL() {
+		for _, win := range platform.WindowsPathCandidatesFromWSLPath(repoPath) {
+			cands = append(cands, SanitizePathForClaude(win))
+		}
+	}
+	return uniqueStrings(cands)
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }

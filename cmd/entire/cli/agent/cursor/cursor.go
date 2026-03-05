@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/platform"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -94,13 +95,26 @@ func (c *CursorAgent) GetSessionDir(repoPath string) (string, error) {
 		return override, nil
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+	homeDirs := platform.HomeDirCandidates()
+	if len(homeDirs) == 0 {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to get home directory: %w", err)
+		}
+		homeDirs = []string{home}
 	}
 
-	projectDir := sanitizePathForCursor(repoPath)
-	return filepath.Join(homeDir, ".cursor", "projects", projectDir, "agent-transcripts"), nil
+	projectDirs := cursorProjectDirCandidates(repoPath)
+	for _, home := range homeDirs {
+		for _, proj := range projectDirs {
+			p := filepath.Join(home, ".cursor", "projects", proj, "agent-transcripts")
+			if dirExists(p) {
+				return p, nil
+			}
+		}
+	}
+
+	return filepath.Join(homeDirs[0], ".cursor", "projects", projectDirs[0], "agent-transcripts"), nil
 }
 
 // ReadSession reads a session from Cursor's storage (JSONL transcript file).
@@ -177,4 +191,35 @@ func (c *CursorAgent) ChunkTranscript(_ context.Context, content []byte, maxSize
 // ReassembleTranscript concatenates JSONL chunks with newlines.
 func (c *CursorAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 	return agent.ReassembleJSONL(chunks), nil
+}
+
+func cursorProjectDirCandidates(repoPath string) []string {
+	cands := []string{sanitizePathForCursor(repoPath)}
+	if platform.IsWSL() {
+		for _, win := range platform.WindowsPathCandidatesFromWSLPath(repoPath) {
+			cands = append(cands, sanitizePathForCursor(win))
+		}
+	}
+	return uniqueStrings(cands)
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
