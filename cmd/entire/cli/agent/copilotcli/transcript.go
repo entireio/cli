@@ -224,9 +224,10 @@ func extractModelFromEvents(events []copilotEvent) string {
 }
 
 // ExtractModelFromTranscript extracts the LLM model name from a Copilot CLI
-// transcript. Copilot CLI emits a session.model_change event early in the
-// JSONL transcript containing the model being used (e.g., "claude-sonnet-4.6").
-// Returns the last model change, or empty string if unavailable.
+// transcript. It prefers session.model_change events (explicit model
+// declarations), but falls back to the model field on tool.execution_complete
+// events for Copilot CLI versions that do not emit session.model_change.
+// Returns the last observed model, or empty string if unavailable.
 func ExtractModelFromTranscript(transcriptPath string) string {
 	if transcriptPath == "" {
 		return ""
