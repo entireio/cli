@@ -2,6 +2,8 @@ package copilotcli
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -107,6 +109,58 @@ func TestParseHookEvent_AgentStop(t *testing.T) {
 	}
 	if event.SessionRef != transcriptPath {
 		t.Errorf("expected transcript path in SessionRef, got %q", event.SessionRef)
+	}
+}
+
+func TestParseHookEvent_AgentStop_ExtractsModel(t *testing.T) {
+	t.Parallel()
+
+	// Create a temp transcript with tool.execution_complete containing model field
+	// (Copilot CLI v0.0.421+ includes model per tool call, not via session.model_change)
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "events.jsonl")
+	transcriptContent := strings.Join([]string{
+		`{"type":"session.start","data":{"sessionId":"model-sess"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":null}`,
+		`{"type":"user.message","data":{"content":"hello"},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":""}`,
+		`{"type":"tool.execution_complete","data":{"toolCallId":"tc1","model":"claude-sonnet-4.6","toolTelemetry":{"properties":{},"metrics":{}}},"id":"3","timestamp":"2026-03-03T00:00:02Z","parentId":""}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(transcriptContent), 0o644); err != nil {
+		t.Fatalf("failed to write test transcript: %v", err)
+	}
+
+	ag := &CopilotCLIAgent{}
+	input := `{"timestamp":1771480085412,"cwd":"/path/to/repo","sessionId":"model-sess","transcriptPath":"` + transcriptPath + `","stopReason":"end_turn"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameAgentStop, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event == nil {
+		t.Fatal("expected event, got nil")
+	}
+	if event.Model != "claude-sonnet-4.6" {
+		t.Errorf("expected model 'claude-sonnet-4.6', got %q", event.Model)
+	}
+}
+
+func TestParseHookEvent_AgentStop_NoTranscript_EmptyModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	// transcriptPath points to a nonexistent file — model should be empty, not error
+	input := `{"timestamp":1771480085412,"cwd":"/path/to/repo","sessionId":"no-model-sess","transcriptPath":"/nonexistent/events.jsonl","stopReason":"end_turn"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameAgentStop, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event == nil {
+		t.Fatal("expected event, got nil")
+	}
+	if event.Model != "" {
+		t.Errorf("expected empty model for nonexistent transcript, got %q", event.Model)
 	}
 }
 

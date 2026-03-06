@@ -10,6 +10,7 @@ import (
 const (
 	testFileHello       = "/tmp/test/hello.txt"
 	testPromptCreateTxt = "create hello.txt"
+	testModelSonnet     = "claude-sonnet-4.6"
 )
 
 // testJSONLLines returns JSONL lines matching the real Copilot CLI transcript format
@@ -365,6 +366,129 @@ func TestExtractModifiedFilesFromEvents_EmptyAndMalformedFilePaths(t *testing.T)
 		files := extractModifiedFilesFromEvents(events)
 		if len(files) != 0 {
 			t.Errorf("expected 0 files for malformed filePaths, got %d: %v", len(files), files)
+		}
+	})
+}
+
+func TestExtractModelFromTranscript_ModelChangeEvent(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{
+		`{"type":"session.start","data":{"sessionId":"abc123"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		`{"type":"session.model_change","data":{"newModel":"claude-sonnet-4.6"},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":"1"}`,
+		`{"type":"user.message","data":{"content":"hello"},"id":"3","timestamp":"2026-03-03T00:00:02Z","parentId":""}`,
+	}
+	path := writeTestJSONL(t, lines)
+
+	model := ExtractModelFromTranscript(path)
+	if model != testModelSonnet {
+		t.Errorf("ExtractModelFromTranscript() = %q, want %q", model, testModelSonnet)
+	}
+}
+
+func TestExtractModelFromTranscript_FallbackToToolExecComplete(t *testing.T) {
+	t.Parallel()
+
+	// No session.model_change, but tool.execution_complete has a model field
+	lines := []string{
+		`{"type":"session.start","data":{"sessionId":"abc123"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		`{"type":"user.message","data":{"content":"hello"},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":""}`,
+		`{"type":"tool.execution_complete","data":{"toolCallId":"tc1","model":"claude-sonnet-4.6","toolTelemetry":{"properties":{},"metrics":{}}},"id":"3","timestamp":"2026-03-03T00:00:02Z","parentId":""}`,
+	}
+	path := writeTestJSONL(t, lines)
+
+	model := ExtractModelFromTranscript(path)
+	if model != testModelSonnet {
+		t.Errorf("ExtractModelFromTranscript() = %q, want %q (fallback to tool.execution_complete)", model, testModelSonnet)
+	}
+}
+
+func TestExtractModelFromTranscript_ModelChangeTakesPrecedence(t *testing.T) {
+	t.Parallel()
+
+	// Both session.model_change and tool.execution_complete present — model_change wins
+	lines := []string{
+		`{"type":"session.start","data":{"sessionId":"abc123"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		`{"type":"session.model_change","data":{"newModel":"gpt-4.1"},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":"1"}`,
+		`{"type":"tool.execution_complete","data":{"toolCallId":"tc1","model":"claude-sonnet-4.6","toolTelemetry":{"properties":{},"metrics":{}}},"id":"3","timestamp":"2026-03-03T00:00:02Z","parentId":""}`,
+	}
+	path := writeTestJSONL(t, lines)
+
+	model := ExtractModelFromTranscript(path)
+	if model != "gpt-4.1" {
+		t.Errorf("ExtractModelFromTranscript() = %q, want %q (model_change takes precedence)", model, "gpt-4.1")
+	}
+}
+
+func TestExtractModelFromTranscript_MultipleModelChanges(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{
+		`{"type":"session.start","data":{"sessionId":"abc123"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		`{"type":"session.model_change","data":{"newModel":"gpt-4.1"},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":"1"}`,
+		`{"type":"user.message","data":{"content":"switch model"},"id":"3","timestamp":"2026-03-03T00:00:02Z","parentId":""}`,
+		`{"type":"session.model_change","data":{"previousModel":"gpt-4.1","newModel":"claude-sonnet-4.6"},"id":"4","timestamp":"2026-03-03T00:00:03Z","parentId":"1"}`,
+	}
+	path := writeTestJSONL(t, lines)
+
+	model := ExtractModelFromTranscript(path)
+	if model != testModelSonnet {
+		t.Errorf("ExtractModelFromTranscript() = %q, want %q (last model change)", model, testModelSonnet)
+	}
+}
+
+func TestExtractModelFromEvents(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns last model", func(t *testing.T) {
+		t.Parallel()
+		lines := []string{
+			`{"type":"session.model_change","data":{"newModel":"gpt-4.1"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+			`{"type":"session.model_change","data":{"newModel":"claude-sonnet-4.6"},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":""}`,
+		}
+		content := strings.Join(lines, "\n") + "\n"
+		events, _ := parseEventsFromBytes([]byte(content)) //nolint:errcheck // test input is always valid
+		model := extractModelFromEvents(events)
+		if model != testModelSonnet {
+			t.Errorf("extractModelFromEvents() = %q, want %q", model, testModelSonnet)
+		}
+	})
+
+	t.Run("returns empty for no events", func(t *testing.T) {
+		t.Parallel()
+		model := extractModelFromEvents(nil)
+		if model != "" {
+			t.Errorf("extractModelFromEvents(nil) = %q, want empty", model)
+		}
+	})
+
+	t.Run("skips empty newModel", func(t *testing.T) {
+		t.Parallel()
+		lines := []string{
+			`{"type":"session.model_change","data":{"newModel":"gpt-4.1"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+			`{"type":"session.model_change","data":{"newModel":""},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":""}`,
+		}
+		content := strings.Join(lines, "\n") + "\n"
+		events, _ := parseEventsFromBytes([]byte(content)) //nolint:errcheck // test input is always valid
+		model := extractModelFromEvents(events)
+		if model != "gpt-4.1" {
+			t.Errorf("extractModelFromEvents() = %q, want %q (skip empty newModel)", model, "gpt-4.1")
+		}
+	})
+
+	t.Run("fallback skips empty and malformed model in tool events", func(t *testing.T) {
+		t.Parallel()
+		lines := []string{
+			// tool.execution_complete with empty model field
+			`{"type":"tool.execution_complete","data":{"toolCallId":"tc1","model":"","toolTelemetry":{"properties":{},"metrics":{}}},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+			// tool.execution_complete with no model field at all (malformed data)
+			`{"type":"tool.execution_complete","data":{"toolCallId":"tc2","toolTelemetry":{"properties":{},"metrics":{}}},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":""}`,
+		}
+		content := strings.Join(lines, "\n") + "\n"
+		events, _ := parseEventsFromBytes([]byte(content)) //nolint:errcheck // test input is always valid
+		model := extractModelFromEvents(events)
+		if model != "" {
+			t.Errorf("extractModelFromEvents() = %q, want empty (no valid model in fallback)", model)
 		}
 	})
 }

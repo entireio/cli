@@ -27,6 +27,7 @@ const (
 	eventTypeUserMessage  = "user.message"
 	eventTypeAssistantMsg = "assistant.message"
 	eventTypeToolExecDone = "tool.execution_complete"
+	eventTypeModelChange  = "session.model_change"
 )
 
 // userMessageData is the data payload for user.message events.
@@ -39,8 +40,15 @@ type assistantMessageData struct {
 	Content string `json:"content"`
 }
 
+// modelChangeData is the data payload for session.model_change events.
+// Copilot CLI emits this early in the transcript with the LLM model being used.
+type modelChangeData struct {
+	NewModel string `json:"newModel"`
+}
+
 type toolExecCompleteData struct {
 	ToolCallID    string        `json:"toolCallId"`
+	Model         string        `json:"model"`
 	ToolTelemetry toolTelemetry `json:"toolTelemetry"`
 }
 
@@ -174,6 +182,67 @@ func extractSummaryFromEvents(events []copilotEvent) string {
 	}
 
 	return ""
+}
+
+// extractModelFromEvents returns the model from transcript events.
+// First checks session.model_change events, then falls back to the model field
+// in tool.execution_complete events (Copilot CLI includes model per tool call).
+func extractModelFromEvents(events []copilotEvent) string {
+	// Primary: session.model_change (explicit model declaration)
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != eventTypeModelChange {
+			continue
+		}
+
+		var data modelChangeData
+		if err := json.Unmarshal(events[i].Data, &data); err != nil {
+			continue
+		}
+
+		if data.NewModel != "" {
+			return data.NewModel
+		}
+	}
+
+	// Fallback: tool.execution_complete events include a model field
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != eventTypeToolExecDone {
+			continue
+		}
+
+		var data toolExecCompleteData
+		if err := json.Unmarshal(events[i].Data, &data); err != nil {
+			continue
+		}
+
+		if data.Model != "" {
+			return data.Model
+		}
+	}
+
+	return ""
+}
+
+// ExtractModelFromTranscript extracts the LLM model name from a Copilot CLI
+// transcript. Copilot CLI emits a session.model_change event early in the
+// JSONL transcript containing the model being used (e.g., "claude-sonnet-4.6").
+// Returns the last model change, or empty string if unavailable.
+func ExtractModelFromTranscript(transcriptPath string) string {
+	if transcriptPath == "" {
+		return ""
+	}
+
+	data, err := os.ReadFile(transcriptPath) //nolint:gosec // Path derived from agent hook input
+	if err != nil {
+		return ""
+	}
+
+	events, err := parseEventsFromBytes(data)
+	if err != nil {
+		return ""
+	}
+
+	return extractModelFromEvents(events)
 }
 
 // GetTranscriptPosition returns the current line count of a Copilot CLI transcript.

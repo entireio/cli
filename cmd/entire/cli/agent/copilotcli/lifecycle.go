@@ -97,10 +97,18 @@ func (c *CopilotCLIAgent) parseAgentStop(stdin io.Reader) (*agent.Event, error) 
 	if err != nil {
 		return nil, err
 	}
+
+	// Extract model from transcript (Copilot CLI hooks don't include model)
+	var model string
+	if raw.TranscriptPath != "" {
+		model = ExtractModelFromTranscript(raw.TranscriptPath)
+	}
+
 	return &agent.Event{
 		Type:       agent.TurnEnd,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		Model:      model,
 		Timestamp:  time.Now(),
 	}, nil
 }
