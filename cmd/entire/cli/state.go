@@ -116,7 +116,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 
 	// Get transcript position using TranscriptAnalyzer if available
 	var transcriptOffset int
-	if analyzer, ok := ag.(agent.TranscriptAnalyzer); ok && sessionRef != "" {
+	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok && sessionRef != "" {
 		pos, posErr := analyzer.GetTranscriptPosition(sessionRef)
 		if posErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "state"), "failed to get transcript position",

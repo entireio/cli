@@ -25,8 +25,14 @@ func newDoctorCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "doctor",
-		Short: "Fix stuck sessions",
-		Long: `Scan for stuck or problematic sessions and offer to fix them.
+		Short: "Diagnose and fix session issues",
+		Long: `Scan for session issues and offer to fix them.
+
+Checks performed:
+  1. Disconnected metadata branches: detects when local and remote
+     entire/checkpoints/v1 branches share no common ancestor (caused by a
+     previous bug). Fixes by cherry-picking local checkpoints onto remote tip.
+  2. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -37,14 +43,13 @@ For each stuck session, you can choose to:
   - Discard: Remove the session state and shadow branch data
   - Skip: Leave the session as-is
 
-Use --force to condense all fixable sessions without prompting.  Sessions that can't
-be condensed will be discarded.`,
+Use --force to auto-fix all issues without prompting.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSessionsFix(cmd, forceFlag)
 		},
 	}
 
-	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Fix all stuck sessions without prompting (condense if possible, otherwise discard)")
+	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Auto-fix all issues without prompting")
 
 	return cmd
 }
@@ -60,6 +65,14 @@ type stuckSession struct {
 }
 
 func runSessionsFix(cmd *cobra.Command, force bool) error {
+	// Check 1: Disconnected metadata branches
+	metadataErr := checkDisconnectedMetadata(cmd, force)
+	if metadataErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: metadata check failed: %v\n", metadataErr)
+	}
+	fmt.Fprintln(cmd.OutOrStdout())
+
+	// Check 2: Stuck sessions
 	ctx := cmd.Context()
 	// Load all session states
 	states, err := strategy.ListSessionStates(ctx)
@@ -69,6 +82,9 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	if len(states) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "No stuck sessions found.")
+		if metadataErr != nil {
+			return fmt.Errorf("metadata check failed: %w", metadataErr)
+		}
 		return nil
 	}
 
@@ -91,6 +107,9 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	if len(stuck) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "No stuck sessions found.")
+		if metadataErr != nil {
+			return fmt.Errorf("metadata check failed: %w", metadataErr)
+		}
 		return nil
 	}
 
@@ -145,6 +164,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		case "skip":
 			fmt.Fprintf(cmd.OutOrStdout(), "  -> Skipped\n\n")
 		}
+	}
+
+	if metadataErr != nil {
+		return fmt.Errorf("metadata check failed: %w", metadataErr)
 	}
 
 	return nil
@@ -277,6 +300,61 @@ func discardSession(ctx context.Context, ss stuckSession, _ *git.Repository, err
 		}
 	}
 
+	return nil
+}
+
+// checkDisconnectedMetadata detects and optionally repairs disconnected
+// local/remote metadata branches (the "empty-orphan bug").
+func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
+	repo, err := openRepository(cmd.Context())
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	ctx := cmd.Context()
+	disconnected, err := strategy.IsMetadataDisconnected(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("could not check metadata branch state: %w", err)
+	}
+
+	w := cmd.OutOrStdout()
+
+	if !disconnected {
+		fmt.Fprintln(w, "Metadata branches: OK")
+		return nil
+	}
+
+	fmt.Fprintln(w, "Metadata branches: DISCONNECTED")
+	fmt.Fprintln(w, "  Local and remote entire/checkpoints/v1 branches share no common ancestor.")
+	fmt.Fprintln(w, "  Some remote checkpoints may not be visible locally.")
+	fmt.Fprintln(w, "  Fix: cherry-pick local checkpoints onto remote tip (preserves all data).")
+
+	if !force {
+		var confirmed bool
+		form := NewAccessibleForm(
+			huh.NewGroup(
+				huh.NewConfirm().
+					Title("Fix disconnected metadata branches?").
+					Value(&confirmed),
+			),
+		)
+		if formErr := form.Run(); formErr != nil {
+			if errors.Is(formErr, huh.ErrUserAborted) {
+				return nil
+			}
+			return fmt.Errorf("prompt failed: %w", formErr)
+		}
+		if !confirmed {
+			fmt.Fprintln(w, "  -> Skipped")
+			return nil
+		}
+	}
+
+	if fixErr := strategy.ReconcileDisconnectedMetadataBranch(ctx, repo, cmd.ErrOrStderr()); fixErr != nil {
+		return fmt.Errorf("failed to reconcile metadata branches: %w", fixErr)
+	}
+
+	fmt.Fprintln(w, "  -> Fixed: metadata branches reconciled")
 	return nil
 }
 

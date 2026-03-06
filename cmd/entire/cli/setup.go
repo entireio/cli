@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -63,6 +64,9 @@ modifying your active branch.`,
 			if err := validateSetupFlags(opts.UseLocalSettings, opts.UseProjectSettings); err != nil {
 				return err
 			}
+
+			// Discover external agent plugins so they appear in agent selection.
+			external.DiscoverAndRegister(ctx)
 
 			// Warn if repo has no commits yet
 			if repo, err := strategy.OpenRepository(ctx); err == nil && strategy.IsEmptyRepository(repo) {
@@ -344,7 +348,7 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 		if err != nil {
 			continue
 		}
-		hookAgent, ok := ag.(agent.HookSupport)
+		hookAgent, ok := agent.AsHookSupport(ag)
 		if !ok {
 			continue
 		}
@@ -360,7 +364,7 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 // setupAgentHooks sets up hooks for a given agent.
 // Returns the number of hooks installed (0 if already installed).
 func setupAgentHooks(ctx context.Context, ag agent.Agent, localDev, forceHooks bool) (int, error) {
-	hookAgent, ok := ag.(agent.HookSupport)
+	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
 		return 0, fmt.Errorf("agent %s does not support hooks", ag.Name())
 	}
@@ -465,7 +469,7 @@ func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(availab
 			continue
 		}
 		// Only show agents that support hooks
-		if _, ok := ag.(agent.HookSupport); !ok {
+		if _, ok := agent.AsHookSupport(ag); !ok {
 			continue
 		}
 		// Skip test-only agents (e.g., Vogon canary)
@@ -585,7 +589,7 @@ func printWrongAgentError(w io.Writer, name string) {
 func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
 	agentName := ag.Name()
 	// Check if agent supports hooks
-	hookAgent, ok := ag.(agent.HookSupport)
+	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
 		return fmt.Errorf("agent %s does not support hooks", agentName)
 	}
@@ -1084,7 +1088,7 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 		if err != nil {
 			continue
 		}
-		hs, ok := ag.(agent.HookSupport)
+		hs, ok := agent.AsHookSupport(ag)
 		if !ok {
 			continue
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -465,5 +466,204 @@ func TestLoadSessionState_DeletesStaleSession(t *testing.T) {
 	// File should be deleted from disk
 	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
 		t.Error("stale session file should be deleted after LoadSessionState()")
+	}
+}
+
+// --- Model hint file tests ---
+
+func TestStoreModelHint_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "2026-01-01-hint-roundtrip"
+
+	err = StoreModelHint(ctx, sessionID, "claude-sonnet-4-20250514")
+	if err != nil {
+		t.Fatalf("StoreModelHint() error = %v", err)
+	}
+
+	got := LoadModelHint(ctx, sessionID)
+	if got != "claude-sonnet-4-20250514" {
+		t.Errorf("LoadModelHint() = %q, want %q", got, "claude-sonnet-4-20250514")
+	}
+}
+
+func TestStoreModelHint_EmptyModel_NoOp(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "2026-01-01-hint-empty"
+
+	err = StoreModelHint(ctx, sessionID, "")
+	if err != nil {
+		t.Fatalf("StoreModelHint() error = %v", err)
+	}
+
+	// No file should have been created
+	stateDir, sdErr := getSessionStateDir(ctx)
+	if sdErr != nil {
+		t.Fatalf("getSessionStateDir() error = %v", sdErr)
+	}
+	hintPath := stateDir + "/" + sessionID + ".model"
+	if _, statErr := os.Stat(hintPath); !os.IsNotExist(statErr) {
+		t.Error("StoreModelHint with empty model should not create a file")
+	}
+}
+
+func TestLoadModelHint_NoFile_ReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	t.Chdir(dir)
+
+	got := LoadModelHint(context.Background(), "2026-01-01-nonexistent")
+	if got != "" {
+		t.Errorf("LoadModelHint() = %q, want empty string for missing file", got)
+	}
+}
+
+func TestStoreModelHint_InvalidSessionID_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	t.Chdir(dir)
+
+	err = StoreModelHint(context.Background(), "../../../etc/passwd", "model")
+	if err == nil {
+		t.Error("StoreModelHint() should return error for invalid session ID")
+	}
+}
+
+func TestLoadModelHint_InvalidSessionID_ReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	t.Chdir(dir)
+
+	got := LoadModelHint(context.Background(), "../../../etc/passwd")
+	if got != "" {
+		t.Errorf("LoadModelHint() = %q, want empty for invalid session ID", got)
+	}
+}
+
+func TestLoadModelHint_TrimsWhitespace(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "2026-01-01-hint-whitespace"
+
+	// Write hint with trailing newline (simulating manual edit)
+	stateDir, sdErr := getSessionStateDir(ctx)
+	if sdErr != nil {
+		t.Fatalf("getSessionStateDir() error = %v", sdErr)
+	}
+	if mkErr := os.MkdirAll(stateDir, 0o750); mkErr != nil {
+		t.Fatalf("MkdirAll() error = %v", mkErr)
+	}
+	hintPath := stateDir + "/" + sessionID + ".model"
+	if wErr := os.WriteFile(hintPath, []byte("claude-opus-4-6\n"), 0o600); wErr != nil {
+		t.Fatalf("WriteFile() error = %v", wErr)
+	}
+
+	got := LoadModelHint(ctx, sessionID)
+	if got != "claude-opus-4-6" {
+		t.Errorf("LoadModelHint() = %q, want %q (should trim whitespace)", got, "claude-opus-4-6")
+	}
+}
+
+func TestClearSessionState_RemovesHintFile(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "2026-01-01-clear-hint"
+
+	// Create both state and hint files
+	state := &SessionState{
+		SessionID:  sessionID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}
+	if sErr := SaveSessionState(ctx, state); sErr != nil {
+		t.Fatalf("SaveSessionState() error = %v", sErr)
+	}
+	if sErr := StoreModelHint(ctx, sessionID, "some-model"); sErr != nil {
+		t.Fatalf("StoreModelHint() error = %v", sErr)
+	}
+
+	// Clear should remove both
+	if cErr := ClearSessionState(ctx, sessionID); cErr != nil {
+		t.Fatalf("ClearSessionState() error = %v", cErr)
+	}
+
+	stateDir, sdErr := getSessionStateDir(ctx)
+	if sdErr != nil {
+		t.Fatalf("getSessionStateDir() error = %v", sdErr)
+	}
+	matches, err := filepath.Glob(filepath.Join(stateDir, sessionID+".*"))
+	if err != nil {
+		t.Fatalf("filepath.Glob() error = %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("expected no files for session after clear, found: %v", matches)
+	}
+}
+
+func TestClearSessionState_RemovesOrphanedHintFile(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "2026-01-01-orphan-hint"
+
+	// Only create hint file (no state file)
+	if sErr := StoreModelHint(ctx, sessionID, "orphan-model"); sErr != nil {
+		t.Fatalf("StoreModelHint() error = %v", sErr)
+	}
+
+	// Clear should succeed and remove the hint file
+	if cErr := ClearSessionState(ctx, sessionID); cErr != nil {
+		t.Fatalf("ClearSessionState() error = %v", cErr)
+	}
+
+	stateDir, sdErr := getSessionStateDir(ctx)
+	if sdErr != nil {
+		t.Fatalf("getSessionStateDir() error = %v", sdErr)
+	}
+	matches, err := filepath.Glob(filepath.Join(stateDir, sessionID+".*"))
+	if err != nil {
+		t.Fatalf("filepath.Glob() error = %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("expected no files for session after clear, found: %v", matches)
 	}
 }

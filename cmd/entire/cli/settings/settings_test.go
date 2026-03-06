@@ -59,7 +59,8 @@ func TestLoad_AcceptsValidKeys(t *testing.T) {
 		"local_dev": false,
 		"log_level": "debug",
 		"strategy_options": {"key": "value"},
-		"telemetry": true
+		"telemetry": true,
+		"external_agents": true
 	}`
 	if err := os.WriteFile(settingsFile, []byte(settingsContent), 0644); err != nil {
 		t.Fatalf("failed to write settings file: %v", err)
@@ -242,6 +243,76 @@ func TestMergeJSON_CommitLinking(t *testing.T) {
 	}
 	if s.CommitLinking != CommitLinkingAlways {
 		t.Errorf("CommitLinking = %q, want %q (expected local override)", s.CommitLinking, CommitLinkingAlways)
+	}
+}
+
+func TestExternalAgents_DefaultsFalse(t *testing.T) {
+	s := &EntireSettings{}
+	if s.ExternalAgents {
+		t.Error("expected ExternalAgents to default to false")
+	}
+}
+
+func TestLoad_ExternalAgentsField(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	settingsFile := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true, "external_agents": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatalf("failed to create .git directory: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !s.ExternalAgents {
+		t.Error("expected ExternalAgents to be true")
+	}
+}
+
+func TestMergeJSON_ExternalAgents(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	// Base settings without external_agents
+	settingsFile := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+
+	// Local override enables external_agents
+	localFile := filepath.Join(entireDir, "settings.local.json")
+	if err := os.WriteFile(localFile, []byte(`{"external_agents": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write local settings file: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatalf("failed to create .git directory: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !s.ExternalAgents {
+		t.Error("expected ExternalAgents to be true from local override")
 	}
 }
 

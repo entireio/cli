@@ -63,6 +63,16 @@ type agentHookInputRaw struct {
 	Prompt         string `json:"prompt,omitempty"` // User's prompt (BeforeAgent only)
 }
 
+// beforeModelRaw is the JSON structure from BeforeModel hooks.
+// Contains the LLM model being used for the current request.
+type beforeModelRaw struct {
+	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
+	LLMRequest     struct {
+		Model string `json:"model"`
+	} `json:"llm_request"`
+}
+
 // Tool names used in Gemini CLI that modify files
 // Note: Gemini CLI uses different names in different contexts:
 // - Internal/transcript names: write_file, replace

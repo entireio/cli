@@ -109,6 +109,27 @@ func TestFeature_Bar(t *testing.T) {
 
 **Exception:** Tests that modify process-global state cannot be parallelized. This includes `os.Chdir()`/`t.Chdir()` and `os.Setenv()`/`t.Setenv()` — Go's test framework will panic if these are used after `t.Parallel()`.
 
+### Git in Tests
+
+**Tests that touch git state must use an isolated temp repo — never the real repo CWD.**
+
+Many handlers (lifecycle, strategy, hooks) resolve the git repo from CWD via `OpenRepository`, `GetGitCommonDir`, `DetectFileChanges`, etc. Without isolation, tests can create session state files, shadow branches, or other artifacts in the real `.git/` directory.
+
+Use the `testutil` helpers:
+
+```go
+tmpDir := t.TempDir()
+testutil.InitRepo(t, tmpDir)                    // git init + user config + disable GPG
+testutil.WriteFile(t, tmpDir, "f.txt", "init")  // create a file
+testutil.GitAdd(t, tmpDir, "f.txt")             // stage it
+testutil.GitCommit(t, tmpDir, "init")           // commit (needs at least one commit for HEAD)
+t.Chdir(tmpDir)                                 // redirect CWD-based git resolution
+```
+
+`testutil.InitRepo` configures `user.name`, `user.email`, and disables GPG signing — safe for CI environments without global git config.
+
+**Do NOT** shell out to `git init`/`git commit` directly without setting user config and `--no-gpg-sign`, and **do NOT** run lifecycle/strategy handlers from the real repo CWD in tests.
+
 ### Linting and Formatting
 
 ```bash

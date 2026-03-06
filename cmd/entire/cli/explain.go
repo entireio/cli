@@ -893,6 +893,9 @@ func walkFirstParentCommits(ctx context.Context, repo *git.Repository, from plum
 //   - On default branch (main/master): show all checkpoints in history (up to limit)
 //   - Includes both committed checkpoints (entire/checkpoints/v1) and temporary checkpoints (shadow branches)
 func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) ([]strategy.RewindPoint, error) {
+	// Warn (once per process) if metadata branches are disconnected
+	strategy.WarnIfMetadataDisconnected()
+
 	store := checkpoint.NewGitStore(repo)
 
 	// Get all committed checkpoints for lookup

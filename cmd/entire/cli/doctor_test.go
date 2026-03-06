@@ -1,16 +1,20 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -285,4 +289,60 @@ func TestClassifySession_WorktreeIDInShadowBranch(t *testing.T) {
 	assert.True(t, result.HasShadowBranch)
 	expectedBranch := checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID)
 	assert.Equal(t, expectedBranch, result.ShadowBranch)
+}
+
+// TestRunSessionsFix_MetadataCheckFailure_PropagatesError verifies that when
+// checkDisconnectedMetadata fails, runSessionsFix returns a non-nil error
+// instead of silently swallowing it.
+func TestRunSessionsFix_MetadataCheckFailure_PropagatesError(t *testing.T) {
+	// Cannot use t.Parallel() because t.Chdir modifies process-global state.
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Create a real local metadata branch
+	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
+	treeObj := repo.Storer.NewEncodedObject()
+	require.NoError(t, emptyTree.Encode(treeObj))
+	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
+	require.NoError(t, err)
+
+	commitObj := &object.Commit{
+		Author:    object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
+		Committer: object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
+		Message:   "metadata",
+		TreeHash:  treeHash,
+	}
+	enc := repo.Storer.NewEncodedObject()
+	require.NoError(t, commitObj.Encode(enc))
+	localHash, err := repo.Storer.SetEncodedObject(enc)
+	require.NoError(t, err)
+
+	localRef := plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName(paths.MetadataBranchName), localHash)
+	require.NoError(t, repo.Storer.SetReference(localRef))
+
+	// Create a remote-tracking ref that points to a nonexistent object.
+	// This makes IsMetadataDisconnected call git merge-base with a bad hash,
+	// which fails with a non-0/1 exit code → treated as an error.
+	bogusHash := plumbing.NewHash("0000000000000000000000000000000000000001")
+	remoteRef := plumbing.NewHashReference(
+		plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName), bogusHash)
+	require.NoError(t, repo.Storer.SetReference(remoteRef))
+
+	// Build a minimal cobra command with captured output and context
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	err = runSessionsFix(cmd, true)
+
+	// The metadata check error should be propagated, not swallowed
+	require.Error(t, err, "runSessionsFix should return error when metadata check fails")
+	assert.Contains(t, err.Error(), "metadata check failed")
+	assert.Contains(t, stderr.String(), "Error: metadata check failed")
 }

@@ -50,7 +50,7 @@ branch, or lists all trails if no trail exists for the current branch.`,
 func runTrailShow(w io.Writer) error {
 	branch, err := GetCurrentBranch(context.Background())
 	if err != nil {
-		return runTrailListAll(w, "", false)
+		return runTrailListAll(w, "", false, false)
 	}
 
 	repo, err := strategy.OpenRepository(context.Background())
@@ -61,7 +61,7 @@ func runTrailShow(w io.Writer) error {
 	store := trail.NewStore(repo)
 	metadata, err := store.FindByBranch(branch)
 	if err != nil || metadata == nil {
-		return runTrailListAll(w, "", false)
+		return runTrailListAll(w, "", false, false)
 	}
 
 	printTrailDetails(w, metadata)
@@ -91,22 +91,24 @@ func printTrailDetails(w io.Writer, m *trail.Metadata) {
 func newTrailListCmd() *cobra.Command {
 	var statusFilter string
 	var jsonOutput bool
+	var showAll bool
 
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all trails",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runTrailListAll(cmd.OutOrStdout(), statusFilter, jsonOutput)
+			return runTrailListAll(cmd.OutOrStdout(), statusFilter, jsonOutput, showAll)
 		},
 	}
 
 	cmd.Flags().StringVar(&statusFilter, "status", "", "Filter by status (draft, open, in_progress, in_review, merged, closed)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
+	cmd.Flags().BoolVarP(&showAll, "all", "a", false, "Include merged and closed trails")
 
 	return cmd
 }
 
-func runTrailListAll(w io.Writer, statusFilter string, jsonOutput bool) error {
+func runTrailListAll(w io.Writer, statusFilter string, jsonOutput, showAll bool) error {
 	// Fetch remote trails branch so we see trails from collaborators
 	fetchTrailsBranch()
 
@@ -125,6 +127,8 @@ func runTrailListAll(w io.Writer, statusFilter string, jsonOutput bool) error {
 		trails = []*trail.Metadata{}
 	}
 
+	totalCount := len(trails)
+
 	// Apply status filter
 	if statusFilter != "" {
 		status := trail.Status(statusFilter)
@@ -134,6 +138,15 @@ func runTrailListAll(w io.Writer, statusFilter string, jsonOutput bool) error {
 		var filtered []*trail.Metadata
 		for _, t := range trails {
 			if t.Status == status {
+				filtered = append(filtered, t)
+			}
+		}
+		trails = filtered
+	} else if !showAll {
+		// By default, hide merged and closed trails
+		var filtered []*trail.Metadata
+		for _, t := range trails {
+			if t.Status != trail.StatusMerged && t.Status != trail.StatusClosed {
 				filtered = append(filtered, t)
 			}
 		}
@@ -155,12 +168,17 @@ func runTrailListAll(w io.Writer, statusFilter string, jsonOutput bool) error {
 	}
 
 	if len(trails) == 0 {
-		fmt.Fprintln(w, "No trails found.")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Commands:")
-		fmt.Fprintln(w, "  entire trail create   Create a trail for the current branch")
-		fmt.Fprintln(w, "  entire trail list     List all trails")
-		fmt.Fprintln(w, "  entire trail update   Update trail metadata")
+		hiddenCount := totalCount - len(trails)
+		if hiddenCount > 0 {
+			fmt.Fprintf(w, "No active trails found. %d merged/closed trail(s) hidden — use --all to show.\n", hiddenCount)
+		} else {
+			fmt.Fprintln(w, "No trails found.")
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "Commands:")
+			fmt.Fprintln(w, "  entire trail create   Create a trail for the current branch")
+			fmt.Fprintln(w, "  entire trail list     List all trails")
+			fmt.Fprintln(w, "  entire trail update   Update trail metadata")
+		}
 		return nil
 	}
 

@@ -1241,6 +1241,28 @@ func TestExtractModelFromTranscript_NoSettingsFile(t *testing.T) {
 	}
 }
 
+func TestExtractModelFromTranscript_CorruptSettingsFile(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	transcriptPath := tmpDir + "/session.jsonl"
+	settingsPath := tmpDir + "/session.settings.json"
+
+	if err := os.WriteFile(transcriptPath, []byte(`{"type":"session_start"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// Write invalid JSON to the settings file
+	if err := os.WriteFile(settingsPath, []byte(`{not valid json`), 0o644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	model := ExtractModelFromTranscript(transcriptPath)
+	if model != "" {
+		t.Errorf("ExtractModelFromTranscript() = %q, want empty for corrupt settings", model)
+	}
+}
+
 func TestExtractModelFromTranscript_EmptyPath(t *testing.T) {
 	t.Parallel()
 

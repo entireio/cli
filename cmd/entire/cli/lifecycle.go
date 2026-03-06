@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/perf"
 )
 
 // DispatchLifecycleEvent routes a normalized lifecycle event to the appropriate handler.
@@ -50,6 +51,8 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return handleLifecycleSubagentStart(ctx, ag, event)
 	case agent.SubagentEnd:
 		return handleLifecycleSubagentEnd(ctx, ag, event)
+	case agent.ModelUpdate:
+		return handleLifecycleModelUpdate(ctx, ag, event)
 	default:
 		return fmt.Errorf("unknown lifecycle event type: %d", event.Type)
 	}
@@ -77,20 +80,34 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	message := "\n\nPowered by Entire:\n  This conversation will be linked to your next commit."
 
 	// Check for concurrent sessions and append count if any
+	_, countSessionsSpan := perf.Start(ctx, "count_active_sessions")
 	strat := GetStrategy(ctx)
 	if count, err := strat.CountOtherActiveSessionsWithCheckpoints(ctx, event.SessionID); err == nil && count > 0 {
 		message += fmt.Sprintf("\n  %d other active conversation(s) in this workspace will also be included.\n  Use 'entire status' for more information.", count)
 	}
+	countSessionsSpan.End()
 
 	// Output informational message if the agent supports hook responses.
 	// Claude Code reads JSON from stdout; agents that don't implement
 	// HookResponseWriter silently skip (avoids raw JSON in their terminal).
+	_, hookResponseSpan := perf.Start(ctx, "write_hook_response")
 	if event.ResponseMessage != "" {
 		message = event.ResponseMessage
 	}
-	if writer, ok := ag.(agent.HookResponseWriter); ok {
+	if writer, ok := agent.AsHookResponseWriter(ag); ok {
 		if err := writer.WriteHookResponse(message); err != nil {
+			hookResponseSpan.RecordError(err)
+			hookResponseSpan.End()
 			return fmt.Errorf("failed to write hook response: %w", err)
+		}
+	}
+	hookResponseSpan.End()
+
+	// Store model hint if the agent provided model info on SessionStart
+	if event.Model != "" {
+		if err := strategy.StoreModelHint(ctx, event.SessionID, event.Model); err != nil {
+			logging.Warn(logCtx, "failed to store model hint on session start",
+				slog.String("error", err.Error()))
 		}
 	}
 
@@ -108,6 +125,47 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 			logging.Warn(logCtx, "failed to update session state on start",
 				slog.String("error", saveErr.Error()))
 		}
+	}
+
+	return nil
+}
+
+// handleLifecycleModelUpdate persists the model name for the current session.
+//
+// If the session state file already exists (e.g., Gemini's BeforeModel fires
+// after TurnStart), the model is written directly to state.ModelName — no hint
+// file needed. Otherwise falls back to StoreModelHint for cross-process
+// persistence (see its doc comment for the full rationale).
+func handleLifecycleModelUpdate(ctx context.Context, ag agent.Agent, event *agent.Event) error {
+	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
+	logging.Info(logCtx, "model-update",
+		slog.String("session_id", event.SessionID),
+		slog.String("model", event.Model),
+	)
+
+	if event.SessionID == "" || event.Model == "" {
+		return nil
+	}
+
+	// Prefer writing directly to session state when it exists
+	state, loadErr := strategy.LoadSessionState(ctx, event.SessionID)
+	if loadErr != nil {
+		logging.Debug(logCtx, "could not load session state for model update, using hint file",
+			slog.String("error", loadErr.Error()))
+	}
+	if loadErr == nil && state != nil {
+		state.ModelName = event.Model
+		if saveErr := strategy.SaveSessionState(ctx, state); saveErr != nil {
+			logging.Warn(logCtx, "failed to update session state with model",
+				slog.String("error", saveErr.Error()))
+		}
+		return nil
+	}
+
+	// State doesn't exist yet (or failed to load) — use hint file (see StoreModelHint doc)
+	if err := strategy.StoreModelHint(ctx, event.SessionID, event.Model); err != nil {
+		logging.Warn(logCtx, "failed to store model hint",
+			slog.String("error", err.Error()))
 	}
 
 	return nil
@@ -132,10 +190,23 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		return fmt.Errorf("invalid %s event: %w", event.Type, err)
 	}
 
+	// Fill model from hint file if the agent didn't provide it on this hook
+	if event.Model == "" {
+		if hint := strategy.LoadModelHint(ctx, sessionID); hint != "" {
+			event.Model = hint
+			logging.Debug(logCtx, "loaded model from hint file",
+				slog.String("model", hint))
+		}
+	}
+
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
+	_, captureSpan := perf.Start(ctx, "capture_pre_prompt_state")
 	if err := CapturePrePromptState(ctx, ag, sessionID, event.SessionRef); err != nil {
+		captureSpan.RecordError(err)
+		captureSpan.End()
 		return err
 	}
+	captureSpan.End()
 
 	// Append prompt to prompt.txt on filesystem so it's available for
 	// mid-turn commits (before SaveStep writes it to the shadow branch).
@@ -161,6 +232,7 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	}
 
 	// Ensure strategy setup and initialize session
+	_, initSpan := perf.Start(ctx, "init_session")
 	if err := strategy.EnsureSetup(ctx); err != nil {
 		logging.Warn(logCtx, "failed to ensure strategy setup",
 			slog.String("error", err.Error()))
@@ -171,6 +243,7 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		logging.Warn(logCtx, "failed to initialize session state",
 			slog.String("error", err.Error()))
 	}
+	initSpan.End()
 
 	return nil
 }
@@ -193,6 +266,15 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		sessionID = unknownSessionID
 	}
 
+	// Fill model from hint file if the agent didn't provide it on this hook
+	if event.Model == "" && sessionID != unknownSessionID {
+		if hint := strategy.LoadModelHint(ctx, sessionID); hint != "" {
+			event.Model = hint
+			logging.Debug(logCtx, "loaded model from hint file",
+				slog.String("model", hint))
+		}
+	}
+
 	transcriptRef := event.SessionRef
 	if transcriptRef == "" {
 		return errors.New("transcript file not specified")
@@ -203,7 +285,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// via `opencode export`, so the file doesn't exist until PrepareTranscript creates it.
 	// Claude Code's PrepareTranscript just flushes (always succeeds). Agents without
 	// TranscriptPreparer (Gemini, Droid) are unaffected.
-	if preparer, ok := ag.(agent.TranscriptPreparer); ok {
+	_, prepareSpan := perf.Start(ctx, "prepare_and_validate_transcript")
+	if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
 		if err := preparer.PrepareTranscript(ctx, transcriptRef); err != nil {
 			logging.Warn(logCtx, "failed to prepare transcript",
 				slog.String("error", err.Error()))
@@ -211,38 +294,52 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	if !fileExists(transcriptRef) {
+		prepareSpan.RecordError(fmt.Errorf("transcript file not found: %s", transcriptRef))
+		prepareSpan.End()
 		return fmt.Errorf("transcript file not found: %s", transcriptRef)
 	}
 
 	// Early check: bail out quickly if the repo has no commits yet.
 	if repo, err := strategy.OpenRepository(ctx); err == nil && strategy.IsEmptyRepository(repo) {
+		prepareSpan.RecordError(strategy.ErrEmptyRepository)
+		prepareSpan.End()
 		logging.Info(logCtx, "skipping checkpoint - will activate after first commit")
 		return NewSilentError(strategy.ErrEmptyRepository)
 	}
+	prepareSpan.End()
 
 	// Create session metadata directory
+	_, copySpan := perf.Start(ctx, "copy_transcript")
 	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
 	sessionDirAbs, err := paths.AbsPath(ctx, sessionDir)
 	if err != nil {
 		sessionDirAbs = sessionDir
 	}
 	if err := os.MkdirAll(sessionDirAbs, 0o750); err != nil {
+		copySpan.RecordError(err)
+		copySpan.End()
 		return fmt.Errorf("failed to create session directory: %w", err)
 	}
 
 	// Copy transcript to session directory
 	transcriptData, err := ag.ReadTranscript(transcriptRef)
 	if err != nil {
+		copySpan.RecordError(err)
+		copySpan.End()
 		return fmt.Errorf("failed to read transcript: %w", err)
 	}
 	logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
 	if err := os.WriteFile(logFile, transcriptData, 0o600); err != nil {
+		copySpan.RecordError(err)
+		copySpan.End()
 		return fmt.Errorf("failed to write transcript: %w", err)
 	}
 	logging.Debug(logCtx, "copied transcript",
 		slog.String("path", sessionDir+"/"+paths.TranscriptFileName))
+	copySpan.End()
 
 	// Load pre-prompt state (captured on TurnStart)
+	_, extractSpan := perf.Start(ctx, "extract_metadata")
 	preState, err := LoadPrePromptState(ctx, sessionID)
 	if err != nil {
 		logging.Warn(logCtx, "failed to load pre-prompt state",
@@ -259,9 +356,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Extract metadata via agent interface (modified files)
 	var modifiedFiles []string
 
-	if analyzer, ok := ag.(agent.TranscriptAnalyzer); ok {
+	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
 		// Extract modified files - prefer SubagentAwareExtractor if available to include subagent files
-		if subagentExtractor, subOk := ag.(agent.SubagentAwareExtractor); subOk {
+		if subagentExtractor, subOk := agent.AsSubagentAwareExtractor(ag); subOk {
 			if files, fileErr := subagentExtractor.ExtractAllModifiedFiles(transcriptData, transcriptOffset, subagentsDir); fileErr != nil {
 				logging.Warn(logCtx, "failed to extract modified files (with subagents)",
 					slog.String("error", fileErr.Error()))
@@ -278,8 +375,10 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			}
 		}
 	}
+	extractSpan.End()
 
 	// Generate commit message from last prompt (read from session state, set at TurnStart)
+	_, commitMsgSpan := perf.Start(ctx, "generate_commit_message")
 	lastPrompt := ""
 	if sessionState, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil && sessionState != nil {
 		lastPrompt = sessionState.LastPrompt
@@ -287,10 +386,14 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	commitMessage := generateCommitMessage(lastPrompt, ag.Type())
 	logging.Debug(logCtx, "using commit message",
 		slog.Int("message_length", len(commitMessage)))
+	commitMsgSpan.End()
 
 	// Get worktree root for path normalization
+	_, detectSpan := perf.Start(ctx, "detect_file_changes")
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
+		detectSpan.RecordError(err)
+		detectSpan.End()
 		return fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
@@ -307,8 +410,10 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		logging.Warn(logCtx, "failed to compute file changes",
 			slog.String("error", err.Error()))
 	}
+	detectSpan.End()
 
 	// Filter and normalize all paths
+	_, normalizeSpan := perf.Start(ctx, "filter_and_normalize_paths")
 	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
@@ -327,6 +432,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// and should not be re-added to FilesTouched by SaveStep. A file is "committed"
 	// if it exists in HEAD with the same content as the working tree.
 	relModifiedFiles = filterToUncommittedFiles(ctx, relModifiedFiles, repoRoot)
+	normalizeSpan.End()
 
 	// Check if there are any changes
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
@@ -508,7 +614,7 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	// Extract modified files from hook payload and/or subagent transcript
 	var modifiedFiles []string
 	modifiedFiles = append(modifiedFiles, event.ModifiedFiles...)
-	if analyzer, ok := ag.(agent.TranscriptAnalyzer); ok {
+	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
 		transcriptToScan := event.SessionRef
 		if subagentTranscriptPath != "" {
 			transcriptToScan = subagentTranscriptPath

@@ -131,9 +131,9 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 		t.Fatal("expected at least one log line")
 	}
 
-	// Check for hook invocation log
+	// Check for hook invocation log and perf span log
 	foundInvocation := false
-	foundCompletion := false
+	foundPerfSpan := false
 	for _, line := range lines {
 		var entry map[string]interface{}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
@@ -141,28 +141,22 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 			continue
 		}
 
-		if entry["hook"] == claudecode.HookNameSessionStart {
-			msg, msgOK := entry["msg"].(string)
-			if !msgOK {
-				continue
+		msg, msgOK := entry["msg"].(string)
+
+		// Hook invocation log: msg="hook invoked", hook="session-start"
+		if msgOK && entry["hook"] == claudecode.HookNameSessionStart && strings.Contains(msg, "invoked") {
+			foundInvocation = true
+			// Verify component is set
+			if entry["component"] != "hooks" {
+				t.Errorf("expected component='hooks', got %v", entry["component"])
 			}
-			if strings.Contains(msg, "invoked") {
-				foundInvocation = true
-				// Verify component is set
-				if entry["component"] != "hooks" {
-					t.Errorf("expected component='hooks', got %v", entry["component"])
-				}
-			}
-			if strings.Contains(msg, "completed") {
-				foundCompletion = true
-				// Verify duration_ms is present
-				if _, ok := entry["duration_ms"]; !ok {
-					t.Error("expected duration_ms in completion log")
-				}
-				// Verify success status
-				if entry["success"] != true {
-					t.Errorf("expected success=true, got %v", entry["success"])
-				}
+		}
+
+		// Perf span log: msg="perf", op="session-start", duration_ms present
+		if msgOK && msg == "perf" && entry["op"] == claudecode.HookNameSessionStart {
+			foundPerfSpan = true
+			if _, ok := entry["duration_ms"]; !ok {
+				t.Error("expected duration_ms in perf span log")
 			}
 		}
 	}
@@ -170,8 +164,8 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	if !foundInvocation {
 		t.Error("expected to find hook invocation log")
 	}
-	if !foundCompletion {
-		t.Error("expected to find hook completion log")
+	if !foundPerfSpan {
+		t.Error("expected to find perf span log")
 	}
 }
 

@@ -111,7 +111,7 @@ func TestAgentHookInstallation(t *testing.T) {
 			t.Fatalf("Get(claude-code) error = %v", err)
 		}
 
-		hookAgent, ok := ag.(agent.HookSupport)
+		hookAgent, ok := agent.AsHookSupport(ag)
 		if !ok {
 			t.Fatal("claude-code agent does not implement HookSupport")
 		}
@@ -160,7 +160,7 @@ func TestAgentHookInstallation(t *testing.T) {
 		defer func() { _ = os.Chdir(oldWd) }()
 
 		ag, _ := agent.Get("claude-code")
-		hookAgent := ag.(agent.HookSupport)
+		hookAgent, _ := agent.AsHookSupport(ag)
 
 		// First install
 		_, err := hookAgent.InstallHooks(context.Background(), false, false)
@@ -190,7 +190,7 @@ func TestAgentHookInstallation(t *testing.T) {
 		defer func() { _ = os.Chdir(oldWd) }()
 
 		ag, _ := agent.Get("claude-code")
-		hookAgent := ag.(agent.HookSupport)
+		hookAgent, _ := agent.AsHookSupport(ag)
 
 		_, err := hookAgent.InstallHooks(context.Background(), true, false) // localDev = true
 		if err != nil {
@@ -467,7 +467,7 @@ func TestGeminiCLIHookInstallation(t *testing.T) {
 			t.Fatalf("Get(gemini) error = %v", err)
 		}
 
-		hookAgent, ok := ag.(agent.HookSupport)
+		hookAgent, ok := agent.AsHookSupport(ag)
 		if !ok {
 			t.Fatal("gemini agent does not implement HookSupport")
 		}
@@ -554,7 +554,7 @@ func TestGeminiCLIHookInstallation(t *testing.T) {
 		defer func() { _ = os.Chdir(oldWd) }()
 
 		ag, _ := agent.Get("gemini")
-		hookAgent := ag.(agent.HookSupport)
+		hookAgent, _ := agent.AsHookSupport(ag)
 
 		// First install
 		_, err := hookAgent.InstallHooks(context.Background(), false, false)
@@ -584,7 +584,7 @@ func TestGeminiCLIHookInstallation(t *testing.T) {
 		defer func() { _ = os.Chdir(oldWd) }()
 
 		ag, _ := agent.Get("gemini")
-		hookAgent := ag.(agent.HookSupport)
+		hookAgent, _ := agent.AsHookSupport(ag)
 
 		_, err := hookAgent.InstallHooks(context.Background(), true, false) // localDev = true
 		if err != nil {
@@ -619,7 +619,7 @@ func TestGeminiCLIHookInstallation(t *testing.T) {
 		defer func() { _ = os.Chdir(oldWd) }()
 
 		ag, _ := agent.Get("gemini")
-		hookAgent := ag.(agent.HookSupport)
+		hookAgent, _ := agent.AsHookSupport(ag)
 
 		_, err := hookAgent.InstallHooks(context.Background(), false, false) // localDev = false
 		if err != nil {
@@ -651,7 +651,7 @@ func TestGeminiCLIHookInstallation(t *testing.T) {
 		defer func() { _ = os.Chdir(oldWd) }()
 
 		ag, _ := agent.Get("gemini")
-		hookAgent := ag.(agent.HookSupport)
+		hookAgent, _ := agent.AsHookSupport(ag)
 
 		// First install
 		_, err := hookAgent.InstallHooks(context.Background(), false, false)
@@ -872,7 +872,7 @@ func TestFactoryAIDroidHookInstallation(t *testing.T) {
 			t.Fatalf("Get(factoryai-droid) error = %v", err)
 		}
 
-		hookAgent, ok := ag.(agent.HookSupport)
+		hookAgent, ok := agent.AsHookSupport(ag)
 		if !ok {
 			t.Fatal("factoryai-droid agent does not implement HookSupport")
 		}
@@ -948,7 +948,7 @@ func TestFactoryAIDroidHookInstallation(t *testing.T) {
 		defer func() { _ = os.Chdir(oldWd) }()
 
 		ag, _ := agent.Get("factoryai-droid")
-		hookAgent := ag.(agent.HookSupport)
+		hookAgent, _ := agent.AsHookSupport(ag)
 
 		ctx := context.Background()
 		// First install
@@ -979,7 +979,7 @@ func TestFactoryAIDroidHookInstallation(t *testing.T) {
 		defer func() { _ = os.Chdir(oldWd) }()
 
 		ag, _ := agent.Get("factoryai-droid")
-		hookAgent := ag.(agent.HookSupport)
+		hookAgent, _ := agent.AsHookSupport(ag)
 
 		ctx := context.Background()
 		_, err := hookAgent.InstallHooks(ctx, true, false) // localDev = true
@@ -1015,7 +1015,7 @@ func TestFactoryAIDroidHookInstallation(t *testing.T) {
 		defer func() { _ = os.Chdir(oldWd) }()
 
 		ag, _ := agent.Get("factoryai-droid")
-		hookAgent := ag.(agent.HookSupport)
+		hookAgent, _ := agent.AsHookSupport(ag)
 
 		ctx := context.Background()
 		_, err := hookAgent.InstallHooks(ctx, false, false) // localDev = false
@@ -1048,7 +1048,7 @@ func TestFactoryAIDroidHookInstallation(t *testing.T) {
 		defer func() { _ = os.Chdir(oldWd) }()
 
 		ag, _ := agent.Get("factoryai-droid")
-		hookAgent := ag.(agent.HookSupport)
+		hookAgent, _ := agent.AsHookSupport(ag)
 
 		ctx := context.Background()
 		// First install
@@ -1271,7 +1271,7 @@ func TestOpenCodeHookInstallation(t *testing.T) {
 			t.Fatalf("Get(opencode) error = %v", err)
 		}
 
-		hookAgent, ok := ag.(agent.HookSupport)
+		hookAgent, ok := agent.AsHookSupport(ag)
 		if !ok {
 			t.Fatal("opencode agent does not implement HookSupport")
 		}
@@ -1310,7 +1310,7 @@ func TestOpenCodeHookInstallation(t *testing.T) {
 		defer func() { _ = os.Chdir(oldWd) }()
 
 		ag, _ := agent.Get("opencode")
-		hookAgent := ag.(agent.HookSupport)
+		hookAgent, _ := agent.AsHookSupport(ag)
 
 		// First install
 		_, err := hookAgent.InstallHooks(context.Background(), false, false)

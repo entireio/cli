@@ -878,7 +878,17 @@ func TestFilesChangedInCommit(t *testing.T) {
 	commit, err := repo.CommitObject(commitHash)
 	require.NoError(t, err)
 
-	changed := filesChangedInCommit(context.Background(), dir, commit)
+	headTree, err := commit.Tree()
+	require.NoError(t, err)
+	var parentTree *object.Tree
+	if commit.NumParents() > 0 {
+		parent, pErr := commit.Parent(0)
+		require.NoError(t, pErr)
+		parentTree, err = parent.Tree()
+		require.NoError(t, err)
+	}
+
+	changed := filesChangedInCommit(context.Background(), dir, commit, headTree, parentTree)
 	assert.Contains(t, changed, "file1.txt")
 	assert.Contains(t, changed, "file2.txt")
 	// test.txt was in the initial commit, not this one
@@ -915,9 +925,55 @@ func TestFilesChangedInCommit_InitialCommit(t *testing.T) {
 	commit, err := repo.CommitObject(commitHash)
 	require.NoError(t, err)
 
-	changed := filesChangedInCommit(context.Background(), dir, commit)
+	headTree, err := commit.Tree()
+	require.NoError(t, err)
+
+	changed := filesChangedInCommit(context.Background(), dir, commit, headTree, nil)
 	assert.Contains(t, changed, "init.txt")
 	assert.Len(t, changed, 1)
+}
+
+// TestFilesChangedInCommit_FallbackOnBadRepoDir verifies that when git diff-tree fails
+// (e.g. invalid repoDir), filesChangedInCommit falls back to go-git tree walk and still
+// returns correct results instead of an empty map.
+func TestFilesChangedInCommit_FallbackOnBadRepoDir(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "new.txt"), []byte("new"), 0o644))
+	_, err = wt.Add("new.txt")
+	require.NoError(t, err)
+
+	commitHash, err := wt.Commit("add new file", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+
+	headTree, err := commit.Tree()
+	require.NoError(t, err)
+	var parentTree *object.Tree
+	if commit.NumParents() > 0 {
+		parent, pErr := commit.Parent(0)
+		require.NoError(t, pErr)
+		parentTree, err = parent.Tree()
+		require.NoError(t, err)
+	}
+
+	// Pass a bogus repoDir to force git diff-tree to fail, triggering the fallback
+	changed := filesChangedInCommit(context.Background(), "/nonexistent/repo", commit, headTree, parentTree)
+
+	// Fallback should still detect the changed file via go-git tree walk
+	assert.Contains(t, changed, "new.txt")
+	assert.NotEmpty(t, changed, "fallback should return files, not empty map")
 }
 
 // TestPostCommit_ActiveSession_CarryForward_PartialCommit verifies that when an

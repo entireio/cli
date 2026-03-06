@@ -123,6 +123,9 @@ func ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
 
+	// Warn (once per process) if metadata branches are disconnected
+	WarnIfMetadataDisconnected()
+
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	ref, err := repo.Reference(refName, true)
 	if err != nil {
@@ -281,15 +284,46 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 	return ctxAgentType
 }
 
-// EnsureMetadataBranch creates the local entire/checkpoints/v1 branch if it doesn't exist.
-// If the remote-tracking branch (origin/entire/checkpoints/v1) exists, creates the local
-// branch from it to preserve existing checkpoint data. Otherwise creates an empty orphan.
+// EnsureMetadataBranch creates or updates the local entire/checkpoints/v1 branch.
+// If the remote-tracking branch (origin/entire/checkpoints/v1) exists and the local
+// branch is missing or empty, creates/updates the local branch from it.
+// Otherwise creates an empty orphan.
 func EnsureMetadataBranch(repo *git.Repository) error {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 
+	// Check if remote-tracking branch exists (e.g., after clone/fetch)
+	remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+	remoteRef, remoteErr := repo.Reference(remoteRefName, true)
+	if remoteErr != nil && !errors.Is(remoteErr, plumbing.ErrReferenceNotFound) {
+		return fmt.Errorf("failed to check remote metadata branch: %w", remoteErr)
+	}
+
 	// Check if local branch already exists
-	_, err := repo.Reference(refName, true)
+	localRef, err := repo.Reference(refName, true)
 	if err == nil {
+		if remoteErr == nil && localRef.Hash() != remoteRef.Hash() {
+			// Local and remote exist but differ — determine relationship
+			isEmpty, checkErr := isEmptyMetadataBranch(repo, localRef)
+			if checkErr != nil {
+				return fmt.Errorf("failed to check metadata branch contents: %w", checkErr)
+			}
+			if isEmpty {
+				// Empty orphan — just point to remote
+				ref := plumbing.NewHashReference(refName, remoteRef.Hash())
+				if setErr := repo.Storer.SetReference(ref); setErr != nil {
+					return fmt.Errorf("failed to update metadata branch from remote: %w", setErr)
+				}
+				fmt.Fprintf(os.Stderr, "[entire] Updated local branch '%s' from origin\n", paths.MetadataBranchName)
+			} else {
+				// Local has real data and differs from remote — if disconnected
+				// (no common ancestor), reconciliation happens at pre-push time
+				// or via 'entire doctor'. Read paths warn but do not auto-fix.
+				logging.Debug(context.Background(), "metadata branch differs from remote, reconciliation deferred to read/write time",
+					"local_hash", localRef.Hash().String()[:7],
+					"remote_hash", remoteRef.Hash().String()[:7],
+				)
+			}
+		}
 		return nil
 	}
 	if !errors.Is(err, plumbing.ErrReferenceNotFound) {
@@ -297,11 +331,6 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 	}
 
 	// Local branch doesn't exist — create from remote if available
-	remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
-	remoteRef, remoteErr := repo.Reference(remoteRefName, true)
-	if remoteErr != nil && !errors.Is(remoteErr, plumbing.ErrReferenceNotFound) {
-		return fmt.Errorf("failed to check remote metadata branch: %w", remoteErr)
-	}
 	if remoteErr == nil {
 		ref := plumbing.NewHashReference(refName, remoteRef.Hash())
 		if err := repo.Storer.SetReference(ref); err != nil {
@@ -356,6 +385,21 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 
 	fmt.Fprintf(os.Stderr, "✓ Created orphan branch '%s' for session metadata\n", paths.MetadataBranchName)
 	return nil
+}
+
+// isEmptyMetadataBranch returns true if the branch ref points to a commit with an empty tree.
+// Only checks the tip commit — if a data commit sits on top of an empty orphan, this returns
+// false, which is correct: the bug this detects creates a single empty orphan as the tip.
+func isEmptyMetadataBranch(repo *git.Repository, ref *plumbing.Reference) (bool, error) {
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		return false, fmt.Errorf("failed to get commit: %w", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return false, fmt.Errorf("failed to get tree: %w", err)
+	}
+	return len(tree.Entries) == 0, nil
 }
 
 // readCheckpointMetadata reads metadata.json from a checkpoint path on entire/checkpoints/v1.
@@ -1442,7 +1486,7 @@ func prepareTranscriptIfNeeded(ctx context.Context, ag agent.Agent, transcriptPa
 	if ag == nil || transcriptPath == "" {
 		return
 	}
-	if preparer, ok := ag.(agent.TranscriptPreparer); ok {
+	if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
 		// Best-effort: callers handle missing files gracefully.
 		// Transcript may not be available yet (e.g., agent not installed).
 		_ = preparer.PrepareTranscript(ctx, transcriptPath) //nolint:errcheck // Best-effort in hook path

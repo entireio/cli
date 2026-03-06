@@ -352,14 +352,12 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
 
-	stateFile := s.stateFilePath(sessionID)
-
-	if err := os.Remove(stateFile); err != nil {
-		if os.IsNotExist(err) {
-			return nil // Already gone, not an error
-		}
-		return fmt.Errorf("failed to remove session state file: %w", err)
+	// Remove all files for this session (state .json, .model hint, any future hint files).
+	matches, _ := filepath.Glob(filepath.Join(s.stateDir, sessionID+".*")) //nolint:errcheck // pattern is always valid
+	for _, f := range matches {
+		_ = os.Remove(f)
 	}
+
 	return nil
 }
 

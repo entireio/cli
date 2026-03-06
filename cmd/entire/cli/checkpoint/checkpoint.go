@@ -259,6 +259,9 @@ type WriteCommittedOptions struct {
 	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
 	Agent types.AgentType
 
+	// Model is the LLM model used during the session (e.g., "claude-sonnet-4-20250514")
+	Model string
+
 	// TurnID correlates checkpoints from the same agent turn.
 	TurnID string
 
@@ -367,6 +370,9 @@ type CommittedMetadata struct {
 
 	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
 	Agent types.AgentType `json:"agent,omitempty"`
+
+	// Model is the LLM model used during the session (e.g., "claude-sonnet-4-20250514")
+	Model string `json:"model,omitempty"`
 
 	// TurnID correlates checkpoints from the same agent turn.
 	// When a turn's work spans multiple commits, each gets its own checkpoint

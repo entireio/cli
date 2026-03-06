@@ -63,6 +63,10 @@ type EntireSettings struct {
 	// Defaults to "prompt" (preserves existing user behavior).
 	CommitLinking string `json:"commit_linking,omitempty"`
 
+	// ExternalAgents enables discovery and registration of external agent
+	// plugins (entire-agent-* binaries on $PATH). Defaults to false.
+	ExternalAgents bool `json:"external_agents,omitempty"`
+
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
@@ -246,6 +250,15 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		}
 	}
 
+	// Override external_agents if present
+	if externalAgentsRaw, ok := raw["external_agents"]; ok {
+		var ea bool
+		if err := json.Unmarshal(externalAgentsRaw, &ea); err != nil {
+			return fmt.Errorf("parsing external_agents field: %w", err)
+		}
+		settings.ExternalAgents = ea
+	}
+
 	return nil
 }
 
@@ -315,6 +328,16 @@ func (s *EntireSettings) IsPushSessionsDisabled() bool {
 		return !boolVal // disabled = !push_sessions
 	}
 	return false
+}
+
+// IsExternalAgentsEnabled checks if external agent discovery is enabled in settings.
+// Returns false by default if settings cannot be loaded or the key is missing.
+func IsExternalAgentsEnabled(ctx context.Context) bool {
+	s, err := Load(ctx)
+	if err != nil {
+		return false
+	}
+	return s.ExternalAgents
 }
 
 // Save saves the settings to .entire/settings.json.

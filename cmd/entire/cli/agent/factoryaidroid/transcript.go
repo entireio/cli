@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -304,6 +305,9 @@ func ExtractModelFromTranscript(transcriptPath string) string {
 
 	var settings droidSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
+		slog.Warn("corrupt settings file, cannot extract model",
+			slog.String("path", settingsPath),
+			slog.Any("error", err))
 		return ""
 	}
 

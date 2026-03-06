@@ -147,7 +147,17 @@ func fetchAndMergeSessionsCommon(ctx context.Context, remote, branchName string)
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
 
-	// Get local branch
+	// Reconcile disconnected metadata branches before merging trees.
+	// The fetch above updated the remote-tracking ref, so reconciliation
+	// can compare fresh local vs remote. If disconnected (empty-orphan bug),
+	// this cherry-picks local commits onto remote tip, updating the local ref.
+	// If reconciliation fails, abort — proceeding to tree merge on disconnected
+	// branches would silently combine unrelated histories.
+	if reconcileErr := ReconcileDisconnectedMetadataBranch(ctx, repo, os.Stderr); reconcileErr != nil {
+		return fmt.Errorf("metadata reconciliation failed: %w", reconcileErr)
+	}
+
+	// Get local branch (re-read after potential reconciliation update)
 	localRef, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
 	if err != nil {
 		return fmt.Errorf("failed to get local ref: %w", err)
