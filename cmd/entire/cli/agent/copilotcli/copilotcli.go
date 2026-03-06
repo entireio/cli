@@ -93,7 +93,15 @@ func (c *CopilotCLIAgent) ReadSession(input *agent.HookInput) (*agent.AgentSessi
 		return nil, fmt.Errorf("failed to read transcript: %w", err)
 	}
 
-	events, _ := parseEventsFromBytes(data)
+	// Parse events for ModifiedFiles; non-fatal if parsing fails since NativeData
+	// is the authoritative session content. ReadSession has no context.Context so
+	// we cannot log here — scanner errors are surfaced by other code paths that
+	// do have context (e.g. ExtractModifiedFilesFromOffset, ExtractPrompts).
+	events, _ := parseEventsFromBytes(data) //nolint:errcheck // best-effort extraction
+	var modifiedFiles []string
+	if len(events) > 0 {
+		modifiedFiles = extractModifiedFilesFromEvents(events)
+	}
 
 	return &agent.AgentSession{
 		SessionID:     input.SessionID,
@@ -101,7 +109,7 @@ func (c *CopilotCLIAgent) ReadSession(input *agent.HookInput) (*agent.AgentSessi
 		SessionRef:    input.SessionRef,
 		StartTime:     time.Now(),
 		NativeData:    data,
-		ModifiedFiles: extractModifiedFilesFromEvents(events),
+		ModifiedFiles: modifiedFiles,
 	}, nil
 }
 
