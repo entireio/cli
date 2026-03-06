@@ -48,7 +48,7 @@ func (c *CopilotCLIAgent) ParseHookEvent(ctx context.Context, hookName string, s
 	case HookNameSessionStart:
 		return c.parseSessionStart(stdin)
 	case HookNameAgentStop:
-		return c.parseAgentStop(stdin)
+		return c.parseAgentStop(ctx, stdin)
 	case HookNameSessionEnd:
 		return c.parseSessionEnd(stdin)
 	case HookNameSubagentStop:
@@ -92,7 +92,7 @@ func (c *CopilotCLIAgent) parseSessionStart(stdin io.Reader) (*agent.Event, erro
 	}, nil
 }
 
-func (c *CopilotCLIAgent) parseAgentStop(stdin io.Reader) (*agent.Event, error) {
+func (c *CopilotCLIAgent) parseAgentStop(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[agentStopRaw](stdin)
 	if err != nil {
 		return nil, err
@@ -101,7 +101,7 @@ func (c *CopilotCLIAgent) parseAgentStop(stdin io.Reader) (*agent.Event, error) 
 	// Extract model from transcript (Copilot CLI hooks don't include model)
 	var model string
 	if raw.TranscriptPath != "" {
-		model = ExtractModelFromTranscript(raw.TranscriptPath)
+		model = ExtractModelFromTranscript(ctx, raw.TranscriptPath)
 	}
 
 	return &agent.Event{
@@ -145,7 +145,7 @@ func (c *CopilotCLIAgent) resolveTranscriptRef(ctx context.Context, sessionID st
 	// state is always in ~/.copilot/session-state/ (not repo-specific).
 	sessionDir, err := c.GetSessionDir("")
 	if err != nil {
-		logging.Warn(ctx, "copilot-cli: failed to resolve transcript path", "err", err)
+		logging.Warn(ctx, "copilot-cli: failed to resolve transcript path", "sessionID", sessionID, "err", err)
 		return ""
 	}
 	return c.ResolveSessionFile(sessionDir, sessionID)

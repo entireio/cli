@@ -93,12 +93,15 @@ func (c *CopilotCLIAgent) ReadSession(input *agent.HookInput) (*agent.AgentSessi
 		return nil, fmt.Errorf("failed to read transcript: %w", err)
 	}
 
+	events, _ := parseEventsFromBytes(data)
+
 	return &agent.AgentSession{
-		SessionID:  input.SessionID,
-		AgentName:  c.Name(),
-		SessionRef: input.SessionRef,
-		StartTime:  time.Now(),
-		NativeData: data,
+		SessionID:     input.SessionID,
+		AgentName:     c.Name(),
+		SessionRef:    input.SessionRef,
+		StartTime:     time.Now(),
+		NativeData:    data,
+		ModifiedFiles: extractModifiedFilesFromEvents(events),
 	}, nil
 }
 

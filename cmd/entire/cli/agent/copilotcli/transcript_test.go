@@ -1,6 +1,7 @@
 package copilotcli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -380,7 +381,7 @@ func TestExtractModelFromTranscript_ModelChangeEvent(t *testing.T) {
 	}
 	path := writeTestJSONL(t, lines)
 
-	model := ExtractModelFromTranscript(path)
+	model := ExtractModelFromTranscript(context.Background(), path)
 	if model != testModelSonnet {
 		t.Errorf("ExtractModelFromTranscript() = %q, want %q", model, testModelSonnet)
 	}
@@ -397,7 +398,7 @@ func TestExtractModelFromTranscript_FallbackToToolExecComplete(t *testing.T) {
 	}
 	path := writeTestJSONL(t, lines)
 
-	model := ExtractModelFromTranscript(path)
+	model := ExtractModelFromTranscript(context.Background(), path)
 	if model != testModelSonnet {
 		t.Errorf("ExtractModelFromTranscript() = %q, want %q (fallback to tool.execution_complete)", model, testModelSonnet)
 	}
@@ -414,7 +415,7 @@ func TestExtractModelFromTranscript_ModelChangeTakesPrecedence(t *testing.T) {
 	}
 	path := writeTestJSONL(t, lines)
 
-	model := ExtractModelFromTranscript(path)
+	model := ExtractModelFromTranscript(context.Background(), path)
 	if model != "gpt-4.1" {
 		t.Errorf("ExtractModelFromTranscript() = %q, want %q (model_change takes precedence)", model, "gpt-4.1")
 	}
@@ -431,7 +432,7 @@ func TestExtractModelFromTranscript_MultipleModelChanges(t *testing.T) {
 	}
 	path := writeTestJSONL(t, lines)
 
-	model := ExtractModelFromTranscript(path)
+	model := ExtractModelFromTranscript(context.Background(), path)
 	if model != testModelSonnet {
 		t.Errorf("ExtractModelFromTranscript() = %q, want %q (last model change)", model, testModelSonnet)
 	}

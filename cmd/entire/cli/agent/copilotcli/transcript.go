@@ -3,12 +3,14 @@ package copilotcli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // Compile-time interface check.
@@ -228,22 +230,32 @@ func extractModelFromEvents(events []copilotEvent) string {
 // declarations), but falls back to the model field on tool.execution_complete
 // events for Copilot CLI versions that do not emit session.model_change.
 // Returns the last observed model, or empty string if unavailable.
-func ExtractModelFromTranscript(transcriptPath string) string {
+func ExtractModelFromTranscript(ctx context.Context, transcriptPath string) string {
 	if transcriptPath == "" {
 		return ""
 	}
 
 	data, err := os.ReadFile(transcriptPath) //nolint:gosec // Path derived from agent hook input
 	if err != nil {
+		logging.Debug(ctx, "copilot-cli: failed to read transcript for model extraction",
+			"transcriptPath", transcriptPath, "err", err)
 		return ""
 	}
 
 	events, err := parseEventsFromBytes(data)
 	if err != nil {
+		logging.Debug(ctx, "copilot-cli: failed to parse transcript for model extraction",
+			"transcriptPath", transcriptPath, "err", err)
 		return ""
 	}
 
-	return extractModelFromEvents(events)
+	model := extractModelFromEvents(events)
+	if model == "" {
+		logging.Debug(ctx, "copilot-cli: no model found in transcript",
+			"transcriptPath", transcriptPath, "eventCount", len(events))
+	}
+
+	return model
 }
 
 // GetTranscriptPosition returns the current line count of a Copilot CLI transcript.
