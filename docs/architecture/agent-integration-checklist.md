@@ -45,7 +45,7 @@ See Guide: [Transcript Format Guide](agent-guide.md#transcript-format-guide), [T
 
 - [ ] **Full transcript on every turn**: At turn-end, capture the complete session transcript, not just events since the last checkpoint
 - [ ] **Resumed session handling**: When a user resumes an existing session, the transcript must include all historical messages, not just new ones since the plugin/hook loaded
-- [ ] **Use agent's canonical export**: Prefer the agent's native export command (e.g., reading Claude's JSONL file, Gemini's JSON, Cursor's JSONL, OpenCode's `opencode export` JSON) over manually reconstructing from events
+- [ ] **Use agent's canonical export**: Prefer the agent's native export command (e.g., reading Claude's JSONL file, Gemini's JSON, Cursor's JSONL, Copilot CLI's JSONL, OpenCode's `opencode export` JSON) over manually reconstructing from events
 - [ ] **No custom formats**: Store the agent's native format directly in `NativeData` - do not convert between formats (e.g., JSON to JSONL) or create intermediate representations
 - [ ] **Graceful degradation**: If the canonical source is unavailable (e.g., agent shutting down), fall back to best-effort capture with clear documentation of limitations
 
@@ -54,7 +54,7 @@ See Guide: [Transcript Format Guide](agent-guide.md#transcript-format-guide), [T
 See Guide: [Step 3 - Core Agent Interface](agent-guide.md#step-3-implement-core-agent-interface-youragentgo)
 
 - [ ] **`WriteSession` implementation**: Agent must implement `WriteSession(AgentSession)` to restore sessions
-- [ ] **File-based agents** (Claude, Gemini, Cursor): Write `NativeData` to `SessionRef` path
+- [ ] **File-based agents** (Claude, Gemini, Cursor, Copilot CLI): Write `NativeData` to `SessionRef` path
 - [ ] **Database-backed agents** (OpenCode): Write `NativeData` to file, then import into native storage (the native format should be what the agent's import command expects)
 - [ ] **Single format per agent**: Store only the agent's native format in `NativeData` - no separate fields for different representations of the same data
 

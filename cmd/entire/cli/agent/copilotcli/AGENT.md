@@ -118,7 +118,7 @@ Each line has: `type`, `data`, `id` (UUID), `timestamp` (ISO 8601), `parentId`
 
 The `assistant.message` entries have a `toolRequests` array with tool call IDs. After each tool executes, a `tool.execution_complete` event is emitted with `toolTelemetry.properties.filePaths`, where `filePaths` is a string containing a JSON array of file paths modified by that tool call. The `TranscriptAnalyzer` implementation parses this `filePaths` property to extract modified files for checkpoint metadata.
 
-**Note:** Token usage is NOT available in the Copilot CLI JSONL format. The transcript events do not include input/output token counts or cost information, so `TokenCalculator` is not implemented.
+**Token usage:** Extracted via `TokenCalculator` from `session.shutdown` events, which contain aggregate `modelMetrics` with per-model `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, and `requests.count`. Mid-session checkpoints use per-message `outputTokens` fallback from `assistant.message` events. **Timing constraint:** Copilot CLI writes `session.shutdown` AFTER all hooks (including `sessionEnd`) return — hooks are synchronous/blocking. This means in-hook token extraction can only use the per-message fallback. The authoritative aggregate is captured at condensation time (commit/push), when the framework re-reads the full transcript and `session.shutdown` is present. Condensation also backfills `state.TokenUsage` so the session JSON reflects the authoritative totals after the first commit.
 
 ### Transcript Position
 
