@@ -52,6 +52,14 @@ func (f *FactoryAIDroidAgent) Description() string {
 // IsPreview returns true as Factory AI Droid integration is in preview.
 func (f *FactoryAIDroidAgent) IsPreview() bool { return true }
 
+// NonInteractiveEnvVar returns the env var that signals a non-interactive subprocess.
+// Factory AI Droid (and other CI environments) set GIT_TERMINAL_PROMPT=0 to disable
+// git's own terminal prompts. Since hooks run as git subprocesses, this signals
+// that interactive prompting should be skipped.
+func (f *FactoryAIDroidAgent) NonInteractiveEnvVar() (string, string) {
+	return "GIT_TERMINAL_PROMPT", "0"
+}
+
 // ProtectedDirs returns directories that Factory AI Droid uses for config/state.
 func (f *FactoryAIDroidAgent) ProtectedDirs() []string { return []string{".factory"} }
 

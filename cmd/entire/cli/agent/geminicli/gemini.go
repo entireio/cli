@@ -50,6 +50,13 @@ func (g *GeminiCLIAgent) Description() string {
 
 func (g *GeminiCLIAgent) IsPreview() bool { return true }
 
+// NonInteractiveEnvVar returns the env var that signals a Gemini CLI subprocess.
+// Gemini sets GEMINI_CLI=1 when running shell commands. The subprocess may
+// inherit the user's TTY but can't respond to interactive prompts.
+func (g *GeminiCLIAgent) NonInteractiveEnvVar() (string, string) {
+	return "GEMINI_CLI", ""
+}
+
 // DetectPresence checks if Gemini CLI is configured in the repository.
 func (g *GeminiCLIAgent) DetectPresence(ctx context.Context) (bool, error) {
 	// Get worktree root to check for .gemini directory

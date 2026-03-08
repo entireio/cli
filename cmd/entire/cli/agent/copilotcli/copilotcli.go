@@ -46,6 +46,13 @@ func (c *CopilotCLIAgent) Description() string {
 // IsPreview returns true because this is a new integration.
 func (c *CopilotCLIAgent) IsPreview() bool { return true }
 
+// NonInteractiveEnvVar returns the env var that signals a Copilot CLI subprocess.
+// Copilot sets COPILOT_CLI=1 when running hook subprocesses (v0.0.421+).
+// The subprocess may inherit the user's TTY but can't respond to prompts.
+func (c *CopilotCLIAgent) NonInteractiveEnvVar() (string, string) {
+	return "COPILOT_CLI", ""
+}
+
 // DetectPresence checks if Entire hooks are installed in the Copilot CLI config.
 // Delegates to AreHooksInstalled which checks .github/hooks/entire.json for Entire hook entries.
 func (c *CopilotCLIAgent) DetectPresence(ctx context.Context) (bool, error) {

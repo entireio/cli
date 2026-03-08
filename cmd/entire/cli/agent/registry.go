@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"slices"
 	"sync"
 
@@ -168,6 +169,33 @@ func AllProtectedDirs() []string {
 	}
 	slices.Sort(dirs)
 	return dirs
+}
+
+// IsNonInteractiveEnv checks whether any registered agent signals that the
+// current process is a non-interactive subprocess (e.g., a git hook run by
+// an agent that inherits the user's TTY but can't respond to prompts).
+func IsNonInteractiveEnv() bool {
+	registryMu.RLock()
+	factories := make([]Factory, 0, len(registry))
+	for _, f := range registry {
+		factories = append(factories, f)
+	}
+	registryMu.RUnlock()
+
+	for _, factory := range factories {
+		ag := factory()
+		if detector, ok := ag.(NonInteractiveDetector); ok {
+			envName, envValue := detector.NonInteractiveEnvVar()
+			actual := os.Getenv(envName)
+			if envValue == "" && actual != "" {
+				return true
+			}
+			if envValue != "" && actual == envValue {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Default returns the default agent.

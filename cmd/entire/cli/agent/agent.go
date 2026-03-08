@@ -196,6 +196,20 @@ type TestOnly interface {
 	IsTestOnly() bool
 }
 
+// NonInteractiveDetector is optionally implemented by agents whose hook
+// subprocesses inherit the user's TTY but can't respond to interactive
+// prompts. Returns the env var name and value that indicate a non-interactive
+// subprocess (e.g., "GEMINI_CLI", "" means any non-empty value).
+type NonInteractiveDetector interface {
+	Agent
+
+	// NonInteractiveEnvVar returns the environment variable name that signals
+	// a non-interactive subprocess. If value is empty, any non-empty env var
+	// value triggers non-interactive mode. If value is non-empty, only that
+	// exact value triggers it.
+	NonInteractiveEnvVar() (name string, value string)
+}
+
 // SubagentAwareExtractor provides methods for extracting files and tokens including subagents.
 // Agents that support spawning subagents (like Claude Code's Task tool) should implement this
 // to ensure subagent contributions are included in checkpoints.

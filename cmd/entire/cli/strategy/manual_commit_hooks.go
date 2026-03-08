@@ -47,26 +47,10 @@ func hasTTY() bool {
 		return v == "1"
 	}
 
-	// Gemini CLI sets GEMINI_CLI=1 when running shell commands.
-	// Gemini subprocesses may have access to the user's TTY, but they can't
-	// actually respond to interactive prompts. Treat them as non-TTY.
-	// See: https://geminicli.com/docs/tools/shell/
-	if os.Getenv("GEMINI_CLI") != "" {
-		return false
-	}
-
-	// Copilot CLI sets COPILOT_CLI=1 when running hook subprocesses (v0.0.421+).
-	// Like Gemini, the subprocess may inherit the user's TTY but can't respond
-	// to interactive prompts.
-	if os.Getenv("COPILOT_CLI") != "" {
-		return false
-	}
-
-	// GIT_TERMINAL_PROMPT=0 disables git's own terminal prompts.
-	// Factory AI Droid (and other non-interactive environments like CI) set this.
-	// Since we run as a git hook, respect it — if the environment doesn't want
-	// git prompting, our hook shouldn't prompt either.
-	if os.Getenv("GIT_TERMINAL_PROMPT") == "0" {
+	// Check if any registered agent signals a non-interactive subprocess.
+	// Agents whose hook subprocesses inherit the user's TTY but can't respond
+	// to prompts implement NonInteractiveDetector with their env var.
+	if agent.IsNonInteractiveEnv() {
 		return false
 	}
 

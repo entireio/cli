@@ -249,6 +249,84 @@ func TestAllProtectedDirs(t *testing.T) {
 	})
 }
 
+func TestIsNonInteractiveEnv(t *testing.T) {
+	// Save original registry state
+	originalRegistry := make(map[types.AgentName]Factory)
+	registryMu.Lock()
+	for k, v := range registry {
+		originalRegistry[k] = v
+	}
+	registry = make(map[types.AgentName]Factory)
+	registryMu.Unlock()
+
+	defer func() {
+		registryMu.Lock()
+		registry = originalRegistry
+		registryMu.Unlock()
+	}()
+
+	t.Run("returns false with no agents", func(t *testing.T) {
+		if IsNonInteractiveEnv() {
+			t.Error("expected false with empty registry")
+		}
+	})
+
+	t.Run("returns false when env var not set", func(t *testing.T) {
+		registryMu.Lock()
+		registry = make(map[types.AgentName]Factory)
+		registryMu.Unlock()
+
+		Register(types.AgentName("ni-agent"), func() Agent {
+			return &nonInteractiveAgent{envName: "TEST_NI_AGENT_ENV_XYZ", envValue: ""}
+		})
+
+		if IsNonInteractiveEnv() {
+			t.Error("expected false when env var is not set")
+		}
+	})
+
+	t.Run("returns true when any-value env var is set", func(t *testing.T) {
+		t.Setenv("TEST_NI_AGENT_ENV_XYZ", "1")
+
+		if !IsNonInteractiveEnv() {
+			t.Error("expected true when env var is set")
+		}
+	})
+
+	t.Run("returns true when exact-value env var matches", func(t *testing.T) {
+		registryMu.Lock()
+		registry = make(map[types.AgentName]Factory)
+		registryMu.Unlock()
+
+		Register(types.AgentName("exact-agent"), func() Agent {
+			return &nonInteractiveAgent{envName: "TEST_EXACT_ENV_XYZ", envValue: "0"}
+		})
+
+		t.Setenv("TEST_EXACT_ENV_XYZ", "0")
+		if !IsNonInteractiveEnv() {
+			t.Error("expected true when env var matches exact value")
+		}
+	})
+
+	t.Run("returns false when exact-value env var does not match", func(t *testing.T) {
+		t.Setenv("TEST_EXACT_ENV_XYZ", "1")
+		if IsNonInteractiveEnv() {
+			t.Error("expected false when env var does not match exact value")
+		}
+	})
+}
+
+// nonInteractiveAgent is a mock that implements NonInteractiveDetector.
+type nonInteractiveAgent struct {
+	mockAgent
+	envName  string
+	envValue string
+}
+
+func (n *nonInteractiveAgent) NonInteractiveEnvVar() (string, string) {
+	return n.envName, n.envValue
+}
+
 // protectedDirAgent is a mock that returns configurable protected dirs.
 type protectedDirAgent struct {
 	mockAgent
