@@ -264,6 +264,17 @@ func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
 	return agentIDs
 }
 
+// extractAllSpawnedAgentIDs parses the full transcript from the beginning to find
+// all spawned agent IDs, regardless of startLine offset. This ensures subagents
+// spawned before a checkpoint boundary are still discovered.
+func extractAllSpawnedAgentIDs(transcriptData []byte) map[string]string {
+	fullParsed, err := transcript.ParseFromBytes(transcriptData)
+	if err != nil {
+		return nil
+	}
+	return ExtractSpawnedAgentIDs(fullParsed)
+}
+
 // extractAgentIDFromText extracts an agent ID from text containing "agentId: <id>".
 func extractAgentIDFromText(text string) string {
 	const prefix = "agentId: "
@@ -305,8 +316,10 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	// Calculate token usage from parsed transcript
 	mainUsage := CalculateTokenUsage(parsed)
 
-	// Extract spawned agent IDs from the same parsed transcript
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
+	// Extract spawned agent IDs from the FULL transcript (not just startLine).
+	// Subagents spawned before startLine may still be active and writing to their
+	// transcript files, so we need to discover them from the beginning.
+	agentIDs := extractAllSpawnedAgentIDs(transcriptData)
 
 	// Calculate subagent token usage (skip when subagentsDir is empty to avoid reading from cwd)
 	if len(agentIDs) > 0 && subagentsDir != "" {
@@ -359,8 +372,10 @@ func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLi
 		}
 	}
 
-	// Find spawned subagents and collect their modified files (skip when subagentsDir is empty to avoid reading from cwd)
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
+	// Find spawned subagents from the FULL transcript (not just startLine).
+	// Subagents spawned before startLine may still be active and writing files,
+	// so we need to discover them from the beginning.
+	agentIDs := extractAllSpawnedAgentIDs(transcriptData)
 	if subagentsDir == "" {
 		return files, nil
 	}

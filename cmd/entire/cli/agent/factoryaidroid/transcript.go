@@ -347,6 +347,16 @@ func extractAgentIDFromText(text string) string {
 	return ""
 }
 
+// extractAllSpawnedAgentIDsFromBytes parses the full transcript from the beginning to find
+// all spawned agent IDs, regardless of startLine offset.
+func extractAllSpawnedAgentIDsFromBytes(data []byte) map[string]string {
+	fullParsed, _, err := ParseDroidTranscriptFromBytes(data, 0)
+	if err != nil {
+		return nil
+	}
+	return ExtractSpawnedAgentIDs(fullParsed)
+}
+
 // CalculateTotalTokenUsageFromBytes calculates token usage from pre-loaded transcript bytes,
 // including subagents. It parses the main transcript bytes from startLine, extracts spawned
 // agent IDs, and calculates their token usage from transcript files in subagentsDir.
@@ -362,7 +372,10 @@ func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir 
 
 	mainUsage := CalculateTokenUsage(parsed)
 
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
+	// Extract spawned agent IDs from the FULL transcript (not just startLine).
+	// Subagents spawned before startLine may still be active and writing to their
+	// transcript files, so we need to discover them from the beginning.
+	agentIDs := extractAllSpawnedAgentIDsFromBytes(data)
 	if len(agentIDs) > 0 && subagentsDir != "" {
 		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {
@@ -405,7 +418,8 @@ func ExtractAllModifiedFilesFromBytes(data []byte, startLine int, subagentsDir s
 		fileSet[f] = true
 	}
 
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
+	// Extract spawned agent IDs from the FULL transcript (not just startLine).
+	agentIDs := extractAllSpawnedAgentIDsFromBytes(data)
 	if subagentsDir == "" {
 		return files, nil
 	}
@@ -443,8 +457,13 @@ func CalculateTotalTokenUsageFromTranscript(transcriptPath string, startLine int
 	// Calculate token usage from parsed transcript
 	mainUsage := CalculateTokenUsage(parsed)
 
-	// Extract spawned agent IDs from the same parsed transcript
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
+	// Extract spawned agent IDs from the FULL transcript (not just startLine).
+	// Subagents spawned before startLine may still be active.
+	allParsed, _, parseAllErr := ParseDroidTranscript(transcriptPath, 0)
+	var agentIDs map[string]string
+	if parseAllErr == nil {
+		agentIDs = ExtractSpawnedAgentIDs(allParsed)
+	}
 
 	// Calculate subagent token usage
 	if len(agentIDs) > 0 {
@@ -493,8 +512,13 @@ func ExtractAllModifiedFilesFromTranscript(transcriptPath string, startLine int,
 		fileSet[f] = true
 	}
 
-	// Find spawned subagents and collect their modified files
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
+	// Find spawned subagents from the FULL transcript (not just startLine).
+	// Subagents spawned before startLine may still be active and writing files.
+	allParsed, _, parseAllErr := ParseDroidTranscript(transcriptPath, 0)
+	var agentIDs map[string]string
+	if parseAllErr == nil {
+		agentIDs = ExtractSpawnedAgentIDs(allParsed)
+	}
 	for agentID := range agentIDs {
 		agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
 		agentLines, _, agentErr := ParseDroidTranscript(agentPath, 0)
