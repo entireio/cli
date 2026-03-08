@@ -106,7 +106,7 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 
 	cmd := exec.CommandContext(ctx, a.Binary(), args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0")
+	cmd.Env = filterEnv(os.Environ(), "ENTIRE_TEST_TTY")
 
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -140,7 +140,7 @@ func (a *openCodeAgent) StartSession(ctx context.Context, dir string) (Session, 
 	for attempt := range 2 {
 		name := fmt.Sprintf("opencode-test-%d", time.Now().UnixNano())
 		var err error
-		s, err = NewTmuxSession(name, dir, nil, "env", "ENTIRE_TEST_TTY=0", a.Binary(), "--model", a.model)
+		s, err = NewTmuxSession(name, dir, []string{"ENTIRE_TEST_TTY"}, a.Binary(), "--model", a.model)
 		if err != nil {
 			return nil, err
 		}

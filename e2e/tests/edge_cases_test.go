@@ -129,7 +129,11 @@ func TestDirtyWorkingTree(t *testing.T) {
 func TestRapidSequentialCommits(t *testing.T) {
 	testutil.ForEachAgent(t, 4*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		_, err := s.RunPrompt(t, ctx,
-			"create three separate markdown files: docs/red.md about red, docs/blue.md about blue, docs/green.md about green. Commit each file separately right after creating it — three separate git commits. Do not ask for confirmation, just make the changes.",
+			"Do these steps in exact order: "+
+				"(1) Create docs/red.md with a paragraph about the colour red. Run: git add docs/red.md && git commit -m 'Add red.md'. "+
+				"(2) Create docs/blue.md with a paragraph about the colour blue. Run: git add docs/blue.md && git commit -m 'Add blue.md'. "+
+				"(3) Create docs/green.md with a paragraph about the colour green. Run: git add docs/green.md && git commit -m 'Add green.md'. "+
+				"Do not ask for confirmation, just execute each step.",
 			agents.WithPromptTimeout(120*time.Second))
 		if err != nil {
 			t.Fatalf("agent failed: %v", err)

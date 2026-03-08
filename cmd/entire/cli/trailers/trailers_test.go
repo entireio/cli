@@ -2,6 +2,8 @@ package trailers
 
 import (
 	"testing"
+
+	checkpointID "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 )
 
 func TestFormatMetadata(t *testing.T) {
@@ -249,6 +251,66 @@ func TestParseAllSessions(t *testing.T) {
 			for i, wantID := range tt.want {
 				if got[i] != wantID {
 					t.Errorf("ParseAllSessions()[%d] = %v, want %v", i, got[i], wantID)
+				}
+			}
+		})
+	}
+}
+
+func TestParseAllCheckpoints(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		message string
+		want    []string
+	}{
+		{
+			name:    "single checkpoint trailer",
+			message: "Add feature\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    []string{"a1b2c3d4e5f6"},
+		},
+		{
+			name:    "no trailer",
+			message: "Simple commit message",
+			want:    nil,
+		},
+		{
+			name:    "multiple checkpoint trailers from squash merge",
+			message: "Soph/test branch (#2)\n\n* random_letter script\n\nEntire-Checkpoint: 0aa0814d9839\n\n* random color\n\nEntire-Checkpoint: 33fb587b6fbb\n",
+			want:    []string{"0aa0814d9839", "33fb587b6fbb"},
+		},
+		{
+			name:    "duplicate checkpoint IDs are deduplicated",
+			message: "Merge\n\nEntire-Checkpoint: a1b2c3d4e5f6\nEntire-Checkpoint: b2c3d4e5f6a1\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    []string{"a1b2c3d4e5f6", "b2c3d4e5f6a1"},
+		},
+		{
+			name:    "invalid checkpoint IDs are skipped",
+			message: "Merge\n\nEntire-Checkpoint: a1b2c3d4e5f6\nEntire-Checkpoint: tooshort\nEntire-Checkpoint: b2c3d4e5f6a1\n",
+			want:    []string{"a1b2c3d4e5f6", "b2c3d4e5f6a1"},
+		},
+		{
+			name:    "mixed with other trailers",
+			message: "Merge\n\nEntire-Checkpoint: a1b2c3d4e5f6\nEntire-Session: session-1\nEntire-Checkpoint: b2c3d4e5f6a1\n",
+			want:    []string{"a1b2c3d4e5f6", "b2c3d4e5f6a1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ParseAllCheckpoints(tt.message)
+			if len(got) != len(tt.want) {
+				t.Errorf("ParseAllCheckpoints() returned %d items, want %d", len(got), len(tt.want))
+				t.Errorf("got: %v, want: %v", got, tt.want)
+				return
+			}
+			for i, wantID := range tt.want {
+				expectedID := checkpointID.MustCheckpointID(wantID)
+				if got[i] != expectedID {
+					t.Errorf("ParseAllCheckpoints()[%d] = %v, want %v", i, got[i], expectedID)
 				}
 			}
 		})

@@ -49,7 +49,9 @@ func (g *GeminiCLIAgent) ParseHookEvent(_ context.Context, hookName string, stdi
 		return g.parseSessionEnd(stdin)
 	case HookNamePreCompress:
 		return g.parseCompaction(stdin)
-	case HookNameBeforeTool, HookNameAfterTool, HookNameBeforeModel,
+	case HookNameBeforeModel:
+		return g.parseBeforeModel(stdin)
+	case HookNameBeforeTool, HookNameAfterTool,
 		HookNameAfterModel, HookNameBeforeToolSelection, HookNameNotification:
 		// Acknowledged hooks with no lifecycle action
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action
@@ -65,37 +67,6 @@ func (g *GeminiCLIAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read transcript: %w", err)
 	}
 	return data, nil
-}
-
-// ExtractPrompts extracts user prompts from the transcript starting at the given message offset.
-func (g *GeminiCLIAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
-	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
-	if err != nil {
-		return nil, fmt.Errorf("failed to read transcript: %w", err)
-	}
-
-	t, parseErr := ParseTranscript(data)
-	if parseErr != nil {
-		return nil, fmt.Errorf("failed to parse transcript: %w", parseErr)
-	}
-
-	var prompts []string
-	for i := fromOffset; i < len(t.Messages); i++ {
-		msg := t.Messages[i]
-		if msg.Type == MessageTypeUser && msg.Content != "" {
-			prompts = append(prompts, msg.Content)
-		}
-	}
-	return prompts, nil
-}
-
-// ExtractSummary extracts the last assistant message as a session summary.
-func (g *GeminiCLIAgent) ExtractSummary(sessionRef string) (string, error) {
-	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
-	if err != nil {
-		return "", fmt.Errorf("failed to read transcript: %w", err)
-	}
-	return ExtractLastAssistantMessage(data)
 }
 
 // CalculateTokenUsage computes token usage from the transcript starting at the given message offset.
@@ -186,6 +157,23 @@ func (g *GeminiCLIAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, error) 
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
 		Timestamp:  time.Now(),
+	}, nil
+}
+
+func (g *GeminiCLIAgent) parseBeforeModel(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[beforeModelRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	model := raw.LLMRequest.Model
+	if model == "" {
+		return nil, nil //nolint:nilnil // no model info → no lifecycle action
+	}
+	return &agent.Event{
+		Type:      agent.ModelUpdate,
+		SessionID: raw.SessionID,
+		Model:     model,
+		Timestamp: time.Now(),
 	}, nil
 }
 

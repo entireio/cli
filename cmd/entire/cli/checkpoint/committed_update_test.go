@@ -10,10 +10,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // setupRepoForUpdate creates a repo with an initial commit and writes a committed checkpoint.
@@ -53,7 +53,6 @@ func setupRepoForUpdate(t *testing.T) (*git.Repository, *GitStore, id.Checkpoint
 		Strategy:     "manual-commit",
 		Transcript:   []byte("provisional transcript line 1\n"),
 		Prompts:      []string{"initial prompt"},
-		Context:      []byte("initial context"),
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
 	})
@@ -114,29 +113,6 @@ func TestUpdateCommitted_ReplacesPrompts(t *testing.T) {
 	}
 }
 
-func TestUpdateCommitted_ReplacesContext(t *testing.T) {
-	t.Parallel()
-	_, store, cpID := setupRepoForUpdate(t)
-
-	err := store.UpdateCommitted(context.Background(), UpdateCommittedOptions{
-		CheckpointID: cpID,
-		SessionID:    "session-001",
-		Context:      []byte("updated context with full session info"),
-	})
-	if err != nil {
-		t.Fatalf("UpdateCommitted() error = %v", err)
-	}
-
-	content, err := store.ReadSessionContent(context.Background(), cpID, 0)
-	if err != nil {
-		t.Fatalf("ReadSessionContent() error = %v", err)
-	}
-
-	if content.Context != "updated context with full session info" {
-		t.Errorf("context mismatch\ngot:  %q\nwant: %q", content.Context, "updated context with full session info")
-	}
-}
-
 func TestUpdateCommitted_ReplacesAllFieldsTogether(t *testing.T) {
 	t.Parallel()
 	_, store, cpID := setupRepoForUpdate(t)
@@ -147,7 +123,6 @@ func TestUpdateCommitted_ReplacesAllFieldsTogether(t *testing.T) {
 		SessionID:    "session-001",
 		Transcript:   fullTranscript,
 		Prompts:      []string{"final prompt"},
-		Context:      []byte("final context"),
 	})
 	if err != nil {
 		t.Fatalf("UpdateCommitted() error = %v", err)
@@ -163,9 +138,6 @@ func TestUpdateCommitted_ReplacesAllFieldsTogether(t *testing.T) {
 	}
 	if content.Prompts != "final prompt" {
 		t.Errorf("prompts mismatch\ngot:  %q\nwant: %q", content.Prompts, "final prompt")
-	}
-	if content.Context != "final context" {
-		t.Errorf("context mismatch\ngot:  %q\nwant: %q", content.Context, "final context")
 	}
 }
 
@@ -245,7 +217,6 @@ func TestUpdateCommitted_MultipleCheckpoints(t *testing.T) {
 			SessionID:    "session-001",
 			Transcript:   fullTranscript,
 			Prompts:      []string{"final prompt 1", "final prompt 2"},
-			Context:      []byte("final context"),
 		})
 		if err != nil {
 			t.Fatalf("UpdateCommitted(%s) error = %v", cpID, err)

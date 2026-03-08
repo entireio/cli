@@ -170,21 +170,6 @@ func (c *ClaudeCodeAgent) FormatResumeCommand(sessionID string) string {
 
 // Session helper methods - work on AgentSession with Claude's native JSONL data
 
-// GetLastUserPrompt extracts the last user prompt from the session.
-// Requires NativeData to be populated (call ReadSession first).
-func (c *ClaudeCodeAgent) GetLastUserPrompt(session *agent.AgentSession) string {
-	if session == nil || len(session.NativeData) == 0 {
-		return ""
-	}
-
-	lines, err := transcript.ParseFromBytes(session.NativeData)
-	if err != nil {
-		return ""
-	}
-
-	return ExtractLastUserPrompt(lines)
-}
-
 // TruncateAtUUID returns a new session truncated at the given UUID (inclusive).
 // This is used for rewind operations to restore transcript state.
 // Requires NativeData to be populated.

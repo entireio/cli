@@ -301,15 +301,23 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				shortID = shortID[:7]
 			}
 
-			// Line 1: Agent · shortID
-			fmt.Fprintf(w, "%s %s %s\n",
-				sty.render(sty.agent, agentLabel),
-				sty.render(sty.dim, "·"),
-				shortID)
+			// Line 1: Agent (model) · shortID
+			if st.ModelName != "" {
+				fmt.Fprintf(w, "%s %s %s %s\n",
+					sty.render(sty.agent, agentLabel),
+					sty.render(sty.dim, "("+st.ModelName+")"),
+					sty.render(sty.dim, "·"),
+					shortID)
+			} else {
+				fmt.Fprintf(w, "%s %s %s\n",
+					sty.render(sty.agent, agentLabel),
+					sty.render(sty.dim, "·"),
+					shortID)
+			}
 
 			// Line 2: > "first prompt" (chevron + quoted, truncated)
-			if st.FirstPrompt != "" {
-				prompt := stringutil.TruncateRunes(st.FirstPrompt, 60, "...")
+			if st.LastPrompt != "" {
+				prompt := stringutil.TruncateRunes(st.LastPrompt, 60, "...")
 				fmt.Fprintf(w, "%s \"%s\"\n", sty.render(sty.dim, ">"), prompt)
 			}
 

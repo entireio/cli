@@ -38,6 +38,7 @@ func TestIsOutdated(t *testing.T) {
 		// Pre-release versions (semver uses hyphen)
 		{"1.0.0-rc1", "1.0.0", true, "prerelease in current"},
 		{"1.0.0", "1.0.1-rc1", true, "prerelease in latest is still newer"},
+		{"1.0.0-dev-xxx", "1.0.1", false, "dev build skips version check"},
 	}
 
 	for _, tt := range tests {

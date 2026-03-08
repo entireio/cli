@@ -42,7 +42,7 @@ func TestMain(m *testing.M) {
 	}
 	for _, a := range agents.All() {
 		if _, err := exec.LookPath(a.Binary()); err != nil {
-			missing = append(missing, a.Binary())
+			missing = append(missing, fmt.Sprintf("%s (%s)", a.Binary(), a.Name()))
 		}
 	}
 	if len(missing) > 0 {

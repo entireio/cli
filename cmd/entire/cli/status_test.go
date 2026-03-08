@@ -14,8 +14,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 func TestResolveWorktreeBranch_RegularRepo(t *testing.T) {
@@ -388,7 +388,7 @@ func TestWriteActiveSessions(t *testing.T) {
 			WorktreePath:        "/Users/test/repo",
 			StartedAt:           now.Add(-2 * time.Hour),
 			LastInteractionTime: &recentInteraction,
-			FirstPrompt:         "Fix auth bug in login flow",
+			LastPrompt:          "Fix auth bug in login flow",
 			AgentType:           types.AgentType("Claude Code"),
 			TokenUsage: &agent.TokenUsage{
 				InputTokens:  800,
@@ -399,7 +399,7 @@ func TestWriteActiveSessions(t *testing.T) {
 			SessionID:    "def-5678-session",
 			WorktreePath: "/Users/test/repo",
 			StartedAt:    now.Add(-15 * time.Minute),
-			FirstPrompt:  "Add dark mode support for the entire application and all components",
+			LastPrompt:   "Add dark mode support for the entire application and all components",
 			AgentType:    agent.AgentTypeCursor,
 			TokenUsage: &agent.TokenUsage{
 				InputTokens:  500,
@@ -452,7 +452,7 @@ func TestWriteActiveSessions(t *testing.T) {
 		t.Errorf("Expected first prompt with chevron, got: %s", output)
 	}
 
-	// Session without FirstPrompt should NOT show a prompt line
+	// Session without LastPrompt should NOT show a prompt line
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		if strings.Contains(line, "ghi-901") {
@@ -515,7 +515,7 @@ func TestWriteActiveSessions_ActiveTimeOmittedWhenClose(t *testing.T) {
 		WorktreePath:        "/Users/test/repo",
 		StartedAt:           startedAt,
 		LastInteractionTime: &lastInteraction,
-		FirstPrompt:         "test prompt",
+		LastPrompt:          "test prompt",
 		AgentType:           types.AgentType("Claude Code"),
 	}
 

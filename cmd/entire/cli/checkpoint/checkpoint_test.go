@@ -19,10 +19,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 func TestCheckpointType_Values(t *testing.T) {
@@ -721,7 +721,7 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 
 	// Clone the repo (this clones main, but not entire/checkpoints/v1 by default)
 	localDir := t.TempDir()
-	localRepo, err := git.PlainClone(localDir, false, &git.CloneOptions{
+	localRepo, err := git.PlainClone(localDir, &git.CloneOptions{
 		URL: remoteDir,
 	})
 	if err != nil {
@@ -1039,7 +1039,6 @@ func TestReadCommitted_ReturnsCheckpointSummary(t *testing.T) {
 			Strategy:         "manual-commit",
 			Transcript:       []byte(fmt.Sprintf(`{"session": %d}`, i)),
 			Prompts:          []string{fmt.Sprintf("Prompt %d", i)},
-			Context:          []byte(fmt.Sprintf("Context %d", i)),
 			FilesTouched:     []string{fmt.Sprintf("file%d.go", i)},
 			CheckpointsCount: i + 1,
 			AuthorName:       "Test Author",
@@ -1349,7 +1348,6 @@ func TestWriteCommitted_SessionWithNoPrompts(t *testing.T) {
 		Strategy:         "manual-commit",
 		Transcript:       []byte(`{"no_prompts": true}`),
 		Prompts:          nil, // No prompts
-		Context:          []byte("Some context"),
 		CheckpointsCount: 1,
 		AuthorName:       "Test Author",
 		AuthorEmail:      "test@example.com",
@@ -1377,11 +1375,6 @@ func TestWriteCommitted_SessionWithNoPrompts(t *testing.T) {
 	// Verify prompts is empty
 	if content.Prompts != "" {
 		t.Errorf("Prompts should be empty, got %q", content.Prompts)
-	}
-
-	// Verify context is present
-	if content.Context != "Some context" {
-		t.Errorf("Context = %q, want %q", content.Context, "Some context")
 	}
 }
 
@@ -1425,56 +1418,6 @@ func TestWriteCommitted_SessionWithSummary(t *testing.T) {
 	}
 	if content.Metadata.Summary.Outcome != "Bug was fixed" {
 		t.Errorf("Summary.Outcome = %q, want %q", content.Metadata.Summary.Outcome, "Bug was fixed")
-	}
-}
-
-// TestWriteCommitted_SessionWithNoContext verifies that a session can be
-// written without context and still be read correctly.
-func TestWriteCommitted_SessionWithNoContext(t *testing.T) {
-	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
-	checkpointID := id.MustCheckpointID("414243444546")
-
-	// Write session without context
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
-		CheckpointID:     checkpointID,
-		SessionID:        "no-context-session",
-		Strategy:         "manual-commit",
-		Transcript:       []byte(`{"no_context": true}`),
-		Prompts:          []string{"A prompt"},
-		Context:          nil, // No context
-		CheckpointsCount: 1,
-		AuthorName:       "Test Author",
-		AuthorEmail:      "test@example.com",
-	})
-	if err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
-	}
-
-	// Read the session content
-	content, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
-	if err != nil {
-		t.Fatalf("ReadSessionContent() error = %v", err)
-	}
-
-	// Verify session metadata is correct
-	if content.Metadata.SessionID != "no-context-session" {
-		t.Errorf("SessionID = %q, want %q", content.Metadata.SessionID, "no-context-session")
-	}
-
-	// Verify transcript is present
-	if len(content.Transcript) == 0 {
-		t.Error("Transcript should not be empty")
-	}
-
-	// Verify prompts is present
-	if !strings.Contains(content.Prompts, "A prompt") {
-		t.Errorf("Prompts should contain 'A prompt', got %q", content.Prompts)
-	}
-
-	// Verify context is empty
-	if content.Context != "" {
-		t.Errorf("Context should be empty, got %q", content.Context)
 	}
 }
 
@@ -2619,7 +2562,6 @@ func TestWriteCommitted_DuplicateSessionIDClearsStaleFiles(t *testing.T) {
 		Strategy:         "manual-commit",
 		Transcript:       []byte(`{"v": 1}`),
 		Prompts:          []string{"original prompt"},
-		Context:          []byte("original context"),
 		CheckpointsCount: 1,
 		AuthorName:       "Test",
 		AuthorEmail:      "test@example.com",
@@ -2628,14 +2570,13 @@ func TestWriteCommitted_DuplicateSessionIDClearsStaleFiles(t *testing.T) {
 		t.Fatalf("WriteCommitted() A v1 error = %v", err)
 	}
 
-	// Write session B with prompts and context
+	// Write session B with prompts
 	err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
 		CheckpointID:     checkpointID,
 		SessionID:        "session-B",
 		Strategy:         "manual-commit",
 		Transcript:       []byte(`{"session": "B"}`),
 		Prompts:          []string{"B prompt"},
-		Context:          []byte("B context"),
 		CheckpointsCount: 1,
 		AuthorName:       "Test",
 		AuthorEmail:      "test@example.com",
@@ -2644,14 +2585,13 @@ func TestWriteCommitted_DuplicateSessionIDClearsStaleFiles(t *testing.T) {
 		t.Fatalf("WriteCommitted() B error = %v", err)
 	}
 
-	// Overwrite session A WITHOUT prompts or context
+	// Overwrite session A WITHOUT prompts
 	err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
 		CheckpointID:     checkpointID,
 		SessionID:        "session-A",
 		Strategy:         "manual-commit",
 		Transcript:       []byte(`{"v": 2}`),
 		Prompts:          nil,
-		Context:          nil,
 		CheckpointsCount: 2,
 		AuthorName:       "Test",
 		AuthorEmail:      "test@example.com",
@@ -2660,16 +2600,13 @@ func TestWriteCommitted_DuplicateSessionIDClearsStaleFiles(t *testing.T) {
 		t.Fatalf("WriteCommitted() A v2 error = %v", err)
 	}
 
-	// Session A: stale prompts and context should be cleared
+	// Session A: stale prompts should be cleared
 	contentA, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
 	if err != nil {
 		t.Fatalf("ReadSessionContent(0) error = %v", err)
 	}
 	if contentA.Prompts != "" {
 		t.Errorf("session A stale prompts should be cleared, got %q", contentA.Prompts)
-	}
-	if contentA.Context != "" {
-		t.Errorf("session A stale context should be cleared, got %q", contentA.Context)
 	}
 	if !strings.Contains(string(contentA.Transcript), `"v": 2`) {
 		t.Errorf("session A transcript should be updated, got %s", string(contentA.Transcript))
@@ -2685,9 +2622,6 @@ func TestWriteCommitted_DuplicateSessionIDClearsStaleFiles(t *testing.T) {
 	}
 	if !strings.Contains(contentB.Prompts, "B prompt") {
 		t.Errorf("session B prompts should be preserved, got %q", contentB.Prompts)
-	}
-	if !strings.Contains(contentB.Context, "B context") {
-		t.Errorf("session B context should be preserved, got %q", contentB.Context)
 	}
 }
 
@@ -2756,38 +2690,6 @@ func TestWriteCommitted_RedactsPromptSecrets(t *testing.T) {
 	}
 	if !strings.Contains(content.Prompts, "REDACTED") {
 		t.Error("prompts should contain REDACTED placeholder")
-	}
-}
-
-func TestWriteCommitted_RedactsContextSecrets(t *testing.T) {
-	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo)
-	checkpointID := id.MustCheckpointID("aabbccddeef3")
-
-	err := store.WriteCommitted(context.Background(), WriteCommittedOptions{
-		CheckpointID:     checkpointID,
-		SessionID:        "redact-context-session",
-		Strategy:         "manual-commit",
-		Transcript:       []byte(`{"msg":"safe"}`),
-		Context:          []byte("DB_PASSWORD=" + highEntropySecret),
-		CheckpointsCount: 1,
-		AuthorName:       "Test Author",
-		AuthorEmail:      "test@example.com",
-	})
-	if err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
-	}
-
-	content, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
-	if err != nil {
-		t.Fatalf("ReadSessionContent() error = %v", err)
-	}
-
-	if strings.Contains(content.Context, highEntropySecret) {
-		t.Error("context should not contain the secret after redaction")
-	}
-	if !strings.Contains(content.Context, "REDACTED") {
-		t.Error("context should contain REDACTED placeholder")
 	}
 }
 

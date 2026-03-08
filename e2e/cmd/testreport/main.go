@@ -217,6 +217,31 @@ func renderReport(parents []*parentTest, color bool) string {
 		b.WriteString("\n")
 	}
 
+	// Rerun commands for failed tests
+	if failed > 0 {
+		b.WriteString("Rerun failed tests:\n")
+		for _, p := range parents {
+			if p.action != "fail" {
+				continue
+			}
+			var failedAgents []string
+			for _, c := range p.children {
+				if c.action == "fail" {
+					failedAgents = append(failedAgents, c.name)
+				}
+			}
+			if len(failedAgents) > 0 {
+				for _, agent := range failedAgents {
+					fmt.Fprintf(&b, "  mise run test:e2e --agent %s %s\n", agent, p.name)
+				}
+			} else {
+				// Standalone test with no subtests
+				fmt.Fprintf(&b, "  mise run test:e2e %s\n", p.name)
+			}
+		}
+		b.WriteString("\n")
+	}
+
 	// Footer banner
 	if failed > 0 {
 		banner := fmt.Sprintf("💥 FAILED (%d/%d passed) 💥", passed, total)

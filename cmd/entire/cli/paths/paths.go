@@ -22,9 +22,7 @@ const (
 
 // Metadata file names
 const (
-	ContextFileName          = "context.md"
 	PromptFileName           = "prompt.txt"
-	SummaryFileName          = "summary.txt"
 	TranscriptFileName       = "full.jsonl"
 	TranscriptFileNameLegacy = "full.log"
 	MetadataFileName         = "metadata.json"
@@ -52,6 +50,10 @@ func MetadataBranchNameFromPrefix(branchPrefix string) string {
 func ConfigureBranchPrefix(branchPrefix string) {
 	MetadataBranchName = branchPrefix + "checkpoints/v1"
 }
+
+// TrailsBranchName is the orphan branch used to store trail metadata.
+// Trails are branch-centric work tracking abstractions that link to checkpoints by branch name.
+const TrailsBranchName = "entire/trails/v1"
 
 // CheckpointPath returns the sharded storage path for a checkpoint ID.
 // Uses first 2 characters as shard (256 buckets), remaining as folder name.

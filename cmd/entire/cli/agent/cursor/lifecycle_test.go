@@ -65,6 +65,38 @@ func TestParseHookEvent_TurnStart(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_TurnStart_IncludesModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &CursorAgent{}
+	input := `{"conversation_id": "sess-m", "transcript_path": "/tmp/t.jsonl", "prompt": "hi", "model": "gpt-4o"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameBeforeSubmitPrompt, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Model != "gpt-4o" {
+		t.Errorf("expected model 'gpt-4o', got %q", event.Model)
+	}
+}
+
+func TestParseHookEvent_TurnStart_EmptyModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &CursorAgent{}
+	input := `{"conversation_id": "sess-nm", "transcript_path": "/tmp/t.jsonl", "prompt": "hi"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameBeforeSubmitPrompt, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Model != "" {
+		t.Errorf("expected empty model, got %q", event.Model)
+	}
+}
+
 func TestParseHookEvent_TurnStart_CLINoTranscriptPath(t *testing.T) {
 	// Cannot use t.Parallel() because of t.Setenv
 	ag := &CursorAgent{}
@@ -176,6 +208,9 @@ func TestParseHookEvent_TurnEnd_CLINoTranscriptPath(t *testing.T) {
 	if event.SessionRef != transcriptFile {
 		t.Errorf("expected computed session_ref %q, got %q", transcriptFile, event.SessionRef)
 	}
+	if event.TurnCount != 3 {
+		t.Errorf("expected TurnCount 3, got %d", event.TurnCount)
+	}
 }
 
 func TestParseHookEvent_SessionEnd_CLINoTranscriptPath(t *testing.T) {
@@ -211,6 +246,9 @@ func TestParseHookEvent_SessionEnd_CLINoTranscriptPath(t *testing.T) {
 	}
 	if event.SessionRef != transcriptFile {
 		t.Errorf("expected computed session_ref %q, got %q", transcriptFile, event.SessionRef)
+	}
+	if event.DurationMs != 45000 {
+		t.Errorf("expected DurationMs 45000, got %d", event.DurationMs)
 	}
 }
 
@@ -277,6 +315,7 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 		"transcript_path": "/tmp/main.jsonl",
 		"subagent_id":     "sub_xyz789",
 		"task":            "task done",
+		"modified_files":  []string{"src/foo.ts", "src/bar.ts"},
 	}
 	inputBytes, marshalErr := json.Marshal(inputData)
 	if marshalErr != nil {
@@ -296,6 +335,40 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 	}
 	if event.ToolUseID != "sub_xyz789" {
 		t.Errorf("expected tool_use_id 'sub_xyz789', got %q", event.ToolUseID)
+	}
+	if len(event.ModifiedFiles) != 2 {
+		t.Fatalf("expected 2 modified files, got %d", len(event.ModifiedFiles))
+	}
+	if event.ModifiedFiles[0] != "src/foo.ts" || event.ModifiedFiles[1] != "src/bar.ts" {
+		t.Errorf("expected modified files [src/foo.ts, src/bar.ts], got %v", event.ModifiedFiles)
+	}
+}
+
+func TestParseHookEvent_PreCompact(t *testing.T) {
+	t.Parallel()
+
+	ag := &CursorAgent{}
+	input := `{"conversation_id": "compact-session", "transcript_path": "/tmp/compact.jsonl", "context_tokens": 8500, "context_window_size": 16000}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNamePreCompact, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event == nil {
+		t.Fatal("expected event, got nil")
+	}
+	if event.Type != agent.Compaction {
+		t.Errorf("expected event type %v, got %v", agent.Compaction, event.Type)
+	}
+	if event.SessionID != "compact-session" {
+		t.Errorf("expected session_id 'compact-session', got %q", event.SessionID)
+	}
+	if event.ContextTokens != 8500 {
+		t.Errorf("expected ContextTokens 8500, got %d", event.ContextTokens)
+	}
+	if event.ContextWindowSize != 16000 {
+		t.Errorf("expected ContextWindowSize 16000, got %d", event.ContextWindowSize)
 	}
 }
 

@@ -90,9 +90,8 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
 2.  **Extract and Save Metadata** (to `.entire/metadata/<session-id>/`):
 
     - `full.jsonl` - Copy of the complete transcript.
-    - `prompt.txt` - All user prompts from this interaction, separated by `---`.
+    - `prompt.txt` - Checkpoint-scoped user prompts, separated by `---`.
     - `summary.txt` - The last assistant message (used as checkpoint summary).
-    - `context.md` - Generated context file with commit message, session info, and file lists.
 
 3.  **Compute File Changes**:
 

@@ -1,4 +1,4 @@
-package checkpoint_test
+package benchutil
 
 import (
 	"context"
@@ -7,13 +7,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/benchutil"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
-	gogit "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	gogit "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // --- WriteTemporary benchmarks ---
@@ -35,16 +34,16 @@ func BenchmarkWriteTemporary(b *testing.B) {
 // than incremental checkpoints.
 func benchWriteTemporaryFirstCheckpoint(fileCount, fileSizeLines int) func(*testing.B) {
 	return func(b *testing.B) {
-		repo := benchutil.NewBenchRepo(b, benchutil.RepoOpts{
+		repo := NewBenchRepo(b, RepoOpts{
 			FileCount:     fileCount,
 			FileSizeLines: fileSizeLines,
 		})
-		sessionID := repo.CreateSessionState(b, benchutil.SessionOpts{})
+		sessionID := repo.CreateSessionState(b, SessionOpts{})
 
 		// Modify a few files to create a dirty working directory
 		for i := range 3 {
 			name := fmt.Sprintf("src/file_%03d.go", i)
-			repo.WriteFile(b, name, benchutil.GenerateGoFile(9000+i, fileSizeLines))
+			repo.WriteFile(b, name, GenerateGoFile(9000+i, fileSizeLines))
 		}
 
 		metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
@@ -86,11 +85,11 @@ func benchWriteTemporaryFirstCheckpoint(fileCount, fileSizeLines int) func(*test
 // These skip collectChangedFiles and only process the provided file lists.
 func benchWriteTemporaryIncremental(modified, newFiles, deleted int) func(*testing.B) {
 	return func(b *testing.B) {
-		repo := benchutil.NewBenchRepo(b, benchutil.RepoOpts{
+		repo := NewBenchRepo(b, RepoOpts{
 			FileCount:     max(modified+newFiles, 10),
 			FileSizeLines: 100,
 		})
-		sessionID := repo.CreateSessionState(b, benchutil.SessionOpts{})
+		sessionID := repo.CreateSessionState(b, SessionOpts{})
 
 		// Seed one checkpoint so subsequent ones are not IsFirstCheckpoint
 		repo.SeedShadowBranch(b, sessionID, 1, 3)
@@ -99,13 +98,13 @@ func benchWriteTemporaryIncremental(modified, newFiles, deleted int) func(*testi
 		modifiedFiles := make([]string, 0, modified)
 		for i := range modified {
 			name := fmt.Sprintf("src/file_%03d.go", i)
-			repo.WriteFile(b, name, benchutil.GenerateGoFile(8000+i, 100))
+			repo.WriteFile(b, name, GenerateGoFile(8000+i, 100))
 			modifiedFiles = append(modifiedFiles, name)
 		}
 		newFileList := make([]string, 0, newFiles)
 		for i := range newFiles {
 			name := fmt.Sprintf("src/new_%03d.go", i)
-			repo.WriteFile(b, name, benchutil.GenerateGoFile(7000+i, 100))
+			repo.WriteFile(b, name, GenerateGoFile(7000+i, 100))
 			newFileList = append(newFileList, name)
 		}
 		deletedFiles := make([]string, 0, deleted)
@@ -148,17 +147,17 @@ func benchWriteTemporaryIncremental(modified, newFiles, deleted int) func(*testi
 // benchWriteTemporaryIncrementalLargeFiles benchmarks checkpoints with large files.
 func benchWriteTemporaryIncrementalLargeFiles(fileCount, linesPerFile int) func(*testing.B) {
 	return func(b *testing.B) {
-		repo := benchutil.NewBenchRepo(b, benchutil.RepoOpts{
+		repo := NewBenchRepo(b, RepoOpts{
 			FileCount:     fileCount,
 			FileSizeLines: linesPerFile,
 		})
-		sessionID := repo.CreateSessionState(b, benchutil.SessionOpts{})
+		sessionID := repo.CreateSessionState(b, SessionOpts{})
 		repo.SeedShadowBranch(b, sessionID, 1, fileCount)
 
 		modifiedFiles := make([]string, 0, fileCount)
 		for i := range fileCount {
 			name := fmt.Sprintf("src/file_%03d.go", i)
-			repo.WriteFile(b, name, benchutil.GenerateGoFile(6000+i, linesPerFile))
+			repo.WriteFile(b, name, GenerateGoFile(6000+i, linesPerFile))
 			modifiedFiles = append(modifiedFiles, name)
 		}
 
@@ -196,8 +195,8 @@ func benchWriteTemporaryIncrementalLargeFiles(fileCount, linesPerFile int) func(
 // matches the previous checkpoint, so the write is skipped.
 func benchWriteTemporaryDedup() func(*testing.B) {
 	return func(b *testing.B) {
-		repo := benchutil.NewBenchRepo(b, benchutil.RepoOpts{FileCount: 10})
-		sessionID := repo.CreateSessionState(b, benchutil.SessionOpts{})
+		repo := NewBenchRepo(b, RepoOpts{FileCount: 10})
+		sessionID := repo.CreateSessionState(b, SessionOpts{})
 		repo.SeedShadowBranch(b, sessionID, 1, 3)
 
 		// Don't modify any files — tree will match the previous checkpoint
@@ -235,14 +234,14 @@ func benchWriteTemporaryDedup() func(*testing.B) {
 // already has many prior checkpoint commits.
 func benchWriteTemporaryWithHistory(priorCheckpoints int) func(*testing.B) {
 	return func(b *testing.B) {
-		repo := benchutil.NewBenchRepo(b, benchutil.RepoOpts{FileCount: 10})
-		sessionID := repo.CreateSessionState(b, benchutil.SessionOpts{})
+		repo := NewBenchRepo(b, RepoOpts{FileCount: 10})
+		sessionID := repo.CreateSessionState(b, SessionOpts{})
 		repo.SeedShadowBranch(b, sessionID, priorCheckpoints, 3)
 
 		// Modify files for the new checkpoint
 		for i := range 3 {
 			name := fmt.Sprintf("src/file_%03d.go", i)
-			repo.WriteFile(b, name, benchutil.GenerateGoFile(5000+i, 100))
+			repo.WriteFile(b, name, GenerateGoFile(5000+i, 100))
 		}
 
 		metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
@@ -292,7 +291,7 @@ func BenchmarkWriteCommitted(b *testing.B) {
 // benchWriteCommitted benchmarks writing to the entire/checkpoints/v1 branch.
 func benchWriteCommitted(messageCount, avgMsgBytes, filesTouched, priorCheckpoints int) func(*testing.B) {
 	return func(b *testing.B) {
-		repo := benchutil.NewBenchRepo(b, benchutil.RepoOpts{
+		repo := NewBenchRepo(b, RepoOpts{
 			FileCount: max(filesTouched, 10),
 		})
 
@@ -306,7 +305,7 @@ func benchWriteCommitted(messageCount, avgMsgBytes, filesTouched, priorCheckpoin
 		for i := range filesTouched {
 			files = append(files, fmt.Sprintf("src/file_%03d.go", i))
 		}
-		transcript := benchutil.GenerateTranscript(benchutil.TranscriptOpts{
+		transcript := GenerateTranscript(TranscriptOpts{
 			MessageCount:    messageCount,
 			AvgMessageBytes: avgMsgBytes,
 			IncludeToolUse:  true,
@@ -352,7 +351,7 @@ func BenchmarkFlattenTree(b *testing.B) {
 
 func benchFlattenTree(fileCount, fileSizeLines int) func(*testing.B) {
 	return func(b *testing.B) {
-		repo := benchutil.NewBenchRepo(b, benchutil.RepoOpts{
+		repo := NewBenchRepo(b, RepoOpts{
 			FileCount:     fileCount,
 			FileSizeLines: fileSizeLines,
 		})
@@ -389,7 +388,7 @@ func BenchmarkBuildTreeFromEntries(b *testing.B) {
 
 func benchBuildTree(entryCount int) func(*testing.B) {
 	return func(b *testing.B) {
-		repo := benchutil.NewBenchRepo(b, benchutil.RepoOpts{
+		repo := NewBenchRepo(b, RepoOpts{
 			FileCount: entryCount,
 		})
 

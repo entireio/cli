@@ -267,63 +267,6 @@ func TestParseTranscript_NullContent(t *testing.T) {
 	}
 }
 
-func TestExtractLastUserPrompt(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		data string
-		want string
-	}{
-		{
-			name: "string content",
-			data: `{"messages": [
-				{"type": "user", "content": "first"},
-				{"type": "gemini", "content": "response"},
-				{"type": "user", "content": "second"}
-			]}`,
-			want: "second",
-		},
-		{
-			name: "array content",
-			data: `{"messages": [
-				{"type": "user", "content": [{"text": "first prompt"}]},
-				{"type": "gemini", "content": "response"},
-				{"type": "user", "content": [{"text": "second prompt"}]}
-			]}`,
-			want: "second prompt",
-		},
-		{
-			name: "only one user message",
-			data: `{"messages": [{"type": "user", "content": "only message"}]}`,
-			want: "only message",
-		},
-		{
-			name: "no user messages",
-			data: `{"messages": [{"type": "gemini", "content": "assistant only"}]}`,
-			want: "",
-		},
-		{
-			name: "empty messages",
-			data: `{"messages": []}`,
-			want: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := ExtractLastUserPrompt([]byte(tt.data))
-			if err != nil {
-				t.Fatalf("ExtractLastUserPrompt() error = %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("ExtractLastUserPrompt() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestGetLastMessageID(t *testing.T) {
 	t.Parallel()
 
@@ -582,24 +525,6 @@ func TestExtractModifiedFilesFromTranscript(t *testing.T) {
 	}
 	if len(files) > 0 && files[0] != "test.go" {
 		t.Errorf("got file %q, want test.go", files[0])
-	}
-}
-
-func TestExtractLastUserPromptFromTranscript(t *testing.T) {
-	t.Parallel()
-
-	transcript := &GeminiTranscript{
-		Messages: []GeminiMessage{
-			{Type: "user", Content: "first prompt"},
-			{Type: "gemini", Content: "response"},
-			{Type: "user", Content: "last prompt"},
-		},
-	}
-
-	got := ExtractLastUserPromptFromTranscript(transcript)
-
-	if got != "last prompt" {
-		t.Errorf("got %q, want 'last prompt'", got)
 	}
 }
 

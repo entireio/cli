@@ -104,8 +104,9 @@ func (c *CursorAgent) GetSessionDir(repoPath string) (string, error) {
 }
 
 // ReadSession reads a session from Cursor's storage (JSONL transcript file).
-// Note: ModifiedFiles is left empty because Cursor's transcript format does not
-// contain tool_use blocks. File detection relies on git status instead.
+// Note: ModifiedFiles is left empty because Cursor's transcript does not contain
+// tool_use blocks for file detection. TranscriptAnalyzer extracts prompts and
+// summaries; file detection relies on git status.
 func (c *CursorAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {
 	if input.SessionRef == "" {
 		return nil, errors.New("session reference (transcript path) is required")

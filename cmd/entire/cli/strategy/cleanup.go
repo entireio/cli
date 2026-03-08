@@ -14,8 +14,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 const (
@@ -61,8 +61,8 @@ var shadowBranchSuffixPattern = regexp.MustCompile(`^[0-9a-fA-F]{7,}(-[0-9a-fA-F
 // commit hash is at least 7 hex characters and worktree hash is 6 hex characters.
 // The metadata branch (e.g. "entire/checkpoints/v1") is NOT a shadow branch.
 func IsShadowBranch(branchName string) bool {
-	// Explicitly exclude the metadata branch
-	if branchName == paths.MetadataBranchName {
+	// Explicitly exclude metadata and trails branches
+	if branchName == paths.MetadataBranchName || branchName == paths.TrailsBranchName {
 		return false
 	}
 	prefix := checkpoint.ShadowBranchPrefix

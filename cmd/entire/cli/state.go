@@ -17,7 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
-	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v6"
 )
 
 // PrePromptState stores the state captured before a user prompt
@@ -116,7 +116,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 
 	// Get transcript position using TranscriptAnalyzer if available
 	var transcriptOffset int
-	if analyzer, ok := ag.(agent.TranscriptAnalyzer); ok && sessionRef != "" {
+	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok && sessionRef != "" {
 		pos, posErr := analyzer.GetTranscriptPosition(sessionRef)
 		if posErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "state"), "failed to get transcript position",

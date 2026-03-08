@@ -11,8 +11,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // Shadow strategy session state methods.
@@ -191,8 +191,9 @@ func (s *ManualCommitStrategy) CountOtherActiveSessionsWithCheckpoints(ctx conte
 // A partial state may exist if the concurrent session warning was shown.
 // agentType is the human-readable name of the agent (e.g., "Claude Code").
 // transcriptPath is the path to the live transcript file (for mid-session commit detection).
-// userPrompt is the user's prompt text (stored truncated as FirstPrompt for display).
-func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.Repository, sessionID string, agentType types.AgentType, transcriptPath string, userPrompt string) (*SessionState, error) {
+// userPrompt is the user's prompt text (stored truncated as LastPrompt for display).
+// model is the LLM model identifier (e.g., "claude-sonnet-4-20250514"); empty if unknown.
+func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.Repository, sessionID string, agentType types.AgentType, transcriptPath string, userPrompt string, model string) (*SessionState, error) {
 	head, err := repo.Head()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get HEAD: %w", err)
@@ -237,8 +238,9 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		StepCount:             0,
 		UntrackedFilesAtStart: untrackedFiles,
 		AgentType:             agentType,
+		ModelName:             model,
 		TranscriptPath:        transcriptPath,
-		FirstPrompt:           truncatePromptForStorage(userPrompt),
+		LastPrompt:            truncatePromptForStorage(userPrompt),
 	}
 
 	if err := s.saveSessionState(ctx, state); err != nil {

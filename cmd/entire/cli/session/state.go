@@ -84,7 +84,8 @@ type State struct {
 	//   - Cleared when session is reset (ResetSession deletes the state file entirely)
 	TurnCheckpointIDs []string `json:"turn_checkpoint_ids,omitempty"`
 
-	// LastInteractionTime is updated on every hook invocation.
+	// LastInteractionTime is updated on agent-interaction events (TurnStart,
+	// TurnEnd, SessionStop, Compaction) but NOT on git commit hooks.
 	// Used for stale session detection in "entire doctor".
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 
@@ -114,11 +115,28 @@ type State struct {
 	// sessions that have been condensed at least once. Cleared on new prompt.
 	LastCheckpointID id.CheckpointID `json:"last_checkpoint_id,omitempty"`
 
+	// FullyCondensed indicates this session has been condensed and has no remaining
+	// carry-forward files. PostCommit skips fully-condensed sessions entirely.
+	// Set after successful condensation when no files remain for carry-forward
+	// and the session phase is ENDED. Cleared on session reactivation (ENDED →
+	// ACTIVE via TurnStart, or ENDED → IDLE via SessionStart) by ActionClearEndedAt.
+	FullyCondensed bool `json:"fully_condensed,omitempty"`
+
 	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Gemini CLI", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
 
+	// ModelName is the LLM model used in this session (e.g., "claude-sonnet-4-20250514", "gpt-4o").
+	// Set from hook data when the agent provides it.
+	ModelName string `json:"model_name,omitempty"`
+
 	// Token usage tracking (accumulated across all checkpoints in this session)
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// Hook-provided session metrics (for agents like Cursor that report via hooks)
+	SessionDurationMs int64 `json:"session_duration_ms,omitempty"`
+	SessionTurnCount  int   `json:"session_turn_count,omitempty"`
+	ContextTokens     int   `json:"context_tokens,omitempty"`
+	ContextWindowSize int   `json:"context_window_size,omitempty"`
 
 	// Deprecated: TranscriptLinesAtStart is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.
@@ -131,8 +149,10 @@ type State struct {
 	// TranscriptPath is the path to the live transcript file (for mid-session commit detection)
 	TranscriptPath string `json:"transcript_path,omitempty"`
 
-	// FirstPrompt is the first user prompt that started this session (truncated for display)
-	FirstPrompt string `json:"first_prompt,omitempty"`
+	// LastPrompt is the most recent user prompt for this session (truncated for display).
+	// Updated on every turn start (UserPromptSubmit). JSON tag kept as "first_prompt"
+	// for backward compatibility with existing state files.
+	LastPrompt string `json:"last_prompt,omitempty"`
 
 	// PromptAttributions tracks user and agent line changes at each prompt start.
 	// This enables accurate attribution by capturing user edits between checkpoints.
@@ -211,11 +231,17 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 	}
 }
 
-// IsStale returns true when the last time a session saw interaction exceeds StaleSessionThreshold.
-// If LastInteractionTime isn't set, we don't consider a session stale to avoid aggressively
-// deleting things.
+// IsStale returns true when a session hasn't seen interaction for longer than
+// StaleSessionThreshold. Falls back to StartedAt when LastInteractionTime is
+// nil (sessions created before interaction tracking was added).
 func (s *State) IsStale() bool {
-	return s.LastInteractionTime != nil && time.Since(*s.LastInteractionTime) > StaleSessionThreshold
+	var since time.Duration
+	if s.LastInteractionTime != nil {
+		since = time.Since(*s.LastInteractionTime)
+	} else {
+		since = time.Since(s.StartedAt)
+	}
+	return since > StaleSessionThreshold
 }
 
 // StateStore provides low-level operations for managing session state files.
@@ -326,14 +352,12 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
 
-	stateFile := s.stateFilePath(sessionID)
-
-	if err := os.Remove(stateFile); err != nil {
-		if os.IsNotExist(err) {
-			return nil // Already gone, not an error
-		}
-		return fmt.Errorf("failed to remove session state file: %w", err)
+	// Remove all files for this session (state .json, .model hint, any future hint files).
+	matches, _ := filepath.Glob(filepath.Join(s.stateDir, sessionID+".*")) //nolint:errcheck // pattern is always valid
+	for _, f := range matches {
+		_ = os.Remove(f)
 	}
+
 	return nil
 }
 

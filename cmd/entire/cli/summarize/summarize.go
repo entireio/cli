@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -118,6 +119,8 @@ func BuildCondensedTranscriptFromBytes(content []byte, agentType types.AgentType
 	switch agentType {
 	case agent.AgentTypeGemini:
 		return buildCondensedTranscriptFromGemini(content)
+	case agent.AgentTypeFactoryAIDroid:
+		return buildCondensedTranscriptFromDroid(content)
 	case agent.AgentTypeOpenCode:
 		return buildCondensedTranscriptFromOpenCode(content)
 	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeUnknown:
@@ -212,6 +215,15 @@ func buildCondensedTranscriptFromOpenCode(content []byte) ([]Entry, error) {
 	}
 
 	return entries, nil
+}
+
+// buildCondensedTranscriptFromDroid parses Droid transcript and extracts a condensed view.
+func buildCondensedTranscriptFromDroid(content []byte) ([]Entry, error) {
+	droidLines, _, err := factoryaidroid.ParseDroidTranscriptFromBytes(content, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Droid transcript: %w", err)
+	}
+	return BuildCondensedTranscript(droidLines), nil
 }
 
 // extractOpenCodeToolDetail extracts a detail string from an OpenCode tool's input map.

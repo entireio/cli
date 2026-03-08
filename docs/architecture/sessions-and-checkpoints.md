@@ -169,8 +169,7 @@ Contains full worktree snapshot plus metadata overlay. **Multiple concurrent ses
 <worktree files...>
 .entire/metadata/<session-id-1>/
 ├── full.jsonl           # Session 1 transcript
-├── prompt.txt           # User prompts
-├── context.md           # Generated context
+├── prompt.txt           # Checkpoint-scoped user prompts
 └── tasks/<tool-use-id>/ # Task checkpoints
 .entire/metadata/<session-id-2>/
 ├── full.jsonl           # Session 2 transcript (concurrent)
@@ -197,8 +196,7 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 ├── 0/                   # First session (0-based indexing)
 │   ├── metadata.json    # Session-specific CommittedMetadata
 │   ├── full.jsonl
-│   ├── prompt.txt
-│   ├── context.md
+│   ├── prompt.txt       # Checkpoint-scoped user prompts
 │   └── content_hash.txt
 ├── 1/                   # Second session
 │   ├── metadata.json
@@ -219,7 +217,6 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
     {
       "metadata": "/ab/c123def456/0/metadata.json",
       "transcript": "/ab/c123def456/0/full.jsonl",
-      "context": "/ab/c123def456/0/context.md",
       "content_hash": "/ab/c123def456/0/content_hash.txt",
       "prompt": "/ab/c123def456/0/prompt.txt"
     }
@@ -307,8 +304,7 @@ are for human readability in `git log` only. The CLI always reads from the tree 
 │     │   (checkpoint_id: "a3b2c4d5e6f7")          │
 │     ├── 0/                                       │
 │     │   ├── full.jsonl                           │
-│     │   ├── prompt.txt                           │
-│     │   └── context.md                           │
+│     │   └── prompt.txt                           │
 │     └── ...                                      │
 │                                                   │
 │   Trailers:                                      │

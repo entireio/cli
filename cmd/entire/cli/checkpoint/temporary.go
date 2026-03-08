@@ -24,10 +24,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/redact"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 const (
@@ -788,36 +788,7 @@ func (s *GitStore) buildTreeWithChanges(
 
 // createCommit creates a commit object.
 func (s *GitStore) createCommit(treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
-	now := time.Now()
-	sig := object.Signature{
-		Name:  authorName,
-		Email: authorEmail,
-		When:  now,
-	}
-
-	commit := &object.Commit{
-		TreeHash:  treeHash,
-		Author:    sig,
-		Committer: sig,
-		Message:   message,
-	}
-
-	// Add parent if not a new branch
-	if parentHash != plumbing.ZeroHash {
-		commit.ParentHashes = []plumbing.Hash{parentHash}
-	}
-
-	obj := s.repo.Storer.NewEncodedObject()
-	if err := commit.Encode(obj); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to encode commit: %w", err)
-	}
-
-	hash, err := s.repo.Storer.SetEncodedObject(obj)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to store commit: %w", err)
-	}
-
-	return hash, nil
+	return CreateCommit(s.repo, treeHash, parentHash, message, authorName, authorEmail)
 }
 
 // Helper functions extracted from strategy/common.go

@@ -1,17 +1,19 @@
 # Write-Tests Command
 
-Generate the E2E test suite for a new agent integration. Uses the research report's findings and the existing E2E test infrastructure.
+Create the E2E agent runner only — no unit tests, no new test scenarios. The runner registers the agent with the E2E framework so existing `ForEachAgent` tests can exercise it. Uses the implementation one-pager (`AGENT.md`) and the existing E2E test infrastructure.
 
 ## Prerequisites
 
-- The research command should have been run first (or equivalent knowledge of the agent's hook model)
-- If no research report exists, ask the user about the agent's hook events, transcript format, and config mechanism
+- The research command's one-pager at `cmd/entire/cli/agent/$AGENT_PACKAGE/AGENT.md`
+- If no one-pager exists, ask the user for: binary name, prompt CLI flags, interactive mode support, and hook event names
 
 ## Procedure
 
 ### Step 1: Read E2E Test Infrastructure
 
-Read these files to understand the existing test patterns:
+Read these files to understand the existing test patterns.
+
+**Most critical:** Focus on items 3 (`agent.go` — the interface you must implement) and read one existing agent implementation (e.g., `e2e/agents/claude.go`) as a reference. Skim the rest for context.
 
 1. `e2e/tests/main_test.go` — `TestMain` builds the CLI binary (via `entire.BinPath()`), runs preflight checks for required binaries (git, tmux, agent CLIs), sets up artifact directories, and configures env
 2. `e2e/testutil/repo.go` — `RepoState` struct (holds agent, dir, artifact dir, head/checkpoint refs), `SetupRepo` (creates temp git repo, runs `entire enable`, patches settings), `ForEachAgent` (runs a test per registered agent with repo setup, concurrency gating, and timeout scaling)
@@ -35,6 +37,15 @@ Run `Glob("e2e/tests/*_test.go")` to find all existing test files. Read a few to
 Read `docs/architecture/checkpoint-scenarios.md` for the state machine and scenarios the tests should cover.
 
 ### Step 4: Create Agent Implementation
+
+Read `cmd/entire/cli/agent/$AGENT_PACKAGE/AGENT.md` (the one-pager from the research phase) for all agent-specific information:
+- Binary name → "Binary" section
+- Prompt flags → "CLI Flags" section
+- Interactive mode → "CLI Flags" section
+- Transient error patterns → "Gaps & Limitations" section (use defaults if not listed)
+- Bootstrap setup → "Config Preservation" section
+
+**If something is missing from the one-pager**, you may search external docs — but update `AGENT.md` with anything new you discover.
 
 Add a new `Agent` implementation in `e2e/agents/${agent_slug}.go`:
 
@@ -147,7 +158,7 @@ Key implementation details:
 - `IsTransientError()` identifies retryable API failures — `RepoState.RunPrompt` retries once on transient errors
 - `RunPrompt()` uses `exec.CommandContext` with `Setpgid: true` and process-group kill for clean cancellation
 - `StartSession()` uses `NewTmuxSession` for interactive PTY tests; return `nil` if interactive mode isn't supported
-- Use the research report to determine CLI flags, prompt passing mechanism, and env vars
+- Use `AGENT.md` (the one-pager) for CLI flags, prompt passing mechanism, and env vars
 
 ### Step 5: Update SetupRepo (if needed)
 
@@ -159,64 +170,19 @@ Check if `testutil.SetupRepo` in `e2e/testutil/repo.go` needs agent-specific con
 
 If no special setup is needed, skip this step.
 
-### Step 6: Write E2E Test Scenarios
+### Step 6: Verify
 
-Existing tests are agent-agnostic (they use `ForEachAgent`), so they should already work with the new agent. **Only create new test files if the agent has unique behaviors** that existing scenarios don't cover.
-
-Check if all existing scenarios work by reviewing:
-- Does the agent support non-interactive prompt mode? (required for `RunPrompt`)
-- Does the agent create files when prompted? (required for basic workflow)
-- Does the agent support git operations? (required for commit scenarios)
-- Does the agent support interactive mode? (required for interactive tests — can return nil from `StartSession`)
-
-If the agent has unique behaviors, create new test files in `e2e/tests/`:
-
-```go
-//go:build e2e
-
-package tests
-
-import (
-	"context"
-	"testing"
-	"time"
-
-	"github.com/entireio/cli/e2e/testutil"
-)
-
-func TestAgentSpecificBehavior(t *testing.T) {
-	testutil.ForEachAgent(t, 2*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
-		// Skip for agents that don't apply
-		if s.Agent.Name() != "${agent-slug}" {
-			t.Skip("only applies to ${agent-slug}")
-		}
-
-		// Use s.RunPrompt for non-interactive, s.StartSession for interactive
-		_, err := s.RunPrompt(t, ctx,
-			"create a file at hello.txt with 'hello world'. Do not ask for confirmation.")
-		if err != nil {
-			t.Fatalf("agent failed: %v", err)
-		}
-
-		testutil.AssertFileExists(t, s.Dir, "hello.txt")
-	})
-}
-```
-
-See `e2e/README.md` for the canonical reference on structure, debugging, and CI workflows.
-
-### Step 7: Verify
-
-After writing the code:
+After writing the runner code:
 
 1. **Lint check**: `mise run lint` — ensure no lint errors
-2. **Compile check**: `go test -c -tags=e2e ./e2e/tests` — compile-only with the build tag to verify the code compiles
-3. **List what to run**: Print the exact E2E commands but do NOT run them (they cost money):
-   ```bash
-   mise run test:e2e:${agent_slug} TestSingleSessionManualCommit
-   ```
-4. **Debug failures**: If tests fail, use `/debug-e2e {artifact-dir}` to diagnose — artifacts are auto-captured to `e2e/artifacts/{timestamp}/`
-5. **Add mise task**: Remind the user to add a `test:e2e:${agent_slug}` task in `mise.toml` and update CI workflows
+2. **Compile check**: `go test -c -tags=e2e ./e2e/tests` — compile-only with the build tag to verify the runner compiles and registers
+3. **Verify registration**: The runner's `init()` calls `Register()` and will be picked up by `ForEachAgent` in existing tests
+4. **Add mise task**: Remind the user that E2E tests are run via `mise run test:e2e --agent ${agent_slug}` and to update CI workflows if needed
+5. **Next step**: The implement phase will run E2E tests against this runner — that's where failures are diagnosed and fixed
+
+### Step 7: Commit
+
+Use `/commit` to commit all files.
 
 ## Key Conventions
 
@@ -231,16 +197,15 @@ After writing the code:
 - **Console logging**: All operations through `s.RunPrompt`, `s.Git`, `s.Send`, `s.WaitFor` are automatically logged to `console.log`
 - **Transient errors**: `s.RunPrompt` auto-retries once on transient API errors via `IsTransientError`
 - **Interactive tests**: Use `s.StartSession`, `s.Send`, `s.WaitFor` — tmux pane is auto-captured in artifacts
-- **Run commands**: `mise run test:e2e:${slug} TestName` — see `e2e/README.md` for all options
-- **Do NOT run E2E tests**: They make real API calls. Only write the code and print commands.
-- **Debugging failures**: If the user runs tests and they fail, use `/debug-e2e` with the artifact directory to diagnose CLI-level issues (hooks, checkpoints, session phases, attribution)
+- **Run commands**: `mise run test:e2e --agent ${slug} TestName` — see `e2e/README.md` for all options
+- **E2E tests are run during the implement phase**: This phase only creates the runner. The implement phase runs E2E tests at each tier to drive development.
+- **Debugging failures**: If tests fail during the implement phase, use `/debug-e2e` with the artifact directory to diagnose CLI-level issues (hooks, checkpoints, session phases, attribution)
 
 ## Output
 
 Summarize what was created/modified:
 - Files added or modified
-- New agent implementation details (how it invokes the agent, auth setup, concurrency gate)
-- Any agent-specific test scenarios added
-- Commands to run the tests (for user to execute manually)
-- If tests fail, suggest using `/debug-e2e {artifact-dir}` for root cause analysis
+- New agent runner details (how it invokes the agent, auth setup, concurrency gate)
+- Confirmation that the runner compiles and registers with the E2E framework
 - Reminder to update `mise.toml` and CI workflows
+- Note that the implement phase will run E2E tests against this runner

@@ -18,10 +18,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/charmbracelet/huh"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // GetRewindPoints returns available rewind points.
@@ -188,13 +188,15 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(ctx context.Context, limi
 		}
 		count++
 
-		// Extract checkpoint ID from Entire-Checkpoint trailer (ParseCheckpoint validates format)
-		cpID, found := trailers.ParseCheckpoint(c.Message)
-		if !found {
+		// Extract all checkpoint IDs from Entire-Checkpoint trailers.
+		// Squash merge commits may contain multiple trailers from the original commits.
+		allCpIDs := trailers.ParseAllCheckpoints(c.Message)
+		if len(allCpIDs) == 0 {
 			return nil
 		}
-		// Check if this checkpoint ID has metadata on entire/checkpoints/v1
-		cpInfo, found := checkpointInfoMap[cpID]
+
+		// Resolve to the latest checkpoint by creation time (consistent with `entire resume`).
+		cpInfo, found := ResolveLatestCheckpointFromMap(allCpIDs, checkpointInfoMap)
 		if !found {
 			return nil
 		}
@@ -248,6 +250,25 @@ func (s *ManualCommitStrategy) GetLogsOnlyRewindPoints(ctx context.Context, limi
 	}
 
 	return points, nil
+}
+
+// ResolveLatestCheckpointFromMap picks the checkpoint with the latest CreatedAt
+// from a list of checkpoint IDs. Filters to IDs present in infoMap, then picks
+// the one with the most recent CreatedAt.
+func ResolveLatestCheckpointFromMap(cpIDs []id.CheckpointID, infoMap map[id.CheckpointID]CheckpointInfo) (CheckpointInfo, bool) {
+	var found bool
+	var latest CheckpointInfo
+	for _, cpID := range cpIDs {
+		info, ok := infoMap[cpID]
+		if !ok {
+			continue
+		}
+		if !found || info.CreatedAt.After(latest.CreatedAt) {
+			latest = info
+			found = true
+		}
+	}
+	return latest, found
 }
 
 // Rewind restores the working directory to a checkpoint.

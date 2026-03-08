@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -103,4 +104,24 @@ func ReleaseSlot(a Agent) {
 
 func All() []Agent {
 	return registry
+}
+
+// filterEnv returns env with entries matching any of the given variable names
+// removed. Used to strip test-only overrides (e.g. ENTIRE_TEST_TTY) from agent
+// processes so they exercise real detection paths.
+func filterEnv(env []string, names ...string) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		skip := false
+		for _, name := range names {
+			if strings.HasPrefix(e, name+"=") {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			out = append(out, e)
+		}
+	}
+	return out
 }

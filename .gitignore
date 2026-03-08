@@ -36,6 +36,7 @@ go.work.sum
 
 # Binary output (only in root)
 /entire
+/vogon
 /testreport
 
 # Build output directory
@@ -48,6 +49,7 @@ e2e/artifacts/
 
 # worktrees
 .worktrees/
+.claude/worktrees/
 test-gemini.txt
 entire-main
 entire-test
@@ -56,4 +58,4 @@ cmd/entire/entire
 docs/requirements
 docs/plans
 docs/reviews
-
+tmp/

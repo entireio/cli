@@ -10,8 +10,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
-	// Import claudecode to register the agent
+	// Import agents to register them
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 )
 
 // Package-level aliases to avoid shadowing the settings package with local variables named "settings".
@@ -85,7 +86,7 @@ func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
 		if err != nil {
 			continue
 		}
-		if hs, ok := ag.(agent.HookSupport); ok && hs.AreHooksInstalled(ctx) {
+		if hs, ok := agent.AsHookSupport(ag); ok && hs.AreHooksInstalled(ctx) {
 			installed = append(installed, name)
 		}
 	}

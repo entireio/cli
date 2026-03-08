@@ -2,6 +2,9 @@ package cli
 
 import (
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
 func TestCleanPromptForCommit(t *testing.T) {
@@ -185,47 +188,78 @@ func TestCleanPromptForCommit(t *testing.T) {
 
 func TestGenerateCommitMessage(t *testing.T) {
 	tests := []struct {
-		name     string
-		prompt   string
-		expected string
+		name      string
+		prompt    string
+		agentType types.AgentType
+		expected  string
 	}{
 		{
-			name:     "returns cleaned prompt",
-			prompt:   "Can you fix the login bug?",
-			expected: "Fix the login bug",
+			name:      "returns cleaned prompt",
+			prompt:    "Can you fix the login bug?",
+			agentType: agent.AgentTypeClaudeCode,
+			expected:  "Fix the login bug",
 		},
 		{
-			name:     "returns default for empty prompt",
-			prompt:   "",
-			expected: "Claude Code session updates",
+			name:      "returns default for empty prompt with Claude Code",
+			prompt:    "",
+			agentType: agent.AgentTypeClaudeCode,
+			expected:  "Claude Code session updates",
 		},
 		{
-			name:     "returns default when cleaned prompt is empty",
-			prompt:   "Can you ?",
-			expected: "Claude Code session updates",
+			name:      "returns default when cleaned prompt is empty",
+			prompt:    "Can you ?",
+			agentType: agent.AgentTypeClaudeCode,
+			expected:  "Claude Code session updates",
 		},
 		{
-			name:     "returns default for whitespace only prompt",
-			prompt:   "   ",
-			expected: "Claude Code session updates",
+			name:      "returns default for whitespace only prompt",
+			prompt:    "   ",
+			agentType: agent.AgentTypeClaudeCode,
+			expected:  "Claude Code session updates",
 		},
 		{
-			name:     "handles direct command prompt",
-			prompt:   "Add unit tests for the auth module",
-			expected: "Add unit tests for the auth module",
+			name:      "handles direct command prompt",
+			prompt:    "Add unit tests for the auth module",
+			agentType: agent.AgentTypeClaudeCode,
+			expected:  "Add unit tests for the auth module",
 		},
 		{
-			name:     "handles polite request",
-			prompt:   "Please refactor the database connection handling",
-			expected: "Refactor the database connection handling",
+			name:      "handles polite request",
+			prompt:    "Please refactor the database connection handling",
+			agentType: agent.AgentTypeClaudeCode,
+			expected:  "Refactor the database connection handling",
+		},
+		{
+			name:      "returns Cursor fallback for empty prompt",
+			prompt:    "",
+			agentType: agent.AgentTypeCursor,
+			expected:  "Cursor session updates",
+		},
+		{
+			name:      "returns Gemini CLI fallback for empty prompt",
+			prompt:    "",
+			agentType: agent.AgentTypeGemini,
+			expected:  "Gemini CLI session updates",
+		},
+		{
+			name:      "returns OpenCode fallback for empty prompt",
+			prompt:    "",
+			agentType: agent.AgentTypeOpenCode,
+			expected:  "OpenCode session updates",
+		},
+		{
+			name:      "returns Agent fallback for empty agent type",
+			prompt:    "",
+			agentType: "",
+			expected:  "Agent session updates",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := generateCommitMessage(tt.prompt)
+			result := generateCommitMessage(tt.prompt, tt.agentType)
 			if result != tt.expected {
-				t.Errorf("generateCommitMessage(%q) = %q, want %q", tt.prompt, result, tt.expected)
+				t.Errorf("generateCommitMessage(%q, %q) = %q, want %q", tt.prompt, tt.agentType, result, tt.expected)
 			}
 		})
 	}

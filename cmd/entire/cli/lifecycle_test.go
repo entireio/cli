@@ -13,8 +13,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // mockLifecycleAgent is a minimal Agent implementation for lifecycle tests.
@@ -214,6 +215,65 @@ func TestHandleLifecycleTurnEnd_NonexistentTranscript(t *testing.T) {
 	}
 }
 
+// mockPreparerAgent is a mock that implements TranscriptPreparer.
+// It creates the transcript file when PrepareTranscript is called,
+// simulating OpenCode's lazy-fetch behavior.
+type mockPreparerAgent struct {
+	mockLifecycleAgent
+
+	prepareTranscriptCalled bool
+}
+
+var _ agent.TranscriptPreparer = (*mockPreparerAgent)(nil)
+
+func (m *mockPreparerAgent) PrepareTranscript(_ context.Context, sessionRef string) error {
+	m.prepareTranscriptCalled = true
+	// Create the file (simulating opencode export writing to disk)
+	if err := os.MkdirAll(filepath.Dir(sessionRef), 0o750); err != nil {
+		return err
+	}
+	return os.WriteFile(sessionRef, m.transcriptData, 0o600)
+}
+
+func TestHandleLifecycleTurnEnd_PreparerCreatesFile(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir()
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	setupGitRepoWithCommit(t, tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	// Transcript file does NOT exist yet — PrepareTranscript should create it
+	transcriptPath := filepath.Join(tmpDir, ".entire", "tmp", "sess-lazy.json")
+
+	ag := &mockPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-preparer",
+			agentType:      "Mock Preparer Agent",
+			transcriptData: []byte(`{"type":"user","message":"test"}`),
+		},
+	}
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "sess-lazy",
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleTurnEnd(context.Background(), ag, event)
+
+	// PrepareTranscript should have been called
+	if !ag.prepareTranscriptCalled {
+		t.Error("expected PrepareTranscript to be called")
+	}
+
+	// The handler may fail later (no strategy state, etc), but it should NOT
+	// fail with "transcript file not found" — that was the bug.
+	if err != nil && strings.Contains(err.Error(), "transcript file not found") {
+		t.Errorf("handler failed with 'transcript file not found' — PrepareTranscript was not called before fileExists check: %v", err)
+	}
+}
+
 func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir()
 	tmpDir := t.TempDir()
@@ -285,6 +345,7 @@ func TestHandleLifecycleCompaction_PreservesTranscriptOffset(t *testing.T) {
 	// Create session state with non-zero transcript offset (set by prior condensation)
 	sessionState := &strategy.SessionState{
 		SessionID:                 sessionID,
+		StartedAt:                 time.Now(),
 		CheckpointTranscriptStart: 50,
 	}
 	if err := strategy.SaveSessionState(context.Background(), sessionState); err != nil {
@@ -377,95 +438,19 @@ func TestResolveTranscriptOffset_ZeroOffsetInPrePromptState(t *testing.T) {
 	}
 }
 
-// --- createContextFile tests ---
-
-func TestCreateContextFile_Format(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	contextFile := filepath.Join(tmpDir, "context.md")
-
-	prompts := []string{"What is the meaning of life?", "Follow-up question here"}
-	summary := "This session explored philosophical questions."
-
-	err := createContextFile(contextFile, "feat: add philosophy", "session-123", prompts, summary)
-	if err != nil {
-		t.Fatalf("createContextFile failed: %v", err)
-	}
-
-	content, err := os.ReadFile(contextFile)
-	if err != nil {
-		t.Fatalf("failed to read context file: %v", err)
-	}
-
-	contentStr := string(content)
-
-	// Check for expected sections
-	if !strings.Contains(contentStr, "# Session Context") {
-		t.Error("expected '# Session Context' header")
-	}
-	if !strings.Contains(contentStr, "Session ID: session-123") {
-		t.Error("expected session ID in context file")
-	}
-	if !strings.Contains(contentStr, "Commit Message: feat: add philosophy") {
-		t.Error("expected commit message in context file")
-	}
-	if !strings.Contains(contentStr, "## Prompts") {
-		t.Error("expected '## Prompts' section")
-	}
-	if !strings.Contains(contentStr, "### Prompt 1") {
-		t.Error("expected '### Prompt 1' subsection")
-	}
-	if !strings.Contains(contentStr, "What is the meaning of life?") {
-		t.Error("expected first prompt content")
-	}
-	if !strings.Contains(contentStr, "### Prompt 2") {
-		t.Error("expected '### Prompt 2' subsection")
-	}
-	if !strings.Contains(contentStr, "## Summary") {
-		t.Error("expected '## Summary' section")
-	}
-	if !strings.Contains(contentStr, "philosophical questions") {
-		t.Error("expected summary content")
-	}
-}
-
-func TestCreateContextFile_EmptyPrompts(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	contextFile := filepath.Join(tmpDir, "context.md")
-
-	err := createContextFile(contextFile, "fix: bug", "session-456", nil, "")
-	if err != nil {
-		t.Fatalf("createContextFile failed: %v", err)
-	}
-
-	content, err := os.ReadFile(contextFile)
-	if err != nil {
-		t.Fatalf("failed to read context file: %v", err)
-	}
-
-	contentStr := string(content)
-
-	// Should still have header and session info
-	if !strings.Contains(contentStr, "# Session Context") {
-		t.Error("expected '# Session Context' header")
-	}
-	// Should NOT have prompts section when empty
-	if strings.Contains(contentStr, "## Prompts") {
-		t.Error("unexpected '## Prompts' section when prompts are empty")
-	}
-	// Should NOT have summary section when empty
-	if strings.Contains(contentStr, "## Summary") {
-		t.Error("unexpected '## Summary' section when summary is empty")
-	}
-}
-
 // --- Event type routing tests ---
 
 func TestDispatchLifecycleEvent_RoutesToCorrectHandler(t *testing.T) {
-	t.Parallel()
+	// NOT parallel: uses t.Chdir to isolate from real repo state.
+	// Without this, the SubagentEnd case creates .git/entire-sessions/test.json
+	// in the real repo whenever untracked files exist, because DetectFileChanges
+	// reports them as new files and SaveTaskStep falls back to initializeSession.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
 
 	// Test that each event type is routed (we can't easily verify which handler
 	// was called without dependency injection, but we can verify no panic and
@@ -524,12 +509,22 @@ func TestDispatchLifecycleEvent_RoutesToCorrectHandler(t *testing.T) {
 			sessionID:   "test",
 			expectError: false, // Succeeds when run from a valid git repo
 		},
+		{
+			name:        "ModelUpdate with empty model is no-op",
+			eventType:   agent.ModelUpdate,
+			sessionID:   "test",
+			expectError: false,
+		},
+		{
+			name:        "ModelUpdate with empty session ID is no-op",
+			eventType:   agent.ModelUpdate,
+			sessionID:   "",
+			expectError: false,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
 			ag := newMockAgent()
 			event := &agent.Event{
 				Type:      tc.eventType,

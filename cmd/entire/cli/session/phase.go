@@ -168,7 +168,7 @@ func transitionFromIdle(event Event, ctx TransitionContext) TransitionResult {
 		}
 		return TransitionResult{
 			NewPhase: PhaseIdle,
-			Actions:  []Action{ActionCondense, ActionUpdateLastInteraction},
+			Actions:  []Action{ActionCondense},
 		}
 	case EventSessionStart:
 		// Already condensable, no-op.
@@ -208,7 +208,7 @@ func transitionFromActive(event Event, ctx TransitionContext) TransitionResult {
 		}
 		return TransitionResult{
 			NewPhase: PhaseActive,
-			Actions:  []Action{ActionCondense, ActionUpdateLastInteraction},
+			Actions:  []Action{ActionCondense},
 		}
 	case EventSessionStart:
 		return TransitionResult{
@@ -249,12 +249,12 @@ func transitionFromEnded(event Event, ctx TransitionContext) TransitionResult {
 		if ctx.HasFilesTouched {
 			return TransitionResult{
 				NewPhase: PhaseEnded,
-				Actions:  []Action{ActionCondenseIfFilesTouched, ActionUpdateLastInteraction},
+				Actions:  []Action{ActionCondenseIfFilesTouched},
 			}
 		}
 		return TransitionResult{
 			NewPhase: PhaseEnded,
-			Actions:  []Action{ActionDiscardIfNoFiles, ActionUpdateLastInteraction},
+			Actions:  []Action{ActionDiscardIfNoFiles},
 		}
 	case EventSessionStart:
 		return TransitionResult{
@@ -322,6 +322,7 @@ func ApplyTransition(ctx context.Context, state *State, result TransitionResult,
 			state.LastInteractionTime = &now
 		case ActionClearEndedAt:
 			state.EndedAt = nil
+			state.FullyCondensed = false
 
 		// Strategy-specific actions: skip remaining after the first handler error.
 		case ActionCondense:

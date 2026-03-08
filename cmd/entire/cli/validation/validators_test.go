@@ -28,10 +28,16 @@ func TestValidateSessionID(t *testing.T) {
 			sessionID: "session-2026.01.25_test@123",
 			wantErr:   false,
 		},
-		// Empty string (security-critical)
+		// Empty/whitespace-only (security-critical)
 		{
 			name:      "empty session ID",
 			sessionID: "",
+			wantErr:   true,
+			errMsg:    "session ID cannot be empty",
+		},
+		{
+			name:      "whitespace-only session ID",
+			sessionID: "   ",
 			wantErr:   true,
 			errMsg:    "session ID cannot be empty",
 		},

@@ -51,6 +51,7 @@ func (s *ManualCommitStrategy) getCheckpointStore() (*checkpoint.GitStore, error
 			s.checkpointStoreErr = fmt.Errorf("failed to open repository: %w", err)
 			return
 		}
+		WarnIfMetadataDisconnected()
 		s.checkpointStore = checkpoint.NewGitStore(repo)
 	})
 	return s.checkpointStore, s.checkpointStoreErr

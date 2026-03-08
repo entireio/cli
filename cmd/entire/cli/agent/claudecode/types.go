@@ -29,10 +29,12 @@ type ClaudeHookEntry struct {
 	Command string `json:"command"`
 }
 
-// sessionInfoRaw is the JSON structure from SessionStart/SessionEnd/Stop hooks
+// sessionInfoRaw is the JSON structure from SessionStart/SessionEnd/Stop hooks.
+// SessionStart includes a "model" field with the LLM model identifier.
 type sessionInfoRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
+	Model          string `json:"model,omitempty"`
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.

@@ -1,5 +1,5 @@
 ---
-description: "Generate E2E test suite for a new agent integration"
+description: "Create E2E agent runner (no unit tests)"
 ---
 
 # Write-Tests Command

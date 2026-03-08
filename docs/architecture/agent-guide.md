@@ -46,10 +46,11 @@ Every agent must implement all 19 methods on the `Agent` interface:
 |-----------|---------|-------------------|
 | `HookSupport` | `InstallHooks`, `UninstallHooks`, `AreHooksInstalled`, `GetSupportedHooks` | Agent uses a config file for hook registration (e.g., `settings.json`) |
 | `HookHandler` | `GetHookNames` | **Required for CLI hook registration** — `entire hooks <agent> <verb>` subcommands are only created for agents implementing this interface. Typically delegates to `HookNames()`. |
-| `TranscriptAnalyzer` | `GetTranscriptPosition`, `ExtractModifiedFilesFromOffset`, `ExtractPrompts`, `ExtractSummary` | You want richer checkpoints with transcript-derived file lists and prompts |
+| `TranscriptAnalyzer` | `GetTranscriptPosition`, `ExtractModifiedFilesFromOffset` | You want richer checkpoints with transcript-derived file lists |
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
+| `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |
 | `FileWatcher` | `GetWatchPaths`, `OnFileChange` | Agent doesn't support hooks; uses file-based detection instead |
 
 ## Step-by-Step Implementation Guide
@@ -458,8 +459,6 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 **Methods:**
 - `GetTranscriptPosition(path) (int, error)` - Return current position. For JSONL: line count. For JSON with messages array: message count.
 - `ExtractModifiedFilesFromOffset(path, startOffset) (files, currentPosition, error)` - Parse transcript from offset and return files touched by write/edit tools.
-- `ExtractPrompts(sessionRef, fromOffset) ([]string, error)` - Extract user prompt strings.
-- `ExtractSummary(sessionRef) (string, error)` - Extract last assistant response as summary.
 
 ### `TranscriptPreparer`
 
@@ -502,6 +501,19 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 **Without it:** Users must manually configure hooks to call `entire hooks <agent> <verb>`.
 
 **Implement when:** Your agent supports a config file with hook definitions (e.g., `.claude/settings.json`, `.gemini/settings.json`).
+
+### `HookResponseWriter`
+
+**What it enables:** Displaying messages to the user during hook execution (e.g., the "Powered by Entire" banner on session start).
+
+**Without it:** No message is shown to the user on session start. The framework silently skips the output.
+
+**Implement when:** Your agent displays hook stdout to the user. The output format is agent-specific:
+- Claude Code: JSON `{"systemMessage":"..."}` to stdout (parsed by Claude Code's UI)
+- Factory AI Droid: Plain text to stdout (displayed directly in terminal)
+
+**Methods:**
+- `WriteHookResponse(message string) error` - Output a message via the agent's hook response protocol.
 
 ### `FileWatcher`
 

@@ -4,20 +4,11 @@ Assess whether a target AI coding agent's hook/lifecycle model is compatible wit
 
 ## Procedure
 
-### Phase 1: Architecture Inspection
+### Phase 1: Understand Entire's Expectations
 
-Read these repo files to understand the Entire lifecycle model that the agent must integrate with:
+Read `docs/architecture/agent-guide.md` to understand what Entire expects from agents: EventType names, required interfaces, hook patterns, and lifecycle flow. This gives you the vocabulary to map the target agent's native hooks to Entire's event model.
 
-**Required reading:**
-
-1. `cmd/entire/cli/agent/agent.go` — Read to find the `Agent` interface and all optional capability interfaces
-2. `cmd/entire/cli/agent/event.go` — Read to find all `EventType` constants (the normalized lifecycle events agents must map to)
-3. `cmd/entire/cli/hook_registry.go` — How native hook names are registered and routed
-4. `cmd/entire/cli/lifecycle.go` — `DispatchLifecycleEvent` handler
-5. `docs/architecture/agent-guide.md` — Full implementation guide
-6. `docs/architecture/agent-integration-checklist.md` — Validation criteria
-
-**Reference implementations:** Run `Glob("cmd/entire/cli/agent/*/")` to discover all existing agent packages. Pick 1-2 as reference. In each, focus on `lifecycle.go` (ParseHookEvent), `hooks.go` (HookSupport), and `types.go` (hook input structs).
+You may also reference `cmd/entire/cli/agent/agent.go` and `cmd/entire/cli/agent/event.go` for exact interface signatures and EventType constants. Prefer `agent-guide.md` as the primary source, but the source files are the ground truth if the guide is out of date. Avoid reading other internal files (`hook_registry.go`, `lifecycle.go`, strategy code) — the implementer handles those, and architecture tests enforce this boundary at the code level.
 
 ### Phase 2: Static Capability Checks
 
@@ -73,65 +64,84 @@ Run the script and analyze:
 1. **Execute**: `chmod +x scripts/test-$AGENT_SLUG-agent-integration.sh && scripts/test-$AGENT_SLUG-agent-integration.sh --manual-live`
 2. **For each captured payload**: show command, artifact path, decoded JSON
 3. **Lifecycle mapping**: native hook name → Entire EventType
-4. **Field coverage**: which `Event` struct fields can be populated per event
 
-### Phase 5: Compatibility Report
+### Phase 5: Implementation One-Pager
 
-Generate structured markdown output directly to the user:
+Write the research findings to `cmd/entire/cli/agent/$AGENT_PACKAGE/AGENT.md` as a structured one-pager that the test-writer and implementer phases will use as their single source of agent-specific information.
+
+**Create the agent package directory first** (if it doesn't exist):
+
+```bash
+mkdir -p cmd/entire/cli/agent/$AGENT_PACKAGE
+```
+
+**Write the one-pager using this template:**
 
 ```markdown
-# Agent Compatibility Report: $AGENT_NAME
+# $AGENT_NAME — Integration One-Pager
 
-**Date:** YYYY-MM-DD
-**Agent:** $AGENT_NAME v$VERSION
-**Binary:** $AGENT_BIN
-**Verdict:** COMPATIBLE / PARTIAL / INCOMPATIBLE
+## Verdict: COMPATIBLE / PARTIAL / INCOMPATIBLE
 
-## Static Capability Checks
-
+## Static Checks
 | Check | Result | Notes |
 |-------|--------|-------|
 | Binary present | PASS/FAIL | path |
 | Help available | PASS/FAIL | |
-| Hook keywords found | PASS/WARN/FAIL | keywords found |
-| Session concept | PASS/WARN/FAIL | |
-| Config directory | PASS/WARN/FAIL | path |
-| Documentation | PASS/WARN/FAIL | URLs |
+| Version info | PASS/FAIL | version string |
+| Hook keywords | PASS/FAIL | keywords found |
+| Session keywords | PASS/FAIL | keywords found |
+| Config directory | PASS/FAIL | path |
+| Documentation | PASS/FAIL | URL |
 
-## Lifecycle Event Mapping
+## Binary
+- Name: `$AGENT_BIN`
+- Version: ...
+- Install: ... (how to install if not present)
 
-For each EventType constant found in `cmd/entire/cli/agent/event.go`, create a row:
+## Hook Mechanism
+- Config file: `~/.config/$AGENT_SLUG/settings.json` (exact path)
+- Config format: JSON / YAML / TOML
+- Hook registration: ... (how hooks are declared — JSON objects, env vars, etc.)
+- Hook names and when they fire:
+  | Native Hook Name | When It Fires | Entire EventType |
+  |-----------------|---------------|-----------------|
+  | `on_session_start` | Agent session begins | `SessionStart` |
+  | ... | ... | ... |
+- Valid Entire EventTypes: `SessionStart`, `TurnStart`, `TurnEnd`, `Compaction`, `SessionEnd`, `SubagentStart`, `SubagentEnd`
+- Hook input (stdin JSON): ... (exact fields with example payload)
 
-| Entire EventType | Native Hook | Status | Fields Available |
-|-----------------|-------------|--------|-----------------|
-| (one row per EventType from event.go) | ? | MAPPED/PARTIAL/MISSING | |
+## Transcript
+- Location: `~/.config/$AGENT_SLUG/sessions/<id>/transcript.jsonl`
+- Format: JSONL / JSON array / other
+- Session ID extraction: ... (from hook payload field or directory name)
+- Example entry: `{"role": "user", "content": "..."}`
 
-## Required Interface Feasibility
+## Config Preservation
+- Keys to preserve when modifying: ... (or "use read-modify-write on entire file")
+- Settings that affect hook behavior: ...
 
-For each interface defined in `cmd/entire/cli/agent/agent.go`, assess feasibility:
+## CLI Flags
+- Non-interactive prompt: `$AGENT_BIN --prompt "..." --no-confirm`
+- Interactive mode: `$AGENT_BIN` (or "not supported")
+- Relevant env vars: ...
 
-| Interface | Feasible | Complexity | Notes |
-|-----------|----------|------------|-------|
-| Agent (core) | Yes/No/Partial | Low/Med/High | |
-| (one row per optional interface from agent.go) | ... | ... | |
+## Gaps & Limitations
+- ... (anything that doesn't map cleanly)
 
-## Integration Gaps
-
-1. **[HIGH/MED/LOW]** Description and impact
-2. ...
-
-## Recommended Adapter Approach
-
-- Which interfaces to implement
-- Complexity estimate (files, LOC)
-- Similar implementation to use as template
-- Key challenges
-
-## Artifacts
-
-- Test script: `scripts/test-$AGENT_SLUG-agent-integration.sh`
-- Captured payloads: `.entire/tmp/probe-$AGENT_SLUG-*/captures/`
+## Captured Payloads
+- See `.entire/tmp/probe-$AGENT_SLUG-*/captures/` for raw JSON captures
 ```
+
+**Key points about the one-pager:**
+
+- The **Entire EventType mapping** (which native hook → which EventType) uses the event names learned from `agent-guide.md` in Phase 1. The researcher can do this mapping because it's a simple table — it doesn't need Entire source code.
+- Fill in every section with concrete values from Phases 2-4. Don't leave placeholders.
+- If a section doesn't apply (e.g., no transcript support), say so explicitly.
+- This file persists as development documentation — future maintainers will reference it.
+
+### Phase 6: Commit
+
+Use `/commit` to commit all files.
 
 ## Blocker Handling
 
@@ -144,7 +154,8 @@ If blocked at any point (auth, sandbox, binary not found):
 
 ## Constraints
 
-- **No Go code.** This command produces a feasibility report and test script only.
-- **Non-destructive.** All artifacts go under `.entire/tmp/` (gitignored).
+- **No Go code.** This command produces a one-pager and test script only.
+- **Non-destructive.** All artifacts go under `.entire/tmp/` (gitignored). The one-pager goes in the agent package directory.
 - **Agent-specific scripts.** Adapt based on Phase 2 findings, not a generic template.
 - **Ask, don't assume.** If the hook mechanism is unclear, ask the user.
+- **External focus.** Prefer `agent-guide.md` for Entire's expectations. You may reference `agent.go` and `event.go` for exact names, but avoid deeper internals — architecture tests enforce the boundary at the code level.

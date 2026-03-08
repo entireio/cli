@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // TestShadow_MidSessionRebaseMigration tests that when Claude performs a rebase
@@ -65,8 +66,8 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	t.Log("Phase 2: Starting session and creating first checkpoint")
 
 	session := env.NewSession()
-	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	if err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Create function A"); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
 	// Create first file change
@@ -104,7 +105,7 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	// happens mid-session as part of Claude's tool execution
 	cmd := exec.Command("git", "rebase", "master")
 	cmd.Dir = env.RepoDir
-	cmd.Env = gitIsolatedEnv()
+	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git rebase failed: %v\nOutput: %s", err, output)
 	}
@@ -197,17 +198,9 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	// ========================================
 	t.Log("Phase 6: Verifying rewind still works after migration")
 
-	// Find checkpoint 1 (before rebase)
-	var checkpoint1ID string
-	for _, p := range points {
-		if p.Message == "Create function A" {
-			checkpoint1ID = p.ID
-			break
-		}
-	}
-	if checkpoint1ID == "" {
-		t.Fatalf("Could not find checkpoint 1 in rewind points")
-	}
+	// Find checkpoint 1 (before rebase) — it is the oldest rewind point.
+	// Points are sorted most recent first, so checkpoint 1 is the last entry.
+	checkpoint1ID := points[len(points)-1].ID
 
 	// Rewind to checkpoint 1
 	if err := env.Rewind(checkpoint1ID); err != nil {
@@ -234,7 +227,7 @@ func (env *TestEnv) gitCheckout(ref string) {
 
 	cmd := exec.Command("git", "checkout", ref)
 	cmd.Dir = env.RepoDir
-	cmd.Env = gitIsolatedEnv()
+	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		env.T.Fatalf("git checkout %s failed: %v\nOutput: %s", ref, err, output)
 	}
@@ -284,8 +277,8 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 	t.Log("Phase 2: Starting session and creating first checkpoint")
 
 	session := env.NewSession()
-	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	if err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Create function A"); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
 	// Create file and checkpoint
@@ -339,7 +332,7 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 
 	cmd := exec.Command("git", "rebase", "master")
 	cmd.Dir = env.RepoDir
-	cmd.Env = gitIsolatedEnv()
+	cmd.Env = testutil.GitIsolatedEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git rebase failed: %v\nOutput: %s", err, output)
 	}

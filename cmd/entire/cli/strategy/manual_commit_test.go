@@ -16,9 +16,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 const testTrailerCheckpointID id.CheckpointID = "a1b2c3d4e5f6"
@@ -2609,7 +2609,7 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 
 	// === PROMPT 1 START: Initialize session (simulates UserPromptSubmit) ===
 	// This must happen BEFORE agent makes any changes
-	if err := s.InitializeSession(context.Background(), sessionID, "Claude Code", "", ""); err != nil {
+	if err := s.InitializeSession(context.Background(), sessionID, "Claude Code", "", "", ""); err != nil {
 		t.Fatalf("InitializeSession() prompt 1 error = %v", err)
 	}
 
@@ -2655,7 +2655,7 @@ func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
 
 	// === PROMPT 2 START: Initialize session again (simulates UserPromptSubmit) ===
 	// This captures the user's edits to user.go BEFORE the agent runs
-	if err := s.InitializeSession(context.Background(), sessionID, "Claude Code", "", ""); err != nil {
+	if err := s.InitializeSession(context.Background(), sessionID, "Claude Code", "", "", ""); err != nil {
 		t.Fatalf("InitializeSession() prompt 2 error = %v", err)
 	}
 
@@ -2979,6 +2979,11 @@ func TestCondenseSession_GeminiTranscript(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
+	// Write prompt.txt (simulating what lifecycle does at turn start / turn end)
+	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.PromptFileName), []byte("Create a new file"), 0o644); err != nil {
+		t.Fatalf("failed to write prompt file: %v", err)
+	}
+
 	// Create modified file
 	if err := os.WriteFile(testFile, []byte("modified by gemini"), 0o644); err != nil {
 		t.Fatalf("failed to modify file: %v", err)
@@ -3133,6 +3138,11 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
+	// Write prompt.txt for checkpoint 1 (simulating what lifecycle does)
+	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.PromptFileName), []byte("Add a main function"), 0o644); err != nil {
+		t.Fatalf("failed to write prompt file: %v", err)
+	}
+
 	// Modify file for checkpoint 1
 	if err := os.WriteFile(testFile, []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
 		t.Fatalf("failed to modify file: %v", err)
@@ -3200,6 +3210,12 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 
 	if err := os.WriteFile(transcriptPath, []byte(checkpoint2Transcript), 0o644); err != nil {
 		t.Fatalf("failed to update transcript: %v", err)
+	}
+
+	// Simulate condensation clearing prompt.txt (condenseAndUpdateState does this),
+	// then lifecycle appending the new prompt at turn start.
+	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.PromptFileName), []byte("Now add error handling"), 0o644); err != nil {
+		t.Fatalf("failed to write prompt file: %v", err)
 	}
 
 	// Modify file for checkpoint 2
@@ -3290,12 +3306,12 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 		t.Error("Full transcript should be stored")
 	}
 
-	// Verify both prompts are present (even though tokens only count from second prompt)
-	if !strings.Contains(content.Prompts, "Add a main function") {
-		t.Error("Prompts should contain first prompt")
+	// Verify only checkpoint-scoped prompts are present (from CheckpointTranscriptStart onwards)
+	if strings.Contains(content.Prompts, "Add a main function") {
+		t.Error("Prompts should NOT contain first prompt (before checkpoint start)")
 	}
 	if !strings.Contains(content.Prompts, "Now add error handling") {
-		t.Error("Prompts should contain second prompt")
+		t.Error("Prompts should contain second prompt (checkpoint-scoped)")
 	}
 }
 
@@ -3530,7 +3546,7 @@ func TestCondenseSession_FilesTouchedNoFallback_NoOverlap(t *testing.T) {
 }
 
 // TestExtractFilesFromLiveTranscript_RespectsOffset verifies that after condensation
-// sets CheckpointTranscriptStart = N, extractFilesFromLiveTranscript only returns
+// sets CheckpointTranscriptStart = N, resolveFilesTouched only returns
 // files from messages at index N and beyond, not from the beginning.
 //
 // This is a regression test for a bug where compaction events (pre-compress hooks)
@@ -3575,15 +3591,90 @@ func TestExtractFilesFromLiveTranscript_RespectsOffset(t *testing.T) {
 	}
 
 	// With correct offset (4): should only find green.md
-	files := s.extractFilesFromLiveTranscript(context.Background(), state)
+	files := s.resolveFilesTouched(context.Background(), state)
 	if len(files) != 1 || files[0] != "docs/green.md" {
-		t.Errorf("extractFilesFromLiveTranscript(offset=4) = %v, want [docs/green.md]", files)
+		t.Errorf("resolveFilesTouched(offset=4) = %v, want [docs/green.md]", files)
 	}
 
 	// With reset offset (0): would incorrectly find all 3 files (the bug)
 	state.CheckpointTranscriptStart = 0
-	allFiles := s.extractFilesFromLiveTranscript(context.Background(), state)
+	allFiles := s.resolveFilesTouched(context.Background(), state)
 	if len(allFiles) != 3 {
-		t.Errorf("extractFilesFromLiveTranscript(offset=0) got %d files, want 3: %v", len(allFiles), allFiles)
+		t.Errorf("resolveFilesTouched(offset=0) got %d files, want 3: %v", len(allFiles), allFiles)
 	}
+}
+
+// TestResolveFilesTouched_PrefersStateFallsBackToTranscript verifies the two-tier
+// resolution in resolveFilesTouched: state.FilesTouched is preferred (returns a copy),
+// and transcript extraction is only used as a fallback when FilesTouched is empty.
+func TestResolveFilesTouched_PrefersStateFallsBackToTranscript(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	// Gemini transcript containing a file write
+	transcript := `{
+  "messages": [
+    {"type": "user", "content": [{"text": "create file"}]},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "from-transcript.txt"}}]}
+  ]
+}`
+	transcriptPath := filepath.Join(dir, "transcript.json")
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	t.Run("prefers FilesTouched over transcript", func(t *testing.T) {
+		state := &SessionState{
+			SessionID:      "test-prefers-state",
+			TranscriptPath: transcriptPath,
+			AgentType:      agent.AgentTypeGemini,
+			WorktreePath:   dir,
+			FilesTouched:   []string{"from-hook.txt"},
+		}
+		files := s.resolveFilesTouched(context.Background(), state)
+		if len(files) != 1 || files[0] != "from-hook.txt" {
+			t.Errorf("resolveFilesTouched with FilesTouched = %v, want [from-hook.txt]", files)
+		}
+	})
+
+	t.Run("returns copy of FilesTouched", func(t *testing.T) {
+		state := &SessionState{
+			SessionID:    "test-copy",
+			FilesTouched: []string{"a.txt", "b.txt"},
+		}
+		files := s.resolveFilesTouched(context.Background(), state)
+		// Mutating returned slice should not affect state
+		files[0] = "mutated.txt"
+		if state.FilesTouched[0] != "a.txt" {
+			t.Errorf("resolveFilesTouched did not return a copy; state.FilesTouched[0] = %q", state.FilesTouched[0])
+		}
+	})
+
+	t.Run("falls back to transcript when FilesTouched is empty", func(t *testing.T) {
+		state := &SessionState{
+			SessionID:      "test-fallback",
+			TranscriptPath: transcriptPath,
+			AgentType:      agent.AgentTypeGemini,
+			WorktreePath:   dir,
+			FilesTouched:   nil,
+		}
+		files := s.resolveFilesTouched(context.Background(), state)
+		if len(files) != 1 || files[0] != "from-transcript.txt" {
+			t.Errorf("resolveFilesTouched with empty FilesTouched = %v, want [from-transcript.txt]", files)
+		}
+	})
+
+	t.Run("returns nil when both sources are empty", func(t *testing.T) {
+		state := &SessionState{
+			SessionID:    "test-empty",
+			FilesTouched: nil,
+			// No transcript path — extraction will return nil
+		}
+		files := s.resolveFilesTouched(context.Background(), state)
+		if files != nil {
+			t.Errorf("resolveFilesTouched with no sources = %v, want nil", files)
+		}
+	})
 }

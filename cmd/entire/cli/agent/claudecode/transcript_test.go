@@ -114,48 +114,6 @@ func TestExtractModifiedFiles(t *testing.T) {
 	}
 }
 
-func TestExtractLastUserPrompt(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		data string
-		want string
-	}{
-		{
-			name: "string content",
-			data: `{"type":"user","uuid":"u1","message":{"content":"first"}}
-{"type":"assistant","uuid":"a1","message":{"content":[]}}
-{"type":"user","uuid":"u2","message":{"content":"second"}}`,
-			want: "second",
-		},
-		{
-			name: "array content with text block",
-			data: `{"type":"user","uuid":"u1","message":{"content":[{"type":"text","text":"hello world"}]}}`,
-			want: "hello world",
-		},
-		{
-			name: "empty transcript",
-			data: ``,
-			want: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			lines, err := transcript.ParseFromBytes([]byte(tt.data))
-			if err != nil && tt.data != "" {
-				t.Fatalf("ParseFromBytes() error = %v", err)
-			}
-			got := ExtractLastUserPrompt(lines)
-			if got != tt.want {
-				t.Errorf("ExtractLastUserPrompt() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestTruncateAtUUID(t *testing.T) {
 	t.Parallel()
 

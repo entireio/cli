@@ -18,9 +18,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/charmbracelet/huh"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/spf13/cobra"
 )
 
@@ -127,11 +127,11 @@ func resumeFromCurrentBranch(ctx context.Context, branchName string, force bool)
 	}
 
 	// Find a commit with an Entire-Checkpoint trailer, looking at branch-only commits
-	result, err := findBranchCheckpoint(repo, branchName)
+	result, err := findBranchCheckpoints(repo, branchName)
 	if err != nil {
 		return err
 	}
-	if result.checkpointID.IsEmpty() {
+	if len(result.checkpointIDs) == 0 {
 		fmt.Fprintf(os.Stderr, "No Entire checkpoint found on branch '%s'\n", branchName)
 		return nil
 	}
@@ -153,13 +153,35 @@ func resumeFromCurrentBranch(ctx context.Context, branchName string, force bool)
 		}
 	}
 
-	checkpointID := result.checkpointID
+	checkpointID := result.checkpointIDs[0]
 
-	// Get metadata branch tree for lookups
-	metadataTree, err := strategy.GetMetadataBranchTree(repo)
-	if err != nil {
-		// No local metadata branch, check if remote has it
-		return checkRemoteMetadata(ctx, repo, checkpointID)
+	// Multiple checkpoints (squash merge): resolve latest by CreatedAt timestamp.
+	// resolveLatestCheckpoint also returns the metadata tree so we can reuse it
+	// for the ReadCheckpointMetadata call below without a redundant lookup.
+	var metadataTree *object.Tree
+	if len(result.checkpointIDs) > 1 {
+		latest, tree, err := resolveLatestCheckpoint(ctx, repo, result.checkpointIDs)
+		if err != nil {
+			// No metadata available — nothing to resume from
+			fmt.Fprintf(os.Stderr, "Found %d checkpoints for commit %s but metadata is not available\n",
+				len(result.checkpointIDs), result.commitHash[:7])
+			return checkRemoteMetadata(ctx, repo, result.checkpointIDs[0])
+		}
+		skipped := len(result.checkpointIDs) - 1
+		fmt.Fprintf(os.Stderr, "Found %d checkpoints for commit %s, resuming from the latest (%d older checkpoints skipped)\n",
+			len(result.checkpointIDs), result.commitHash[:7], skipped)
+		checkpointID = latest
+		metadataTree = tree
+	}
+
+	// Get metadata branch tree for lookups (reuse from resolveLatestCheckpoint if available)
+	if metadataTree == nil {
+		var err error
+		metadataTree, err = strategy.GetMetadataBranchTree(repo)
+		if err != nil {
+			// No local metadata branch, check if remote has it
+			return checkRemoteMetadata(ctx, repo, checkpointID)
+		}
 	}
 
 	// Look up metadata from sharded path
@@ -169,23 +191,71 @@ func resumeFromCurrentBranch(ctx context.Context, branchName string, force bool)
 		return checkRemoteMetadata(ctx, repo, checkpointID)
 	}
 
-	return resumeSession(ctx, metadata.SessionID, checkpointID, force)
+	return resumeSession(ctx, metadata, force)
 }
 
-// branchCheckpointResult contains the result of searching for a checkpoint on a branch.
-type branchCheckpointResult struct {
-	checkpointID      id.CheckpointID
+// resolveLatestCheckpoint reads metadata for each checkpoint ID and returns
+// the one with the latest CreatedAt, along with the metadata tree for reuse.
+// It tries the local metadata branch first, then fetches from remote, then
+// falls back to the remote tree directly.
+func resolveLatestCheckpoint(ctx context.Context, repo *git.Repository, checkpointIDs []id.CheckpointID) (id.CheckpointID, *object.Tree, error) {
+	metadataTree, err := getMetadataTree(ctx, repo)
+	if err != nil {
+		return id.EmptyCheckpointID, nil, err
+	}
+	infoMap := make(map[id.CheckpointID]strategy.CheckpointInfo, len(checkpointIDs))
+	for _, cpID := range checkpointIDs {
+		metadata, err := strategy.ReadCheckpointMetadata(metadataTree, cpID.Path())
+		if err != nil {
+			continue
+		}
+		infoMap[cpID] = *metadata
+	}
+	latest, found := strategy.ResolveLatestCheckpointFromMap(checkpointIDs, infoMap)
+	if !found {
+		return id.EmptyCheckpointID, nil, errors.New("no checkpoint metadata found")
+	}
+	return latest.CheckpointID, metadataTree, nil
+}
+
+// getMetadataTree returns the metadata branch tree, trying local first,
+// then fetching from remote, then falling back to the remote tree directly.
+func getMetadataTree(ctx context.Context, repo *git.Repository) (*object.Tree, error) {
+	metadataTree, err := strategy.GetMetadataBranchTree(repo)
+	if err == nil {
+		return metadataTree, nil
+	}
+
+	// Try fetching from remote
+	if fetchErr := FetchMetadataBranch(ctx); fetchErr == nil {
+		metadataTree, err = strategy.GetMetadataBranchTree(repo)
+		if err == nil {
+			return metadataTree, nil
+		}
+	}
+
+	// Try remote tree directly
+	remoteTree, remoteErr := strategy.GetRemoteMetadataBranchTree(repo)
+	if remoteErr != nil {
+		return nil, fmt.Errorf("metadata branch not available: %w", remoteErr)
+	}
+	return remoteTree, nil
+}
+
+// branchCheckpointsResult contains the result of searching for checkpoints on a branch.
+type branchCheckpointsResult struct {
+	checkpointIDs     []id.CheckpointID
 	commitHash        string
 	commitMessage     string
 	newerCommitsExist bool // true if there are branch-only commits (not merge commits) without checkpoints
 	newerCommitCount  int  // count of branch-only commits without checkpoints
 }
 
-// findBranchCheckpoint finds the most recent commit with an Entire-Checkpoint trailer
+// findBranchCheckpoints finds the most recent commit with an Entire-Checkpoint trailer
 // among commits that are unique to this branch (not reachable from the default branch).
 // This handles the case where main has been merged into the feature branch.
-func findBranchCheckpoint(repo *git.Repository, branchName string) (*branchCheckpointResult, error) {
-	result := &branchCheckpointResult{}
+func findBranchCheckpoints(repo *git.Repository, branchName string) (*branchCheckpointsResult, error) {
+	result := &branchCheckpointsResult{}
 
 	// Get HEAD commit
 	head, err := repo.Head()
@@ -199,8 +269,8 @@ func findBranchCheckpoint(repo *git.Repository, branchName string) (*branchCheck
 	}
 
 	// First, check if HEAD itself has a checkpoint (most common case)
-	if cpID, found := trailers.ParseCheckpoint(headCommit.Message); found {
-		result.checkpointID = cpID
+	if cpIDs := trailers.ParseAllCheckpoints(headCommit.Message); len(cpIDs) > 0 {
+		result.checkpointIDs = cpIDs
 		result.commitHash = head.Hash().String()
 		result.commitMessage = headCommit.Message
 		result.newerCommitsExist = false
@@ -254,8 +324,8 @@ func findBranchCheckpoint(repo *git.Repository, branchName string) (*branchCheck
 // Returns the first checkpoint found and info about commits between HEAD and the checkpoint.
 // It distinguishes between merge commits (bringing in other branches) and regular commits
 // (actual branch work) to avoid false warnings after merging main.
-func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branchCheckpointResult {
-	result := &branchCheckpointResult{}
+func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branchCheckpointsResult {
+	result := &branchCheckpointsResult{}
 	branchWorkCommits := 0 // Regular commits without checkpoints (actual work)
 	const maxCommits = 100 // Limit search depth
 	totalChecked := 0
@@ -268,8 +338,8 @@ func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branc
 		}
 
 		// Check for checkpoint trailer
-		if cpID, found := trailers.ParseCheckpoint(current.Message); found {
-			result.checkpointID = cpID
+		if cpIDs := trailers.ParseAllCheckpoints(current.Message); len(cpIDs) > 0 {
+			result.checkpointIDs = cpIDs
 			result.commitHash = current.Hash.String()
 			result.commitMessage = current.Message
 			// Only warn about branch work commits, not merge commits
@@ -350,28 +420,17 @@ func checkRemoteMetadata(ctx context.Context, repo *git.Repository, checkpointID
 	}
 
 	// Now resume the session with the fetched metadata
-	return resumeSession(ctx, metadata.SessionID, checkpointID, false)
+	return resumeSession(ctx, metadata, false)
 }
 
 // resumeSession restores and displays the resume command for a specific session.
 // For multi-session checkpoints, restores ALL sessions and shows commands for each.
 // If force is false, prompts for confirmation when local logs have newer timestamps.
-func resumeSession(ctx context.Context, sessionID string, checkpointID id.CheckpointID, force bool) error {
-	// Read checkpoint metadata first to get agent type (matching rewind pattern)
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-
-	metadataTree, err := strategy.GetMetadataBranchTree(repo)
-	if err != nil {
-		return fmt.Errorf("failed to get metadata branch: %w", err)
-	}
-
-	metadata, err := strategy.ReadCheckpointMetadata(metadataTree, checkpointID.Path())
-	if err != nil {
-		return fmt.Errorf("failed to read checkpoint metadata: %w", err)
-	}
+// The caller must provide the already-resolved checkpoint metadata to avoid redundant lookups
+// and to support both local and remote metadata trees.
+func resumeSession(ctx context.Context, metadata *strategy.CheckpointInfo, force bool) error {
+	checkpointID := metadata.CheckpointID
+	sessionID := metadata.SessionID
 
 	// Resolve agent from checkpoint metadata (same as rewind)
 	ag, err := strategy.ResolveAgentForRewind(metadata.Agent)
@@ -420,24 +479,27 @@ func resumeSession(ctx context.Context, sessionID string, checkpointID id.Checkp
 		return resumeSingleSession(ctx, ag, sessionID, checkpointID, repoRoot, force)
 	}
 
-	// Sort sessions by CreatedAt so the most recent is last (for display).
-	// This fixes ordering when subdirectory index doesn't reflect activity order.
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].CreatedAt.Before(sessions[j].CreatedAt)
-	})
-
 	logging.Debug(logCtx, "resume session completed",
 		slog.String("checkpoint_id", checkpointID.String()),
 		slog.Int("session_count", len(sessions)),
 	)
 
-	// Print per-session resume commands using returned sessions
+	return displayRestoredSessions(sessions)
+}
+
+// displayRestoredSessions sorts sessions by CreatedAt and prints resume commands.
+func displayRestoredSessions(sessions []strategy.RestoredSession) error {
+	sort.SliceStable(sessions, func(i, j int) bool {
+		return sessions[i].CreatedAt.Before(sessions[j].CreatedAt)
+	})
+
 	if len(sessions) > 1 {
 		fmt.Fprintf(os.Stderr, "\nRestored %d sessions. To continue, run:\n", len(sessions))
 	} else if len(sessions) == 1 {
 		fmt.Fprintf(os.Stderr, "Session: %s\n", sessions[0].SessionID)
 		fmt.Fprintf(os.Stderr, "\nTo continue this session, run:\n")
 	}
+
 	for i, sess := range sessions {
 		sessionAgent, err := strategy.ResolveAgentForRewind(sess.Agent)
 		if err != nil {
@@ -445,26 +507,16 @@ func resumeSession(ctx context.Context, sessionID string, checkpointID id.Checkp
 		}
 		cmd := sessionAgent.FormatResumeCommand(sess.SessionID)
 
-		if len(sessions) > 1 {
-			if i == len(sessions)-1 {
-				if sess.Prompt != "" {
-					fmt.Fprintf(os.Stderr, "  %s  # %s (most recent)\n", cmd, sess.Prompt)
-				} else {
-					fmt.Fprintf(os.Stderr, "  %s  # (most recent)\n", cmd)
-				}
-			} else {
-				if sess.Prompt != "" {
-					fmt.Fprintf(os.Stderr, "  %s  # %s\n", cmd, sess.Prompt)
-				} else {
-					fmt.Fprintf(os.Stderr, "  %s\n", cmd)
-				}
-			}
-		} else {
-			if sess.Prompt != "" {
-				fmt.Fprintf(os.Stderr, "  %s  # %s\n", cmd, sess.Prompt)
-			} else {
-				fmt.Fprintf(os.Stderr, "  %s\n", cmd)
-			}
+		isLast := i == len(sessions)-1
+		switch {
+		case len(sessions) > 1 && isLast && sess.Prompt != "":
+			fmt.Fprintf(os.Stderr, "  %s  # %s (most recent)\n", cmd, sess.Prompt)
+		case len(sessions) > 1 && isLast:
+			fmt.Fprintf(os.Stderr, "  %s  # (most recent)\n", cmd)
+		case sess.Prompt != "":
+			fmt.Fprintf(os.Stderr, "  %s  # %s\n", cmd, sess.Prompt)
+		default:
+			fmt.Fprintf(os.Stderr, "  %s\n", cmd)
 		}
 	}
 

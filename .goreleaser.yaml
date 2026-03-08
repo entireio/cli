@@ -1,4 +1,6 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema-pro.json
 version: 2
+pro: true
 
 before:
   hooks:
@@ -59,13 +61,6 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
-changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
 
 homebrew_casks:
   - name: entire
@@ -82,3 +77,9 @@ homebrew_casks:
       bash: "completions/entire.bash"
       zsh: "completions/entire.zsh"
       fish: "completions/entire.fish"
+
+announce:
+  discord:
+    enabled: '{{ and (isEnvSet "DISCORD_WEBHOOK_ID") (isEnvSet "DISCORD_WEBHOOK_TOKEN") }}'
+    message_template: "Beep, boop. **Entire CLI {{ .Tag }}** is out!\n\n{{ .ReleaseURL }}\n\nSee https://docs.entire.io/cli/installation for help installing and updating."
+    author: "Entire"

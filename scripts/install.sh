@@ -234,24 +234,23 @@ main() {
         esac
 
         echo ""
-        echo -e "  ${YELLOW}Almost there!${NC} Add it to your PATH so you can run ${BOLD}entire${NC} from anywhere."
+        echo -e "  Add ${BOLD}entire${NC} to your PATH:"
         echo ""
         if [[ "$shell_name" == "fish" ]]; then
-            echo -e "  Run this, then restart your terminal:"
-            echo ""
             echo -e "    ${BOLD}mkdir -p ~/.config/fish${NC}"
             echo -e "    ${BOLD}echo 'fish_add_path ${install_dir}' >> \$HOME/.config/fish/config.fish${NC}"
         elif [[ -n "$shell_config" ]]; then
-            echo -e "  Run this, then restart your terminal:"
-            echo ""
             echo -e "    ${BOLD}echo 'export PATH=\"${install_dir}:\$PATH\"' >> ${shell_config}${NC}"
         else
-            echo -e "  Add this to your shell config, then restart your terminal:"
+            echo -e "  Add this to your shell config:"
             echo ""
             echo -e "    ${BOLD}export PATH=\"${install_dir}:\$PATH\"${NC}"
+            echo ""
+            echo -e "  Restart your terminal, then run ${BOLD}entire${NC} to get started."
+            exit 0
         fi
         echo ""
-        echo -e "  Then run ${BOLD}entire${NC} to get started."
+        echo -e "  Restart your terminal, then run ${BOLD}entire${NC} to get started."
         exit 0
     fi
 

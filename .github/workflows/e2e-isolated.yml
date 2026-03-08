@@ -8,7 +8,7 @@ on:
         required: true
         default: "gemini-cli"
         type: choice
-        options: [claude-code, opencode, gemini-cli]
+        options: [claude-code, opencode, gemini-cli, cursor-cli, factoryai-droid, copilot-cli]
       test:
         description: "Test name filter (regex)"
         required: true
@@ -38,6 +38,9 @@ jobs:
             claude-code) curl -fsSL https://claude.ai/install.sh | bash ;;
             opencode)    curl -fsSL https://opencode.ai/install | bash ;;
             gemini-cli)  npm install -g @google/gemini-cli ;;
+            cursor-cli)  curl https://cursor.com/install -fsS | bash ;;
+            factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
+            copilot-cli)  npm install -g @github/copilot  ;;
           esac
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
@@ -45,12 +48,18 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: go run ./e2e/bootstrap
 
       - name: Run isolated test
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
           E2E_ENTIRE_BIN: /usr/local/bin/entire
         run: |

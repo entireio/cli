@@ -1,0 +1,35 @@
+#!/bin/sh
+#MISE description="Run E2E canary tests with Vogon agent (no API calls)"
+#USAGE arg "[filter]" help="Test name filter (regex)" default=""
+
+set -eu
+
+export E2E_AGENT="vogon"
+
+# Build entire CLI
+mise run build
+export E2E_ENTIRE_BIN="$PWD/entire"
+
+# Build vogon binary
+go build -o vogon ./e2e/vogon
+export PATH="$PWD:$PATH"
+
+if [ -z "${E2E_ARTIFACT_DIR:-}" ]; then
+  E2E_ARTIFACT_DIR="$PWD/e2e/artifacts/canary-$(date +%Y-%m-%dT%H-%M-%S)"
+fi
+export E2E_ARTIFACT_DIR
+mkdir -p "$E2E_ARTIFACT_DIR"
+echo "artifacts: $E2E_ARTIFACT_DIR"
+
+filter="${usage_filter:-}"
+
+gotestsum --format dots --jsonfile "$E2E_ARTIFACT_DIR/test-events.json" -- \
+  -tags=e2e -count=1 -timeout=10m \
+  ${filter:+-run "$filter"} \
+  ./e2e/tests/... || rc=$?
+
+go run ./e2e/cmd/testreport -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json"
+echo ""
+cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null
+echo "artifacts: $E2E_ARTIFACT_DIR"
+exit "${rc:-0}"

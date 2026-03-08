@@ -16,7 +16,7 @@ func CalculateTokenUsage(ctx context.Context, ag Agent, transcriptData []byte, t
 	}
 
 	// Calculate token usage - prefer SubagentAwareExtractor to include subagent tokens
-	if subagentExtractor, ok := ag.(SubagentAwareExtractor); ok {
+	if subagentExtractor, ok := AsSubagentAwareExtractor(ag); ok {
 		usage, err := subagentExtractor.CalculateTotalTokenUsage(transcriptData, transcriptLinesAtStart, subagentsDir)
 		if err != nil {
 			logging.Debug(ctx, "failed subagent aware token extraction",
@@ -26,7 +26,7 @@ func CalculateTokenUsage(ctx context.Context, ag Agent, transcriptData []byte, t
 		return usage
 	}
 
-	if calculator, ok := ag.(TokenCalculator); ok {
+	if calculator, ok := AsTokenCalculator(ag); ok {
 		// Fall back to basic token calculation (main transcript only)
 		usage, err := calculator.CalculateTokenUsage(transcriptData, transcriptLinesAtStart)
 		if err != nil {

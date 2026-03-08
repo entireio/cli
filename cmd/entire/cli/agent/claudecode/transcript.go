@@ -16,7 +16,6 @@ type TranscriptLine = transcript.Line
 
 // Type aliases for internal use.
 type (
-	userMessage      = transcript.UserMessage
 	assistantMessage = transcript.AssistantMessage
 	toolInput        = transcript.ToolInput
 )
@@ -86,43 +85,6 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 	}
 
 	return files
-}
-
-// ExtractLastUserPrompt extracts the last user message from transcript
-func ExtractLastUserPrompt(lines []TranscriptLine) string {
-	for i := len(lines) - 1; i >= 0; i-- {
-		if lines[i].Type != "user" { //nolint:goconst // already present in codebase
-			continue
-		}
-
-		var msg userMessage
-		if err := json.Unmarshal(lines[i].Message, &msg); err != nil {
-			continue
-		}
-
-		// Handle string content
-		if str, ok := msg.Content.(string); ok {
-			return str
-		}
-
-		// Handle array content (text blocks)
-		if arr, ok := msg.Content.([]interface{}); ok {
-			var texts []string
-			for _, item := range arr {
-				if m, ok := item.(map[string]interface{}); ok {
-					if m["type"] == "text" {
-						if text, ok := m["text"].(string); ok {
-							texts = append(texts, text)
-						}
-					}
-				}
-			}
-			if len(texts) > 0 {
-				return strings.Join(texts, "\n\n")
-			}
-		}
-	}
-	return ""
 }
 
 // TruncateAtUUID returns transcript lines up to and including the line with given UUID

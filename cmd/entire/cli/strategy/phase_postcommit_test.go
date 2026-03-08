@@ -14,9 +14,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -878,7 +878,17 @@ func TestFilesChangedInCommit(t *testing.T) {
 	commit, err := repo.CommitObject(commitHash)
 	require.NoError(t, err)
 
-	changed := filesChangedInCommit(commit, nil, nil)
+	headTree, err := commit.Tree()
+	require.NoError(t, err)
+	var parentTree *object.Tree
+	if commit.NumParents() > 0 {
+		parent, pErr := commit.Parent(0)
+		require.NoError(t, pErr)
+		parentTree, err = parent.Tree()
+		require.NoError(t, err)
+	}
+
+	changed := filesChangedInCommit(context.Background(), dir, commit, headTree, parentTree)
 	assert.Contains(t, changed, "file1.txt")
 	assert.Contains(t, changed, "file2.txt")
 	// test.txt was in the initial commit, not this one
@@ -915,14 +925,18 @@ func TestFilesChangedInCommit_InitialCommit(t *testing.T) {
 	commit, err := repo.CommitObject(commitHash)
 	require.NoError(t, err)
 
-	changed := filesChangedInCommit(commit, nil, nil)
+	headTree, err := commit.Tree()
+	require.NoError(t, err)
+
+	changed := filesChangedInCommit(context.Background(), dir, commit, headTree, nil)
 	assert.Contains(t, changed, "init.txt")
 	assert.Len(t, changed, 1)
 }
 
-// TestFilesChangedInCommit_CacheEquivalence verifies that passing pre-resolved
-// trees produces the same result as passing nil (fallback resolution).
-func TestFilesChangedInCommit_CacheEquivalence(t *testing.T) {
+// TestFilesChangedInCommit_FallbackOnBadRepoDir verifies that when git diff-tree fails
+// (e.g. invalid repoDir), filesChangedInCommit falls back to go-git tree walk and still
+// returns correct results instead of an empty map.
+func TestFilesChangedInCommit_FallbackOnBadRepoDir(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 
@@ -932,36 +946,34 @@ func TestFilesChangedInCommit_CacheEquivalence(t *testing.T) {
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
 
-	// Create a second commit with changes (setupGitRepo already created initial commit)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("modified"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "new.txt"), []byte("new"), 0o644))
-	_, err = wt.Add("test.txt")
-	require.NoError(t, err)
 	_, err = wt.Add("new.txt")
 	require.NoError(t, err)
-	headHash, err := wt.Commit("changes", &git.CommitOptions{})
+
+	commitHash, err := wt.Commit("add new file", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
 	require.NoError(t, err)
 
-	commit, err := repo.CommitObject(headHash)
+	commit, err := repo.CommitObject(commitHash)
 	require.NoError(t, err)
 
-	// Resolve trees
 	headTree, err := commit.Tree()
 	require.NoError(t, err)
-	parent, err := commit.Parent(0)
-	require.NoError(t, err)
-	parentTree, err := parent.Tree()
-	require.NoError(t, err)
+	var parentTree *object.Tree
+	if commit.NumParents() > 0 {
+		parent, pErr := commit.Parent(0)
+		require.NoError(t, pErr)
+		parentTree, err = parent.Tree()
+		require.NoError(t, err)
+	}
 
-	// Cache miss (nil trees)
-	resultNil := filesChangedInCommit(commit, nil, nil)
-	// Cache hit (pre-resolved trees)
-	resultCached := filesChangedInCommit(commit, headTree, parentTree)
+	// Pass a bogus repoDir to force git diff-tree to fail, triggering the fallback
+	changed := filesChangedInCommit(context.Background(), "/nonexistent/repo", commit, headTree, parentTree)
 
-	assert.Equal(t, resultNil, resultCached, "Cache hit and cache miss should produce identical results")
-	assert.Contains(t, resultCached, "test.txt")
-	assert.Contains(t, resultCached, "new.txt")
-	assert.Len(t, resultCached, 2)
+	// Fallback should still detect the changed file via go-git tree walk
+	assert.Contains(t, changed, "new.txt")
+	assert.NotEmpty(t, changed, "fallback should return files, not empty map")
 }
 
 // TestPostCommit_ActiveSession_CarryForward_PartialCommit verifies that when an
@@ -1685,12 +1697,10 @@ func TestPostCommit_EndedSessionCarryForward_NotCondensedIntoUnrelatedCommit(t *
 // commit from a different session.
 //
 // Root cause: when an agent is killed without the Stop hook firing, its session
-// remains in ACTIVE phase permanently. Previously, PostCommit unconditionally
-// set hasNew=true for ACTIVE sessions and skipped the filesOverlapWithContent
-// check, so stale ACTIVE sessions got condensed into every commit.
-//
-// The fix applies the overlap check to ALL sessions (including ACTIVE) using
-// filesTouchedBefore, so stale sessions with unrelated files are filtered out.
+// remains in ACTIVE phase permanently. The overlap check prevents stale sessions
+// with unrelated files from being condensed. The isRecentInteraction guard
+// ensures that genuinely-active sessions (recent LastInteractionTime) skip the
+// overlap check, while stale sessions (old/nil LastInteractionTime) must pass it.
 func TestPostCommit_StaleActiveSession_NotCondensed(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
@@ -1711,6 +1721,9 @@ func TestPostCommit_StaleActiveSession_NotCondensed(t *testing.T) {
 	// The stale session touched "test.txt" (set by setupSessionWithCheckpoint)
 	// but the new commit will modify a different file.
 	staleState.FilesTouched = []string{"test.txt"}
+	// Stale session: LastInteractionTime is old (agent was killed days ago)
+	staleTime := time.Now().Add(-48 * time.Hour)
+	staleState.LastInteractionTime = &staleTime
 	require.NoError(t, s.saveSessionState(context.Background(), staleState))
 
 	staleOriginalBaseCommit := staleState.BaseCommit
@@ -1760,6 +1773,9 @@ func TestPostCommit_StaleActiveSession_NotCondensed(t *testing.T) {
 	newState, err := s.loadSessionState(context.Background(), newSessionID)
 	require.NoError(t, err)
 	newState.Phase = session.PhaseActive
+	// New session has recent interaction (agent is genuinely running)
+	now := time.Now()
+	newState.LastInteractionTime = &now
 	require.NoError(t, s.saveSessionState(context.Background(), newState))
 
 	// --- Commit ONLY new-feature.txt (not test.txt) with checkpoint trailer ---
@@ -1879,12 +1895,78 @@ func TestPostCommit_IdleSessionEmptyFilesTouched_NotCondensed(t *testing.T) {
 	// BaseCommit is NOT updated for non-ACTIVE sessions (updateBaseCommitIfChanged skips them)
 }
 
+// TestPostCommit_IdleSession_NoTranscriptFallbackForCarryForward verifies that
+// carry-forward computation for IDLE sessions does NOT fall back to transcript
+// extraction. Only ACTIVE sessions (mid-session commits before Stop) should parse
+// the transcript, because IDLE sessions have FilesTouched populated by SaveStep.
+//
+// Regression test: resolveFilesTouched unconditionally falls back to transcript
+// extraction, but the PostCommit call site must gate it on IsActive().
+func TestPostCommit_IdleSession_NoTranscriptFallbackForCarryForward(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+
+	// Create an IDLE session with checkpoint
+	sessionID := "idle-transcript-guard"
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseIdle
+	// Clear FilesTouched to simulate the edge case
+	state.FilesTouched = nil
+	// Set transcript info so transcript extraction WOULD find files if called
+	state.AgentType = agent.AgentTypeGemini
+	transcriptPath := filepath.Join(dir, "idle-transcript.json")
+	transcript := `{
+  "messages": [
+    {"type": "user", "content": [{"text": "create file"}]},
+    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "` + filepath.Join(dir, "test.txt") + `"}}]}
+  ]
+}`
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(transcript), 0o644))
+	state.TranscriptPath = transcriptPath
+	state.CheckpointTranscriptStart = 0
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	originalStepCount := state.StepCount
+
+	// Commit the file the transcript references — if transcript extraction
+	// ran, it would find overlap and trigger condensation
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("committed"), 0o644))
+	_, err = wt.Add("test.txt")
+	require.NoError(t, err)
+
+	cpID := "a1a2a3a4a5a6"
+	commitMsg := "commit test.txt\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
+	_, err = wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// Run PostCommit
+	err = s.PostCommit(context.Background())
+	require.NoError(t, err)
+
+	// Verify: IDLE session was NOT condensed (transcript fallback was skipped)
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, originalStepCount, state.StepCount,
+		"IDLE session should NOT be condensed via transcript fallback — only ACTIVE sessions get transcript extraction for carry-forward")
+}
+
 // TestPostCommit_IdleSession_SkipsSentinelWait is a regression test verifying that
 // PostCommit for an IDLE session with AgentType=ClaudeCode and a TranscriptPath
 // completes quickly without hitting the 3s sentinel timeout in PrepareTranscript.
 //
-// Before the fix, extractNewModifiedFilesFromLiveTranscript and
-// extractModifiedFilesFromLiveTranscript called PrepareTranscript unconditionally,
+// Before the fix, the transcript extraction functions called PrepareTranscript unconditionally,
 // which triggered waitForTranscriptFlush (3s timeout) even for idle/ended sessions
 // where the transcript was already fully flushed.
 //
@@ -1991,4 +2073,254 @@ func TestPostCommit_EndedSession_SkipsSentinelWait(t *testing.T) {
 	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensation")
 	assert.NotNil(t, sessionsRef)
+}
+
+// TestPostCommit_EndedSession_SetsFullyCondensed verifies that an ENDED session
+// is marked FullyCondensed after condensation when no carry-forward files remain.
+func TestPostCommit_EndedSession_SetsFullyCondensed(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-postcommit-ended-fully-condensed"
+
+	// Initialize session and save a checkpoint
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	// Set phase to ENDED with files touched (the committed file matches shadow branch)
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	now := time.Now()
+	state.Phase = session.PhaseEnded
+	state.EndedAt = &now
+	state.FilesTouched = []string{"test.txt"}
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// Create a commit that includes test.txt — this commits the only touched file,
+	// so carry-forward will be empty afterward.
+	commitWithCheckpointTrailer(t, repo, dir, "fc01fc01fc01")
+
+	// Run PostCommit
+	err = s.PostCommit(context.Background())
+	require.NoError(t, err)
+
+	// Verify FullyCondensed is set
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.True(t, state.FullyCondensed,
+		"ENDED session with no carry-forward should be marked FullyCondensed")
+	assert.Equal(t, session.PhaseEnded, state.Phase)
+	assert.Empty(t, state.FilesTouched,
+		"FilesTouched should be empty after all files were committed")
+}
+
+// TestPostCommit_FullyCondensedEndedSession_SkippedOnNextCommit verifies that
+// a FullyCondensed ENDED session is skipped entirely on subsequent commits,
+// avoiding redundant shadow branch resolution and condensation attempts.
+func TestPostCommit_FullyCondensedEndedSession_SkippedOnNextCommit(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-postcommit-skip-fully-condensed"
+
+	// Initialize session and save a checkpoint
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	// Set phase to ENDED with files touched
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	now := time.Now()
+	state.Phase = session.PhaseEnded
+	state.EndedAt = &now
+	state.FilesTouched = []string{"test.txt"}
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// First commit — condenses the ENDED session and marks it FullyCondensed
+	commitWithCheckpointTrailer(t, repo, dir, "fc02fc02fc02")
+	err = s.PostCommit(context.Background())
+	require.NoError(t, err)
+
+	// Verify it's now fully condensed
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.True(t, state.FullyCondensed)
+
+	// Record the LastCheckpointID — this should persist (the reason the session exists)
+	lastCPID := state.LastCheckpointID
+
+	// Second commit — the fully-condensed session should be skipped entirely.
+	// Create a new file so there's something to commit.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "other.txt"), []byte("other"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("other.txt")
+	require.NoError(t, err)
+	commitMsg := "second commit\n\n" + trailers.CheckpointTrailerKey + ": fc03fc03fc03\n"
+	_, err = wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test",
+			Email: "test@test.com",
+			When:  time.Now(),
+		},
+	})
+	require.NoError(t, err)
+
+	// Run PostCommit again
+	err = s.PostCommit(context.Background())
+	require.NoError(t, err)
+
+	// Verify state is unchanged — the session was skipped, not re-processed
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.True(t, state.FullyCondensed,
+		"FullyCondensed should still be true after being skipped")
+	assert.Equal(t, session.PhaseEnded, state.Phase)
+	assert.Equal(t, lastCPID, state.LastCheckpointID,
+		"LastCheckpointID should be preserved across skipped commits")
+}
+
+// TestPostCommit_NonEndedSession_NotMarkedFullyCondensed verifies that ACTIVE
+// and IDLE sessions are never marked FullyCondensed, even when condensed with
+// no carry-forward. Only ENDED sessions get the flag.
+func TestPostCommit_NonEndedSession_NotMarkedFullyCondensed(t *testing.T) {
+	for _, phase := range []session.Phase{session.PhaseActive, session.PhaseIdle} {
+		t.Run(string(phase), func(t *testing.T) {
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
+
+			repo, err := git.PlainOpen(dir)
+			require.NoError(t, err)
+
+			s := &ManualCommitStrategy{}
+			sessionID := "test-postcommit-" + string(phase) + "-not-fully-condensed"
+
+			// Initialize session and save a checkpoint
+			setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+			state, err := s.loadSessionState(context.Background(), sessionID)
+			require.NoError(t, err)
+			state.Phase = phase
+			state.FilesTouched = []string{"test.txt"}
+			require.NoError(t, s.saveSessionState(context.Background(), state))
+
+			// Commit the file
+			commitWithCheckpointTrailer(t, repo, dir, "fc04fc04fc04")
+
+			// Run PostCommit
+			err = s.PostCommit(context.Background())
+			require.NoError(t, err)
+
+			// Verify FullyCondensed is NOT set
+			state, err = s.loadSessionState(context.Background(), sessionID)
+			require.NoError(t, err)
+			assert.False(t, state.FullyCondensed,
+				"%s sessions must never be marked FullyCondensed", phase)
+		})
+	}
+}
+
+// TestPostCommit_ActiveSession_DifferentFilesThanCommit_ShouldCondense verifies
+// that when an ACTIVE session's Turn 1 touched file A (e.g., a cache file) but
+// Turn 2 commits different files B and C, condensation still happens.
+//
+// This is a regression test for the bug where shouldCondenseWithOverlapCheck
+// incorrectly skipped condensation because filesTouchedBefore (from Turn 1)
+// didn't overlap with the committed files (from Turn 2). ACTIVE sessions with a
+// recent LastInteractionTime should condense when hasNew is true — the overlap
+// check is only meaningful for IDLE/ENDED sessions and stale ACTIVE sessions.
+func TestPostCommit_ActiveSession_DifferentFilesThanCommit_ShouldCondense(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-active-different-files"
+
+	// --- Turn 1: Save checkpoint touching a cache file (not what will be committed) ---
+	// Write the cache file so SaveStep can snapshot it
+	cacheFile := filepath.Join(dir, ".gitstats_cache.sqlite3")
+	require.NoError(t, os.WriteFile(cacheFile, []byte("cache data"), 0o644))
+
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	transcript := `{"type":"human","message":{"content":"analyze git stats"}}
+{"type":"assistant","message":{"content":"analyzing stats, creating cache"}}
+`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(metadataDirAbs, paths.TranscriptFileName),
+		[]byte(transcript), 0o644))
+
+	err = s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{},
+		NewFiles:       []string{".gitstats_cache.sqlite3"},
+		DeletedFiles:   []string{},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint: cache created",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	})
+	require.NoError(t, err)
+
+	// Set phase to ACTIVE (agent mid-turn) with recent interaction
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseActive
+	// FilesTouched reflects Turn 1's cache file — NOT the files about to be committed
+	state.FilesTouched = []string{".gitstats_cache.sqlite3"}
+	now := time.Now()
+	state.LastInteractionTime = &now
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// --- Turn 2: Agent commits DIFFERENT files (README.md, org_commit_activity.py) ---
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Git Stats"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "org_commit_activity.py"), []byte("print('hello')"), 0o644))
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("README.md")
+	require.NoError(t, err)
+	_, err = wt.Add("org_commit_activity.py")
+	require.NoError(t, err)
+
+	cpID := "d1d2d3d4d5d6"
+	commitMsg := "Add git stats tools\n\n" + trailers.CheckpointTrailerKey + ": " + cpID + "\n"
+	_, err = wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// --- Run PostCommit ---
+	err = s.PostCommit(context.Background())
+	require.NoError(t, err)
+
+	// --- Verify condensation happened ---
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+
+	// StepCount should be 1 because carry-forward created a new checkpoint for
+	// .gitstats_cache.sqlite3 which was NOT committed (remaining agent work)
+	assert.Equal(t, 1, state.StepCount,
+		"ACTIVE session StepCount should be 1 (carry-forward for uncommitted cache file)")
+
+	// Phase stays ACTIVE
+	assert.Equal(t, session.PhaseActive, state.Phase,
+		"ACTIVE session should stay ACTIVE after condensation")
+
+	// entire/checkpoints/v1 branch should exist
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err,
+		"entire/checkpoints/v1 should exist — ACTIVE session with different files must still condense")
 }

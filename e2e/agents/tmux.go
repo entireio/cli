@@ -2,6 +2,7 @@ package agents
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -22,16 +23,30 @@ func (s *TmuxSession) OnClose(fn func()) {
 
 // NewTmuxSession creates a new tmux session running the given command in dir.
 // unsetEnv lists environment variable names to strip from the session.
+//
+// The command is wrapped with `env` to propagate PATH from the current process.
+// tmux sessions inherit the tmux server's environment (not the client's), so
+// without this, binaries added to PATH by the test runner (e.g., freshly built
+// `entire` and `vogon`) would not be found inside the session.
 func NewTmuxSession(name string, dir string, unsetEnv []string, command string, args ...string) (*TmuxSession, error) {
 	s := &TmuxSession{name: name}
 
 	tmuxArgs := []string{"new-session", "-d", "-s", name, "-c", dir}
-	// Build a shell command string, prefixed with env -u for each var to strip.
+	// Build a shell command string using `env` to:
+	//   1. Propagate PATH from the current process (tmux server may have stale PATH)
+	//   2. Unset variables listed in unsetEnv
 	// All arguments are shell-quoted to prevent injection or splitting.
+	// PATH is always forwarded from the current process so that the freshly-built
+	// "entire" binary (prepended to PATH by main_test.go) is available inside the
+	// tmux session. Without this, tmux inherits the server's environment which may
+	// have an older binary (or none at all).
 	var parts []string
+	parts = append(parts, "env")
+	// Options (-u) must precede variable assignments for BSD env on macOS.
 	for _, v := range unsetEnv {
-		parts = append(parts, "env", "-u", shellQuote(v))
+		parts = append(parts, "-u", shellQuote(v))
 	}
+	parts = append(parts, "PATH="+shellQuote(os.Getenv("PATH")))
 	parts = append(parts, shellQuote(command))
 	for _, a := range args {
 		parts = append(parts, shellQuote(a))
@@ -117,7 +132,13 @@ func (s *TmuxSession) WaitFor(pattern string, timeout time.Duration) (string, er
 		content := s.Capture()
 		stable := stableContent(content)
 
+		// Bail early if the process has exited and the pattern doesn't match.
+		// remain-on-exit keeps the pane alive, so without this check we'd
+		// poll a dead pane for the full timeout duration.
 		if !re.MatchString(content) {
+			if s.IsPaneDead() {
+				return content, fmt.Errorf("process exited while waiting for %q\n--- pane content ---\n%s\n--- end pane content ---", pattern, content)
+			}
 			// Pattern lost — reset
 			matchedAt = time.Time{}
 			lastStable = ""
@@ -149,6 +170,19 @@ func (s *TmuxSession) WaitFor(pattern string, timeout time.Duration) (string, er
 	}
 	content := s.Capture()
 	return content, fmt.Errorf("timed out waiting for %q after %s\n--- pane content ---\n%s\n--- end pane content ---", pattern, timeout, content)
+}
+
+// IsPaneDead returns true if the process inside the tmux pane has exited.
+// This relies on the remain-on-exit option being set (which NewTmuxSession does).
+func (s *TmuxSession) IsPaneDead() bool {
+	cmd := exec.Command("tmux", "display-message", "-t", s.name, "-p", "#{pane_dead}")
+	out, err := cmd.Output()
+	if err != nil {
+		// If tmux itself fails (e.g. session/pane no longer exists),
+		// treat it as dead so WaitFor doesn't poll until timeout.
+		return true
+	}
+	return strings.TrimSpace(string(out)) == "1"
 }
 
 func (s *TmuxSession) Capture() string {

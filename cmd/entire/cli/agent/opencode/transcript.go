@@ -198,61 +198,6 @@ func extractFilePaths(state *ToolState) []string {
 	return nil
 }
 
-// ExtractPrompts extracts user prompt strings from the transcript starting at the given offset.
-func (a *OpenCodeAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
-	session, err := parseExportSessionFromFile(sessionRef)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if session == nil {
-		return nil, nil
-	}
-
-	var prompts []string
-	for i := fromOffset; i < len(session.Messages); i++ {
-		msg := session.Messages[i]
-		if msg.Info.Role != roleUser {
-			continue
-		}
-		// Extract text from parts
-		content := ExtractTextFromParts(msg.Parts)
-		if content != "" {
-			prompts = append(prompts, content)
-		}
-	}
-
-	return prompts, nil
-}
-
-// ExtractSummary extracts the last assistant message content as a summary.
-func (a *OpenCodeAgent) ExtractSummary(sessionRef string) (string, error) {
-	session, err := parseExportSessionFromFile(sessionRef)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	if session == nil {
-		return "", nil
-	}
-
-	for i := len(session.Messages) - 1; i >= 0; i-- {
-		msg := session.Messages[i]
-		if msg.Info.Role == roleAssistant {
-			content := ExtractTextFromParts(msg.Parts)
-			if content != "" {
-				return content, nil
-			}
-		}
-	}
-
-	return "", nil
-}
-
 // ExtractTextFromParts extracts text content from message parts.
 func ExtractTextFromParts(parts []Part) string {
 	var texts []string

@@ -461,69 +461,6 @@ func TestExtractModifiedFilesFromOffset_CamelCaseFilePath(t *testing.T) {
 	}
 }
 
-func TestExtractPrompts(t *testing.T) {
-	t.Parallel()
-	ag := &OpenCodeAgent{}
-	path := writeTestTranscript(t, testExportJSON)
-
-	// From offset 0 — both prompts
-	prompts, err := ag.ExtractPrompts(path, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(prompts) != 2 {
-		t.Fatalf("expected 2 prompts, got %d: %v", len(prompts), prompts)
-	}
-	if prompts[0] != "Fix the bug in main.go" {
-		t.Errorf("expected first prompt 'Fix the bug in main.go', got %q", prompts[0])
-	}
-
-	// From offset 2 — only second prompt
-	prompts, err = ag.ExtractPrompts(path, 2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(prompts) != 1 {
-		t.Fatalf("expected 1 prompt from offset 2, got %d", len(prompts))
-	}
-	if prompts[0] != "Also fix util.go" {
-		t.Errorf("expected 'Also fix util.go', got %q", prompts[0])
-	}
-}
-
-func TestExtractSummary(t *testing.T) {
-	t.Parallel()
-	ag := &OpenCodeAgent{}
-	path := writeTestTranscript(t, testExportJSON)
-
-	summary, err := ag.ExtractSummary(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if summary != "Done fixing util.go." {
-		t.Errorf("expected summary 'Done fixing util.go.', got %q", summary)
-	}
-}
-
-func TestExtractSummary_EmptyTranscript(t *testing.T) {
-	t.Parallel()
-	ag := &OpenCodeAgent{}
-	emptySession := ExportSession{Info: SessionInfo{ID: "empty"}, Messages: []ExportMessage{}}
-	data, err := json.Marshal(emptySession)
-	if err != nil {
-		t.Fatalf("failed to marshal empty session: %v", err)
-	}
-	path := writeTestTranscript(t, string(data))
-
-	summary, err := ag.ExtractSummary(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if summary != "" {
-		t.Errorf("expected empty summary, got %q", summary)
-	}
-}
-
 func TestCalculateTokenUsage(t *testing.T) {
 	t.Parallel()
 	ag := &OpenCodeAgent{}

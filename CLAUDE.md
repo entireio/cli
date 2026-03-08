@@ -46,7 +46,23 @@ mise run test:integration
 mise run test:ci
 ```
 
-Integration tests use the `//go:build integration` build tag and are located in `cmd/entire/cli/integration_test/`.
+This runs unit tests, integration tests, and the E2E canary (Vogon agent) in sequence. Integration tests use the `//go:build integration` build tag and are located in `cmd/entire/cli/integration_test/`.
+
+### Running E2E Canary Tests (Vogon Agent)
+
+The Vogon agent is a deterministic fake agent that exercises the full E2E test suite without making any API calls. Named after the Vogons from The Hitchhiker's Guide to the Galaxy — bureaucratic, procedural, and deterministic to a fault.
+
+```bash
+mise run test:e2e:canary           # Run all E2E tests with the Vogon agent
+mise run test:e2e:canary TestFoo   # Run a specific test
+```
+
+- **Runs as part of `test:ci`** — canary failures block merges
+- **No API calls, no cost** — safe to run freely, unlike real agent E2E tests
+- **If a canary test fails, the bug is in the CLI or test infrastructure**, not in an agent
+- Located in `e2e/vogon/` (binary) and `cmd/entire/cli/agent/vogon/` (Agent interface)
+- The binary parses prompts via regex, creates/modifies/deletes files, and fires lifecycle hooks
+- **IMPORTANT: When changing E2E test prompt wording**, the Vogon binary (`e2e/vogon/main.go`) parses prompts with hardcoded regexes. New phrasing may not match existing patterns — always run `mise run test:e2e:canary` after changing prompt text and fix Vogon's parsing if tests fail.
 
 ### Running E2E Tests (Only When Explicitly Requested)
 
@@ -64,9 +80,9 @@ E2E tests:
 - Use the `//go:build e2e` build tag
 - Located in `e2e/tests/`
 - See [`e2e/README.md`](e2e/README.md) for full documentation (structure, debugging, adding agents)
-- Test real agent interactions (Claude Code, Gemini CLI, OpenCode, or Cursor creating files, committing, etc.)
+- Test real agent interactions (Claude Code, Gemini CLI, OpenCode, Cursor, or Vogon creating files, committing, etc.)
 - Validate checkpoint scenarios documented in `docs/architecture/checkpoint-scenarios.md`
-- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini`, `opencode`, `cursor`)
+- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini`, `opencode`, `cursor`, `vogon`)
 
 **Environment variables:**
 
@@ -93,6 +109,27 @@ func TestFeature_Bar(t *testing.T) {
 ```
 
 **Exception:** Tests that modify process-global state cannot be parallelized. This includes `os.Chdir()`/`t.Chdir()` and `os.Setenv()`/`t.Setenv()` — Go's test framework will panic if these are used after `t.Parallel()`.
+
+### Git in Tests
+
+**Tests that touch git state must use an isolated temp repo — never the real repo CWD.**
+
+Many handlers (lifecycle, strategy, hooks) resolve the git repo from CWD via `OpenRepository`, `GetGitCommonDir`, `DetectFileChanges`, etc. Without isolation, tests can create session state files, shadow branches, or other artifacts in the real `.git/` directory.
+
+Use the `testutil` helpers:
+
+```go
+tmpDir := t.TempDir()
+testutil.InitRepo(t, tmpDir)                    // git init + user config + disable GPG
+testutil.WriteFile(t, tmpDir, "f.txt", "init")  // create a file
+testutil.GitAdd(t, tmpDir, "f.txt")             // stage it
+testutil.GitCommit(t, tmpDir, "init")           // commit (needs at least one commit for HEAD)
+t.Chdir(tmpDir)                                 // redirect CWD-based git resolution
+```
+
+`testutil.InitRepo` configures `user.name`, `user.email`, and disables GPG signing — safe for CI environments without global git config.
+
+**Do NOT** shell out to `git init`/`git commit` directly without setting user config and `--no-gpg-sign`, and **do NOT** run lifecycle/strategy handlers from the real repo CWD in tests.
 
 ### Linting and Formatting
 
@@ -381,8 +418,7 @@ The state machine emits **actions** (e.g., `ActionCondense`, `ActionUpdateLastIn
 ```
 .entire/metadata/<session-id>/
 ├── full.jsonl               # Session transcript
-├── prompt.txt               # User prompts
-├── context.md               # Generated context
+├── prompt.txt               # Checkpoint-scoped user prompts
 └── tasks/<tool-use-id>/     # Task checkpoints
     ├── checkpoint.json      # UUID mapping for rewind
     └── agent-<id>.jsonl     # Subagent transcript
@@ -396,8 +432,7 @@ The state machine emits **actions** (e.g., `ActionCondense`, `ActionUpdateLastIn
 ├── 0/                       # First session (0-based indexing)
 │   ├── metadata.json        # Session-specific metadata
 │   ├── full.jsonl           # Session transcript
-│   ├── prompt.txt           # User prompts
-│   ├── context.md           # Generated context
+│   ├── prompt.txt           # Checkpoint-scoped user prompts
 │   ├── content_hash.txt     # SHA256 of transcript
 │   └── tasks/<tool-use-id>/ # Task checkpoints (if applicable)
 │       ├── checkpoint.json  # UUID mapping
@@ -486,8 +521,7 @@ entire/checkpoints/v1 commit:
   Tree: a3/b2c4d5e6f7/
     ├── metadata.json (checkpoint_id: "a3b2c4d5e6f7")
     ├── full.jsonl (session transcript)
-    ├── prompt.txt
-    └── context.md
+    └── prompt.txt
 ```
 
 #### Commit Trailers

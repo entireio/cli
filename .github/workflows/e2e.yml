@@ -2,9 +2,26 @@ name: E2E Tests
 
 on:
   workflow_dispatch:
+    inputs:
+      agent:
+        description: 'Run a single agent (leave empty for all)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - claude-code
+          - opencode
+          - gemini-cli
+          - factoryai-droid
+          - cursor-cli
+          - copilot-cli
   push:
     branches:
       - main
+
+permissions:
+  actions: read
+  contents: read
 
 # Concurrency: only one E2E job runs at a time
 concurrency:
@@ -12,13 +29,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Build the matrix dynamically so workflow_dispatch can select a single agent.
+  matrix-setup:
+    runs-on: ubuntu-latest
+    outputs:
+      agents: ${{ steps.set.outputs.agents }}
+    steps:
+      - id: set
+        run: |
+          input="${{ github.event.inputs.agent }}"
+          if [ -n "$input" ]; then
+            echo "agents=[\"$input\"]" >> "$GITHUB_OUTPUT"
+          else
+            echo 'agents=["claude-code","opencode","gemini-cli","factoryai-droid","cursor-cli","copilot-cli"]' >> "$GITHUB_OUTPUT"
+          fi
+
   e2e-tests:
+    needs: matrix-setup
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        agent: [claude-code, opencode, gemini-cli]
+        agent: ${{ fromJson(needs.matrix-setup.outputs.agents) }}
 
     steps:
       - name: Checkout repository
@@ -36,6 +69,9 @@ jobs:
             claude-code) curl -fsSL https://claude.ai/install.sh | bash ;;
             opencode)    curl -fsSL https://opencode.ai/install | bash ;;
             gemini-cli)  npm install -g @google/gemini-cli ;;
+            cursor-cli)  curl https://cursor.com/install -fsS | bash ;;
+            factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
+            copilot-cli)  npm install -g @github/copilot  ;;
           esac
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
@@ -43,13 +79,19 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: go run ./e2e/bootstrap
 
       - name: Run E2E Tests
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'gemini-cli' && '6' || '' }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'gemini-cli' && '6' || matrix.agent == 'factoryai-droid' && '1' || '' }}
         run: mise run test:e2e --agent ${{ matrix.agent }}
 
       - name: Upload artifacts
@@ -59,3 +101,44 @@ jobs:
           name: e2e-artifacts-${{ matrix.agent }}
           path: e2e/artifacts/
           retention-days: 7
+
+  notify-slack:
+    runs-on: ubuntu-latest
+    needs: [e2e-tests]
+    if: ${{ always() && needs.e2e-tests.result == 'failure' && github.event_name == 'push' }}
+    steps:
+      - name: Get failed agents
+        id: failed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          failed=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs \
+            --jq '[.jobs[] | select(.conclusion == "failure") | .name | capture("\\((?<agent>[^)]+)\\)") | .agent] | join(", ")')
+          echo "agents=$failed" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack of E2E failure
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a # v2.1.1
+        with:
+          webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": ":red_circle: *E2E Tests Failed* on `main`\n\nFailed agents: *${{ steps.failed.outputs.agents }}*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "Commit: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}> by ${{ github.actor }}"
+                    }
+                  ]
+                }
+              ]
+            }

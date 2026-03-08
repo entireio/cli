@@ -16,6 +16,8 @@ import (
 	"github.com/entireio/cli/e2e/entire"
 )
 
+const droidRepoSettingsPath = ".factory/settings.json"
+
 // RepoState holds the working state for a single test's cloned repository.
 type RepoState struct {
 	Agent            agents.Agent
@@ -65,7 +67,25 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	Git(t, dir, "commit", "--allow-empty", "-m", "initial commit")
 
 	entire.Enable(t, dir, agent.EntireAgent())
+	if agent.Name() == "factoryai-droid" {
+		if err := configureDroidRepoSettings(dir); err != nil {
+			t.Fatalf("configure droid repo settings: %v", err)
+		}
+	}
 	PatchSettings(t, dir, map[string]any{"log_level": "debug"})
+
+	// Copilot CLI blocks on a "No copilot instructions found" notice in fresh
+	// repos that lack .github/copilot-instructions.md, preventing the interactive
+	// prompt from appearing.
+	if agent.Name() == "copilot-cli" {
+		ghDir := filepath.Join(dir, ".github")
+		if err := os.MkdirAll(ghDir, 0o755); err != nil {
+			t.Fatalf("create .github dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(ghDir, "copilot-instructions.md"), []byte("# E2E Test\n"), 0o644); err != nil {
+			t.Fatalf("write copilot-instructions.md: %v", err)
+		}
+	}
 
 	// OpenCode's non-interactive mode auto-rejects external_directory permission
 	// since there's no user to prompt. Write a config to allow it.
@@ -105,6 +125,129 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	})
 
 	return state
+}
+
+func configureDroidRepoSettings(repoDir string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+
+	globalSettingsPath := filepath.Join(home, ".factory", "settings.json")
+	repoSettingsPath := filepath.Join(repoDir, droidRepoSettingsPath)
+
+	if err := mergeDroidCustomModels(globalSettingsPath, repoSettingsPath); err != nil {
+		return err
+	}
+	if err := ensureGitInfoExcludeContains(repoDir, droidRepoSettingsPath); err != nil {
+		return fmt.Errorf("exclude droid settings from git: %w", err)
+	}
+	return nil
+}
+
+func mergeDroidCustomModels(globalSettingsPath, repoSettingsPath string) error {
+	globalSettings, err := loadJSONMap(globalSettingsPath, "global droid settings")
+	if err != nil {
+		return err
+	}
+
+	customModels, ok := globalSettings["customModels"]
+	if !ok {
+		return fmt.Errorf(
+			"global droid settings at %s missing customModels; repo-local %s shadows global settings",
+			globalSettingsPath,
+			repoSettingsPath,
+		)
+	}
+
+	var models []json.RawMessage
+	if err := json.Unmarshal(customModels, &models); err != nil {
+		return fmt.Errorf("parse customModels in %s: %w", globalSettingsPath, err)
+	}
+	if len(models) == 0 {
+		return fmt.Errorf("global droid settings at %s has empty customModels", globalSettingsPath)
+	}
+
+	repoSettings, err := loadJSONMap(repoSettingsPath, "repo-local droid settings")
+	if err != nil {
+		return err
+	}
+	repoSettings["customModels"] = customModels
+
+	// Set the active custom model so interactive mode uses the BYOK model
+	// instead of prompting for selection. The value must match the Model
+	// field from the customModels entry (not the displayName).
+	modelJSON, err := json.Marshal(agents.DefaultDroidModel())
+	if err != nil {
+		return fmt.Errorf("marshal model setting: %w", err)
+	}
+	repoSettings["model"] = json.RawMessage(modelJSON)
+
+	// High autonomy prevents Droid from asking for confirmation during
+	// interactive E2E tests, which would cause hangs waiting for input.
+	repoSettings["autonomyMode"] = json.RawMessage(`"auto-high"`)
+	repoSettings["completionSound"] = json.RawMessage(`"off"`)
+
+	out, err := json.MarshalIndent(repoSettings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal repo-local droid settings: %w", err)
+	}
+	out = append(out, '\n')
+
+	if err := os.WriteFile(repoSettingsPath, out, 0o600); err != nil {
+		return fmt.Errorf("write repo-local droid settings %s: %w", repoSettingsPath, err)
+	}
+	return nil
+}
+
+func loadJSONMap(path, description string) (map[string]json.RawMessage, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s at %s: %w", description, path, err)
+	}
+
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, fmt.Errorf("parse %s at %s: %w", description, path, err)
+	}
+	if parsed == nil {
+		parsed = make(map[string]json.RawMessage)
+	}
+	return parsed, nil
+}
+
+func ensureGitInfoExcludeContains(repoDir, entry string) error {
+	excludePath := filepath.Join(repoDir, ".git", "info", "exclude")
+
+	data, err := os.ReadFile(excludePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", excludePath, err)
+	}
+
+	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+	for _, line := range strings.Split(normalized, "\n") {
+		if strings.TrimSpace(line) == entry {
+			return nil
+		}
+	}
+
+	var b strings.Builder
+	if len(data) > 0 {
+		b.Write(data)
+		if data[len(data)-1] != '\n' {
+			b.WriteByte('\n')
+		}
+	}
+	b.WriteString(entry)
+	b.WriteByte('\n')
+
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(excludePath), err)
+	}
+	if err := os.WriteFile(excludePath, []byte(b.String()), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", excludePath, err)
+	}
+	return nil
 }
 
 // ForEachAgent runs fn as a parallel subtest for every registered agent.

@@ -144,12 +144,6 @@ type TranscriptAnalyzer interface {
 	//   - currentPosition: the current position (line count or message count)
 	//   - error: any error encountered during reading
 	ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error)
-
-	// ExtractPrompts extracts user prompts from the transcript starting at the given offset.
-	ExtractPrompts(sessionRef string, fromOffset int) ([]string, error)
-
-	// ExtractSummary extracts a summary of the session from the transcript.
-	ExtractSummary(sessionRef string) (string, error)
 }
 
 // TranscriptPreparer is called before ReadTranscript to handle agent-specific
@@ -170,6 +164,36 @@ type TokenCalculator interface {
 
 	// CalculateTokenUsage computes token usage from the transcript starting at the given offset.
 	CalculateTokenUsage(transcriptData []byte, fromOffset int) (*TokenUsage, error)
+}
+
+// TextGenerator is an optional interface for agents whose CLI supports
+// non-interactive text generation (e.g., claude --print).
+// Used for AI-powered metadata generation (trail titles, summaries).
+type TextGenerator interface {
+	Agent
+
+	// GenerateText sends a prompt to the agent's CLI and returns the raw text response.
+	// model is a hint (e.g., "haiku", "sonnet"). Implementations may ignore if not applicable.
+	GenerateText(ctx context.Context, prompt string, model string) (string, error)
+}
+
+// HookResponseWriter is implemented by agents that support structured hook responses.
+// Agents that implement this can output messages (e.g., banners) to the user via
+// the agent's response protocol. For example, Claude Code outputs JSON with a
+// systemMessage field to stdout. Agents that don't implement this will silently
+// skip hook response output.
+type HookResponseWriter interface {
+	Agent
+
+	// WriteHookResponse outputs a message to the user via the agent's hook response protocol.
+	WriteHookResponse(message string) error
+}
+
+// TestOnly is implemented by agents that exist solely for testing (e.g., the Vogon canary agent).
+// These agents are excluded from the user-facing agent selection in `entire enable`.
+type TestOnly interface {
+	Agent
+	IsTestOnly() bool
 }
 
 // SubagentAwareExtractor provides methods for extracting files and tokens including subagents.

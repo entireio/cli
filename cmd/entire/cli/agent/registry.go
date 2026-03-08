@@ -52,12 +52,16 @@ func List() []types.AgentName {
 	return names
 }
 
+// StringList returns user-facing agent names, excluding test-only agents.
 func StringList() []string {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 
 	names := make([]string, 0, len(registry))
-	for name := range registry {
+	for name, factory := range registry {
+		if to, ok := factory().(TestOnly); ok && to.IsTestOnly() {
+			continue
+		}
 		names = append(names, string(name))
 	}
 	slices.Sort(names)
@@ -96,19 +100,23 @@ func Detect(ctx context.Context) (Agent, error) {
 
 // Agent name constants (registry keys)
 const (
-	AgentNameClaudeCode types.AgentName = "claude-code"
-	AgentNameCursor     types.AgentName = "cursor"
-	AgentNameGemini     types.AgentName = "gemini"
-	AgentNameOpenCode   types.AgentName = "opencode"
+	AgentNameClaudeCode     types.AgentName = "claude-code"
+	AgentNameCopilotCLI     types.AgentName = "copilot-cli"
+	AgentNameCursor         types.AgentName = "cursor"
+	AgentNameFactoryAIDroid types.AgentName = "factoryai-droid"
+	AgentNameGemini         types.AgentName = "gemini"
+	AgentNameOpenCode       types.AgentName = "opencode"
 )
 
 // Agent type constants (type identifiers stored in metadata/trailers)
 const (
-	AgentTypeClaudeCode types.AgentType = "Claude Code"
-	AgentTypeCursor     types.AgentType = "Cursor"
-	AgentTypeGemini     types.AgentType = "Gemini CLI"
-	AgentTypeOpenCode   types.AgentType = "OpenCode"
-	AgentTypeUnknown    types.AgentType = "Agent" // Fallback for backwards compatibility
+	AgentTypeClaudeCode     types.AgentType = "Claude Code"
+	AgentTypeCopilotCLI     types.AgentType = "Copilot CLI"
+	AgentTypeCursor         types.AgentType = "Cursor"
+	AgentTypeFactoryAIDroid types.AgentType = "Factory AI Droid"
+	AgentTypeGemini         types.AgentType = "Gemini CLI"
+	AgentTypeOpenCode       types.AgentType = "OpenCode"
+	AgentTypeUnknown        types.AgentType = "Agent" // Fallback for backwards compatibility
 )
 
 // DefaultAgentName is the registry key for the default agent.

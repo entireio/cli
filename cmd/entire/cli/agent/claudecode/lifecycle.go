@@ -12,8 +12,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // Compile-time interface assertions for new interfaces.
@@ -22,7 +20,20 @@ var (
 	_ agent.TranscriptPreparer     = (*ClaudeCodeAgent)(nil)
 	_ agent.TokenCalculator        = (*ClaudeCodeAgent)(nil)
 	_ agent.SubagentAwareExtractor = (*ClaudeCodeAgent)(nil)
+	_ agent.HookResponseWriter     = (*ClaudeCodeAgent)(nil)
 )
+
+// WriteHookResponse outputs a JSON hook response to stdout.
+// Claude Code reads this JSON and displays the systemMessage to the user.
+func (c *ClaudeCodeAgent) WriteHookResponse(message string) error {
+	resp := struct {
+		SystemMessage string `json:"systemMessage,omitempty"`
+	}{SystemMessage: message}
+	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		return fmt.Errorf("failed to encode hook response: %w", err)
+	}
+	return nil
+}
 
 // HookNames returns the hook verbs Claude Code supports.
 // These become subcommands: entire hooks claude-code <verb>
@@ -71,56 +82,6 @@ func (c *ClaudeCodeAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 	return data, nil
 }
 
-// ExtractPrompts extracts user prompts from the transcript starting at the given line offset.
-func (c *ClaudeCodeAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
-	lines, err := transcript.ParseFromFileAtLine(sessionRef, fromOffset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse transcript: %w", err)
-	}
-
-	var prompts []string
-	for i := range lines {
-		if lines[i].Type != transcript.TypeUser {
-			continue
-		}
-		content := transcript.ExtractUserContent(lines[i].Message)
-		if content != "" {
-			prompts = append(prompts, textutil.StripIDEContextTags(content))
-		}
-	}
-	return prompts, nil
-}
-
-// ExtractSummary extracts the last assistant message as a session summary.
-func (c *ClaudeCodeAgent) ExtractSummary(sessionRef string) (string, error) {
-	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
-	if err != nil {
-		return "", fmt.Errorf("failed to read transcript: %w", err)
-	}
-
-	lines, parseErr := transcript.ParseFromBytes(data)
-	if parseErr != nil {
-		return "", fmt.Errorf("failed to parse transcript: %w", parseErr)
-	}
-
-	// Walk backward to find last assistant text block
-	for i := len(lines) - 1; i >= 0; i-- {
-		if lines[i].Type != transcript.TypeAssistant {
-			continue
-		}
-		var msg transcript.AssistantMessage
-		if err := json.Unmarshal(lines[i].Message, &msg); err != nil {
-			continue
-		}
-		for _, block := range msg.Content {
-			if block.Type == transcript.ContentTypeText && block.Text != "" {
-				return block.Text, nil
-			}
-		}
-	}
-	return "", nil
-}
-
 // PrepareTranscript waits for Claude Code's async transcript flush to complete.
 // Claude writes a hook_progress sentinel entry after flushing all pending writes.
 func (c *ClaudeCodeAgent) PrepareTranscript(ctx context.Context, sessionRef string) error {
@@ -144,6 +105,7 @@ func (c *ClaudeCodeAgent) parseSessionStart(stdin io.Reader) (*agent.Event, erro
 		Type:       agent.SessionStart,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
 }
@@ -239,6 +201,27 @@ func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStar
 	)
 
 	logCtx := logging.WithComponent(ctx, "agent.claudecode")
+
+	// Fast path: skip the poll loop when the sentinel can't possibly appear.
+	// - File doesn't exist: nothing to poll.
+	// - File is stale (unmodified for 2+ min): agent isn't running anymore.
+	//   This avoids 3s timeouts per stale "active" session (e.g., agent crashed
+	//   without firing stop hook).
+	const staleThreshold = 2 * time.Minute
+	info, err := os.Stat(transcriptPath)
+	if err != nil {
+		// Most likely the file doesn't exist; other errors (permission, etc.)
+		// would also prevent polling, so skip the wait either way.
+		return
+	}
+	fileAge := time.Since(info.ModTime())
+	if fileAge > staleThreshold {
+		logging.Debug(logCtx, "transcript file is stale, skipping sentinel wait",
+			slog.Duration("file_age", fileAge),
+		)
+		return
+	}
+
 	deadline := time.Now().Add(maxWait)
 	for time.Now().Before(deadline) {
 		if checkStopSentinel(transcriptPath, tailBytes, hookStartTime, maxSkew) {

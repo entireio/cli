@@ -12,8 +12,9 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // TestShadow_DeferredTranscriptFinalization tests that HandleTurnEnd updates
@@ -37,7 +38,7 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session (ACTIVE)
-	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, "Create feature function", sess.TranscriptPath); err != nil {
 		t.Fatalf("user-prompt-submit failed: %v", err)
 	}
 
@@ -76,7 +77,7 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 		// Run prepare-commit-msg
 		prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
 		prepCmd.Dir = env.RepoDir
-		prepCmd.Env = append(gitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
 		prepOutput, prepErr := prepCmd.CombinedOutput()
 		t.Logf("prepare-commit-msg output: %s (err: %v)", prepOutput, prepErr)
 
@@ -244,7 +245,7 @@ func TestShadow_CarryForward_ActiveSession(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session (ACTIVE)
-	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, "Create files A, B, and C", sess.TranscriptPath); err != nil {
 		t.Fatalf("user-prompt-submit failed: %v", err)
 	}
 
@@ -365,7 +366,7 @@ func TestShadow_CarryForward_ActiveSession(t *testing.T) {
 	// indicate a regression in carry-forward cleanup.
 	branchesAfterAll := env.ListBranchesWithPrefix("entire/")
 	for _, b := range branchesAfterAll {
-		if b != paths.MetadataBranchName {
+		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
 			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
 		}
 	}
@@ -403,8 +404,8 @@ func TestShadow_CarryForward_IdleSession(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session
-	if err := env.SimulateUserPromptSubmit(sess.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	if err := env.SimulateUserPromptSubmitWithPrompt(sess.ID, "Create files A and B"); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
 	// Create multiple files
@@ -478,7 +479,7 @@ func TestShadow_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session (ACTIVE)
-	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, "Create files A, B, and C", sess.TranscriptPath); err != nil {
 		t.Fatalf("user-prompt-submit failed: %v", err)
 	}
 
@@ -576,7 +577,7 @@ func TestShadow_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 	// No shadow branches should remain after all files are committed
 	branchesAfter := env.ListBranchesWithPrefix("entire/")
 	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName {
+		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
 			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
 		}
 	}
@@ -601,7 +602,7 @@ func TestShadow_MultipleCommits_SameActiveTurn(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session (ACTIVE)
-	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, "Create files A, B, and C", sess.TranscriptPath); err != nil {
 		t.Fatalf("user-prompt-submit failed: %v", err)
 	}
 
@@ -724,8 +725,8 @@ func TestShadow_OverlapCheck_UnrelatedCommit(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session
-	if err := env.SimulateUserPromptSubmit(sess.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	if err := env.SimulateUserPromptSubmitWithPrompt(sess.ID, "Create file A"); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
 	// Create file A through session
@@ -781,8 +782,8 @@ func TestShadow_OverlapCheck_PartialOverlap(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session
-	if err := env.SimulateUserPromptSubmit(sess.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	if err := env.SimulateUserPromptSubmitWithPrompt(sess.ID, "Create file A"); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
 	// Create file A through session
@@ -831,8 +832,8 @@ func TestShadow_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session
-	if err := env.SimulateUserPromptSubmit(sess.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	if err := env.SimulateUserPromptSubmitWithPrompt(sess.ID, "Create files A, B, and C"); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
 	// Create 3 files through session
@@ -921,8 +922,8 @@ func TestShadow_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session
-	if err := env.SimulateUserPromptSubmit(sess.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	if err := env.SimulateUserPromptSubmitWithPrompt(sess.ID, "Create files A, B, and C"); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
 	// Create 3 files through session
@@ -998,7 +999,7 @@ func TestShadow_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session (ACTIVE)
-	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, "Create feature function", sess.TranscriptPath); err != nil {
 		t.Fatalf("user-prompt-submit failed: %v", err)
 	}
 
@@ -1084,7 +1085,7 @@ func TestShadow_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session (ACTIVE)
-	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, "Create files A and B", sess.TranscriptPath); err != nil {
 		t.Fatalf("user-prompt-submit failed: %v", err)
 	}
 
@@ -1180,7 +1181,7 @@ func TestShadow_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
 	// No shadow branches should remain
 	branchesAfter := env.ListBranchesWithPrefix("entire/")
 	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName {
+		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
 			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
 		}
 	}
@@ -1216,7 +1217,7 @@ func TestShadow_DeletedFiles_CheckpointAndCarryForward(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session
-	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, "Create new_file.go and delete old_a.go", sess.TranscriptPath); err != nil {
 		t.Fatalf("user-prompt-submit failed: %v", err)
 	}
 
@@ -1274,7 +1275,7 @@ func TestShadow_DeletedFiles_CheckpointAndCarryForward(t *testing.T) {
 	// doesn't produce full metadata (known limitation).
 	branchesAfter := env.ListBranchesWithPrefix("entire/")
 	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName {
+		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
 			t.Logf("Shadow branch remaining after commits (may be expected for deleted files): %s", b)
 		}
 	}
@@ -1311,7 +1312,7 @@ func TestShadow_CarryForward_ModifiedExistingFiles(t *testing.T) {
 	sess := env.NewSession()
 
 	// Start session
-	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, "Update MVC files", sess.TranscriptPath); err != nil {
 		t.Fatalf("user-prompt-submit failed: %v", err)
 	}
 
@@ -1368,7 +1369,7 @@ func TestShadow_CarryForward_ModifiedExistingFiles(t *testing.T) {
 	// No shadow branches should remain
 	branchesAfter := env.ListBranchesWithPrefix("entire/")
 	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName {
+		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
 			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
 		}
 	}
