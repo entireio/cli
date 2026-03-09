@@ -344,25 +344,25 @@ fi
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.
 // Returns "go run ./cmd/entire/main.go" when local_dev is enabled.
-// When absolutePath is true, resolves the full binary path via os.Executable()
-// and returns an error if resolution fails. This is needed for GUI git clients
-// (Xcode, Tower, etc.) that don't source shell profiles.
-func hookCmdPrefix(localDev, absolutePath bool) (string, error) {
+// By default, resolves the full binary path via os.Executable() so that hooks
+// work in GUI git clients (Xcode, Tower, etc.) that don't source shell profiles.
+// Falls back to bare "entire" only if binary path resolution fails.
+func hookCmdPrefix(localDev, _ bool) (string, error) {
 	if localDev {
 		return "go run ./cmd/entire/main.go", nil
 	}
-	if absolutePath {
-		exe, err := os.Executable()
-		if err != nil {
-			return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve binary path: %w", err)
-		}
-		resolved, err := filepath.EvalSymlinks(exe)
-		if err != nil {
-			return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve symlinks for %s: %w", exe, err)
-		}
-		return shellQuote(resolved), nil
+	// Always resolve the absolute path so hooks work in environments
+	// that don't source shell profiles (GUI git clients, IDEs, cron).
+	exe, err := os.Executable()
+	if err != nil {
+		// Fall back to bare command name if resolution fails
+		return "entire", nil //nolint:nilerr // Graceful fallback to PATH-based lookup
 	}
-	return "entire", nil
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "entire", nil //nolint:nilerr // Graceful fallback to PATH-based lookup
+	}
+	return shellQuote(resolved), nil
 }
 
 // shellQuote wraps a string in single quotes for safe use in #!/bin/sh scripts.

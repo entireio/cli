@@ -599,7 +599,7 @@ func TestInstallGitHook_LocalDevCommandPrefix(t *testing.T) {
 		}
 	}
 
-	// Reinstall with localDev=false — hooks should update to use "entire" prefix
+	// Reinstall with localDev=false - hooks should update to use absolute path
 	count, err = InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook(localDev=false) error = %v", err)
@@ -617,22 +617,23 @@ func TestInstallGitHook_LocalDevCommandPrefix(t *testing.T) {
 		if strings.Contains(content, "go run") {
 			t.Errorf("hook %s should not use 'go run' prefix when localDev=false, got:\n%s", hook, content)
 		}
-		if !strings.Contains(content, "\nentire ") {
-			t.Errorf("hook %s should use bare 'entire' prefix when localDev=false", hook)
+		// Should contain an absolute path (resolved via os.Executable), not bare "entire"
+		if !strings.Contains(content, "/") {
+			t.Errorf("hook %s should use absolute path when localDev=false, got:\n%s", hook, content)
 		}
 	}
 }
 
-func TestInstallGitHook_AbsoluteGitHookPath(t *testing.T) {
+func TestInstallGitHook_AbsolutePathByDefault(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
-	// Install with absolutePath=true
-	count, err := InstallGitHook(context.Background(), true, false, true)
+	// Install with default settings (localDev=false) - should use absolute path
+	count, err := InstallGitHook(context.Background(), true, false, false)
 	if err != nil {
-		t.Fatalf("InstallGitHook(absolutePath=true) error = %v", err)
+		t.Fatalf("InstallGitHook() error = %v", err)
 	}
 	if count == 0 {
-		t.Fatal("InstallGitHook(absolutePath=true) should install hooks")
+		t.Fatal("InstallGitHook() should install hooks")
 	}
 
 	// Get the expected absolute path (shell-quoted)
@@ -656,7 +657,7 @@ func TestInstallGitHook_AbsoluteGitHookPath(t *testing.T) {
 			t.Errorf("hook %s should contain shell-quoted absolute path %q, got:\n%s", hook, quoted, content)
 		}
 		if strings.Contains(content, "\nentire ") {
-			t.Errorf("hook %s should not use bare 'entire' prefix when absolutePath=true", hook)
+			t.Errorf("hook %s should not use bare 'entire' prefix", hook)
 		}
 	}
 }
