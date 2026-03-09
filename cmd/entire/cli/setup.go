@@ -382,9 +382,22 @@ If Entire is already configured but disabled, this re-enables it.`,
 			// Check if we're in a git repository first - this is a prerequisite error,
 			// not a usage error, so we silence Cobra's output and use SilentError
 			// to prevent duplicate error output in main.go
-			if _, err := paths.WorktreeRoot(ctx); err != nil {
+			repoRoot, err := paths.WorktreeRoot(ctx)
+			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run 'entire enable' from within a git repository.")
 				return NewSilentError(errors.New("not a git repository"))
+			}
+
+			// Change to repo root so all paths resolve correctly.
+			// This ensures agent hooks (e.g., .gemini/settings.json, .claude/settings.json)
+			// are created at the repo root even when running from a subdirectory.
+			cwd, _ := os.Getwd() //nolint:forbidigo // Need CWD to detect subdirectory
+			if cwd != repoRoot {
+				if err := os.Chdir(repoRoot); err != nil { //nolint:forbidigo // Intentional chdir to repo root for correct path resolution
+					return fmt.Errorf("failed to change to repository root %s: %w", repoRoot, err)
+				}
+				paths.ClearWorktreeRootCache()
+				fmt.Fprintf(cmd.ErrOrStderr(), "Note: Running from repository root (%s)\n\n", repoRoot)
 			}
 
 			if err := validateSetupFlags(opts.UseLocalSettings, opts.UseProjectSettings); err != nil {
