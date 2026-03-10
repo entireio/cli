@@ -209,8 +209,46 @@ func ExtractTextFromParts(parts []Part) string {
 	return strings.Join(texts, "\n")
 }
 
+// systemReminderOpen is the opening tag for system-reminder messages injected by
+// oh-my-opencode and similar orchestration tools. These arrive with role "user"
+// but are not actual user prompts.
+const systemReminderOpen = "<system-reminder>"
+
+// systemReminderClose is the corresponding closing tag.
+const systemReminderClose = "</system-reminder>"
+
+// isSystemReminderOnly reports whether content consists entirely of a
+// <system-reminder>...</system-reminder> block (after trimming whitespace).
+func isSystemReminderOnly(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	return strings.HasPrefix(trimmed, systemReminderOpen) &&
+		strings.HasSuffix(trimmed, systemReminderClose)
+}
+
+// stripSystemReminders removes all <system-reminder>...</system-reminder>
+// sections from content and returns the remaining text. If nothing remains
+// after stripping (or the content was system-reminder-only), it returns "".
+func stripSystemReminders(content string) string {
+	result := content
+	for {
+		start := strings.Index(result, systemReminderOpen)
+		if start == -1 {
+			break
+		}
+		end := strings.Index(result[start:], systemReminderClose)
+		if end == -1 {
+			break
+		}
+		end += start + len(systemReminderClose)
+		result = result[:start] + result[end:]
+	}
+	return strings.TrimSpace(result)
+}
+
 // ExtractAllUserPrompts extracts all user prompts from raw export JSON transcript bytes.
 // This is a package-level function used by the condensation path.
+// Messages that consist entirely of <system-reminder> tags (e.g. from oh-my-opencode)
+// are excluded. Mixed messages have their system-reminder sections stripped.
 func ExtractAllUserPrompts(data []byte) ([]string, error) {
 	session, err := ParseExportSession(data)
 	if err != nil {
@@ -226,6 +264,13 @@ func ExtractAllUserPrompts(data []byte) ([]string, error) {
 			continue
 		}
 		content := ExtractTextFromParts(msg.Parts)
+		if content == "" {
+			continue
+		}
+		if isSystemReminderOnly(content) {
+			continue
+		}
+		content = stripSystemReminders(content)
 		if content != "" {
 			prompts = append(prompts, content)
 		}
