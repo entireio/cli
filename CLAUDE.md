@@ -73,7 +73,7 @@ mise run test:e2e --agent claude-code [filter]       # Claude Code only
 mise run test:e2e --agent gemini-cli [filter]        # Gemini CLI only
 mise run test:e2e --agent opencode [filter]          # OpenCode only
 mise run test:e2e --agent copilot-cli [filter]       # Copilot CLI only
-mise run test:e2e --agent cursor [filter]            # Cursor only
+mise run test:e2e --agent cursor-cli [filter]        # Cursor only
 ```
 
 E2E tests:
@@ -83,7 +83,7 @@ E2E tests:
 - See [`e2e/README.md`](e2e/README.md) for full documentation (structure, debugging, adding agents)
 - Test real agent interactions (Claude Code, Gemini CLI, OpenCode, Cursor, Copilot CLI, or Vogon creating files, committing, etc.)
 - Validate checkpoint scenarios documented in `docs/architecture/checkpoint-scenarios.md`
-- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini`, `opencode`, `cursor`, `copilot-cli`, `vogon`)
+- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini-cli`, `opencode`, `cursor-cli`, `copilot-cli`, `vogon`)
 
 **Environment variables:**
 
