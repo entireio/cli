@@ -330,6 +330,23 @@ func (s *EntireSettings) IsPushSessionsDisabled() bool {
 	return false
 }
 
+// GetCheckpointRemote returns the configured checkpoint remote, if any.
+// When set, checkpoint branches are pushed to this remote instead of the
+// user's push remote. Returns empty string if not configured.
+func (s *EntireSettings) GetCheckpointRemote() string {
+	if s.StrategyOptions == nil {
+		return ""
+	}
+	val, exists := s.StrategyOptions["checkpoint_remote"]
+	if !exists {
+		return ""
+	}
+	if strVal, ok := val.(string); ok && strVal != "" {
+		return strVal
+	}
+	return ""
+}
+
 // IsExternalAgentsEnabled checks if external agent discovery is enabled in settings.
 // Returns false by default if settings cannot be loaded or the key is missing.
 func IsExternalAgentsEnabled(ctx context.Context) bool {

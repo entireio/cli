@@ -14,8 +14,10 @@ import (
 //   - "prompt" (default): ask user with option to enable auto
 //   - "false"/"off"/"no": never push
 func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error {
+	checkpointRemote := resolveCheckpointRemote(ctx, remote)
+
 	_, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoints_branch")
-	if err := pushSessionsBranchCommon(ctx, remote, paths.MetadataBranchName); err != nil {
+	if err := pushSessionsBranchCommon(ctx, checkpointRemote, paths.MetadataBranchName); err != nil {
 		pushCheckpointsSpan.RecordError(err)
 		pushCheckpointsSpan.End()
 		return err
@@ -23,7 +25,7 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 	pushCheckpointsSpan.End()
 
 	_, pushTrailsSpan := perf.Start(ctx, "push_trails_branch")
-	err := PushTrailsBranch(ctx, remote)
+	err := PushTrailsBranch(ctx, checkpointRemote)
 	pushTrailsSpan.RecordError(err)
 	pushTrailsSpan.End()
 	return err

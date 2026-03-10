@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
@@ -81,6 +82,40 @@ func isPushSessionsDisabled(ctx context.Context) bool {
 		return false // Default: push is enabled
 	}
 	return s.IsPushSessionsDisabled()
+}
+
+// resolveCheckpointRemote returns the remote to use for pushing checkpoint branches.
+// If checkpoint_remote is configured in settings and the remote exists in git config,
+// it is returned. Otherwise falls back to the provided default remote.
+func resolveCheckpointRemote(ctx context.Context, defaultRemote string) string {
+	s, err := settings.Load(ctx)
+	if err != nil {
+		return defaultRemote
+	}
+	configured := s.GetCheckpointRemote()
+	if configured == "" {
+		return defaultRemote
+	}
+
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return defaultRemote
+	}
+	if !remoteExists(repo, configured) {
+		logging.Warn(logging.WithComponent(ctx, "push"),
+			"configured checkpoint_remote does not exist, falling back to default",
+			"checkpoint_remote", configured,
+			"fallback_remote", defaultRemote,
+		)
+		return defaultRemote
+	}
+	return configured
+}
+
+// remoteExists checks if a named remote is configured in the git repository.
+func remoteExists(repo *git.Repository, name string) bool {
+	_, err := repo.Remote(name)
+	return err == nil
 }
 
 // doPushBranch pushes the given branch to the remote with fetch+merge recovery.
