@@ -762,6 +762,8 @@ func (h *postCommitActionHandler) HandleWarnStaleSession(_ *session.State) error
 func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:unparam // error return is part of the hook contract; callers check it
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
+	warnIfTooManySessions(ctx)
+
 	_, openRepoSpan := perf.Start(ctx, "open_repository_and_head")
 	repo, err := OpenRepository(ctx)
 	if err != nil {
