@@ -371,6 +371,127 @@ func TestExtractModifiedFilesFromEvents_EmptyAndMalformedFilePaths(t *testing.T)
 	})
 }
 
+// --- Token Usage Tests ---
+
+func TestCalculateTokenUsage_SessionShutdown(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+
+	lines := append(testJSONLLines, //nolint:gocritic // append to copy is intentional
+		`{"type":"session.shutdown","data":{"modelMetrics":[{"modelId":"claude-sonnet-4.6","requests":{"count":3},"usage":{"inputTokens":64807,"outputTokens":289,"cacheReadTokens":42625,"cacheWriteTokens":100}}]},"id":"99","timestamp":"2026-03-03T00:01:00Z","parentId":""}`,
+	)
+	content := []byte(strings.Join(lines, "\n") + "\n")
+
+	usage, err := ag.CalculateTokenUsage(content, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if usage.InputTokens != 64807 {
+		t.Errorf("InputTokens = %d, want 64807", usage.InputTokens)
+	}
+	if usage.OutputTokens != 289 {
+		t.Errorf("OutputTokens = %d, want 289", usage.OutputTokens)
+	}
+	if usage.CacheReadTokens != 42625 {
+		t.Errorf("CacheReadTokens = %d, want 42625", usage.CacheReadTokens)
+	}
+	if usage.CacheCreationTokens != 100 {
+		t.Errorf("CacheCreationTokens = %d, want 100", usage.CacheCreationTokens)
+	}
+	if usage.APICallCount != 3 {
+		t.Errorf("APICallCount = %d, want 3", usage.APICallCount)
+	}
+}
+
+func TestCalculateTokenUsage_MultiModel(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+
+	lines := []string{
+		`{"type":"session.shutdown","data":{"modelMetrics":[` +
+			`{"modelId":"gpt-4.1","requests":{"count":2},"usage":{"inputTokens":1000,"outputTokens":200,"cacheReadTokens":0,"cacheWriteTokens":0}},` +
+			`{"modelId":"claude-sonnet-4.6","requests":{"count":1},"usage":{"inputTokens":500,"outputTokens":100,"cacheReadTokens":300,"cacheWriteTokens":50}}` +
+			`]},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+	}
+	content := []byte(strings.Join(lines, "\n") + "\n")
+
+	usage, err := ag.CalculateTokenUsage(content, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if usage.InputTokens != 1500 {
+		t.Errorf("InputTokens = %d, want 1500", usage.InputTokens)
+	}
+	if usage.OutputTokens != 300 {
+		t.Errorf("OutputTokens = %d, want 300", usage.OutputTokens)
+	}
+	if usage.CacheReadTokens != 300 {
+		t.Errorf("CacheReadTokens = %d, want 300", usage.CacheReadTokens)
+	}
+	if usage.APICallCount != 3 {
+		t.Errorf("APICallCount = %d, want 3", usage.APICallCount)
+	}
+}
+
+func TestCalculateTokenUsage_FallbackToAssistantMessages(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+
+	// No session.shutdown — should fall back to assistant.message outputTokens
+	lines := []string{
+		`{"type":"assistant.message","data":{"content":"hello","outputTokens":150},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		`{"type":"assistant.message","data":{"content":"world","outputTokens":114},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":""}`,
+	}
+	content := []byte(strings.Join(lines, "\n") + "\n")
+
+	usage, err := ag.CalculateTokenUsage(content, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if usage.InputTokens != 0 {
+		t.Errorf("InputTokens = %d, want 0 (fallback has no input tokens)", usage.InputTokens)
+	}
+	if usage.OutputTokens != 264 {
+		t.Errorf("OutputTokens = %d, want 264", usage.OutputTokens)
+	}
+	if usage.APICallCount != 2 {
+		t.Errorf("APICallCount = %d, want 2", usage.APICallCount)
+	}
+}
+
+func TestCalculateTokenUsage_EmptyTranscript(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+
+	usage, err := ag.CalculateTokenUsage([]byte{}, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if usage.OutputTokens != 0 {
+		t.Errorf("OutputTokens = %d, want 0", usage.OutputTokens)
+	}
+}
+
+func TestCalculateTokenUsage_WithOffset(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+
+	// session.shutdown is on line 2; offset 1 skips line 1 but still sees shutdown
+	lines := []string{
+		`{"type":"user.message","data":{"content":"hello"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":[{"modelId":"claude-sonnet-4.6","requests":{"count":1},"usage":{"inputTokens":500,"outputTokens":50,"cacheReadTokens":0,"cacheWriteTokens":0}}]},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":""}`,
+	}
+	content := []byte(strings.Join(lines, "\n") + "\n")
+
+	usage, err := ag.CalculateTokenUsage(content, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if usage.InputTokens != 500 {
+		t.Errorf("InputTokens = %d, want 500", usage.InputTokens)
+	}
+}
+
 func TestExtractModelFromTranscript_ModelChangeEvent(t *testing.T) {
 	t.Parallel()
 

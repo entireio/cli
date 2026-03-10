@@ -13,8 +13,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
-// Compile-time interface check.
-var _ agent.TranscriptAnalyzer = (*CopilotCLIAgent)(nil)
+// Compile-time interface checks.
+var (
+	_ agent.TranscriptAnalyzer = (*CopilotCLIAgent)(nil)
+	_ agent.TokenCalculator    = (*CopilotCLIAgent)(nil)
+)
 
 // copilotEvent is a single line in events.jsonl.
 type copilotEvent struct {
@@ -223,6 +226,100 @@ func extractModelFromEvents(events []copilotEvent) string {
 	}
 
 	return ""
+}
+
+// sessionShutdownData is the data payload for session.shutdown events.
+// Contains aggregate model metrics for the entire session.
+type sessionShutdownData struct {
+	ModelMetrics []modelMetric `json:"modelMetrics"`
+}
+
+// modelMetric contains per-model token usage aggregates.
+type modelMetric struct {
+	ModelID  string        `json:"modelId"`
+	Requests modelRequests `json:"requests"`
+	Usage    modelUsage    `json:"usage"`
+}
+
+type modelRequests struct {
+	Count int `json:"count"`
+}
+
+type modelUsage struct {
+	InputTokens      int `json:"inputTokens"`
+	OutputTokens     int `json:"outputTokens"`
+	CacheReadTokens  int `json:"cacheReadTokens"`
+	CacheWriteTokens int `json:"cacheWriteTokens"`
+}
+
+// assistantMessageTokenData is used as a fallback when session.shutdown is not
+// yet available. Each assistant.message may carry an outputTokens field.
+type assistantMessageTokenData struct {
+	OutputTokens int `json:"outputTokens"`
+}
+
+const eventTypeSessionShutdown = "session.shutdown"
+
+// CalculateTokenUsage computes token usage from the Copilot CLI JSONL transcript.
+// It prefers session.shutdown events (which contain session-wide aggregates) and
+// falls back to summing per-message outputTokens from assistant.message events.
+func (c *CopilotCLIAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*agent.TokenUsage, error) {
+	events, err := parseEventsFromOffset(transcriptData, fromOffset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transcript for token usage: %w", err)
+	}
+
+	return extractTokenUsageFromEvents(events), nil
+}
+
+// extractTokenUsageFromEvents extracts token usage from parsed events.
+// Prefers session.shutdown aggregate; falls back to per-message outputTokens.
+func extractTokenUsageFromEvents(events []copilotEvent) *agent.TokenUsage {
+	// Try session.shutdown first — authoritative session-wide aggregate
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != eventTypeSessionShutdown {
+			continue
+		}
+
+		var data sessionShutdownData
+		if err := json.Unmarshal(events[i].Data, &data); err != nil {
+			continue
+		}
+
+		if len(data.ModelMetrics) == 0 {
+			continue
+		}
+
+		// Sum across all models
+		usage := &agent.TokenUsage{}
+		for _, m := range data.ModelMetrics {
+			usage.InputTokens += m.Usage.InputTokens
+			usage.OutputTokens += m.Usage.OutputTokens
+			usage.CacheReadTokens += m.Usage.CacheReadTokens
+			usage.CacheCreationTokens += m.Usage.CacheWriteTokens
+			usage.APICallCount += m.Requests.Count
+		}
+		return usage
+	}
+
+	// Fallback: sum outputTokens from assistant.message events
+	usage := &agent.TokenUsage{}
+	for i := range events {
+		if events[i].Type != eventTypeAssistantMsg {
+			continue
+		}
+
+		var data assistantMessageTokenData
+		if err := json.Unmarshal(events[i].Data, &data); err != nil {
+			continue
+		}
+		usage.OutputTokens += data.OutputTokens
+		if data.OutputTokens > 0 {
+			usage.APICallCount++
+		}
+	}
+
+	return usage
 }
 
 // ExtractModelFromTranscript extracts the LLM model name from a Copilot CLI

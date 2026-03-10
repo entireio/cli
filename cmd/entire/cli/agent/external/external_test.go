@@ -2,10 +2,12 @@ package external
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -30,6 +32,27 @@ func testBinaryDir(t *testing.T, script string) string {
 	}
 
 	return path
+}
+
+// newExternalAgent creates an ExternalAgent with retry to handle ETXTBSY.
+// On heavily loaded CI machines, the kernel may briefly report "text file busy"
+// when executing a just-written shell script.
+func newExternalAgent(t *testing.T, binPath string) *Agent {
+	t.Helper()
+	var ea *Agent
+	var err error
+	for range 3 {
+		ea, err = New(context.Background(), binPath)
+		if err == nil {
+			return ea
+		}
+		if !errors.Is(err, syscall.ETXTBSY) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("New: %v", err)
+	return nil
 }
 
 // mockInfoScript returns a shell script that responds to "info" with the given JSON.
@@ -137,10 +160,7 @@ case "$1" in
 esac
 `
 	binPath := testBinaryDir(t, script)
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	// Temporarily override the default timeout to keep the test fast.
 	orig := defaultRunTimeout
@@ -148,7 +168,7 @@ esac
 	t.Cleanup(func() { defaultRunTimeout = orig })
 
 	start := time.Now()
-	_, err = ea.run(context.Background(), nil, "slow")
+	_, err := ea.run(context.Background(), nil, "slow")
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -178,10 +198,7 @@ case "$1" in
 esac
 `
 	binPath := testBinaryDir(t, script)
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	// Provide a context with a short deadline. run() should respect it
 	// and NOT override with its own (longer) timeout.
@@ -189,7 +206,7 @@ esac
 	defer cancel()
 
 	start := time.Now()
-	_, err = ea.run(ctx, nil, "slow")
+	_, err := ea.run(ctx, nil, "slow")
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -208,10 +225,7 @@ func TestNew_Valid(t *testing.T) {
 	}
 
 	binPath := testBinaryDir(t, mockInfoScript(validInfoJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 	if ea.info.Name != "test" {
 		t.Errorf("Name = %q, want %q", ea.info.Name, "test")
 	}
@@ -271,10 +285,7 @@ func TestExternalAgent_Identity(t *testing.T) {
 	}
 
 	binPath := testBinaryDir(t, mockInfoScript(validInfoJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	if string(ea.Name()) != "test" {
 		t.Errorf("Name() = %q, want %q", ea.Name(), "test")
@@ -302,10 +313,7 @@ func TestExternalAgent_DetectPresence(t *testing.T) {
 	}
 
 	binPath := testBinaryDir(t, mockInfoScript(validInfoJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	present, err := ea.DetectPresence(context.Background())
 	if err != nil {
@@ -324,10 +332,7 @@ func TestExternalAgent_GetSessionDir(t *testing.T) {
 	}
 
 	binPath := testBinaryDir(t, mockInfoScript(validInfoJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	dir, err := ea.GetSessionDir("/repo")
 	if err != nil {
@@ -346,10 +351,7 @@ func TestExternalAgent_TranscriptAnalyzer(t *testing.T) {
 	}
 
 	binPath := testBinaryDir(t, mockInfoScript(validInfoJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	pos, err := ea.GetTranscriptPosition("/some/path")
 	if err != nil {
@@ -395,10 +397,7 @@ func TestExternalAgent_HookSupport(t *testing.T) {
 	}
 
 	binPath := testBinaryDir(t, mockInfoScript(validInfoJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	names := ea.HookNames()
 	if len(names) != 2 {
@@ -437,12 +436,9 @@ case "$1" in
 esac
 `
 	binPath := testBinaryDir(t, script)
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
-	_, err = ea.DetectPresence(context.Background())
+	_, err := ea.DetectPresence(context.Background())
 	if err == nil {
 		t.Fatal("expected error from stderr")
 	}
@@ -459,10 +455,7 @@ func TestWrap_HooksAndAnalyzer(t *testing.T) {
 	}
 
 	binPath := testBinaryDir(t, mockInfoScript(validInfoJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	wrapped, err := Wrap(ea)
 	if err != nil {
@@ -509,10 +502,7 @@ func TestWrap_NoCapabilities(t *testing.T) {
 }`
 
 	binPath := testBinaryDir(t, mockInfoScript(noCapJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	wrapped, err := Wrap(ea)
 	if err != nil {
@@ -546,10 +536,7 @@ func TestWrap_HooksOnly(t *testing.T) {
 }`
 
 	binPath := testBinaryDir(t, mockInfoScript(hooksOnlyJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	wrapped, err := Wrap(ea)
 	if err != nil {
@@ -583,10 +570,7 @@ func TestWrap_PreparerOnly(t *testing.T) {
 }`
 
 	binPath := testBinaryDir(t, mockInfoScript(infoJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	wrapped, err := Wrap(ea)
 	if err != nil {
@@ -623,10 +607,7 @@ func TestWrap_AnalyzerAndPreparer(t *testing.T) {
 }`
 
 	binPath := testBinaryDir(t, mockInfoScript(infoJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	wrapped, err := Wrap(ea)
 	if err != nil {
@@ -663,10 +644,7 @@ func TestWrap_HooksAnalyzerPreparer(t *testing.T) {
 }`
 
 	binPath := testBinaryDir(t, mockInfoScript(infoJSON))
-	ea, err := New(context.Background(), binPath)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	ea := newExternalAgent(t, binPath)
 
 	wrapped, err := Wrap(ea)
 	if err != nil {

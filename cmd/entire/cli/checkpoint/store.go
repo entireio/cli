@@ -1,7 +1,7 @@
 package checkpoint
 
 import (
-	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v6"
 )
 
 // Compile-time check that GitStore implements the Store interface.

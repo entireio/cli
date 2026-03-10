@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -233,16 +234,63 @@ func TestParseGitHubRelease(t *testing.T) {
 }
 
 func TestUpdateCommand(t *testing.T) {
-	// updateCommand should return one of the two valid update commands
-	cmd := updateCommand()
-
-	validCommands := map[string]bool{
-		"brew upgrade entire":                            true,
-		"curl -fsSL https://entire.io/install.sh | bash": true,
+	tests := []struct {
+		name     string
+		execPath func() (string, error)
+		want     string
+	}{
+		{
+			name:     "homebrew cellar path",
+			execPath: func() (string, error) { return "/opt/homebrew/Cellar/entire/1.0.0/bin/entire", nil },
+			want:     "brew upgrade entire",
+		},
+		{
+			name:     "homebrew opt path",
+			execPath: func() (string, error) { return "/opt/homebrew/bin/entire", nil },
+			want:     "brew upgrade entire",
+		},
+		{
+			name:     "linuxbrew path",
+			execPath: func() (string, error) { return "/home/linuxbrew/.linuxbrew/bin/entire", nil },
+			want:     "brew upgrade entire",
+		},
+		{
+			name:     "mise path",
+			execPath: func() (string, error) { return "/home/user/.local/share/mise/installs/entire/1.0.0/bin/entire", nil },
+			want:     "mise upgrade entire",
+		},
+		{
+			name:     "username mise not detected as mise install",
+			execPath: func() (string, error) { return "/home/mise/bin/entire", nil },
+			want:     "curl -fsSL https://entire.io/install.sh | bash",
+		},
+		{
+			name:     "username homebrew not detected as brew install",
+			execPath: func() (string, error) { return "/home/homebrew/bin/entire", nil },
+			want:     "curl -fsSL https://entire.io/install.sh | bash",
+		},
+		{
+			name:     "unknown path falls back to curl",
+			execPath: func() (string, error) { return "/usr/local/bin/entire", nil },
+			want:     "curl -fsSL https://entire.io/install.sh | bash",
+		},
+		{
+			name:     "executable error falls back to curl",
+			execPath: func() (string, error) { return "", errors.New("not found") },
+			want:     "curl -fsSL https://entire.io/install.sh | bash",
+		},
 	}
 
-	if !validCommands[cmd] {
-		t.Errorf("updateCommand() = %q, want one of %v", cmd, validCommands)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := executablePath
+			executablePath = tt.execPath
+			t.Cleanup(func() { executablePath = original })
+
+			if got := updateCommand(); got != tt.want {
+				t.Errorf("updateCommand() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

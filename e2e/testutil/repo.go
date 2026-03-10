@@ -74,6 +74,19 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	}
 	PatchSettings(t, dir, map[string]any{"log_level": "debug"})
 
+	// Copilot CLI blocks on a "No copilot instructions found" notice in fresh
+	// repos that lack .github/copilot-instructions.md, preventing the interactive
+	// prompt from appearing.
+	if agent.Name() == "copilot-cli" {
+		ghDir := filepath.Join(dir, ".github")
+		if err := os.MkdirAll(ghDir, 0o755); err != nil {
+			t.Fatalf("create .github dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(ghDir, "copilot-instructions.md"), []byte("# E2E Test\n"), 0o644); err != nil {
+			t.Fatalf("write copilot-instructions.md: %v", err)
+		}
+	}
+
 	// OpenCode's non-interactive mode auto-rejects external_directory permission
 	// since there's no user to prompt. Write a config to allow it.
 	if agent.Name() == "opencode" {

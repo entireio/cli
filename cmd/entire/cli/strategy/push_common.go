@@ -13,9 +13,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // pushSessionsBranchCommon is the shared implementation for pushing session branches.
@@ -136,7 +136,8 @@ func fetchAndMergeSessionsCommon(ctx context.Context, remote, branchName string)
 	defer cancel()
 
 	// Use git CLI for fetch (go-git's fetch can be tricky with auth)
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", remote, branchName)
+	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", branchName, remote, branchName)
+	fetchCmd := exec.CommandContext(ctx, "git", "fetch", remote, refSpec)
 	fetchCmd.Stdin = nil
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("fetch failed: %s", output)
@@ -171,12 +172,13 @@ func fetchAndMergeSessionsCommon(ctx context.Context, remote, branchName string)
 		return fmt.Errorf("failed to get local tree: %w", err)
 	}
 
-	// Get remote (FETCH_HEAD)
-	fetchHeadRef, err := repo.Reference(plumbing.ReferenceName("FETCH_HEAD"), true)
+	// Get remote tracking ref (updated by the fetch above)
+	remoteRefName := plumbing.NewRemoteReferenceName(remote, branchName)
+	remoteRef, err := repo.Reference(remoteRefName, true)
 	if err != nil {
-		return fmt.Errorf("failed to get FETCH_HEAD: %w", err)
+		return fmt.Errorf("failed to get remote ref: %w", err)
 	}
-	remoteCommit, err := repo.CommitObject(fetchHeadRef.Hash())
+	remoteCommit, err := repo.CommitObject(remoteRef.Hash())
 	if err != nil {
 		return fmt.Errorf("failed to get remote commit: %w", err)
 	}
@@ -203,7 +205,7 @@ func fetchAndMergeSessionsCommon(ctx context.Context, remote, branchName string)
 
 	// Create merge commit with both parents
 	mergeCommitHash, err := createMergeCommitCommon(repo, mergedTreeHash,
-		[]plumbing.Hash{localRef.Hash(), fetchHeadRef.Hash()},
+		[]plumbing.Hash{localRef.Hash(), remoteRef.Hash()},
 		"Merge remote session logs")
 	if err != nil {
 		return fmt.Errorf("failed to create merge commit: %w", err)

@@ -44,10 +44,10 @@ func TestLineAttributionReasonable(t *testing.T) {
 	})
 }
 
-// TestAttributionOnAgentCommit: agent creates a file and commits it in the
+// TestInteractiveAttributionOnAgentCommit: agent creates a file and commits it in the
 // same prompt (interactive session). The first commit's checkpoint should have
 // initial_attribution populated.
-func TestAttributionOnAgentCommit(t *testing.T) {
+func TestInteractiveAttributionOnAgentCommit(t *testing.T) {
 	testutil.ForEachAgent(t, 3*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		prompt := s.Agent.PromptPattern()
 
@@ -74,10 +74,10 @@ func TestAttributionOnAgentCommit(t *testing.T) {
 	})
 }
 
-// TestAttributionMultiCommitSameSession: two prompts in the same interactive
+// TestInteractiveAttributionMultiCommitSameSession: two prompts in the same interactive
 // session, agent modifies the same file and commits both times. The second
 // checkpoint's initial_attribution should have non-zero values.
-func TestAttributionMultiCommitSameSession(t *testing.T) {
+func TestInteractiveAttributionMultiCommitSameSession(t *testing.T) {
 	testutil.ForEachAgent(t, 4*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		prompt := s.Agent.PromptPattern()
 
@@ -115,10 +115,10 @@ func TestAttributionMultiCommitSameSession(t *testing.T) {
 	})
 }
 
-// TestShadowBranchCleanedAfterAgentCommit: after an agent creates a file
+// TestInteractiveShadowBranchCleanedAfterAgentCommit: after an agent creates a file
 // and commits it, there should be no lingering shadow branches. Shadow
 // branches match entire/* but are not entire/checkpoints/*.
-func TestShadowBranchCleanedAfterAgentCommit(t *testing.T) {
+func TestInteractiveShadowBranchCleanedAfterAgentCommit(t *testing.T) {
 	testutil.ForEachAgent(t, 3*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		prompt := s.Agent.PromptPattern()
 

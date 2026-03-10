@@ -62,6 +62,7 @@ mise run test:e2e:canary TestFoo   # Run a specific test
 - **If a canary test fails, the bug is in the CLI or test infrastructure**, not in an agent
 - Located in `e2e/vogon/` (binary) and `cmd/entire/cli/agent/vogon/` (Agent interface)
 - The binary parses prompts via regex, creates/modifies/deletes files, and fires lifecycle hooks
+- **IMPORTANT: When changing E2E test prompt wording**, the Vogon binary (`e2e/vogon/main.go`) parses prompts with hardcoded regexes. New phrasing may not match existing patterns — always run `mise run test:e2e:canary` after changing prompt text and fix Vogon's parsing if tests fail.
 
 ### Running E2E Tests (Only When Explicitly Requested)
 

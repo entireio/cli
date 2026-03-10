@@ -290,31 +290,58 @@ func parseNumberedSteps(prompt string) []action {
 
 	var actions []action
 	for _, step := range steps {
-		// Explicit git command: "Run: git add ... && git commit ..."
-		if explicitGitRe.MatchString(step) {
-			actions = append(actions, action{kind: "commit"})
-			continue
-		}
+		hasExplicitGit := explicitGitRe.MatchString(step)
 
-		// Create file with optional inline content
+		// Create file with optional inline content.
+		// Try the full "create ... file ... <path>" regex first, then fall back
+		// to "Create <path>" (any file path after a Create verb).
 		if m := createFileRe.FindStringSubmatch(step); m != nil {
 			content := fmt.Sprintf("# %s\n\nGenerated content.\n", m[1])
 			if ic := inlineContentRe.FindStringSubmatch(step); ic != nil {
 				content = ic[1] + "\n"
 			}
 			actions = append(actions, action{kind: "create", path: m[1], content: content})
+			if hasExplicitGit {
+				actions = append(actions, action{kind: "commit"})
+			}
 			continue
+		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(step)), "create") {
+			if m := anyFileRe.FindStringSubmatch(step); m != nil {
+				topic := extractTopic(step)
+				content := fmt.Sprintf("# %s\n\nA paragraph about %s.\n", topic, topic)
+				if ic := inlineContentRe.FindStringSubmatch(step); ic != nil {
+					content = ic[1] + "\n"
+				}
+				actions = append(actions, action{kind: "create", path: m[1], content: content})
+				if hasExplicitGit {
+					actions = append(actions, action{kind: "commit"})
+				}
+				continue
+			}
 		}
 
 		// Modify file
 		if m := modifyFileRe.FindStringSubmatch(step); m != nil {
 			actions = append(actions, action{kind: "modify", path: m[1], content: "// Modified by vogon agent\n"})
+			if hasExplicitGit {
+				actions = append(actions, action{kind: "commit"})
+			}
 			continue
 		}
 
 		// Delete file
 		if m := deleteFileRe.FindStringSubmatch(step); m != nil {
 			actions = append(actions, action{kind: "delete", path: m[1]})
+			if hasExplicitGit {
+				actions = append(actions, action{kind: "commit"})
+			}
+			continue
+		}
+
+		// Explicit git command without a file operation in this step
+		if hasExplicitGit {
+			actions = append(actions, action{kind: "commit"})
 			continue
 		}
 

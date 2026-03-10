@@ -23,11 +23,18 @@ func (s *TmuxSession) OnClose(fn func()) {
 
 // NewTmuxSession creates a new tmux session running the given command in dir.
 // unsetEnv lists environment variable names to strip from the session.
+//
+// The command is wrapped with `env` to propagate PATH from the current process.
+// tmux sessions inherit the tmux server's environment (not the client's), so
+// without this, binaries added to PATH by the test runner (e.g., freshly built
+// `entire` and `vogon`) would not be found inside the session.
 func NewTmuxSession(name string, dir string, unsetEnv []string, command string, args ...string) (*TmuxSession, error) {
 	s := &TmuxSession{name: name}
 
 	tmuxArgs := []string{"new-session", "-d", "-s", name, "-c", dir}
-	// Build a shell command string, prefixed with env -u for each var to strip.
+	// Build a shell command string using `env` to:
+	//   1. Propagate PATH from the current process (tmux server may have stale PATH)
+	//   2. Unset variables listed in unsetEnv
 	// All arguments are shell-quoted to prevent injection or splitting.
 	// PATH is always forwarded from the current process so that the freshly-built
 	// "entire" binary (prepended to PATH by main_test.go) is available inside the

@@ -8,9 +8,10 @@ import (
 	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/format/config"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // Content-aware overlap detection for checkpoint management.
@@ -513,11 +514,15 @@ func workingTreeMatchesCommit(worktreeRoot, filePath string, commitHash plumbing
 	if err != nil {
 		return false
 	}
-	h := plumbing.NewHasher(plumbing.BlobObject, int64(len(diskContent)))
+	of := config.SHA1
+	if commitHash.Size() == config.SHA256.Size() {
+		of = config.SHA256
+	}
+	h := plumbing.NewHasher(of, plumbing.BlobObject, int64(len(diskContent)))
 	if _, err := h.Write(diskContent); err != nil {
 		return false
 	}
-	return h.Sum() == commitHash
+	return commitHash.Equal(h.Sum())
 }
 
 // subtractFilesByName returns files from filesTouched that are NOT in committedFiles.

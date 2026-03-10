@@ -1,0 +1,25 @@
+#!/bin/bash
+set -e
+
+# Install mise (tool version manager)
+if ! command -v mise &> /dev/null; then
+    curl https://mise.run | sh
+
+    # Add mise to .bashrc for future sessions
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    echo 'eval "$(mise activate bash)"' >> ~/.bashrc
+fi
+
+# Add mise to PATH for this session
+export PATH="$HOME/.local/bin:$PATH"
+
+# Trust this directory and install tools (both real and symlinked paths)
+HOST_REPO_PATH="${1:-$(pwd)}"
+mise trust /mnt/shared/repo
+mise trust "$HOST_REPO_PATH"
+if [ -f mise.toml ]; then
+    mise install -y
+fi
+
+# Install Entire CLI (yes to skip prompts in non-interactive sessions)
+yes | curl -fsSL https://entire.io/install.sh | bash

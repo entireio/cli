@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-03-06
+
+### Added
+
+- External agent plugin system with lazy discovery, timeout protection, feature-flag gating, and stdin/stdout caps ([docs](https://docs.entire.io/cli/external-agents), [#604](https://github.com/entireio/cli/pull/604))
+- Vogon deterministic fake agent for cost-free E2E canary testing ([#619](https://github.com/entireio/cli/pull/619))
+- `entire resume` now supports squash-merged commits by parsing checkpoint IDs from the metadata branch ([#534](https://github.com/entireio/cli/pull/534), [#602](https://github.com/entireio/cli/pull/602), [#593](https://github.com/entireio/cli/pull/593))
+- `entire rewind` now supports squash-merged commits ([#612](https://github.com/entireio/cli/pull/612))
+- Model name tracking and display in session info for Claude Code, Gemini CLI, Cursor, and Droid ([#595](https://github.com/entireio/cli/pull/595), [#581](https://github.com/entireio/cli/pull/581))
+- Performance measurement (`perf` package) with span-based instrumentation across all lifecycle hooks ([#614](https://github.com/entireio/cli/pull/614))
+- Cursor session metrics: duration, turns, model, and attribution captured via hooks ([#613](https://github.com/entireio/cli/pull/613))
+- Commit hook perf benchmark with control baseline and scaling analysis ([#549](https://github.com/entireio/cli/pull/549))
+- Discord notifications for new releases ([#624](https://github.com/entireio/cli/pull/624))
+- Changelog-based release notes with CI enforcement ([#635](https://github.com/entireio/cli/pull/635))
+
+### Changed
+
+- Replaced O(N) go-git tree walks with `git diff-tree` in post-commit hook for faster commits ([#594](https://github.com/entireio/cli/pull/594))
+- Removed `context.md` and scoped `prompt.txt` to checkpoint-only prompts; prompt source of truth is now shadow branch/filesystem, never transcript ([#572](https://github.com/entireio/cli/pull/572))
+- Consolidated transcript file extraction behind `resolveFilesTouched` and `hasNewTranscriptWork` ([#597](https://github.com/entireio/cli/pull/597))
+- Reconcile disconnected local/remote metadata branches automatically at read/write time and during `entire enable` ([#533](https://github.com/entireio/cli/pull/533))
+
+### Fixed
+
+- `entire explain` showing "(no prompt)" for multi-session checkpoints ([#633](https://github.com/entireio/cli/pull/633))
+- Two-turn bug where second turn committed different files than first turn, causing carry-forward failure ([#578](https://github.com/entireio/cli/pull/578))
+- Phantom file carry-forward causing lingering shadow branches ([#537](https://github.com/entireio/cli/pull/537))
+- Spurious task checkpoints for agents without `SubagentStart` hook ([#577](https://github.com/entireio/cli/pull/577))
+- OpenCode session end detection via `server.instance.disposed` ([#584](https://github.com/entireio/cli/pull/584))
+- OpenCode turn-end hook chain for reliable checkpoints ([#541](https://github.com/entireio/cli/pull/541))
+- Cursor `modified_files` forwarding from subagent-stop and transcript position tracking ([#598](https://github.com/entireio/cli/pull/598))
+- Session state with nil `LastInteractionTime` causing immortal sessions ([#617](https://github.com/entireio/cli/pull/617))
+- Dispatch test leaking session state into real repo ([#625](https://github.com/entireio/cli/pull/625))
+- Error propagation in push, doctor, and post-commit paths ([#533](https://github.com/entireio/cli/pull/533))
+
+### Housekeeping
+
+- Droid E2E tests stabilized for CI ([#607](https://github.com/entireio/cli/pull/607))
+- E2E tests show rerun command on failure ([#621](https://github.com/entireio/cli/pull/621))
+- Added "Git in Tests" section to CLAUDE.md ([#625](https://github.com/entireio/cli/pull/625))
+- Flaky external agent test fix with `ETXTBSY` retry ([#638](https://github.com/entireio/cli/pull/638))
+- E2E workflow dynamically builds agent matrix for single-agent dispatch ([#609](https://github.com/entireio/cli/pull/609), [#616](https://github.com/entireio/cli/pull/616))
+- E2E test failure alerting on main branch ([#603](https://github.com/entireio/cli/pull/603))
+- tmux PATH propagation in E2E interactive tests ([#629](https://github.com/entireio/cli/pull/629))
+
+### Thanks
+
+Thanks to @erezrokah for contributing to this release!
+
 ## [0.4.9] - 2026-03-02
 
 ### Added

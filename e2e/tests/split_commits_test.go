@@ -35,9 +35,9 @@ func TestUserSplitsAgentChanges(t *testing.T) {
 		cpID1 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		cpBranch1 := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
 
-		// User commits C + D.
-		s.Git(t, "add", "docs/c.md", "docs/d.md")
-		s.Git(t, "commit", "-m", "Add c.md and d.md")
+		// Commit everything remaining (c.md + d.md + any extra files the agent might have created).
+		s.Git(t, "add", "-A")
+		s.Git(t, "commit", "-m", "Commit remaining changes (including c.md and d.md)")
 
 		testutil.WaitForCheckpointAdvanceFrom(t, s.Dir, cpBranch1, 15*time.Second)
 		cpID2 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
@@ -138,9 +138,9 @@ func TestSplitModificationsToExistingFiles(t *testing.T) {
 		cpID2 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		cpBranch2 := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
 
-		// Commit controller.go.
-		s.Git(t, "add", "src/controller.go")
-		s.Git(t, "commit", "-m", "Update controller.go")
+		// Commit everything remaining (controller.go + any extra files the agent might have created).
+		s.Git(t, "add", "-A")
+		s.Git(t, "commit", "-m", "Commit remaining changes")
 
 		testutil.WaitForCheckpointAdvanceFrom(t, s.Dir, cpBranch2, 15*time.Second)
 		cpID3 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")

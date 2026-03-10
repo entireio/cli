@@ -11,4 +11,5 @@ if [ -n "$files" ]; then
   echo "$files"
   echo ""
   echo "To fix: mise run fmt"
+  exit 1
 fi

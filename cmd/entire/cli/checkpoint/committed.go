@@ -26,12 +26,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/redact"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/utils/binary"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/utils/binary"
 )
 
 // errStopIteration is used to stop commit iteration early in GetCheckpointAuthor.
@@ -1614,7 +1614,7 @@ type Author struct {
 }
 
 // GetCheckpointAuthor retrieves the author of a checkpoint from the entire/checkpoints/v1 commit history.
-// Returns the author of the commit that introduced this checkpoint's metadata.json file.
+// Finds the commit whose subject matches "Checkpoint: <id>" and returns its author.
 // Returns empty Author if the checkpoint is not found or the sessions branch doesn't exist.
 func (s *GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (Author, error) {
 	if err := ctx.Err(); err != nil {
@@ -1627,10 +1627,9 @@ func (s *GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.Chec
 		return Author{}, nil
 	}
 
-	// Path to the checkpoint's metadata file
-	metadataPath := checkpointID.Path() + "/" + paths.MetadataFileName
+	// Search for the commit whose subject matches "Checkpoint: <id>"
+	targetSubject := "Checkpoint: " + checkpointID.String()
 
-	// Walk commit history looking for the commit that introduced this file
 	iter, err := s.repo.Log(&git.LogOptions{
 		From:  ref.Hash(),
 		Order: git.LogOrderCommitterTime,
@@ -1641,36 +1640,21 @@ func (s *GitStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.Chec
 	defer iter.Close()
 
 	var author Author
-	var foundCommit *object.Commit
-
 	err = iter.ForEach(func(c *object.Commit) error {
 		if err := ctx.Err(); err != nil {
 			return err //nolint:wrapcheck // Propagating context cancellation
 		}
-		tree, treeErr := c.Tree()
-		if treeErr != nil {
-			return nil //nolint:nilerr // Skip commits we can't read, continue searching
-		}
-
-		_, fileErr := tree.File(metadataPath)
-		if fileErr != nil {
-			// File doesn't exist in this commit - we've gone past the creation point
-			if foundCommit != nil {
-				return errStopIteration
+		subject := strings.SplitN(c.Message, "\n", 2)[0]
+		if subject == targetSubject {
+			author = Author{
+				Name:  c.Author.Name,
+				Email: c.Author.Email,
 			}
-			return nil
-		}
-
-		// File exists - track it (oldest one with file is the creator)
-		foundCommit = c
-		author = Author{
-			Name:  c.Author.Name,
-			Email: c.Author.Email,
+			return errStopIteration
 		}
 		return nil
 	})
 
-	// Ignore errStopIteration - it's just for early exit
 	if err != nil && !errors.Is(err, errStopIteration) {
 		return Author{}, nil
 	}

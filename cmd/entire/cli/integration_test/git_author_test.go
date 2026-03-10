@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v6"
 )
 
 // TestGetGitAuthorWithLocalConfig tests the normal path where local repo config exists.

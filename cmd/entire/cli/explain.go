@@ -24,10 +24,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/storer"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/storer"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -45,6 +45,7 @@ type associatedCommit struct {
 	ShortSHA string
 	Message  string
 	Author   string
+	Email    string
 	Date     time.Time
 }
 
@@ -286,11 +287,21 @@ func runExplainCheckpoint(ctx context.Context, w, errW io.Writer, checkpointIDPr
 		return nil
 	}
 
-	// Look up the author for this checkpoint (best-effort, ignore errors)
-	author, _ := store.GetCheckpointAuthor(ctx, fullCheckpointID) //nolint:errcheck // Author is optional
-
 	// Find associated commits (git commits with matching Entire-Checkpoint trailer)
 	associatedCommits, _ := getAssociatedCommits(ctx, repo, fullCheckpointID, searchAll) //nolint:errcheck // Best-effort
+
+	// Derive author from the first associated commit (the user who made the commit).
+	// Fall back to GetCheckpointAuthor (walks entire/checkpoints/v1) for checkpoints
+	// not reachable from the current branch.
+	var author checkpoint.Author
+	if len(associatedCommits) > 0 {
+		author = checkpoint.Author{
+			Name:  associatedCommits[0].Author,
+			Email: associatedCommits[0].Email,
+		}
+	} else {
+		author, _ = store.GetCheckpointAuthor(ctx, fullCheckpointID) //nolint:errcheck // Author is optional
+	}
 
 	// Format and output
 	output := formatCheckpointOutput(summary, content, fullCheckpointID, associatedCommits, author, verbose, full)
@@ -479,6 +490,7 @@ func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointI
 			ShortSHA: shortSHA,
 			Message:  strings.Split(c.Message, "\n")[0],
 			Author:   c.Author.Name,
+			Email:    c.Author.Email,
 			Date:     c.Author.When,
 		})
 	}

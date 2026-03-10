@@ -61,26 +61,6 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
-changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
-  ai:
-    use: anthropic
-    model: claude-sonnet-4-6
-    prompt: |
-      Write release notes for the Entire CLI based on the commit list below.
-      Group changes into these sections (using ### headings): Added, Changed, Fixed, Docs, Housekeeping.
-      Omit empty sections. Use bullet points. Do not use emojis.
-      Do not start bullets with the section verb (e.g., don't write "Added X" under Added or "Fixed Y" under Fixed — the heading already provides context).
-      Keep each bullet to one sentence. Preserve PR links from the original commits.
-      Every bullet must include a PR link if one exists in the source commits.
-      Consolidate related commits into a single bullet when they address the same feature or fix.
-
-      {{ .ReleaseNotes }}
 
 homebrew_casks:
   - name: entire
@@ -97,3 +77,9 @@ homebrew_casks:
       bash: "completions/entire.bash"
       zsh: "completions/entire.zsh"
       fish: "completions/entire.fish"
+
+announce:
+  discord:
+    enabled: '{{ and (isEnvSet "DISCORD_WEBHOOK_ID") (isEnvSet "DISCORD_WEBHOOK_TOKEN") }}'
+    message_template: "Beep, boop. **Entire CLI {{ .Tag }}** is out!\n\n{{ .ReleaseURL }}\n\nSee https://docs.entire.io/cli/installation for help installing and updating."
+    author: "Entire"

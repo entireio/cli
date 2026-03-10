@@ -13,9 +13,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -51,7 +51,7 @@ func TestReconcileDisconnected_NoRemote(t *testing.T) {
 	run("commit", "-m", "checkpoint")
 	run("checkout", "main")
 
-	repo, err := git.PlainOpenWithOptions(tmpDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestReconcileDisconnected_NoLocal(t *testing.T) {
 	bareDir := initBareWithMetadataBranch(t)
 	cloneDir, _ := cloneWithConfig(t, bareDir)
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestReconcileDisconnected_SameHash(t *testing.T) {
 	bareDir := initBareWithMetadataBranch(t)
 	cloneDir, _ := cloneWithConfig(t, bareDir)
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestReconcileDisconnected_SharedAncestry(t *testing.T) {
 	bareDir := initBareWithMetadataBranch(t)
 	cloneDir, run := cloneWithConfig(t, bareDir)
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestReconcileDisconnected_SharedAncestry(t *testing.T) {
 	run("checkout", "main")
 
 	// Re-open to see updated refs
-	repo, err = git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err = git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to re-open repo: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestReconcileDisconnected_Disconnected(t *testing.T) {
 	run("branch", "-f", paths.MetadataBranchName, "temp-orphan")
 	run("checkout", "main")
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestReconcileDisconnected_MultipleLocalCheckpoints(t *testing.T) {
 	run("branch", "-f", paths.MetadataBranchName, "temp-orphan")
 	run("checkout", "main")
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestIsMetadataDisconnected_NoRemote(t *testing.T) {
 	run("commit", "-m", "checkpoint")
 	run("checkout", "main")
 
-	repo, err := git.PlainOpenWithOptions(tmpDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(tmpDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestIsMetadataDisconnected_NoLocal(t *testing.T) {
 	bareDir := initBareWithMetadataBranch(t)
 	cloneDir, _ := cloneWithConfig(t, bareDir)
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -450,7 +450,7 @@ func TestIsMetadataDisconnected_SameHash(t *testing.T) {
 	bareDir := initBareWithMetadataBranch(t)
 	cloneDir, _ := cloneWithConfig(t, bareDir)
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -474,7 +474,7 @@ func TestIsMetadataDisconnected_SharedAncestry(t *testing.T) {
 	bareDir := initBareWithMetadataBranch(t)
 	cloneDir, run := cloneWithConfig(t, bareDir)
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -496,7 +496,7 @@ func TestIsMetadataDisconnected_SharedAncestry(t *testing.T) {
 	run("commit", "-m", "local checkpoint")
 	run("checkout", "main")
 
-	repo, err = git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err = git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to re-open repo: %v", err)
 	}
@@ -531,7 +531,7 @@ func TestIsMetadataDisconnected_Disconnected(t *testing.T) {
 	run("branch", "-f", paths.MetadataBranchName, "temp-orphan")
 	run("checkout", "main")
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -586,7 +586,7 @@ func TestReconcileDisconnected_ModifiedEntries(t *testing.T) {
 	run("branch", "-f", paths.MetadataBranchName, "temp-orphan")
 	run("checkout", "main")
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	if err != nil {
 		t.Fatalf("failed to open repo: %v", err)
 	}
@@ -683,7 +683,7 @@ func TestReconcileDisconnected_AllEmptyOrphans(t *testing.T) {
 	run("branch", "-f", paths.MetadataBranchName, "temp-orphan")
 	run("checkout", "main")
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	require.NoError(t, err)
 
 	// Get remote hash before reconciliation
@@ -738,7 +738,7 @@ func TestReconcileDisconnected_CherryPickDeletion(t *testing.T) {
 	run("branch", "-f", paths.MetadataBranchName, "temp-orphan")
 	run("checkout", "main")
 
-	repo, err := git.PlainOpenWithOptions(cloneDir, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	repo, err := git.PlainOpen(cloneDir)
 	require.NoError(t, err)
 
 	err = ReconcileDisconnectedMetadataBranch(context.Background(), repo, io.Discard)

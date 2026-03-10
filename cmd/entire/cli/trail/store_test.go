@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v6"
 )
 
 // initTestRepo creates a test git repository with an initial commit.

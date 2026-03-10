@@ -7,7 +7,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
-	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // isAccessibleMode returns true if accessibility mode should be enabled.

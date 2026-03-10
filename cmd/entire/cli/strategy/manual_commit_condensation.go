@@ -25,9 +25,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // listCheckpoints returns all checkpoints from the metadata branch.
@@ -139,6 +139,17 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		if extractErr != nil {
 			return nil, fmt.Errorf("failed to extract session data from live transcript: %w", extractErr)
 		}
+	}
+
+	// Backfill session state token usage from the freshly-extracted transcript.
+	// Some agents (e.g., Copilot CLI) write aggregate token data (session.shutdown)
+	// AFTER all hooks return, so state.TokenUsage from turn-end only has fallback data.
+	// By condensation time, the transcript has the authoritative totals.
+	// Only replace when we got authoritative data (e.g., session.shutdown provides
+	// InputTokens; the fallback path only captures OutputTokens). This avoids
+	// overwriting accumulated multi-checkpoint totals with partial checkpoint data.
+	if sessionData.TokenUsage != nil && sessionData.TokenUsage.InputTokens > 0 {
+		state.TokenUsage = sessionData.TokenUsage
 	}
 
 	// For 1:1 checkpoint model: filter files_touched to only include files actually

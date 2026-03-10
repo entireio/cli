@@ -40,6 +40,9 @@ func (c *CopilotCLI) IsTransientError(out Output, err error) bool {
 		"ECONNRESET",
 		"ETIMEDOUT",
 		"Too Many Requests",
+		// gpt-4.1 sometimes calls Copilot's Edit tool without old_str,
+		// resulting in zero code changes despite a successful exit.
+		"old_str is required",
 	} {
 		if strings.Contains(combined, p) {
 			return true
@@ -97,17 +100,50 @@ func (c *CopilotCLI) RunPrompt(ctx context.Context, dir string, prompt string, o
 		}
 	}
 
-	return Output{
+	out := Output{
 		Command:  c.Binary() + " " + strings.Join(displayArgs, " "),
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
 		ExitCode: exitCode,
-	}, err
+	}
+
+	// gpt-4.1 sometimes calls Copilot's Edit tool without required parameters,
+	// producing zero code changes despite exit 0. Surface this as an error so
+	// the transient-error retry mechanism can restart the scenario.
+	// Only trigger when copilot reports zero changes — it may retry internally.
+	if err == nil && strings.Contains(out.Stdout, "old_str is required") &&
+		strings.Contains(out.Stderr, "Total code changes:     +0 -0") {
+		err = errors.New("copilot Edit tool failed: old_str is required")
+	}
+
+	return out, err
 }
 
 func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, error) {
+	bin, err := exec.LookPath(c.Binary())
+	if err != nil {
+		return nil, fmt.Errorf("agent binary not found: %w", err)
+	}
+
+	// Forward critical env vars into the tmux session. tmux starts a new
+	// shell that doesn't inherit Go's os.Environ(), so without this the
+	// session lacks auth tokens (COPILOT_GITHUB_TOKEN) and HOME (for gh auth).
+	if os.Getenv("COPILOT_GITHUB_TOKEN") == "" {
+		return nil, errors.New("COPILOT_GITHUB_TOKEN is not set; copilot-cli interactive session requires authentication")
+	}
+	var envArgs []string
+	for _, key := range []string{"COPILOT_GITHUB_TOKEN", "HOME", "TERM"} {
+		if v := os.Getenv(key); v != "" {
+			envArgs = append(envArgs, key+"="+v)
+		}
+	}
+	args := append([]string{"env"}, envArgs...)
+	args = append(args, bin, "--model", "gpt-4.1", "--allow-all")
+
 	name := fmt.Sprintf("copilot-test-%d", time.Now().UnixNano())
-	s, err := NewTmuxSession(name, dir, nil, "env", "ENTIRE_TEST_TTY=0", c.Binary(), "--model", "gpt-4.1", "--allow-all")
+	// Strip CI env vars that may affect interactive mode.
+	unset := []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY"}
+	s, err := NewTmuxSession(name, dir, unset, args[0], args[1:]...)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +162,10 @@ func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, err
 			foundPrompt = true
 			break
 		}
-		_ = s.SendKeys("Enter")
+		if err := s.SendKeys("Enter"); err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("dismissing startup dialog: %w", err)
+		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	if !foundPrompt {
