@@ -55,7 +55,7 @@ e2e/
 | `E2E_ARTIFACT_DIR` | Override artifact output directory | `e2e/artifacts/<timestamp>` |
 | `ANTHROPIC_API_KEY` | Required for Claude Code | — |
 | `GEMINI_API_KEY` | Required for Gemini CLI | — |
-| `GITHUB_TOKEN` | Required for Copilot CLI (or `gh auth login`) | — |
+| `COPILOT_GITHUB_TOKEN` | Required for Copilot CLI (or `gh auth login`) | — |
 
 ## Debugging Failures
 

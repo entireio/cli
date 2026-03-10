@@ -424,13 +424,13 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 
 | Event Type | Framework Actions | Claude Code Hook | Gemini CLI Hook | Cursor Hook | OpenCode Hook | Copilot CLI Hook |
 |------------|-------------------|------------------|-----------------|-----------------|---------------|-----------------|
-| `SessionStart` | Shows banner, checks concurrent sessions, fires state machine transition | `session-start` | `session-start` | `session-start` | `session-start` | `sessionStart` |
-| `TurnStart` | Captures pre-prompt state (git status, transcript position), ensures strategy setup, initializes session | `user-prompt-submit` | `before-agent` | `before-submit-prompt` | `turn-start` | `userPromptSubmitted` |
-| `TurnEnd` | Validates transcript, extracts metadata (prompts, summary, files), detects file changes via git status, saves step + checkpoint, transitions phase to IDLE | `stop` | `after-agent` | `stop` | `turn-end` | `agentStop` |
+| `SessionStart` | Shows banner, checks concurrent sessions, fires state machine transition | `session-start` | `session-start` | `session-start` | `session-start` | `session-start` |
+| `TurnStart` | Captures pre-prompt state (git status, transcript position), ensures strategy setup, initializes session | `user-prompt-submit` | `before-agent` | `before-submit-prompt` | `turn-start` | `user-prompt-submitted` |
+| `TurnEnd` | Validates transcript, extracts metadata (prompts, summary, files), detects file changes via git status, saves step + checkpoint, transitions phase to IDLE | `stop` | `after-agent` | `stop` | `turn-end` | `agent-stop` |
 | `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compress` | `pre-compact` | `compaction` | *(not used)* |
-| `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `sessionEnd` |
+| `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` |
 | `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | *(not used)* | `subagent-start` | *(not used)* | *(not used)* |
-| `SubagentEnd` | Extracts subagent modified files, detects changes, saves task checkpoint | `post-task` (PostToolUse[Task]) | *(not used)* | `subagent-stop` | *(not used)* | `subagentStop` |
+| `SubagentEnd` | Extracts subagent modified files, detects changes, saves task checkpoint | `post-task` (PostToolUse[Task]) | *(not used)* | `subagent-stop` | *(not used)* | `subagent-stop` |
 
 ### Event Field Requirements
 
