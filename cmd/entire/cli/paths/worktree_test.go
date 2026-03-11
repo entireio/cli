@@ -63,6 +63,40 @@ func TestGetWorktreeID(t *testing.T) {
 			wantErr:    true,
 			errContain: "unexpected gitdir format",
 		},
+		{
+			name: "submodule with relative gitdir",
+			setupFunc: func(dir string) error {
+				content := "gitdir: ../.git/modules/mysubmodule\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "",
+		},
+		{
+			name: "submodule with absolute gitdir",
+			setupFunc: func(dir string) error {
+				content := "gitdir: /repo/.git/modules/libs/crypto\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "",
+		},
+		{
+			name: "nested submodule",
+			setupFunc: func(dir string) error {
+				content := "gitdir: /repo/.git/modules/vendor/deps/openssl\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "",
+		},
+		{
+			name: "worktree inside a submodule",
+			setupFunc: func(dir string) error {
+				// A linked worktree created inside a submodule points to
+				// .git/modules/<submod>/worktrees/<name>
+				content := "gitdir: /repo/.git/modules/mylib/worktrees/feature-branch\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "feature-branch",
+		},
 	}
 
 	for _, tt := range tests {
