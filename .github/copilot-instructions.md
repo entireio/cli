@@ -2,7 +2,7 @@
 
 ## Repository Overview
 
-Entire CLI is a Go CLI tool that captures AI coding agent sessions (Claude Code, Cursor, etc.) as searchable metadata stored separately from code commits. It uses a strategy pattern for session/checkpoint management with minimal impact on commit history.
+Entire CLI is a Go CLI tool that captures AI coding agent sessions (Claude Code, Cursor, Copilot CLI, Gemini CLI, OpenCode, etc.) as searchable metadata stored separately from code commits. It uses a strategy pattern for session/checkpoint management with minimal impact on commit history.
 
 **Tech Stack**: Go (version in `mise.toml`), Cobra (CLI), charmbracelet/huh (interactive prompts), go-git/v5 (with caveats)
 

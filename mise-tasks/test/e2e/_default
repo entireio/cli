@@ -1,7 +1,7 @@
 #!/bin/sh
 #MISE description="Run E2E tests: mise run test:e2e --agent claude-code [filter]"
 #MISE quiet=true
-#USAGE flag "--agent <agent>" help="Agent (claude-code, gemini-cli, opencode)" default="" env="E2E_AGENT"
+#USAGE flag "--agent <agent>" help="Agent (claude-code, gemini-cli, opencode, cursor-cli, copilot-cli)" default="" env="E2E_AGENT"
 #USAGE arg "[filter]" help="Test name filter (regex)" default=""
 
 set -eu

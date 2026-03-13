@@ -22,6 +22,7 @@ func initTestRepo(t *testing.T) *git.Repository {
 		{"git", "init", dir},
 		{"git", "-C", dir, "config", "user.name", "Test"},
 		{"git", "-C", dir, "config", "user.email", "test@test.com"},
+		{"git", "-C", dir, "config", "commit.gpgsign", "false"},
 	}
 	for _, args := range cmds {
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)

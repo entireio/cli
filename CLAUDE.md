@@ -13,7 +13,7 @@ This repo contains the CLI for Entire.
 - `entire/`: Main CLI entry point
 - `entire/cli`: CLI utilities and helpers
 - `entire/cli/commands`: actual command implementations
-- `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI, OpenCode, Cursor) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
+- `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI, OpenCode, Cursor, Copilot CLI) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
 - `entire/cli/strategy`: strategy implementation (manual-commit) - see section below
 - `entire/cli/checkpoint`: checkpoint storage abstractions (temporary and committed)
 - `entire/cli/session`: session state management
@@ -73,6 +73,8 @@ mise run test:e2e [filter]                          # All agents, filtered
 mise run test:e2e --agent claude-code [filter]       # Claude Code only
 mise run test:e2e --agent gemini-cli [filter]        # Gemini CLI only
 mise run test:e2e --agent opencode [filter]          # OpenCode only
+mise run test:e2e --agent copilot-cli [filter]       # Copilot CLI only
+mise run test:e2e --agent cursor-cli [filter]        # Cursor only
 ```
 
 E2E tests:
@@ -80,9 +82,9 @@ E2E tests:
 - Use the `//go:build e2e` build tag
 - Located in `e2e/tests/`
 - See [`e2e/README.md`](e2e/README.md) for full documentation (structure, debugging, adding agents)
-- Test real agent interactions (Claude Code, Gemini CLI, OpenCode, Cursor, or Vogon creating files, committing, etc.)
+- Test real agent interactions (Claude Code, Gemini CLI, OpenCode, Cursor, Copilot CLI, or Vogon creating files, committing, etc.)
 - Validate checkpoint scenarios documented in `docs/architecture/checkpoint-scenarios.md`
-- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini`, `opencode`, `cursor`, `vogon`)
+- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini-cli`, `opencode`, `cursor-cli`, `copilot-cli`, `vogon`)
 
 **Environment variables:**
 

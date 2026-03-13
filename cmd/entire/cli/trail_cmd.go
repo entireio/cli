@@ -366,7 +366,7 @@ func newTrailUpdateCmd() *cobra.Command {
 		Use:   "update",
 		Short: "Update trail metadata",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runTrailUpdate(cmd.OutOrStdout(), statusStr, title, body, branch, labelAdd, labelRemove)
+			return runTrailUpdate(cmd.OutOrStdout(), cmd.ErrOrStderr(), statusStr, title, body, branch, labelAdd, labelRemove)
 		},
 	}
 
@@ -380,7 +380,7 @@ func newTrailUpdateCmd() *cobra.Command {
 	return cmd
 }
 
-func runTrailUpdate(w io.Writer, statusStr, title, body, branch string, labelAdd, labelRemove []string) error {
+func runTrailUpdate(w, errW io.Writer, statusStr, title, body, branch string, labelAdd, labelRemove []string) error {
 	repo, err := strategy.OpenRepository(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
@@ -475,6 +475,11 @@ func runTrailUpdate(w io.Writer, statusStr, title, body, branch string, labelAdd
 	}
 
 	fmt.Fprintf(w, "Updated trail for branch %s\n", branch)
+
+	if err := strategy.PushTrailsBranch(context.Background(), "origin"); err != nil {
+		fmt.Fprintf(errW, "Warning: failed to push trail data: %v\n", err)
+	}
+
 	return nil
 }
 

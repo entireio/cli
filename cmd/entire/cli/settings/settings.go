@@ -405,6 +405,49 @@ func (s *EntireSettings) IsSummarizeEnabled() bool {
 	return enabled
 }
 
+// CheckpointRemoteConfig holds the structured checkpoint remote configuration.
+// Stored in strategy_options.checkpoint_remote as {"provider": "github", "repo": "org/repo"}.
+type CheckpointRemoteConfig struct {
+	Provider string // e.g., "github"
+	Repo     string // e.g., "org/checkpoints-repo"
+}
+
+// Owner returns the owner portion of the repo field (before the slash).
+// Returns empty string if the repo field doesn't contain a slash.
+func (c *CheckpointRemoteConfig) Owner() string {
+	parts := strings.SplitN(c.Repo, "/", 2)
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[0]
+}
+
+// GetCheckpointRemote returns the configured checkpoint remote.
+// Expects a structured object: {"provider": "github", "repo": "org/repo"}.
+// Returns nil if not configured, wrong type, or missing required fields.
+func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
+	if s.StrategyOptions == nil {
+		return nil
+	}
+	val, ok := s.StrategyOptions["checkpoint_remote"]
+	if !ok {
+		return nil
+	}
+	m, ok := val.(map[string]any)
+	if !ok {
+		return nil
+	}
+	provider, providerOK := m["provider"].(string)
+	repo, repoOK := m["repo"].(string)
+	if !providerOK || !repoOK || provider == "" || repo == "" {
+		return nil
+	}
+	if !strings.Contains(repo, "/") {
+		return nil
+	}
+	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
+}
+
 // IsPushSessionsDisabled checks if push_sessions is disabled in settings.
 // Returns true if push_sessions is explicitly set to false.
 func (s *EntireSettings) IsPushSessionsDisabled() bool {

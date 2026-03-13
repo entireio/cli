@@ -404,8 +404,11 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, point RewindPoint) er
 			return fmt.Errorf("failed to read file %s: %w", f.Name, err)
 		}
 
+		// Resolve absolute path using repoRoot since f.Name is repo-relative
+		absPath := filepath.Join(repoRoot, f.Name)
+
 		// Ensure directory exists
-		dir := filepath.Dir(f.Name)
+		dir := filepath.Dir(absPath)
 		if dir != "." {
 			//nolint:gosec // G301: Need 0o755 for user directories during rewind
 			if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -418,7 +421,7 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, point RewindPoint) er
 		if f.Mode == filemode.Executable {
 			perm = 0o755
 		}
-		if err := os.WriteFile(f.Name, []byte(contents), perm); err != nil {
+		if err := os.WriteFile(absPath, []byte(contents), perm); err != nil {
 			return fmt.Errorf("failed to write file %s: %w", f.Name, err)
 		}
 

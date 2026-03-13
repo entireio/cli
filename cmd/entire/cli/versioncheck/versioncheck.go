@@ -243,9 +243,13 @@ func isOutdated(current, latest string) bool {
 	return semver.Compare(current, latest) < 0
 }
 
+// executablePath is the function used to get the current executable path.
+// It's a variable so tests can override it.
+var executablePath = os.Executable
+
 // updateCommand returns the appropriate update instruction based on how the binary was installed.
 func updateCommand() string {
-	execPath, err := os.Executable()
+	execPath, err := executablePath()
 	if err != nil {
 		return "curl -fsSL https://entire.io/install.sh | bash"
 	}
@@ -256,8 +260,12 @@ func updateCommand() string {
 		realPath = execPath
 	}
 
-	if strings.Contains(realPath, "/Cellar/") || strings.Contains(realPath, "/homebrew/") {
+	if strings.Contains(realPath, "/Cellar/") || strings.Contains(realPath, "/opt/homebrew/") || strings.Contains(realPath, "/linuxbrew/") {
 		return "brew upgrade entire"
+	}
+
+	if strings.Contains(realPath, "/mise/installs/") {
+		return "mise upgrade entire"
 	}
 
 	return "curl -fsSL https://entire.io/install.sh | bash"

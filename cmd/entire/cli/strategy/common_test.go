@@ -1014,6 +1014,7 @@ func initBareWithMetadataBranch(t *testing.T) string {
 	run(workDir, "clone", bareDir, ".")
 	run(workDir, "config", "user.email", "test@test.com")
 	run(workDir, "config", "user.name", "Test User")
+	run(workDir, "config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test"), 0o644); err != nil {
 		t.Fatalf("failed to write file: %v", err)
 	}
@@ -1177,6 +1178,7 @@ func cloneWithConfig(t *testing.T, bareDir string) (string, func(args ...string)
 	}
 	run("config", "user.email", "test@test.com")
 	run("config", "user.name", "Test User")
+	run("config", "commit.gpgsign", "false")
 	return cloneDir, run
 }
 
@@ -1432,8 +1434,8 @@ func TestReadLatestSessionPromptFromCommittedTree(t *testing.T) {
 		// Session 1 (latest) has no prompt.txt, session 0 does.
 		// This happens when a test session gets condensed alongside a real one.
 		tree := buildCommittedTree(t, map[string]string{
-			"a3/b2c4d5e6f7/0/prompt.txt":      "Real session prompt",
-			"a3/b2c4d5e6f7/1/metadata.json":    `{"session_id":"test"}`,
+			"a3/b2c4d5e6f7/0/prompt.txt":    "Real session prompt",
+			"a3/b2c4d5e6f7/1/metadata.json": `{"session_id":"test"}`,
 		})
 
 		got := ReadLatestSessionPromptFromCommittedTree(tree, cpID, 2)
@@ -1446,9 +1448,9 @@ func TestReadLatestSessionPromptFromCommittedTree(t *testing.T) {
 		t.Parallel()
 		// Sessions 2 and 1 have no prompt, session 0 does.
 		tree := buildCommittedTree(t, map[string]string{
-			"a3/b2c4d5e6f7/0/prompt.txt":      "Original prompt",
-			"a3/b2c4d5e6f7/1/metadata.json":    `{"session_id":"s1"}`,
-			"a3/b2c4d5e6f7/2/metadata.json":    `{"session_id":"s2"}`,
+			"a3/b2c4d5e6f7/0/prompt.txt":    "Original prompt",
+			"a3/b2c4d5e6f7/1/metadata.json": `{"session_id":"s1"}`,
+			"a3/b2c4d5e6f7/2/metadata.json": `{"session_id":"s2"}`,
 		})
 
 		got := ReadLatestSessionPromptFromCommittedTree(tree, cpID, 3)
