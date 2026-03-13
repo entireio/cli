@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -14,6 +15,15 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 )
+
+// resolvePathForComparison resolves symlinks and cleans a path for comparison.
+// Returns the cleaned original path if symlink resolution fails.
+func resolvePathForComparison(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(p)
+}
 
 // Shadow strategy session state methods.
 // Uses session.StateStore for persistence.
@@ -102,15 +112,19 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 }
 
 // findSessionsForWorktree finds all sessions for the given worktree path.
+// Paths are compared after symlink resolution to handle cases where the same
+// directory is accessed via different paths (e.g., /tmp vs /private/tmp on macOS).
 func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, worktreePath string) ([]*SessionState, error) {
 	allStates, err := s.listAllSessionStates(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	resolvedTarget := resolvePathForComparison(worktreePath)
+
 	var matching []*SessionState
 	for _, state := range allStates {
-		if state.WorktreePath == worktreePath {
+		if state.WorktreePath == worktreePath || resolvePathForComparison(state.WorktreePath) == resolvedTarget {
 			matching = append(matching, state)
 		}
 	}
@@ -172,13 +186,16 @@ func (s *ManualCommitStrategy) CountOtherActiveSessionsWithCheckpoints(ctx conte
 		return 0, err
 	}
 
+	resolvedCurrentWorktree := resolvePathForComparison(currentWorktree)
+
 	count := 0
 	for _, state := range allStates {
 		// Only consider sessions from the same worktree with checkpoints
 		// AND based on the same commit (current HEAD)
 		// Sessions from different base commits are independent and shouldn't be counted
+		sameWorktree := state.WorktreePath == currentWorktree || resolvePathForComparison(state.WorktreePath) == resolvedCurrentWorktree
 		if state.SessionID != currentSessionID &&
-			state.WorktreePath == currentWorktree &&
+			sameWorktree &&
 			state.StepCount > 0 &&
 			state.BaseCommit == currentHead {
 			count++

@@ -116,11 +116,14 @@ func FindMostRecentSession(ctx context.Context) string {
 	}
 
 	// Scope to current worktree to prevent cross-worktree pollution.
+	// Compare with symlink resolution to handle cases where the same
+	// directory is accessed via different paths.
 	worktreePath, wpErr := paths.WorktreeRoot(ctx)
 	if wpErr == nil && worktreePath != "" {
+		resolvedTarget := resolvePathForComparison(worktreePath)
 		var filtered []*SessionState
 		for _, s := range states {
-			if s.WorktreePath == worktreePath {
+			if s.WorktreePath == worktreePath || resolvePathForComparison(s.WorktreePath) == resolvedTarget {
 				filtered = append(filtered, s)
 			}
 		}

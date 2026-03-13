@@ -85,6 +85,14 @@ func WorktreeRoot(ctx context.Context) (string, error) {
 
 	root := strings.TrimSpace(string(output))
 
+	// Resolve symlinks so the canonical path is always used.
+	// This prevents mismatches when the same directory is accessed via
+	// different paths (e.g., /tmp vs /private/tmp on macOS).
+	// On failure, fall back to the unresolved path.
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+
 	worktreeRootMu.Lock()
 	worktreeRootCache = root
 	worktreeRootCacheDir = cwd
