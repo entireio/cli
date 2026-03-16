@@ -12,7 +12,18 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/spf13/cobra"
 )
+
+// newTestCleanCmd creates a cobra.Command with captured stdout for testing runClean.
+func newTestCleanCmd(t *testing.T) (*cobra.Command, *bytes.Buffer) {
+	t.Helper()
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	return cmd, &stdout
+}
 
 func setupCleanTestRepo(t *testing.T) (*git.Repository, plumbing.Hash) {
 	t.Helper()
@@ -70,9 +81,9 @@ func TestRunClean_NoOrphanedItems(t *testing.T) {
 	setupCleanTestRepo(t)
 
 	var stdout bytes.Buffer
-	err := runClean(context.Background(), &stdout, false)
+	err := runCleanWithItems(context.Background(), &stdout, false, []strategy.CleanupItem{}, nil)
 	if err != nil {
-		t.Fatalf("runClean() error = %v", err)
+		t.Fatalf("runCleanWithItems() error = %v", err)
 	}
 
 	output := stdout.String()
@@ -99,17 +110,24 @@ func TestRunClean_PreviewMode(t *testing.T) {
 		t.Fatalf("failed to create %s: %v", paths.MetadataBranchName, err)
 	}
 
-	var stdout bytes.Buffer
-	err := runClean(context.Background(), &stdout, false) // force=false
+	// Use runClean with force=true would need TTY for confirmation,
+	// so test preview output via runCleanWithItems directly.
+	items, err := strategy.ListAllCleanupItems(context.Background())
 	if err != nil {
-		t.Fatalf("runClean() error = %v", err)
+		t.Fatalf("ListAllCleanupItems() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err = runCleanWithItems(context.Background(), &stdout, false, items, nil)
+	if err != nil {
+		t.Fatalf("runCleanWithItems() error = %v", err)
 	}
 
 	output := stdout.String()
 
 	// Should show preview header
-	if !strings.Contains(output, "items to clean") {
-		t.Errorf("Expected 'items to clean' in output, got: %s", output)
+	if !strings.Contains(output, "to clean") {
+		t.Errorf("Expected 'to clean' in output, got: %s", output)
 	}
 
 	// Should list the shadow branches
@@ -151,17 +169,17 @@ func TestRunClean_ForceMode(t *testing.T) {
 		}
 	}
 
-	var stdout bytes.Buffer
-	err := runClean(context.Background(), &stdout, true) // force=true
+	cmd, stdout := newTestCleanCmd(t)
+	err := runClean(cmd.Context(), cmd, true) // force=true skips confirmation
 	if err != nil {
 		t.Fatalf("runClean() error = %v", err)
 	}
 
 	output := stdout.String()
 
-	// Should show deletion confirmation
-	if !strings.Contains(output, "Deleted") {
-		t.Errorf("Expected 'Deleted' in output, got: %s", output)
+	// Should show deletion confirmation with ✓ prefix
+	if !strings.Contains(output, "✓ Deleted") {
+		t.Errorf("Expected '✓ Deleted' in output, got: %s", output)
 	}
 
 	// Branches should be deleted
@@ -187,8 +205,8 @@ func TestRunClean_SessionsBranchPreserved(t *testing.T) {
 		t.Fatalf("failed to create entire/checkpoints/v1: %v", err)
 	}
 
-	var stdout bytes.Buffer
-	err := runClean(context.Background(), &stdout, true) // force=true
+	cmd, _ := newTestCleanCmd(t)
+	err := runClean(cmd.Context(), cmd, true) // force=true
 	if err != nil {
 		t.Fatalf("runClean() error = %v", err)
 	}
@@ -211,8 +229,8 @@ func TestRunClean_NotGitRepository(t *testing.T) {
 	t.Chdir(dir)
 	paths.ClearWorktreeRootCache()
 
-	var stdout bytes.Buffer
-	err := runClean(context.Background(), &stdout, false)
+	cmd, _ := newTestCleanCmd(t)
+	err := runClean(cmd.Context(), cmd, true) // force=true to skip TTY prompt
 
 	// Should return error for non-git directory
 	if err == nil {
@@ -243,10 +261,16 @@ func TestRunClean_Subdirectory(t *testing.T) {
 	t.Chdir(subDir)
 	paths.ClearWorktreeRootCache()
 
-	var stdout bytes.Buffer
-	err = runClean(context.Background(), &stdout, false)
+	// Use ListAllCleanupItems + runCleanWithItems to test preview without TTY
+	items, err := strategy.ListAllCleanupItems(context.Background())
 	if err != nil {
-		t.Fatalf("runClean() from subdirectory error = %v", err)
+		t.Fatalf("ListAllCleanupItems() from subdirectory error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err = runCleanWithItems(context.Background(), &stdout, false, items, nil)
+	if err != nil {
+		t.Fatalf("runCleanWithItems() from subdirectory error = %v", err)
 	}
 
 	output := stdout.String()
@@ -282,20 +306,24 @@ func TestRunCleanWithItems_PartialFailure(t *testing.T) {
 		t.Fatal("runCleanWithItems() should return error when items fail to delete")
 	}
 
-	// Error message should indicate the failure
-	if !strings.Contains(err.Error(), "failed to delete") {
-		t.Errorf("Error should mention 'failed to delete', got: %v", err)
+	// Error message should indicate the failure with correct grammar
+	if !strings.Contains(err.Error(), "failed to delete 1 item") {
+		t.Errorf("Error should mention 'failed to delete 1 item', got: %v", err)
+	}
+	// Verify singular (not "1 items")
+	if strings.Contains(err.Error(), "1 items") {
+		t.Errorf("Error should use singular 'item' for count 1, got: %v", err)
 	}
 
-	// Output should show the successful deletion
+	// Output should show the successful deletion with ✓ and singular grammar
 	output := stdout.String()
-	if !strings.Contains(output, "Deleted 1 items") {
-		t.Errorf("Output should show successful deletion, got: %s", output)
+	if !strings.Contains(output, "✓ Deleted 1 item:") {
+		t.Errorf("Output should show '✓ Deleted 1 item:', got: %s", output)
 	}
 
-	// Output should also show the failures
-	if !strings.Contains(output, "Failed to delete 1 items") {
-		t.Errorf("Output should show failures, got: %s", output)
+	// Output should also show the failure with singular grammar
+	if !strings.Contains(output, "Failed to delete 1 item:") {
+		t.Errorf("Output should show 'Failed to delete 1 item:', got: %s", output)
 	}
 }
 
@@ -318,20 +346,20 @@ func TestRunCleanWithItems_AllFailures(t *testing.T) {
 		t.Fatal("runCleanWithItems() should return error when items fail to delete")
 	}
 
-	// Error message should indicate 2 failures
+	// Error message should indicate 2 failures with plural grammar
 	if !strings.Contains(err.Error(), "failed to delete 2 items") {
 		t.Errorf("Error should mention 'failed to delete 2 items', got: %v", err)
 	}
 
-	// Output should NOT show any successful deletions
+	// Output should NOT show any successful deletions (no ✓ Deleted line)
 	output := stdout.String()
-	if strings.Contains(output, "Deleted") {
+	if strings.Contains(output, "✓ Deleted") {
 		t.Errorf("Output should not show successful deletions, got: %s", output)
 	}
 
-	// Output should show the failures
-	if !strings.Contains(output, "Failed to delete 2 items") {
-		t.Errorf("Output should show failures, got: %s", output)
+	// Output should show the failures with plural grammar
+	if !strings.Contains(output, "Failed to delete 2 items:") {
+		t.Errorf("Output should show 'Failed to delete 2 items:', got: %s", output)
 	}
 }
 

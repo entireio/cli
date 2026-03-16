@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/charmbracelet/huh"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -40,12 +41,12 @@ This command finds and removes orphaned data from any strategy:
     Cached transcripts and other temporary data. Safe to delete when no
     active sessions are using them.
 
-Default: shows a preview of items that would be deleted.
-With --force, actually deletes the orphaned items.
+Default: shows a preview and asks for confirmation before deleting.
+With --force, deletes without prompting.
 
 The entire/checkpoints/v1 branch itself is never deleted.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runClean(cmd.Context(), cmd.OutOrStdout(), forceFlag)
+			return runClean(cmd.Context(), cmd, forceFlag)
 		},
 	}
 
@@ -54,7 +55,9 @@ The entire/checkpoints/v1 branch itself is never deleted.`,
 	return cmd
 }
 
-func runClean(ctx context.Context, w io.Writer, force bool) error {
+func runClean(ctx context.Context, cmd *cobra.Command, force bool) error {
+	w := cmd.OutOrStdout()
+
 	// Initialize logging so structured logs go to .entire/logs/ instead of stderr.
 	// Error is non-fatal: if logging init fails, logs go to stderr (acceptable fallback).
 	logging.SetLogLevelGetter(GetLogLevel)
@@ -75,7 +78,44 @@ func runClean(ctx context.Context, w io.Writer, force bool) error {
 		fmt.Fprintf(w, "Warning: failed to list temp files: %v\n", err)
 	}
 
-	return runCleanWithItems(ctx, w, force, items, tempFiles)
+	// Force mode: skip preview and confirmation
+	if force {
+		return runCleanWithItems(ctx, w, true, items, tempFiles)
+	}
+
+	// Show preview
+	if err := runCleanWithItems(ctx, w, false, items, tempFiles); err != nil {
+		return err
+	}
+
+	// If nothing to clean, we're done (preview already printed the message)
+	totalItems := len(items) + len(tempFiles)
+	if totalItems == 0 {
+		return nil
+	}
+
+	// Interactive confirmation
+	var confirmed bool
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Delete these items?").
+				Affirmative("Yes, delete").
+				Negative("Cancel").
+				Value(&confirmed),
+		),
+	)
+
+	if err := form.Run(); err != nil {
+		return fmt.Errorf("confirmation cancelled: %w", err)
+	}
+
+	if !confirmed {
+		fmt.Fprintln(w, "Clean cancelled.")
+		return nil
+	}
+
+	return runCleanWithItems(ctx, w, true, items, tempFiles)
 }
 
 // listTempFiles returns files in .entire/tmp/ that are safe to delete,
@@ -172,7 +212,7 @@ func runCleanWithItems(ctx context.Context, w io.Writer, force bool, items []str
 	// Preview mode (default)
 	if !force {
 		totalItems := len(items) + len(tempFiles)
-		fmt.Fprintf(w, "Found %d items to clean:\n\n", totalItems)
+		fmt.Fprintf(w, "Found %d %s to clean:\n\n", totalItems, itemWord(totalItems))
 
 		if len(branches) > 0 {
 			fmt.Fprintf(w, "Shadow branches (%d):\n", len(branches))
@@ -224,70 +264,78 @@ func runCleanWithItems(ctx context.Context, w io.Writer, force bool, items []str
 	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(failedTempFiles)
 
 	if totalDeleted > 0 {
-		fmt.Fprintf(w, "Deleted %d items:\n", totalDeleted)
+		fmt.Fprintf(w, "✓ Deleted %d %s:\n", totalDeleted, itemWord(totalDeleted))
 
 		if len(result.ShadowBranches) > 0 {
-			fmt.Fprintf(w, "\n  Shadow branches (%d):\n", len(result.ShadowBranches))
+			fmt.Fprintf(w, "\nShadow branches (%d):\n", len(result.ShadowBranches))
 			for _, branch := range result.ShadowBranches {
-				fmt.Fprintf(w, "    %s\n", branch)
+				fmt.Fprintf(w, "  %s\n", branch)
 			}
 		}
 
 		if len(result.SessionStates) > 0 {
-			fmt.Fprintf(w, "\n  Session states (%d):\n", len(result.SessionStates))
+			fmt.Fprintf(w, "\nSession states (%d):\n", len(result.SessionStates))
 			for _, state := range result.SessionStates {
-				fmt.Fprintf(w, "    %s\n", state)
+				fmt.Fprintf(w, "  %s\n", state)
 			}
 		}
 
 		if len(result.Checkpoints) > 0 {
-			fmt.Fprintf(w, "\n  Checkpoints (%d):\n", len(result.Checkpoints))
+			fmt.Fprintf(w, "\nCheckpoints (%d):\n", len(result.Checkpoints))
 			for _, cp := range result.Checkpoints {
-				fmt.Fprintf(w, "    %s\n", cp)
+				fmt.Fprintf(w, "  %s\n", cp)
 			}
 		}
 
 		if len(deletedTempFiles) > 0 {
-			fmt.Fprintf(w, "\n  Temp files (%d):\n", len(deletedTempFiles))
+			fmt.Fprintf(w, "\nTemp files (%d):\n", len(deletedTempFiles))
 			for _, file := range deletedTempFiles {
-				fmt.Fprintf(w, "    %s\n", file)
+				fmt.Fprintf(w, "  %s\n", file)
 			}
 		}
 	}
 
 	if totalFailed > 0 {
-		fmt.Fprintf(w, "\nFailed to delete %d items:\n", totalFailed)
+		fmt.Fprintf(w, "\nFailed to delete %d %s:\n", totalFailed, itemWord(totalFailed))
 
 		if len(result.FailedBranches) > 0 {
-			fmt.Fprintf(w, "\n  Shadow branches:\n")
+			fmt.Fprintf(w, "\nShadow branches:\n")
 			for _, branch := range result.FailedBranches {
-				fmt.Fprintf(w, "    %s\n", branch)
+				fmt.Fprintf(w, "  %s\n", branch)
 			}
 		}
 
 		if len(result.FailedStates) > 0 {
-			fmt.Fprintf(w, "\n  Session states:\n")
+			fmt.Fprintf(w, "\nSession states:\n")
 			for _, state := range result.FailedStates {
-				fmt.Fprintf(w, "    %s\n", state)
+				fmt.Fprintf(w, "  %s\n", state)
 			}
 		}
 
 		if len(result.FailedCheckpoints) > 0 {
-			fmt.Fprintf(w, "\n  Checkpoints:\n")
+			fmt.Fprintf(w, "\nCheckpoints:\n")
 			for _, cp := range result.FailedCheckpoints {
-				fmt.Fprintf(w, "    %s\n", cp)
+				fmt.Fprintf(w, "  %s\n", cp)
 			}
 		}
 
 		if len(failedTempFiles) > 0 {
-			fmt.Fprintf(w, "\n  Temp files:\n")
+			fmt.Fprintf(w, "\nTemp files:\n")
 			for _, fe := range failedTempFiles {
-				fmt.Fprintf(w, "    %s: %v\n", fe.File, fe.Err)
+				fmt.Fprintf(w, "  %s: %v\n", fe.File, fe.Err)
 			}
 		}
 
-		return fmt.Errorf("failed to delete %d items", totalFailed)
+		return fmt.Errorf("failed to delete %d %s", totalFailed, itemWord(totalFailed))
 	}
 
 	return nil
+}
+
+// itemWord returns "item" or "items" based on count.
+func itemWord(n int) string {
+	if n == 1 {
+		return "item"
+	}
+	return "items"
 }
