@@ -2,6 +2,7 @@ package paths
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -60,6 +61,51 @@ func TestGetClaudeProjectDir_Override(t *testing.T) {
 
 	if result != "/tmp/test-claude-project" {
 		t.Errorf("GetClaudeProjectDir() = %q, want %q", result, "/tmp/test-claude-project")
+	}
+}
+
+func TestWorktreeRoot_ResolvesSymlinks(t *testing.T) {
+	// Cannot use t.Parallel() because t.Chdir modifies process-global state.
+
+	// Create a real directory and a symlink to it
+	realDir := t.TempDir()
+	symlinkDir := filepath.Join(t.TempDir(), "symlink-repo")
+	if err := os.Symlink(realDir, symlinkDir); err != nil {
+		t.Skipf("cannot create symlinks: %v", err)
+	}
+
+	// Initialize a git repo in the real directory
+	ctx := t.Context()
+	cmd := exec.CommandContext(ctx, "git", "init", realDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+	cmd = exec.CommandContext(ctx, "git", "-C", realDir, "config", "user.email", "test@test.com")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git config failed: %v", err)
+	}
+	cmd = exec.CommandContext(ctx, "git", "-C", realDir, "config", "user.name", "Test")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git config failed: %v", err)
+	}
+
+	// cd into the symlink path and call WorktreeRoot
+	t.Chdir(symlinkDir)
+
+	ClearWorktreeRootCache()
+	root, err := WorktreeRoot(ctx)
+	if err != nil {
+		t.Fatalf("WorktreeRoot() error = %v", err)
+	}
+
+	// Resolve the real dir for comparison (handles /tmp -> /private/tmp on macOS)
+	resolvedReal, evalErr := filepath.EvalSymlinks(realDir)
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(%q) error = %v", realDir, evalErr)
+	}
+
+	if root != resolvedReal {
+		t.Errorf("WorktreeRoot() via symlink = %q, want resolved real path %q", root, resolvedReal)
 	}
 }
 
