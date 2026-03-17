@@ -195,7 +195,7 @@ func resumeFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName 
 		return checkRemoteMetadata(ctx, w, errW, repo, checkpointID)
 	}
 
-	return resumeSession(ctx, w, metadata, force)
+	return resumeSession(ctx, w, errW, metadata, force)
 }
 
 // resolveLatestCheckpoint reads metadata for each checkpoint ID and returns
@@ -424,7 +424,7 @@ func checkRemoteMetadata(ctx context.Context, w, errW io.Writer, repo *git.Repos
 	}
 
 	// Now resume the session with the fetched metadata
-	return resumeSession(ctx, w, metadata, false)
+	return resumeSession(ctx, w, errW, metadata, false)
 }
 
 // resumeSession restores and displays the resume command for a specific session.
@@ -432,7 +432,7 @@ func checkRemoteMetadata(ctx context.Context, w, errW io.Writer, repo *git.Repos
 // If force is false, prompts for confirmation when local logs have newer timestamps.
 // The caller must provide the already-resolved checkpoint metadata to avoid redundant lookups
 // and to support both local and remote metadata trees.
-func resumeSession(ctx context.Context, w io.Writer, metadata *strategy.CheckpointInfo, force bool) error {
+func resumeSession(ctx context.Context, w, errW io.Writer, metadata *strategy.CheckpointInfo, force bool) error {
 	checkpointID := metadata.CheckpointID
 	sessionID := metadata.SessionID
 
@@ -477,10 +477,10 @@ func resumeSession(ctx context.Context, w io.Writer, metadata *strategy.Checkpoi
 		Agent:        metadata.Agent,
 	}
 
-	sessions, restoreErr := strat.RestoreLogsOnly(ctx, point, force)
+	sessions, restoreErr := strat.RestoreLogsOnly(ctx, w, errW, point, force)
 	if restoreErr != nil || len(sessions) == 0 {
 		// Fall back to single-session restore (e.g., old checkpoints without agent metadata)
-		return resumeSingleSession(ctx, w, ag, sessionID, checkpointID, repoRoot, force)
+		return resumeSingleSession(ctx, w, errW, ag, sessionID, checkpointID, repoRoot, force)
 	}
 
 	logging.Debug(logCtx, "resume session completed",
@@ -530,7 +530,7 @@ func displayRestoredSessions(w io.Writer, sessions []strategy.RestoredSession) e
 // resumeSingleSession restores a single session (fallback when multi-session restore fails).
 // Always overwrites existing session logs to ensure consistency with checkpoint state.
 // If force is false, prompts for confirmation when local log has newer timestamps.
-func resumeSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sessionID string, checkpointID id.CheckpointID, repoRoot string, force bool) error {
+func resumeSingleSession(ctx context.Context, w, errW io.Writer, ag agent.Agent, sessionID string, checkpointID id.CheckpointID, repoRoot string, force bool) error {
 	sessionLogPath, err := resolveTranscriptPath(ctx, sessionID, ag)
 	if err != nil {
 		return fmt.Errorf("failed to resolve transcript path: %w", err)
@@ -579,7 +579,7 @@ func resumeSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sessi
 				LocalTime:      localTime,
 				CheckpointTime: checkpointTime,
 			}}
-			shouldOverwrite, promptErr := strategy.PromptOverwriteNewerLogs(sessions)
+			shouldOverwrite, promptErr := strategy.PromptOverwriteNewerLogs(errW, sessions)
 			if promptErr != nil {
 				return fmt.Errorf("failed to get confirmation: %w", promptErr)
 			}

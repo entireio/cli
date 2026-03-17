@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -275,7 +276,7 @@ func ResolveLatestCheckpointFromMap(cpIDs []id.CheckpointID, infoMap map[id.Chec
 // Rewind restores the working directory to a checkpoint.
 //
 
-func (s *ManualCommitStrategy) Rewind(ctx context.Context, point RewindPoint) error {
+func (s *ManualCommitStrategy) Rewind(ctx context.Context, w, errW io.Writer, point RewindPoint) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
@@ -374,7 +375,7 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, point RewindPoint) er
 	untrackedNow, err := collectUntrackedFiles(ctx)
 	if err != nil {
 		// Non-fatal - continue with restoration
-		fmt.Fprintf(os.Stderr, "Warning: error listing untracked files: %v\n", err)
+		fmt.Fprintf(errW, "Warning: error listing untracked files: %v\n", err)
 	}
 	for _, relPath := range untrackedNow {
 		// If file is in checkpoint, it will be restored
@@ -394,7 +395,7 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, point RewindPoint) er
 
 		// File is untracked and not in checkpoint - delete it via os.Root
 		if removeErr := osroot.Remove(repoRootHandle, relPath); removeErr == nil {
-			fmt.Fprintf(os.Stderr, "  Deleted: %s\n", relPath)
+			fmt.Fprintf(w, "  Deleted: %s\n", relPath)
 		}
 	}
 
@@ -432,20 +433,20 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, point RewindPoint) er
 			return fmt.Errorf("failed to write file %s: %w", f.Name, err)
 		}
 
-		fmt.Fprintf(os.Stderr, "  Restored: %s\n", f.Name)
+		fmt.Fprintf(w, "  Restored: %s\n", f.Name)
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("failed to iterate tree files: %w", err)
 	}
 
-	fmt.Println()
+	fmt.Fprintln(w)
 	if len(point.ID) >= 7 {
-		fmt.Printf("Restored files from shadow commit %s\n", point.ID[:7])
+		fmt.Fprintf(w, "Restored files from shadow commit %s\n", point.ID[:7])
 	} else {
-		fmt.Printf("Restored files from shadow commit %s\n", point.ID)
+		fmt.Fprintf(w, "Restored files from shadow commit %s\n", point.ID)
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 
 	return nil
 }
@@ -611,7 +612,7 @@ func (s *ManualCommitStrategy) PreviewRewind(ctx context.Context, point RewindPo
 // When multiple sessions were condensed to the same checkpoint, ALL sessions are restored.
 // If force is false, prompts for confirmation when local logs have newer timestamps.
 // Returns info about each restored session so callers can print correct per-session resume commands.
-func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, point RewindPoint, force bool) ([]RestoredSession, error) {
+func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.Writer, point RewindPoint, force bool) ([]RestoredSession, error) {
 	if !point.IsLogsOnly {
 		return nil, errors.New("not a logs-only rewind point")
 	}
@@ -652,12 +653,12 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, point Rewind
 			}
 		}
 		if hasConflicts {
-			shouldOverwrite, promptErr := PromptOverwriteNewerLogs(sessions)
+			shouldOverwrite, promptErr := PromptOverwriteNewerLogs(errW, sessions)
 			if promptErr != nil {
 				return nil, promptErr
 			}
 			if !shouldOverwrite {
-				fmt.Fprintf(os.Stderr, "Resume cancelled. Local session logs preserved.\n")
+				fmt.Fprintf(w, "Resume cancelled. Local session logs preserved.\n")
 				return nil, nil
 			}
 		}
@@ -666,7 +667,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, point Rewind
 	// Count sessions to restore
 	totalSessions := len(summary.Sessions)
 	if totalSessions > 1 {
-		fmt.Fprintf(os.Stderr, "Restoring %d sessions from checkpoint:\n", totalSessions)
+		fmt.Fprintf(w, "Restoring %d sessions from checkpoint:\n", totalSessions)
 	}
 
 	// Restore all sessions (oldest to newest, using 0-based indexing)
@@ -674,7 +675,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, point Rewind
 	for i := range totalSessions {
 		content, readErr := store.ReadSessionContent(ctx, point.CheckpointID, i)
 		if readErr != nil {
-			fmt.Fprintf(os.Stderr, "  Warning: failed to read session %d: %v\n", i, readErr)
+			fmt.Fprintf(errW, "  Warning: failed to read session %d: %v\n", i, readErr)
 			continue
 		}
 		if content == nil || len(content.Transcript) == 0 {
@@ -683,25 +684,25 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, point Rewind
 
 		sessionID := content.Metadata.SessionID
 		if sessionID == "" {
-			fmt.Fprintf(os.Stderr, "  Warning: session %d has no session ID, skipping\n", i)
+			fmt.Fprintf(errW, "  Warning: session %d has no session ID, skipping\n", i)
 			continue
 		}
 
 		// Resolve per-session agent from metadata — skip if agent is unknown
 		if content.Metadata.Agent == "" {
-			fmt.Fprintf(os.Stderr, "  Warning: session %d (%s) has no agent metadata, skipping (cannot determine target directory)\n", i, sessionID)
+			fmt.Fprintf(errW, "  Warning: session %d (%s) has no agent metadata, skipping (cannot determine target directory)\n", i, sessionID)
 			continue
 		}
 		sessionAgent, agErr := ResolveAgentForRewind(content.Metadata.Agent)
 		if agErr != nil {
-			fmt.Fprintf(os.Stderr, "  Warning: session %d (%s) has unknown agent %q, skipping\n", i, sessionID, content.Metadata.Agent)
+			fmt.Fprintf(errW, "  Warning: session %d (%s) has unknown agent %q, skipping\n", i, sessionID, content.Metadata.Agent)
 			continue
 		}
 
 		// Compute transcript path from current repo location for cross-machine portability.
 		sessionAgentDir, dirErr := sessionAgent.GetSessionDir(repoRoot)
 		if dirErr != nil {
-			fmt.Fprintf(os.Stderr, "  Warning: failed to get session dir for session %d: %v\n", i, dirErr)
+			fmt.Fprintf(errW, "  Warning: failed to get session dir for session %d: %v\n", i, dirErr)
 			continue
 		}
 		sessionFile := sessionAgent.ResolveSessionFile(sessionAgentDir, sessionID)
@@ -713,19 +714,19 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, point Rewind
 			isLatest := i == totalSessions-1
 			if promptPreview != "" {
 				if isLatest {
-					fmt.Fprintf(os.Stderr, "  Session %d (latest): %s\n", i+1, promptPreview)
+					fmt.Fprintf(w, "  Session %d (latest): %s\n", i+1, promptPreview)
 				} else {
-					fmt.Fprintf(os.Stderr, "  Session %d: %s\n", i+1, promptPreview)
+					fmt.Fprintf(w, "  Session %d: %s\n", i+1, promptPreview)
 				}
 			}
-			fmt.Fprintf(os.Stderr, "    Writing to: %s\n", sessionFile)
+			fmt.Fprintf(w, "    Writing to: %s\n", sessionFile)
 		} else {
-			fmt.Fprintf(os.Stderr, "Writing transcript to: %s\n", sessionFile)
+			fmt.Fprintf(w, "Writing transcript to: %s\n", sessionFile)
 		}
 
 		// Ensure parent directory exists (session file may be in a different dir than sessionAgentDir)
 		if mkdirErr := os.MkdirAll(filepath.Dir(sessionFile), 0o750); mkdirErr != nil {
-			fmt.Fprintf(os.Stderr, "    Warning: failed to create directory: %v\n", mkdirErr)
+			fmt.Fprintf(errW, "    Warning: failed to create directory: %v\n", mkdirErr)
 			continue
 		}
 
@@ -738,7 +739,7 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, point Rewind
 		}
 		if writeErr := sessionAgent.WriteSession(ctx, agentSession); writeErr != nil {
 			if totalSessions > 1 {
-				fmt.Fprintf(os.Stderr, "    Warning: failed to write session: %v\n", writeErr)
+				fmt.Fprintf(errW, "    Warning: failed to write session: %v\n", writeErr)
 				continue
 			}
 			return nil, fmt.Errorf("failed to write session: %w", writeErr)
@@ -900,7 +901,7 @@ func StatusToText(status SessionRestoreStatus) string {
 
 // PromptOverwriteNewerLogs asks the user for confirmation to overwrite local
 // session logs that have newer timestamps than the checkpoint versions.
-func PromptOverwriteNewerLogs(sessions []SessionRestoreInfo) (bool, error) {
+func PromptOverwriteNewerLogs(errW io.Writer, sessions []SessionRestoreInfo) (bool, error) {
 	// Separate conflicting and non-conflicting sessions
 	var conflicting, nonConflicting []SessionRestoreInfo
 	for _, s := range sessions {
@@ -911,32 +912,32 @@ func PromptOverwriteNewerLogs(sessions []SessionRestoreInfo) (bool, error) {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "\nWarning: Local session log(s) have newer entries than the checkpoint:\n")
+	fmt.Fprintf(errW, "\nWarning: Local session log(s) have newer entries than the checkpoint:\n")
 	for _, info := range conflicting {
 		// Show prompt if available, otherwise fall back to session ID
 		if info.Prompt != "" {
-			fmt.Fprintf(os.Stderr, "  \"%s\"\n", info.Prompt)
+			fmt.Fprintf(errW, "  \"%s\"\n", info.Prompt)
 		} else {
-			fmt.Fprintf(os.Stderr, "  Session: %s\n", info.SessionID)
+			fmt.Fprintf(errW, "  Session: %s\n", info.SessionID)
 		}
-		fmt.Fprintf(os.Stderr, "    Local last entry:      %s\n", info.LocalTime.Local().Format("2006-01-02 15:04:05"))
-		fmt.Fprintf(os.Stderr, "    Checkpoint last entry: %s\n", info.CheckpointTime.Local().Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(errW, "    Local last entry:      %s\n", info.LocalTime.Local().Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(errW, "    Checkpoint last entry: %s\n", info.CheckpointTime.Local().Format("2006-01-02 15:04:05"))
 	}
 
 	// Show non-conflicting sessions with their status
 	if len(nonConflicting) > 0 {
-		fmt.Fprintf(os.Stderr, "\nThese other session(s) will also be restored:\n")
+		fmt.Fprintf(errW, "\nThese other session(s) will also be restored:\n")
 		for _, info := range nonConflicting {
 			statusText := StatusToText(info.Status)
 			if info.Prompt != "" {
-				fmt.Fprintf(os.Stderr, "  \"%s\" %s\n", info.Prompt, statusText)
+				fmt.Fprintf(errW, "  \"%s\" %s\n", info.Prompt, statusText)
 			} else {
-				fmt.Fprintf(os.Stderr, "  Session: %s %s\n", info.SessionID, statusText)
+				fmt.Fprintf(errW, "  Session: %s %s\n", info.SessionID, statusText)
 			}
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "\nOverwriting will lose the newer local entries.\n\n")
+	fmt.Fprintf(errW, "\nOverwriting will lose the newer local entries.\n\n")
 
 	var confirmed bool
 	form := huh.NewForm(

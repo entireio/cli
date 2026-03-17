@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -337,7 +338,7 @@ func TestShadowStrategy_Rewind_FromSubdirectory(t *testing.T) {
 		Date:    time.Now(),
 	}
 
-	if err := s.Rewind(context.Background(), point); err != nil {
+	if err := s.Rewind(context.Background(), io.Discard, io.Discard, point); err != nil {
 		t.Fatalf("Rewind() error = %v", err)
 	}
 
@@ -468,7 +469,7 @@ func TestShadowStrategy_Rewind_FromRepoRoot(t *testing.T) {
 		Date:    time.Now(),
 	}
 
-	if err := s.Rewind(context.Background(), point); err != nil {
+	if err := s.Rewind(context.Background(), io.Discard, io.Discard, point); err != nil {
 		t.Fatalf("Rewind() error = %v", err)
 	}
 
