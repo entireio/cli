@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -61,13 +62,15 @@ your agent's context.`,
 			}
 
 			ctx := cmd.Context()
+			w := cmd.OutOrStdout()
+			errW := cmd.ErrOrStderr()
 			if listFlag {
-				return runRewindList(ctx)
+				return runRewindList(ctx, w)
 			}
 			if toFlag != "" {
-				return runRewindToWithOptions(ctx, toFlag, logsOnlyFlag, resetFlag)
+				return runRewindToWithOptions(ctx, w, errW, toFlag, logsOnlyFlag, resetFlag)
 			}
-			return runRewindInteractive(ctx)
+			return runRewindInteractive(ctx, w, errW)
 		},
 	}
 
@@ -79,7 +82,7 @@ your agent's context.`,
 	return cmd
 }
 
-func runRewindInteractive(ctx context.Context) error { //nolint:maintidx // already present in codebase
+func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //nolint:maintidx // already present in codebase
 	// Get the configured strategy
 	start := GetStrategy(ctx)
 
@@ -89,7 +92,7 @@ func runRewindInteractive(ctx context.Context) error { //nolint:maintidx // alre
 		return fmt.Errorf("failed to check for uncommitted changes: %w", err)
 	}
 	if !canRewind {
-		fmt.Println(changeMsg)
+		fmt.Fprintln(w, changeMsg)
 		return nil
 	}
 
@@ -100,8 +103,8 @@ func runRewindInteractive(ctx context.Context) error { //nolint:maintidx // alre
 	}
 
 	if len(points) == 0 {
-		fmt.Println("No rewind points found.")
-		fmt.Println("Rewind points are created automatically when agent sessions end.")
+		fmt.Fprintln(w, "No rewind points found.")
+		fmt.Fprintln(w, "Rewind points are created automatically when agent sessions end.")
 		return nil
 	}
 
@@ -162,7 +165,7 @@ func runRewindInteractive(ctx context.Context) error { //nolint:maintidx // alre
 	}
 
 	if selectedID == "cancel" {
-		fmt.Println("Rewind cancelled.")
+		fmt.Fprintln(w, "Rewind cancelled.")
 		return nil
 	}
 
@@ -189,28 +192,28 @@ func runRewindInteractive(ctx context.Context) error { //nolint:maintidx // alre
 	switch {
 	case selectedPoint.IsLogsOnly:
 		// Committed checkpoint - show sha
-		fmt.Printf("\nSelected: %s %s\n", shortID, sanitizeForTerminal(selectedPoint.Message))
+		fmt.Fprintf(w, "\nSelected: %s %s\n", shortID, sanitizeForTerminal(selectedPoint.Message))
 	case selectedPoint.IsTaskCheckpoint:
 		// Task checkpoint - no sha
-		fmt.Printf("\nSelected: [Task] %s\n", sanitizeForTerminal(selectedPoint.Message))
+		fmt.Fprintf(w, "\nSelected: [Task] %s\n", sanitizeForTerminal(selectedPoint.Message))
 	default:
 		// Shadow checkpoint - no sha
-		fmt.Printf("\nSelected: %s\n", sanitizeForTerminal(selectedPoint.Message))
+		fmt.Fprintf(w, "\nSelected: %s\n", sanitizeForTerminal(selectedPoint.Message))
 	}
 
 	// Handle logs-only points with a sub-choice menu
 	if selectedPoint.IsLogsOnly {
-		return handleLogsOnlyRewindInteractive(ctx, start, *selectedPoint, shortID)
+		return handleLogsOnlyRewindInteractive(ctx, w, errW, start, *selectedPoint, shortID)
 	}
 
 	// Preview rewind to show warnings about files that will be deleted
 	preview, previewErr := start.PreviewRewind(ctx, *selectedPoint)
 	if previewErr == nil && preview != nil && len(preview.FilesToDelete) > 0 {
-		fmt.Fprintf(os.Stderr, "\nWarning: The following untracked files will be DELETED:\n")
+		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
 		for _, f := range preview.FilesToDelete {
-			fmt.Fprintf(os.Stderr, "  - %s\n", f)
+			fmt.Fprintf(errW, "  - %s\n", f)
 		}
-		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(errW, "\n")
 	}
 
 	// Confirm rewind
@@ -230,7 +233,7 @@ func runRewindInteractive(ctx context.Context) error { //nolint:maintidx // alre
 	}
 
 	if !confirm {
-		fmt.Println("Rewind cancelled.")
+		fmt.Fprintln(w, "Rewind cancelled.")
 		return nil
 	}
 
@@ -271,7 +274,7 @@ func runRewindInteractive(ctx context.Context) error { //nolint:maintidx // alre
 		// For task checkpoint: read checkpoint.json to get UUID and truncate transcript
 		checkpoint, err := start.GetTaskCheckpoint(ctx, *selectedPoint)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to read task checkpoint: %v\n", err)
+			fmt.Fprintf(errW, "Warning: failed to read task checkpoint: %v\n", err)
 			return nil
 		}
 
@@ -279,10 +282,10 @@ func runRewindInteractive(ctx context.Context) error { //nolint:maintidx // alre
 
 		if checkpoint.CheckpointUUID != "" {
 			// Truncate transcript at checkpoint UUID
-			if err := restoreTaskCheckpointTranscript(ctx, start, *selectedPoint, sessionID, checkpoint.CheckpointUUID, agent); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to restore truncated session transcript: %v\n", err)
+			if err := restoreTaskCheckpointTranscript(ctx, w, start, *selectedPoint, sessionID, checkpoint.CheckpointUUID, agent); err != nil {
+				fmt.Fprintf(errW, "Warning: failed to restore truncated session transcript: %v\n", err)
 			} else {
-				fmt.Printf("Rewound to task checkpoint. %s\n", agent.FormatResumeCommand(sessionID))
+				fmt.Fprintf(w, "✓ Rewound to task checkpoint. %s\n", agent.FormatResumeCommand(sessionID))
 			}
 			return nil
 		}
@@ -320,18 +323,18 @@ func runRewindInteractive(ctx context.Context) error { //nolint:maintidx // alre
 
 	if !restored {
 		// Fall back to local file
-		if err := restoreSessionTranscript(ctx, transcriptFile, sessionID, agent); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to restore session transcript: %v\n", err)
-			fmt.Fprintf(os.Stderr, "  Source: %s\n", transcriptFile)
-			fmt.Fprintf(os.Stderr, "  Session ID: %s\n", sessionID)
+		if err := restoreSessionTranscript(ctx, w, transcriptFile, sessionID, agent); err != nil {
+			fmt.Fprintf(errW, "Warning: failed to restore session transcript: %v\n", err)
+			fmt.Fprintf(errW, "  Source: %s\n", transcriptFile)
+			fmt.Fprintf(errW, "  Session ID: %s\n", sessionID)
 		}
 	}
 
-	fmt.Printf("Rewound to %s. %s\n", shortID, agent.FormatResumeCommand(sessionID))
+	fmt.Fprintf(w, "✓ Rewound to %s. %s\n", shortID, agent.FormatResumeCommand(sessionID))
 	return nil
 }
 
-func runRewindList(ctx context.Context) error {
+func runRewindList(ctx context.Context, w io.Writer) error {
 	start := GetStrategy(ctx)
 
 	points, err := start.GetRewindPoints(ctx, 20)
@@ -374,15 +377,15 @@ func runRewindList(ctx context.Context) error {
 	if err != nil {
 		return err //nolint:wrapcheck // already present in codebase
 	}
-	fmt.Println(string(data))
+	fmt.Fprintln(w, string(data))
 	return nil
 }
 
-func runRewindToWithOptions(ctx context.Context, commitID string, logsOnly bool, reset bool) error {
-	return runRewindToInternal(ctx, commitID, logsOnly, reset)
+func runRewindToWithOptions(ctx context.Context, w, errW io.Writer, commitID string, logsOnly bool, reset bool) error {
+	return runRewindToInternal(ctx, w, errW, commitID, logsOnly, reset)
 }
 
-func runRewindToInternal(ctx context.Context, commitID string, logsOnly bool, reset bool) error {
+func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string, logsOnly bool, reset bool) error {
 	start := GetStrategy(ctx)
 
 	// Check for uncommitted changes (skip for reset which handles this itself)
@@ -418,24 +421,24 @@ func runRewindToInternal(ctx context.Context, commitID string, logsOnly bool, re
 
 	// Handle reset mode (for logs-only points)
 	if reset {
-		return handleLogsOnlyResetNonInteractive(ctx, start, *selectedPoint)
+		return handleLogsOnlyResetNonInteractive(ctx, w, errW, start, *selectedPoint)
 	}
 
 	// Handle logs-only restoration:
 	// 1. For logs-only points, always use logs-only restoration
 	// 2. If --logs-only flag is set, use logs-only restoration even for checkpoint points
 	if selectedPoint.IsLogsOnly || logsOnly {
-		return handleLogsOnlyRewindNonInteractive(ctx, start, *selectedPoint)
+		return handleLogsOnlyRewindNonInteractive(ctx, w, errW, start, *selectedPoint)
 	}
 
 	// Preview rewind to show warnings about files that will be deleted
 	preview, previewErr := start.PreviewRewind(ctx, *selectedPoint)
 	if previewErr == nil && preview != nil && len(preview.FilesToDelete) > 0 {
-		fmt.Fprintf(os.Stderr, "\nWarning: The following untracked files will be DELETED:\n")
+		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
 		for _, f := range preview.FilesToDelete {
-			fmt.Fprintf(os.Stderr, "  - %s\n", f)
+			fmt.Fprintf(errW, "  - %s\n", f)
 		}
-		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(errW, "\n")
 	}
 
 	// Resolve agent once for use throughout
@@ -474,7 +477,7 @@ func runRewindToInternal(ctx context.Context, commitID string, logsOnly bool, re
 	if selectedPoint.IsTaskCheckpoint {
 		checkpoint, err := start.GetTaskCheckpoint(ctx, *selectedPoint)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to read task checkpoint: %v\n", err)
+			fmt.Fprintf(errW, "Warning: failed to read task checkpoint: %v\n", err)
 			return nil
 		}
 
@@ -482,10 +485,10 @@ func runRewindToInternal(ctx context.Context, commitID string, logsOnly bool, re
 
 		if checkpoint.CheckpointUUID != "" {
 			// Use strategy-based transcript restoration for task checkpoints
-			if err := restoreTaskCheckpointTranscript(ctx, start, *selectedPoint, sessionID, checkpoint.CheckpointUUID, agent); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to restore truncated session transcript: %v\n", err)
+			if err := restoreTaskCheckpointTranscript(ctx, w, start, *selectedPoint, sessionID, checkpoint.CheckpointUUID, agent); err != nil {
+				fmt.Fprintf(errW, "Warning: failed to restore truncated session transcript: %v\n", err)
 			} else {
-				fmt.Printf("Rewound to task checkpoint. %s\n", agent.FormatResumeCommand(sessionID))
+				fmt.Fprintf(w, "✓ Rewound to task checkpoint. %s\n", agent.FormatResumeCommand(sessionID))
 			}
 			return nil
 		}
@@ -521,18 +524,18 @@ func runRewindToInternal(ctx context.Context, commitID string, logsOnly bool, re
 
 	if !restored {
 		// Fall back to local file
-		if err := restoreSessionTranscript(ctx, transcriptFile, sessionID, agent); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to restore session transcript: %v\n", err)
+		if err := restoreSessionTranscript(ctx, w, transcriptFile, sessionID, agent); err != nil {
+			fmt.Fprintf(errW, "Warning: failed to restore session transcript: %v\n", err)
 		}
 	}
 
-	fmt.Printf("Rewound to %s. %s\n", selectedPoint.ID[:7], agent.FormatResumeCommand(sessionID))
+	fmt.Fprintf(w, "✓ Rewound to %s. %s\n", selectedPoint.ID[:7], agent.FormatResumeCommand(sessionID))
 	return nil
 }
 
 // handleLogsOnlyRewindNonInteractive handles logs-only rewind in non-interactive mode.
 // Defaults to restoring logs only (no checkout) for safety.
-func handleLogsOnlyRewindNonInteractive(ctx context.Context, start *strategy.ManualCommitStrategy, point strategy.RewindPoint) error {
+func handleLogsOnlyRewindNonInteractive(ctx context.Context, w, errW io.Writer, start *strategy.ManualCommitStrategy, point strategy.RewindPoint) error {
 	// Resolve agent once for use throughout
 	agent, err := getAgent(point.Agent)
 	if err != nil {
@@ -562,15 +565,15 @@ func handleLogsOnlyRewindNonInteractive(ctx context.Context, start *strategy.Man
 	)
 
 	// Show resume commands for all sessions
-	printMultiSessionResumeCommands(sessions)
+	printMultiSessionResumeCommands(w, errW, sessions)
 
-	fmt.Println("Note: Working directory unchanged. Use interactive mode for full checkout.")
+	fmt.Fprintln(w, "Note: Working directory unchanged. Use interactive mode for full checkout.")
 	return nil
 }
 
 // handleLogsOnlyResetNonInteractive handles reset in non-interactive mode.
 // This performs a git reset --hard to the target commit.
-func handleLogsOnlyResetNonInteractive(ctx context.Context, start *strategy.ManualCommitStrategy, point strategy.RewindPoint) error {
+func handleLogsOnlyResetNonInteractive(ctx context.Context, w, errW io.Writer, start *strategy.ManualCommitStrategy, point strategy.RewindPoint) error {
 	// Resolve agent once for use throughout
 	agent, err := getAgent(point.Agent)
 	if err != nil {
@@ -620,10 +623,10 @@ func handleLogsOnlyResetNonInteractive(ctx context.Context, start *strategy.Manu
 		shortID = shortID[:7]
 	}
 
-	fmt.Printf("Reset branch to %s.\n", shortID)
+	fmt.Fprintf(w, "✓ Reset branch to %s.\n", shortID)
 
 	// Show resume commands for all sessions
-	printMultiSessionResumeCommands(sessions)
+	printMultiSessionResumeCommands(w, errW, sessions)
 
 	// Show recovery instructions
 	if currentHead != "" && currentHead != point.ID {
@@ -631,13 +634,13 @@ func handleLogsOnlyResetNonInteractive(ctx context.Context, start *strategy.Manu
 		if len(currentShort) > 7 {
 			currentShort = currentShort[:7]
 		}
-		fmt.Printf("\nTo undo this reset: git reset --hard %s\n", currentShort)
+		fmt.Fprintf(w, "\nTo undo this reset: git reset --hard %s\n", currentShort)
 	}
 
 	return nil
 }
 
-func restoreSessionTranscript(ctx context.Context, transcriptFile, sessionID string, agent agentpkg.Agent) error {
+func restoreSessionTranscript(ctx context.Context, w io.Writer, transcriptFile, sessionID string, agent agentpkg.Agent) error {
 	sessionFile, err := resolveTranscriptPath(ctx, sessionID, agent)
 	if err != nil {
 		return err
@@ -648,7 +651,7 @@ func restoreSessionTranscript(ctx context.Context, transcriptFile, sessionID str
 		return fmt.Errorf("failed to create agent session directory: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Copying transcript:\n  From: %s\n  To: %s\n", transcriptFile, sessionFile)
+	fmt.Fprintf(w, "Copying transcript:\n  From: %s\n  To: %s\n", transcriptFile, sessionFile)
 	if err := copyFile(transcriptFile, sessionFile); err != nil {
 		return fmt.Errorf("failed to copy transcript: %w", err)
 	}
@@ -740,7 +743,7 @@ func restoreSessionTranscriptFromShadow(ctx context.Context, commitHash, metadat
 // This is acceptable because task checkpoints are currently only created by Claude Code's
 // PostToolUse hook. If other agents gain sub-agent support, this will need a
 // format-aware refactor (agent-specific parsing, truncation, and serialization).
-func restoreTaskCheckpointTranscript(ctx context.Context, strat *strategy.ManualCommitStrategy, point strategy.RewindPoint, sessionID, checkpointUUID string, agent agentpkg.Agent) error {
+func restoreTaskCheckpointTranscript(ctx context.Context, w io.Writer, strat *strategy.ManualCommitStrategy, point strategy.RewindPoint, sessionID, checkpointUUID string, agent agentpkg.Agent) error {
 	// Get transcript content from strategy
 	content, err := strat.GetTaskCheckpointTranscript(ctx, point)
 	if err != nil {
@@ -766,7 +769,7 @@ func restoreTaskCheckpointTranscript(ctx context.Context, strat *strategy.Manual
 		return fmt.Errorf("failed to create agent session directory: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Writing truncated transcript to: %s\n", sessionFile)
+	fmt.Fprintf(w, "Writing truncated transcript to: %s\n", sessionFile)
 
 	if err := writeTranscript(sessionFile, truncated); err != nil {
 		return fmt.Errorf("failed to write truncated transcript: %w", err)
@@ -776,7 +779,7 @@ func restoreTaskCheckpointTranscript(ctx context.Context, strat *strategy.Manual
 }
 
 // handleLogsOnlyRewindInteractive handles rewind for logs-only points with a sub-choice menu.
-func handleLogsOnlyRewindInteractive(ctx context.Context, start *strategy.ManualCommitStrategy, point strategy.RewindPoint, shortID string) error {
+func handleLogsOnlyRewindInteractive(ctx context.Context, w, errW io.Writer, start *strategy.ManualCommitStrategy, point strategy.RewindPoint, shortID string) error {
 	var action string
 
 	form := NewAccessibleForm(
@@ -800,13 +803,13 @@ func handleLogsOnlyRewindInteractive(ctx context.Context, start *strategy.Manual
 
 	switch action {
 	case "logs":
-		return handleLogsOnlyRestore(ctx, start, point)
+		return handleLogsOnlyRestore(ctx, w, errW, start, point)
 	case "checkout":
-		return handleLogsOnlyCheckout(ctx, start, point, shortID)
+		return handleLogsOnlyCheckout(ctx, w, errW, start, point, shortID)
 	case "reset":
-		return handleLogsOnlyReset(ctx, start, point, shortID)
+		return handleLogsOnlyReset(ctx, w, errW, start, point, shortID)
 	case "cancel":
-		fmt.Println("Rewind cancelled.")
+		fmt.Fprintln(w, "Rewind cancelled.")
 		return nil
 	}
 
@@ -814,7 +817,7 @@ func handleLogsOnlyRewindInteractive(ctx context.Context, start *strategy.Manual
 }
 
 // handleLogsOnlyRestore restores only the session logs without changing files.
-func handleLogsOnlyRestore(ctx context.Context, start *strategy.ManualCommitStrategy, point strategy.RewindPoint) error {
+func handleLogsOnlyRestore(ctx context.Context, w, errW io.Writer, start *strategy.ManualCommitStrategy, point strategy.RewindPoint) error {
 	// Resolve agent once for use throughout
 	agent, err := getAgent(point.Agent)
 	if err != nil {
@@ -845,13 +848,13 @@ func handleLogsOnlyRestore(ctx context.Context, start *strategy.ManualCommitStra
 	)
 
 	// Show resume commands for all sessions
-	fmt.Println("Restored session logs.")
-	printMultiSessionResumeCommands(sessions)
+	fmt.Fprintln(w, "✓ Restored session logs.")
+	printMultiSessionResumeCommands(w, errW, sessions)
 	return nil
 }
 
 // handleLogsOnlyCheckout restores logs and checks out the commit (detached HEAD).
-func handleLogsOnlyCheckout(ctx context.Context, start *strategy.ManualCommitStrategy, point strategy.RewindPoint, shortID string) error {
+func handleLogsOnlyCheckout(ctx context.Context, w, errW io.Writer, start *strategy.ManualCommitStrategy, point strategy.RewindPoint, shortID string) error {
 	// Resolve agent once for use throughout
 	agent, err := getAgent(point.Agent)
 	if err != nil {
@@ -892,8 +895,8 @@ func handleLogsOnlyCheckout(ctx context.Context, start *strategy.ManualCommitStr
 	}
 
 	if !confirm {
-		fmt.Println("Checkout cancelled. Session logs were still restored.")
-		printMultiSessionResumeCommands(sessions)
+		fmt.Fprintln(w, "Checkout cancelled. Session logs were still restored.")
+		printMultiSessionResumeCommands(w, errW, sessions)
 		return nil
 	}
 
@@ -910,13 +913,13 @@ func handleLogsOnlyCheckout(ctx context.Context, start *strategy.ManualCommitStr
 		slog.String("checkpoint_id", point.ID),
 	)
 
-	fmt.Printf("Checked out %s (detached HEAD).\n", shortID)
-	printMultiSessionResumeCommands(sessions)
+	fmt.Fprintf(w, "✓ Checked out %s (detached HEAD).\n", shortID)
+	printMultiSessionResumeCommands(w, errW, sessions)
 	return nil
 }
 
 // handleLogsOnlyReset restores logs and resets the branch to the commit (destructive).
-func handleLogsOnlyReset(ctx context.Context, start *strategy.ManualCommitStrategy, point strategy.RewindPoint, shortID string) error {
+func handleLogsOnlyReset(ctx context.Context, w, errW io.Writer, start *strategy.ManualCommitStrategy, point strategy.RewindPoint, shortID string) error {
 	// Resolve agent once for use throughout
 	agent, agentErr := getAgent(point.Agent)
 	if agentErr != nil {
@@ -987,8 +990,8 @@ func handleLogsOnlyReset(ctx context.Context, start *strategy.ManualCommitStrate
 	}
 
 	if !confirm {
-		fmt.Println("Reset cancelled. Session logs were still restored.")
-		printMultiSessionResumeCommands(sessions)
+		fmt.Fprintln(w, "Reset cancelled. Session logs were still restored.")
+		printMultiSessionResumeCommands(w, errW, sessions)
 		return nil
 	}
 
@@ -1005,8 +1008,8 @@ func handleLogsOnlyReset(ctx context.Context, start *strategy.ManualCommitStrate
 		slog.String("checkpoint_id", point.ID),
 	)
 
-	fmt.Printf("Reset branch to %s.\n", shortID)
-	printMultiSessionResumeCommands(sessions)
+	fmt.Fprintf(w, "✓ Reset branch to %s.\n", shortID)
+	printMultiSessionResumeCommands(w, errW, sessions)
 
 	// Show recovery instructions
 	if currentHead != "" && currentHead != point.ID {
@@ -1014,7 +1017,7 @@ func handleLogsOnlyReset(ctx context.Context, start *strategy.ManualCommitStrate
 		if len(currentShort) > 7 {
 			currentShort = currentShort[:7]
 		}
-		fmt.Printf("\nTo undo this reset: git reset --hard %s\n", currentShort)
+		fmt.Fprintf(w, "\nTo undo this reset: git reset --hard %s\n", currentShort)
 	}
 
 	return nil
@@ -1167,19 +1170,19 @@ func sanitizeForTerminal(s string) string {
 
 // printMultiSessionResumeCommands prints resume commands for restored sessions.
 // Each session may have a different agent, so per-session agent resolution is used.
-func printMultiSessionResumeCommands(sessions []strategy.RestoredSession) {
+func printMultiSessionResumeCommands(w, errW io.Writer, sessions []strategy.RestoredSession) {
 	if len(sessions) == 0 {
 		return
 	}
 
 	if len(sessions) > 1 {
-		fmt.Printf("\nRestored %d sessions. Resume with:\n", len(sessions))
+		fmt.Fprintf(w, "\n✓ Restored %d sessions. Resume with:\n", len(sessions))
 	}
 
 	for i, sess := range sessions {
 		ag, err := strategy.ResolveAgentForRewind(sess.Agent)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  Warning: could not resolve agent %q for session %s, skipping\n", sess.Agent, sess.SessionID)
+			fmt.Fprintf(errW, "  Warning: could not resolve agent %q for session %s, skipping\n", sess.Agent, sess.SessionID)
 			continue
 		}
 
@@ -1189,22 +1192,22 @@ func printMultiSessionResumeCommands(sessions []strategy.RestoredSession) {
 			// Add "(most recent)" label to the last session
 			if i == len(sessions)-1 {
 				if sess.Prompt != "" {
-					fmt.Printf("  %s  # %s (most recent)\n", cmd, sess.Prompt)
+					fmt.Fprintf(w, "  %s  # %s (most recent)\n", cmd, sess.Prompt)
 				} else {
-					fmt.Printf("  %s  # (most recent)\n", cmd)
+					fmt.Fprintf(w, "  %s  # (most recent)\n", cmd)
 				}
 			} else {
 				if sess.Prompt != "" {
-					fmt.Printf("  %s  # %s\n", cmd, sess.Prompt)
+					fmt.Fprintf(w, "  %s  # %s\n", cmd, sess.Prompt)
 				} else {
-					fmt.Printf("  %s\n", cmd)
+					fmt.Fprintf(w, "  %s\n", cmd)
 				}
 			}
 		} else {
 			if sess.Prompt != "" {
-				fmt.Printf("%s  # %s\n", cmd, sess.Prompt)
+				fmt.Fprintf(w, "%s  # %s\n", cmd, sess.Prompt)
 			} else {
-				fmt.Printf("%s\n", cmd)
+				fmt.Fprintf(w, "%s\n", cmd)
 			}
 		}
 	}
