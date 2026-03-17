@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/spf13/cobra"
 )
 
 func TestFirstLine(t *testing.T) {
@@ -205,7 +207,7 @@ func TestResumeFromCurrentBranch_NoCheckpoint(t *testing.T) {
 	setupResumeTestRepo(t, tmpDir, false)
 
 	// Run resumeFromCurrentBranch - should not error, just report no checkpoint found
-	err := resumeFromCurrentBranch(context.Background(), "master", false)
+	err := resumeFromCurrentBranch(context.Background(), io.Discard, io.Discard, "master", false)
 	if err != nil {
 		t.Errorf("resumeFromCurrentBranch() returned error for commit without checkpoint: %v", err)
 	}
@@ -229,7 +231,11 @@ func TestRunResume_AlreadyOnBranch(t *testing.T) {
 	}
 
 	// Run resume on the branch we're already on - should skip checkout
-	err := runResume(context.Background(), "feature", false)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := runResume(context.Background(), cmd, "feature", false)
 	// Should not error (no session, but shouldn't error)
 	if err != nil {
 		t.Errorf("runResume() returned error when already on branch: %v", err)
@@ -243,7 +249,11 @@ func TestRunResume_BranchDoesNotExist(t *testing.T) {
 	setupResumeTestRepo(t, tmpDir, false)
 
 	// Run resume on a branch that doesn't exist
-	err := runResume(context.Background(), "nonexistent", false)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := runResume(context.Background(), cmd, "nonexistent", false)
 	if err == nil {
 		t.Error("runResume() expected error for nonexistent branch, got nil")
 	}
@@ -262,7 +272,11 @@ func TestRunResume_UncommittedChanges(t *testing.T) {
 	}
 
 	// Run resume - should fail due to uncommitted changes
-	err := runResume(context.Background(), "feature", false)
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := runResume(context.Background(), cmd, "feature", false)
 	if err == nil {
 		t.Error("runResume() expected error for uncommitted changes, got nil")
 	}
@@ -617,7 +631,7 @@ func TestCheckRemoteMetadata_MetadataExistsOnRemote(t *testing.T) {
 	// Call checkRemoteMetadata - should find it on remote and attempt to fetch
 	// In this test environment without a real origin remote, the fetch will fail
 	// but it should return a SilentError (user-friendly error message already printed)
-	err = checkRemoteMetadata(context.Background(), repo, checkpointID)
+	err = checkRemoteMetadata(context.Background(), io.Discard, io.Discard, repo, checkpointID)
 	if err == nil {
 		t.Error("checkRemoteMetadata() should return SilentError when fetch fails")
 	} else {
@@ -642,7 +656,7 @@ func TestCheckRemoteMetadata_NoRemoteMetadataBranch(t *testing.T) {
 	// Don't create any remote ref - simulating no remote entire/checkpoints/v1
 
 	// Call checkRemoteMetadata - should handle gracefully (no remote branch)
-	err := checkRemoteMetadata(context.Background(), repo, "nonexistent123")
+	err := checkRemoteMetadata(context.Background(), io.Discard, io.Discard, repo, "nonexistent123")
 	if err != nil {
 		t.Errorf("checkRemoteMetadata() returned error when no remote branch: %v", err)
 	}
@@ -677,7 +691,7 @@ func TestCheckRemoteMetadata_CheckpointNotOnRemote(t *testing.T) {
 	}
 
 	// Call checkRemoteMetadata with a DIFFERENT checkpoint ID (not on remote)
-	err = checkRemoteMetadata(context.Background(), repo, "abcd12345678")
+	err = checkRemoteMetadata(context.Background(), io.Discard, io.Discard, repo, "abcd12345678")
 	if err != nil {
 		t.Errorf("checkRemoteMetadata() returned error for missing checkpoint: %v", err)
 	}
@@ -738,7 +752,7 @@ func TestResumeFromCurrentBranch_FallsBackToRemote(t *testing.T) {
 	// Run resumeFromCurrentBranch - should fall back to remote and attempt fetch
 	// In this test environment without a real origin remote, the fetch will fail
 	// but it should return a SilentError (user-friendly error message already printed)
-	err = resumeFromCurrentBranch(context.Background(), "master", false)
+	err = resumeFromCurrentBranch(context.Background(), io.Discard, io.Discard, "master", false)
 	if err == nil {
 		t.Error("resumeFromCurrentBranch() should return SilentError when fetch fails")
 	} else {
