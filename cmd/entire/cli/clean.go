@@ -246,7 +246,7 @@ func runCleanWithItems(ctx context.Context, w io.Writer, force bool, items []str
 			fmt.Fprintln(w)
 		}
 
-		fmt.Fprintln(w, "Run with --force to delete these items.")
+		fmt.Fprintln(w, "Use --force to skip this prompt.")
 		return nil
 	}
 
