@@ -161,7 +161,10 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 	)
 
 	if err := form.Run(); err != nil {
-		return fmt.Errorf("selection cancelled: %w", err)
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil
+		}
+		return fmt.Errorf("selection failed: %w", err)
 	}
 
 	if selectedID == "cancel" {
@@ -208,7 +211,9 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 
 	// Preview rewind to show warnings about files that will be deleted
 	preview, previewErr := start.PreviewRewind(ctx, *selectedPoint)
-	if previewErr == nil && preview != nil && len(preview.FilesToDelete) > 0 {
+	if previewErr != nil {
+		fmt.Fprintf(errW, "Warning: could not preview rewind effects: %v\n", previewErr)
+	} else if preview != nil && len(preview.FilesToDelete) > 0 {
 		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
 		for _, f := range preview.FilesToDelete {
 			fmt.Fprintf(errW, "  - %s\n", f)
@@ -229,7 +234,10 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 	)
 
 	if err := confirmForm.Run(); err != nil {
-		return fmt.Errorf("confirmation cancelled: %w", err)
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil
+		}
+		return fmt.Errorf("confirmation failed: %w", err)
 	}
 
 	if !confirm {
@@ -433,7 +441,9 @@ func runRewindToInternal(ctx context.Context, w, errW io.Writer, commitID string
 
 	// Preview rewind to show warnings about files that will be deleted
 	preview, previewErr := start.PreviewRewind(ctx, *selectedPoint)
-	if previewErr == nil && preview != nil && len(preview.FilesToDelete) > 0 {
+	if previewErr != nil {
+		fmt.Fprintf(errW, "Warning: could not preview rewind effects: %v\n", previewErr)
+	} else if preview != nil && len(preview.FilesToDelete) > 0 {
 		fmt.Fprintf(errW, "\nWarning: The following untracked files will be DELETED:\n")
 		for _, f := range preview.FilesToDelete {
 			fmt.Fprintf(errW, "  - %s\n", f)
@@ -798,7 +808,10 @@ func handleLogsOnlyRewindInteractive(ctx context.Context, w, errW io.Writer, sta
 	)
 
 	if err := form.Run(); err != nil {
-		return fmt.Errorf("action selection cancelled: %w", err)
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil
+		}
+		return fmt.Errorf("action selection failed: %w", err)
 	}
 
 	switch action {
@@ -891,7 +904,10 @@ func handleLogsOnlyCheckout(ctx context.Context, w, errW io.Writer, start *strat
 	)
 
 	if err := confirmForm.Run(); err != nil {
-		return fmt.Errorf("confirmation cancelled: %w", err)
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil
+		}
+		return fmt.Errorf("confirmation failed: %w", err)
 	}
 
 	if !confirm {
@@ -986,7 +1002,10 @@ func handleLogsOnlyReset(ctx context.Context, w, errW io.Writer, start *strategy
 	)
 
 	if err := confirmForm.Run(); err != nil {
-		return fmt.Errorf("confirmation cancelled: %w", err)
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil
+		}
+		return fmt.Errorf("confirmation failed: %w", err)
 	}
 
 	if !confirm {

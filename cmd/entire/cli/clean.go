@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -50,13 +51,14 @@ The entire/checkpoints/v1 branch itself is never deleted.`,
 		},
 	}
 
-	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Actually delete items (default: dry run)")
+	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Delete without prompting for confirmation")
 
 	return cmd
 }
 
 func runClean(ctx context.Context, cmd *cobra.Command, force bool) error {
 	w := cmd.OutOrStdout()
+	errW := cmd.ErrOrStderr()
 
 	// Initialize logging so structured logs go to .entire/logs/ instead of stderr.
 	// Error is non-fatal: if logging init fails, logs go to stderr (acceptable fallback).
@@ -75,7 +77,7 @@ func runClean(ctx context.Context, cmd *cobra.Command, force bool) error {
 	tempFiles, err := listTempFiles(ctx)
 	if err != nil {
 		// Non-fatal: continue with other cleanup items
-		fmt.Fprintf(w, "Warning: failed to list temp files: %v\n", err)
+		fmt.Fprintf(errW, "Warning: failed to list temp files: %v\n", err)
 	}
 
 	// Force mode: skip preview and confirmation
@@ -107,7 +109,10 @@ func runClean(ctx context.Context, cmd *cobra.Command, force bool) error {
 	)
 
 	if err := form.Run(); err != nil {
-		return fmt.Errorf("confirmation cancelled: %w", err)
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil
+		}
+		return fmt.Errorf("confirmation failed: %w", err)
 	}
 
 	if !confirmed {
