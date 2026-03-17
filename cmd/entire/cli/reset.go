@@ -94,7 +94,7 @@ Without --force, prompts for confirmation before deleting.`,
 			}
 
 			// Call strategy's Reset method
-			if err := strat.Reset(ctx); err != nil {
+			if err := strat.Reset(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
 				return fmt.Errorf("reset failed: %w", err)
 			}
 
@@ -146,11 +146,11 @@ func runResetSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 		}
 	}
 
-	if err := strat.ResetSession(ctx, sessionID); err != nil {
+	if err := strat.ResetSession(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), sessionID); err != nil {
 		return fmt.Errorf("reset session failed: %w", err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Session %s has been reset. File changes remain in the working directory.\n", sessionID)
+	fmt.Fprintf(cmd.OutOrStdout(), "✓ Session %s has been reset. File changes remain in the working directory.\n", sessionID)
 	return nil
 }
 

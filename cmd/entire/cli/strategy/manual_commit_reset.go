@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -18,7 +19,7 @@ func isAccessibleMode() bool {
 
 // Reset deletes the shadow branch and session state for the current HEAD.
 // This allows starting fresh without existing checkpoints.
-func (s *ManualCommitStrategy) Reset(ctx context.Context) error {
+func (s *ManualCommitStrategy) Reset(ctx context.Context, w, errW io.Writer) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
@@ -56,7 +57,7 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context) error {
 
 	// If nothing to reset, return early
 	if !hasShadowBranch && len(sessions) == 0 {
-		fmt.Fprintf(os.Stderr, "Nothing to reset for %s\n", shadowBranchName)
+		fmt.Fprintf(w, "Nothing to reset for %s\n", shadowBranchName)
 		return nil
 	}
 
@@ -64,7 +65,7 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context) error {
 	clearedSessions := make([]string, 0)
 	for _, state := range sessions {
 		if err := s.clearSessionState(ctx, state.SessionID); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to clear session state for %s: %v\n", state.SessionID, err)
+			fmt.Fprintf(errW, "Warning: failed to clear session state for %s: %v\n", state.SessionID, err)
 		} else {
 			clearedSessions = append(clearedSessions, state.SessionID)
 		}
@@ -73,7 +74,7 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context) error {
 	// Report cleared session states with session IDs
 	if len(clearedSessions) > 0 {
 		for _, sessionID := range clearedSessions {
-			fmt.Fprintf(os.Stderr, "Cleared session state for %s\n", sessionID)
+			fmt.Fprintf(w, "✓ Cleared session state for %s\n", sessionID)
 		}
 	}
 
@@ -82,7 +83,7 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context) error {
 		if err := DeleteBranchCLI(ctx, shadowBranchName); err != nil {
 			return fmt.Errorf("failed to delete shadow branch: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "Deleted shadow branch %s\n", shadowBranchName)
+		fmt.Fprintf(w, "✓ Deleted shadow branch %s\n", shadowBranchName)
 	}
 
 	return nil
@@ -90,7 +91,7 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context) error {
 
 // ResetSession clears a single session's state and removes the shadow branch
 // if no other sessions reference it. File changes remain in the working directory.
-func (s *ManualCommitStrategy) ResetSession(ctx context.Context, sessionID string) error {
+func (s *ManualCommitStrategy) ResetSession(ctx context.Context, w, errW io.Writer, sessionID string) error {
 	// Load the session state
 	state, err := s.loadSessionState(ctx, sessionID)
 	if err != nil {
@@ -104,7 +105,7 @@ func (s *ManualCommitStrategy) ResetSession(ctx context.Context, sessionID strin
 	if err := s.clearSessionState(ctx, sessionID); err != nil {
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "Cleared session state for %s\n", sessionID)
+	fmt.Fprintf(w, "✓ Cleared session state for %s\n", sessionID)
 
 	// Determine the shadow branch for this session
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
@@ -117,12 +118,12 @@ func (s *ManualCommitStrategy) ResetSession(ctx context.Context, sessionID strin
 
 	// Clean up shadow branch if no other sessions need it
 	if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to clean up shadow branch %s: %v\n", shadowBranchName, err)
+		fmt.Fprintf(errW, "Warning: failed to clean up shadow branch %s: %v\n", shadowBranchName, err)
 	} else {
 		// Check if it was actually deleted via git CLI (go-git's cache
 		// may be stale after CLI-based deletion with packed refs)
 		if err := branchExistsCLI(ctx, shadowBranchName); err != nil {
-			fmt.Fprintf(os.Stderr, "Deleted shadow branch %s\n", shadowBranchName)
+			fmt.Fprintf(w, "✓ Deleted shadow branch %s\n", shadowBranchName)
 		}
 	}
 
