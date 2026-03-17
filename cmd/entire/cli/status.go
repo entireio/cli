@@ -296,23 +296,18 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				agentLabel = unknownPlaceholder
 			}
 
-			shortID := st.SessionID
-			if len(shortID) > 7 {
-				shortID = shortID[:7]
-			}
-
-			// Line 1: Agent (model) · shortID
+			// Line 1: Agent (model) · sessionID
 			if st.ModelName != "" {
 				fmt.Fprintf(w, "%s %s %s %s\n",
 					sty.render(sty.agent, agentLabel),
 					sty.render(sty.dim, "("+st.ModelName+")"),
 					sty.render(sty.dim, "·"),
-					shortID)
+					st.SessionID)
 			} else {
 				fmt.Fprintf(w, "%s %s %s\n",
 					sty.render(sty.agent, agentLabel),
 					sty.render(sty.dim, "·"),
-					shortID)
+					st.SessionID)
 			}
 
 			// Line 2: > "first prompt" (chevron + quoted, truncated)
