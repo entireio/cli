@@ -102,7 +102,7 @@ func runResume(ctx context.Context, cmd *cobra.Command, branchName string, force
 			fmt.Fprintf(errW, "Error: failed to checkout branch: %v\n", err)
 			return NewSilentError(errors.New("failed to checkout branch"))
 		}
-		fmt.Fprintf(w, "✓ Switched to branch '%s'\n", branchName)
+		fmt.Fprintf(w, "✓ Switched to branch %s\n", branchName)
 	} else {
 		// Branch exists locally, check for uncommitted changes before checkout
 		hasChanges, err := HasUncommittedChanges(ctx)
@@ -118,7 +118,7 @@ func runResume(ctx context.Context, cmd *cobra.Command, branchName string, force
 			fmt.Fprintf(errW, "Error: failed to checkout branch: %v\n", err)
 			return NewSilentError(errors.New("failed to checkout branch"))
 		}
-		fmt.Fprintf(w, "✓ Switched to branch '%s'\n", branchName)
+		fmt.Fprintf(w, "✓ Switched to branch %s\n", branchName)
 	}
 
 	return resumeFromCurrentBranch(ctx, w, errW, branchName, force)
@@ -500,7 +500,7 @@ func displayRestoredSessions(w io.Writer, sessions []strategy.RestoredSession) e
 	if len(sessions) > 1 {
 		fmt.Fprintf(w, "\n✓ Restored %d sessions. To continue, run:\n", len(sessions))
 	} else if len(sessions) == 1 {
-		fmt.Fprintf(w, "✓ Session: %s\n", sessions[0].SessionID)
+		fmt.Fprintf(w, "✓ Restored session %s.\n", sessions[0].SessionID)
 		fmt.Fprintf(w, "\nTo continue this session, run:\n")
 	}
 

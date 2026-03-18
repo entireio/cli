@@ -267,7 +267,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr str
 		}
 		fmt.Fprintf(w, "✓ Created branch %s\n", branch)
 	} else if currentBranch != branch {
-		fmt.Fprintf(errW, "Note: trail will be created for branch %q (not the current branch)\n", branch)
+		fmt.Fprintf(w, "Note: trail will be created for branch %q (not the current branch)\n", branch)
 	}
 
 	// Check if trail already exists for this branch

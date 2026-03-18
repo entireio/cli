@@ -785,7 +785,7 @@ func TestDisplayRestoredSessions_SingleSessionOutput(t *testing.T) {
 	}
 
 	got := output.String()
-	if !strings.Contains(got, "✓ Session: 2026-02-02-resume-output\n") {
+	if !strings.Contains(got, "✓ Restored session 2026-02-02-resume-output.\n") {
 		t.Fatalf("displayRestoredSessions() missing session header, got: %q", got)
 	}
 	if !strings.Contains(got, "\nTo continue this session, run:\n") {
@@ -794,6 +794,42 @@ func TestDisplayRestoredSessions_SingleSessionOutput(t *testing.T) {
 	wantCommand := "  " + ag.FormatResumeCommand(session.SessionID) + "  # Implement auth\n"
 	if !strings.Contains(got, wantCommand) {
 		t.Fatalf("displayRestoredSessions() missing command %q in %q", wantCommand, got)
+	}
+}
+
+func TestPrintMultiSessionResumeCommands_SingleSessionHasCheckmark(t *testing.T) {
+	t.Parallel()
+
+	sessions := []strategy.RestoredSession{
+		{
+			SessionID: "2026-02-02-rewind-single",
+			Agent:     "Claude Code",
+			Prompt:    "Fix the bug",
+		},
+	}
+
+	ag, err := strategy.ResolveAgentForRewind("Claude Code")
+	if err != nil {
+		t.Fatalf("ResolveAgentForRewind() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	var errOutput bytes.Buffer
+	printMultiSessionResumeCommands(&output, &errOutput, sessions)
+
+	got := output.String()
+	if !strings.Contains(got, "✓ Restored session 2026-02-02-rewind-single.\n") {
+		t.Fatalf("printMultiSessionResumeCommands() single session missing ✓ header, got: %q", got)
+	}
+	if !strings.Contains(got, "\nTo continue this session, run:\n") {
+		t.Fatalf("printMultiSessionResumeCommands() missing continuation line, got: %q", got)
+	}
+	wantCommand := "  " + ag.FormatResumeCommand("2026-02-02-rewind-single") + "  # Fix the bug\n"
+	if !strings.Contains(got, wantCommand) {
+		t.Fatalf("printMultiSessionResumeCommands() missing command %q in %q", wantCommand, got)
+	}
+	if errOutput.Len() != 0 {
+		t.Fatalf("printMultiSessionResumeCommands() unexpected stderr: %q", errOutput.String())
 	}
 }
 

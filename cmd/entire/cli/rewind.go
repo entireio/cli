@@ -1197,6 +1197,7 @@ func printMultiSessionResumeCommands(w, errW io.Writer, sessions []strategy.Rest
 	if len(sessions) > 1 {
 		fmt.Fprintf(w, "\n✓ Restored %d sessions. To continue, run:\n", len(sessions))
 	} else {
+		fmt.Fprintf(w, "✓ Restored session %s.\n", sessions[0].SessionID)
 		fmt.Fprintf(w, "\nTo continue this session, run:\n")
 	}
 
