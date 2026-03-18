@@ -1195,7 +1195,9 @@ func printMultiSessionResumeCommands(w, errW io.Writer, sessions []strategy.Rest
 	}
 
 	if len(sessions) > 1 {
-		fmt.Fprintf(w, "\n✓ Restored %d sessions. Resume with:\n", len(sessions))
+		fmt.Fprintf(w, "\n✓ Restored %d sessions. To continue, run:\n", len(sessions))
+	} else {
+		fmt.Fprintf(w, "\nTo continue this session, run:\n")
 	}
 
 	for i, sess := range sessions {
@@ -1207,27 +1209,19 @@ func printMultiSessionResumeCommands(w, errW io.Writer, sessions []strategy.Rest
 
 		cmd := ag.FormatResumeCommand(sess.SessionID)
 
-		if len(sessions) > 1 {
-			// Add "(most recent)" label to the last session
-			if i == len(sessions)-1 {
-				if sess.Prompt != "" {
-					fmt.Fprintf(w, "  %s  # %s (most recent)\n", cmd, sess.Prompt)
-				} else {
-					fmt.Fprintf(w, "  %s  # (most recent)\n", cmd)
-				}
-			} else {
-				if sess.Prompt != "" {
-					fmt.Fprintf(w, "  %s  # %s\n", cmd, sess.Prompt)
-				} else {
-					fmt.Fprintf(w, "  %s\n", cmd)
-				}
-			}
-		} else {
-			if sess.Prompt != "" {
-				fmt.Fprintf(w, "%s  # %s\n", cmd, sess.Prompt)
-			} else {
-				fmt.Fprintf(w, "%s\n", cmd)
-			}
+		switch {
+		case len(sessions) > 1 && i == len(sessions)-1 && sess.Prompt != "":
+			fmt.Fprintf(w, "  %s  # %s (most recent)\n", cmd, sess.Prompt)
+		case len(sessions) > 1 && i == len(sessions)-1:
+			fmt.Fprintf(w, "  %s  # (most recent)\n", cmd)
+		case len(sessions) > 1 && sess.Prompt != "":
+			fmt.Fprintf(w, "  %s  # %s\n", cmd, sess.Prompt)
+		case len(sessions) > 1:
+			fmt.Fprintf(w, "  %s\n", cmd)
+		case sess.Prompt != "":
+			fmt.Fprintf(w, "  %s  # %s\n", cmd, sess.Prompt)
+		default:
+			fmt.Fprintf(w, "  %s\n", cmd)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -760,5 +761,80 @@ func TestResumeFromCurrentBranch_FallsBackToRemote(t *testing.T) {
 		if !errors.As(err, &silentErr) {
 			t.Errorf("resumeFromCurrentBranch() should return SilentError, got: %v", err)
 		}
+	}
+}
+
+func TestDisplayRestoredSessions_SingleSessionOutput(t *testing.T) {
+	t.Parallel()
+
+	session := strategy.RestoredSession{
+		SessionID: "2026-02-02-resume-output",
+		Agent:     "Claude Code",
+		Prompt:    "Implement auth",
+		CreatedAt: time.Date(2026, time.February, 2, 12, 0, 0, 0, time.UTC),
+	}
+
+	ag, err := strategy.ResolveAgentForRewind(session.Agent)
+	if err != nil {
+		t.Fatalf("ResolveAgentForRewind() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := displayRestoredSessions(&output, []strategy.RestoredSession{session}); err != nil {
+		t.Fatalf("displayRestoredSessions() error = %v", err)
+	}
+
+	got := output.String()
+	if !strings.Contains(got, "✓ Session: 2026-02-02-resume-output\n") {
+		t.Fatalf("displayRestoredSessions() missing session header, got: %q", got)
+	}
+	if !strings.Contains(got, "\nTo continue this session, run:\n") {
+		t.Fatalf("displayRestoredSessions() missing continuation header, got: %q", got)
+	}
+	wantCommand := "  " + ag.FormatResumeCommand(session.SessionID) + "  # Implement auth\n"
+	if !strings.Contains(got, wantCommand) {
+		t.Fatalf("displayRestoredSessions() missing command %q in %q", wantCommand, got)
+	}
+}
+
+func TestPrintMultiSessionResumeCommands_OutputMatchesResumeStyle(t *testing.T) {
+	t.Parallel()
+
+	sessions := []strategy.RestoredSession{
+		{
+			SessionID: "2026-02-02-rewind-old",
+			Agent:     "Claude Code",
+			Prompt:    "Old prompt",
+		},
+		{
+			SessionID: "2026-02-02-rewind-new",
+			Agent:     "Claude Code",
+			Prompt:    "Most recent prompt",
+		},
+	}
+
+	ag, err := strategy.ResolveAgentForRewind("Claude Code")
+	if err != nil {
+		t.Fatalf("ResolveAgentForRewind() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	var errOutput bytes.Buffer
+	printMultiSessionResumeCommands(&output, &errOutput, sessions)
+
+	got := output.String()
+	if !strings.Contains(got, "\n✓ Restored 2 sessions. To continue, run:\n") {
+		t.Fatalf("printMultiSessionResumeCommands() missing multi-session header, got: %q", got)
+	}
+	oldCommand := "  " + ag.FormatResumeCommand("2026-02-02-rewind-old") + "  # Old prompt\n"
+	if !strings.Contains(got, oldCommand) {
+		t.Fatalf("printMultiSessionResumeCommands() missing older command %q in %q", oldCommand, got)
+	}
+	newCommand := "  " + ag.FormatResumeCommand("2026-02-02-rewind-new") + "  # Most recent prompt (most recent)\n"
+	if !strings.Contains(got, newCommand) {
+		t.Fatalf("printMultiSessionResumeCommands() missing latest command %q in %q", newCommand, got)
+	}
+	if errOutput.Len() != 0 {
+		t.Fatalf("printMultiSessionResumeCommands() unexpected stderr: %q", errOutput.String())
 	}
 }

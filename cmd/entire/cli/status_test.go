@@ -442,9 +442,15 @@ func TestWriteActiveSessions(t *testing.T) {
 		t.Errorf("Expected '%s' for missing agent type, got: %s", unknownPlaceholder, output)
 	}
 
-	// Should contain truncated session IDs
-	if !strings.Contains(output, "abc-123") {
-		t.Errorf("Expected truncated session ID 'abc-123', got: %s", output)
+	// Should contain full session IDs
+	if !strings.Contains(output, "abc-1234-session") {
+		t.Errorf("Expected full session ID 'abc-1234-session', got: %s", output)
+	}
+	if !strings.Contains(output, "def-5678-session") {
+		t.Errorf("Expected full session ID 'def-5678-session', got: %s", output)
+	}
+	if !strings.Contains(output, "ghi-9012-session") {
+		t.Errorf("Expected full session ID 'ghi-9012-session', got: %s", output)
 	}
 
 	// Should contain first prompts with chevron
@@ -455,7 +461,7 @@ func TestWriteActiveSessions(t *testing.T) {
 	// Session without LastPrompt should NOT show a prompt line
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
-		if strings.Contains(line, "ghi-901") {
+		if strings.Contains(line, "ghi-9012-session") {
 			if strings.Contains(line, "\"") {
 				t.Errorf("Session without prompt should not show quoted text on first line, got: %s", line)
 			}

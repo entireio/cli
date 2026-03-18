@@ -65,10 +65,13 @@ type stuckSession struct {
 }
 
 func runSessionsFix(cmd *cobra.Command, force bool) error {
+	var finalErr error
+
 	// Check 1: Disconnected metadata branches
 	metadataErr := checkDisconnectedMetadata(cmd, force)
 	if metadataErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Error: metadata check failed: %v\n", metadataErr)
+		finalErr = NewSilentError(fmt.Errorf("metadata check failed: %w", metadataErr))
 	}
 	fmt.Fprintln(cmd.OutOrStdout())
 
@@ -82,8 +85,8 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	if len(states) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "No stuck sessions found.")
-		if metadataErr != nil {
-			return fmt.Errorf("metadata check failed: %w", metadataErr)
+		if finalErr != nil {
+			return finalErr
 		}
 		return nil
 	}
@@ -107,8 +110,8 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	if len(stuck) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "No stuck sessions found.")
-		if metadataErr != nil {
-			return fmt.Errorf("metadata check failed: %w", metadataErr)
+		if finalErr != nil {
+			return finalErr
 		}
 		return nil
 	}
@@ -166,8 +169,8 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		}
 	}
 
-	if metadataErr != nil {
-		return fmt.Errorf("metadata check failed: %w", metadataErr)
+	if finalErr != nil {
+		return finalErr
 	}
 
 	return nil

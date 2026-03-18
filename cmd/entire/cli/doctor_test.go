@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -292,8 +293,8 @@ func TestClassifySession_WorktreeIDInShadowBranch(t *testing.T) {
 }
 
 // TestRunSessionsFix_MetadataCheckFailure_PropagatesError verifies that when
-// checkDisconnectedMetadata fails, runSessionsFix returns a non-nil error
-// instead of silently swallowing it.
+// checkDisconnectedMetadata fails, runSessionsFix returns a SilentError so the
+// custom stderr message is not printed twice by main.go.
 func TestRunSessionsFix_MetadataCheckFailure_PropagatesError(t *testing.T) {
 	// Cannot use t.Parallel() because t.Chdir modifies process-global state.
 	dir := setupGitRepoForPhaseTest(t)
@@ -341,8 +342,46 @@ func TestRunSessionsFix_MetadataCheckFailure_PropagatesError(t *testing.T) {
 
 	err = runSessionsFix(cmd, true)
 
-	// The metadata check error should be propagated, not swallowed
+	// The metadata check error should be propagated, not swallowed.
+	// It should be SilentError because the user-facing message was already printed.
 	require.Error(t, err, "runSessionsFix should return error when metadata check fails")
+	var silentErr *SilentError
+	require.ErrorAs(t, err, &silentErr)
 	assert.Contains(t, err.Error(), "metadata check failed")
 	assert.Contains(t, stderr.String(), "Error: metadata check failed")
+}
+
+func TestRunSessionsFix_ForceDiscardOutput_Indented(t *testing.T) {
+	// Cannot use t.Parallel() because t.Chdir modifies process-global state.
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	state := &strategy.SessionState{
+		SessionID:  "2026-02-02-doctor-output",
+		BaseCommit: testBaseCommit,
+		Phase:      session.PhaseActive,
+		StartedAt:  time.Now().Add(-2 * time.Hour),
+	}
+	require.NoError(t, strategy.SaveSessionState(context.Background(), state))
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	require.NoError(t, runSessionsFix(cmd, true))
+	assert.Empty(t, stderr.String())
+
+	output := stdout.String()
+	assert.Contains(t, output, "✓ Metadata branches: OK")
+	assert.Contains(t, output, "Found 1 stuck session(s):")
+	assert.Contains(t, output, "  Session: 2026-02-02-doctor-output")
+	assert.Contains(t, output, "  ✓ Discarded session 2026-02-02-doctor-output")
+
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "Discarded session") {
+			assert.True(t, strings.HasPrefix(line, "  ✓ "), "expected nested success line to stay indented: %q", line)
+		}
+	}
 }

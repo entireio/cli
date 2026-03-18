@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/huh"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/go-git/go-git/v6"
@@ -141,6 +142,10 @@ func TestResetCmd_WithForce(t *testing.T) {
 	err = cmd.Execute()
 	if err != nil {
 		t.Fatalf("reset command error = %v", err)
+	}
+
+	if output := stdout.String(); !strings.Contains(output, "✓ Deleted shadow branch") {
+		t.Fatalf("expected reset success output, got: %q", output)
 	}
 
 	// Verify shadow branch deleted
@@ -313,5 +318,32 @@ func TestResetCmd_MultipleSessions(t *testing.T) {
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
 	if _, err := repo.Reference(refName, true); err == nil {
 		t.Error("shadow branch should be deleted")
+	}
+}
+
+func TestHandleResetConfirmationError_Cancelled(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	err := handleResetConfirmationError(&output, huh.ErrUserAborted)
+	if err != nil {
+		t.Fatalf("handleResetConfirmationError() error = %v, want nil", err)
+	}
+
+	if got := output.String(); got != "Reset cancelled.\n" {
+		t.Fatalf("handleResetConfirmationError() output = %q, want %q", got, "Reset cancelled.\n")
+	}
+}
+
+func TestHandleResetDecline_PrintsCancelled(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	if confirmed := handleResetDecline(&output, false); confirmed {
+		t.Fatal("handleResetDecline() = true, want false")
+	}
+
+	if got := output.String(); got != "Reset cancelled.\n" {
+		t.Fatalf("handleResetDecline() output = %q, want %q", got, "Reset cancelled.\n")
 	}
 }

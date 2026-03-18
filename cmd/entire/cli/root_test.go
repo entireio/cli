@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/huh"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
@@ -173,5 +174,33 @@ func TestPersistentPostRun_ParentHiddenWalk(t *testing.T) {
 				t.Errorf("isHidden = %v, want %v", gotHidden, tt.wantHidden)
 			}
 		})
+	}
+}
+
+func TestHandleTrailInteractionError_CreateCancelled(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	err := handleTrailInteractionError(&output, "Trail creation", huh.ErrUserAborted)
+	if err != nil {
+		t.Fatalf("handleTrailInteractionError() error = %v, want nil", err)
+	}
+
+	if got := output.String(); got != "Trail creation cancelled.\n" {
+		t.Fatalf("handleTrailInteractionError() output = %q, want %q", got, "Trail creation cancelled.\n")
+	}
+}
+
+func TestHandleTrailInteractionError_UpdateCancelled(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	err := handleTrailInteractionError(&output, "Trail update", huh.ErrUserAborted)
+	if err != nil {
+		t.Fatalf("handleTrailInteractionError() error = %v, want nil", err)
+	}
+
+	if got := output.String(); got != "Trail update cancelled.\n" {
+		t.Fatalf("handleTrailInteractionError() output = %q, want %q", got, "Trail update cancelled.\n")
 	}
 }
