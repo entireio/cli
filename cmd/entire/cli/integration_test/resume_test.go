@@ -68,8 +68,8 @@ func TestResume_SwitchBranchWithSession(t *testing.T) {
 	}
 
 	// Verify output contains session info and resume command
-	if !strings.Contains(output, "Session:") {
-		t.Errorf("output should contain 'Session:', got: %s", output)
+	if !strings.Contains(output, "Restored session") {
+		t.Errorf("output should contain 'Restored session', got: %s", output)
 	}
 	if !strings.Contains(output, "claude -r") {
 		t.Errorf("output should contain 'claude -r', got: %s", output)
@@ -118,8 +118,8 @@ func TestResume_AlreadyOnBranch(t *testing.T) {
 	}
 
 	// Should still show session info
-	if !strings.Contains(output, "Session:") {
-		t.Errorf("output should contain 'Session:', got: %s", output)
+	if !strings.Contains(output, "Restored session") {
+		t.Errorf("output should contain 'Restored session', got: %s", output)
 	}
 }
 
@@ -334,7 +334,7 @@ func TestResume_MultipleSessionsOnBranch(t *testing.T) {
 	}
 
 	// Should show session info (multi-session output says "Restored N sessions")
-	if !strings.Contains(output, "Restored 2 sessions") && !strings.Contains(output, "Session:") {
+	if !strings.Contains(output, "Restored 2 sessions") && !strings.Contains(output, "Restored session") {
 		t.Errorf("output should contain session info, got: %s", output)
 	}
 
@@ -399,8 +399,8 @@ func TestResume_CheckpointWithoutMetadata(t *testing.T) {
 
 	// Should NOT show session info since metadata is missing
 	// The resume command should silently skip commits without valid metadata
-	if strings.Contains(output, "Session:") {
-		t.Errorf("output should not contain 'Session:' when metadata is missing, got: %s", output)
+	if strings.Contains(output, "Restored session") {
+		t.Errorf("output should not contain 'Restored session' when metadata is missing, got: %s", output)
 	}
 }
 
@@ -467,8 +467,8 @@ func TestResume_AfterMergingMain(t *testing.T) {
 	}
 
 	// Should find the session from the older commit (before the merge)
-	if !strings.Contains(output, "Session:") {
-		t.Errorf("output should contain 'Session:', got: %s", output)
+	if !strings.Contains(output, "Restored session") {
+		t.Errorf("output should contain 'Restored session', got: %s", output)
 	}
 	if !strings.Contains(output, "claude -r") {
 		t.Errorf("output should contain 'claude -r', got: %s", output)
@@ -1287,7 +1287,7 @@ func TestResume_RelocatedRepo(t *testing.T) {
 	}
 
 	// Verify output contains session info
-	if !strings.Contains(output, "Session:") {
-		t.Errorf("output should contain 'Session:', got: %s", output)
+	if !strings.Contains(output, "Restored session") {
+		t.Errorf("output should contain 'Restored session', got: %s", output)
 	}
 }

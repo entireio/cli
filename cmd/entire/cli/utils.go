@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -35,6 +37,34 @@ func NewAccessibleForm(groups ...*huh.Group) *huh.Form {
 		form = form.WithAccessible(true)
 	}
 	return form
+}
+
+// handleFormCancellation handles cancellation from huh form prompts.
+// If err is a user abort (Ctrl+C), it prints "[action] cancelled." to w and returns nil.
+// Otherwise it returns the error as-is.
+func handleFormCancellation(w io.Writer, action string, err error) error {
+	if errors.Is(err, huh.ErrUserAborted) {
+		fmt.Fprintf(w, "%s cancelled.\n", action)
+		return nil
+	}
+	return err
+}
+
+// printSessionCommand writes a single session resume command line to w.
+// It appends a "(most recent)" label to the last entry in a multi-session list,
+// and a "# prompt" comment when a prompt is available.
+func printSessionCommand(w io.Writer, resumeCmd, prompt string, isMulti, isLast bool) {
+	comment := ""
+	if isMulti && isLast {
+		if prompt != "" {
+			comment = fmt.Sprintf("  # %s (most recent)", prompt)
+		} else {
+			comment = "  # (most recent)"
+		}
+	} else if prompt != "" {
+		comment = "  # " + prompt
+	}
+	fmt.Fprintf(w, "  %s%s\n", resumeCmd, comment)
 }
 
 // fileExists checks if a file exists

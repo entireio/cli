@@ -504,24 +504,13 @@ func displayRestoredSessions(w io.Writer, sessions []strategy.RestoredSession) e
 		fmt.Fprintf(w, "\nTo continue this session, run:\n")
 	}
 
+	isMulti := len(sessions) > 1
 	for i, sess := range sessions {
 		sessionAgent, err := strategy.ResolveAgentForRewind(sess.Agent)
 		if err != nil {
 			return fmt.Errorf("failed to resolve agent for session %s: %w", sess.SessionID, err)
 		}
-		cmd := sessionAgent.FormatResumeCommand(sess.SessionID)
-
-		isLast := i == len(sessions)-1
-		switch {
-		case len(sessions) > 1 && isLast && sess.Prompt != "":
-			fmt.Fprintf(w, "  %s  # %s (most recent)\n", cmd, sess.Prompt)
-		case len(sessions) > 1 && isLast:
-			fmt.Fprintf(w, "  %s  # (most recent)\n", cmd)
-		case sess.Prompt != "":
-			fmt.Fprintf(w, "  %s  # %s\n", cmd, sess.Prompt)
-		default:
-			fmt.Fprintf(w, "  %s\n", cmd)
-		}
+		printSessionCommand(w, sessionAgent.FormatResumeCommand(sess.SessionID), sess.Prompt, isMulti, i == len(sessions)-1)
 	}
 
 	return nil

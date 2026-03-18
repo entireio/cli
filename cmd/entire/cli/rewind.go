@@ -1201,28 +1201,13 @@ func printMultiSessionResumeCommands(w, errW io.Writer, sessions []strategy.Rest
 		fmt.Fprintf(w, "\nTo continue this session, run:\n")
 	}
 
+	isMulti := len(sessions) > 1
 	for i, sess := range sessions {
 		ag, err := strategy.ResolveAgentForRewind(sess.Agent)
 		if err != nil {
 			fmt.Fprintf(errW, "  Warning: could not resolve agent %q for session %s, skipping\n", sess.Agent, sess.SessionID)
 			continue
 		}
-
-		cmd := ag.FormatResumeCommand(sess.SessionID)
-
-		switch {
-		case len(sessions) > 1 && i == len(sessions)-1 && sess.Prompt != "":
-			fmt.Fprintf(w, "  %s  # %s (most recent)\n", cmd, sess.Prompt)
-		case len(sessions) > 1 && i == len(sessions)-1:
-			fmt.Fprintf(w, "  %s  # (most recent)\n", cmd)
-		case len(sessions) > 1 && sess.Prompt != "":
-			fmt.Fprintf(w, "  %s  # %s\n", cmd, sess.Prompt)
-		case len(sessions) > 1:
-			fmt.Fprintf(w, "  %s\n", cmd)
-		case sess.Prompt != "":
-			fmt.Fprintf(w, "  %s  # %s\n", cmd, sess.Prompt)
-		default:
-			fmt.Fprintf(w, "  %s\n", cmd)
-		}
+		printSessionCommand(w, ag.FormatResumeCommand(sess.SessionID), sess.Prompt, isMulti, i == len(sessions)-1)
 	}
 }

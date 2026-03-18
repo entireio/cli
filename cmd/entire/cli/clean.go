@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -109,10 +108,7 @@ func runClean(ctx context.Context, cmd *cobra.Command, force bool) error {
 	)
 
 	if err := form.Run(); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			return nil
-		}
-		return fmt.Errorf("confirmation failed: %w", err)
+		return handleFormCancellation(w, "Clean", err)
 	}
 
 	if !confirmed {

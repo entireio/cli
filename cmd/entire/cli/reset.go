@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 
 	"github.com/charmbracelet/huh"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -83,10 +82,11 @@ Without --force, prompts for confirmation before deleting.`,
 				)
 
 				if err := form.Run(); err != nil {
-					return handleResetConfirmationError(cmd.OutOrStdout(), err)
+					return handleFormCancellation(cmd.OutOrStdout(), "Reset", err)
 				}
 
-				if !handleResetDecline(cmd.OutOrStdout(), confirmed) {
+				if !confirmed {
+					fmt.Fprintln(cmd.OutOrStdout(), "Reset cancelled.")
 					return nil
 				}
 			}
@@ -133,10 +133,11 @@ func runResetSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 		)
 
 		if err := form.Run(); err != nil {
-			return handleResetConfirmationError(cmd.OutOrStdout(), err)
+			return handleFormCancellation(cmd.OutOrStdout(), "Reset", err)
 		}
 
-		if !handleResetDecline(cmd.OutOrStdout(), confirmed) {
+		if !confirmed {
+			fmt.Fprintln(cmd.OutOrStdout(), "Reset cancelled.")
 			return nil
 		}
 	}
@@ -179,22 +180,4 @@ func activeSessionsOnCurrentHead(ctx context.Context) ([]*session.State, error) 
 	}
 
 	return active, nil
-}
-
-func handleResetConfirmationError(w io.Writer, err error) error {
-	if errors.Is(err, huh.ErrUserAborted) {
-		fmt.Fprintln(w, "Reset cancelled.")
-		return nil
-	}
-
-	return fmt.Errorf("failed to get confirmation: %w", err)
-}
-
-func handleResetDecline(w io.Writer, confirmed bool) bool {
-	if confirmed {
-		return true
-	}
-
-	fmt.Fprintln(w, "Reset cancelled.")
-	return false
 }

@@ -1,13 +1,64 @@
 package cli
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/charmbracelet/huh"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestHandleFormCancellation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		action  string
+		err     error
+		wantOut string
+		wantErr bool
+	}{
+		{
+			name:    "user abort prints cancelled and returns nil",
+			action:  "Reset",
+			err:     huh.ErrUserAborted,
+			wantOut: "Reset cancelled.\n",
+			wantErr: false,
+		},
+		{
+			name:    "action name used in cancelled message",
+			action:  "Trail creation",
+			err:     huh.ErrUserAborted,
+			wantOut: "Trail creation cancelled.\n",
+			wantErr: false,
+		},
+		{
+			name:    "non-abort error is returned as-is",
+			action:  "Reset",
+			err:     errors.New("form exploded"),
+			wantOut: "",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			err := handleFormCancellation(&out, tt.action, tt.err)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.wantOut, out.String())
+		})
+	}
+}
 
 func TestCopyFile_HappyPath(t *testing.T) {
 	t.Parallel()

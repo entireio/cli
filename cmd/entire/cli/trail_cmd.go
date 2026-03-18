@@ -240,7 +240,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr str
 	if interactive {
 		// Interactive flow: title → body → branch (derived) → status
 		if err := runTrailCreateInteractive(&title, &body, &branch, &statusStr); err != nil {
-			return handleTrailInteractionError(w, "Trail creation", err)
+			return handleFormCancellation(w, "Trail creation", err)
 		}
 	} else {
 		// Non-interactive: derive missing values from provided flags
@@ -439,7 +439,7 @@ func runTrailUpdate(w, errW io.Writer, statusStr, title, body, branch string, la
 			),
 		)
 		if formErr := form.Run(); formErr != nil {
-			return handleTrailInteractionError(w, "Trail update", fmt.Errorf("form cancelled: %w", formErr))
+			return handleFormCancellation(w, "Trail update", formErr)
 		}
 	}
 
@@ -554,17 +554,6 @@ func runTrailCreateInteractive(title, body, branch, statusStr *string) error {
 		*branch = suggested
 	}
 	return nil
-}
-
-func handleTrailInteractionError(w io.Writer, action string, err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, huh.ErrUserAborted) {
-		fmt.Fprintf(w, "%s cancelled.\n", action)
-		return nil
-	}
-	return err
 }
 
 // fetchTrailsBranch fetches the remote trails branch so we see trails from collaborators.
