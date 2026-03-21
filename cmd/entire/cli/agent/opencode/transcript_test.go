@@ -824,6 +824,13 @@ func TestIsSystemReminderOnly(t *testing.T) {
 			content: "",
 			want:    false,
 		},
+		{
+			// Multiple blocks with real content between them — starts with open tag
+			// and ends with close tag, but is NOT system-reminder-only.
+			name:    "real content between multiple blocks",
+			content: "<system-reminder>a</system-reminder>Fix this<system-reminder>b</system-reminder>",
+			want:    false,
+		},
 	}
 
 	for _, tt := range tests {

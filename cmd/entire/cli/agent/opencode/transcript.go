@@ -209,20 +209,22 @@ func ExtractTextFromParts(parts []Part) string {
 	return strings.Join(texts, "\n")
 }
 
-// systemReminderOpen is the opening tag for system-reminder messages injected by
-// oh-my-opencode and similar orchestration tools. These arrive with role "user"
-// but are not actual user prompts.
-const systemReminderOpen = "<system-reminder>"
+// Tags used by oh-my-opencode and similar orchestration tools to inject
+// context into the conversation with role "user" — not actual user prompts.
+const (
+	systemReminderOpen  = "<system-reminder>"
+	systemReminderClose = "</system-reminder>"
+)
 
-// systemReminderClose is the corresponding closing tag.
-const systemReminderClose = "</system-reminder>"
-
-// isSystemReminderOnly reports whether content consists entirely of a
-// <system-reminder>...</system-reminder> block (after trimming whitespace).
+// isSystemReminderOnly reports whether content consists entirely of
+// <system-reminder>...</system-reminder> blocks (after trimming whitespace).
+// Delegates to stripSystemReminders to correctly handle multiple blocks
+// (HasPrefix+HasSuffix would false-positive on "<sr>a</sr>real<sr>b</sr>").
 func isSystemReminderOnly(content string) bool {
-	trimmed := strings.TrimSpace(content)
-	return strings.HasPrefix(trimmed, systemReminderOpen) &&
-		strings.HasSuffix(trimmed, systemReminderClose)
+	if strings.TrimSpace(content) == "" {
+		return false
+	}
+	return stripSystemReminders(content) == ""
 }
 
 // stripSystemReminders removes all <system-reminder>...</system-reminder>
