@@ -391,9 +391,9 @@ If Entire is already configured but disabled, this re-enables it.`,
 			// Change to repo root so all paths resolve correctly.
 			// This ensures agent hooks (e.g., .gemini/settings.json, .claude/settings.json)
 			// are created at the repo root even when running from a subdirectory.
-			cwd, _ := os.Getwd() //nolint:forbidigo // Need CWD to detect subdirectory
-			if cwd != repoRoot {
-				if err := os.Chdir(repoRoot); err != nil { //nolint:forbidigo // Intentional chdir to repo root for correct path resolution
+			cwd, err := os.Getwd() //nolint:forbidigo // Need CWD to detect subdirectory
+			if err == nil && cwd != repoRoot {
+				if err := os.Chdir(repoRoot); err != nil {
 					return fmt.Errorf("failed to change to repository root %s: %w", repoRoot, err)
 				}
 				paths.ClearWorktreeRootCache()
