@@ -388,15 +388,11 @@ If Entire is already configured but disabled, this re-enables it.`,
 				return NewSilentError(errors.New("not a git repository"))
 			}
 
-			// Change to repo root so all paths resolve correctly.
-			// This ensures agent hooks (e.g., .gemini/settings.json, .claude/settings.json)
-			// are created at the repo root even when running from a subdirectory.
+			// Notify the user when running from a subdirectory.
+			// All path resolution uses paths.WorktreeRoot(ctx) which returns the
+			// correct repo root regardless of CWD, so no directory change is needed.
 			cwd, err := os.Getwd() //nolint:forbidigo // Need CWD to detect subdirectory
 			if err == nil && cwd != repoRoot {
-				if err := os.Chdir(repoRoot); err != nil {
-					return fmt.Errorf("failed to change to repository root %s: %w", repoRoot, err)
-				}
-				paths.ClearWorktreeRootCache()
 				fmt.Fprintf(cmd.ErrOrStderr(), "Note: Running from repository root (%s)\n\n", repoRoot)
 			}
 
