@@ -139,15 +139,23 @@ func (cs *CopilotSession) Send(input string) error {
 		return err
 	}
 
-	// Wait briefly, then check if copilot is in Edit mode (Enter didn't submit).
+	// Briefly poll to see if copilot is still in Edit mode (Enter didn't submit).
 	// In Edit mode the status bar shows "ctrl+s run command". If detected,
-	// send Ctrl+S to actually submit the prompt.
-	time.Sleep(500 * time.Millisecond)
-	content := cs.Capture()
-	if strings.Contains(content, "ctrl+s") {
-		if err := cs.SendKeys("C-s"); err != nil {
-			return err
+	// send Ctrl+S to actually submit the prompt. Break early if the content
+	// changes from the pre-send snapshot, indicating submission has started.
+	editDeadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(editDeadline) {
+		content := cs.Capture()
+		if isEditMode(content) {
+			if err := cs.SendKeys("C-s"); err != nil {
+				return err
+			}
+			break
 		}
+		if stableContent(content) != preSend {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Wait for the terminal to reflect the echoed input, then snapshot.
@@ -162,6 +170,21 @@ func (cs *CopilotSession) Send(input string) error {
 	}
 	cs.stableAtSend = stableContent(cs.Capture())
 	return nil
+}
+
+// isEditMode checks if copilot-cli is in Edit mode by looking for the
+// "ctrl+s run command" indicator in the last few lines (status bar area).
+// Restricting the search avoids false positives if the phrase appears in
+// agent output.
+func isEditMode(content string) bool {
+	lines := strings.Split(content, "\n")
+	const statusPhrase = "ctrl+s run command"
+	for i := len(lines) - 1; i >= 0 && i >= len(lines)-3; i-- {
+		if strings.Contains(lines[i], statusPhrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, error) {
