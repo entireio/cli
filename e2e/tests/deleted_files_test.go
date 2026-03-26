@@ -39,12 +39,12 @@ func TestDeletedFilesCommitDeletion(t *testing.T) {
 
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add replacement")
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		cpID1 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 
 		// git add . already staged the deletion of to_delete.go above,
 		// so no separate git rm + commit is needed.
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

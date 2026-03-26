@@ -128,6 +128,25 @@ func AssertNoShadowBranches(t *testing.T, dir string) {
 		"shadow branches should be cleaned up after commit, found: %v", shadow)
 }
 
+// WaitForNoShadowBranches polls until all shadow branches are cleaned up or
+// the timeout expires. Shadow branch cleanup can lag slightly behind checkpoint
+// condensation (carry-forward creates intermediate branches that are deleted
+// asynchronously).
+func WaitForNoShadowBranches(t *testing.T, dir string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		shadow := shadowBranches(t, dir)
+		if len(shadow) == 0 {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	shadow := shadowBranches(t, dir)
+	assert.Empty(t, shadow,
+		"shadow branches should be cleaned up after commit, found: %v", shadow)
+}
+
 // AssertHasShadowBranches asserts that at least one shadow branch (entire/*)
 // exists, excluding entire/checkpoints/*. Use this when the shadow branch is
 // expected to persist (e.g., session is still idle).

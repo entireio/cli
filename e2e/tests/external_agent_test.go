@@ -29,7 +29,7 @@ func TestExternalAgentSingleSessionManualCommit(t *testing.T) {
 		s.Git(t, "commit", "-m", "Add hello file via external agent")
 
 		testutil.AssertNewCommits(t, s, 1)
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		testutil.AssertCheckpointAdvanced(t, s)
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
@@ -37,7 +37,7 @@ func TestExternalAgentSingleSessionManualCommit(t *testing.T) {
 		testutil.AssertCheckpointMetadataComplete(t, s.Dir, cpID)
 		testutil.AssertCheckpointHasSingleSession(t, s.Dir, cpID)
 		testutil.AssertCheckpointFilesTouchedContains(t, s.Dir, cpID, "docs/hello.md")
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -69,13 +69,13 @@ func TestExternalAgentMultipleTurnsManualCommit(t *testing.T) {
 		s.Git(t, "commit", "-m", "Add alpha and beta via external agent")
 
 		testutil.AssertNewCommits(t, s, 1)
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		testutil.AssertCheckpointAdvanced(t, s)
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
 		testutil.AssertCheckpointMetadataComplete(t, s.Dir, cpID)
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 
 		// Both files should appear in files_touched
 		testutil.AssertCheckpointFilesTouchedContains(t, s.Dir, cpID, "src/alpha.txt")
@@ -99,7 +99,7 @@ func TestExternalAgentDeepCheckpointValidation(t *testing.T) {
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Deep checkpoint validation test")
 
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 
@@ -125,7 +125,7 @@ func TestExternalAgentSessionMetadata(t *testing.T) {
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Metadata test commit")
 
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 

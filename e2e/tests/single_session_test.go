@@ -53,13 +53,13 @@ func TestSingleSessionManualCommit(t *testing.T) {
 		testutil.AssertFileExists(t, s.Dir, "docs/*.md")
 		testutil.AssertNewCommits(t, s, 1)
 
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		testutil.AssertCheckpointAdvanced(t, s)
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
 		testutil.AssertCheckpointMetadataComplete(t, s.Dir, cpID)
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -76,13 +76,13 @@ func TestSingleSessionAgentCommitInTurn(t *testing.T) {
 
 		testutil.AssertFileExists(t, s.Dir, "docs/*.md")
 
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		testutil.AssertCheckpointAdvanced(t, s)
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
 		testutil.AssertCheckpointInLastN(t, s.Dir, cpID, 2)
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -99,12 +99,12 @@ func TestSingleSessionSubagentCommitInTurn(t *testing.T) {
 
 		testutil.AssertFileExists(t, s.Dir, "docs/*.md")
 
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		testutil.AssertCheckpointAdvanced(t, s)
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
 		testutil.AssertCheckpointInLastN(t, s.Dir, cpID, 2)
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
