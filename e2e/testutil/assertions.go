@@ -118,16 +118,6 @@ func shadowBranches(t *testing.T, dir string) []string {
 	return shadow
 }
 
-// AssertNoShadowBranches asserts that no shadow branches (entire/*) remain,
-// excluding entire/checkpoints/*. Shadow branches should be cleaned up after
-// commits condense session data to the metadata branch.
-func AssertNoShadowBranches(t *testing.T, dir string) {
-	t.Helper()
-	shadow := shadowBranches(t, dir)
-	assert.Empty(t, shadow,
-		"shadow branches should be cleaned up after commit, found: %v", shadow)
-}
-
 // WaitForNoShadowBranches polls until all shadow branches are cleaned up or
 // the timeout expires. Shadow branch cleanup can lag slightly behind checkpoint
 // condensation (carry-forward creates intermediate branches that are deleted
@@ -143,8 +133,8 @@ func WaitForNoShadowBranches(t *testing.T, dir string, timeout time.Duration) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	shadow := shadowBranches(t, dir)
-	assert.Empty(t, shadow,
-		"shadow branches should be cleaned up after commit, found: %v", shadow)
+	require.Emptyf(t, shadow,
+		"shadow branches should be cleaned up within %s after commit, found: %v", timeout, shadow)
 }
 
 // AssertHasShadowBranches asserts that at least one shadow branch (entire/*)
