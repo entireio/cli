@@ -186,10 +186,14 @@ func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBr
 func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowTree *object.Tree, stagedFiles, filesTouched []string) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
-	// Build set of filesTouched for quick lookup
+	// Build set of filesTouched for quick lookup.
+	// Normalize to base filenames as a fallback to handle path format mismatches
+	// (absolute vs repo-relative) from stale sessions or older CLI versions (#768).
 	touchedSet := make(map[string]bool)
+	touchedByBase := make(map[string]bool) // fallback: basename-only lookup
 	for _, f := range filesTouched {
 		touchedSet[f] = true
+		touchedByBase[filepath.Base(f)] = true
 	}
 
 	// Get HEAD tree to determine if files are being modified or newly created
@@ -232,8 +236,17 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 
 	// Check each staged file
 	for _, stagedPath := range stagedFiles {
+		// Try exact path match first, then fall back to basename match.
+		// This handles stale sessions or older CLI versions that stored
+		// absolute paths in FilesTouched (#768).
 		if !touchedSet[stagedPath] {
-			continue // Not in filesTouched, skip
+			if !touchedByBase[filepath.Base(stagedPath)] {
+				continue // Not in filesTouched by exact or basename, skip
+			}
+			logging.Debug(logCtx, "stagedFilesOverlapWithContent: path format mismatch, matched by basename",
+				slog.String("staged_path", stagedPath),
+				slog.Any("files_touched", filesTouched),
+			)
 		}
 
 		// Check if this is a modified file (exists in HEAD) or new file

@@ -141,7 +141,8 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	state.PromptAttributions = append(state.PromptAttributions, promptAttr)
 
 	// Track touched files (modified, new, and deleted)
-	state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
+	// Normalize paths to repo-relative form to prevent path format mismatches (#768)
+	state.FilesTouched = mergeFilesTouched(state.WorktreePath, state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
 
 	// On first checkpoint, record the transcript identifier for this session
 	if state.StepCount == 1 {
@@ -273,7 +274,8 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 	}
 
 	// Track touched files (modified, new, and deleted)
-	state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
+	// Normalize paths to repo-relative form to prevent path format mismatches (#768)
+	state.FilesTouched = mergeFilesTouched(state.WorktreePath, state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
 
 	// Save updated state
 	if err := s.saveSessionState(ctx, state); err != nil {
@@ -315,15 +317,17 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 }
 
 // mergeFilesTouched merges multiple file lists into existing touched files, deduplicating.
-func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
+// All paths are normalized to repo-relative form using worktreePath to prevent
+// path format mismatches between absolute agent paths and repo-relative git paths (#768).
+func mergeFilesTouched(worktreePath string, existing []string, fileLists ...[]string) []string {
 	seen := make(map[string]bool)
 	for _, f := range existing {
-		seen[f] = true
+		seen[normalizeToRepoRelative(f, worktreePath)] = true
 	}
 
 	for _, list := range fileLists {
 		for _, f := range list {
-			seen[f] = true
+			seen[normalizeToRepoRelative(f, worktreePath)] = true
 		}
 	}
 
@@ -335,6 +339,18 @@ func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
 	// Sort for deterministic output
 	sort.Strings(result)
 	return result
+}
+
+// normalizeToRepoRelative converts a file path to repo-relative form.
+// If the path is already relative or worktreePath is empty, the path is returned as-is.
+func normalizeToRepoRelative(filePath, worktreePath string) string {
+	if worktreePath == "" || !filepath.IsAbs(filePath) {
+		return filePath
+	}
+	if rel := paths.ToRelativePath(filePath, worktreePath); rel != "" {
+		return rel
+	}
+	return filePath
 }
 
 // accumulateTokenUsage adds new token usage to existing accumulated usage.
