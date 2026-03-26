@@ -119,6 +119,51 @@ func (c *CopilotCLI) RunPrompt(ctx context.Context, dir string, prompt string, o
 	return out, err
 }
 
+// CopilotSession wraps TmuxSession to handle Copilot CLI's dual input modes.
+// Copilot CLI can be in "Chat" mode (Enter submits) or "Edit" mode (Ctrl+S
+// submits). After completing a prompt, copilot may return to either mode
+// non-deterministically. This wrapper detects Edit mode after sending Enter
+// and falls back to Ctrl+S if needed.
+type CopilotSession struct {
+	*TmuxSession
+}
+
+func (cs *CopilotSession) Send(input string) error {
+	preSend := stableContent(cs.Capture())
+	// Send text and Enter separately, same as TmuxSession.Send.
+	if err := cs.SendKeys(input); err != nil {
+		return err
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := cs.SendKeys("Enter"); err != nil {
+		return err
+	}
+
+	// Wait briefly, then check if copilot is in Edit mode (Enter didn't submit).
+	// In Edit mode the status bar shows "ctrl+s run command". If detected,
+	// send Ctrl+S to actually submit the prompt.
+	time.Sleep(500 * time.Millisecond)
+	content := cs.Capture()
+	if strings.Contains(content, "ctrl+s") {
+		if err := cs.SendKeys("C-s"); err != nil {
+			return err
+		}
+	}
+
+	// Wait for the terminal to reflect the echoed input, then snapshot.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		current := stableContent(cs.Capture())
+		if current != preSend {
+			cs.stableAtSend = current
+			return nil
+		}
+	}
+	cs.stableAtSend = stableContent(cs.Capture())
+	return nil
+}
+
 func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, error) {
 	bin, err := exec.LookPath(c.Binary())
 	if err != nil {
@@ -174,5 +219,5 @@ func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, err
 	}
 	s.stableAtSend = ""
 
-	return s, nil
+	return &CopilotSession{TmuxSession: s}, nil
 }
