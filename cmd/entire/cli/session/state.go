@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -363,6 +364,15 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 	tmpFile := stateFile + ".tmp"
 	if err := os.Rename(tmpFile, stateFile); err != nil {
 		return fmt.Errorf("failed to rename session state file: %w", err)
+	}
+
+	info, err := os.Lstat(stateFile)
+	if err != nil {
+		return fmt.Errorf("failed to stat session state file after rename: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		_ = os.Remove(stateFile)
+		return errors.New("security error: state file is not a regular file (symlink / path traversal detected)")
 	}
 	return nil
 }

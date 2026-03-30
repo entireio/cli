@@ -2,7 +2,7 @@
 package claudecode
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -257,7 +257,7 @@ func SanitizePathForClaude(path string) string {
 // GetTranscriptPosition returns the current line count of a Claude Code transcript.
 // Claude Code uses JSONL format, so position is the number of lines.
 // This is a lightweight operation that only counts lines without parsing JSON.
-// Uses bufio.Reader to handle arbitrarily long lines (no size limit).
+// Uses a fixed-size buffer to handle arbitrarily long lines safely.
 // Returns 0 if the file doesn't exist or is empty.
 func (c *ClaudeCodeAgent) GetTranscriptPosition(path string) (int, error) {
 	if path == "" {
@@ -273,21 +273,25 @@ func (c *ClaudeCodeAgent) GetTranscriptPosition(path string) (int, error) {
 	}
 	defer file.Close()
 
-	reader := bufio.NewReader(file)
+	buf := make([]byte, 32*1024)
 	lineCount := 0
+	var lastByte byte = '\n'
 
 	for {
-		line, err := reader.ReadBytes('\n')
+		n, err := file.Read(buf)
+		if n > 0 {
+			lineCount += bytes.Count(buf[:n], []byte{'\n'})
+			lastByte = buf[n-1]
+		}
 		if err != nil {
 			if err == io.EOF {
-				if len(line) > 0 {
-					lineCount++ // Count final line without trailing newline
+				if lastByte != '\n' {
+					lineCount++
 				}
 				break
 			}
 			return 0, fmt.Errorf("failed to read transcript: %w", err)
 		}
-		lineCount++
 	}
 
 	return lineCount, nil
@@ -295,7 +299,7 @@ func (c *ClaudeCodeAgent) GetTranscriptPosition(path string) (int, error) {
 
 // ExtractModifiedFilesFromOffset extracts files modified since a given line number.
 // For Claude Code (JSONL format), offset is the starting line number.
-// Uses bufio.Reader to handle arbitrarily long lines (no size limit).
+// Uses a fixed-size buffer to handle arbitrarily long lines safely.
 // Returns:
 //   - files: list of file paths modified by Claude (from Write/Edit tools)
 //   - currentPosition: total number of lines in the file
@@ -307,33 +311,64 @@ func (c *ClaudeCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffse
 
 	file, openErr := os.Open(path) //nolint:gosec // Path comes from Claude Code transcript location
 	if openErr != nil {
+		if os.IsNotExist(openErr) {
+			return nil, 0, nil
+		}
 		return nil, 0, fmt.Errorf("failed to open transcript file: %w", openErr)
 	}
 	defer file.Close()
 
-	reader := bufio.NewReader(file)
 	var lines []TranscriptLine
 	lineNum := 0
+	var lastByte byte = '\n'
+	buf := make([]byte, 32*1024)
+	var lineBuf []byte
+	const maxLineSize = 10 * 1024 * 1024 // 10MB limit
 
 	for {
-		lineData, readErr := reader.ReadBytes('\n')
-		if readErr != nil && readErr != io.EOF {
-			return nil, 0, fmt.Errorf("failed to read transcript: %w", readErr)
-		}
-
-		if len(lineData) > 0 {
-			lineNum++
-			if lineNum > startOffset {
-				var line TranscriptLine
-				if parseErr := json.Unmarshal(lineData, &line); parseErr == nil {
-					lines = append(lines, line)
+		n, readErr := file.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			for len(chunk) > 0 {
+				idx := bytes.IndexByte(chunk, '\n')
+				if idx == -1 {
+					if lineNum >= startOffset && len(lineBuf) < maxLineSize {
+						lineBuf = append(lineBuf, chunk...)
+					}
+					lastByte = chunk[len(chunk)-1]
+					break
 				}
-				// Skip malformed lines silently
+
+				if lineNum >= startOffset {
+					if len(lineBuf) < maxLineSize {
+						lineBuf = append(lineBuf, chunk[:idx]...)
+						var line TranscriptLine
+						if parseErr := json.Unmarshal(lineBuf, &line); parseErr == nil {
+							lines = append(lines, line)
+						}
+					}
+					lineBuf = lineBuf[:0]
+				}
+				lineNum++
+				lastByte = '\n'
+				chunk = chunk[idx+1:]
 			}
 		}
 
-		if readErr == io.EOF {
-			break
+		if readErr != nil {
+			if readErr == io.EOF {
+				if lastByte != '\n' {
+					if lineNum >= startOffset && len(lineBuf) > 0 && len(lineBuf) < maxLineSize {
+						var line TranscriptLine
+						if parseErr := json.Unmarshal(lineBuf, &line); parseErr == nil {
+							lines = append(lines, line)
+						}
+					}
+					lineNum++
+				}
+				break
+			}
+			return nil, 0, fmt.Errorf("failed to read transcript: %w", readErr)
 		}
 	}
 

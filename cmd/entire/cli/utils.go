@@ -10,7 +10,6 @@ import (
 
 	"github.com/charmbracelet/huh"
 
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -87,10 +86,11 @@ func copyFile(src, dst string) error {
 		return fmt.Errorf("copyFile: dst must be absolute, got %q", dst)
 	}
 
-	input, err := os.ReadFile(src)
+	srcFile, err := os.Open(src)
 	if err != nil {
 		return err //nolint:wrapcheck // already present in codebase
 	}
+	defer srcFile.Close()
 
 	root, relPath, err := openAllowedRoot(dst)
 	if err != nil {
@@ -98,7 +98,13 @@ func copyFile(src, dst string) error {
 	}
 	defer root.Close()
 
-	if err := osroot.WriteFile(root, relPath, input, 0o600); err != nil {
+	dstFile, err := root.OpenFile(relPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 	return nil

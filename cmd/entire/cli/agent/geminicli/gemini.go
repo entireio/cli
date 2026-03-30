@@ -317,7 +317,8 @@ func (g *GeminiCLIAgent) ChunkTranscript(ctx context.Context, content []byte, ma
 
 	var chunks [][]byte
 	var currentMessages []GeminiMessage
-	currentSize := len(`{"messages":[]}`) // Base JSON structure size
+	baseSize := len(`{"messages":[]}`)
+	currentSize := baseSize // Base JSON structure size
 
 	for i, msg := range transcript.Messages {
 		// Marshal message to get its size
@@ -330,6 +331,10 @@ func (g *GeminiCLIAgent) ChunkTranscript(ctx context.Context, content []byte, ma
 			continue
 		}
 		msgSize := len(msgBytes) + 1 // +1 for comma separator
+		
+		if msgSize+baseSize > maxSize {
+			return nil, fmt.Errorf("single message size (%d) exceeds chunk maxSize (%d)", msgSize+baseSize, maxSize)
+		}
 
 		if currentSize+msgSize > maxSize && len(currentMessages) > 0 {
 			// Save current chunk

@@ -467,23 +467,35 @@ func FetchBlobsByHash(ctx context.Context, hashes []plumbing.Hash) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	// Build fetch args: "git fetch origin <hash1> <hash2> ..."
-	// This uses the normal transport + credential helpers, unlike fetch-pack.
-	args := []string{"fetch", "--no-write-fetch-head", "origin"}
-	for _, h := range hashes {
-		args = append(args, h.String())
-	}
+	const batchSize = 500
+	for i := 0; i < len(hashes); i += batchSize {
+		end := i + batchSize
+		if end > len(hashes) {
+			end = len(hashes)
+		}
 
-	fetchCmd := exec.CommandContext(ctx, "git", args...)
-	if _, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
-		logging.Debug(ctx, "fetch-by-hash failed, falling back to full metadata fetch",
-			slog.Int("blob_count", len(hashes)),
-			slog.String("error", fetchErr.Error()),
-		)
-		// Fallback: full metadata branch fetch (pack negotiation skips already-local objects)
-		if fallbackErr := FetchMetadataBranch(ctx); fallbackErr != nil {
-			return fmt.Errorf("fetch-by-hash failed: %w; fallback fetch also failed: %w",
-				fetchErr, fallbackErr)
+		batchHashes := hashes[i:end]
+		// Build fetch args: "git fetch origin <hash1> <hash2> ..."
+		// This uses the normal transport + credential helpers, unlike fetch-pack.
+		args := []string{"fetch", "--no-write-fetch-head", "origin"}
+		for _, h := range batchHashes {
+			args = append(args, h.String())
+		}
+
+		fetchCmd := exec.CommandContext(ctx, "git", args...)
+		if _, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
+			logging.Debug(ctx, "fetch-by-hash failed for batch, falling back to full metadata fetch",
+				slog.Int("total_blobs", len(hashes)),
+				slog.Int("batch_start", i),
+				slog.Int("batch_size", len(batchHashes)),
+				slog.String("error", fetchErr.Error()),
+			)
+			// Fallback: full metadata branch fetch (pack negotiation skips already-local objects)
+			if fallbackErr := FetchMetadataBranch(ctx); fallbackErr != nil {
+				return fmt.Errorf("fetch-by-hash failed: %w; fallback fetch also failed: %w",
+					fetchErr, fallbackErr)
+			}
+			return nil // Fallback fetched everything, no need to process remaining batches
 		}
 	}
 

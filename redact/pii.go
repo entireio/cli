@@ -71,7 +71,31 @@ func ConfigurePII(cfg PIIConfig) {
 func getPIIConfig() *PIIConfig {
 	piiConfigMu.RLock()
 	defer piiConfigMu.RUnlock()
-	return piiConfig
+
+	if piiConfig == nil {
+		return nil
+	}
+
+	cfgCopy := &PIIConfig{
+		Enabled:  piiConfig.Enabled,
+		patterns: piiConfig.patterns,
+	}
+
+	if piiConfig.Categories != nil {
+		cfgCopy.Categories = make(map[PIICategory]bool, len(piiConfig.Categories))
+		for k, v := range piiConfig.Categories {
+			cfgCopy.Categories[k] = v
+		}
+	}
+
+	if piiConfig.CustomPatterns != nil {
+		cfgCopy.CustomPatterns = make(map[string]string, len(piiConfig.CustomPatterns))
+		for k, v := range piiConfig.CustomPatterns {
+			cfgCopy.CustomPatterns[k] = v
+		}
+	}
+
+	return cfgCopy
 }
 
 // Pre-compiled builtin PII regexes.

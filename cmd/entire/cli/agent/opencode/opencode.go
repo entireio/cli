@@ -98,6 +98,10 @@ func (a *OpenCodeAgent) ChunkTranscript(_ context.Context, content []byte, maxSi
 		}
 		msgSize := len(msgBytes) + 1 // +1 for comma separator
 
+		if msgSize+baseSize > maxSize {
+			return nil, fmt.Errorf("single message size (%d) exceeds chunk maxSize (%d)", msgSize+baseSize, maxSize)
+		}
+
 		if currentSize+msgSize > maxSize && len(currentMessages) > 0 {
 			// Save current chunk
 			chunkData, err := json.Marshal(ExportSession{Info: session.Info, Messages: currentMessages})
@@ -167,7 +171,7 @@ func (a *OpenCodeAgent) GetSessionID(input *agent.HookInput) string {
 // GetSessionDir returns the directory where Entire stores OpenCode session transcripts.
 // Transcripts are ephemeral handoff files between the TS plugin and the Go hook handler.
 // Once checkpointed, the data lives on git refs and the file is disposable.
-// Stored in os.TempDir()/entire-opencode/<sanitized-path>/ to avoid squatting on
+// Stored in repoPath/.git/entire-opencode/<sanitized-path>/ to avoid squatting on
 // OpenCode's own directories (~/.opencode/ is project-level, not home-level).
 func (a *OpenCodeAgent) GetSessionDir(repoPath string) (string, error) {
 	// Check for test environment override
@@ -176,7 +180,11 @@ func (a *OpenCodeAgent) GetSessionDir(repoPath string) (string, error) {
 	}
 
 	projectDir := SanitizePathForOpenCode(repoPath)
-	return filepath.Join(os.TempDir(), "entire-opencode", projectDir), nil
+	dir := filepath.Join(repoPath, ".git", "entire-opencode", projectDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("failed to create secure opencode session dir: %w", err)
+	}
+	return dir, nil
 }
 
 func (a *OpenCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
