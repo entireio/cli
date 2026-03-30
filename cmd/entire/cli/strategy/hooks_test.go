@@ -1335,3 +1335,62 @@ func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 		t.Errorf("error should mention 'failed to remove hooks', got: %v", err)
 	}
 }
+
+func TestInstallGitHook_BackupPreservesExecutePermission(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// Create a custom hook with restricted permissions (simulate Windows/Git Bash
+	// where execute bits may be lost during rename)
+	hookPath := filepath.Join(hooksDir, "pre-push")
+	customContent := "#!/bin/sh\necho 'custom pre-push'\n"
+	if err := os.WriteFile(hookPath, []byte(customContent), 0o644); err != nil {
+		t.Fatalf("failed to create hook: %v", err)
+	}
+
+	_, err := InstallGitHook(context.Background(), true, false, false)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	// Verify backup exists and is executable (chmod 0o755 applied after rename)
+	backupPath := filepath.Join(hooksDir, "pre-push"+backupSuffix)
+	info, err := os.Stat(backupPath)
+	if err != nil {
+		t.Fatalf("backup should exist: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Errorf("backup permissions = %o, want executable (at least 0o755)", info.Mode().Perm())
+	}
+}
+
+func TestGenerateChainedContent_UsesSymlinkForBasenameCompat(t *testing.T) {
+	t.Parallel()
+
+	base := "#!/bin/sh\n# Entire CLI hooks\nentire hooks git pre-push 2>/dev/null || true\n"
+	result := generateChainedContent(base, "pre-push")
+
+	// Should contain symlink-based chain (mktemp + ln -sf) for basename compatibility
+	if !strings.Contains(result, "mktemp -d") {
+		t.Error("chain should use mktemp for temp directory")
+	}
+	if !strings.Contains(result, "ln -sf") {
+		t.Error("chain should create a symlink to backup")
+	}
+	// The symlink target should use the original hook name (not .pre-entire suffix)
+	// so that basename "$0" resolves correctly for frameworks like Husky
+	if !strings.Contains(result, `"$_entire_chain_dir/pre-push"`) {
+		t.Error("chain symlink should use original hook name (pre-push), not the .pre-entire name")
+	}
+	// Should still reference the backup file
+	if !strings.Contains(result, "pre-push"+backupSuffix) {
+		t.Error("chain should reference the .pre-entire backup file")
+	}
+	// Should clean up temp dir
+	if !strings.Contains(result, "rmdir") {
+		t.Error("chain should clean up temp directory")
+	}
+	// Should propagate exit code
+	if !strings.Contains(result, "_entire_rc") {
+		t.Error("chain should capture and propagate exit code")
+	}
+}

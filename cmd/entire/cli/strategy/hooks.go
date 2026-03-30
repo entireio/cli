@@ -237,6 +237,12 @@ func InstallGitHook(ctx context.Context, silent, localDev, absolutePath bool) (i
 				if err := os.Rename(hookPath, backupPath); err != nil {
 					return installedCount, fmt.Errorf("failed to back up %s: %w", spec.name, err)
 				}
+				// Ensure backup is executable — os.Rename preserves permissions,
+				// but on some platforms (Windows/Git Bash) the execute bit can be lost.
+				// The chain script checks [ -x ] and silently skips non-executable backups.
+				if err := os.Chmod(backupPath, 0o755); err != nil { //nolint:gosec // Git hooks require executable permissions
+					return installedCount, fmt.Errorf("failed to set permissions on %s: %w", backupPath, err)
+				}
 				fmt.Fprintf(os.Stderr, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
 			} else {
 				fmt.Fprintf(os.Stderr, "[entire] Warning: replacing %s (backup %s%s already exists from a previous install)\n", spec.name, spec.name, backupSuffix)
@@ -333,13 +339,26 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 
 // generateChainedContent appends a chain call to the base hook content,
 // so the pre-existing hook (backed up to .pre-entire) is called after our hook.
+//
+// The chain uses a temporary symlink with the original hook name so that
+// hook frameworks like Husky (which use basename "$0" to resolve the hook
+// type) see the correct name instead of "pre-push.pre-entire".
 func generateChainedContent(baseContent, hookName string) string {
 	return baseContent + fmt.Sprintf(`%s
 _entire_hook_dir="$(dirname "$0")"
-if [ -x "$_entire_hook_dir/%s%s" ]; then
-    "$_entire_hook_dir/%s%s" "$@"
+_entire_backup="$_entire_hook_dir/%s%s"
+if [ -x "$_entire_backup" ]; then
+    # Invoke via a temp symlink so basename "$0" returns the original
+    # hook name — required by frameworks like Husky that resolve hooks
+    # via basename.
+    _entire_chain_dir="$(mktemp -d)" && \
+        ln -sf "$_entire_backup" "$_entire_chain_dir/%s" && \
+        "$_entire_chain_dir/%s" "$@"; _entire_rc=$?
+    rm -f "$_entire_chain_dir/%s" 2>/dev/null
+    rmdir "$_entire_chain_dir" 2>/dev/null
+    exit "$_entire_rc"
 fi
-`, chainComment, hookName, backupSuffix, hookName, backupSuffix)
+`, chainComment, hookName, backupSuffix, hookName, hookName, hookName)
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.
