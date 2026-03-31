@@ -79,7 +79,11 @@ func (s *ManualCommitStrategy) migrateShadowBranchIfNeeded(ctx context.Context, 
 		slog.String("from", oldShadowBranch),
 		slog.String("to", newShadowBranch))
 
-	// Update state with new base commit
+	// Update state with new base commit.
+	// NOTE: AttributionBaseCommit is intentionally NOT updated here. Migration
+	// renames the shadow branch but its checkpoint trees are still relative to
+	// the original base. Attribution must diff from that original base to
+	// correctly measure agent work captured in those checkpoints.
 	state.BaseCommit = currentHead
 	return true, nil
 }

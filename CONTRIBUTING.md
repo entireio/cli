@@ -55,8 +55,7 @@ If you discover a security vulnerability, **do not report it through GitHub Issu
 Contributions and communications are expected to occur through:
 
 - [GitHub Issues](https://github.com/entireio/cli/issues) - Bug reports and feature requests
-- [GitHub Discussions](https://github.com/entireio/cli/discussions) - Questions and general conversation
-- [Discord](https://discord.gg/jZJs3Tue4S) - Real-time chat and support
+- [Discord](https://discord.gg/jZJs3Tue4S) - Questions, general conversation, and real-time support
 
 Please represent the project and community respectfully in all public and private interactions.
 
@@ -327,10 +326,8 @@ type -a entire
 Join the Entire community:
 
 - **Discord** - [Join our server][discord] for discussions and support
-- **GitHub Discussions** - [Join the conversation][discussions]
 
 [discord]: https://discord.gg/jZJs3Tue4S
-[discussions]: https://github.com/entireio/cli/discussions
 
 ---
 

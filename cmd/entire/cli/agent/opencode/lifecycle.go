@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -190,6 +192,14 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 
 	// Validate output is valid JSON before caching
 	if !json.Valid(data) {
+		// Emit prefix/suffix at DEBUG only — the error message propagates to
+		// WARN logs and could contain sensitive transcript/user content.
+		logging.Debug(logging.WithComponent(ctx, "lifecycle"),
+			"opencode export returned invalid JSON",
+			slog.Int("bytes", len(data)),
+			slog.String("prefix", string(data[:min(len(data), 200)])),
+			slog.String("suffix", string(data[max(0, len(data)-200):])),
+		)
 		return "", fmt.Errorf("opencode export returned invalid JSON (%d bytes)", len(data))
 	}
 

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	apiurl "github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/zalando/go-keyring"
 )
 
@@ -70,5 +70,5 @@ func (s *Store) DeleteToken(baseURL string) error {
 // LookupCurrentToken retrieves the token for the current base URL.
 func LookupCurrentToken() (string, error) {
 	store := NewStore()
-	return store.GetToken(apiurl.BaseURL())
+	return store.GetToken(api.BaseURL())
 }

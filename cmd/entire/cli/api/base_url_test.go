@@ -1,4 +1,4 @@
-package apiurl
+package api
 
 import (
 	"errors"

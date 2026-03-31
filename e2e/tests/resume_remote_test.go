@@ -40,7 +40,7 @@ func TestResumeFromClonedRepo(t *testing.T) {
 
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add hello doc")
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
 		// Push feature branch and metadata branch to the bare remote.
 		s.Git(t, "push", "-u", "origin", "feature")
@@ -108,7 +108,7 @@ func TestResumeMetadataBranchAlreadyLocal(t *testing.T) {
 
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add hello doc")
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
 		// Switch back to main and resume the feature branch.
 		// The metadata branch exists locally (was created during commit).

@@ -5,4 +5,7 @@ TAG=$(git describe --tags --abbrev=0 || echo "v0.0.0")
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 VERSION="${TAG}-dev-${COMMIT}"
 
-go build -ldflags "-X github.com/entireio/cli/cmd/entire/cli/versioninfo.Version=${VERSION} -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Commit=${COMMIT}" -o entire ./cmd/entire
+OUTPUT="entire"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*|Windows_NT) OUTPUT="entire.exe" ;; esac
+
+go build -ldflags "-X github.com/entireio/cli/cmd/entire/cli/versioninfo.Version=${VERSION} -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Commit=${COMMIT}" -o "$OUTPUT" ./cmd/entire

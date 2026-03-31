@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -274,12 +273,6 @@ func startProgressDots(w io.Writer) func(suffix string) {
 // isURL returns true if the target looks like a URL rather than a git remote name.
 func isURL(target string) bool {
 	return strings.Contains(target, "://") || strings.Contains(target, "@")
-}
-
-// PushTrailsBranch pushes the entire/trails/v1 branch to the remote.
-// Trails are always pushed regardless of the push_sessions setting.
-func PushTrailsBranch(ctx context.Context, remote string) error {
-	return pushBranchIfNeeded(ctx, remote, paths.TrailsBranchName)
 }
 
 // createMergeCommitCommon creates a merge commit with multiple parents.

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -376,5 +377,37 @@ func TestDiscoverAndRegister_SkipsInfoFailure(t *testing.T) {
 	_, err := agent.Get(types.AgentName(name))
 	if err == nil {
 		t.Error("expected agent with bad info to be skipped, but it was registered")
+	}
+}
+
+// TestDiscoverAndRegister_RegistersBatOnWindows verifies that a .bat agent
+// binary is discovered and registered on Windows, with the file extension
+// stripped from the agent name. .cmd and .exe follow the same code path.
+func TestDiscoverAndRegister_RegistersBatOnWindows(t *testing.T) {
+	if runtime.GOOS != osWindows {
+		t.Skip("this test only applies on Windows")
+	}
+
+	enableExternalAgents(t)
+
+	name := "disc-bat"
+	infoJSON := `{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"Agent ` + name + `","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{}}`
+	script := "@echo off\r\nif not \"%1\"==\"info\" goto :notinfo\r\necho " + infoJSON + "\r\ngoto :eof\r\n:notinfo\r\necho unknown subcommand: %1 1>&2\r\nexit /b 1\r\n"
+
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, binaryPrefix+name+".bat")
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write mock binary: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	DiscoverAndRegister(context.Background())
+
+	ag, err := agent.Get(types.AgentName(name))
+	if err != nil {
+		t.Fatalf("expected agent %q to be registered after stripping .bat, got error: %v", name, err)
+	}
+	if string(ag.Name()) != name {
+		t.Errorf("agent Name() = %q, want %q", ag.Name(), name)
 	}
 }

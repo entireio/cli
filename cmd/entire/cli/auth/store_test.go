@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	apiurl "github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/zalando/go-keyring"
 )
 
@@ -133,7 +133,7 @@ func TestStoreDeleteToken_NotFoundIsNoop(t *testing.T) {
 }
 
 func TestLookupCurrentToken(t *testing.T) {
-	t.Setenv(apiurl.BaseURLEnvVar, "http://localhost:8787")
+	t.Setenv(api.BaseURLEnvVar, "http://localhost:8787")
 
 	store := NewStore()
 	if err := store.SaveToken("http://localhost:8787", "local-token"); err != nil {

@@ -23,6 +23,7 @@ func TestParseTraceEntry(t *testing.T) {
 		entry := parseTraceEntry(line)
 		if entry == nil {
 			t.Fatal("parseTraceEntry returned nil for valid trace entry")
+			return
 		}
 
 		if entry.Op != testOpPostCommit {
@@ -251,6 +252,7 @@ func TestParseTraceEntry_WithSubSteps(t *testing.T) {
 	entry := parseTraceEntry(line)
 	if entry == nil {
 		t.Fatal("parseTraceEntry returned nil")
+		return
 	}
 
 	if len(entry.Steps) != 2 {
@@ -305,6 +307,7 @@ func TestParseTraceEntry_SubStepNumericOrdering(t *testing.T) {
 	entry := parseTraceEntry(line)
 	if entry == nil {
 		t.Fatal("parseTraceEntry returned nil")
+		return
 	}
 
 	if len(entry.Steps) != 1 {

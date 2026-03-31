@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -14,7 +15,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
-const binaryPrefix = "entire-agent-"
+const (
+	binaryPrefix = "entire-agent-"
+	osWindows    = "windows"
+)
 
 // discoveryTimeout caps the total time spent scanning $PATH for external agents.
 const discoveryTimeout = 10 * time.Second
@@ -78,7 +82,10 @@ func discoverAndRegister(ctx context.Context) {
 			}
 			seen[name] = true
 
-			agentName := types.AgentName(strings.TrimPrefix(name, binaryPrefix))
+			// Strip Windows executable extensions (.exe, .bat) before deriving agent name.
+			// On Unix, binaries have no extension, so this is a no-op.
+			cleanName := stripExeExt(name)
+			agentName := types.AgentName(strings.TrimPrefix(cleanName, binaryPrefix))
 			if registered[agentName] {
 				logging.Debug(ctx, "skipping external agent (name conflict with built-in)",
 					slog.String("binary", name),
@@ -90,8 +97,8 @@ func discoverAndRegister(ctx context.Context) {
 			if err != nil || finfo.IsDir() {
 				continue
 			}
-			// Check executable bit (on Unix)
-			if finfo.Mode()&0o111 == 0 {
+			// Check executable bit (on Unix; Windows doesn't set execute bits)
+			if runtime.GOOS != osWindows && finfo.Mode()&0o111 == 0 {
 				continue
 			}
 
@@ -122,4 +129,15 @@ func discoverAndRegister(ctx context.Context) {
 				slog.String("binary", binPath))
 		}
 	}
+}
+
+// stripExeExt removes Windows executable extensions (.exe, .bat, .cmd) from a
+// file name so that the agent name derived from the binary matches on all platforms.
+// On Unix this is effectively a no-op because binaries have no extension.
+func stripExeExt(name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".exe", ".bat", ".cmd":
+		return strings.TrimSuffix(name, filepath.Ext(name))
+	}
+	return name
 }

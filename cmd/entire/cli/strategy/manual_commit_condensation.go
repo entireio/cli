@@ -243,8 +243,8 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		}
 	}
 
-	// Write checkpoint metadata using the checkpoint store
-	if err := store.WriteCommitted(ctx, cpkg.WriteCommittedOptions{
+	// Build write options (shared by v1 and v2)
+	writeOpts := cpkg.WriteCommittedOptions{
 		CheckpointID:                checkpointID,
 		SessionID:                   state.SessionID,
 		Strategy:                    StrategyNameManualCommit,
@@ -265,9 +265,14 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		SessionMetrics:              buildSessionMetrics(state),
 		InitialAttribution:          attribution,
 		Summary:                     summary,
-	}); err != nil {
+	}
+
+	// Write checkpoint metadata to v1 branch
+	if err := store.WriteCommitted(ctx, writeOpts); err != nil {
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
 	}
+
+	writeCommittedV2IfEnabled(ctx, repo, writeOpts)
 
 	return &CondenseResult{
 		CheckpointID:         checkpointID,
@@ -906,4 +911,21 @@ func (s *ManualCommitStrategy) cleanupShadowBranchIfUnused(ctx context.Context, 
 		return fmt.Errorf("failed to remove shadow branch: %w", err)
 	}
 	return nil
+}
+
+// writeCommittedV2IfEnabled writes checkpoint data to v2 refs when checkpoints_v2
+// is enabled in settings. Failures are logged as warnings — v2 writes are
+// best-effort during the dual-write period and must not block the v1 path.
+func writeCommittedV2IfEnabled(ctx context.Context, repo *git.Repository, opts cpkg.WriteCommittedOptions) {
+	if !settings.IsCheckpointsV2Enabled(ctx) {
+		return
+	}
+
+	v2Store := cpkg.NewV2GitStore(repo)
+	if err := v2Store.WriteCommitted(ctx, opts); err != nil {
+		logging.Warn(ctx, "v2 dual-write failed",
+			slog.String("checkpoint_id", opts.CheckpointID.String()),
+			slog.String("error", err.Error()),
+		)
+	}
 }
