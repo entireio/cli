@@ -460,6 +460,14 @@ func PatchSettings(t *testing.T, dir string, extra map[string]any) {
 	}
 }
 
+// EmptyDir returns the path to an empty temporary directory, cleaned up when
+// the test finishes. Useful as a cross-platform replacement for /dev/null in
+// git config paths like core.hooksPath (git on Windows cannot open NUL).
+func EmptyDir(t *testing.T) string {
+	t.Helper()
+	return t.TempDir()
+}
+
 // Git runs a git command in the given directory and fails the test if it
 // returns a non-zero exit code.
 func Git(t *testing.T, dir string, args ...string) {

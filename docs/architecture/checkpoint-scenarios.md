@@ -603,9 +603,9 @@ Most orphaned data is cleaned up automatically:
 - **Shadow branches**: Deleted after condensation if no other sessions reference them
 - **Session states**: Cleaned up during session listing when shadow branch no longer exists (and session is not ACTIVE, has no `LastCheckpointID`)
 
-For anything that slips through, run `entire clean` manually:
+For anything that slips through, run `entire clean --all` manually:
 
 ```bash
-entire clean          # Preview orphaned items
-entire clean --force  # Delete orphaned items
+entire clean --all          # Preview orphaned items
+entire clean --all --force  # Delete orphaned items
 ```

@@ -104,6 +104,17 @@ func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
 	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
 }
 
+// GetSessionBaseDir returns the base directory containing per-project session subdirectories.
+// Unlike GetSessionDir, this does NOT use ENTIRE_TEST_CLAUDE_PROJECT_DIR because the
+// test override points to a specific project dir, not the base containing all projects.
+func (c *ClaudeCodeAgent) GetSessionBaseDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(homeDir, ".claude", "projects"), nil
+}
+
 // ReadSession reads a session from Claude's storage (JSONL transcript file).
 // The session data is stored in NativeData as raw JSONL bytes.
 // ModifiedFiles is computed by parsing the transcript.

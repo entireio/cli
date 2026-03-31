@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -87,10 +86,7 @@ func (g *Gemini) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 	cmd.Dir = dir
 	cmd.Stdin = nil
 	cmd.Env = append(filterEnv(os.Environ(), "ENTIRE_TEST_TTY"), "ACCESSIBLE=1")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	setupProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
 	var stdout, stderr strings.Builder

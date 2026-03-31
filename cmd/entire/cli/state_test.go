@@ -234,6 +234,22 @@ func TestFilterAndNormalizePaths_SiblingDirectories(t *testing.T) {
 			},
 		},
 		{
+			// On Windows, git status returns paths with backslashes (e.g., "src\file.ts").
+			// filepath.ToSlash normalizes these to forward slashes for consistent storage.
+			// On Linux/macOS, filepath.Separator is already '/', so ToSlash is a no-op —
+			// we use strings.ReplaceAll to simulate the Windows input on all platforms.
+			name: "platform separator paths are normalized to forward slashes",
+			files: []string{
+				"src" + string(filepath.Separator) + "file.ts",
+				"lib" + string(filepath.Separator) + "nested" + string(filepath.Separator) + "util.go",
+			},
+			basePath: "/repo",
+			want: []string{
+				"src/file.ts",
+				"lib/nested/util.go",
+			},
+		},
+		{
 			name: "infrastructure paths are filtered",
 			files: []string{
 				"/repo/src/file.ts",

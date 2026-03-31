@@ -87,7 +87,7 @@ func TestRewindAfterCommit(t *testing.T) {
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add red.md")
 
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
 		// Get rewind points after commit — old shadow IDs should be gone.
 		pointsAfter := entire.RewindList(t, s.Dir)
@@ -108,7 +108,7 @@ func TestRewindAfterCommit(t *testing.T) {
 
 		// Working directory should be unchanged — file still committed.
 		testutil.AssertFileExists(t, s.Dir, "docs/red.md")
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -173,7 +173,7 @@ func TestRewindSquashMergeMultipleCheckpoints(t *testing.T) {
 
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add red doc")
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		cp1Ref := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
 
 		_, err = s.RunPrompt(t, ctx,
@@ -184,7 +184,7 @@ func TestRewindSquashMergeMultipleCheckpoints(t *testing.T) {
 
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add blue doc")
-		testutil.WaitForCheckpointAdvanceFrom(t, s.Dir, cp1Ref, 15*time.Second)
+		testutil.WaitForCheckpointAdvanceFrom(t, s.Dir, cp1Ref, 30*time.Second)
 
 		// Record checkpoint IDs from both feature branch commits.
 		cpID1 := testutil.GetCheckpointTrailer(t, s.Dir, "HEAD~1")

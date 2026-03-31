@@ -55,9 +55,9 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context, w, errW io.Writer) err
 		sessions = nil // Ignore error, treat as no sessions
 	}
 
-	// If nothing to reset, return early
+	// If nothing to clean, return early
 	if !hasShadowBranch && len(sessions) == 0 {
-		fmt.Fprintf(w, "Nothing to reset for %s\n", shadowBranchName)
+		fmt.Fprintf(w, "Nothing to clean for %s\n", shadowBranchName)
 		return nil
 	}
 

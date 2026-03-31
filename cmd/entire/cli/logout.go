@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	apiurl "github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/spf13/cobra"
 )
@@ -20,7 +20,7 @@ func newLogoutCmd() *cobra.Command {
 		Use:   "logout",
 		Short: "Log out of Entire",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runLogout(cmd.OutOrStdout(), auth.NewStore(), apiurl.BaseURL())
+			return runLogout(cmd.OutOrStdout(), auth.NewStore(), api.BaseURL())
 		},
 	}
 }

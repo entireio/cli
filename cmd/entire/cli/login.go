@@ -12,7 +12,7 @@ import (
 	"runtime"
 	"time"
 
-	apiurl "github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/spf13/cobra"
 )
@@ -43,7 +43,7 @@ func newLoginCmd() *cobra.Command {
 			client := auth.NewClient(nil)
 
 			if !insecureHTTPAuth {
-				if err := apiurl.RequireSecureURL(client.BaseURL()); err != nil {
+				if err := api.RequireSecureURL(client.BaseURL()); err != nil {
 					return fmt.Errorf("base URL check: %w", err)
 				}
 			}

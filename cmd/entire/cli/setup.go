@@ -28,8 +28,12 @@ const (
 	configDisplayLocal   = ".entire/settings.local.json"
 )
 
-// agentFlagName is the flag name used for agent selection across setup commands.
-const agentFlagName = "agent"
+// Flag names used across setup commands.
+const (
+	agentFlagName        = "agent"
+	flagCheckpointRemote = "checkpoint-remote"
+	flagSkipPushSessions = "skip-push-sessions"
+)
 
 // EnableOptions holds the flags for `entire enable`.
 type EnableOptions struct {
@@ -65,6 +69,78 @@ func (opts *EnableOptions) applyStrategyOptions(settings *EntireSettings) {
 			}
 		}
 	}
+}
+
+func hasStrategyFlags(cmd *cobra.Command) bool {
+	return cmd.Flags().Changed(flagCheckpointRemote) || cmd.Flags().Changed(flagSkipPushSessions)
+}
+
+// updateStrategyOptions applies strategy flags to settings without re-running agent setup.
+// Loads and writes only the target file to avoid leaking settings between layers.
+func updateStrategyOptions(ctx context.Context, w io.Writer, opts EnableOptions) error {
+	// Validate before doing any I/O so we don't report "Settings updated" on bad input.
+	if opts.CheckpointRemote != "" {
+		if _, _, err := parseCheckpointRemoteFlag(opts.CheckpointRemote); err != nil {
+			return fmt.Errorf("invalid --checkpoint-remote: %w", err)
+		}
+	}
+
+	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+
+	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	if err != nil {
+		targetFileAbs = targetFile
+	}
+
+	s, err := settings.LoadFromFile(targetFileAbs)
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+
+	opts.applyStrategyOptions(s)
+
+	if targetFile == settings.EntireSettingsLocalFile {
+		if err := SaveEntireSettingsLocal(ctx, s); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+	} else {
+		if err := SaveEntireSettings(ctx, s); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+	}
+
+	fmt.Fprintf(w, "✓ Settings updated (%s)\n", configDisplay)
+	return nil
+}
+
+// settingsTargetFile determines which settings file to write to based on flags
+// and which files exist. Unlike determineSettingsTarget, this correctly handles
+// local-only repos by checking for settings.local.json when settings.json is absent.
+func settingsTargetFile(ctx context.Context, useLocal, useProject bool) (string, string) {
+	if useLocal {
+		return settings.EntireSettingsLocalFile, configDisplayLocal
+	}
+	if useProject {
+		return settings.EntireSettingsFile, configDisplayProject
+	}
+
+	// No explicit flag — write to whichever file exists.
+	// Check project file first, then local.
+	projectAbs, err := paths.AbsPath(ctx, settings.EntireSettingsFile)
+	if err == nil {
+		if _, statErr := os.Stat(projectAbs); statErr == nil {
+			return settings.EntireSettingsFile, configDisplayProject
+		}
+	}
+	localAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
+	if err == nil {
+		if _, statErr := os.Stat(localAbs); statErr == nil {
+			return settings.EntireSettingsLocalFile, configDisplayLocal
+		}
+	}
+
+	// Neither exists — default to project
+	return settings.EntireSettingsFile, configDisplayProject
 }
 
 // parseCheckpointRemoteFlag parses a "provider:owner/repo" string into its components.
@@ -330,6 +406,11 @@ Use --remove to remove a specific agent's hooks:
 				return setupAgentHooksNonInteractive(ctx, cmd.OutOrStdout(), ag, opts)
 			}
 
+			// Settings-only mode: update strategy options without agent selection
+			if hasStrategyFlags(cmd) && settings.IsSetUpAny(ctx) {
+				return updateStrategyOptions(ctx, cmd.OutOrStdout(), opts)
+			}
+
 			// If already set up, show agents and let user add more
 			if settings.IsSetUpAny(ctx) {
 				return runAddAgents(ctx, cmd.OutOrStdout(), opts)
@@ -347,7 +428,8 @@ Use --remove to remove a specific agent's hooks:
 	cmd.Flags().StringVar(&agentName, agentFlagName, "", "Enable a specific agent (e.g., "+strings.Join(agent.StringList(), ", ")+"; external agents on $PATH are also available)")
 	cmd.Flags().StringVar(&removeAgentName, "remove", "", "Remove a specific agent's hooks (e.g., "+strings.Join(agent.StringList(), ", ")+")")
 	cmd.Flags().BoolVarP(&opts.ForceHooks, "force", "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
-	cmd.Flags().BoolVar(&opts.SkipPushSessions, "skip-push-sessions", false, "Disable automatic pushing of session logs on git push")
+	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
+	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
 	cmd.Flags().BoolVar(&opts.Telemetry, "telemetry", true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, "absolute-git-hook-path", false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 
@@ -414,12 +496,20 @@ If Entire is already configured but disabled, this re-enables it.`,
 				return setupAgentHooksNonInteractive(ctx, cmd.OutOrStdout(), ag, opts)
 			}
 
-			// If already set up, just enable (don't re-run full setup)
+			// If already set up, apply any strategy flags then just enable
 			if settings.IsSetUpAny(ctx) {
+				updatedStrategy := hasStrategyFlags(cmd)
+				if updatedStrategy {
+					if err := updateStrategyOptions(ctx, cmd.OutOrStdout(), opts); err != nil {
+						return err
+					}
+				}
 				enabled, err := IsEnabled(ctx)
 				if err == nil && enabled {
 					w := cmd.OutOrStdout()
-					fmt.Fprintln(w, "Entire is already enabled.")
+					if !updatedStrategy {
+						fmt.Fprintln(w, "Entire is already enabled.")
+					}
 					printEnabledStatus(ctx, w)
 					return nil
 				}
@@ -439,8 +529,8 @@ If Entire is already configured but disabled, this re-enables it.`,
 	cmd.Flags().BoolVar(&opts.UseProjectSettings, "project", false, "Write settings to .entire/settings.json even if it already exists")
 	cmd.Flags().StringVar(&agentName, agentFlagName, "", "Agent to set up hooks for (e.g., "+strings.Join(agent.StringList(), ", ")+"; external agents on $PATH are also available). Enables non-interactive mode.")
 	cmd.Flags().BoolVarP(&opts.ForceHooks, "force", "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
-	cmd.Flags().BoolVar(&opts.SkipPushSessions, "skip-push-sessions", false, "Disable automatic pushing of session logs on git push")
-	cmd.Flags().StringVar(&opts.CheckpointRemote, "checkpoint-remote", "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
+	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
+	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
 	cmd.Flags().BoolVar(&opts.Telemetry, "telemetry", true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, "absolute-git-hook-path", false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 

@@ -132,6 +132,21 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 	return ps
 }
 
+// ResolveRemoteRepo returns the host, owner, and repo name for the given git remote.
+// It parses the remote URL (SSH or HTTPS) and extracts the components.
+// For example, git@github.com:org/my-repo.git returns ("github.com", "org", "my-repo").
+func ResolveRemoteRepo(ctx context.Context, remoteName string) (host, owner, repo string, err error) {
+	rawURL, err := getRemoteURL(ctx, remoteName)
+	if err != nil {
+		return "", "", "", fmt.Errorf("get remote URL for %q: %w", remoteName, err)
+	}
+	info, err := parseGitRemoteURL(rawURL)
+	if err != nil {
+		return "", "", "", fmt.Errorf("parse remote URL: %w", err)
+	}
+	return info.host, info.owner, info.repo, nil
+}
+
 // gitRemoteInfo holds parsed components of a git remote URL.
 type gitRemoteInfo struct {
 	protocol string // "ssh" or "https"

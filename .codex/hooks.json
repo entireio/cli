@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": null,
+        "hooks": [
+          {
+            "type": "command",
+            "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks codex session-start",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": null,
+        "hooks": [
+          {
+            "type": "command",
+            "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks codex stop",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": null,
+        "hooks": [
+          {
+            "type": "command",
+            "command": "go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks codex user-prompt-submit",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -83,6 +83,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newResumeCmd())
 	cmd.AddCommand(newCleanCmd())
 	cmd.AddCommand(newResetCmd())
+	cmd.AddCommand(newSessionsCmd())
 	cmd.AddCommand(newSetupCmd())
 	cmd.AddCommand(newEnableCmd())
 	cmd.AddCommand(newDisableCmd())
@@ -97,6 +98,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newTrailCmd())
 	cmd.AddCommand(newSearchCmd())
 	cmd.AddCommand(newSendAnalyticsCmd())
+	cmd.AddCommand(newAttachCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 
 	cmd.SetVersionTemplate(versionString())

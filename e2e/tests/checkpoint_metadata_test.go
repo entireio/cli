@@ -27,7 +27,7 @@ func TestCheckpointMetadataDeepValidation(t *testing.T) {
 
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add validated.go")
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.ValidateCheckpointDeep(t, s.Dir, testutil.DeepCheckpointValidation{
@@ -35,6 +35,6 @@ func TestCheckpointMetadataDeepValidation(t *testing.T) {
 			Strategy:     "manual-commit",
 			FilesTouched: []string{"validated.go"},
 		})
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

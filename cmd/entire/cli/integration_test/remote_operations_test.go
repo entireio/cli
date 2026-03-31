@@ -6,13 +6,9 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/entireio/cli/cmd/entire/cli/trail"
-
-	"github.com/go-git/go-git/v6"
 )
 
 // =============================================================================
@@ -69,35 +65,6 @@ func TestPrePush_PushesCheckpointBranchToOrigin(t *testing.T) {
 	summaryPath := CheckpointSummaryPath(checkpointID)
 	if !fileExistsOnRemoteBranch(t, bareDir, summaryPath) {
 		t.Errorf("checkpoint metadata should exist on remote at %s", summaryPath)
-	}
-}
-
-// TestPrePush_PushesTrailsBranchWhenPresent verifies that PrePush pushes
-// the entire/trails/v1 branch to the bare remote when it exists locally.
-// A real trail is created via trail.Store to exercise the production code path.
-func TestPrePush_PushesTrailsBranchWhenPresent(t *testing.T) {
-	t.Parallel()
-	env := NewFeatureBranchEnv(t)
-
-	bareDir := env.SetupBareRemote()
-
-	// Create a session, checkpoint, and commit
-	_ = createCheckpointedCommit(t, env, "Add feature", "feature.go", "package feature", "Add feature")
-
-	// Create a real trail for the current branch so we can verify it pushes.
-	createTrailForCurrentBranch(t, env)
-
-	// Run PrePush
-	env.RunPrePush("origin")
-
-	// Checkpoint branch must be on remote
-	if !env.BranchExistsOnRemote(bareDir, paths.MetadataBranchName) {
-		t.Error("entire/checkpoints/v1 should exist on remote")
-	}
-
-	// Trails branch must be on remote after PrePush
-	if !env.BranchExistsOnRemote(bareDir, paths.TrailsBranchName) {
-		t.Error("entire/trails/v1 should exist on remote after PrePush when present locally")
 	}
 }
 
@@ -170,7 +137,7 @@ func TestPrePush_IdempotentWhenAlreadyPushed(t *testing.T) {
 // =============================================================================
 
 // TestPrePush_PushDisabledSkipsCheckpoints verifies that push_sessions: false
-// disables checkpoint push while trails are still pushed.
+// disables checkpoint push.
 func TestPrePush_PushDisabledSkipsCheckpoints(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -192,29 +159,21 @@ func TestPrePush_PushDisabledSkipsCheckpoints(t *testing.T) {
 		t.Fatal("should have local checkpoint branch after condensation")
 	}
 
-	// Create a real trail so we can assert it pushes independently of checkpoints
-	createTrailForCurrentBranch(t, env)
-
-	// Single PrePush — should push trails but skip checkpoints
+	// PrePush should skip checkpoints when push_sessions is false
 	env.RunPrePush("origin")
 
 	// Checkpoints should NOT be on remote
 	if env.BranchExistsOnRemote(bareDir, paths.MetadataBranchName) {
 		t.Error("entire/checkpoints/v1 should NOT be on remote when push_sessions is false")
 	}
-
-	// Trails SHOULD be on remote (trails are independent of push_sessions)
-	if !env.BranchExistsOnRemote(bareDir, paths.TrailsBranchName) {
-		t.Error("entire/trails/v1 should be on remote even when push_sessions is false")
-	}
 }
 
 // TestPrePush_CheckpointRemoteRoutesToSeparateRemote verifies that checkpoint data
-// can be selectively pushed to a separate remote while trails stay on origin.
+// can be selectively pushed to a separate remote.
 //
 // This is a data routing verification test. It validates that when the production
-// code's pushBranchIfNeeded is called with different targets for checkpoints vs
-// trails, the branches land on the correct remotes with correct data.
+// code's pushBranchIfNeeded is called with different targets for checkpoints,
+// the branches land on the correct remotes with correct data.
 //
 // Why not test through PrePush directly: resolvePushSettings derives the checkpoint
 // URL from origin's protocol (SSH/HTTPS). Since integration tests use local file
@@ -229,7 +188,7 @@ func TestPrePush_CheckpointRemoteRoutesToSeparateRemote(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 
-	// Set up two bare remotes: origin for user code + trails, checkpoint remote for checkpoints
+	// Set up two bare remotes: origin for user code, checkpoint remote for checkpoints
 	bareOrigin := env.SetupBareRemote()
 	bareCheckpoint := env.SetupNamedBareRemote("checkpoint-store")
 
@@ -241,14 +200,9 @@ func TestPrePush_CheckpointRemoteRoutesToSeparateRemote(t *testing.T) {
 		t.Fatal("should have local checkpoint branch after condensation")
 	}
 
-	// Simulate checkpoint_remote routing: push checkpoints to the checkpoint bare repo
-	// and trails to origin. This mirrors what PrePush does when resolvePushSettings
-	// returns a checkpointURL: checkpoints go to ps.pushTarget(), trails go to ps.remote.
+	// Simulate checkpoint_remote routing: push checkpoints to the checkpoint bare repo.
+	// This mirrors what PrePush does when resolvePushSettings returns a checkpointURL.
 	env.GitPush(bareCheckpoint, paths.MetadataBranchName)
-
-	// Create a real trail and push it to origin.
-	createTrailForCurrentBranch(t, env)
-	env.GitPush("origin", paths.TrailsBranchName)
 
 	// Checkpoints should be on checkpoint remote, NOT on origin
 	if !env.BranchExistsOnRemote(bareCheckpoint, paths.MetadataBranchName) {
@@ -256,14 +210,6 @@ func TestPrePush_CheckpointRemoteRoutesToSeparateRemote(t *testing.T) {
 	}
 	if env.BranchExistsOnRemote(bareOrigin, paths.MetadataBranchName) {
 		t.Error("entire/checkpoints/v1 should NOT be on origin when routed to checkpoint remote")
-	}
-
-	// Trails should be on origin, NOT on checkpoint remote
-	if !env.BranchExistsOnRemote(bareOrigin, paths.TrailsBranchName) {
-		t.Error("entire/trails/v1 should be on origin")
-	}
-	if env.BranchExistsOnRemote(bareCheckpoint, paths.TrailsBranchName) {
-		t.Error("entire/trails/v1 should NOT be on checkpoint remote")
 	}
 
 	// Verify checkpoint data arrived on checkpoint remote
@@ -613,22 +559,14 @@ func TestGracefulDegradation_UnreachableCheckpointRemotePushContinues(t *testing
 		t.Fatal("should have local checkpoint branch after condensation")
 	}
 
-	// Create a real trail so we can verify it pushes independently.
-	createTrailForCurrentBranch(t, env)
-
 	// Run PrePush with checkpoint_remote configured. Since origin is a local path,
 	// resolvePushSettings will fail to derive a checkpoint URL and fall back to
-	// pushing both checkpoints and trails to origin.
+	// pushing checkpoints to origin.
 	env.RunPrePush("origin")
 
 	// Checkpoints should be on origin (fallback behavior when checkpoint URL derivation fails)
 	if !env.BranchExistsOnRemote(bareOrigin, paths.MetadataBranchName) {
 		t.Error("entire/checkpoints/v1 should be on origin when checkpoint_remote URL derivation fails")
-	}
-
-	// Trails should always be on origin regardless of checkpoint_remote config
-	if !env.BranchExistsOnRemote(bareOrigin, paths.TrailsBranchName) {
-		t.Error("entire/trails/v1 should be on origin even when checkpoint_remote is configured")
 	}
 }
 
@@ -693,45 +631,6 @@ func TestGracefulDegradation_UnreachableCheckpointRemoteOnCloneIsSilent(t *testi
 // =============================================================================
 // Helpers
 // =============================================================================
-
-// createTrailForCurrentBranch creates a real trail via the trail.Store for the
-// current branch, writing proper trail metadata through the production code path.
-func createTrailForCurrentBranch(t *testing.T, env *TestEnv) {
-	t.Helper()
-
-	repo, err := git.PlainOpen(env.RepoDir)
-	if err != nil {
-		t.Fatalf("failed to open repo: %v", err)
-	}
-
-	trailID, err := trail.GenerateID()
-	if err != nil {
-		t.Fatalf("failed to generate trail ID: %v", err)
-	}
-
-	now := time.Now()
-	metadata := &trail.Metadata{
-		TrailID:   trailID,
-		Branch:    env.GetCurrentBranch(),
-		Base:      "main",
-		Title:     "Test trail",
-		Status:    trail.StatusDraft,
-		Author:    "test",
-		Assignees: []string{},
-		Labels:    []string{},
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-
-	store := trail.NewStore(repo)
-	if err := store.Write(metadata, nil, nil); err != nil {
-		t.Fatalf("failed to write trail: %v", err)
-	}
-
-	if !env.BranchExists(paths.TrailsBranchName) {
-		t.Fatal("trails branch should exist after writing trail")
-	}
-}
 
 // fileExistsOnRemoteBranch checks if a file exists in the metadata branch tree on a bare remote.
 func fileExistsOnRemoteBranch(t *testing.T, bareDir, filePath string) bool {

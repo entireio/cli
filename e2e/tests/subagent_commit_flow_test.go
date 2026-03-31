@@ -26,7 +26,7 @@ func TestSubagentCommitFlow(t *testing.T) {
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add red.md via subagent")
 
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		testutil.AssertCheckpointAdvanced(t, s)
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
@@ -42,6 +42,6 @@ func TestSubagentCommitFlow(t *testing.T) {
 		sm := testutil.ReadSessionMetadata(t, s.Dir, cpID, 0)
 		assert.NotEmpty(t, sm.Agent, "session agent field should be populated")
 		assert.NotEmpty(t, sm.SessionID, "session_id should be set")
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

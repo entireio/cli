@@ -42,6 +42,12 @@ const (
 
 	// V2FullCurrentRefName stores the active generation of raw transcripts.
 	V2FullCurrentRefName = "refs/entire/checkpoints/v2/full/current"
+
+	// V2FullRefPrefix is the common prefix for all /full/* refs (current + archived).
+	V2FullRefPrefix = "refs/entire/checkpoints/v2/full/"
+
+	// GenerationFileName is the metadata file at the root of each /full/* generation tree.
+	GenerationFileName = "generation.json"
 )
 
 // TrailsBranchName is the orphan branch used to store trail metadata.
@@ -156,6 +162,7 @@ func ToRelativePath(absPath, cwd string) string {
 	if err != nil || strings.HasPrefix(relPath, "..") {
 		return ""
 	}
+
 	return relPath
 }
 

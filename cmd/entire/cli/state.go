@@ -361,7 +361,7 @@ func FilterAndNormalizePaths(files []string, cwd string) []string {
 		if paths.IsInfrastructurePath(relPath) {
 			continue // skip .entire directory
 		}
-		result = append(result, relPath)
+		result = append(result, filepath.ToSlash(relPath))
 	}
 	return result
 }

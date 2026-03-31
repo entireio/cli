@@ -10,7 +10,16 @@ import (
 )
 
 func main() {
+	// Optional: pass agent name as argument to bootstrap only that agent.
+	filter := ""
+	if len(os.Args) > 1 {
+		filter = os.Args[1]
+	}
+
 	for _, a := range agents.All() {
+		if filter != "" && a.Name() != filter {
+			continue
+		}
 		fmt.Fprintf(os.Stderr, "bootstrapping %s...\n", a.Name())
 		if err := a.Bootstrap(); err != nil {
 			fmt.Fprintf(os.Stderr, "bootstrap %s: %v\n", a.Name(), err)

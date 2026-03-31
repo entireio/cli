@@ -25,7 +25,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
-	"github.com/entireio/cli/cmd/entire/cli/trail"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
@@ -1093,16 +1092,6 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 		return false
 	}
 
-	// Link checkpoint to trail (best-effort)
-	branchName := GetCurrentBranchName(repo)
-	if branchName != "" && branchName != GetDefaultBranchName(repo) {
-		store := trail.NewStore(repo)
-		existing, findErr := store.FindByBranch(branchName)
-		if findErr == nil && existing != nil {
-			appendCheckpointToExistingTrail(store, existing.TrailID, result.CheckpointID, head.Hash(), result.Prompts)
-		}
-	}
-
 	// Track this shadow branch for cleanup
 	shadowBranchesToDelete[shadowBranchName] = struct{}{}
 
@@ -1154,7 +1143,11 @@ func (s *ManualCommitStrategy) updateBaseCommitIfChanged(ctx context.Context, st
 	}
 	if state.BaseCommit != newHead {
 		state.BaseCommit = newHead
-		logging.Debug(logCtx, "post-commit: updated BaseCommit",
+		// Keep AttributionBaseCommit in sync to prevent stale base drift.
+		// Without this, a subsequent condensation would diff from the old base,
+		// inflating human_added with lines from unrelated prior commits.
+		state.AttributionBaseCommit = newHead
+		logging.Debug(logCtx, "post-commit: updated BaseCommit and AttributionBaseCommit",
 			slog.String("session_id", state.SessionID),
 			slog.String("new_head", truncateHash(newHead)),
 		)
@@ -1188,12 +1181,16 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 			continue
 		}
 		if state.BaseCommit != newHead {
-			logging.Debug(logCtx, "post-commit (no trailer): updating BaseCommit",
+			logging.Debug(logCtx, "post-commit (no trailer): updating BaseCommit and AttributionBaseCommit",
 				slog.String("session_id", state.SessionID),
 				slog.String("old_base", truncateHash(state.BaseCommit)),
 				slog.String("new_head", truncateHash(newHead)),
 			)
 			state.BaseCommit = newHead
+			// Keep AttributionBaseCommit in sync to prevent stale base drift.
+			// Without this, a subsequent condensation would diff from the old base,
+			// inflating human_added with lines from unrelated prior commits.
+			state.AttributionBaseCommit = newHead
 			if err := s.saveSessionState(ctx, state); err != nil {
 				logging.Warn(logCtx, "failed to update session state",
 					slog.String("session_id", state.SessionID),
@@ -1216,6 +1213,7 @@ func truncateHash(h string) string {
 // Computes the staged files list once and reuses it across all sessions to avoid
 // redundant `git diff --cached` calls (previously called up to 3 times per session).
 func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context, repo *git.Repository, sessions []*SessionState) []*SessionState {
+	logCtx := logging.WithComponent(ctx, "manual-commit")
 	var result []*SessionState
 
 	// Compute staged files once for all sessions.
@@ -1223,7 +1221,7 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 	// "unavailable" and skips overlap checks, falling through to other heuristics.
 	stagedFiles, err := getStagedFiles(ctx)
 	if err != nil {
-		logging.Debug(logging.WithComponent(ctx, "manual-commit"),
+		logging.Debug(logCtx,
 			"filterSessionsWithNewContent: getStagedFiles failed, skipping overlap checks",
 			slog.String("error", err.Error()),
 		)
@@ -1233,13 +1231,27 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 	for _, state := range sessions {
 		// Skip fully-condensed ended sessions — no new content possible.
 		if state.FullyCondensed && state.Phase == session.PhaseEnded {
+			logging.Debug(logCtx, "filterSessionsWithNewContent: skipping fully-condensed ended session",
+				slog.String("session_id", state.SessionID),
+			)
 			continue
 		}
 		hasNew, err := s.sessionHasNewContent(ctx, repo, state, contentCheckOpts{stagedFiles: stagedFiles})
 		if err != nil {
+			logging.Debug(logCtx, "filterSessionsWithNewContent: error checking session, including it (fail-open)",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", err.Error()),
+			)
 			// On error, include the session (fail open for hooks)
 			result = append(result, state)
 			continue
+		}
+		if !hasNew {
+			logging.Debug(logCtx, "filterSessionsWithNewContent: session has no new content",
+				slog.String("session_id", state.SessionID),
+				slog.String("phase", string(state.Phase)),
+				slog.Int("files_touched", len(state.FilesTouched)),
+			)
 		}
 		if hasNew {
 			result = append(result, state)
@@ -1397,9 +1409,28 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 	}
 
 	// No staged files - either PostCommit context or edge case.
-	// Return transcript growth status. For PostCommit with hasTranscriptFile=true,
-	// if there's no transcript growth, the session hasn't done new work since last checkpoint.
-	// (Carry-forward creates a shadow branch WITHOUT transcript, handled in the block above.)
+	//
+	// For recently-active IDLE sessions, the staged set is already gone by
+	// PostCommit, but carry-forward files from the just-ended turn must still
+	// count as "new content". The caller performs the stricter committed-file
+	// overlap check before actually condensing, which prevents false positives
+	// from unrelated commits.
+	//
+	// Stale IDLE sessions and ENDED sessions should NOT take this path. Those
+	// states may retain FilesTouched from older work, and treating that alone as
+	// fresh content would incorrectly condense old sessions into unrelated commits.
+	if hasUncommittedFiles && state.Phase == session.PhaseIdle && isRecentInteraction(state.LastInteractionTime) {
+		logging.Debug(logCtx, "sessionHasNewContent: no staged files, returning true due to recent idle carry-forward files",
+			slog.String("session_id", state.SessionID),
+			slog.Bool("has_transcript_growth", hasTranscriptGrowth),
+			slog.Bool("has_uncommitted_files", hasUncommittedFiles),
+			slog.String("phase", string(state.Phase)),
+		)
+		return true, nil
+	}
+
+	// No staged files and no carry-forward files: transcript growth is the only
+	// remaining signal that there is new session content to condense.
 	logging.Debug(logCtx, "sessionHasNewContent: no staged files, returning transcript growth",
 		slog.String("session_id", state.SessionID),
 		slog.Bool("has_transcript_growth", hasTranscriptGrowth),
@@ -1639,9 +1670,9 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 		normalized := make([]string, 0, len(modifiedFiles))
 		for _, f := range modifiedFiles {
 			if rel := paths.ToRelativePath(f, basePath); rel != "" {
-				normalized = append(normalized, rel)
+				normalized = append(normalized, filepath.ToSlash(rel))
 			} else {
-				normalized = append(normalized, f)
+				normalized = append(normalized, filepath.ToSlash(f))
 			}
 		}
 		modifiedFiles = normalized
@@ -1661,7 +1692,8 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 //     have /dev/tty but can't respond to prompts, and content detection fails
 //     since the shadow branch doesn't exist yet).
 func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string) bool {
-	skipContentDetection := !hasTTY()
+	noTTY := !hasTTY()
+	skipContentDetection := noTTY
 	if !skipContentDetection {
 		if stngs, err := settings.Load(ctx); err == nil {
 			skipContentDetection = stngs.GetCommitLinking() == settings.CommitLinkingAlways
@@ -1677,6 +1709,16 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 			return true
 		}
 	}
+	// Log why fast path didn't fire — collect session phases for diagnostics.
+	phases := make([]string, 0, len(sessions))
+	for _, state := range sessions {
+		phases = append(phases, string(state.Phase))
+	}
+	logging.Debug(logCtx, "prepare-commit-msg: fast path found no ACTIVE sessions",
+		slog.Bool("no_tty", noTTY),
+		slog.Int("sessions", len(sessions)),
+		slog.Any("session_phases", phases),
+	)
 	return false
 }
 
@@ -1717,62 +1759,9 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 }
 
 // addCheckpointTrailer adds the Entire-Checkpoint trailer to a commit message.
-// Handles proper trailer formatting (blank line before trailers if needed).
+// Delegates to trailers.AppendCheckpointTrailer for trailer-aware formatting.
 func addCheckpointTrailer(message string, checkpointID id.CheckpointID) string {
-	trailer := trailers.CheckpointTrailerKey + ": " + checkpointID.String()
-
-	// If message already ends with trailers (lines starting with key:), just append
-	// Otherwise, add a blank line first
-	lines := strings.Split(strings.TrimRight(message, "\n"), "\n")
-
-	// Check if the message already ends with a trailer paragraph.
-	// Git trailers must be in a separate paragraph (preceded by a blank line).
-	// A single-paragraph message (e.g., just a subject line) cannot have trailers,
-	// even if the subject contains ": " (like conventional commits: "docs: Add foo").
-	//
-	// Scan from the bottom: find the last paragraph of non-comment content,
-	// then check if it looks like trailers AND has a blank line above it.
-	hasTrailers := false
-	i := len(lines) - 1
-
-	// Skip trailing comment lines
-	for i >= 0 && strings.HasPrefix(strings.TrimSpace(lines[i]), "#") {
-		i--
-	}
-
-	// Check if the last non-comment line looks like a trailer
-	if i >= 0 {
-		line := strings.TrimSpace(lines[i])
-		if line != "" && strings.Contains(line, ": ") {
-			// Found a trailer-like line. Now scan upward past the trailer block
-			// to verify there's a blank line (paragraph separator) above it.
-			for i > 0 {
-				i--
-				above := strings.TrimSpace(lines[i])
-				if strings.HasPrefix(above, "#") {
-					continue
-				}
-				if above == "" {
-					// Blank line found above trailer block — real trailers
-					hasTrailers = true
-					break
-				}
-				if !strings.Contains(above, ": ") {
-					// Non-trailer, non-blank line — this is message body, not trailers
-					break
-				}
-				// Another trailer-like line, keep scanning upward
-			}
-		}
-	}
-
-	if hasTrailers {
-		// Append trailer directly
-		return strings.TrimRight(message, "\n") + "\n" + trailer + "\n"
-	}
-
-	// Add blank line before trailer
-	return strings.TrimRight(message, "\n") + "\n\n" + trailer + "\n"
+	return trailers.AppendCheckpointTrailer(message, checkpointID.String())
 }
 
 // addCheckpointTrailerWithComment adds the Entire-Checkpoint trailer with an explanatory comment.
@@ -2069,9 +2058,12 @@ func getStagedFiles(ctx context.Context) ([]string, error) {
 	}
 
 	staged := []string{}
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	trimmed := strings.TrimSpace(string(output))
+	// Normalize Windows line endings (\r\n) to Unix (\n) for cross-platform git output
+	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
+	for _, line := range strings.Split(trimmed, "\n") {
 		if line != "" {
-			staged = append(staged, line)
+			staged = append(staged, filepath.ToSlash(line))
 		}
 	}
 	return staged, nil
@@ -2457,29 +2449,4 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 		slog.String("session_id", state.SessionID),
 		slog.Int("remaining_files", len(remainingFiles)),
 	)
-}
-
-// appendCheckpointToExistingTrail links a checkpoint to the given trail.
-// Best-effort: silently returns on any error (trails are non-critical metadata).
-func appendCheckpointToExistingTrail(store *trail.Store, trailID trail.ID, cpID id.CheckpointID, commitSHA plumbing.Hash, prompts []string) {
-	var summary *string
-	if len(prompts) > 0 {
-		s := truncateForSummary(prompts[len(prompts)-1], 200)
-		summary = &s
-	}
-
-	//nolint:errcheck,gosec // best-effort: trail checkpoint linking is non-critical
-	store.AddCheckpoint(trailID, trail.CheckpointRef{
-		CheckpointID: cpID.String(),
-		CommitSHA:    commitSHA.String(),
-		CreatedAt:    time.Now().UTC(),
-		Summary:      summary,
-	})
-}
-
-// truncateForSummary takes the first line of s and truncates to maxLen runes.
-func truncateForSummary(s string, maxLen int) string {
-	line, _, _ := strings.Cut(s, "\n")
-	line = strings.TrimSpace(line)
-	return stringutil.TruncateRunes(line, maxLen, "...")
 }

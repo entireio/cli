@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strings"
 
-	apiurl "github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 const (
@@ -51,7 +51,7 @@ func NewClient(httpClient *http.Client) *Client {
 
 	return &Client{
 		httpClient: httpClient,
-		baseURL:    apiurl.BaseURL(),
+		baseURL:    api.BaseURL(),
 	}
 }
 
@@ -112,7 +112,7 @@ func (c *Client) PollDeviceAuth(ctx context.Context, deviceCode string) (*Device
 
 // postForm sends a POST request with form-encoded body to an API-relative path.
 func (c *Client) postForm(ctx context.Context, path string, body url.Values) (*http.Response, error) {
-	endpoint, err := apiurl.ResolveURLFromBase(c.baseURL, path)
+	endpoint, err := api.ResolveURLFromBase(c.baseURL, path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve URL %s: %w", path, err)
 	}

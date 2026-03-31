@@ -252,3 +252,51 @@ func FormatShadowTaskCommit(message, taskMetadataDir, sessionID string) string {
 func FormatCheckpoint(message string, cpID checkpointID.CheckpointID) string {
 	return fmt.Sprintf("%s\n\n%s: %s\n", message, CheckpointTrailerKey, cpID.String())
 }
+
+// trailerLineRe matches git trailer format: "Key-Name: value" (no spaces before colon).
+var trailerLineRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*: `)
+
+// IsTrailerLine reports whether a line matches git trailer format.
+func IsTrailerLine(line string) bool {
+	return trailerLineRe.MatchString(line)
+}
+
+// AppendCheckpointTrailer appends Entire-Checkpoint in trailer-aware format.
+// If the message already ends with a trailer paragraph, append directly to it;
+// otherwise add a blank line before starting a new trailer block.
+func AppendCheckpointTrailer(message, checkpointID string) string {
+	trimmed := strings.TrimRight(message, "\n")
+	trailer := fmt.Sprintf("%s: %s", CheckpointTrailerKey, checkpointID)
+
+	lines := strings.Split(trimmed, "\n")
+	i := len(lines) - 1
+	for i >= 0 && strings.HasPrefix(strings.TrimSpace(lines[i]), "#") {
+		i--
+	}
+
+	hasTrailerBlock := false
+	if i >= 0 {
+		last := strings.TrimSpace(lines[i])
+		if last != "" && IsTrailerLine(last) {
+			for i > 0 {
+				i--
+				above := strings.TrimSpace(lines[i])
+				if strings.HasPrefix(above, "#") {
+					continue
+				}
+				if above == "" {
+					hasTrailerBlock = true
+					break
+				}
+				if !IsTrailerLine(above) {
+					break
+				}
+			}
+		}
+	}
+
+	if hasTrailerBlock {
+		return trimmed + "\n" + trailer + "\n"
+	}
+	return trimmed + "\n\n" + trailer + "\n"
+}

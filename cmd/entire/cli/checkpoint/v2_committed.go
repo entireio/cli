@@ -368,8 +368,8 @@ func (s *V2GitStore) writeContentHash(redactedTranscript []byte, sessionPath str
 
 // writeCommittedFullTranscript writes the raw transcript to the /full/current ref.
 // Transcripts accumulate across checkpoints — each write splices into the existing
-// tree. When the ref reaches capacity, generation rotation (future work) archives
-// the current ref and starts a fresh one.
+// tree. Generation metadata (generation.json) at the tree root is updated on every
+// write with the new checkpoint ID and timestamps.
 //
 // sessionIndex is the session slot (0-based), determined by the caller to stay
 // consistent with the /main ref's session numbering.
@@ -423,14 +423,41 @@ func (s *V2GitStore) writeCommittedFullTranscript(ctx context.Context, opts Writ
 		return err
 	}
 
-	// Splice into existing root tree (preserves other checkpoints' transcripts)
+	// Splice checkpoint data into the root tree (preserves other checkpoints' transcripts)
 	newTreeHash, err := s.gs.spliceCheckpointSubtree(rootTreeHash, opts.CheckpointID, basePath, entries)
 	if err != nil {
 		return err
 	}
 
+	// Update generation.json at the tree root with the new checkpoint ID and timestamps.
+	// This reads from the pre-splice root tree (to get existing metadata) and writes
+	// into the post-splice tree (which already has the shard directories).
+	gen, err := s.updateGenerationForWrite(rootTreeHash, opts.CheckpointID, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("failed to update generation metadata: %w", err)
+	}
+	newTreeHash, err = s.addGenerationToRootTree(newTreeHash, gen)
+	if err != nil {
+		return fmt.Errorf("failed to add generation.json to tree: %w", err)
+	}
+
 	commitMsg := fmt.Sprintf("Checkpoint: %s\n", opts.CheckpointID)
-	return s.updateRef(refName, newTreeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
+	if err := s.updateRef(refName, newTreeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail); err != nil {
+		return err
+	}
+
+	// Check if rotation is needed after successful write.
+	if len(gen.Checkpoints) >= s.maxCheckpoints() {
+		if rotErr := s.rotateGeneration(ctx); rotErr != nil {
+			logging.Warn(ctx, "generation rotation failed",
+				slog.String("error", rotErr.Error()),
+				slog.Int("checkpoint_count", len(gen.Checkpoints)),
+			)
+			// Non-fatal: rotation failure doesn't invalidate the write
+		}
+	}
+
+	return nil
 }
 
 // writeTranscriptBlobs writes redacted, chunked transcript blobs to entries.

@@ -25,3 +25,11 @@ run = """
 go test -tags=integration -race ./...
 mise run test:e2e:canary
 """
+
+[tasks."build:windows"]
+description = "Cross-compile for Windows amd64"
+run = "CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o entire.exe ./cmd/entire/"
+
+[tasks."build:windows-arm64"]
+description = "Cross-compile for Windows arm64"
+run = "CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -o entire-arm64.exe ./cmd/entire/"

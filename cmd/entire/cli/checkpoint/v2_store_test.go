@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -714,4 +715,92 @@ func TestV2GitStore_UpdateCommitted_CheckpointNotFound(t *testing.T) {
 		Agent:        agent.AgentTypeClaudeCode,
 	})
 	require.Error(t, err)
+}
+
+func TestWriteCommitted_TriggersRotationAtThreshold(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo)
+	store.maxCheckpointsPerGeneration = 3 // Low threshold for testing
+	ctx := context.Background()
+
+	// Write 3 checkpoints — the 3rd should trigger rotation
+	for i := range 3 {
+		cpID := id.MustCheckpointID(fmt.Sprintf("%012x", i+1))
+		err := store.WriteCommitted(ctx, WriteCommittedOptions{
+			CheckpointID: cpID,
+			SessionID:    fmt.Sprintf("session-rot-%d", i),
+			Strategy:     "manual-commit",
+			Agent:        agent.AgentTypeClaudeCode,
+			Transcript:   []byte(fmt.Sprintf(`{"cp":%d}`, i)),
+			AuthorName:   "Test",
+			AuthorEmail:  "test@test.com",
+		})
+		require.NoError(t, err)
+	}
+
+	// Verify an archived generation exists
+	archived, err := store.listArchivedGenerations()
+	require.NoError(t, err)
+	assert.Len(t, archived, 1, "one archived generation should exist after rotation")
+
+	// Verify /full/current is now a fresh generation
+	gen, err := store.readGenerationFromRef(plumbing.ReferenceName(paths.V2FullCurrentRefName))
+	require.NoError(t, err)
+	assert.Empty(t, gen.Checkpoints, "fresh /full/current should have no checkpoints")
+
+	// Verify the archived generation has 3 checkpoints
+	archiveGen, err := store.readGenerationFromRef(plumbing.ReferenceName(paths.V2FullRefPrefix + archived[0]))
+	require.NoError(t, err)
+	assert.Len(t, archiveGen.Checkpoints, 3)
+
+	// Write a 4th checkpoint — should land on the fresh /full/current
+	cpID4 := id.MustCheckpointID("000000000004")
+	err = store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID4,
+		SessionID:    "session-rot-3",
+		Strategy:     "manual-commit",
+		Agent:        agent.AgentTypeClaudeCode,
+		Transcript:   []byte(`{"cp":3}`),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})
+	require.NoError(t, err)
+
+	gen, err = store.readGenerationFromRef(plumbing.ReferenceName(paths.V2FullCurrentRefName))
+	require.NoError(t, err)
+	assert.Len(t, gen.Checkpoints, 1, "new checkpoint should be on fresh generation")
+	assert.Equal(t, cpID4, gen.Checkpoints[0])
+}
+
+func TestWriteCommitted_NoRotationBelowThreshold(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo)
+	store.maxCheckpointsPerGeneration = 5
+	ctx := context.Background()
+
+	// Write 3 checkpoints (below threshold of 5)
+	for i := range 3 {
+		cpID := id.MustCheckpointID(fmt.Sprintf("%012x", i+100))
+		err := store.WriteCommitted(ctx, WriteCommittedOptions{
+			CheckpointID: cpID,
+			SessionID:    fmt.Sprintf("session-norot-%d", i),
+			Strategy:     "manual-commit",
+			Agent:        agent.AgentTypeClaudeCode,
+			Transcript:   []byte(fmt.Sprintf(`{"cp":%d}`, i)),
+			AuthorName:   "Test",
+			AuthorEmail:  "test@test.com",
+		})
+		require.NoError(t, err)
+	}
+
+	// No rotation should have occurred
+	archived, err := store.listArchivedGenerations()
+	require.NoError(t, err)
+	assert.Empty(t, archived, "no archived generations should exist below threshold")
+
+	gen, err := store.readGenerationFromRef(plumbing.ReferenceName(paths.V2FullCurrentRefName))
+	require.NoError(t, err)
+	assert.Len(t, gen.Checkpoints, 3)
 }

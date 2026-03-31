@@ -109,6 +109,23 @@ func (env *TestEnv) Cleanup() {
 	// No-op - temp dirs are cleaned up by t.TempDir()
 }
 
+// gitEmptyConfigPath returns the path to an empty file suitable for use as
+// GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM. We use an empty file instead of
+// os.DevNull because git on Windows cannot open NUL as a config file.
+var gitEmptyConfig string
+
+func gitEmptyConfigPath() string {
+	if gitEmptyConfig == "" {
+		f, err := os.CreateTemp("", "git-empty-config-*")
+		if err != nil {
+			panic("create empty git config: " + err.Error())
+		}
+		f.Close()
+		gitEmptyConfig = f.Name()
+	}
+	return gitEmptyConfig
+}
+
 // cliEnv returns the environment variables for CLI execution.
 // Includes Claude, Gemini, and OpenCode project dirs so tests work for any agent.
 // Delegates to testutil.GitIsolatedEnv() for git config isolation.

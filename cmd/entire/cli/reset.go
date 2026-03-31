@@ -1,14 +1,12 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"fmt"
 
 	"github.com/charmbracelet/huh"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/spf13/cobra"
 )
 
@@ -17,39 +15,29 @@ func newResetCmd() *cobra.Command {
 	var sessionFlag string
 
 	cmd := &cobra.Command{
-		Use:   "reset",
-		Short: "Reset the shadow branch and session state for current HEAD",
-		Long: `Reset deletes the shadow branch and session state for the current HEAD commit.
-
-This allows starting fresh without existing checkpoints on your current commit.
-
-
-The command will:
-  - Find all sessions where base_commit matches the current HEAD
-  - Delete each session state file (.git/entire-sessions/<session-id>.json)
-  - Delete the shadow branch (entire/<commit-hash>-<worktree-hash>)
-
-Use --session <id> to reset a single session instead of all sessions.
-
-Example: If HEAD is at commit abc1234567890, the command will:
-  1. Find all .json files in .git/entire-sessions/ with "base_commit": "abc1234567890"
-  2. Delete those session files (e.g., 2026-02-02-xyz123.json, 2026-02-02-abc456.json)
-  3. Delete the shadow branch entire/abc1234-fd5432
-
-Without --force, prompts for confirmation before deleting.`,
+		Use:        "reset",
+		Short:      "Reset the shadow branch and session state for current HEAD",
+		Deprecated: "use 'entire clean' instead (or 'entire clean --all' for repo-wide cleanup)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			// Check if in git repository
+
+			// Check if in git repository before initializing logging,
+			// to avoid creating .entire/logs in arbitrary directories.
 			if _, err := paths.WorktreeRoot(ctx); err != nil {
 				return errors.New("not a git repository")
 			}
 
-			// Get current strategy
+			// Initialize logging
+			logging.SetLogLevelGetter(GetLogLevel)
+			if err := logging.Init(ctx, ""); err == nil {
+				defer logging.Close()
+			}
+
 			strat := GetStrategy(ctx)
 
-			// Handle --session flag: reset a single session
+			// Handle --session flag: delegate to clean's session logic
 			if sessionFlag != "" {
-				return runResetSession(ctx, cmd, strat, sessionFlag, forceFlag)
+				return runCleanSession(ctx, cmd, strat, sessionFlag, forceFlag, false, "Reset", "reset")
 			}
 
 			// Check for active sessions before bulk reset
@@ -91,7 +79,6 @@ Without --force, prompts for confirmation before deleting.`,
 				}
 			}
 
-			// Call strategy's Reset method
 			if err := strat.Reset(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
 				return fmt.Errorf("reset failed: %w", err)
 			}
@@ -104,80 +91,4 @@ Without --force, prompts for confirmation before deleting.`,
 	cmd.Flags().StringVar(&sessionFlag, "session", "", "Reset a specific session by ID")
 
 	return cmd
-}
-
-// runResetSession handles the --session flag: reset a single session.
-func runResetSession(ctx context.Context, cmd *cobra.Command, strat *strategy.ManualCommitStrategy, sessionID string, force bool) error {
-	// Verify the session exists
-	state, err := strategy.LoadSessionState(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to load session: %w", err)
-	}
-	if state == nil {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
-
-	if !force {
-		var confirmed bool
-
-		title := fmt.Sprintf("Reset session %s?", sessionID)
-		description := fmt.Sprintf("Phase: %s, Checkpoints: %d", state.Phase, state.StepCount)
-
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title(title).
-					Description(description).
-					Value(&confirmed),
-			),
-		)
-
-		if err := form.Run(); err != nil {
-			return handleFormCancellation(cmd.OutOrStdout(), "Reset", err)
-		}
-
-		if !confirmed {
-			fmt.Fprintln(cmd.OutOrStdout(), "Reset cancelled.")
-			return nil
-		}
-	}
-
-	if err := strat.ResetSession(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), sessionID); err != nil {
-		return fmt.Errorf("reset session failed: %w", err)
-	}
-
-	fmt.Fprintf(cmd.OutOrStdout(), "✓ Session %s has been reset. File changes remain in the working directory.\n", sessionID)
-	return nil
-}
-
-// activeSessionsOnCurrentHead returns sessions on the current HEAD
-// that are in an active phase (ACTIVE).
-func activeSessionsOnCurrentHead(ctx context.Context) ([]*session.State, error) {
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	head, err := repo.Head()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get HEAD: %w", err)
-	}
-	currentHead := head.Hash().String()
-
-	states, err := strategy.ListSessionStates(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list session states: %w", err)
-	}
-
-	var active []*session.State
-	for _, state := range states {
-		if state.BaseCommit != currentHead {
-			continue
-		}
-		if state.Phase.IsActive() {
-			active = append(active, state)
-		}
-	}
-
-	return active, nil
 }

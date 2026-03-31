@@ -123,6 +123,17 @@ func (g *GeminiCLIAgent) GetSessionDir(repoPath string) (string, error) {
 	return filepath.Join(homeDir, ".gemini", "tmp", projectDir, "chats"), nil
 }
 
+// GetSessionBaseDir returns the base directory containing per-project session subdirectories.
+// Unlike GetSessionDir, this does NOT use ENTIRE_TEST_GEMINI_PROJECT_DIR because the
+// test override points to a specific project dir, not the base containing all projects.
+func (g *GeminiCLIAgent) GetSessionBaseDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(homeDir, ".gemini", "tmp"), nil
+}
+
 // ReadSession reads a session from Gemini's storage (JSON transcript file).
 // The session data is stored in NativeData as raw JSON bytes.
 func (g *GeminiCLIAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {
