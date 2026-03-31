@@ -87,20 +87,18 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 			w := cmd.OutOrStdout()
 			isTerminal := isTerminalWriter(w)
 
-			hasFilters := searchCfg.Author != "" || searchCfg.Date != ""
-
 			// No query and no filters + non-interactive = error
-			if query == "" && !hasFilters && (jsonOutput || !isTerminal) {
+			if query == "" && !searchCfg.HasFilters() && (jsonOutput || !isTerminal) {
 				return errors.New("query required when using --json or piped output. Usage: entire search <query>")
 			}
 
 			// Use wildcard query when only filters are provided
-			if query == "" && hasFilters {
-				searchCfg.Query = "*"
+			if query == "" && searchCfg.HasFilters() {
+				searchCfg.Query = search.WildcardQuery
 			}
 
 			// No query provided + interactive = open TUI with search bar focused
-			if query == "" && !hasFilters {
+			if query == "" && !searchCfg.HasFilters() {
 				styles := newStatusStyles(w)
 				model := newSearchModel(nil, "", 0, searchCfg, styles)
 				model.mode = modeSearch

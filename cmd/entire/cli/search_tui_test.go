@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -395,6 +396,120 @@ func TestRenderSearchStatic(t *testing.T) {
 	}
 	if !strings.Contains(output, "d5e6f789ab") {
 		t.Error("static output missing second result ID")
+	}
+}
+
+func TestSearchModel_PageResults(t *testing.T) {
+	t.Parallel()
+
+	// With 2 results and 25 per page, everything fits on page 0
+	m := testModel()
+	page := m.pageResults()
+	if len(page) != 2 {
+		t.Errorf("pageResults() = %d items, want 2", len(page))
+	}
+
+	// Out-of-range page returns nil
+	m.page = 5
+	if got := m.pageResults(); got != nil {
+		t.Errorf("pageResults() on out-of-range page = %v, want nil", got)
+	}
+}
+
+func TestSearchModel_TotalPages(t *testing.T) {
+	t.Parallel()
+
+	// 2 results, 25 per page = 1 page
+	m := testModel()
+	if got := m.totalPages(); got != 1 {
+		t.Errorf("totalPages() with 2 results = %d, want 1", got)
+	}
+
+	// 0 results = 1 page (empty state)
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{}
+	empty := newSearchModel(nil, "", 0, cfg, ss)
+	if got := empty.totalPages(); got != 1 {
+		t.Errorf("totalPages() with 0 results = %d, want 1", got)
+	}
+
+	// 26 results = 2 pages
+	many := newSearchModel(make([]search.Result, 26), "q", 26, cfg, ss)
+	if got := many.totalPages(); got != 2 {
+		t.Errorf("totalPages() with 26 results = %d, want 2", got)
+	}
+}
+
+func TestSearchModel_SelectedResult(t *testing.T) {
+	t.Parallel()
+
+	m := testModel()
+	r := m.selectedResult()
+	if r == nil {
+		t.Fatal("selectedResult() = nil, want first result")
+	}
+	if r.Data.ID != "a3b2c4d5e6f7" {
+		t.Errorf("selectedResult().Data.ID = %q, want %q", r.Data.ID, "a3b2c4d5e6f7")
+	}
+
+	// Move cursor to second result
+	m.cursor = 1
+	r = m.selectedResult()
+	if r == nil {
+		t.Fatal("selectedResult() at cursor 1 = nil")
+	}
+	if r.Data.ID != "d5e6f789ab01" {
+		t.Errorf("selectedResult().Data.ID = %q, want %q", r.Data.ID, "d5e6f789ab01")
+	}
+
+	// Out-of-range cursor returns nil
+	m.cursor = 99
+	if got := m.selectedResult(); got != nil {
+		t.Errorf("selectedResult() at cursor 99 = %v, want nil", got)
+	}
+}
+
+func TestSearchModel_PageNavigation(t *testing.T) {
+	t.Parallel()
+
+	// Create model with 30 results (2 pages)
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r"}
+	results := make([]search.Result, 30)
+	for i := range results {
+		results[i] = search.Result{Data: search.CheckpointResult{ID: fmt.Sprintf("id-%02d", i)}}
+	}
+	m := newSearchModel(results, "q", 30, cfg, ss)
+
+	if m.page != 0 {
+		t.Fatalf("initial page = %d, want 0", m.page)
+	}
+
+	// Navigate to next page
+	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if m.page != 1 {
+		t.Errorf("after 'n': page = %d, want 1", m.page)
+	}
+	if m.cursor != 0 {
+		t.Errorf("after 'n': cursor = %d, want 0 (reset)", m.cursor)
+	}
+
+	// Can't go past last page
+	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if m.page != 1 {
+		t.Errorf("after 'n' on last page: page = %d, want 1", m.page)
+	}
+
+	// Navigate back
+	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if m.page != 0 {
+		t.Errorf("after 'p': page = %d, want 0", m.page)
+	}
+
+	// Can't go before first page
+	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if m.page != 0 {
+		t.Errorf("after 'p' on first page: page = %d, want 0", m.page)
 	}
 }
 

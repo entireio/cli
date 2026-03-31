@@ -17,6 +17,9 @@ const apiTimeout = 30 * time.Second
 // DefaultServiceURL is the production search service URL.
 const DefaultServiceURL = "https://entire.io"
 
+// WildcardQuery is the query string used when only filters are provided (no search terms).
+const WildcardQuery = "*"
+
 // Meta contains search ranking metadata for a result.
 type Meta struct {
 	MatchType string  `json:"matchType"`
@@ -64,6 +67,11 @@ type Config struct {
 	Limit       int
 	Author      string // Filter by author name
 	Date        string // Filter by time period: "week" or "month"
+}
+
+// HasFilters reports whether any filter fields (Author, Date) are set on the config.
+func (c Config) HasFilters() bool {
+	return c.Author != "" || c.Date != ""
 }
 
 // ParsedInput holds the parsed query and optional filters extracted from search input.

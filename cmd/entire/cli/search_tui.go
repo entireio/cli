@@ -192,7 +192,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 		parsed := search.ParseSearchInput(raw)
 		cfg.Query = parsed.Query
 		if cfg.Query == "" {
-			cfg.Query = "*" // wildcard when only filters are provided
+			cfg.Query = search.WildcardQuery
 		}
 		if parsed.Author != "" {
 			cfg.Author = parsed.Author
@@ -417,16 +417,18 @@ func (m searchModel) viewHelp() string {
 			m.styles.render(m.styles.helpKey, "esc") + " cancel" + "\n"
 	}
 
+	pages := m.totalPages()
+
 	left := m.styles.render(m.styles.helpKey, "/") + " search" + dot +
 		m.styles.render(m.styles.helpKey, "j/k") + " navigate"
-	if m.totalPages() > 1 {
+	if pages > 1 {
 		left += dot + m.styles.render(m.styles.helpKey, "n/p") + " page"
 	}
 	left += dot + m.styles.render(m.styles.helpKey, "q") + " quit"
 
 	right := fmt.Sprintf("%d results", m.total)
-	if m.totalPages() > 1 {
-		right = fmt.Sprintf("page %d/%d · %d results", m.page+1, m.totalPages(), m.total)
+	if pages > 1 {
+		right = fmt.Sprintf("page %d/%d · %d results", m.page+1, pages, m.total)
 	}
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2

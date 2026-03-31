@@ -340,6 +340,25 @@ func TestSearch_EmptyFiltersOmitParams(t *testing.T) {
 	}
 }
 
+// -- HasFilters tests --
+
+func TestConfig_HasFilters(t *testing.T) {
+	t.Parallel()
+
+	if (Config{}).HasFilters() {
+		t.Error("empty config should not have filters")
+	}
+	if !(Config{Author: "alice"}).HasFilters() {
+		t.Error("config with Author should have filters")
+	}
+	if !(Config{Date: "week"}).HasFilters() {
+		t.Error("config with Date should have filters")
+	}
+	if !(Config{Author: "alice", Date: "week"}).HasFilters() {
+		t.Error("config with both should have filters")
+	}
+}
+
 // -- ParseSearchInput tests --
 
 const testQuery = "auth"
