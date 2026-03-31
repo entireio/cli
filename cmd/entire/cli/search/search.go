@@ -145,7 +145,7 @@ func tokenizeInput(s string) []string {
 	return tokens
 }
 
-var httpClient = &http.Client{Timeout: apiTimeout}
+var httpClient = &http.Client{}
 
 // Search calls the search service to perform a hybrid search.
 func Search(ctx context.Context, cfg Config) (*Response, error) {

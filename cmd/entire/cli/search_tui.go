@@ -182,7 +182,12 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn
 			return m, nil
 		}
 		m.apiPage++
-		m.results = append(m.results, msg.results...)
+		if len(msg.results) > 0 {
+			m.results = append(m.results, msg.results...)
+		} else {
+			// API returned no more results — cap total to what we have
+			m.total = len(m.results)
+		}
 		return m, nil
 
 	case tea.WindowSizeMsg:
