@@ -207,52 +207,9 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | `entire login`   | Authenticate the CLI with Entire device auth                                                      |
 | `entire resume`  | Switch to a branch, restore latest checkpointed session metadata, and show command(s) to continue |
 | `entire rewind`  | Rewind to a previous checkpoint                                                                   |
-| `entire search`  | Search checkpoints using semantic and keyword matching                                            |
 | `entire status`  | Show current session info                                                                         |
 | `entire sessions stop` | Mark one or more active sessions as ended                                                   |
 | `entire version` | Show Entire CLI version                                                                           |
-
-### `entire search`
-
-Search checkpoints across the current repository using hybrid search (semantic + keyword). Results are ranked using Reciprocal Rank Fusion (RRF), combining OpenAI embeddings with BM25 full-text search.
-
-```bash
-# Interactive search (opens TUI with search bar)
-entire search
-
-# Search with a query
-entire search "implement login feature"
-
-# Filter by author or time period
-entire search "fix bug" --author alice
-entire search "add tests" --date week
-
-# Use filter syntax in the search bar
-entire search "auth author:alice date:week"
-
-# Limit results
-entire search "add tests" --limit 10
-
-# JSON output for scripting
-entire search "fix auth bug" --json
-```
-
-| Flag       | Description                             |
-| ---------- | --------------------------------------- |
-| `--json`   | Output results as JSON                  |
-| `--limit`  | Maximum number of results (default: 20) |
-| `--author` | Filter by author name                   |
-| `--date`   | Filter by time period (`week` or `month`) |
-
-**Search bar syntax:** In the interactive TUI, you can type filters directly: `auth author:alice date:week`. Supports quoted values: `author:"Alice Smith"`.
-
-**Authentication:** `entire search` requires authentication. Run `entire login` first to authenticate via Entire device auth — your token is stored in the OS keyring and used automatically.
-
-**Environment variables:**
-
-| Variable             | Description                                                |
-| -------------------- | ---------------------------------------------------------- |
-| `ENTIRE_SEARCH_URL`  | Override the search service URL (default: `https://entire.io`) |
 
 ### `entire enable` Flags
 
