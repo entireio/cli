@@ -185,7 +185,7 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Authorization", "token "+cfg.GitHubToken)
+	req.Header.Set("Authorization", "Bearer "+cfg.GitHubToken)
 	req.Header.Set("User-Agent", "entire-cli")
 
 	resp, err := httpClient.Do(req)

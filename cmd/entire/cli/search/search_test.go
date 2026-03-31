@@ -117,8 +117,8 @@ func TestSearch_URLConstruction(t *testing.T) {
 	if capturedReq.URL.Query().Get("limit") != "10" {
 		t.Errorf("limit = %s, want '10'", capturedReq.URL.Query().Get("limit"))
 	}
-	if capturedReq.Header.Get("Authorization") != "token ghp_test123" {
-		t.Errorf("auth header = %s, want 'token ghp_test123'", capturedReq.Header.Get("Authorization"))
+	if capturedReq.Header.Get("Authorization") != "Bearer ghp_test123" {
+		t.Errorf("auth header = %s, want 'Bearer ghp_test123'", capturedReq.Header.Get("Authorization"))
 	}
 	if capturedReq.Header.Get("User-Agent") != "entire-cli" {
 		t.Errorf("user-agent = %s, want 'entire-cli'", capturedReq.Header.Get("User-Agent"))

@@ -657,17 +657,17 @@ func TestSearchModel_NewSearchClearsFilters(t *testing.T) {
 		t.Fatal("expected a search command")
 	}
 
-	// The searchCfg on the model should still have the original filters
-	// (it's a copy), but the search was dispatched with cleared filters.
-	// We verify by checking the model's stored config is unchanged.
-	if m.searchCfg.Author != "alice" {
-		t.Error("model's searchCfg.Author should be unchanged")
+	// searchCfg should be updated with the new query and cleared filters,
+	// so that fetchMoreResults uses the correct config for page 2+.
+	if m.searchCfg.Author != "" {
+		t.Errorf("searchCfg.Author should be cleared, got %q", m.searchCfg.Author)
 	}
-
-	// To verify the dispatched config has cleared filters, we inspect
-	// that the model transitioned correctly (loading=true means the
-	// performSearch was called with the new config). The actual HTTP
-	// verification is covered by search_test.go's empty filter tests.
+	if m.searchCfg.Date != "" {
+		t.Errorf("searchCfg.Date should be cleared, got %q", m.searchCfg.Date)
+	}
+	if m.searchCfg.Query != "new query" {
+		t.Errorf("searchCfg.Query = %q, want %q", m.searchCfg.Query, "new query")
+	}
 }
 
 func TestComputeColumns(t *testing.T) {

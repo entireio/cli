@@ -227,6 +227,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 		}
 		cfg.Author = parsed.Author
 		cfg.Date = parsed.Date
+		m.searchCfg = cfg
 		return m, performSearch(cfg)
 	}
 

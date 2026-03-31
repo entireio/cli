@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/search"
@@ -71,6 +72,9 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 			serviceURL := os.Getenv("ENTIRE_SEARCH_URL")
 			if serviceURL == "" {
 				serviceURL = search.DefaultServiceURL
+			}
+			if err := api.RequireSecureURL(serviceURL); err != nil {
+				return fmt.Errorf("search service URL: %w", err)
 			}
 
 			searchCfg := search.Config{
