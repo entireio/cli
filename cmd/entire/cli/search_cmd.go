@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/search"
@@ -38,6 +37,16 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			query := strings.Join(args, " ")
+
+			// Extract inline filters (author:, date:) from query args
+			parsed := search.ParseSearchInput(query)
+			query = parsed.Query
+			if authorFlag == "" {
+				authorFlag = parsed.Author
+			}
+			if dateFlag == "" {
+				dateFlag = parsed.Date
+			}
 
 			ghToken, err := auth.LookupCurrentToken()
 			if err != nil {
@@ -72,9 +81,6 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 			serviceURL := os.Getenv("ENTIRE_SEARCH_URL")
 			if serviceURL == "" {
 				serviceURL = search.DefaultServiceURL
-			}
-			if err := api.RequireSecureURL(serviceURL); err != nil {
-				return fmt.Errorf("search service URL: %w", err)
 			}
 
 			searchCfg := search.Config{
