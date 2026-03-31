@@ -363,7 +363,7 @@ func (m searchModel) View() string {
 }
 
 func (m searchModel) viewTable() string {
-	contentWidth := m.width - 2 // 1 char padding each side
+	contentWidth := max(m.width-2, 0) // 1 char padding each side
 	cols := computeColumns(contentWidth)
 	pad := " "
 

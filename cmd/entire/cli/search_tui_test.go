@@ -289,6 +289,17 @@ func TestSearchModel_ViewZeroWidth(t *testing.T) {
 	}
 }
 
+func TestSearchModel_ViewNarrowWidth(t *testing.T) {
+	t.Parallel()
+	ss := statusStyles{colorEnabled: false, width: 1}
+	cfg := search.Config{}
+	m := newSearchModel(testResults(), "auth", 2, cfg, ss)
+	m.width = 1
+
+	// Should not panic on width=1 (contentWidth would be negative without guard)
+	_ = m.View()
+}
+
 func TestSearchModel_SearchResultsMsg(t *testing.T) {
 	t.Parallel()
 	m := testModel()

@@ -97,7 +97,7 @@ func ParseSearchInput(raw string) ParsedInput {
 		case strings.HasPrefix(tok, "author:"):
 			p.Author = strings.Trim(tok[len("author:"):], "\"")
 		case strings.HasPrefix(tok, "date:"):
-			p.Date = tok[len("date:"):]
+			p.Date = strings.Trim(tok[len("date:"):], "\"")
 		default:
 			queryParts = append(queryParts, tok)
 		}

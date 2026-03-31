@@ -9,7 +9,9 @@ import (
 )
 
 // ParseGitHubRemote extracts owner and repo from a GitHub remote URL.
-// Supports SSH (git@github.com:owner/repo.git) and HTTPS (https://github.com/owner/repo.git).
+// Supports SCP-style SSH (git@github.com:owner/repo.git),
+// ssh:// URLs (ssh://git@github.com/owner/repo.git),
+// and HTTPS (https://github.com/owner/repo.git).
 func ParseGitHubRemote(remoteURL string) (owner, repo string, err error) {
 	remoteURL = strings.TrimSpace(remoteURL)
 	if remoteURL == "" {
@@ -18,8 +20,9 @@ func ParseGitHubRemote(remoteURL string) (owner, repo string, err error) {
 
 	var path string
 
-	// SSH format: git@github.com:owner/repo.git
-	if strings.HasPrefix(remoteURL, "git@") {
+	// SCP-style SSH: git@github.com:owner/repo.git
+	// Distinguished from ssh:// URLs by having no scheme and a colon before the path.
+	if strings.HasPrefix(remoteURL, "git@") && !strings.Contains(remoteURL, "://") {
 		idx := strings.Index(remoteURL, ":")
 		if idx < 0 {
 			return "", "", fmt.Errorf("invalid SSH remote URL: %s", remoteURL)
@@ -30,13 +33,14 @@ func ParseGitHubRemote(remoteURL string) (owner, repo string, err error) {
 		}
 		path = remoteURL[idx+1:]
 	} else {
-		// HTTPS format: https://github.com/owner/repo.git
+		// URL format: https://, ssh://, git://
 		u, parseErr := url.Parse(remoteURL)
 		if parseErr != nil {
 			return "", "", fmt.Errorf("parsing remote URL: %w", parseErr)
 		}
-		if u.Host != "github.com" {
-			return "", "", fmt.Errorf("remote is not a GitHub repository (host: %s)", u.Host)
+		host := u.Hostname()
+		if host != "github.com" {
+			return "", "", fmt.Errorf("remote is not a GitHub repository (host: %s)", host)
 		}
 		path = strings.TrimPrefix(u.Path, "/")
 	}

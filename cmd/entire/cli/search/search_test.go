@@ -60,6 +60,28 @@ func TestParseGitHubRemote_Invalid(t *testing.T) {
 	}
 }
 
+func TestParseGitHubRemote_SSHProtocol(t *testing.T) {
+	t.Parallel()
+	owner, repo, err := ParseGitHubRemote("ssh://git@github.com/entirehq/entire.io.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner != testOwner || repo != testRepo {
+		t.Errorf("got %s/%s, want %s/%s", owner, repo, testOwner, testRepo)
+	}
+}
+
+func TestParseGitHubRemote_SSHProtocolNoGit(t *testing.T) {
+	t.Parallel()
+	owner, repo, err := ParseGitHubRemote("ssh://git@github.com/entirehq/entire.io")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner != testOwner || repo != testRepo {
+		t.Errorf("got %s/%s, want %s/%s", owner, repo, testOwner, testRepo)
+	}
+}
+
 func TestParseGitHubRemote_NonGitHubSSH(t *testing.T) {
 	t.Parallel()
 	_, _, err := ParseGitHubRemote("git@gitlab.com:entirehq/entire.io.git")
@@ -295,7 +317,7 @@ func TestSearch_FilterParams(t *testing.T) {
 		Repo:        "r",
 		Query:       "q",
 		Author:      testAuthor,
-		Date:        "week",
+		Date:        testDateWeek,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -304,7 +326,7 @@ func TestSearch_FilterParams(t *testing.T) {
 	if capturedReq.URL.Query().Get("author") != testAuthor {
 		t.Errorf("author = %s, want %q", capturedReq.URL.Query().Get("author"), testAuthor)
 	}
-	if capturedReq.URL.Query().Get("date") != "week" {
+	if capturedReq.URL.Query().Get("date") != testDateWeek {
 		t.Errorf("date = %s, want 'week'", capturedReq.URL.Query().Get("date"))
 	}
 }
@@ -408,10 +430,10 @@ func TestConfig_HasFilters(t *testing.T) {
 	if !(Config{Author: "alice"}).HasFilters() {
 		t.Error("config with Author should have filters")
 	}
-	if !(Config{Date: "week"}).HasFilters() {
+	if !(Config{Date: testDateWeek}).HasFilters() {
 		t.Error("config with Date should have filters")
 	}
-	if !(Config{Author: "alice", Date: "week"}).HasFilters() {
+	if !(Config{Author: "alice", Date: testDateWeek}).HasFilters() {
 		t.Error("config with both should have filters")
 	}
 }
@@ -420,6 +442,7 @@ func TestConfig_HasFilters(t *testing.T) {
 
 const testQuery = "auth"
 const testAuthor = "alice"
+const testDateWeek = "week"
 
 func TestParseSearchInput_QueryOnly(t *testing.T) {
 	t.Parallel()
@@ -449,7 +472,7 @@ func TestParseSearchInput_DateFilter(t *testing.T) {
 	if p.Query != testQuery {
 		t.Errorf("query = %q, want %q", p.Query, testQuery)
 	}
-	if p.Date != "week" {
+	if p.Date != testDateWeek {
 		t.Errorf("date = %q, want 'week'", p.Date)
 	}
 }
@@ -476,6 +499,14 @@ func TestParseSearchInput_QuotedAuthor(t *testing.T) {
 	}
 	if p.Query != "fix bug" {
 		t.Errorf("query = %q, want 'fix bug'", p.Query)
+	}
+}
+
+func TestParseSearchInput_QuotedDate(t *testing.T) {
+	t.Parallel()
+	p := ParseSearchInput(`date:"week"`)
+	if p.Date != testDateWeek {
+		t.Errorf("date = %q, want 'week' (quotes should be stripped)", p.Date)
 	}
 }
 
