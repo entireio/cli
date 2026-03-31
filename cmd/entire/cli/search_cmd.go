@@ -52,6 +52,15 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 				branchFlag = parsed.Branch
 			}
 
+			w := cmd.OutOrStdout()
+			isTerminal := isTerminalWriter(w)
+			hasFilters := authorFlag != "" || dateFlag != "" || branchFlag != ""
+
+			// Fast-fail: no query + non-interactive mode = error (before auth/git checks)
+			if query == "" && !hasFilters && (jsonOutput || !isTerminal || IsAccessibleMode()) {
+				return errors.New("query required when using --json, accessible mode, or piped output. Usage: entire search <query>")
+			}
+
 			ghToken, err := auth.LookupCurrentToken()
 			if err != nil {
 				return fmt.Errorf("reading credentials: %w", err)
@@ -97,14 +106,6 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 				Author:      authorFlag,
 				Date:        dateFlag,
 				Branch:      branchFlag,
-			}
-
-			w := cmd.OutOrStdout()
-			isTerminal := isTerminalWriter(w)
-
-			// No query and no filters + non-interactive = error
-			if query == "" && !searchCfg.HasFilters() && (jsonOutput || !isTerminal || IsAccessibleMode()) {
-				return errors.New("query required when using --json, accessible mode, or piped output. Usage: entire search <query>")
 			}
 
 			// Use wildcard query when only filters are provided
