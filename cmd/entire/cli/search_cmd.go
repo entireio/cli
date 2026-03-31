@@ -99,7 +99,7 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 
 			// No query provided + interactive = open TUI with search bar focused
 			if query == "" && !searchCfg.HasFilters() {
-				searchCfg.Limit = resultsPerPage
+				searchCfg.Limit = search.MaxLimit
 				styles := newStatusStyles(w)
 				model := newSearchModel(nil, "", 0, searchCfg, styles)
 				model.mode = modeSearch
@@ -111,10 +111,12 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 				return nil
 			}
 
-			// Align API page size with TUI display page size for interactive mode
+			// Fetch max results for TUI so client-side pagination works.
+			// The search API uses limit to cap total results fetched, so
+			// server-side page param alone is insufficient for pagination.
 			willUseTUI := !jsonOutput && isTerminal && !IsAccessibleMode()
-			if willUseTUI && searchCfg.Limit < resultsPerPage {
-				searchCfg.Limit = resultsPerPage
+			if willUseTUI {
+				searchCfg.Limit = search.MaxLimit
 			}
 
 			resp, err := search.Search(ctx, searchCfg)

@@ -20,6 +20,9 @@ const DefaultServiceURL = "https://entire.io"
 // WildcardQuery is the query string used when only filters are provided (no search terms).
 const WildcardQuery = "*"
 
+// MaxLimit is the maximum number of results the search API will return per request.
+const MaxLimit = 200
+
 // Meta contains search ranking metadata for a result.
 type Meta struct {
 	MatchType string  `json:"matchType"`
