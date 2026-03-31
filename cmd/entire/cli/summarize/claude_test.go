@@ -133,6 +133,67 @@ func TestClaudeGenerator_NonZeroExit(t *testing.T) {
 	}
 }
 
+func TestClaudeGenerator_ArrayResponse(t *testing.T) {
+	t.Parallel()
+
+	summaryJSON := `{\"intent\":\"Fix a bug\",\"outcome\":\"Bug fixed\",\"learnings\":{\"repo\":[],\"code\":[],\"workflow\":[]},\"friction\":[],\"open_items\":[]}`
+	// Claude Code 2.x array format with system, assistant, and result elements
+	response := `[{"type":"system","system":"..."},{"type":"assistant","message":"..."},{"type":"result","result":"` + summaryJSON + `"}]`
+
+	gen := &ClaudeGenerator{
+		CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+			return exec.CommandContext(ctx, "sh", "-c", "printf '%s' '"+response+"'")
+		},
+	}
+
+	input := Input{
+		Transcript: []Entry{
+			{Type: EntryTypeUser, Content: "Fix the bug"},
+		},
+	}
+
+	summary, err := gen.Generate(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if summary.Intent != "Fix a bug" {
+		t.Errorf("unexpected intent: %s", summary.Intent)
+	}
+
+	if summary.Outcome != "Bug fixed" {
+		t.Errorf("unexpected outcome: %s", summary.Outcome)
+	}
+}
+
+func TestClaudeGenerator_ArrayResponseNoResult(t *testing.T) {
+	t.Parallel()
+
+	// Array with no "result" type element
+	response := `[{"type":"system","system":"..."},{"type":"assistant","message":"..."}]`
+
+	gen := &ClaudeGenerator{
+		CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+			return exec.CommandContext(ctx, "sh", "-c", "printf '%s' '"+response+"'")
+		},
+	}
+
+	input := Input{
+		Transcript: []Entry{
+			{Type: EntryTypeUser, Content: "Hello"},
+		},
+	}
+
+	_, err := gen.Generate(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected error when array has no result element")
+	}
+
+	if !strings.Contains(err.Error(), "no result element") {
+		t.Errorf("expected 'no result element' error, got: %v", err)
+	}
+}
+
 func TestClaudeGenerator_ErrorCases(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -244,6 +305,70 @@ func TestClaudeGenerator_MarkdownCodeBlock(t *testing.T) {
 
 	if summary.Intent != "Test markdown extraction" {
 		t.Errorf("unexpected intent: %s", summary.Intent)
+	}
+}
+
+func TestParseClaudeCLIResult(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		input       string
+		expected    string
+		expectError string
+	}{
+		{
+			name:     "single object (1.x format)",
+			input:    `{"result": "the summary"}`,
+			expected: "the summary",
+		},
+		{
+			name:     "array with result (2.x format)",
+			input:    `[{"type":"system","system":"..."},{"type":"result","result":"the summary"}]`,
+			expected: "the summary",
+		},
+		{
+			name:     "array picks result type over others",
+			input:    `[{"type":"assistant","result":"wrong"},{"type":"result","result":"correct"}]`,
+			expected: "correct",
+		},
+		{
+			name:        "array with no result element",
+			input:       `[{"type":"system"},{"type":"assistant"}]`,
+			expectError: "no result element",
+		},
+		{
+			name:        "invalid JSON",
+			input:       `not json at all`,
+			expectError: "parse claude CLI response",
+		},
+		{
+			name:        "single object with empty result",
+			input:       `{"result": ""}`,
+			expectError: "empty result",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result, err := parseClaudeCLIResult([]byte(tt.input))
+			if tt.expectError != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.expectError)
+				}
+				if !strings.Contains(err.Error(), tt.expectError) {
+					t.Errorf("expected error containing %q, got: %v", tt.expectError, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
 	}
 }
 

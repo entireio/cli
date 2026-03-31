@@ -67,7 +67,10 @@ type ClaudeGenerator struct {
 }
 
 // claudeCLIResponse represents the JSON response from the Claude CLI.
+// Claude Code 1.x returns a single object: {"result": "..."}
+// Claude Code 2.x returns an array: [{type:"system",...}, {type:"result", result:"..."}]
 type claudeCLIResponse struct {
+	Type   string `json:"type"`
 	Result string `json:"result"`
 }
 
@@ -133,14 +136,13 @@ func (g *ClaudeGenerator) Generate(ctx context.Context, input Input) (*checkpoin
 		return nil, fmt.Errorf("failed to run claude CLI: %w", err)
 	}
 
-	// Parse the CLI response
-	var cliResponse claudeCLIResponse
-	if err := json.Unmarshal(stdout.Bytes(), &cliResponse); err != nil {
-		return nil, fmt.Errorf("failed to parse claude CLI response: %w", err)
+	// Parse the CLI response.
+	// Claude Code 2.x returns a JSON array of messages; extract the "result" element.
+	// Claude Code 1.x returns a single JSON object; try that as a fallback.
+	resultJSON, err := parseClaudeCLIResult(stdout.Bytes())
+	if err != nil {
+		return nil, err
 	}
-
-	// The result field contains the actual JSON summary
-	resultJSON := cliResponse.Result
 
 	// Try to extract JSON if it's wrapped in markdown code blocks
 	resultJSON = extractJSONFromMarkdown(resultJSON)
@@ -152,6 +154,33 @@ func (g *ClaudeGenerator) Generate(ctx context.Context, input Input) (*checkpoin
 	}
 
 	return &summary, nil
+}
+
+// parseClaudeCLIResult extracts the result string from the Claude CLI JSON output.
+// It handles both formats:
+//   - Claude Code 2.x: JSON array with a "type":"result" element
+//   - Claude Code 1.x: single JSON object with a "result" field
+func parseClaudeCLIResult(data []byte) (string, error) {
+	// Try array format first (Claude Code 2.x)
+	var responses []claudeCLIResponse
+	if err := json.Unmarshal(data, &responses); err == nil {
+		for _, r := range responses {
+			if r.Type == "result" && r.Result != "" {
+				return r.Result, nil
+			}
+		}
+		return "", errors.New("claude CLI response array contained no result element")
+	}
+
+	// Fall back to single object (Claude Code 1.x)
+	var single claudeCLIResponse
+	if err := json.Unmarshal(data, &single); err != nil {
+		return "", fmt.Errorf("failed to parse claude CLI response: %w", err)
+	}
+	if single.Result == "" {
+		return "", errors.New("claude CLI response contained empty result")
+	}
+	return single.Result, nil
 }
 
 // buildSummarizationPrompt creates the prompt for the Claude CLI.
