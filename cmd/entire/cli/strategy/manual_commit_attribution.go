@@ -218,7 +218,7 @@ func CalculateAttributionWithAccumulated(
 	// IMPORTANT: shadowTree is a snapshot of the worktree at checkpoint time,
 	// which includes both agent work AND accumulated user edits (to agent-touched files).
 	// So base→shadow diff = (agent work + accumulated user work to these files).
-	var totalAgentAndUserWork int
+	var totalAgentAndUserWorkAdded, totalAgentAndUserWorkRemoved int
 	var postCheckpointUserAdded, postCheckpointUserRemoved int
 	postCheckpointUserRemovedPerFile := make(map[string]int)
 
@@ -228,8 +228,9 @@ func CalculateAttributionWithAccumulated(
 		headContent := getFileContent(headTree, filePath)
 
 		// Total work in shadow: base → shadow (agent + accumulated user work for this file)
-		_, workAdded, _ := diffLines(baseContent, shadowContent)
-		totalAgentAndUserWork += workAdded
+		_, workAdded, workRemoved := diffLines(baseContent, shadowContent)
+		totalAgentAndUserWorkAdded += workAdded
+		totalAgentAndUserWorkRemoved += workRemoved
 
 		// Post-checkpoint user edits: shadow → head (only post-checkpoint edits for this file)
 		_, postUserAdded, postUserRemoved := diffLines(shadowContent, headContent)
@@ -288,7 +289,8 @@ func CalculateAttributionWithAccumulated(
 	}
 
 	// Agent work = (base→shadow for agent files) - (accumulated user edits to agent files only)
-	totalAgentAdded := max(0, totalAgentAndUserWork-accumulatedToAgentFiles)
+	totalAgentAdded := max(0, totalAgentAndUserWorkAdded-accumulatedToAgentFiles)
+	totalAgentRemoved := max(0, totalAgentAndUserWorkRemoved-accumulatedUserRemoved)
 
 	// Post-checkpoint edits to non-agent files = total edits - accumulated portion (never negative)
 	postToNonAgentFiles := max(0, allUserEditsToNonAgentFiles-accumulatedToCommittedNonAgentFiles)
@@ -339,20 +341,31 @@ func CalculateAttributionWithAccumulated(
 	// Clamp to 0 to handle cases where user removed/modified more than agent added.
 	agentLinesInCommit := max(0, totalAgentAdded-pureUserRemoved-humanModifiedAgent)
 
+	// Deletion work is measured from base → shadow and preserved in the commit
+	// unless the user reintroduces lines later. We do not currently track re-added
+	// deletions separately, so this remains an approximation when a user undoes
+	// the agent's deletions before commit.
+	agentRemovedInCommit := totalAgentRemoved
+
+	agentChangedLines := agentLinesInCommit + agentRemovedInCommit
+	totalLinesChanged := agentChangedLines + pureUserAdded + totalHumanModified + pureUserRemoved
+
 	// Calculate percentage
 	var agentPercentage float64
-	if totalCommitted > 0 {
-		agentPercentage = float64(agentLinesInCommit) / float64(totalCommitted) * 100
+	if totalLinesChanged > 0 {
+		agentPercentage = float64(agentChangedLines) / float64(totalLinesChanged) * 100
 	}
 
 	return &checkpoint.InitialAttribution{
-		CalculatedAt:    time.Now().UTC(),
-		AgentLines:      agentLinesInCommit,
-		HumanAdded:      pureUserAdded,
-		HumanModified:   totalHumanModified, // Total modifications (for reporting)
-		HumanRemoved:    pureUserRemoved,
-		TotalCommitted:  totalCommitted,
-		AgentPercentage: agentPercentage,
+		CalculatedAt:      time.Now().UTC(),
+		AgentLines:        agentLinesInCommit,
+		AgentRemoved:      agentRemovedInCommit,
+		HumanAdded:        pureUserAdded,
+		HumanModified:     totalHumanModified, // Total modifications (for reporting)
+		HumanRemoved:      pureUserRemoved,
+		TotalCommitted:    totalCommitted,
+		TotalLinesChanged: totalLinesChanged,
+		AgentPercentage:   agentPercentage,
 	}
 }
 
