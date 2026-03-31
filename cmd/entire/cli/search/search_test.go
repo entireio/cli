@@ -275,3 +275,149 @@ func TestSearch_SuccessWithResults(t *testing.T) {
 		t.Errorf("matchType = %s, want both", resp.Results[0].Meta.MatchType)
 	}
 }
+
+func TestSearch_FilterParams(t *testing.T) {
+	t.Parallel()
+
+	var capturedReq *http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedReq = r
+		resp := Response{Results: []Result{}, Total: 0, Page: 1}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
+	}))
+	defer srv.Close()
+
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "o",
+		Repo:        "r",
+		Query:       "q",
+		Author:      testAuthor,
+		Date:        "week",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if capturedReq.URL.Query().Get("author") != testAuthor {
+		t.Errorf("author = %s, want %q", capturedReq.URL.Query().Get("author"), testAuthor)
+	}
+	if capturedReq.URL.Query().Get("date") != "week" {
+		t.Errorf("date = %s, want 'week'", capturedReq.URL.Query().Get("date"))
+	}
+}
+
+func TestSearch_EmptyFiltersOmitParams(t *testing.T) {
+	t.Parallel()
+
+	var capturedReq *http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedReq = r
+		resp := Response{Results: []Result{}, Total: 0, Page: 1}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
+	}))
+	defer srv.Close()
+
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "o",
+		Repo:        "r",
+		Query:       "q",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if capturedReq.URL.Query().Has("author") {
+		t.Error("author param should be omitted when empty")
+	}
+	if capturedReq.URL.Query().Has("date") {
+		t.Error("date param should be omitted when empty")
+	}
+}
+
+// -- ParseSearchInput tests --
+
+const testQuery = "auth"
+const testAuthor = "alice"
+
+func TestParseSearchInput_QueryOnly(t *testing.T) {
+	t.Parallel()
+	p := ParseSearchInput("fix auth bug")
+	if p.Query != "fix auth bug" {
+		t.Errorf("query = %q, want 'fix auth bug'", p.Query)
+	}
+	if p.Author != "" || p.Date != "" {
+		t.Error("expected no filters")
+	}
+}
+
+func TestParseSearchInput_AuthorFilter(t *testing.T) {
+	t.Parallel()
+	p := ParseSearchInput(testQuery + " author:" + testAuthor)
+	if p.Query != testQuery {
+		t.Errorf("query = %q, want %q", p.Query, testQuery)
+	}
+	if p.Author != testAuthor {
+		t.Errorf("author = %q, want %q", p.Author, testAuthor)
+	}
+}
+
+func TestParseSearchInput_DateFilter(t *testing.T) {
+	t.Parallel()
+	p := ParseSearchInput(testQuery + " date:week")
+	if p.Query != testQuery {
+		t.Errorf("query = %q, want %q", p.Query, testQuery)
+	}
+	if p.Date != "week" {
+		t.Errorf("date = %q, want 'week'", p.Date)
+	}
+}
+
+func TestParseSearchInput_BothFilters(t *testing.T) {
+	t.Parallel()
+	p := ParseSearchInput(testQuery + " author:" + testAuthor + " date:month")
+	if p.Query != testQuery {
+		t.Errorf("query = %q, want %q", p.Query, testQuery)
+	}
+	if p.Author != testAuthor {
+		t.Errorf("author = %q, want %q", p.Author, testAuthor)
+	}
+	if p.Date != "month" {
+		t.Errorf("date = %q, want 'month'", p.Date)
+	}
+}
+
+func TestParseSearchInput_QuotedAuthor(t *testing.T) {
+	t.Parallel()
+	p := ParseSearchInput(`author:"` + testAuthor + ` smith" fix bug`)
+	if p.Author != testAuthor+" smith" {
+		t.Errorf("author = %q, want %q", p.Author, testAuthor+" smith")
+	}
+	if p.Query != "fix bug" {
+		t.Errorf("query = %q, want 'fix bug'", p.Query)
+	}
+}
+
+func TestParseSearchInput_FiltersOnly(t *testing.T) {
+	t.Parallel()
+	p := ParseSearchInput("author:bob")
+	if p.Query != "" {
+		t.Errorf("query = %q, want empty", p.Query)
+	}
+	if p.Author != "bob" {
+		t.Errorf("author = %q, want 'bob'", p.Author)
+	}
+}
+
+func TestParseSearchInput_Empty(t *testing.T) {
+	t.Parallel()
+	p := ParseSearchInput("")
+	if p.Query != "" || p.Author != "" || p.Date != "" {
+		t.Error("expected all empty for empty input")
+	}
+}

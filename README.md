@@ -223,6 +223,13 @@ entire search
 # Search with a query
 entire search "implement login feature"
 
+# Filter by author or time period
+entire search "fix bug" --author alice
+entire search "add tests" --date week
+
+# Use filter syntax in the search bar
+entire search "auth author:alice date:week"
+
 # Limit results
 entire search "add tests" --limit 10
 
@@ -230,10 +237,14 @@ entire search "add tests" --limit 10
 entire search "fix auth bug" --json
 ```
 
-| Flag      | Description                             |
-| --------- | --------------------------------------- |
-| `--json`  | Output results as JSON                  |
-| `--limit` | Maximum number of results (default: 20) |
+| Flag       | Description                             |
+| ---------- | --------------------------------------- |
+| `--json`   | Output results as JSON                  |
+| `--limit`  | Maximum number of results (default: 20) |
+| `--author` | Filter by author name                   |
+| `--date`   | Filter by time period (`week` or `month`) |
+
+**Search bar syntax:** In the interactive TUI, you can type filters directly: `auth author:alice date:week`. Supports quoted values: `author:"Alice Smith"`.
 
 **Authentication:** `entire search` requires authentication. Run `entire login` first to authenticate via Entire device auth — your token is stored in the OS keyring and used automatically.
 

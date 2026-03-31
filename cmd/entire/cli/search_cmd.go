@@ -18,11 +18,14 @@ func newSearchCmd() *cobra.Command {
 	var (
 		jsonOutput bool
 		limitFlag  int
+		authorFlag string
+		dateFlag   string
 	)
 
 	cmd := &cobra.Command{
-		Use:   "search [query]",
-		Short: "Search checkpoints using semantic and keyword matching",
+		Use:    "search [query]",
+		Short:  "Search checkpoints using semantic and keyword matching",
+		Hidden: true,
 		Long: `Search checkpoints using hybrid search (semantic + keyword),
 powered by the Entire search service.
 
@@ -77,23 +80,32 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 				Repo:        repoName,
 				Query:       query,
 				Limit:       limitFlag,
+				Author:      authorFlag,
+				Date:        dateFlag,
 			}
 
 			w := cmd.OutOrStdout()
 			isTerminal := isTerminalWriter(w)
 
-			// No query provided + non-interactive = error
-			if query == "" && (jsonOutput || !isTerminal) {
+			hasFilters := searchCfg.Author != "" || searchCfg.Date != ""
+
+			// No query and no filters + non-interactive = error
+			if query == "" && !hasFilters && (jsonOutput || !isTerminal) {
 				return errors.New("query required when using --json or piped output. Usage: entire search <query>")
 			}
 
+			// Use wildcard query when only filters are provided
+			if query == "" && hasFilters {
+				searchCfg.Query = "*"
+			}
+
 			// No query provided + interactive = open TUI with search bar focused
-			if query == "" {
+			if query == "" && !hasFilters {
 				styles := newStatusStyles(w)
 				model := newSearchModel(nil, "", 0, searchCfg, styles)
 				model.mode = modeSearch
 				model.input.Focus()
-				p := tea.NewProgram(model)
+				p := tea.NewProgram(model, tea.WithAltScreen())
 				if _, err := p.Run(); err != nil {
 					return fmt.Errorf("TUI error: %w", err)
 				}
@@ -133,7 +145,7 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 
 			// Interactive TUI
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles)
-			p := tea.NewProgram(model)
+			p := tea.NewProgram(model, tea.WithAltScreen())
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)
 			}
@@ -143,6 +155,8 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
 	cmd.Flags().IntVar(&limitFlag, "limit", 20, "Maximum number of results")
+	cmd.Flags().StringVar(&authorFlag, "author", "", "Filter by author name")
+	cmd.Flags().StringVar(&dateFlag, "date", "", "Filter by time period (week or month)")
 
 	return cmd
 }

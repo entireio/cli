@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -61,6 +62,75 @@ type Config struct {
 	Repo        string
 	Query       string
 	Limit       int
+	Author      string // Filter by author name
+	Date        string // Filter by time period: "week" or "month"
+}
+
+// ParsedInput holds the parsed query and optional filters extracted from search input.
+type ParsedInput struct {
+	Query  string
+	Author string
+	Date   string
+}
+
+// ParseSearchInput extracts filter prefixes (author:, date:) from raw input.
+// Supports quoted values: author:"alice smith". Remaining tokens become the query.
+func ParseSearchInput(raw string) ParsedInput {
+	var p ParsedInput
+	var queryParts []string
+
+	tokens := tokenizeInput(raw)
+	for _, tok := range tokens {
+		switch {
+		case strings.HasPrefix(tok, "author:"):
+			p.Author = strings.Trim(tok[len("author:"):], "\"")
+		case strings.HasPrefix(tok, "date:"):
+			p.Date = tok[len("date:"):]
+		default:
+			queryParts = append(queryParts, tok)
+		}
+	}
+
+	p.Query = strings.Join(queryParts, " ")
+	return p
+}
+
+// tokenizeInput splits input on whitespace but respects quoted values after filter prefixes.
+// Example: `author:"alice smith" fix bug` → ["author:\"alice smith\"", "fix", "bug"]
+func tokenizeInput(s string) []string {
+	var tokens []string
+	i := 0
+	s = strings.TrimSpace(s)
+	for i < len(s) {
+		// Skip whitespace
+		for i < len(s) && s[i] == ' ' {
+			i++
+		}
+		if i >= len(s) {
+			break
+		}
+
+		start := i
+
+		// Look ahead: is this a prefix:"quoted" token?
+		if colonIdx := strings.Index(s[i:], ":\""); colonIdx >= 0 && !strings.Contains(s[i:i+colonIdx], " ") {
+			// Found prefix:" — scan to closing quote
+			quoteStart := i + colonIdx + 2
+			endQuote := strings.IndexByte(s[quoteStart:], '"')
+			if endQuote >= 0 {
+				i = quoteStart + endQuote + 1
+				tokens = append(tokens, s[start:i])
+				continue
+			}
+		}
+
+		// Regular token: advance to next space
+		for i < len(s) && s[i] != ' ' {
+			i++
+		}
+		tokens = append(tokens, s[start:i])
+	}
+	return tokens
 }
 
 var httpClient = &http.Client{Timeout: apiTimeout}
@@ -87,6 +157,12 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 	q.Set("types", "checkpoints")
 	if cfg.Limit > 0 {
 		q.Set("limit", strconv.Itoa(cfg.Limit))
+	}
+	if cfg.Author != "" {
+		q.Set("author", cfg.Author)
+	}
+	if cfg.Date != "" {
+		q.Set("date", cfg.Date)
 	}
 	u.RawQuery = q.Encode()
 

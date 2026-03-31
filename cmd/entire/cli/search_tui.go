@@ -63,10 +63,13 @@ func newSearchStyles(ss statusStyles) searchStyles {
 	return s
 }
 
+const resultsPerPage = 25
+
 // searchModel is the bubbletea model for interactive search results.
 type searchModel struct {
 	results   []search.Result
 	cursor    int
+	page      int // 0-based page index
 	total     int
 	width     int
 	mode      searchMode
@@ -77,13 +80,43 @@ type searchModel struct {
 	styles    searchStyles
 }
 
+// pageResults returns the slice of results for the current page.
+func (m searchModel) pageResults() []search.Result {
+	start := m.page * resultsPerPage
+	if start >= len(m.results) {
+		return nil
+	}
+	end := start + resultsPerPage
+	if end > len(m.results) {
+		end = len(m.results)
+	}
+	return m.results[start:end]
+}
+
+// totalPages returns the number of pages.
+func (m searchModel) totalPages() int {
+	if len(m.results) == 0 {
+		return 1
+	}
+	return (len(m.results) + resultsPerPage - 1) / resultsPerPage
+}
+
+// selectedResult returns the currently selected result, accounting for pagination.
+func (m searchModel) selectedResult() *search.Result {
+	pageResults := m.pageResults()
+	if m.cursor >= 0 && m.cursor < len(pageResults) {
+		return &pageResults[m.cursor]
+	}
+	return nil
+}
+
 func newSearchModel(results []search.Result, query string, total int, cfg search.Config, ss statusStyles) searchModel {
 	styles := newSearchStyles(ss)
 
 	ti := textinput.New()
 	ti.SetValue(query)
 	ti.Prompt = " › "
-	ti.Placeholder = "type a query to search checkpoints..."
+	ti.Placeholder = "search checkpoints... (author:name date:week)"
 	ti.CharLimit = 200
 	ti.Width = max(ss.width-6, 30)
 	if ss.colorEnabled {
@@ -123,6 +156,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn
 		m.results = msg.results
 		m.total = msg.total
 		m.cursor = 0
+		m.page = 0
 		return m, nil
 
 	case tea.WindowSizeMsg:
@@ -146,8 +180,8 @@ func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 		m.input.Blur()
 		return m, nil
 	case "enter":
-		query := strings.TrimSpace(m.input.Value())
-		if query == "" {
+		raw := strings.TrimSpace(m.input.Value())
+		if raw == "" {
 			return m, nil
 		}
 		m.mode = modeBrowse
@@ -155,7 +189,17 @@ func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 		m.loading = true
 		m.searchErr = ""
 		cfg := m.searchCfg
-		cfg.Query = query
+		parsed := search.ParseSearchInput(raw)
+		cfg.Query = parsed.Query
+		if cfg.Query == "" {
+			cfg.Query = "*" // wildcard when only filters are provided
+		}
+		if parsed.Author != "" {
+			cfg.Author = parsed.Author
+		}
+		if parsed.Date != "" {
+			cfg.Date = parsed.Date
+		}
 		return m, performSearch(cfg)
 	}
 
@@ -165,6 +209,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 }
 
 func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea pattern
+	pageLen := len(m.pageResults())
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -173,8 +218,18 @@ func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 			m.cursor--
 		}
 	case "down", "j":
-		if m.cursor < len(m.results)-1 {
+		if m.cursor < pageLen-1 {
 			m.cursor++
+		}
+	case "n", "right":
+		if m.page < m.totalPages()-1 {
+			m.page++
+			m.cursor = 0
+		}
+	case "p", "left":
+		if m.page > 0 {
+			m.page--
+			m.cursor = 0
 		}
 	case "/":
 		m.mode = modeSearch
@@ -212,6 +267,9 @@ func (m searchModel) View() string {
 	// Search input
 	if m.mode == modeSearch {
 		b.WriteString(pad + m.input.View())
+		b.WriteString("\n\n")
+		b.WriteString(pad + m.styles.render(m.styles.dim, "  Filters: author:<name>  date:<week|month>"))
+		b.WriteString("\n")
 	} else {
 		query := m.input.Value()
 		b.WriteString(pad + m.styles.render(m.styles.agent, "›") + " " + m.styles.render(m.styles.bold, query))
@@ -239,13 +297,13 @@ func (m searchModel) View() string {
 	b.WriteString(pad + m.styles.render(m.styles.sectionTitle, "RESULTS"))
 	b.WriteString("\n\n")
 
-	// Table
+	// Table (current page only)
 	b.WriteString(m.viewTable())
 	b.WriteString("\n")
 
 	// Detail card
-	if m.cursor >= 0 && m.cursor < len(m.results) {
-		b.WriteString(m.viewDetailCard(m.results[m.cursor]))
+	if r := m.selectedResult(); r != nil {
+		b.WriteString(m.viewDetailCard(*r))
 		b.WriteString("\n")
 	}
 
@@ -263,12 +321,12 @@ func (m searchModel) viewTable() string {
 	var b strings.Builder
 
 	// Column headers
-	hdr := fmt.Sprintf("%-*s %-*s %-*s %-*s %s",
+	hdr := fmt.Sprintf("%-*s %-*s %-*s %-*s %-*s",
 		cols.age, "Age",
 		cols.id, "ID",
 		cols.branch, "Branch",
 		cols.prompt, "Prompt",
-		"Author",
+		cols.author, "Author",
 	)
 	b.WriteString(pad + m.styles.render(m.styles.dim, hdr) + "\n")
 
@@ -276,7 +334,7 @@ func (m searchModel) viewTable() string {
 	b.WriteString(pad + m.styles.render(m.styles.dim, strings.Repeat("─", contentWidth)) + "\n")
 
 	// Rows
-	for i, r := range m.results {
+	for i, r := range m.pageResults() {
 		row := m.viewRow(r, cols)
 		if i == m.cursor && m.styles.colorEnabled {
 			b.WriteString(pad + m.styles.selected.Render(row))
@@ -296,7 +354,7 @@ func (m searchModel) viewRow(r search.Result, cols columnLayout) string {
 	prompt := fmt.Sprintf("%-*s", cols.prompt, stringutil.TruncateRunes(
 		stringutil.CollapseWhitespace(r.Data.Prompt), cols.prompt-1, "…",
 	))
-	author := r.Data.Author
+	author := fmt.Sprintf("%-*s", cols.author, stringutil.TruncateRunes(r.Data.Author, cols.author-1, "…"))
 
 	return fmt.Sprintf("%s %s %s %s %s", age, id, branch, prompt, author)
 }
@@ -360,10 +418,16 @@ func (m searchModel) viewHelp() string {
 	}
 
 	left := m.styles.render(m.styles.helpKey, "/") + " search" + dot +
-		m.styles.render(m.styles.helpKey, "j/k") + " navigate" + dot +
-		m.styles.render(m.styles.helpKey, "q") + " quit"
+		m.styles.render(m.styles.helpKey, "j/k") + " navigate"
+	if m.totalPages() > 1 {
+		left += dot + m.styles.render(m.styles.helpKey, "n/p") + " page"
+	}
+	left += dot + m.styles.render(m.styles.helpKey, "q") + " quit"
 
 	right := fmt.Sprintf("%d results", m.total)
+	if m.totalPages() > 1 {
+		right = fmt.Sprintf("page %d/%d · %d results", m.page+1, m.totalPages(), m.total)
+	}
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
 	if gap < 1 {
@@ -386,23 +450,24 @@ func indentLines(text, prefix string) string {
 // ─── Column Layout ───────────────────────────────────────────────────────────
 
 // columnLayout holds computed column widths for the search results table.
-// Author column takes remaining space and is not width-constrained.
 type columnLayout struct {
 	age    int
 	id     int
 	branch int
 	prompt int
+	author int
 }
 
 // computeColumns calculates column widths from terminal width.
 func computeColumns(width int) columnLayout {
 	const (
-		ageWidth = 10
-		idWidth  = 12
-		gaps     = 4 // spaces between columns
+		ageWidth    = 10
+		idWidth     = 12
+		authorWidth = 14
+		gaps        = 4 // spaces between columns
 	)
 
-	remaining := width - ageWidth - idWidth - gaps
+	remaining := width - ageWidth - idWidth - authorWidth - gaps
 	if remaining < 20 {
 		remaining = 20
 	}
@@ -415,6 +480,7 @@ func computeColumns(width int) columnLayout {
 		id:     idWidth,
 		branch: branchWidth,
 		prompt: promptWidth,
+		author: authorWidth,
 	}
 }
 
@@ -484,12 +550,12 @@ func renderSearchStatic(w io.Writer, results []search.Result, query string, tota
 
 	cols := computeColumns(styles.width)
 
-	fmt.Fprintf(w, "%-*s  %-*s  %-*s  %-*s  %s\n",
+	fmt.Fprintf(w, "%-*s  %-*s  %-*s  %-*s  %-*s\n",
 		cols.age, "AGE",
 		cols.id, "ID",
 		cols.branch, "BRANCH",
 		cols.prompt, "PROMPT",
-		"AUTHOR",
+		cols.author, "AUTHOR",
 	)
 
 	for _, r := range results {
@@ -499,14 +565,14 @@ func renderSearchStatic(w io.Writer, results []search.Result, query string, tota
 		prompt := stringutil.TruncateRunes(
 			stringutil.CollapseWhitespace(r.Data.Prompt), cols.prompt, "...",
 		)
-		author := r.Data.Author
+		author := stringutil.TruncateRunes(r.Data.Author, cols.author, "...")
 
-		fmt.Fprintf(w, "%-*s  %-*s  %-*s  %-*s  %s\n",
+		fmt.Fprintf(w, "%-*s  %-*s  %-*s  %-*s  %-*s\n",
 			cols.age, age,
 			cols.id, id,
 			cols.branch, branch,
 			cols.prompt, prompt,
-			author,
+			cols.author, author,
 		)
 	}
 }

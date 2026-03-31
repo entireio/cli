@@ -408,6 +408,9 @@ func TestComputeColumns(t *testing.T) {
 	if cols.id != 12 {
 		t.Errorf("id width = %d, want 12", cols.id)
 	}
+	if cols.author != 14 {
+		t.Errorf("author width = %d, want 14", cols.author)
+	}
 
 	cols = computeColumns(40)
 	if cols.branch < 8 {
