@@ -670,6 +670,112 @@ func TestSearchModel_NewSearchClearsFilters(t *testing.T) {
 	}
 }
 
+func TestSearchModel_FetchMoreError(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{}
+	m := newSearchModel(make([]search.Result, 25), "q", 50, cfg, ss)
+	m.fetchingMore = true
+
+	m = updateModel(t, m, searchMoreResultsMsg{err: errTestSearch})
+
+	if m.fetchingMore {
+		t.Error("fetchingMore should be false after error")
+	}
+	if m.searchErr == "" {
+		t.Error("searchErr should be set after fetch-more error")
+	}
+	if len(m.results) != 25 {
+		t.Errorf("results should be unchanged, got %d", len(m.results))
+	}
+}
+
+func TestSearchModel_FetchMoreEmpty_CapsTotal(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{}
+	m := newSearchModel(make([]search.Result, 25), "q", 100, cfg, ss)
+
+	if m.totalPages() != 4 {
+		t.Fatalf("initial totalPages = %d, want 4", m.totalPages())
+	}
+
+	// Simulate API returning empty results (exhausted)
+	m = updateModel(t, m, searchMoreResultsMsg{results: nil})
+
+	if m.total != 25 {
+		t.Errorf("total should be capped to loaded results (25), got %d", m.total)
+	}
+	if m.totalPages() != 1 {
+		t.Errorf("totalPages should be 1 after cap, got %d", m.totalPages())
+	}
+}
+
+func TestSearchModel_ViewFetchingMore(t *testing.T) {
+	t.Parallel()
+
+	// Model with 25 loaded results but on page 2 (no data) while fetching
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{}
+	m := newSearchModel(make([]search.Result, 25), "q", 50, cfg, ss)
+	m.page = 1
+	m.fetchingMore = true
+
+	view := m.View()
+	if !strings.Contains(view, "Loading more results...") {
+		t.Error("view should show loading message when fetchingMore and page has no data")
+	}
+}
+
+func TestSearchModel_NewSearchPersistsFilters(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 25}
+	m := newSearchModel(testResults(), "old", 2, cfg, ss)
+
+	// Enter search mode and type query with filters
+	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m.input.SetValue("new query author:bob date:month")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, ok := updated.(searchModel)
+	if !ok {
+		t.Fatalf("Update returned %T, want searchModel", updated)
+	}
+
+	if m.searchCfg.Query != "new query" {
+		t.Errorf("searchCfg.Query = %q, want %q", m.searchCfg.Query, "new query")
+	}
+	if m.searchCfg.Author != "bob" {
+		t.Errorf("searchCfg.Author = %q, want %q", m.searchCfg.Author, "bob")
+	}
+	if m.searchCfg.Date != "month" {
+		t.Errorf("searchCfg.Date = %q, want %q", m.searchCfg.Date, "month")
+	}
+}
+
+func TestSearchModel_ApiPageInitialization(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{}
+
+	// With results: apiPage = 1
+	withResults := newSearchModel(testResults(), "q", 2, cfg, ss)
+	if withResults.apiPage != 1 {
+		t.Errorf("apiPage with results = %d, want 1", withResults.apiPage)
+	}
+
+	// Without results: apiPage = 0
+	noResults := newSearchModel(nil, "", 0, cfg, ss)
+	if noResults.apiPage != 0 {
+		t.Errorf("apiPage without results = %d, want 0", noResults.apiPage)
+	}
+}
+
 func TestComputeColumns(t *testing.T) {
 	t.Parallel()
 

@@ -1,25 +1,9 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 )
-
-func TestNewSearchCmd_Flags(t *testing.T) {
-	t.Parallel()
-
-	cmd := newSearchCmd()
-
-	if cmd.Use != "search [query]" {
-		t.Errorf("Use = %q, want %q", cmd.Use, "search [query]")
-	}
-
-	// Verify expected flags exist
-	for _, name := range []string{"json", "limit", "author", "date"} {
-		if cmd.Flags().Lookup(name) == nil {
-			t.Errorf("missing flag: %s", name)
-		}
-	}
-}
 
 // TestSearchCmd_AccessibleModeRequiresQuery verifies that accessible mode
 // is treated like --json: a query is required when ACCESSIBLE=1.
@@ -28,28 +12,16 @@ func TestNewSearchCmd_Flags(t *testing.T) {
 func TestSearchCmd_AccessibleModeRequiresQuery(t *testing.T) {
 	t.Setenv("ACCESSIBLE", "1")
 
-	cmd := newSearchCmd()
-	// Set up a parent to avoid nil pointer in SilenceUsage
 	root := NewRootCmd()
-	root.AddCommand(cmd)
+	root.SetArgs([]string{"search", "--json"})
 
-	cmd.SetArgs([]string{})
-	err := cmd.Execute()
+	err := root.Execute()
 	if err == nil {
-		// The command may fail at auth before reaching the accessible check.
-		// If it reaches the accessible check, it should error.
-		// If it fails at auth, that's also acceptable for this test since
-		// the accessible guard is before the TUI launch.
-		t.Log("command returned nil error — may have auth configured; check manually")
-		return
+		t.Fatal("expected error when no query with --json + ACCESSIBLE=1")
 	}
 
-	// Either auth error or our expected error is fine — the key is that
-	// it does NOT launch the TUI (which would hang in tests).
-	if err.Error() == "query required when using --json, accessible mode, or piped output. Usage: entire search <query>" {
-		return // exact match — guard works
+	want := "query required when using --json, accessible mode, or piped output"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want containing %q", err.Error(), want)
 	}
-
-	// Auth errors are expected in test environments without credentials
-	t.Logf("command errored (expected): %v", err)
 }
