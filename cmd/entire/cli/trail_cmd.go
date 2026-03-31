@@ -6,14 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"net/http"
 	"os/exec"
-	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
@@ -25,6 +24,8 @@ import (
 )
 
 func newTrailCmd() *cobra.Command {
+	var insecureHTTPAuth bool
+
 	cmd := &cobra.Command{
 		Use:    "trail",
 		Short:  "Manage trails for your branches",
@@ -35,8 +36,14 @@ func newTrailCmd() *cobra.Command {
 Running 'entire trail' without a subcommand shows the trail for the current
 branch, or lists all trails if no trail exists for the current branch.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runTrailShow(cmd.OutOrStdout())
+			return runTrailShow(cmd.Context(), cmd.OutOrStdout(), insecureHTTPAuth)
 		},
+	}
+
+	cmd.PersistentFlags().BoolVar(&insecureHTTPAuth, "insecure-http-auth", false,
+		"Allow API calls over plain HTTP (insecure, for local development only)")
+	if err := cmd.PersistentFlags().MarkHidden("insecure-http-auth"); err != nil {
+		panic(fmt.Sprintf("hide insecure-http-auth flag: %v", err))
 	}
 
 	cmd.AddCommand(newTrailListCmd())
@@ -46,25 +53,38 @@ branch, or lists all trails if no trail exists for the current branch.`,
 	return cmd
 }
 
+// trailInsecureHTTP reads the persistent --insecure-http-auth flag from the trail root command.
+func trailInsecureHTTP(cmd *cobra.Command) bool {
+	v, _ := cmd.Flags().GetBool("insecure-http-auth") //nolint:errcheck // flag is always registered
+	return v
+}
+
 // runTrailShow shows the trail for the current branch, or falls through to list.
-func runTrailShow(w io.Writer) error {
-	branch, err := GetCurrentBranch(context.Background())
+func runTrailShow(ctx context.Context, w io.Writer, insecureHTTP bool) error {
+	branch, err := GetCurrentBranch(ctx)
 	if err != nil {
-		return runTrailListAll(w, "", false, false)
+		return runTrailListAll(ctx, w, "", false, false, insecureHTTP)
 	}
 
-	repo, err := strategy.OpenRepository(context.Background())
+	client, err := NewAuthenticatedAPIClient(insecureHTTP)
 	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
+		return fmt.Errorf("authentication required: %w", err)
 	}
 
-	store := trail.NewStore(repo)
-	metadata, err := store.FindByBranch(branch)
-	if err != nil || metadata == nil {
-		return runTrailListAll(w, "", false, false)
+	host, owner, repo, err := strategy.ResolveRemoteRepo(ctx, "origin")
+	if err != nil {
+		return fmt.Errorf("failed to resolve repository: %w", err)
 	}
 
-	printTrailDetails(w, metadata)
+	found, err := findTrailByBranch(ctx, client, host, owner, repo, branch)
+	if err != nil {
+		return err
+	}
+	if found == nil {
+		return runTrailListAll(ctx, w, "", false, false, insecureHTTP)
+	}
+
+	printTrailDetails(w, found.ToMetadata())
 	return nil
 }
 
@@ -84,8 +104,8 @@ func printTrailDetails(w io.Writer, m *trail.Metadata) {
 	if len(m.Assignees) > 0 {
 		fmt.Fprintf(w, "  Assignees: %s\n", strings.Join(m.Assignees, ", "))
 	}
-	fmt.Fprintf(w, "  Created: %s\n", m.CreatedAt.Format(time.RFC3339))
-	fmt.Fprintf(w, "  Updated: %s\n", m.UpdatedAt.Format(time.RFC3339))
+	fmt.Fprintf(w, "  Created: %s\n", m.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	fmt.Fprintf(w, "  Updated: %s\n", m.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
 }
 
 func newTrailListCmd() *cobra.Command {
@@ -97,7 +117,7 @@ func newTrailListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List all trails",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runTrailListAll(cmd.OutOrStdout(), statusFilter, jsonOutput, showAll)
+			return runTrailListAll(cmd.Context(), cmd.OutOrStdout(), statusFilter, jsonOutput, showAll, trailInsecureHTTP(cmd))
 		},
 	}
 
@@ -108,23 +128,35 @@ func newTrailListCmd() *cobra.Command {
 	return cmd
 }
 
-func runTrailListAll(w io.Writer, statusFilter string, jsonOutput, showAll bool) error {
-	// Fetch remote trails branch so we see trails from collaborators
-	fetchTrailsBranch()
-
-	repo, err := strategy.OpenRepository(context.Background())
+func runTrailListAll(ctx context.Context, w io.Writer, statusFilter string, jsonOutput, showAll, insecureHTTP bool) error {
+	client, err := NewAuthenticatedAPIClient(insecureHTTP)
 	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
+		return fmt.Errorf("authentication required: %w", err)
 	}
 
-	store := trail.NewStore(repo)
-	trails, err := store.List()
+	host, owner, repo, err := strategy.ResolveRemoteRepo(ctx, "origin")
+	if err != nil {
+		return fmt.Errorf("failed to resolve repository: %w", err)
+	}
+
+	resp, err := client.Get(ctx, trailsBasePath(host, owner, repo))
 	if err != nil {
 		return fmt.Errorf("failed to list trails: %w", err)
 	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return err
+	}
 
-	if trails == nil {
-		trails = []*trail.Metadata{}
+	var listResp api.TrailListResponse
+	if err := api.DecodeJSON(resp, &listResp); err != nil {
+		return fmt.Errorf("failed to decode trail list: %w", err)
+	}
+
+	// Convert to metadata for display
+	trails := make([]*trail.Metadata, 0, len(listResp.Trails))
+	for i := range listResp.Trails {
+		trails = append(trails, listResp.Trails[i].ToMetadata())
 	}
 
 	totalCount := len(trails)
@@ -218,10 +250,13 @@ func newTrailCreateCmd() *cobra.Command {
 
 //nolint:cyclop // sequential steps for creating a trail — splitting would obscure the flow
 func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr string, checkout bool) error {
+	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
-	repo, err := strategy.OpenRepository(context.Background())
+	// --- Phase 1: Local git operations (no API calls) ---
+
+	repo, err := strategy.OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
@@ -234,7 +269,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr str
 		}
 	}
 
-	_, currentBranch, _ := IsOnDefaultBranch(context.Background()) //nolint:errcheck // best-effort detection
+	_, currentBranch, _ := IsOnDefaultBranch(ctx) //nolint:errcheck // best-effort detection
 	interactive := !cmd.Flags().Changed("title") && !cmd.Flags().Changed("branch")
 
 	if interactive {
@@ -259,79 +294,64 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr str
 		return errors.New("branch name is required")
 	}
 
-	// Create the branch if it doesn't exist
+	// Create the local branch if it doesn't exist
 	needsCreation := branchNeedsCreation(repo, branch)
 	if needsCreation {
 		if err := createBranch(repo, branch); err != nil {
 			return fmt.Errorf("failed to create branch %q: %w", branch, err)
 		}
-		fmt.Fprintf(w, "✓ Created branch %s\n", branch)
+		fmt.Fprintf(w, "Created branch %s\n", branch)
 	} else if currentBranch != branch {
 		fmt.Fprintf(w, "Note: trail will be created for branch %q (not the current branch)\n", branch)
 	}
 
-	// Check if trail already exists for this branch
-	store := trail.NewStore(repo)
-	existing, err := store.FindByBranch(branch)
-	if err == nil && existing != nil {
-		fmt.Fprintf(w, "Trail already exists for branch %q (ID: %s)\n", branch, existing.TrailID)
-		return nil
-	}
-
-	// Determine status
-	var trailStatus trail.Status
-	if statusStr != "" {
-		trailStatus = trail.Status(statusStr)
-		if !trailStatus.IsValid() {
-			return fmt.Errorf("invalid status %q: valid values are %s", statusStr, formatValidStatuses())
-		}
-	} else {
-		trailStatus = trail.StatusDraft
-	}
-
-	// Generate trail ID
-	trailID, err := trail.GenerateID()
-	if err != nil {
-		return fmt.Errorf("failed to generate trail ID: %w", err)
-	}
-
-	// Get author (GitHub username, falls back to git user.name)
-	authorName := getTrailAuthor(repo)
-
-	now := time.Now()
-	metadata := &trail.Metadata{
-		TrailID:   trailID,
-		Branch:    branch,
-		Base:      base,
-		Title:     title,
-		Body:      body,
-		Status:    trailStatus,
-		Author:    authorName,
-		Assignees: []string{},
-		Labels:    []string{},
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-
-	if err := store.Write(metadata, nil, nil); err != nil {
-		return fmt.Errorf("failed to create trail: %w", err)
-	}
-
-	fmt.Fprintf(w, "✓ Created trail %q for branch %s (ID: %s)\n", title, branch, trailID)
-
-	// Push the branch and trail data to origin
+	// Push the branch so the API can reference it
 	if needsCreation {
 		if err := pushBranchToOrigin(branch); err != nil {
 			fmt.Fprintf(errW, "Warning: failed to push branch: %v\n", err)
 		} else {
-			fmt.Fprintf(w, "✓ Pushed branch %s to origin\n", branch)
+			fmt.Fprintf(w, "Pushed branch %s to origin\n", branch)
 		}
 	}
-	if err := strategy.PushTrailsBranch(context.Background(), "origin"); err != nil {
-		fmt.Fprintf(errW, "Warning: failed to push trail data: %v\n", err)
+
+	// --- Phase 2: API operations ---
+
+	client, err := NewAuthenticatedAPIClient(trailInsecureHTTP(cmd))
+	if err != nil {
+		return fmt.Errorf("authentication required: %w", err)
 	}
 
-	// Checkout the branch if requested or prompted
+	host, owner, repoName, err := strategy.ResolveRemoteRepo(ctx, "origin")
+	if err != nil {
+		return fmt.Errorf("failed to resolve repository: %w", err)
+	}
+
+	createReq := api.TrailCreateRequest{
+		Title:      title,
+		Body:       body,
+		BranchName: branch,
+		Base:       base,
+		Status:     statusStr,
+	}
+
+	resp, err := client.Post(ctx, trailsBasePath(host, owner, repoName), createReq)
+	if err != nil {
+		return fmt.Errorf("failed to create trail: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return err
+	}
+
+	var createResp api.TrailCreateResponse
+	if err := api.DecodeJSON(resp, &createResp); err != nil {
+		return fmt.Errorf("failed to decode create response: %w", err)
+	}
+
+	fmt.Fprintf(w, "Created trail %q for branch %s (ID: %s)\n", createResp.Trail.Title, createResp.Trail.Branch, createResp.Trail.TrailID)
+
+	// --- Phase 3: Post-creation local operations ---
+
 	if needsCreation && currentBranch != branch {
 		shouldCheckout := checkout
 		if !shouldCheckout && !cmd.Flags().Changed("checkout") {
@@ -348,10 +368,10 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr str
 			}
 		}
 		if checkout {
-			if err := CheckoutBranch(context.Background(), branch); err != nil {
+			if err := CheckoutBranch(ctx, branch); err != nil {
 				return fmt.Errorf("failed to checkout branch %q: %w", branch, err)
 			}
-			fmt.Fprintf(w, "✓ Switched to branch %s\n", branch)
+			fmt.Fprintf(w, "Switched to branch %s\n", branch)
 		}
 	}
 
@@ -366,7 +386,7 @@ func newTrailUpdateCmd() *cobra.Command {
 		Use:   "update",
 		Short: "Update trail metadata",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runTrailUpdate(cmd.OutOrStdout(), cmd.ErrOrStderr(), statusStr, title, body, branch, labelAdd, labelRemove)
+			return runTrailUpdate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), statusStr, title, body, branch, labelAdd, labelRemove)
 		},
 	}
 
@@ -380,35 +400,41 @@ func newTrailUpdateCmd() *cobra.Command {
 	return cmd
 }
 
-func runTrailUpdate(w, errW io.Writer, statusStr, title, body, branch string, labelAdd, labelRemove []string) error {
-	repo, err := strategy.OpenRepository(context.Background())
+func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, statusStr, title, body, branch string, labelAdd, labelRemove []string) error {
+	_ = errW // reserved for future warnings
+
+	client, err := NewAuthenticatedAPIClient(insecureHTTP)
 	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
+		return fmt.Errorf("authentication required: %w", err)
+	}
+
+	host, owner, repoName, err := strategy.ResolveRemoteRepo(ctx, "origin")
+	if err != nil {
+		return fmt.Errorf("failed to resolve repository: %w", err)
 	}
 
 	// Determine branch
 	if branch == "" {
-		branch, err = GetCurrentBranch(context.Background())
+		branch, err = GetCurrentBranch(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to determine current branch: %w", err)
 		}
 	}
 
-	store := trail.NewStore(repo)
-	metadata, err := store.FindByBranch(branch)
+	// Find the trail by branch
+	found, err := findTrailByBranch(ctx, client, host, owner, repoName, branch)
 	if err != nil {
-		return fmt.Errorf("failed to find trail: %w", err)
+		return err
 	}
-	if metadata == nil {
+	if found == nil {
 		return fmt.Errorf("no trail found for branch %q", branch)
 	}
 
 	// Interactive mode when no flags are provided
 	noFlags := statusStr == "" && title == "" && body == "" && labelAdd == nil && labelRemove == nil
 	if noFlags {
+		metadata := found.ToMetadata()
 		// Build status options with current value as default.
-		// Exclude "merged" and "closed" unless the trail is already in that status
-		// (otherwise the select would silently reset to the first option).
 		var statusOptions []huh.Option[string]
 		for _, s := range trail.ValidStatuses() {
 			if (s == trail.StatusMerged || s == trail.StatusClosed) && s != metadata.Status {
@@ -451,36 +477,69 @@ func runTrailUpdate(w, errW io.Writer, statusStr, title, body, branch string, la
 		}
 	}
 
-	err = store.Update(metadata.TrailID, func(m *trail.Metadata) {
-		if statusStr != "" {
-			m.Status = trail.Status(statusStr)
-		}
-		if title != "" {
-			m.Title = title
-		}
-		if body != "" {
-			m.Body = body
-		}
-		for _, l := range labelAdd {
-			if !slices.Contains(m.Labels, l) {
-				m.Labels = append(m.Labels, l)
-			}
-		}
-		for _, l := range labelRemove {
-			m.Labels = slices.DeleteFunc(m.Labels, func(v string) bool { return v == l })
-		}
-	})
+	// Build update request with only changed fields
+	updateReq := buildTrailUpdateRequest(found, statusStr, title, body, labelAdd, labelRemove)
+
+	resp, err := client.Patch(ctx, trailsBasePath(host, owner, repoName)+"/"+found.TrailID, updateReq)
 	if err != nil {
 		return fmt.Errorf("failed to update trail: %w", err)
 	}
-
-	fmt.Fprintf(w, "✓ Updated trail for branch %s\n", branch)
-
-	if err := strategy.PushTrailsBranch(context.Background(), "origin"); err != nil {
-		fmt.Fprintf(errW, "Warning: failed to push trail data: %v\n", err)
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return err
 	}
 
+	var updateResp api.TrailUpdateResponse
+	if err := api.DecodeJSON(resp, &updateResp); err != nil {
+		return fmt.Errorf("failed to decode update response: %w", err)
+	}
+
+	fmt.Fprintf(w, "Updated trail for branch %s\n", branch)
 	return nil
+}
+
+// buildTrailUpdateRequest constructs a PATCH request body from the current trail and the requested changes.
+func buildTrailUpdateRequest(current *api.TrailResource, statusStr, title, body string, labelAdd, labelRemove []string) api.TrailUpdateRequest {
+	var req api.TrailUpdateRequest
+
+	if statusStr != "" {
+		req.Status = &statusStr
+	}
+	if title != "" {
+		req.Title = &title
+	}
+	if body != "" {
+		req.Body = &body
+	}
+
+	// Handle label changes: merge adds, remove removes
+	if len(labelAdd) > 0 || len(labelRemove) > 0 {
+		labels := make([]string, 0, len(current.Labels)+len(labelAdd))
+		labels = append(labels, current.Labels...)
+		for _, l := range labelAdd {
+			found := false
+			for _, existing := range labels {
+				if existing == l {
+					found = true
+					break
+				}
+			}
+			if !found {
+				labels = append(labels, l)
+			}
+		}
+		for _, l := range labelRemove {
+			for i, existing := range labels {
+				if existing == l {
+					labels = append(labels[:i], labels[i+1:]...)
+					break
+				}
+			}
+		}
+		req.Labels = &labels
+	}
+
+	return req
 }
 
 // defaultBaseBranch is the fallback base branch name when it cannot be determined.
@@ -556,34 +615,53 @@ func runTrailCreateInteractive(title, body, branch, statusStr *string) error {
 	return nil
 }
 
-// fetchTrailsBranch fetches the remote trails branch so we see trails from collaborators.
-// Best-effort: silently ignores errors (e.g., no remote, no network).
-func fetchTrailsBranch() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	branchName := paths.TrailsBranchName
-	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
+// findTrailByBranch looks up a trail by branch name via the list API.
+func findTrailByBranch(ctx context.Context, client *api.Client, host, owner, repo, branch string) (*api.TrailResource, error) {
+	resp, err := client.Get(ctx, trailsBasePath(host, owner, repo))
+	if err != nil {
+		return nil, fmt.Errorf("list trails: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return nil, err
+	}
 
-	cmd := exec.CommandContext(ctx, "git", "fetch", "origin", refSpec)
-	// Ensure non-interactive fetch in hook/agent contexts
-	cmd.Stdin = nil
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	_ = cmd.Run() //nolint:errcheck // best-effort fetch
-}
+	var listResp api.TrailListResponse
+	if err := api.DecodeJSON(resp, &listResp); err != nil {
+		return nil, fmt.Errorf("decode trail list: %w", err)
+	}
 
-// getTrailAuthor returns the GitHub username for the trail author.
-// Falls back to git user.name if gh CLI is unavailable or not authenticated.
-func getTrailAuthor(repo *git.Repository) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "gh", "api", "user", "-q", ".login")
-	if output, err := cmd.Output(); err == nil {
-		if login := strings.TrimSpace(string(output)); login != "" {
-			return login
+	for i := range listResp.Trails {
+		if listResp.Trails[i].Branch == branch {
+			return &listResp.Trails[i], nil
 		}
 	}
-	name, _ := strategy.GetGitAuthorFromRepo(repo)
-	return name
+	return nil, nil //nolint:nilnil // nil, nil means "not found" — callers check both
+}
+
+// apiHostAlias maps git host domains to short aliases used by the trails API.
+var apiHostAlias = map[string]string{
+	"github.com": "gh",
+}
+
+// trailsBasePath returns the API path prefix for trails endpoints (e.g., "/api/v1/trails/gh/org/repo").
+func trailsBasePath(host, owner, repo string) string {
+	if alias, ok := apiHostAlias[host]; ok {
+		host = alias
+	}
+	return fmt.Sprintf("/api/v1/trails/%s/%s/%s", host, owner, repo)
+}
+
+// checkTrailResponse checks the API response and returns user-friendly errors.
+// For auth failures, it appends a hint to re-authenticate while preserving the server's error message.
+func checkTrailResponse(resp *http.Response) error {
+	if err := api.CheckResponse(resp); err != nil {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return fmt.Errorf("%w — run 'entire login' to re-authenticate", err)
+		}
+		return fmt.Errorf("trail API: %w", err)
+	}
+	return nil
 }
 
 // slugifyTitle converts a title string into a branch-friendly slug.

@@ -112,8 +112,8 @@ type action struct {
 const fileExt = `go|md|txt|js|ts|py|rb|rs|toml|yaml|json`
 
 var (
-	// "create a [single|new|...] [markdown|text] file [at|called] <path>"
-	createFileRe = regexp.MustCompile(`(?i)create\s+(?:a\s+)?(?:\w+\s+)*?(?:markdown\s+|text\s+)?file\s+(?:at\s+|called\s+)?([^\s,]+\.(?:` + fileExt + `))`)
+	// "create a [single|new|...] [markdown|text] file [exactly at|at|called] <path>"
+	createFileRe = regexp.MustCompile(`(?i)create\s+(?:a\s+)?(?:\w+\s+)*?(?:markdown\s+|text\s+)?file\s+(?:exactly\s+at\s+|at\s+|called\s+)?([^\s,]+\.(?:` + fileExt + `))`)
 	// "create N files: <path> about <topic>, <path> about <topic>"
 	createMultiRe = regexp.MustCompile(`(?i)create\s+(?:\w+\s+)*?(?:four|three|two|\d+)\s+(?:\w+\s+)*?(?:markdown\s+)?files?:?\s+(.+)`)
 	// "modify <path>"

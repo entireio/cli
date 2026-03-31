@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"log/slog"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -101,6 +103,13 @@ func newHooksGitCmd() *cobra.Command {
 				gitHooksDisabled = true
 				return nil
 			}
+			// Discover external agent plugins so GetByAgentType works correctly
+			// during condensation (e.g. post-commit). Without this, external agents
+			// registered in the hook phase cannot be resolved here, causing token
+			// usage and other agent-specific data to be missing from metadata.json.
+			discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			external.DiscoverAndRegister(discoveryCtx)
 			hookLogCleanup = initHookLogging(ctx)
 			return nil
 		},

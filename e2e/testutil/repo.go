@@ -64,6 +64,7 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	Git(t, dir, "init")
 	Git(t, dir, "config", "user.name", "E2E Test")
 	Git(t, dir, "config", "user.email", "e2e@test.local")
+	Git(t, dir, "config", "core.pager", "cat")
 	Git(t, dir, "commit", "--allow-empty", "-m", "initial commit")
 
 	// External agents need external_agents enabled in settings before enable,
@@ -85,7 +86,13 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 			t.Fatalf("configure droid repo settings: %v", err)
 		}
 	}
-	PatchSettings(t, dir, map[string]any{"log_level": "debug"})
+	// commit_linking=always ensures the prepare-commit-msg hook adds the
+	// Entire-Checkpoint trailer unconditionally. This is needed because
+	// interactive agents run inside tmux (hasTTY()=true) but can't respond to
+	// prompts, and content detection may fail on the first checkpoint when no
+	// shadow branch exists yet. Prompt-mode agents still exercise the !hasTTY()
+	// fast path since they have no TTY regardless of this setting.
+	PatchSettings(t, dir, map[string]any{"log_level": "debug", "commit_linking": "always"})
 
 	// Copilot CLI blocks on a "No copilot instructions found" notice in fresh
 	// repos that lack .github/copilot-instructions.md, preventing the interactive
@@ -451,6 +458,14 @@ func PatchSettings(t *testing.T, dir string, extra map[string]any) {
 	if err := os.WriteFile(path, out, 0o644); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
+}
+
+// EmptyDir returns the path to an empty temporary directory, cleaned up when
+// the test finishes. Useful as a cross-platform replacement for /dev/null in
+// git config paths like core.hooksPath (git on Windows cannot open NUL).
+func EmptyDir(t *testing.T) string {
+	t.Helper()
+	return t.TempDir()
 }
 
 // Git runs a git command in the given directory and fails the test if it

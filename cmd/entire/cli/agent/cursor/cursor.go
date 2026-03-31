@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,8 +14,12 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
+
+// Compile-time interface assertion.
+var _ agent.TranscriptPreparer = (*CursorAgent)(nil)
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
 func init() {
@@ -124,6 +129,41 @@ func (c *CursorAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, 
 		StartTime:  time.Now(),
 		NativeData: data,
 	}, nil
+}
+
+// PrepareTranscript waits for Cursor's transcript file to be flushed to disk.
+// Cursor writes transcripts asynchronously; during mid-turn commits the file
+// may not yet contain data. This polls until the file exists and is non-empty,
+// or until the timeout expires.
+func (c *CursorAgent) PrepareTranscript(ctx context.Context, sessionRef string) error {
+	const (
+		maxWait      = 3 * time.Second
+		pollInterval = 50 * time.Millisecond
+	)
+
+	logCtx := logging.WithComponent(ctx, "agent.cursor")
+
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		info, err := os.Stat(sessionRef)
+		if err == nil {
+			if info.Size() > 0 {
+				logging.Debug(logCtx, "transcript file ready",
+					slog.Int64("size", info.Size()),
+				)
+				return nil
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to stat transcript %q: %w", sessionRef, err)
+		}
+		time.Sleep(pollInterval)
+	}
+
+	logging.Warn(logCtx, "transcript file not ready within timeout, proceeding",
+		slog.Duration("timeout", maxWait),
+		slog.String("path", sessionRef),
+	)
+	return nil
 }
 
 // WriteSession writes a session to Cursor's storage (JSONL transcript file).

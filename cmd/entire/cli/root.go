@@ -88,6 +88,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newDisableCmd())
 	cmd.AddCommand(newStatusCmd())
 	cmd.AddCommand(newLoginCmd())
+	cmd.AddCommand(newLogoutCmd())
 	cmd.AddCommand(newHooksCmd())
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newExplainCmd())

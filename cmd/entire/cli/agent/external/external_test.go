@@ -22,7 +22,7 @@ func testBinaryDir(t *testing.T, script string) string {
 	dir := t.TempDir()
 
 	name := "entire-agent-test"
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		name += ".bat"
 	}
 
@@ -662,5 +662,37 @@ func TestWrap_HooksAnalyzerPreparer(t *testing.T) {
 	}
 	if _, ok := agent.AsTokenCalculator(wrapped); ok {
 		t.Error("Wrap() should not return TokenCalculator when token_calculator=false")
+	}
+}
+
+func TestStripExeExt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "exe lowercase", in: "entire-agent-test.exe", want: "entire-agent-test"},
+		{name: "bat lowercase", in: "entire-agent-test.bat", want: "entire-agent-test"},
+		{name: "cmd lowercase", in: "entire-agent-test.cmd", want: "entire-agent-test"},
+		{name: "exe uppercase", in: "entire-agent-test.EXE", want: "entire-agent-test"},
+		{name: "bat mixed case", in: "entire-agent-test.Bat", want: "entire-agent-test"},
+		{name: "cmd mixed case", in: "entire-agent-test.CmD", want: "entire-agent-test"},
+		{name: "no extension", in: "entire-agent-test", want: "entire-agent-test"},
+		{name: "unrelated extension", in: "entire-agent-test.sh", want: "entire-agent-test.sh"},
+		{name: "dot only", in: "entire-agent-test.", want: "entire-agent-test."},
+		{name: "empty string", in: "", want: ""},
+		{name: "exe in middle", in: "entire-agent-exe-test", want: "entire-agent-exe-test"},
+		{name: "double extension", in: "entire-agent-test.tar.exe", want: "entire-agent-test.tar"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := stripExeExt(tt.in); got != tt.want {
+				t.Errorf("stripExeExt(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }

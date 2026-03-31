@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/stretchr/testify/require"
@@ -582,5 +583,88 @@ func TestReadTranscript_MatchesReadSession(t *testing.T) {
 
 	if !bytes.Equal(transcriptData, session.NativeData) {
 		t.Error("ReadTranscript() and ReadSession().NativeData should return identical bytes")
+	}
+}
+
+// --- PrepareTranscript ---
+
+func TestPrepareTranscript_FileExistsWithContent(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "transcript.jsonl")
+	if err := os.WriteFile(path, []byte(`{"role":"user"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	ag := &CursorAgent{}
+	err := ag.PrepareTranscript(context.Background(), path)
+	if err != nil {
+		t.Fatalf("expected nil error for existing non-empty file, got: %v", err)
+	}
+}
+
+func TestPrepareTranscript_NonTransientStatError(t *testing.T) {
+	t.Parallel()
+
+	// A path through a regular file (not a directory) causes os.Stat to
+	// return ENOTDIR, which is not IsNotExist — a non-transient error.
+	tmpDir := t.TempDir()
+	blocker := filepath.Join(tmpDir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write blocker file: %v", err)
+	}
+	path := filepath.Join(blocker, "transcript.jsonl")
+
+	ag := &CursorAgent{}
+	err := ag.PrepareTranscript(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected error for non-transient stat failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to stat transcript") {
+		t.Errorf("expected 'failed to stat transcript' error, got: %v", err)
+	}
+}
+
+func TestPrepareTranscript_FileAppearsAfterDelay(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "delayed.jsonl")
+
+	// Create the file after a short delay, simulating async flush.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = os.WriteFile(path, []byte(`{"role":"assistant"}`+"\n"), 0o644) //nolint:errcheck // test helper in goroutine
+	}()
+
+	ag := &CursorAgent{}
+	err := ag.PrepareTranscript(context.Background(), path)
+	if err != nil {
+		t.Fatalf("expected nil error when file appears during polling, got: %v", err)
+	}
+}
+
+func TestPrepareTranscript_EmptyFileGrowsDuringPolling(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "empty-then-filled.jsonl")
+
+	// Create empty file immediately.
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("write empty file: %v", err)
+	}
+
+	// Write content after a short delay.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = os.WriteFile(path, []byte(`{"role":"user"}`+"\n"), 0o644) //nolint:errcheck // test helper in goroutine
+	}()
+
+	ag := &CursorAgent{}
+	err := ag.PrepareTranscript(context.Background(), path)
+	if err != nil {
+		t.Fatalf("expected nil error when empty file grows during polling, got: %v", err)
 	}
 }

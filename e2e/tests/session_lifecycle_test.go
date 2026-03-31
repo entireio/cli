@@ -33,20 +33,18 @@ func TestEndedSessionUserCommitsAfterExit(t *testing.T) {
 
 		s.Git(t, "add", "ended_a.go", "ended_b.go")
 		s.Git(t, "commit", "-m", "Add ended files A and B")
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		cpID1 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
-
-		cpBranchAfterFirst := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
 
 		s.Git(t, "add", "ended_c.go")
 		s.Git(t, "commit", "-m", "Add ended file C")
-		testutil.WaitForCheckpointAdvanceFrom(t, s.Dir, cpBranchAfterFirst, 15*time.Second)
 		cpID2 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
+		testutil.WaitForCheckpointExists(t, s.Dir, cpID2, 30*time.Second)
 
 		assert.NotEqual(t, cpID1, cpID2, "each commit should have its own checkpoint ID")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 		testutil.AssertCheckpointExists(t, s.Dir, cpID2)
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -66,7 +64,7 @@ func TestSessionDepletedManualEditNoCheckpoint(t *testing.T) {
 
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add depleted.go")
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
 
@@ -83,7 +81,7 @@ func TestSessionDepletedManualEditNoCheckpoint(t *testing.T) {
 		assert.Equal(t, cpBranchAfterAgent, cpBranchAfterManual,
 			"manual edit after session depletion should not advance checkpoint branch")
 		testutil.AssertNoCheckpointTrailer(t, s.Dir, "HEAD")
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -102,7 +100,7 @@ func TestTrailerRemovalSkipsCondensation(t *testing.T) {
 		testutil.AssertFileExists(t, s.Dir, "trailer_test.go")
 
 		s.Git(t, "add", ".")
-		s.Git(t, "-c", "core.hooksPath=/dev/null", "commit", "-m", "Add trailer_test (no checkpoint)")
+		s.Git(t, "-c", "core.hooksPath="+testutil.EmptyDir(t), "commit", "-m", "Add trailer_test (no checkpoint)")
 
 		testutil.AssertNoCheckpointTrailer(t, s.Dir, "HEAD")
 

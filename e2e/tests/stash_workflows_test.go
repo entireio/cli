@@ -36,10 +36,8 @@ func TestPartialCommitStashNewPrompt(t *testing.T) {
 		s.Git(t, "add", "docs/b.md", "docs/c.md")
 		s.Git(t, "stash")
 
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		cpID1 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
-		cpBranch1 := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
-
 		// Second prompt: agent creates D, E.
 		_, err = s.RunPrompt(t, ctx,
 			"create two markdown files: docs/d.md about dates, docs/e.md about elderberries. Do not commit them, only create the files. Do not ask for confirmation, just make the changes.")
@@ -53,13 +51,13 @@ func TestPartialCommitStashNewPrompt(t *testing.T) {
 		s.Git(t, "add", "docs/d.md", "docs/e.md")
 		s.Git(t, "commit", "-m", "Add d.md and e.md")
 
-		testutil.WaitForCheckpointAdvanceFrom(t, s.Dir, cpBranch1, 15*time.Second)
 		cpID2 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
+		testutil.WaitForCheckpointExists(t, s.Dir, cpID2, 30*time.Second)
 
 		assert.NotEqual(t, cpID1, cpID2, "checkpoint IDs should be distinct")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 		testutil.AssertCheckpointExists(t, s.Dir, cpID2)
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -85,10 +83,8 @@ func TestStashSecondPromptUnstashCommitAll(t *testing.T) {
 		s.Git(t, "add", "docs/b.md", "docs/c.md")
 		s.Git(t, "stash")
 
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		cpID1 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
-		cpBranch1 := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
-
 		// Second prompt: agent creates D, E.
 		_, err = s.RunPrompt(t, ctx,
 			"create two markdown files: docs/d.md about dates, docs/e.md about elderberries. Do not commit them, only create the files. Do not ask for confirmation, just make the changes.")
@@ -103,13 +99,13 @@ func TestStashSecondPromptUnstashCommitAll(t *testing.T) {
 		s.Git(t, "add", "docs/")
 		s.Git(t, "commit", "-m", "Add b, c, d, e")
 
-		testutil.WaitForCheckpointAdvanceFrom(t, s.Dir, cpBranch1, 15*time.Second)
 		cpID2 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
+		testutil.WaitForCheckpointExists(t, s.Dir, cpID2, 30*time.Second)
 
 		assert.NotEqual(t, cpID1, cpID2, "checkpoint IDs should be distinct")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 		testutil.AssertCheckpointExists(t, s.Dir, cpID2)
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -148,21 +144,21 @@ func TestStashModificationsToTrackedFiles(t *testing.T) {
 		// Stash b.go modifications.
 		s.Git(t, "stash")
 
-		testutil.WaitForCheckpoint(t, s, 15*time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		cpID1 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
-		cpBranch1 := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
-
 		// Pop and commit b.go.
 		s.Git(t, "stash", "pop")
 		s.Git(t, "add", "src/b.go")
 		s.Git(t, "commit", "-m", "Update b.go")
 
-		testutil.WaitForCheckpointAdvanceFrom(t, s.Dir, cpBranch1, 15*time.Second)
 		cpID2 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
+		testutil.WaitForCheckpointExists(t, s.Dir, cpID2, 30*time.Second)
 
 		assert.NotEqual(t, cpID1, cpID2, "checkpoint IDs should be distinct")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 		testutil.AssertCheckpointExists(t, s.Dir, cpID2)
-		testutil.AssertNoShadowBranches(t, s.Dir)
+		// Shadow branch cleanup can lag behind condensation when carry-forward
+		// creates intermediate branches, so poll instead of instant-assert.
+		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

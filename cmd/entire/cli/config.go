@@ -12,6 +12,7 @@ import (
 
 	// Import agents to register them
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 )
 

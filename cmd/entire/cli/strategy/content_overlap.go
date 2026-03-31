@@ -14,6 +14,14 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
+// truncateStringSlice returns the first n elements of a slice, for concise logging.
+func truncateStringSlice(s []string, n int) []string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
 // Content-aware overlap detection for checkpoint management.
 //
 // These functions determine whether a commit contains session-related work by comparing
@@ -233,6 +241,9 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 	// Check each staged file
 	for _, stagedPath := range stagedFiles {
 		if !touchedSet[stagedPath] {
+			logging.Debug(logCtx, "stagedFilesOverlapWithContent: staged file not in files_touched, skipping",
+				slog.String("staged_file", stagedPath),
+			)
 			continue // Not in filesTouched, skip
 		}
 
@@ -334,6 +345,8 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 	logging.Debug(logCtx, "stagedFilesOverlapWithContent: no overlapping files found",
 		slog.Int("staged_files", len(stagedFiles)),
 		slog.Int("files_touched", len(filesTouched)),
+		slog.Any("staged_paths", truncateStringSlice(stagedFiles, 10)),
+		slog.Any("touched_paths", truncateStringSlice(filesTouched, 10)),
 	)
 	return false
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/go-git/go-git/v6"
 )
@@ -1402,5 +1404,152 @@ func TestDetectOrSelectAgent_ReRun_EmptySelection_ReturnsError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no agents selected") {
 		t.Errorf("Expected 'no agents selected' error, got: %v", err)
+	}
+}
+
+// Tests for configure --checkpoint-remote
+
+func TestConfigureCmd_CheckpointRemote_UpdatesProjectSettings(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--checkpoint-remote", "github:ashtom/zeugs-checkpoints"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --checkpoint-remote failed: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Settings updated") {
+		t.Errorf("expected 'Settings updated' output, got: %s", stdout.String())
+	}
+
+	// Verify the setting was written to settings.json
+	s, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load settings: %v", err)
+	}
+	remote := s.GetCheckpointRemote()
+	if remote == nil {
+		t.Fatal("expected checkpoint_remote to be set")
+		return
+	}
+	if remote.Provider != "github" || remote.Repo != "ashtom/zeugs-checkpoints" {
+		t.Errorf("unexpected checkpoint_remote: %+v", remote)
+	}
+}
+
+func TestConfigureCmd_CheckpointRemote_WritesToLocalFile(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--local", "--checkpoint-remote", "github:org/repo"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --local --checkpoint-remote failed: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "settings.local.json") {
+		t.Errorf("expected output to reference settings.local.json, got: %s", stdout.String())
+	}
+
+	// Verify the setting was written to settings.local.json, not settings.json
+	localS, err := settings.LoadFromFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to load local settings: %v", err)
+	}
+	remote := localS.GetCheckpointRemote()
+	if remote == nil {
+		t.Fatal("expected checkpoint_remote in local settings")
+	}
+
+	// Project settings should be unchanged
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if projectS.GetCheckpointRemote() != nil {
+		t.Error("checkpoint_remote should not leak into project settings")
+	}
+}
+
+func TestConfigureCmd_CheckpointRemote_LocalOnlyRepo(t *testing.T) {
+	setupTestRepo(t)
+	// Only local settings exist — no settings.json
+	writeLocalSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--checkpoint-remote", "github:org/repo"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --checkpoint-remote on local-only repo failed: %v", err)
+	}
+
+	// Should NOT create settings.json
+	if _, err := os.Stat(EntireSettingsFile); err == nil {
+		t.Error("settings.json should not be created in a local-only repo")
+	}
+
+	// Should write to settings.local.json
+	localS, err := settings.LoadFromFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to load local settings: %v", err)
+	}
+	if localS.GetCheckpointRemote() == nil {
+		t.Error("expected checkpoint_remote in local settings")
+	}
+}
+
+func TestConfigureCmd_CheckpointRemote_InvalidFormat(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--checkpoint-remote", "invalid-format"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for invalid --checkpoint-remote format")
+	}
+}
+
+func TestConfigureCmd_CheckpointRemote_DoesNotLeakMergedSettings(t *testing.T) {
+	setupTestRepo(t)
+	// Project has enabled=true, local has log_level override
+	writeSettings(t, testSettingsEnabled)
+	writeLocalSettings(t, `{"log_level": "debug"}`)
+
+	cmd := newSetupCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--project", "--checkpoint-remote", "github:org/repo"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --project --checkpoint-remote failed: %v", err)
+	}
+
+	// Project settings should NOT contain log_level from local
+	data, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read settings: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("failed to parse settings: %v", err)
+	}
+	if _, exists := raw["log_level"]; exists {
+		t.Error("log_level from local settings leaked into project settings")
 	}
 }

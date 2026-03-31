@@ -12,7 +12,7 @@ import (
 	"runtime"
 	"time"
 
-	apiurl "github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/spf13/cobra"
 )
@@ -43,7 +43,7 @@ func newLoginCmd() *cobra.Command {
 			client := auth.NewClient(nil)
 
 			if !insecureHTTPAuth {
-				if err := apiurl.RequireSecureURL(client.BaseURL()); err != nil {
+				if err := api.RequireSecureURL(client.BaseURL()); err != nil {
 					return fmt.Errorf("base URL check: %w", err)
 				}
 			}
@@ -67,22 +67,22 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 	}
 
 	fmt.Fprintf(outW, "Device code: %s\n", start.UserCode)
+
 	approvalURL := start.VerificationURI
-	if approvalURL == "" {
-		approvalURL = start.VerificationURIComplete
-	}
 
 	if canPromptInteractively() {
-		fmt.Fprintf(outW, "Press Enter to open %s in your browser...", approvalURL)
+		fmt.Fprintf(outW, "Press Enter to open %s in your browser and enter the generated device code...", approvalURL)
 
 		// Read from /dev/tty so we get a real keypress and don't consume piped stdin.
-		waitForEnter()
+		if err := waitForEnter(ctx); err != nil {
+			return fmt.Errorf("wait for input: %w", err)
+		}
 
 		fmt.Fprintln(outW)
 
 		if err := openURL(ctx, approvalURL); err != nil {
 			fmt.Fprintf(errW, "Warning: failed to open browser: %v\n", err)
-			fmt.Fprintln(outW, "Open the approval URL in your browser to continue.")
+			fmt.Fprintf(outW, "Open the approval URL in your browser to continue and enter the generated device code: %s\n", approvalURL)
 		}
 	} else {
 		fmt.Fprintf(outW, "Approval URL: %s\n", approvalURL)
@@ -170,16 +170,28 @@ func waitForApproval(ctx context.Context, poller deviceAuthClient, deviceCode st
 
 // waitForEnter reads a line from /dev/tty, blocking until the user presses Enter.
 // If /dev/tty cannot be opened (e.g. on Windows), it returns immediately.
-func waitForEnter() {
+// Returns ctx.Err() if the context is cancelled before the user presses Enter.
+func waitForEnter(ctx context.Context) error {
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
-		return
+		return nil //nolint:nilerr // tty unavailable (e.g. Windows) — skip prompt silently
 	}
-	defer tty.Close()
 
-	reader := bufio.NewReader(tty)
-	if _, err = reader.ReadString('\n'); err != nil {
-		return
+	done := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(tty)
+		_, err := reader.ReadString('\n')
+		done <- err
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Close tty to unblock the reading goroutine.
+		_ = tty.Close()
+		return fmt.Errorf("interrupted: %w", ctx.Err())
+	case <-done:
+		_ = tty.Close()
+		return nil
 	}
 }
 

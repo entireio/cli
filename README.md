@@ -37,7 +37,7 @@ With Entire, you can:
 ## Requirements
 
 - Git
-- macOS or Linux (Windows via WSL)
+- macOS, Linux or Windows
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [OpenCode](https://opencode.ai/docs/cli/), [Cursor](https://www.cursor.com/), [Factory AI Droid](https://www.factory.ai/), or [GitHub Copilot CLI](https://docs.github.com/en/copilot) installed and authenticated
 
 ## Quick Start
@@ -47,8 +47,15 @@ With Entire, you can:
 brew tap entireio/tap
 brew install entireio/tap/entire
 
+# Or install via Scoop (Windows)
+scoop bucket add entire https://github.com/entireio/scoop-bucket.git
+scoop install entire/cli
+
 # Or install via Go
 go install github.com/entireio/cli/cmd/entire@latest
+
+# Linux: Add Go binaries to PATH (add to ~/.zshrc or ~/.bashrc if not already configured)
+export PATH="$HOME/go/bin:$PATH"
 
 # Enable in your project
 cd your-project && entire enable
@@ -206,15 +213,15 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 
 ### `entire enable` Flags
 
-| Flag                   | Description                                                           |
-| ---------------------- | --------------------------------------------------------------------- |
-| `--agent <name>`       | AI agent to install hooks for: `claude-code`, `gemini`, `opencode`, `cursor`, `factoryai-droid`, or `copilot-cli` |
-| `--force`, `-f`        | Force reinstall hooks (removes existing Entire hooks first)           |
-| `--local`              | Write settings to `settings.local.json` instead of `settings.json`    |
-| `--project`            | Write settings to `settings.json` even if it already exists           |
-| `--skip-push-sessions`       | Disable automatic pushing of session logs on git push                 |
-| `--checkpoint-remote <provider:owner/repo>` | Push checkpoint branches to a separate repo (e.g., `github:org/checkpoints-repo`) |
-| `--telemetry=false`          | Disable anonymous usage analytics                                     |
+| Flag                                        | Description                                                                                                       |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `--agent <name>`                            | AI agent to install hooks for: `claude-code`, `gemini`, `opencode`, `cursor`, `factoryai-droid`, or `copilot-cli` |
+| `--force`, `-f`                             | Force reinstall hooks (removes existing Entire hooks first)                                                       |
+| `--local`                                   | Write settings to `settings.local.json` instead of `settings.json`                                                |
+| `--project`                                 | Write settings to `settings.json` even if it already exists                                                       |
+| `--skip-push-sessions`                      | Disable automatic pushing of session logs on git push                                                             |
+| `--checkpoint-remote <provider:owner/repo>` | Push checkpoint branches to a separate repo (e.g., `github:org/checkpoints-repo`)                                 |
+| `--telemetry=false`                         | Disable anonymous usage analytics                                                                                 |
 
 **Examples:**
 
@@ -253,27 +260,27 @@ Personal overrides, gitignored by default:
 
 ### Configuration Options
 
-| Option                                | Values                           | Description                                                        |
-| ------------------------------------- | -------------------------------- | ------------------------------------------------------------------ |
-| `enabled`                             | `true`, `false`                  | Enable/disable Entire                                              |
-| `log_level`                           | `debug`, `info`, `warn`, `error` | Logging verbosity                                                  |
-| `strategy_options.push_sessions`      | `true`, `false`                  | Auto-push `entire/checkpoints/v1` branch on git push               |
-| `strategy_options.checkpoint_remote`  | `{"provider": "github", "repo": "org/repo"}` | Push checkpoint branches to a separate repo (see below) |
-| `strategy_options.summarize.enabled`  | `true`, `false`                  | Auto-generate AI summaries at commit time                          |
-| `telemetry`                           | `true`, `false`                  | Send anonymous usage statistics to Posthog                         |
+| Option                               | Values                                       | Description                                             |
+| ------------------------------------ | -------------------------------------------- | ------------------------------------------------------- |
+| `enabled`                            | `true`, `false`                              | Enable/disable Entire                                   |
+| `log_level`                          | `debug`, `info`, `warn`, `error`             | Logging verbosity                                       |
+| `strategy_options.push_sessions`     | `true`, `false`                              | Auto-push `entire/checkpoints/v1` branch on git push    |
+| `strategy_options.checkpoint_remote` | `{"provider": "github", "repo": "org/repo"}` | Push checkpoint branches to a separate repo (see below) |
+| `strategy_options.summarize.enabled` | `true`, `false`                              | Auto-generate AI summaries at commit time               |
+| `telemetry`                          | `true`, `false`                              | Send anonymous usage statistics to Posthog              |
 
 ### Agent Hook Configuration
 
 Each agent stores its hook configuration in its own directory. When you run `entire enable`, hooks are installed in the appropriate location for each selected agent:
 
-| Agent       | Hook Location                 | Format            |
-|-------------| ----------------------------- | ----------------- |
-| Claude Code | `.claude/settings.json`       | JSON hooks config |
-| Gemini CLI  | `.gemini/settings.json`       | JSON hooks config |
-| OpenCode    | `.opencode/plugins/entire.ts` | TypeScript plugin |
-| Cursor      | `.cursor/hooks.json`          | JSON hooks config |
-| Factory AI Droid | `.factory/settings.json` | JSON hooks config |
-| Copilot CLI | `.github/hooks/entire.json`   | JSON hooks config |
+| Agent            | Hook Location                 | Format            |
+| ---------------- | ----------------------------- | ----------------- |
+| Claude Code      | `.claude/settings.json`       | JSON hooks config |
+| Gemini CLI       | `.gemini/settings.json`       | JSON hooks config |
+| OpenCode         | `.opencode/plugins/entire.ts` | TypeScript plugin |
+| Cursor           | `.cursor/hooks.json`          | JSON hooks config |
+| Factory AI Droid | `.factory/settings.json`      | JSON hooks config |
+| Copilot CLI      | `.github/hooks/entire.json`   | JSON hooks config |
 
 You can enable multiple agents at the same time — each agent's hooks are independent. Entire detects which agents are active by checking for installed hooks, not by a setting in `settings.json`.
 

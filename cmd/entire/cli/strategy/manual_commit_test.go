@@ -3875,3 +3875,179 @@ func TestResolveFilesTouched_PrefersStateFallsBackToTranscript(t *testing.T) {
 		}
 	})
 }
+
+// TestCondenseSession_V2DualWrite verifies that when checkpoints_v2 is enabled,
+// CondenseSession writes to both v1 (entire/checkpoints/v1) and v2 refs
+// (refs/entire/checkpoints/v2/main and refs/entire/checkpoints/v2/full/current).
+func TestCondenseSession_V2DualWrite(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644))
+	_, err = worktree.Add("main.go")
+	require.NoError(t, err)
+	commitHash, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	t.Chdir(dir)
+
+	// Enable checkpoints_v2 via settings
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	settingsJSON := `{"enabled": true, "strategy": "manual-commit", "strategy_options": {"checkpoints_v2": true}}`
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsJSON), 0o644))
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2025-01-15-test-v2-dual-write"
+
+	// Create metadata directory with transcript
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	transcript := `{"type":"human","message":{"content":"hello"}}
+{"type":"assistant","message":{"content":"hi there"}}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
+
+	// SaveStep to create shadow branch
+	err = s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"main.go"},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	})
+	require.NoError(t, err)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.TranscriptPath = filepath.Join(metadataDirAbs, paths.TranscriptFileName)
+	state.BaseCommit = commitHash.String()[:7]
+
+	checkpointID := id.MustCheckpointID("dd11ee22ff33")
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// v1 branch should exist (as before)
+	v1Ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err, "v1 metadata branch should exist")
+	require.NotEqual(t, plumbing.ZeroHash, v1Ref.Hash())
+
+	// v2 /main ref should exist
+	v2MainRef, err := repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
+	require.NoError(t, err, "v2 /main ref should exist")
+	require.NotEqual(t, plumbing.ZeroHash, v2MainRef.Hash())
+
+	// v2 /full/current ref should exist (transcript was non-empty)
+	v2FullRef, err := repo.Reference(plumbing.ReferenceName(paths.V2FullCurrentRefName), true)
+	require.NoError(t, err, "v2 /full/current ref should exist")
+	require.NotEqual(t, plumbing.ZeroHash, v2FullRef.Hash())
+
+	// Verify /main has metadata but no transcript
+	v2MainCommit, err := repo.CommitObject(v2MainRef.Hash())
+	require.NoError(t, err)
+	v2MainTree, err := v2MainCommit.Tree()
+	require.NoError(t, err)
+
+	cpPath := checkpointID.Path()
+	mainCpTree, err := v2MainTree.Tree(cpPath)
+	require.NoError(t, err)
+
+	// Root metadata.json should exist
+	_, err = mainCpTree.File(paths.MetadataFileName)
+	require.NoError(t, err, "root metadata.json should exist on /main")
+
+	// Verify /full/current has transcript
+	v2FullCommit, err := repo.CommitObject(v2FullRef.Hash())
+	require.NoError(t, err)
+	v2FullTree, err := v2FullCommit.Tree()
+	require.NoError(t, err)
+
+	fullCpTree, err := v2FullTree.Tree(cpPath)
+	require.NoError(t, err)
+	fullSessionTree, err := fullCpTree.Tree("0")
+	require.NoError(t, err)
+	_, err = fullSessionTree.File(paths.TranscriptFileName)
+	require.NoError(t, err, "full.jsonl should exist on /full/current")
+}
+
+// TestCondenseSession_V2Disabled_NoV2Refs verifies that when checkpoints_v2 is
+// not enabled, CondenseSession only writes to v1 and does not create v2 refs.
+func TestCondenseSession_V2Disabled_NoV2Refs(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644))
+	_, err = worktree.Add("main.go")
+	require.NoError(t, err)
+	commitHash, err := worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	t.Chdir(dir)
+
+	// No checkpoints_v2 setting — default is disabled
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	settingsJSON := `{"enabled": true, "strategy": "manual-commit"}`
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsJSON), 0o644))
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2025-01-15-test-v2-disabled"
+
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	transcript := `{"type":"human","message":{"content":"hello"}}
+{"type":"assistant","message":{"content":"hi"}}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
+
+	err = s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"main.go"},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	})
+	require.NoError(t, err)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.TranscriptPath = filepath.Join(metadataDirAbs, paths.TranscriptFileName)
+	state.BaseCommit = commitHash.String()[:7]
+
+	checkpointID := id.MustCheckpointID("ee22ff33aa44")
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// v1 should exist
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err, "v1 metadata branch should exist")
+
+	// v2 refs should NOT exist
+	_, err = repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
+	require.Error(t, err, "v2 /main ref should not exist when v2 is disabled")
+
+	_, err = repo.Reference(plumbing.ReferenceName(paths.V2FullCurrentRefName), true)
+	require.Error(t, err, "v2 /full/current ref should not exist when v2 is disabled")
+}
