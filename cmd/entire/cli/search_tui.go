@@ -354,7 +354,8 @@ func (m searchModel) viewRow(r search.Result, cols columnLayout) string {
 	prompt := fmt.Sprintf("%-*s", cols.prompt, stringutil.TruncateRunes(
 		stringutil.CollapseWhitespace(r.Data.Prompt), cols.prompt-1, "…",
 	))
-	author := fmt.Sprintf("%-*s", cols.author, stringutil.TruncateRunes(r.Data.Author, cols.author-1, "…"))
+	authorName := derefStr(r.Data.AuthorUsername, r.Data.Author)
+	author := fmt.Sprintf("%-*s", cols.author, stringutil.TruncateRunes(authorName, cols.author-1, "…"))
 
 	return fmt.Sprintf("%s %s %s %s %s", age, id, branch, prompt, author)
 }
@@ -510,10 +511,10 @@ func formatCommit(sha, message *string) string {
 	return s
 }
 
-// formatAuthor renders author name with optional username.
+// formatAuthor renders username with display name, e.g. "dipree (Daniel Adams)".
 func formatAuthor(author string, username *string) string {
 	if username != nil && *username != "" {
-		return author + " (@" + *username + ")"
+		return *username + " (" + author + ")"
 	}
 	return author
 }
@@ -567,7 +568,7 @@ func renderSearchStatic(w io.Writer, results []search.Result, query string, tota
 		prompt := stringutil.TruncateRunes(
 			stringutil.CollapseWhitespace(r.Data.Prompt), cols.prompt, "...",
 		)
-		author := stringutil.TruncateRunes(r.Data.Author, cols.author, "...")
+		author := stringutil.TruncateRunes(derefStr(r.Data.AuthorUsername, r.Data.Author), cols.author, "...")
 
 		fmt.Fprintf(w, "%-*s  %-*s  %-*s  %-*s  %-*s\n",
 			cols.age, age,

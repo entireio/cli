@@ -236,7 +236,7 @@ func TestSearchModel_View(t *testing.T) {
 	if !strings.Contains(view, "entirehq/entire.io") {
 		t.Error("detail missing repo")
 	}
-	if !strings.Contains(view, "@alicecodes") {
+	if !strings.Contains(view, "alicecodes (alice)") {
 		t.Error("detail missing username")
 	}
 	if !strings.Contains(view, "semantic") {
@@ -371,8 +371,8 @@ func TestFormatAuthor(t *testing.T) {
 	t.Parallel()
 
 	username := "alicecodes"
-	if got := formatAuthor("alice", &username); got != "alice (@alicecodes)" {
-		t.Errorf("formatAuthor = %q, want %q", got, "alice (@alicecodes)")
+	if got := formatAuthor("alice", &username); got != "alicecodes (alice)" {
+		t.Errorf("formatAuthor = %q, want %q", got, "alicecodes (alice)")
 	}
 
 	if got := formatAuthor("bob", nil); got != "bob" {
