@@ -309,6 +309,63 @@ func TestSearch_FilterParams(t *testing.T) {
 	}
 }
 
+func TestSearch_PageParam(t *testing.T) {
+	t.Parallel()
+
+	var capturedReq *http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedReq = r
+		resp := Response{Results: []Result{}, Total: 0, Page: 2}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
+	}))
+	defer srv.Close()
+
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "o",
+		Repo:        "r",
+		Query:       "q",
+		Page:        2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if capturedReq.URL.Query().Get("page") != "2" {
+		t.Errorf("page = %s, want '2'", capturedReq.URL.Query().Get("page"))
+	}
+}
+
+func TestSearch_ZeroPageOmitsParam(t *testing.T) {
+	t.Parallel()
+
+	var capturedReq *http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedReq = r
+		resp := Response{Results: []Result{}, Total: 0, Page: 1}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
+	}))
+	defer srv.Close()
+
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "o",
+		Repo:        "r",
+		Query:       "q",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if capturedReq.URL.Query().Has("page") {
+		t.Error("page param should be omitted when zero")
+	}
+}
+
 func TestSearch_EmptyFiltersOmitParams(t *testing.T) {
 	t.Parallel()
 

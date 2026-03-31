@@ -88,8 +88,8 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 			isTerminal := isTerminalWriter(w)
 
 			// No query and no filters + non-interactive = error
-			if query == "" && !searchCfg.HasFilters() && (jsonOutput || !isTerminal) {
-				return errors.New("query required when using --json or piped output. Usage: entire search <query>")
+			if query == "" && !searchCfg.HasFilters() && (jsonOutput || !isTerminal || IsAccessibleMode()) {
+				return errors.New("query required when using --json, accessible mode, or piped output. Usage: entire search <query>")
 			}
 
 			// Use wildcard query when only filters are provided
@@ -99,6 +99,7 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 
 			// No query provided + interactive = open TUI with search bar focused
 			if query == "" && !searchCfg.HasFilters() {
+				searchCfg.Limit = resultsPerPage
 				styles := newStatusStyles(w)
 				model := newSearchModel(nil, "", 0, searchCfg, styles)
 				model.mode = modeSearch
@@ -108,6 +109,12 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 					return fmt.Errorf("TUI error: %w", err)
 				}
 				return nil
+			}
+
+			// Align API page size with TUI display page size for interactive mode
+			willUseTUI := !jsonOutput && isTerminal && !IsAccessibleMode()
+			if willUseTUI && searchCfg.Limit < resultsPerPage {
+				searchCfg.Limit = resultsPerPage
 			}
 
 			resp, err := search.Search(ctx, searchCfg)

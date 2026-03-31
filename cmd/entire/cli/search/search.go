@@ -67,6 +67,7 @@ type Config struct {
 	Limit       int
 	Author      string // Filter by author name
 	Date        string // Filter by time period: "week" or "month"
+	Page        int    // 1-based page number (0 means omit, API defaults to 1)
 }
 
 // HasFilters reports whether any filter fields (Author, Date) are set on the config.
@@ -171,6 +172,9 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 	}
 	if cfg.Date != "" {
 		q.Set("date", cfg.Date)
+	}
+	if cfg.Page > 0 {
+		q.Set("page", strconv.Itoa(cfg.Page))
 	}
 	u.RawQuery = q.Encode()
 

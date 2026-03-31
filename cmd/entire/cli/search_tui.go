@@ -30,6 +30,12 @@ type searchResultsMsg struct {
 	err     error
 }
 
+// searchMoreResultsMsg is sent when a fetch-more-results call completes.
+type searchMoreResultsMsg struct {
+	results []search.Result
+	err     error
+}
+
 // searchStyles holds lipgloss styles specific to the search TUI.
 // Styles shared with the status TUI (bold, dim, green, red, cyan, agent/id)
 // are accessed via the embedded statusStyles.
@@ -67,17 +73,19 @@ const resultsPerPage = 25
 
 // searchModel is the bubbletea model for interactive search results.
 type searchModel struct {
-	results   []search.Result
-	cursor    int
-	page      int // 0-based page index
-	total     int
-	width     int
-	mode      searchMode
-	loading   bool
-	searchErr string
-	input     textinput.Model
-	searchCfg search.Config
-	styles    searchStyles
+	results      []search.Result
+	cursor       int
+	page         int // 0-based display page index
+	total        int
+	width        int
+	mode         searchMode
+	loading      bool
+	fetchingMore bool // true while fetching next API page
+	searchErr    string
+	input        textinput.Model
+	searchCfg    search.Config
+	apiPage      int // 1-based last-fetched API page
+	styles       searchStyles
 }
 
 // pageResults returns the slice of results for the current page.
@@ -93,12 +101,12 @@ func (m searchModel) pageResults() []search.Result {
 	return m.results[start:end]
 }
 
-// totalPages returns the number of pages.
+// totalPages returns the number of pages based on the API's total result count.
 func (m searchModel) totalPages() int {
-	if len(m.results) == 0 {
+	if m.total == 0 {
 		return 1
 	}
-	return (len(m.results) + resultsPerPage - 1) / resultsPerPage
+	return (m.total + resultsPerPage - 1) / resultsPerPage
 }
 
 // selectedResult returns the currently selected result, accounting for pagination.
@@ -126,6 +134,11 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		ti.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	}
 
+	var apiPage int
+	if results != nil {
+		apiPage = 1
+	}
+
 	return searchModel{
 		results:   results,
 		total:     total,
@@ -133,6 +146,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		mode:      modeBrowse,
 		input:     ti,
 		searchCfg: cfg,
+		apiPage:   apiPage,
 		styles:    styles,
 	}
 }
@@ -148,6 +162,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn
 	switch msg := msg.(type) {
 	case searchResultsMsg:
 		m.loading = false
+		m.fetchingMore = false
 		if msg.err != nil {
 			m.searchErr = msg.err.Error()
 			return m, nil
@@ -155,8 +170,19 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn
 		m.searchErr = ""
 		m.results = msg.results
 		m.total = msg.total
+		m.apiPage = 1
 		m.cursor = 0
 		m.page = 0
+		return m, nil
+
+	case searchMoreResultsMsg:
+		m.fetchingMore = false
+		if msg.err != nil {
+			m.searchErr = msg.err.Error()
+			return m, nil
+		}
+		m.apiPage++
+		m.results = append(m.results, msg.results...)
 		return m, nil
 
 	case tea.WindowSizeMsg:
@@ -194,12 +220,8 @@ func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 		if cfg.Query == "" {
 			cfg.Query = search.WildcardQuery
 		}
-		if parsed.Author != "" {
-			cfg.Author = parsed.Author
-		}
-		if parsed.Date != "" {
-			cfg.Date = parsed.Date
-		}
+		cfg.Author = parsed.Author
+		cfg.Date = parsed.Date
 		return m, performSearch(cfg)
 	}
 
@@ -225,6 +247,12 @@ func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 		if m.page < m.totalPages()-1 {
 			m.page++
 			m.cursor = 0
+			// Fetch next API page if we've scrolled past loaded results
+			start := m.page * resultsPerPage
+			if start >= len(m.results) && !m.fetchingMore {
+				m.fetchingMore = true
+				return m, fetchMoreResults(m.searchCfg, m.apiPage+1)
+			}
 		}
 	case "p", "left":
 		if m.page > 0 {
@@ -246,6 +274,17 @@ func performSearch(cfg search.Config) tea.Cmd {
 			return searchResultsMsg{err: err}
 		}
 		return searchResultsMsg{results: resp.Results, total: resp.Total}
+	}
+}
+
+func fetchMoreResults(cfg search.Config, page int) tea.Cmd {
+	return func() tea.Msg {
+		cfg.Page = page
+		resp, err := search.Search(context.Background(), cfg)
+		if err != nil {
+			return searchMoreResultsMsg{err: err}
+		}
+		return searchMoreResultsMsg{results: resp.Results}
 	}
 }
 
@@ -298,7 +337,11 @@ func (m searchModel) View() string {
 	b.WriteString("\n\n")
 
 	// Table (current page only)
-	b.WriteString(m.viewTable())
+	if m.fetchingMore && m.pageResults() == nil {
+		b.WriteString(pad + m.styles.render(m.styles.dim, "Loading more results...") + "\n")
+	} else {
+		b.WriteString(m.viewTable())
+	}
 	b.WriteString("\n")
 
 	// Detail card
