@@ -107,6 +107,17 @@ func (f *FactoryAIDroidAgent) GetSessionDir(repoPath string) (string, error) {
 	return filepath.Join(homeDir, ".factory", "sessions", projectDir), nil
 }
 
+// GetSessionBaseDir returns the base directory containing per-project session subdirectories.
+// Unlike GetSessionDir, this does NOT use test overrides because the override
+// points to a specific project dir, not the base containing all projects.
+func (f *FactoryAIDroidAgent) GetSessionBaseDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(homeDir, ".factory", "sessions"), nil
+}
+
 // ResolveSessionFile returns the path to a Factory AI Droid session file.
 func (f *FactoryAIDroidAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 	return filepath.Join(sessionDir, agentSessionID+".jsonl")

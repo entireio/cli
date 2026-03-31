@@ -108,6 +108,17 @@ func (c *CursorAgent) GetSessionDir(repoPath string) (string, error) {
 	return filepath.Join(homeDir, ".cursor", "projects", projectDir, "agent-transcripts"), nil
 }
 
+// GetSessionBaseDir returns the base directory containing per-project session subdirectories.
+// Unlike GetSessionDir, this does NOT use test overrides because the override
+// points to a specific project dir, not the base containing all projects.
+func (c *CursorAgent) GetSessionBaseDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(homeDir, ".cursor", "projects"), nil
+}
+
 // ReadSession reads a session from Cursor's storage (JSONL transcript file).
 // Note: ModifiedFiles is left empty because Cursor's transcript does not contain
 // tool_use blocks for file detection. TranscriptAnalyzer extracts prompts and

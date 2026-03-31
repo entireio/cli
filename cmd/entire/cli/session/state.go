@@ -128,6 +128,10 @@ type State struct {
 	// ACTIVE via TurnStart, or ENDED → IDLE via SessionStart) by ActionClearEndedAt.
 	FullyCondensed bool `json:"fully_condensed,omitempty"`
 
+	// AttachedManually indicates this session was imported via `entire attach` rather
+	// than being captured by hooks during normal agent execution.
+	AttachedManually bool `json:"attached_manually,omitempty"`
+
 	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Gemini CLI", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
 

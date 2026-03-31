@@ -417,12 +417,22 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Generate commit message from last prompt (read from session state, set at TurnStart).
 	// In exec mode, session state LastPrompt may be empty because UserPromptSubmit never fires.
 	// Fall back to backfilledPrompt extracted from the transcript.
+	// Single load serves both prompt retrieval and backfill.
 	_, commitMsgSpan := perf.Start(ctx, "generate_commit_message")
 	lastPrompt := ""
 	if sessionState, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil && sessionState != nil {
 		lastPrompt = sessionState.LastPrompt
-	}
-	if lastPrompt == "" && backfilledPrompt != "" {
+		// Backfill LastPrompt so `entire status` shows the prompt even when
+		// no files were modified (before the early return below).
+		if lastPrompt == "" && backfilledPrompt != "" {
+			lastPrompt = backfilledPrompt
+			sessionState.LastPrompt = backfilledPrompt
+			if saveErr := strategy.SaveSessionState(ctx, sessionState); saveErr != nil {
+				logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
+					slog.String("error", saveErr.Error()))
+			}
+		}
+	} else if backfilledPrompt != "" {
 		lastPrompt = backfilledPrompt
 	}
 	commitMessage := generateCommitMessage(lastPrompt, ag.Type())
@@ -475,18 +485,6 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// if it exists in HEAD with the same content as the working tree.
 	relModifiedFiles = filterToUncommittedFiles(ctx, relModifiedFiles, repoRoot)
 	normalizeSpan.End()
-
-	// Backfill session state LastPrompt early so `entire status` shows the prompt
-	// even when no files were modified (before the early return below).
-	if backfilledPrompt != "" {
-		if state, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil && state != nil && state.LastPrompt == "" {
-			state.LastPrompt = backfilledPrompt
-			if saveErr := strategy.SaveSessionState(ctx, state); saveErr != nil {
-				logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
-					slog.String("error", saveErr.Error()))
-			}
-		}
-	}
 
 	// Check if there are any changes
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)

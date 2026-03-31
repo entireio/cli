@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -1406,6 +1407,38 @@ func setupSessionWithCheckpoint(t *testing.T, s *ManualCommitStrategy, _ *git.Re
 	require.NoError(t, err, "SaveStep should succeed to create shadow branch content")
 }
 
+// setupSessionWithCheckpointAndFile initializes a session with a checkpoint for
+// a caller-provided new file. This lets tests create multiple independent
+// sessions that all overlap with the same commit.
+func setupSessionWithCheckpointAndFile(t *testing.T, s *ManualCommitStrategy, dir, sessionID, fileName string) {
+	t.Helper()
+
+	filePath := filepath.Join(dir, fileName)
+	fileContent := "agent content for " + fileName
+	require.NoError(t, os.WriteFile(filePath, []byte(fileContent), 0o644))
+
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(metadataDirAbs, paths.TranscriptFileName),
+		[]byte(testTranscript), 0o644))
+
+	err := s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{},
+		NewFiles:       []string{fileName},
+		DeletedFiles:   []string{},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 1",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	})
+	require.NoError(t, err, "SaveStep should succeed to create shadow branch content")
+}
+
 // shadowTranscriptSize returns the byte size of the transcript blob on the shadow branch.
 // Used in tests to set CheckpointTranscriptSize without hardcoding sizes.
 func shadowTranscriptSize(t *testing.T, repo *git.Repository, state *SessionState) int64 {
@@ -2312,4 +2345,144 @@ func TestPostCommit_EmptyEndedSession_MarkedFullyCondensed(t *testing.T) {
 		"ENDED session with no files and no new content should be marked FullyCondensed")
 	assert.Equal(t, session.PhaseEnded, state.Phase,
 		"Phase should stay ENDED")
+}
+
+// TestCountWarnableStaleEndedSessions verifies that the warning only counts the
+// same ENDED sessions that 'entire doctor' can actually condense.
+// Uses t.Chdir — do NOT add t.Parallel().
+func TestCountWarnableStaleEndedSessions(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	setupSessionWithCheckpoint(t, s, repo, dir, "warnable-session")
+
+	warnableState, err := s.loadSessionState(context.Background(), "warnable-session")
+	require.NoError(t, err)
+	warnableState.Phase = session.PhaseEnded
+	warnableState.FullyCondensed = false
+	require.NoError(t, s.saveSessionState(context.Background(), warnableState))
+
+	sessions := []*SessionState{
+		warnableState,
+		{
+			SessionID:      "no-shadow-branch",
+			BaseCommit:     "1234567890abcdef1234567890abcdef12345678",
+			WorktreeID:     warnableState.WorktreeID,
+			Phase:          session.PhaseEnded,
+			FullyCondensed: false,
+			StepCount:      3,
+		},
+		{
+			SessionID:      "zero-steps",
+			BaseCommit:     warnableState.BaseCommit,
+			WorktreeID:     warnableState.WorktreeID,
+			Phase:          session.PhaseEnded,
+			FullyCondensed: false,
+			StepCount:      0,
+		},
+		{
+			SessionID:      "fully-condensed",
+			BaseCommit:     warnableState.BaseCommit,
+			WorktreeID:     warnableState.WorktreeID,
+			Phase:          session.PhaseEnded,
+			FullyCondensed: true,
+			StepCount:      3,
+		},
+		{
+			SessionID:      "idle-session",
+			BaseCommit:     warnableState.BaseCommit,
+			WorktreeID:     warnableState.WorktreeID,
+			Phase:          session.PhaseIdle,
+			FullyCondensed: false,
+			StepCount:      3,
+		},
+	}
+
+	assert.Equal(t, 1, countWarnableStaleEndedSessions(repo, sessions))
+}
+
+// TestPostCommit_WarnStaleEndedSessions_AfterProcessing verifies that the
+// warning is emitted only for sessions that remain stale AFTER the current
+// commit is processed.
+// Uses t.Chdir — do NOT add t.Parallel().
+func TestPostCommit_WarnStaleEndedSessions_AfterProcessing(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	type sessionFile struct {
+		sessionID string
+		fileName  string
+	}
+	sessionFiles := []sessionFile{
+		{"ended-a", "stale-a.txt"},
+		{"ended-b", "stale-b.txt"},
+		{"ended-c", "stale-c.txt"},
+	}
+
+	filesToCommit := make([]string, 0, len(sessionFiles))
+	for _, sf := range sessionFiles {
+		setupSessionWithCheckpointAndFile(t, s, dir, sf.sessionID, sf.fileName)
+
+		state, loadErr := s.loadSessionState(context.Background(), sf.sessionID)
+		require.NoError(t, loadErr)
+		now := time.Now()
+		state.Phase = session.PhaseEnded
+		state.EndedAt = &now
+		state.FilesTouched = []string{sf.fileName}
+		require.NoError(t, s.saveSessionState(context.Background(), state))
+
+		filesToCommit = append(filesToCommit, sf.fileName)
+	}
+
+	commitFilesWithTrailer(t, repo, dir, "abc123def456", filesToCommit...)
+
+	// Capture warning output via the injectable stderrWriter instead of
+	// mutating the process-global os.Stderr.
+	var buf bytes.Buffer
+	oldWriter := stderrWriter
+	stderrWriter = &buf
+	defer func() { stderrWriter = oldWriter }()
+
+	err = s.PostCommit(context.Background())
+	require.NoError(t, err)
+
+	assert.NotContains(t, buf.String(), "entire doctor",
+		"warning should be suppressed when this commit already condensed the stale ended sessions")
+}
+
+// TestWarnStaleEndedSessions_RateLimit verifies the 24h sentinel file gate.
+// Uses t.Chdir — do NOT add t.Parallel().
+func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+
+	// First call: no sentinel file → should write to stderr
+	var buf bytes.Buffer
+	warnStaleEndedSessionsTo(ctx, 5, &buf)
+	assert.Contains(t, buf.String(), "entire doctor")
+
+	// Sentinel file now exists with current mtime → second call suppressed
+	buf.Reset()
+	warnStaleEndedSessionsTo(ctx, 5, &buf)
+	assert.Empty(t, buf.String(), "second call within window must be suppressed")
+
+	// Backdate sentinel file by 25h → call should warn again
+	commonDir, err := GetGitCommonDir(ctx)
+	require.NoError(t, err)
+	warnFile := filepath.Join(commonDir, session.SessionStateDirName, staleEndedSessionWarnFile)
+	past := time.Now().Add(-25 * time.Hour)
+	require.NoError(t, os.Chtimes(warnFile, past, past))
+
+	buf.Reset()
+	warnStaleEndedSessionsTo(ctx, 5, &buf)
+	assert.Contains(t, buf.String(), "entire doctor")
 }

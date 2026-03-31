@@ -140,6 +140,20 @@ func AsPromptExtractor(ag Agent) (PromptExtractor, bool) { //nolint:ireturn // t
 	return pe, true
 }
 
+// AsSessionBaseDirProvider returns the agent as SessionBaseDirProvider if it implements
+// the interface. No capability declaration is needed since this is a built-in-only feature
+// (external agents use the agent binary's own session resolution).
+func AsSessionBaseDirProvider(ag Agent) (SessionBaseDirProvider, bool) { //nolint:ireturn // type-assertion helper must return interface
+	if ag == nil {
+		return nil, false
+	}
+	sbp, ok := ag.(SessionBaseDirProvider)
+	if !ok {
+		return nil, false
+	}
+	return sbp, true
+}
+
 // AsSubagentAwareExtractor returns the agent as SubagentAwareExtractor if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) { //nolint:ireturn // type-assertion helper must return interface

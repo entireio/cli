@@ -40,14 +40,14 @@ func NewAccessibleForm(groups ...*huh.Group) *huh.Form {
 }
 
 // handleFormCancellation handles cancellation from huh form prompts.
-// If err is a user abort (Ctrl+C), it prints "[action] cancelled." to w and returns nil.
-// Otherwise it returns the error as-is.
+// User abort (Ctrl+C) and timeout both print a cancelled message and return nil.
+// Other errors are wrapped with the action name for context.
 func handleFormCancellation(w io.Writer, action string, err error) error {
-	if errors.Is(err, huh.ErrUserAborted) {
+	if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, huh.ErrTimeout) {
 		fmt.Fprintf(w, "%s cancelled.\n", action)
 		return nil
 	}
-	return err
+	return fmt.Errorf("%s prompt failed: %w", action, err)
 }
 
 // printSessionCommand writes a single session resume command line to w.

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -122,8 +121,7 @@ func tryPushSessionsCommon(ctx context.Context, remote, branchName string) error
 	defer cancel()
 
 	// Use --no-verify to prevent recursive hook calls
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", remote, branchName)
-	cmd.Stdin = nil // Disconnect stdin to prevent hanging in hook context
+	cmd := CheckpointGitCommand(ctx, remote, "push", "--no-verify", remote, branchName)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -158,8 +156,7 @@ func fetchAndMergeSessionsCommon(ctx context.Context, target, branchName string)
 	}
 
 	// Use git CLI for fetch (go-git's fetch can be tricky with auth)
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", target, refSpec)
-	fetchCmd.Stdin = nil
+	fetchCmd := CheckpointGitCommand(ctx, target, "fetch", target, refSpec)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("fetch failed: %s", output)
 	}
