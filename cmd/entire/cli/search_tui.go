@@ -124,7 +124,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	ti := textinput.New()
 	ti.SetValue(query)
 	ti.Prompt = " › "
-	ti.Placeholder = "search checkpoints... (author:name date:week)"
+	ti.Placeholder = "search checkpoints... (author:name date:week branch:main)"
 	ti.CharLimit = 200
 	ti.Width = max(ss.width-6, 30)
 	if ss.colorEnabled {
@@ -227,6 +227,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 		}
 		cfg.Author = parsed.Author
 		cfg.Date = parsed.Date
+		cfg.Branch = parsed.Branch
 		m.searchCfg = cfg
 		return m, performSearch(cfg)
 	}
@@ -313,7 +314,7 @@ func (m searchModel) View() string {
 	if m.mode == modeSearch {
 		b.WriteString(pad + m.input.View())
 		b.WriteString("\n\n")
-		b.WriteString(pad + m.styles.render(m.styles.dim, "  Filters: author:<name>  date:<week|month>"))
+		b.WriteString(pad + m.styles.render(m.styles.dim, "  Filters: author:<name>  date:<week|month>  branch:<name>"))
 		b.WriteString("\n")
 	} else {
 		query := m.input.Value()

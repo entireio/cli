@@ -20,6 +20,7 @@ func newSearchCmd() *cobra.Command {
 		limitFlag  int
 		authorFlag string
 		dateFlag   string
+		branchFlag string
 	)
 
 	cmd := &cobra.Command{
@@ -46,6 +47,9 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 			}
 			if dateFlag == "" {
 				dateFlag = parsed.Date
+			}
+			if branchFlag == "" {
+				branchFlag = parsed.Branch
 			}
 
 			ghToken, err := auth.LookupCurrentToken()
@@ -92,6 +96,7 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 				Limit:       limitFlag,
 				Author:      authorFlag,
 				Date:        dateFlag,
+				Branch:      branchFlag,
 			}
 
 			w := cmd.OutOrStdout()
@@ -174,6 +179,7 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 	cmd.Flags().IntVar(&limitFlag, "limit", 20, "Maximum number of results")
 	cmd.Flags().StringVar(&authorFlag, "author", "", "Filter by author name")
 	cmd.Flags().StringVar(&dateFlag, "date", "", "Filter by time period (week or month)")
+	cmd.Flags().StringVar(&branchFlag, "branch", "", "Filter by branch name")
 
 	return cmd
 }

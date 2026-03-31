@@ -70,12 +70,13 @@ type Config struct {
 	Limit       int
 	Author      string // Filter by author name
 	Date        string // Filter by time period: "week" or "month"
+	Branch      string // Filter by branch name
 	Page        int    // 1-based page number (0 means omit, API defaults to 1)
 }
 
-// HasFilters reports whether any filter fields (Author, Date) are set on the config.
+// HasFilters reports whether any filter fields (Author, Date, Branch) are set on the config.
 func (c Config) HasFilters() bool {
-	return c.Author != "" || c.Date != ""
+	return c.Author != "" || c.Date != "" || c.Branch != ""
 }
 
 // ParsedInput holds the parsed query and optional filters extracted from search input.
@@ -83,6 +84,7 @@ type ParsedInput struct {
 	Query  string
 	Author string
 	Date   string
+	Branch string
 }
 
 // ParseSearchInput extracts filter prefixes (author:, date:) from raw input.
@@ -98,6 +100,8 @@ func ParseSearchInput(raw string) ParsedInput {
 			p.Author = strings.Trim(tok[len("author:"):], "\"")
 		case strings.HasPrefix(tok, "date:"):
 			p.Date = strings.Trim(tok[len("date:"):], "\"")
+		case strings.HasPrefix(tok, "branch:"):
+			p.Branch = strings.Trim(tok[len("branch:"):], "\"")
 		default:
 			queryParts = append(queryParts, tok)
 		}
@@ -175,6 +179,9 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 	}
 	if cfg.Date != "" {
 		q.Set("date", cfg.Date)
+	}
+	if cfg.Branch != "" {
+		q.Set("branch", cfg.Branch)
 	}
 	if cfg.Page > 0 {
 		q.Set("page", strconv.Itoa(cfg.Page))
