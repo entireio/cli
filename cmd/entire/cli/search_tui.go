@@ -806,7 +806,7 @@ func renderSearchStatic(w io.Writer, results []search.Result, query string, tota
 
 	cols := computeColumns(styles.width)
 
-	fmt.Fprintf(w, "%-*s  %-*s  %-*s  %-*s  %-*s\n",
+	fmt.Fprintf(w, "%-*s %-*s %-*s %-*s %-*s\n",
 		cols.age, "AGE",
 		cols.id, "ID",
 		cols.branch, "BRANCH",
@@ -823,7 +823,7 @@ func renderSearchStatic(w io.Writer, results []search.Result, query string, tota
 		)
 		author := stringutil.TruncateRunes(derefStr(r.Data.AuthorUsername, r.Data.Author), cols.author, "...")
 
-		fmt.Fprintf(w, "%-*s  %-*s  %-*s  %-*s  %-*s\n",
+		fmt.Fprintf(w, "%-*s %-*s %-*s %-*s %-*s\n",
 			cols.age, age,
 			cols.id, id,
 			cols.branch, branch,
