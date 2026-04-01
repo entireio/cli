@@ -75,11 +75,11 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
               seenUserMessages.clear()
               messageStore.clear()
               currentModel = null
+              await callHook("session-start", {
+                session_id: session.id,
+              })
             }
             currentSessionID = session.id
-            await callHook("session-start", {
-              session_id: session.id,
-            })
             break
           }
 

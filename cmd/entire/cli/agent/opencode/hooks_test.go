@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -98,6 +99,45 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 	content := string(data)
 	if !strings.Contains(content, `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go`) {
 		t.Error("local dev mode: plugin file should use git rev-parse for go run path")
+	}
+}
+
+func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ag := &OpenCodeAgent{}
+
+	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("plugin file not created: %v", err)
+	}
+
+	content := string(data)
+	guard := "if (currentSessionID !== session.id) {"
+	hook := `await callHook("session-start", {`
+	currentSessionAssignment := "currentSessionID = session.id"
+
+	guardIdx := strings.Index(content, guard)
+	hookIdx := strings.Index(content, hook)
+	assignIdx := strings.Index(content, currentSessionAssignment)
+
+	if guardIdx == -1 {
+		t.Fatalf("plugin file missing guard %q", guard)
+	}
+	if hookIdx == -1 {
+		t.Fatalf("plugin file missing session-start hook call %q", hook)
+	}
+	if assignIdx == -1 {
+		t.Fatalf("plugin file missing current session assignment %q", currentSessionAssignment)
+	}
+	if !(guardIdx < hookIdx && hookIdx < assignIdx) {
+		t.Fatalf("expected guarded session-start call before session assignment, got guard=%s hook=%s assignment=%s",
+			strconv.Itoa(guardIdx), strconv.Itoa(hookIdx), strconv.Itoa(assignIdx))
 	}
 }
 
