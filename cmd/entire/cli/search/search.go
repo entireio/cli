@@ -218,7 +218,7 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 
 	var result Response
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parsing response: %w", err)
+		return nil, fmt.Errorf("unexpected response from search service: %s", string(body))
 	}
 
 	if result.Error != "" {

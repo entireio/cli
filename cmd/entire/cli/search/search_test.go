@@ -205,7 +205,7 @@ func TestSearch_ErrorRawBody(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write([]byte("<html>Bad Gateway</html>")) //nolint:errcheck // test helper response
+		w.Write([]byte("upstream timeout")) //nolint:errcheck // test helper response
 	}))
 	defer srv.Close()
 
@@ -219,8 +219,57 @@ func TestSearch_ErrorRawBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 502")
 	}
-	if got := err.Error(); got != "search service returned 502: <html>Bad Gateway</html>" {
+	if got := err.Error(); got != "search service returned 502: upstream timeout" {
 		t.Errorf("error = %q", got)
+	}
+}
+
+func TestSearch_HTMLResponseNon200(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte("<html>Bad Gateway</html>")) //nolint:errcheck // test helper response
+	}))
+	defer srv.Close()
+
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "o",
+		Repo:        "r",
+		Query:       "q",
+	})
+	if err == nil {
+		t.Fatal("expected error for HTML response")
+	}
+	want := "search service returned 502: <html>Bad Gateway</html>"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestSearch_HTMLResponseOn200(t *testing.T) {
+	t.Parallel()
+
+	htmlBody := "<!DOCTYPE html><html><body>Website</body></html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(htmlBody)) //nolint:errcheck // test helper response
+	}))
+	defer srv.Close()
+
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "o",
+		Repo:        "r",
+		Query:       "q",
+	})
+	if err == nil {
+		t.Fatal("expected error for HTML response on 200")
+	}
+	if !strings.Contains(err.Error(), htmlBody) {
+		t.Errorf("error should contain full body, got: %q", err.Error())
 	}
 }
 

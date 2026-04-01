@@ -120,7 +120,7 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 				model := newSearchModel(nil, "", 0, searchCfg, styles)
 				model.mode = modeSearch
 				model.input.Focus()
-				p := tea.NewProgram(model, tea.WithAltScreen())
+				p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 				if _, err := p.Run(); err != nil {
 					return fmt.Errorf("TUI error: %w", err)
 				}
@@ -168,7 +168,7 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 
 			// Interactive TUI
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles)
-			p := tea.NewProgram(model, tea.WithAltScreen())
+			p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)
 			}

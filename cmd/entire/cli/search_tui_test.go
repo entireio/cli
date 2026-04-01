@@ -65,7 +65,16 @@ func testResults() []search.Result {
 func testModel() searchModel {
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{ServiceURL: "http://test", Owner: "o", Repo: "r", Limit: 20}
-	return newSearchModel(testResults(), "auth", 2, cfg, ss)
+	m := newSearchModel(testResults(), "auth", 2, cfg, ss)
+	return initTestViewport(m)
+}
+
+// initTestViewport sets a simulated terminal height and initializes the browse viewport for tests that call View().
+func initTestViewport(m searchModel) searchModel {
+	m.height = 60
+	m.browseVP.Height = 59
+	m = m.refreshBrowseContent()
+	return m
 }
 
 // updateModel is a test helper that sends a message and returns the updated searchModel.
@@ -242,8 +251,9 @@ func TestSearchModel_View(t *testing.T) {
 	if !strings.Contains(view, "semantic") {
 		t.Error("detail missing match type")
 	}
-	if !strings.Contains(view, "src/middleware/auth.go") {
-		t.Error("detail missing files")
+	// Files may be truncated in the inline card — check for "enter for more" hint
+	if !strings.Contains(view, "src/middleware/auth.go") && !strings.Contains(view, "enter for more") {
+		t.Error("detail missing files or truncation hint")
 	}
 
 	// Footer
@@ -259,7 +269,7 @@ func TestSearchModel_ViewNoResults(t *testing.T) {
 	t.Parallel()
 	ss := statusStyles{colorEnabled: false, width: 80}
 	cfg := search.Config{}
-	m := newSearchModel(nil, "nothing", 0, cfg, ss)
+	m := initTestViewport(newSearchModel(nil, "nothing", 0, cfg, ss))
 	view := m.View()
 
 	if !strings.Contains(view, "No results found") {
@@ -730,9 +740,10 @@ func TestSearchModel_ViewFetchingMore(t *testing.T) {
 	// Model with 25 loaded results but on page 2 (no data) while fetching
 	ss := statusStyles{colorEnabled: false, width: 100}
 	cfg := search.Config{}
-	m := newSearchModel(make([]search.Result, 25), "q", 50, cfg, ss)
+	m := initTestViewport(newSearchModel(make([]search.Result, 25), "q", 50, cfg, ss))
 	m.page = 1
 	m.fetchingMore = true
+	m = m.refreshBrowseContent()
 
 	view := m.View()
 	if !strings.Contains(view, "Loading more results...") {
