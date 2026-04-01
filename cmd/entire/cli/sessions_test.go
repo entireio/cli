@@ -3,15 +3,23 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+)
+
+const (
+	testAgentClaude    = "Claude Code"
+	testCheckpointID   = "a3b2c4d5e6f7"
+	testPromptFixLogin = "fix the login bug"
 )
 
 // setupStopTestRepo initializes a temporary git repo, changes to it, and clears
@@ -102,7 +110,7 @@ func TestStopCmd_SingleSession_WithCheckpoint(t *testing.T) {
 	setupStopTestRepo(t)
 
 	state := makeSessionState("test-stop-checkpoint-1", session.PhaseIdle)
-	state.LastCheckpointID = "a3b2c4d5e6f7"
+	state.LastCheckpointID = testCheckpointID
 	if err := strategy.SaveSessionState(context.Background(), state); err != nil {
 		t.Fatalf("SaveSessionState() error = %v", err)
 	}
@@ -283,7 +291,7 @@ func TestStopCmd_AllFlag(t *testing.T) {
 	}
 }
 
-func TestStopCmd_AllFlag_ExcludesOtherWorktrees(t *testing.T) {
+func TestStopCmd_AllFlag_IncludesAllWorktrees(t *testing.T) {
 	setupStopTestRepo(t)
 
 	ctx := context.Background()
@@ -314,20 +322,18 @@ func TestStopCmd_AllFlag_ExcludesOtherWorktrees(t *testing.T) {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 
-	stopped, err := strategy.LoadSessionState(ctx, "test-all-scope-in")
-	if err != nil {
-		t.Fatalf("LoadSessionState(in-scope) error = %v", err)
-	}
-	if stopped == nil || stopped.Phase != session.PhaseEnded {
-		t.Errorf("expected in-scope session to be PhaseEnded, got: %v", stopped.Phase)
-	}
-
-	untouched, err := strategy.LoadSessionState(ctx, "test-all-scope-out")
-	if err != nil {
-		t.Fatalf("LoadSessionState(out-of-scope) error = %v", err)
-	}
-	if untouched == nil || untouched.Phase == session.PhaseEnded {
-		t.Errorf("expected out-of-scope session to remain non-ended, got: %v", untouched.Phase)
+	// Both sessions should be stopped (--all is no longer worktree-scoped)
+	for _, id := range []string{"test-all-scope-in", "test-all-scope-out"} {
+		loaded, err := strategy.LoadSessionState(ctx, id)
+		if err != nil {
+			t.Fatalf("LoadSessionState(%s) error = %v", id, err)
+		}
+		if loaded == nil {
+			t.Fatalf("expected session %s to exist after stop", id)
+		}
+		if loaded.Phase != session.PhaseEnded {
+			t.Errorf("expected session %s to be PhaseEnded, got: %v", id, loaded.Phase)
+		}
 	}
 }
 
@@ -415,11 +421,11 @@ func TestStopCmd_NotGitRepo(t *testing.T) {
 	paths.ClearWorktreeRootCache()
 	session.ClearGitCommonDirCache()
 
-	cmd := newStopCmd()
+	cmd := newSessionsCmd()
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{})
+	cmd.SetArgs([]string{"stop"})
 
 	err := cmd.ExecuteContext(context.Background())
 	if err == nil {
@@ -465,8 +471,11 @@ func TestStopSelectedSessions_StopsAll(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadSessionState(%s) error = %v", id, err)
 		}
-		if loaded == nil || loaded.Phase != session.PhaseEnded {
-			t.Errorf("expected session %s to be PhaseEnded after batch stop", id)
+		if loaded == nil {
+			t.Fatalf("expected session %s to exist after batch stop", id)
+		}
+		if loaded.Phase != session.PhaseEnded {
+			t.Errorf("expected session %s to be PhaseEnded after batch stop, got: %v", id, loaded.Phase)
 		}
 	}
 }
@@ -514,6 +523,27 @@ func TestStopCmd_AlreadyStopped_EndedAtOnly(t *testing.T) {
 	}
 }
 
+// TestFilterActiveSessions_ExcludesPhaseEndedWithoutEndedAt verifies that sessions
+// created by `entire attach` (Phase=PhaseEnded, EndedAt=nil) are excluded.
+func TestFilterActiveSessions_ExcludesPhaseEndedWithoutEndedAt(t *testing.T) {
+	t.Parallel()
+
+	// Simulates a session created by `entire attach` — Phase is ended but EndedAt is nil.
+	attachEnded := makeSessionState("attach-ended", session.PhaseEnded)
+	// EndedAt intentionally nil
+
+	activeIdle := makeSessionState("active-idle", session.PhaseIdle)
+
+	result := filterActiveSessions([]*strategy.SessionState{attachEnded, activeIdle})
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 active session, got %d", len(result))
+	}
+	if result[0].SessionID != "active-idle" {
+		t.Errorf("expected active-idle, got: %s", result[0].SessionID)
+	}
+}
+
 // TestFilterActiveSessions_ExcludesEndedAtSet verifies that filterActiveSessions
 // excludes sessions with EndedAt set regardless of Phase, and includes sessions in
 // both PhaseIdle and PhaseActive.
@@ -542,62 +572,437 @@ func TestFilterActiveSessions_ExcludesEndedAtSet(t *testing.T) {
 	}
 }
 
-// TestStopCmd_WorktreeScoping_NoFlags verifies that the no-flags path scopes session
-// listing to the current worktree, so sessions from other worktrees are invisible.
-func TestStopCmd_WorktreeScoping_NoFlags(t *testing.T) {
+// TestStopCmd_NoFlags_CrossWorktreeSession verifies that a session from a
+// different worktree is reachable via the no-args single-session path.
+func TestStopCmd_NoFlags_CrossWorktreeSession(t *testing.T) {
 	setupStopTestRepo(t)
 
 	ctx := context.Background()
-	worktreePath, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		t.Fatalf("WorktreeRoot() error = %v", err)
-	}
 
-	// One session in the current worktree, one in a foreign worktree.
-	inScope := makeSessionState("test-stop-scope-in", session.PhaseIdle)
-	inScope.WorktreePath = worktreePath
+	// Session in a different worktree — should be stoppable via no-args path.
+	remote := makeSessionState("test-cross-wt-stop", session.PhaseIdle)
+	remote.WorktreePath = "/other/worktree"
+	remote.WorktreeID = "other-wt"
+	remote.StepCount = 0
 
-	outOfScope := makeSessionState("test-stop-scope-out", session.PhaseIdle)
-	outOfScope.WorktreePath = "/some/other/worktree"
-
-	for _, s := range []*strategy.SessionState{inScope, outOfScope} {
-		if err := strategy.SaveSessionState(ctx, s); err != nil {
-			t.Fatalf("SaveSessionState() error = %v", err)
-		}
+	if err := strategy.SaveSessionState(ctx, remote); err != nil {
+		t.Fatalf("SaveSessionState() error = %v", err)
 	}
 
 	cmd := newStopCmd()
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	// Single in-scope session → confirm + stop path (bypasses TUI selector).
+	// Single session + --force → bypasses TUI, goes through runStopSession.
 	cmd.SetArgs([]string{"--force"})
 
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 
-	// In-scope session must be stopped.
-	stopped, err := strategy.LoadSessionState(ctx, "test-stop-scope-in")
+	loaded, err := strategy.LoadSessionState(ctx, "test-cross-wt-stop")
 	if err != nil {
-		t.Fatalf("LoadSessionState(in-scope) error = %v", err)
+		t.Fatalf("LoadSessionState() error = %v", err)
 	}
-	if stopped == nil {
-		t.Fatal("expected in-scope session to exist")
+	if loaded == nil {
+		t.Fatal("expected cross-worktree session to exist after stop")
 	}
-	if stopped.Phase != session.PhaseEnded {
-		t.Errorf("expected in-scope session Phase=PhaseEnded, got: %v", stopped.Phase)
+	if loaded.Phase != session.PhaseEnded {
+		t.Errorf("expected cross-worktree session to be PhaseEnded, got: %v", loaded.Phase)
+	}
+}
+
+// --- sessions list tests ---
+
+func TestListCmd_NoSessions(t *testing.T) {
+	setupStopTestRepo(t)
+
+	cmd := newListCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
 	}
 
-	// Out-of-scope session must be untouched.
-	untouched, err := strategy.LoadSessionState(ctx, "test-stop-scope-out")
-	if err != nil {
-		t.Fatalf("LoadSessionState(out-of-scope) error = %v", err)
+	if !strings.Contains(stdout.String(), "No sessions.") {
+		t.Errorf("expected 'No sessions.' in output, got: %q", stdout.String())
 	}
-	if untouched == nil {
-		t.Fatal("expected out-of-scope session to exist")
+}
+
+func TestListCmd_ShowsAllSessions(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+
+	// Create sessions with different states and staggered start times
+	active := makeSessionState("test-list-active", session.PhaseActive)
+	active.AgentType = testAgentClaude
+	active.StartedAt = time.Now().Add(-1 * time.Hour)
+
+	idle := makeSessionState("test-list-idle", session.PhaseIdle)
+	idle.AgentType = "Gemini CLI"
+	idle.WorktreeID = "other-wt"
+	idle.LastCheckpointID = testCheckpointID
+	idle.StartedAt = time.Now().Add(-2 * time.Hour)
+
+	now := time.Now()
+	ended := makeSessionState("test-list-ended", session.PhaseEnded)
+	ended.EndedAt = &now
+	ended.AgentType = testAgentClaude
+	ended.StartedAt = time.Now().Add(-3 * time.Hour)
+
+	for _, s := range []*strategy.SessionState{active, idle, ended} {
+		if err := strategy.SaveSessionState(ctx, s); err != nil {
+			t.Fatalf("SaveSessionState() error = %v", err)
+		}
 	}
-	if untouched.Phase == session.PhaseEnded {
-		t.Errorf("expected out-of-scope session to remain non-ended, got PhaseEnded")
+
+	cmd := newListCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{})
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	out := stdout.String()
+
+	// Should include all sessions (active, idle, ended)
+	if !strings.Contains(out, "session test-list-active") {
+		t.Errorf("expected active session in output, got: %q", out)
+	}
+	if !strings.Contains(out, "session test-list-idle") {
+		t.Errorf("expected idle session in output, got: %q", out)
+	}
+	if !strings.Contains(out, "session test-list-ended") {
+		t.Errorf("expected ended session in output, got: %q", out)
+	}
+	// Should show checkpoint ID when present
+	if !strings.Contains(out, "checkpoint a3b2c4d5e6f7") {
+		t.Errorf("expected checkpoint ID in output, got: %q", out)
+	}
+	// Should show worktree labels
+	if !strings.Contains(out, "other-wt") {
+		t.Errorf("expected worktree ID in output, got: %q", out)
+	}
+	// Verify sort order: active (1h ago) should appear before idle (2h ago)
+	activeIdx := strings.Index(out, "test-list-active")
+	idleIdx := strings.Index(out, "test-list-idle")
+	endedIdx := strings.Index(out, "test-list-ended")
+	if activeIdx > idleIdx || idleIdx > endedIdx {
+		t.Errorf("expected newest-first sort order, got active@%d idle@%d ended@%d", activeIdx, idleIdx, endedIdx)
+	}
+}
+
+func TestListCmd_NotGitRepo(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	cmd := newSessionsCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"list"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected error for non-git directory, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a git repository") {
+		t.Errorf("expected 'not a git repository' error, got: %v", err)
+	}
+}
+
+// --- sessions info tests ---
+
+func TestInfoCmd_SessionNotFound(t *testing.T) {
+	setupStopTestRepo(t)
+
+	cmd := newInfoCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"nonexistent-id"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected error for unknown session, got nil")
+	}
+
+	var silentErr *SilentError
+	if !errors.As(err, &silentErr) {
+		t.Errorf("expected SilentError, got: %T %v", err, err)
+	}
+
+	if !strings.Contains(stderr.String(), "Session not found.") {
+		t.Errorf("expected 'Session not found.' in stderr, got: %q", stderr.String())
+	}
+}
+
+func TestInfoCmd_TextOutput(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	lastActive := time.Now().Add(-5 * time.Minute)
+
+	state := makeSessionState("test-info-text", session.PhaseActive)
+	state.AgentType = testAgentClaude
+	state.ModelName = "claude-opus-4-6[1m]"
+	state.WorktreeID = "my-feature"
+	state.LastInteractionTime = &lastActive
+	state.SessionTurnCount = 3
+	state.StepCount = 2
+	state.LastCheckpointID = testCheckpointID
+	state.TokenUsage = &agent.TokenUsage{
+		InputTokens:         100,
+		CacheReadTokens:     5000,
+		CacheCreationTokens: 2000,
+		OutputTokens:        500,
+	}
+	state.LastPrompt = testPromptFixLogin
+	state.FilesTouched = []string{"auth.go", "auth_test.go"}
+
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState() error = %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"test-info-text"})
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	out := stdout.String()
+	checks := []string{
+		"Session test-info-text",
+		"Agent:       Claude Code",
+		"Model:       claude-opus-4-6[1m]",
+		"Status:      active",
+		"Worktree:    my-feature",
+		"Turns:       3",
+		"Checkpoints: 2",
+		"Checkpoint:  a3b2c4d5e6f7",
+		"7.6k",
+		"Input: 100",
+		"Cache read: 5k",
+		"Cache write: 2k",
+		"Output: 500",
+		testPromptFixLogin,
+		"auth.go",
+		"auth_test.go",
+	}
+	for _, check := range checks {
+		if !strings.Contains(out, check) {
+			t.Errorf("expected %q in output, got:\n%s", check, out)
+		}
+	}
+}
+
+func TestInfoCmd_JSONOutput(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+
+	state := makeSessionState("test-info-json", session.PhaseIdle)
+	state.AgentType = testAgentClaude
+	state.ModelName = "claude-opus-4-6[1m]"
+	state.WorktreeID = "my-feature"
+	state.StepCount = 2
+	state.LastCheckpointID = testCheckpointID
+	state.TokenUsage = &agent.TokenUsage{
+		InputTokens:     100,
+		CacheReadTokens: 5000,
+		OutputTokens:    500,
+	}
+	state.LastPrompt = testPromptFixLogin
+	state.FilesTouched = []string{"auth.go"}
+
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState() error = %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"test-info-json", "--json"})
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("expected valid JSON, got parse error: %v\noutput: %s", err, stdout.String())
+	}
+
+	if result["session_id"] != "test-info-json" {
+		t.Errorf("expected session_id 'test-info-json', got: %v", result["session_id"])
+	}
+	if result["agent"] != "Claude Code" {
+		t.Errorf("expected agent 'Claude Code', got: %v", result["agent"])
+	}
+	if result["status"] != "idle" {
+		t.Errorf("expected status 'idle', got: %v", result["status"])
+	}
+	if result["last_checkpoint_id"] != testCheckpointID {
+		t.Errorf("expected last_checkpoint_id %q, got: %v", testCheckpointID, result["last_checkpoint_id"])
+	}
+
+	tokens, ok := result["tokens"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected tokens object, got: %T", result["tokens"])
+	}
+	total, ok := tokens["total"].(float64)
+	if !ok {
+		t.Fatalf("expected total to be float64, got: %T", tokens["total"])
+	}
+	if total != 5600 {
+		t.Errorf("expected total tokens 5600, got: %v", total)
+	}
+}
+
+func TestInfoCmd_EndedSession(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	endedAt := time.Now().Add(-24 * time.Hour)
+
+	state := makeSessionState("test-info-ended", session.PhaseEnded)
+	state.EndedAt = &endedAt
+	state.AgentType = testAgentClaude
+	state.StepCount = 1
+	state.LastCheckpointID = "b79b35cd956d"
+
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState() error = %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"test-info-ended"})
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Status:      ended") {
+		t.Errorf("expected 'Status:      ended' in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Ended:") {
+		t.Errorf("expected 'Ended:' line in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Checkpoint:  b79b35cd956d") {
+		t.Errorf("expected checkpoint ID in output, got:\n%s", out)
+	}
+}
+
+func TestInfoCmd_NotGitRepo(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	cmd := newSessionsCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"info", "some-id"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected error for non-git directory, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a git repository") {
+		t.Errorf("expected 'not a git repository' error, got: %v", err)
+	}
+}
+
+// --- helper function tests ---
+
+func TestSessionWorktreeLabel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		state    *strategy.SessionState
+		expected string
+	}{
+		{
+			name:     "uses WorktreeID when set",
+			state:    &strategy.SessionState{WorktreeID: "my-feature", WorktreePath: "/some/path/my-feature"},
+			expected: "my-feature",
+		},
+		{
+			name:     "falls back to filepath.Base of WorktreePath",
+			state:    &strategy.SessionState{WorktreePath: "/Users/dev/repo/.worktrees/feature-branch"},
+			expected: "feature-branch",
+		},
+		{
+			name:     "returns (unknown) when both empty",
+			state:    &strategy.SessionState{},
+			expected: unknownPlaceholder,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sessionWorktreeLabel(tt.state)
+			if got != tt.expected {
+				t.Errorf("sessionWorktreeLabel() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSessionPhaseLabel(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+
+	tests := []struct {
+		name     string
+		state    *strategy.SessionState
+		expected string
+	}{
+		{
+			name:     "active phase",
+			state:    &strategy.SessionState{Phase: session.PhaseActive},
+			expected: "active",
+		},
+		{
+			name:     "idle phase",
+			state:    &strategy.SessionState{Phase: session.PhaseIdle},
+			expected: "idle",
+		},
+		{
+			name:     "ended when EndedAt set",
+			state:    &strategy.SessionState{Phase: session.PhaseIdle, EndedAt: &now},
+			expected: "ended",
+		},
+		{
+			name:     "empty phase defaults to idle",
+			state:    &strategy.SessionState{},
+			expected: "idle",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sessionPhaseLabel(tt.state)
+			if got != tt.expected {
+				t.Errorf("sessionPhaseLabel() = %q, want %q", got, tt.expected)
+			}
+		})
 	}
 }
