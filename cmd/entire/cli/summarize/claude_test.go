@@ -347,6 +347,11 @@ func TestParseClaudeCLIResult(t *testing.T) {
 			input:       `{"result": ""}`,
 			expectError: "empty result",
 		},
+		{
+			name:        "array with empty result element",
+			input:       `[{"type":"system"},{"type":"result","result":""}]`,
+			expectError: "empty result",
+		},
 	}
 
 	for _, tt := range tests {

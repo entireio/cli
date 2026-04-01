@@ -68,7 +68,7 @@ type ClaudeGenerator struct {
 
 // claudeCLIResponse represents the JSON response from the Claude CLI.
 // Claude Code 1.x returns a single object: {"result": "..."}
-// Claude Code 2.x returns an array: [{type:"system",...}, {type:"result", result:"..."}]
+// Claude Code 2.x returns an array: [{"type":"system",...}, {"type":"result", "result":"..."}]
 type claudeCLIResponse struct {
 	Type   string `json:"type"`
 	Result string `json:"result"`
@@ -141,7 +141,7 @@ func (g *ClaudeGenerator) Generate(ctx context.Context, input Input) (*checkpoin
 	// Claude Code 1.x returns a single JSON object; try that as a fallback.
 	resultJSON, err := parseClaudeCLIResult(stdout.Bytes())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse claude CLI response: %w", err)
 	}
 
 	// Try to extract JSON if it's wrapped in markdown code blocks
@@ -164,10 +164,18 @@ func parseClaudeCLIResult(data []byte) (string, error) {
 	// Try array format first (Claude Code 2.x)
 	var responses []claudeCLIResponse
 	if err := json.Unmarshal(data, &responses); err == nil {
+		hasEmptyResultElement := false
 		for _, r := range responses {
-			if r.Type == "result" && r.Result != "" {
+			if r.Type == "result" {
+				if r.Result == "" {
+					hasEmptyResultElement = true
+					continue
+				}
 				return r.Result, nil
 			}
+		}
+		if hasEmptyResultElement {
+			return "", errors.New("claude CLI response contained empty result")
 		}
 		return "", errors.New("claude CLI response array contained no result element")
 	}
