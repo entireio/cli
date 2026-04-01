@@ -202,7 +202,7 @@ esac
 
 	// Provide a context with a short deadline. run() should respect it
 	// and NOT override with its own (longer) timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
@@ -212,7 +212,7 @@ esac
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
-	if elapsed >= 5*time.Second {
+	if elapsed >= 2*time.Second {
 		t.Errorf("run() took %v; caller's deadline was not respected", elapsed)
 	}
 }
