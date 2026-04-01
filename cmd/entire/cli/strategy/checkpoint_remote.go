@@ -76,9 +76,11 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 		return ps
 	}
 
-	// Get the push remote URL for protocol detection and fork detection
+	// Get the push remote URL for protocol detection
 	pushRemoteURL, err := getRemoteURL(ctx, pushRemoteName)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: checkpoint_remote is configured (%s) but could not get push remote URL: %v\n", config.Repo, err)
+		fmt.Fprintln(os.Stderr, "[entire] Checkpoints will be pushed to origin instead. Check your git remote configuration.")
 		logging.Debug(ctx, "checkpoint-remote: could not get push remote URL, skipping",
 			slog.String("remote", pushRemoteName),
 			slog.String("error", err.Error()),
@@ -86,9 +88,11 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 		return ps
 	}
 
-	// Parse the push remote URL once for both fork detection and URL derivation
+	// Parse the push remote URL for protocol detection and URL derivation
 	pushInfo, err := parseGitRemoteURL(pushRemoteURL)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: checkpoint_remote is configured (%s) but could not parse push remote URL: %v\n", config.Repo, err)
+		fmt.Fprintln(os.Stderr, "[entire] Checkpoints will be pushed to origin instead. Check your git remote configuration.")
 		logging.Warn(ctx, "checkpoint-remote: could not parse push remote URL",
 			slog.String("remote", pushRemoteName),
 			slog.String("error", err.Error()),
@@ -96,19 +100,22 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 		return ps
 	}
 
-	// Fork detection: compare owners
+	// Log when push remote owner differs from checkpoint remote owner.
+	// Previously this skipped checkpoint_remote entirely (fork detection),
+	// but the user explicitly configured a checkpoint remote — respect that choice.
 	checkpointOwner := config.Owner()
 	if pushInfo.owner != "" && checkpointOwner != "" && !strings.EqualFold(pushInfo.owner, checkpointOwner) {
-		logging.Debug(ctx, "checkpoint-remote: push remote owner differs from checkpoint remote owner, skipping (fork detected)",
+		logging.Debug(ctx, "checkpoint-remote: push remote owner differs from checkpoint remote owner, proceeding with configured checkpoint remote",
 			slog.String("push_owner", pushInfo.owner),
 			slog.String("checkpoint_owner", checkpointOwner),
 		)
-		return ps
 	}
 
 	// Derive checkpoint URL using same protocol as push remote
 	checkpointURL, err := deriveCheckpointURLFromInfo(pushInfo, config)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: checkpoint_remote is configured (%s) but could not derive URL from push remote: %v\n", config.Repo, err)
+		fmt.Fprintln(os.Stderr, "[entire] Checkpoints will be pushed to origin instead. Check your checkpoint_remote settings.")
 		logging.Warn(ctx, "checkpoint-remote: could not derive URL from push remote",
 			slog.String("remote", pushRemoteName),
 			slog.String("repo", config.Repo),

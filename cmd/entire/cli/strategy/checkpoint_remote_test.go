@@ -490,9 +490,10 @@ func TestResolvePushSettings_ForkDetection(t *testing.T) {
 	t.Chdir(localDir)
 
 	ps := resolvePushSettings(ctx, "origin")
-	// Should fall back to origin since fork detected (alice != org)
-	assert.False(t, ps.hasCheckpointURL())
-	assert.Equal(t, "origin", ps.pushTarget())
+	// Should proceed with checkpoint remote even when owners differ —
+	// the user explicitly configured it, respect that choice.
+	assert.True(t, ps.hasCheckpointURL())
+	assert.Equal(t, "git@github.com:org/checkpoints.git", ps.pushTarget())
 	assert.False(t, ps.pushDisabled)
 }
 
