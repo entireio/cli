@@ -61,6 +61,8 @@ type openCodeMsgToken struct {
 }
 
 // compactOpenCode converts a full OpenCode session JSON into transcript lines.
+// opts.StartLine is treated as a message-index offset (not a newline offset)
+// because the OpenCode transcript is a single JSON object.
 func compactOpenCode(content []byte, opts MetadataFields) ([]byte, error) {
 	var session struct {
 		Messages []openCodeMessage `json:"messages"`
@@ -69,10 +71,18 @@ func compactOpenCode(content []byte, opts MetadataFields) ([]byte, error) {
 		return nil, fmt.Errorf("parsing opencode session: %w", err)
 	}
 
+	messages := session.Messages
+	if opts.StartLine > 0 {
+		if opts.StartLine >= len(messages) {
+			return []byte{}, nil
+		}
+		messages = messages[opts.StartLine:]
+	}
+
 	base := newTranscriptLine(opts)
 	var result []byte
 
-	for _, msg := range session.Messages {
+	for _, msg := range messages {
 		ts := msToTimestamp(msg.Info.Time.Created)
 
 		switch msg.Info.Role {
@@ -187,7 +197,7 @@ func openCodeToolResult(state map[string]json.RawMessage) json.RawMessage {
 		Status: "success",
 	}
 	if s := unquote(state["status"]); s != "" && s != "completed" {
-		r.Status = "error"
+		r.Status = toolResultStatusError
 	}
 	b, err := json.Marshal(r)
 	if err != nil {

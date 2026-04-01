@@ -61,6 +61,9 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 `
 	transcriptPath := filepath.Join(dir, "transcript.jsonl")
 	require.NoError(t, os.WriteFile(transcriptPath, []byte(transcriptContent), 0o644))
+	// Backdate so waitForTranscriptFlush treats it as stale and skips the 3s poll.
+	stale := time.Now().Add(-3 * time.Minute)
+	require.NoError(t, os.Chtimes(transcriptPath, stale, stale))
 
 	// Create session state: no shadow branch (it was deleted after last condensation),
 	// transcript path points to the file, agent type is Claude Code
@@ -141,6 +144,9 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 `
 	transcriptPath := filepath.Join(transcriptDir, "transcript.jsonl")
 	require.NoError(t, os.WriteFile(transcriptPath, []byte(mainTranscript), 0o644))
+	// Backdate so waitForTranscriptFlush treats it as stale and skips the 3s poll.
+	staleTime := time.Now().Add(-3 * time.Minute)
+	require.NoError(t, os.Chtimes(transcriptPath, staleTime, staleTime))
 
 	// Create the subagent transcript with a Write tool_use targeting the staged file.
 	// Path: <transcriptDir>/<modelSessionID>/subagents/agent-sub123.jsonl
