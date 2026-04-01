@@ -10,6 +10,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/search"
 )
 
+const newQuery = "new query"
+
 func testResults() []search.Result {
 	sha1 := "e4f5a6b7c8d9"
 	msg1 := "Implement auth middleware"
@@ -165,7 +167,7 @@ func TestSearchModel_SearchModeEnter(t *testing.T) {
 	// Enter search mode
 	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	// Type a query
-	m.input.SetValue("new query")
+	m.input.SetValue(newQuery)
 
 	// Press enter — should set loading and return to browse mode
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -428,6 +430,12 @@ func TestRenderSearchStatic(t *testing.T) {
 	if !strings.Contains(output, `Found 2 checkpoints matching "auth"`) {
 		t.Error("static output missing header")
 	}
+	if !strings.Contains(output, "REPO") {
+		t.Error("static output missing repo header")
+	}
+	if !strings.Contains(output, "entirehq/entire.io") {
+		t.Error("static output missing repo value")
+	}
 	if !strings.Contains(output, "a3b2c4d5e6") {
 		t.Error("static output missing first result ID")
 	}
@@ -678,7 +686,7 @@ func TestSearchModel_NewSearchClearsFilters(t *testing.T) {
 	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 
 	// Type a query without filters
-	m.input.SetValue("new query")
+	m.input.SetValue(newQuery)
 
 	// Press enter — should trigger search with cleared filters
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -705,8 +713,8 @@ func TestSearchModel_NewSearchClearsFilters(t *testing.T) {
 	if got := m.searchCfg.Repos; len(got) != 0 {
 		t.Errorf("searchCfg.Repos should be cleared, got %v", got)
 	}
-	if m.searchCfg.Query != "new query" {
-		t.Errorf("searchCfg.Query = %q, want %q", m.searchCfg.Query, "new query")
+	if m.searchCfg.Query != newQuery {
+		t.Errorf("searchCfg.Query = %q, want %q", m.searchCfg.Query, newQuery)
 	}
 }
 
@@ -779,7 +787,7 @@ func TestSearchModel_NewSearchPersistsFilters(t *testing.T) {
 
 	// Enter search mode and type query with filters
 	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	m.input.SetValue("new query author:bob date:month")
+	m.input.SetValue(newQuery + " author:bob date:month")
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m, ok := updated.(searchModel)
@@ -787,8 +795,8 @@ func TestSearchModel_NewSearchPersistsFilters(t *testing.T) {
 		t.Fatalf("Update returned %T, want searchModel", updated)
 	}
 
-	if m.searchCfg.Query != "new query" {
-		t.Errorf("searchCfg.Query = %q, want %q", m.searchCfg.Query, "new query")
+	if m.searchCfg.Query != newQuery {
+		t.Errorf("searchCfg.Query = %q, want %q", m.searchCfg.Query, newQuery)
 	}
 	if m.searchCfg.Author != "bob" {
 		t.Errorf("searchCfg.Author = %q, want %q", m.searchCfg.Author, "bob")
@@ -811,7 +819,7 @@ func TestSearchModel_NewSearchPersistsRepoFilters(t *testing.T) {
 	m := newSearchModel(testResults(), "old", 2, cfg, ss)
 
 	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	m.input.SetValue("new query repo:entirehq/entire.io")
+	m.input.SetValue(newQuery + " repo:entirehq/entire.io")
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m, ok := updated.(searchModel)
@@ -819,8 +827,8 @@ func TestSearchModel_NewSearchPersistsRepoFilters(t *testing.T) {
 		t.Fatalf("Update returned %T, want searchModel", updated)
 	}
 
-	if m.searchCfg.Query != "new query" {
-		t.Errorf("searchCfg.Query = %q, want %q", m.searchCfg.Query, "new query")
+	if m.searchCfg.Query != newQuery {
+		t.Errorf("searchCfg.Query = %q, want %q", m.searchCfg.Query, newQuery)
 	}
 	if got := m.searchCfg.Repos; len(got) != 1 || got[0] != "entirehq/entire.io" {
 		t.Errorf("searchCfg.Repos = %v, want %v", got, []string{"entirehq/entire.io"})
@@ -841,7 +849,7 @@ func TestSearchModel_NewSearchClearsExplicitRepoFilters(t *testing.T) {
 	m := newSearchModel(testResults(), "auth", 2, cfg, ss)
 
 	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	m.input.SetValue("new query")
+	m.input.SetValue(newQuery)
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m, ok := updated.(searchModel)
@@ -870,7 +878,7 @@ func TestSearchModel_NewSearchAllReposFilter(t *testing.T) {
 	m := newSearchModel(testResults(), "old", 2, cfg, ss)
 
 	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	m.input.SetValue("new query repo:*")
+	m.input.SetValue(newQuery + " repo:*")
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m, ok := updated.(searchModel)
@@ -896,7 +904,7 @@ func TestSearchModel_NewSearchRejectsMultipleExplicitRepos(t *testing.T) {
 	m := newSearchModel(testResults(), "old", 2, cfg, ss)
 
 	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	m.input.SetValue("new query repo:entirehq/entire.io,entireio/cli")
+	m.input.SetValue(newQuery + " repo:entirehq/entire.io,entireio/cli")
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m, ok := updated.(searchModel)

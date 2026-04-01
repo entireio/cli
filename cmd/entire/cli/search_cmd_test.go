@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/search"
 )
 
 // TestSearchCmd_AccessibleModeRequiresQuery verifies that accessible mode
@@ -49,5 +51,28 @@ func TestSearchCmd_HelpMentionsRepoFlagAndInlineFilters(t *testing.T) {
 	}
 	if !strings.Contains(help, "repo:*") {
 		t.Fatalf("help missing repo:* inline example:\n%s", help)
+	}
+}
+
+func TestWriteSearchJSON_ZeroLimitFallsBackToDefaultPageSize(t *testing.T) {
+	t.Parallel()
+
+	resp := &search.Response{
+		Results: testResults(),
+		Total:   2,
+		Page:    1,
+	}
+
+	var buf bytes.Buffer
+	if err := writeSearchJSON(&buf, resp, 0, 1); err != nil {
+		t.Fatalf("writeSearchJSON returned error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, `"limit": 25`) {
+		t.Fatalf("output missing default limit fallback:\n%s", output)
+	}
+	if !strings.Contains(output, `"total_pages": 1`) {
+		t.Fatalf("output missing total_pages:\n%s", output)
 	}
 }

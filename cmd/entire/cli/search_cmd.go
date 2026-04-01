@@ -62,7 +62,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				repos = []string{repoFlag}
 			}
 			if err := search.ValidateRepoFilters(repos); err != nil {
-				return err
+				return fmt.Errorf("validating repo filter: %w", err)
 			}
 
 			w := cmd.OutOrStdout()
@@ -195,6 +195,10 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 // writeSearchJSON writes client-side paginated search results as JSON.
 func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error {
+	if limit <= 0 {
+		limit = resultsPerPage
+	}
+
 	total := len(resp.Results)
 	totalPages := (total + limit - 1) / limit
 	if totalPages < 1 {

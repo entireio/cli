@@ -831,10 +831,11 @@ func renderSearchStatic(w io.Writer, results []search.Result, query string, tota
 
 	cols := computeColumns(styles.width)
 
-	fmt.Fprintf(w, "%-*s %-*s %-*s %-*s %-*s\n",
+	fmt.Fprintf(w, "%-*s %-*s %-*s %-*s %-*s %-*s\n",
 		cols.age, "AGE",
 		cols.id, "ID",
 		cols.branch, "BRANCH",
+		cols.repo, "REPO",
 		cols.prompt, "PROMPT",
 		cols.author, "AUTHOR",
 	)
@@ -843,15 +844,17 @@ func renderSearchStatic(w io.Writer, results []search.Result, query string, tota
 		age := formatSearchAge(r.Data.CreatedAt)
 		id := stringutil.TruncateRunes(r.Data.ID, cols.id, "")
 		branch := stringutil.TruncateRunes(r.Data.Branch, cols.branch, "...")
+		repo := stringutil.TruncateRunes(r.Data.Org+"/"+r.Data.Repo, cols.repo, "...")
 		prompt := stringutil.TruncateRunes(
 			stringutil.CollapseWhitespace(r.Data.Prompt), cols.prompt, "...",
 		)
 		author := stringutil.TruncateRunes(derefStr(r.Data.AuthorUsername, r.Data.Author), cols.author, "...")
 
-		fmt.Fprintf(w, "%-*s %-*s %-*s %-*s %-*s\n",
+		fmt.Fprintf(w, "%-*s %-*s %-*s %-*s %-*s %-*s\n",
 			cols.age, age,
 			cols.id, id,
 			cols.branch, branch,
+			cols.repo, repo,
 			cols.prompt, prompt,
 			cols.author, author,
 		)

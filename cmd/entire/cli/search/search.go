@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -178,7 +179,7 @@ func parseListFilter(raw string) []string {
 // ValidateRepoFilters ensures repo filters match backend semantics.
 func ValidateRepoFilters(repos []string) error {
 	if len(repos) > 1 {
-		return fmt.Errorf("only one explicit repo filter is currently supported")
+		return errors.New("only one explicit repo filter is currently supported")
 	}
 	if len(repos) == 1 && !isValidRepoFilter(repos[0]) {
 		return fmt.Errorf(
@@ -243,13 +244,12 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 	if err := ValidateRepoFilters(cfg.Repos); err != nil {
 		return nil, err
 	}
-	if len(cfg.Repos) == 1 && cfg.Repos[0] == AllReposFilter {
-		// Omit repo entirely so the search service searches all accessible repos.
-	} else if len(cfg.Repos) > 0 {
+	allRepos := len(cfg.Repos) == 1 && cfg.Repos[0] == AllReposFilter
+	if len(cfg.Repos) > 0 && !allRepos {
 		for _, repo := range cfg.Repos {
 			q.Add("repo", repo)
 		}
-	} else if cfg.Owner != "" && cfg.Repo != "" {
+	} else if len(cfg.Repos) == 0 && cfg.Owner != "" && cfg.Repo != "" {
 		q.Set("repo", cfg.Owner+"/"+cfg.Repo)
 	}
 	q.Set("types", "checkpoints")
