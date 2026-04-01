@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -18,6 +19,7 @@ func newSearchCmd() *cobra.Command {
 	var (
 		jsonOutput bool
 		limitFlag  int
+		pageFlag   int
 		authorFlag string
 		dateFlag   string
 		branchFlag string
@@ -103,6 +105,7 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 				Repo:        repoName,
 				Query:       query,
 				Limit:       limitFlag,
+				Page:        pageFlag,
 				Author:      authorFlag,
 				Date:        dateFlag,
 				Branch:      branchFlag,
@@ -127,13 +130,13 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 				return nil
 			}
 
-			// Fetch max results for TUI so client-side pagination works.
-			// The search API uses limit to cap total results fetched, so
-			// server-side page param alone is insufficient for pagination.
-			willUseTUI := !jsonOutput && isTerminal && !IsAccessibleMode()
-			if willUseTUI {
-				searchCfg.Limit = search.MaxLimit
-			}
+			// Fetch max results so client-side pagination works.
+			// The search API caps results at the limit, so we fetch
+			// the maximum and paginate client-side for all output modes.
+			requestedLimit := searchCfg.Limit
+			requestedPage := searchCfg.Page
+			searchCfg.Limit = search.MaxLimit
+			searchCfg.Page = 0 // let API default to page 1
 
 			resp, err := search.Search(ctx, searchCfg)
 			if err != nil {
@@ -142,16 +145,7 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 
 			// JSON output: explicit flag or piped/redirected stdout
 			if jsonOutput || !isTerminal {
-				if len(resp.Results) == 0 {
-					fmt.Fprintln(w, "[]")
-					return nil
-				}
-				data, err := jsonutil.MarshalIndentWithNewline(resp.Results, "", "  ")
-				if err != nil {
-					return fmt.Errorf("marshaling results: %w", err)
-				}
-				fmt.Fprint(w, string(data))
-				return nil
+				return writeSearchJSON(w, resp, requestedLimit, requestedPage)
 			}
 
 			styles := newStatusStyles(w)
@@ -177,10 +171,57 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 	}
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
-	cmd.Flags().IntVar(&limitFlag, "limit", 20, "Maximum number of results")
+	cmd.Flags().IntVar(&limitFlag, "limit", resultsPerPage, "Maximum number of results per page")
+	cmd.Flags().IntVar(&pageFlag, "page", 1, "Page number (1-based)")
 	cmd.Flags().StringVar(&authorFlag, "author", "", "Filter by author name")
 	cmd.Flags().StringVar(&dateFlag, "date", "", "Filter by time period (week or month)")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Filter by branch name")
 
 	return cmd
+}
+
+// writeSearchJSON writes client-side paginated search results as JSON.
+func writeSearchJSON(w io.Writer, resp *search.Response, limit, page int) error {
+	total := len(resp.Results)
+	totalPages := (total + limit - 1) / limit
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+
+	// Slice results for the requested page.
+	start := (page - 1) * limit
+	end := start + limit
+	var pageResults []search.Result
+	if start < total {
+		if end > total {
+			end = total
+		}
+		pageResults = resp.Results[start:end]
+	}
+	if pageResults == nil {
+		pageResults = []search.Result{}
+	}
+
+	out := struct {
+		Results    []search.Result `json:"results"`
+		Total      int             `json:"total"`
+		Page       int             `json:"page"`
+		TotalPages int             `json:"total_pages"`
+		Limit      int             `json:"limit"`
+	}{
+		Results:    pageResults,
+		Total:      total,
+		Page:       page,
+		TotalPages: totalPages,
+		Limit:      limit,
+	}
+	data, err := jsonutil.MarshalIndentWithNewline(out, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling results: %w", err)
+	}
+	fmt.Fprint(w, string(data))
+	return nil
 }
