@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -23,5 +24,30 @@ func TestSearchCmd_AccessibleModeRequiresQuery(t *testing.T) {
 	want := "query required when using --json, accessible mode, or piped output"
 	if !strings.Contains(err.Error(), want) {
 		t.Errorf("error = %q, want containing %q", err.Error(), want)
+	}
+}
+
+func TestSearchCmd_HelpMentionsRepoFlagAndInlineFilters(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"search", "-h"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("help command failed: %v", err)
+	}
+
+	help := buf.String()
+	if !strings.Contains(help, "--repo") {
+		t.Fatalf("help missing --repo flag:\n%s", help)
+	}
+	if !strings.Contains(help, "inline filters") {
+		t.Fatalf("help missing inline filter note:\n%s", help)
+	}
+	if !strings.Contains(help, "repo:*") {
+		t.Fatalf("help missing repo:* inline example:\n%s", help)
 	}
 }

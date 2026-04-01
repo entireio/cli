@@ -380,6 +380,111 @@ func TestSearch_FilterParams(t *testing.T) {
 	}
 }
 
+func TestSearch_ExplicitRepoParam(t *testing.T) {
+	t.Parallel()
+
+	var capturedReq *http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedReq = r
+		resp := Response{Results: []Result{}, Total: 0, Page: 1}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
+	}))
+	defer srv.Close()
+
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "default-owner",
+		Repo:        "default-repo",
+		Query:       "q",
+		Repos:       []string{"owner-one/repo-a"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := capturedReq.URL.Query()["repo"]; len(got) != 1 || got[0] != "owner-one/repo-a" {
+		t.Errorf("repo params = %v, want %v", got, []string{"owner-one/repo-a"})
+	}
+}
+
+func TestSearch_DefaultRepoParam(t *testing.T) {
+	t.Parallel()
+
+	var capturedReq *http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedReq = r
+		resp := Response{Results: []Result{}, Total: 0, Page: 1}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
+	}))
+	defer srv.Close()
+
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "default-owner",
+		Repo:        "default-repo",
+		Query:       "q",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := capturedReq.URL.Query()["repo"]; len(got) != 1 || got[0] != "default-owner/default-repo" {
+		t.Errorf("repo params = %v, want %v", got, []string{"default-owner/default-repo"})
+	}
+}
+
+func TestSearch_AllReposFilterOmitsRepoParam(t *testing.T) {
+	t.Parallel()
+
+	var capturedReq *http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedReq = r
+		resp := Response{Results: []Result{}, Total: 0, Page: 1}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test helper response
+	}))
+	defer srv.Close()
+
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  srv.URL,
+		GitHubToken: "tok",
+		Owner:       "default-owner",
+		Repo:        "default-repo",
+		Query:       "q",
+		Repos:       []string{AllReposFilter},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := capturedReq.URL.Query()["repo"]; len(got) != 0 {
+		t.Errorf("repo params = %v, want omitted for all-repos search", got)
+	}
+}
+
+func TestSearch_MultipleExplicitReposRejected(t *testing.T) {
+	t.Parallel()
+
+	_, err := Search(context.Background(), Config{
+		ServiceURL:  "http://example.com",
+		GitHubToken: "tok",
+		Owner:       "default-owner",
+		Repo:        "default-repo",
+		Query:       "q",
+		Repos:       []string{"owner-one/repo-a", "owner-two/repo-b"},
+	})
+	if err == nil {
+		t.Fatal("expected error for multiple explicit repo filters")
+	}
+	if got := err.Error(); got != "only one explicit repo filter is currently supported" {
+		t.Errorf("error = %q", got)
+	}
+}
+
 func TestSearch_PageParam(t *testing.T) {
 	t.Parallel()
 
@@ -482,6 +587,9 @@ func TestConfig_HasFilters(t *testing.T) {
 	if !(Config{Date: testDateWeek}).HasFilters() {
 		t.Error("config with Date should have filters")
 	}
+	if !(Config{Repos: []string{"entirehq/entire.io"}}).HasFilters() {
+		t.Error("config with Repos should have filters")
+	}
 	if !(Config{Author: "alice", Date: testDateWeek}).HasFilters() {
 		t.Error("config with both should have filters")
 	}
@@ -540,6 +648,67 @@ func TestParseSearchInput_BothFilters(t *testing.T) {
 	}
 }
 
+func TestParseSearchInput_RepoFilter(t *testing.T) {
+	t.Parallel()
+
+	p := ParseSearchInput("fix auth repo:entirehq/entire.io")
+	if p.Query != "fix auth" {
+		t.Errorf("query = %q, want %q", p.Query, "fix auth")
+	}
+	if got := p.Repos; len(got) != 1 || got[0] != "entirehq/entire.io" {
+		t.Errorf("repos = %v, want %v", got, []string{"entirehq/entire.io"})
+	}
+}
+
+func TestParseSearchInput_RepoOnly(t *testing.T) {
+	t.Parallel()
+
+	p := ParseSearchInput("repo:entirehq/entire.io")
+	if p.Query != "" {
+		t.Errorf("query = %q, want empty", p.Query)
+	}
+	if got := p.Repos; len(got) != 1 || got[0] != "entirehq/entire.io" {
+		t.Errorf("repos = %v, want %v", got, []string{"entirehq/entire.io"})
+	}
+}
+
+func TestParseSearchInput_AllReposFilter(t *testing.T) {
+	t.Parallel()
+
+	p := ParseSearchInput("repo:*")
+	if p.Query != "" {
+		t.Errorf("query = %q, want empty", p.Query)
+	}
+	if got := p.Repos; len(got) != 1 || got[0] != AllReposFilter {
+		t.Errorf("repos = %v, want %v", got, []string{AllReposFilter})
+	}
+}
+
+func TestValidateRepoFilters_RejectsMultipleRepos(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateRepoFilters([]string{"entirehq/entire.io", "entireio/cli"})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if got := err.Error(); got != "only one explicit repo filter is currently supported" {
+		t.Errorf("error = %q", got)
+	}
+}
+
+func TestValidateRepoFilters_RejectsInvalidRepoValue(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateRepoFilters([]string{"AGENTS.md"})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	want := "invalid repo filter \"AGENTS.md\": expected owner/name or *; if you meant all repos, quote the asterisk: --repo '*'"
+	if got := err.Error(); got != want {
+		t.Errorf("error = %q, want %q", got, want)
+	}
+}
+
 func TestParseSearchInput_QuotedAuthor(t *testing.T) {
 	t.Parallel()
 	p := ParseSearchInput(`author:"` + testAuthor + ` smith" fix bug`)
@@ -573,7 +742,7 @@ func TestParseSearchInput_FiltersOnly(t *testing.T) {
 func TestParseSearchInput_Empty(t *testing.T) {
 	t.Parallel()
 	p := ParseSearchInput("")
-	if p.Query != "" || p.Author != "" || p.Date != "" {
+	if p.Query != "" || p.Author != "" || p.Date != "" || len(p.Repos) != 0 {
 		t.Error("expected all empty for empty input")
 	}
 }

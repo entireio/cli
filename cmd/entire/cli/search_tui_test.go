@@ -221,7 +221,7 @@ func TestSearchModel_View(t *testing.T) {
 	}
 
 	// Column headers
-	for _, col := range []string{"Age", "ID", "Branch", "Prompt", "Author"} {
+	for _, col := range []string{"Age", "ID", "Branch", "Repo", "Prompt", "Author"} {
 		if !strings.Contains(view, col) {
 			t.Errorf("view missing column header %q", col)
 		}
@@ -262,6 +262,22 @@ func TestSearchModel_View(t *testing.T) {
 	}
 	if !strings.Contains(view, "2 results") {
 		t.Error("view missing results count in footer")
+	}
+}
+
+func TestSearchModel_ViewSearchModeIncludesRepoHint(t *testing.T) {
+	t.Parallel()
+
+	m := testModel()
+	m.mode = modeSearch
+	m.input.Focus()
+
+	view := m.View()
+	if !strings.Contains(view, "repo:<owner/name|*>") {
+		t.Error("view missing repo filter hint")
+	}
+	if !strings.Contains(view, "repo:* searches all accessible repos") {
+		t.Error("view missing repo:* note")
 	}
 }
 
@@ -686,6 +702,9 @@ func TestSearchModel_NewSearchClearsFilters(t *testing.T) {
 	if m.searchCfg.Date != "" {
 		t.Errorf("searchCfg.Date should be cleared, got %q", m.searchCfg.Date)
 	}
+	if got := m.searchCfg.Repos; len(got) != 0 {
+		t.Errorf("searchCfg.Repos should be cleared, got %v", got)
+	}
 	if m.searchCfg.Query != "new query" {
 		t.Errorf("searchCfg.Query = %q, want %q", m.searchCfg.Query, "new query")
 	}
@@ -779,6 +798,123 @@ func TestSearchModel_NewSearchPersistsFilters(t *testing.T) {
 	}
 }
 
+func TestSearchModel_NewSearchPersistsRepoFilters(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{
+		ServiceURL: "http://test",
+		Owner:      "default-owner",
+		Repo:       "default-repo",
+		Limit:      25,
+	}
+	m := newSearchModel(testResults(), "old", 2, cfg, ss)
+
+	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m.input.SetValue("new query repo:entirehq/entire.io")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, ok := updated.(searchModel)
+	if !ok {
+		t.Fatalf("Update returned %T, want searchModel", updated)
+	}
+
+	if m.searchCfg.Query != "new query" {
+		t.Errorf("searchCfg.Query = %q, want %q", m.searchCfg.Query, "new query")
+	}
+	if got := m.searchCfg.Repos; len(got) != 1 || got[0] != "entirehq/entire.io" {
+		t.Errorf("searchCfg.Repos = %v, want %v", got, []string{"entirehq/entire.io"})
+	}
+}
+
+func TestSearchModel_NewSearchClearsExplicitRepoFilters(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{
+		ServiceURL: "http://test",
+		Owner:      "default-owner",
+		Repo:       "default-repo",
+		Limit:      25,
+		Repos:      []string{"entirehq/entire.io"},
+	}
+	m := newSearchModel(testResults(), "auth", 2, cfg, ss)
+
+	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m.input.SetValue("new query")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, ok := updated.(searchModel)
+	if !ok {
+		t.Fatalf("Update returned %T, want searchModel", updated)
+	}
+
+	if got := m.searchCfg.Repos; len(got) != 0 {
+		t.Errorf("searchCfg.Repos = %v, want empty explicit repo overrides", got)
+	}
+	if m.searchCfg.Owner != "default-owner" || m.searchCfg.Repo != "default-repo" {
+		t.Errorf("default repo scope changed unexpectedly: %s/%s", m.searchCfg.Owner, m.searchCfg.Repo)
+	}
+}
+
+func TestSearchModel_NewSearchAllReposFilter(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{
+		ServiceURL: "http://test",
+		Owner:      "default-owner",
+		Repo:       "default-repo",
+		Limit:      25,
+	}
+	m := newSearchModel(testResults(), "old", 2, cfg, ss)
+
+	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m.input.SetValue("new query repo:*")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, ok := updated.(searchModel)
+	if !ok {
+		t.Fatalf("Update returned %T, want searchModel", updated)
+	}
+
+	if got := m.searchCfg.Repos; len(got) != 1 || got[0] != search.AllReposFilter {
+		t.Errorf("searchCfg.Repos = %v, want %v", got, []string{search.AllReposFilter})
+	}
+}
+
+func TestSearchModel_NewSearchRejectsMultipleExplicitRepos(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{
+		ServiceURL: "http://test",
+		Owner:      "default-owner",
+		Repo:       "default-repo",
+		Limit:      25,
+	}
+	m := newSearchModel(testResults(), "old", 2, cfg, ss)
+
+	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m.input.SetValue("new query repo:entirehq/entire.io,entireio/cli")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, ok := updated.(searchModel)
+	if !ok {
+		t.Fatalf("Update returned %T, want searchModel", updated)
+	}
+
+	if cmd != nil {
+		t.Fatal("expected no search command on invalid multi-repo input")
+	}
+	if m.mode != modeSearch {
+		t.Errorf("mode = %d, want modeSearch", m.mode)
+	}
+	if m.searchErr != "only one explicit repo filter is currently supported" {
+		t.Errorf("searchErr = %q", m.searchErr)
+	}
+}
+
 func TestSearchModel_ApiPageInitialization(t *testing.T) {
 	t.Parallel()
 
@@ -808,6 +944,9 @@ func TestComputeColumns(t *testing.T) {
 	if cols.id != 12 {
 		t.Errorf("id width = %d, want 12", cols.id)
 	}
+	if cols.repo != 18 {
+		t.Errorf("repo width = %d, want 18", cols.repo)
+	}
 	if cols.author != 14 {
 		t.Errorf("author width = %d, want 14", cols.author)
 	}
@@ -815,5 +954,8 @@ func TestComputeColumns(t *testing.T) {
 	cols = computeColumns(40)
 	if cols.branch < 8 {
 		t.Errorf("branch width on narrow terminal = %d, want >= 8", cols.branch)
+	}
+	if cols.repo < 10 {
+		t.Errorf("repo width on narrow terminal = %d, want >= 10", cols.repo)
 	}
 }

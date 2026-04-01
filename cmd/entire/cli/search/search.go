@@ -20,6 +20,9 @@ const DefaultServiceURL = "https://entire.io"
 // WildcardQuery is the query string used when only filters are provided (no search terms).
 const WildcardQuery = "*"
 
+// AllReposFilter is the inline repo filter value that disables repo scoping.
+const AllReposFilter = "*"
+
 // MaxLimit is the maximum number of results the search API will return per request.
 const MaxLimit = 200
 
@@ -66,6 +69,7 @@ type Config struct {
 	GitHubToken string
 	Owner       string
 	Repo        string
+	Repos       []string
 	Query       string
 	Limit       int
 	Author      string // Filter by author name
@@ -74,9 +78,9 @@ type Config struct {
 	Page        int    // 1-based page number (0 means omit, API defaults to 1)
 }
 
-// HasFilters reports whether any filter fields (Author, Date, Branch) are set on the config.
+// HasFilters reports whether any filter fields are set on the config.
 func (c Config) HasFilters() bool {
-	return c.Author != "" || c.Date != "" || c.Branch != ""
+	return c.Author != "" || c.Date != "" || c.Branch != "" || len(c.Repos) > 0
 }
 
 // ParsedInput holds the parsed query and optional filters extracted from search input.
@@ -85,10 +89,12 @@ type ParsedInput struct {
 	Author string
 	Date   string
 	Branch string
+	Repos  []string
 }
 
-// ParseSearchInput extracts filter prefixes (author:, date:) from raw input.
-// Supports quoted values: author:"alice smith". Remaining tokens become the query.
+// ParseSearchInput extracts filter prefixes from raw input.
+// Supports quoted values for single-value filters, for example: author:"alice smith".
+// Remaining tokens become the query.
 func ParseSearchInput(raw string) ParsedInput {
 	var p ParsedInput
 	var queryParts []string
@@ -102,6 +108,8 @@ func ParseSearchInput(raw string) ParsedInput {
 			p.Date = strings.Trim(tok[len("date:"):], "\"")
 		case strings.HasPrefix(tok, "branch:"):
 			p.Branch = strings.Trim(tok[len("branch:"):], "\"")
+		case strings.HasPrefix(tok, "repo:"):
+			p.Repos = appendUnique(p.Repos, parseListFilter(strings.TrimPrefix(tok, "repo:"))...)
 		default:
 			queryParts = append(queryParts, tok)
 		}
@@ -149,6 +157,69 @@ func tokenizeInput(s string) []string {
 	return tokens
 }
 
+func parseListFilter(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.Trim(strings.TrimSpace(part), "\"")
+		if value == "" {
+			continue
+		}
+		values = append(values, value)
+	}
+
+	return values
+}
+
+// ValidateRepoFilters ensures repo filters match backend semantics.
+func ValidateRepoFilters(repos []string) error {
+	if len(repos) > 1 {
+		return fmt.Errorf("only one explicit repo filter is currently supported")
+	}
+	if len(repos) == 1 && !isValidRepoFilter(repos[0]) {
+		return fmt.Errorf(
+			"invalid repo filter %q: expected owner/name or *; if you meant all repos, quote the asterisk: --repo '*'",
+			repos[0],
+		)
+	}
+	return nil
+}
+
+func isValidRepoFilter(repo string) bool {
+	if repo == AllReposFilter {
+		return true
+	}
+	if strings.Contains(repo, " ") {
+		return false
+	}
+	parts := strings.Split(repo, "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+}
+
+func appendUnique(existing []string, values ...string) []string {
+	if len(values) == 0 {
+		return existing
+	}
+
+	seen := make(map[string]struct{}, len(existing)+len(values))
+	for _, value := range existing {
+		seen[value] = struct{}{}
+	}
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		existing = append(existing, value)
+	}
+
+	return existing
+}
+
 var httpClient = &http.Client{}
 
 // Search calls the search service to perform a hybrid search.
@@ -169,7 +240,18 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 
 	q := u.Query()
 	q.Set("q", cfg.Query)
-	q.Set("repo", cfg.Owner+"/"+cfg.Repo)
+	if err := ValidateRepoFilters(cfg.Repos); err != nil {
+		return nil, err
+	}
+	if len(cfg.Repos) == 1 && cfg.Repos[0] == AllReposFilter {
+		// Omit repo entirely so the search service searches all accessible repos.
+	} else if len(cfg.Repos) > 0 {
+		for _, repo := range cfg.Repos {
+			q.Add("repo", repo)
+		}
+	} else if cfg.Owner != "" && cfg.Repo != "" {
+		q.Set("repo", cfg.Owner+"/"+cfg.Repo)
+	}
 	q.Set("types", "checkpoints")
 	if cfg.Limit > 0 {
 		q.Set("limit", strconv.Itoa(cfg.Limit))

@@ -23,6 +23,7 @@ func newSearchCmd() *cobra.Command {
 		authorFlag string
 		dateFlag   string
 		branchFlag string
+		repoFlag   string
 	)
 
 	cmd := &cobra.Command{
@@ -35,13 +36,16 @@ powered by the Entire search service.
 Requires authentication via 'entire login' (GitHub device flow).
 
 Run without arguments to open an interactive search. Results are
-displayed in an interactive table. Use --json for machine-readable output.`,
+displayed in an interactive table. Use --json for machine-readable output.
+
+CLI queries also support inline filters like author:<name>, date:<week|month>,
+branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			query := strings.Join(args, " ")
 
-			// Extract inline filters (author:, date:) from query args
+			// Extract inline filters (author:, date:, branch:, repo:) from query args
 			parsed := search.ParseSearchInput(query)
 			query = parsed.Query
 			if authorFlag == "" {
@@ -53,10 +57,17 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 			if branchFlag == "" {
 				branchFlag = parsed.Branch
 			}
+			repos := parsed.Repos
+			if repoFlag != "" {
+				repos = []string{repoFlag}
+			}
+			if err := search.ValidateRepoFilters(repos); err != nil {
+				return err
+			}
 
 			w := cmd.OutOrStdout()
 			isTerminal := isTerminalWriter(w)
-			hasFilters := authorFlag != "" || dateFlag != "" || branchFlag != ""
+			hasFilters := authorFlag != "" || dateFlag != "" || branchFlag != "" || len(repos) > 0
 
 			// Fast-fail: no query + non-interactive mode = error (before auth/git checks)
 			if query == "" && !hasFilters && (jsonOutput || !isTerminal || IsAccessibleMode()) {
@@ -103,6 +114,7 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 				GitHubToken: ghToken,
 				Owner:       owner,
 				Repo:        repoName,
+				Repos:       repos,
 				Query:       query,
 				Limit:       limitFlag,
 				Page:        pageFlag,
@@ -176,6 +188,7 @@ displayed in an interactive table. Use --json for machine-readable output.`,
 	cmd.Flags().StringVar(&authorFlag, "author", "", "Filter by author name")
 	cmd.Flags().StringVar(&dateFlag, "date", "", "Filter by time period (week or month)")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Filter by branch name")
+	cmd.Flags().StringVar(&repoFlag, "repo", "", "Filter by repository (owner/name or *)")
 
 	return cmd
 }

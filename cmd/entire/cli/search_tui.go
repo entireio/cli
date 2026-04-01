@@ -129,7 +129,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	ti := textinput.New()
 	ti.SetValue(query)
 	ti.Prompt = " › "
-	ti.Placeholder = "search checkpoints... (author:name date:week branch:main)"
+	ti.Placeholder = "search checkpoints... (author:name date:week branch:main repo:owner/name or repo:*)"
 	ti.CharLimit = 200
 	ti.Width = max(ss.width-6, 30)
 	if ss.colorEnabled {
@@ -254,12 +254,17 @@ func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 		if raw == "" {
 			return m, nil
 		}
+		parsed := search.ParseSearchInput(raw)
+		if err := search.ValidateRepoFilters(parsed.Repos); err != nil {
+			m.searchErr = err.Error()
+			m = m.refreshBrowseContent()
+			return m, nil
+		}
 		m.mode = modeBrowse
 		m.input.Blur()
 		m.loading = true
 		m.searchErr = ""
 		cfg := m.searchCfg
-		parsed := search.ParseSearchInput(raw)
 		cfg.Query = parsed.Query
 		if cfg.Query == "" {
 			cfg.Query = search.WildcardQuery
@@ -267,6 +272,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 		cfg.Author = parsed.Author
 		cfg.Date = parsed.Date
 		cfg.Branch = parsed.Branch
+		cfg.Repos = parsed.Repos
 		m.searchCfg = cfg
 		m = m.refreshBrowseContent()
 		return m, performSearch(cfg)
@@ -403,7 +409,13 @@ func (m searchModel) viewSearchMode() string {
 	m.viewSearchHeader(&b)
 	b.WriteString(" " + m.input.View())
 	b.WriteString("\n\n")
-	b.WriteString(" " + m.styles.render(m.styles.dim, "  Filters: author:<name>  date:<week|month>  branch:<name>"))
+	if m.searchErr != "" {
+		b.WriteString(" " + m.styles.render(m.styles.red, "Error: "+m.searchErr))
+		b.WriteString("\n\n")
+	}
+	b.WriteString(" " + m.styles.render(m.styles.dim, "  Filters: author:<name>  date:<week|month>  branch:<name>  repo:<owner/name|*>"))
+	b.WriteString("\n")
+	b.WriteString(" " + m.styles.render(m.styles.dim, "  repo:* searches all accessible repos"))
 	b.WriteString("\n\n")
 	b.WriteString(m.viewHelp())
 	return b.String()
@@ -468,10 +480,11 @@ func (m searchModel) viewTable() string {
 	var b strings.Builder
 
 	// Column headers
-	hdr := fmt.Sprintf("%-*s %-*s %-*s %-*s %-*s",
+	hdr := fmt.Sprintf("%-*s %-*s %-*s %-*s %-*s %-*s",
 		cols.age, "Age",
 		cols.id, "ID",
 		cols.branch, "Branch",
+		cols.repo, "Repo",
 		cols.prompt, "Prompt",
 		cols.author, "Author",
 	)
@@ -498,13 +511,16 @@ func (m searchModel) viewRow(r search.Result, cols columnLayout) string {
 	age := fmt.Sprintf("%-*s", cols.age, stringutil.TruncateRunes(formatSearchAge(r.Data.CreatedAt), cols.age, ""))
 	id := fmt.Sprintf("%-*s", cols.id, stringutil.TruncateRunes(r.Data.ID, cols.id-1, "…"))
 	branch := fmt.Sprintf("%-*s", cols.branch, stringutil.TruncateRunes(r.Data.Branch, cols.branch-1, "…"))
+	repo := fmt.Sprintf("%-*s", cols.repo, stringutil.TruncateRunes(
+		r.Data.Org+"/"+r.Data.Repo, cols.repo-1, "…",
+	))
 	prompt := fmt.Sprintf("%-*s", cols.prompt, stringutil.TruncateRunes(
 		stringutil.CollapseWhitespace(r.Data.Prompt), cols.prompt-1, "…",
 	))
 	authorName := derefStr(r.Data.AuthorUsername, r.Data.Author)
 	author := fmt.Sprintf("%-*s", cols.author, stringutil.TruncateRunes(authorName, cols.author-1, "…"))
 
-	return fmt.Sprintf("%s %s %s %s %s", age, id, branch, prompt, author)
+	return fmt.Sprintf("%s %s %s %s %s %s", age, id, branch, repo, prompt, author)
 }
 
 // renderDetailContent builds the text content for a checkpoint detail (no border/card chrome).
@@ -710,6 +726,7 @@ type columnLayout struct {
 	age    int
 	id     int
 	branch int
+	repo   int
 	prompt int
 	author int
 }
@@ -719,8 +736,9 @@ func computeColumns(width int) columnLayout {
 	const (
 		ageWidth    = 10
 		idWidth     = 12
+		repoMin     = 10
 		authorWidth = 14
-		gaps        = 4 // spaces between columns
+		gaps        = 5 // spaces between columns
 	)
 
 	remaining := width - ageWidth - idWidth - authorWidth - gaps
@@ -728,13 +746,20 @@ func computeColumns(width int) columnLayout {
 		remaining = 20
 	}
 
-	branchWidth := max(remaining*20/100, 8)
-	promptWidth := remaining - branchWidth
+	branchWidth := max(remaining*18/100, 8)
+	repoWidth := max(remaining*31/100, repoMin)
+	promptWidth := remaining - branchWidth - repoWidth
+	if promptWidth < 12 {
+		reclaim := 12 - promptWidth
+		repoWidth = max(repoWidth-reclaim, repoMin)
+		promptWidth = remaining - branchWidth - repoWidth
+	}
 
 	return columnLayout{
 		age:    ageWidth,
 		id:     idWidth,
 		branch: branchWidth,
+		repo:   repoWidth,
 		prompt: promptWidth,
 		author: authorWidth,
 	}
