@@ -1283,12 +1283,10 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 		}
 		hasNew, err := s.sessionHasNewContent(ctx, repo, state, contentCheckOpts{stagedFiles: stagedFiles})
 		if err != nil {
-			logging.Debug(logCtx, "filterSessionsWithNewContent: error checking session, including it (fail-open)",
+			logging.Debug(logCtx, "filterSessionsWithNewContent: error checking session, skipping it",
 				slog.String("session_id", state.SessionID),
 				slog.String("error", err.Error()),
 			)
-			// On error, include the session (fail open for hooks)
-			result = append(result, state)
 			continue
 		}
 		if !hasNew {
