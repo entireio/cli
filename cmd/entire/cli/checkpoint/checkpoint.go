@@ -498,14 +498,15 @@ type CodeLearning struct {
 //   - AgentRemoved tracks committed deletions performed by the agent
 type InitialAttribution struct {
 	CalculatedAt      time.Time `json:"calculated_at"`
-	AgentLines        int       `json:"agent_lines"`         // Lines added by agent that remain in the commit
-	AgentRemoved      int       `json:"agent_removed"`       // Lines removed by agent that remain removed in the commit
-	HumanAdded        int       `json:"human_added"`         // Lines added by human (excluding modifications)
-	HumanModified     int       `json:"human_modified"`      // Lines modified by human (estimate: min(added, removed))
-	HumanRemoved      int       `json:"human_removed"`       // Lines removed by human (excluding modifications)
-	TotalCommitted    int       `json:"total_committed"`     // Net additions in commit (legacy additions-focused metric)
-	TotalLinesChanged int       `json:"total_lines_changed"` // Total committed line changes (adds + modifies + removes)
-	AgentPercentage   float64   `json:"agent_percentage"`    // (agent_lines + agent_removed) / total_lines_changed * 100
+	AgentLines        int       `json:"agent_lines"`              // Lines added by agent that remain in the commit
+	AgentRemoved      int       `json:"agent_removed"`            // Lines removed by agent that remain removed in the commit
+	HumanAdded        int       `json:"human_added"`              // Lines added by human (excluding modifications)
+	HumanModified     int       `json:"human_modified"`           // Lines modified by human (estimate: min(added, removed))
+	HumanRemoved      int       `json:"human_removed"`            // Lines removed by human (excluding modifications)
+	TotalCommitted    int       `json:"total_committed"`          // Net additions in commit (legacy additions-focused metric)
+	TotalLinesChanged int       `json:"total_lines_changed"`      // Total committed line changes (adds + modifies + removes)
+	AgentPercentage   float64   `json:"agent_percentage"`         // (agent_lines + agent_removed) / total_lines_changed * 100
+	MetricVersion     int       `json:"metric_version,omitempty"` // 0/absent = legacy (additions-only %), 2 = changed-lines %
 }
 
 // Info provides summary information for listing checkpoints.

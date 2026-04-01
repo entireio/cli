@@ -202,15 +202,18 @@ func CalculateAttributionWithAccumulated(
 	}
 
 	// Sum accumulated user lines from prompt attributions
-	// Also aggregate per-file user additions for accurate modification tracking
+	// Also aggregate per-file user additions and removals for accurate attribution
 	var accumulatedUserAdded, accumulatedUserRemoved int
 	accumulatedUserAddedPerFile := make(map[string]int)
+	accumulatedUserRemovedPerFile := make(map[string]int)
 	for _, pa := range promptAttributions {
 		accumulatedUserAdded += pa.UserLinesAdded
 		accumulatedUserRemoved += pa.UserLinesRemoved
-		// Merge per-file data from all prompt attributions
 		for filePath, added := range pa.UserAddedPerFile {
 			accumulatedUserAddedPerFile[filePath] += added
+		}
+		for filePath, removed := range pa.UserRemovedPerFile {
+			accumulatedUserRemovedPerFile[filePath] += removed
 		}
 	}
 
@@ -218,7 +221,7 @@ func CalculateAttributionWithAccumulated(
 	// IMPORTANT: shadowTree is a snapshot of the worktree at checkpoint time,
 	// which includes both agent work AND accumulated user edits (to agent-touched files).
 	// So base→shadow diff = (agent work + accumulated user work to these files).
-	var totalAgentAndUserWorkAdded, totalAgentAndUserWorkRemoved int
+	var totalAgentAndUserWorkAdded int
 	var postCheckpointUserAdded, postCheckpointUserRemoved int
 	postCheckpointUserRemovedPerFile := make(map[string]int)
 
@@ -230,7 +233,7 @@ func CalculateAttributionWithAccumulated(
 		// Total work in shadow: base → shadow (agent + accumulated user work for this file)
 		_, workAdded, workRemoved := diffLines(baseContent, shadowContent)
 		totalAgentAndUserWorkAdded += workAdded
-		totalAgentAndUserWorkRemoved += workRemoved
+		_ = workRemoved // Used per-file in agentRemovedInCommit calculation below
 
 		// Post-checkpoint user edits: shadow → head (only post-checkpoint edits for this file)
 		_, postUserAdded, postUserRemoved := diffLines(shadowContent, headContent)
@@ -288,9 +291,18 @@ func CalculateAttributionWithAccumulated(
 		// else: file not committed (worktree-only), excluded from attribution
 	}
 
+	// Fix issue 1: compute per-file user removals to agent files (symmetric with additions).
+	// Without this, global user removals would incorrectly reduce agent deletion credit
+	// when users delete lines in non-agent files.
+	var accumulatedRemovedToAgentFiles int
+	for filePath, removed := range accumulatedUserRemovedPerFile {
+		if slices.Contains(filesTouched, filePath) {
+			accumulatedRemovedToAgentFiles += removed
+		}
+	}
+
 	// Agent work = (base→shadow for agent files) - (accumulated user edits to agent files only)
 	totalAgentAdded := max(0, totalAgentAndUserWorkAdded-accumulatedToAgentFiles)
-	totalAgentRemoved := max(0, totalAgentAndUserWorkRemoved-accumulatedUserRemoved)
 
 	// Post-checkpoint edits to non-agent files = total edits - accumulated portion (never negative)
 	postToNonAgentFiles := max(0, allUserEditsToNonAgentFiles-accumulatedToCommittedNonAgentFiles)
@@ -298,10 +310,6 @@ func CalculateAttributionWithAccumulated(
 	// Total user contribution = accumulated (committed files only) + post-checkpoint edits
 	relevantAccumulatedUser := accumulatedToAgentFiles + accumulatedToCommittedNonAgentFiles
 	totalUserAdded := relevantAccumulatedUser + postCheckpointUserAdded + postToNonAgentFiles
-	// TODO: accumulatedUserRemoved also includes removals from uncommitted files,
-	// but we don't have per-file tracking for removals yet. In practice, removals
-	// from uncommitted files are rare and the impact is minor (could slightly reduce
-	// totalCommitted via pureUserRemoved). Add UserRemovedPerFile if this becomes an issue.
 	totalUserRemoved := accumulatedUserRemoved + postCheckpointUserRemoved
 
 	// Estimate modified lines (user changed existing lines)
@@ -341,14 +349,40 @@ func CalculateAttributionWithAccumulated(
 	// Clamp to 0 to handle cases where user removed/modified more than agent added.
 	agentLinesInCommit := max(0, totalAgentAdded-pureUserRemoved-humanModifiedAgent)
 
-	// Deletion work is measured from base → shadow and preserved in the commit
-	// unless the user reintroduces lines later. We do not currently track re-added
-	// deletions separately, so this remains an approximation when a user undoes
-	// the agent's deletions before commit.
-	agentRemovedInCommit := totalAgentRemoved
+	// Fix issue 2: clamp agent deletions to what's actually removed in the commit.
+	// If the user re-adds lines the agent deleted (shadow→head insertions), those
+	// lines are no longer deleted in the commit and shouldn't count as agent deletions.
+	// Per-file: take min(base→shadow removed, base→head removed) to avoid over-reporting.
+	var agentRemovedInCommit int
+	for _, filePath := range filesTouched {
+		baseContent := getFileContent(baseTree, filePath)
+		shadowContent := getFileContent(shadowTree, filePath)
+		headContent := getFileContent(headTree, filePath)
+
+		_, _, removedBaseToShadow := diffLines(baseContent, shadowContent)
+		_, _, removedBaseToHead := diffLines(baseContent, headContent)
+
+		// Agent can only claim deletions that actually remain deleted in the commit
+		agentRemovedInCommit += min(removedBaseToShadow, removedBaseToHead)
+	}
+	// Subtract accumulated user removals to agent files (same correction as additions)
+	agentRemovedInCommit = max(0, agentRemovedInCommit-accumulatedRemovedToAgentFiles)
+
+	// Fix issue 3: include non-agent file removals in total lines changed.
+	// Without this, user deletions to non-agent files are invisible in the denominator.
+	var nonAgentUserRemoved int
+	for _, filePath := range allChangedFiles {
+		if slices.Contains(filesTouched, filePath) {
+			continue
+		}
+		baseContent := getFileContent(baseTree, filePath)
+		headContent := getFileContent(headTree, filePath)
+		_, _, removed := diffLines(baseContent, headContent)
+		nonAgentUserRemoved += removed
+	}
 
 	agentChangedLines := agentLinesInCommit + agentRemovedInCommit
-	totalLinesChanged := agentChangedLines + pureUserAdded + totalHumanModified + pureUserRemoved
+	totalLinesChanged := agentChangedLines + pureUserAdded + totalHumanModified + pureUserRemoved + nonAgentUserRemoved
 
 	// Calculate percentage
 	var agentPercentage float64
@@ -366,6 +400,7 @@ func CalculateAttributionWithAccumulated(
 		TotalCommitted:    totalCommitted,
 		TotalLinesChanged: totalLinesChanged,
 		AgentPercentage:   agentPercentage,
+		MetricVersion:     2, // changed-lines % (adds + removes), distinct from legacy additions-only %
 	}
 }
 
@@ -409,8 +444,9 @@ func CalculatePromptAttribution(
 	checkpointNumber int,
 ) PromptAttribution {
 	result := PromptAttribution{
-		CheckpointNumber: checkpointNumber,
-		UserAddedPerFile: make(map[string]int),
+		CheckpointNumber:   checkpointNumber,
+		UserAddedPerFile:   make(map[string]int),
+		UserRemovedPerFile: make(map[string]int),
 	}
 
 	if len(worktreeFiles) == 0 {
@@ -433,10 +469,14 @@ func CalculatePromptAttribution(
 		result.UserLinesAdded += userAdded
 		result.UserLinesRemoved += userRemoved
 
-		// Track per-file user additions for accurate modification tracking.
-		// This enables distinguishing user self-modifications from agent modifications.
+		// Track per-file user additions and removals for accurate attribution.
+		// Additions: distinguishing user self-modifications from agent modifications.
+		// Removals: subtracting only agent-file removals from agent deletion credit.
 		if userAdded > 0 {
 			result.UserAddedPerFile[filePath] = userAdded
+		}
+		if userRemoved > 0 {
+			result.UserRemovedPerFile[filePath] = userRemoved
 		}
 
 		// Agent lines so far: diff(base, lastCheckpoint)
