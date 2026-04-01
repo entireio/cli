@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -136,8 +135,8 @@ func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
 		t.Fatalf("plugin file missing current session assignment %q", currentSessionAssignment)
 	}
 	if !(guardIdx < hookIdx && hookIdx < assignIdx) {
-		t.Fatalf("expected guarded session-start call before session assignment, got guard=%s hook=%s assignment=%s",
-			strconv.Itoa(guardIdx), strconv.Itoa(hookIdx), strconv.Itoa(assignIdx))
+		t.Fatalf("expected guarded session-start call before session assignment, got guard=%d hook=%d assignment=%d",
+			guardIdx, hookIdx, assignIdx)
 	}
 }
 
