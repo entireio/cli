@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -76,10 +75,7 @@ func (c *CopilotCLI) RunPrompt(ctx context.Context, dir string, prompt string, o
 	cmd.Dir = dir
 	cmd.Stdin = nil
 	cmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	setupProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
 	var stdout, stderr strings.Builder
@@ -129,6 +125,10 @@ type CopilotSession struct {
 }
 
 func (cs *CopilotSession) Send(input string) error {
+	if err := cs.clearInputLine(); err != nil {
+		return err
+	}
+
 	preSend := stableContent(cs.Capture())
 
 	if err := cs.sendOnce(input, preSend); err != nil {
@@ -140,15 +140,21 @@ func (cs *CopilotSession) Send(input string) error {
 	// If detected, dismiss with Escape, clear the input, and retry once.
 	time.Sleep(300 * time.Millisecond)
 	if isAutocompleteMenu(cs.Capture()) {
-		if err := cs.SendKeys("Escape"); err != nil {
+		if err := cs.dismissAutocompleteAndClear(); err != nil {
 			return err
 		}
-		time.Sleep(200 * time.Millisecond)
-		// Ctrl+U clears the current input line.
-		if err := cs.SendKeys("C-u"); err != nil {
+		if err := cs.sendOnce(input, stableContent(cs.Capture())); err != nil {
 			return err
 		}
-		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Copilot can leave behind a stray slash-command invocation between turns.
+	// Only retry if that error appeared in output produced by this submission,
+	// not merely somewhere in pane scrollback from an earlier turn.
+	if content := cs.Capture(); appearedInNewOutput(preSend, content, "Unknown command: /") {
+		if err := cs.clearInputLine(); err != nil {
+			return err
+		}
 		if err := cs.sendOnce(input, stableContent(cs.Capture())); err != nil {
 			return err
 		}
@@ -166,6 +172,45 @@ func (cs *CopilotSession) Send(input string) error {
 	}
 	cs.stableAtSend = stableContent(cs.Capture())
 	return nil
+}
+
+// clearInputLine removes any partially typed prompt text without sending other
+// UI navigation keys. In Copilot CLI, Escape can trigger undo/snapshot actions,
+// so routine pre-send cleanup must avoid it.
+func (cs *CopilotSession) clearInputLine() error {
+	if err := cs.SendKeys("C-u"); err != nil {
+		return err
+	}
+	time.Sleep(200 * time.Millisecond)
+	return nil
+}
+
+// dismissAutocompleteAndClear closes the slash-command autocomplete dropdown
+// and then clears the input line before retrying the prompt.
+func (cs *CopilotSession) dismissAutocompleteAndClear() error {
+	if err := cs.SendKeys("Escape"); err != nil {
+		return err
+	}
+	time.Sleep(200 * time.Millisecond)
+	return cs.clearInputLine()
+}
+
+// appearedInNewOutput reports whether pattern is present in content that was
+// added after the pre-send snapshot. This avoids retriggering on old pane
+// scrollback from previous turns.
+func appearedInNewOutput(before string, after string, pattern string) bool {
+	if after == before {
+		return false
+	}
+	if strings.HasPrefix(after, before) {
+		return strings.Contains(after[len(before):], pattern)
+	}
+
+	// If tmux capture lost a clean prefix relationship due to scrollback churn,
+	// fall back to checking only the most recent lines.
+	lines := strings.Split(after, "\n")
+	start := max(0, len(lines)-12)
+	return strings.Contains(strings.Join(lines[start:], "\n"), pattern)
 }
 
 // sendOnce types the input text, sends Enter, and handles Edit mode fallback.
@@ -242,14 +287,11 @@ func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, err
 		return nil, fmt.Errorf("agent binary not found: %w", err)
 	}
 
-	// Forward critical env vars into the tmux session. tmux starts a new
+	// Forward auth-related env vars into the tmux session. tmux starts a new
 	// shell that doesn't inherit Go's os.Environ(), so without this the
-	// session lacks auth tokens (COPILOT_GITHUB_TOKEN) and HOME (for gh auth).
-	if os.Getenv("COPILOT_GITHUB_TOKEN") == "" {
-		return nil, errors.New("COPILOT_GITHUB_TOKEN is not set; copilot-cli interactive session requires authentication")
-	}
+	// session can lose both token-based auth and local gh/copilot login state.
 	var envArgs []string
-	for _, key := range []string{"COPILOT_GITHUB_TOKEN", "HOME", "TERM"} {
+	for _, key := range []string{"COPILOT_GITHUB_TOKEN", "HOME", "TERM", "XDG_CONFIG_HOME", "GH_CONFIG_DIR"} {
 		if v := os.Getenv(key); v != "" {
 			envArgs = append(envArgs, key+"="+v)
 		}

@@ -162,6 +162,7 @@ func ToRelativePath(absPath, cwd string) string {
 	if err != nil || strings.HasPrefix(relPath, "..") {
 		return ""
 	}
+
 	return relPath
 }
 

@@ -91,6 +91,10 @@ func TestSingleSessionAgentCommitInTurn(t *testing.T) {
 // (end-of-turn) referencing the same checkpoint ID.
 func TestSingleSessionSubagentCommitInTurn(t *testing.T) {
 	testutil.ForEachAgent(t, 2*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
+		if s.Agent.Name() == "copilot-cli" {
+			t.Skip("copilot-cli may run prompt-mode subagents in the background while the foreground process returns and fires agent-stop/session-end hooks first; when the later subagent commit happens, git hooks see no active session, so this same-turn subagent-commit assertion is not stable for Copilot")
+		}
+
 		_, err := s.RunPrompt(t, ctx,
 			"use a subagent: create a markdown file at docs/red.md with a paragraph about the colour red, then commit it. Do not ask for confirmation, just make the change.")
 		if err != nil {

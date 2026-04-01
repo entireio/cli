@@ -599,17 +599,20 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 }
 
 // mergeFilesTouched combines two file lists, removing duplicates.
+// All paths are normalized to forward slashes for platform-agnostic storage.
 func mergeFilesTouched(existing, additional []string) []string {
 	seen := make(map[string]bool)
 	var result []string
 
 	for _, f := range existing {
+		f = filepath.ToSlash(f)
 		if !seen[f] {
 			seen[f] = true
 			result = append(result, f)
 		}
 	}
 	for _, f := range additional {
+		f = filepath.ToSlash(f)
 		if !seen[f] {
 			seen[f] = true
 			result = append(result, f)

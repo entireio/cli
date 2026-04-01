@@ -4,19 +4,16 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
-)
-
-// Transcript message type constants - aliases to transcript package for local use.
-const (
-	transcriptTypeUser = transcript.TypeUser
 )
 
 // resolveTranscriptPath determines the correct file path for an agent's session transcript.
@@ -32,6 +29,63 @@ func resolveTranscriptPath(ctx context.Context, sessionID string, agent agentpkg
 		return "", fmt.Errorf("failed to get agent session directory: %w", err)
 	}
 	return agent.ResolveSessionFile(sessionDir, sessionID), nil
+}
+
+// searchTranscriptInProjectDirs searches for a session transcript across an agent's
+// project directories that could plausibly belong to the current repository.
+// Agents like Claude Code and Gemini CLI derive the project directory from the cwd,
+// so the transcript may be stored under a different project directory if the session
+// was started from a different working directory.
+//
+// The search is scoped to the agent's base directory (e.g., ~/.claude/projects) and only
+// walks immediate subdirectories (plus one extra level for agents like Gemini that nest
+// chats under <project>/chats/).
+// Only agents implementing SessionBaseDirProvider support this fallback search.
+func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string, error) {
+	provider, ok := agentpkg.AsSessionBaseDirProvider(ag)
+	if !ok {
+		return "", fmt.Errorf("fallback transcript search not supported for agent %q", ag.Name())
+	}
+	baseDir, err := provider.GetSessionBaseDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get base directory: %w", err)
+	}
+
+	// Walk subdirectories with a max depth of 3 (baseDir/project/subdir/file)
+	// to avoid scanning unrelated project trees.
+	const maxExtraDepth = 3
+
+	var found string
+	walkErr := filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr // skip inaccessible dirs
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		// Limit walk depth using relative path from base
+		rel, relErr := filepath.Rel(baseDir, path)
+		if relErr != nil {
+			return filepath.SkipDir
+		}
+		depth := strings.Count(rel, string(filepath.Separator))
+		if depth > maxExtraDepth {
+			return filepath.SkipDir
+		}
+		candidate := ag.ResolveSessionFile(path, sessionID)
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			found = candidate
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return "", fmt.Errorf("failed to search project directories: %w", walkErr)
+	}
+	if found != "" {
+		return found, nil
+	}
+	return "", errors.New("transcript not found in any project directory")
 }
 
 // AgentTranscriptPath returns the path to a subagent's transcript file.
@@ -56,9 +110,9 @@ type userMessageWithToolResults struct {
 // for the given tool_use_id. This is used to find the checkpoint point for
 // transcript truncation when rewinding to a task.
 // Returns the UUID and true if found, empty string and false otherwise.
-func FindCheckpointUUID(transcript []transcriptLine, toolUseID string) (string, bool) {
-	for _, line := range transcript {
-		if line.Type != transcriptTypeUser {
+func FindCheckpointUUID(lines []transcriptLine, toolUseID string) (string, bool) {
+	for _, line := range lines {
+		if line.Type != transcript.TypeUser {
 			continue
 		}
 
@@ -81,30 +135,30 @@ func FindCheckpointUUID(transcript []transcriptLine, toolUseID string) (string, 
 // the entire transcript.
 //
 //nolint:revive // Exported for testing purposes
-func TruncateTranscriptAtUUID(transcript []transcriptLine, uuid string) []transcriptLine {
+func TruncateTranscriptAtUUID(lines []transcriptLine, uuid string) []transcriptLine {
 	if uuid == "" {
-		return transcript
+		return lines
 	}
 
-	for i, line := range transcript {
+	for i, line := range lines {
 		if line.UUID == uuid {
-			return transcript[:i+1]
+			return lines[:i+1]
 		}
 	}
 
 	// UUID not found, return full transcript
-	return transcript
+	return lines
 }
 
 // writeTranscript writes transcript lines to a file in JSONL format.
-func writeTranscript(path string, transcript []transcriptLine) error {
+func writeTranscript(path string, lines []transcriptLine) error {
 	file, err := os.Create(path) //nolint:gosec // Writing to controlled git metadata path
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
 	defer func() { _ = file.Close() }()
 
-	for _, line := range transcript {
+	for _, line := range lines {
 		data, err := json.Marshal(line)
 		if err != nil {
 			return fmt.Errorf("failed to marshal line: %w", err)

@@ -118,10 +118,14 @@ jobs:
           path: e2e/artifacts/
           retention-days: 7
 
+  e2e-windows:
+    uses: ./.github/workflows/e2e-windows.yml
+    secrets: inherit
+
   notify-slack:
     runs-on: ubuntu-latest
-    needs: [e2e-tests]
-    if: ${{ always() && needs.e2e-tests.result == 'failure' && github.event_name == 'push' }}
+    needs: [e2e-tests, e2e-windows]
+    if: ${{ always() && (needs.e2e-tests.result == 'failure' || needs.e2e-windows.result == 'failure') && github.event_name == 'push' }}
     steps:
       - name: Get failed agents
         id: failed
@@ -129,7 +133,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           failed=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs \
-            --jq '[.jobs[] | select(.conclusion == "failure") | .name | capture("\\((?<agent>[^)]+)\\)") | .agent] | join(", ")')
+            --jq '[.jobs[] | select(.conclusion == "failure") | .name | if test("\\(") then capture("\\((?<agent>[^)]+)\\)") | .agent else . end] | join(", ")')
           echo "agents=$failed" >> "$GITHUB_OUTPUT"
 
       - name: Notify Slack of E2E failure

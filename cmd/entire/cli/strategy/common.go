@@ -1159,11 +1159,14 @@ func computeDiffStats(oldContent, newContent []byte) (added, removed int) {
 }
 
 // splitLines splits content into lines, preserving empty lines.
+// Handles both Unix (\n) and Windows (\r\n) line endings.
 func splitLines(content []byte) []string {
 	if len(content) == 0 {
 		return nil
 	}
 	s := string(content)
+	// Normalize Windows line endings to Unix
+	s = strings.ReplaceAll(s, "\r\n", "\n")
 	// Remove trailing newline to avoid empty last element
 	s = strings.TrimSuffix(s, "\n")
 	return strings.Split(s, "\n")

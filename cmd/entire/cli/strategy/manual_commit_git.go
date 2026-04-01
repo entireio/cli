@@ -315,15 +315,16 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 }
 
 // mergeFilesTouched merges multiple file lists into existing touched files, deduplicating.
+// All paths are normalized to forward slashes for platform-agnostic storage.
 func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
 	seen := make(map[string]bool)
 	for _, f := range existing {
-		seen[f] = true
+		seen[filepath.ToSlash(f)] = true
 	}
 
 	for _, list := range fileLists {
 		for _, f := range list {
-			seen[f] = true
+			seen[filepath.ToSlash(f)] = true
 		}
 	}
 

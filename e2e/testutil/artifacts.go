@@ -81,9 +81,8 @@ func CaptureArtifacts(t *testing.T, s *RepoState) {
 	captureEntireLogs(t, s.Dir, dir)
 
 	if os.Getenv("E2E_KEEP_REPOS") != "" {
-		link := filepath.Join(dir, "repo")
-		if err := os.Symlink(s.Dir, link); err != nil {
-			t.Logf("warning: failed to symlink repo: %v", err)
+		if err := linkRepo(s.Dir, dir); err != nil {
+			t.Logf("warning: failed to link repo: %v", err)
 		}
 	}
 }

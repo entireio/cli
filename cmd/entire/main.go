@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -19,7 +20,11 @@ func main() {
 
 	// Handle interrupt signals
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	signals := []os.Signal{os.Interrupt}
+	if runtime.GOOS != "windows" {
+		signals = append(signals, syscall.SIGTERM)
+	}
+	signal.Notify(sigChan, signals...)
 	go func() {
 		<-sigChan
 		cancel()

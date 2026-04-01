@@ -37,7 +37,14 @@ func TestHandleFormCancellation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "non-abort error is returned as-is",
+			name:    "timeout prints cancelled and returns nil",
+			action:  "Stop",
+			err:     huh.ErrTimeout,
+			wantOut: "Stop cancelled.\n",
+			wantErr: false,
+		},
+		{
+			name:    "unexpected error is wrapped with action name",
 			action:  "Reset",
 			err:     errors.New("form exploded"),
 			wantOut: "",

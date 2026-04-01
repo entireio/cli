@@ -206,6 +206,19 @@ type TestOnly interface {
 	IsTestOnly() bool
 }
 
+// SessionBaseDirProvider is implemented by agents that store transcripts in a
+// home-directory-based structure with per-project subdirectories. This enables
+// cross-project transcript search (e.g., when a session was started from a
+// different working directory). Agents with ephemeral/temp-based storage or
+// flat session layouts should NOT implement this interface.
+type SessionBaseDirProvider interface {
+	Agent
+
+	// GetSessionBaseDir returns the base directory containing per-project
+	// session subdirectories (e.g., ~/.claude/projects, ~/.gemini/tmp).
+	GetSessionBaseDir() (string, error)
+}
+
 // SubagentAwareExtractor provides methods for extracting files and tokens including subagents.
 // Agents that support spawning subagents (like Claude Code's Task tool) should implement this
 // to ensure subagent contributions are included in checkpoints.

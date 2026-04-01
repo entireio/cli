@@ -213,6 +213,94 @@ func GetLastMessageIDFromFile(path string) (string, error) {
 	return GetLastMessageID(data)
 }
 
+// NormalizeTranscript normalizes user message content fields in-place from
+// [{"text":"..."}] arrays to plain strings, preserving all other transcript fields
+// (timestamps, thoughts, tokens, model, toolCalls, etc.).
+//
+// This operates on raw JSON rather than using ParseTranscript + re-marshal because
+// GeminiMessage only captures a subset of fields (id, type, content, toolCalls).
+// Round-tripping through the struct would silently drop fields like timestamp, model,
+// and tokens that are present in real Gemini transcripts. The raw approach rewrites
+// only the content values while leaving all other fields untouched.
+func NormalizeTranscript(data []byte) ([]byte, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
+	messagesRaw, ok := raw["messages"]
+	if !ok {
+		return data, nil
+	}
+
+	var messages []json.RawMessage
+	if err := json.Unmarshal(messagesRaw, &messages); err != nil {
+		return nil, fmt.Errorf("failed to parse messages: %w", err)
+	}
+
+	changed := false
+	for i, msgRaw := range messages {
+		var msg map[string]json.RawMessage
+		if err := json.Unmarshal(msgRaw, &msg); err != nil {
+			continue
+		}
+
+		contentRaw, hasContent := msg["content"]
+		if !hasContent || len(contentRaw) == 0 {
+			continue
+		}
+
+		// Skip if already a string
+		var strContent string
+		if json.Unmarshal(contentRaw, &strContent) == nil {
+			continue
+		}
+
+		// Try to convert array of {"text":"..."} to a plain string
+		var parts []struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(contentRaw, &parts) != nil {
+			continue
+		}
+
+		var texts []string
+		for _, p := range parts {
+			if p.Text != "" {
+				texts = append(texts, p.Text)
+			}
+		}
+		joined := strings.Join(texts, "\n")
+		strBytes, err := json.Marshal(joined)
+		if err != nil {
+			continue
+		}
+		msg["content"] = strBytes
+		rewritten, err := json.Marshal(msg)
+		if err != nil {
+			continue
+		}
+		messages[i] = rewritten
+		changed = true
+	}
+
+	if !changed {
+		return data, nil
+	}
+
+	rewrittenMessages, err := json.Marshal(messages)
+	if err != nil {
+		return nil, fmt.Errorf("failed to re-serialize messages: %w", err)
+	}
+	raw["messages"] = rewrittenMessages
+
+	result, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to re-serialize transcript: %w", err)
+	}
+	return result, nil
+}
+
 // SliceFromMessage returns a Gemini transcript scoped to messages starting from
 // startMessageIndex. This is the Gemini equivalent of transcript.SliceFromLine —
 // for Gemini's single JSON blob, scoping is done by message index rather than line offset.

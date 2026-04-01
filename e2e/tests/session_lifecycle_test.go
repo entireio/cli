@@ -100,7 +100,7 @@ func TestTrailerRemovalSkipsCondensation(t *testing.T) {
 		testutil.AssertFileExists(t, s.Dir, "trailer_test.go")
 
 		s.Git(t, "add", ".")
-		s.Git(t, "-c", "core.hooksPath=/dev/null", "commit", "-m", "Add trailer_test (no checkpoint)")
+		s.Git(t, "-c", "core.hooksPath="+testutil.EmptyDir(t), "commit", "-m", "Add trailer_test (no checkpoint)")
 
 		testutil.AssertNoCheckpointTrailer(t, s.Dir, "HEAD")
 

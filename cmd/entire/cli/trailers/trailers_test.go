@@ -6,6 +6,76 @@ import (
 	checkpointID "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 )
 
+func TestAppendCheckpointTrailer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{
+			name: "no existing trailers",
+			msg:  "feat: add attach command\n",
+			want: "feat: add attach command\n\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			name: "existing non-checkpoint trailer block",
+			msg:  "feat: add attach command\n\nSigned-off-by: Test User <test@example.com>\n",
+			want: "feat: add attach command\n\nSigned-off-by: Test User <test@example.com>\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			name: "existing checkpoint trailer block",
+			msg:  "feat: add attach command\n\nEntire-Checkpoint: deadbeefcafe\n",
+			want: "feat: add attach command\n\nEntire-Checkpoint: deadbeefcafe\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			name: "subject with colon is not trailer block",
+			msg:  "docs: update readme\n",
+			want: "docs: update readme\n\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			name: "body text containing colon-space is not trailer block",
+			msg:  "fix: login\n\nThis fixes the error: connection refused\n",
+			want: "fix: login\n\nThis fixes the error: connection refused\n\nEntire-Checkpoint: abc123def456\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := AppendCheckpointTrailer(tt.msg, "abc123def456")
+			if got != tt.want {
+				t.Errorf("AppendCheckpointTrailer() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsTrailerLine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		line string
+		want bool
+	}{
+		{"Signed-off-by: User <user@example.com>", true},
+		{"Entire-Checkpoint: abc123def456", true},
+		{"not a trailer", false},
+		{"error: connection refused", true}, // "error" is a valid trailer key format
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.line, func(t *testing.T) {
+			t.Parallel()
+			if got := IsTrailerLine(tt.line); got != tt.want {
+				t.Errorf("IsTrailerLine(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatMetadata(t *testing.T) {
 	message := "Update authentication logic"
 	metadataDir := ".entire/metadata/2025-01-28-abc123"

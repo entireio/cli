@@ -340,7 +340,7 @@ func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error 
 
 	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
 
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", refSpec)
+	fetchCmd := strategy.CheckpointGitCommand(ctx, "origin", "fetch", "origin", refSpec)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return errors.New("fetch timed out after 2 minutes")
@@ -383,7 +383,7 @@ func FetchMetadataBranch(ctx context.Context) error {
 
 	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
 
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", refSpec)
+	fetchCmd := strategy.CheckpointGitCommand(ctx, "origin", "fetch", "origin", refSpec)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return errors.New("fetch timed out after 2 minutes")
@@ -425,7 +425,7 @@ func FetchMetadataTreeOnly(ctx context.Context) error {
 
 	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
 
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "--depth=1", "--filter=blob:none", "origin", refSpec)
+	fetchCmd := strategy.CheckpointGitCommand(ctx, "origin", "fetch", "--depth=1", "--filter=blob:none", "origin", refSpec)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return errors.New("treeless fetch timed out after 2 minutes")
@@ -474,7 +474,7 @@ func FetchBlobsByHash(ctx context.Context, hashes []plumbing.Hash) error {
 		args = append(args, h.String())
 	}
 
-	fetchCmd := exec.CommandContext(ctx, "git", args...)
+	fetchCmd := strategy.CheckpointGitCommand(ctx, "origin", args...)
 	if _, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
 		logging.Debug(ctx, "fetch-by-hash failed, falling back to full metadata fetch",
 			slog.Int("blob_count", len(hashes)),
