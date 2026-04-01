@@ -322,7 +322,7 @@ func runAddAgents(ctx context.Context, w io.Writer, opts EnableOptions) error {
 
 	// Install hooks for newly selected agents only
 	for _, ag := range newAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooks(ctx, w, ag, opts.LocalDev, opts.ForceHooks); err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
 		}
 	}
@@ -596,7 +596,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, opts.LocalDev, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooks(ctx, w, ag, opts.LocalDev, opts.ForceHooks); err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
 		}
 	}
@@ -861,7 +861,7 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 
 // setupAgentHooks sets up hooks for a given agent.
 // Returns the number of hooks installed (0 if already installed).
-func setupAgentHooks(ctx context.Context, ag agent.Agent, localDev, forceHooks bool) (int, error) { //nolint:unparam // count useful for callers that want to report installed hook count
+func setupAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, localDev, forceHooks bool) (int, error) { //nolint:unparam // count useful for callers that want to report installed hook count
 	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
 		return 0, fmt.Errorf("agent %s does not support hooks", ag.Name())
@@ -871,6 +871,12 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, localDev, forceHooks b
 	if err != nil {
 		return 0, fmt.Errorf("failed to install %s hooks: %w", ag.Name(), err)
 	}
+
+	scaffoldResult, err := scaffoldSearchSubagent(ctx, ag)
+	if err != nil {
+		return 0, fmt.Errorf("failed to scaffold %s search subagent: %w", ag.Name(), err)
+	}
+	reportSearchSubagentScaffold(w, ag, scaffoldResult)
 
 	return count, nil
 }
@@ -1081,15 +1087,14 @@ func printWrongAgentError(w io.Writer, name string) {
 func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
 	agentName := ag.Name()
 	// Check if agent supports hooks
-	hookAgent, ok := agent.AsHookSupport(ag)
-	if !ok {
+	if _, ok := agent.AsHookSupport(ag); !ok {
 		return fmt.Errorf("agent %s does not support hooks", agentName)
 	}
 
 	fmt.Fprintf(w, "Agent: %s\n\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := hookAgent.InstallHooks(ctx, opts.LocalDev, opts.ForceHooks)
+	installedHooks, err := setupAgentHooks(ctx, w, ag, opts.LocalDev, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
 	}

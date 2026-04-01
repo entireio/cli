@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -73,6 +74,19 @@ func TestSetupClaudeHooks_AddsAllRequiredHooks(t *testing.T) {
 	}
 	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "TodoWrite") {
 		t.Error("PostToolUse[TodoWrite] hook should exist")
+	}
+
+	searchAgentPath := filepath.Join(env.RepoDir, ".claude", "agents", "search.md")
+	data, err := os.ReadFile(searchAgentPath)
+	if err != nil {
+		t.Fatalf("failed to read generated Claude search subagent: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "ENTIRE-MANAGED SEARCH SUBAGENT") {
+		t.Error("Claude search subagent should be marked as Entire-managed")
+	}
+	if !strings.Contains(content, "entire search --json") {
+		t.Error("Claude search subagent should instruct use of `entire search --json`")
 	}
 }
 
