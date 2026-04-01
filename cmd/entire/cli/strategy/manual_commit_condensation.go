@@ -87,10 +87,12 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 
 // condenseOpts provides pre-resolved git objects to avoid redundant reads.
 type condenseOpts struct {
-	shadowRef      *plumbing.Reference // Pre-resolved shadow branch ref (nil = resolve from repo)
-	headTree       *object.Tree        // Pre-resolved HEAD tree (passed through to calculateSessionAttributions)
-	repoDir        string              // Repository worktree path for git CLI commands
-	headCommitHash string              // HEAD commit hash (passed through for attribution)
+	shadowRef        *plumbing.Reference // Pre-resolved shadow branch ref (nil = resolve from repo)
+	headTree         *object.Tree        // Pre-resolved HEAD tree (passed through to calculateSessionAttributions)
+	parentTree       *object.Tree        // Pre-resolved parent tree (nil for initial commits, for consistent non-agent line counting)
+	repoDir          string              // Repository worktree path for git CLI commands
+	parentCommitHash string              // HEAD's first parent hash for per-commit non-agent file detection
+	headCommitHash   string              // HEAD commit hash (passed through for attribution)
 }
 
 // CondenseSession condenses a session's shadow branch to permanent storage.
@@ -195,8 +197,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	attribution := calculateSessionAttributions(ctx, repo, ref, sessionData, state, attributionOpts{
 		headTree:              o.headTree,
+		parentTree:            o.parentTree,
 		repoDir:               o.repoDir,
 		attributionBaseCommit: attrBase,
+		parentCommitHash:      o.parentCommitHash,
 		headCommitHash:        o.headCommitHash,
 	})
 
@@ -337,7 +341,9 @@ func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentTy
 type attributionOpts struct {
 	headTree              *object.Tree // HEAD commit tree (already resolved by PostCommit)
 	shadowTree            *object.Tree // Shadow branch tree (already resolved by PostCommit)
+	parentTree            *object.Tree // Parent commit tree (nil for initial commits, for consistent non-agent line counting)
 	repoDir               string       // Repository worktree path for git CLI commands
+	parentCommitHash      string       // HEAD's first parent hash (preferred diff base for non-agent files)
 	attributionBaseCommit string       // Base commit hash for non-agent file detection (empty = fall back to go-git tree walk)
 	headCommitHash        string       // HEAD commit hash for non-agent file detection (empty = fall back to go-git tree walk)
 }
@@ -441,17 +447,18 @@ func calculateSessionAttributions(ctx context.Context, repo *git.Repository, sha
 			slog.Int("index", i))
 	}
 
-	attribution := CalculateAttributionWithAccumulated(
-		ctx,
-		baseTree,
-		shadowTree,
-		headTree,
-		sessionData.FilesTouched,
-		state.PromptAttributions,
-		o.repoDir,
-		o.attributionBaseCommit,
-		o.headCommitHash,
-	)
+	attribution := CalculateAttributionWithAccumulated(ctx, AttributionParams{
+		BaseTree:              baseTree,
+		ShadowTree:            shadowTree,
+		HeadTree:              headTree,
+		ParentTree:            o.parentTree,
+		FilesTouched:          sessionData.FilesTouched,
+		PromptAttributions:    state.PromptAttributions,
+		RepoDir:               o.repoDir,
+		ParentCommitHash:      o.parentCommitHash,
+		AttributionBaseCommit: attrBase,
+		HeadCommitHash:        o.headCommitHash,
+	})
 
 	if attribution != nil {
 		logging.Info(logCtx, "attribution calculated",
