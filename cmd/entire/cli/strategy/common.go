@@ -690,21 +690,40 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 	}
 
 	// Fall back to detecting agent from config files (shadow branches don't have metadata.json).
-	// Order: Gemini (most specific check), Claude (established default), OpenCode (newest/preview).
+	// Multiple agent config dirs may coexist when users configure multiple agents via
+	// `entire configure`. Only return a specific agent type when exactly one agent config
+	// dir is present; otherwise return Unknown since we can't determine which agent
+	// created the checkpoint.
+	var detected types.AgentType
+	detectedCount := 0
+
 	if _, err := tree.File(".gemini/settings.json"); err == nil {
-		return agent.AgentTypeGemini
+		detected = agent.AgentTypeGemini
+		detectedCount++
 	}
 	if _, err := tree.Tree(".claude"); err == nil {
-		return agent.AgentTypeClaudeCode
+		detected = agent.AgentTypeClaudeCode
+		detectedCount++
 	}
-	// OpenCode: .opencode directory or opencode.json config
 	if _, err := tree.Tree(".opencode"); err == nil {
-		return agent.AgentTypeOpenCode
+		detected = agent.AgentTypeOpenCode
+		detectedCount++
+	} else if _, err := tree.File("opencode.json"); err == nil {
+		detected = agent.AgentTypeOpenCode
+		detectedCount++
 	}
-	if _, err := tree.File("opencode.json"); err == nil {
-		return agent.AgentTypeOpenCode
+	if _, err := tree.Tree(".codex"); err == nil {
+		detected = agent.AgentTypeCodex
+		detectedCount++
+	}
+	if _, err := tree.Tree(".cursor"); err == nil {
+		detected = agent.AgentTypeCursor
+		detectedCount++
 	}
 
+	if detectedCount == 1 {
+		return detected
+	}
 	return agent.AgentTypeUnknown
 }
 
