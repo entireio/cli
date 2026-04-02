@@ -689,11 +689,11 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 		}
 	}
 
-	// Fall back to detecting agent from config files (shadow branches don't have metadata.json).
-	// Multiple agent config dirs may coexist when users configure multiple agents via
+	// Fall back to detecting agent from config markers (shadow branches don't have metadata.json).
+	// Multiple agent config markers may coexist when users configure multiple agents via
 	// `entire configure`. Only return a specific agent type when exactly one agent config
-	// dir is present; otherwise return Unknown since we can't determine which agent
-	// created the checkpoint.
+	// marker (directory or file) is present; otherwise return Unknown since we can't
+	// determine which agent created the checkpoint.
 	var detected types.AgentType
 	detectedCount := 0
 
@@ -718,6 +718,10 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 	}
 	if _, err := tree.Tree(".cursor"); err == nil {
 		detected = agent.AgentTypeCursor
+		detectedCount++
+	}
+	if _, err := tree.Tree(".factory"); err == nil {
+		detected = agent.AgentTypeFactoryAIDroid
 		detectedCount++
 	}
 
