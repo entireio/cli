@@ -553,3 +553,251 @@ func TestResolvePushSettings_LegacyStringConfigIgnored(t *testing.T) {
 	assert.False(t, ps.hasCheckpointURL())
 	assert.Equal(t, "origin", ps.pushTarget())
 }
+
+// Not parallel: uses t.Chdir()
+func TestResolveCheckpointRemoteURL_ReturnsURL(t *testing.T) {
+	ctx := context.Background()
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+
+	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", "git@github.com:org/main-repo.git")
+	cmd.Dir = localDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+
+	t.Chdir(localDir)
+
+	url, ok, err := ResolveCheckpointRemoteURL(ctx)
+	assert.True(t, ok)
+	require.NoError(t, err)
+	assert.Equal(t, "git@github.com:org/checkpoints.git", url)
+}
+
+// Not parallel: uses t.Chdir()
+func TestResolveCheckpointRemoteURL_NoConfig(t *testing.T) {
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true}`),
+		0o644,
+	))
+
+	t.Chdir(localDir)
+
+	url, ok, err := ResolveCheckpointRemoteURL(t.Context())
+	assert.False(t, ok)
+	require.NoError(t, err)
+	assert.Empty(t, url)
+}
+
+// Not parallel: uses t.Chdir()
+// This is the key correctness test: ResolveCheckpointRemoteURL must NOT apply fork
+// detection. A forked clone should still be able to read checkpoints from the upstream
+// checkpoint repo. Fork detection is only for push (resolvePushSettings).
+func TestResolveCheckpointRemoteURL_IgnoresForkDetection(t *testing.T) {
+	ctx := context.Background()
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+
+	// Origin is a fork (alice != org)
+	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", "git@github.com:alice/main-repo.git")
+	cmd.Dir = localDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+
+	t.Chdir(localDir)
+
+	// resolvePushSettings would reject this (fork detected), but ResolveCheckpointRemoteURL
+	// must return the URL — reading checkpoints is always allowed.
+	url, ok, err := ResolveCheckpointRemoteURL(ctx)
+	assert.True(t, ok, "ResolveCheckpointRemoteURL should resolve even from forked clones")
+	require.NoError(t, err)
+	assert.Equal(t, "git@github.com:org/checkpoints.git", url)
+
+	// Contrast: push settings should reject the same config
+	ps := resolvePushSettings(ctx, "origin")
+	assert.False(t, ps.hasCheckpointURL(), "resolvePushSettings should reject forked origin")
+}
+
+// Not parallel: uses t.Chdir()
+func TestFetchMetadataBranch_FetchesAndCreatesLocalBranch(t *testing.T) {
+	ctx := context.Background()
+
+	// Set up a "remote" repo with entire/checkpoints/v1
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+
+	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	branchCmd.Dir = remoteDir
+	branchCmd.Env = testutil.GitIsolatedEnv()
+	branchOut, err := branchCmd.Output()
+	require.NoError(t, err)
+	defaultBranch := strings.TrimSpace(string(branchOut))
+
+	cmd := exec.CommandContext(ctx, "git", "checkout", "--orphan", "entire/checkpoints/v1")
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	cmd = exec.CommandContext(ctx, "git", "rm", "-rf", ".")
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	testutil.WriteFile(t, remoteDir, "metadata.json", `{"test": true}`)
+	testutil.GitAdd(t, remoteDir, "metadata.json")
+
+	cmd = exec.CommandContext(ctx, "git", "-c", "commit.gpgsign=false", "commit", "-m", "checkpoint data")
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	cmd = exec.CommandContext(ctx, "git", "checkout", defaultBranch)
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	// Set up local repo
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+
+	t.Chdir(localDir)
+
+	// Branch doesn't exist yet
+	assert.False(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"))
+
+	// Fetch from "remote" (local path)
+	require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+
+	// Branch should now exist
+	assert.True(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"))
+
+	// Temp ref should be cleaned up
+	assert.False(t, testutil.BranchExists(t, localDir, "refs/entire-fetch-tmp/entire/checkpoints/v1"))
+}
+
+// Not parallel: uses t.Chdir()
+func TestFetchMetadataBranch_UpdatesExistingLocalBranch(t *testing.T) {
+	ctx := context.Background()
+
+	// Set up a "remote" repo with entire/checkpoints/v1
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+
+	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	branchCmd.Dir = remoteDir
+	branchCmd.Env = testutil.GitIsolatedEnv()
+	branchOut, err := branchCmd.Output()
+	require.NoError(t, err)
+	defaultBranch := strings.TrimSpace(string(branchOut))
+
+	cmd := exec.CommandContext(ctx, "git", "checkout", "--orphan", "entire/checkpoints/v1")
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	cmd = exec.CommandContext(ctx, "git", "rm", "-rf", ".")
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	testutil.WriteFile(t, remoteDir, "metadata.json", `{"version": 1}`)
+	testutil.GitAdd(t, remoteDir, "metadata.json")
+	cmd = exec.CommandContext(ctx, "git", "-c", "commit.gpgsign=false", "commit", "-m", "v1")
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	cmd = exec.CommandContext(ctx, "git", "checkout", defaultBranch)
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	// Set up local repo and fetch once
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	t.Chdir(localDir)
+
+	require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+
+	// Record initial hash
+	hashCmd := exec.CommandContext(ctx, "git", "rev-parse", "entire/checkpoints/v1")
+	hashCmd.Dir = localDir
+	hashCmd.Env = testutil.GitIsolatedEnv()
+	hash1Out, err := hashCmd.Output()
+	require.NoError(t, err)
+	hash1 := strings.TrimSpace(string(hash1Out))
+
+	// Add a second commit on the remote
+	cmd = exec.CommandContext(ctx, "git", "checkout", "entire/checkpoints/v1")
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	testutil.WriteFile(t, remoteDir, "metadata.json", `{"version": 2}`)
+	testutil.GitAdd(t, remoteDir, "metadata.json")
+	cmd = exec.CommandContext(ctx, "git", "-c", "commit.gpgsign=false", "commit", "-m", "v2")
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	cmd = exec.CommandContext(ctx, "git", "checkout", defaultBranch)
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	// Fetch again — should update local branch
+	require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+
+	hashCmd = exec.CommandContext(ctx, "git", "rev-parse", "entire/checkpoints/v1")
+	hashCmd.Dir = localDir
+	hashCmd.Env = testutil.GitIsolatedEnv()
+	hash2Out, err := hashCmd.Output()
+	require.NoError(t, err)
+	hash2 := strings.TrimSpace(string(hash2Out))
+
+	assert.NotEqual(t, hash1, hash2, "FetchMetadataBranch should update existing local branch to new remote tip")
+}

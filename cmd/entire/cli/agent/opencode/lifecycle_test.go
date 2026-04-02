@@ -2,12 +2,15 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/stretchr/testify/require"
 )
 
@@ -357,4 +360,32 @@ func TestParseHookEvent_TurnEnd_InvalidSessionID(t *testing.T) {
 	if !strings.Contains(err.Error(), "contains path separators") {
 		t.Errorf("expected 'contains path separators' error, got: %v", err)
 	}
+}
+
+func TestFetchAndCacheExport_WritesAndValidatesExportFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	original := runOpenCodeExportToFileFn
+	runOpenCodeExportToFileFn = func(_ context.Context, sessionID, outputPath string) error {
+		if sessionID != "ses_abc123" {
+			return fmt.Errorf("unexpected session id: %s", sessionID)
+		}
+		return os.WriteFile(outputPath, []byte(`{"info":{"id":"ses_abc123"},"messages":[]}`), 0o600)
+	}
+	t.Cleanup(func() {
+		runOpenCodeExportToFileFn = original
+	})
+
+	ag := &OpenCodeAgent{}
+	transcriptPath, err := ag.fetchAndCacheExport(context.Background(), "ses_abc123")
+	require.NoError(t, err)
+
+	content, err := os.ReadFile(transcriptPath)
+	require.NoError(t, err)
+	require.True(t, json.Valid(content), "expected cached transcript to be valid JSON")
+	require.Contains(t, string(content), "\"ses_abc123\"")
 }
