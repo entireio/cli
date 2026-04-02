@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,9 +10,11 @@ import (
 	"sync"
 )
 
-// CheckpointTokenEnvVar is the environment variable for providing a bearer token
+// CheckpointTokenEnvVar is the environment variable for providing an access token
 // used to authenticate git push/fetch operations for checkpoint branches.
-// The token is injected as an HTTP Authorization header for HTTPS remotes.
+// The token is injected as an HTTP Basic Authorization header per RFC 7617:
+// the credentials string "x-access-token:<token>" is base64-encoded and sent as
+// "Authorization: Basic <base64>". This matches GitHub's token auth for Git HTTPS.
 // SSH remotes ignore the token (with a warning).
 const CheckpointTokenEnvVar = "ENTIRE_CHECKPOINT_TOKEN"
 
@@ -19,7 +22,7 @@ var sshTokenWarningOnce sync.Once
 
 // CheckpointGitCommand creates an exec.Cmd for a git operation that may need
 // checkpoint token authentication. If ENTIRE_CHECKPOINT_TOKEN is set and the
-// target resolves to an HTTPS remote, the bearer token is injected via
+// target resolves to an HTTPS remote, a Basic auth token is injected via
 // GIT_CONFIG_COUNT/GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* environment variables.
 //
 // For SSH remotes, a warning is printed once to stderr and the token is not injected.
@@ -64,7 +67,9 @@ func CheckpointGitCommand(ctx context.Context, target string, args ...string) *e
 }
 
 // appendCheckpointTokenEnv appends GIT_CONFIG_COUNT-based env vars to inject
-// an Authorization bearer token header into git HTTP requests.
+// an Authorization header into git HTTP requests. The token is sent as a Basic
+// credential with the format "x-access-token:<token>" (base64-encoded), which
+// is compatible with GitHub's token authentication.
 // It filters out any pre-existing GIT_CONFIG_COUNT/KEY/VALUE entries to avoid
 // conflicts, then appends the new ones.
 //
@@ -82,10 +87,11 @@ func appendCheckpointTokenEnv(baseEnv []string, token string) []string {
 		}
 		filtered = append(filtered, e)
 	}
+	encoded := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
 	return append(filtered,
 		"GIT_CONFIG_COUNT=1",
 		"GIT_CONFIG_KEY_0=http.extraHeader",
-		"GIT_CONFIG_VALUE_0=Authorization: Bearer "+token,
+		"GIT_CONFIG_VALUE_0=Authorization: Basic "+encoded,
 	)
 }
 

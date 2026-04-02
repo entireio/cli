@@ -3908,7 +3908,8 @@ func TestCondenseSession_V2DualWrite(t *testing.T) {
 	metadataDirAbs := filepath.Join(dir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
 
-	transcript := `{"type":"human","message":{"content":"hello"}}
+	secret := "q9Xv2Lm8Rt1Yp4Kd7Wz0Hs6Nc3Bf5Jg"
+	transcript := `{"type":"human","message":{"content":"hello secret: ` + secret + `"}}
 {"type":"assistant","message":{"content":"hi there"}}
 `
 	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
@@ -3929,6 +3930,7 @@ func TestCondenseSession_V2DualWrite(t *testing.T) {
 	require.NoError(t, err)
 	state.TranscriptPath = filepath.Join(metadataDirAbs, paths.TranscriptFileName)
 	state.BaseCommit = commitHash.String()[:7]
+	state.AgentType = agent.AgentTypeClaudeCode
 
 	checkpointID := id.MustCheckpointID("dd11ee22ff33")
 	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
@@ -3950,7 +3952,7 @@ func TestCondenseSession_V2DualWrite(t *testing.T) {
 	require.NoError(t, err, "v2 /full/current ref should exist")
 	require.NotEqual(t, plumbing.ZeroHash, v2FullRef.Hash())
 
-	// Verify /main has metadata but no transcript
+	// Verify /main has metadata and redacted compact transcript
 	v2MainCommit, err := repo.CommitObject(v2MainRef.Hash())
 	require.NoError(t, err)
 	v2MainTree, err := v2MainCommit.Tree()
@@ -3963,6 +3965,14 @@ func TestCondenseSession_V2DualWrite(t *testing.T) {
 	// Root metadata.json should exist
 	_, err = mainCpTree.File(paths.MetadataFileName)
 	require.NoError(t, err, "root metadata.json should exist on /main")
+
+	mainSessionTree, err := mainCpTree.Tree("0")
+	require.NoError(t, err)
+	compactFile, err := mainSessionTree.File(paths.CompactTranscriptFileName)
+	require.NoError(t, err, "transcript.jsonl should exist on /main")
+	compactContent, err := compactFile.Contents()
+	require.NoError(t, err)
+	require.NotContains(t, compactContent, secret, "compact transcript on /main must be redacted")
 
 	// Verify /full/current has transcript
 	v2FullCommit, err := repo.CommitObject(v2FullRef.Hash())

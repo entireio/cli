@@ -64,6 +64,15 @@ your agent's context.`,
 
 			ctx := cmd.Context()
 
+			// Only initialize logging when inside a git worktree to avoid
+			// creating .entire/logs/ in arbitrary directories.
+			if _, err := paths.WorktreeRoot(ctx); err == nil {
+				logging.SetLogLevelGetter(GetLogLevel)
+				if err := logging.Init(ctx, ""); err == nil {
+					defer logging.Close()
+				}
+			}
+
 			// Discover external agents so checkpoints from external agents can be resolved.
 			external.DiscoverAndRegister(ctx)
 			w := cmd.OutOrStdout()

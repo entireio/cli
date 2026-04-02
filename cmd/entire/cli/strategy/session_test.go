@@ -174,6 +174,9 @@ func TestManualCommitStrategyGetAdditionalSessions(t *testing.T) {
 }
 
 func TestListSessionsFunctionsWithoutRepo(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
 	// Without a git repo, these will fail - just verifying they're callable
 	_, err := ListSessions(context.Background())
 	if err != nil {

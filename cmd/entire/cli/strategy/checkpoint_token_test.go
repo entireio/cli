@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -96,7 +97,8 @@ func TestAppendCheckpointTokenEnv(t *testing.T) {
 		assert.Contains(t, env, "HOME=/home/user")
 		assert.Contains(t, env, "GIT_CONFIG_COUNT=1")
 		assert.Contains(t, env, "GIT_CONFIG_KEY_0=http.extraHeader")
-		assert.Contains(t, env, "GIT_CONFIG_VALUE_0=Authorization: Bearer my-secret-token")
+		wantAuth := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:my-secret-token"))
+		assert.Contains(t, env, "GIT_CONFIG_VALUE_0="+wantAuth)
 	})
 
 	t.Run("filters existing GIT_CONFIG entries", func(t *testing.T) {
@@ -123,7 +125,8 @@ func TestAppendCheckpointTokenEnv(t *testing.T) {
 		// New entries should be present
 		assert.Contains(t, env, "GIT_CONFIG_COUNT=1")
 		assert.Contains(t, env, "GIT_CONFIG_KEY_0=http.extraHeader")
-		assert.Contains(t, env, "GIT_CONFIG_VALUE_0=Authorization: Bearer new-token")
+		wantAuth := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:new-token"))
+		assert.Contains(t, env, "GIT_CONFIG_VALUE_0="+wantAuth)
 	})
 }
 
@@ -190,7 +193,8 @@ func TestCheckpointGitCommand_HTTPS_InjectsToken(t *testing.T) {
 	envMap := envToMap(cmd.Env)
 	assert.Equal(t, "1", envMap["GIT_CONFIG_COUNT"])
 	assert.Equal(t, "http.extraHeader", envMap["GIT_CONFIG_KEY_0"])
-	assert.Equal(t, "Authorization: Bearer ghp_test123", envMap["GIT_CONFIG_VALUE_0"])
+	wantAuth := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghp_test123"))
+	assert.Equal(t, wantAuth, envMap["GIT_CONFIG_VALUE_0"])
 }
 
 // Not parallel: uses t.Setenv() and os.Stderr
@@ -274,10 +278,10 @@ func setupTokenTestRepo(t *testing.T) string {
 }
 
 // TestCheckpointToken_HTTPSServer_SendsAuthHeader uses a real TLS server to verify
-// that the bearer token is actually sent as an HTTP header in git fetch requests.
+// that the Basic auth token is actually sent as an HTTP header in git fetch requests.
 // Not parallel: uses t.Chdir()
 func TestCheckpointToken_HTTPSServer_SendsAuthHeader(t *testing.T) {
-	t.Setenv(CheckpointTokenEnvVar, "test-bearer-token-abc123")
+	t.Setenv(CheckpointTokenEnvVar, "test-token-abc123")
 
 	srv, getCapture := newTLSTestServer(t)
 	tmpDir := setupTokenTestRepo(t)
@@ -294,8 +298,9 @@ func TestCheckpointToken_HTTPSServer_SendsAuthHeader(t *testing.T) {
 
 	auth, count := getCapture()
 	require.Positive(t, count, "server should have received at least one request")
-	assert.Equal(t, "Bearer test-bearer-token-abc123", auth,
-		"git should send the bearer token as an Authorization header")
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:test-token-abc123"))
+	assert.Equal(t, wantAuth, auth,
+		"git should send the token as a Basic Authorization header")
 }
 
 // TestCheckpointToken_HTTPSServer_NoTokenNoHeader verifies that without
@@ -342,8 +347,9 @@ func TestCheckpointToken_HTTPSServer_LsRemoteSendsAuthHeader(t *testing.T) {
 
 	auth, count := getCapture()
 	require.Positive(t, count, "server should have received at least one request")
-	assert.Equal(t, "Bearer push-token-xyz789", auth,
-		"git ls-remote should send the bearer token as an Authorization header")
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:push-token-xyz789"))
+	assert.Equal(t, wantAuth, auth,
+		"git ls-remote should send the token as a Basic Authorization header")
 }
 
 // TestCheckpointToken_GIT_TERMINAL_PROMPT_Coexistence verifies that the token env
@@ -361,7 +367,8 @@ func TestCheckpointToken_GIT_TERMINAL_PROMPT_Coexistence(t *testing.T) {
 
 	envMap := envToMap(cmd.Env)
 	assert.Equal(t, "1", envMap["GIT_CONFIG_COUNT"])
-	assert.Equal(t, "Authorization: Bearer coexist-token", envMap["GIT_CONFIG_VALUE_0"])
+	wantAuth := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:coexist-token"))
+	assert.Equal(t, wantAuth, envMap["GIT_CONFIG_VALUE_0"])
 	assert.Equal(t, "0", envMap["GIT_TERMINAL_PROMPT"])
 }
 

@@ -987,11 +987,11 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 	if simulateTTY {
 		// Simulate human at terminal: ENTIRE_TEST_TTY=1 makes hasTTY() return true
 		// and askConfirmTTY() return defaultYes without reading from /dev/tty.
-		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+		prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=1")
 	} else {
 		// Simulate agent: ENTIRE_TEST_TTY=0 makes hasTTY() return false,
 		// triggering the fast path that adds trailers for ACTIVE sessions.
-		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=0")
+		prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=0")
 	}
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)
@@ -1030,10 +1030,19 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 	// This triggers condensation if the commit has an Entire-Checkpoint trailer
 	postCmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
 	postCmd.Dir = env.RepoDir
+	postCmd.Env = env.gitHookEnv()
 	if output, err := postCmd.CombinedOutput(); err != nil {
 		env.T.Logf("post-commit output: %s", output)
 		// Don't fail - hook may silently succeed
 	}
+}
+
+func (env *TestEnv) gitHookEnv(extra ...string) []string {
+	envVars := append(testutil.GitIsolatedEnv(),
+		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
+		"ENTIRE_TEST_OPENCODE_MOCK_EXPORT=1",
+	)
+	return append(envVars, extra...)
 }
 
 // GitCommitAmendWithShadowHooks amends the last commit with shadow hooks.
@@ -1057,7 +1066,7 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 	// Set ENTIRE_TEST_TTY=1 to simulate human (amend is always a human operation).
 	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "commit")
 	prepCmd.Dir = env.RepoDir
-	prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+	prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=1")
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg (amend) output: %s", output)
 	}
@@ -1094,6 +1103,7 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 	// Run post-commit hook
 	postCmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
 	postCmd.Dir = env.RepoDir
+	postCmd.Env = env.gitHookEnv()
 	if output, err := postCmd.CombinedOutput(); err != nil {
 		env.T.Logf("post-commit (amend) output: %s", output)
 	}
@@ -1121,7 +1131,7 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 	// the user removes the trailer before committing).
 	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile)
 	prepCmd.Dir = env.RepoDir
-	prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+	prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=1")
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)
 	}
@@ -1175,6 +1185,7 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 	// Run post-commit hook - since trailer was removed, no condensation should happen
 	postCmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
 	postCmd.Dir = env.RepoDir
+	postCmd.Env = env.gitHookEnv()
 	if output, err := postCmd.CombinedOutput(); err != nil {
 		env.T.Logf("post-commit output: %s", output)
 	}
@@ -1215,9 +1226,9 @@ func (env *TestEnv) gitCommitStagedWithShadowHooks(message string, simulateTTY b
 	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
 	prepCmd.Dir = env.RepoDir
 	if simulateTTY {
-		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+		prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=1")
 	} else {
-		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=0")
+		prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=0")
 	}
 	if output, err := prepCmd.CombinedOutput(); err != nil {
 		env.T.Logf("prepare-commit-msg output: %s", output)
@@ -1254,6 +1265,7 @@ func (env *TestEnv) gitCommitStagedWithShadowHooks(message string, simulateTTY b
 	// Run post-commit hook
 	postCmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
 	postCmd.Dir = env.RepoDir
+	postCmd.Env = env.gitHookEnv()
 	if output, err := postCmd.CombinedOutput(); err != nil {
 		env.T.Logf("post-commit output: %s", output)
 	}

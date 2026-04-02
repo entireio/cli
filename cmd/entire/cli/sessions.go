@@ -2,13 +2,20 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/charmbracelet/huh"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/spf13/cobra"
 )
 
@@ -16,8 +23,28 @@ func newSessionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sessions",
 		Short: "Manage agent sessions tracked by Entire",
+		Long: `View and manage agent sessions tracked by Entire.
+
+Commands:
+  list    List all sessions across all worktrees
+  info    Show detailed information for a specific session
+  stop    Stop one or more active sessions
+
+Examples:
+  entire sessions list                     List all sessions
+  entire sessions info <session-id>        Show session details
+  entire sessions info <session-id> --json Output as JSON
+  entire sessions stop                     Interactive stop`,
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
+				return errors.New("not a git repository")
+			}
+			return nil
+		},
 	}
 
+	cmd.AddCommand(newListCmd())
+	cmd.AddCommand(newInfoCmd())
 	cmd.AddCommand(newStopCmd())
 
 	return cmd
@@ -38,7 +65,7 @@ so no condensation or checkpoint-writing occurs. To flush pending work, commit f
 Examples:
   entire sessions stop                     No sessions: exits. One session: confirm and stop. Multiple: show selector
   entire sessions stop <session-id>        Stop a specific session by ID
-  entire sessions stop --all               Stop all active sessions in current worktree
+  entire sessions stop --all               Stop all active sessions
   entire sessions stop --force             Skip confirmation prompt`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -53,16 +80,11 @@ Examples:
 				return errors.New("--all and session ID argument are mutually exclusive")
 			}
 
-			// Check if in git repository
-			if _, err := paths.WorktreeRoot(ctx); err != nil {
-				return errors.New("not a git repository")
-			}
-
 			return runStop(ctx, cmd, sessionID, allFlag, forceFlag)
 		},
 	}
 
-	cmd.Flags().BoolVar(&allFlag, "all", false, "Stop all active sessions in current worktree")
+	cmd.Flags().BoolVar(&allFlag, "all", false, "Stop all active sessions")
 	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Skip confirmation prompt")
 
 	return cmd
@@ -83,46 +105,32 @@ func runStop(ctx context.Context, cmd *cobra.Command, sessionID string, all, for
 
 	activeSessions := filterActiveSessions(states)
 
-	// --all path: stop all active sessions in current worktree (scoped inside runStopAll).
+	// --all path: stop all active sessions across all worktrees.
 	if all {
 		return runStopAll(ctx, cmd, activeSessions, force)
 	}
 
-	// No-flags path: scope to current worktree before presenting options.
-	// RunE already validated the git repo, so this call succeeds in practice.
-	worktreePath, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to resolve worktree root: %w", err)
-	}
-	var scoped []*strategy.SessionState
-	for _, s := range activeSessions {
-		if s.WorktreePath == worktreePath || s.WorktreePath == "" {
-			scoped = append(scoped, s)
-		}
-	}
-
-	if len(scoped) == 0 {
+	// No-flags path: show all active sessions across all worktrees.
+	// This aligns with `entire status` which displays sessions globally.
+	// Users see worktree labels in the multi-select to make informed choices.
+	if len(activeSessions) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "No active sessions.")
 		return nil
 	}
 
 	// One active session: confirm + stop.
-	if len(scoped) == 1 {
-		return runStopSession(ctx, cmd, scoped[0].SessionID, force)
+	if len(activeSessions) == 1 {
+		return runStopSession(ctx, cmd, activeSessions[0].SessionID, force)
 	}
 
 	// Multiple active sessions: show TUI multi-select.
-	return runStopMultiSelect(ctx, cmd, scoped, force)
+	return runStopMultiSelect(ctx, cmd, activeSessions, force)
 }
 
-// filterActiveSessions returns sessions in PhaseIdle or PhaseActive — all sessions
-// that have not been explicitly ended. Both phases are considered stoppable: IDLE
-// means the agent finished its last turn but the session is still open.
-//
-// The dual check (Phase != PhaseEnded AND EndedAt == nil) is intentionally stricter
-// than status.go's EndedAt-only check: it ensures sessions where only the state
-// machine transition succeeded (Phase=Ended) but EndedAt was never written are still
-// treated as ended, avoiding an accidental re-stop of a partially-ended session.
+// filterActiveSessions returns sessions that have not been explicitly ended.
+// A session is considered ended if Phase == PhaseEnded OR EndedAt is set.
+// This matches the logic in status.go's writeActiveSessions for consistency:
+// any session visible in `entire status` should also be visible in `sessions stop`.
 func filterActiveSessions(states []*strategy.SessionState) []*strategy.SessionState {
 	var active []*strategy.SessionState
 	for _, s := range states {
@@ -134,6 +142,326 @@ func filterActiveSessions(states []*strategy.SessionState) []*strategy.SessionSt
 		}
 	}
 	return active
+}
+
+// sessionWorktreeLabel returns the worktree display label for a session.
+// Uses WorktreeID if available, falls back to the last path component of
+// WorktreePath, or "(unknown)" for empty values (legacy sessions without
+// worktree tracking). Matches status.go's unknownPlaceholder convention.
+func sessionWorktreeLabel(s *strategy.SessionState) string {
+	if s.WorktreeID != "" {
+		return s.WorktreeID
+	}
+	if s.WorktreePath != "" {
+		return filepath.Base(s.WorktreePath)
+	}
+	return unknownPlaceholder
+}
+
+// sessionPhaseLabel returns the display status for a session.
+func sessionPhaseLabel(s *strategy.SessionState) string {
+	if s.EndedAt != nil {
+		return "ended"
+	}
+	status := string(s.Phase)
+	if status == "" {
+		return "idle"
+	}
+	return status
+}
+
+func newListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all sessions",
+		Long: `List all sessions tracked by Entire, including ended sessions.
+
+For active sessions only, use 'entire status'.
+
+Examples:
+  entire sessions list    List all sessions across all worktrees`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runSessionList(cmd.Context(), cmd)
+		},
+	}
+
+	return cmd
+}
+
+func runSessionList(ctx context.Context, cmd *cobra.Command) error {
+	states, err := strategy.ListSessionStates(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list sessions: %w", err)
+	}
+
+	var filtered []*strategy.SessionState
+	for _, s := range states {
+		if s != nil {
+			filtered = append(filtered, s)
+		}
+	}
+
+	w := cmd.OutOrStdout()
+
+	if len(filtered) == 0 {
+		fmt.Fprintln(w, "No sessions.")
+		return nil
+	}
+
+	// Sort by StartedAt descending (newest first)
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].StartedAt.After(filtered[j].StartedAt)
+	})
+
+	sty := newStatusStyles(w)
+
+	fmt.Fprintln(w, sty.sectionRule("Sessions", sty.width))
+	fmt.Fprintln(w)
+
+	for _, s := range filtered {
+		writeSessionCard(w, s, sty)
+	}
+
+	// Footer
+	fmt.Fprintln(w, sty.horizontalRule(sty.width))
+	if len(filtered) == 1 {
+		fmt.Fprintln(w, sty.render(sty.dim, "1 session"))
+	} else {
+		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("%d sessions", len(filtered))))
+	}
+	fmt.Fprintln(w)
+
+	return nil
+}
+
+// writeSessionCard renders a single session in status-style card format.
+func writeSessionCard(w io.Writer, s *strategy.SessionState, sty statusStyles) {
+	agentLabel := string(s.AgentType)
+	if agentLabel == "" {
+		agentLabel = "(unknown)"
+	}
+	wt := sessionWorktreeLabel(s)
+
+	// Line 1: Agent · Model · worktree · session <id> [· checkpoint <id>]
+	fmt.Fprint(w, sty.render(sty.agent, agentLabel))
+	if s.ModelName != "" {
+		fmt.Fprintf(w, " %s %s", sty.render(sty.dim, "·"), sty.render(sty.dim, s.ModelName))
+	}
+	fmt.Fprintf(w, " %s %s", sty.render(sty.dim, "·"), wt)
+	fmt.Fprintf(w, " %s session %s", sty.render(sty.dim, "·"), s.SessionID)
+	if s.LastCheckpointID != "" {
+		fmt.Fprintf(w, " %s checkpoint %s", sty.render(sty.dim, "·"), string(s.LastCheckpointID))
+	}
+	fmt.Fprintln(w)
+
+	// Line 2: > "prompt" (truncated)
+	if s.LastPrompt != "" {
+		prompt := stringutil.TruncateRunes(s.LastPrompt, 60, "...")
+		fmt.Fprintf(w, "%s \"%s\"\n", sty.render(sty.dim, ">"), prompt)
+	}
+
+	// Line 3: status · started X ago · active X ago · tokens X.Xk
+	var stats []string
+	stats = append(stats, sessionPhaseLabel(s))
+	stats = append(stats, "started "+timeAgo(s.StartedAt))
+	if s.LastInteractionTime != nil && s.LastInteractionTime.Sub(s.StartedAt) > time.Minute {
+		stats = append(stats, activeTimeDisplay(s.LastInteractionTime))
+	}
+	tokens := "0"
+	if s.TokenUsage != nil {
+		tokens = formatTokenCount(totalTokens(s.TokenUsage))
+	}
+	stats = append(stats, "tokens "+tokens)
+	statsLine := strings.Join(stats, sty.render(sty.dim, " · "))
+	fmt.Fprintln(w, sty.render(sty.dim, statsLine))
+	fmt.Fprintln(w)
+}
+
+func newInfoCmd() *cobra.Command {
+	var jsonFlag bool
+
+	cmd := &cobra.Command{
+		Use:   "info <session-id>",
+		Short: "Show detailed session information",
+		Long: `Display detailed state for a session.
+
+Shows agent, model, status, worktree, timing, token usage, checkpoint linkage,
+and files touched. Works for both active and ended sessions.
+
+Examples:
+  entire sessions info <session-id>
+  entire sessions info <session-id> --json`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSessionInfo(cmd.Context(), cmd, args[0], jsonFlag)
+		},
+	}
+
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
+
+	return cmd
+}
+
+func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, jsonOutput bool) error {
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to load session: %w", err)
+	}
+	if state == nil {
+		cmd.SilenceUsage = true
+		fmt.Fprintln(cmd.ErrOrStderr(), "Session not found.")
+		return NewSilentError(fmt.Errorf("session not found: %s", sessionID))
+	}
+
+	status := sessionPhaseLabel(state)
+
+	if jsonOutput {
+		return writeSessionInfoJSON(cmd.OutOrStdout(), state, status)
+	}
+	return writeSessionInfoText(cmd.OutOrStdout(), state, status)
+}
+
+// sessionInfoJSON is the JSON output structure for sessions info --json.
+type sessionInfoJSON struct {
+	SessionID      string         `json:"session_id"`
+	Agent          string         `json:"agent"`
+	Model          string         `json:"model,omitempty"`
+	Status         string         `json:"status"`
+	WorktreeID     string         `json:"worktree_id,omitempty"`
+	WorktreePath   string         `json:"worktree_path,omitempty"`
+	StartedAt      time.Time      `json:"started_at"`
+	EndedAt        *time.Time     `json:"ended_at,omitempty"`
+	LastActive     *time.Time     `json:"last_active,omitempty"`
+	Turns          int            `json:"turns"`
+	Checkpoints    int            `json:"checkpoints"`
+	LastCheckpoint string         `json:"last_checkpoint_id,omitempty"`
+	Tokens         *tokenInfoJSON `json:"tokens,omitempty"`
+	LastPrompt     string         `json:"last_prompt,omitempty"`
+	FilesTouched   []string       `json:"files_touched,omitempty"`
+}
+
+type tokenInfoJSON struct {
+	Total      int `json:"total"`
+	Input      int `json:"input"`
+	CacheRead  int `json:"cache_read"`
+	CacheWrite int `json:"cache_write"`
+	Output     int `json:"output"`
+}
+
+func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status string) error {
+	agentLabel := string(state.AgentType)
+	if agentLabel == "" {
+		agentLabel = unknownPlaceholder
+	}
+	info := sessionInfoJSON{
+		SessionID:      state.SessionID,
+		Agent:          agentLabel,
+		Model:          state.ModelName,
+		Status:         status,
+		WorktreeID:     state.WorktreeID,
+		WorktreePath:   state.WorktreePath,
+		StartedAt:      state.StartedAt,
+		EndedAt:        state.EndedAt,
+		LastActive:     state.LastInteractionTime,
+		Turns:          state.SessionTurnCount,
+		Checkpoints:    state.StepCount,
+		LastCheckpoint: string(state.LastCheckpointID),
+		LastPrompt:     state.LastPrompt,
+		FilesTouched:   state.FilesTouched,
+	}
+	if state.TokenUsage != nil {
+		info.Tokens = &tokenInfoJSON{
+			Total:      totalTokens(state.TokenUsage),
+			Input:      state.TokenUsage.InputTokens,
+			CacheRead:  state.TokenUsage.CacheReadTokens,
+			CacheWrite: state.TokenUsage.CacheCreationTokens,
+			Output:     state.TokenUsage.OutputTokens,
+		}
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(info); err != nil {
+		return fmt.Errorf("failed to encode session info: %w", err)
+	}
+	return nil
+}
+
+func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status string) error {
+	fmt.Fprintf(w, "Session %s\n\n", state.SessionID)
+
+	agentLabel := string(state.AgentType)
+	if agentLabel == "" {
+		agentLabel = "(unknown)"
+	}
+	fmt.Fprintf(w, "Agent:       %s\n", agentLabel)
+	if state.ModelName != "" {
+		fmt.Fprintf(w, "Model:       %s\n", state.ModelName)
+	}
+
+	fmt.Fprintf(w, "Status:      %s\n", status)
+
+	wt := sessionWorktreeLabel(state)
+	fmt.Fprintf(w, "Worktree:    %s\n", wt)
+
+	fmt.Fprintf(w, "Started:     %s (%s)\n",
+		state.StartedAt.Local().Format("2006-01-02 15:04"), timeAgo(state.StartedAt))
+
+	if state.EndedAt != nil {
+		fmt.Fprintf(w, "Ended:       %s (%s)\n",
+			state.EndedAt.Local().Format("2006-01-02 15:04"), timeAgo(*state.EndedAt))
+	}
+
+	if state.LastInteractionTime != nil {
+		fmt.Fprintf(w, "Last active: %s (%s)\n",
+			state.LastInteractionTime.Local().Format("2006-01-02 15:04"),
+			timeAgo(*state.LastInteractionTime))
+	}
+
+	if state.SessionTurnCount > 0 {
+		fmt.Fprintf(w, "Turns:       %d\n", state.SessionTurnCount)
+	}
+
+	fmt.Fprintf(w, "Checkpoints: %d\n", state.StepCount)
+
+	if state.LastCheckpointID != "" {
+		fmt.Fprintf(w, "Checkpoint:  %s\n", state.LastCheckpointID)
+	}
+
+	if state.TokenUsage != nil {
+		total := totalTokens(state.TokenUsage)
+		fmt.Fprintf(w, "\nTokens:      %s\n", formatTokenCount(total))
+
+		var parts []string
+		if state.TokenUsage.InputTokens > 0 {
+			parts = append(parts, "Input: "+formatTokenCount(state.TokenUsage.InputTokens))
+		}
+		if state.TokenUsage.CacheReadTokens > 0 {
+			parts = append(parts, "Cache read: "+formatTokenCount(state.TokenUsage.CacheReadTokens))
+		}
+		if state.TokenUsage.CacheCreationTokens > 0 {
+			parts = append(parts, "Cache write: "+formatTokenCount(state.TokenUsage.CacheCreationTokens))
+		}
+		if state.TokenUsage.OutputTokens > 0 {
+			parts = append(parts, "Output: "+formatTokenCount(state.TokenUsage.OutputTokens))
+		}
+		if len(parts) > 0 {
+			fmt.Fprintf(w, "  %s\n", strings.Join(parts, " · "))
+		}
+	}
+
+	if state.LastPrompt != "" {
+		fmt.Fprintf(w, "\nLast prompt: %q\n", state.LastPrompt)
+	}
+
+	if len(state.FilesTouched) > 0 {
+		fmt.Fprintln(w, "\nFiles touched:")
+		for _, f := range state.FilesTouched {
+			fmt.Fprintf(w, "  %s\n", f)
+		}
+	}
+
+	return nil
 }
 
 // runStopSession stops a single session by ID, with optional confirmation.
@@ -174,25 +502,9 @@ func runStopSession(ctx context.Context, cmd *cobra.Command, sessionID string, f
 	return stopSessionAndPrint(ctx, cmd, state)
 }
 
-// runStopAll stops all active sessions scoped to the current worktree.
+// runStopAll stops all active sessions across all worktrees.
 func runStopAll(ctx context.Context, cmd *cobra.Command, activeSessions []*strategy.SessionState, force bool) error {
-	// Scope to current worktree. Sessions with an empty WorktreePath predate
-	// worktree-path tracking and cannot be attributed to any specific worktree —
-	// including them here prevents them from being permanently unreachable via --all.
-	// RunE already validated the git repo, so this call succeeds in practice.
-	worktreePath, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to resolve worktree root: %w", err)
-	}
-
-	var toStop []*strategy.SessionState
-	for _, s := range activeSessions {
-		if s.WorktreePath == worktreePath || s.WorktreePath == "" {
-			toStop = append(toStop, s)
-		}
-	}
-
-	if len(toStop) == 0 {
+	if len(activeSessions) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "No active sessions.")
 		return nil
 	}
@@ -202,7 +514,7 @@ func runStopAll(ctx context.Context, cmd *cobra.Command, activeSessions []*strat
 		form := NewAccessibleForm(
 			huh.NewGroup(
 				huh.NewConfirm().
-					Title(fmt.Sprintf("Stop %d session(s)?", len(toStop))).
+					Title(fmt.Sprintf("Stop %d session(s)?", len(activeSessions))).
 					Value(&confirmed),
 			),
 		)
@@ -215,16 +527,18 @@ func runStopAll(ctx context.Context, cmd *cobra.Command, activeSessions []*strat
 		}
 	}
 
-	return stopSelectedSessions(ctx, cmd, toStop)
+	return stopSelectedSessions(ctx, cmd, activeSessions)
 }
 
 // runStopMultiSelect shows a TUI multi-select for multiple active sessions.
 func runStopMultiSelect(ctx context.Context, cmd *cobra.Command, activeSessions []*strategy.SessionState, force bool) error {
 	options := make([]huh.Option[string], len(activeSessions))
 	for i, s := range activeSessions {
-		label := fmt.Sprintf("%s · %s", s.AgentType, s.SessionID)
+		wt := sessionWorktreeLabel(s)
+		label := fmt.Sprintf("%s · %s · %s", s.AgentType, wt, s.SessionID)
 		if s.LastPrompt != "" {
-			label = fmt.Sprintf("%s · %q", label, s.LastPrompt)
+			prompt := stringutil.TruncateRunes(s.LastPrompt, 40, "...")
+			label = fmt.Sprintf("%s · %q", label, prompt)
 		}
 		options[i] = huh.NewOption(label, s.SessionID)
 	}
