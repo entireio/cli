@@ -856,8 +856,8 @@ func TestShadowStrategy_PrepareCommitMsg_SkipsSessionWhenContentCheckFails(t *te
 	require.NoError(t, err)
 
 	_, found := trailers.ParseCheckpoint(string(content))
-	assert.False(t, found, "corrupt session state should not add a dangling checkpoint trailer")
-	assert.Equal(t, originalMsg, string(content))
+	require.False(t, found, "corrupt session state should not add a dangling checkpoint trailer")
+	require.Equal(t, originalMsg, string(content))
 }
 
 func TestAddCheckpointTrailer_NoComment(t *testing.T) {
