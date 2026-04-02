@@ -103,6 +103,8 @@ func reportSearchSubagentScaffold(w io.Writer, ag agent.Agent, result searchSuba
 			ag.Type(),
 			result.RelPath,
 		)
+	case searchSubagentUnsupported, searchSubagentUnchanged:
+		// Nothing to report.
 	}
 }
 
