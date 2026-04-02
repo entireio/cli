@@ -111,11 +111,11 @@ func reportSearchSubagentScaffold(w io.Writer, ag agent.Agent, result searchSuba
 func searchSubagentTemplate(agentName types.AgentName) (string, []byte, bool) {
 	switch agentName {
 	case agent.AgentNameClaudeCode:
-		return filepath.Join(".claude", "agents", "search.md"), []byte(strings.TrimSpace(claudeSearchSubagentTemplate) + "\n"), true
+		return filepath.Join(".claude", "agents", "entire-search.md"), []byte(strings.TrimSpace(claudeSearchSubagentTemplate) + "\n"), true
 	case agent.AgentNameCodex:
-		return filepath.Join(".codex", "agents", "search.toml"), []byte(strings.TrimSpace(codexSearchSubagentTemplate) + "\n"), true
+		return filepath.Join(".codex", "agents", "entire-search.toml"), []byte(strings.TrimSpace(codexSearchSubagentTemplate) + "\n"), true
 	case agent.AgentNameGemini:
-		return filepath.Join(".gemini", "agents", "search.md"), []byte(strings.TrimSpace(geminiSearchSubagentTemplate) + "\n"), true
+		return filepath.Join(".gemini", "agents", "entire-search.md"), []byte(strings.TrimSpace(geminiSearchSubagentTemplate) + "\n"), true
 	default:
 		return "", nil, false
 	}
@@ -123,7 +123,7 @@ func searchSubagentTemplate(agentName types.AgentName) (string, []byte, bool) {
 
 const claudeSearchSubagentTemplate = `
 ---
-name: search
+name: entire-search
 description: Search Entire checkpoint history and transcripts with ` + "`entire search --json`" + `. Use proactively when the user asks about previous work, commits, sessions, prompts, or historical context in this repository.
 tools: Bash
 model: haiku
@@ -151,7 +151,7 @@ Keep answers concise and evidence-based.
 
 const geminiSearchSubagentTemplate = `
 ---
-name: search
+name: entire-search
 description: Search Entire checkpoint history and transcripts with ` + "`entire search --json`" + `. Use proactively when the user asks about previous work, commits, sessions, prompts, or historical context in this repository.
 kind: local
 tools:
@@ -182,7 +182,7 @@ Keep answers concise and evidence-based.
 
 const codexSearchSubagentTemplate = `
 # ` + entireManagedSearchSubagentMarker + `
-name = "search"
+name = "entire-search"
 description = "Search Entire checkpoint history and transcripts with ` + "`entire search --json`" + `. Use when the user asks about previous work, commits, sessions, prompts, or historical context in this repository."
 sandbox_mode = "read-only"
 model_reasoning_effort = "medium"

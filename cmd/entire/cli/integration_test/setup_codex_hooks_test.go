@@ -45,7 +45,7 @@ func TestSetupCodexHooks_AddsAllRequiredHooks(t *testing.T) {
 		t.Error("Codex Stop hook should exist")
 	}
 
-	searchAgentPath := filepath.Join(env.RepoDir, ".codex", "agents", "search.toml")
+	searchAgentPath := filepath.Join(env.RepoDir, ".codex", "agents", "entire-search.toml")
 	searchData, err := os.ReadFile(searchAgentPath)
 	if err != nil {
 		t.Fatalf("failed to read generated Codex search subagent: %v", err)

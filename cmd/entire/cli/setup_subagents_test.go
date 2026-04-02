@@ -24,7 +24,7 @@ func TestScaffoldSearchSubagent_CreatesManagedFiles(t *testing.T) {
 			scaffoldFn: func() (searchSubagentScaffoldResult, error) {
 				return scaffoldSearchSubagent(context.Background(), claudecode.NewClaudeCodeAgent())
 			},
-			relPath:     filepath.Join(".claude", "agents", "search.md"),
+			relPath:     filepath.Join(".claude", "agents", "entire-search.md"),
 			wantSnippet: "tools: Bash",
 		},
 		{
@@ -32,7 +32,7 @@ func TestScaffoldSearchSubagent_CreatesManagedFiles(t *testing.T) {
 			scaffoldFn: func() (searchSubagentScaffoldResult, error) {
 				return scaffoldSearchSubagent(context.Background(), codex.NewCodexAgent())
 			},
-			relPath:     filepath.Join(".codex", "agents", "search.toml"),
+			relPath:     filepath.Join(".codex", "agents", "entire-search.toml"),
 			wantSnippet: `sandbox_mode = "read-only"`,
 		},
 		{
@@ -40,7 +40,7 @@ func TestScaffoldSearchSubagent_CreatesManagedFiles(t *testing.T) {
 			scaffoldFn: func() (searchSubagentScaffoldResult, error) {
 				return scaffoldSearchSubagent(context.Background(), geminicli.NewGeminiCLIAgent())
 			},
-			relPath:     filepath.Join(".gemini", "agents", "search.md"),
+			relPath:     filepath.Join(".gemini", "agents", "entire-search.md"),
 			wantSnippet: "- run_shell_command",
 		},
 	}

@@ -1,5 +1,5 @@
 ---
-name: search
+name: entire-search
 description: Search Entire checkpoint history and transcripts with `entire search --json`. Use proactively when the user asks about previous work, commits, sessions, prompts, or historical context in this repository.
 kind: local
 tools:

@@ -77,7 +77,7 @@ func TestSetupGeminiHooks_AddsAllRequiredHooks(t *testing.T) {
 		t.Error("Notification hook should exist")
 	}
 
-	searchAgentPath := filepath.Join(env.RepoDir, ".gemini", "agents", "search.md")
+	searchAgentPath := filepath.Join(env.RepoDir, ".gemini", "agents", "entire-search.md")
 	data, err := os.ReadFile(searchAgentPath)
 	if err != nil {
 		t.Fatalf("failed to read generated Gemini search subagent: %v", err)

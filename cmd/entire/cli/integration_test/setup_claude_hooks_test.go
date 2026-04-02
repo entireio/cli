@@ -76,7 +76,7 @@ func TestSetupClaudeHooks_AddsAllRequiredHooks(t *testing.T) {
 		t.Error("PostToolUse[TodoWrite] hook should exist")
 	}
 
-	searchAgentPath := filepath.Join(env.RepoDir, ".claude", "agents", "search.md")
+	searchAgentPath := filepath.Join(env.RepoDir, ".claude", "agents", "entire-search.md")
 	data, err := os.ReadFile(searchAgentPath)
 	if err != nil {
 		t.Fatalf("failed to read generated Claude search subagent: %v", err)
