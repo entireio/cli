@@ -134,7 +134,7 @@ func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
 	if assignIdx == -1 {
 		t.Fatalf("plugin file missing current session assignment %q", currentSessionAssignment)
 	}
-	if !(guardIdx < hookIdx && hookIdx < assignIdx) {
+	if guardIdx >= hookIdx || hookIdx >= assignIdx {
 		t.Fatalf("expected guarded session-start call before session assignment, got guard=%d hook=%d assignment=%d",
 			guardIdx, hookIdx, assignIdx)
 	}
