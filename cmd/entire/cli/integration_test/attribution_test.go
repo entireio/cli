@@ -317,21 +317,22 @@ func TestManualCommit_AttributionDeletionOnly(t *testing.T) {
 	}
 
 	attr := metadata.InitialAttribution
-	t.Logf("Attribution (deletion-only): agent=%d, human_added=%d, human_removed=%d, total=%d, percentage=%.1f%%",
-		attr.AgentLines, attr.HumanAdded, attr.HumanRemoved,
-		attr.TotalCommitted, attr.AgentPercentage)
+	t.Logf("Attribution (deletion-only): agent_added=%d, agent_removed=%d, human_added=%d, human_removed=%d, total=%d, changed=%d, percentage=%.1f%%",
+		attr.AgentLines, attr.AgentRemoved, attr.HumanAdded, attr.HumanRemoved,
+		attr.TotalCommitted, attr.TotalLinesChanged, attr.AgentPercentage)
 
-	// For deletion-only commits where agent makes no additions:
-	// - Agent removed oldFunc1 (made deletions, not additions)
-	// - AgentLines = 0 (no additions)
-	// - User removed oldFunc2 and oldFunc3
-	// - HumanAdded = 0 (no new lines)
-	// - HumanRemoved = number of lines user deleted
-	// - TotalCommitted = 0 (no additions from anyone)
-	// - AgentPercentage = 0 (by convention for deletion-only)
+	// Under changed-lines attribution:
+	// - Agent removed oldFunc1 => agent_removed = 1 line
+	// - User removed oldFunc2 and oldFunc3 => human_removed = 3 lines
+	// - TotalCommitted remains 0 (legacy net-additions field)
+	// - TotalLinesChanged = 4
+	// - AgentPercentage = 25%
 
 	if attr.AgentLines != 0 {
 		t.Errorf("AgentLines = %d, want 0 (agent made no additions, only deletions)", attr.AgentLines)
+	}
+	if attr.AgentRemoved != 1 {
+		t.Errorf("AgentRemoved = %d, want 1 (removed oldFunc1)", attr.AgentRemoved)
 	}
 
 	if attr.HumanAdded != 0 {
@@ -346,9 +347,12 @@ func TestManualCommit_AttributionDeletionOnly(t *testing.T) {
 	if attr.TotalCommitted != 0 {
 		t.Errorf("TotalCommitted = %d, want 0 (deletion-only commit has no net additions)", attr.TotalCommitted)
 	}
+	if attr.TotalLinesChanged != 4 {
+		t.Errorf("TotalLinesChanged = %d, want 4 (1 agent deletion + 3 human deletions)", attr.TotalLinesChanged)
+	}
 
-	if attr.AgentPercentage != 0 {
-		t.Errorf("AgentPercentage = %.1f%%, want 0 (deletion-only commit)",
+	if attr.AgentPercentage != 25 {
+		t.Errorf("AgentPercentage = %.1f%%, want 25 (1 agent-changed line out of 4 total changed)",
 			attr.AgentPercentage)
 	}
 }

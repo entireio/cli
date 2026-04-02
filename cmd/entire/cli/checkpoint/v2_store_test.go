@@ -304,6 +304,127 @@ func TestV2GitStore_WriteCommittedMain_ExcludesTranscript(t *testing.T) {
 	}
 }
 
+func TestV2GitStore_WriteCommittedMain_WritesCompactTranscript(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo)
+	ctx := context.Background()
+
+	compactData := []byte(`{"v":1,"agent":"claude-code","cli_version":"0.1.0","type":"user","ts":"2026-01-01T00:00:00Z","content":"hello"}`)
+
+	cpID := id.MustCheckpointID("d4e5f6a1b2c3")
+	_, err := store.writeCommittedMain(ctx, WriteCommittedOptions{
+		CheckpointID:      cpID,
+		SessionID:         "test-session-compact",
+		Strategy:          "manual-commit",
+		Transcript:        []byte(`{"type":"human","message":"hello"}`),
+		CompactTranscript: compactData,
+		Prompts:           []string{"hello"},
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+	})
+	require.NoError(t, err)
+
+	tree := v2MainTree(t, repo)
+	cpPath := cpID.Path()
+
+	// transcript.jsonl should exist on /main
+	transcriptContent := v2ReadFile(t, tree, cpPath+"/0/"+paths.CompactTranscriptFileName)
+	assert.Equal(t, string(compactData), transcriptContent)
+
+	// transcript_hash.txt should exist on /main
+	hashContent := v2ReadFile(t, tree, cpPath+"/0/"+paths.CompactTranscriptHashFileName)
+	assert.True(t, strings.HasPrefix(hashContent, "sha256:"),
+		"transcript_hash.txt should be a sha256 hash")
+
+	// SessionFilePaths should repurpose transcript/content_hash for compact artifacts
+	summaryContent := v2ReadFile(t, tree, cpPath+"/"+paths.MetadataFileName)
+	var summary CheckpointSummary
+	require.NoError(t, json.Unmarshal([]byte(summaryContent), &summary))
+	require.Len(t, summary.Sessions, 1)
+	assert.Contains(t, summary.Sessions[0].Transcript, paths.CompactTranscriptFileName)
+	assert.Contains(t, summary.Sessions[0].ContentHash, paths.CompactTranscriptHashFileName)
+}
+
+func TestV2GitStore_WriteCommittedMain_NoCompactTranscript_SkipsGracefully(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo)
+	ctx := context.Background()
+
+	cpID := id.MustCheckpointID("e5f6a1b2c3d4")
+	_, err := store.writeCommittedMain(ctx, WriteCommittedOptions{
+		CheckpointID:      cpID,
+		SessionID:         "test-session-no-compact",
+		Strategy:          "manual-commit",
+		Transcript:        []byte(`{"type":"human","message":"hello"}`),
+		CompactTranscript: nil,
+		Prompts:           []string{"hello"},
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+	})
+	require.NoError(t, err)
+
+	tree := v2MainTree(t, repo)
+	cpPath := cpID.Path()
+
+	// metadata.json and prompt.txt should still exist
+	_ = v2ReadFile(t, tree, cpPath+"/0/"+paths.MetadataFileName)
+	_ = v2ReadFile(t, tree, cpPath+"/0/"+paths.PromptFileName)
+
+	// transcript.jsonl should NOT exist
+	sessionTree, err := tree.Tree(cpPath + "/0")
+	require.NoError(t, err)
+	_, err = sessionTree.File(paths.CompactTranscriptFileName)
+	assert.Error(t, err, "transcript.jsonl should not exist when CompactTranscript is nil")
+}
+
+func TestV2GitStore_UpdateCommitted_WritesCompactTranscript(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo)
+	ctx := context.Background()
+
+	cpID := id.MustCheckpointID("f6a1b2c3d4e5")
+	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "test-session-update-compact",
+		Strategy:     "manual-commit",
+		Transcript:   []byte(`{"type":"human","message":"hello"}`),
+		Prompts:      []string{"hello"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})
+	require.NoError(t, err)
+
+	compactData := []byte(`{"v":1,"agent":"claude-code","cli_version":"0.1.0","type":"user","content":"hello"}`)
+	err = store.UpdateCommitted(ctx, UpdateCommittedOptions{
+		CheckpointID:      cpID,
+		SessionID:         "test-session-update-compact",
+		Transcript:        []byte(`{"type":"human","message":"hello updated"}`),
+		CompactTranscript: compactData,
+		Agent:             "Claude Code",
+	})
+	require.NoError(t, err)
+
+	tree := v2MainTree(t, repo)
+	cpPath := cpID.Path()
+
+	transcriptContent := v2ReadFile(t, tree, cpPath+"/0/"+paths.CompactTranscriptFileName)
+	assert.Equal(t, string(compactData), transcriptContent)
+
+	hashContent := v2ReadFile(t, tree, cpPath+"/0/"+paths.CompactTranscriptHashFileName)
+	assert.True(t, strings.HasPrefix(hashContent, "sha256:"))
+
+	// Root summary paths should stay in sync after UpdateCommitted
+	summaryContent := v2ReadFile(t, tree, cpPath+"/"+paths.MetadataFileName)
+	var summary CheckpointSummary
+	require.NoError(t, json.Unmarshal([]byte(summaryContent), &summary))
+	require.Len(t, summary.Sessions, 1)
+	assert.Contains(t, summary.Sessions[0].Transcript, paths.CompactTranscriptFileName)
+	assert.Contains(t, summary.Sessions[0].ContentHash, paths.CompactTranscriptHashFileName)
+}
+
 func TestV2GitStore_WriteCommittedMain_MultiSession(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
