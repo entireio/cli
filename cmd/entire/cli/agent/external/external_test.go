@@ -164,7 +164,7 @@ esac
 
 	// Temporarily override the default timeout to keep the test fast.
 	orig := defaultRunTimeout
-	defaultRunTimeout = 1 * time.Second
+	defaultRunTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { defaultRunTimeout = orig })
 
 	start := time.Now()
@@ -174,8 +174,8 @@ esac
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
-	// Should be killed around 1s, not 60s.
-	if elapsed >= 5*time.Second {
+	// Should be killed around 200ms, not 60s.
+	if elapsed >= 4*time.Second {
 		t.Errorf("run() took %v; default timeout was not applied", elapsed)
 	}
 }
@@ -202,7 +202,7 @@ esac
 
 	// Provide a context with a short deadline. run() should respect it
 	// and NOT override with its own (longer) timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
@@ -212,7 +212,7 @@ esac
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
-	if elapsed >= 5*time.Second {
+	if elapsed >= 4*time.Second {
 		t.Errorf("run() took %v; caller's deadline was not respected", elapsed)
 	}
 }

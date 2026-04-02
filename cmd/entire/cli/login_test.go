@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
@@ -44,7 +45,7 @@ func TestWaitForApproval_ImmediateSuccess(t *testing.T) {
 		{result: &auth.DeviceAuthPoll{AccessToken: "tok-123"}},
 	}}
 
-	token, err := waitForApproval(context.Background(), poller, "device-1", 60, 0)
+	token, err := waitForApproval(context.Background(), poller, "device-1", 60, time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +66,7 @@ func TestWaitForApproval_PendingThenSuccess(t *testing.T) {
 		{result: &auth.DeviceAuthPoll{AccessToken: "tok-456"}},
 	}}
 
-	token, err := waitForApproval(context.Background(), poller, "device-1", 60, 0)
+	token, err := waitForApproval(context.Background(), poller, "device-1", 60, time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,7 +85,7 @@ func TestWaitForApproval_AccessDenied(t *testing.T) {
 		{result: &auth.DeviceAuthPoll{Error: "access_denied"}},
 	}}
 
-	_, err := waitForApproval(context.Background(), poller, "device-1", 60, 0)
+	_, err := waitForApproval(context.Background(), poller, "device-1", 60, time.Millisecond, time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "device authorization denied") {
 		t.Fatalf("err = %v, want 'device authorization denied'", err)
 	}
@@ -97,7 +98,7 @@ func TestWaitForApproval_ExpiredToken(t *testing.T) {
 		{result: &auth.DeviceAuthPoll{Error: "expired_token"}},
 	}}
 
-	_, err := waitForApproval(context.Background(), poller, "device-1", 60, 0)
+	_, err := waitForApproval(context.Background(), poller, "device-1", 60, time.Millisecond, time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "device authorization expired") {
 		t.Fatalf("err = %v, want 'device authorization expired'", err)
 	}
@@ -110,7 +111,7 @@ func TestWaitForApproval_UnknownError(t *testing.T) {
 		{result: &auth.DeviceAuthPoll{Error: "server_error"}},
 	}}
 
-	_, err := waitForApproval(context.Background(), poller, "device-1", 60, 0)
+	_, err := waitForApproval(context.Background(), poller, "device-1", 60, time.Millisecond, time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "server_error") {
 		t.Fatalf("err = %v, want to contain 'server_error'", err)
 	}
@@ -123,7 +124,7 @@ func TestWaitForApproval_EmptyTokenOnSuccess(t *testing.T) {
 		{result: &auth.DeviceAuthPoll{AccessToken: ""}},
 	}}
 
-	_, err := waitForApproval(context.Background(), poller, "device-1", 60, 0)
+	_, err := waitForApproval(context.Background(), poller, "device-1", 60, time.Millisecond, time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "completed without a token") {
 		t.Fatalf("err = %v, want 'completed without a token'", err)
 	}
@@ -137,7 +138,7 @@ func TestWaitForApproval_SlowDown(t *testing.T) {
 		{result: &auth.DeviceAuthPoll{AccessToken: "tok-slow"}},
 	}}
 
-	token, err := waitForApproval(context.Background(), poller, "device-1", 60, 0)
+	token, err := waitForApproval(context.Background(), poller, "device-1", 60, time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,7 +156,7 @@ func TestWaitForApproval_ExpiresInClamped(t *testing.T) {
 		{result: &auth.DeviceAuthPoll{AccessToken: "tok-clamp"}},
 	}}
 
-	token, err := waitForApproval(context.Background(), poller, "device-1", 0, 0)
+	token, err := waitForApproval(context.Background(), poller, "device-1", 0, time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -171,7 +172,7 @@ func TestWaitForApproval_NegativeExpiresInClamped(t *testing.T) {
 		{result: &auth.DeviceAuthPoll{AccessToken: "tok-neg"}},
 	}}
 
-	token, err := waitForApproval(context.Background(), poller, "device-1", -1, 0)
+	token, err := waitForApproval(context.Background(), poller, "device-1", -1, time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -189,7 +190,7 @@ func TestWaitForApproval_TransientErrorRetry(t *testing.T) {
 		{result: &auth.DeviceAuthPoll{AccessToken: "tok-retry"}},
 	}}
 
-	token, err := waitForApproval(context.Background(), poller, "device-1", 60, 0)
+	token, err := waitForApproval(context.Background(), poller, "device-1", 60, time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -210,7 +211,7 @@ func TestWaitForApproval_TransientErrorExhausted(t *testing.T) {
 	}
 	poller := &mockClient{responses: responses}
 
-	_, err := waitForApproval(context.Background(), poller, "device-1", 60, 0)
+	_, err := waitForApproval(context.Background(), poller, "device-1", 60, time.Millisecond, time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "consecutive failures") {
 		t.Fatalf("err = %v, want 'consecutive failures'", err)
 	}
@@ -234,7 +235,7 @@ func TestWaitForApproval_TransientErrorCounterResets(t *testing.T) {
 	responses = append(responses, pollResponse{result: &auth.DeviceAuthPoll{AccessToken: "tok-reset"}})
 	poller := &mockClient{responses: responses}
 
-	token, err := waitForApproval(context.Background(), poller, "device-1", 60, 0)
+	token, err := waitForApproval(context.Background(), poller, "device-1", 60, time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -253,7 +254,7 @@ func TestWaitForApproval_ContextCancelled(t *testing.T) {
 		{result: &auth.DeviceAuthPoll{Error: "authorization_pending"}},
 	}}
 
-	_, err := waitForApproval(ctx, poller, "device-1", 60, 0)
+	_, err := waitForApproval(ctx, poller, "device-1", 60, time.Millisecond, time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "context canceled") {
 		t.Fatalf("err = %v, want context canceled", err)
 	}

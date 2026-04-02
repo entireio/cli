@@ -322,15 +322,16 @@ func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agen
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve transcript path: %w", err)
 	}
-	// Some agents write transcripts asynchronously. PrepareTranscript ensures the
-	// file is fully flushed before we read it. For finished sessions the file is
-	// typically stale (>2 min old) and the call returns immediately.
-	if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
-		if prepErr := preparer.PrepareTranscript(ctx, transcriptPath); prepErr != nil {
-			logging.Debug(ctx, "PrepareTranscript failed (best-effort)", "error", prepErr)
-		}
-	}
+	// Only call PrepareTranscript when the file already exists — it flushes
+	// in-progress writes, but can't conjure a file that was never started.
+	// This avoids agents like Cursor polling for 3s on non-existent files
+	// during auto-detection.
 	if _, statErr := os.Stat(transcriptPath); statErr == nil {
+		if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
+			if prepErr := preparer.PrepareTranscript(ctx, transcriptPath); prepErr != nil {
+				logging.Debug(ctx, "PrepareTranscript failed (best-effort)", "error", prepErr)
+			}
+		}
 		return transcriptPath, nil
 	}
 	found, searchErr := searchTranscriptInProjectDirs(sessionID, ag)

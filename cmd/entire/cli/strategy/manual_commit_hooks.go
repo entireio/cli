@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -626,6 +627,14 @@ type postCommitActionHandler struct {
 	condensed bool
 }
 
+// parentCommitHash returns the first parent's hash as a string, or empty for initial commits.
+func (h *postCommitActionHandler) parentCommitHash() string {
+	if h.commit.NumParents() > 0 && len(h.commit.ParentHashes) > 0 {
+		return h.commit.ParentHashes[0].String()
+	}
+	return ""
+}
+
 func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 	logCtx := logging.WithComponent(h.ctx, "checkpoint")
 	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime)
@@ -640,10 +649,12 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 
 	if shouldCondense {
 		h.condensed = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete, h.committedFileSet, condenseOpts{
-			shadowRef:      h.shadowRef,
-			headTree:       h.headTree,
-			repoDir:        h.repoDir,
-			headCommitHash: h.newHead,
+			shadowRef:        h.shadowRef,
+			headTree:         h.headTree,
+			parentTree:       h.parentTree,
+			repoDir:          h.repoDir,
+			parentCommitHash: h.parentCommitHash(),
+			headCommitHash:   h.newHead,
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead)
@@ -666,10 +677,12 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 
 	if shouldCondense {
 		h.condensed = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete, h.committedFileSet, condenseOpts{
-			shadowRef:      h.shadowRef,
-			headTree:       h.headTree,
-			repoDir:        h.repoDir,
-			headCommitHash: h.newHead,
+			shadowRef:        h.shadowRef,
+			headTree:         h.headTree,
+			parentTree:       h.parentTree,
+			repoDir:          h.repoDir,
+			parentCommitHash: h.parentCommitHash(),
+			headCommitHash:   h.newHead,
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead)
@@ -719,6 +732,46 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 		parentTree:    h.parentTree,
 		hasParentTree: true,
 	})
+}
+
+const (
+	staleEndedSessionWarnThreshold = 3                   // warn when ≥ this many stale sessions
+	staleEndedSessionWarnInterval  = 24 * time.Hour      // rate-limit window
+	staleEndedSessionWarnFile      = ".warn-stale-ended" // sentinel file name in entire-sessions/
+)
+
+// stderrWriter is the destination for user-facing warnings emitted outside of
+// Cobra command output (e.g. from PostCommit). Tests can swap this to capture
+// output without mutating the process-global os.Stderr.
+var stderrWriter io.Writer = os.Stderr
+
+// warnStaleEndedSessions emits a rate-limited warning to stderr when too many
+// non-FullyCondensed ENDED sessions are accumulating.
+func warnStaleEndedSessions(ctx context.Context, count int) {
+	warnStaleEndedSessionsTo(ctx, count, stderrWriter)
+}
+
+func warnStaleEndedSessionsTo(ctx context.Context, count int, w io.Writer) {
+	commonDir, err := GetGitCommonDir(ctx)
+	if err != nil {
+		return // fail-open
+	}
+	warnDir := filepath.Join(commonDir, session.SessionStateDirName)
+	warnFile := filepath.Join(warnDir, staleEndedSessionWarnFile)
+	if info, statErr := os.Stat(warnFile); statErr == nil {
+		if time.Since(info.ModTime()) < staleEndedSessionWarnInterval {
+			return // rate-limited
+		}
+	}
+	//nolint:errcheck,gosec // G104: Best-effort warning — fail-open if file ops fail
+	os.MkdirAll(warnDir, 0o750)
+	//nolint:errcheck,gosec // G104: Best-effort sentinel file write
+	os.WriteFile(warnFile, []byte{}, 0o644)
+	fmt.Fprintf(w,
+		"\nentire: %d ended session(s) are accumulating and slowing down commits.\n"+
+			"Run 'entire doctor' to condense them and restore commit performance.\n\n",
+		count,
+	)
 }
 
 // activeSessionInteractionThreshold is the maximum age of LastInteractionTime
@@ -885,6 +938,10 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 		}
 	}
 	cleanupBranchesSpan.End()
+
+	if stale := countWarnableStaleEndedSessions(repo, sessions); stale >= staleEndedSessionWarnThreshold {
+		warnStaleEndedSessions(ctx, stale)
+	}
 
 	return nil
 }

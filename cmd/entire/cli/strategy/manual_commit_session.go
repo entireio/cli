@@ -9,6 +9,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 
 	"github.com/go-git/go-git/v6"
@@ -99,6 +100,36 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		states = append(states, state)
 	}
 	return states, nil
+}
+
+// isWarnableStaleEndedSession reports whether an ENDED session is still both
+// expensive in PostCommit and actionable via 'entire doctor'.
+func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool {
+	if state.Phase != session.PhaseEnded || state.FullyCondensed || state.StepCount <= 0 {
+		return false
+	}
+
+	// Re-check shadow branch existence even though listAllSessionStates already
+	// filters orphaned sessions. This is intentional: PostCommit deletes shadow
+	// branches during condensation, so a branch that existed at list-load time
+	// may be gone by the time we reach the warning check. Without this re-check
+	// we would warn about sessions that this commit just cleaned up.
+	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	refName := plumbing.NewBranchReferenceName(shadowBranch)
+	_, err := repo.Reference(refName, true)
+	return err == nil
+}
+
+// countWarnableStaleEndedSessions returns the number of ENDED sessions that
+// still remain slow and fixable after PostCommit finishes processing.
+func countWarnableStaleEndedSessions(repo *git.Repository, sessions []*SessionState) int {
+	n := 0
+	for _, state := range sessions {
+		if isWarnableStaleEndedSession(repo, state) {
+			n++
+		}
+	}
+	return n
 }
 
 // findSessionsForWorktree finds all sessions for the given worktree path.
