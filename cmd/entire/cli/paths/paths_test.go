@@ -102,6 +102,75 @@ func TestGetClaudeProjectDir_Override(t *testing.T) {
 	}
 }
 
+func TestNormalizeMSYSPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// Drive letter paths
+		{name: "lowercase drive", in: "/c/Users/Victor/repo", want: "C:/Users/Victor/repo"},
+		{name: "uppercase drive", in: "/D/Projects/app", want: "D:/Projects/app"},
+		{name: "drive root", in: "/c/", want: "C:/"},
+
+		// /tmp mapping
+		{name: "tmp path", in: "/tmp/e2e-repo-123/docs/red.md", want: filepath.Join(os.TempDir(), "e2e-repo-123/docs/red.md")},
+		{name: "tmp root file", in: "/tmp/file.txt", want: filepath.Join(os.TempDir(), "file.txt")},
+
+		// Paths that should NOT be converted
+		{name: "already relative", in: "docs/red.md", want: "docs/red.md"},
+		{name: "windows absolute", in: "C:/Users/Victor/repo", want: "C:/Users/Victor/repo"},
+		{name: "unix absolute non-drive", in: "/home/user/docs/red.md", want: "/home/user/docs/red.md"},
+		{name: "empty string", in: "", want: ""},
+		{name: "single slash", in: "/", want: "/"},
+		{name: "tmp exact no trailing slash", in: "/tmp", want: "/tmp"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := NormalizeMSYSPath(tt.in)
+			if got != tt.want {
+				t.Errorf("NormalizeMSYSPath(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestToRelativePath_MSYSAndUnixPaths(t *testing.T) {
+	t.Parallel()
+
+	// On Unix, /home/user/... is a valid absolute path so filepath.Rel handles it.
+	// On Windows, /home/user/... is not absolute and gets dropped by the Unix filter.
+	// These tests verify behavior that is consistent across platforms.
+	tests := []struct {
+		name    string
+		absPath string
+		cwd     string
+		want    string
+	}{
+		// Relative paths pass through unchanged on all platforms
+		{name: "relative path unchanged", absPath: "docs/red.md", cwd: "/repo", want: "docs/red.md"},
+
+		// MSYS drive paths: /c/ → C:/ conversion happens, then platform-specific handling.
+		// On Unix, C:/Users/... is not absolute so it passes through as-is.
+		// On Windows, C:/Users/... is absolute so filepath.Rel resolves it.
+		// We test the NormalizeMSYSPath conversion separately above.
+
+		// Paths outside cwd return empty
+		{name: "outside cwd", absPath: "/other/repo/file.txt", cwd: "/my/repo", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := ToRelativePath(tt.absPath, tt.cwd)
+			if got != tt.want {
+				t.Errorf("ToRelativePath(%q, %q) = %q, want %q", tt.absPath, tt.cwd, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetClaudeProjectDir_Default(t *testing.T) {
 	// Ensure env var is not set by setting it to empty string
 	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", "")
