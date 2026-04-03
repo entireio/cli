@@ -297,21 +297,37 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 
 	repo, err := openRepository(ctx)
 	if err != nil {
+		logging.Warn(ctx, "filterToUncommittedFiles: failed to open repository, keeping all files",
+			slog.String("error", err.Error()),
+			slog.String("dir", repoRoot),
+			slog.Any("files", files))
 		return files // fail open
 	}
 
 	head, err := repo.Head()
 	if err != nil {
+		logging.Warn(ctx, "filterToUncommittedFiles: failed to resolve HEAD, keeping all files",
+			slog.String("error", err.Error()),
+			slog.String("dir", repoRoot),
+			slog.Any("files", files))
 		return files // fail open (empty repo, detached HEAD, etc.)
 	}
 
 	commit, err := repo.CommitObject(head.Hash())
 	if err != nil {
+		logging.Warn(ctx, "filterToUncommittedFiles: failed to get commit object, keeping all files",
+			slog.String("error", err.Error()),
+			slog.String("dir", repoRoot),
+			slog.Any("files", files))
 		return files // fail open
 	}
 
 	headTree, err := commit.Tree()
 	if err != nil {
+		logging.Warn(ctx, "filterToUncommittedFiles: failed to get commit tree, keeping all files",
+			slog.String("error", err.Error()),
+			slog.String("dir", repoRoot),
+			slog.Any("files", files))
 		return files // fail open
 	}
 
