@@ -44,14 +44,13 @@ type searchMoreResultsMsg struct {
 type searchStyles struct {
 	statusStyles
 
-	sectionTitle  lipgloss.Style // bold uppercase section headers
-	label         lipgloss.Style // dim key labels in detail panel
-	selected      lipgloss.Style // highlighted selected row
-	helpKey       lipgloss.Style // colored key hints in footer
-	helpSep       lipgloss.Style // dim separator dots in footer
-	detailTitle   lipgloss.Style // colored title inside detail card
-	detailBorder  lipgloss.Style // border style for detail card
-	sectionHeader lipgloss.Style // bold orange section headers in detail view
+	sectionTitle lipgloss.Style // bold uppercase section headers
+	label        lipgloss.Style // dim key labels in detail panel
+	selected     lipgloss.Style // highlighted selected row
+	helpKey      lipgloss.Style // colored key hints in footer
+	helpSep      lipgloss.Style // dim separator dots in footer
+	detailTitle  lipgloss.Style // colored title and section headers (orange, bold)
+	detailBorder lipgloss.Style // border style for detail card
 }
 
 func newSearchStyles(ss statusStyles) searchStyles {
@@ -69,7 +68,6 @@ func newSearchStyles(ss statusStyles) searchStyles {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("243")).
 		Padding(1, 2)
-	s.sectionHeader = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 	return s
 }
 
@@ -513,7 +511,6 @@ func (m searchModel) viewRow(r search.Result, cols columnLayout) string {
 }
 
 // renderDetailContent builds the text content for a checkpoint detail (no border/card chrome).
-// contentWidth is the usable text width. showSections controls whether section headers are shown.
 func (m searchModel) renderDetailContent(r search.Result, contentWidth int, showSections bool) string {
 	const labelWidth = 12
 	// Available width for field values: content width minus label minus space.
@@ -552,7 +549,7 @@ func (m searchModel) renderDetailContent(r search.Result, contentWidth int, show
 
 	writeSection := func(title string) {
 		if showSections {
-			content.WriteString("\n" + m.styles.render(m.styles.sectionHeader, title) + "\n")
+			content.WriteString("\n" + m.styles.render(m.styles.detailTitle, title) + "\n")
 		} else {
 			content.WriteString("\n")
 		}
@@ -595,7 +592,7 @@ func (m searchModel) renderDetailContent(r search.Result, contentWidth int, show
 	if len(r.Data.FilesTouched) > 0 {
 		content.WriteString("\n")
 		if showSections {
-			content.WriteString(m.styles.render(m.styles.sectionHeader, "FILES") + "\n")
+			content.WriteString(m.styles.render(m.styles.detailTitle, "FILES") + "\n")
 		} else {
 			content.WriteString(m.styles.render(m.styles.label, "Files:") + "\n")
 		}
@@ -818,14 +815,6 @@ func formatCommit(sha, message *string) string {
 		s += "  " + msg
 	}
 	return s
-}
-
-// formatAuthor renders username with display name, e.g. "dipree (Daniel Adams)".
-func formatAuthor(author string, username *string) string {
-	if username != nil && *username != "" {
-		return *username + " (" + author + ")"
-	}
-	return author
 }
 
 // derefStr returns the dereferenced string pointer, or fallback if nil.

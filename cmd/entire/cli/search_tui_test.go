@@ -406,19 +406,6 @@ func TestFormatCommit(t *testing.T) {
 	}
 }
 
-func TestFormatAuthor(t *testing.T) {
-	t.Parallel()
-
-	username := "alicecodes"
-	if got := formatAuthor("alice", &username); got != "alicecodes (alice)" {
-		t.Errorf("formatAuthor = %q, want %q", got, "alicecodes (alice)")
-	}
-
-	if got := formatAuthor("bob", nil); got != "bob" {
-		t.Errorf("formatAuthor(nil username) = %q, want %q", got, "bob")
-	}
-}
-
 func TestRenderSearchStatic(t *testing.T) {
 	t.Parallel()
 
