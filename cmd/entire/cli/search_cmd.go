@@ -135,7 +135,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				model := newSearchModel(nil, "", 0, searchCfg, styles)
 				model.mode = modeSearch
 				model.input.Focus()
-				p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+				p := tea.NewProgram(model, tea.WithAltScreen())
 				if _, err := p.Run(); err != nil {
 					return fmt.Errorf("TUI error: %w", err)
 				}
@@ -174,7 +174,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// Interactive TUI
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles)
-			p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+			p := tea.NewProgram(model, tea.WithAltScreen())
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)
 			}
