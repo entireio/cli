@@ -406,6 +406,68 @@ func TestFormatCommit(t *testing.T) {
 	}
 }
 
+func TestRenderDetailContent_Sections(t *testing.T) {
+	t.Parallel()
+	m := testModel()
+	r := testResults()[0]
+
+	withSections := m.renderDetailContent(r, 80, true)
+	if !strings.Contains(withSections, "OVERVIEW") {
+		t.Error("showSections=true should contain OVERVIEW header")
+	}
+	if !strings.Contains(withSections, "SOURCE") {
+		t.Error("showSections=true should contain SOURCE header")
+	}
+	if !strings.Contains(withSections, "FILES") {
+		t.Error("showSections=true should contain FILES header")
+	}
+
+	withoutSections := m.renderDetailContent(r, 80, false)
+	if strings.Contains(withoutSections, "OVERVIEW") {
+		t.Error("showSections=false should not contain OVERVIEW header")
+	}
+	if strings.Contains(withoutSections, "SOURCE") {
+		t.Error("showSections=false should not contain SOURCE header")
+	}
+	if !strings.Contains(withoutSections, "Files:") {
+		t.Error("showSections=false should contain Files: label")
+	}
+}
+
+func TestRenderDetailContent_AuthorEmptyUsername(t *testing.T) {
+	t.Parallel()
+	m := testModel()
+	r := testResults()[1] // bob, no AuthorUsername
+	content := m.renderDetailContent(r, 80, false)
+	if !strings.Contains(content, "bob") {
+		t.Error("author should show display name when username is nil")
+	}
+
+	// Empty string username should fall back to display name
+	empty := ""
+	r.Data.AuthorUsername = &empty
+	content = m.renderDetailContent(r, 80, false)
+	if !strings.Contains(content, "bob") {
+		t.Error("author should show display name when username is empty string")
+	}
+}
+
+func TestRenderDetailContent_PromptWrapping(t *testing.T) {
+	t.Parallel()
+	m := testModel()
+	r := testResults()[0]
+	r.Data.Prompt = "line one\nline two\nline three"
+
+	content := m.renderDetailContent(r, 80, false)
+	// CollapseWhitespace should merge the newlines into spaces
+	if strings.Contains(content, "line one\n") {
+		t.Error("prompt should have newlines collapsed")
+	}
+	if !strings.Contains(content, "line one line two line three") {
+		t.Error("prompt should be collapsed to single line")
+	}
+}
+
 func TestRenderSearchStatic(t *testing.T) {
 	t.Parallel()
 

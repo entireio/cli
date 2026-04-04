@@ -570,7 +570,7 @@ func (m searchModel) renderDetailContent(r search.Result, contentWidth int, show
 	writeWrappedField("Commit", formatCommit(r.Data.CommitSHA, r.Data.CommitMessage))
 	writeField("Branch", r.Data.Branch)
 	writeField("Repo", r.Data.Org+"/"+r.Data.Repo)
-	authorStr := derefStr(r.Data.AuthorUsername, r.Data.Author)
+	authorStr := r.Data.Author
 	if r.Data.AuthorUsername != nil && *r.Data.AuthorUsername != "" {
 		authorStr = *r.Data.AuthorUsername + " " + m.styles.render(m.styles.dim, "("+r.Data.Author+")")
 	}
@@ -619,11 +619,17 @@ func formatDetailCreatedAt(createdAt string, styles searchStyles) string {
 const maxCardContentLines = 15
 
 func (m searchModel) viewDetailCard(r search.Result) string {
-	// lipgloss .Width(W) includes padding but excludes border:
-	//   text wraps at W - padding(4), rendered = W + border(2), + indent(1) = W + 3
-	// So W = m.width - 3, text content width = W - 4 = m.width - 7
-	borderWidth := max(m.width-3, 44)
-	contentWidth := borderWidth - 4
+	var contentWidth int
+	var borderWidth int
+	if m.styles.colorEnabled {
+		// lipgloss .Width(W) includes padding but excludes border:
+		//   text wraps at W - padding(4), rendered = W + border(2), + indent(1) = W + 3
+		borderWidth = max(m.width-3, 0)
+		contentWidth = max(borderWidth-4, 0)
+	} else {
+		// No border/padding in NO_COLOR mode, only indent(1)
+		contentWidth = max(m.width-1, 0)
+	}
 	cardContent := m.renderDetailContent(r, contentWidth, false)
 
 	lines := strings.Split(cardContent, "\n")
