@@ -100,13 +100,26 @@ func TestParseHookEvent_Stop(t *testing.T) {
 	require.Equal(t, "gpt-4.1", event.Model)
 }
 
-func TestParseHookEvent_PreToolUse_ReturnsNil(t *testing.T) {
+func TestParseHookEvent_PassThroughHooks_ReturnsNil(t *testing.T) {
 	t.Parallel()
+
+	passThroughHooks := []string{
+		HookNamePreToolUse,
+		HookNamePostToolUse,
+	}
+
 	ag := &CodexAgent{}
 	// PreToolUse is a pass-through — should return nil event
-	event, err := ag.ParseHookEvent(context.Background(), HookNamePreToolUse, strings.NewReader("{}"))
-	require.NoError(t, err)
-	require.Nil(t, event)
+
+	for _, hookName := range passThroughHooks {
+		t.Run(hookName, func(t *testing.T) {
+			t.Parallel()
+
+			event, err := ag.ParseHookEvent(context.Background(), hookName, strings.NewReader("{}"))
+			require.NoError(t, err)
+			require.Nil(t, event)
+		})
+	}
 }
 
 func TestParseHookEvent_UnknownHook_ReturnsNil(t *testing.T) {

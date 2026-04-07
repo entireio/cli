@@ -35,6 +35,7 @@ const (
 	HookNameUserPromptSubmit = "user-prompt-submit"
 	HookNameStop             = "stop"
 	HookNamePreToolUse       = "pre-tool-use"
+	HookNamePostToolUse      = "post-tool-use"
 )
 
 // HookNames returns the hook verbs Codex supports.
@@ -44,6 +45,7 @@ func (c *CodexAgent) HookNames() []string {
 		HookNameUserPromptSubmit,
 		HookNameStop,
 		HookNamePreToolUse,
+		HookNamePostToolUse,
 	}
 }
 
@@ -57,8 +59,8 @@ func (c *CodexAgent) ParseHookEvent(_ context.Context, hookName string, stdin io
 		return c.parseTurnStart(stdin)
 	case HookNameStop:
 		return c.parseTurnEnd(stdin)
-	case HookNamePreToolUse:
-		// PreToolUse has no lifecycle significance — pass through
+	case HookNamePreToolUse, HookNamePostToolUse:
+		// Acknowledged hooks with no lifecycle action
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action
 	default:
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action

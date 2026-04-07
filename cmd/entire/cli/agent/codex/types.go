@@ -11,6 +11,7 @@ type HookEvents struct {
 	UserPromptSubmit []MatcherGroup `json:"UserPromptSubmit,omitempty"`
 	Stop             []MatcherGroup `json:"Stop,omitempty"`
 	PreToolUse       []MatcherGroup `json:"PreToolUse,omitempty"`
+	PostToolUse      []MatcherGroup `json:"PostToolUse,omitempty"`
 }
 
 // MatcherGroup groups hooks under an optional matcher pattern.
