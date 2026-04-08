@@ -64,6 +64,40 @@ cd your-project && entire enable
 entire status
 ```
 
+### Download & Verify (manual install)
+
+Pre-built binaries are available from the [GitHub Releases](https://github.com/entireio/cli/releases) page. All release checksums are signed with [cosign](https://docs.sigstore.dev/cosign/overview/) using keyless (ephemeral) signing via Sigstore, so you can verify that artifacts haven't been tampered with.
+
+```bash
+# 1. Set the version and platform
+VERSION="0.5.0"              # replace with desired version
+OS="linux"                   # linux or darwin
+ARCH="amd64"                 # amd64 or arm64
+
+# 2. Download the archive, checksums, signature and certificate
+BASE_URL="https://github.com/entireio/cli/releases/download/v${VERSION}"
+curl -fsSLO "${BASE_URL}/entire_${OS}_${ARCH}.tar.gz"
+curl -fsSLO "${BASE_URL}/checksums.txt"
+curl -fsSLO "${BASE_URL}/checksums.txt.sig"
+curl -fsSLO "${BASE_URL}/checksums.txt.pem"
+
+# 3. Verify the signature on the checksums file
+cosign verify-blob checksums.txt \
+  --certificate checksums.txt.pem \
+  --signature checksums.txt.sig \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp 'github\.com/entireio/cli'
+
+# 4. Verify the archive against the signed checksums
+sha256sum --check --ignore-missing checksums.txt
+
+# 5. Extract and install
+tar xzf "entire_${OS}_${ARCH}.tar.gz"
+sudo install -m 755 entire /usr/local/bin/entire
+```
+
+> **Note:** On macOS, use `shasum -a 256 --check --ignore-missing checksums.txt` instead of `sha256sum`.
+
 ## Typical Workflow
 
 ### 1. Enable Entire in Your Repository
