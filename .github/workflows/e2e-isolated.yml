@@ -21,10 +21,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Setup mise
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux
@@ -33,8 +33,10 @@ jobs:
         run: go build -o /usr/local/bin/entire ./cmd/entire
 
       - name: Install agent CLI
+        env:
+          E2E_AGENT: ${{ inputs.agent }}
         run: |
-          case "${{ inputs.agent }}" in
+          case "$E2E_AGENT" in
             claude-code) curl -fsSL https://claude.ai/install.sh | bash ;;
             opencode)    curl -fsSL https://opencode.ai/install | bash ;;
             gemini-cli)  npm install -g @google/gemini-cli ;;
@@ -76,13 +78,15 @@ jobs:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
           E2E_ENTIRE_BIN: /usr/local/bin/entire
+          E2E_AGENT: ${{ inputs.agent }}
+          E2E_TEST_FILTER: ${{ inputs.test }}
         run: |
           mkdir -p "$E2E_ARTIFACT_DIR"
-          mise run test:e2e --agent ${{ inputs.agent }} "${{ inputs.test }}"
+          mise run test:e2e --agent "$E2E_AGENT" "$E2E_TEST_FILTER"
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: e2e-isolated-${{ inputs.agent }}-${{ inputs.test }}
           path: e2e-artifacts/
