@@ -34,7 +34,7 @@ func (env *TestEnv) RunCommandInteractive(args []string, respond func(ptyFile *o
 	if err != nil {
 		return "", fmt.Errorf("failed to start pty: %w", err)
 	}
-	defer ptmx.Close()
+	defer func() { _ = ptmx.Close() }()
 
 	// Let the respond function interact with the pty and collect output
 	var respondOutput string
@@ -75,10 +75,14 @@ func (env *TestEnv) RunCommandInteractive(args []string, respond func(ptyFile *o
 		cmdErr = fmt.Errorf("process timed out")
 	}
 
+	// Close PTY as soon as the command is done so io.Copy in remainingDone
+	// unblocks immediately instead of waiting for the timeout path below.
+	_ = ptmx.Close()
+
 	// Give remaining output goroutine time to finish after process exits
 	select {
 	case <-remainingDone:
-	case <-time.After(1 * time.Second):
+	case <-time.After(100 * time.Millisecond):
 	}
 
 	return respondOutput + remaining.String(), cmdErr
