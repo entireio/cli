@@ -1475,6 +1475,70 @@ type CheckpointValidation struct {
 	CheckpointsCount int
 }
 
+type branchReadFunc func(filePath string) (string, bool)
+
+type branchFileReader struct {
+	tree  *object.Tree
+	cache map[string]string
+	found map[string]bool
+}
+
+func (r *branchFileReader) ReadFile(filePath string) (string, bool) {
+	if found, ok := r.found[filePath]; ok {
+		if !found {
+			return "", false
+		}
+		return r.cache[filePath], true
+	}
+
+	file, err := r.tree.File(filePath)
+	if err != nil {
+		r.found[filePath] = false
+		return "", false
+	}
+
+	content, err := file.Contents()
+	if err != nil {
+		r.found[filePath] = false
+		return "", false
+	}
+
+	r.found[filePath] = true
+	r.cache[filePath] = content
+	return content, true
+}
+
+func (env *TestEnv) newBranchFileReader(branchName string) (*branchFileReader, error) {
+	repo, err := git.PlainOpen(env.RepoDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open git repo: %w", err)
+	}
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	if err != nil {
+		ref, err = repo.Reference(plumbing.ReferenceName("refs/heads/"+branchName), true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get branch reference %s: %w", branchName, err)
+		}
+	}
+
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit object for %s: %w", branchName, err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tree for %s: %w", branchName, err)
+	}
+
+	return &branchFileReader{
+		tree:  tree,
+		cache: make(map[string]string),
+		found: make(map[string]bool),
+	}, nil
+}
+
 // ValidateCheckpoint performs comprehensive validation of a checkpoint on the metadata branch.
 // It validates:
 // - Root metadata.json (CheckpointSummary) structure and expected fields
@@ -1485,30 +1549,35 @@ type CheckpointValidation struct {
 func (env *TestEnv) ValidateCheckpoint(v CheckpointValidation) {
 	env.T.Helper()
 
+	reader, err := env.newBranchFileReader(paths.MetadataBranchName)
+	if err != nil {
+		env.T.Fatalf("failed to initialize metadata branch reader: %v", err)
+	}
+
 	// Validate root metadata.json (CheckpointSummary)
-	env.validateCheckpointSummary(v)
+	env.validateCheckpointSummary(v, reader.ReadFile)
 
 	// Validate session metadata.json (CommittedMetadata)
-	env.validateSessionMetadata(v)
+	env.validateSessionMetadata(v, reader.ReadFile)
 
 	// Validate transcript is valid JSONL
-	env.validateTranscriptJSONL(v.CheckpointID, v.ExpectedTranscriptContent)
+	env.validateTranscriptJSONL(v.CheckpointID, v.ExpectedTranscriptContent, reader.ReadFile)
 
 	// Validate content hash matches transcript
-	env.validateContentHash(v.CheckpointID)
+	env.validateContentHash(v.CheckpointID, reader.ReadFile)
 
 	// Validate prompt.txt contains expected prompts
 	if len(v.ExpectedPrompts) > 0 {
-		env.validatePromptContent(v.CheckpointID, v.ExpectedPrompts)
+		env.validatePromptContent(v.CheckpointID, v.ExpectedPrompts, reader.ReadFile)
 	}
 }
 
 // validateCheckpointSummary validates the root metadata.json (CheckpointSummary).
-func (env *TestEnv) validateCheckpointSummary(v CheckpointValidation) {
+func (env *TestEnv) validateCheckpointSummary(v CheckpointValidation, readFromMetadata branchReadFunc) {
 	env.T.Helper()
 
 	summaryPath := CheckpointSummaryPath(v.CheckpointID)
-	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, summaryPath)
+	content, found := readFromMetadata(summaryPath)
 	if !found {
 		env.T.Fatalf("CheckpointSummary not found at %s", summaryPath)
 	}
@@ -1553,11 +1622,11 @@ func (env *TestEnv) validateCheckpointSummary(v CheckpointValidation) {
 }
 
 // validateSessionMetadata validates the session-level metadata.json (CommittedMetadata).
-func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
+func (env *TestEnv) validateSessionMetadata(v CheckpointValidation, readFromMetadata branchReadFunc) {
 	env.T.Helper()
 
 	metadataPath := SessionMetadataPath(v.CheckpointID)
-	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, metadataPath)
+	content, found := readFromMetadata(metadataPath)
 	if !found {
 		env.T.Fatalf("Session metadata not found at %s", metadataPath)
 	}
@@ -1610,11 +1679,11 @@ func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
 // It supports both:
 // - JSON format (single document, used by OpenCode and Gemini CLI)
 // - JSONL format (one JSON object per line, used by Claude Code)
-func (env *TestEnv) validateTranscriptJSONL(checkpointID string, expectedContent []string) {
+func (env *TestEnv) validateTranscriptJSONL(checkpointID string, expectedContent []string, readFromMetadata branchReadFunc) {
 	env.T.Helper()
 
 	transcriptPath := SessionFilePath(checkpointID, paths.TranscriptFileName)
-	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, transcriptPath)
+	content, found := readFromMetadata(transcriptPath)
 	if !found {
 		env.T.Fatalf("Transcript not found at %s", transcriptPath)
 	}
@@ -1653,19 +1722,19 @@ func (env *TestEnv) validateTranscriptJSONL(checkpointID string, expectedContent
 }
 
 // validateContentHash validates that content_hash.txt matches the SHA256 of the transcript.
-func (env *TestEnv) validateContentHash(checkpointID string) {
+func (env *TestEnv) validateContentHash(checkpointID string, readFromMetadata branchReadFunc) {
 	env.T.Helper()
 
 	// Read transcript
 	transcriptPath := SessionFilePath(checkpointID, paths.TranscriptFileName)
-	transcript, found := env.ReadFileFromBranch(paths.MetadataBranchName, transcriptPath)
+	transcript, found := readFromMetadata(transcriptPath)
 	if !found {
 		env.T.Fatalf("Transcript not found at %s", transcriptPath)
 	}
 
 	// Read content hash
 	hashPath := SessionFilePath(checkpointID, "content_hash.txt")
-	storedHash, found := env.ReadFileFromBranch(paths.MetadataBranchName, hashPath)
+	storedHash, found := readFromMetadata(hashPath)
 	if !found {
 		env.T.Fatalf("Content hash not found at %s", hashPath)
 	}
@@ -1681,11 +1750,11 @@ func (env *TestEnv) validateContentHash(checkpointID string) {
 }
 
 // validatePromptContent validates that prompt.txt contains the expected prompts.
-func (env *TestEnv) validatePromptContent(checkpointID string, expectedPrompts []string) {
+func (env *TestEnv) validatePromptContent(checkpointID string, expectedPrompts []string, readFromMetadata branchReadFunc) {
 	env.T.Helper()
 
 	promptPath := SessionFilePath(checkpointID, paths.PromptFileName)
-	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, promptPath)
+	content, found := readFromMetadata(promptPath)
 	if !found {
 		env.T.Fatalf("Prompt file not found at %s", promptPath)
 	}
