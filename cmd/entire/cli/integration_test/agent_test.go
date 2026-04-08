@@ -20,6 +20,22 @@ import (
 // TestAgentDetection verifies agent detection and default behavior.
 // Not parallel - contains subtests that use os.Chdir which is process-global.
 func TestAgentDetection(t *testing.T) {
+
+	t.Run("defaults to claude-code when nothing configured", func(t *testing.T) {
+		t.Parallel()
+		env := NewTestEnv(t)
+		env.InitRepo()
+
+		// No .claude directory, no .entire settings
+		ag, err := agent.Get(agent.DefaultAgentName)
+		if err != nil {
+			t.Fatalf("Get(default) error = %v", err)
+		}
+		if ag.Name() != "claude-code" {
+			t.Errorf("default agent = %q, want %q", ag.Name(), "claude-code")
+		}
+	})
+
 	t.Run("claude-code detects presence when .claude exists", func(t *testing.T) {
 		// Not parallel - uses os.Chdir which is process-global
 		env := NewTestEnv(t)
@@ -56,38 +72,21 @@ func TestAgentDetection(t *testing.T) {
 		}
 	})
 
-}
+	t.Run("agent registry lists claude-code", func(t *testing.T) {
+		t.Parallel()
 
-func TestAgentDefaultIsClaudeCode(t *testing.T) {
-	t.Parallel()
-
-	env := NewTestEnv(t)
-	env.InitRepo()
-
-	// No .claude directory, no .entire settings
-	ag, err := agent.Get(agent.DefaultAgentName)
-	if err != nil {
-		t.Fatalf("Get(default) error = %v", err)
-	}
-	if ag.Name() != "claude-code" {
-		t.Errorf("default agent = %q, want %q", ag.Name(), "claude-code")
-	}
-}
-
-func TestAgentRegistryListsClaudeCode(t *testing.T) {
-	t.Parallel()
-
-	agents := agent.List()
-	found := false
-	for _, name := range agents {
-		if name == "claude-code" {
-			found = true
-			break
+		agents := agent.List()
+		found := false
+		for _, name := range agents {
+			if name == "claude-code" {
+				found = true
+				break
+			}
 		}
-	}
-	if !found {
-		t.Errorf("agent.List() = %v, want to contain 'claude-code'", agents)
-	}
+		if !found {
+			t.Errorf("agent.List() = %v, want to contain 'claude-code'", agents)
+		}
+	})
 }
 
 // TestAgentHookInstallation verifies hook installation via agent interface.
@@ -392,6 +391,23 @@ func TestClaudeCodeHelperMethods(t *testing.T) {
 // TestGeminiCLIAgentDetection verifies Gemini CLI agent detection.
 // Not parallel - contains subtests that use os.Chdir which is process-global.
 func TestGeminiCLIAgentDetection(t *testing.T) {
+
+	t.Run("gemini agent is registered", func(t *testing.T) {
+		t.Parallel()
+
+		agents := agent.List()
+		found := false
+		for _, name := range agents {
+			if name == "gemini" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("agent.List() = %v, want to contain 'gemini'", agents)
+		}
+	})
+
 	t.Run("gemini detects presence when .gemini exists", func(t *testing.T) {
 		// Not parallel - uses os.Chdir which is process-global
 		env := NewTestEnv(t)
@@ -427,22 +443,6 @@ func TestGeminiCLIAgentDetection(t *testing.T) {
 			t.Error("DetectPresence() = false, want true when .gemini exists")
 		}
 	})
-}
-
-func TestAgentRegistryListsGemini(t *testing.T) {
-	t.Parallel()
-
-	agents := agent.List()
-	found := false
-	for _, name := range agents {
-		if name == "gemini" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("agent.List() = %v, want to contain 'gemini'", agents)
-	}
 }
 
 // TestGeminiCLIHookInstallation verifies hook installation via Gemini CLI agent interface.
@@ -799,6 +799,23 @@ func TestGeminiCLIHelperMethods(t *testing.T) {
 // TestFactoryAIDroidAgentDetection verifies Factory AI Droid agent detection.
 // Not parallel - contains subtests that use os.Chdir which is process-global.
 func TestFactoryAIDroidAgentDetection(t *testing.T) {
+
+	t.Run("agent is registered", func(t *testing.T) {
+		t.Parallel()
+
+		agents := agent.List()
+		found := false
+		for _, name := range agents {
+			if name == "factoryai-droid" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("agent.List() = %v, want to contain 'factoryai-droid'", agents)
+		}
+	})
+
 	t.Run("detects presence when .factory exists", func(t *testing.T) {
 		// Not parallel - uses os.Chdir which is process-global
 		env := NewTestEnv(t)
@@ -831,22 +848,6 @@ func TestFactoryAIDroidAgentDetection(t *testing.T) {
 			t.Error("DetectPresence() = false, want true when .factory exists")
 		}
 	})
-}
-
-func TestAgentRegistryListsFactoryAIDroid(t *testing.T) {
-	t.Parallel()
-
-	agents := agent.List()
-	found := false
-	for _, name := range agents {
-		if name == "factoryai-droid" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("agent.List() = %v, want to contain 'factoryai-droid'", agents)
-	}
 }
 
 // TestFactoryAIDroidHookInstallation verifies hook installation via Factory AI Droid agent interface.
@@ -1168,6 +1169,23 @@ func TestFactoryAIDroidSessionMethods(t *testing.T) {
 
 // TestOpenCodeAgentDetection verifies OpenCode agent detection and default behavior.
 func TestOpenCodeAgentDetection(t *testing.T) {
+
+	t.Run("opencode agent is registered", func(t *testing.T) {
+		t.Parallel()
+
+		agents := agent.List()
+		found := false
+		for _, name := range agents {
+			if name == "opencode" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("agent.List() = %v, want to contain 'opencode'", agents)
+		}
+	})
+
 	t.Run("opencode detects presence when .opencode exists", func(t *testing.T) {
 		// Not parallel - uses os.Chdir which is process-global
 		env := NewTestEnv(t)
@@ -1231,22 +1249,6 @@ func TestOpenCodeAgentDetection(t *testing.T) {
 			t.Error("DetectPresence() = false, want true when opencode.json exists")
 		}
 	})
-}
-
-func TestAgentRegistryListsOpenCode(t *testing.T) {
-	t.Parallel()
-
-	agents := agent.List()
-	found := false
-	for _, name := range agents {
-		if name == "opencode" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("agent.List() = %v, want to contain 'opencode'", agents)
-	}
 }
 
 // TestOpenCodeHookInstallation verifies hook installation via OpenCode agent interface.
