@@ -1480,32 +1480,30 @@ type branchReadFunc func(filePath string) (string, bool)
 
 type branchFileReader struct {
 	tree  *object.Tree
-	cache map[string]string
-	found map[string]bool
+	cache map[string]*string
 }
 
 func (r *branchFileReader) ReadFile(filePath string) (string, bool) {
-	if found, ok := r.found[filePath]; ok {
-		if !found {
+	if v, ok := r.cache[filePath]; ok {
+		if v == nil {
 			return "", false
 		}
-		return r.cache[filePath], true
+		return *v, true
 	}
 
 	file, err := r.tree.File(filePath)
 	if err != nil {
-		r.found[filePath] = false
+		r.cache[filePath] = nil
 		return "", false
 	}
 
 	content, err := file.Contents()
 	if err != nil {
-		r.found[filePath] = false
+		r.cache[filePath] = nil
 		return "", false
 	}
 
-	r.found[filePath] = true
-	r.cache[filePath] = content
+	r.cache[filePath] = &content
 	return content, true
 }
 
@@ -1517,10 +1515,7 @@ func (env *TestEnv) newBranchFileReader(branchName string) (*branchFileReader, e
 
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
 	if err != nil {
-		ref, err = repo.Reference(plumbing.ReferenceName("refs/heads/"+branchName), true)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get branch reference %s: %w", branchName, err)
-		}
+		return nil, fmt.Errorf("failed to get branch reference %s: %w", branchName, err)
 	}
 
 	commit, err := repo.CommitObject(ref.Hash())
@@ -1535,8 +1530,7 @@ func (env *TestEnv) newBranchFileReader(branchName string) (*branchFileReader, e
 
 	return &branchFileReader{
 		tree:  tree,
-		cache: make(map[string]string),
-		found: make(map[string]bool),
+		cache: make(map[string]*string),
 	}, nil
 }
 
@@ -1734,7 +1728,7 @@ func (env *TestEnv) validateContentHash(checkpointID string, readFromMetadata br
 	}
 
 	// Read content hash
-	hashPath := SessionFilePath(checkpointID, "content_hash.txt")
+	hashPath := SessionFilePath(checkpointID, paths.ContentHashFileName)
 	storedHash, found := readFromMetadata(hashPath)
 	if !found {
 		env.T.Fatalf("Content hash not found at %s", hashPath)
