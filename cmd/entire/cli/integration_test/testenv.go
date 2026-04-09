@@ -135,7 +135,6 @@ func (env *TestEnv) cliEnv() []string {
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_TEST_TTY=0", // Prevent interactive prompts from blocking in tests
-		"ACCESSIBLE=1",      // Force huh prompts to use stdin, not /dev/tty
 	)
 }
 

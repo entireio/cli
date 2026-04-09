@@ -75,14 +75,13 @@ func (env *TestEnv) RunCommandInteractive(args []string, respond func(ptyFile *o
 		cmdErr = fmt.Errorf("process timed out")
 	}
 
-	// Close PTY as soon as the command is done so io.Copy in remainingDone
-	// unblocks immediately instead of waiting for the timeout path below.
+	// Close PTY so io.Copy unblocks immediately with EOF/error.
 	_ = ptmx.Close()
 
-	// Give remaining output goroutine time to finish after process exits
+	// Wait for remaining output drain — should complete instantly after PTY close.
 	select {
 	case <-remainingDone:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(1 * time.Second):
 	}
 
 	return respondOutput + remaining.String(), cmdErr
