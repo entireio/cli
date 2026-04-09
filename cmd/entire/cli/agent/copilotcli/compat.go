@@ -2,6 +2,7 @@ package copilotcli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -30,7 +31,7 @@ type hookEnvelope struct {
 
 func parseHookEnvelope(data []byte) (*hookEnvelope, error) {
 	if len(data) == 0 {
-		return nil, fmt.Errorf("empty hook input")
+		return nil, errors.New("empty hook input")
 	}
 
 	var raw map[string]json.RawMessage
@@ -108,12 +109,12 @@ func parseTimestamp(raw json.RawMessage) (time.Time, error) {
 
 	var ts string
 	if err := json.Unmarshal(raw, &ts); err != nil {
-		return time.Time{}, err
+		return time.Time{}, fmt.Errorf("unmarshal timestamp string: %w", err)
 	}
 
 	parsed, err := time.Parse(time.RFC3339Nano, ts)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, fmt.Errorf("parse timestamp %q: %w", ts, err)
 	}
 	return parsed, nil
 }
