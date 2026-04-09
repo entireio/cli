@@ -911,6 +911,47 @@ func (env *TestEnv) ReadFileFromRef(refName, filePath string) (string, bool) {
 	return content, true
 }
 
+// AssertCheckpointContainsSession verifies that the checkpoint summary includes
+// a session with the given session ID by reading per-session metadata from the
+// metadata branch.
+func (env *TestEnv) AssertCheckpointContainsSession(t *testing.T, summary checkpoint.CheckpointSummary, sessionID string) {
+	t.Helper()
+	for _, s := range summary.Sessions {
+		if env.sessionMetadataMatchesID(s.Metadata, sessionID) {
+			return
+		}
+	}
+	t.Errorf("Checkpoint did not include session %q", sessionID)
+}
+
+// AssertCheckpointExcludesSession verifies that the checkpoint summary does NOT
+// include a session with the given session ID.
+func (env *TestEnv) AssertCheckpointExcludesSession(t *testing.T, summary checkpoint.CheckpointSummary, sessionID string) {
+	t.Helper()
+	for _, s := range summary.Sessions {
+		if env.sessionMetadataMatchesID(s.Metadata, sessionID) {
+			t.Errorf("Checkpoint incorrectly included session %q", sessionID)
+			return
+		}
+	}
+}
+
+// sessionMetadataMatchesID reads session metadata from the metadata branch and
+// checks if it belongs to the given session ID.
+func (env *TestEnv) sessionMetadataMatchesID(metadataPath, sessionID string) bool {
+	// Strip leading slash — git tree paths are relative
+	cleanPath := strings.TrimPrefix(metadataPath, "/")
+	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, cleanPath)
+	if !found {
+		return false
+	}
+	var meta checkpoint.CommittedMetadata
+	if err := json.Unmarshal([]byte(content), &meta); err != nil {
+		return false
+	}
+	return meta.SessionID == sessionID
+}
+
 // RefExists checks if a ref exists in the repository.
 func (env *TestEnv) RefExists(refName string) bool {
 	env.T.Helper()

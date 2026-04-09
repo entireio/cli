@@ -601,19 +601,20 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 // Handler methods use the *State parameter from ApplyTransition (same pointer
 // as the state being transitioned) rather than capturing state separately.
 type postCommitActionHandler struct {
-	s                      *ManualCommitStrategy
-	ctx                    context.Context
-	repo                   *git.Repository
-	checkpointID           id.CheckpointID
-	head                   *plumbing.Reference
-	commit                 *object.Commit
-	newHead                string
-	repoDir                string
-	shadowBranchName       string
-	shadowBranchesToDelete map[string]struct{}
-	committedFileSet       map[string]struct{}
-	hasNew                 bool
-	filesTouchedBefore     []string
+	s                          *ManualCommitStrategy
+	ctx                        context.Context
+	repo                       *git.Repository
+	checkpointID               id.CheckpointID
+	head                       *plumbing.Reference
+	commit                     *object.Commit
+	newHead                    string
+	repoDir                    string
+	shadowBranchName           string
+	shadowBranchesToDelete     map[string]struct{}
+	committedFileSet           map[string]struct{}
+	hasNew                     bool
+	filesTouchedBefore         []string
+	sessionsWithCommittedFiles int // number of processable sessions that have tracked files
 
 	// Cached git objects — resolved once per PostCommit invocation to avoid
 	// redundant reads across filesOverlapWithContent, filesWithRemainingAgentChanges,
@@ -694,9 +695,10 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 }
 
 // shouldCondenseWithOverlapCheck returns true if the session should be condensed
-// into this commit. Active sessions with recent interaction always condense
-// (bypasses overlap check). Stale ACTIVE and IDLE/ENDED sessions require
-// file overlap evidence between tracked files and committed files.
+// into this commit. Active sessions with recent interaction condense unless they
+// have no tracked files and another session claims the committed files (read-only
+// gate). Stale ACTIVE and IDLE/ENDED sessions require file overlap evidence
+// between tracked files and committed files.
 func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time) bool {
 	if !h.hasNew {
 		return false
@@ -706,10 +708,23 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	// (added trailer). The overlap check is only meaningful when we need
 	// heuristic evidence that a commit was related to the session.
 	//
+	// Exception: when another session's tracked files overlap with the
+	// committed files, skip this ACTIVE session if it has no tracked files
+	// itself. This prevents read-only sessions (e.g., codex exec from tools
+	// like summarize) from being condensed when a different session's commit
+	// triggers PostCommit. When no other session claims the committed files,
+	// the ACTIVE session is assumed to own the commit.
+	//
 	// We check LastInteractionTime to avoid condensing stale ACTIVE sessions
 	// (agent killed without Stop hook) into every subsequent commit. A stale
 	// session has no recent interaction and falls through to the overlap check.
 	if isActive && isRecentInteraction(lastInteraction) {
+		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 {
+			logging.Debug(h.ctx, "post-commit: skipping read-only ACTIVE session (no tracked files, other sessions claim committed files)",
+				slog.Int("sessions_with_committed_files", h.sessionsWithCommittedFiles),
+			)
+			return false
+		}
 		return true
 	}
 	if len(h.filesTouchedBefore) == 0 {
@@ -904,13 +919,20 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 	committedFileSet := filesChangedInCommit(ctx, worktreePath, commit, headTree, parentTree)
 	resolveTreesSpan.End()
 
-	// Compute union of all sessions' FilesTouched for cross-session attribution.
-	// This lets each session's attribution exclude files created by other agent sessions,
-	// preventing files from session B being counted as "human work" in session A.
+	// Compute union of all sessions' FilesTouched for cross-session attribution,
+	// and count sessions whose tracked files overlap with committed files.
 	allAgentFiles := make(map[string]struct{})
+	sessionsWithCommittedFiles := 0
 	for _, state := range sessions {
+		if state.FullyCondensed && state.Phase == session.PhaseEnded {
+			continue
+		}
 		for _, f := range state.FilesTouched {
 			allAgentFiles[f] = struct{}{}
+			if _, ok := committedFileSet[f]; ok {
+				sessionsWithCommittedFiles++
+				break // count each session at most once
+			}
 		}
 	}
 
@@ -924,7 +946,8 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 		iterCtx, iterSpan := processSessionsLoop.Iteration(loopCtx)
 		s.postCommitProcessSession(iterCtx, repo, state, &transitionCtx, checkpointID,
 			head, commit, newHead, worktreePath, headTree, parentTree,
-			committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles)
+			committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
+			sessionsWithCommittedFiles)
 		iterSpan.End()
 	}
 	processSessionsLoop.End()
@@ -1092,6 +1115,7 @@ func (s *ManualCommitStrategy) postCommitProcessSession(
 	shadowBranchesToDelete map[string]struct{},
 	uncondensedActiveOnBranch map[string]bool,
 	allAgentFiles map[string]struct{},
+	sessionsWithCommittedFiles int,
 ) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
@@ -1165,24 +1189,25 @@ func (s *ManualCommitStrategy) postCommitProcessSession(
 	// Run the state machine transition with handler for strategy-specific actions.
 	_, transitionAndCondenseSpan := perf.Start(ctx, "transition_and_condense")
 	handler := &postCommitActionHandler{
-		s:                      s,
-		ctx:                    ctx,
-		repo:                   repo,
-		checkpointID:           checkpointID,
-		head:                   head,
-		commit:                 commit,
-		newHead:                newHead,
-		repoDir:                repoDir,
-		shadowBranchName:       shadowBranchName,
-		shadowBranchesToDelete: shadowBranchesToDelete,
-		committedFileSet:       committedFileSet,
-		hasNew:                 hasNew,
-		filesTouchedBefore:     filesTouchedBefore,
-		headTree:               headTree,
-		parentTree:             parentTree,
-		shadowRef:              shadowRef,
-		shadowTree:             shadowTree,
-		allAgentFiles:          allAgentFiles,
+		s:                          s,
+		ctx:                        ctx,
+		repo:                       repo,
+		checkpointID:               checkpointID,
+		head:                       head,
+		commit:                     commit,
+		newHead:                    newHead,
+		repoDir:                    repoDir,
+		shadowBranchName:           shadowBranchName,
+		shadowBranchesToDelete:     shadowBranchesToDelete,
+		committedFileSet:           committedFileSet,
+		hasNew:                     hasNew,
+		filesTouchedBefore:         filesTouchedBefore,
+		headTree:                   headTree,
+		parentTree:                 parentTree,
+		shadowRef:                  shadowRef,
+		shadowTree:                 shadowTree,
+		allAgentFiles:              allAgentFiles,
+		sessionsWithCommittedFiles: sessionsWithCommittedFiles,
 	}
 
 	if err := TransitionAndLog(ctx, state, session.EventGitCommit, *transitionCtx, handler); err != nil {
