@@ -51,13 +51,13 @@ func TestExternalAgentMultipleTurnsManualCommit(t *testing.T) {
 		}
 
 		_, err := s.RunPrompt(t, ctx,
-			"create a file called src/alpha.txt")
+			"create a file called src/alpha.txt with a short paragraph. Do not ask for confirmation or approval, just make the change.")
 		if err != nil {
 			t.Fatalf("first prompt failed: %v", err)
 		}
 
 		_, err = s.RunPrompt(t, ctx,
-			"create a file called src/beta.txt")
+			"create a file called src/beta.txt with a short paragraph. Do not ask for confirmation or approval, just make the change.")
 		if err != nil {
 			t.Fatalf("second prompt failed: %v", err)
 		}
@@ -89,7 +89,7 @@ func TestExternalAgentMultipleTurnsManualCommit(t *testing.T) {
 func TestExternalAgentDeepCheckpointValidation(t *testing.T) {
 	testutil.ForEachAgent(t, 2*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		_, err := s.RunPrompt(t, ctx,
-			"create a file called notes/deep.md")
+			"create a file called notes/deep.md with a paragraph about deep validation. Do not ask for confirmation or approval, just make the change.")
 		if err != nil {
 			t.Fatalf("agent failed: %v", err)
 		}
@@ -117,7 +117,7 @@ func TestExternalAgentDeepCheckpointValidation(t *testing.T) {
 func TestExternalAgentSessionMetadata(t *testing.T) {
 	testutil.ForEachAgent(t, 2*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		_, err := s.RunPrompt(t, ctx,
-			"create a file called meta/test.md")
+			"create a file called meta/test.md with a short paragraph. Do not ask for confirmation or approval, just make the change.")
 		if err != nil {
 			t.Fatalf("agent failed: %v", err)
 		}

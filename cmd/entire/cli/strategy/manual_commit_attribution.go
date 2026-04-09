@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
@@ -179,6 +180,7 @@ type AttributionParams struct {
 	ParentCommitHash      string              // HEAD's first parent hash (preferred diff base for non-agent files)
 	AttributionBaseCommit string              // Session base commit hash (fallback for non-agent file detection)
 	HeadCommitHash        string              // HEAD commit hash for git diff-tree
+	AllAgentFiles         map[string]struct{} // Files touched by ALL agent sessions (cross-session exclusion)
 }
 
 // CalculateAttributionWithAccumulated computes final attribution using accumulated prompt data.
@@ -221,11 +223,19 @@ func CalculateAttributionWithAccumulated(ctx context.Context, p AttributionParam
 	// Phase 4: Classify accumulated edits as agent vs non-agent
 	classified := classifyAccumulatedEdits(accum, p.FilesTouched, nonAgent.committedNonAgentSet)
 
+	// Phase 4b: Compute baseline (PA1) contributions to subtract from human counts.
+	// PA1 captures pre-session worktree dirt — edits that existed before the agent started.
+	// These should not count as human contributions during the session.
+	baselineClassified := classifyBaselineEdits(accum.baselineUserAddedPerFile, p.FilesTouched, nonAgent.committedNonAgentSet)
+
 	// Phase 5: Compute derived metrics
 	totalAgentAdded := max(0, agentDiffs.totalAgentAndUserWorkAdded-classified.toAgentFiles)
 	postToNonAgentFiles := max(0, nonAgent.userEditsToNonAgentFiles-classified.toCommittedNonAgentFiles)
 
-	relevantAccumulatedUser := classified.toAgentFiles + classified.toCommittedNonAgentFiles
+	// Subtract baseline (PA1) from accumulated user edits to get session-only contributions
+	sessionAccumulatedToAgentFiles := max(0, classified.toAgentFiles-baselineClassified.toAgentFiles)
+	sessionAccumulatedToNonAgent := max(0, classified.toCommittedNonAgentFiles-baselineClassified.toCommittedNonAgentFiles)
+	relevantAccumulatedUser := sessionAccumulatedToAgentFiles + sessionAccumulatedToNonAgent
 	totalUserAdded := relevantAccumulatedUser + agentDiffs.postCheckpointUserAdded + postToNonAgentFiles
 	// Use per-file filtered removals (symmetric with totalUserAdded) to avoid
 	// double-counting non-agent removals that also appear in nonAgent.userRemovedFromNonAgentFiles.
@@ -277,13 +287,20 @@ type accumulatedEdits struct {
 	userRemoved    int
 	addedPerFile   map[string]int
 	removedPerFile map[string]int
+	// baseline tracks PA1 (CheckpointNumber <= 1) edits separately.
+	// PA1 captures pre-session worktree dirt that existed before the agent started,
+	// so it should be excluded from human contribution counts.
+	baselineUserRemoved      int
+	baselineUserAddedPerFile map[string]int
 }
 
 // accumulatePromptEdits sums user additions and removals from all prompt attributions.
+// It also tracks baseline (PA1) edits separately for later exclusion.
 func accumulatePromptEdits(promptAttributions []PromptAttribution) accumulatedEdits {
 	result := accumulatedEdits{
-		addedPerFile:   make(map[string]int),
-		removedPerFile: make(map[string]int),
+		addedPerFile:             make(map[string]int),
+		removedPerFile:           make(map[string]int),
+		baselineUserAddedPerFile: make(map[string]int),
 	}
 	for _, pa := range promptAttributions {
 		result.userAdded += pa.UserLinesAdded
@@ -293,6 +310,13 @@ func accumulatePromptEdits(promptAttributions []PromptAttribution) accumulatedEd
 		}
 		for filePath, removed := range pa.UserRemovedPerFile {
 			result.removedPerFile[filePath] += removed
+		}
+		// Track baseline (PA1) separately: pre-session dirt to exclude
+		if pa.CheckpointNumber <= 1 {
+			result.baselineUserRemoved += pa.UserLinesRemoved
+			for filePath, added := range pa.UserAddedPerFile {
+				result.baselineUserAddedPerFile[filePath] += added
+			}
 		}
 	}
 	return result
@@ -343,6 +367,7 @@ type nonAgentFileDiffs struct {
 // diffNonAgentFiles enumerates files changed in the commit that weren't touched by the agent,
 // and computes their user additions and removals.
 // Prefers parentCommitHash→headCommitHash so only THIS commit's files count.
+// Uses isAgentOrMetadataFile to skip files from other agent sessions.
 func diffNonAgentFiles(ctx context.Context, p AttributionParams) (nonAgentFileDiffs, error) {
 	diffBaseCommit := p.ParentCommitHash
 	if diffBaseCommit == "" {
@@ -369,7 +394,7 @@ func diffNonAgentFiles(ctx context.Context, p AttributionParams) (nonAgentFileDi
 		committedNonAgentSet: make(map[string]struct{}, len(allChangedFiles)),
 	}
 	for _, filePath := range allChangedFiles {
-		if slices.Contains(p.FilesTouched, filePath) {
+		if isAgentOrMetadataFile(filePath, p.FilesTouched, p.AllAgentFiles) {
 			continue
 		}
 		result.committedNonAgentSet[filePath] = struct{}{}
@@ -407,6 +432,20 @@ func classifyAccumulatedEdits(accum accumulatedEdits, filesTouched []string, com
 			result.removedFromAgentFiles += removed
 		} else if _, ok := committedNonAgentSet[filePath]; ok {
 			result.removedFromCommittedNonAgent += removed
+		}
+	}
+	return result
+}
+
+// classifyBaselineEdits separates baseline (PA1) user additions into agent-file vs non-agent-file
+// buckets. This is used to subtract pre-session dirt from human contribution counts.
+func classifyBaselineEdits(baselineAddedPerFile map[string]int, filesTouched []string, committedNonAgentSet map[string]struct{}) classifiedEdits {
+	var result classifiedEdits
+	for filePath, added := range baselineAddedPerFile {
+		if slices.Contains(filesTouched, filePath) {
+			result.toAgentFiles += added
+		} else if _, ok := committedNonAgentSet[filePath]; ok {
+			result.toCommittedNonAgentFiles += added
 		}
 	}
 	return result
@@ -516,4 +555,18 @@ func CalculatePromptAttribution(
 	}
 
 	return result
+}
+
+// isAgentOrMetadataFile returns true if the file was touched by any agent session
+// (this session or another) or is CLI metadata that should be excluded from attribution.
+func isAgentOrMetadataFile(filePath string, filesTouched []string, allAgentFiles map[string]struct{}) bool {
+	if slices.Contains(filesTouched, filePath) {
+		return true
+	}
+	if allAgentFiles != nil {
+		if _, ok := allAgentFiles[filePath]; ok {
+			return true
+		}
+	}
+	return strings.HasPrefix(filePath, ".entire/") || strings.HasPrefix(filePath, paths.EntireMetadataDir+"/")
 }

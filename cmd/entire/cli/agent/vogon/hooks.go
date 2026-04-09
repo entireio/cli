@@ -45,6 +45,7 @@ func (v *Agent) ParseHookEvent(_ context.Context, hookName string, stdin io.Read
 			Type:       agent.SessionStart,
 			SessionID:  raw.SessionID,
 			SessionRef: raw.TranscriptPath,
+			Model:      raw.Model,
 			Timestamp:  time.Now(),
 		}, nil
 
@@ -58,6 +59,7 @@ func (v *Agent) ParseHookEvent(_ context.Context, hookName string, stdin io.Read
 			SessionID:  raw.SessionID,
 			SessionRef: raw.TranscriptPath,
 			Prompt:     raw.Prompt,
+			Model:      raw.Model,
 			Timestamp:  time.Now(),
 		}, nil
 
@@ -70,6 +72,7 @@ func (v *Agent) ParseHookEvent(_ context.Context, hookName string, stdin io.Read
 			Type:       agent.TurnEnd,
 			SessionID:  raw.SessionID,
 			SessionRef: raw.TranscriptPath,
+			Model:      raw.Model,
 			Timestamp:  time.Now(),
 		}, nil
 
@@ -82,6 +85,7 @@ func (v *Agent) ParseHookEvent(_ context.Context, hookName string, stdin io.Read
 			Type:       agent.SessionEnd,
 			SessionID:  raw.SessionID,
 			SessionRef: raw.TranscriptPath,
+			Model:      raw.Model,
 			Timestamp:  time.Now(),
 		}, nil
 
@@ -117,10 +121,12 @@ func (v *Agent) WriteHookResponse(message string) error {
 type sessionInfoRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
+	Model          string `json:"model,omitempty"`
 }
 
 type userPromptSubmitRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
 	Prompt         string `json:"prompt"`
+	Model          string `json:"model,omitempty"`
 }

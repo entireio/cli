@@ -27,24 +27,13 @@ import (
 const DefaultMaxCheckpointsPerGeneration = 100
 
 // GenerationMetadata tracks the state of a /full/* generation.
-// A "generation" is a batch of raw transcripts stored under a single ref.
-// The active generation lives at /full/current; when it reaches the checkpoint
-// limit, it is archived as a numbered ref (e.g., /full/0000000000001) and a
-// fresh /full/current is created. Archived generations can later be cleaned up
-// based on their timestamps (see RFD-009 cleanup path).
+// Written to the tree root as generation.json at archive time only — not during
+// normal writes to /full/current. This keeps /full/current free of root-level
+// files, ensuring conflict-free tree merges during push recovery.
 //
-// Stored at the tree root as generation.json and updated on every WriteCommitted.
-// UpdateCommitted (stop-time finalization) does NOT update this file since it
-// replaces an existing transcript rather than adding a new checkpoint.
-//
-// The generation's sequence number is derived from the ref name, not stored
-// in this struct. The checkpoint count is len(Checkpoints).
+// The generation's sequence number is derived from the ref name, not stored here.
+// Checkpoint membership is determined by walking the tree (shard directories).
 type GenerationMetadata struct {
-	// Checkpoints is the list of checkpoint IDs stored in this generation.
-	// Used for finding which generation holds a specific checkpoint
-	// without walking the tree. len(Checkpoints) gives the count.
-	Checkpoints []id.CheckpointID `json:"checkpoints"`
-
 	// OldestCheckpointAt is the creation time of the earliest checkpoint.
 	OldestCheckpointAt time.Time `json:"oldest_checkpoint_at"`
 
@@ -87,7 +76,7 @@ func (s *V2GitStore) readGeneration(treeHash plumbing.Hash) (GenerationMetadata,
 
 // readGenerationFromRef reads generation.json from the tree pointed to by the given ref.
 func (s *V2GitStore) readGenerationFromRef(refName plumbing.ReferenceName) (GenerationMetadata, error) {
-	_, treeHash, err := s.getRefState(refName)
+	_, treeHash, err := s.GetRefState(refName)
 	if err != nil {
 		return GenerationMetadata{}, fmt.Errorf("failed to get ref state: %w", err)
 	}
@@ -124,41 +113,33 @@ func (s *V2GitStore) writeGeneration(gen GenerationMetadata, entries map[string]
 	return nil
 }
 
-// updateGenerationForWrite reads the current generation metadata, appends the
-// checkpoint ID (if not already present), and updates timestamps.
-// Returns the updated metadata for the caller to write into the tree.
-func (s *V2GitStore) updateGenerationForWrite(rootTreeHash plumbing.Hash, checkpointID id.CheckpointID, now time.Time) (GenerationMetadata, error) {
-	gen, err := s.readGeneration(rootTreeHash)
+// CountCheckpointsInTree counts checkpoint shard directories in a /full/* tree.
+// The tree structure is <id[:2]>/<id[2:]>/ — we count second-level directories
+// across all shard prefixes. Returns 0 for an empty tree.
+func (s *V2GitStore) CountCheckpointsInTree(treeHash plumbing.Hash) (int, error) {
+	if treeHash == plumbing.ZeroHash {
+		return 0, nil
+	}
+
+	tree, err := s.repo.TreeObject(treeHash)
 	if err != nil {
-		return GenerationMetadata{}, err
+		return 0, fmt.Errorf("failed to read tree: %w", err)
 	}
 
-	// Only append if checkpoint ID is not already present (multi-session writes
-	// to the same checkpoint should not duplicate the ID).
-	found := false
-	for _, existing := range gen.Checkpoints {
-		if existing == checkpointID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		gen.Checkpoints = append(gen.Checkpoints, checkpointID)
-
-		// Only update timestamps when a new checkpoint is added, so they reflect
-		// checkpoint creation times rather than last-write times.
-		if gen.OldestCheckpointAt.IsZero() {
-			gen.OldestCheckpointAt = now
-		}
-		gen.NewestCheckpointAt = now
+	count := 0
+	if err := WalkCheckpointShards(s.repo, tree, func(_ id.CheckpointID, _ plumbing.Hash) error {
+		count++
+		return nil
+	}); err != nil {
+		return 0, err
 	}
 
-	return gen, nil
+	return count, nil
 }
 
-// addGenerationToRootTree adds generation.json to an existing root tree, returning
+// AddGenerationJSONToTree adds generation.json to an existing root tree, returning
 // a new root tree hash. Preserves all existing entries (shard directories, etc.).
-func (s *V2GitStore) addGenerationToRootTree(rootTreeHash plumbing.Hash, gen GenerationMetadata) (plumbing.Hash, error) {
+func (s *V2GitStore) AddGenerationJSONToTree(rootTreeHash plumbing.Hash, gen GenerationMetadata) (plumbing.Hash, error) {
 	entry, err := s.marshalGenerationBlob(gen)
 	if err != nil {
 		return plumbing.ZeroHash, err
@@ -168,15 +149,54 @@ func (s *V2GitStore) addGenerationToRootTree(rootTreeHash plumbing.Hash, gen Gen
 		UpdateSubtreeOptions{MergeMode: MergeKeepExisting})
 }
 
+// computeGenerationTimestamps derives timestamps for a generation being archived.
+// Uses the commit history of the /full/current ref: oldest = first commit time,
+// newest = latest commit time. Falls back to time.Now() if the ref has no history.
+// Note: /full/* trees don't contain session metadata (that's on /main), so we
+// derive timestamps from git commit times rather than walking the tree.
+func (s *V2GitStore) computeGenerationTimestamps() GenerationMetadata {
+	now := time.Now().UTC()
+	fallback := GenerationMetadata{OldestCheckpointAt: now, NewestCheckpointAt: now}
+
+	refName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
+	ref, err := s.repo.Reference(refName, true)
+	if err != nil {
+		return fallback
+	}
+
+	commit, err := s.repo.CommitObject(ref.Hash())
+	if err != nil {
+		return fallback
+	}
+
+	newest := commit.Committer.When.UTC()
+
+	// Walk parents to find the oldest commit in this generation
+	iter := commit
+	for len(iter.ParentHashes) > 0 {
+		parent, parentErr := s.repo.CommitObject(iter.ParentHashes[0])
+		if parentErr != nil {
+			break
+		}
+		iter = parent
+	}
+	oldest := iter.Committer.When.UTC()
+
+	return GenerationMetadata{
+		OldestCheckpointAt: oldest,
+		NewestCheckpointAt: newest,
+	}
+}
+
 // generationRefWidth is the zero-padded width of archived generation ref names.
 const generationRefWidth = 13
 
-// generationRefPattern matches exactly 13 digits (the archived generation ref suffix format).
-var generationRefPattern = regexp.MustCompile(`^\d{13}$`)
+// GenerationRefPattern matches exactly 13 digits (the archived generation ref suffix format).
+var GenerationRefPattern = regexp.MustCompile(`^\d{13}$`)
 
 // listArchivedGenerations returns the names of all archived generation refs
 // (everything under V2FullRefPrefix matching the expected numeric format), sorted ascending.
-func (s *V2GitStore) listArchivedGenerations() ([]string, error) {
+func (s *V2GitStore) ListArchivedGenerations() ([]string, error) {
 	refs, err := s.repo.References()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list references: %w", err)
@@ -189,7 +209,7 @@ func (s *V2GitStore) listArchivedGenerations() ([]string, error) {
 			return nil
 		}
 		suffix := strings.TrimPrefix(name, paths.V2FullRefPrefix)
-		if suffix == "current" || !generationRefPattern.MatchString(suffix) {
+		if suffix == "current" || !GenerationRefPattern.MatchString(suffix) {
 			return nil
 		}
 		archived = append(archived, suffix)
@@ -206,7 +226,7 @@ func (s *V2GitStore) listArchivedGenerations() ([]string, error) {
 // nextGenerationNumber returns the next sequential generation number for archiving.
 // Scans existing archived refs and returns max+1. Returns 1 if no archives exist.
 func (s *V2GitStore) nextGenerationNumber() (int, error) {
-	archived, err := s.listArchivedGenerations()
+	archived, err := s.ListArchivedGenerations()
 	if err != nil {
 		return 0, err
 	}
@@ -234,13 +254,17 @@ func (s *V2GitStore) nextGenerationNumber() (int, error) {
 func (s *V2GitStore) rotateGeneration(ctx context.Context) error {
 	refName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
 
-	// Guard against concurrent rotation: if another instance already rotated,
-	// /full/current will have fewer checkpoints than the threshold.
-	gen, err := s.readGenerationFromRef(refName)
+	// Guard against concurrent rotation: re-read /full/current and check if
+	// it's still above the threshold. If not, another instance already rotated.
+	_, currentTreeHash, err := s.GetRefState(refName)
 	if err != nil {
 		return fmt.Errorf("rotation: failed to read /full/current: %w", err)
 	}
-	if len(gen.Checkpoints) < s.maxCheckpoints() {
+	checkpointCount, err := s.CountCheckpointsInTree(currentTreeHash)
+	if err != nil {
+		return fmt.Errorf("rotation: failed to count checkpoints: %w", err)
+	}
+	if checkpointCount < s.maxCheckpoints() {
 		return nil
 	}
 
@@ -280,21 +304,32 @@ func (s *V2GitStore) rotateGeneration(ctx context.Context) error {
 		return nil
 	}
 
-	// Phase 2: Create fresh orphan /full/current
-	seedGen := GenerationMetadata{
-		Checkpoints: []id.CheckpointID{},
-	}
-	seedEntries := make(map[string]object.TreeEntry)
-	if err := s.writeGeneration(seedGen, seedEntries); err != nil {
-		return fmt.Errorf("rotation: failed to build seed generation: %w", err)
-	}
-	seedTreeHash, err := BuildTreeFromEntries(s.repo, seedEntries)
+	// Write generation.json to the current tree before archiving.
+	gen := s.computeGenerationTimestamps()
+	archiveTreeHash, err := s.AddGenerationJSONToTree(currentTreeHash, gen)
 	if err != nil {
-		return fmt.Errorf("rotation: failed to build seed tree: %w", err)
+		return fmt.Errorf("rotation: failed to add generation.json: %w", err)
 	}
 
 	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-	orphanCommitHash, err := CreateCommit(s.repo, seedTreeHash, plumbing.ZeroHash, "Start generation", authorName, authorEmail)
+	archiveCommitHash, err := CreateCommit(s.repo, archiveTreeHash, currentRef.Hash(), "Archive generation", authorName, authorEmail)
+	if err != nil {
+		return fmt.Errorf("rotation: failed to create archive commit: %w", err)
+	}
+
+	// Update the archive ref to point to the commit with generation.json
+	archiveRef = plumbing.NewHashReference(archiveRefName, archiveCommitHash)
+	if err := s.repo.Storer.SetReference(archiveRef); err != nil {
+		return fmt.Errorf("rotation: failed to update archived ref %s: %w", archiveRefName, err)
+	}
+
+	// Phase 2: Create fresh orphan /full/current (empty tree, no generation.json)
+	emptyTreeHash, err := BuildTreeFromEntries(s.repo, make(map[string]object.TreeEntry))
+	if err != nil {
+		return fmt.Errorf("rotation: failed to build empty tree: %w", err)
+	}
+
+	orphanCommitHash, err := CreateCommit(s.repo, emptyTreeHash, plumbing.ZeroHash, "Start generation", authorName, authorEmail)
 	if err != nil {
 		return fmt.Errorf("rotation: failed to create orphan commit: %w", err)
 	}

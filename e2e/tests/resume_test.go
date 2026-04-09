@@ -33,7 +33,7 @@ func TestResumeFromFeatureBranch(t *testing.T) {
 		s.Git(t, "checkout", "-b", "feature")
 
 		_, err := s.RunPrompt(t, ctx,
-			"create a file at docs/hello.md with a paragraph about greetings. Do not ask for confirmation, just make the change.")
+			"create a file at docs/hello.md with a paragraph about greetings. Do not ask for confirmation or approval, just make the change.")
 		if err != nil {
 			t.Fatalf("agent failed: %v", err)
 		}
@@ -79,7 +79,7 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 		s.Git(t, "checkout", "-b", "feature")
 
 		_, err := s.RunPrompt(t, ctx,
-			"create a file at docs/red.md with a paragraph about the colour red. Do not ask for confirmation, just make the change.")
+			"create a file at docs/red.md with a paragraph about the colour red. Do not ask for confirmation or approval, just make the change.")
 		if err != nil {
 			t.Fatalf("prompt 1 failed: %v", err)
 		}
@@ -90,7 +90,7 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 		cp1Ref := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
 
 		_, err = s.RunPrompt(t, ctx,
-			"create a file at docs/blue.md with a paragraph about the colour blue. Do not ask for confirmation, just make the change.")
+			"create a file at docs/blue.md with a paragraph about the colour blue. Do not ask for confirmation or approval, just make the change.")
 		if err != nil {
 			t.Fatalf("prompt 2 failed: %v", err)
 		}
@@ -207,7 +207,7 @@ func TestResumeOlderCheckpointWithNewerCommits(t *testing.T) {
 		s.Git(t, "checkout", "-b", "feature")
 
 		_, err := s.RunPrompt(t, ctx,
-			"create a file at docs/hello.md with a paragraph about greetings. Do not ask for confirmation, just make the change.")
+			"create a file at docs/hello.md with a paragraph about greetings. Do not ask for confirmation or approval, just make the change.")
 		if err != nil {
 			t.Fatalf("agent failed: %v", err)
 		}

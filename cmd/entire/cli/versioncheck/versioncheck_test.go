@@ -40,6 +40,11 @@ func TestIsOutdated(t *testing.T) {
 		{"1.0.0-rc1", "1.0.0", true, "prerelease in current"},
 		{"1.0.0", "1.0.1-rc1", true, "prerelease in latest is still newer"},
 		{"1.0.0-dev-xxx", "1.0.1", false, "dev build skips version check"},
+
+		// Nightly-vs-nightly comparisons (same channel)
+		{"0.5.3-nightly.202604051159.abc1234", "0.5.3-nightly.202604061200.def5678", true, "older nightly is outdated by newer nightly"},
+		{"0.5.3-nightly.202604061200.def5678", "0.5.3-nightly.202604051159.abc1234", false, "newer nightly is not outdated by older nightly"},
+		{"0.5.3-nightly.202604061200.abc1234", "0.5.3-nightly.202604061200.abc1234", false, "same nightly is not outdated"},
 	}
 
 	for _, tt := range tests {
@@ -49,6 +54,77 @@ func TestIsOutdated(t *testing.T) {
 				t.Errorf("isOutdated(%q, %q) = %v, want %v", tt.current, tt.latest, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsNightly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"0.5.3-nightly.202604061200.abc1234", true},
+		{"v0.5.3-nightly.202604061200.abc1234", true},
+		{"1.0.0", false},
+		{"v1.0.0", false},
+		{"1.0.0-rc1", false},
+		{"1.0.0-dev-xxx", false},
+		{"dev", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			t.Parallel()
+			if got := isNightly(tt.version); got != tt.want {
+				t.Errorf("isNightly(%q) = %v, want %v", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFetchLatestNightlyVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		releases := []GitHubRelease{
+			{TagName: "v0.5.4", Prerelease: false},
+			{TagName: "v0.5.4-nightly.202604061200.abc1234", Prerelease: true},
+			{TagName: "v0.5.4-nightly.202604051159.def5678", Prerelease: true},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
+		json.NewEncoder(w).Encode(releases)
+	}))
+	defer server.Close()
+
+	original := githubReleasesURL
+	githubReleasesURL = server.URL
+	t.Cleanup(func() { githubReleasesURL = original })
+
+	version, err := fetchLatestNightlyVersion(context.Background())
+	if err != nil {
+		t.Fatalf("fetchLatestNightlyVersion() error = %v", err)
+	}
+	if version != "v0.5.4-nightly.202604061200.abc1234" {
+		t.Errorf("fetchLatestNightlyVersion() = %q, want v0.5.4-nightly.202604061200.abc1234", version)
+	}
+}
+
+func TestFetchLatestNightlyVersion_NoNightlies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		releases := []GitHubRelease{
+			{TagName: "v0.5.4", Prerelease: false},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		//nolint:errcheck // test helper
+		json.NewEncoder(w).Encode(releases)
+	}))
+	defer server.Close()
+
+	original := githubReleasesURL
+	githubReleasesURL = server.URL
+	t.Cleanup(func() { githubReleasesURL = original })
+
+	_, err := fetchLatestNightlyVersion(context.Background())
+	if err == nil {
+		t.Fatal("fetchLatestNightlyVersion() expected error when no nightlies, got nil")
 	}
 }
 

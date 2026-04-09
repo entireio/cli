@@ -1,0 +1,22 @@
+name: PR Binary Size
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  binary-size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Check for oversized binary files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MAX_BINARY_SIZE_BYTES: "1048576"
+        run: bash scripts/check-pr-binaries.sh "${BASE_SHA}" "${HEAD_SHA}"

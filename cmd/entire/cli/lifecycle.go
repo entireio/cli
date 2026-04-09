@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -79,16 +80,20 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 
 	// Build informational message — warn early if repo has no commits yet,
 	// since checkpoints require at least one commit to work.
-	message := "\n\nPowered by Entire:\n  This conversation will be linked to your next commit."
+	message := sessionStartMessage(ag.Name(), false)
 	if repo, err := strategy.OpenRepository(ctx); err == nil && strategy.IsEmptyRepository(repo) {
-		message = "\n\nPowered by Entire:\n  No commits yet — checkpoints will activate after your first commit."
+		message = sessionStartMessage(ag.Name(), true)
 	}
 
 	// Check for concurrent sessions and append count if any
 	_, countSessionsSpan := perf.Start(ctx, "count_active_sessions")
 	strat := GetStrategy(ctx)
 	if count, err := strat.CountOtherActiveSessionsWithCheckpoints(ctx, event.SessionID); err == nil && count > 0 {
-		message += fmt.Sprintf("\n  %d other active conversation(s) in this workspace will also be included.\n  Use 'entire status' for more information.", count)
+		if ag.Name() == agent.AgentNameCodex {
+			message += fmt.Sprintf(" %d other active conversation(s) in this workspace will also be included. Use 'entire status' for more information.", count)
+		} else {
+			message += fmt.Sprintf("\n  %d other active conversation(s) in this workspace will also be included.\n  Use 'entire status' for more information.", count)
+		}
 	}
 	countSessionsSpan.End()
 
@@ -133,6 +138,20 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	}
 
 	return nil
+}
+
+func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
+	if agentName == agent.AgentNameCodex {
+		if emptyRepo {
+			return "Powered by Entire: No commits yet — checkpoints will activate after your first commit."
+		}
+		return "Powered by Entire: This conversation will be linked to your next commit."
+	}
+
+	if emptyRepo {
+		return "\n\nPowered by Entire:\n  No commits yet — checkpoints will activate after your first commit."
+	}
+	return "\n\nPowered by Entire:\n  This conversation will be linked to your next commit."
 }
 
 // handleLifecycleModelUpdate persists the model name for the current session.
@@ -622,7 +641,22 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	if err := markSessionEnded(ctx, event, event.SessionID); err != nil {
 		logging.Warn(logCtx, "failed to mark session ended",
 			slog.String("error", err.Error()))
+		// Don't attempt eager condense if we couldn't even mark the session ended —
+		// the session state may be in an inconsistent state.
+		return nil
 	}
+
+	// Eagerly condense session data so PostCommit doesn't have to process it.
+	// This prevents zombie ENDED sessions from accumulating and causing O(N)
+	// overhead on every future commit (GitHub issue #591).
+	// Fail-open: if this fails, PostCommit will still process it on the next commit.
+	strat := GetStrategy(ctx)
+	if err := strat.CondenseAndMarkFullyCondensed(ctx, event.SessionID); err != nil {
+		logging.Warn(logCtx, "eager condense on session stop failed",
+			slog.String("session_id", event.SessionID),
+			slog.String("error", err.Error()))
+	}
+
 	return nil
 }
 

@@ -1,0 +1,89 @@
+#!/bin/sh
+#MISE description="Run one shard of the integration test package with race detection"
+#USAGE arg "<shard>" help="Shard name (a, b, c)"
+
+set -eu
+
+shard="${usage_shard:-}"
+parallel="${GO_TEST_PARALLEL:-16}"
+pkg="./cmd/entire/cli/integration_test"
+
+case "$shard" in
+  a|b|c) ;;
+  *)
+    echo "error: shard must be one of a, b, c" >&2
+    exit 1
+    ;;
+esac
+
+tests="$(
+  go test -tags=integration -list '^Test' "$pkg" |
+    awk '/^Test/ && $0 != "TestMain" { print }'
+)"
+
+if [ -z "$tests" ]; then
+  echo "error: failed to enumerate integration tests" >&2
+  exit 1
+fi
+
+selected_tests=""
+
+for test_name in $tests; do
+  target_shard="c"
+  case "$test_name" in
+    TestShadow_*|\
+    TestShadowStrategy_*|\
+    TestRewind_*|\
+    TestTaskCheckpoint_*|\
+    TestLogsOnlyRewind_*|\
+    TestManualCommit_*|\
+    TestCarryForward_*|\
+    TestLastInteractionTime_*|\
+    TestOld*|\
+    TestSubagent*|\
+    TestHookOverwrite_*)
+      target_shard="a"
+      ;;
+    TestResume_*|\
+    TestV2*|\
+    TestCloneAndResume_*|\
+    TestConcurrentPush_*|\
+    TestGracefulDegradation_*|\
+    TestPrePush_*|\
+    TestSessionIDConflict_*|\
+    TestSessionStart_*|\
+    TestAttach_*|\
+    TestOpenCodeHookFlow|\
+    TestOpenCodeMidTurnCommit|\
+    TestOpenCodeMultiTurnCondensation|\
+    TestOpenCodeResumedSessionAfterCommit|\
+    TestOpenCodeRewind)
+      target_shard="b"
+      ;;
+  esac
+
+  if [ "$target_shard" = "$shard" ]; then
+    if [ -n "$selected_tests" ]; then
+      selected_tests="$selected_tests
+$test_name"
+    else
+      selected_tests="$test_name"
+    fi
+  fi
+done
+
+if [ -z "$selected_tests" ]; then
+  echo "error: shard $shard matched no tests" >&2
+  exit 1
+fi
+
+count="$(printf '%s\n' "$selected_tests" | wc -l | tr -d ' ')"
+echo "integration shard $shard: $count tests"
+
+run_regex="$(
+  printf '%s\n' "$selected_tests" |
+    paste -sd'|' -
+)"
+
+go test -tags=integration -race -count=1 -parallel="$parallel" \
+  "$pkg" -run "^(${run_regex})$"

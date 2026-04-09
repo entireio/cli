@@ -49,7 +49,7 @@ type searchStyles struct {
 	selected     lipgloss.Style // highlighted selected row
 	helpKey      lipgloss.Style // colored key hints in footer
 	helpSep      lipgloss.Style // dim separator dots in footer
-	detailTitle  lipgloss.Style // colored title inside detail card
+	detailTitle  lipgloss.Style // colored title and section headers (orange, bold)
 	detailBorder lipgloss.Style // border style for detail card
 }
 
@@ -216,19 +216,6 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn
 		m = m.refreshBrowseContent()
 		return m, nil
 
-	case tea.MouseMsg:
-		if m.mode == modeBrowse {
-			var cmd tea.Cmd
-			m.browseVP, cmd = m.browseVP.Update(msg)
-			return m, cmd
-		}
-		if m.mode == modeDetail {
-			var cmd tea.Cmd
-			m.detailVP, cmd = m.detailVP.Update(msg)
-			return m, cmd
-		}
-		return m, nil
-
 	case tea.KeyMsg:
 		switch m.mode {
 		case modeSearch:
@@ -322,7 +309,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 	case "enter":
 		if r := m.selectedResult(); r != nil {
 			m.mode = modeDetail
-			content := m.renderDetailContent(*r)
+			content := m.renderDetailContent(*r, m.width, true)
 			m.detailVP = viewport.New(m.width, max(m.height-2, 1))
 			m.detailVP.SetContent(content)
 			return m, nil
@@ -524,10 +511,10 @@ func (m searchModel) viewRow(r search.Result, cols columnLayout) string {
 }
 
 // renderDetailContent builds the text content for a checkpoint detail (no border/card chrome).
-func (m searchModel) renderDetailContent(r search.Result) string {
+func (m searchModel) renderDetailContent(r search.Result, contentWidth int, showSections bool) string {
 	const labelWidth = 12
-	// Available width for field values: total width minus border/padding chrome minus label.
-	valueWidth := m.width - 8 - labelWidth - 1 // 8 for border+padding, 1 for space after label
+	// Available width for field values: content width minus label minus space.
+	valueWidth := contentWidth - labelWidth - 1
 	if valueWidth < 20 {
 		valueWidth = 0 // disable wrapping on very narrow terminals
 	}
@@ -535,7 +522,7 @@ func (m searchModel) renderDetailContent(r search.Result) string {
 	var content strings.Builder
 
 	content.WriteString(m.styles.render(m.styles.detailTitle, "Checkpoint Detail"))
-	content.WriteString("\n\n")
+	content.WriteString("\n")
 
 	formatLabel := func(label string) string {
 		return m.styles.render(m.styles.label, fmt.Sprintf("%-*s", labelWidth, label+":"))
@@ -560,34 +547,70 @@ func (m searchModel) renderDetailContent(r search.Result) string {
 		}
 	}
 
+	writeSection := func(title string) {
+		if showSections {
+			content.WriteString("\n" + m.styles.render(m.styles.detailTitle, title) + "\n")
+		} else {
+			content.WriteString("\n")
+		}
+	}
+
+	// ── OVERVIEW ──
+	writeSection("OVERVIEW")
 	writeField("ID", r.Data.ID)
-	writeWrappedField("Prompt", r.Data.Prompt)
+	writeWrappedField("Prompt", stringutil.CollapseWhitespace(r.Data.Prompt))
+	matchType := r.Meta.MatchType
+	if r.Meta.Score > 0 {
+		matchType += " " + m.styles.render(m.styles.dim, fmt.Sprintf("(score: %.3f)", r.Meta.Score))
+	}
+	writeField("Match", matchType)
+
+	// ── SOURCE ──
+	writeSection("SOURCE")
 	writeWrappedField("Commit", formatCommit(r.Data.CommitSHA, r.Data.CommitMessage))
 	writeField("Branch", r.Data.Branch)
 	writeField("Repo", r.Data.Org+"/"+r.Data.Repo)
-	writeField("Author", formatAuthor(r.Data.Author, r.Data.AuthorUsername))
-	writeField("Created", formatCreatedAt(r.Data.CreatedAt))
-	writeField("Match", formatMatch(r.Meta))
+	authorStr := r.Data.Author
+	if r.Data.AuthorUsername != nil && *r.Data.AuthorUsername != "" {
+		authorStr = *r.Data.AuthorUsername + " " + m.styles.render(m.styles.dim, "("+r.Data.Author+")")
+	}
+	writeField("Author", authorStr)
+	createdStr := formatDetailCreatedAt(r.Data.CreatedAt, m.styles)
+	writeField("Created", createdStr)
 
+	// ── SNIPPET ──
 	if r.Meta.Snippet != "" {
-		content.WriteString("\n")
-		content.WriteString(m.styles.render(m.styles.label, "Snippet:") + "\n")
+		writeSection("SNIPPET")
 		if valueWidth > 0 {
-			content.WriteString(wrapText(r.Meta.Snippet, m.width-8) + "\n")
+			content.WriteString(wrapText(r.Meta.Snippet, contentWidth) + "\n")
 		} else {
 			content.WriteString(r.Meta.Snippet + "\n")
 		}
 	}
 
+	// ── FILES ──
 	if len(r.Data.FilesTouched) > 0 {
 		content.WriteString("\n")
-		content.WriteString(m.styles.render(m.styles.label, "Files:") + "\n")
+		if showSections {
+			content.WriteString(m.styles.render(m.styles.detailTitle, "FILES") + "\n")
+		} else {
+			content.WriteString(m.styles.render(m.styles.label, "Files:") + "\n")
+		}
 		for _, f := range r.Data.FilesTouched {
-			content.WriteString(f + "\n")
+			content.WriteString("  " + f + "\n")
 		}
 	}
 
 	return strings.TrimRight(content.String(), "\n")
+}
+
+// formatDetailCreatedAt renders date (default) + relative time (dim) for the detail view.
+func formatDetailCreatedAt(createdAt string, styles searchStyles) string {
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return createdAt
+	}
+	return t.Format("Jan 02, 2006") + " " + styles.render(styles.dim, "("+timeAgo(t)+")")
 }
 
 // maxCardContentLines is the maximum number of content lines shown in the
@@ -596,20 +619,31 @@ func (m searchModel) renderDetailContent(r search.Result) string {
 const maxCardContentLines = 15
 
 func (m searchModel) viewDetailCard(r search.Result) string {
-	innerWidth := m.width - 8 // border + padding eats ~6-8 chars
-	cardContent := m.renderDetailContent(r)
+	var contentWidth int
+	var borderWidth int
+	if m.styles.colorEnabled {
+		// lipgloss .Width(W) includes padding but excludes border:
+		//   text wraps at W - padding(4), rendered = W + border(2), + indent(1) = W + 3
+		borderWidth = max(m.width-3, 0)
+		contentWidth = max(borderWidth-4, 0)
+	} else {
+		// No border/padding in NO_COLOR mode, only indent(1)
+		contentWidth = max(m.width-1, 0)
+	}
+	cardContent := m.renderDetailContent(r, contentWidth, false)
 
 	lines := strings.Split(cardContent, "\n")
 	if len(lines) > maxCardContentLines {
 		lines = lines[:maxCardContentLines]
 		hint := m.styles.render(m.styles.dim, "▼ enter for more")
-		lines = append(lines, "", strings.Repeat(" ", max(innerWidth-lipgloss.Width(hint), 0))+hint)
+		hintWidth := lipgloss.Width(hint)
+		lines = append(lines, "", strings.Repeat(" ", max(contentWidth-hintWidth, 0))+hint)
 		cardContent = strings.Join(lines, "\n")
 	}
 
 	card := cardContent
 	if m.styles.colorEnabled {
-		card = m.styles.detailBorder.Width(max(innerWidth, 40)).Render(cardContent)
+		card = m.styles.detailBorder.Width(borderWidth).Render(cardContent)
 	}
 
 	return indentLines(card, " ")
@@ -747,7 +781,7 @@ func computeColumns(width int) columnLayout {
 	}
 
 	branchWidth := max(remaining*18/100, 8)
-	repoWidth := max(remaining*31/100, repoMin)
+	repoWidth := max(remaining*18/100, repoMin)
 	promptWidth := remaining - branchWidth - repoWidth
 	if promptWidth < 12 {
 		reclaim := 12 - promptWidth
@@ -785,32 +819,6 @@ func formatCommit(sha, message *string) string {
 	msg := derefStr(message, "")
 	if msg != "" {
 		s += "  " + msg
-	}
-	return s
-}
-
-// formatAuthor renders username with display name, e.g. "dipree (Daniel Adams)".
-func formatAuthor(author string, username *string) string {
-	if username != nil && *username != "" {
-		return *username + " (" + author + ")"
-	}
-	return author
-}
-
-// formatCreatedAt renders a timestamp with relative time.
-func formatCreatedAt(createdAt string) string {
-	t, err := time.Parse(time.RFC3339, createdAt)
-	if err != nil {
-		return createdAt
-	}
-	return t.Format("Jan 02, 2006") + " (" + timeAgo(t) + ")"
-}
-
-// formatMatch renders match type and score.
-func formatMatch(meta search.Meta) string {
-	s := meta.MatchType
-	if meta.Score > 0 {
-		s += fmt.Sprintf(" (score: %.3f)", meta.Score)
 	}
 	return s
 }

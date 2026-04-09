@@ -25,7 +25,7 @@ const (
 	sessionGracePeriod = 10 * time.Minute
 )
 
-// CleanupType identifies the type of orphaned item.
+// CleanupType identifies the type of item to clean up.
 type CleanupType string
 
 const (
@@ -34,11 +34,11 @@ const (
 	CleanupTypeCheckpoint   CleanupType = "checkpoint"
 )
 
-// CleanupItem represents an orphaned item that can be cleaned up.
+// CleanupItem represents an item that can be cleaned up.
 type CleanupItem struct {
 	Type   CleanupType
 	ID     string // Branch name, session ID, or checkpoint ID
-	Reason string // Why this item is considered orphaned
+	Reason string // Why this item is being cleaned
 }
 
 // CleanupResult contains the results of a cleanup operation.
@@ -335,29 +335,46 @@ func DeleteOrphanedCheckpoints(ctx context.Context, checkpointIDs []string) (del
 	return checkpointIDs, []string{}, nil
 }
 
-// ListAllCleanupItems returns all orphaned items across all categories.
-// It iterates over all registered strategies and calls ListOrphanedItems on those
-// that implement OrphanedItemsLister.
-// Returns an error if the repository cannot be opened.
-func ListAllCleanupItems(ctx context.Context) ([]CleanupItem, error) {
+// ListAllItems returns all Entire items for full cleanup.
+// This includes all shadow branches and all session states regardless of
+// whether they have checkpoints or active shadow branches.
+func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 	var items []CleanupItem
-	var firstErr error
 
-	strat := NewManualCommitStrategy()
-	stratItems, err := strat.ListOrphanedItems(ctx)
+	// All shadow branches (using ListShadowBranches directly, not
+	// ListOrphanedItems, so this won't break if orphan filtering is added)
+	branches, err := ListShadowBranches(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing orphaned items: %w", err)
+		return nil, fmt.Errorf("listing shadow branches: %w", err)
 	}
-	items = append(items, stratItems...)
-	// Orphaned session states (strategy-agnostic)
-	states, err := ListOrphanedSessionStates(ctx)
+	for _, branch := range branches {
+		items = append(items, CleanupItem{
+			Type:   CleanupTypeShadowBranch,
+			ID:     branch,
+			Reason: "clean all",
+		})
+	}
+
+	// All session states (not just orphaned)
+	store, err := session.NewStateStore(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create state store: %w", err)
 	}
 
-	items = append(items, states...)
+	states, err := store.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list session states: %w", err)
+	}
 
-	return items, firstErr
+	for _, state := range states {
+		items = append(items, CleanupItem{
+			Type:   CleanupTypeSessionState,
+			ID:     state.SessionID,
+			Reason: "clean all",
+		})
+	}
+
+	return items, nil
 }
 
 // DeleteAllCleanupItems deletes all specified cleanup items.
@@ -396,7 +413,7 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 
 		// Log deleted branches
 		for _, id := range deleted {
-			logging.Info(logCtx, "deleted orphaned shadow branch",
+			logging.Info(logCtx, "deleted shadow branch",
 				slog.String("type", string(CleanupTypeShadowBranch)),
 				slog.String("id", id),
 				slog.String("reason", reasonMap[id]),
@@ -404,7 +421,7 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 		}
 		// Log failed branches
 		for _, id := range failed {
-			logging.Warn(logCtx, "failed to delete orphaned shadow branch",
+			logging.Warn(logCtx, "failed to delete shadow branch",
 				slog.String("type", string(CleanupTypeShadowBranch)),
 				slog.String("id", id),
 				slog.String("reason", reasonMap[id]),
@@ -423,7 +440,7 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 
 		// Log deleted session states
 		for _, id := range deleted {
-			logging.Info(logCtx, "deleted orphaned session state",
+			logging.Info(logCtx, "deleted session state",
 				slog.String("type", string(CleanupTypeSessionState)),
 				slog.String("id", id),
 				slog.String("reason", reasonMap[id]),
@@ -431,7 +448,7 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 		}
 		// Log failed session states
 		for _, id := range failed {
-			logging.Warn(logCtx, "failed to delete orphaned session state",
+			logging.Warn(logCtx, "failed to delete session state",
 				slog.String("type", string(CleanupTypeSessionState)),
 				slog.String("id", id),
 				slog.String("reason", reasonMap[id]),
@@ -450,7 +467,7 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 
 		// Log deleted checkpoints
 		for _, id := range deleted {
-			logging.Info(logCtx, "deleted orphaned checkpoint",
+			logging.Info(logCtx, "deleted checkpoint",
 				slog.String("type", string(CleanupTypeCheckpoint)),
 				slog.String("id", id),
 				slog.String("reason", reasonMap[id]),
@@ -458,7 +475,7 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 		}
 		// Log failed checkpoints
 		for _, id := range failed {
-			logging.Warn(logCtx, "failed to delete orphaned checkpoint",
+			logging.Warn(logCtx, "failed to delete checkpoint",
 				slog.String("type", string(CleanupTypeCheckpoint)),
 				slog.String("id", id),
 				slog.String("reason", reasonMap[id]),

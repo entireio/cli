@@ -248,10 +248,10 @@ func TestGenerateCommitMessage(t *testing.T) {
 			expected:  "OpenCode session updates",
 		},
 		{
-			name:      "returns Agent fallback for empty agent type",
+			name:      "returns Unknown fallback for empty agent type",
 			prompt:    "",
 			agentType: "",
-			expected:  "Agent session updates",
+			expected:  "Unknown session updates",
 		},
 	}
 

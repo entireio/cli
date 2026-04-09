@@ -119,6 +119,23 @@ func TestParseHookEvent_TurnEnd(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_TurnEnd_IncludesModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"session_id": "sess-stop-model", "transcript_path": "/tmp/stop.jsonl", "model": "claude-opus-4-6"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, event, "expected event, got nil")
+	if event.Model != "claude-opus-4-6" {
+		t.Errorf("expected model 'claude-opus-4-6', got %q", event.Model)
+	}
+}
+
 func TestParseHookEvent_SessionEnd(t *testing.T) {
 	t.Parallel()
 
@@ -136,6 +153,23 @@ func TestParseHookEvent_SessionEnd(t *testing.T) {
 	}
 	if event.SessionID != "ending-session" {
 		t.Errorf("expected session_id 'ending-session', got %q", event.SessionID)
+	}
+}
+
+func TestParseHookEvent_SessionEnd_IncludesModel(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"session_id": "end-model", "transcript_path": "/tmp/end.jsonl", "model": "claude-sonnet-4-20250514"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionEnd, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, event, "expected event, got nil")
+	if event.Model != "claude-sonnet-4-20250514" {
+		t.Errorf("expected model 'claude-sonnet-4-20250514', got %q", event.Model)
 	}
 }
 

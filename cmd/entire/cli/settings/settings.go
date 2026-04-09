@@ -410,6 +410,16 @@ func IsCheckpointsV2Enabled(ctx context.Context) bool {
 	return settings.IsCheckpointsV2Enabled()
 }
 
+// IsPushV2RefsEnabled checks if pushing v2 refs is enabled in settings.
+// Returns false by default if settings cannot be loaded or flags are missing.
+func IsPushV2RefsEnabled(ctx context.Context) bool {
+	s, err := Load(ctx)
+	if err != nil {
+		return false
+	}
+	return s.IsPushV2RefsEnabled()
+}
+
 // IsSummarizeEnabled checks if auto-summarize is enabled in settings.
 // Returns false by default if settings cannot be loaded or the key is missing.
 func IsSummarizeEnabled(ctx context.Context) bool {
@@ -486,6 +496,19 @@ func (s *EntireSettings) IsCheckpointsV2Enabled() bool {
 		return false
 	}
 	val, ok := s.StrategyOptions["checkpoints_v2"].(bool)
+	return ok && val
+}
+
+// IsPushV2RefsEnabled checks if pushing v2 refs is enabled.
+// Requires both checkpoints_v2 and push_v2_refs to be true.
+func (s *EntireSettings) IsPushV2RefsEnabled() bool {
+	if !s.IsCheckpointsV2Enabled() {
+		return false
+	}
+	if s.StrategyOptions == nil {
+		return false
+	}
+	val, ok := s.StrategyOptions["push_v2_refs"].(bool)
 	return ok && val
 }
 

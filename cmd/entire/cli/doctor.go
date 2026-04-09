@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
@@ -16,9 +17,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
 )
-
-// stalenessThreshold is the duration after which an active session is considered stuck.
-const stalenessThreshold = 1 * time.Hour
 
 func newDoctorCmd() *cobra.Command {
 	var forceFlag bool
@@ -191,9 +189,7 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 
 	switch {
 	case state.Phase.IsActive():
-		// Active sessions are stuck if no interaction for over the staleness threshold
-		isStale := state.LastInteractionTime == nil || now.Sub(*state.LastInteractionTime) > stalenessThreshold
-		if !isStale {
+		if !state.IsStuckActive() {
 			return nil
 		}
 
@@ -201,7 +197,7 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 		if state.LastInteractionTime != nil {
 			reason = fmt.Sprintf("active, last interaction %s ago", now.Sub(*state.LastInteractionTime).Truncate(time.Minute))
 		} else {
-			reason = "active, no recorded interaction time"
+			reason = fmt.Sprintf("active, started %s ago with no recorded interaction", now.Sub(state.StartedAt).Truncate(time.Minute))
 		}
 
 		return &stuckSession{
@@ -319,7 +315,8 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	}
 
 	ctx := cmd.Context()
-	disconnected, err := strategy.IsMetadataDisconnected(ctx, repo)
+	remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+	disconnected, err := strategy.IsMetadataDisconnected(ctx, repo, remoteRefName)
 	if err != nil {
 		return fmt.Errorf("could not check metadata branch state: %w", err)
 	}
@@ -357,7 +354,7 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 		}
 	}
 
-	if fixErr := strategy.ReconcileDisconnectedMetadataBranch(ctx, repo, cmd.ErrOrStderr()); fixErr != nil {
+	if fixErr := strategy.ReconcileDisconnectedMetadataBranch(ctx, repo, remoteRefName, cmd.ErrOrStderr()); fixErr != nil {
 		return fmt.Errorf("failed to reconcile metadata branches: %w", fixErr)
 	}
 

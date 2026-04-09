@@ -359,7 +359,7 @@ func TestCheckpointToken_GIT_TERMINAL_PROMPT_Coexistence(t *testing.T) {
 	t.Setenv(CheckpointTokenEnvVar, "coexist-token")
 
 	cmd := CheckpointGitCommand(context.Background(), "https://github.com/org/repo.git",
-		"fetch", "--no-tags", "https://github.com/org/repo.git", "refs/heads/main")
+		"fetch", "--no-tags", "--filter=blob:none", "https://github.com/org/repo.git", "refs/heads/main")
 	require.NotNil(t, cmd.Env)
 
 	// Simulate what fetchMetadataBranchIfMissing does: append GIT_TERMINAL_PROMPT

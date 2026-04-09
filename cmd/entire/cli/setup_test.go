@@ -6,18 +6,22 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/go-git/go-git/v6"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // Note: Tests for hook manipulation functions (addHookToMatcher, hookCommandExists, etc.)
@@ -29,6 +33,7 @@ import (
 func setupTestDir(t *testing.T) string {
 	t.Helper()
 	tmpDir := t.TempDir()
+	hideExternalAgentsFromPath(t)
 	t.Chdir(tmpDir)
 	paths.ClearWorktreeRootCache()
 	session.ClearGitCommonDirCache()
@@ -39,9 +44,7 @@ func setupTestDir(t *testing.T) string {
 func setupTestRepo(t *testing.T) {
 	t.Helper()
 	tmpDir := setupTestDir(t)
-	if _, err := git.PlainInit(tmpDir, false); err != nil {
-		t.Fatalf("Failed to init repo: %v", err)
-	}
+	testutil.InitRepo(t, tmpDir)
 }
 
 // writeSettings writes settings content to the settings file.
@@ -53,6 +56,110 @@ func writeSettings(t *testing.T, content string) {
 	}
 	if err := os.WriteFile(EntireSettingsFile, []byte(content), 0o644); err != nil {
 		t.Fatalf("Failed to write settings file: %v", err)
+	}
+}
+
+func hideExternalAgentsFromPath(t *testing.T) {
+	t.Helper()
+
+	pathDir := t.TempDir()
+	for _, name := range []string{"git", "sh"} {
+		if err := preserveToolOnPath(name, pathDir); err != nil {
+			t.Fatalf("preserve %s on PATH: %v", name, err)
+		}
+	}
+
+	t.Setenv("PATH", pathDir)
+}
+
+func TestSetupTestDir_HidesExternalAgentsButKeepsGitAvailable(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not available")
+	}
+
+	sharedDir := t.TempDir()
+	if err := copyExecutable(gitPath, filepath.Join(sharedDir, "git")); err != nil {
+		t.Fatalf("copy git executable: %v", err)
+	}
+	writeExternalAgentBinary(t, sharedDir, "ext-shared-dir")
+	t.Setenv("PATH", sharedDir)
+
+	setupTestDir(t)
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatalf("expected git to remain available after test PATH isolation: %v", err)
+	}
+	if _, err := exec.LookPath("entire-agent-ext-shared-dir"); err == nil {
+		t.Fatal("expected external agent to be hidden from PATH")
+	}
+}
+
+func preserveToolOnPath(name, dstDir string) error {
+	src, err := exec.LookPath(name)
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	return copyExecutable(src, filepath.Join(dstDir, filepath.Base(src)))
+}
+
+func copyExecutable(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	if err := os.Symlink(src, dst); err == nil {
+		return nil
+	}
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(dst, data, info.Mode())
+}
+
+func writeExternalAgentBinary(t *testing.T, dir, name string) {
+	t.Helper()
+
+	script := `#!/bin/sh
+case "$1" in
+  info)
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External test agent","is_preview":false,"protected_dirs":[],"hook_names":["stop"],"capabilities":{"hooks":true}}'
+    ;;
+  detect)
+    if [ "$ENTIRE_TEST_EXTERNAL_PRESENT" = "1" ]; then
+      echo '{"present": true}'
+    else
+      echo '{"present": false}'
+    fi
+    ;;
+  install-hooks)
+    echo '{"hooks_installed": 1}'
+    ;;
+  uninstall-hooks)
+    exit 0
+    ;;
+  are-hooks-installed)
+    echo '{"installed": false}'
+    ;;
+  *)
+    echo '{}'
+    ;;
+esac
+`
+
+	if err := os.WriteFile(filepath.Join(dir, "entire-agent-"+name), []byte(script), 0o755); err != nil {
+		t.Fatalf("Failed to write external agent binary: %v", err)
 	}
 }
 
@@ -935,6 +1042,90 @@ func TestDetectOrSelectAgent_GeminiDetected(t *testing.T) {
 	}
 }
 
+func TestDetectOrSelectAgent_OnlyExternalDetected_WithTTY_PromptsUser(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir, t.Setenv, and global agent registration
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	externalAgentName := "ext-prompt-pi"
+	externalDir := t.TempDir()
+	writeExternalAgentBinary(t, externalDir, externalAgentName)
+	t.Setenv("ENTIRE_TEST_EXTERNAL_PRESENT", "1")
+	t.Setenv("PATH", externalDir)
+
+	external.DiscoverAndRegisterAlways(context.Background())
+
+	var receivedAvailable []string
+	selectFn := func(available []string) ([]string, error) {
+		receivedAvailable = available
+		return []string{string(agent.AgentNameClaudeCode)}, nil
+	}
+
+	var buf bytes.Buffer
+	agents, err := detectOrSelectAgent(context.Background(), &buf, selectFn)
+	if err != nil {
+		t.Fatalf("detectOrSelectAgent() error = %v", err)
+	}
+
+	if len(receivedAvailable) == 0 {
+		t.Fatal("Expected interactive prompt when only an external agent is detected")
+	}
+	if !slices.Contains(receivedAvailable, externalAgentName) {
+		t.Fatalf("Expected external agent %q in options, got %v", externalAgentName, receivedAvailable)
+	}
+	if !slices.Contains(receivedAvailable, string(agent.AgentNameClaudeCode)) {
+		t.Fatalf("Expected built-in agent options alongside external agent, got %v", receivedAvailable)
+	}
+	if len(agents) != 1 || agents[0].Name() != agent.AgentNameClaudeCode {
+		t.Fatalf("Expected selected Claude Code agent, got %v", agents)
+	}
+	if strings.Contains(buf.String(), "Detected agent:") {
+		t.Errorf("Expected external-only detection to prompt instead of auto-selecting, got output: %s", buf.String())
+	}
+}
+
+func TestIsBuiltInAgent_ExternalAgent_False(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+
+	externalAgentName := "ext-preselect-pi"
+	externalDir := t.TempDir()
+	writeExternalAgentBinary(t, externalDir, externalAgentName)
+	t.Setenv("ENTIRE_TEST_EXTERNAL_PRESENT", "1")
+	t.Setenv("PATH", externalDir)
+
+	external.DiscoverAndRegisterAlways(context.Background())
+
+	externalAgent, err := agent.Get(types.AgentName(externalAgentName))
+	if err != nil {
+		t.Fatalf("failed to get external agent %q: %v", externalAgentName, err)
+	}
+
+	if isBuiltInAgent(externalAgent) {
+		t.Fatalf("expected external agent %q to not be treated as built-in", externalAgentName)
+	}
+}
+
+func TestIsBuiltInAgent_BuiltInAgent_True(t *testing.T) {
+	t.Parallel()
+
+	claudeAgent, err := agent.Get(agent.AgentNameClaudeCode)
+	if err != nil {
+		t.Fatalf("failed to get claude agent: %v", err)
+	}
+
+	if !isBuiltInAgent(claudeAgent) {
+		t.Fatal("expected built-in agent to be treated as built-in")
+	}
+}
+
 func TestDetectOrSelectAgent_NoDetection_NoTTY_FallsBackToDefault(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
@@ -1339,6 +1530,165 @@ func TestUninstallDeselectedAgentHooks_MultipleInstalled_DeselectOne(t *testing.
 	output := buf.String()
 	if !strings.Contains(output, "Removed") {
 		t.Errorf("Expected output to mention removal, got: %s", output)
+	}
+}
+
+func TestManageAgents_DeselectRemovesAgent(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	writeSettings(t, testSettingsEnabled)
+
+	// Install Claude Code hooks
+	writeClaudeHooksFixture(t)
+
+	if !checkClaudeCodeHooksInstalled() {
+		t.Fatal("Expected Claude Code hooks to be installed before test")
+	}
+
+	// Deselect claude-code, select gemini instead
+	selectFn := func(_ []string) ([]string, error) {
+		return []string{string(agent.AgentNameGemini)}, nil
+	}
+
+	var buf bytes.Buffer
+	err := runManageAgents(context.Background(), &buf, EnableOptions{}, selectFn)
+	if err != nil {
+		t.Fatalf("runManageAgents() error = %v", err)
+	}
+
+	output := buf.String()
+
+	// Claude Code hooks should be removed
+	if checkClaudeCodeHooksInstalled() {
+		t.Error("Expected Claude Code hooks to be uninstalled after deselection")
+	}
+
+	if !strings.Contains(output, "Removed agents") {
+		t.Errorf("Expected output to mention removed agents, got: %s", output)
+	}
+}
+
+func TestManageAgents_DeselectAll_RemovesAllAndShowsGuidance(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	if !checkClaudeCodeHooksInstalled() {
+		t.Fatal("Expected Claude Code hooks to be installed before test")
+	}
+
+	selectFn := func(_ []string) ([]string, error) {
+		return []string{}, nil
+	}
+
+	var buf bytes.Buffer
+	err := runManageAgents(context.Background(), &buf, EnableOptions{}, selectFn)
+	if err != nil {
+		t.Fatalf("runManageAgents() error = %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "All agents have been removed.") {
+		t.Errorf("Expected 'All agents have been removed.' message, got: %s", output)
+	}
+	if !strings.Contains(output, "entire configure --agent") {
+		t.Errorf("Expected guidance on how to re-add agents, got: %s", output)
+	}
+
+	if checkClaudeCodeHooksInstalled() {
+		t.Error("Expected Claude Code hooks to be uninstalled after deselecting all")
+	}
+}
+
+func TestManageAgents_NoChanges(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	// Keep the same selection
+	selectFn := func(_ []string) ([]string, error) {
+		return []string{string(agent.AgentNameClaudeCode)}, nil
+	}
+
+	var buf bytes.Buffer
+	err := runManageAgents(context.Background(), &buf, EnableOptions{}, selectFn)
+	if err != nil {
+		t.Fatalf("runManageAgents() error = %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "No changes made.") {
+		t.Errorf("Expected 'No changes made.' output, got: %s", buf.String())
+	}
+}
+
+func TestManageAgents_AddAndRemove(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	writeSettings(t, testSettingsEnabled)
+
+	// Install Claude Code hooks
+	writeClaudeHooksFixture(t)
+
+	// Deselect claude-code, add gemini
+	selectFn := func(_ []string) ([]string, error) {
+		return []string{string(agent.AgentNameGemini)}, nil
+	}
+
+	var buf bytes.Buffer
+	err := runManageAgents(context.Background(), &buf, EnableOptions{}, selectFn)
+	if err != nil {
+		t.Fatalf("runManageAgents() error = %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Added agents") {
+		t.Errorf("Expected 'Added agents' in output, got: %s", output)
+	}
+	if !strings.Contains(output, "Removed agents") {
+		t.Errorf("Expected 'Removed agents' in output, got: %s", output)
+	}
+
+	// Verify hooks on disk: Claude removed, Gemini added
+	if checkClaudeCodeHooksInstalled() {
+		t.Error("Expected Claude Code hooks to be uninstalled after deselection")
+	}
+	if !checkGeminiCLIHooksInstalled() {
+		t.Error("Expected Gemini CLI hooks to be installed after selection")
+	}
+}
+
+func TestConfigureCmd_RemoveFlag_StillWorks(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	if !checkClaudeCodeHooksInstalled() {
+		t.Fatal("Expected Claude Code hooks to be installed before test")
+	}
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--remove", "claude-code"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --remove claude-code error = %v", err)
+	}
+
+	if checkClaudeCodeHooksInstalled() {
+		t.Error("Expected Claude Code hooks to be removed after --remove")
+	}
+
+	if !strings.Contains(stdout.String(), "Removed") {
+		t.Errorf("Expected removal message, got: %s", stdout.String())
 	}
 }
 

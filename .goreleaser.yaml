@@ -66,6 +66,8 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+release:
+  prerelease: auto
 
 scoops:
   - repository:
@@ -75,6 +77,7 @@ scoops:
     homepage: "https://github.com/entireio/cli"
     description: "CLI for Entire"
     license: MIT
+    skip_upload: auto
 
 homebrew_casks:
   - name: entire
@@ -91,9 +94,30 @@ homebrew_casks:
       bash: "completions/entire.bash"
       zsh: "completions/entire.zsh"
       fish: "completions/entire.fish"
+    conflicts:
+      - cask: entire@nightly
+    skip_upload: auto
+
+  - name: entire@nightly
+    repository:
+      owner: entireio
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/entireio/cli"
+    description: "CLI for Entire (nightly build)"
+    binaries:
+      - entire
+    completions:
+      bash: "completions/entire.bash"
+      zsh: "completions/entire.zsh"
+      fish: "completions/entire.fish"
+    conflicts:
+      - cask: entire
+    skip_upload: "{{ if not .Prerelease }}true{{ end }}"
 
 announce:
   discord:
-    enabled: '{{ and (isEnvSet "DISCORD_WEBHOOK_ID") (isEnvSet "DISCORD_WEBHOOK_TOKEN") }}'
+    enabled: '{{ and (not .Prerelease) (isEnvSet "DISCORD_WEBHOOK_ID") (isEnvSet "DISCORD_WEBHOOK_TOKEN") }}'
     message_template: "Beep, boop. **Entire CLI {{ .Tag }}** is out!\n\n{{ .ReleaseURL }}\n\nSee https://docs.entire.io/cli/installation for help installing and updating."
     author: "Entire"

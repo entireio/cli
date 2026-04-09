@@ -65,6 +65,7 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	Git(t, dir, "config", "user.name", "E2E Test")
 	Git(t, dir, "config", "user.email", "e2e@test.local")
 	Git(t, dir, "config", "core.pager", "cat")
+	Git(t, dir, "config", "core.autocrlf", "true")
 	Git(t, dir, "commit", "--allow-empty", "-m", "initial commit")
 
 	// External agents need external_agents enabled in settings before enable,

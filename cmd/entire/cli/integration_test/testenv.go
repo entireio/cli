@@ -1901,7 +1901,7 @@ func (env *TestEnv) FetchMetadataBranch(remoteURL string) {
 
 	branchName := paths.MetadataBranchName
 	refSpec := "+refs/heads/" + branchName + ":refs/heads/" + branchName
-	cmd := exec.CommandContext(env.T.Context(), "git", "fetch", "--no-tags", remoteURL, refSpec)
+	cmd := exec.CommandContext(env.T.Context(), "git", "fetch", "--no-tags", "--filter=blob:none", remoteURL, refSpec)
 	cmd.Dir = env.RepoDir
 	cmd.Env = testutil.GitIsolatedEnv()
 

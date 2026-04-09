@@ -13,15 +13,15 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
 
       - name: Generate Homebrew Tap token
         id: app-token
-        uses: actions/create-github-app-token@v3.0.0
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
         with:
           app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
           private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
@@ -30,7 +30,18 @@ jobs:
             homebrew-tap
             scoop-bucket
 
+      - name: Detect release type
+        id: release-type
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Extract release notes from CHANGELOG.md
+        if: steps.release-type.outputs.prerelease == 'false'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           awk -v ver="$VERSION" 'BEGIN{header="^## \\[" ver "\\]"} $0 ~ header{found=1; next} /^## \[/{if(found) exit} found{print}' CHANGELOG.md > "$RUNNER_TEMP/release_notes.md"
@@ -39,8 +50,25 @@ jobs:
             exit 1
           fi
 
+      - name: Generate nightly release notes
+        if: steps.release-type.outputs.prerelease == 'true'
+        run: |
+          LAST_NIGHTLY=$(git tag -l 'v*-nightly.*' --sort=-creatordate | grep -v "^${GITHUB_REF_NAME}$" | head -1)
+          if [ -n "$LAST_NIGHTLY" ]; then
+            BASE_TAG="$LAST_NIGHTLY"
+          else
+            BASE_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' HEAD 2>/dev/null || echo "")
+          fi
+          echo "## Nightly Build (${GITHUB_REF_NAME})" > "$RUNNER_TEMP/release_notes.md"
+          echo "" >> "$RUNNER_TEMP/release_notes.md"
+          if [ -n "$BASE_TAG" ]; then
+            echo "Changes since ${BASE_TAG}:" >> "$RUNNER_TEMP/release_notes.md"
+            echo "" >> "$RUNNER_TEMP/release_notes.md"
+            git log --oneline "${BASE_TAG}..HEAD" --no-merges >> "$RUNNER_TEMP/release_notes.md"
+          fi
+
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7
         with:
           distribution: goreleaser-pro
           version: latest

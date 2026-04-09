@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.3] - 2026-04-03
+
+### Added
+
+- `entire sessions` subcommands (`list`, `info`, `stop`) for managing active and ended sessions ([#822](https://github.com/entireio/cli/pull/822), [#739](https://github.com/entireio/cli/pull/739))
+- `entire attach` command to manually link untracked sessions ([#688](https://github.com/entireio/cli/pull/688), [#743](https://github.com/entireio/cli/pull/743))
+- Gemini CLI transcript support for session logs and condensation ([#819](https://github.com/entireio/cli/pull/819))
+- Checkpoints v2 (work in progress): compact `transcript.jsonl` file and metadata on `/main` ref ([#828](https://github.com/entireio/cli/pull/828))
+- `ENTIRE_CHECKPOINT_TOKEN` environment variable for authenticated checkpoint push/fetch ([#818](https://github.com/entireio/cli/pull/818), [#827](https://github.com/entireio/cli/pull/827))
+
+### Changed
+
+- Deprecated `entire reset` command in favor of `entire clean` ([#720](https://github.com/entireio/cli/pull/720))
+
+### Fixed
+
+- Resume failing when checkpoints aren't fetched locally yet ([#796](https://github.com/entireio/cli/pull/796))
+- OpenCode transcript export resilient to stdout truncation ([#832](https://github.com/entireio/cli/pull/832))
+- Fail-closed content detection in `prepare-commit-msg` to prevent dangling checkpoint trailers from stale sessions ([#826](https://github.com/entireio/cli/pull/826))
+
+### Housekeeping
+
+- Scoop installation instructions for Windows ([#808](https://github.com/entireio/cli/pull/808))
+- Eliminated real-time waits causing test suite hangs ([#823](https://github.com/entireio/cli/pull/823))
+- Sped up slow unit tests in strategy and external packages ([#830](https://github.com/entireio/cli/pull/830))
+- Dependency bumps: go-git/go-git v6 alpha.1, jdx/mise-action 4 ([#831](https://github.com/entireio/cli/pull/831), [#809](https://github.com/entireio/cli/pull/809))
+
 ## [0.5.2] - 2026-03-30
 
 ### Added

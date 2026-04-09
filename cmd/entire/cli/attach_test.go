@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"     // register agent
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"          // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"         // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid" // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"      // register agent
@@ -463,6 +464,57 @@ func TestAttach_CursorSuccess(t *testing.T) {
 	}
 	if state.SessionTurnCount != 1 {
 		t.Errorf("SessionTurnCount = %d, want 1", state.SessionTurnCount)
+	}
+}
+
+func TestAttach_CodexSuccess(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	codexDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", codexDir)
+
+	sessionID := "019d6c43-1537-7343-9691-1f8cee04fe59"
+	transcriptContent := `{"timestamp":"2026-04-08T10:43:48.000Z","type":"session_meta","payload":{"id":"019d6c43-1537-7343-9691-1f8cee04fe59","timestamp":"2026-04-08T10:43:48.000Z"}}
+{"timestamp":"2026-04-08T10:43:49.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"investigate attach failure"}]}}
+{"timestamp":"2026-04-08T10:43:50.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Looking into it."}]}}
+`
+	sessionFile := filepath.Join(codexDir, "2026", "04", "08", "rollout-2026-04-08T10-43-48-"+sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sessionFile, []byte(transcriptContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameCodex, true)
+	if err != nil {
+		t.Fatalf("runAttach failed: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "Attached session") {
+		t.Errorf("expected 'Attached session' in output, got: %s", out.String())
+	}
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil {
+		t.Fatal("expected session state to be created")
+	}
+	if state.AgentType != agent.AgentTypeCodex {
+		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeCodex)
+	}
+	if state.TranscriptPath != sessionFile {
+		t.Errorf("TranscriptPath = %q, want %q", state.TranscriptPath, sessionFile)
+	}
+	if state.LastCheckpointID.IsEmpty() {
+		t.Error("expected LastCheckpointID to be set after attach")
 	}
 }
 

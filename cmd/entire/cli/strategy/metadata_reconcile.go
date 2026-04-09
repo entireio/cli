@@ -23,12 +23,10 @@ import (
 // disconnectedOnce ensures the disconnection warning runs at most once per process.
 var disconnectedOnce sync.Once //nolint:gochecknoglobals // intentional per-process gate
 
-// IsMetadataDisconnected checks whether local and remote entire/checkpoints/v1
-// branches exist but share no common ancestor (the "empty-orphan bug").
-// Returns (false, nil) if either branch is missing, they point to the same hash,
-// or they share a common ancestor (normal divergence handled by push merge).
-// Returns (true, nil) only when both exist and are truly disconnected.
-func IsMetadataDisconnected(ctx context.Context, repo *git.Repository) (bool, error) {
+// IsMetadataDisconnected checks whether the local metadata branch
+// and the provided fetched or remote-tracking ref exist but share no common
+// ancestor.
+func IsMetadataDisconnected(ctx context.Context, repo *git.Repository, remoteRefName plumbing.ReferenceName) (bool, error) {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	localRef, err := repo.Reference(refName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
@@ -38,7 +36,6 @@ func IsMetadataDisconnected(ctx context.Context, repo *git.Repository) (bool, er
 		return false, fmt.Errorf("failed to check local metadata branch: %w", err)
 	}
 
-	remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
 	remoteRef, err := repo.Reference(remoteRefName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return false, nil
@@ -75,7 +72,7 @@ func WarnIfMetadataDisconnected() {
 				slog.String("error", err.Error()))
 			return
 		}
-		disconnected, err := IsMetadataDisconnected(ctx, repo)
+		disconnected, err := IsMetadataDisconnected(ctx, repo, plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName))
 		if err != nil {
 			logging.Debug(ctx, "metadata disconnection check failed",
 				slog.String("error", err.Error()))
@@ -100,7 +97,13 @@ func WarnIfMetadataDisconnected() {
 //
 // Progress messages are written to w (typically os.Stderr for hooks or
 // cmd.ErrOrStderr() for commands).
-func ReconcileDisconnectedMetadataBranch(ctx context.Context, repo *git.Repository, w io.Writer) error {
+// The remote ref can be either a remote-tracking ref or a temporary fetched ref.
+func ReconcileDisconnectedMetadataBranch(
+	ctx context.Context,
+	repo *git.Repository,
+	remoteRefName plumbing.ReferenceName,
+	w io.Writer,
+) error {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 
 	// Check local branch
@@ -113,7 +116,6 @@ func ReconcileDisconnectedMetadataBranch(ctx context.Context, repo *git.Reposito
 	}
 
 	// Check remote-tracking branch
-	remoteRefName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
 	remoteRef, err := repo.Reference(remoteRefName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return nil // No remote branch — nothing to reconcile

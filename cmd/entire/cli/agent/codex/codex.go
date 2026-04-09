@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -68,22 +69,39 @@ func resolveCodexHome() (string, error) {
 }
 
 // GetSessionDir returns the directory where Codex stores session transcripts.
-// Codex stores transcripts (rollout files) in its home directory.
+// Codex stores transcripts under CODEX_HOME/sessions/YYYY/MM/DD/.
 func (c *CodexAgent) GetSessionDir(_ string) (string, error) {
 	if override := os.Getenv("ENTIRE_TEST_CODEX_SESSION_DIR"); override != "" {
 		return override, nil
 	}
-	return resolveCodexHome()
+	codexHome, err := resolveCodexHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(codexHome, "sessions"), nil
 }
 
 // ResolveSessionFile returns the path to a Codex session transcript file.
 // Codex provides the transcript path directly in hook payloads as an absolute path.
-// When only a session ID is available, we construct a best-effort path.
+// When only a session ID is available, attach/rewind must recover it from the
+// sessions/YYYY/MM/DD/rollout-...-<session-id>.jsonl layout.
 func (c *CodexAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 	if filepath.IsAbs(agentSessionID) {
 		return agentSessionID
 	}
 	if sessionDir != "" {
+		patterns := []string{
+			filepath.Join(sessionDir, "rollout-*-"+agentSessionID+".jsonl"),
+			filepath.Join(sessionDir, "*", "*", "*", "rollout-*-"+agentSessionID+".jsonl"),
+		}
+		for _, pattern := range patterns {
+			matches, err := filepath.Glob(pattern)
+			if err == nil && len(matches) > 0 {
+				sort.Strings(matches)
+				return matches[len(matches)-1]
+			}
+		}
+
 		return filepath.Join(sessionDir, agentSessionID+".jsonl")
 	}
 	return agentSessionID

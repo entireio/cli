@@ -226,6 +226,46 @@ func TestHandleLifecycleSessionStart_DefaultMessageWithCommits(t *testing.T) {
 	if strings.Contains(ag.lastMessage, "No commits yet") {
 		t.Errorf("did not expect empty-repo warning, got: %q", ag.lastMessage)
 	}
+	if !strings.HasPrefix(ag.lastMessage, "\n\nPowered by Entire:\n  ") {
+		t.Errorf("expected multiline session-start banner, got %q", ag.lastMessage)
+	}
+	if strings.Contains(ag.lastMessage, "Powered by Entire: This conversation") {
+		t.Errorf("expected default agent banner to remain multiline, got %q", ag.lastMessage)
+	}
+}
+
+func TestSessionStartMessage_CodexUsesSingleLineBanner(t *testing.T) {
+	t.Parallel()
+
+	msg := sessionStartMessage(agent.AgentNameCodex, false)
+	require.Equal(t, "Powered by Entire: This conversation will be linked to your next commit.", msg)
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("expected single-line Codex message, got %q", msg)
+	}
+}
+
+func TestSessionStartMessage_CodexUsesSingleLineBannerForEmptyRepo(t *testing.T) {
+	t.Parallel()
+
+	msg := sessionStartMessage(agent.AgentNameCodex, true)
+	require.Equal(t, "Powered by Entire: No commits yet — checkpoints will activate after your first commit.", msg)
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("expected single-line Codex empty-repo message, got %q", msg)
+	}
+}
+
+func TestHandleLifecycleSessionStart_CodexConcurrentSessionsStaySingleLine(t *testing.T) {
+	t.Parallel()
+
+	msg := sessionStartMessage(agent.AgentNameCodex, false)
+	msg += " 1 other active conversation(s) in this workspace will also be included. Use 'entire status' for more information."
+
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("expected Codex concurrent-session message to stay single-line, got %q", msg)
+	}
+	if strings.Contains(msg, "  ") {
+		t.Fatalf("expected Codex concurrent-session message to avoid repeated spaces, got %q", msg)
+	}
 }
 
 // --- handleLifecycleTurnStart tests ---

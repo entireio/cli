@@ -70,7 +70,7 @@ func TestClassifySession_ActiveStale_NilInteractionTime(t *testing.T) {
 	result := classifySession(state, repo, time.Now())
 
 	require.NotNil(t, result, "active session with nil LastInteractionTime should be stuck")
-	assert.Equal(t, "active, no recorded interaction time", result.Reason)
+	assert.Contains(t, result.Reason, "active, started")
 	assert.Equal(t, 3, result.CheckpointCount)
 	assert.False(t, result.HasShadowBranch)
 }
@@ -217,7 +217,7 @@ func TestClassifySession_StalenessThresholdBoundary(t *testing.T) {
 	now := time.Now()
 
 	// Exactly at the threshold — should be stuck (> check, not >=, but let's verify)
-	justOverThreshold := now.Add(-stalenessThreshold - time.Second)
+	justOverThreshold := now.Add(-session.StuckActiveThreshold - time.Second)
 	state := &strategy.SessionState{
 		SessionID:           "test-boundary-over",
 		BaseCommit:          testBaseCommit,
@@ -230,7 +230,7 @@ func TestClassifySession_StalenessThresholdBoundary(t *testing.T) {
 	require.NotNil(t, result, "session just over staleness threshold should be stuck")
 
 	// Just under the threshold — should be healthy
-	justUnderThreshold := now.Add(-stalenessThreshold + time.Minute)
+	justUnderThreshold := now.Add(-session.StuckActiveThreshold + time.Minute)
 	state2 := &strategy.SessionState{
 		SessionID:           "test-boundary-under",
 		BaseCommit:          testBaseCommit,

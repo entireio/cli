@@ -13,9 +13,12 @@ type GitHubRelease struct {
 	Prerelease bool   `json:"prerelease"`
 }
 
-// githubAPIURL is the GitHub API endpoint for fetching the latest release.
+// githubAPIURL is the GitHub API endpoint for fetching the latest stable release.
 // This is a var (not const) to allow overriding in tests.
 var githubAPIURL = "https://api.github.com/repos/entireio/cli/releases/latest"
+
+// githubReleasesURL is the GitHub API endpoint for listing releases (used for nightly checks).
+var githubReleasesURL = "https://api.github.com/repos/entireio/cli/releases"
 
 const (
 	// checkInterval is the duration between version checks.

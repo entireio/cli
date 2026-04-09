@@ -133,6 +133,7 @@ func (c *ClaudeCodeAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 		Type:       agent.TurnEnd,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
 }
@@ -146,6 +147,7 @@ func (c *ClaudeCodeAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, error)
 		Type:       agent.SessionEnd,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
 }

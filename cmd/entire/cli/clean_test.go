@@ -360,8 +360,8 @@ func TestCleanCmd_All_NoOrphanedItems(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "No orphaned items") {
-		t.Errorf("Expected 'No orphaned items' message, got: %s", output)
+	if !strings.Contains(output, "No items to clean up") {
+		t.Errorf("Expected 'No items to clean up' message, got: %s", output)
 	}
 }
 
@@ -583,6 +583,61 @@ func TestCleanCmd_All_Subdirectory(t *testing.T) {
 	}
 }
 
+// Regression test: --all should find sessions that have a shadow branch.
+// Previously, --all only cleaned orphaned sessions (no shadow branch AND no checkpoints),
+// so active sessions with a shadow branch were invisible to --all.
+func TestCleanCmd_All_FindsSessionWithShadowBranch(t *testing.T) {
+	repo, commitHash := setupCleanTestRepo(t)
+
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	worktreePath := wt.Filesystem.Root()
+	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	if err != nil {
+		t.Fatalf("failed to get worktree ID: %v", err)
+	}
+
+	// Create shadow branch for the session's base commit
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(commitHash.String(), worktreeID)
+	shadowRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), commitHash)
+	if err := repo.Storer.SetReference(shadowRef); err != nil {
+		t.Fatalf("failed to create shadow branch: %v", err)
+	}
+
+	// Create session state file — this session HAS a shadow branch,
+	// so it was NOT considered orphaned by the old --all behavior
+	sessionFile := createSessionStateFile(t, worktreePath, "2026-02-02-active-session", commitHash)
+
+	cmd := newCleanCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"--all", "--force"})
+
+	err = cmd.Execute()
+	if err != nil {
+		t.Fatalf("clean --all --force error = %v", err)
+	}
+
+	output := stdout.String()
+
+	// Session should be cleaned
+	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
+		t.Error("session state file should be deleted by --all")
+	}
+
+	// Shadow branch should be cleaned
+	refName := plumbing.NewBranchReferenceName(shadowBranch)
+	if _, err := repo.Reference(refName, true); err == nil {
+		t.Error("shadow branch should be deleted by --all")
+	}
+
+	if !strings.Contains(output, "Deleted") {
+		t.Errorf("Expected 'Deleted' in output, got: %s", output)
+	}
+}
+
 // --- runCleanAllWithItems unit tests ---
 
 func TestRunCleanAllWithItems_PartialFailure(t *testing.T) {
@@ -663,8 +718,8 @@ func TestRunCleanAllWithItems_NoItems(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "No orphaned items") {
-		t.Errorf("Expected 'No orphaned items' message, got: %s", output)
+	if !strings.Contains(output, "No items to clean up") {
+		t.Errorf("Expected 'No items to clean up' message, got: %s", output)
 	}
 }
 

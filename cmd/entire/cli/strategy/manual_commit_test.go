@@ -24,6 +24,9 @@ import (
 
 const testTrailerCheckpointID id.CheckpointID = "a1b2c3d4e5f6"
 
+// testTranscriptPromptResponse is a minimal transcript used across strategy tests.
+const testTranscriptPromptResponse = "{\"type\":\"human\",\"message\":{\"content\":\"test prompt\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":\"test response\"}}\n"
+
 func TestShadowStrategy_ValidateRepository(t *testing.T) {
 	dir := t.TempDir()
 	_, err := git.PlainInit(dir, false)
@@ -824,6 +827,42 @@ func TestShadowStrategy_PrepareCommitMsg_SkipSources(t *testing.T) {
 	}
 }
 
+func TestShadowStrategy_PrepareCommitMsg_SkipsSessionWhenContentCheckFails(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+
+	err = s.InitializeSession(context.Background(), "test-session-corrupt-shadow", agent.AgentTypeClaudeCode, "", "", "")
+	require.NoError(t, err)
+
+	state, err := s.loadSessionState(context.Background(), "test-session-corrupt-shadow")
+	require.NoError(t, err)
+	require.NotNil(t, state)
+
+	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	corruptRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), plumbing.ZeroHash)
+	require.NoError(t, repo.Storer.SetReference(corruptRef))
+
+	commitMsgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+	originalMsg := "Test commit\n"
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte(originalMsg), 0o644))
+
+	err = s.PrepareCommitMsg(context.Background(), commitMsgFile, "")
+	require.NoError(t, err)
+
+	content, err := os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+
+	_, found := trailers.ParseCheckpoint(string(content))
+	require.False(t, found, "corrupt session state should not add a dangling checkpoint trailer")
+	require.Equal(t, originalMsg, string(content))
+}
+
 func TestAddCheckpointTrailer_NoComment(t *testing.T) {
 	// Test that addCheckpointTrailer adds trailer without any comment lines
 	message := "Test commit message\n" //nolint:goconst // already present in codebase
@@ -1501,7 +1540,7 @@ func TestShadowStrategy_CondenseSession_EphemeralBranchTrailer(t *testing.T) {
 		t.Fatalf("failed to create metadata dir: %v", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(testTranscript), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(testTranscriptPromptResponse), 0o644); err != nil {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
@@ -2450,19 +2489,20 @@ func TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent(t *testi
 	t.Logf("Attribution (mixed, no shadow): agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
 		attr.AgentLines, attr.HumanAdded, attr.TotalCommitted, attr.AgentPercentage)
 
-	// src/app.go has 7 lines (agent), docs/notes.md has 4 lines (human)
+	// src/app.go has 7 lines (agent). docs/notes.md was added before the session
+	// (captured by PA1) so it's pre-session baseline — excluded from human count.
 	if attr.AgentLines != 7 {
 		t.Errorf("AgentLines = %d, want 7 (src/app.go has 7 lines)", attr.AgentLines)
 	}
-	if attr.HumanAdded != 4 {
-		t.Errorf("HumanAdded = %d, want 4 (docs/notes.md has 4 lines)", attr.HumanAdded)
+	if attr.HumanAdded != 0 {
+		t.Errorf("HumanAdded = %d, want 0 (docs/notes.md is pre-session baseline, excluded)", attr.HumanAdded)
 	}
-	if attr.TotalCommitted != 11 {
-		t.Errorf("TotalCommitted = %d, want 11 (7 agent + 4 human)", attr.TotalCommitted)
+	if attr.TotalCommitted != 7 {
+		t.Errorf("TotalCommitted = %d, want 7 (agent-only, pre-session excluded)", attr.TotalCommitted)
 	}
-	// Agent wrote 7/11 = 63.6%
-	if attr.AgentPercentage < 60 || attr.AgentPercentage > 70 {
-		t.Errorf("AgentPercentage = %.1f%%, want ~63.6%% (7/11)", attr.AgentPercentage)
+	// Agent wrote 7/7 = 100%
+	if attr.AgentPercentage < 99.0 {
+		t.Errorf("AgentPercentage = %.1f%%, want ~100%% (pre-session human file excluded)", attr.AgentPercentage)
 	}
 }
 
@@ -3908,7 +3948,8 @@ func TestCondenseSession_V2DualWrite(t *testing.T) {
 	metadataDirAbs := filepath.Join(dir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
 
-	transcript := `{"type":"human","message":{"content":"hello"}}
+	secret := "q9Xv2Lm8Rt1Yp4Kd7Wz0Hs6Nc3Bf5Jg"
+	transcript := `{"type":"human","message":{"content":"hello secret: ` + secret + `"}}
 {"type":"assistant","message":{"content":"hi there"}}
 `
 	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
@@ -3929,6 +3970,7 @@ func TestCondenseSession_V2DualWrite(t *testing.T) {
 	require.NoError(t, err)
 	state.TranscriptPath = filepath.Join(metadataDirAbs, paths.TranscriptFileName)
 	state.BaseCommit = commitHash.String()[:7]
+	state.AgentType = agent.AgentTypeClaudeCode
 
 	checkpointID := id.MustCheckpointID("dd11ee22ff33")
 	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
@@ -3950,7 +3992,7 @@ func TestCondenseSession_V2DualWrite(t *testing.T) {
 	require.NoError(t, err, "v2 /full/current ref should exist")
 	require.NotEqual(t, plumbing.ZeroHash, v2FullRef.Hash())
 
-	// Verify /main has metadata but no transcript
+	// Verify /main has metadata and redacted compact transcript
 	v2MainCommit, err := repo.CommitObject(v2MainRef.Hash())
 	require.NoError(t, err)
 	v2MainTree, err := v2MainCommit.Tree()
@@ -3963,6 +4005,14 @@ func TestCondenseSession_V2DualWrite(t *testing.T) {
 	// Root metadata.json should exist
 	_, err = mainCpTree.File(paths.MetadataFileName)
 	require.NoError(t, err, "root metadata.json should exist on /main")
+
+	mainSessionTree, err := mainCpTree.Tree("0")
+	require.NoError(t, err)
+	compactFile, err := mainSessionTree.File(paths.CompactTranscriptFileName)
+	require.NoError(t, err, "transcript.jsonl should exist on /main")
+	compactContent, err := compactFile.Contents()
+	require.NoError(t, err)
+	require.NotContains(t, compactContent, secret, "compact transcript on /main must be redacted")
 
 	// Verify /full/current has transcript
 	v2FullCommit, err := repo.CommitObject(v2FullRef.Hash())
@@ -4047,4 +4097,41 @@ func TestCondenseSession_V2Disabled_NoV2Refs(t *testing.T) {
 
 	_, err = repo.Reference(plumbing.ReferenceName(paths.V2FullCurrentRefName), true)
 	require.Error(t, err, "v2 /full/current ref should not exist when v2 is disabled")
+}
+
+func TestCommittedFilesExcludingMetadata(t *testing.T) {
+	t.Parallel()
+
+	input := map[string]struct{}{
+		"docs/blue.md":          {},
+		"docs/red.md":           {},
+		".entire/settings.json": {},
+		".entire/.gitignore":    {},
+		".claude/settings.json": {},
+	}
+
+	result := committedFilesExcludingMetadata(input)
+
+	// .entire/ files should be excluded, everything else kept
+	resultSet := make(map[string]struct{}, len(result))
+	for _, f := range result {
+		resultSet[f] = struct{}{}
+	}
+
+	require.Contains(t, resultSet, "docs/blue.md")
+	require.Contains(t, resultSet, "docs/red.md")
+	require.Contains(t, resultSet, ".claude/settings.json")
+	require.NotContains(t, resultSet, ".entire/settings.json", ".entire/ should be excluded")
+	require.NotContains(t, resultSet, ".entire/.gitignore", ".entire/ should be excluded")
+	require.Len(t, result, 3)
+}
+
+func TestCommittedFilesExcludingMetadata_AllMetadata(t *testing.T) {
+	t.Parallel()
+
+	result := committedFilesExcludingMetadata(map[string]struct{}{
+		".entire/settings.json": {},
+		".entire/.gitignore":    {},
+	})
+	require.Empty(t, result, "all metadata files should be excluded")
 }

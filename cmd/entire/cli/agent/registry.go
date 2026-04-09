@@ -118,7 +118,7 @@ const (
 	AgentTypeFactoryAIDroid types.AgentType = "Factory AI Droid"
 	AgentTypeGemini         types.AgentType = "Gemini CLI"
 	AgentTypeOpenCode       types.AgentType = "OpenCode"
-	AgentTypeUnknown        types.AgentType = "Agent" // Fallback for backwards compatibility
+	AgentTypeUnknown        types.AgentType = "Unknown"
 )
 
 // DefaultAgentName is the registry key for the default agent.

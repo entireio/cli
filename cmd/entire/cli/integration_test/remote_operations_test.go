@@ -470,9 +470,9 @@ func TestCloneAndResume_NewSessionPushAppends(t *testing.T) {
 // P1 -- Non-Fast-Forward Recovery
 // =============================================================================
 
-// TestConcurrentPush_SecondPusherMergesAndRetries verifies that when two clones
-// push to the same remote, the second pusher fetches, merges, and retries.
-func TestConcurrentPush_SecondPusherMergesAndRetries(t *testing.T) {
+// TestConcurrentPush_SecondPusherRebasesAndRetries verifies that when two clones
+// push to the same remote, the second pusher fetches, rebases, and retries.
+func TestConcurrentPush_SecondPusherRebasesAndRetries(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 
@@ -497,7 +497,7 @@ func TestConcurrentPush_SecondPusherMergesAndRetries(t *testing.T) {
 	// A pushes first (should succeed cleanly)
 	cloneA.RunPrePush("origin")
 
-	// B pushes second (will get non-fast-forward, should fetch+merge+retry)
+	// B pushes second (will get non-fast-forward, should fetch+rebase+retry)
 	cloneB.RunPrePush("origin")
 
 	// Remote should have BOTH checkpoints
@@ -511,11 +511,11 @@ func TestConcurrentPush_SecondPusherMergesAndRetries(t *testing.T) {
 		t.Errorf("remote should have checkpoint from clone B: %s", checkpointB)
 	}
 
-	// Verify B's local metadata branch has a merge commit with 2 parents.
-	// This confirms the fetch+merge+retry path was taken.
+	// Verify B's local metadata branch tip has exactly 1 parent (linear rebase, not merge).
+	// This confirms the fetch+rebase+retry path was taken.
 	parentCount := cloneB.GetBranchTipParentCount(paths.MetadataBranchName)
-	if parentCount != 2 {
-		t.Errorf("clone B's metadata branch tip should have 2 parents (merge commit), got %d", parentCount)
+	if parentCount != 1 {
+		t.Errorf("clone B's metadata branch tip should have 1 parent (rebased), got %d", parentCount)
 	}
 }
 

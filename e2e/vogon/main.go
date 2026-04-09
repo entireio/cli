@@ -47,6 +47,7 @@ func main() {
 	fireHook(dir, "session-start", map[string]string{
 		"session_id":      sessionID,
 		"transcript_path": transcriptPath,
+		"model":           "vogon-llm-42",
 	})
 
 	if prompt != "" {
@@ -76,6 +77,7 @@ func main() {
 	fireHook(dir, "session-end", map[string]string{
 		"session_id":      sessionID,
 		"transcript_path": transcriptPath,
+		"model":           "vogon-llm-42",
 	})
 }
 
@@ -84,6 +86,7 @@ func runTurn(dir, sessionID, transcriptPath, prompt string) {
 		"session_id":      sessionID,
 		"transcript_path": transcriptPath,
 		"prompt":          prompt,
+		"model":           "vogon-llm-42",
 	})
 
 	appendTranscript(transcriptPath, "user", prompt)
@@ -97,6 +100,7 @@ func runTurn(dir, sessionID, transcriptPath, prompt string) {
 	fireHook(dir, "stop", map[string]string{
 		"session_id":      sessionID,
 		"transcript_path": transcriptPath,
+		"model":           "vogon-llm-42",
 	})
 }
 

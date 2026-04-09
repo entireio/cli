@@ -52,7 +52,7 @@ func (s *V2GitStore) WriteCommitted(ctx context.Context, opts WriteCommittedOpti
 // UpdateCommitted replaces the prompts and/or transcript for an existing v2 checkpoint.
 // Called at stop time to finalize checkpoints with the complete session transcript.
 //
-// On /main: replaces prompts (transcript is not stored there).
+// On /main: replaces prompts and compact transcript (if provided).
 // On /full/current: replaces the raw transcript (if provided).
 //
 // Returns ErrCheckpointNotFound if the checkpoint doesn't exist on /main.
@@ -75,11 +75,11 @@ func (s *V2GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOp
 	return nil
 }
 
-// updateCommittedMain updates prompts on the /main ref for an existing checkpoint.
+// updateCommittedMain updates prompts and compact transcript on the /main ref for an existing checkpoint.
 // Returns the session index for coordination with /full/current.
 func (s *V2GitStore) updateCommittedMain(ctx context.Context, opts UpdateCommittedOptions) (int, error) {
 	refName := plumbing.ReferenceName(paths.V2MainRefName)
-	parentHash, rootTreeHash, err := s.getRefState(refName)
+	parentHash, rootTreeHash, err := s.GetRefState(refName)
 	if err != nil {
 		return 0, ErrCheckpointNotFound
 	}
@@ -121,7 +121,7 @@ func (s *V2GitStore) updateCommittedMain(ctx context.Context, opts UpdateCommitt
 	sessionPath := fmt.Sprintf("%s%d/", basePath, sessionIndex)
 
 	if len(opts.Prompts) > 0 {
-		promptContent := redact.String(strings.Join(opts.Prompts, "\n\n---\n\n"))
+		promptContent := redact.String(JoinPrompts(opts.Prompts))
 		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
 		if err != nil {
 			return 0, fmt.Errorf("failed to create prompt blob: %w", err)
@@ -130,6 +130,43 @@ func (s *V2GitStore) updateCommittedMain(ctx context.Context, opts UpdateCommitt
 			Name: sessionPath + paths.PromptFileName,
 			Mode: filemode.Regular,
 			Hash: blobHash,
+		}
+	}
+
+	// Replace compact transcript if provided
+	if len(opts.CompactTranscript) > 0 {
+		blobHash, err := CreateBlobFromContent(s.repo, opts.CompactTranscript)
+		if err != nil {
+			return 0, fmt.Errorf("failed to create compact transcript blob: %w", err)
+		}
+		entries[sessionPath+paths.CompactTranscriptFileName] = object.TreeEntry{
+			Name: sessionPath + paths.CompactTranscriptFileName,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		}
+
+		if err := s.writeCompactTranscriptHash(opts.CompactTranscript, sessionPath, entries); err != nil {
+			return 0, fmt.Errorf("failed to write compact transcript hash: %w", err)
+		}
+
+		// Keep root checkpoint summary in sync with compact artifact paths.
+		if sessionIndex >= 0 && sessionIndex < len(summary.Sessions) {
+			summary.Sessions[sessionIndex].Transcript = "/" + sessionPath + paths.CompactTranscriptFileName
+			summary.Sessions[sessionIndex].ContentHash = "/" + sessionPath + paths.CompactTranscriptHashFileName
+
+			summaryBytes, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
+			if err != nil {
+				return 0, fmt.Errorf("failed to marshal checkpoint summary: %w", err)
+			}
+			summaryHash, err := CreateBlobFromContent(s.repo, summaryBytes)
+			if err != nil {
+				return 0, fmt.Errorf("failed to create checkpoint summary blob: %w", err)
+			}
+			entries[rootMetadataPath] = object.TreeEntry{
+				Name: rootMetadataPath,
+				Mode: filemode.Regular,
+				Hash: summaryHash,
+			}
 		}
 	}
 
@@ -155,7 +192,7 @@ func (s *V2GitStore) updateCommittedFullTranscript(ctx context.Context, opts Upd
 		return fmt.Errorf("failed to ensure /full/current ref: %w", err)
 	}
 
-	parentHash, rootTreeHash, err := s.getRefState(refName)
+	parentHash, rootTreeHash, err := s.GetRefState(refName)
 	if err != nil {
 		return err
 	}
@@ -207,7 +244,7 @@ func (s *V2GitStore) writeCommittedMain(ctx context.Context, opts WriteCommitted
 		return 0, fmt.Errorf("failed to ensure /main ref: %w", err)
 	}
 
-	parentHash, rootTreeHash, err := s.getRefState(refName)
+	parentHash, rootTreeHash, err := s.GetRefState(refName)
 	if err != nil {
 		return 0, err
 	}
@@ -281,10 +318,10 @@ func (s *V2GitStore) writeMainCheckpointEntries(ctx context.Context, opts WriteC
 	return sessionIndex, nil
 }
 
-// writeMainSessionToSubdirectory writes a single session's metadata and prompts
-// to a session subdirectory (0/, 1/, 2/, … indexed by session order within the
-// checkpoint). Unlike the v1 equivalent, this does NOT write the raw transcript
-// (full.jsonl) or content hash (content_hash.txt) — those go to /full/current.
+// writeMainSessionToSubdirectory writes a single session's metadata, prompts,
+// and compact transcript to a session subdirectory (0/, 1/, 2/, … indexed by
+// session order within the checkpoint). The raw transcript (full.jsonl) and its
+// content hash (content_hash.txt) go to /full/current, not here.
 func (s *V2GitStore) writeMainSessionToSubdirectory(opts WriteCommittedOptions, sessionPath string, entries map[string]object.TreeEntry) (SessionFilePaths, error) {
 	filePaths := SessionFilePaths{}
 
@@ -297,7 +334,7 @@ func (s *V2GitStore) writeMainSessionToSubdirectory(opts WriteCommittedOptions, 
 
 	// Write prompts
 	if len(opts.Prompts) > 0 {
-		promptContent := redact.String(strings.Join(opts.Prompts, "\n\n---\n\n"))
+		promptContent := redact.String(JoinPrompts(opts.Prompts))
 		blobHash, err := CreateBlobFromContent(s.repo, []byte(promptContent))
 		if err != nil {
 			return filePaths, err
@@ -308,6 +345,25 @@ func (s *V2GitStore) writeMainSessionToSubdirectory(opts WriteCommittedOptions, 
 			Hash: blobHash,
 		}
 		filePaths.Prompt = "/" + sessionPath + paths.PromptFileName
+	}
+
+	// Write compact transcript (transcript.jsonl) + hash if provided
+	if len(opts.CompactTranscript) > 0 {
+		blobHash, err := CreateBlobFromContent(s.repo, opts.CompactTranscript)
+		if err != nil {
+			return filePaths, fmt.Errorf("failed to create compact transcript blob: %w", err)
+		}
+		entries[sessionPath+paths.CompactTranscriptFileName] = object.TreeEntry{
+			Name: sessionPath + paths.CompactTranscriptFileName,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		}
+		filePaths.Transcript = "/" + sessionPath + paths.CompactTranscriptFileName
+
+		if err := s.writeCompactTranscriptHash(opts.CompactTranscript, sessionPath, entries); err != nil {
+			return filePaths, fmt.Errorf("failed to write compact transcript hash: %w", err)
+		}
+		filePaths.ContentHash = "/" + sessionPath + paths.CompactTranscriptHashFileName
 	}
 
 	// Write session metadata
@@ -329,6 +385,7 @@ func (s *V2GitStore) writeMainSessionToSubdirectory(opts WriteCommittedOptions, 
 		TokenUsage:                  opts.TokenUsage,
 		SessionMetrics:              opts.SessionMetrics,
 		InitialAttribution:          opts.InitialAttribution,
+		PromptAttributions:          opts.PromptAttributionsJSON,
 		Summary:                     redactSummary(opts.Summary),
 		CLIVersion:                  versioninfo.Version,
 	}
@@ -366,6 +423,21 @@ func (s *V2GitStore) writeContentHash(redactedTranscript []byte, sessionPath str
 	return nil
 }
 
+// writeCompactTranscriptHash computes and writes the SHA-256 hash of the compact transcript.
+func (s *V2GitStore) writeCompactTranscriptHash(compactTranscript []byte, sessionPath string, entries map[string]object.TreeEntry) error {
+	hash := fmt.Sprintf("sha256:%x", sha256.Sum256(compactTranscript))
+	blobHash, err := CreateBlobFromContent(s.repo, []byte(hash))
+	if err != nil {
+		return err
+	}
+	entries[sessionPath+paths.CompactTranscriptHashFileName] = object.TreeEntry{
+		Name: sessionPath + paths.CompactTranscriptHashFileName,
+		Mode: filemode.Regular,
+		Hash: blobHash,
+	}
+	return nil
+}
+
 // writeCommittedFullTranscript writes the raw transcript to the /full/current ref.
 // Transcripts accumulate across checkpoints — each write splices into the existing
 // tree. Generation metadata (generation.json) at the tree root is updated on every
@@ -392,7 +464,7 @@ func (s *V2GitStore) writeCommittedFullTranscript(ctx context.Context, opts Writ
 		return fmt.Errorf("failed to ensure /full/current ref: %w", err)
 	}
 
-	parentHash, rootTreeHash, err := s.getRefState(refName)
+	parentHash, rootTreeHash, err := s.GetRefState(refName)
 	if err != nil {
 		return err
 	}
@@ -429,29 +501,25 @@ func (s *V2GitStore) writeCommittedFullTranscript(ctx context.Context, opts Writ
 		return err
 	}
 
-	// Update generation.json at the tree root with the new checkpoint ID and timestamps.
-	// This reads from the pre-splice root tree (to get existing metadata) and writes
-	// into the post-splice tree (which already has the shard directories).
-	gen, err := s.updateGenerationForWrite(rootTreeHash, opts.CheckpointID, time.Now().UTC())
-	if err != nil {
-		return fmt.Errorf("failed to update generation metadata: %w", err)
-	}
-	newTreeHash, err = s.addGenerationToRootTree(newTreeHash, gen)
-	if err != nil {
-		return fmt.Errorf("failed to add generation.json to tree: %w", err)
-	}
-
 	commitMsg := fmt.Sprintf("Checkpoint: %s\n", opts.CheckpointID)
 	if err := s.updateRef(refName, newTreeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail); err != nil {
 		return err
 	}
 
 	// Check if rotation is needed after successful write.
-	if len(gen.Checkpoints) >= s.maxCheckpoints() {
+	// Count checkpoints by walking the tree (no generation.json on /full/current).
+	checkpointCount, countErr := s.CountCheckpointsInTree(newTreeHash)
+	if countErr != nil {
+		logging.Warn(ctx, "failed to count checkpoints for rotation check",
+			slog.String("error", countErr.Error()),
+		)
+		return nil
+	}
+	if checkpointCount >= s.maxCheckpoints() {
 		if rotErr := s.rotateGeneration(ctx); rotErr != nil {
 			logging.Warn(ctx, "generation rotation failed",
 				slog.String("error", rotErr.Error()),
-				slog.Int("checkpoint_count", len(gen.Checkpoints)),
+				slog.Int("checkpoint_count", checkpointCount),
 			)
 			// Non-fatal: rotation failure doesn't invalidate the write
 		}

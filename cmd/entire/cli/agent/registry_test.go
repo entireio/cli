@@ -144,6 +144,9 @@ func TestAgentNameConstants(t *testing.T) {
 }
 
 func TestDefaultAgentName(t *testing.T) {
+	// DefaultAgentName is for the `entire enable` setup flow when no agent is
+	// detected. It is NOT used for agent attribution fallbacks — those use
+	// AgentTypeUnknown ("Unknown") or "Unknown" in the DB.
 	if DefaultAgentName != AgentNameClaudeCode {
 		t.Errorf("expected DefaultAgentName %q, got %q", AgentNameClaudeCode, DefaultAgentName)
 	}

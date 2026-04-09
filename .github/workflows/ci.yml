@@ -6,17 +6,69 @@ on:
     branches:
       - main
 jobs:
-  test:
+  test-core:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Setup Keyring
         run: |
           sudo apt-get update
           sudo apt-get install -y gnome-keyring
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
-      - uses: jdx/mise-action@v4
-      - name: Tests
-        run: mise run test:ci
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+      - name: Core Tests
+        env:
+          GO_TEST_PARALLEL: "16"
+        run: mise run test:ci:core
+
+  test-integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [a, b, c]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Setup Keyring
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring
+          echo 'somecredstorepass' | gnome-keyring-daemon --unlock
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+      - name: Integration Tests
+        env:
+          GO_TEST_PARALLEL: "16"
+        run: mise run test:ci:integration:shard -- ${{ matrix.shard }}
+
+  test-canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Setup Keyring
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring
+          echo 'somecredstorepass' | gnome-keyring-daemon --unlock
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+      - name: E2E Canary
+        run: mise run test:e2e:canary
+
+  test:
+    runs-on: ubuntu-latest
+    needs:
+      - test-core
+      - test-integration
+      - test-canary
+    if: ${{ always() }}
+    steps:
+      - name: Check dependencies
+        run: |
+          [ "${{ needs.test-core.result }}" = "success" ]
+          [ "${{ needs.test-integration.result }}" = "success" ]
+          [ "${{ needs.test-canary.result }}" = "success" ]

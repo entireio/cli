@@ -3,6 +3,7 @@ package paths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -119,5 +120,81 @@ func TestGetClaudeProjectDir_Default(t *testing.T) {
 
 	if result != expected {
 		t.Errorf("GetClaudeProjectDir() = %q, want %q", result, expected)
+	}
+}
+
+func TestToRelativePath_MSYSPaths(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "windows" {
+		t.Skip("MSYS path handling is Windows-only")
+	}
+	tests := []struct {
+		name    string
+		absPath string
+		cwd     string
+		want    string
+	}{
+		{
+			name:    "msys with drive letter",
+			absPath: "/c/Users/test/repo/docs/red.md",
+			cwd:     "C:/Users/test/repo",
+			want:    "docs\\red.md",
+		},
+		{
+			name:    "msys without drive letter",
+			absPath: "/Users/test/repo/docs/red.md",
+			cwd:     "C:/Users/test/repo",
+			want:    "docs\\red.md",
+		},
+		{
+			name:    "msys without drive letter different cwd drive",
+			absPath: "/Users/test/repo/docs/red.md",
+			cwd:     "D:/Users/test/repo",
+			want:    "docs\\red.md",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := ToRelativePath(tt.absPath, tt.cwd)
+			if got != tt.want {
+				t.Errorf("ToRelativePath(%q, %q) = %q, want %q", tt.absPath, tt.cwd, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeMSYSPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "msys drive c", path: "/c/Users/test/repo", want: "C:/Users/test/repo"},
+		{name: "msys drive d", path: "/d/work/project", want: "D:/work/project"},
+		{name: "already windows", path: "C:/Users/test/repo", want: "C:/Users/test/repo"},
+		{name: "unix absolute", path: "/home/user/repo", want: "/home/user/repo"},
+		{name: "relative path", path: "docs/red.md", want: "docs/red.md"},
+		{name: "root slash only", path: "/", want: "/"},
+		{name: "short path", path: "/c", want: "/c"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeMSYSPath(tt.path)
+			// On non-Windows, normalizeMSYSPath is a no-op
+			if runtime.GOOS == "windows" {
+				if got != tt.want {
+					t.Errorf("normalizeMSYSPath(%q) = %q, want %q", tt.path, got, tt.want)
+				}
+			} else {
+				if got != tt.path {
+					t.Errorf("normalizeMSYSPath(%q) should be no-op on %s, got %q", tt.path, runtime.GOOS, got)
+				}
+			}
+		})
 	}
 }

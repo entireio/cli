@@ -24,6 +24,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/compact"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -93,6 +96,7 @@ type condenseOpts struct {
 	repoDir          string              // Repository worktree path for git CLI commands
 	parentCommitHash string              // HEAD's first parent hash for per-commit non-agent file detection
 	headCommitHash   string              // HEAD commit hash (passed through for attribution)
+	allAgentFiles    map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
 }
 
 // CondenseSession condenses a session's shadow branch to permanent storage.
@@ -173,10 +177,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		}
 
 		if len(sessionData.FilesTouched) == 0 && !hadFilesBeforeFiltering {
-			sessionData.FilesTouched = make([]string, 0, len(committedFiles))
-			for f := range committedFiles {
-				sessionData.FilesTouched = append(sessionData.FilesTouched, f)
-			}
+			sessionData.FilesTouched = committedFilesExcludingMetadata(committedFiles)
 		}
 	}
 
@@ -202,49 +203,15 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		attributionBaseCommit: attrBase,
 		parentCommitHash:      o.parentCommitHash,
 		headCommitHash:        o.headCommitHash,
+		allAgentFiles:         o.allAgentFiles,
 	})
 
 	// Get current branch name
 	branchName := GetCurrentBranchName(repo)
 
-	// Generate summary if enabled
 	var summary *cpkg.Summary
 	if settings.IsSummarizeEnabled(ctx) && len(sessionData.Transcript) > 0 {
-		summarizeCtx := logging.WithComponent(ctx, "summarize")
-
-		var scopedTranscript []byte
-		switch state.AgentType {
-		case agent.AgentTypeGemini:
-			scoped, sliceErr := geminicli.SliceFromMessage(sessionData.Transcript, state.CheckpointTranscriptStart)
-			if sliceErr != nil {
-				logging.Warn(summarizeCtx, "failed to scope Gemini transcript for summary",
-					slog.String("session_id", state.SessionID),
-					slog.String("error", sliceErr.Error()))
-			}
-			scopedTranscript = scoped
-		case agent.AgentTypeOpenCode:
-			scoped, sliceErr := opencode.SliceFromMessage(sessionData.Transcript, state.CheckpointTranscriptStart)
-			if sliceErr != nil {
-				logging.Warn(summarizeCtx, "failed to scope OpenCode transcript for summary",
-					slog.String("session_id", state.SessionID),
-					slog.String("error", sliceErr.Error()))
-			}
-			scopedTranscript = scoped
-		case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
-			scopedTranscript = transcript.SliceFromLine(sessionData.Transcript, state.CheckpointTranscriptStart)
-		}
-		if len(scopedTranscript) > 0 {
-			var err error
-			summary, err = summarize.GenerateFromTranscript(summarizeCtx, scopedTranscript, sessionData.FilesTouched, state.AgentType, nil)
-			if err != nil {
-				logging.Warn(summarizeCtx, "summary generation failed",
-					slog.String("session_id", state.SessionID),
-					slog.String("error", err.Error()))
-			} else {
-				logging.Info(summarizeCtx, "summary generated",
-					slog.String("session_id", state.SessionID))
-			}
-		}
+		summary = generateSummary(ctx, sessionData, state)
 	}
 
 	// Build write options (shared by v1 and v2)
@@ -268,7 +235,20 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TokenUsage:                  sessionData.TokenUsage,
 		SessionMetrics:              buildSessionMetrics(state),
 		InitialAttribution:          attribution,
+		PromptAttributionsJSON:      marshalPromptAttributions(state.PromptAttributions),
 		Summary:                     summary,
+	}
+
+	if settings.IsCheckpointsV2Enabled(ctx) {
+		redactedForCompact, compactRedactErr := redact.JSONLBytes(sessionData.Transcript)
+		if compactRedactErr != nil {
+			logging.Warn(ctx, "compact transcript redaction failed, skipping transcript.jsonl on /main",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", compactRedactErr.Error()),
+			)
+			redactedForCompact = nil
+		}
+		writeOpts.CompactTranscript = compactTranscriptForV2(ctx, ag, redactedForCompact, state.CheckpointTranscriptStart)
 	}
 
 	// Write checkpoint metadata to v1 branch
@@ -289,8 +269,64 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}, nil
 }
 
+// generateSummary produces an LLM-generated summary of the session transcript.
+// Returns nil if the scoped transcript is empty or generation fails.
+func generateSummary(ctx context.Context, sessionData *ExtractedSessionData, state *SessionState) *cpkg.Summary {
+	summarizeCtx := logging.WithComponent(ctx, "summarize")
+
+	var scopedTranscript []byte
+	switch state.AgentType {
+	case agent.AgentTypeGemini:
+		scoped, sliceErr := geminicli.SliceFromMessage(sessionData.Transcript, state.CheckpointTranscriptStart)
+		if sliceErr != nil {
+			logging.Warn(summarizeCtx, "failed to scope Gemini transcript for summary",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", sliceErr.Error()))
+		}
+		scopedTranscript = scoped
+	case agent.AgentTypeOpenCode:
+		scoped, sliceErr := opencode.SliceFromMessage(sessionData.Transcript, state.CheckpointTranscriptStart)
+		if sliceErr != nil {
+			logging.Warn(summarizeCtx, "failed to scope OpenCode transcript for summary",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", sliceErr.Error()))
+		}
+		scopedTranscript = scoped
+	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
+		scopedTranscript = transcript.SliceFromLine(sessionData.Transcript, state.CheckpointTranscriptStart)
+	}
+
+	if len(scopedTranscript) == 0 {
+		return nil
+	}
+
+	summary, err := summarize.GenerateFromTranscript(summarizeCtx, scopedTranscript, sessionData.FilesTouched, state.AgentType, nil)
+	if err != nil {
+		logging.Warn(summarizeCtx, "summary generation failed",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+	logging.Info(summarizeCtx, "summary generated",
+		slog.String("session_id", state.SessionID))
+	return summary
+}
+
 // buildSessionMetrics creates a SessionMetrics from session state if any metrics are available.
 // Returns nil if no hook-provided metrics exist (e.g., for agents that don't report them).
+// marshalPromptAttributions encodes PromptAttributions to JSON for diagnostic persistence.
+// Returns nil if there are no attributions to persist.
+func marshalPromptAttributions(pas []PromptAttribution) json.RawMessage {
+	if len(pas) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(pas)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
 func buildSessionMetrics(state *SessionState) *cpkg.SessionMetrics {
 	if state.SessionDurationMs == 0 && state.SessionTurnCount == 0 && state.ContextTokens == 0 && state.ContextWindowSize == 0 {
 		return nil
@@ -339,13 +375,14 @@ func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentTy
 
 // attributionOpts provides pre-resolved git objects to avoid redundant reads.
 type attributionOpts struct {
-	headTree              *object.Tree // HEAD commit tree (already resolved by PostCommit)
-	shadowTree            *object.Tree // Shadow branch tree (already resolved by PostCommit)
-	parentTree            *object.Tree // Parent commit tree (nil for initial commits, for consistent non-agent line counting)
-	repoDir               string       // Repository worktree path for git CLI commands
-	parentCommitHash      string       // HEAD's first parent hash (preferred diff base for non-agent files)
-	attributionBaseCommit string       // Base commit hash for non-agent file detection (empty = fall back to go-git tree walk)
-	headCommitHash        string       // HEAD commit hash for non-agent file detection (empty = fall back to go-git tree walk)
+	headTree              *object.Tree        // HEAD commit tree (already resolved by PostCommit)
+	shadowTree            *object.Tree        // Shadow branch tree (already resolved by PostCommit)
+	parentTree            *object.Tree        // Parent commit tree (nil for initial commits, for consistent non-agent line counting)
+	repoDir               string              // Repository worktree path for git CLI commands
+	parentCommitHash      string              // HEAD's first parent hash (preferred diff base for non-agent files)
+	attributionBaseCommit string              // Base commit hash for non-agent file detection (empty = fall back to go-git tree walk)
+	headCommitHash        string              // HEAD commit hash for non-agent file detection (empty = fall back to go-git tree walk)
+	allAgentFiles         map[string]struct{} // Union of all sessions' FilesTouched (nil = single-session)
 }
 
 func calculateSessionAttributions(ctx context.Context, repo *git.Repository, shadowRef *plumbing.Reference, sessionData *ExtractedSessionData, state *SessionState, opts ...attributionOpts) *cpkg.InitialAttribution {
@@ -433,9 +470,19 @@ func calculateSessionAttributions(ctx context.Context, repo *git.Repository, sha
 			slog.String("attribution_base", attrBase))
 	}
 
+	// Include PendingPromptAttribution if it was never moved to PromptAttributions.
+	// This happens when an agent commits mid-turn without calling SaveStep (e.g., Codex).
+	// PendingPromptAttribution is set during UserPromptSubmit but only moved to
+	// PromptAttributions during SaveStep. Without this, mid-turn commits have no PA
+	// data and pre-session worktree dirt cannot be identified for baseline exclusion.
+	promptAttrs := state.PromptAttributions
+	if state.PendingPromptAttribution != nil {
+		promptAttrs = append(promptAttrs, *state.PendingPromptAttribution)
+	}
+
 	// Log accumulated prompt attributions for debugging
 	var totalUserAdded, totalUserRemoved int
-	for i, pa := range state.PromptAttributions {
+	for i, pa := range promptAttrs {
 		totalUserAdded += pa.UserLinesAdded
 		totalUserRemoved += pa.UserLinesRemoved
 		logging.Debug(logCtx, "prompt attribution data",
@@ -453,11 +500,12 @@ func calculateSessionAttributions(ctx context.Context, repo *git.Repository, sha
 		HeadTree:              headTree,
 		ParentTree:            o.parentTree,
 		FilesTouched:          sessionData.FilesTouched,
-		PromptAttributions:    state.PromptAttributions,
+		PromptAttributions:    promptAttrs,
 		RepoDir:               o.repoDir,
 		ParentCommitHash:      o.parentCommitHash,
 		AttributionBaseCommit: attrBase,
 		HeadCommitHash:        o.headCommitHash,
+		AllAgentFiles:         o.allAgentFiles,
 	})
 
 	if attribution != nil {
@@ -474,6 +522,20 @@ func calculateSessionAttributions(ctx context.Context, repo *git.Repository, sha
 	}
 
 	return attribution
+}
+
+// committedFilesExcludingMetadata returns committed files with CLI metadata paths filtered out.
+// `.entire/` files are created by `entire enable`, not by the agent, and should not be
+// attributed as agent work when used as a fallback for sessions with no FilesTouched.
+func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []string {
+	result := make([]string, 0, len(committedFiles))
+	for f := range committedFiles {
+		if strings.HasPrefix(f, ".entire/") || strings.HasPrefix(f, paths.EntireMetadataDir+"/") {
+			continue
+		}
+		result = append(result, f)
+	}
+	return result
 }
 
 // extractSessionData extracts session data from the shadow branch.
@@ -806,7 +868,7 @@ func clearFilesystemPrompt(ctx context.Context, sessionID string) {
 	_ = os.Remove(promptPath)
 }
 
-// CondenseSessionByID force-condenses a session by its ID and cleans up.
+// CondenseSessionByID condenses a session by its ID and cleans up.
 // This is used by "entire doctor" to salvage stuck sessions.
 func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionID string) error {
 	logCtx := logging.WithComponent(ctx, "condense-by-id")
@@ -889,6 +951,118 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	return nil
 }
 
+// CondenseAndMarkFullyCondensed condenses an ENDED session and marks it
+// FullyCondensed in one operation. Used by the session stop hook to eagerly
+// clean up sessions so PostCommit doesn't have to process them.
+//
+// This does NOT call CondenseSessionByID because that method has two behaviors
+// we don't want: (1) it calls clearSessionState when no shadow branch exists
+// (deletes the state file entirely), and (2) it sets Phase = IDLE. Instead,
+// we inline the condensation logic with ENDED-appropriate behavior.
+//
+// Fail-open: if condensation fails, the session is left in its current state
+// and PostCommit will still process it on the next commit.
+func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context, sessionID string) error {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+
+	state, err := s.loadSessionState(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to load session state: %w", err)
+	}
+	if state == nil {
+		return nil // No state file
+	}
+
+	// Sessions with FilesTouched must be processed by PostCommit for carry-forward
+	// tracking — each user commit that overlaps with tracked files gets its own
+	// checkpoint. Eagerly condensing here would prevent that 1:1 linkage.
+	if len(state.FilesTouched) > 0 {
+		return nil
+	}
+
+	// Only condense if there's uncondensed data
+	if state.StepCount <= 0 {
+		// No data and no files — mark FullyCondensed
+		state.FullyCondensed = true
+		return s.saveSessionState(ctx, state)
+	}
+
+	// Check if shadow branch exists — required for condensation
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		logging.Warn(logCtx, "eager condense: failed to open repository",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()),
+		)
+		return nil // fail-open
+	}
+
+	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+	_, refErr := repo.Reference(refName, true)
+	hasShadowBranch := refErr == nil
+
+	if !hasShadowBranch {
+		// No shadow branch = no checkpoint data to condense.
+		// Unlike CondenseSessionByID, we do NOT delete the state file.
+		logging.Info(logCtx, "eager condense: no shadow branch",
+			slog.String("session_id", sessionID),
+			slog.String("shadow_branch", shadowBranchName),
+		)
+		state.StepCount = 0
+		state.FullyCondensed = true // FilesTouched is already empty (checked above)
+		return s.saveSessionState(ctx, state)
+	}
+
+	// Generate checkpoint ID and condense
+	checkpointID, err := id.Generate()
+	if err != nil {
+		logging.Warn(logCtx, "eager condense: failed to generate checkpoint ID",
+			slog.String("error", err.Error()),
+		)
+		return nil // fail-open
+	}
+
+	// Condense with nil committedFiles (include all FilesTouched)
+	result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil)
+	if err != nil {
+		logging.Warn(logCtx, "eager condense on session stop failed, PostCommit will retry",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()),
+		)
+		return nil // fail-open
+	}
+
+	// Update state — keep Phase = ENDED (unlike CondenseSessionByID which sets IDLE)
+	state.StepCount = 0
+	state.CheckpointTranscriptStart = result.TotalTranscriptLines
+	state.LastCheckpointID = checkpointID
+	state.AttributionBaseCommit = state.BaseCommit
+	state.PromptAttributions = nil
+	state.PendingPromptAttribution = nil
+	state.FullyCondensed = true // FilesTouched is already empty (checked above)
+	// Phase stays ENDED — do NOT set to IDLE
+
+	logging.Info(logCtx, "eager condense on session stop succeeded",
+		slog.String("session_id", sessionID),
+		slog.String("checkpoint_id", result.CheckpointID.String()),
+	)
+
+	if err := s.saveSessionState(ctx, state); err != nil {
+		return fmt.Errorf("failed to save session state: %w", err)
+	}
+
+	// Clean up shadow branch
+	if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {
+		logging.Warn(logCtx, "eager condense: failed to clean up shadow branch",
+			slog.String("shadow_branch", shadowBranchName),
+			slog.String("error", err.Error()),
+		)
+	}
+
+	return nil
+}
+
 // cleanupShadowBranchIfUnused deletes a shadow branch if no other active sessions reference it.
 func (s *ManualCommitStrategy) cleanupShadowBranchIfUnused(ctx context.Context, _ *git.Repository, shadowBranchName, excludeSessionID string) error {
 	// List all session states to check if any other session uses this shadow branch
@@ -920,6 +1094,33 @@ func (s *ManualCommitStrategy) cleanupShadowBranchIfUnused(ctx context.Context, 
 	return nil
 }
 
+// compactTranscriptForV2 produces the Entire Transcript Format (transcript.jsonl)
+// from a redacted agent transcript. Returns nil if compaction cannot be performed
+// (nil agent, empty transcript, or compaction error) —
+// callers treat nil as "skip writing transcript.jsonl to /main".
+func compactTranscriptForV2(ctx context.Context, ag agent.Agent, transcript []byte, checkpointTranscriptStart int) []byte {
+	if ag == nil || len(transcript) == 0 {
+		return nil
+	}
+	if !settings.IsCheckpointsV2Enabled(ctx) {
+		return nil
+	}
+
+	compacted, err := compact.Compact(transcript, compact.MetadataFields{
+		Agent:      string(ag.Name()),
+		CLIVersion: versioninfo.Version,
+		StartLine:  checkpointTranscriptStart,
+	})
+	if err != nil {
+		logging.Warn(ctx, "compact transcript generation failed, skipping transcript.jsonl on /main",
+			slog.String("agent", string(ag.Name())),
+			slog.String("error", err.Error()),
+		)
+		return nil
+	}
+	return compacted
+}
+
 // writeCommittedV2IfEnabled writes checkpoint data to v2 refs when checkpoints_v2
 // is enabled in settings. Failures are logged as warnings — v2 writes are
 // best-effort during the dual-write period and must not block the v1 path.
@@ -928,7 +1129,7 @@ func writeCommittedV2IfEnabled(ctx context.Context, repo *git.Repository, opts c
 		return
 	}
 
-	v2Store := cpkg.NewV2GitStore(repo)
+	v2Store := cpkg.NewV2GitStore(repo, ResolveCheckpointURL(ctx, "origin"))
 	if err := v2Store.WriteCommitted(ctx, opts); err != nil {
 		logging.Warn(ctx, "v2 dual-write failed",
 			slog.String("checkpoint_id", opts.CheckpointID.String()),

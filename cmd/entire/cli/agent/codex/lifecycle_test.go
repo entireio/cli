@@ -73,6 +73,7 @@ func TestParseHookEvent_UserPromptSubmit(t *testing.T) {
 	require.Equal(t, "test-uuid", event.SessionID)
 	require.Equal(t, "/tmp/rollout.jsonl", event.SessionRef)
 	require.Equal(t, "Create a hello.txt file", event.Prompt)
+	require.Equal(t, "gpt-4.1", event.Model)
 }
 
 func TestParseHookEvent_Stop(t *testing.T) {
@@ -96,6 +97,7 @@ func TestParseHookEvent_Stop(t *testing.T) {
 	require.Equal(t, agent.TurnEnd, event.Type)
 	require.Equal(t, "test-uuid", event.SessionID)
 	require.Equal(t, "/tmp/rollout.jsonl", event.SessionRef)
+	require.Equal(t, "gpt-4.1", event.Model)
 }
 
 func TestParseHookEvent_PreToolUse_ReturnsNil(t *testing.T) {

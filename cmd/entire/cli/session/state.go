@@ -28,6 +28,10 @@ const (
 	// StaleSessionThreshold is the duration after which an ended session is considered stale
 	// and will be automatically deleted during load/list operations.
 	StaleSessionThreshold = 7 * 24 * time.Hour
+
+	// StuckActiveThreshold is the duration after which an ACTIVE session with no
+	// interaction is considered stuck (used by "entire doctor" and "entire status").
+	StuckActiveThreshold = 1 * time.Hour
 )
 
 // State represents the state of an active session.
@@ -249,6 +253,20 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 // IsStale returns true when a session hasn't seen interaction for longer than
 // StaleSessionThreshold. Falls back to StartedAt when LastInteractionTime is
 // nil (sessions created before interaction tracking was added).
+// IsStuckActive returns true if the session is in ACTIVE phase but has not had
+// any interaction for longer than StuckActiveThreshold. Falls back to StartedAt
+// when LastInteractionTime is nil, so brand-new sessions are not falsely flagged.
+func (s *State) IsStuckActive() bool {
+	if !s.Phase.IsActive() {
+		return false
+	}
+	ref := s.LastInteractionTime
+	if ref == nil {
+		ref = &s.StartedAt
+	}
+	return time.Since(*ref) > StuckActiveThreshold
+}
+
 func (s *State) IsStale() bool {
 	var since time.Duration
 	if s.LastInteractionTime != nil {

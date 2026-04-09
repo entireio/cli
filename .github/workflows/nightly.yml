@@ -1,0 +1,44 @@
+name: Nightly Release
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-release-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  create-nightly-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: cli
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Create nightly tag
+        run: |
+          TAG=$(scripts/create-nightly-tag.sh)
+          EXIT_CODE=$?
+          if [ "$EXIT_CODE" -eq 2 ]; then
+            echo "Skipping — no new nightly needed."
+            exit 0
+          elif [ "$EXIT_CODE" -ne 0 ] || [ -z "$TAG" ]; then
+            echo "::error::Failed to generate nightly tag"
+            exit 1
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"

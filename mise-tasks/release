@@ -1,0 +1,45 @@
+#!/bin/sh
+#MISE description="Create stable + nightly release tags and push them (usage: mise run release vX.X.X)"
+set -eu
+
+VERSION="${1:-}"
+if [ -z "$VERSION" ]; then
+  echo "Usage: mise run release vX.X.X"
+  exit 1
+fi
+
+# Ensure version starts with v
+case "$VERSION" in
+  v*) ;;
+  *) VERSION="v${VERSION}" ;;
+esac
+
+# Validate semver format (vMAJOR.MINOR.PATCH)
+if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "Error: invalid version format '${VERSION}', expected vMAJOR.MINOR.PATCH"
+  exit 1
+fi
+
+# Ensure working tree is clean
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Error: working tree is not clean, commit or stash changes first"
+  exit 1
+fi
+
+# Create stable tag first so the nightly script can find it
+git tag "$VERSION"
+echo "Created tag ${VERSION}"
+
+# Generate and create nightly tag if possible
+NIGHTLY_TAG=$(scripts/create-nightly-tag.sh) || true
+
+git push origin "$VERSION"
+echo "Pushed tag ${VERSION}"
+
+if [ -n "$NIGHTLY_TAG" ]; then
+  git tag "$NIGHTLY_TAG"
+  echo "Created tag ${NIGHTLY_TAG}"
+  git push origin "$NIGHTLY_TAG"
+fi
+echo ""
+echo "Done. Release workflows will start automatically."

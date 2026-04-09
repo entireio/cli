@@ -372,6 +372,8 @@ func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error 
 
 // FetchMetadataBranch fetches the entire/checkpoints/v1 branch from origin and creates/updates the local branch.
 // This is used when the metadata branch exists on remote but not locally.
+// The fetch is treeless (--filter=blob:none) because checkpoint metadata reads
+// support on-demand blob retrieval.
 // Uses git CLI instead of go-git for fetch because go-git doesn't use credential helpers,
 // which breaks HTTPS URLs that require authentication.
 func FetchMetadataBranch(ctx context.Context) error {
@@ -383,7 +385,7 @@ func FetchMetadataBranch(ctx context.Context) error {
 
 	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
 
-	fetchCmd := strategy.CheckpointGitCommand(ctx, "origin", "fetch", "origin", refSpec)
+	fetchCmd := strategy.CheckpointGitCommand(ctx, "origin", "fetch", "--no-tags", "--filter=blob:none", "origin", refSpec)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return errors.New("fetch timed out after 2 minutes")
@@ -425,7 +427,7 @@ func FetchMetadataTreeOnly(ctx context.Context) error {
 
 	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branchName, branchName)
 
-	fetchCmd := strategy.CheckpointGitCommand(ctx, "origin", "fetch", "--depth=1", "--filter=blob:none", "origin", refSpec)
+	fetchCmd := strategy.CheckpointGitCommand(ctx, "origin", "fetch", "--no-tags", "--depth=1", "--filter=blob:none", "origin", refSpec)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return errors.New("treeless fetch timed out after 2 minutes")
@@ -450,6 +452,66 @@ func FetchMetadataTreeOnly(ctx context.Context) error {
 		return fmt.Errorf("failed to create local %s branch: %w", branchName, err)
 	}
 
+	return nil
+}
+
+// FetchV2MainTreeOnly fetches the tip of the v2 /main ref from origin with
+// --depth=1 --filter=blob:none, downloading only the latest commit and its
+// tree objects (no blobs, no history).
+// Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
+func FetchV2MainTreeOnly(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	refSpec := fmt.Sprintf("+%s:%s", paths.V2MainRefName, paths.V2MainRefName)
+
+	fetchCmd := strategy.CheckpointGitCommand(ctx, "origin", "fetch", "--no-tags", "--depth=1", "--filter=blob:none", "origin", refSpec)
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return errors.New("v2 treeless fetch timed out after 2 minutes")
+		}
+		return fmt.Errorf("failed to treeless-fetch v2 /main from origin: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	return nil
+}
+
+// FetchV2MainRef fetches the v2 /main ref from origin.
+// The fetch is treeless (--filter=blob:none) because /main is metadata-only and
+// v2 checkpoint reads handle transcript retrieval separately.
+// Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
+func FetchV2MainRef(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	refSpec := fmt.Sprintf("+%s:%s", paths.V2MainRefName, paths.V2MainRefName)
+
+	fetchCmd := strategy.CheckpointGitCommand(ctx, "origin", "fetch", "--no-tags", "--filter=blob:none", "origin", refSpec)
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return errors.New("v2 fetch timed out after 2 minutes")
+		}
+		return fmt.Errorf("failed to fetch v2 /main from origin: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	return nil
+}
+
+// FetchV2MetadataFromCheckpointRemote fetches the v2 /main ref from the
+// configured checkpoint_remote URL.
+// Returns an error if the fetch fails or no checkpoint_remote is configured.
+func FetchV2MetadataFromCheckpointRemote(ctx context.Context) error {
+	checkpointURL, hasCheckpointRemote, resolveErr := strategy.ResolveCheckpointRemoteURL(ctx)
+	if !hasCheckpointRemote {
+		return errors.New("no checkpoint_remote configured")
+	}
+	if resolveErr != nil {
+		return fmt.Errorf("checkpoint_remote configured but could not resolve URL: %w", resolveErr)
+	}
+
+	if err := strategy.FetchV2MainFromURL(ctx, checkpointURL); err != nil {
+		return fmt.Errorf("failed to fetch v2 /main from checkpoint remote: %w", err)
+	}
 	return nil
 }
 
@@ -485,9 +547,9 @@ func FetchBlobsByHash(ctx context.Context, hashes []plumbing.Hash) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	// Build fetch args: "git fetch origin <hash1> <hash2> ..."
+	// Build fetch args: "git fetch --no-tags origin <hash1> <hash2> ..."
 	// This uses the normal transport + credential helpers, unlike fetch-pack.
-	args := []string{"fetch", "--no-write-fetch-head", "origin"}
+	args := []string{"fetch", "--no-tags", "--no-write-fetch-head", "origin"}
 	for _, h := range hashes {
 		args = append(args, h.String())
 	}

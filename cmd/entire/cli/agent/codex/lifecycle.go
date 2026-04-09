@@ -89,6 +89,7 @@ func (c *CodexAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) {
 		SessionID:  raw.SessionID,
 		SessionRef: derefString(raw.TranscriptPath),
 		Prompt:     raw.Prompt,
+		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
 }
@@ -102,6 +103,7 @@ func (c *CodexAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 		Type:       agent.TurnEnd,
 		SessionID:  raw.SessionID,
 		SessionRef: derefString(raw.TranscriptPath),
+		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
 }

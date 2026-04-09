@@ -39,7 +39,7 @@ func (c *CopilotCLI) IsTransientError(out Output, err error) bool {
 		"ECONNRESET",
 		"ETIMEDOUT",
 		"Too Many Requests",
-		// gpt-4.1 sometimes calls Copilot's Edit tool without old_str,
+		// Copilot sometimes calls its Edit tool without old_str,
 		// resulting in zero code changes despite a successful exit.
 		"old_str is required",
 	} {
@@ -57,7 +57,7 @@ func (c *CopilotCLI) Bootstrap() error {
 }
 
 func (c *CopilotCLI) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
-	cfg := &runConfig{Model: "gpt-4.1"}
+	cfg := &runConfig{Model: "claude-haiku-4.5"}
 	for _, o := range opts {
 		o(cfg)
 	}
@@ -103,7 +103,7 @@ func (c *CopilotCLI) RunPrompt(ctx context.Context, dir string, prompt string, o
 		ExitCode: exitCode,
 	}
 
-	// gpt-4.1 sometimes calls Copilot's Edit tool without required parameters,
+	// Copilot sometimes calls its Edit tool without required parameters,
 	// producing zero code changes despite exit 0. Surface this as an error so
 	// the transient-error retry mechanism can restart the scenario.
 	// Only trigger when copilot reports zero changes — it may retry internally.
@@ -297,7 +297,7 @@ func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, err
 		}
 	}
 	args := append([]string{"env"}, envArgs...)
-	args = append(args, bin, "--model", "gpt-4.1", "--allow-all")
+	args = append(args, bin, "--model", "claude-haiku-4.5", "--allow-all")
 
 	name := fmt.Sprintf("copilot-test-%d", time.Now().UnixNano())
 	// Strip CI env vars that may affect interactive mode.

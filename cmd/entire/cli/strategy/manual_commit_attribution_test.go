@@ -775,18 +775,12 @@ func TestCalculateAttributionWithAccumulated_UserEditsNonAgentFile(t *testing.T)
 
 	// Expected calculation:
 	// - Agent added 3 lines to file1.go (2 functions + 1 blank)
-	// - User added 2 lines to file2.go between checkpoints (from PromptAttribution)
-	// - User added 2 MORE lines to file2.go after last checkpoint (post-checkpoint)
-	// - Total user added: 2 + 2 = 4
+	// - PA1 captured 2 lines to file2.go — but PA1 is pre-session baseline, excluded from human count
+	// - User added 2 MORE lines to file2.go after last checkpoint (post-checkpoint) — these count
+	// - Total user added: 0 (PA1 excluded) + 2 (post-checkpoint) = 2
 	// - agentLinesInCommit: 3
-	// - Total: 3 + 4 = 7
-	// - Agent percentage: 3/7 = 42.9%
-	//
-	// BUG (if not fixed): Post-checkpoint calculation only looks at file1.go,
-	// so it would miss the 2 post-checkpoint edits to file2.go:
-	// - Total user added: 2 + 0 = 2 (WRONG)
-	// - Total: 3 + 2 = 5 (WRONG)
-	// - Agent percentage: 3/5 = 60% (WRONG, inflated)
+	// - Total: 3 + 2 = 5
+	// - Agent percentage: 3/5 = 60%
 
 	t.Logf("Attribution: agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
 		result.AgentLines, result.HumanAdded, result.TotalCommitted, result.AgentPercentage)
@@ -795,18 +789,18 @@ func TestCalculateAttributionWithAccumulated_UserEditsNonAgentFile(t *testing.T)
 		t.Errorf("AgentLines = %d, want 3", result.AgentLines)
 	}
 
-	if result.HumanAdded != 4 {
-		t.Errorf("HumanAdded = %d, want 4 (2 between + 2 post-checkpoint, including file agent never touched)",
+	if result.HumanAdded != 2 {
+		t.Errorf("HumanAdded = %d, want 2 (post-checkpoint only; PA1 pre-session edits excluded as baseline)",
 			result.HumanAdded)
 	}
 
-	if result.TotalCommitted != 7 {
-		t.Errorf("TotalCommitted = %d, want 7 (3 agent + 4 user)", result.TotalCommitted)
+	if result.TotalCommitted != 5 {
+		t.Errorf("TotalCommitted = %d, want 5 (3 agent + 2 post-checkpoint user)", result.TotalCommitted)
 	}
 
-	// Agent percentage should be 3/7 = 42.9%
-	if result.AgentPercentage < 42.8 || result.AgentPercentage > 43.0 {
-		t.Errorf("AgentPercentage = %.1f%%, want ~42.9%% (not inflated)", result.AgentPercentage)
+	// Agent percentage should be 3/5 = 60%
+	if result.AgentPercentage < 59.9 || result.AgentPercentage > 60.1 {
+		t.Errorf("AgentPercentage = %.1f%%, want ~60.0%%", result.AgentPercentage)
 	}
 }
 
@@ -1296,4 +1290,316 @@ func TestCalculatePromptAttribution_PopulatesPerFile(t *testing.T) {
 	if result.UserAddedPerFile["b.go"] != 1 {
 		t.Errorf("UserAddedPerFile[b.go] = %d, want 1", result.UserAddedPerFile["b.go"])
 	}
+}
+
+// TestCalculateAttributionWithAccumulated_PreSessionDirtOnAgentFiles verifies that
+// pre-session worktree dirt (captured in PA1 / checkpoint 1) on files the agent later
+// touches does NOT get counted as human contributions.
+//
+// Scenario: hooks.go has 3 pre-session dirty lines when session starts.
+// Agent also modifies hooks.go (adds 5 more lines). Shadow captures all 8 new lines.
+// At commit time, the 3 pre-session lines should be excluded from human count.
+func TestCalculateAttributionWithAccumulated_PreSessionDirtOnAgentFiles(t *testing.T) {
+	t.Parallel()
+
+	// Base: hooks.go has 3 lines
+	baseTree := buildTestTree(t, map[string]string{
+		"hooks.go": "package strategy\n\nfunc warn() {}\n",
+	})
+
+	// Shadow captures base (3 lines) + pre-session dirt (3 new lines) + agent work (5 new lines)
+	// = 11 total lines, 8 added relative to base
+	shadowContent := "package strategy\n\n// pre1\n// pre2\n// pre3\nfunc agentA() {}\nfunc agentB() {}\nfunc agentC() {}\nfunc agentD() {}\nfunc agentE() {}\nfunc warn() {}\n"
+	shadowTree := buildTestTree(t, map[string]string{
+		"hooks.go": shadowContent,
+	})
+
+	// Head = shadow (user didn't edit after agent)
+	headTree := shadowTree
+
+	filesTouched := []string{"hooks.go"}
+
+	// PA1 captured the 3 pre-session dirty lines at session start
+	promptAttributions := []PromptAttribution{
+		{
+			CheckpointNumber: 1,
+			UserLinesAdded:   3,
+			UserLinesRemoved: 0,
+			UserAddedPerFile: map[string]int{"hooks.go": 3},
+		},
+	}
+
+	result := CalculateAttributionWithAccumulated(context.Background(), AttributionParams{
+		BaseTree: baseTree, ShadowTree: shadowTree, HeadTree: headTree,
+		FilesTouched: filesTouched, PromptAttributions: promptAttributions,
+	})
+
+	require.NotNil(t, result)
+
+	// base→shadow adds 8 lines. PA1 says 3 are pre-session.
+	// totalAgentAdded = 8 - 3 = 5 (correct agent subtraction).
+	// Pre-session 3 lines should NOT appear in HumanAdded.
+	require.Equal(t, 5, result.AgentLines, "agent should get credit for 5 lines")
+	require.Equal(t, 0, result.HumanAdded, "pre-session dirt should not count as human")
+	require.Equal(t, 5, result.TotalCommitted, "total should be agent-only")
+	require.InDelta(t, 100.0, result.AgentPercentage, 0.1, "should be 100%% agent")
+}
+
+// TestCalculateAttributionWithAccumulated_PreSessionConfigFiles verifies that
+// non-agent files dirty at session start (e.g., CLI config files from `entire enable`)
+// do NOT get counted as human contributions.
+//
+// Uses flat file names because buildTestTree doesn't support nested paths.
+// The attribution code only checks filesTouched membership and UserAddedPerFile keys,
+// so flat names are equivalent for testing.
+func TestCalculateAttributionWithAccumulated_PreSessionConfigFiles(t *testing.T) {
+	t.Parallel()
+
+	// Base: empty repo
+	baseTree := buildTestTree(t, map[string]string{
+		"empty": "",
+	})
+
+	// Shadow: agent created hello.py (5 lines). Config file also present (10 lines).
+	shadowTree := buildTestTree(t, map[string]string{
+		"empty":       "",
+		"hello.py":    "line1\nline2\nline3\nline4\nline5\n",
+		"config.json": "k1\nk2\nk3\nk4\nk5\nk6\nk7\nk8\nk9\nk10\n",
+	})
+
+	// Head = shadow (user didn't edit)
+	headTree := shadowTree
+
+	filesTouched := []string{"hello.py"}
+
+	// PA1 captured the config file at session start (pre-session dirty)
+	promptAttributions := []PromptAttribution{
+		{
+			CheckpointNumber: 1,
+			UserLinesAdded:   10,
+			UserLinesRemoved: 0,
+			UserAddedPerFile: map[string]int{"config.json": 10},
+		},
+	}
+
+	result := CalculateAttributionWithAccumulated(context.Background(), AttributionParams{
+		BaseTree: baseTree, ShadowTree: shadowTree, HeadTree: headTree,
+		FilesTouched: filesTouched, PromptAttributions: promptAttributions,
+	})
+
+	require.NotNil(t, result)
+
+	// Agent created hello.py (5 lines). Config file is pre-session baseline — excluded.
+	require.Equal(t, 5, result.AgentLines, "agent should get 5 lines for hello.py")
+	require.Equal(t, 0, result.HumanAdded, "pre-session config should not count as human")
+	require.Equal(t, 5, result.TotalCommitted, "total should be agent-only")
+	require.InDelta(t, 100.0, result.AgentPercentage, 0.1, "should be 100%% agent")
+}
+
+// TestCalculateAttributionWithAccumulated_DuringSessionHumanEdits verifies that
+// human edits made DURING the session (captured by PA2+) are still correctly
+// counted as human contributions after the baseline fix.
+//
+// This is a correctness guard — the fix must not break this.
+func TestCalculateAttributionWithAccumulated_DuringSessionHumanEdits(t *testing.T) {
+	t.Parallel()
+
+	baseTree := buildTestTree(t, map[string]string{
+		"main.go": "",
+	})
+
+	// Shadow: 12 lines total — 10 agent + 2 user (added between turns)
+	shadowTree := buildTestTree(t, map[string]string{
+		"main.go": "a1\na2\na3\na4\na5\na6\na7\na8\nu1\nu2\na9\na10\n",
+	})
+
+	headTree := shadowTree
+
+	filesTouched := []string{"main.go"}
+
+	promptAttributions := []PromptAttribution{
+		{
+			CheckpointNumber: 1,
+			UserLinesAdded:   0, // Clean worktree at session start
+			UserLinesRemoved: 0,
+			UserAddedPerFile: map[string]int{},
+		},
+		{
+			CheckpointNumber: 2,
+			UserLinesAdded:   2, // User added 2 lines between turn 1 and 2
+			UserLinesRemoved: 0,
+			UserAddedPerFile: map[string]int{"main.go": 2},
+		},
+	}
+
+	result := CalculateAttributionWithAccumulated(context.Background(), AttributionParams{
+		BaseTree: baseTree, ShadowTree: shadowTree, HeadTree: headTree,
+		FilesTouched: filesTouched, PromptAttributions: promptAttributions,
+	})
+
+	require.NotNil(t, result)
+
+	// 12 total lines in shadow. PA2 says user added 2. Agent = 12 - 2 = 10.
+	require.Equal(t, 10, result.AgentLines, "agent should get 10 lines")
+	require.Equal(t, 2, result.HumanAdded, "user's 2 lines from PA2 should count")
+	require.Equal(t, 12, result.TotalCommitted)
+	require.InDelta(t, 83.3, result.AgentPercentage, 0.1)
+}
+
+// TestCalculateAttributionWithAccumulated_EmptyPA verifies that sessions with
+// no prompt attributions (old CLI versions, edge cases) still work correctly.
+func TestCalculateAttributionWithAccumulated_EmptyPA(t *testing.T) {
+	t.Parallel()
+
+	baseTree := buildTestTree(t, map[string]string{
+		"main.go": "",
+	})
+
+	shadowTree := buildTestTree(t, map[string]string{
+		"main.go": "line1\nline2\nline3\n",
+	})
+
+	headTree := shadowTree
+	filesTouched := []string{"main.go"}
+
+	// No prompt attributions at all (old session or edge case)
+	result := CalculateAttributionWithAccumulated(context.Background(), AttributionParams{
+		BaseTree: baseTree, ShadowTree: shadowTree, HeadTree: headTree,
+		FilesTouched: filesTouched,
+	})
+
+	require.NotNil(t, result)
+	require.Equal(t, 3, result.AgentLines)
+	require.Equal(t, 0, result.HumanAdded)
+	require.InDelta(t, 100.0, result.AgentPercentage, 0.1)
+}
+
+// TestCalculateAttributionWithAccumulated_ParentTreeForNonAgentLines verifies that
+// non-agent file line counting uses parentTree (not baseTree) when provided.
+// This prevents inflation in multi-commit sessions where a non-agent file was
+// modified in an intermediate commit AND the current commit.
+//
+// Scenario (multi-commit session):
+//   - Session starts at commit A: readme.md has 2 lines
+//   - Commit B: user adds 5 lines to readme.md (intermediate commit)
+//   - Commit C (current): agent modifies main.go, user adds 3 more lines to readme.md
+//
+// Without parentTree: diffLines(baseTree=A, headTree=C) counts ALL 8 lines → inflated
+// With parentTree:    diffLines(parentTree=B, headTree=C) counts only 3 lines → correct
+func TestCalculateAttributionWithAccumulated_ParentTreeForNonAgentLines(t *testing.T) {
+	t.Parallel()
+
+	// baseTree = commit A: readme.md has 2 lines, main.go is empty
+	baseTree := buildTestTree(t, map[string]string{
+		"main.go":   "",
+		"readme.md": "line1\nline2\n",
+	})
+
+	// parentTree = commit B: readme.md grew to 7 lines (user added 5 in intermediate commit)
+	parentTree := buildTestTree(t, map[string]string{
+		"main.go":   "",
+		"readme.md": "line1\nline2\ninter1\ninter2\ninter3\ninter4\ninter5\n",
+	})
+
+	// shadowTree: agent added 4 lines to main.go (checkpoint state)
+	shadowTree := buildTestTree(t, map[string]string{
+		"main.go":   "func a() {}\nfunc b() {}\nfunc c() {}\nfunc d() {}\n",
+		"readme.md": "line1\nline2\ninter1\ninter2\ninter3\ninter4\ninter5\n",
+	})
+
+	// headTree = commit C: agent's main.go + user added 3 more lines to readme.md
+	headTree := buildTestTree(t, map[string]string{
+		"main.go":   "func a() {}\nfunc b() {}\nfunc c() {}\nfunc d() {}\n",
+		"readme.md": "line1\nline2\ninter1\ninter2\ninter3\ninter4\ninter5\nnew1\nnew2\nnew3\n",
+	})
+
+	filesTouched := []string{"main.go"}
+
+	// No prompt attributions (clean worktree at session start)
+	promptAttributions := []PromptAttribution{}
+
+	// WITH parentTree: should only count 3 new readme.md lines (parent→head)
+	result := CalculateAttributionWithAccumulated(context.Background(), AttributionParams{
+		BaseTree: baseTree, ShadowTree: shadowTree, HeadTree: headTree,
+		FilesTouched: filesTouched, PromptAttributions: promptAttributions,
+		ParentTree: parentTree,
+	})
+
+	require.NotNil(t, result)
+	require.Equal(t, 4, result.AgentLines, "agent added 4 lines to main.go")
+	require.Equal(t, 3, result.HumanAdded, "only 3 lines from THIS commit, not all 8 since session start")
+	require.Equal(t, 7, result.TotalCommitted, "4 agent + 3 human")
+	require.InDelta(t, 57.1, result.AgentPercentage, 0.2, "4/7 = 57.1%")
+
+	// WITHOUT parentTree (nil): would count all 8 lines since session start — verify the bug
+	resultNoPT := CalculateAttributionWithAccumulated(context.Background(), AttributionParams{
+		BaseTree: baseTree, ShadowTree: shadowTree, HeadTree: headTree,
+		FilesTouched: filesTouched, PromptAttributions: promptAttributions,
+	})
+
+	require.NotNil(t, resultNoPT)
+	// Without parentTree, falls back to baseTree: counts 8 lines (all since session start)
+	require.Equal(t, 8, resultNoPT.HumanAdded, "without parentTree, all 8 lines counted (inflated)")
+}
+
+// TestCalculateAttributionWithAccumulated_MultiSessionCrossExclusion verifies that
+// files touched by OTHER agent sessions in the same commit are not counted as human work.
+//
+// Scenario: two sessions create files, then both are committed together.
+//   - Session 0 created blue.md (3 lines)
+//   - Session 1 created red.md (3 lines)
+//
+// When calculating Session 0's attribution, red.md should be excluded via AllAgentFiles
+// (the union of all sessions' FilesTouched), not counted as human_added.
+func TestCalculateAttributionWithAccumulated_MultiSessionCrossExclusion(t *testing.T) {
+	t.Parallel()
+
+	baseTree := buildTestTree(t, nil)
+
+	// Shadow: Session 0 created blue.md
+	shadowTree := buildTestTree(t, map[string]string{
+		"blue.md": "line1\nline2\nline3\n",
+	})
+
+	// Head: commit contains both blue.md and red.md (from two sessions)
+	headTree := buildTestTree(t, map[string]string{
+		"blue.md": "line1\nline2\nline3\n",
+		"red.md":  "line1\nline2\nline3\n",
+	})
+
+	// Session 0 only touched blue.md
+	filesTouched := []string{"blue.md"}
+
+	promptAttributions := []PromptAttribution{
+		{CheckpointNumber: 1, UserAddedPerFile: map[string]int{}},
+	}
+
+	// AllAgentFiles = union of ALL sessions' FilesTouched
+	allAgentFiles := map[string]struct{}{
+		"blue.md": {},
+		"red.md":  {}, // From Session 1
+	}
+
+	// WITH AllAgentFiles: red.md excluded from human count
+	result := CalculateAttributionWithAccumulated(context.Background(), AttributionParams{
+		BaseTree: baseTree, ShadowTree: shadowTree, HeadTree: headTree,
+		FilesTouched: filesTouched, PromptAttributions: promptAttributions,
+		AllAgentFiles: allAgentFiles,
+	})
+
+	require.NotNil(t, result)
+	require.Equal(t, 3, result.AgentLines, "agent should get 3 lines for blue.md")
+	require.Equal(t, 0, result.HumanAdded, "red.md should NOT count as human (other agent session)")
+	require.Equal(t, 3, result.TotalCommitted, "total should be agent-only for this session's scope")
+	require.InDelta(t, 100.0, result.AgentPercentage, 0.1, "should be 100%% agent")
+
+	// WITHOUT AllAgentFiles: red.md incorrectly counted as human (the bug)
+	resultNoExcl := CalculateAttributionWithAccumulated(context.Background(), AttributionParams{
+		BaseTree: baseTree, ShadowTree: shadowTree, HeadTree: headTree,
+		FilesTouched: filesTouched, PromptAttributions: promptAttributions,
+	})
+
+	require.NotNil(t, resultNoExcl)
+	require.Equal(t, 3, resultNoExcl.HumanAdded, "without AllAgentFiles, red.md counted as human (inflated)")
+	require.Equal(t, 6, resultNoExcl.TotalCommitted, "inflated total includes red.md as human")
 }

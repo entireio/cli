@@ -47,6 +47,7 @@ type SessionMetadata struct {
 	CreatedAt          time.Time   `json:"created_at"`
 	Branch             string      `json:"branch"`
 	Agent              string      `json:"agent"`
+	Model              string      `json:"model"`
 	CheckpointsCount   int         `json:"checkpoints_count"`
 	FilesTouched       []string    `json:"files_touched"`
 	TokenUsage         TokenUsage  `json:"token_usage"`

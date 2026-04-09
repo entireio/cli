@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v6"
@@ -280,6 +281,42 @@ func ApplyTreeChanges(
 	}
 	sortTreeEntries(result)
 	return storeTree(repo, result)
+}
+
+// WalkCheckpointShards iterates over the two-level shard structure (<id[:2]>/<id[2:]>/)
+// in a checkpoint tree, calling fn for each checkpoint found. Skips non-directory entries
+// at both levels (e.g., generation.json at the root). The callback receives the parsed
+// checkpoint ID and the tree hash of the checkpoint subtree.
+func WalkCheckpointShards(repo *git.Repository, tree *object.Tree, fn func(cpID id.CheckpointID, cpTreeHash plumbing.Hash) error) error {
+	for _, bucketEntry := range tree.Entries {
+		if bucketEntry.Mode != filemode.Dir {
+			continue
+		}
+		if len(bucketEntry.Name) != 2 {
+			continue
+		}
+
+		bucketTree, err := repo.TreeObject(bucketEntry.Hash)
+		if err != nil {
+			continue
+		}
+
+		for _, cpEntry := range bucketTree.Entries {
+			if cpEntry.Mode != filemode.Dir {
+				continue
+			}
+
+			cpID, err := id.NewCheckpointID(bucketEntry.Name + cpEntry.Name)
+			if err != nil {
+				continue
+			}
+
+			if err := fn(cpID, cpEntry.Hash); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // splitFirstSegment splits "a/b/c" into ("a", "b/c"), and "file.txt" into ("file.txt", "").

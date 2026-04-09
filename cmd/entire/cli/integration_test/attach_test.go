@@ -187,9 +187,7 @@ func TestAttach_AlreadyTracked_NoCheckpoint(t *testing.T) {
 	env.GitCommit("add research notes")
 
 	// Now attach — session state exists but has no checkpoint.
-	// Don't use -f because the amend may fail in the test environment
-	// (pre-commit hooks reference paths that don't exist in the temp repo).
-	output := env.RunCLI("attach", session1.ID, "-a", "claude-code")
+	output := env.RunCLI("attach", session1.ID, "-a", "claude-code", "-f")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -303,6 +301,55 @@ func TestAttach_DifferentWorkingDirectory(t *testing.T) {
 	}
 	if !strings.Contains(output, "Created checkpoint") {
 		t.Errorf("expected 'Created checkpoint' in output, got:\n%s", output)
+	}
+}
+
+// TestAttach_CodexSessionTreeLayout tests attaching a Codex session from the
+// CODEX_HOME/sessions/YYYY/MM/DD/ rollout tree using only the session ID.
+func TestAttach_CodexSessionTreeLayout(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	codexDir := t.TempDir()
+	sessionID := "019d6c43-1537-7343-9691-1f8cee04fe59"
+	sessionFile := filepath.Join(codexDir, "2026", "04", "08", "rollout-2026-04-08T10-43-48-"+sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	transcript := `{"timestamp":"2026-04-08T10:43:48.000Z","type":"session_meta","payload":{"id":"019d6c43-1537-7343-9691-1f8cee04fe59","timestamp":"2026-04-08T10:43:48.000Z"}}
+{"timestamp":"2026-04-08T10:43:49.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"investigate attach failure"}]}}
+{"timestamp":"2026-04-08T10:43:50.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Looking into it."}]}}
+`
+	if err := os.WriteFile(sessionFile, []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(getTestBinary(), "attach", sessionID, "-a", "codex", "-f")
+	cmd.Dir = env.RepoDir
+	cmd.Env = append(env.cliEnv(),
+		"ENTIRE_TEST_CODEX_SESSION_DIR="+codexDir,
+	)
+
+	outputBytes, err := cmd.CombinedOutput()
+	output := string(outputBytes)
+	if err != nil {
+		t.Fatalf("attach failed: %v\nOutput: %s", err, output)
+	}
+
+	if !strings.Contains(output, "Attached session") {
+		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "Created checkpoint") {
+		t.Errorf("expected 'Created checkpoint' in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "Entire-Checkpoint") {
+		t.Errorf("expected checkpoint trailer in output, got:\n%s", output)
+	}
+
+	sessionStateFile := filepath.Join(env.RepoDir, ".git", "entire-sessions", sessionID+".json")
+	if _, statErr := os.Stat(sessionStateFile); statErr != nil {
+		t.Errorf("expected session state file at %s: %v", sessionStateFile, statErr)
 	}
 }
 

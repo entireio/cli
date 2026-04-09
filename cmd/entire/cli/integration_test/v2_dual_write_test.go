@@ -99,6 +99,17 @@ func TestV2DualWrite_FullWorkflow(t *testing.T) {
 	_, found = env.ReadFileFromRef(paths.V2MainRefName, cpPath+"/0/"+paths.TranscriptFileName)
 	assert.False(t, found, "full.jsonl should NOT be on v2 /main")
 
+	// transcript.jsonl (compact format) SHOULD be on /main
+	compactTranscript, found := env.ReadFileFromRef(paths.V2MainRefName, cpPath+"/0/"+paths.CompactTranscriptFileName)
+	require.True(t, found, "transcript.jsonl should exist on v2 /main")
+	assert.Contains(t, compactTranscript, `"v":1`)
+	assert.Contains(t, compactTranscript, `"agent":`)
+
+	// transcript_hash.txt should be on /main
+	transcriptHash, found := env.ReadFileFromRef(paths.V2MainRefName, cpPath+"/0/"+paths.CompactTranscriptHashFileName)
+	require.True(t, found, "transcript_hash.txt should exist on v2 /main")
+	assert.True(t, strings.HasPrefix(transcriptHash, "sha256:"))
+
 	// ========================================
 	// Verify v2 /full/current ref
 	// ========================================
@@ -227,4 +238,9 @@ func TestV2DualWrite_StopTimeFinalization(t *testing.T) {
 	fullTranscript, found := env.ReadFileFromRef(paths.V2FullCurrentRefName, cpPath+"/0/"+paths.TranscriptFileName)
 	require.True(t, found, "full.jsonl should exist on /full/current after finalization")
 	assert.Contains(t, fullTranscript, "main")
+
+	// transcript.jsonl should exist on /main after stop-time finalization
+	compactTranscript, found := env.ReadFileFromRef(paths.V2MainRefName, cpPath+"/0/"+paths.CompactTranscriptFileName)
+	require.True(t, found, "transcript.jsonl should exist on v2 /main after finalization")
+	assert.Contains(t, compactTranscript, `"v":1`)
 }

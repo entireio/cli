@@ -76,10 +76,11 @@ type userTextBlock struct {
 //	{"v":1,"agent":"claude-code","cli_version":"0.42.0","type":"user","ts":"...","content":"..."}
 //	{"v":1,"agent":"claude-code","cli_version":"0.42.0","type":"assistant","ts":"...","id":"msg_xxx","content":[{"type":"text","text":"..."},{"type":"tool_use","id":"...","name":"...","input":{...},"result":{"output":"...","status":"..."}}]}
 func Compact(content []byte, opts MetadataFields) ([]byte, error) {
-	// Single-object formats (OpenCode, Gemini) must be detected on the raw
-	// content. SliceFromLine operates on newline offsets which would cut a
-	// JSON object mid-value and break parsing. These compactors handle
-	// StartLine internally as a message-index offset.
+	// Formats that need detection on raw content before line truncation:
+	// - Single-object formats (OpenCode, Gemini): SliceFromLine would cut
+	//   a JSON object mid-value. They handle StartLine as a message-index offset.
+	// - Codex: session_meta header is only on the first line. Codex handles
+	//   StartLine as a response_item index offset.
 	if isOpenCodeFormat(content) {
 		return compactOpenCode(content, opts)
 	}
@@ -88,9 +89,21 @@ func Compact(content []byte, opts MetadataFields) ([]byte, error) {
 		return compactGemini(content, opts)
 	}
 
+	if isCodexFormat(content) {
+		return compactCodex(content, opts)
+	}
+
 	truncated := transcript.SliceFromLine(content, opts.StartLine)
 	if truncated == nil {
 		truncated = []byte{}
+	}
+
+	if isCopilotFormat(truncated) {
+		return compactCopilot(truncated, opts)
+	}
+
+	if isDroidFormat(truncated) {
+		return compactDroid(truncated, opts)
 	}
 
 	return compactJSONL(truncated, opts)
@@ -132,6 +145,9 @@ func normalizeKind(raw map[string]json.RawMessage) string {
 	return ""
 }
 
+// linePreprocessor transforms a parsed JSONL line before conversion.
+type linePreprocessor func(map[string]json.RawMessage) map[string]json.RawMessage
+
 // parsedEntry is an intermediate representation of a JSONL line used during
 // the two-pass compact conversion.
 type parsedEntry struct {
@@ -150,10 +166,14 @@ type parsedEntry struct {
 // compactJSONL converts JSONL transcripts (Claude Code, Cursor) into the
 // transcript.jsonl format.
 func compactJSONL(content []byte, opts MetadataFields) ([]byte, error) {
+	return compactJSONLWith(content, opts, nil)
+}
+
+func compactJSONLWith(content []byte, opts MetadataFields, preprocess linePreprocessor) ([]byte, error) {
 	base := newTranscriptLine(opts)
 
 	// Pass 1: parse all lines into intermediate entries.
-	entries, err := parseJSONLEntries(content)
+	entries, err := parseJSONLEntries(content, preprocess)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +278,7 @@ func appendLine(result *[]byte, line transcriptLine) {
 
 // parseJSONLEntries parses all JSONL lines into intermediate entries,
 // filtering dropped types and malformed lines.
-func parseJSONLEntries(content []byte) ([]parsedEntry, error) {
+func parseJSONLEntries(content []byte, preprocess linePreprocessor) ([]parsedEntry, error) {
 	reader := bufio.NewReader(bytes.NewReader(content))
 	var entries []parsedEntry
 
@@ -269,7 +289,7 @@ func parseJSONLEntries(content []byte) ([]parsedEntry, error) {
 		}
 
 		if len(bytes.TrimSpace(lineBytes)) > 0 {
-			if e, ok := parseLine(lineBytes); ok {
+			if e, ok := parseLine(lineBytes, preprocess); ok {
 				entries = append(entries, e)
 			}
 		}
@@ -284,10 +304,14 @@ func parseJSONLEntries(content []byte) ([]parsedEntry, error) {
 
 // parseLine converts a single JSONL line into a parsedEntry.
 // Returns ok=false for dropped/malformed lines.
-func parseLine(lineBytes []byte) (parsedEntry, bool) {
+func parseLine(lineBytes []byte, preprocess linePreprocessor) (parsedEntry, bool) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(lineBytes, &raw); err != nil {
 		return parsedEntry{}, false
+	}
+
+	if preprocess != nil {
+		raw = preprocess(raw)
 	}
 
 	kind := normalizeKind(raw)

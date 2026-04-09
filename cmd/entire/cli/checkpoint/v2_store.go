@@ -24,6 +24,11 @@ type V2GitStore struct {
 	// maxCheckpointsPerGeneration overrides the rotation threshold for testing.
 	// Zero means use DefaultMaxCheckpointsPerGeneration.
 	maxCheckpointsPerGeneration int
+
+	// FetchRemote is the git remote used for fetch-on-demand operations (e.g.,
+	// fetching /full/* refs during entire resume). Defaults to "origin".
+	// Set to the checkpoint remote URL when checkpoint_remote is configured.
+	FetchRemote string
 }
 
 // maxCheckpoints returns the effective rotation threshold.
@@ -35,10 +40,16 @@ func (s *V2GitStore) maxCheckpoints() int {
 }
 
 // NewV2GitStore creates a new v2 checkpoint store backed by the given git repository.
-func NewV2GitStore(repo *git.Repository) *V2GitStore {
+// fetchRemote is the git remote used for fetch-on-demand operations (e.g., fetching
+// /full/* refs during entire resume). Pass "origin" or the checkpoint remote URL.
+func NewV2GitStore(repo *git.Repository, fetchRemote string) *V2GitStore {
+	if fetchRemote == "" {
+		fetchRemote = "origin"
+	}
 	return &V2GitStore{
-		repo: repo,
-		gs:   &GitStore{repo: repo},
+		repo:        repo,
+		gs:          &GitStore{repo: repo},
+		FetchRemote: fetchRemote,
 	}
 }
 
@@ -69,8 +80,8 @@ func (s *V2GitStore) ensureRef(refName plumbing.ReferenceName) error {
 	return nil
 }
 
-// getRefState returns the parent commit hash and root tree hash for a ref.
-func (s *V2GitStore) getRefState(refName plumbing.ReferenceName) (parentHash, treeHash plumbing.Hash, err error) {
+// GetRefState returns the parent commit hash and root tree hash for a ref.
+func (s *V2GitStore) GetRefState(refName plumbing.ReferenceName) (parentHash, treeHash plumbing.Hash, err error) {
 	ref, err := s.repo.Reference(refName, true)
 	if err != nil {
 		return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("ref %s not found: %w", refName, err)

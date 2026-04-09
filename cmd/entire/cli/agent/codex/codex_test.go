@@ -66,6 +66,33 @@ func TestCodexAgent_FormatResumeCommand(t *testing.T) {
 	require.Equal(t, "codex resume 550e8400-e29b-41d4-a716-446655440000", cmd)
 }
 
+func TestCodexAgent_GetSessionDir(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("HOME", fakeHome)
+
+	ag := &CodexAgent{}
+	dir, err := ag.GetSessionDir("")
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(fakeHome, ".codex", "sessions"), dir)
+}
+
+func TestCodexAgent_ResolveSessionFile_SessionTreeLayout(t *testing.T) {
+	t.Parallel()
+
+	ag := &CodexAgent{}
+	sessionID := "019d6c43-1537-7343-9691-1f8cee04fe59"
+	sessionDir := t.TempDir()
+	dayDir := filepath.Join(sessionDir, "2026", "04", "08")
+	require.NoError(t, os.MkdirAll(dayDir, 0o750))
+
+	expected := filepath.Join(dayDir, "rollout-2026-04-08T10-43-48-"+sessionID+".jsonl")
+	require.NoError(t, os.WriteFile(expected, []byte(sampleRollout), 0o600))
+
+	result := ag.ResolveSessionFile(sessionDir, sessionID)
+	require.Equal(t, expected, result)
+}
+
 func TestCodexAgent_ReadSession(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}

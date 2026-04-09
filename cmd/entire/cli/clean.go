@@ -27,17 +27,16 @@ func newCleanCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "clean",
-		Short: "Clean up session data and orphaned Entire data",
+		Short: "Clean up Entire session data",
 		Long: `Clean up Entire session data for the current HEAD commit.
 
 By default, cleans session state and shadow branches for the current HEAD:
   - Session state files (.git/entire-sessions/<session-id>.json)
   - Shadow branch (entire/<commit-hash>-<worktree-hash>)
 
-Use --all to clean all orphaned Entire data across the repository:
-  - Orphaned shadow branches
-  - Orphaned session state files
-  - Orphaned checkpoint entries on entire/checkpoints/v1
+Use --all to clean all Entire session data across the repository:
+  - All session state files (.git/entire-sessions/)
+  - All shadow branches
   - Temporary files (.entire/tmp/)
 The entire/checkpoints/v1 branch itself is preserved.
 
@@ -79,7 +78,7 @@ Use --dry-run to preview what would be deleted without prompting.`,
 	}
 
 	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Skip confirmation prompt and override active session guard")
-	cmd.Flags().BoolVarP(&allFlag, "all", "a", false, "Clean all orphaned data across the repository")
+	cmd.Flags().BoolVarP(&allFlag, "all", "a", false, "Clean all session data across the repository")
 	cmd.Flags().BoolVarP(&dryRunFlag, "dry-run", "d", false, "Preview what would be deleted without deleting")
 	cmd.Flags().StringVar(&sessionFlag, "session", "", "Clean a specific session by ID")
 
@@ -257,16 +256,16 @@ func runCleanSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 	return nil
 }
 
-// runCleanAll cleans all orphaned data across the repository (old `entire clean` behavior).
+// runCleanAll cleans all session data across the repository.
 func runCleanAll(ctx context.Context, cmd *cobra.Command, force, dryRun bool) error {
-	// List all cleanup items
-	items, err := strategy.ListAllCleanupItems(ctx)
+	// List all items (sessions, shadow branches) — not just orphaned ones
+	items, err := strategy.ListAllItems(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to list orphaned items: %w", err)
+		return fmt.Errorf("failed to list items: %w", err)
 	}
 
-	// List temp files
-	tempFiles, err := listTempFiles(ctx)
+	// List temp files — skip active-session filter since --all deletes those sessions
+	tempFiles, err := listAllTempFiles(ctx)
 	if err != nil {
 		// Non-fatal: continue with other cleanup items
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to list temp files: %v\n", err)
@@ -275,14 +274,14 @@ func runCleanAll(ctx context.Context, cmd *cobra.Command, force, dryRun bool) er
 	return runCleanAllWithItems(ctx, cmd, force, dryRun, items, tempFiles)
 }
 
-// runCleanAllWithItems is the core logic for cleaning all orphaned items.
+// runCleanAllWithItems is the core logic for cleaning all items.
 // Separated for testability — tests pass a cmd without a TTY and use force or dryRun to avoid prompts.
 func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun bool, items []strategy.CleanupItem, tempFiles []string) error {
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 	// Handle no items case
 	if len(items) == 0 && len(tempFiles) == 0 {
-		fmt.Fprintln(w, "No orphaned items to clean up.")
+		fmt.Fprintln(w, "No items to clean up.")
 		return nil
 	}
 
@@ -364,7 +363,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	// Force mode - delete items
 	result, err := strategy.DeleteAllCleanupItems(ctx, items)
 	if err != nil {
-		return fmt.Errorf("failed to delete orphaned items: %w", err)
+		return fmt.Errorf("failed to delete items: %w", err)
 	}
 
 	// Delete temp files
@@ -443,10 +442,9 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	return nil
 }
 
-// listTempFiles returns files in .entire/tmp/ that are safe to delete,
-// excluding files belonging to active sessions.
-// Uses os.DirFS + fs.WalkDir to confine listing to the temp directory.
-func listTempFiles(ctx context.Context) ([]string, error) {
+// listAllTempFiles returns all files in .entire/tmp/ without filtering.
+// Used by --all since those sessions are being deleted anyway.
+func listAllTempFiles(ctx context.Context) ([]string, error) {
 	absDir, err := paths.AbsPath(ctx, paths.EntireTmpDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve temp dir: %w", err)
@@ -460,14 +458,6 @@ func listTempFiles(ctx context.Context) ([]string, error) {
 	}
 	defer root.Close()
 
-	// Build set of active session IDs to protect their temp files
-	activeSessionIDs := make(map[string]bool)
-	if states, listErr := strategy.ListSessionStates(ctx); listErr == nil {
-		for _, state := range states {
-			activeSessionIDs[state.SessionID] = true
-		}
-	}
-
 	var files []string
 	err = fs.WalkDir(root.FS(), ".", func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -476,13 +466,7 @@ func listTempFiles(ctx context.Context) ([]string, error) {
 		if d.IsDir() {
 			return nil
 		}
-		// Skip temp files belonging to active sessions (e.g., "session-id.json")
-		name := d.Name()
-		sessionID := strings.TrimSuffix(name, ".json")
-		if sessionID != name && activeSessionIDs[sessionID] {
-			return nil
-		}
-		files = append(files, name)
+		files = append(files, d.Name())
 		return nil
 	})
 	if os.IsNotExist(err) {

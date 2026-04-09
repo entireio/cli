@@ -1,0 +1,17 @@
+#!/bin/sh
+#MISE description="Run non-integration Go tests with race detection for CI"
+
+set -eu
+
+parallel="${GO_TEST_PARALLEL:-16}"
+
+packages="$(go list ./... | grep -v '^github.com/entireio/cli/cmd/entire/cli/integration_test$' || true)"
+
+if [ -z "$packages" ]; then
+  echo "error: no non-integration packages found" >&2
+  exit 1
+fi
+
+# Newline-separated package output from go list is safe to expand here.
+# shellcheck disable=SC2086
+go test -tags=integration -race -parallel="$parallel" $packages

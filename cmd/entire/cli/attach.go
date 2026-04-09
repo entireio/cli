@@ -45,7 +45,7 @@ the session started, or to attach a research session.
 If the last commit already has a checkpoint, the session is added to it.
 Otherwise a new checkpoint is created.
 
-Supported agents: claude-code, gemini, opencode, cursor, copilot-cli, factoryai-droid`,
+Supported agents: claude-code, gemini, opencode, codex, cursor, copilot-cli, factoryai-droid`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return cmd.Help()
@@ -58,7 +58,7 @@ Supported agents: claude-code, gemini, opencode, cursor, copilot-cli, factoryai-
 		},
 	}
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation and amend the last commit with the checkpoint trailer")
-	cmd.Flags().StringVarP(&agentFlag, "agent", "a", string(agent.DefaultAgentName), "Agent that created the session (claude-code, gemini, opencode, cursor, copilot-cli, factoryai-droid)")
+	cmd.Flags().StringVarP(&agentFlag, "agent", "a", string(agent.DefaultAgentName), "Agent that created the session (claude-code, gemini, opencode, codex, cursor, copilot-cli, factoryai-droid)")
 	return cmd
 }
 
@@ -382,6 +382,11 @@ func promptAmendCommit(ctx context.Context, w io.Writer, headCommit *object.Comm
 
 	amend := true
 	if !force {
+		if !canPromptInteractively() {
+			// Non-interactive: can't prompt, print trailer for manual use.
+			fmt.Fprintf(w, "\nCopy to your commit message to attach:\n\n  Entire-Checkpoint: %s\n", checkpointIDStr)
+			return nil
+		}
 		form := NewAccessibleForm(
 			huh.NewGroup(
 				huh.NewConfirm().
