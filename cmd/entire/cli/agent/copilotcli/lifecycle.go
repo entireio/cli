@@ -2,8 +2,8 @@ package copilotcli
 
 import (
 	"context"
+	"fmt"
 	"io"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -64,77 +64,88 @@ func (c *CopilotCLIAgent) ParseHookEvent(ctx context.Context, hookName string, s
 // --- Internal hook parsing functions ---
 
 func (c *CopilotCLIAgent) parseUserPromptSubmitted(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[userPromptSubmittedRaw](stdin)
+	env, err := c.readHookEnvelope(stdin)
 	if err != nil {
 		return nil, err
 	}
 
-	transcriptRef := c.resolveTranscriptRef(ctx, raw.SessionID)
+	transcriptRef := env.TranscriptPath
+	if transcriptRef == "" {
+		transcriptRef = c.resolveTranscriptRef(ctx, env.SessionID)
+	}
 
 	return &agent.Event{
 		Type:       agent.TurnStart,
-		SessionID:  raw.SessionID,
+		SessionID:  env.SessionID,
 		SessionRef: transcriptRef,
-		Prompt:     raw.Prompt,
-		Timestamp:  time.Now(),
+		Prompt:     env.Prompt,
+		Timestamp:  env.Timestamp,
 	}, nil
 }
 
 func (c *CopilotCLIAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionStartRaw](stdin)
+	env, err := c.readHookEnvelope(stdin)
 	if err != nil {
 		return nil, err
 	}
 	return &agent.Event{
 		Type:      agent.SessionStart,
-		SessionID: raw.SessionID,
-		Timestamp: time.Now(),
+		SessionID: env.SessionID,
+		Timestamp: env.Timestamp,
 	}, nil
 }
 
 func (c *CopilotCLIAgent) parseAgentStop(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[agentStopRaw](stdin)
+	env, err := c.readHookEnvelope(stdin)
 	if err != nil {
 		return nil, err
 	}
 
 	// Extract model from transcript (Copilot CLI hooks don't include model)
 	var model string
-	if raw.TranscriptPath != "" {
-		model = ExtractModelFromTranscript(ctx, raw.TranscriptPath)
+	if env.TranscriptPath != "" {
+		model = ExtractModelFromTranscript(ctx, env.TranscriptPath)
 	}
 
 	return &agent.Event{
 		Type:       agent.TurnEnd,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
+		SessionID:  env.SessionID,
+		SessionRef: env.TranscriptPath,
 		Model:      model,
-		Timestamp:  time.Now(),
+		Timestamp:  env.Timestamp,
 	}, nil
 }
 
 func (c *CopilotCLIAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[sessionEndRaw](stdin)
+	env, err := c.readHookEnvelope(stdin)
 	if err != nil {
 		return nil, err
 	}
 	return &agent.Event{
 		Type:      agent.SessionEnd,
-		SessionID: raw.SessionID,
-		Timestamp: time.Now(),
+		SessionID: env.SessionID,
+		Timestamp: env.Timestamp,
 	}, nil
 }
 
 func (c *CopilotCLIAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[subagentStopRaw](stdin)
+	env, err := c.readHookEnvelope(stdin)
 	if err != nil {
 		return nil, err
 	}
 	return &agent.Event{
 		Type:      agent.SubagentEnd,
-		SessionID: raw.SessionID,
-		Timestamp: time.Now(),
+		SessionID: env.SessionID,
+		Timestamp: env.Timestamp,
 	}, nil
+}
+
+func (c *CopilotCLIAgent) readHookEnvelope(stdin io.Reader) (*hookEnvelope, error) {
+	data, err := io.ReadAll(stdin)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read hook input: %w", err)
+	}
+	return parseHookEnvelope(data)
 }
 
 // resolveTranscriptRef computes the transcript path from the session ID.

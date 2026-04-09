@@ -430,14 +430,16 @@ type HookOutput struct {
 	Err    error
 }
 
-// runHookWithOutput runs a hook and returns both stdout and stderr separately.
-func (r *HookRunner) runHookWithOutput(hookName string, inputJSON []byte) HookOutput {
-	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", hookName)
+// runAgentHookWithOutput runs a hook for the given agent and returns stdout/stderr separately.
+func (r *HookRunner) runAgentHookWithOutput(agentName, hookName string, inputJSON []byte, extraEnv ...string) HookOutput {
+	cmd := exec.Command(getTestBinary(), "hooks", agentName, hookName)
 	cmd.Dir = r.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+r.ClaudeProjectDir,
+		"GOCACHE=/tmp/go-build",
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -449,6 +451,35 @@ func (r *HookRunner) runHookWithOutput(hookName string, inputJSON []byte) HookOu
 		Stderr: stderr.Bytes(),
 		Err:    err,
 	}
+}
+
+// runShellHookCommandWithOutput runs an installed hook shell command exactly as written
+// in the hook file and returns stdout/stderr separately.
+func (r *HookRunner) runShellHookCommandWithOutput(command string, inputJSON []byte, extraEnv ...string) HookOutput {
+	cmd := exec.Command("/bin/sh", "-lc", command)
+	cmd.Dir = r.RepoDir
+	cmd.Stdin = bytes.NewReader(inputJSON)
+	cmd.Env = append(testutil.GitIsolatedEnv(),
+		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+r.ClaudeProjectDir,
+		"GOCACHE=/tmp/go-build",
+	)
+	cmd.Env = append(cmd.Env, extraEnv...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	return HookOutput{
+		Stdout: stdout.Bytes(),
+		Stderr: stderr.Bytes(),
+		Err:    err,
+	}
+}
+
+// runHookWithOutput runs a hook and returns both stdout and stderr separately.
+func (r *HookRunner) runHookWithOutput(hookName string, inputJSON []byte) HookOutput {
+	return r.runAgentHookWithOutput("claude-code", hookName, inputJSON)
 }
 
 // SimulateUserPromptSubmitWithOutput simulates the UserPromptSubmit hook and returns the output.

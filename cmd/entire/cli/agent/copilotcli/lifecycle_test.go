@@ -58,6 +58,32 @@ func TestParseHookEvent_UserPromptSubmitted_TranscriptRef(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_UserPromptSubmitted_VSCodePayload(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	input := `{"timestamp":"2026-02-09T10:30:00.000Z","cwd":"/path/to/repo","sessionId":"` + testSessionID + `","hookEventName":"UserPromptSubmit","transcript_path":"/tmp/transcript.json","prompt":"hi"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameUserPromptSubmitted, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, event, "expected event, got nil")
+	if event.Type != agent.TurnStart {
+		t.Errorf("expected event type %v, got %v", agent.TurnStart, event.Type)
+	}
+	if event.SessionID != testSessionID {
+		t.Errorf("expected session_id %q, got %q", testSessionID, event.SessionID)
+	}
+	if event.Prompt != "hi" {
+		t.Errorf("expected prompt 'hi', got %q", event.Prompt)
+	}
+	if event.SessionRef != "/tmp/transcript.json" {
+		t.Errorf("expected transcript path in SessionRef, got %q", event.SessionRef)
+	}
+}
+
 func TestParseHookEvent_SessionStart(t *testing.T) {
 	t.Parallel()
 
@@ -81,12 +107,56 @@ func TestParseHookEvent_SessionStart(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_SessionStart_VSCodePayload(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	input := `{"timestamp":"2026-02-09T10:30:00.000Z","cwd":"/path/to/repo","sessionId":"` + testSessionID + `","hookEventName":"SessionStart"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, event, "expected event, got nil")
+	if event.Type != agent.SessionStart {
+		t.Errorf("expected event type %v, got %v", agent.SessionStart, event.Type)
+	}
+	if event.SessionID != testSessionID {
+		t.Errorf("expected session_id %q, got %q", testSessionID, event.SessionID)
+	}
+}
+
 func TestParseHookEvent_AgentStop(t *testing.T) {
 	t.Parallel()
 
 	ag := &CopilotCLIAgent{}
 	transcriptPath := "/home/user/.copilot/session-state/" + testSessionID + "/events.jsonl"
 	input := `{"timestamp":1771480085412,"cwd":"/path/to/repo","sessionId":"` + testSessionID + `","transcriptPath":"` + transcriptPath + `","stopReason":"end_turn"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameAgentStop, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, event, "expected event, got nil")
+	if event.Type != agent.TurnEnd {
+		t.Errorf("expected event type %v, got %v", agent.TurnEnd, event.Type)
+	}
+	if event.SessionID != testSessionID {
+		t.Errorf("expected session_id %q, got %q", testSessionID, event.SessionID)
+	}
+	if event.SessionRef != transcriptPath {
+		t.Errorf("expected transcript path in SessionRef, got %q", event.SessionRef)
+	}
+}
+
+func TestParseHookEvent_AgentStop_VSCodePayload(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	transcriptPath := "/tmp/transcript.json"
+	input := `{"timestamp":"2026-02-09T10:30:00.000Z","cwd":"/path/to/repo","sessionId":"` + testSessionID + `","hookEventName":"Stop","transcript_path":"` + transcriptPath + `","stopReason":"end_turn"}`
 
 	event, err := ag.ParseHookEvent(context.Background(), HookNameAgentStop, strings.NewReader(input))
 
@@ -170,6 +240,51 @@ func TestParseHookEvent_SessionEnd(t *testing.T) {
 	}
 	if event.SessionID != testSessionID {
 		t.Errorf("expected session_id %q, got %q", testSessionID, event.SessionID)
+	}
+}
+
+func TestParseHookEvent_SessionEnd_VSCodePayload(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	input := `{"timestamp":"2026-02-09T10:30:00.000Z","cwd":"/path/to/repo","sessionId":"` + testSessionID + `","hookEventName":"SessionEnd","reason":"complete"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionEnd, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, event, "expected event, got nil")
+	if event.Type != agent.SessionEnd {
+		t.Errorf("expected event type %v, got %v", agent.SessionEnd, event.Type)
+	}
+	if event.SessionID != testSessionID {
+		t.Errorf("expected session_id %q, got %q", testSessionID, event.SessionID)
+	}
+}
+
+func TestParseHookEvent_PassthroughHooks_VSCodePayload_ReturnNil(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	passthroughHooks := []string{
+		HookNamePreToolUse,
+		HookNamePostToolUse,
+		HookNameErrorOccurred,
+	}
+
+	for _, hookName := range passthroughHooks {
+		t.Run(hookName, func(t *testing.T) {
+			t.Parallel()
+			input := `{"timestamp":"2026-02-09T10:30:00.000Z","cwd":"/path/to/repo","sessionId":"` + testSessionID + `","hookEventName":"PreToolUse"}`
+			event, err := ag.ParseHookEvent(context.Background(), hookName, strings.NewReader(input))
+			if err != nil {
+				t.Fatalf("unexpected error for %s: %v", hookName, err)
+			}
+			if event != nil {
+				t.Errorf("expected nil event for pass-through hook %s, got %+v", hookName, event)
+			}
+		})
 	}
 }
 
