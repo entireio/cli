@@ -247,7 +247,8 @@ func TestParseHookEvent_SessionEnd_VSCodePayload(t *testing.T) {
 	t.Parallel()
 
 	ag := &CopilotCLIAgent{}
-	input := `{"timestamp":"2026-02-09T10:30:00.000Z","cwd":"/path/to/repo","sessionId":"` + testSessionID + `","hookEventName":"SessionEnd","reason":"complete"}`
+	// VS Code uses "Stop" for both agent-stop and session-end hooks.
+	input := `{"timestamp":"2026-02-09T10:30:00.000Z","cwd":"/path/to/repo","sessionId":"` + testSessionID + `","hookEventName":"Stop","reason":"complete"}`
 
 	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionEnd, strings.NewReader(input))
 
@@ -260,6 +261,39 @@ func TestParseHookEvent_SessionEnd_VSCodePayload(t *testing.T) {
 	}
 	if event.SessionID != testSessionID {
 		t.Errorf("expected session_id %q, got %q", testSessionID, event.SessionID)
+	}
+}
+
+func TestParseHookEvent_VSCodeMismatchedHookEventName_ReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	// VS Code sends "SessionStart" but the CLI subcommand is "agent-stop" — mismatch.
+	input := `{"timestamp":"2026-02-09T10:30:00.000Z","cwd":"/path/to/repo","sessionId":"` + testSessionID + `","hookEventName":"SessionStart","transcript_path":"/tmp/t.json"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameAgentStop, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event != nil {
+		t.Errorf("expected nil event for mismatched hookEventName, got %+v", event)
+	}
+}
+
+func TestParseHookEvent_VSCodeUnknownHookEventName_ReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	input := `{"timestamp":"2026-02-09T10:30:00.000Z","cwd":"/path/to/repo","sessionId":"` + testSessionID + `","hookEventName":"FutureEvent"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event != nil {
+		t.Errorf("expected nil event for unknown hookEventName, got %+v", event)
 	}
 }
 

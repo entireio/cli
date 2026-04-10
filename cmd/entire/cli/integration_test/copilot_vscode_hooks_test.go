@@ -95,7 +95,7 @@ func TestCopilotVSCodeHooks_AgentStopCreatesCheckpoint(t *testing.T) {
 			"cwd":             env.RepoDir,
 			"sessionId":       sessionID,
 			"stopReason":      "end_turn",
-			"hookEventName":   "SessionEnd",
+			"hookEventName":   "Stop",
 			"transcript_path": transcriptPath,
 		}),
 	)
@@ -169,7 +169,7 @@ func TestCopilotVSCodeHooks_GeneratedHookCommands(t *testing.T) {
 			"cwd":             env.RepoDir,
 			"sessionId":       sessionID,
 			"stopReason":      "end_turn",
-			"hookEventName":   "SessionEnd",
+			"hookEventName":   "Stop",
 			"transcript_path": transcriptPath,
 		}),
 	)
@@ -213,6 +213,9 @@ func assertNoParseFailure(t *testing.T, output HookOutput) {
 	}
 	if strings.Contains(stderr, "cannot unmarshal string into Go struct field") {
 		t.Fatalf("unexpected schema mismatch in stderr: %s", stderr)
+	}
+	if strings.Contains(stderr, "Warning from") {
+		t.Fatalf("unexpected warning in stderr: %s", stderr)
 	}
 }
 

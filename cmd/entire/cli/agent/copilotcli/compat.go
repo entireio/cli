@@ -16,6 +16,34 @@ const (
 	HostVSCode     HookHost = "vscode"
 )
 
+// VS Code hookEventName values (from official VS Code docs).
+// See: https://code.visualstudio.com/docs/copilot/customization/hooks
+const (
+	VSCodeEventSessionStart     = "SessionStart"
+	VSCodeEventUserPromptSubmit = "UserPromptSubmit"
+	VSCodeEventStop             = "Stop"
+	VSCodeEventPreToolUse       = "PreToolUse"
+	VSCodeEventPostToolUse      = "PostToolUse"
+	VSCodeEventPreCompact       = "PreCompact"
+	VSCodeEventSubagentStart    = "SubagentStart"
+	VSCodeEventSubagentStop     = "SubagentStop"
+)
+
+// vsCodeEventToHookNames maps each VS Code hookEventName to the CLI hook name(s)
+// that are allowed to carry that event. "Stop" maps to both agent-stop and
+// session-end because VS Code uses a single Stop event where Copilot CLI
+// distinguishes the two.
+var vsCodeEventToHookNames = map[string][]string{
+	VSCodeEventUserPromptSubmit: {HookNameUserPromptSubmitted},
+	VSCodeEventSessionStart:     {HookNameSessionStart},
+	VSCodeEventStop:             {HookNameAgentStop, HookNameSessionEnd},
+	VSCodeEventSubagentStop:     {HookNameSubagentStop},
+	VSCodeEventPreToolUse:       {HookNamePreToolUse},
+	VSCodeEventPostToolUse:      {HookNamePostToolUse},
+	VSCodeEventPreCompact:       {},
+	VSCodeEventSubagentStart:    {},
+}
+
 type hookEnvelope struct {
 	Host           HookHost
 	SessionID      string
@@ -133,4 +161,20 @@ func isJSONNumber(raw json.RawMessage) bool {
 	}
 	var n int64
 	return json.Unmarshal(raw, &n) == nil
+}
+
+// validateVSCodeEvent checks whether the hookEventName is consistent with the
+// CLI hook subcommand that was invoked. Returns true if the event should be
+// processed, false if it should be silently skipped (mismatch or unknown event).
+func validateVSCodeEvent(hookEventName, hookName string) bool {
+	allowedHooks, known := vsCodeEventToHookNames[hookEventName]
+	if !known {
+		return false
+	}
+	for _, allowed := range allowedHooks {
+		if allowed == hookName {
+			return true
+		}
+	}
+	return false
 }
