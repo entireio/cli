@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -522,6 +523,13 @@ func filesWithRemainingAgentChanges(
 // workingTreeMatchesCommit checks if the file on disk matches the committed blob hash.
 // Returns true if the working tree is clean for this file (no remaining changes).
 func workingTreeMatchesCommit(worktreeRoot, filePath string, commitHash plumbing.Hash) bool {
+	// Ask Git first so clean/smudge filters like core.autocrlf don't create
+	// phantom differences between the working tree bytes and the committed blob.
+	cmd := exec.CommandContext(context.Background(), "git", "-C", worktreeRoot, "diff", "--exit-code", "--quiet", "--", filePath)
+	if err := cmd.Run(); err == nil {
+		return true
+	}
+
 	absPath := filepath.Join(worktreeRoot, filePath)
 	diskContent, err := os.ReadFile(absPath) //nolint:gosec // filePath is from git status, not user input
 	if err != nil {
