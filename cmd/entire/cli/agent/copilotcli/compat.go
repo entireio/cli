@@ -126,12 +126,15 @@ func firstString(raw map[string]json.RawMessage, keys ...string) string {
 }
 
 func parseTimestamp(raw json.RawMessage) (time.Time, error) {
-	if len(raw) == 0 {
+	if len(raw) == 0 || string(raw) == "null" {
 		return time.Time{}, nil
 	}
 
 	var millis int64
 	if err := json.Unmarshal(raw, &millis); err == nil {
+		if millis == 0 {
+			return time.Time{}, nil // Treat epoch as missing — triggers time.Now() fallback.
+		}
 		return time.UnixMilli(millis), nil
 	}
 
@@ -156,7 +159,7 @@ func isJSONString(raw json.RawMessage) bool {
 }
 
 func isJSONNumber(raw json.RawMessage) bool {
-	if len(raw) == 0 {
+	if len(raw) == 0 || raw[0] == 'n' {
 		return false
 	}
 	var n int64

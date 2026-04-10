@@ -51,6 +51,49 @@ func TestDetectHookHost(t *testing.T) {
 	}
 }
 
+func TestParseTimestamp_NullAndZeroFallBackToNow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "null timestamp", raw: `{"timestamp":null,"sessionId":"s"}`},
+		{name: "zero timestamp", raw: `{"timestamp":0,"sessionId":"s"}`},
+		{name: "missing timestamp", raw: `{"sessionId":"s"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			env, err := parseHookEnvelope([]byte(tt.raw))
+			if err != nil {
+				t.Fatalf("parseHookEnvelope() error = %v", err)
+			}
+			if env.Timestamp.IsZero() {
+				t.Fatal("expected time.Now() fallback, got zero time")
+			}
+			if env.Timestamp.Year() < 2025 {
+				t.Fatalf("expected recent timestamp from time.Now(), got %v", env.Timestamp)
+			}
+		})
+	}
+}
+
+func TestDetectHookHost_NullTimestampIsNotCopilotCLI(t *testing.T) {
+	t.Parallel()
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(`{"timestamp":null,"sessionId":"s"}`), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got := detectHookHost(raw); got == HostCopilotCLI {
+		t.Fatalf("null timestamp should not classify as HostCopilotCLI, got %q", got)
+	}
+}
+
 func TestParseHookEnvelope_AcceptsAlternateTranscriptPathAndTimestampFormats(t *testing.T) {
 	t.Parallel()
 
