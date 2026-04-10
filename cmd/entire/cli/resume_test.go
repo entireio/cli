@@ -777,6 +777,39 @@ func TestDisplayRestoredSessions_SingleSessionOutput(t *testing.T) {
 	}
 }
 
+func TestDisplayRestoredSessions_CodexShowsResumeCommand(t *testing.T) {
+	t.Parallel()
+
+	session := strategy.RestoredSession{
+		SessionID: "019d6d29-8cf7-7fe3-adc9-8c3e4d9d5603",
+		Agent:     "Codex",
+		Prompt:    "Can you take a look at the go code",
+		CreatedAt: time.Date(2026, time.April, 8, 18, 46, 0, 0, time.UTC),
+	}
+
+	ag, err := strategy.ResolveAgentForRewind(session.Agent)
+	if err != nil {
+		t.Fatalf("ResolveAgentForRewind() error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := displayRestoredSessions(&output, []strategy.RestoredSession{session}); err != nil {
+		t.Fatalf("displayRestoredSessions() error = %v", err)
+	}
+
+	got := output.String()
+	if !strings.Contains(got, "✓ Restored session 019d6d29-8cf7-7fe3-adc9-8c3e4d9d5603.\n") {
+		t.Fatalf("displayRestoredSessions() missing session header, got: %q", got)
+	}
+	if !strings.Contains(got, "\nTo continue this session, run:\n") {
+		t.Fatalf("displayRestoredSessions() missing continuation header, got: %q", got)
+	}
+	wantCommand := "  " + ag.FormatResumeCommand(session.SessionID) + "  # Can you take a look at the go code\n"
+	if !strings.Contains(got, wantCommand) {
+		t.Fatalf("displayRestoredSessions() missing command %q in %q", wantCommand, got)
+	}
+}
+
 func TestPrintMultiSessionResumeCommands_SingleSessionHasCheckmark(t *testing.T) {
 	t.Parallel()
 

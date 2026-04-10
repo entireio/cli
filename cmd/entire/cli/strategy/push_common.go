@@ -8,7 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -73,6 +76,7 @@ func doPushBranch(ctx context.Context, target, branchName string) error {
 	// Try pushing first
 	if err := tryPushSessionsCommon(ctx, target, branchName); err == nil {
 		stop(" done")
+		printSettingsCommitHint(ctx, target)
 		return nil
 	}
 	stop("")
@@ -99,6 +103,7 @@ func doPushBranch(ctx context.Context, target, branchName string) error {
 		printCheckpointRemoteHint(target)
 	} else {
 		stop(" done")
+		printSettingsCommitHint(ctx, target)
 	}
 
 	return nil
@@ -112,6 +117,46 @@ func printCheckpointRemoteHint(target string) {
 	}
 	fmt.Fprintln(os.Stderr, "[entire] A checkpoint remote is configured in Entire settings (.entire/settings.json or .entire/settings.local.json) but could not be reached.")
 	fmt.Fprintln(os.Stderr, "[entire] Checkpoints are saved locally but not synced. Ensure you have access to the checkpoint remote.")
+}
+
+// settingsHintOnce ensures the settings commit hint prints at most once per process.
+var settingsHintOnce sync.Once
+
+// printSettingsCommitHint prints a hint after a successful checkpoint remote push
+// when the committed .entire/settings.json does not contain a checkpoint_remote config.
+// entire.io discovers the external checkpoint repo by reading the committed project
+// settings, so the checkpoint_remote must be present in HEAD:.entire/settings.json
+// (not just in settings.local.json or uncommitted local changes).
+// Uses sync.Once to avoid duplicates when multiple branches/refs are pushed in a
+// single pre-push invocation.
+func printSettingsCommitHint(ctx context.Context, target string) {
+	if !isURL(target) {
+		return
+	}
+	settingsHintOnce.Do(func() {
+		if isCheckpointRemoteCommitted(ctx) {
+			return
+		}
+		fmt.Fprintln(os.Stderr, "[entire] Note: Checkpoints were pushed to a separate checkpoint remote, but .entire/settings.json does not contain checkpoint_remote in the latest commit. entire.io will not be able to discover these checkpoints until checkpoint_remote is committed and pushed in .entire/settings.json.")
+	})
+}
+
+// isCheckpointRemoteCommitted returns true if the committed .entire/settings.json
+// at HEAD contains a valid checkpoint_remote configuration. This is the true
+// discoverability check: entire.io reads from committed project settings, not from
+// local overrides or uncommitted changes.
+func isCheckpointRemoteCommitted(ctx context.Context) bool {
+	cmd := exec.CommandContext(ctx, "git", "show", "HEAD:.entire/settings.json")
+	output, err := cmd.Output()
+	if err != nil {
+		return false // file doesn't exist at HEAD
+	}
+	// Parse the committed content and check for checkpoint_remote
+	committed, err := settings.LoadFromBytes(output)
+	if err != nil {
+		return false
+	}
+	return committed.GetCheckpointRemote() != nil
 }
 
 // tryPushSessionsCommon attempts to push the sessions branch.

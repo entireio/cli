@@ -17,9 +17,10 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ agent.TranscriptAnalyzer = (*CodexAgent)(nil)
-	_ agent.TokenCalculator    = (*CodexAgent)(nil)
-	_ agent.PromptExtractor    = (*CodexAgent)(nil)
+	_ agent.TranscriptAnalyzer          = (*CodexAgent)(nil)
+	_ agent.TokenCalculator             = (*CodexAgent)(nil)
+	_ agent.PromptExtractor             = (*CodexAgent)(nil)
+	_ agent.RestoredSessionPathResolver = (*CodexAgent)(nil)
 )
 
 // rolloutLine is the top-level JSONL line structure in Codex rollout files.
@@ -28,6 +29,8 @@ type rolloutLine struct {
 	Type      string          `json:"type"` // "session_meta", "response_item", "event_msg", "turn_context"
 	Payload   json.RawMessage `json:"payload"`
 }
+
+const rolloutLineTypeResponseItem = "response_item"
 
 // sessionMetaPayload is the payload for type="session_meta" lines.
 type sessionMetaPayload struct {
@@ -156,7 +159,7 @@ func extractFilesFromLine(lineData []byte) []string {
 		return nil
 	}
 
-	if line.Type != "response_item" {
+	if line.Type != rolloutLineTypeResponseItem {
 		return nil
 	}
 
@@ -274,7 +277,7 @@ func (c *CodexAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string
 			continue
 		}
 
-		if line.Type != "response_item" {
+		if line.Type != rolloutLineTypeResponseItem {
 			continue
 		}
 
@@ -301,6 +304,134 @@ func (c *CodexAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string
 	}
 
 	return prompts, nil
+}
+
+// SanitizePortableTranscript strips encrypted history fragments that cannot be
+// replayed when Entire reconstructs a Codex rollout outside its original
+// session context.
+func SanitizePortableTranscript(data []byte) []byte {
+	lines := splitJSONL(data)
+	if len(lines) == 0 {
+		return data
+	}
+
+	sanitized := make([][]byte, 0, len(lines))
+	for _, lineData := range lines {
+		updated, keep := sanitizeRolloutLine(lineData)
+		if !keep {
+			continue
+		}
+		sanitized = append(sanitized, updated)
+	}
+
+	if len(sanitized) == 0 {
+		return data
+	}
+	return agent.ReassembleJSONL(sanitized)
+}
+
+func sanitizeRestoredTranscript(data []byte) []byte {
+	return SanitizePortableTranscript(data)
+}
+
+func sanitizeRolloutLine(lineData []byte) ([]byte, bool) {
+	var line rolloutLine
+	if err := json.Unmarshal(lineData, &line); err != nil {
+		return lineData, true
+	}
+	if line.Type == "compacted" {
+		return sanitizeCompactedLine(line)
+	}
+	if line.Type != rolloutLineTypeResponseItem {
+		return lineData, true
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(line.Payload, &payload); err != nil {
+		return lineData, true
+	}
+
+	itemType, ok := payload["type"].(string)
+	if !ok {
+		return lineData, true
+	}
+	switch itemType {
+	case "reasoning":
+		delete(payload, "encrypted_content")
+	case "compaction", "compaction_summary":
+		return nil, false
+	default:
+		return lineData, true
+	}
+
+	encodedPayload, err := json.Marshal(payload)
+	if err != nil {
+		return lineData, true
+	}
+	line.Payload = encodedPayload
+
+	encodedLine, err := json.Marshal(line)
+	if err != nil {
+		return lineData, true
+	}
+	return encodedLine, true
+}
+
+func sanitizeCompactedLine(line rolloutLine) ([]byte, bool) {
+	var payload map[string]any
+	if err := json.Unmarshal(line.Payload, &payload); err != nil {
+		return mustMarshalRolloutLine(line), true
+	}
+
+	replacementHistory, ok := payload["replacement_history"].([]any)
+	if !ok {
+		return mustMarshalRolloutLine(line), true
+	}
+
+	sanitizedHistory := sanitizeHistoryItems(replacementHistory)
+	payload["replacement_history"] = sanitizedHistory
+
+	encodedPayload, err := json.Marshal(payload)
+	if err != nil {
+		return mustMarshalRolloutLine(line), true
+	}
+	line.Payload = encodedPayload
+
+	return mustMarshalRolloutLine(line), true
+}
+
+func sanitizeHistoryItems(items []any) []any {
+	sanitized := make([]any, 0, len(items))
+	for _, item := range items {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			sanitized = append(sanitized, item)
+			continue
+		}
+
+		itemType, ok := itemMap["type"].(string)
+		if !ok {
+			sanitized = append(sanitized, itemMap)
+			continue
+		}
+		switch itemType {
+		case "reasoning":
+			delete(itemMap, "encrypted_content")
+		case "compaction", "compaction_summary":
+			continue
+		}
+
+		sanitized = append(sanitized, itemMap)
+	}
+	return sanitized
+}
+
+func mustMarshalRolloutLine(line rolloutLine) []byte {
+	encodedLine, err := json.Marshal(line)
+	if err != nil {
+		return nil
+	}
+	return encodedLine
 }
 
 // splitJSONL splits JSONL bytes into individual lines, skipping empty lines.

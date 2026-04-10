@@ -100,6 +100,7 @@ func TestStopCmd_SingleSession_EmptyWorktreePath_Force(t *testing.T) {
 	}
 	if loaded == nil {
 		t.Fatal("expected session state to still exist after stop")
+		return
 	}
 	if loaded.Phase != session.PhaseEnded {
 		t.Errorf("expected Phase=PhaseEnded, got: %v", loaded.Phase)
@@ -191,6 +192,7 @@ func TestStopCmd_AlreadyStopped(t *testing.T) {
 	}
 	if loaded == nil {
 		t.Fatal("expected session state to still exist")
+		return
 	}
 	if loaded.Phase != session.PhaseEnded {
 		t.Errorf("expected Phase=PhaseEnded unchanged, got: %v", loaded.Phase)
@@ -225,6 +227,7 @@ func TestStopCmd_SessionFlag(t *testing.T) {
 	}
 	if target == nil {
 		t.Fatal("expected target session state to exist")
+		return
 	}
 	if target.Phase != session.PhaseEnded {
 		t.Errorf("expected target Phase=PhaseEnded, got: %v", target.Phase)
@@ -236,6 +239,7 @@ func TestStopCmd_SessionFlag(t *testing.T) {
 	}
 	if other == nil {
 		t.Fatal("expected other session state to exist")
+		return
 	}
 	if other.Phase == session.PhaseEnded {
 		t.Errorf("expected other session to remain non-ended, got: %v", other.Phase)
@@ -284,6 +288,7 @@ func TestStopCmd_AllFlag(t *testing.T) {
 		}
 		if loaded == nil {
 			t.Fatalf("expected session %s to exist after stop", id)
+			return
 		}
 		if loaded.Phase != session.PhaseEnded {
 			t.Errorf("expected session %s Phase=PhaseEnded, got: %v", id, loaded.Phase)
@@ -330,6 +335,7 @@ func TestStopCmd_AllFlag_IncludesAllWorktrees(t *testing.T) {
 		}
 		if loaded == nil {
 			t.Fatalf("expected session %s to exist after stop", id)
+			return
 		}
 		if loaded.Phase != session.PhaseEnded {
 			t.Errorf("expected session %s to be PhaseEnded, got: %v", id, loaded.Phase)
@@ -384,6 +390,7 @@ func TestStopCmd_AllAndSessionMutuallyExclusive(t *testing.T) {
 	}
 	if loaded == nil {
 		t.Fatal("expected session state to still exist")
+		return
 	}
 	if loaded.Phase == session.PhaseEnded {
 		t.Error("expected session to remain non-ended after mutual exclusion error")
@@ -473,6 +480,7 @@ func TestStopSelectedSessions_StopsAll(t *testing.T) {
 		}
 		if loaded == nil {
 			t.Fatalf("expected session %s to exist after batch stop", id)
+			return
 		}
 		if loaded.Phase != session.PhaseEnded {
 			t.Errorf("expected session %s to be PhaseEnded after batch stop, got: %v", id, loaded.Phase)
@@ -517,6 +525,7 @@ func TestStopCmd_AlreadyStopped_EndedAtOnly(t *testing.T) {
 	}
 	if loaded == nil {
 		t.Fatal("expected session state to still exist")
+		return
 	}
 	if loaded.Phase != session.PhaseIdle {
 		t.Errorf("expected Phase to remain PhaseIdle (legacy), got: %v", loaded.Phase)
@@ -606,6 +615,7 @@ func TestStopCmd_NoFlags_CrossWorktreeSession(t *testing.T) {
 	}
 	if loaded == nil {
 		t.Fatal("expected cross-worktree session to exist after stop")
+		return
 	}
 	if loaded.Phase != session.PhaseEnded {
 		t.Errorf("expected cross-worktree session to be PhaseEnded, got: %v", loaded.Phase)

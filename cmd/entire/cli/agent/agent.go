@@ -199,6 +199,18 @@ type HookResponseWriter interface {
 	WriteHookResponse(message string) error
 }
 
+// RestoredSessionPathResolver is implemented by agents that need a
+// transcript-specific path when Entire reconstructs a session from checkpoint
+// metadata. This is used for restored sessions only; live sessions still use
+// the agent's native hook/session references.
+type RestoredSessionPathResolver interface {
+	Agent
+
+	// ResolveRestoredSessionFile returns where Entire should write a restored
+	// transcript so the agent can discover it later.
+	ResolveRestoredSessionFile(sessionDir, agentSessionID string, transcript []byte) (string, error)
+}
+
 // TestOnly is implemented by agents that exist solely for testing (e.g., the Vogon canary agent).
 // These agents are excluded from the user-facing agent selection in `entire enable`.
 type TestOnly interface {

@@ -81,6 +81,7 @@ func TestAttach_Success(t *testing.T) {
 	}
 	if state == nil {
 		t.Fatal("expected session state to be created")
+		return
 	}
 	if state.SessionID != sessionID {
 		t.Errorf("session ID = %q, want %q", state.SessionID, sessionID)
@@ -368,6 +369,7 @@ func TestAttach_GeminiSubdirectorySession(t *testing.T) {
 	}
 	if state == nil {
 		t.Fatal("expected session state to be created")
+		return
 	}
 	if state.AgentType != agent.AgentTypeGemini {
 		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeGemini)
@@ -413,6 +415,7 @@ func TestAttach_GeminiSuccess(t *testing.T) {
 	}
 	if state == nil {
 		t.Fatal("expected session state to be created")
+		return
 	}
 	if state.AgentType != agent.AgentTypeGemini {
 		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeGemini)
@@ -458,6 +461,7 @@ func TestAttach_CursorSuccess(t *testing.T) {
 	}
 	if state == nil {
 		t.Fatal("expected session state to be created")
+		return
 	}
 	if state.AgentType != agent.AgentTypeCursor {
 		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeCursor)
@@ -506,6 +510,7 @@ func TestAttach_CodexSuccess(t *testing.T) {
 	}
 	if state == nil {
 		t.Fatal("expected session state to be created")
+		return
 	}
 	if state.AgentType != agent.AgentTypeCodex {
 		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeCodex)
@@ -554,6 +559,7 @@ func TestAttach_FactoryAIDroidSuccess(t *testing.T) {
 	}
 	if state == nil {
 		t.Fatal("expected session state to be created")
+		return
 	}
 	if state.AgentType != agent.AgentTypeFactoryAIDroid {
 		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeFactoryAIDroid)

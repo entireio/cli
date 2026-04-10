@@ -160,6 +160,50 @@ func TestInstallHooks_ForceReinstall(t *testing.T) {
 	}
 }
 
+func TestInstallHooks_RewritesWhenContentDiffers(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ag := &OpenCodeAgent{}
+
+	// Install with localDev=true
+	count, err := ag.InstallHooks(context.Background(), true, false)
+	if err != nil {
+		t.Fatalf("first install failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("first install: expected 1, got %d", count)
+	}
+
+	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	before, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("failed to read plugin file: %v", err)
+	}
+	if !strings.Contains(string(before), "go run") {
+		t.Fatal("expected localDev content with 'go run'")
+	}
+
+	// Reinstall with localDev=false (content differs) — should rewrite
+	count, err = ag.InstallHooks(context.Background(), false, false)
+	if err != nil {
+		t.Fatalf("second install failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("second install with different content: expected 1, got %d", count)
+	}
+
+	after, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("failed to read plugin file after rewrite: %v", err)
+	}
+	if strings.Contains(string(after), "go run") {
+		t.Error("expected production content after rewrite, but still contains 'go run'")
+	}
+	if !strings.Contains(string(after), `const ENTIRE_CMD = 'entire'`) {
+		t.Error("expected production command constant after rewrite")
+	}
+}
+
 func TestUninstallHooks(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)

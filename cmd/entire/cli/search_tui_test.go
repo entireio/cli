@@ -654,6 +654,7 @@ func TestSearchModel_SelectedResult(t *testing.T) {
 	r := m.selectedResult()
 	if r == nil {
 		t.Fatal("selectedResult() = nil, want first result")
+		return
 	}
 	if r.Data.ID != "a3b2c4d5e6f7" {
 		t.Errorf("selectedResult().Data.ID = %q, want %q", r.Data.ID, "a3b2c4d5e6f7")
@@ -664,6 +665,7 @@ func TestSearchModel_SelectedResult(t *testing.T) {
 	r = m.selectedResult()
 	if r == nil {
 		t.Fatal("selectedResult() at cursor 1 = nil")
+		return
 	}
 	if r.Data.ID != "d5e6f789ab01" {
 		t.Errorf("selectedResult().Data.ID = %q, want %q", r.Data.ID, "d5e6f789ab01")

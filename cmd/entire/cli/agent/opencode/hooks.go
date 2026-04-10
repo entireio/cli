@@ -40,21 +40,12 @@ func getPluginPath(ctx context.Context) (string, error) {
 }
 
 // InstallHooks writes the Entire plugin file to .opencode/plugins/entire.ts.
-// Returns 1 if the plugin was installed, 0 if already present (idempotent).
+// Returns 1 if the plugin was written, 0 if already up-to-date (idempotent).
+// If the file exists but content differs (e.g., localDev vs production), it is rewritten.
 func (a *OpenCodeAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
 	pluginPath, err := getPluginPath(ctx)
 	if err != nil {
 		return 0, err
-	}
-
-	// Check if already installed (idempotent) unless force
-	if !force {
-		if _, err := os.Stat(pluginPath); err == nil {
-			data, readErr := os.ReadFile(pluginPath) //nolint:gosec // Path constructed from repo root
-			if readErr == nil && strings.Contains(string(data), entireMarker) {
-				return 0, nil // Already installed
-			}
-		}
 	}
 
 	// Build the command prefix
@@ -67,6 +58,15 @@ func (a *OpenCodeAgent) InstallHooks(ctx context.Context, localDev bool, force b
 
 	// Generate plugin content from template
 	content := strings.ReplaceAll(pluginTemplate, entireCmdPlaceholder, cmdPrefix)
+
+	// Check if already installed with identical content (idempotent) unless force
+	if !force {
+		if existing, readErr := os.ReadFile(pluginPath); readErr == nil { //nolint:gosec // Path constructed from repo root
+			if string(existing) == content {
+				return 0, nil // Already up-to-date
+			}
+		}
+	}
 
 	// Ensure directory exists
 	pluginDir := filepath.Dir(pluginPath)

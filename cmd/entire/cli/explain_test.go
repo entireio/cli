@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
@@ -2735,6 +2736,38 @@ func TestScopeTranscriptForCheckpoint_ZeroLinesReturnsAll(t *testing.T) {
 
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines with linesAtStart=0, got %d", len(lines))
+	}
+}
+
+func TestScopeTranscriptForCheckpoint_CodexUsesStoredLineOffsets(t *testing.T) {
+	t.Parallel()
+
+	fullTranscript := []byte(`{"timestamp":"t1","type":"session_meta","payload":{"id":"s1"}}
+{"timestamp":"t2","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"developer instructions"}]}}
+{"timestamp":"t3","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md\ninstructions"}]}}
+{"timestamp":"t4","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first prompt"}]}}
+{"timestamp":"t5","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"response to first"}]}}
+{"timestamp":"t6","type":"event_msg","payload":{"type":"token_count","input_tokens":10,"output_tokens":1}}
+{"timestamp":"t7","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"second prompt"}]}}
+{"timestamp":"t8","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"response to second"}]}}
+`)
+
+	scoped := scopeTranscriptForCheckpoint(fullTranscript, 6, agent.AgentTypeCodex)
+	entries, err := summarize.BuildCondensedTranscriptFromBytes(scoped, agent.AgentTypeCodex)
+	if err != nil {
+		t.Fatalf("failed to build condensed transcript: %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 scoped entries, got %d", len(entries))
+	}
+
+	if entries[0].Type != summarize.EntryTypeUser || entries[0].Content != "second prompt" {
+		t.Fatalf("expected first entry to be second prompt, got %#v", entries[0])
+	}
+
+	if entries[1].Type != summarize.EntryTypeAssistant || entries[1].Content != "response to second" {
+		t.Fatalf("expected second entry to be second response, got %#v", entries[1])
 	}
 }
 

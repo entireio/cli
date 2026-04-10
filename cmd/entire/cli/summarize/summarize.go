@@ -2,6 +2,7 @@
 package summarize
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/compact"
 )
 
 // GenerateFromTranscript generates a summary from raw transcript bytes.
@@ -123,6 +125,8 @@ func BuildCondensedTranscriptFromBytes(content []byte, agentType types.AgentType
 		return buildCondensedTranscriptFromDroid(content)
 	case agent.AgentTypeOpenCode:
 		return buildCondensedTranscriptFromOpenCode(content)
+	case agent.AgentTypeCodex:
+		return buildCondensedTranscriptFromCodex(content)
 	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeUnknown:
 		// Claude/cursor format - fall through to shared logic below
 	}
@@ -217,6 +221,84 @@ func buildCondensedTranscriptFromOpenCode(content []byte) ([]Entry, error) {
 	return entries, nil
 }
 
+// buildCondensedTranscriptFromCodex converts Codex rollout JSONL into the compact
+// transcript format, then reuses the shared transcript condensation logic.
+func buildCondensedTranscriptFromCodex(content []byte) ([]Entry, error) {
+	compacted, err := compact.Compact(content, compact.MetadataFields{
+		Agent:      "codex",
+		CLIVersion: "summarize",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to compact Codex transcript: %w", err)
+	}
+
+	type compactUserTextBlock struct {
+		Text string `json:"text"`
+	}
+	type compactAssistantBlock struct {
+		Type  string          `json:"type"`
+		Text  string          `json:"text,omitempty"`
+		Name  string          `json:"name,omitempty"`
+		Input json.RawMessage `json:"input,omitempty"`
+	}
+	type compactLine struct {
+		Type    string          `json:"type"`
+		Content json.RawMessage `json:"content"`
+	}
+
+	var entries []Entry
+	for _, lineBytes := range splitCompactJSONL(compacted) {
+		var line compactLine
+		if err := json.Unmarshal(lineBytes, &line); err != nil {
+			continue
+		}
+
+		switch line.Type {
+		case transcript.TypeUser:
+			var blocks []compactUserTextBlock
+			if err := json.Unmarshal(line.Content, &blocks); err != nil {
+				continue
+			}
+			for _, block := range blocks {
+				if block.Text != "" {
+					entries = append(entries, Entry{
+						Type:    EntryTypeUser,
+						Content: block.Text,
+					})
+				}
+			}
+		case transcript.TypeAssistant:
+			var blocks []compactAssistantBlock
+			if err := json.Unmarshal(line.Content, &blocks); err != nil {
+				continue
+			}
+			for _, block := range blocks {
+				switch block.Type {
+				case transcript.ContentTypeText:
+					if block.Text != "" {
+						entries = append(entries, Entry{
+							Type:    EntryTypeAssistant,
+							Content: block.Text,
+						})
+					}
+				case transcript.ContentTypeToolUse:
+					var input map[string]interface{}
+					if err := json.Unmarshal(block.Input, &input); err != nil {
+						input = nil
+					}
+					entries = append(entries, Entry{
+						Type:       EntryTypeTool,
+						ToolName:   block.Name,
+						ToolDetail: extractGenericToolDetail(input),
+					})
+				}
+			}
+		}
+	}
+
+	return entries, nil
+}
+
 // buildCondensedTranscriptFromDroid parses Droid transcript and extracts a condensed view.
 func buildCondensedTranscriptFromDroid(content []byte) ([]Entry, error) {
 	droidLines, _, err := factoryaidroid.ParseDroidTranscriptFromBytes(content, 0)
@@ -240,12 +322,26 @@ func extractOpenCodeToolDetail(input map[string]interface{}) string {
 // extractGenericToolDetail extracts an appropriate detail string from a tool's input/args map.
 // Checks common fields in order of preference. Used by Gemini condensation.
 func extractGenericToolDetail(input map[string]interface{}) string {
-	for _, key := range []string{"description", "command", "file_path", "path", "pattern"} {
+	if input == nil {
+		return ""
+	}
+	for _, key := range []string{"description", "command", "cmd", "file_path", "path", "pattern"} {
 		if v, ok := input[key].(string); ok && v != "" {
 			return v
 		}
 	}
 	return ""
+}
+
+func splitCompactJSONL(data []byte) [][]byte {
+	var lines [][]byte
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 // BuildCondensedTranscript extracts a condensed view of the transcript.

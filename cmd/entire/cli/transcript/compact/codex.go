@@ -13,9 +13,12 @@ import (
 )
 
 const (
-	transcriptTypeMessage       = "message"
-	codexTypeFunctionCall       = "function_call"
-	codexTypeFunctionCallOutput = "function_call_output"
+	transcriptTypeMessage         = "message"
+	codexTypeResponseItem         = "response_item"
+	codexTypeFunctionCall         = "function_call"
+	codexTypeFunctionCallOutput   = "function_call_output"
+	codexTypeCustomToolCall       = "custom_tool_call"
+	codexTypeCustomToolCallOutput = "custom_tool_call_output"
 )
 
 // isCodexFormat checks whether JSONL content uses the Codex format.
@@ -33,7 +36,12 @@ func isCodexFormat(content []byte) bool {
 		if json.Unmarshal(line, &probe) != nil {
 			continue
 		}
-		return probe.Type == "session_meta"
+		switch probe.Type {
+		case "session_meta", codexTypeResponseItem, "event_msg", "turn_context":
+			return true
+		default:
+			return false
+		}
 	}
 	if scanner.Err() != nil {
 		return false
@@ -56,22 +64,23 @@ type codexPayload struct {
 	Phase     string          `json:"phase"`
 	Name      string          `json:"name"`
 	Arguments string          `json:"arguments"`
+	Input     string          `json:"input"`
 	CallID    string          `json:"call_id"`
 	Output    string          `json:"output"`
 }
 
 // compactCodex converts a Codex JSONL transcript into the compact format.
 func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
+	if opts.StartLine > 0 {
+		content = transcript.SliceFromLine(content, opts.StartLine)
+		if content == nil {
+			return []byte{}, nil
+		}
+	}
+
 	lines, err := parseCodexLines(content)
 	if err != nil {
 		return nil, err
-	}
-
-	if opts.StartLine > 0 {
-		lines = codexSliceFromResponseItem(lines, opts.StartLine)
-		if len(lines) == 0 {
-			return []byte{}, nil
-		}
 	}
 
 	base := newTranscriptLine(opts)
@@ -119,7 +128,7 @@ func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
 				continue
 			}
 
-			// Collect any function_calls that follow this assistant message.
+			// Collect any tool calls that follow this assistant message.
 			var toolBlocks []map[string]json.RawMessage
 			inTok, outTok := pendingInTok, pendingOutTok
 			pendingInTok, pendingOutTok = 0, 0
@@ -134,27 +143,14 @@ func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
 				if json.Unmarshal(next.Payload, &np) != nil {
 					break
 				}
-				if np.Type == codexTypeFunctionCall {
-					tb := codexToolUseBlock(np)
-					i++ // consume the function_call line
-					// Skip token_count lines between function_call and output.
-					for i+1 < len(lines) && isCodexTokenCountLine(lines[i+1]) {
-						inTok, outTok = codexTokenCount(lines[i+1].Payload)
-						i++
-					}
-					// Look ahead for the matching output.
-					if i+1 < len(lines) {
-						var outp codexPayload
-						if json.Unmarshal(lines[i+1].Payload, &outp) == nil && outp.Type == codexTypeFunctionCallOutput && outp.CallID == np.CallID {
-							tb["result"] = buildToolResult(toolResultEntry{output: outp.Output})
-							i++ // consume the output line
-						}
-					}
+				if np.Type == codexTypeFunctionCall || np.Type == codexTypeCustomToolCall {
+					i++ // consume the tool call line
+					tb := codexConsumeToolCall(np, lines, &i, &inTok, &outTok)
 					toolBlocks = append(toolBlocks, tb)
 					continue
 				}
-				// function_call_output without a preceding function_call — skip.
-				if np.Type == codexTypeFunctionCallOutput {
+				// Orphan output without a preceding call — skip.
+				if np.Type == codexTypeFunctionCallOutput || np.Type == codexTypeCustomToolCallOutput {
 					i++
 					continue
 				}
@@ -170,23 +166,11 @@ func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
 			line.Content = contentArr
 			appendLine(&result, line)
 
-		case p.Type == codexTypeFunctionCall:
-			// Standalone function_call not preceded by assistant text.
-			tb := codexToolUseBlock(p)
+		case p.Type == codexTypeFunctionCall || p.Type == codexTypeCustomToolCall:
+			// Standalone tool call not preceded by assistant text.
 			inTok, outTok := pendingInTok, pendingOutTok
 			pendingInTok, pendingOutTok = 0, 0
-			// Skip token_count lines between function_call and output.
-			for i+1 < len(lines) && isCodexTokenCountLine(lines[i+1]) {
-				inTok, outTok = codexTokenCount(lines[i+1].Payload)
-				i++
-			}
-			if i+1 < len(lines) {
-				var np codexPayload
-				if json.Unmarshal(lines[i+1].Payload, &np) == nil && np.Type == codexTypeFunctionCallOutput && np.CallID == p.CallID {
-					tb["result"] = buildToolResult(toolResultEntry{output: np.Output})
-					i++
-				}
-			}
+			tb := codexConsumeToolCall(p, lines, &i, &inTok, &outTok)
 			// Also consume any trailing token_count.
 			for i+1 < len(lines) && isCodexTokenCountLine(lines[i+1]) {
 				inTok, outTok = codexTokenCount(lines[i+1].Payload)
@@ -327,26 +311,6 @@ func codexAssistantText(raw json.RawMessage) string {
 	return strings.Join(texts, "\n\n")
 }
 
-// codexSliceFromResponseItem returns a suffix of lines starting after skipping
-// n response_item entries. token_count lines do not count toward the offset.
-func codexSliceFromResponseItem(lines []codexLine, n int) []codexLine {
-	if n <= 0 {
-		return lines
-	}
-
-	seen := 0
-	for i, line := range lines {
-		if line.Type == "response_item" {
-			seen++
-		}
-		if seen >= n {
-			return lines[i+1:]
-		}
-	}
-
-	return nil
-}
-
 // codexToolUseBlock builds a compact tool_use content block from a function_call.
 func codexToolUseBlock(p codexPayload) map[string]json.RawMessage {
 	block := map[string]json.RawMessage{
@@ -364,6 +328,113 @@ func codexToolUseBlock(p codexPayload) map[string]json.RawMessage {
 	}
 
 	return block
+}
+
+// codexConsumeToolCall builds a tool_use block from a function_call or custom_tool_call,
+// consuming any trailing token_count lines and the matching output line.
+// The caller must advance i past the tool call line itself before calling this function,
+// and must verify p.Type is a tool call type.
+func codexConsumeToolCall(p codexPayload, lines []codexLine, i *int, inTok, outTok *int) map[string]json.RawMessage {
+	var tb map[string]json.RawMessage
+	var outputType string
+
+	switch p.Type {
+	case codexTypeFunctionCall:
+		tb = codexToolUseBlock(p)
+		outputType = codexTypeFunctionCallOutput
+	case codexTypeCustomToolCall:
+		tb = codexCustomToolUseBlock(p)
+		outputType = codexTypeCustomToolCallOutput
+	default:
+		return nil
+	}
+
+	for *i+1 < len(lines) && isCodexTokenCountLine(lines[*i+1]) {
+		*inTok, *outTok = codexTokenCount(lines[*i+1].Payload)
+		*i++
+	}
+
+	if *i+1 < len(lines) {
+		callID, typ := codexCallIDAndType(lines[*i+1].Payload)
+		if typ == outputType && callID == p.CallID {
+			output := codexToolOutputText(lines[*i+1].Payload, outputType)
+			tb["result"] = buildToolResult(toolResultEntry{output: output})
+			*i++
+		}
+	}
+
+	return tb
+}
+
+// codexToolOutputText extracts the output text from a tool call output payload.
+// For function_call_output, the output field is a plain string.
+// For custom_tool_call_output, it is an object {"type":"text","text":"..."}.
+func codexToolOutputText(payload json.RawMessage, outputType string) string {
+	if outputType == codexTypeCustomToolCallOutput {
+		return codexCustomOutputText(payload)
+	}
+	var p codexPayload
+	if json.Unmarshal(payload, &p) == nil {
+		return p.Output
+	}
+	return ""
+}
+
+// codexCallIDAndType extracts just the type and call_id from a payload without
+// failing on fields with unexpected types (e.g., custom_tool_call_output has an
+// object "output" field that can't unmarshal into codexPayload.Output string).
+func codexCallIDAndType(payload json.RawMessage) (callID, typ string) {
+	var p struct {
+		Type   string `json:"type"`
+		CallID string `json:"call_id"`
+	}
+	if json.Unmarshal(payload, &p) == nil {
+		return p.CallID, p.Type
+	}
+	return "", ""
+}
+
+// codexCustomToolUseBlock builds a tool_use block from a custom_tool_call payload.
+// Unlike function_call, the input is plain text (e.g., apply_patch content) rather
+// than a JSON arguments string.
+func codexCustomToolUseBlock(p codexPayload) map[string]json.RawMessage {
+	block := map[string]json.RawMessage{
+		"type": mustJSON(transcript.ContentTypeToolUse),
+		"name": mustJSON(p.Name),
+	}
+	if p.CallID != "" {
+		block["id"] = mustJSON(p.CallID)
+	}
+	if p.Input != "" {
+		if inputJSON, err := json.Marshal(map[string]string{"input": p.Input}); err == nil {
+			block["input"] = inputJSON
+		}
+	}
+	return block
+}
+
+// codexCustomOutputText extracts the output text from a custom_tool_call_output payload.
+// The output field is an object {"type":"text","text":"..."} rather than a plain string.
+func codexCustomOutputText(payload json.RawMessage) string {
+	var p struct {
+		Output json.RawMessage `json:"output"`
+	}
+	if json.Unmarshal(payload, &p) != nil || p.Output == nil {
+		return ""
+	}
+	// Try as plain string first (for forward compatibility).
+	var s string
+	if json.Unmarshal(p.Output, &s) == nil {
+		return s
+	}
+	// Try as object with "text" field.
+	var obj struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(p.Output, &obj) == nil {
+		return obj.Text
+	}
+	return ""
 }
 
 // mustJSON marshals v to JSON, panicking on error (only used for simple types).

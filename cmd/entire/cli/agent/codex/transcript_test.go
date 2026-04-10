@@ -223,3 +223,35 @@ func TestSplitJSONL(t *testing.T) {
 	require.Contains(t, string(lines[0]), `"a"`)
 	require.Contains(t, string(lines[2]), `"c"`)
 }
+
+func TestSanitizeRestoredTranscript_StripsEncryptedItems(t *testing.T) {
+	t.Parallel()
+
+	input := []byte(`{"timestamp":"2026-03-25T11:31:11.752Z","type":"session_meta","payload":{"id":"019d24c3","timestamp":"2026-03-25T11:31:10.922Z","cwd":"/tmp/repo","originator":"codex_exec","cli_version":"0.116.0","source":"exec"}}
+{"timestamp":"2026-03-25T11:31:11.754Z","type":"response_item","payload":{"type":"reasoning","summary":[{"text":"brief"}],"encrypted_content":"REDACTED"}}
+{"timestamp":"2026-03-25T11:31:11.755Z","type":"response_item","payload":{"type":"compaction","encrypted_content":"REDACTED"}}
+{"timestamp":"2026-03-25T11:31:11.756Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
+`)
+
+	got := string(sanitizeRestoredTranscript(input))
+	require.Contains(t, got, `"type":"reasoning"`)
+	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
+	require.NotContains(t, got, `"type":"compaction"`)
+	require.Contains(t, got, `"type":"message"`)
+}
+
+func TestSanitizeRestoredTranscript_StripsEncryptedItemsFromCompactedHistory(t *testing.T) {
+	t.Parallel()
+
+	input := []byte(`{"timestamp":"2026-03-25T11:31:11.752Z","type":"session_meta","payload":{"id":"019d24c3","timestamp":"2026-03-25T11:31:10.922Z","cwd":"/tmp/repo","originator":"codex_exec","cli_version":"0.116.0","source":"exec"}}
+{"timestamp":"2026-03-25T11:31:11.754Z","type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"reasoning","summary":[{"text":"brief"}],"encrypted_content":"REDACTED"},{"type":"compaction","encrypted_content":"REDACTED"},{"type":"compaction_summary","encrypted_content":"REDACTED"}]}}
+`)
+
+	got := string(sanitizeRestoredTranscript(input))
+	require.Contains(t, got, `"type":"compacted"`)
+	require.Contains(t, got, `"type":"reasoning"`)
+	require.Contains(t, got, `"type":"message"`)
+	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
+	require.NotContains(t, got, `"type":"compaction"`)
+	require.NotContains(t, got, `"type":"compaction_summary"`)
+}

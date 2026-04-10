@@ -145,6 +145,18 @@ func LoadFromFile(filePath string) (*EntireSettings, error) {
 	return loadFromFile(filePath)
 }
 
+// LoadFromBytes parses settings from raw JSON bytes without merging local overrides.
+// Use this when you have settings content from a non-file source (e.g., git show).
+func LoadFromBytes(data []byte) (*EntireSettings, error) {
+	s := &EntireSettings{Enabled: true}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(s); err != nil {
+		return nil, fmt.Errorf("parsing settings: %w", err)
+	}
+	return s, nil
+}
+
 // loadFromFile loads settings from a specific file path.
 // Returns default settings if the file doesn't exist.
 func loadFromFile(filePath string) (*EntireSettings, error) {

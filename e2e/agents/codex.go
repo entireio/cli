@@ -23,6 +23,14 @@ func init() {
 // Codex implements the E2E Agent interface for OpenAI's Codex CLI.
 type Codex struct{}
 
+type CodexSession struct {
+	*TmuxSession
+
+	home string
+}
+
+func (s *CodexSession) Home() string { return s.home }
+
 func (c *Codex) Name() string               { return "codex" }
 func (c *Codex) Binary() string             { return "codex" }
 func (c *Codex) EntireAgent() string        { return "codex" }
@@ -149,12 +157,7 @@ func (c *Codex) StartSession(ctx context.Context, dir string) (Session, error) {
 		return nil, fmt.Errorf("seed codex home: %w", err)
 	}
 
-	s, err := NewTmuxSession(name, dir, []string{"CODEX_HOME", "ENTIRE_TEST_TTY"}, "env",
-		"CODEX_HOME="+home,
-		"HOME="+os.Getenv("HOME"),
-		"TERM="+os.Getenv("TERM"),
-		"codex", "--dangerously-bypass-approvals-and-sandbox",
-	)
+	s, err := c.startTmuxSession(name, dir, home, "codex", "--dangerously-bypass-approvals-and-sandbox")
 	if err != nil {
 		cleanup()
 		return nil, err
@@ -177,7 +180,39 @@ func (c *Codex) StartSession(ctx context.Context, dir string) (Session, error) {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	return s, nil
+	return &CodexSession{TmuxSession: s, home: home}, nil
+}
+
+func (c *Codex) ResumeSession(ctx context.Context, dir, home, sessionID string) (Session, error) {
+	_ = ctx
+	name := fmt.Sprintf("codex-resume-%d", time.Now().UnixNano())
+
+	s, err := c.startTmuxSession(name, dir, home, "codex", "--dangerously-bypass-approvals-and-sandbox", "resume", sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Dismiss any startup prompts until the input prompt appears.
+	for range 5 {
+		content, waitErr := s.WaitFor(c.PromptPattern(), 15*time.Second)
+		if waitErr != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("waiting for codex resumed prompt: %w", waitErr)
+		}
+		if !strings.Contains(content, "press enter to confirm") &&
+			!strings.Contains(content, "Use ↑/↓ to move") {
+			break
+		}
+		_ = s.SendKeys("Enter")
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	return &CodexSession{TmuxSession: s, home: home}, nil
+}
+
+func (c *Codex) startTmuxSession(name, dir, home string, args ...string) (*TmuxSession, error) {
+	tmuxArgs := append([]string{"CODEX_HOME=" + home, "HOME=" + os.Getenv("HOME"), "TERM=" + os.Getenv("TERM")}, args...)
+	return NewTmuxSession(name, dir, []string{"CODEX_HOME", "ENTIRE_TEST_TTY"}, "env", tmuxArgs...)
 }
 
 // seedCodexHome writes trust + feature flag config and links auth credentials

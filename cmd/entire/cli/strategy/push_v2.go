@@ -73,6 +73,7 @@ func doPushRef(ctx context.Context, target string, refName plumbing.ReferenceNam
 
 	if err := tryPushRef(ctx, target, refName); err == nil {
 		stop(" done")
+		printSettingsCommitHint(ctx, target)
 		return nil
 	}
 	stop("")
@@ -97,6 +98,7 @@ func doPushRef(ctx context.Context, target string, refName plumbing.ReferenceNam
 		printCheckpointRemoteHint(target)
 	} else {
 		stop(" done")
+		printSettingsCommitHint(ctx, target)
 	}
 
 	return nil

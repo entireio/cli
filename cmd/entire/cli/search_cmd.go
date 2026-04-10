@@ -27,9 +27,8 @@ func newSearchCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:    "search [query]",
-		Short:  "Search checkpoints using semantic and keyword matching",
-		Hidden: true,
+		Use:   "search [query]",
+		Short: "Search checkpoints using semantic and keyword matching",
 		Long: `Search checkpoints using hybrid search (semantic + keyword),
 powered by the Entire search service.
 
