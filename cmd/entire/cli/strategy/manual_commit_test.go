@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -3030,6 +3031,65 @@ func TestCondenseSession_TranscriptRelocatedMidSession(t *testing.T) {
 	// State should have been updated to the resolved path
 	if state.TranscriptPath != nestedPath {
 		t.Errorf("state.TranscriptPath = %q, want %q (should be updated after re-resolution)", state.TranscriptPath, nestedPath)
+	}
+}
+
+// TestCondenseSession_MidTurnMissingTranscriptDoesNotFail verifies that
+// condensation does not fail when an ACTIVE mid-turn session has no shadow branch
+// and the live transcript file is temporarily unavailable.
+func TestCondenseSession_MidTurnMissingTranscriptDoesNotFail(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("content\n"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := wt.Add("file.txt"); err != nil {
+		t.Fatalf("failed to stage: %v", err)
+	}
+	if _, err := wt.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("failed to get HEAD: %v", err)
+	}
+
+	state := &SessionState{
+		SessionID:                 "mid-turn-missing-transcript",
+		BaseCommit:                head.Hash().String(),
+		WorktreePath:              dir,
+		Phase:                     session.PhaseActive,
+		AgentType:                 agent.AgentTypeOpenCode,
+		TranscriptPath:            filepath.Join(dir, ".entire", "tmp", "missing.json"),
+		CheckpointTranscriptStart: 0,
+	}
+
+	checkpointID := id.MustCheckpointID("d4e5f6a1b2c3")
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, map[string]struct{}{"file.txt": {}})
+	if err != nil {
+		t.Fatalf("CondenseSession() error = %v, want nil (missing live transcript should not fail condensation)", err)
+	}
+
+	if result == nil {
+		t.Fatal("CondenseSession() result = nil, want non-nil")
+	}
+	if len(result.FilesTouched) == 0 || result.FilesTouched[0] != "file.txt" {
+		t.Fatalf("FilesTouched = %v, want [file.txt]", result.FilesTouched)
 	}
 }
 
