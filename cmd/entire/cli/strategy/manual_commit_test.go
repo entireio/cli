@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -3039,26 +3040,17 @@ func TestCondenseSession_TranscriptRelocatedMidSession(t *testing.T) {
 // and the live transcript file is temporarily unavailable.
 func TestCondenseSession_MidTurnMissingTranscriptDoesNotFail(t *testing.T) {
 	dir := t.TempDir()
-	repo, err := git.PlainInit(dir, false)
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("failed to init repo: %v", err)
+		t.Fatalf("failed to open repo: %v", err)
 	}
 
-	wt, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
 	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("content\n"), 0o644); err != nil {
 		t.Fatalf("failed to write file: %v", err)
 	}
-	if _, err := wt.Add("file.txt"); err != nil {
-		t.Fatalf("failed to stage: %v", err)
-	}
-	if _, err := wt.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-	}); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
+	testutil.GitAdd(t, dir, "file.txt")
+	testutil.GitCommit(t, dir, "Initial commit")
 
 	t.Chdir(dir)
 

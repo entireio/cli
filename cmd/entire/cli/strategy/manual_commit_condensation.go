@@ -151,11 +151,13 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 			if state.Phase.IsActive() && errors.Is(extractErr, os.ErrNotExist) {
 				// Mid-turn race: the live transcript may be temporarily unavailable
 				// when PostCommit runs (e.g., opencode export path not materialized yet).
-				// Keep condensation non-fatal and fall back to state/filesystem data.
+				// Keep condensation non-fatal and fall back to state/filesystem data
+				// without re-preparing or rereading the transcript. If FilesTouched
+				// is empty, downstream logic can still rely on committed-files fallback.
 				sessionData = &ExtractedSessionData{
 					FullTranscriptLines: state.CheckpointTranscriptStart,
 					Prompts:             readPromptsFromFilesystem(ctx, state.SessionID),
-					FilesTouched:        s.resolveFilesTouched(ctx, state),
+					FilesTouched:        append([]string(nil), state.FilesTouched...),
 				}
 			} else {
 				return nil, fmt.Errorf("failed to extract session data from live transcript: %w", extractErr)

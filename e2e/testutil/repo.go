@@ -186,7 +186,7 @@ func acknowledgeGeminiSearchAgent(t *testing.T, repoDir string) {
 	acks := map[string]map[string]string{}
 	if data, readErr := os.ReadFile(ackPath); readErr == nil {
 		if err := json.Unmarshal(data, &acks); err != nil {
-			t.Fatalf("parse gemini acknowledgments: %v", err)
+			acks = map[string]map[string]string{}
 		}
 	} else if !errors.Is(readErr, os.ErrNotExist) {
 		t.Fatalf("read gemini acknowledgments: %v", readErr)
