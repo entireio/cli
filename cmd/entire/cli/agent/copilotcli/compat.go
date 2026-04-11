@@ -170,10 +170,40 @@ func isJSONNumber(raw json.RawMessage) bool {
 // validateVSCodeEvent checks whether the hookEventName is consistent with the
 // CLI hook subcommand that was invoked. Returns true if the event should be
 // processed, false if it should be silently skipped (mismatch or unknown event).
-func validateVSCodeEvent(hookEventName, hookName string) bool {
+func validateVSCodeEvent(env *hookEnvelope, hookName string) bool {
+	hookEventName := env.HookEventName
 	allowedHooks, known := vsCodeEventToHookNames[hookEventName]
 	if !known {
 		return false
 	}
-	return slices.Contains(allowedHooks, hookName)
+	if !slices.Contains(allowedHooks, hookName) {
+		return false
+	}
+
+	// VS Code overloads "Stop" for both end-of-turn and terminal session-stop
+	// payloads. Route them by reason to avoid ending sessions on ordinary turns.
+	if hookEventName == VSCodeEventStop {
+		isTerminal := isTerminalVSCodeStop(env)
+		switch hookName {
+		case HookNameAgentStop:
+			return !isTerminal
+		case HookNameSessionEnd:
+			return isTerminal
+		}
+	}
+
+	return true
+}
+
+func isTerminalVSCodeStop(env *hookEnvelope) bool {
+	if env.Reason != "" {
+		return true
+	}
+
+	switch env.StopReason {
+	case "", "end_turn":
+		return false
+	default:
+		return true
+	}
 }

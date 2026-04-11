@@ -61,7 +61,7 @@ func (c *CopilotCLIAgent) ParseHookEvent(ctx context.Context, hookName string, s
 
 	// VS Code payloads: validate hookEventName matches the CLI subcommand.
 	if env.Host == HostVSCode && env.HookEventName != "" {
-		if !validateVSCodeEvent(env.HookEventName, hookName) {
+		if !validateVSCodeEvent(env, hookName) {
 			logging.Debug(ctx, "copilot-cli: skipping VS Code event with mismatched hookEventName",
 				"hookEventName", env.HookEventName, "hookName", hookName)
 			return nil, nil //nolint:nilnil // Mismatched VS Code event — skip silently.

@@ -264,6 +264,22 @@ func TestParseHookEvent_SessionEnd_VSCodePayload(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_SessionEnd_VSCodeNonTerminalStop_ReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	input := `{"timestamp":"2026-02-09T10:30:00.000Z","cwd":"/path/to/repo","sessionId":"` + testSessionID + `","hookEventName":"Stop","stopReason":"end_turn"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSessionEnd, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event != nil {
+		t.Errorf("expected nil event for non-terminal VS Code Stop payload, got %+v", event)
+	}
+}
+
 func TestParseHookEvent_VSCodeMismatchedHookEventName_ReturnsNil(t *testing.T) {
 	t.Parallel()
 
