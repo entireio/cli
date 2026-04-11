@@ -93,10 +93,10 @@ func parseHookEnvelope(data []byte) (*hookEnvelope, error) {
 }
 
 func detectHookHost(raw map[string]json.RawMessage) HookHost {
-	if _, ok := raw["hookEventName"]; ok {
+	if isJSONString(raw["hookEventName"]) {
 		return HostVSCode
 	}
-	if _, ok := raw["transcript_path"]; ok {
+	if isJSONString(raw["transcript_path"]) {
 		return HostVSCode
 	}
 	if isJSONString(raw["timestamp"]) {

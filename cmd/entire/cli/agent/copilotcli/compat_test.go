@@ -29,6 +29,16 @@ func TestDetectHookHost(t *testing.T) {
 			want: HostVSCode,
 		},
 		{
+			name: "null hookEventName is not vscode",
+			raw:  `{"timestamp":1771480081360,"sessionId":"sess-123","hookEventName":null}`,
+			want: HostCopilotCLI,
+		},
+		{
+			name: "null transcript_path is not vscode",
+			raw:  `{"timestamp":1771480081360,"sessionId":"sess-123","transcript_path":null}`,
+			want: HostCopilotCLI,
+		},
+		{
 			name: "unknown payload",
 			raw:  `{"sessionId":"sess-123"}`,
 			want: HostUnknown,
