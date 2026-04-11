@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -529,9 +530,15 @@ func workingTreeMatchesCommit(ctx context.Context, worktreeRoot, filePath string
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", worktreeRoot, "diff", "--exit-code", "--quiet", "--", filePath)
-	if err := cmd.Run(); err == nil {
+	err := cmd.Run()
+	if err == nil {
 		return true
 	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false // git says file is dirty
+	}
+	// git itself failed (128+, timeout, etc.) — fall back to raw blob hash
 
 	absPath := filepath.Join(worktreeRoot, filePath)
 	diskContent, err := os.ReadFile(absPath) //nolint:gosec // filePath is from git status, not user input
