@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -174,10 +175,5 @@ func validateVSCodeEvent(hookEventName, hookName string) bool {
 	if !known {
 		return false
 	}
-	for _, allowed := range allowedHooks {
-		if allowed == hookName {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(allowedHooks, hookName)
 }

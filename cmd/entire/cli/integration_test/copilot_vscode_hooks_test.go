@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -117,7 +118,7 @@ func TestCopilotVSCodeHooks_AgentStopCreatesCheckpoint(t *testing.T) {
 	if len(state.FilesTouched) == 0 {
 		t.Fatal("expected FilesTouched to include transcript-derived changes")
 	}
-	if !containsString(state.FilesTouched, "feature.txt") {
+	if !slices.Contains(state.FilesTouched, "feature.txt") {
 		t.Fatalf("expected FilesTouched to contain feature.txt, got %v", state.FilesTouched)
 	}
 }
@@ -189,7 +190,7 @@ func TestCopilotVSCodeHooks_GeneratedHookCommands(t *testing.T) {
 	if state.StepCount == 0 {
 		t.Fatal("expected generated hook commands to create a checkpoint")
 	}
-	if !containsString(state.FilesTouched, "generated-hook.txt") {
+	if !slices.Contains(state.FilesTouched, "generated-hook.txt") {
 		t.Fatalf("expected FilesTouched to contain generated-hook.txt, got %v", state.FilesTouched)
 	}
 }
@@ -239,15 +240,6 @@ func writeCopilotTranscript(t *testing.T, transcriptPath, modifiedFile, prompt s
 	if err := os.WriteFile(transcriptPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 func readCopilotHooksFile(t *testing.T, env *TestEnv) copilotcli.CopilotHooksFile {
