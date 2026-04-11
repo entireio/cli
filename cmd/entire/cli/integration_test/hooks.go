@@ -456,7 +456,7 @@ func (r *HookRunner) runAgentHookWithOutput(agentName, hookName string, inputJSO
 // runShellHookCommandWithOutput runs an installed hook shell command exactly as written
 // in the hook file and returns stdout/stderr separately.
 func (r *HookRunner) runShellHookCommandWithOutput(command string, inputJSON []byte, extraEnv ...string) HookOutput {
-	cmd := exec.Command("/bin/sh", "-lc", command)
+	cmd := exec.Command("/bin/sh", "-c", command)
 	cmd.Dir = r.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),
