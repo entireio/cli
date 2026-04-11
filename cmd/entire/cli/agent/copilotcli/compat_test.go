@@ -147,3 +147,15 @@ func TestParseHookEnvelope_AcceptsAlternateTranscriptPathAndTimestampFormats(t *
 		})
 	}
 }
+
+func TestParseHookEnvelope_AcceptsSnakeCaseSessionID(t *testing.T) {
+	t.Parallel()
+
+	env, err := parseHookEnvelope([]byte(`{"timestamp":"2026-02-09T10:30:00.000Z","session_id":"sess-456","hookEventName":"UserPromptSubmit","prompt":"hi"}`))
+	if err != nil {
+		t.Fatalf("parseHookEnvelope() error = %v", err)
+	}
+	if env.SessionID != "sess-456" {
+		t.Fatalf("SessionID = %q, want %q", env.SessionID, "sess-456")
+	}
+}

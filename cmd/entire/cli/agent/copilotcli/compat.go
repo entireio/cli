@@ -70,7 +70,7 @@ func parseHookEnvelope(data []byte) (*hookEnvelope, error) {
 
 	env := &hookEnvelope{
 		Host:           detectHookHost(raw),
-		SessionID:      firstString(raw, "sessionId"),
+		SessionID:      firstString(raw, "sessionId", "session_id"),
 		Prompt:         firstString(raw, "prompt"),
 		TranscriptPath: firstString(raw, "transcriptPath", "transcript_path"),
 		HookEventName:  firstString(raw, "hookEventName"),
