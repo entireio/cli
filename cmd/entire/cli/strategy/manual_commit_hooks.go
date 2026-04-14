@@ -260,8 +260,21 @@ func (s *ManualCommitStrategy) PostRewrite(ctx context.Context, rewriteType stri
 		return nil //nolint:nilerr // Hook must be resilient
 	}
 
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return nil //nolint:nilerr // Hook must be resilient
+	}
+
 	for _, state := range sessions {
-		if !remapSessionBaseCommit(state, rewrites) {
+		changed, err := s.remapSessionForRewrite(ctx, repo, state, rewrites)
+		if err != nil {
+			logging.Warn(logCtx, "post-rewrite: failed to remap session linkage",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		if !changed {
 			continue
 		}
 		if err := s.saveSessionState(ctx, state); err != nil {
@@ -290,7 +303,7 @@ func parsePostRewritePairs(r io.Reader) ([]rewritePair, error) {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) != 2 {
+		if len(fields) < 2 {
 			return nil, fmt.Errorf("invalid post-rewrite mapping line: %q", line)
 		}
 		pairs = append(pairs, rewritePair{
@@ -299,7 +312,7 @@ func parsePostRewritePairs(r io.Reader) ([]rewritePair, error) {
 		})
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scan post-rewrite input: %w", err)
 	}
 	return pairs, nil
 }

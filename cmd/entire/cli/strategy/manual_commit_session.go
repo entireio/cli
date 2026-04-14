@@ -153,19 +153,44 @@ type rewritePair struct {
 	NewSHA string
 }
 
-func remapSessionBaseCommit(state *SessionState, rewrites []rewritePair) bool {
-	changed := false
+func remapRewriteSHA(sha string, rewrites []rewritePair) (string, bool) {
 	for _, pair := range rewrites {
-		if state.BaseCommit == pair.OldSHA {
-			state.BaseCommit = pair.NewSHA
-			changed = true
-		}
-		if state.AttributionBaseCommit == pair.OldSHA {
-			state.AttributionBaseCommit = pair.NewSHA
-			changed = true
+		if sha == pair.OldSHA {
+			return pair.NewSHA, true
 		}
 	}
-	return changed
+	return sha, false
+}
+
+func (s *ManualCommitStrategy) remapSessionForRewrite(ctx context.Context, repo *git.Repository, state *SessionState, rewrites []rewritePair) (bool, error) {
+	if state == nil {
+		return false, nil
+	}
+
+	newBaseCommit, baseChanged := remapRewriteSHA(state.BaseCommit, rewrites)
+	newAttrBaseCommit, attrChanged := remapRewriteSHA(state.AttributionBaseCommit, rewrites)
+	if !baseChanged && !attrChanged {
+		return false, nil
+	}
+
+	shadowBranchMigrated := false
+	if baseChanged {
+		var err error
+		shadowBranchMigrated, err = s.migrateShadowBranchToBaseCommit(ctx, repo, state, newBaseCommit)
+		if err != nil {
+			return false, fmt.Errorf("failed to migrate rewritten shadow branch: %w", err)
+		}
+	}
+
+	// If a shadow branch existed, preserve AttributionBaseCommit so future
+	// attribution still diffs against the original checkpoint base captured on
+	// that branch. Without a shadow branch, keep attribution in sync with the
+	// rewritten commit lineage.
+	if attrChanged && !shadowBranchMigrated {
+		state.AttributionBaseCommit = newAttrBaseCommit
+	}
+
+	return true, nil
 }
 
 // findSessionsForCommit finds all sessions where base_commit matches the given SHA.

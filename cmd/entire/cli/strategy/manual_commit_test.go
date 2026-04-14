@@ -1480,7 +1480,7 @@ func TestShadowStrategy_PrepareCommitMsg_ReusesLastCheckpointID(t *testing.T) {
 		StartedAt:                 time.Now(),
 		StepCount:                 1,
 		CheckpointTranscriptStart: 10, // Already condensed
-		LastCheckpointID:          "abc123def456",
+		LastCheckpointID:          testTrailerCheckpointID,
 	}
 	if err := s.saveSessionState(context.Background(), state); err != nil {
 		t.Fatalf("saveSessionState() error = %v", err)
@@ -1495,8 +1495,8 @@ func TestShadowStrategy_PrepareCommitMsg_ReusesLastCheckpointID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSessionState() error = %v", err)
 	}
-	if loaded.LastCheckpointID != "abc123def456" {
-		t.Errorf("LastCheckpointID = %q, want %q", loaded.LastCheckpointID, "abc123def456")
+	if loaded.LastCheckpointID != testTrailerCheckpointID {
+		t.Errorf("LastCheckpointID = %q, want %q", loaded.LastCheckpointID, testTrailerCheckpointID)
 	}
 }
 
@@ -1516,6 +1516,19 @@ func TestParsePostRewritePairs(t *testing.T) {
 	}
 }
 
+func TestParsePostRewritePairs_AllowsOptionalExtraField(t *testing.T) {
+	pairs, err := parsePostRewritePairs(strings.NewReader("oldsha newsha extra-info\n"))
+	if err != nil {
+		t.Fatalf("parsePostRewritePairs() error = %v", err)
+	}
+	if len(pairs) != 1 {
+		t.Fatalf("len(pairs) = %d, want 1", len(pairs))
+	}
+	if pairs[0].OldSHA != "oldsha" || pairs[0].NewSHA != "newsha" {
+		t.Fatalf("pairs[0] = %+v, want oldsha->newsha", pairs[0])
+	}
+}
+
 func TestParsePostRewritePairs_InvalidLine(t *testing.T) {
 	_, err := parsePostRewritePairs(strings.NewReader("missing-second-column\n"))
 	if err == nil {
@@ -1527,6 +1540,8 @@ func TestShadowStrategy_PostRewrite_RemapsMatchingSessionInWorktree(t *testing.T
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
+	oldSHA := strings.Repeat("a", 40)
+	newSHA := strings.Repeat("b", 40)
 	worktreePath, err := paths.WorktreeRoot(context.Background())
 	if err != nil {
 		t.Fatalf("WorktreeRoot() error = %v", err)
@@ -1535,17 +1550,17 @@ func TestShadowStrategy_PostRewrite_RemapsMatchingSessionInWorktree(t *testing.T
 	s := &ManualCommitStrategy{}
 	state := &SessionState{
 		SessionID:             "session-1",
-		BaseCommit:            "oldsha",
-		AttributionBaseCommit: "oldsha",
+		BaseCommit:            oldSHA,
+		AttributionBaseCommit: oldSHA,
 		WorktreePath:          worktreePath,
 		StartedAt:             time.Now(),
-		LastCheckpointID:      "abc123def456",
+		LastCheckpointID:      testTrailerCheckpointID,
 	}
 	if err := s.saveSessionState(context.Background(), state); err != nil {
 		t.Fatalf("saveSessionState() error = %v", err)
 	}
 
-	if err := s.PostRewrite(context.Background(), "amend", strings.NewReader("oldsha newsha\n")); err != nil {
+	if err := s.PostRewrite(context.Background(), "amend", strings.NewReader(oldSHA+" "+newSHA+"\n")); err != nil {
 		t.Fatalf("PostRewrite() error = %v", err)
 	}
 
@@ -1553,14 +1568,93 @@ func TestShadowStrategy_PostRewrite_RemapsMatchingSessionInWorktree(t *testing.T
 	if err != nil {
 		t.Fatalf("loadSessionState() error = %v", err)
 	}
-	if loaded.BaseCommit != "newsha" {
-		t.Fatalf("BaseCommit = %q, want %q", loaded.BaseCommit, "newsha")
+	if loaded.BaseCommit != newSHA {
+		t.Fatalf("BaseCommit = %q, want %q", loaded.BaseCommit, newSHA)
 	}
-	if loaded.AttributionBaseCommit != "newsha" {
-		t.Fatalf("AttributionBaseCommit = %q, want %q", loaded.AttributionBaseCommit, "newsha")
+	if loaded.AttributionBaseCommit != newSHA {
+		t.Fatalf("AttributionBaseCommit = %q, want %q", loaded.AttributionBaseCommit, newSHA)
 	}
-	if loaded.LastCheckpointID != "abc123def456" {
-		t.Fatalf("LastCheckpointID = %q, want %q", loaded.LastCheckpointID, "abc123def456")
+	if loaded.LastCheckpointID != testTrailerCheckpointID {
+		t.Fatalf("LastCheckpointID = %q, want %q", loaded.LastCheckpointID, testTrailerCheckpointID)
+	}
+}
+
+func TestShadowStrategy_PostRewrite_MigratesExistingShadowBranch(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "tracked.txt", "one\n")
+	testutil.GitAdd(t, dir, "tracked.txt")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+
+	repo, err := OpenRepository(context.Background())
+	if err != nil {
+		t.Fatalf("OpenRepository() error = %v", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("Head() error = %v", err)
+	}
+	oldBaseCommit := head.Hash().String()
+
+	testutil.WriteFile(t, dir, "tracked.txt", "two\n")
+	testutil.GitAdd(t, dir, "tracked.txt")
+	testutil.GitCommit(t, dir, "second")
+	head, err = repo.Head()
+	if err != nil {
+		t.Fatalf("Head() after second commit error = %v", err)
+	}
+	newBaseCommit := head.Hash().String()
+
+	worktreePath, err := paths.WorktreeRoot(context.Background())
+	if err != nil {
+		t.Fatalf("WorktreeRoot() error = %v", err)
+	}
+	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	if err != nil {
+		t.Fatalf("GetWorktreeID() error = %v", err)
+	}
+
+	oldShadowBranch := checkpoint.ShadowBranchNameForCommit(oldBaseCommit, worktreeID)
+	newShadowBranch := checkpoint.ShadowBranchNameForCommit(newBaseCommit, worktreeID)
+	oldShadowRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(oldShadowBranch), plumbing.NewHash(oldBaseCommit))
+	if err := repo.Storer.SetReference(oldShadowRef); err != nil {
+		t.Fatalf("SetReference(old shadow) error = %v", err)
+	}
+
+	s := &ManualCommitStrategy{}
+	state := &SessionState{
+		SessionID:             "session-1",
+		BaseCommit:            oldBaseCommit,
+		AttributionBaseCommit: oldBaseCommit,
+		WorktreePath:          worktreePath,
+		WorktreeID:            worktreeID,
+		StartedAt:             time.Now(),
+		LastCheckpointID:      testTrailerCheckpointID,
+	}
+	if err := s.saveSessionState(context.Background(), state); err != nil {
+		t.Fatalf("saveSessionState() error = %v", err)
+	}
+
+	if err := s.PostRewrite(context.Background(), "amend", strings.NewReader(oldBaseCommit+" "+newBaseCommit+" extra\n")); err != nil {
+		t.Fatalf("PostRewrite() error = %v", err)
+	}
+
+	loaded, err := s.loadSessionState(context.Background(), state.SessionID)
+	if err != nil {
+		t.Fatalf("loadSessionState() error = %v", err)
+	}
+	if loaded.BaseCommit != newBaseCommit {
+		t.Fatalf("BaseCommit = %q, want %q", loaded.BaseCommit, newBaseCommit)
+	}
+	if loaded.AttributionBaseCommit != oldBaseCommit {
+		t.Fatalf("AttributionBaseCommit = %q, want original %q when shadow branch migrates", loaded.AttributionBaseCommit, oldBaseCommit)
+	}
+	if !referenceExists(t, repo, plumbing.NewBranchReferenceName(newShadowBranch)) {
+		t.Fatalf("expected migrated shadow branch %q to exist", newShadowBranch)
+	}
+	if referenceExists(t, repo, plumbing.NewBranchReferenceName(oldShadowBranch)) {
+		t.Fatalf("expected old shadow branch %q to be removed", oldShadowBranch)
 	}
 }
 
@@ -1568,21 +1662,23 @@ func TestShadowStrategy_PostRewrite_DoesNotTouchOtherWorktrees(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
+	oldSHA := strings.Repeat("a", 40)
+	newSHA := strings.Repeat("b", 40)
 
 	s := &ManualCommitStrategy{}
 	other := &SessionState{
 		SessionID:             "other-worktree",
-		BaseCommit:            "oldsha",
-		AttributionBaseCommit: "oldsha",
+		BaseCommit:            oldSHA,
+		AttributionBaseCommit: oldSHA,
 		WorktreePath:          filepath.Join(dir, "other"),
 		StartedAt:             time.Now(),
-		LastCheckpointID:      "abc123def456",
+		LastCheckpointID:      testTrailerCheckpointID,
 	}
 	if err := s.saveSessionState(context.Background(), other); err != nil {
 		t.Fatalf("saveSessionState() error = %v", err)
 	}
 
-	if err := s.PostRewrite(context.Background(), "amend", strings.NewReader("oldsha newsha\n")); err != nil {
+	if err := s.PostRewrite(context.Background(), "amend", strings.NewReader(oldSHA+" "+newSHA+"\n")); err != nil {
 		t.Fatalf("PostRewrite() error = %v", err)
 	}
 
@@ -1590,15 +1686,22 @@ func TestShadowStrategy_PostRewrite_DoesNotTouchOtherWorktrees(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSessionState() error = %v", err)
 	}
-	if loaded.BaseCommit != "oldsha" {
-		t.Fatalf("BaseCommit = %q, want %q", loaded.BaseCommit, "oldsha")
+	if loaded.BaseCommit != oldSHA {
+		t.Fatalf("BaseCommit = %q, want %q", loaded.BaseCommit, oldSHA)
 	}
-	if loaded.AttributionBaseCommit != "oldsha" {
-		t.Fatalf("AttributionBaseCommit = %q, want %q", loaded.AttributionBaseCommit, "oldsha")
+	if loaded.AttributionBaseCommit != oldSHA {
+		t.Fatalf("AttributionBaseCommit = %q, want %q", loaded.AttributionBaseCommit, oldSHA)
 	}
-	if loaded.LastCheckpointID != "abc123def456" {
-		t.Fatalf("LastCheckpointID = %q, want %q", loaded.LastCheckpointID, "abc123def456")
+	if loaded.LastCheckpointID != testTrailerCheckpointID {
+		t.Fatalf("LastCheckpointID = %q, want %q", loaded.LastCheckpointID, testTrailerCheckpointID)
 	}
+}
+
+func referenceExists(t *testing.T, repo *git.Repository, refName plumbing.ReferenceName) bool {
+	t.Helper()
+
+	_, err := repo.Reference(refName, true)
+	return err == nil
 }
 
 // TestShadowStrategy_CondenseSession_EphemeralBranchTrailer verifies that checkpoint commits

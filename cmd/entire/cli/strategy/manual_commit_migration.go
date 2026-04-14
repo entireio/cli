@@ -35,14 +35,28 @@ func (s *ManualCommitStrategy) migrateShadowBranchIfNeeded(ctx context.Context, 
 		return false, nil // No migration needed
 	}
 
-	// HEAD changed - check if old shadow branch exists and migrate it
+	return s.migrateShadowBranchToBaseCommit(ctx, repo, state, currentHead)
+}
+
+// migrateShadowBranchToBaseCommit moves the current session's shadow branch to a
+// new base commit-derived name and updates state.BaseCommit. It returns whether
+// an existing shadow branch ref had to be migrated.
+func (s *ManualCommitStrategy) migrateShadowBranchToBaseCommit(ctx context.Context, repo *git.Repository, state *SessionState, newBaseCommit string) (bool, error) {
+	if state == nil || state.BaseCommit == "" || newBaseCommit == "" {
+		return false, nil
+	}
+	if state.BaseCommit == newBaseCommit {
+		return false, nil
+	}
+
+	// Base commit changed - check if old shadow branch exists and migrate it
 	oldShadowBranch := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	newShadowBranch := checkpoint.ShadowBranchNameForCommit(currentHead, state.WorktreeID)
+	newShadowBranch := checkpoint.ShadowBranchNameForCommit(newBaseCommit, state.WorktreeID)
 
 	// Guard against hash prefix collision: if both commits produce the same
 	// shadow branch name (same 7-char prefix), just update state - no ref rename needed
 	if oldShadowBranch == newShadowBranch {
-		state.BaseCommit = currentHead
+		state.BaseCommit = newBaseCommit
 		return true, nil
 	}
 
@@ -51,10 +65,10 @@ func (s *ManualCommitStrategy) migrateShadowBranchIfNeeded(ctx context.Context, 
 	if err != nil {
 		// Old shadow branch doesn't exist - just update state.BaseCommit
 		// This can happen if this is the first checkpoint after HEAD changed
-		state.BaseCommit = currentHead
-		logging.Info(logging.WithComponent(ctx, "migration"), "updated session base commit (HEAD changed during session)",
-			slog.String("new_base", currentHead[:7]))
-		return true, nil //nolint:nilerr // err is "reference not found" which is fine - just need to update state
+		state.BaseCommit = newBaseCommit
+		logging.Info(logging.WithComponent(ctx, "migration"), "updated session base commit",
+			slog.String("new_base", newBaseCommit[:7]))
+		return false, nil //nolint:nilerr // err is "reference not found" which is fine - just need to update state
 	}
 
 	// Old shadow branch exists - move it to new base commit
@@ -84,7 +98,7 @@ func (s *ManualCommitStrategy) migrateShadowBranchIfNeeded(ctx context.Context, 
 	// renames the shadow branch but its checkpoint trees are still relative to
 	// the original base. Attribution must diff from that original base to
 	// correctly measure agent work captured in those checkpoints.
-	state.BaseCommit = currentHead
+	state.BaseCommit = newBaseCommit
 	return true, nil
 }
 

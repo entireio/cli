@@ -384,6 +384,62 @@ func TestShadow_PostRewriteAmendRemapsSessionState(t *testing.T) {
 	}
 }
 
+func TestShadow_PostRewriteAmendMigratesExistingShadowBranch(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+
+	sess := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(sess.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+
+	env.WriteFile("main.go", "package main\n\nfunc main() {}\n")
+	sess.CreateTranscript("Create main.go", []FileChange{
+		{Path: "main.go", Content: "package main\n\nfunc main() {}\n"},
+	})
+	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	originalCommitHash := env.GetHeadHash()
+	originalShadowBranch := env.GetShadowBranchNameForCommit(originalCommitHash)
+	if !env.BranchExists(originalShadowBranch) {
+		t.Fatalf("expected original shadow branch %q to exist", originalShadowBranch)
+	}
+
+	env.GitCommitAmendWithShadowHooks("Initial commit (amended)")
+
+	amendedCommitHash := env.GetHeadHash()
+	if amendedCommitHash == originalCommitHash {
+		t.Fatal("Amended commit should have a different hash")
+	}
+
+	env.GitPostRewriteWithShadowHooks("amend", [2]string{originalCommitHash, amendedCommitHash})
+
+	newShadowBranch := env.GetShadowBranchNameForCommit(amendedCommitHash)
+	if !env.BranchExists(newShadowBranch) {
+		t.Fatalf("expected migrated shadow branch %q to exist", newShadowBranch)
+	}
+	if env.BranchExists(originalShadowBranch) {
+		t.Fatalf("expected original shadow branch %q to be removed", originalShadowBranch)
+	}
+
+	stateAfterRewrite, err := env.GetSessionState(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState after post-rewrite failed: %v", err)
+	}
+	if stateAfterRewrite == nil {
+		t.Fatal("Session state should exist after post-rewrite")
+	}
+	if stateAfterRewrite.BaseCommit != amendedCommitHash {
+		t.Fatalf("BaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.BaseCommit, amendedCommitHash)
+	}
+	if stateAfterRewrite.AttributionBaseCommit != originalCommitHash {
+		t.Fatalf("AttributionBaseCommit after post-rewrite = %q, want original %q when shadow branch migrates", stateAfterRewrite.AttributionBaseCommit, originalCommitHash)
+	}
+}
+
 func TestShadow_PostRewriteRebaseRemapsSessionState(t *testing.T) {
 	t.Parallel()
 
