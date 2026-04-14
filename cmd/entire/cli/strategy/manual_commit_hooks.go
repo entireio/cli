@@ -231,10 +231,77 @@ func (s *ManualCommitStrategy) CommitMsg(_ context.Context, commitMsgFile string
 }
 
 // PostRewrite is called by the git post-rewrite hook after amend/rebase
-// operations. Task 1 wires the hook surface; rewrite remapping logic is added
-// in the follow-up implementation step.
-func (s *ManualCommitStrategy) PostRewrite(_ context.Context, _ string, _ io.Reader) error {
+// operations. It keeps session linkage aligned with rewritten commit SHAs in
+// the current worktree.
+func (s *ManualCommitStrategy) PostRewrite(ctx context.Context, rewriteType string, r io.Reader) error {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	if rewriteType != "amend" && rewriteType != "rebase" {
+		logging.Debug(logCtx, "post-rewrite: unsupported rewrite type, skipping",
+			slog.String("rewrite_type", rewriteType),
+		)
+		return nil
+	}
+
+	rewrites, err := parsePostRewritePairs(r)
+	if err != nil {
+		return err
+	}
+	if len(rewrites) == 0 {
+		return nil
+	}
+
+	worktreePath, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil //nolint:nilerr // Hook must be resilient
+	}
+
+	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
+	if err != nil || len(sessions) == 0 {
+		return nil //nolint:nilerr // Hook must be resilient
+	}
+
+	for _, state := range sessions {
+		if !remapSessionBaseCommit(state, rewrites) {
+			continue
+		}
+		if err := s.saveSessionState(ctx, state); err != nil {
+			logging.Warn(logCtx, "post-rewrite: failed to save remapped session state",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		logging.Info(logCtx, "post-rewrite: remapped session linkage",
+			slog.String("session_id", state.SessionID),
+			slog.String("rewrite_type", rewriteType),
+			slog.String("base_commit", truncateHash(state.BaseCommit)),
+		)
+	}
+
 	return nil
+}
+
+func parsePostRewritePairs(r io.Reader) ([]rewritePair, error) {
+	scanner := bufio.NewScanner(r)
+	var pairs []rewritePair
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("invalid post-rewrite mapping line: %q", line)
+		}
+		pairs = append(pairs, rewritePair{
+			OldSHA: fields[0],
+			NewSHA: fields[1],
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return pairs, nil
 }
 
 // hasUserContent checks if the message has any content besides comments and our trailer.

@@ -148,6 +148,26 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 	return matching, nil
 }
 
+type rewritePair struct {
+	OldSHA string
+	NewSHA string
+}
+
+func remapSessionBaseCommit(state *SessionState, rewrites []rewritePair) bool {
+	changed := false
+	for _, pair := range rewrites {
+		if state.BaseCommit == pair.OldSHA {
+			state.BaseCommit = pair.NewSHA
+			changed = true
+		}
+		if state.AttributionBaseCommit == pair.OldSHA {
+			state.AttributionBaseCommit = pair.NewSHA
+			changed = true
+		}
+	}
+	return changed
+}
+
 // findSessionsForCommit finds all sessions where base_commit matches the given SHA.
 func (s *ManualCommitStrategy) findSessionsForCommit(ctx context.Context, baseCommitSHA string) ([]*SessionState, error) {
 	allStates, err := s.listAllSessionStates(ctx)
