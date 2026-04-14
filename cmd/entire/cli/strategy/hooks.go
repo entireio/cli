@@ -342,12 +342,34 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 // generateChainedContent appends a chain call to the base hook content,
 // so the pre-existing hook (backed up to .pre-entire) is called after our hook.
 func generateChainedContent(baseContent, hookName string) string {
+	if hookName == "post-rewrite" {
+		return generatePostRewriteChainedContent(baseContent)
+	}
+
 	return baseContent + fmt.Sprintf(`%s
 _entire_hook_dir="$(dirname "$0")"
 if [ -x "$_entire_hook_dir/%s%s" ]; then
     "$_entire_hook_dir/%s%s" "$@"
 fi
 `, chainComment, hookName, backupSuffix, hookName, backupSuffix)
+}
+
+func generatePostRewriteChainedContent(baseContent string) string {
+	const original = `entire hooks git post-rewrite "$1" 2>/dev/null || true`
+	const replacement = `entire hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`
+
+	replayPrefix := `_entire_stdin="$(mktemp "${TMPDIR:-/tmp}/entire-post-rewrite.XXXXXX")"
+cat > "$_entire_stdin"
+trap 'rm -f "$_entire_stdin"' EXIT
+` + replacement
+
+	return strings.Replace(baseContent, original, replayPrefix, 1) + fmt.Sprintf(`
+%s
+_entire_hook_dir="$(dirname "$0")"
+if [ -x "$_entire_hook_dir/post-rewrite%s" ]; then
+    "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin"
+fi
+`, chainComment, backupSuffix, backupSuffix)
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.

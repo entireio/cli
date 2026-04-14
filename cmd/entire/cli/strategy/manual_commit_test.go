@@ -1658,6 +1658,64 @@ func TestShadowStrategy_PostRewrite_MigratesExistingShadowBranch(t *testing.T) {
 	}
 }
 
+func TestShadowStrategy_MigrateAndPersistIfNeeded_PersistsBaseCommitWithoutShadowBranch(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "tracked.txt", "one\n")
+	testutil.GitAdd(t, dir, "tracked.txt")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+
+	repo, err := OpenRepository(context.Background())
+	if err != nil {
+		t.Fatalf("OpenRepository() error = %v", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("Head() error = %v", err)
+	}
+	oldBaseCommit := head.Hash().String()
+
+	testutil.WriteFile(t, dir, "tracked.txt", "two\n")
+	testutil.GitAdd(t, dir, "tracked.txt")
+	testutil.GitCommit(t, dir, "second")
+	head, err = repo.Head()
+	if err != nil {
+		t.Fatalf("Head() after second commit error = %v", err)
+	}
+	newBaseCommit := head.Hash().String()
+
+	worktreePath, err := paths.WorktreeRoot(context.Background())
+	if err != nil {
+		t.Fatalf("WorktreeRoot() error = %v", err)
+	}
+
+	s := &ManualCommitStrategy{}
+	state := &SessionState{
+		SessionID:             "session-1",
+		BaseCommit:            oldBaseCommit,
+		AttributionBaseCommit: oldBaseCommit,
+		WorktreePath:          worktreePath,
+		StartedAt:             time.Now(),
+		LastCheckpointID:      testTrailerCheckpointID,
+	}
+	if err := s.saveSessionState(context.Background(), state); err != nil {
+		t.Fatalf("saveSessionState() error = %v", err)
+	}
+
+	if err := s.migrateAndPersistIfNeeded(context.Background(), repo, state); err != nil {
+		t.Fatalf("migrateAndPersistIfNeeded() error = %v", err)
+	}
+
+	loaded, err := s.loadSessionState(context.Background(), state.SessionID)
+	if err != nil {
+		t.Fatalf("loadSessionState() error = %v", err)
+	}
+	if loaded.BaseCommit != newBaseCommit {
+		t.Fatalf("BaseCommit = %q, want %q", loaded.BaseCommit, newBaseCommit)
+	}
+}
+
 func TestShadowStrategy_PostRewrite_DoesNotTouchOtherWorktrees(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)

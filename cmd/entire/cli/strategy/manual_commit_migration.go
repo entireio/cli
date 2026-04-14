@@ -68,7 +68,7 @@ func (s *ManualCommitStrategy) migrateShadowBranchToBaseCommit(ctx context.Conte
 		state.BaseCommit = newBaseCommit
 		logging.Info(logging.WithComponent(ctx, "migration"), "updated session base commit",
 			slog.String("new_base", newBaseCommit[:7]))
-		return false, nil //nolint:nilerr // err is "reference not found" which is fine - just need to update state
+		return true, nil //nolint:nilerr // err is "reference not found" which is fine - just need to update state
 	}
 
 	// Old shadow branch exists - move it to new base commit

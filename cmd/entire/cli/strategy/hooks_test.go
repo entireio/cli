@@ -1230,6 +1230,26 @@ func TestGenerateChainedContent(t *testing.T) {
 	}
 }
 
+func TestGenerateChainedContent_PostRewritePreservesStdinForBackup(t *testing.T) {
+	t.Parallel()
+
+	base := "#!/bin/sh\n# Entire CLI hooks\n# Post-rewrite hook: remap session linkage after amend/rebase rewrites\nentire hooks git post-rewrite \"$1\" 2>/dev/null || true\n"
+	result := generateChainedContent(base, "post-rewrite")
+
+	if !strings.Contains(result, `_entire_stdin="$(mktemp "${TMPDIR:-/tmp}/entire-post-rewrite.XXXXXX")"`) {
+		t.Fatalf("post-rewrite chained content should create temp stdin copy, got:\n%s", result)
+	}
+	if !strings.Contains(result, `cat > "$_entire_stdin"`) {
+		t.Fatalf("post-rewrite chained content should capture stdin once, got:\n%s", result)
+	}
+	if !strings.Contains(result, `entire hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`) {
+		t.Fatalf("post-rewrite chained content should replay stdin into Entire handler, got:\n%s", result)
+	}
+	if !strings.Contains(result, `"$_entire_hook_dir/post-rewrite`+backupSuffix+`" "$@" < "$_entire_stdin"`) {
+		t.Fatalf("post-rewrite chained content should replay stdin into backup hook, got:\n%s", result)
+	}
+}
+
 func TestInstallGitHook_InstallRemoveReinstall(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
