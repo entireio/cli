@@ -245,3 +245,19 @@ func TestHooksGitCmd_DiscoverExternalAgents_WhenEnabled(t *testing.T) {
 		t.Errorf("expected external agent %q to be registered after hook pre-run, got: %v", agentName, err)
 	}
 }
+
+func TestHooksGitCmd_ExposesPostRewriteSubcommand(t *testing.T) {
+	t.Parallel()
+
+	cmd := newHooksGitCmd()
+	found, _, err := cmd.Find([]string{"post-rewrite"})
+	if err != nil {
+		t.Fatalf("could not find post-rewrite subcommand: %v", err)
+	}
+	if found == nil {
+		t.Fatal("expected post-rewrite subcommand, got nil")
+	}
+	if found.Use != "post-rewrite <rewrite-type>" {
+		t.Fatalf("post-rewrite Use = %q, want %q", found.Use, "post-rewrite <rewrite-type>")
+	}
+}

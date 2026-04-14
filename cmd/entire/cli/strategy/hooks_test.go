@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -926,6 +927,41 @@ func TestInstallGitHook_BacksUpCustomHook(t *testing.T) {
 	}
 	if !strings.Contains(hookContent, "prepare-commit-msg"+backupSuffix) {
 		t.Error("chain call should reference the backup file")
+	}
+}
+
+func TestManagedGitHookNames_IncludesPostRewrite(t *testing.T) {
+	t.Parallel()
+
+	names := ManagedGitHookNames()
+	if !slices.Contains(names, "post-rewrite") {
+		t.Fatalf("ManagedGitHookNames() = %v, want post-rewrite included", names)
+	}
+}
+
+func TestInstallGitHook_InstallsPostRewrite(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	count, err := InstallGitHook(context.Background(), true, false, false)
+	if err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	if count == 0 {
+		t.Fatal("InstallGitHook() should install hooks")
+	}
+
+	hookPath := filepath.Join(hooksDir, "post-rewrite")
+	hookData, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("post-rewrite hook should exist: %v", err)
+	}
+
+	hookContent := string(hookData)
+	if !strings.Contains(hookContent, entireHookMarker) {
+		t.Error("installed post-rewrite hook should contain Entire marker")
+	}
+	if !strings.Contains(hookContent, `entire hooks git post-rewrite "$1" 2>/dev/null || true`) {
+		t.Errorf("installed post-rewrite hook content missing expected command:\n%s", hookContent)
 	}
 }
 

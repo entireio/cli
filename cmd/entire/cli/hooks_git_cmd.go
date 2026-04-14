@@ -124,6 +124,7 @@ func newHooksGitCmd() *cobra.Command {
 	cmd.AddCommand(newHooksGitPrepareCommitMsgCmd())
 	cmd.AddCommand(newHooksGitCommitMsgCmd())
 	cmd.AddCommand(newHooksGitPostCommitCmd())
+	cmd.AddCommand(newHooksGitPostRewriteCmd())
 	cmd.AddCommand(newHooksGitPrePushCmd())
 
 	return cmd
@@ -195,6 +196,28 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 			g.logInvoked()
 
 			hookErr := g.strategy.PostCommit(g.ctx)
+			g.logCompleted(hookErr)
+
+			return nil
+		},
+	}
+}
+
+func newHooksGitPostRewriteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "post-rewrite <rewrite-type>",
+		Short: "Handle post-rewrite git hook",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if gitHooksDisabled {
+				return nil
+			}
+
+			g := newGitHookContext(cmd.Context(), "post-rewrite")
+			defer g.span.End()
+			g.logInvoked(slog.String("rewrite_type", args[0]))
+
+			hookErr := g.strategy.PostRewrite(g.ctx, args[0], cmd.InOrStdin())
 			g.logCompleted(hookErr)
 
 			return nil

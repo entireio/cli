@@ -230,6 +230,13 @@ func (s *ManualCommitStrategy) CommitMsg(_ context.Context, commitMsgFile string
 	return nil
 }
 
+// PostRewrite is called by the git post-rewrite hook after amend/rebase
+// operations. Task 1 wires the hook surface; rewrite remapping logic is added
+// in the follow-up implementation step.
+func (s *ManualCommitStrategy) PostRewrite(_ context.Context, _ string, _ io.Reader) error {
+	return nil
+}
+
 // hasUserContent checks if the message has any content besides comments and our trailer.
 func hasUserContent(message string) bool {
 	trailerPrefix := trailers.CheckpointTrailerKey + ":"

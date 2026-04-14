@@ -20,7 +20,7 @@ const backupSuffix = ".pre-entire"
 const chainComment = "# Chain: run pre-existing hook"
 
 // gitHookNames are the git hooks managed by Entire CLI
-var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "pre-push"}
+var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"}
 
 // ManagedGitHookNames returns the list of git hooks managed by Entire CLI.
 // This is useful for tests that need to manipulate hooks.
@@ -188,6 +188,14 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 # %s
 # Post-commit hook: condense session data if commit has Entire-Checkpoint trailer
 %s hooks git post-commit 2>/dev/null || true
+`, entireHookMarker, cmdPrefix),
+		},
+		{
+			name: "post-rewrite",
+			content: fmt.Sprintf(`#!/bin/sh
+# %s
+# Post-rewrite hook: remap session linkage after amend/rebase rewrites
+%s hooks git post-rewrite "$1" 2>/dev/null || true
 `, entireHookMarker, cmdPrefix),
 		},
 		{

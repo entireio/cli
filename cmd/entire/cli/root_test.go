@@ -73,11 +73,11 @@ func TestPersistentPostRun_SkipsHiddenParent(t *testing.T) {
 
 	root := NewRootCmd()
 
-	// Find the leaf command: entire hooks git post-commit
+	// Find the leaf command: entire hooks git post-rewrite
 	// This exercises the real command tree where "hooks" is Hidden but its descendants are not.
-	leaf, _, err := root.Find([]string{"hooks", "git", "post-commit"})
+	leaf, _, err := root.Find([]string{"hooks", "git", "post-rewrite"})
 	if err != nil {
-		t.Fatalf("could not find hooks git post-commit command: %v", err)
+		t.Fatalf("could not find hooks git post-rewrite command: %v", err)
 	}
 
 	if leaf.Hidden {
