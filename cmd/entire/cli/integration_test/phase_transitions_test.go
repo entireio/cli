@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"os/exec"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -304,4 +305,167 @@ func TestShadow_AmendPreservesTrailer(t *testing.T) {
 	}
 
 	t.Log("AmendPreservesTrailer test completed successfully")
+}
+
+// TestShadow_PostRewriteAmendRemapsSessionState verifies that the git
+// post-rewrite hook updates local session linkage after an amend rewrites the
+// commit SHA.
+func TestShadow_PostRewriteAmendRemapsSessionState(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+
+	sess := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(sess.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+
+	env.WriteFile("main.go", "package main\n\nfunc main() {}\n")
+	sess.CreateTranscript("Create main.go", []FileChange{
+		{Path: "main.go", Content: "package main\n\nfunc main() {}\n"},
+	})
+	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	env.GitCommitWithShadowHooks("Initial implementation", "main.go")
+
+	originalCommitHash := env.GetHeadHash()
+	originalCheckpointID := env.GetCheckpointIDFromCommitMessage(originalCommitHash)
+	if originalCheckpointID == "" {
+		t.Fatal("Original commit should have a checkpoint trailer")
+	}
+
+	stateBeforeAmend, err := env.GetSessionState(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if stateBeforeAmend == nil {
+		t.Fatal("Session state should exist")
+	}
+	if stateBeforeAmend.BaseCommit != originalCommitHash {
+		t.Fatalf("BaseCommit before amend = %q, want %q", stateBeforeAmend.BaseCommit, originalCommitHash)
+	}
+
+	env.GitCommitAmendWithShadowHooks("Initial implementation (amended)")
+	amendedCommitHash := env.GetHeadHash()
+	if amendedCommitHash == originalCommitHash {
+		t.Fatal("Amended commit should have a different hash")
+	}
+
+	stateAfterAmend, err := env.GetSessionState(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState after amend failed: %v", err)
+	}
+	if stateAfterAmend == nil {
+		t.Fatal("Session state should exist after amend")
+	}
+	if stateAfterAmend.BaseCommit != originalCommitHash {
+		t.Fatalf("BaseCommit after amend = %q, want original %q before post-rewrite", stateAfterAmend.BaseCommit, originalCommitHash)
+	}
+
+	env.GitPostRewriteWithShadowHooks("amend", [2]string{originalCommitHash, amendedCommitHash})
+
+	stateAfterRewrite, err := env.GetSessionState(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState after post-rewrite failed: %v", err)
+	}
+	if stateAfterRewrite == nil {
+		t.Fatal("Session state should exist after post-rewrite")
+	}
+	if stateAfterRewrite.BaseCommit != amendedCommitHash {
+		t.Fatalf("BaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.BaseCommit, amendedCommitHash)
+	}
+	if stateAfterRewrite.AttributionBaseCommit != amendedCommitHash {
+		t.Fatalf("AttributionBaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.AttributionBaseCommit, amendedCommitHash)
+	}
+	if stateAfterRewrite.LastCheckpointID.String() != originalCheckpointID {
+		t.Fatalf("LastCheckpointID after post-rewrite = %q, want %q", stateAfterRewrite.LastCheckpointID.String(), originalCheckpointID)
+	}
+}
+
+func TestShadow_PostRewriteRebaseRemapsSessionState(t *testing.T) {
+	t.Parallel()
+
+	env := NewTestEnv(t)
+	defer env.Cleanup()
+
+	env.InitRepo()
+	env.WriteFile("README.md", "base\n")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	env.GitCheckoutNewBranch("feature/post-rewrite-rebase")
+	env.InitEntire()
+
+	sess := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(sess.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+
+	env.WriteFile("feature.txt", "feature work\n")
+	sess.CreateTranscript("Add feature file", []FileChange{
+		{Path: "feature.txt", Content: "feature work\n"},
+	})
+	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	env.GitCommitWithShadowHooks("Feature work", "feature.txt")
+	originalFeatureCommit := env.GetHeadHash()
+
+	stateBeforeRebase, err := env.GetSessionState(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if stateBeforeRebase == nil {
+		t.Fatal("Session state should exist")
+	}
+	if stateBeforeRebase.BaseCommit != originalFeatureCommit {
+		t.Fatalf("BaseCommit before rebase = %q, want %q", stateBeforeRebase.BaseCommit, originalFeatureCommit)
+	}
+
+	env.gitCheckout("master")
+	env.WriteFile("upstream.txt", "upstream\n")
+	env.GitAdd("upstream.txt")
+	env.GitCommit("Upstream change")
+	env.gitCheckout("feature/post-rewrite-rebase")
+
+	cmd := exec.Command("git", "rebase", "master")
+	cmd.Dir = env.RepoDir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git rebase failed: %v\nOutput: %s", err, output)
+	}
+
+	rebasedFeatureCommit := env.GetHeadHash()
+	if rebasedFeatureCommit == originalFeatureCommit {
+		t.Fatal("Rebased commit should have a different hash")
+	}
+
+	stateAfterRebase, err := env.GetSessionState(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState after rebase failed: %v", err)
+	}
+	if stateAfterRebase == nil {
+		t.Fatal("Session state should exist after rebase")
+	}
+	if stateAfterRebase.BaseCommit != originalFeatureCommit {
+		t.Fatalf("BaseCommit after rebase = %q, want original %q before post-rewrite", stateAfterRebase.BaseCommit, originalFeatureCommit)
+	}
+
+	env.GitPostRewriteWithShadowHooks("rebase", [2]string{originalFeatureCommit, rebasedFeatureCommit})
+
+	stateAfterRewrite, err := env.GetSessionState(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState after post-rewrite failed: %v", err)
+	}
+	if stateAfterRewrite == nil {
+		t.Fatal("Session state should exist after post-rewrite")
+	}
+	if stateAfterRewrite.BaseCommit != rebasedFeatureCommit {
+		t.Fatalf("BaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.BaseCommit, rebasedFeatureCommit)
+	}
+	if stateAfterRewrite.AttributionBaseCommit != rebasedFeatureCommit {
+		t.Fatalf("AttributionBaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.AttributionBaseCommit, rebasedFeatureCommit)
+	}
 }

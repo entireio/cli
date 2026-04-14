@@ -1240,6 +1240,28 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 	}
 }
 
+// GitPostRewriteWithShadowHooks runs the git post-rewrite hook with the provided
+// old->new commit mappings. Each mapping is a pair of commit SHAs.
+func (env *TestEnv) GitPostRewriteWithShadowHooks(rewriteType string, mappings ...[2]string) {
+	env.T.Helper()
+
+	var input strings.Builder
+	for _, mapping := range mappings {
+		input.WriteString(mapping[0])
+		input.WriteByte(' ')
+		input.WriteString(mapping[1])
+		input.WriteByte('\n')
+	}
+
+	cmd := exec.Command(getTestBinary(), "hooks", "git", "post-rewrite", rewriteType)
+	cmd.Dir = env.RepoDir
+	cmd.Env = env.gitHookEnv()
+	cmd.Stdin = strings.NewReader(input.String())
+	if output, err := cmd.CombinedOutput(); err != nil {
+		env.T.Fatalf("post-rewrite hook failed: %v\nOutput: %s", err, output)
+	}
+}
+
 // GitCommitWithTrailerRemoved stages and commits files, simulating what happens when
 // a user removes the Entire-Checkpoint trailer during commit message editing.
 // This tests the opt-out behavior where removing the trailer skips condensation.
