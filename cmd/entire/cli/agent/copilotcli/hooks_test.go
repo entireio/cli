@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,14 +60,14 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	}
 
 	// Verify commands use bash field and type is "command"
-	assertEntryBash(t, hooksFile.Hooks.UserPromptSubmitted, "entire hooks copilot-cli user-prompt-submitted")
-	assertEntryBash(t, hooksFile.Hooks.SessionStart, "entire hooks copilot-cli session-start")
-	assertEntryBash(t, hooksFile.Hooks.AgentStop, "entire hooks copilot-cli agent-stop")
-	assertEntryBash(t, hooksFile.Hooks.SessionEnd, "entire hooks copilot-cli session-end")
-	assertEntryBash(t, hooksFile.Hooks.SubagentStop, "entire hooks copilot-cli subagent-stop")
-	assertEntryBash(t, hooksFile.Hooks.PreToolUse, "entire hooks copilot-cli pre-tool-use")
-	assertEntryBash(t, hooksFile.Hooks.PostToolUse, "entire hooks copilot-cli post-tool-use")
-	assertEntryBash(t, hooksFile.Hooks.ErrorOccurred, "entire hooks copilot-cli error-occurred")
+	assertEntryBash(t, hooksFile.Hooks.UserPromptSubmitted, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli user-prompt-submitted"))
+	assertEntryBash(t, hooksFile.Hooks.SessionStart, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli session-start"))
+	assertEntryBash(t, hooksFile.Hooks.AgentStop, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli agent-stop"))
+	assertEntryBash(t, hooksFile.Hooks.SessionEnd, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli session-end"))
+	assertEntryBash(t, hooksFile.Hooks.SubagentStop, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli subagent-stop"))
+	assertEntryBash(t, hooksFile.Hooks.PreToolUse, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli pre-tool-use"))
+	assertEntryBash(t, hooksFile.Hooks.PostToolUse, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli post-tool-use"))
+	assertEntryBash(t, hooksFile.Hooks.ErrorOccurred, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli error-occurred"))
 
 	// Verify type field is "command"
 	assertEntryType(t, hooksFile.Hooks.AgentStop, "command")
@@ -226,7 +227,7 @@ func TestInstallHooks_PreservesExistingHooks(t *testing.T) {
 		t.Errorf("AgentStop hooks = %d, want 2 (user + entire)", len(hooksFile.Hooks.AgentStop))
 	}
 	assertEntryBash(t, hooksFile.Hooks.AgentStop, "echo user hook")
-	assertEntryBash(t, hooksFile.Hooks.AgentStop, "entire hooks copilot-cli agent-stop")
+	assertEntryBash(t, hooksFile.Hooks.AgentStop, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli agent-stop"))
 }
 
 func TestInstallHooks_LocalDev(t *testing.T) {
@@ -312,7 +313,7 @@ func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
 		t.Errorf("agentStop hooks = %d, want 2 (user + entire)", len(agentStopHooks))
 	}
 	assertEntryBash(t, agentStopHooks, "echo user stop")
-	assertEntryBash(t, agentStopHooks, "entire hooks copilot-cli agent-stop")
+	assertEntryBash(t, agentStopHooks, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli agent-stop"))
 }
 
 func TestUninstallHooks_PreservesUnknownFields(t *testing.T) {

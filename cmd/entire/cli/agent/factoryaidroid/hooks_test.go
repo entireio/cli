@@ -8,6 +8,7 @@ import (
 	"slices"
 	"testing"
 
+	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 )
 
@@ -53,14 +54,14 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	}
 
 	// Verify hook commands
-	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", "entire hooks factoryai-droid session-start", "SessionStart")
-	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", "entire hooks factoryai-droid user-prompt-submit", "SessionStart user-prompt-submit")
-	assertFactoryHookExists(t, settings.Hooks.SessionEnd, "", "entire hooks factoryai-droid session-end", "SessionEnd")
-	assertFactoryHookExists(t, settings.Hooks.Stop, "", "entire hooks factoryai-droid stop", "Stop")
-	assertFactoryHookExists(t, settings.Hooks.UserPromptSubmit, "", "entire hooks factoryai-droid user-prompt-submit", "UserPromptSubmit")
-	assertFactoryHookExists(t, settings.Hooks.PreToolUse, "Task", "entire hooks factoryai-droid pre-tool-use", "PreToolUse[Task]")
-	assertFactoryHookExists(t, settings.Hooks.PostToolUse, "Task", "entire hooks factoryai-droid post-tool-use", "PostToolUse[Task]")
-	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", "entire hooks factoryai-droid pre-compact", "PreCompact")
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-start"), "SessionStart")
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit"), "SessionStart user-prompt-submit")
+	assertFactoryHookExists(t, settings.Hooks.SessionEnd, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-end"), "SessionEnd")
+	assertFactoryHookExists(t, settings.Hooks.Stop, "", agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine), "Stop")
+	assertFactoryHookExists(t, settings.Hooks.UserPromptSubmit, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit"), "UserPromptSubmit")
+	assertFactoryHookExists(t, settings.Hooks.PreToolUse, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-tool-use"), "PreToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PostToolUse, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use"), "PostToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-compact"), "PreCompact")
 
 	// Verify AreHooksInstalled returns true
 	if !agent.AreHooksInstalled(context.Background()) {
@@ -351,7 +352,7 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse Stop hooks: %v", err)
 		}
 		assertFactoryHookExists(t, matchers, "", "echo user stop hook", "user Stop hook")
-		assertFactoryHookExists(t, matchers, "", "entire hooks factoryai-droid stop", "Entire Stop hook")
+		assertFactoryHookExists(t, matchers, "", agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine), "Entire Stop hook")
 	})
 
 	t.Run("SessionStart", func(t *testing.T) {
@@ -361,8 +362,8 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse SessionStart hooks: %v", err)
 		}
 		assertFactoryHookExists(t, matchers, "", "echo user session start", "user SessionStart hook")
-		assertFactoryHookExists(t, matchers, "", "entire hooks factoryai-droid session-start", "Entire SessionStart hook")
-		assertFactoryHookExists(t, matchers, "", "entire hooks factoryai-droid user-prompt-submit", "Entire SessionStart user-prompt-submit hook")
+		assertFactoryHookExists(t, matchers, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-start"), "Entire SessionStart hook")
+		assertFactoryHookExists(t, matchers, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit"), "Entire SessionStart user-prompt-submit hook")
 	})
 
 	t.Run("PostToolUse", func(t *testing.T) {
@@ -372,7 +373,7 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse PostToolUse hooks: %v", err)
 		}
 		assertFactoryHookExists(t, matchers, "Write", "echo user wrote file", "user Write hook")
-		assertFactoryHookExists(t, matchers, "Task", "entire hooks factoryai-droid post-tool-use", "Entire Task hook")
+		assertFactoryHookExists(t, matchers, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use"), "Entire Task hook")
 	})
 }
 

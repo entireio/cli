@@ -118,7 +118,7 @@ func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
 
 	content := string(data)
 	guard := "if (currentSessionID !== session.id) {"
-	hook := `await callHook("session-start", {`
+	hook := `const proc = Bun.spawn(hookCmd("session-start"), {`
 	currentSessionAssignment := "currentSessionID = session.id"
 
 	guardIdx := strings.Index(content, guard)
@@ -129,7 +129,7 @@ func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
 		t.Fatalf("plugin file missing guard %q", guard)
 	}
 	if hookIdx == -1 {
-		t.Fatalf("plugin file missing session-start hook call %q", hook)
+		t.Fatalf("plugin file missing session-start hook spawn %q", hook)
 	}
 	if assignIdx == -1 {
 		t.Fatalf("plugin file missing current session assignment %q", currentSessionAssignment)
@@ -137,6 +137,9 @@ func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
 	if guardIdx >= hookIdx || hookIdx >= assignIdx {
 		t.Fatalf("expected guarded session-start call before session assignment, got guard=%d hook=%d assignment=%d",
 			guardIdx, hookIdx, assignIdx)
+	}
+	if !strings.Contains(content, `if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks opencode ${hookName}`) {
+		t.Fatal("plugin file missing silent production hook command")
 	}
 }
 

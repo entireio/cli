@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -112,6 +111,9 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, localDev bool, force
 	// Add hooks that don't already exist
 	for _, hookName := range c.HookNames() {
 		cmd := cmdPrefix + hookName
+		if !localDev {
+			cmd = agent.WrapProductionSilentHookCommand(cmd)
+		}
 		entries := hookEntries[hookName]
 		if !hookBashExists(entries, cmd) {
 			entries = append(entries, CopilotHookEntry{
@@ -137,7 +139,7 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, localDev bool, force
 	}
 
 	// Marshal hooks and update raw file
-	hooksJSON, err := json.Marshal(rawHooks)
+	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
@@ -206,7 +208,7 @@ func (c *CopilotCLIAgent) UninstallHooks(ctx context.Context) error {
 
 	// Marshal hooks back (preserving unknown hook types)
 	if len(rawHooks) > 0 {
-		hooksJSON, err := json.Marshal(rawHooks)
+		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 		if err != nil {
 			return fmt.Errorf("failed to marshal hooks: %w", err)
 		}
@@ -292,7 +294,7 @@ func marshalCopilotHookType(rawHooks map[string]json.RawMessage, hookType string
 		delete(rawHooks, hookType)
 		return nil
 	}
-	data, err := json.Marshal(entries)
+	data, err := jsonutil.MarshalWithNoHTMLEscape(entries)
 	if err != nil {
 		return fmt.Errorf("failed to marshal hook type %s: %w", hookType, err)
 	}
@@ -312,12 +314,7 @@ func hookBashExists(entries []CopilotHookEntry, bash string) bool {
 
 // isEntireHook checks if a hook entry's bash command belongs to Entire.
 func isEntireHook(bash string) bool {
-	for _, prefix := range entireHookPrefixes {
-		if strings.HasPrefix(bash, prefix) {
-			return true
-		}
-	}
-	return false
+	return agent.IsManagedHookCommand(bash, entireHookPrefixes)
 }
 
 // hasEntireHook checks if any entry in the slice is an Entire hook.

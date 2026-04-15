@@ -21,13 +21,15 @@ func BinPath() string {
 
 // RewindPoint represents a single entry from `entire rewind --list`.
 type RewindPoint struct {
-	ID             string `json:"id"`
-	Message        string `json:"message"`
-	MetadataDir    string `json:"metadata_dir"`
-	Date           string `json:"date"`
-	IsLogsOnly     bool   `json:"is_logs_only"`
-	CondensationID string `json:"condensation_id"`
-	SessionID      string `json:"session_id"`
+	ID               string `json:"id"`
+	Message          string `json:"message"`
+	MetadataDir      string `json:"metadata_dir"`
+	Date             string `json:"date"`
+	IsTaskCheckpoint bool   `json:"is_task_checkpoint"`
+	ToolUseID        string `json:"tool_use_id"`
+	IsLogsOnly       bool   `json:"is_logs_only"`
+	CondensationID   string `json:"condensation_id"`
+	SessionID        string `json:"session_id"`
 }
 
 // Enable runs `entire enable` for the given agent with telemetry disabled.

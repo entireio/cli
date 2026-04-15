@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -46,6 +45,8 @@ var entireHookPrefixes = []string{
 // InstallHooks installs Factory AI Droid hooks in .factory/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
+//
+//nolint:maintidx // Hook installation is intentionally centralized here; splitting it further would add churn for a config-assembly path.
 func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
 	// Use repo root instead of CWD to find .factory directory
 	// This ensures hooks are installed correctly when run from a subdirectory
@@ -128,13 +129,13 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, localDev bool, f
 		postTaskCmd = localDevPrefix + "post-tool-use"
 		preCompactCmd = localDevPrefix + "pre-compact"
 	} else {
-		sessionStartCmd = "entire hooks factoryai-droid session-start"
-		sessionEndCmd = "entire hooks factoryai-droid session-end"
-		stopCmd = "entire hooks factoryai-droid stop"
-		userPromptSubmitCmd = "entire hooks factoryai-droid user-prompt-submit"
-		preTaskCmd = "entire hooks factoryai-droid pre-tool-use"
-		postTaskCmd = "entire hooks factoryai-droid post-tool-use"
-		preCompactCmd = "entire hooks factoryai-droid pre-compact"
+		sessionStartCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-start")
+		sessionEndCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-end")
+		stopCmd = agent.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agent.WarningFormatSingleLine)
+		userPromptSubmitCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit")
+		preTaskCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-tool-use")
+		postTaskCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use")
+		preCompactCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-compact")
 	}
 
 	count := 0
@@ -209,14 +210,14 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, localDev bool, f
 	marshalHookType(rawHooks, "PreCompact", preCompact)
 
 	// Marshal hooks and update raw settings
-	hooksJSON, err := json.Marshal(rawHooks)
+	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
 	rawSettings["hooks"] = hooksJSON
 
 	// Marshal permissions and update raw settings
-	permJSON, err := json.Marshal(rawPermissions)
+	permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal permissions: %w", err)
 	}
@@ -255,7 +256,7 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, match
 		delete(rawHooks, hookType)
 		return
 	}
-	data, err := json.Marshal(matchers)
+	data, err := jsonutil.MarshalWithNoHTMLEscape(matchers)
 	if err != nil {
 		return // Silently ignore marshal errors (shouldn't happen)
 	}
@@ -353,7 +354,7 @@ func (f *FactoryAIDroidAgent) UninstallHooks(ctx context.Context) error {
 
 		// If permissions is empty, remove it entirely
 		if len(rawPermissions) > 0 {
-			permJSON, err := json.Marshal(rawPermissions)
+			permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
 			if err == nil {
 				rawSettings["permissions"] = permJSON
 			}
@@ -364,7 +365,7 @@ func (f *FactoryAIDroidAgent) UninstallHooks(ctx context.Context) error {
 
 	// Marshal hooks back (preserving unknown hook types)
 	if len(rawHooks) > 0 {
-		hooksJSON, err := json.Marshal(rawHooks)
+		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 		if err != nil {
 			return fmt.Errorf("failed to marshal hooks: %w", err)
 		}
@@ -402,9 +403,8 @@ func (f *FactoryAIDroidAgent) AreHooksInstalled(ctx context.Context) bool {
 		return false
 	}
 
-	// Check for at least one of our hooks (production or local-dev format)
-	return hookCommandExists(settings.Hooks.Stop, "entire hooks factoryai-droid stop") ||
-		hookCommandExists(settings.Hooks.Stop, `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks factoryai-droid stop`)
+	// Check for at least one of our hooks (production, wrapped, or local-dev format)
+	return hasEntireHook(settings.Hooks.Stop)
 }
 
 // Helper functions for hook management
@@ -413,6 +413,17 @@ func hookCommandExists(matchers []FactoryHookMatcher, command string) bool {
 	for _, matcher := range matchers {
 		for _, hook := range matcher.Hooks {
 			if hook.Command == command {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasEntireHook(matchers []FactoryHookMatcher) bool {
+	for _, matcher := range matchers {
+		for _, hook := range matcher.Hooks {
+			if isEntireHook(hook.Command) {
 				return true
 			}
 		}
@@ -446,12 +457,7 @@ func addHookToMatcher(matchers []FactoryHookMatcher, matcherName, command string
 
 // isEntireHook checks if a command is an Entire hook
 func isEntireHook(command string) bool {
-	for _, prefix := range entireHookPrefixes {
-		if strings.HasPrefix(command, prefix) {
-			return true
-		}
-	}
-	return false
+	return agent.IsManagedHookCommand(command, entireHookPrefixes)
 }
 
 // removeEntireHooks removes all Entire hooks from a list of matchers (for simple hooks like Stop)

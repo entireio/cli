@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
@@ -148,7 +149,7 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 		return fmt.Errorf("failed to redact transcript: %w", redactErr)
 	}
 
-	if err := store.WriteCommitted(ctx, cpkg.WriteCommittedOptions{
+	writeOpts := cpkg.WriteCommittedOptions{
 		CheckpointID: checkpointID,
 		SessionID:    sessionID,
 		Strategy:     strategy.StrategyNameManualCommit,
@@ -159,8 +160,20 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 		Agent:        ag.Type(),
 		Model:        meta.Model,
 		TokenUsage:   tokenUsage,
-	}); err != nil {
+	}
+
+	if compacted := compactTranscriptForStartLine(logCtx, redactedTranscript.Bytes(), cpkg.CommittedMetadata{
+		CheckpointID: checkpointID,
+		Agent:        ag.Type(),
+	}, 0); compacted != nil {
+		writeOpts.CompactTranscript = compacted
+	}
+
+	if err := store.WriteCommitted(ctx, writeOpts); err != nil {
 		return fmt.Errorf("failed to write checkpoint: %w", err)
+	}
+	if settings.IsCheckpointsV2Enabled(logCtx) {
+		writeAttachCheckpointV2(logCtx, repo, writeOpts)
 	}
 
 	// Create or update session state.
@@ -182,6 +195,19 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 	}
 
 	return nil
+}
+
+// writeAttachCheckpointV2 mirrors attach-created checkpoints into the v2 refs.
+// The caller is responsible for checking whether checkpoints_v2 is enabled.
+// v2 failures are logged and do not fail attach.
+func writeAttachCheckpointV2(ctx context.Context, repo *git.Repository, opts cpkg.WriteCommittedOptions) {
+	v2Store := cpkg.NewV2GitStore(repo, strategy.ResolveCheckpointURL(ctx, "origin"))
+	if err := v2Store.WriteCommitted(ctx, opts); err != nil {
+		logging.Warn(ctx, "attach v2 dual-write failed",
+			"checkpoint_id", opts.CheckpointID.String(),
+			"error", err,
+		)
+	}
 }
 
 // getHeadCommit returns the HEAD commit object.

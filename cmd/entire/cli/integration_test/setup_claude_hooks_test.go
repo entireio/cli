@@ -251,7 +251,7 @@ func assertClaudeStopHookRewritten(t *testing.T, env *TestEnv) {
 	if strings.Contains(content, "stop --stale") {
 		t.Fatalf("expected stale Claude hook to be removed, got: %s", content)
 	}
-	if !strings.Contains(content, `"command": "entire hooks claude-code stop"`) {
+	if !strings.Contains(content, "entire hooks claude-code stop") {
 		t.Fatalf("expected canonical Claude stop hook to be restored, got: %s", content)
 	}
 }

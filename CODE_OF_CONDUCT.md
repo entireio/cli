@@ -8,7 +8,7 @@ We're committed to providing a welcoming, respectful, and harassment-free enviro
 This Code of Conduct applies to all Entire community spaces, including:
 
 - **GitHub** - repositories, issues, pull requests, discussions, and comments
-- **Slack** - all channels in the Entire workspace
+- **Discord** - all channels in the Entire workspace
 - **Events** - meetups, conferences, and online gatherings hosted by Entire
 - **Public representation** - acting as a representative of Entire in public spaces, including social media, forums, and conferences
 

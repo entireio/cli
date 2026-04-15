@@ -1814,7 +1814,7 @@ func TestManageAgents_ForceReinstallsSelectedAgentHooks(t *testing.T) {
 	if strings.Contains(content, "stop --stale") {
 		t.Errorf("Expected force reinstall to rewrite stale Claude hook, got: %s", content)
 	}
-	if !strings.Contains(content, `"command": "entire hooks claude-code stop"`) {
+	if !strings.Contains(content, "entire hooks claude-code stop") {
 		t.Errorf("Expected force reinstall to restore canonical Claude hook, got: %s", content)
 	}
 	if strings.Contains(buf.String(), "No changes made.") {

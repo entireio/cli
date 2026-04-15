@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
@@ -78,8 +79,15 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		cmdPrefix = "entire hooks codex "
 	}
 	sessionStartCmd := cmdPrefix + "session-start"
+	if !localDev {
+		sessionStartCmd = agent.WrapProductionJSONWarningHookCommand(sessionStartCmd, agent.WarningFormatSingleLine)
+	}
 	userPromptSubmitCmd := cmdPrefix + "user-prompt-submit"
 	stopCmd := cmdPrefix + "stop"
+	if !localDev {
+		userPromptSubmitCmd = agent.WrapProductionSilentHookCommand(userPromptSubmitCmd)
+		stopCmd = agent.WrapProductionSilentHookCommand(stopCmd)
+	}
 
 	count := 0
 
@@ -116,7 +124,7 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		// Re-parse the original file to preserve all top-level keys
 		_ = json.Unmarshal(existingData, &topLevel) //nolint:errcheck // best-effort preservation
 	}
-	hooksJSON, err := json.Marshal(rawHooks)
+	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
@@ -193,7 +201,7 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	marshalHookType(rawHooks, "Stop", stop)
 
 	if len(rawHooks) > 0 {
-		hooksJSON, err := json.Marshal(rawHooks)
+		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 		if err != nil {
 			return fmt.Errorf("failed to marshal hooks: %w", err)
 		}
@@ -251,7 +259,7 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, group
 		delete(rawHooks, hookType)
 		return
 	}
-	data, err := json.Marshal(groups)
+	data, err := jsonutil.MarshalWithNoHTMLEscape(groups)
 	if err != nil {
 		return
 	}
@@ -290,12 +298,7 @@ func addHook(groups []MatcherGroup, command string) []MatcherGroup {
 }
 
 func isEntireHook(command string) bool {
-	for _, prefix := range entireHookPrefixes {
-		if strings.HasPrefix(command, prefix) {
-			return true
-		}
-	}
-	return false
+	return agent.IsManagedHookCommand(command, entireHookPrefixes)
 }
 
 func hasEntireHook(groups []MatcherGroup) bool {

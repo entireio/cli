@@ -8,8 +8,6 @@ on:
         description: "Test name filter (regex)"
         required: false
         default: ""
-  schedule:
-    - cron: "0 6 * * *" # Nightly at 6am UTC
 
 concurrency:
   group: e2e-windows-tests

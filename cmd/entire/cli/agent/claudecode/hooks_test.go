@@ -8,6 +8,7 @@ import (
 	"slices"
 	"testing"
 
+	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 )
 
@@ -478,7 +479,7 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse Stop hooks: %v", err)
 		}
 		assertHookExists(t, matchers, "", "echo user stop hook", "user Stop hook")
-		assertHookExists(t, matchers, "", "entire hooks claude-code stop", "Entire Stop hook")
+		assertHookExists(t, matchers, "", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop"), "Entire Stop hook")
 	})
 
 	t.Run("SessionStart", func(t *testing.T) {
@@ -488,7 +489,7 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse SessionStart hooks: %v", err)
 		}
 		assertHookExists(t, matchers, "", "echo user session start", "user SessionStart hook")
-		assertHookExists(t, matchers, "", "entire hooks claude-code session-start", "Entire SessionStart hook")
+		assertHookExists(t, matchers, "", agentpkg.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agentpkg.WarningFormatMultiLine), "Entire SessionStart hook")
 	})
 
 	t.Run("PostToolUse", func(t *testing.T) {
@@ -498,8 +499,8 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse PostToolUse hooks: %v", err)
 		}
 		assertHookExists(t, matchers, "Write", "echo user wrote file", "user Write hook")
-		assertHookExists(t, matchers, "Task", "entire hooks claude-code post-task", "Entire Task hook")
-		assertHookExists(t, matchers, "TodoWrite", "entire hooks claude-code post-todo", "Entire TodoWrite hook")
+		assertHookExists(t, matchers, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "Entire Task hook")
+		assertHookExists(t, matchers, "TodoWrite", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "Entire TodoWrite hook")
 	})
 }
 

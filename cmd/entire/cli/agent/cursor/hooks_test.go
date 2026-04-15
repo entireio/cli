@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
 func TestInstallHooks_FreshInstall(t *testing.T) {
@@ -53,12 +55,12 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	}
 
 	// Verify commands
-	assertEntryCommand(t, hooksFile.Hooks.Stop, "entire hooks cursor stop")
-	assertEntryCommand(t, hooksFile.Hooks.SessionStart, "entire hooks cursor session-start")
-	assertEntryCommand(t, hooksFile.Hooks.BeforeSubmitPrompt, "entire hooks cursor before-submit-prompt")
-	assertEntryCommand(t, hooksFile.Hooks.PreCompact, "entire hooks cursor pre-compact")
-	assertEntryCommand(t, hooksFile.Hooks.SubagentStart, "entire hooks cursor subagent-start")
-	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, "entire hooks cursor subagent-stop")
+	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapProductionSilentHookCommand("entire hooks cursor stop"))
+	assertEntryCommand(t, hooksFile.Hooks.SessionStart, agent.WrapProductionSilentHookCommand("entire hooks cursor session-start"))
+	assertEntryCommand(t, hooksFile.Hooks.BeforeSubmitPrompt, agent.WrapProductionSilentHookCommand("entire hooks cursor before-submit-prompt"))
+	assertEntryCommand(t, hooksFile.Hooks.PreCompact, agent.WrapProductionSilentHookCommand("entire hooks cursor pre-compact"))
+	assertEntryCommand(t, hooksFile.Hooks.SubagentStart, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-start"))
+	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-stop"))
 }
 
 func TestInstallHooks_Idempotent(t *testing.T) {
@@ -215,14 +217,14 @@ func TestInstallHooks_PreservesExistingHooks(t *testing.T) {
 		t.Errorf("Stop hooks = %d, want 2 (user + entire)", len(hooksFile.Hooks.Stop))
 	}
 	assertEntryCommand(t, hooksFile.Hooks.Stop, "echo user hook")
-	assertEntryCommand(t, hooksFile.Hooks.Stop, "entire hooks cursor stop")
+	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapProductionSilentHookCommand("entire hooks cursor stop"))
 
 	// SubagentStop should have user Write hook + Entire hook
 	if len(hooksFile.Hooks.SubagentStop) != 2 {
 		t.Errorf("SubagentStop hooks = %d, want 2 (user Write + Entire)", len(hooksFile.Hooks.SubagentStop))
 	}
 	assertEntryWithMatcher(t, hooksFile.Hooks.SubagentStop, "Write", "echo file written")
-	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, "entire hooks cursor subagent-stop")
+	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-stop"))
 }
 
 func TestInstallHooks_LocalDev(t *testing.T) {
@@ -308,7 +310,7 @@ func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
 		t.Errorf("stop hooks = %d, want 2 (user + entire)", len(stopHooks))
 	}
 	assertEntryCommand(t, stopHooks, "echo user stop")
-	assertEntryCommand(t, stopHooks, "entire hooks cursor stop")
+	assertEntryCommand(t, stopHooks, agent.WrapProductionSilentHookCommand("entire hooks cursor stop"))
 }
 
 func TestUninstallHooks_PreservesUnknownFields(t *testing.T) {

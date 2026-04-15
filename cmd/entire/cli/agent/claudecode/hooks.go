@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -123,13 +122,13 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 		postTaskCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-task"
 		postTodoCmd = "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code post-todo"
 	} else {
-		sessionStartCmd = "entire hooks claude-code session-start"
-		sessionEndCmd = "entire hooks claude-code session-end"
-		stopCmd = "entire hooks claude-code stop"
-		userPromptSubmitCmd = "entire hooks claude-code user-prompt-submit"
-		preTaskCmd = "entire hooks claude-code pre-task"
-		postTaskCmd = "entire hooks claude-code post-task"
-		postTodoCmd = "entire hooks claude-code post-todo"
+		sessionStartCmd = agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)
+		sessionEndCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")
+		stopCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+		userPromptSubmitCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")
+		preTaskCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+		postTaskCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+		postTodoCmd = agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
 	}
 
 	count := 0
@@ -195,14 +194,14 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, localDev bool, force
 	marshalHookType(rawHooks, "PostToolUse", postToolUse)
 
 	// Marshal hooks and update raw settings
-	hooksJSON, err := json.Marshal(rawHooks)
+	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
 	rawSettings["hooks"] = hooksJSON
 
 	// Marshal permissions and update raw settings
-	permJSON, err := json.Marshal(rawPermissions)
+	permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal permissions: %w", err)
 	}
@@ -241,7 +240,7 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, match
 		delete(rawHooks, hookType)
 		return
 	}
-	data, err := json.Marshal(matchers)
+	data, err := jsonutil.MarshalWithNoHTMLEscape(matchers)
 	if err != nil {
 		return // Silently ignore marshal errors (shouldn't happen)
 	}
@@ -336,7 +335,7 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 
 		// If permissions is empty, remove it entirely
 		if len(rawPermissions) > 0 {
-			permJSON, err := json.Marshal(rawPermissions)
+			permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
 			if err == nil {
 				rawSettings["permissions"] = permJSON
 			}
@@ -347,7 +346,7 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 
 	// Marshal hooks back (preserving unknown hook types)
 	if len(rawHooks) > 0 {
-		hooksJSON, err := json.Marshal(rawHooks)
+		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 		if err != nil {
 			return fmt.Errorf("failed to marshal hooks: %w", err)
 		}
@@ -385,14 +384,8 @@ func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
 		return false
 	}
 
-	// Check for at least one of our hooks (new or old format)
-	return hookCommandExists(settings.Hooks.Stop, "entire hooks claude-code stop") ||
-		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code stop") ||
-		// Backwards compatibility: check for old hook formats
-		hookCommandExists(settings.Hooks.Stop, "entire hooks claudecode stop") ||
-		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claudecode stop") ||
-		hookCommandExists(settings.Hooks.Stop, "entire rewind claude-hook --stop") ||
-		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go rewind claude-hook --stop")
+	// Check for at least one of our hooks (new, wrapped, or legacy format)
+	return hasEntireHook(settings.Hooks.Stop)
 }
 
 // Helper functions for hook management
@@ -401,6 +394,17 @@ func hookCommandExists(matchers []ClaudeHookMatcher, command string) bool {
 	for _, matcher := range matchers {
 		for _, hook := range matcher.Hooks {
 			if hook.Command == command {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasEntireHook(matchers []ClaudeHookMatcher) bool {
+	for _, matcher := range matchers {
+		for _, hook := range matcher.Hooks {
+			if isEntireHook(hook.Command) {
 				return true
 			}
 		}
@@ -457,12 +461,7 @@ func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string)
 
 // isEntireHook checks if a command is an Entire hook (old or new format)
 func isEntireHook(command string) bool {
-	for _, prefix := range entireHookPrefixes {
-		if strings.HasPrefix(command, prefix) {
-			return true
-		}
-	}
-	return false
+	return agent.IsManagedHookCommand(command, entireHookPrefixes)
 }
 
 // removeEntireHooks removes all Entire hooks from a list of matchers (for simple hooks like Stop)

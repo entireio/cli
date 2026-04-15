@@ -21,7 +21,10 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
    * (e.g., $(git rev-parse --show-toplevel) for local-dev) is interpreted.
    */
   function hookCmd(hookName: string): string[] {
-    return ["sh", "-c", `${ENTIRE_CMD} hooks opencode ${hookName}`]
+    if (ENTIRE_CMD !== "entire") {
+      return ["sh", "-c", `${ENTIRE_CMD} hooks opencode ${hookName}`]
+    }
+    return ["sh", "-c", `if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks opencode ${hookName}`]
   }
 
   /**
@@ -75,9 +78,16 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
               seenUserMessages.clear()
               messageStore.clear()
               currentModel = null
-              await callHook("session-start", {
+              const json = JSON.stringify({
                 session_id: session.id,
               })
+              const proc = Bun.spawn(hookCmd("session-start"), {
+                cwd: directory,
+                stdin: new Blob([json + "\n"]),
+                stdout: "ignore",
+                stderr: "ignore",
+              })
+              await proc.exited
             }
             currentSessionID = session.id
             break

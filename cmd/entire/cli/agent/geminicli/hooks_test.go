@@ -3,10 +3,12 @@ package geminicli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 )
 
@@ -74,18 +76,18 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	}
 
 	// Verify hook commands (localDev=false, so use entire binary)
-	verifyHookCommand(t, settings.Hooks.SessionStart, "", "entire hooks gemini session-start")
-	verifyHookCommand(t, settings.Hooks.SessionEnd, "exit", "entire hooks gemini session-end")
-	verifyHookCommand(t, settings.Hooks.SessionEnd, "logout", "entire hooks gemini session-end")
-	verifyHookCommand(t, settings.Hooks.BeforeAgent, "", "entire hooks gemini before-agent")
-	verifyHookCommand(t, settings.Hooks.AfterAgent, "", "entire hooks gemini after-agent")
-	verifyHookCommand(t, settings.Hooks.BeforeModel, "", "entire hooks gemini before-model")
-	verifyHookCommand(t, settings.Hooks.AfterModel, "", "entire hooks gemini after-model")
-	verifyHookCommand(t, settings.Hooks.BeforeToolSelection, "", "entire hooks gemini before-tool-selection")
-	verifyHookCommand(t, settings.Hooks.BeforeTool, "*", "entire hooks gemini before-tool")
-	verifyHookCommand(t, settings.Hooks.AfterTool, "*", "entire hooks gemini after-tool")
-	verifyHookCommand(t, settings.Hooks.PreCompress, "", "entire hooks gemini pre-compress")
-	verifyHookCommand(t, settings.Hooks.Notification, "", "entire hooks gemini notification")
+	verifyHookCommand(t, settings.Hooks.SessionStart, "", agentpkg.WrapProductionJSONWarningHookCommand("entire hooks gemini session-start", agentpkg.WarningFormatSingleLine))
+	verifyHookCommand(t, settings.Hooks.SessionEnd, "exit", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini session-end"))
+	verifyHookCommand(t, settings.Hooks.SessionEnd, "logout", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini session-end"))
+	verifyHookCommand(t, settings.Hooks.BeforeAgent, "", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini before-agent"))
+	verifyHookCommand(t, settings.Hooks.AfterAgent, "", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini after-agent"))
+	verifyHookCommand(t, settings.Hooks.BeforeModel, "", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini before-model"))
+	verifyHookCommand(t, settings.Hooks.AfterModel, "", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini after-model"))
+	verifyHookCommand(t, settings.Hooks.BeforeToolSelection, "", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini before-tool-selection"))
+	verifyHookCommand(t, settings.Hooks.BeforeTool, "*", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini before-tool"))
+	verifyHookCommand(t, settings.Hooks.AfterTool, "*", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini after-tool"))
+	verifyHookCommand(t, settings.Hooks.PreCompress, "", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini pre-compress"))
+	verifyHookCommand(t, settings.Hooks.Notification, "", agentpkg.WrapProductionSilentHookCommand("entire hooks gemini notification"))
 }
 
 func TestInstallHooks_LocalDev(t *testing.T) {
@@ -297,7 +299,7 @@ func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
   "hooks": {
     "SessionStart": [
       {
-        "hooks": [{"name": "entire-session-start", "type": "command", "command": "entire hooks gemini session-start"}]
+        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Powered by Entire: Tracking is enabled, but the Entire CLI is not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
       }
     ],
     "FutureHook": [
@@ -423,7 +425,7 @@ func TestUninstallHooks_PreservesUserHooks(t *testing.T) {
         "hooks": [{"name": "my-hook", "type": "command", "command": "echo hello"}]
       },
       {
-        "hooks": [{"name": "entire-session-start", "type": "command", "command": "entire hooks gemini session-start"}]
+        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Powered by Entire: Tracking is enabled, but the Entire CLI is not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
       }
     ]
   }
@@ -551,16 +553,16 @@ func TestInstallHooks_RemovesLegacyEnabledField_WhenAlreadyInstalled(t *testing.
 	t.Chdir(tempDir)
 
 	// Hooks already installed but legacy "enabled": true is also present
-	writeGeminiSettings(t, tempDir, `{
+	writeGeminiSettings(t, tempDir, fmt.Sprintf(`{
   "hooks": {
     "enabled": true,
     "SessionStart": [
       {
-        "hooks": [{"name": "entire-session-start", "type": "command", "command": "entire hooks gemini session-start"}]
+        "hooks": [{"name": "entire-session-start", "type": "command", "command": %q}]
       }
     ]
   }
-}`)
+}`, agentpkg.WrapProductionJSONWarningHookCommand("entire hooks gemini session-start", agentpkg.WarningFormatSingleLine)))
 
 	agent := &GeminiCLIAgent{}
 	n, err := agent.InstallHooks(context.Background(), false, false)
@@ -639,7 +641,7 @@ func TestInstallHooks_ForceWithLegacyFields(t *testing.T) {
     "enabled": true,
     "SessionStart": [
       {
-        "hooks": [{"name": "entire-session-start", "type": "command", "command": "entire hooks gemini session-start"}]
+        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Powered by Entire: Tracking is enabled, but the Entire CLI is not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
       }
     ]
   }
@@ -673,7 +675,7 @@ func TestUninstallHooks_RemovesLegacyEnabledField(t *testing.T) {
     "enabled": true,
     "SessionStart": [
       {
-        "hooks": [{"name": "entire-session-start", "type": "command", "command": "entire hooks gemini session-start"}]
+        "hooks": [{"name": "entire-session-start", "type": "command", "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then echo \"Powered by Entire: Tracking is enabled, but the Entire CLI is not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\" >&2; exit 0; fi; exec entire hooks gemini session-start'"}]
       }
     ]
   }
