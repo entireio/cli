@@ -41,23 +41,26 @@ func pushRefIfNeeded(ctx context.Context, target string, refName plumbing.Refere
 }
 
 // tryPushRef attempts to push a custom ref using an explicit refspec.
-func tryPushRef(ctx context.Context, target string, refName plumbing.ReferenceName) error {
+func tryPushRef(ctx context.Context, target string, refName plumbing.ReferenceName) (pushResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	// Use --no-verify to prevent recursive hook calls (this runs inside pre-push)
+	// Use --no-verify to prevent recursive hook calls (this runs inside pre-push).
+	// Use --porcelain for machine-readable, locale-independent output.
 	refSpec := fmt.Sprintf("%s:%s", refName, refName)
-	cmd := CheckpointGitCommand(ctx, target, "push", "--no-verify", target, refSpec)
+	cmd := CheckpointGitCommand(ctx, target, "push", "--no-verify", "--porcelain", target, refSpec)
 
 	output, err := cmd.CombinedOutput()
+	outputStr := string(output)
 	if err != nil {
-		if strings.Contains(string(output), "non-fast-forward") ||
-			strings.Contains(string(output), "rejected") {
-			return errors.New("non-fast-forward")
+		if strings.Contains(outputStr, "non-fast-forward") ||
+			strings.Contains(outputStr, "rejected") {
+			return pushResult{}, errors.New("non-fast-forward")
 		}
-		return fmt.Errorf("push failed: %s", output)
+		return pushResult{}, fmt.Errorf("push failed: %s", outputStr)
 	}
-	return nil
+
+	return parsePushResult(outputStr), nil
 }
 
 // doPushRef pushes a custom ref with fetch+merge recovery on conflict.
@@ -71,9 +74,8 @@ func doPushRef(ctx context.Context, target string, refName plumbing.ReferenceNam
 	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", shortRef, displayTarget)
 	stop := startProgressDots(os.Stderr)
 
-	if err := tryPushRef(ctx, target, refName); err == nil {
-		stop(" done")
-		printSettingsCommitHint(ctx, target)
+	if result, err := tryPushRef(ctx, target, refName); err == nil {
+		finishPush(ctx, stop, result, target)
 		return nil
 	}
 	stop("")
@@ -92,13 +94,12 @@ func doPushRef(ctx context.Context, target string, refName plumbing.ReferenceNam
 	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", shortRef, displayTarget)
 	stop = startProgressDots(os.Stderr)
 
-	if err := tryPushRef(ctx, target, refName); err != nil {
+	if result, err := tryPushRef(ctx, target, refName); err != nil {
 		stop("")
 		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", shortRef, err)
 		printCheckpointRemoteHint(target)
 	} else {
-		stop(" done")
-		printSettingsCommitHint(ctx, target)
+		finishPush(ctx, stop, result, target)
 	}
 
 	return nil
@@ -335,7 +336,7 @@ func handleRotationConflict(ctx context.Context, target, fetchTarget string, rep
 		return fmt.Errorf("failed to update archive ref: %w", err)
 	}
 
-	if pushErr := tryPushRef(ctx, target, archiveRefName); pushErr != nil {
+	if _, pushErr := tryPushRef(ctx, target, archiveRefName); pushErr != nil {
 		return fmt.Errorf("failed to push updated archive: %w", pushErr)
 	}
 

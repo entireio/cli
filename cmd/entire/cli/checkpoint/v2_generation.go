@@ -41,9 +41,9 @@ type GenerationMetadata struct {
 	NewestCheckpointAt time.Time `json:"newest_checkpoint_at"`
 }
 
-// readGeneration reads generation.json from the given tree hash.
+// ReadGeneration reads generation.json from the given tree hash.
 // Returns a zero-value GenerationMetadata if the file doesn't exist (new/empty generation).
-func (s *V2GitStore) readGeneration(treeHash plumbing.Hash) (GenerationMetadata, error) {
+func (s *V2GitStore) ReadGeneration(treeHash plumbing.Hash) (GenerationMetadata, error) {
 	if treeHash == plumbing.ZeroHash {
 		return GenerationMetadata{}, nil
 	}
@@ -74,13 +74,13 @@ func (s *V2GitStore) readGeneration(treeHash plumbing.Hash) (GenerationMetadata,
 	return gen, nil
 }
 
-// readGenerationFromRef reads generation.json from the tree pointed to by the given ref.
-func (s *V2GitStore) readGenerationFromRef(refName plumbing.ReferenceName) (GenerationMetadata, error) {
+// ReadGenerationFromRef reads generation.json from the tree pointed to by the given ref.
+func (s *V2GitStore) ReadGenerationFromRef(refName plumbing.ReferenceName) (GenerationMetadata, error) {
 	_, treeHash, err := s.GetRefState(refName)
 	if err != nil {
 		return GenerationMetadata{}, fmt.Errorf("failed to get ref state: %w", err)
 	}
-	return s.readGeneration(treeHash)
+	return s.ReadGeneration(treeHash)
 }
 
 // marshalGenerationBlob marshals gen as generation.json and stores it as a git blob.

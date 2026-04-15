@@ -1,11 +1,13 @@
 package factoryaidroid
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -50,7 +52,7 @@ func (f *FactoryAIDroidAgent) HookNames() []string {
 
 // ParseHookEvent translates a Factory AI Droid hook into a normalized lifecycle Event.
 // Returns nil if the hook has no lifecycle significance.
-func (f *FactoryAIDroidAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
+func (f *FactoryAIDroidAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
 		return f.parseSessionStart(stdin)
@@ -61,9 +63,9 @@ func (f *FactoryAIDroidAgent) ParseHookEvent(_ context.Context, hookName string,
 	case HookNameSessionEnd:
 		return f.parseSessionEnd(stdin)
 	case HookNamePreToolUse:
-		return f.parseSubagentStart(stdin)
+		return f.parseSubagentStart(ctx, stdin)
 	case HookNamePostToolUse:
-		return f.parseSubagentEnd(stdin)
+		return f.parseSubagentEnd(ctx, stdin)
 	case HookNamePreCompact:
 		return f.parseCompaction(stdin)
 	case HookNameSubagentStop, HookNameNotification:
@@ -226,36 +228,50 @@ func (f *FactoryAIDroidAgent) parseSessionEnd(stdin io.Reader) (*agent.Event, er
 	}, nil
 }
 
-func (f *FactoryAIDroidAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
+func (f *FactoryAIDroidAgent) parseSubagentStart(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[taskHookInputRaw](stdin)
 	if err != nil {
 		return nil, err
+	}
+	toolUseID := raw.ToolUseID
+	if toolUseID == "" {
+		toolUseID, err = registerFallbackToolUseID(ctx, raw.SessionID, raw.ToolName, raw.ToolInput)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &agent.Event{
 		Type:       agent.SubagentStart,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
-		ToolUseID:  raw.ToolUseID,
+		ToolUseID:  toolUseID,
 		ToolInput:  raw.ToolInput,
 		Timestamp:  time.Now(),
 	}, nil
 }
 
-func (f *FactoryAIDroidAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error) {
+func (f *FactoryAIDroidAgent) parseSubagentEnd(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[postToolHookInputRaw](stdin)
 	if err != nil {
 		return nil, err
+	}
+	toolUseID := raw.ToolUseID
+	if toolUseID == "" {
+		toolUseID, err = resolveFallbackToolUseID(ctx, raw.SessionID, raw.ToolName, raw.ToolInput)
+		if err != nil {
+			return nil, err
+		}
 	}
 	event := &agent.Event{
 		Type:       agent.SubagentEnd,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
-		ToolUseID:  raw.ToolUseID,
+		ToolUseID:  toolUseID,
 		ToolInput:  raw.ToolInput,
 		Timestamp:  time.Now(),
 	}
-	if raw.ToolResponse.AgentID != "" {
-		event.SubagentID = raw.ToolResponse.AgentID
+	if agentID := parseHookToolResponseAgentID(raw.ToolResponse); agentID != "" {
+		event.SubagentID = agentID
 	}
 	return event, nil
 }
@@ -271,4 +287,45 @@ func (f *FactoryAIDroidAgent) parseCompaction(stdin io.Reader) (*agent.Event, er
 		SessionRef: raw.TranscriptPath,
 		Timestamp:  time.Now(),
 	}, nil
+}
+
+func parseHookToolResponseAgentID(raw json.RawMessage) string {
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+
+	var obj struct {
+		AgentID string `json:"agentId"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil && obj.AgentID != "" {
+		return obj.AgentID
+	}
+
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return extractHookToolResponseAgentID(text)
+	}
+
+	return ""
+}
+
+func extractHookToolResponseAgentID(text string) string {
+	const prefix = "agentId: "
+	_, after, found := strings.Cut(text, prefix)
+	if !found {
+		return ""
+	}
+
+	after = strings.TrimSpace(after)
+	end := 0
+	for end < len(after) {
+		ch := after[end]
+		if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-' || ch == '_' {
+			end++
+			continue
+		}
+		break
+	}
+
+	return after[:end]
 }

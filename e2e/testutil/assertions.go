@@ -36,6 +36,22 @@ func AssertFileExists(t *testing.T, dir string, glob string) {
 	assert.NotEmpty(t, matches, "expected files matching %s in %s", glob, dir)
 }
 
+// AssertConsoleLogDoesNotContain asserts that the current test's console.log
+// does not contain any of the forbidden substrings.
+func AssertConsoleLogDoesNotContain(t *testing.T, s *RepoState, forbidden ...string) {
+	t.Helper()
+
+	require.NoError(t, s.ConsoleLog.Sync())
+
+	data, err := os.ReadFile(filepath.Join(s.ArtifactDir, "console.log"))
+	require.NoError(t, err)
+
+	log := string(data)
+	for _, needle := range forbidden {
+		assert.NotContains(t, log, needle, "console.log should not contain %q", needle)
+	}
+}
+
 // WaitForFileExists polls until at least one file matches the glob pattern
 // relative to dir, or fails the test after timeout. Handles the race where an
 // interactive agent's prompt pattern appears before file writes land on disk.

@@ -170,7 +170,91 @@ func TestSetupClaudeHooks_PreservesExistingSettings(t *testing.T) {
 	}
 }
 
+func TestSetupClaudeHooks_ConfigureForce_RewritesExistingEntireHooks(t *testing.T) {
+	t.Parallel()
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire()
+
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	output, err := env.RunCLIWithError("configure", "--agent", "claude-code")
+	if err != nil {
+		t.Fatalf("configure claude-hooks command failed: %v\nOutput: %s", err, output)
+	}
+
+	writeStaleClaudeStopHook(t, env)
+
+	output, err = env.RunCLIWithError("configure", "--agent", "claude-code", "--force")
+	if err != nil {
+		t.Fatalf("configure --force claude-hooks command failed: %v\nOutput: %s", err, output)
+	}
+
+	assertClaudeStopHookRewritten(t, env)
+}
+
+func TestSetupClaudeHooks_EnableForceWithAgent_RewritesExistingEntireHooks(t *testing.T) {
+	t.Parallel()
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire()
+
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	output, err := env.RunCLIWithError("enable", "--agent", "claude-code")
+	if err != nil {
+		t.Fatalf("enable claude-hooks command failed: %v\nOutput: %s", err, output)
+	}
+
+	writeStaleClaudeStopHook(t, env)
+
+	output, err = env.RunCLIWithError("enable", "--agent", "claude-code", "--force")
+	if err != nil {
+		t.Fatalf("enable --agent claude-code --force failed: %v\nOutput: %s", err, output)
+	}
+
+	assertClaudeStopHookRewritten(t, env)
+}
+
 // Helper functions
+
+func writeStaleClaudeStopHook(t *testing.T, env *TestEnv) {
+	t.Helper()
+	settingsPath := filepath.Join(env.RepoDir, ".claude", claudecode.ClaudeSettingsFileName)
+	staleSettings := `{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [{"type": "command", "command": "entire hooks claude-code stop --stale"}]
+      }
+    ]
+  }
+}`
+	if err := os.WriteFile(settingsPath, []byte(staleSettings), 0o644); err != nil {
+		t.Fatalf("failed to write stale Claude settings: %v", err)
+	}
+}
+
+func assertClaudeStopHookRewritten(t *testing.T, env *TestEnv) {
+	t.Helper()
+	settingsPath := filepath.Join(env.RepoDir, ".claude", claudecode.ClaudeSettingsFileName)
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
+	content := string(data)
+	if strings.Contains(content, "stop --stale") {
+		t.Fatalf("expected stale Claude hook to be removed, got: %s", content)
+	}
+	if !strings.Contains(content, `"command": "entire hooks claude-code stop"`) {
+		t.Fatalf("expected canonical Claude stop hook to be restored, got: %s", content)
+	}
+}
 
 func readClaudeSettings(t *testing.T, env *TestEnv) ClaudeSettings {
 	t.Helper()

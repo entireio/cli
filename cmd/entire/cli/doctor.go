@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 
 	"github.com/charmbracelet/huh"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -30,14 +32,21 @@ Checks performed:
   1. Disconnected metadata branches: detects when local and remote
      entire/checkpoints/v1 branches share no common ancestor (caused by a
      previous bug). Fixes by cherry-picking local checkpoints onto remote tip.
-  2. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+
+  When checkpoints_v2 is enabled:
+  2. Disconnected v2 /main ref: same detection for v2 refs under refs/entire/.
+  3. v2 ref existence: verifies /main and /full/current refs exist consistently.
+  4. v2 checkpoint counts: verifies /main and /full/current checkpoint counts are consistent.
+  5. v2 generation health: checks archived generations for valid metadata.
+
+  6. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
   - It is in ENDED phase with uncondensed checkpoint data on a shadow branch
 
 For each stuck session, you can choose to:
-  - Condense: Save session data to permanent storage (entire/checkpoints/v1 branch)
+  - Condense: Save session data to permanent storage
   - Discard: Remove the session state and shadow branch data
   - Skip: Leave the session as-is
 
@@ -77,8 +86,54 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	}
 	fmt.Fprintln(cmd.OutOrStdout())
 
-	// Check 2: Stuck sessions
+	// v2 checks (only when checkpoints_v2 is enabled)
 	ctx := cmd.Context()
+	if settings.IsCheckpointsV2Enabled(ctx) {
+		// Check 2: Disconnected v2 /main ref
+		v2DisconnectedErr := checkDisconnectedV2Main(cmd, force)
+		if v2DisconnectedErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Error: v2 /main check failed: %v\n", v2DisconnectedErr)
+			if finalErr == nil {
+				finalErr = NewSilentError(fmt.Errorf("v2 /main check failed: %w", v2DisconnectedErr))
+			}
+		}
+
+		repo, repoErr := openRepository(ctx)
+		if repoErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Error: could not open repository for v2 checks: %v\n", repoErr)
+			if finalErr == nil {
+				finalErr = NewSilentError(fmt.Errorf("v2 checks failed: %w", repoErr))
+			}
+		} else {
+			// Check 3: v2 ref existence
+			if refErr := checkV2RefExistence(cmd, repo); refErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Error: v2 ref existence check failed: %v\n", refErr)
+				if finalErr == nil {
+					finalErr = NewSilentError(fmt.Errorf("v2 ref check failed: %w", refErr))
+				}
+			}
+
+			// Check 4: v2 checkpoint count consistency
+			if countErr := checkV2CheckpointCounts(cmd, repo); countErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Error: v2 checkpoint count check failed: %v\n", countErr)
+				if finalErr == nil {
+					finalErr = NewSilentError(fmt.Errorf("v2 count check failed: %w", countErr))
+				}
+			}
+
+			// Check 5: v2 generation health
+			if genErr := checkV2GenerationHealth(cmd, repo); genErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Error: v2 generation health check failed: %v\n", genErr)
+				if finalErr == nil {
+					finalErr = NewSilentError(fmt.Errorf("v2 generation check failed: %w", genErr))
+				}
+			}
+		}
+
+		fmt.Fprintln(cmd.OutOrStdout())
+	}
+
+	// Stuck sessions
 	// Load all session states
 	states, err := strategy.ListSessionStates(ctx)
 	if err != nil {
@@ -359,6 +414,248 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	}
 
 	fmt.Fprintln(w, "  ✓ Fixed: metadata branches reconciled")
+	return nil
+}
+
+// checkDisconnectedV2Main detects and optionally repairs disconnected
+// local/remote v2 /main refs.
+func checkDisconnectedV2Main(cmd *cobra.Command, force bool) error {
+	repo, err := openRepository(cmd.Context())
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	ctx := cmd.Context()
+	remote, configured, resolveErr := strategy.ResolveCheckpointRemoteURL(ctx)
+	if configured && resolveErr != nil {
+		return fmt.Errorf("checkpoint_remote is configured but could not be resolved: %w", resolveErr)
+	}
+	if remote == "" {
+		remote = "origin"
+	}
+
+	disconnected, err := strategy.IsV2MainDisconnected(ctx, repo, remote)
+	if err != nil {
+		// If no checkpoint_remote is configured and origin doesn't exist or is
+		// unreachable, treat as "can't check" rather than a hard failure — mirrors
+		// the v1 behavior which no-ops when the remote-tracking ref is absent.
+		if !configured {
+			fmt.Fprintln(cmd.OutOrStdout(), "✓ v2 /main ref: OK (no remote to compare)")
+			return nil
+		}
+		return fmt.Errorf("could not check v2 /main ref state: %w", err)
+	}
+
+	w := cmd.OutOrStdout()
+
+	if !disconnected {
+		fmt.Fprintln(w, "✓ v2 /main ref: OK")
+		return nil
+	}
+
+	fmt.Fprintln(w, "v2 /main ref: DISCONNECTED")
+	fmt.Fprintln(w, "  Local and remote v2 /main refs share no common ancestor.")
+	fmt.Fprintln(w, "  Fix: cherry-pick local checkpoints onto remote tip (preserves all data).")
+
+	if !force {
+		var confirmed bool
+		form := NewAccessibleForm(
+			huh.NewGroup(
+				huh.NewConfirm().
+					Title("Fix disconnected v2 /main ref?").
+					Value(&confirmed),
+			),
+		)
+		if formErr := form.Run(); formErr != nil {
+			if errors.Is(formErr, huh.ErrUserAborted) {
+				return nil
+			}
+			return fmt.Errorf("prompt failed: %w", formErr)
+		}
+		if !confirmed {
+			fmt.Fprintln(w, "  -> Skipped")
+			return nil
+		}
+	}
+
+	if fixErr := strategy.ReconcileDisconnectedV2Ref(ctx, repo, remote, cmd.ErrOrStderr()); fixErr != nil {
+		return fmt.Errorf("failed to reconcile v2 /main ref: %w", fixErr)
+	}
+
+	fmt.Fprintln(w, "  ✓ Fixed: v2 /main ref reconciled")
+	return nil
+}
+
+// checkV2GenerationHealth verifies that archived /full/* generations are well-formed.
+// Checks: generation.json exists and is valid, timestamps are sane, generation has checkpoints,
+// and generation sequence numbers are contiguous.
+func checkV2GenerationHealth(cmd *cobra.Command, repo *git.Repository) error {
+	w := cmd.OutOrStdout()
+
+	v2Store := checkpoint.NewV2GitStore(repo, "origin")
+
+	archived, err := v2Store.ListArchivedGenerations()
+	if err != nil {
+		return fmt.Errorf("failed to list archived generations: %w", err)
+	}
+
+	if len(archived) == 0 {
+		fmt.Fprintln(w, "✓ v2 generations: OK (no archived generations)")
+		return nil
+	}
+
+	var warnings []string
+
+	for _, genName := range archived {
+		refName := plumbing.ReferenceName(paths.V2FullRefPrefix + genName)
+
+		_, treeHash, refErr := v2Store.GetRefState(refName)
+		if refErr != nil {
+			warnings = append(warnings, fmt.Sprintf("generation %s: cannot read ref: %v", genName, refErr))
+			continue
+		}
+
+		gen, genErr := v2Store.ReadGeneration(treeHash)
+		if genErr != nil {
+			warnings = append(warnings, fmt.Sprintf("generation %s: failed to read generation.json: %v", genName, genErr))
+			continue
+		}
+
+		hasOldest := !gen.OldestCheckpointAt.IsZero()
+		hasNewest := !gen.NewestCheckpointAt.IsZero()
+
+		switch {
+		case !hasOldest && !hasNewest:
+			// ReadGeneration returns zero-value when the file is absent
+			warnings = append(warnings, fmt.Sprintf("generation %s: WARNING — missing generation.json", genName))
+		case hasOldest != hasNewest:
+			warnings = append(warnings, fmt.Sprintf("generation %s: WARNING — incomplete generation.json (partial timestamps)", genName))
+		case gen.OldestCheckpointAt.After(gen.NewestCheckpointAt):
+			warnings = append(warnings, fmt.Sprintf("generation %s: WARNING — invalid timestamps (oldest > newest)", genName))
+		}
+
+		cpCount, countErr := v2Store.CountCheckpointsInTree(treeHash)
+		if countErr != nil {
+			warnings = append(warnings, fmt.Sprintf("generation %s: failed to count checkpoints: %v", genName, countErr))
+			continue
+		}
+		if cpCount == 0 {
+			warnings = append(warnings, fmt.Sprintf("generation %s: WARNING — empty (no checkpoint shards)", genName))
+		}
+	}
+
+	if len(archived) > 1 {
+		for i := 1; i < len(archived); i++ {
+			prev, prevErr := strconv.ParseInt(archived[i-1], 10, 64)
+			curr, currErr := strconv.ParseInt(archived[i], 10, 64)
+			if prevErr != nil || currErr != nil {
+				continue
+			}
+			if curr-prev > 1 {
+				first := prev + 1
+				last := curr - 1
+				if first == last {
+					warnings = append(warnings, fmt.Sprintf("INFO — gap in generation sequence (%013d missing)", first))
+				} else {
+					warnings = append(warnings, fmt.Sprintf("INFO — gap in generation sequence (%013d–%013d missing)", first, last))
+				}
+			}
+		}
+	}
+
+	if len(warnings) > 0 {
+		fmt.Fprintf(w, "v2 generations: %d issue(s) found in %d archived generation(s):\n", len(warnings), len(archived))
+		for _, warning := range warnings {
+			fmt.Fprintf(w, "  %s\n", warning)
+		}
+		return fmt.Errorf("v2 generation health: %d issue(s) found", len(warnings))
+	}
+
+	fmt.Fprintf(w, "✓ v2 generations: OK (%d archived)\n", len(archived))
+	return nil
+}
+
+// checkV2CheckpointCounts verifies checkpoint count consistency between /main and /full/current.
+// /main is permanent (accumulates all checkpoints), /full/current holds only the current generation.
+// So main count >= full/current count. If full/current exceeds main, a dual-write partially failed.
+// Skips silently if either ref doesn't exist (already covered by checkV2RefExistence).
+func checkV2CheckpointCounts(cmd *cobra.Command, repo *git.Repository) error {
+	w := cmd.OutOrStdout()
+
+	v2Store := checkpoint.NewV2GitStore(repo, "origin")
+
+	mainRefName := plumbing.ReferenceName(paths.V2MainRefName)
+	fullRefName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
+
+	_, mainTreeHash, mainErr := v2Store.GetRefState(mainRefName)
+	_, fullTreeHash, fullErr := v2Store.GetRefState(fullRefName)
+
+	// Skip only when ref is missing (already covered by checkV2RefExistence).
+	if mainErr != nil {
+		if errors.Is(mainErr, plumbing.ErrReferenceNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to read /main ref: %w", mainErr)
+	}
+	if fullErr != nil {
+		if errors.Is(fullErr, plumbing.ErrReferenceNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to read /full/current ref: %w", fullErr)
+	}
+
+	mainCount, err := v2Store.CountCheckpointsInTree(mainTreeHash)
+	if err != nil {
+		return fmt.Errorf("failed to count /main checkpoints: %w", err)
+	}
+
+	fullCount, err := v2Store.CountCheckpointsInTree(fullTreeHash)
+	if err != nil {
+		return fmt.Errorf("failed to count /full/current checkpoints: %w", err)
+	}
+
+	if fullCount > mainCount {
+		fmt.Fprintf(w, "v2 checkpoint counts: INCONSISTENT — /full/current has %d checkpoints but /main has only %d\n", fullCount, mainCount)
+		return fmt.Errorf("v2 checkpoint counts inconsistent: /full/current (%d) exceeds /main (%d)", fullCount, mainCount)
+	}
+
+	fmt.Fprintf(w, "✓ v2 checkpoint counts: OK (main: %d, full/current: %d)\n", mainCount, fullCount)
+	return nil
+}
+
+// checkV2RefExistence verifies that v2 refs exist (or both are absent for a fresh repo).
+// One ref without the other suggests a partial initialization.
+func checkV2RefExistence(cmd *cobra.Command, repo *git.Repository) error {
+	w := cmd.OutOrStdout()
+
+	mainRefName := plumbing.ReferenceName(paths.V2MainRefName)
+	fullRefName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
+
+	_, mainErr := repo.Reference(mainRefName, true)
+	_, fullErr := repo.Reference(fullRefName, true)
+	if mainErr != nil && !errors.Is(mainErr, plumbing.ErrReferenceNotFound) {
+		return fmt.Errorf("failed to read /main ref: %w", mainErr)
+	}
+	if fullErr != nil && !errors.Is(fullErr, plumbing.ErrReferenceNotFound) {
+		return fmt.Errorf("failed to read /full/current ref: %w", fullErr)
+	}
+
+	hasMain := mainErr == nil
+	hasFull := fullErr == nil
+
+	switch {
+	case hasMain && hasFull:
+		fmt.Fprintln(w, "✓ v2 refs: OK")
+	case !hasMain && !hasFull:
+		fmt.Fprintln(w, "✓ v2 refs: OK (no checkpoints written yet)")
+	case hasMain && !hasFull:
+		fmt.Fprintln(w, "v2 refs: INCONSISTENT — /main exists but /full/current is missing")
+		return errors.New("v2 refs inconsistent: /main exists but /full/current is missing")
+	case !hasMain && hasFull:
+		fmt.Fprintln(w, "v2 refs: INCONSISTENT — /full/current exists but /main is missing")
+		return errors.New("v2 refs inconsistent: /full/current exists but /main is missing")
+	}
+
 	return nil
 }
 

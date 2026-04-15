@@ -2,10 +2,13 @@ package factoryaidroid
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	git "github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/require"
 )
 
@@ -173,6 +176,91 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 	}
 	if event.SubagentID != "agent-789" {
 		t.Errorf("expected SubagentID 'agent-789', got %q", event.SubagentID)
+	}
+}
+
+func TestParseHookEvent_SubagentStart_MissingToolUseID(t *testing.T) {
+	t.Parallel()
+
+	ag := &FactoryAIDroidAgent{}
+	input := `{"session_id": "sess-4", "transcript_path": "/tmp/t.jsonl", "tool_name": "Task", "tool_input": {"prompt": "do something"}}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNamePreToolUse, strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.ToolUseID == "" {
+		t.Fatal("expected fallback tool_use_id, got empty string")
+	}
+}
+
+func TestParseHookEvent_SubagentEnd_StringToolResponse(t *testing.T) {
+	t.Parallel()
+
+	ag := &FactoryAIDroidAgent{}
+	input := `{"session_id": "sess-5", "transcript_path": "/tmp/t.jsonl", "tool_name": "Task", "tool_input": {}, "tool_response": "agentId: agent-789"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNamePostToolUse, strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event.Type != agent.SubagentEnd {
+		t.Errorf("expected SubagentEnd, got %v", event.Type)
+	}
+	if event.SubagentID != "agent-789" {
+		t.Errorf("expected SubagentID 'agent-789', got %q", event.SubagentID)
+	}
+	if event.ToolUseID == "" {
+		t.Fatal("expected fallback tool_use_id, got empty string")
+	}
+}
+
+func TestParseHookEvent_MissingToolUseID_RepeatedInputsStayUniqueAndCorrelate(t *testing.T) {
+	repoDir := t.TempDir()
+	if _, err := git.PlainInit(repoDir, false); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	ag := &FactoryAIDroidAgent{}
+	input := `{"session_id": "sess-repeat", "transcript_path": "/tmp/t.jsonl", "tool_name": "Task", "tool_input": {"prompt": "do something"}}`
+
+	startOne, err := ag.ParseHookEvent(context.Background(), HookNamePreToolUse, strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error on first start: %v", err)
+	}
+	startTwo, err := ag.ParseHookEvent(context.Background(), HookNamePreToolUse, strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error on second start: %v", err)
+	}
+	if startOne.ToolUseID == startTwo.ToolUseID {
+		t.Fatalf("expected unique fallback tool_use_id values, got %q", startOne.ToolUseID)
+	}
+
+	endTwo, err := ag.ParseHookEvent(context.Background(), HookNamePostToolUse, strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error on second end: %v", err)
+	}
+	if endTwo.ToolUseID != startTwo.ToolUseID {
+		t.Fatalf("expected most recent fallback tool_use_id %q, got %q", startTwo.ToolUseID, endTwo.ToolUseID)
+	}
+
+	endOne, err := ag.ParseHookEvent(context.Background(), HookNamePostToolUse, strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error on first end: %v", err)
+	}
+	if endOne.ToolUseID != startOne.ToolUseID {
+		t.Fatalf("expected earlier fallback tool_use_id %q, got %q", startOne.ToolUseID, endOne.ToolUseID)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(repoDir, paths.EntireTmpDir, fallbackToolUseStatePrefix+"*.json"))
+	if err != nil {
+		t.Fatalf("glob fallback state files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected fallback state cleanup, found %v", matches)
 	}
 }
 

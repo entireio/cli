@@ -1,6 +1,10 @@
 package factoryaidroid
 
-import "encoding/json"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+)
 
 // FactorySettings represents the .factory/settings.json structure.
 type FactorySettings struct {
@@ -57,6 +61,7 @@ type taskHookInputRaw struct {
 	SessionID      string          `json:"session_id"`
 	TranscriptPath string          `json:"transcript_path"`
 	ToolUseID      string          `json:"tool_use_id"`
+	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
 }
 
@@ -65,10 +70,19 @@ type postToolHookInputRaw struct {
 	SessionID      string          `json:"session_id"`
 	TranscriptPath string          `json:"transcript_path"`
 	ToolUseID      string          `json:"tool_use_id"`
+	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
-	ToolResponse   struct {
-		AgentID string `json:"agentId"`
-	} `json:"tool_response"`
+	ToolResponse   json.RawMessage `json:"tool_response"`
+}
+
+func fallbackToolUseID(sessionID, toolName string, toolInput json.RawMessage) string {
+	sum := sha256.Sum256([]byte(sessionID + "\n" + toolName + "\n" + string(toolInput)))
+	return "factorytask_" + hex.EncodeToString(sum[:8])
+}
+
+func fallbackToolFingerprint(toolName string, toolInput json.RawMessage) string {
+	sum := sha256.Sum256([]byte(toolName + "\n" + string(toolInput)))
+	return hex.EncodeToString(sum[:16])
 }
 
 // Tool names used in Factory Droid transcripts.

@@ -74,6 +74,8 @@ cd your-project && entire enable
 entire status
 ```
 
+After the initial setup, use `entire configure` to add/remove agents or update setup-related options, and use `entire enable` / `entire disable` to toggle Entire on or off.
+
 ## Release Channels
 
 Entire currently ships two release channels:
@@ -97,7 +99,12 @@ How to use each channel:
 entire enable
 ```
 
-This installs agent and Git hooks to work with your AI agent. You'll be prompted to select which agents to enable. To enable a specific agent non-interactively, use `entire enable --agent <name>` (e.g., `entire enable --agent cursor`).
+On a repo that has not been enabled yet, `entire enable` runs the initial enable flow: it creates Entire settings, installs git hooks, and prompts you to choose which agent hooks to install. To enable a specific agent non-interactively, use `entire enable --agent <name>` (for example, `entire enable --agent cursor`).
+
+After setup:
+
+- Use `entire enable` to turn Entire back on if the repo is currently disabled.
+- Use `entire configure` to change which agents are installed or to update setup-related settings.
 
 The hooks capture session data as you work. Checkpoints are created when you or the agent make a git commit. Your code commits stay clean, Entire never creates commits on your active branch. All session metadata is stored on a separate `entire/checkpoints/v1` branch.
 
@@ -225,6 +232,7 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | Command          | Description                                                                                       |
 | ---------------- | ------------------------------------------------------------------------------------------------- |
 | `entire clean`   | Clean up session data and orphaned Entire data (use `--all` for repo-wide cleanup)                |
+| `entire configure` | Configure agents and setup options for the current repository                                  |
 | `entire disable` | Remove Entire hooks from repository                                                               |
 | `entire doctor`  | Fix or clean up stuck sessions                                                                    |
 | `entire enable`  | Enable Entire in your repository                                                                  |
@@ -251,11 +259,46 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 **Examples:**
 
 ```
-# Force reinstall hooks
+# First-time setup with a specific agent
+entire enable --agent claude-code
+
+# Re-enable a disabled repo
+entire enable
+
+# Re-enable and refresh hooks
 entire enable --force
 
 # Save settings locally (not committed to git)
 entire enable --local
+```
+
+`entire enable` is primarily for turning Entire on. On an unconfigured repo it will also bootstrap setup, but once the repo is already configured, `entire configure` is the clearer command for managing agents and setup options.
+
+### `entire configure`
+
+Use `entire configure` after the repo is already set up and you want to change the configuration without framing the action as an enable/disable toggle.
+
+Typical uses:
+
+- Add another agent
+- Remove an agent
+- Reinstall hooks for selected agents
+- Update settings such as `--checkpoint-remote` or `--skip-push-sessions`
+
+**Examples:**
+
+```bash
+# Add or remove agents interactively
+entire configure
+
+# Install or refresh hooks for one agent non-interactively
+entire configure --agent claude-code --force
+
+# Update setup settings on an existing repo
+entire configure --checkpoint-remote github:myorg/checkpoints-private
+
+# Remove one agent's hooks
+entire configure --remove claude-code
 ```
 
 ## Configuration

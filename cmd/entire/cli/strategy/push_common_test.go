@@ -1202,3 +1202,104 @@ func TestPrintSettingsCommitHint(t *testing.T) {
 		assert.Equal(t, 1, count, "hint should print exactly once, got %d", count)
 	})
 }
+
+// captureStderr redirects os.Stderr to a pipe and returns a function that restores
+// stderr and returns the captured output. Must be called on the main goroutine
+// (not parallel-safe). Uses t.Cleanup as a safety net to restore stderr and close
+// pipe file descriptors if the test fails or panics before the returned function
+// is called.
+func captureStderr(t *testing.T) func() string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+
+	// Safety net: restore stderr and close pipe ends on test failure/panic.
+	// In the normal path the returned function handles cleanup first;
+	// duplicate Close calls return an error that we intentionally ignore.
+	t.Cleanup(func() {
+		os.Stderr = old
+		_ = w.Close()
+		_ = r.Close()
+	})
+
+	return func() string {
+		_ = w.Close()
+		var buf bytes.Buffer
+		_, readErr := buf.ReadFrom(r)
+		require.NoError(t, readErr)
+		_ = r.Close()
+		os.Stderr = old
+		return buf.String()
+	}
+}
+
+// setupBareRemoteWithCheckpointBranch creates a work repo with a checkpoint branch
+// and a bare remote that already has the branch pushed. Returns (workDir, bareDir).
+// Caller must t.Chdir(workDir) before calling push functions.
+func setupBareRemoteWithCheckpointBranch(t *testing.T) (string, string) {
+	t.Helper()
+	ctx := context.Background()
+
+	workDir := setupRepoWithCheckpointBranch(t)
+
+	bareDir := t.TempDir()
+	initCmd := exec.CommandContext(ctx, "git", "init", "--bare")
+	initCmd.Dir = bareDir
+	initCmd.Env = testutil.GitIsolatedEnv()
+	out, err := initCmd.CombinedOutput()
+	require.NoError(t, err, "git init --bare failed: %s", out)
+
+	// Push the checkpoint branch to the bare remote
+	pushCmd := exec.CommandContext(ctx, "git", "push", bareDir, paths.MetadataBranchName)
+	pushCmd.Dir = workDir
+	pushCmd.Env = testutil.GitIsolatedEnv()
+	out, err = pushCmd.CombinedOutput()
+	require.NoError(t, err, "initial push failed: %s", out)
+
+	return workDir, bareDir
+}
+
+// TestDoPushBranch_AlreadyUpToDate verifies that when the remote already has all
+// commits, the output says "already up-to-date" instead of "done".
+//
+// Not parallel: uses t.Chdir() and os.Stderr redirection.
+func TestDoPushBranch_AlreadyUpToDate(t *testing.T) {
+	workDir, bareDir := setupBareRemoteWithCheckpointBranch(t)
+	t.Chdir(workDir)
+
+	restore := captureStderr(t)
+	err := doPushBranch(context.Background(), bareDir, paths.MetadataBranchName)
+	output := restore()
+
+	require.NoError(t, err)
+	assert.Contains(t, output, "already up-to-date", "should indicate nothing was pushed")
+	assert.NotContains(t, output, " done", "should not say 'done' when nothing was pushed")
+}
+
+// TestDoPushBranch_NewContent_SaysDone verifies that when there are new commits
+// to push, the output says "done".
+//
+// Not parallel: uses t.Chdir() and os.Stderr redirection.
+func TestDoPushBranch_NewContent_SaysDone(t *testing.T) {
+	workDir := setupRepoWithCheckpointBranch(t)
+
+	// Create a bare remote with no checkpoint branch yet
+	bareDir := t.TempDir()
+	initCmd := exec.CommandContext(context.Background(), "git", "init", "--bare")
+	initCmd.Dir = bareDir
+	initCmd.Env = testutil.GitIsolatedEnv()
+	out, err := initCmd.CombinedOutput()
+	require.NoError(t, err, "git init --bare failed: %s", out)
+
+	t.Chdir(workDir)
+
+	restore := captureStderr(t)
+	err = doPushBranch(context.Background(), bareDir, paths.MetadataBranchName)
+	output := restore()
+
+	require.NoError(t, err)
+	assert.Contains(t, output, " done", "should say 'done' when new content was pushed")
+	assert.NotContains(t, output, "already up-to-date", "should not say 'already up-to-date' when content was pushed")
+}

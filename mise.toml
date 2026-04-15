@@ -26,6 +26,10 @@ go test -tags=integration -race ./...
 mise run test:e2e:canary
 """
 
+[tasks.check]
+description = "Run formatting, linting, and CI tests"
+depends = ["fmt", "lint", "test:ci"]
+
 [tasks."build:windows"]
 description = "Cross-compile for Windows amd64"
 run = "CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o entire.exe ./cmd/entire/"
