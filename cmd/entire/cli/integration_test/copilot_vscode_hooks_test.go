@@ -273,9 +273,43 @@ func findHookCommand(t *testing.T, entries []copilotcli.CopilotHookEntry, hookNa
 func resolveHookCommand(t *testing.T, command string) string {
 	t.Helper()
 
-	if strings.HasPrefix(command, "entire ") {
-		return fmt.Sprintf("%q%s", getTestBinary(), strings.TrimPrefix(command, "entire"))
+	return resolveHookCommandWithBinary(command, getTestBinary())
+}
+
+func TestResolveHookCommand_RewritesWrappedProductionCommand(t *testing.T) {
+	t.Parallel()
+
+	command := `sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks copilot-cli user-prompt-submitted'`
+	got := resolveHookCommandWithBinary(command, "/tmp/entire-test-binary")
+
+	if strings.Contains(got, "command -v entire") {
+		t.Fatalf("resolveHookCommand() should not depend on PATH lookup for entire, got %q", got)
 	}
+	if strings.Contains(got, "exec entire hooks") {
+		t.Fatalf("resolveHookCommand() should rewrite wrapped exec target, got %q", got)
+	}
+	if !strings.Contains(got, `exec "/tmp/entire-test-binary" hooks copilot-cli user-prompt-submitted`) {
+		t.Fatalf("resolveHookCommand() did not rewrite wrapped command correctly, got %q", got)
+	}
+}
+
+func resolveHookCommandWithBinary(command, binaryPath string) string {
+	testBinary := fmt.Sprintf("%q", binaryPath)
+
+	if strings.HasPrefix(command, "entire ") {
+		return testBinary + strings.TrimPrefix(command, "entire")
+	}
+
+	if strings.Contains(command, "command -v entire") && strings.Contains(command, "exec entire ") {
+		resolved := strings.Replace(command,
+			"command -v entire >/dev/null 2>&1",
+			"test -x "+testBinary,
+			1,
+		)
+		resolved = strings.Replace(resolved, "exec entire ", "exec "+testBinary+" ", 1)
+		return resolved
+	}
+
 	return command
 }
 
