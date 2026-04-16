@@ -251,9 +251,9 @@ func isProtectedPath(relPath string) bool {
 // isInternalTrackingPath returns true for runtime/config paths that Entire
 // should never attribute as agent-authored project work.
 //
-// Keep this narrower than isProtectedPath(): some protected dirs (like
-// .claude/) can contain user-managed files, while these paths are managed by
-// Entire or the OpenCode runtime itself.
+// Keep this narrower than isProtectedPath(): protected dirs (like .claude/ or
+// .opencode/) can contain user-managed files, while these paths are generated
+// by Entire itself.
 func isInternalTrackingPath(relPath string) bool {
 	p := filepath.ToSlash(strings.TrimSpace(relPath))
 	if p == "" {
@@ -264,7 +264,7 @@ func isInternalTrackingPath(relPath string) bool {
 		return true
 	}
 
-	if p == ".opencode" || strings.HasPrefix(p, ".opencode/") {
+	if p == ".opencode/plugins/entire.ts" {
 		return true
 	}
 
