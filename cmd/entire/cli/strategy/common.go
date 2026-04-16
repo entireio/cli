@@ -264,7 +264,7 @@ func isInternalTrackingPath(relPath string) bool {
 		return true
 	}
 
-	if p == ".opencode" || strings.HasPrefix(p, ".opencode/") || p == "opencode.json" {
+	if p == ".opencode" || strings.HasPrefix(p, ".opencode/") {
 		return true
 	}
 

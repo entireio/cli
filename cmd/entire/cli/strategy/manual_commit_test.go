@@ -4732,12 +4732,12 @@ func TestCommittedFilesExcludingMetadata(t *testing.T) {
 
 	require.Contains(t, resultSet, "docs/blue.md")
 	require.Contains(t, resultSet, "docs/red.md")
+	require.Contains(t, resultSet, "opencode.json")
 	require.Contains(t, resultSet, ".claude/settings.json")
 	require.NotContains(t, resultSet, ".entire/settings.json", ".entire/ should be excluded")
 	require.NotContains(t, resultSet, ".entire/.gitignore", ".entire/ should be excluded")
 	require.NotContains(t, resultSet, ".opencode/plugins/entire.ts", ".opencode/ should be excluded")
-	require.NotContains(t, resultSet, "opencode.json", "opencode.json should be excluded")
-	require.Len(t, result, 3)
+	require.Len(t, result, 4)
 }
 
 func TestMarshalPromptAttributionsIncludingPending_IncludesPending(t *testing.T) {
@@ -4814,7 +4814,6 @@ func TestCommittedFilesExcludingMetadata_AllMetadata(t *testing.T) {
 		".entire/settings.json":       {},
 		".entire/.gitignore":          {},
 		".opencode/plugins/entire.ts": {},
-		"opencode.json":               {},
 	})
 	require.Empty(t, result, "all metadata files should be excluded")
 }
@@ -4828,5 +4827,5 @@ func TestMergeFilesTouched_ExcludesInternalTrackingPaths(t *testing.T) {
 		[]string{".entire/settings.json", "docs/green.md"},
 	)
 
-	require.Equal(t, []string{"docs/blue.md", "docs/green.md", "docs/red.md"}, result)
+	require.Equal(t, []string{"docs/blue.md", "docs/green.md", "docs/red.md", "opencode.json"}, result)
 }
