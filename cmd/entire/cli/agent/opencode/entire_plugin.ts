@@ -116,8 +116,12 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             messageStore.set(msg.id, msg)
             if (msg.role === "user") {
               // Fallback for run-mode where message.part.updated can be absent/late.
-              const prompt = typeof msg.content === "string" ? msg.content : ""
-              await maybeStartTurn(msg.sessionID ?? currentSessionID, msg.id, prompt)
+              // Only use it when message.updated already carries usable text,
+              // so message.part.updated can still provide the prompt otherwise.
+              const prompt = typeof msg.content === "string" ? msg.content : null
+              if (prompt && prompt.trim().length > 0) {
+                await maybeStartTurn(msg.sessionID ?? currentSessionID, msg.id, prompt)
+              }
             }
             // Track model from assistant messages
             if (msg.role === "assistant" && msg.modelID) {
