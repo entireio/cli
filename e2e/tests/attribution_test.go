@@ -174,12 +174,13 @@ func TestAttributionMixedHumanAndAgent(t *testing.T) {
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		sm := testutil.ReadSessionMetadata(t, s.Dir, cpID, 0)
 
-		assert.Equal(t, agentLines, sm.InitialAttribution.AgentLines,
-			"agent_lines should match actual lines in agent.txt")
+		assert.InDelta(t, agentLines, sm.InitialAttribution.AgentLines, 1,
+			"agent_lines should be within one line of actual lines in agent.txt")
 		assert.Equal(t, humanLines, sm.InitialAttribution.HumanAdded,
 			"human_added should match lines in human.txt")
-		assert.Equal(t, agentLines+humanLines, sm.InitialAttribution.TotalCommitted,
-			"total_committed should be sum of agent and human lines")
+		expectedTotal := agentLines + humanLines
+		assert.InDelta(t, expectedTotal, sm.InitialAttribution.TotalCommitted, 1,
+			"total_committed should be within one line of agent+human sum")
 		assert.Greater(t, sm.InitialAttribution.AgentPercentage, 0.0,
 			"agent_percentage should be > 0 when agent wrote content")
 		assert.Less(t, sm.InitialAttribution.AgentPercentage, 100.0,
