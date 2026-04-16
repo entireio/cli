@@ -21,7 +21,8 @@ func TestAgentContinuesAfterCommit(t *testing.T) {
 	testutil.ForEachAgent(t, 3*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		// First prompt — agent creates and commits.
 		_, err := s.RunPrompt(t, ctx,
-			"create a markdown file at docs/red.md with a paragraph about the colour red, then commit it. Do not ask for confirmation, just make the change.")
+			"create a markdown file at docs/red.md with a paragraph about the colour red, then commit it. Do not ask for confirmation, just make the change.",
+			agents.WithPromptTimeout(2*time.Minute))
 		if err != nil {
 			t.Fatalf("agent prompt 1 failed: %v", err)
 		}
@@ -32,7 +33,8 @@ func TestAgentContinuesAfterCommit(t *testing.T) {
 
 		// Second prompt — agent creates another file, user commits.
 		_, err = s.RunPrompt(t, ctx,
-			"create a markdown file at docs/blue.md with a paragraph about the colour blue. Do not commit it, only create the file. Do not ask for confirmation, just make the change.")
+			"create a markdown file at docs/blue.md with a paragraph about the colour blue. Do not commit it, only create the file. Do not ask for confirmation, just make the change.",
+			agents.WithPromptTimeout(2*time.Minute))
 		if err != nil {
 			t.Fatalf("agent prompt 2 failed: %v", err)
 		}
