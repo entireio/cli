@@ -14,6 +14,21 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   let currentModel: string | null = null
   // In-memory store for message metadata (role, tokens, etc.)
   const messageStore = new Map<string, any>()
+  // Track sessions with a started turn that still needs a turn-end hook.
+  const sessionsWithOpenTurn = new Set<string>()
+
+  function maybeStartTurn(sessionID: string | null, messageID: string, prompt: string) {
+    if (!sessionID || seenUserMessages.has(messageID)) {
+      return
+    }
+    seenUserMessages.add(messageID)
+    sessionsWithOpenTurn.add(sessionID)
+    return callHook("turn-start", {
+      session_id: sessionID,
+      prompt,
+      model: currentModel ?? "",
+    })
+  }
 
   /**
    * Build the shell command for a hook invocation.
@@ -77,6 +92,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             if (currentSessionID !== session.id) {
               seenUserMessages.clear()
               messageStore.clear()
+              sessionsWithOpenTurn.clear()
               currentModel = null
               const json = JSON.stringify({
                 session_id: session.id,
@@ -98,6 +114,11 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             if (!msg) break
             // Store message metadata (role, time, tokens, etc.)
             messageStore.set(msg.id, msg)
+            if (msg.role === "user") {
+              // Fallback for run-mode where message.part.updated can be absent/late.
+              const prompt = typeof msg.content === "string" ? msg.content : ""
+              await maybeStartTurn(msg.sessionID ?? currentSessionID, msg.id, prompt)
+            }
             // Track model from assistant messages
             if (msg.role === "assistant" && msg.modelID) {
               currentModel = msg.modelID
@@ -111,16 +132,8 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
 
             // Fire turn-start on the first text part of a new user message
             const msg = messageStore.get(part.messageID)
-            if (msg?.role === "user" && part.type === "text" && !seenUserMessages.has(msg.id)) {
-              seenUserMessages.add(msg.id)
-              const sessionID = msg.sessionID ?? currentSessionID
-              if (sessionID) {
-                await callHook("turn-start", {
-                  session_id: sessionID,
-                  prompt: part.text ?? "",
-                  model: currentModel ?? "",
-                })
-              }
+            if (msg?.role === "user" && part.type === "text") {
+              await maybeStartTurn(msg.sessionID ?? currentSessionID, msg.id, part.text ?? "")
             }
             break
           }
@@ -132,6 +145,9 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             if (props?.status?.type !== "idle") break
             const sessionID = props?.sessionID ?? currentSessionID
             if (!sessionID) break
+            // Ignore duplicate/late idle events when no corresponding turn-start ran.
+            if (!sessionsWithOpenTurn.has(sessionID)) break
+            sessionsWithOpenTurn.delete(sessionID)
             // Use sync variant: `opencode run` exits on the same idle event,
             // so an async hook would be killed before completing.
             callHookSync("turn-end", {
@@ -155,6 +171,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             if (!session?.id) break
             seenUserMessages.clear()
             messageStore.clear()
+            sessionsWithOpenTurn.delete(session.id)
             currentSessionID = null
             // Use sync variant: session-end may fire during shutdown.
             callHookSync("session-end", {
@@ -171,6 +188,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             const sessionID = currentSessionID
             seenUserMessages.clear()
             messageStore.clear()
+            sessionsWithOpenTurn.delete(sessionID)
             currentSessionID = null
             // Use sync variant: this is the last event before process exit.
             callHookSync("session-end", {

@@ -207,6 +207,36 @@ func TestInstallHooks_RewritesWhenContentDiffers(t *testing.T) {
 	}
 }
 
+func TestInstallHooks_TurnLifecycleGuardsArePresent(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ag := &OpenCodeAgent{}
+
+	if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	pluginPath := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("plugin file not created: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "const sessionsWithOpenTurn = new Set<string>()") {
+		t.Fatal("plugin file missing open-turn tracking set")
+	}
+	if !strings.Contains(content, "await maybeStartTurn(msg.sessionID ?? currentSessionID, msg.id, prompt)") {
+		t.Fatal("plugin file missing message.updated fallback turn-start")
+	}
+	if !strings.Contains(content, "if (!sessionsWithOpenTurn.has(sessionID)) break") {
+		t.Fatal("plugin file missing turn-end dedupe guard")
+	}
+	if !strings.Contains(content, "sessionsWithOpenTurn.delete(sessionID)") {
+		t.Fatal("plugin file missing turn-end session cleanup")
+	}
+}
+
 func TestUninstallHooks(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
