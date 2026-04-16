@@ -235,6 +235,9 @@ func TestInstallHooks_TurnLifecycleGuardsArePresent(t *testing.T) {
 	if !strings.Contains(content, "sessionsWithOpenTurn.delete(sessionID)") {
 		t.Fatal("plugin file missing turn-end session cleanup")
 	}
+	if !strings.Contains(content, "currentSessionID = sessionID") {
+		t.Fatal("plugin file missing session tracking update on turn-start")
+	}
 }
 
 func TestUninstallHooks(t *testing.T) {

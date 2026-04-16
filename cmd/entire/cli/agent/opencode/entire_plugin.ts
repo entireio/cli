@@ -21,6 +21,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
     if (!sessionID || seenUserMessages.has(messageID)) {
       return
     }
+    currentSessionID = sessionID
     seenUserMessages.add(messageID)
     sessionsWithOpenTurn.add(sessionID)
     return callHook("turn-start", {
@@ -90,6 +91,13 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             if (!session?.id) break
             // Reset per-session tracking state when switching sessions.
             if (currentSessionID !== session.id) {
+              if (currentSessionID) {
+                // Session switched without an explicit session.deleted event.
+                // End the previous session to avoid leaving stale ACTIVE state.
+                callHookSync("session-end", {
+                  session_id: currentSessionID,
+                })
+              }
               seenUserMessages.clear()
               messageStore.clear()
               sessionsWithOpenTurn.clear()
