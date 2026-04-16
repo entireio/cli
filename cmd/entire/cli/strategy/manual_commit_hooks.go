@@ -1807,8 +1807,13 @@ func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(ctx contex
 // so callers don't need to prepare the transcript first.
 func (s *ManualCommitStrategy) resolveFilesTouched(ctx context.Context, state *SessionState) []string {
 	if len(state.FilesTouched) > 0 {
-		result := make([]string, len(state.FilesTouched))
-		copy(result, state.FilesTouched)
+		result := make([]string, 0, len(state.FilesTouched))
+		for _, f := range state.FilesTouched {
+			if isInternalTrackingPath(f) {
+				continue
+			}
+			result = append(result, f)
+		}
 		return result
 	}
 
@@ -1976,10 +1981,18 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 		normalized := make([]string, 0, len(modifiedFiles))
 		for _, f := range modifiedFiles {
 			if rel := paths.ToRelativePath(f, basePath); rel != "" {
-				normalized = append(normalized, filepath.ToSlash(rel))
+				rel = filepath.ToSlash(rel)
+				if isInternalTrackingPath(rel) {
+					continue
+				}
+				normalized = append(normalized, rel)
 			} else if len(f) > 0 && !filepath.IsAbs(f) && f[0] != '/' {
 				// Already relative — keep as-is
-				normalized = append(normalized, filepath.ToSlash(f))
+				rel := filepath.ToSlash(f)
+				if isInternalTrackingPath(rel) {
+					continue
+				}
+				normalized = append(normalized, rel)
 			}
 			// else: absolute path outside repo — skip. These can't match
 			// committed file paths (which are repo-relative) and would

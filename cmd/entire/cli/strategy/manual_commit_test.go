@@ -4713,11 +4713,13 @@ func TestCommittedFilesExcludingMetadata(t *testing.T) {
 	t.Parallel()
 
 	input := map[string]struct{}{
-		"docs/blue.md":          {},
-		"docs/red.md":           {},
-		".entire/settings.json": {},
-		".entire/.gitignore":    {},
-		".claude/settings.json": {},
+		"docs/blue.md":                {},
+		"docs/red.md":                 {},
+		".entire/settings.json":       {},
+		".entire/.gitignore":          {},
+		".opencode/plugins/entire.ts": {},
+		"opencode.json":               {},
+		".claude/settings.json":       {},
 	}
 
 	result := committedFilesExcludingMetadata(input)
@@ -4733,6 +4735,8 @@ func TestCommittedFilesExcludingMetadata(t *testing.T) {
 	require.Contains(t, resultSet, ".claude/settings.json")
 	require.NotContains(t, resultSet, ".entire/settings.json", ".entire/ should be excluded")
 	require.NotContains(t, resultSet, ".entire/.gitignore", ".entire/ should be excluded")
+	require.NotContains(t, resultSet, ".opencode/plugins/entire.ts", ".opencode/ should be excluded")
+	require.NotContains(t, resultSet, "opencode.json", "opencode.json should be excluded")
 	require.Len(t, result, 3)
 }
 
@@ -4807,8 +4811,22 @@ func TestCommittedFilesExcludingMetadata_AllMetadata(t *testing.T) {
 	t.Parallel()
 
 	result := committedFilesExcludingMetadata(map[string]struct{}{
-		".entire/settings.json": {},
-		".entire/.gitignore":    {},
+		".entire/settings.json":       {},
+		".entire/.gitignore":          {},
+		".opencode/plugins/entire.ts": {},
+		"opencode.json":               {},
 	})
 	require.Empty(t, result, "all metadata files should be excluded")
+}
+
+func TestMergeFilesTouched_ExcludesInternalTrackingPaths(t *testing.T) {
+	t.Parallel()
+
+	result := mergeFilesTouched(
+		[]string{"docs/red.md", ".opencode/plugins/entire.ts"},
+		[]string{"docs/blue.md", "opencode.json"},
+		[]string{".entire/settings.json", "docs/green.md"},
+	)
+
+	require.Equal(t, []string{"docs/blue.md", "docs/green.md", "docs/red.md"}, result)
 }

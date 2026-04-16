@@ -319,12 +319,20 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
 	seen := make(map[string]bool)
 	for _, f := range existing {
-		seen[filepath.ToSlash(f)] = true
+		norm := filepath.ToSlash(f)
+		if isInternalTrackingPath(norm) {
+			continue
+		}
+		seen[norm] = true
 	}
 
 	for _, list := range fileLists {
 		for _, f := range list {
-			seen[filepath.ToSlash(f)] = true
+			norm := filepath.ToSlash(f)
+			if isInternalTrackingPath(norm) {
+				continue
+			}
+			seen[norm] = true
 		}
 	}
 

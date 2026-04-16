@@ -646,7 +646,7 @@ func calculateSessionAttributions(ctx context.Context, repo *git.Repository, sha
 func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []string {
 	result := make([]string, 0, len(committedFiles))
 	for f := range committedFiles {
-		if strings.HasPrefix(f, ".entire/") || strings.HasPrefix(f, paths.EntireMetadataDir+"/") {
+		if isInternalTrackingPath(f) {
 			continue
 		}
 		result = append(result, f)
