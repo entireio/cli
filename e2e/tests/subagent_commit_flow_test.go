@@ -4,7 +4,6 @@ package tests
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -22,20 +21,6 @@ func TestSubagentCommitFlow(t *testing.T) {
 			prompt)
 		if err != nil {
 			t.Fatalf("agent failed: %v", err)
-		}
-
-		// Some agents occasionally report completion before the subagent file
-		// write lands. Retry once before failing the scenario.
-		matches, globErr := filepath.Glob(filepath.Join(s.Dir, "docs/red.md"))
-		if globErr != nil {
-			t.Fatalf("glob docs/red.md: %v", globErr)
-		}
-		if len(matches) == 0 {
-			_, err = s.RunPrompt(t, ctx,
-				"use a subagent: create a markdown file at docs/red.md with a paragraph about the colour red. Do not commit the file. Do not ask for confirmation, just make the change.")
-			if err != nil {
-				t.Fatalf("agent retry failed: %v", err)
-			}
 		}
 		testutil.WaitForFileExists(t, s.Dir, "docs/red.md", 30*time.Second)
 
