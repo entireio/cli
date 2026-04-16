@@ -1980,23 +1980,19 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 	if basePath != "" {
 		normalized := make([]string, 0, len(modifiedFiles))
 		for _, f := range modifiedFiles {
-			if rel := paths.ToRelativePath(f, basePath); rel != "" {
-				rel = filepath.ToSlash(rel)
-				if isInternalTrackingPath(rel) {
-					continue
-				}
-				normalized = append(normalized, rel)
+			var rel string
+			if r := paths.ToRelativePath(f, basePath); r != "" {
+				rel = filepath.ToSlash(r)
 			} else if len(f) > 0 && !filepath.IsAbs(f) && f[0] != '/' {
 				// Already relative — keep as-is
-				rel := filepath.ToSlash(f)
-				if isInternalTrackingPath(rel) {
-					continue
-				}
-				normalized = append(normalized, rel)
+				rel = filepath.ToSlash(f)
 			}
 			// else: absolute path outside repo — skip. These can't match
 			// committed file paths (which are repo-relative) and would
 			// create phantom carry-forward branches.
+			if rel != "" && !isInternalTrackingPath(rel) {
+				normalized = append(normalized, rel)
+			}
 		}
 		modifiedFiles = normalized
 	}
