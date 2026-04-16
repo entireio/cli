@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/redact"
 	"github.com/stretchr/testify/require"
@@ -25,6 +26,7 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
@@ -446,6 +448,166 @@ func setupBranchTestRepo(t *testing.T) (*git.Repository, plumbing.Hash) {
 	}
 
 	return repo, commitHash
+}
+
+func TestEnsureSessionsBranch_WritesVercelConfigWhenEnabled(t *testing.T) {
+	vercelconfig.ResetSettingsCache()
+	t.Cleanup(vercelconfig.ResetSettingsCache)
+
+	repo, _ := setupBranchTestRepo(t)
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("repo.Worktree() error = %v", err)
+	}
+	t.Chdir(worktree.Filesystem.Root())
+
+	entireDir := filepath.Join(worktree.Filesystem.Root(), ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{"enabled":true,"vercel":true}`), 0o644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	store := NewGitStore(repo)
+	if err := store.ensureSessionsBranch(context.Background()); err != nil {
+		t.Fatalf("ensureSessionsBranch() error = %v", err)
+	}
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("metadata branch ref: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("metadata commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("metadata tree: %v", err)
+	}
+	file, err := tree.File(vercelconfig.FileName)
+	if err != nil {
+		t.Fatalf("expected %s on metadata branch: %v", vercelconfig.FileName, err)
+	}
+	content, err := file.Contents()
+	if err != nil {
+		t.Fatalf("read %s: %v", vercelconfig.FileName, err)
+	}
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(content), &config); err != nil {
+		t.Fatalf("parse %s: %v", vercelconfig.FileName, err)
+	}
+	if !vercelconfig.DeploymentDisabled(config) {
+		t.Fatalf("expected %s to disable %s, got %s", vercelconfig.FileName, vercelconfig.BranchPattern, content)
+	}
+}
+
+func TestWriteCommitted_MergesVercelConfigOnMetadataBranch(t *testing.T) {
+	vercelconfig.ResetSettingsCache()
+	t.Cleanup(vercelconfig.ResetSettingsCache)
+
+	repo, _ := setupBranchTestRepo(t)
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("repo.Worktree() error = %v", err)
+	}
+	repoRoot := worktree.Filesystem.Root()
+	t.Chdir(repoRoot)
+
+	entireDir := filepath.Join(repoRoot, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{"enabled":true,"vercel":true}`), 0o644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	initialConfig := []byte(`{
+  "cleanUrls": true,
+  "git": {
+    "deploymentEnabled": {
+      "main": true
+    }
+  }
+}
+`)
+	blobHash, err := CreateBlobFromContent(repo, initialConfig)
+	if err != nil {
+		t.Fatalf("CreateBlobFromContent() error = %v", err)
+	}
+	treeHash, err := BuildTreeFromEntries(context.Background(), repo, map[string]object.TreeEntry{
+		vercelconfig.FileName: {Name: vercelconfig.FileName, Mode: filemode.Regular, Hash: blobHash},
+	})
+	if err != nil {
+		t.Fatalf("BuildTreeFromEntries() error = %v", err)
+	}
+
+	store := NewGitStore(repo)
+	commitHash, err := store.createCommit(treeHash, plumbing.ZeroHash, "Initialize metadata branch", "Test", "test@test.com")
+	if err != nil {
+		t.Fatalf("createCommit() error = %v", err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), commitHash)); err != nil {
+		t.Fatalf("set metadata branch ref: %v", err)
+	}
+
+	cpID := id.MustCheckpointID("abcdef123456")
+	err = store.WriteCommitted(context.Background(), WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "test-session-id",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"test": true}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("metadata branch ref: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("metadata commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("metadata tree: %v", err)
+	}
+	file, err := tree.File(vercelconfig.FileName)
+	if err != nil {
+		t.Fatalf("expected %s on metadata branch: %v", vercelconfig.FileName, err)
+	}
+	content, err := file.Contents()
+	if err != nil {
+		t.Fatalf("read %s: %v", vercelconfig.FileName, err)
+	}
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(content), &config); err != nil {
+		t.Fatalf("parse %s: %v", vercelconfig.FileName, err)
+	}
+	if config["cleanUrls"] != true {
+		t.Fatalf("expected cleanUrls to be preserved, got %#v", config["cleanUrls"])
+	}
+	gitConfig, ok := config["git"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected git object, got %#v", config["git"])
+	}
+	deploymentEnabled, ok := gitConfig["deploymentEnabled"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected deploymentEnabled object, got %#v", gitConfig["deploymentEnabled"])
+	}
+	if deploymentEnabled["main"] != true {
+		t.Fatalf("expected main rule to be preserved, got %#v", deploymentEnabled["main"])
+	}
+	if deploymentEnabled[vercelconfig.BranchPattern] != false {
+		t.Fatalf("expected %s to be disabled, got %#v", vercelconfig.BranchPattern, deploymentEnabled[vercelconfig.BranchPattern])
+	}
 }
 
 // verifyBranchInMetadata reads and verifies the branch field in metadata.json.

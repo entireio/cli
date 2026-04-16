@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -417,7 +418,7 @@ func promptAmendCommit(ctx context.Context, w io.Writer, headCommit *object.Comm
 
 	amend := true
 	if !force {
-		if !canPromptInteractively() {
+		if !interactive.CanPromptInteractively() {
 			// Non-interactive: can't prompt, print trailer for manual use.
 			fmt.Fprintf(w, "\nCopy to your commit message to attach:\n\n  Entire-Checkpoint: %s\n", checkpointIDStr)
 			return nil

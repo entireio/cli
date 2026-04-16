@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/redact"
 	"github.com/stretchr/testify/require"
@@ -1050,4 +1051,37 @@ func mustMarshal(t *testing.T, v interface{}) json.RawMessage {
 		t.Fatalf("failed to marshal: %v", err)
 	}
 	return data
+}
+
+func TestResolveModel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		provider string
+		model    string
+		want     string
+	}{
+		{
+			name:     "claude code with empty model defaults to DefaultModel",
+			provider: string(agent.AgentNameClaudeCode),
+			model:    "",
+			want:     DefaultModel,
+		},
+		{
+			name:     "other provider passes model through unchanged",
+			provider: "codex",
+			model:    "gpt-5",
+			want:     "gpt-5",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := ResolveModel(types.AgentName(tt.provider), tt.model)
+			if got != tt.want {
+				t.Errorf("ResolveModel(%q, %q) = %q, want %q", tt.provider, tt.model, got, tt.want)
+			}
+		})
+	}
 }

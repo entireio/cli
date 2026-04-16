@@ -96,16 +96,7 @@ func (g *ClaudeGenerator) Generate(ctx context.Context, input Input) (*checkpoin
 		return nil, fmt.Errorf("failed to generate summary text: %w", err)
 	}
 
-	// Try to extract JSON if it's wrapped in markdown code blocks
-	resultJSON = extractJSONFromMarkdown(resultJSON)
-
-	// Parse the summary from the result
-	var summary checkpoint.Summary
-	if err := json.Unmarshal([]byte(resultJSON), &summary); err != nil {
-		return nil, fmt.Errorf("failed to parse summary JSON: %w (response: %s)", err, resultJSON)
-	}
-
-	return &summary, nil
+	return parseSummaryText(resultJSON)
 }
 
 // buildSummarizationPrompt creates the prompt for the Claude CLI.
@@ -113,8 +104,27 @@ func buildSummarizationPrompt(transcriptText string) string {
 	return fmt.Sprintf(summarizationPromptTemplate, transcriptText)
 }
 
-// stripGitEnv returns a copy of env with all GIT_* variables removed.
-// This prevents a subprocess from discovering or modifying the parent's git repo.
+func parseSummaryText(result string) (*checkpoint.Summary, error) {
+	resultJSON := extractJSONFromMarkdown(result)
+
+	var summary checkpoint.Summary
+	if err := json.Unmarshal([]byte(resultJSON), &summary); err != nil {
+		start := strings.Index(resultJSON, "{")
+		end := strings.LastIndex(resultJSON, "}")
+		if start >= 0 && end > start {
+			candidate := resultJSON[start : end+1]
+			if candidate != resultJSON {
+				if retryErr := json.Unmarshal([]byte(candidate), &summary); retryErr == nil {
+					return &summary, nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("failed to parse summary JSON: %w (response: %s)", err, resultJSON)
+	}
+
+	return &summary, nil
+}
+
 // extractJSONFromMarkdown attempts to extract JSON from markdown code blocks.
 // If the input is not wrapped in code blocks, it returns the input unchanged.
 func extractJSONFromMarkdown(s string) string {

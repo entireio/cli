@@ -367,77 +367,53 @@ func ResolveCheckpointRemoteURL(ctx context.Context) (string, bool, error) {
 // where the local branch may be stale).
 func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
 	branchName := paths.MetadataBranchName
+	tmpRef := FetchTmpRefPrefix + branchName
+	srcRef := "refs/heads/" + branchName
 
-	fetchCtx, cancel := context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
-	defer cancel()
-
-	tmpRef := "refs/entire-fetch-tmp/" + branchName
-	refSpec := fmt.Sprintf("+refs/heads/%s:%s", branchName, tmpRef)
-	fetchArgs := AppendFetchFilterArgs(fetchCtx, []string{"fetch", "--no-tags", remoteURL, refSpec})
-	fetchCmd := CheckpointGitCommand(fetchCtx, remoteURL, fetchArgs...)
-	// Merge GIT_TERMINAL_PROMPT=0 into whatever env CheckpointGitCommand set.
-	// If the token was injected, cmd.Env is already populated; otherwise use os.Environ().
-	if fetchCmd.Env == nil {
-		fetchCmd.Env = os.Environ()
+	if err := fetchURLIntoTmpRef(ctx, remoteURL, srcRef, tmpRef, "metadata branch"); err != nil {
+		return err
 	}
-	fetchCmd.Env = append(fetchCmd.Env, "GIT_TERMINAL_PROMPT=0")
-	output, fetchErr := fetchCmd.CombinedOutput()
-	if fetchErr != nil {
-		// Include redacted output for diagnostics without leaking credentials.
-		// Git stderr may echo the URL with embedded credentials, so replace it.
-		redactedURL := RedactURL(remoteURL)
-		msg := strings.TrimSpace(strings.ReplaceAll(string(output), remoteURL, redactedURL))
-		if msg != "" {
-			return fmt.Errorf("fetch from %s failed: %s: %w", redactedURL, msg, fetchErr)
-		}
-		return fmt.Errorf("fetch from %s failed: %w", redactedURL, fetchErr)
-	}
-
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-
-	fetchedRef, err := repo.Reference(plumbing.ReferenceName(tmpRef), true)
-	if err != nil {
-		return fmt.Errorf("branch not found after fetch: %w", err)
-	}
-
-	branchRef := plumbing.NewBranchReferenceName(branchName)
-	newRef := plumbing.NewHashReference(branchRef, fetchedRef.Hash())
-	if err := repo.Storer.SetReference(newRef); err != nil {
-		return fmt.Errorf("failed to create local branch from fetched ref: %w", err)
-	}
-
-	_ = repo.Storer.RemoveReference(plumbing.ReferenceName(tmpRef)) //nolint:errcheck // cleanup is best-effort
-
-	return nil
+	return PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), plumbing.NewBranchReferenceName(branchName), branchName)
 }
 
-// FetchV2MainFromURL fetches the v2 /main ref from a remote URL and updates the local ref.
+// FetchV2MainFromURL fetches the v2 /main ref from a remote URL and advances
+// the local ref only when doing so cannot rewind locally-ahead commits.
 // Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
 func FetchV2MainFromURL(ctx context.Context, remoteURL string) error {
+	if err := fetchURLIntoTmpRef(ctx, remoteURL, paths.V2MainRefName, V2MainFetchTmpRef, "v2 /main"); err != nil {
+		return err
+	}
+	return PromoteTmpRefSafely(ctx, V2MainFetchTmpRef, paths.V2MainRefName, "v2 /main")
+}
+
+// fetchURLIntoTmpRef runs `git fetch <remoteURL> +<srcRef>:<tmpRef>` via the
+// checkpoint git wrapper, disabling the terminal prompt so a misconfigured
+// credential helper doesn't hang the process. Errors include the redacted URL
+// and any captured stderr so operators can diagnose without credentials
+// leaking into logs.
+func fetchURLIntoTmpRef(ctx context.Context, remoteURL, srcRef, tmpRef, label string) error {
 	fetchCtx, cancel := context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
 	defer cancel()
 
-	refSpec := fmt.Sprintf("+%s:%s", paths.V2MainRefName, paths.V2MainRefName)
+	refSpec := fmt.Sprintf("+%s:%s", srcRef, tmpRef)
 	fetchArgs := AppendFetchFilterArgs(fetchCtx, []string{"fetch", "--no-tags", remoteURL, refSpec})
 	fetchCmd := CheckpointGitCommand(fetchCtx, remoteURL, fetchArgs...)
 	if fetchCmd.Env == nil {
 		fetchCmd.Env = os.Environ()
 	}
 	fetchCmd.Env = append(fetchCmd.Env, "GIT_TERMINAL_PROMPT=0")
+
 	output, fetchErr := fetchCmd.CombinedOutput()
-	if fetchErr != nil {
-		redactedURL := RedactURL(remoteURL)
-		msg := strings.TrimSpace(strings.ReplaceAll(string(output), remoteURL, redactedURL))
-		if msg != "" {
-			return fmt.Errorf("fetch v2 /main from %s failed: %s: %w", redactedURL, msg, fetchErr)
-		}
-		return fmt.Errorf("fetch v2 /main from %s failed: %w", redactedURL, fetchErr)
+	if fetchErr == nil {
+		return nil
 	}
 
-	return nil
+	redactedURL := RedactURL(remoteURL)
+	msg := strings.TrimSpace(strings.ReplaceAll(string(output), remoteURL, redactedURL))
+	if msg != "" {
+		return fmt.Errorf("fetch %s from %s failed: %s: %w", label, redactedURL, msg, fetchErr)
+	}
+	return fmt.Errorf("fetch %s from %s failed: %w", label, redactedURL, fetchErr)
 }
 
 // fetchMetadataBranchIfMissing fetches the metadata branch from a URL only if it doesn't exist locally.

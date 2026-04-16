@@ -373,11 +373,11 @@ func TestSessionStart_InformationalMessage(t *testing.T) {
 	t.Logf("Session start message:\n%s", msg)
 
 	// Verify base informational message is present
-	if !strings.Contains(msg, "Powered by Entire") {
-		t.Errorf("Message should contain 'Powered by Entire', got:\n%s", msg)
+	if !strings.Contains(msg, "Entire CLI") {
+		t.Errorf("Message should contain 'Entire CLI', got:\n%s", msg)
 	}
-	if !strings.Contains(msg, "linked to your next commit") {
-		t.Errorf("Message should contain 'linked to your next commit', got:\n%s", msg)
+	if !strings.Contains(msg, "link this conversation to your next commit") {
+		t.Errorf("Message should contain 'link this conversation to your next commit', got:\n%s", msg)
 	}
 
 	// Verify concurrent session count is shown
@@ -448,11 +448,11 @@ func TestSessionStart_InformationalMessageNoConcurrentSessions(t *testing.T) {
 	t.Logf("Session start message:\n%s", msg)
 
 	// Verify base informational message is present
-	if !strings.Contains(msg, "Powered by Entire") {
-		t.Errorf("Message should contain 'Powered by Entire', got:\n%s", msg)
+	if !strings.Contains(msg, "Entire CLI") {
+		t.Errorf("Message should contain 'Entire CLI', got:\n%s", msg)
 	}
-	if !strings.Contains(msg, "linked to your next commit") {
-		t.Errorf("Message should contain 'linked to your next commit', got:\n%s", msg)
+	if !strings.Contains(msg, "link this conversation to your next commit") {
+		t.Errorf("Message should contain 'link this conversation to your next commit', got:\n%s", msg)
 	}
 
 	// Verify concurrent session info is NOT shown (no other sessions)

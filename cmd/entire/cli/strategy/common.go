@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
@@ -69,6 +70,9 @@ func EnsureSetup(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
 	}
+	if err := vercelconfig.InitSettings(ctx); err != nil {
+		return fmt.Errorf("failed to initialize vercel settings: %w", err)
+	}
 	if err := EnsureMetadataBranch(repo); err != nil {
 		return fmt.Errorf("failed to ensure metadata branch: %w", err)
 	}
@@ -79,6 +83,71 @@ func EnsureSetup(ctx context.Context) error {
 		if _, err := InstallGitHook(ctx, true, localDev, absoluteHookPath); err != nil {
 			return fmt.Errorf("failed to install git hooks: %w", err)
 		}
+	}
+	return nil
+}
+
+// FetchTmpRefPrefix is the namespace for temporary refs used by fetch helpers
+// to land a fetched hash before safely promoting it to a final ref (via
+// PromoteTmpRefSafely). Prefer using the named constants below when possible.
+const FetchTmpRefPrefix = "refs/entire-fetch-tmp/"
+
+// V2MainFetchTmpRef is the staging ref for fetches that target V2MainRefName.
+// Shared between the cli package's origin-based fetches and the strategy
+// package's checkpoint_remote URL-based fetch — those code paths never run
+// concurrently (they are sequenced in explain and resume), so reusing one
+// staging ref is safe and avoids divergent conventions.
+const V2MainFetchTmpRef = FetchTmpRefPrefix + "v2-main"
+
+// PromoteTmpRefSafely reads tmpRefName (the ref a fetch just landed into),
+// advances destRefName to its hash via SafelyAdvanceLocalRef, then removes
+// the tmp ref. The cleanup is deferred so the tmp ref is reaped even when
+// the advance fails.
+//
+// label is a short human-readable name used in error messages (e.g.
+// "v2 /main", "entire/checkpoints/v1"). Typical use:
+//
+//	// fetch with refspec "+<src>:<V2MainFetchTmpRef>"
+//	return PromoteTmpRefSafely(ctx, V2MainFetchTmpRef, paths.V2MainRefName, "v2 /main")
+func PromoteTmpRefSafely(ctx context.Context, tmpRefName, destRefName plumbing.ReferenceName, label string) error {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open repository for %s promote: %w", label, err)
+	}
+	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
+
+	tmpRef, err := repo.Reference(tmpRefName, true)
+	if err != nil {
+		return fmt.Errorf("%s not found after fetch (tmp ref %s missing): %w", label, tmpRefName, err)
+	}
+	if err := SafelyAdvanceLocalRef(ctx, repo, destRefName, tmpRef.Hash()); err != nil {
+		return fmt.Errorf("failed to advance local %s: %w", label, err)
+	}
+	return nil
+}
+
+// SafelyAdvanceLocalRef updates localRefName to point at targetHash, except
+// when the existing local ref is already at or ahead of targetHash. In that
+// case it leaves the local ref unchanged to avoid rewinding locally-ahead
+// work. Otherwise (local missing, behind, or diverged) it updates the ref to
+// targetHash.
+//
+// The ancestry check walks from the local ref (which has full history), so
+// callers that fetched with --depth=1 do not break the check.
+func SafelyAdvanceLocalRef(ctx context.Context, repo *git.Repository, localRefName plumbing.ReferenceName, targetHash plumbing.Hash) error {
+	currentLocal, localErr := repo.Reference(localRefName, true)
+	if localErr == nil {
+		if currentLocal.Hash() == targetHash {
+			return nil
+		}
+		if IsAncestorOf(ctx, repo, targetHash, currentLocal.Hash()) {
+			return nil
+		}
+	}
+
+	newRef := plumbing.NewHashReference(localRefName, targetHash)
+	if err := repo.Storer.SetReference(newRef); err != nil {
+		return fmt.Errorf("failed to update local ref %s: %w", localRefName, err)
 	}
 	return nil
 }
@@ -399,6 +468,10 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 	emptyTreeHash, err := repo.Storer.SetEncodedObject(obj)
 	if err != nil {
 		return fmt.Errorf("failed to store empty tree: %w", err)
+	}
+	emptyTreeHash, err = vercelconfig.MaybeMergeMetadataBranchConfig(repo, emptyTreeHash)
+	if err != nil {
+		return fmt.Errorf("failed to initialize metadata branch vercel config: %w", err)
 	}
 
 	// Create orphan commit (no parent)

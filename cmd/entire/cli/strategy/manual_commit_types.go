@@ -56,6 +56,7 @@ type CondenseResult struct {
 	TotalTranscriptLines   int      // Total transcript units after this condensation (JSONL line count or message count by agent format)
 	CompactTranscriptLines int      // New compact transcript lines added by this checkpoint (0 if v2 disabled); used to advance CompactTranscriptStart
 	Transcript             []byte   // Raw transcript bytes for downstream consumers (trail title generation)
+	Skipped                bool     // True if condensation was skipped (no transcript or files to condense)
 }
 
 // ExtractedSessionData contains data extracted from a shadow branch.

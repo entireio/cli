@@ -11,7 +11,7 @@ require (
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/go-git/go-git/v6 v6.0.0-alpha.1
 	github.com/google/uuid v1.6.0
-	github.com/posthog/posthog-go v1.11.2
+	github.com/posthog/posthog-go v1.11.3
 	github.com/sergi/go-diff v1.4.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10

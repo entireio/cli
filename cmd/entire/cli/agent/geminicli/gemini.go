@@ -27,7 +27,9 @@ func init() {
 // GeminiCLIAgent implements the Agent interface for Gemini CLI.
 //
 //nolint:revive // GeminiCLIAgent is clearer than Agent in this context
-type GeminiCLIAgent struct{}
+type GeminiCLIAgent struct {
+	CommandRunner agent.TextCommandRunner
+}
 
 func NewGeminiCLIAgent() agent.Agent {
 	return &GeminiCLIAgent{}

@@ -29,7 +29,9 @@ func init() {
 // CursorAgent implements the Agent interface for Cursor.
 //
 //nolint:revive // CursorAgent is clearer than Agent in this context
-type CursorAgent struct{}
+type CursorAgent struct {
+	CommandRunner agent.TextCommandRunner
+}
 
 // NewCursorAgent creates a new Cursor agent instance.
 func NewCursorAgent() agent.Agent {

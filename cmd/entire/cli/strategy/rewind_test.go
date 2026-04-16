@@ -1,10 +1,12 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,6 +267,27 @@ func TestResolveAgentForRewind(t *testing.T) {
 			t.Errorf("Name() = %q, want %q", ag.Name(), testName)
 		}
 	})
+}
+
+func TestPromptOverwriteNewerLogs_NonInteractiveRequiresForce(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+
+	var errW bytes.Buffer
+	_, err := PromptOverwriteNewerLogs(&errW, []SessionRestoreInfo{
+		{
+			SessionID:      "test-session",
+			Status:         StatusLocalNewer,
+			LocalTime:      time.Now(),
+			CheckpointTime: time.Now().Add(-time.Minute),
+			Prompt:         "test prompt",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected non-interactive prompt error")
+	}
+	if !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("expected error to mention --force, got %v", err)
+	}
 }
 
 // TestShadowStrategy_Rewind_FromSubdirectory verifies that Rewind() writes files

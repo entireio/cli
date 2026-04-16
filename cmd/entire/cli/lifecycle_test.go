@@ -195,8 +195,8 @@ func TestHandleLifecycleSessionStart_EmptyRepoWarning(t *testing.T) {
 	err := handleLifecycleSessionStart(context.Background(), ag, event)
 	require.NoError(t, err)
 
-	if !strings.Contains(ag.lastMessage, "No commits yet") {
-		t.Errorf("expected message containing 'No commits yet', got: %q", ag.lastMessage)
+	if !strings.Contains(ag.lastMessage, "no commits yet") {
+		t.Errorf("expected message containing 'no commits yet', got: %q", ag.lastMessage)
 	}
 }
 
@@ -220,16 +220,16 @@ func TestHandleLifecycleSessionStart_DefaultMessageWithCommits(t *testing.T) {
 	err := handleLifecycleSessionStart(context.Background(), ag, event)
 	require.NoError(t, err)
 
-	if !strings.Contains(ag.lastMessage, "linked to your next commit") {
-		t.Errorf("expected message containing 'linked to your next commit', got: %q", ag.lastMessage)
+	if !strings.Contains(ag.lastMessage, "link this conversation to your next commit") {
+		t.Errorf("expected message containing 'link this conversation to your next commit', got: %q", ag.lastMessage)
 	}
-	if strings.Contains(ag.lastMessage, "No commits yet") {
+	if strings.Contains(ag.lastMessage, "no commits yet") {
 		t.Errorf("did not expect empty-repo warning, got: %q", ag.lastMessage)
 	}
-	if !strings.HasPrefix(ag.lastMessage, "\n\nPowered by Entire:\n  ") {
+	if !strings.HasPrefix(ag.lastMessage, "\n\nEntire CLI ") {
 		t.Errorf("expected multiline session-start banner, got %q", ag.lastMessage)
 	}
-	if strings.Contains(ag.lastMessage, "Powered by Entire: This conversation") {
+	if !strings.Contains(ag.lastMessage, "\n\n") {
 		t.Errorf("expected default agent banner to remain multiline, got %q", ag.lastMessage)
 	}
 }
@@ -238,7 +238,7 @@ func TestSessionStartMessage_CodexUsesSingleLineBanner(t *testing.T) {
 	t.Parallel()
 
 	msg := sessionStartMessage(agent.AgentNameCodex, false)
-	require.Equal(t, "Powered by Entire: This conversation will be linked to your next commit.", msg)
+	require.Equal(t, "Entire CLI will link this conversation to your next commit.", msg)
 	if strings.Contains(msg, "\n") {
 		t.Fatalf("expected single-line Codex message, got %q", msg)
 	}
@@ -248,7 +248,7 @@ func TestSessionStartMessage_CodexUsesSingleLineBannerForEmptyRepo(t *testing.T)
 	t.Parallel()
 
 	msg := sessionStartMessage(agent.AgentNameCodex, true)
-	require.Equal(t, "Powered by Entire: No commits yet — checkpoints will activate after your first commit.", msg)
+	require.Equal(t, "Entire CLI found no commits yet — checkpoints will activate after your first commit.", msg)
 	if strings.Contains(msg, "\n") {
 		t.Fatalf("expected single-line Codex empty-repo message, got %q", msg)
 	}

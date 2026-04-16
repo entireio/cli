@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
@@ -99,6 +100,10 @@ func (s *GitStore) WriteCommitted(ctx context.Context, opts WriteCommittedOption
 
 	// Build checkpoint subtree and splice into root (O(depth) tree surgery)
 	newTreeHash, err := s.spliceCheckpointSubtree(ctx, rootTreeHash, opts.CheckpointID, basePath, entries)
+	if err != nil {
+		return err
+	}
+	newTreeHash, err = s.maybeMergeVercelConfig(ctx, newTreeHash)
 	if err != nil {
 		return err
 	}
@@ -345,11 +350,14 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 	}
 
 	// Write transcript
-	if err := s.writeTranscript(ctx, opts, sessionPath, entries); err != nil {
+	wroteTranscript, err := s.writeTranscript(ctx, opts, sessionPath, entries)
+	if err != nil {
 		return filePaths, err
 	}
-	filePaths.Transcript = "/" + sessionPath + paths.TranscriptFileName
-	filePaths.ContentHash = "/" + sessionPath + paths.ContentHashFileName
+	if wroteTranscript {
+		filePaths.Transcript = "/" + sessionPath + paths.TranscriptFileName
+		filePaths.ContentHash = "/" + sessionPath + paths.ContentHashFileName
+	}
 
 	// Write prompts
 	if len(opts.Prompts) > 0 {
@@ -626,9 +634,9 @@ func aggregateTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
 	return result
 }
 
-// writeTranscript writes the transcript file from in-memory content or file path.
-// If the transcript exceeds MaxChunkSize, it's split into multiple chunk files.
-func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry) error {
+// writeTranscript writes the transcript and content hash to the checkpoint entries.
+// Returns (true, nil) if files were written, (false, nil) if transcript was empty.
+func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry) (bool, error) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	transcriptBytes := opts.Transcript.Bytes()
 
@@ -644,13 +652,13 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 		if len(rawData) > 0 {
 			redacted, redactErr := redact.JSONLBytes(rawData)
 			if redactErr != nil {
-				return fmt.Errorf("failed to redact transcript from file: %w", redactErr)
+				return false, fmt.Errorf("failed to redact transcript from file: %w", redactErr)
 			}
 			transcriptBytes = redacted.Bytes()
 		}
 	}
 	if len(transcriptBytes) == 0 {
-		return nil
+		return false, nil
 	}
 
 	if opts.Agent == agent.AgentTypeCodex {
@@ -664,7 +672,7 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 	if err != nil {
 		chunkTranscriptSpan.RecordError(err)
 		chunkTranscriptSpan.End()
-		return fmt.Errorf("failed to chunk transcript: %w", err)
+		return false, fmt.Errorf("failed to chunk transcript: %w", err)
 	}
 	chunkTranscriptSpan.End()
 	chunkDuration := time.Since(chunkStart)
@@ -678,7 +686,7 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 		if err != nil {
 			writeTranscriptBlobsSpan.RecordError(err)
 			writeTranscriptBlobsSpan.End()
-			return err
+			return false, err
 		}
 		entries[chunkPath] = object.TreeEntry{
 			Name: chunkPath,
@@ -697,7 +705,7 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 	if err != nil {
 		contentHashSpan.RecordError(err)
 		contentHashSpan.End()
-		return err
+		return false, err
 	}
 	entries[basePath+paths.ContentHashFileName] = object.TreeEntry{
 		Name: basePath + paths.ContentHashFileName,
@@ -716,7 +724,7 @@ func (s *GitStore) writeTranscript(ctx context.Context, opts WriteCommittedOptio
 		slog.Int("transcript_bytes", len(transcriptBytes)),
 		slog.Int("chunk_count", len(chunks)),
 	)
-	return nil
+	return true, nil
 }
 
 // mergeFilesTouched combines two file lists, removing duplicates.
@@ -1334,6 +1342,10 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 	if err != nil {
 		return err
 	}
+	newTreeHash, err = s.maybeMergeVercelConfig(ctx, newTreeHash)
+	if err != nil {
+		return err
+	}
 
 	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 	commitMsg := fmt.Sprintf("Finalize transcript for Checkpoint: %s", opts.CheckpointID)
@@ -1411,6 +1423,10 @@ func (s *GitStore) ensureSessionsBranch(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	emptyTreeHash, err = s.maybeMergeVercelConfig(ctx, emptyTreeHash)
+	if err != nil {
+		return err
+	}
 
 	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 	commitHash, err := s.createCommit(emptyTreeHash, plumbing.ZeroHash, "Initialize sessions branch", authorName, authorEmail)
@@ -1423,6 +1439,17 @@ func (s *GitStore) ensureSessionsBranch(ctx context.Context) error {
 		return fmt.Errorf("failed to set branch reference: %w", err)
 	}
 	return nil
+}
+
+func (s *GitStore) maybeMergeVercelConfig(ctx context.Context, rootTreeHash plumbing.Hash) (plumbing.Hash, error) {
+	if err := vercelconfig.InitSettings(ctx); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("initialize vercel settings: %w", err)
+	}
+	mergedTreeHash, err := vercelconfig.MaybeMergeMetadataBranchConfig(s.repo, rootTreeHash)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("merge vercel metadata branch config: %w", err)
+	}
+	return mergedTreeHash, nil
 }
 
 // getFetchingTree returns a FetchingTree for the metadata branch.

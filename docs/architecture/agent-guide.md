@@ -505,7 +505,7 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 
 ### `HookResponseWriter`
 
-**What it enables:** Displaying messages to the user during hook execution (e.g., the "Powered by Entire" banner on session start).
+**What it enables:** Displaying messages to the user during hook execution (e.g., the "Entire CLI will link this conversation..." banner on session start).
 
 **Without it:** No message is shown to the user on session start. The framework silently skips the output.
 

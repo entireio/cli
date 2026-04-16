@@ -242,6 +242,39 @@ func runExplainCheckpoint(ctx context.Context, w, errW io.Writer, checkpointIDPr
 		}
 	}
 
+	// If not found locally, fetch metadata from remote and retry.
+	// This handles the case where we're looking at a checkpoint from another
+	// collaborator's PR whose metadata hasn't been fetched yet.
+	// Try origin first (fast treeless fetch, ~1-2s), then checkpoint_remote
+	// if configured and origin didn't have it. Fetch both v1 and v2 refs.
+	if len(matches) == 0 {
+		anyFetched := FetchMetadataTreeOnly(ctx) == nil
+		if !anyFetched {
+			anyFetched = FetchMetadataFromCheckpointRemote(ctx) == nil
+		}
+		if preferCheckpointsV2 {
+			v2Fetched := FetchV2MainTreeOnly(ctx) == nil
+			if !v2Fetched {
+				v2Fetched = FetchV2MetadataFromCheckpointRemote(ctx) == nil
+			}
+			anyFetched = anyFetched || v2Fetched
+		}
+		if anyFetched {
+			if freshRepo, repoErr := openRepository(ctx); repoErr == nil {
+				repo = freshRepo
+				v1Store = checkpoint.NewGitStore(repo)
+				v2Store = checkpoint.NewV2GitStore(repo, strategy.ResolveCheckpointURL(ctx, "origin"))
+				if freshCommitted, listErr := listCommittedForExplain(ctx, v1Store, v2Store, preferCheckpointsV2); listErr == nil {
+					for _, info := range freshCommitted {
+						if strings.HasPrefix(info.CheckpointID.String(), checkpointIDPrefix) {
+							matches = append(matches, info.CheckpointID)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	var fullCheckpointID id.CheckpointID
 	switch len(matches) {
 	case 0:
@@ -475,13 +508,18 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *
 		return fmt.Errorf("checkpoint %s has no transcript content for this checkpoint (scoped)", checkpointID)
 	}
 
+	provider, err := resolveCheckpointSummaryProvider(ctx, w)
+	if err != nil {
+		return fmt.Errorf("failed to resolve summary provider: %w", err)
+	}
+
 	// Generate summary using shared helper
 	logging.Info(ctx, "generating checkpoint summary")
 	if errW != nil {
 		fmt.Fprintln(errW, "Generating checkpoint summary...")
 	}
 
-	summary, err := generateCheckpointAISummary(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent)
+	summary, err := generateCheckpointAISummary(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent, provider.Generator)
 	if err != nil {
 		return fmt.Errorf("failed to generate summary: %w", err)
 	}
@@ -513,10 +551,11 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *
 	}
 
 	fmt.Fprintln(w, "✓ Summary generated and saved")
+	fmt.Fprint(w, formatSummaryProviderDetails(provider))
 	return nil
 }
 
-func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, filesTouched []string, agentType types.AgentType) (*checkpoint.Summary, error) {
+func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, filesTouched []string, agentType types.AgentType, generator summarize.Generator) (*checkpoint.Summary, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, checkpointSummaryTimeout)
 	timeoutDuration := checkpointSummaryTimeout
 	if deadline, ok := timeoutCtx.Deadline(); ok {
@@ -525,7 +564,7 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 	defer cancel()
 
 	// scopedTranscript is read from checkpoint storage, which redacts on write.
-	summary, err := generateTranscriptSummary(timeoutCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, nil)
+	summary, err := generateTranscriptSummary(timeoutCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(timeoutCtx.Err(), context.Canceled) {
 			return nil, fmt.Errorf("summary generation canceled: %w", context.Canceled)
@@ -765,9 +804,7 @@ func scopeTranscriptForCheckpoint(fullTranscript []byte, startOffset int, agentT
 			return nil
 		}
 		return scoped
-	case agent.AgentTypeCodex:
-		return transcript.SliceFromLine(fullTranscript, startOffset)
-	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
+	case agent.AgentTypeCodex, agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
 		return transcript.SliceFromLine(fullTranscript, startOffset)
 	}
 	return transcript.SliceFromLine(fullTranscript, startOffset)

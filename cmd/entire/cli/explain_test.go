@@ -130,7 +130,7 @@ func TestGenerateCheckpointAISummary_AddsDefaultTimeoutWithoutParentDeadline(t *
 	}
 
 	start := time.Now()
-	summary, err := generateCheckpointAISummary(context.Background(), []byte("transcript"), nil, agent.AgentTypeClaudeCode)
+	summary, err := generateCheckpointAISummary(context.Background(), []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil)
 	if err != nil {
 		t.Fatalf("generateCheckpointAISummary() error = %v", err)
 	}
@@ -172,7 +172,7 @@ func TestGenerateCheckpointAISummary_UsesParentDeadlineAndWrapsSentinel(t *testi
 		return nil, ctx.Err()
 	}
 
-	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode)
+	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil)
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -220,7 +220,7 @@ func TestGenerateCheckpointAISummary_ClampsLongParentDeadlineToDefaultTimeout(t 
 	}
 
 	start := time.Now()
-	summary, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode)
+	summary, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil)
 	if err != nil {
 		t.Fatalf("generateCheckpointAISummary() error = %v", err)
 	}
@@ -257,7 +257,7 @@ func TestGenerateCheckpointAISummary_UsesCancellationSentinel(t *testing.T) {
 		return nil, ctx.Err()
 	}
 
-	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode)
+	_, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil)
 	if err == nil {
 		t.Fatal("expected cancellation error")
 	}
@@ -1161,6 +1161,81 @@ func TestRunExplainCheckpoint_V2OnlyRawTranscript(t *testing.T) {
 	}
 }
 
+func TestRunExplainCheckpoint_V2CheckpointRemoteFallbackResolvesRawTranscript(t *testing.T) {
+	ctx := context.Background()
+
+	emptyConfig := filepath.Join(t.TempDir(), "empty-git-config")
+	require.NoError(t, os.WriteFile(emptyConfig, []byte(""), 0o644))
+	t.Setenv("GIT_CONFIG_GLOBAL", emptyConfig)
+	t.Setenv("GIT_CONFIG_SYSTEM", emptyConfig)
+
+	checkpointDir := t.TempDir()
+	testutil.InitRepo(t, checkpointDir)
+	testutil.WriteFile(t, checkpointDir, "checkpoint.txt", "checkpoint")
+	testutil.GitAdd(t, checkpointDir, "checkpoint.txt")
+	testutil.GitCommit(t, checkpointDir, "checkpoint init")
+
+	checkpointRepo, err := git.PlainOpen(checkpointDir)
+	require.NoError(t, err)
+
+	cpID := id.MustCheckpointID("121212121212")
+	rawTranscript := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"raw from checkpoint_remote"}]}}` + "\n")
+	checkpointStore := checkpoint.NewV2GitStore(checkpointRepo, "origin")
+	require.NoError(t, checkpointStore.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-checkpoint-remote",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted(rawTranscript),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}))
+
+	localDir := t.TempDir()
+	t.Chdir(localDir)
+
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "local.txt", "local")
+	testutil.GitAdd(t, localDir, "local.txt")
+	testutil.GitCommit(t, localDir, "local init")
+
+	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", "git@github.com:user/source.git")
+	cmd.Dir = localDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	sshScript := filepath.Join(t.TempDir(), "fake-ssh")
+	require.NoError(t, os.WriteFile(sshScript, []byte(`#!/bin/bash
+set -euo pipefail
+cmd="${@: -1}"
+case "$cmd" in
+  *"user/source.git"*)
+    echo "origin intentionally unavailable" >&2
+    exit 1
+    ;;
+  *"org/checkpoints.git"*) repo="$CHECKPOINT_REPO" ;;
+  *)
+    echo "unexpected ssh command: $cmd" >&2
+    exit 1
+    ;;
+esac
+exec git-upload-pack "$repo"
+`), 0o755))
+	t.Setenv("GIT_SSH", sshScript)
+	t.Setenv("CHECKPOINT_REPO", checkpointDir)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(localDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true, "checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+
+	var buf, errBuf bytes.Buffer
+	err = runExplainCheckpoint(ctx, &buf, &errBuf, "121212", false, false, false, true, false, false, false)
+	require.NoError(t, err)
+	require.Contains(t, buf.String(), "raw from checkpoint_remote")
+}
+
 func TestRunExplainCheckpoint_V2UsesCompactTranscriptForIntent(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -1234,6 +1309,7 @@ func TestRunExplainCheckpoint_V2UsesCompactTranscriptForIntent(t *testing.T) {
 func TestRunExplainCheckpoint_V2PreferredGenerateWritesBothStores(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv("ENTIRE_TEST_TTY", "0") // prevent interactive summary provider prompt
 
 	testutil.InitRepo(t, tmpDir)
 	repo, err := git.PlainOpen(tmpDir)
@@ -1295,6 +1371,7 @@ func TestRunExplainCheckpoint_V2PreferredGenerateWritesBothStores(t *testing.T) 
 func TestRunExplainCheckpoint_V2OnlyGenerateSucceedsViaV2Store(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv("ENTIRE_TEST_TTY", "0") // prevent interactive summary provider prompt
 
 	testutil.InitRepo(t, tmpDir)
 	repo, err := git.PlainOpen(tmpDir)
@@ -1406,6 +1483,7 @@ func TestRunExplainCheckpoint_V2FallsBackToFullWhenCompactMissing(t *testing.T) 
 func TestRunExplainCheckpoint_V2CompactTranscriptNotUsedForGenerate(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	t.Setenv("ENTIRE_TEST_TTY", "0") // prevent interactive summary provider prompt
 
 	testutil.InitRepo(t, tmpDir)
 	repo, err := git.PlainOpen(tmpDir)

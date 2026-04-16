@@ -21,7 +21,9 @@ func init() {
 // CopilotCLIAgent implements the Agent interface for GitHub Copilot CLI.
 //
 //nolint:revive // CopilotCLIAgent is clearer than Agent in this context
-type CopilotCLIAgent struct{}
+type CopilotCLIAgent struct {
+	CommandRunner agent.TextCommandRunner
+}
 
 // NewCopilotCLIAgent creates a new Copilot CLI agent instance.
 func NewCopilotCLIAgent() agent.Agent {

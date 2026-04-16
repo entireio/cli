@@ -153,14 +153,38 @@ The `TranscriptAnalyzer` interface is implemented for Copilot CLI, providing:
 
 ## CLI Flags
 
-- Non-interactive prompt: `copilot -p "prompt" --allow-all-tools`
+- Non-interactive prompt (documented): `copilot -p "prompt" --allow-all-tools`
 - Interactive with initial prompt: `copilot -i "prompt"`
 - Interactive mode: `copilot`
 - Resume most recent: `copilot --continue`
 - Resume specific: `copilot --resume <sessionId>`
 - Autopilot (no confirmations): `copilot --autopilot`
 - Config directory: `--config-dir <dir>` (default: `~/.copilot`)
+- Disable built-in MCP servers: `--disable-builtin-mcps` (skips GitHub MCP loading, ~28% fewer input tokens per call)
 - Relevant env vars: `COPILOT_ALLOW_ALL` (equivalent to `--allow-all-tools`)
+
+### Summary Text Generation Invocation
+
+For `explain --generate` and auto-summarize, Entire invokes Copilot via stdin
+rather than the documented `-p "prompt"` form:
+
+```
+copilot --allow-all-tools --disable-builtin-mcps   # prompt piped to stdin
+```
+
+This matches the pattern used by every other summary-capable agent in the
+repo (Claude, Codex, Gemini, Cursor), which all converge on one transport
+through the shared `agent.RunIsolatedTextGeneratorCLI` helper. It also
+sidesteps the OS `ARG_MAX` limit on long transcripts — and while Copilot's
+`--help` does not explicitly document stdin input, Copilot's own error
+output does (`"provide a prompt with -p or via standard in."`), and end-to-end
+summary generation has been verified against the installed CLI.
+
+If a future Copilot release changes this, the error surface is clear — the
+generator helper returns either "CLI returned empty output" or a non-zero
+exit with stderr. At that point reverting to `-p <prompt>` with a prompt-size
+cap is the obvious fallback. See `cmd/entire/cli/agent/copilotcli/generate.go`
+for the implementation.
 
 ## Presence Detection
 

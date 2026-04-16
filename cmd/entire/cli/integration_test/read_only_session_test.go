@@ -574,3 +574,209 @@ func TestAllReadOnlySessions_NoCheckpointCreated(t *testing.T) {
 			roState.StepCount, roStateAfter.StepCount)
 	}
 }
+
+// TestEmptySession_NoTranscriptPath_NotCondensed verifies that a session with
+// no transcript path and no files (e.g., a Codex companion that never provided
+// transcript_path) is not condensed into the checkpoint, even though committed
+// files exist from another session.
+//
+// Regression test for checkpoint 12a9a7e2ffbe: filterFilesTouched's fallback
+// assigned all committed files to sessions with empty FilesTouched, which
+// defeated the skip gate that should have caught the empty session.
+func TestEmptySession_NoTranscriptPath_NotCondensed(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+
+	// ========================================
+	// Phase 1: Start an empty session (no transcript, simulates Codex companion)
+	// ========================================
+	t.Log("Phase 1: Start empty session with no transcript path")
+
+	emptySess := env.NewSession()
+
+	// UserPromptSubmit with no transcript path (Codex companion pattern)
+	if err := env.SimulateUserPromptSubmit(emptySess.ID); err != nil {
+		t.Fatalf("empty session user-prompt-submit failed: %v", err)
+	}
+
+	// End the session (Codex companion exits without a full Stop lifecycle)
+	if err := env.SimulateSessionEnd(emptySess.ID); err != nil {
+		t.Fatalf("empty session session-end failed: %v", err)
+	}
+
+	// Verify: session is ENDED with no transcript path and no files
+	emptyState, err := env.GetSessionState(emptySess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState for empty session failed: %v", err)
+	}
+	if emptyState.Phase != session.PhaseEnded {
+		t.Fatalf("Empty session should be ENDED, got %s", emptyState.Phase)
+	}
+	if emptyState.TranscriptPath != "" {
+		t.Fatalf("Empty session should have no transcript path, got %q", emptyState.TranscriptPath)
+	}
+	if len(emptyState.FilesTouched) != 0 {
+		t.Fatalf("Empty session should have empty FilesTouched, got %v", emptyState.FilesTouched)
+	}
+
+	// ========================================
+	// Phase 2: Create a normal coding session that touches files
+	// ========================================
+	t.Log("Phase 2: Create coding session with file changes")
+
+	codingSess := env.NewSession()
+
+	if err := env.SimulateUserPromptSubmit(codingSess.ID); err != nil {
+		t.Fatalf("coding session user-prompt-submit failed: %v", err)
+	}
+
+	env.WriteFile("feature.go", "package main\n\nfunc Feature() {}\n")
+	codingSess.CreateTranscript("Create feature function", []FileChange{
+		{Path: "feature.go", Content: "package main\n\nfunc Feature() {}\n"},
+	})
+
+	if err := env.SimulateStop(codingSess.ID, codingSess.TranscriptPath); err != nil {
+		t.Fatalf("coding session stop failed: %v", err)
+	}
+
+	// ========================================
+	// Phase 3: User commits — only the coding session should be condensed
+	// ========================================
+	t.Log("Phase 3: User commits; empty session should NOT be condensed")
+
+	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+
+	commitHash := env.GetHeadHash()
+	cpID := env.GetCheckpointIDFromCommitMessage(commitHash)
+	if cpID == "" {
+		t.Fatal("Commit should have an Entire-Checkpoint trailer")
+	}
+
+	// ========================================
+	// Phase 4: Verify empty session was NOT included in the checkpoint
+	// ========================================
+	t.Log("Phase 4: Verify checkpoint contains only the coding session")
+
+	summaryPath := CheckpointSummaryPath(cpID)
+	summaryContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, summaryPath)
+	if !found {
+		t.Fatalf("CheckpointSummary not found at %s", summaryPath)
+	}
+
+	var summary checkpoint.CheckpointSummary
+	if err := json.Unmarshal([]byte(summaryContent), &summary); err != nil {
+		t.Fatalf("Failed to parse CheckpointSummary: %v", err)
+	}
+
+	if len(summary.Sessions) != 1 {
+		t.Errorf("Checkpoint should contain exactly 1 session (the coding session), got %d sessions", len(summary.Sessions))
+		for i, s := range summary.Sessions {
+			t.Logf("  Session %d: %s", i, s.Metadata)
+		}
+	}
+
+	env.AssertCheckpointContainsSession(t, summary, codingSess.ID)
+	env.AssertCheckpointExcludesSession(t, summary, emptySess.ID)
+
+	// The empty session should NOT have been condensed
+	emptyStateAfter, err := env.GetSessionState(emptySess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState for empty session after commit failed: %v", err)
+	}
+	if emptyStateAfter.LastCheckpointID != emptyState.LastCheckpointID {
+		t.Errorf("Empty session LastCheckpointID changed from %q to %q — it was incorrectly condensed",
+			emptyState.LastCheckpointID, emptyStateAfter.LastCheckpointID)
+	}
+}
+
+// TestEmptySession_ActiveDuringCommit_NotCondensed verifies that an ACTIVE session
+// with no transcript path (Codex companion still running) is not condensed when
+// a commit happens alongside another session that does have content.
+func TestEmptySession_ActiveDuringCommit_NotCondensed(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+
+	// ========================================
+	// Phase 1: Create a coding session with file changes, then stop it
+	// ========================================
+	t.Log("Phase 1: Create coding session with file changes")
+
+	codingSess := env.NewSession()
+
+	if err := env.SimulateUserPromptSubmit(codingSess.ID); err != nil {
+		t.Fatalf("coding session user-prompt-submit failed: %v", err)
+	}
+
+	env.WriteFile("feature.go", "package main\n\nfunc Feature() {}\n")
+	codingSess.CreateTranscript("Create feature function", []FileChange{
+		{Path: "feature.go", Content: "package main\n\nfunc Feature() {}\n"},
+	})
+
+	if err := env.SimulateStop(codingSess.ID, codingSess.TranscriptPath); err != nil {
+		t.Fatalf("coding session stop failed: %v", err)
+	}
+
+	// ========================================
+	// Phase 2: Start an empty session and leave it ACTIVE (no Stop)
+	// ========================================
+	t.Log("Phase 2: Start empty session, leave it ACTIVE")
+
+	emptySess := env.NewSession()
+
+	if err := env.SimulateUserPromptSubmit(emptySess.ID); err != nil {
+		t.Fatalf("empty session user-prompt-submit failed: %v", err)
+	}
+
+	// Verify it's ACTIVE with no transcript path
+	emptyState, err := env.GetSessionState(emptySess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState for empty session failed: %v", err)
+	}
+	if emptyState.Phase != session.PhaseActive {
+		t.Fatalf("Empty session should be ACTIVE, got %s", emptyState.Phase)
+	}
+	if emptyState.TranscriptPath != "" {
+		t.Fatalf("Empty session should have no transcript path, got %q", emptyState.TranscriptPath)
+	}
+
+	// ========================================
+	// Phase 3: User commits while empty session is still ACTIVE
+	// ========================================
+	t.Log("Phase 3: User commits while empty session is ACTIVE")
+
+	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+
+	commitHash := env.GetHeadHash()
+	cpID := env.GetCheckpointIDFromCommitMessage(commitHash)
+	if cpID == "" {
+		t.Fatal("Commit should have an Entire-Checkpoint trailer")
+	}
+
+	// ========================================
+	// Phase 4: Verify empty ACTIVE session was NOT included
+	// ========================================
+	t.Log("Phase 4: Verify checkpoint contains only the coding session")
+
+	summaryPath := CheckpointSummaryPath(cpID)
+	summaryContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, summaryPath)
+	if !found {
+		t.Fatalf("CheckpointSummary not found at %s", summaryPath)
+	}
+
+	var summary checkpoint.CheckpointSummary
+	if err := json.Unmarshal([]byte(summaryContent), &summary); err != nil {
+		t.Fatalf("Failed to parse CheckpointSummary: %v", err)
+	}
+
+	if len(summary.Sessions) != 1 {
+		t.Errorf("Checkpoint should contain exactly 1 session (the coding session), got %d sessions", len(summary.Sessions))
+		for i, s := range summary.Sessions {
+			t.Logf("  Session %d: %s", i, s.Metadata)
+		}
+	}
+
+	env.AssertCheckpointContainsSession(t, summary, codingSess.ID)
+	env.AssertCheckpointExcludesSession(t, summary, emptySess.ID)
+}

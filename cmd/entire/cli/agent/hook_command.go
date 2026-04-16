@@ -17,9 +17,9 @@ const (
 func MissingEntireWarning(format WarningFormat) string {
 	switch format {
 	case WarningFormatSingleLine:
-		return "Powered by Entire: Tracking is enabled, but the Entire CLI is not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
+		return "Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
 	case WarningFormatMultiLine:
-		return "\n\nPowered by Entire:\n  Tracking is enabled, but the Entire CLI is not installed or not on PATH.\n  Installation guide: https://docs.entire.io/cli/installation#installation-methods"
+		return "\n\nEntire CLI is enabled but not installed or not on PATH.\nInstallation guide: https://docs.entire.io/cli/installation#installation-methods"
 	default:
 		return MissingEntireWarning(WarningFormatSingleLine)
 	}

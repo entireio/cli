@@ -470,6 +470,285 @@ func TestExplain_BranchListingShowsCheckpointsAndPrompts(t *testing.T) {
 	}
 }
 
+// TestExplain_CheckpointFetchesFromRemoteWhenMissingLocally verifies that
+// explain --checkpoint fetches metadata from the remote when the
+// entire/checkpoints/v1 branch doesn't exist locally (e.g., reviewing
+// someone else's PR).
+func TestExplain_CheckpointFetchesFromRemoteWhenMissingLocally(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	// Set up bare remote
+	env.SetupBareRemote()
+
+	// Create a session, make changes, checkpoint, and commit (triggers condensation)
+	session := env.NewSession()
+	transcriptPath := session.CreateTranscript("Add feature module", []FileChange{
+		{Path: "feature.go", Content: "package feature"},
+	})
+
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(session.ID, "Add feature module", transcriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+
+	env.WriteFile("feature.go", "package feature")
+	env.GitAdd("feature.go")
+
+	if err := env.SimulateStop(session.ID, transcriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	// Commit with hooks (triggers prepare-commit-msg + post-commit = condensation)
+	env.GitCommitWithShadowHooks("Add feature module", "feature.go")
+
+	// Get the checkpoint ID before we delete the local branch
+	checkpointID := env.GetLatestCheckpointID()
+	if checkpointID == "" {
+		t.Fatal("should have a checkpoint ID after condensation")
+	}
+
+	// Push checkpoint data to remote
+	env.RunPrePush("origin")
+
+	// Delete local metadata branch and remote-tracking ref to simulate
+	// a collaborator's repo that has never fetched the metadata branch.
+	// RemoveReference may fail if the remote-tracking ref was never
+	// populated; we tolerate that but assert absence below so the test
+	// actually exercises the "fetch from remote when missing" path.
+	repo, err := git.PlainOpen(env.RepoDir)
+	require.NoError(t, err)
+
+	localRef := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	remoteRef := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+	_ = repo.Storer.RemoveReference(localRef)
+	_ = repo.Storer.RemoveReference(remoteRef)
+
+	_, err = repo.Storer.Reference(localRef)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "local metadata ref should be absent")
+	_, err = repo.Storer.Reference(remoteRef)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "remote-tracking metadata ref should be absent")
+
+	// This should succeed by fetching metadata from the remote
+	output := env.RunCLI("explain", "--checkpoint", checkpointID)
+
+	// Verify the output contains checkpoint content (prompt text)
+	if !strings.Contains(output, "Add feature module") {
+		t.Errorf("expected output to contain prompt text, got:\n%s", output)
+	}
+}
+
+// TestExplain_CheckpointV2FetchesFromRemoteWhenMissingLocally verifies that
+// explain --checkpoint fetches v2 metadata from the remote when the v2 refs
+// don't exist locally. Same scenario as the v1 test but with checkpoints_v2 enabled.
+func TestExplain_CheckpointV2FetchesFromRemoteWhenMissingLocally(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	// Enable v2 checkpoints with push
+	env.PatchSettings(map[string]any{
+		"strategy_options": map[string]any{
+			"checkpoints_v2": true,
+			"push_v2_refs":   true,
+		},
+	})
+
+	// Set up bare remote
+	env.SetupBareRemote()
+
+	// Create a session, make changes, checkpoint, and commit
+	session := env.NewSession()
+	transcriptPath := session.CreateTranscript("Add v2 feature", []FileChange{
+		{Path: "v2feature.go", Content: "package v2feature"},
+	})
+
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(session.ID, "Add v2 feature", transcriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+
+	env.WriteFile("v2feature.go", "package v2feature")
+	env.GitAdd("v2feature.go")
+
+	if err := env.SimulateStop(session.ID, transcriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	env.GitCommitWithShadowHooks("Add v2 feature", "v2feature.go")
+
+	checkpointID := env.GetLatestCheckpointID()
+	if checkpointID == "" {
+		t.Fatal("should have a checkpoint ID after condensation")
+	}
+
+	// Push checkpoint data (v1 + v2 refs) to remote
+	env.RunPrePush("origin")
+
+	// Delete ALL local metadata refs (v1 and v2) to simulate
+	// a collaborator's repo that has never fetched them.
+	// RemoveReference may fail if a remote-tracking ref was never
+	// populated; we tolerate that but assert absence below so the test
+	// actually exercises the "fetch from remote when missing" path.
+	repo, err := git.PlainOpen(env.RepoDir)
+	require.NoError(t, err)
+
+	refsToRemove := []plumbing.ReferenceName{
+		// v1 refs
+		plumbing.NewBranchReferenceName(paths.MetadataBranchName),
+		plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName),
+		// v2 refs
+		plumbing.ReferenceName(paths.V2MainRefName),
+		plumbing.ReferenceName(paths.V2FullCurrentRefName),
+	}
+	for _, ref := range refsToRemove {
+		_ = repo.Storer.RemoveReference(ref)
+		_, err := repo.Storer.Reference(ref)
+		require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "ref %s should be absent", ref)
+	}
+
+	// This should succeed by fetching metadata from the remote
+	output := env.RunCLI("explain", "--checkpoint", checkpointID)
+
+	if !strings.Contains(output, "Add v2 feature") {
+		t.Errorf("expected output to contain prompt text, got:\n%s", output)
+	}
+}
+
+// TestExplain_CheckpointFetchDoesNotRewindLocalAheadBranch verifies that running
+// explain --checkpoint with a non-matching prefix does NOT rewind a
+// locally-ahead entire/checkpoints/v1 branch. If the fetch path force-updates
+// the local ref to match origin, locally-committed (but unpushed) checkpoints
+// become orphaned and undiscoverable — potentially subject to GC.
+func TestExplain_CheckpointFetchDoesNotRewindLocalAheadBranch(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	env.SetupBareRemote()
+
+	// Checkpoint A: commit locally, push to origin.
+	sessionA := env.NewSession()
+	transcriptA := sessionA.CreateTranscript("Add module A", []FileChange{
+		{Path: "a.go", Content: "package a"},
+	})
+	require.NoError(t, env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sessionA.ID, "Add module A", transcriptA))
+	env.WriteFile("a.go", "package a")
+	env.GitAdd("a.go")
+	require.NoError(t, env.SimulateStop(sessionA.ID, transcriptA))
+	env.GitCommitWithShadowHooks("Add module A", "a.go")
+	env.RunPrePush("origin")
+
+	// Checkpoint B: commit locally, DO NOT push. Local entire/checkpoints/v1 is
+	// now ahead of origin by one commit.
+	sessionB := env.NewSession()
+	transcriptB := sessionB.CreateTranscript("Add module B", []FileChange{
+		{Path: "b.go", Content: "package b"},
+	})
+	require.NoError(t, env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sessionB.ID, "Add module B", transcriptB))
+	env.WriteFile("b.go", "package b")
+	env.GitAdd("b.go")
+	require.NoError(t, env.SimulateStop(sessionB.ID, transcriptB))
+	env.GitCommitWithShadowHooks("Add module B", "b.go")
+
+	checkpointB := env.GetLatestCheckpointID()
+	require.NotEmpty(t, checkpointB, "should have a checkpoint ID for B")
+
+	// Snapshot local metadata branch hash (includes B) so we can verify it
+	// doesn't rewind after the fetch.
+	repo, err := git.PlainOpen(env.RepoDir)
+	require.NoError(t, err)
+	localRefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	beforeRef, err := repo.Storer.Reference(localRefName)
+	require.NoError(t, err)
+	beforeHash := beforeRef.Hash()
+
+	// Run explain with a checkpoint prefix that doesn't match anything locally,
+	// forcing the "fetch on miss" path. The prefix is 12 zeros: vanishingly
+	// unlikely to collide with a real checkpoint ID.
+	// The command is expected to fail (no such checkpoint) — we're testing the
+	// side effect on the local ref, not the command's success.
+	_, _ = env.RunCLIWithError("explain", "--checkpoint", "000000000000")
+
+	// Re-open repo (go-git caches ref state per handle).
+	repo, err = git.PlainOpen(env.RepoDir)
+	require.NoError(t, err)
+	afterRef, err := repo.Storer.Reference(localRefName)
+	require.NoError(t, err, "local metadata branch should still exist after fetch-on-miss")
+	require.Equal(t, beforeHash, afterRef.Hash(),
+		"local metadata branch must not be rewound by fetch-on-miss; locally-ahead checkpoints would otherwise be orphaned")
+
+	// Independently, checkpoint B must still be discoverable by explain.
+	output := env.RunCLI("explain", "--checkpoint", checkpointB)
+	require.Contains(t, output, "Add module B",
+		"locally-committed checkpoint must remain discoverable after fetch-on-miss")
+}
+
+// TestExplain_CheckpointV2FetchDoesNotRewindLocalAheadRefs verifies that
+// running explain --checkpoint with a non-matching prefix does NOT rewind a
+// locally-ahead v2 ref (refs/entire/v2/main). v2 uses a direct-write refspec
+// (`+refs/entire/v2/main:refs/entire/v2/main`), so a naive fetch force-rewinds
+// the local ref, orphaning locally-committed-but-unpushed v2 checkpoint data.
+func TestExplain_CheckpointV2FetchDoesNotRewindLocalAheadRefs(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	env.PatchSettings(map[string]any{
+		"strategy_options": map[string]any{
+			"checkpoints_v2": true,
+			"push_v2_refs":   true,
+		},
+	})
+	env.SetupBareRemote()
+
+	// Checkpoint A: commit locally, push to origin.
+	sessionA := env.NewSession()
+	transcriptA := sessionA.CreateTranscript("Add v2 module A", []FileChange{
+		{Path: "a.go", Content: "package a"},
+	})
+	require.NoError(t, env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sessionA.ID, "Add v2 module A", transcriptA))
+	env.WriteFile("a.go", "package a")
+	env.GitAdd("a.go")
+	require.NoError(t, env.SimulateStop(sessionA.ID, transcriptA))
+	env.GitCommitWithShadowHooks("Add v2 module A", "a.go")
+	env.RunPrePush("origin")
+
+	// Checkpoint B: commit locally, DO NOT push. Local v2 /main is now ahead.
+	sessionB := env.NewSession()
+	transcriptB := sessionB.CreateTranscript("Add v2 module B", []FileChange{
+		{Path: "b.go", Content: "package b"},
+	})
+	require.NoError(t, env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sessionB.ID, "Add v2 module B", transcriptB))
+	env.WriteFile("b.go", "package b")
+	env.GitAdd("b.go")
+	require.NoError(t, env.SimulateStop(sessionB.ID, transcriptB))
+	env.GitCommitWithShadowHooks("Add v2 module B", "b.go")
+
+	checkpointB := env.GetLatestCheckpointID()
+	require.NotEmpty(t, checkpointB, "should have a checkpoint ID for B")
+
+	// Snapshot local v2 /main hash (includes B's condensation) so we can verify
+	// it doesn't rewind after the fetch.
+	repo, err := git.PlainOpen(env.RepoDir)
+	require.NoError(t, err)
+	v2MainRef := plumbing.ReferenceName(paths.V2MainRefName)
+	beforeRef, err := repo.Storer.Reference(v2MainRef)
+	require.NoError(t, err, "local v2 /main ref should exist after condensation")
+	beforeHash := beforeRef.Hash()
+
+	// Run explain with a non-matching prefix to force the fetch-on-miss path
+	// for both v1 and v2. The command is expected to fail; we're testing the
+	// side effect on the local v2 ref.
+	_, _ = env.RunCLIWithError("explain", "--checkpoint", "000000000000")
+
+	repo, err = git.PlainOpen(env.RepoDir)
+	require.NoError(t, err)
+	afterRef, err := repo.Storer.Reference(v2MainRef)
+	require.NoError(t, err, "local v2 /main ref should still exist after fetch-on-miss")
+	require.Equal(t, beforeHash, afterRef.Hash(),
+		"local v2 /main ref must not be rewound by fetch-on-miss; locally-ahead v2 checkpoints would otherwise be orphaned")
+
+	// Independently, checkpoint B must still be discoverable.
+	output := env.RunCLI("explain", "--checkpoint", checkpointB)
+	require.Contains(t, output, "Add v2 module B",
+		"locally-committed v2 checkpoint must remain discoverable after fetch-on-miss")
+}
+
 // TestExplain_BranchListingV2OnlyAfterV1Deleted verifies that the branch listing
 // works when only v2 data exists (v1 metadata branch deleted after dual-write).
 func TestExplain_BranchListingV2OnlyAfterV1Deleted(t *testing.T) {

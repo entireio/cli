@@ -143,15 +143,15 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 	if agentName == agent.AgentNameCodex {
 		if emptyRepo {
-			return "Powered by Entire: No commits yet — checkpoints will activate after your first commit."
+			return "Entire CLI found no commits yet — checkpoints will activate after your first commit."
 		}
-		return "Powered by Entire: This conversation will be linked to your next commit."
+		return "Entire CLI will link this conversation to your next commit."
 	}
 
 	if emptyRepo {
-		return "\n\nPowered by Entire:\n  No commits yet — checkpoints will activate after your first commit."
+		return "\n\nEntire CLI found no commits yet — checkpoints will activate after your first commit."
 	}
-	return "\n\nPowered by Entire:\n  This conversation will be linked to your next commit."
+	return "\n\nEntire CLI will link this conversation to your next commit."
 }
 
 // handleLifecycleModelUpdate persists the model name for the current session.

@@ -69,6 +69,19 @@ type Generator interface {
 	Generate(ctx context.Context, input Input) (*checkpoint.Summary, error)
 }
 
+// ResolveModel returns the effective model to use for summary generation.
+// When the provider is Claude Code and no model is configured, it falls back
+// to DefaultModel ("sonnet") — the summarize package's quality/cost choice,
+// which differs from Claude Code's own invocation default ("haiku"). For
+// other providers, an empty model means "use the provider CLI's own default",
+// so we leave it unchanged.
+func ResolveModel(name types.AgentName, model string) string {
+	if name == agent.AgentNameClaudeCode && model == "" {
+		return DefaultModel
+	}
+	return model
+}
+
 // Input contains condensed checkpoint data for summarization.
 type Input struct {
 	// Transcript is the condensed transcript entries
@@ -320,7 +333,7 @@ func extractOpenCodeToolDetail(input map[string]interface{}) string {
 }
 
 // extractGenericToolDetail extracts an appropriate detail string from a tool's input/args map.
-// Checks common fields in order of preference. Used by Gemini condensation.
+// Checks common fields in order of preference.
 func extractGenericToolDetail(input map[string]interface{}) string {
 	if input == nil {
 		return ""

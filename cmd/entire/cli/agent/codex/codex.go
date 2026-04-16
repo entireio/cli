@@ -23,7 +23,9 @@ func init() {
 // CodexAgent implements the Agent interface for OpenAI's Codex CLI.
 //
 //nolint:revive // CodexAgent is clearer than Agent in this context
-type CodexAgent struct{}
+type CodexAgent struct {
+	CommandRunner agent.TextCommandRunner
+}
 
 // NewCodexAgent creates a new Codex agent instance.
 func NewCodexAgent() agent.Agent {

@@ -182,30 +182,32 @@ func TestShadowStrategy_MidSessionCommit_NoTrailerForUnrelatedFile(t *testing.T)
 	}
 }
 
-// TestShadowStrategy_AgentCommit_AlwaysGetsTrailer tests that when an agent commits
-// (ACTIVE session + no TTY), the trailer is always added regardless of content
-// detection. This is the fast path that bypasses transcript analysis.
-func TestShadowStrategy_AgentCommit_AlwaysGetsTrailer(t *testing.T) {
+// TestShadowStrategy_AgentCommit_GetsTrailerWhenSessionHasContent tests that when
+// an agent commits (ACTIVE session + no TTY) and the session has content (transcript
+// path set), the trailer is added via the fast path that bypasses transcript analysis.
+// Sessions with no content (no transcript path, no files, no steps) are intentionally
+// skipped to avoid dangling trailers — see CondenseSession skip gate.
+func TestShadowStrategy_AgentCommit_GetsTrailerWhenSessionHasContent(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
 
 	session := env.NewSession()
 
-	// Start session (sets phase to ACTIVE)
-	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	// Start session with transcript path (sets phase to ACTIVE with content)
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmitWithTranscriptPath failed: %v", err)
 	}
 
 	// Create a file and commit as agent (no TTY)
 	env.WriteFile("agent_file.txt", "created by agent")
 	env.GitCommitWithShadowHooksAsAgent("Agent commit", "agent_file.txt")
 
-	// Agent commits should ALWAYS get a trailer (fast path, no content detection)
+	// Agent commits with session content should get a trailer (fast path)
 	commitHash := env.GetHeadHash()
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
 	if checkpointID == "" {
-		t.Error("Agent commit during ACTIVE session should always get a checkpoint trailer")
+		t.Error("Agent commit during ACTIVE session with content should get a checkpoint trailer")
 	} else {
 		t.Logf("Agent commit correctly got checkpoint trailer: %s", checkpointID)
 	}

@@ -130,33 +130,17 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// Errors are ignored; downstream readers handle missing transcripts gracefully.
 	resolveTranscriptPath(state) //nolint:errcheck,gosec // best-effort; downstream readers handle missing files
 
-	var sessionData *ExtractedSessionData
 	extractStart := time.Now()
 	_, extractSessionDataSpan := perf.Start(ctx, "extract_session_data")
+	var shadowHash plumbing.Hash
 	if hasShadowBranch {
-		var extractErr error
-		sessionData, extractErr = s.extractSessionData(ctx, repo, ref.Hash(), state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.Phase.IsActive())
-		if extractErr != nil {
-			extractSessionDataSpan.RecordError(extractErr)
-			extractSessionDataSpan.End()
-			return nil, fmt.Errorf("failed to extract session data: %w", extractErr)
-		}
-	} else {
-		if state.TranscriptPath == "" {
-			extractSessionDataSpan.RecordError(errors.New("shadow branch not found and no live transcript available"))
-			extractSessionDataSpan.End()
-			return nil, errors.New("shadow branch not found and no live transcript available")
-		}
-		if state.Phase.IsActive() {
-			prepareTranscriptIfNeeded(ctx, ag, state.TranscriptPath)
-		}
-		var extractErr error
-		sessionData, extractErr = s.extractSessionDataFromLiveTranscript(ctx, state)
-		if extractErr != nil {
-			extractSessionDataSpan.RecordError(extractErr)
-			extractSessionDataSpan.End()
-			return nil, fmt.Errorf("failed to extract session data from live transcript: %w", extractErr)
-		}
+		shadowHash = ref.Hash()
+	}
+	sessionData, extractErr := s.extractOrCreateSessionData(ctx, repo, ag, shadowHash, hasShadowBranch, state)
+	if extractErr != nil {
+		extractSessionDataSpan.RecordError(extractErr)
+		extractSessionDataSpan.End()
+		return nil, extractErr
 	}
 	extractSessionDataSpan.End()
 	extractDuration := time.Since(extractStart)
@@ -167,6 +151,29 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart.
 	if backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, sessionData.Transcript, sessionData.TokenUsage); backfillUsage != nil {
 		state.TokenUsage = backfillUsage
+	}
+
+	// Skip gate: if there is no transcript AND no files touched, there is nothing
+	// meaningful to condense. Return early to avoid writing metadata-only stubs.
+	//
+	// This check MUST run before filterFilesTouched. That function's fallback
+	// assigns all committed files to sessions with empty FilesTouched (designed
+	// for mid-turn commits where SaveStep hasn't run yet). Without this ordering,
+	// genuinely empty sessions (no transcript, no shadow branch, no tracked files)
+	// would acquire committed files from the fallback and bypass this gate.
+	if len(sessionData.Transcript) == 0 && len(sessionData.FilesTouched) == 0 {
+		logging.Info(logCtx, "session skipped: no transcript or files to condense",
+			slog.String("session_id", state.SessionID),
+			slog.String("agent_type", string(state.AgentType)),
+			slog.String("checkpoint_id", checkpointID.String()),
+			slog.Bool("has_shadow_branch", hasShadowBranch),
+			slog.String("transcript_path", state.TranscriptPath),
+		)
+		return &CondenseResult{
+			CheckpointID: checkpointID,
+			SessionID:    state.SessionID,
+			Skipped:      true,
+		}, nil
 	}
 
 	filterFilesTouched(sessionData, committedFiles)
@@ -356,6 +363,46 @@ func filterFilesTouched(sessionData *ExtractedSessionData, committedFiles map[st
 	}
 }
 
+// extractOrCreateSessionData tries to extract session data from the shadow branch,
+// live transcript, or creates empty session data as a fallback. The empty case is
+// handled by the skip gate in CondenseSession.
+func (s *ManualCommitStrategy) extractOrCreateSessionData(ctx context.Context, repo *git.Repository, ag agent.Agent, shadowHash plumbing.Hash, hasShadowBranch bool, state *SessionState) (*ExtractedSessionData, error) {
+	switch {
+	case hasShadowBranch:
+		// Shadow branch exists (from SaveStep commits) — extract transcript and
+		// metadata from the branch tree, preferring the live transcript if fresher.
+		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.Phase.IsActive())
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract session data: %w", err)
+		}
+		return data, nil
+	case state.TranscriptPath != "":
+		// No shadow branch but a live transcript path is known — read directly
+		// from disk. This handles mid-session commits before SaveStep runs.
+		if state.Phase.IsActive() {
+			prepareTranscriptIfNeeded(ctx, ag, state.TranscriptPath)
+		}
+		data, err := s.extractSessionDataFromLiveTranscript(ctx, state)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract session data from live transcript: %w", err)
+		}
+		return data, nil
+	default:
+		// No shadow branch and no transcript path — create empty session data.
+		// This happens for sessions where the agent never set TranscriptPath
+		// (e.g., Codex hooks may send null transcript_path). The skip gate in
+		// CondenseSession will skip condensation if nothing is found.
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
+			"no shadow branch and no transcript path, returning empty session data",
+			slog.String("session_id", state.SessionID),
+			slog.String("agent_type", string(state.AgentType)),
+		)
+		return &ExtractedSessionData{
+			FilesTouched: state.FilesTouched,
+		}, nil
+	}
+}
+
 // buildCompactTranscript produces compact (v2) transcript forms when v2
 // checkpoints are enabled. The transcript must be pre-redacted. Returns
 // the compaction duration for timing logs.
@@ -408,8 +455,9 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 		return nil
 	}
 
+	generator := buildSummaryGenerator(summarizeCtx)
 	// scopedTranscript is sliced from redactedTranscript, which was redacted earlier in CondenseSession.
-	summary, err := summarize.GenerateFromTranscript(summarizeCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, state.AgentType, nil)
+	summary, err := summarize.GenerateFromTranscript(summarizeCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, state.AgentType, generator)
 	if err != nil {
 		logging.Warn(summarizeCtx, "summary generation failed",
 			slog.String("session_id", state.SessionID),
@@ -419,6 +467,57 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 	logging.Info(summarizeCtx, "summary generated",
 		slog.String("session_id", state.SessionID))
 	return summary
+}
+
+// buildSummaryGenerator returns a Generator based on the configured summary provider.
+// Returns nil if no provider is configured (GenerateFromTranscript falls back to ClaudeGenerator).
+//
+// The return type is the summarize.Generator interface rather than the concrete
+// adapter pointer so callers can't accidentally hold a non-nil interface that
+// wraps a nil pointer (the classic Go nil-interface footgun).
+func buildSummaryGenerator(ctx context.Context) summarize.Generator { //nolint:ireturn // intentional: nil interface avoids nil-pointer-wrapped-in-interface bug
+	s, err := settings.Load(ctx)
+	if err != nil {
+		// Warn (not Debug): this is the auto-summarize hot path on every commit.
+		// A settings-load failure silently downgrades the user's configured
+		// provider to the default, and Debug would hide that from operators.
+		logging.Warn(ctx, "could not load settings for summary provider, using default",
+			"error", err.Error())
+		return nil
+	}
+	if s.SummaryGeneration == nil || s.SummaryGeneration.Provider == "" {
+		return nil
+	}
+
+	providerName := types.AgentName(s.SummaryGeneration.Provider)
+	ag, err := agent.Get(providerName)
+	if err != nil {
+		logging.Warn(ctx, "configured summary provider not available, using default",
+			"provider", s.SummaryGeneration.Provider, "error", err.Error())
+		return nil
+	}
+
+	// Check binary on PATH, not DetectPresence — a repo can use one agent
+	// for development while a different agent generates summaries. Fall back
+	// silently (Warn log) because this runs in the post-commit hook and a
+	// hard error would block the commit.
+	if !agent.IsSummaryCLIAvailable(providerName) {
+		logging.Warn(ctx, "configured summary provider CLI binary not on PATH, using default",
+			"provider", s.SummaryGeneration.Provider)
+		return nil
+	}
+
+	tg, ok := agent.AsTextGenerator(ag)
+	if !ok {
+		logging.Warn(ctx, "configured summary provider does not support text generation, using default",
+			"provider", s.SummaryGeneration.Provider)
+		return nil
+	}
+
+	return &summarize.TextGeneratorAdapter{
+		TextGenerator: tg,
+		Model:         summarize.ResolveModel(providerName, s.SummaryGeneration.Model),
+	}
 }
 
 // marshalPromptAttributionsIncludingPending builds the complete prompt attribution slice
@@ -1036,6 +1135,16 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		return fmt.Errorf("failed to condense session: %w", err)
 	}
 
+	if result.Skipped {
+		// Nothing to condense. Mark fully condensed so entire doctor doesn't
+		// keep retrying this empty session on every invocation.
+		logging.Info(logCtx, "session condensation skipped (no transcript or files), marking fully condensed",
+			slog.String("session_id", sessionID),
+		)
+		state.FullyCondensed = true
+		return s.saveSessionState(ctx, state)
+	}
+
 	logging.Info(logCtx, "session condensed by ID",
 		slog.String("session_id", sessionID),
 		slog.String("checkpoint_id", result.CheckpointID.String()),
@@ -1149,6 +1258,16 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			slog.String("error", err.Error()),
 		)
 		return nil // fail-open
+	}
+
+	if result.Skipped {
+		// No transcript or files — nothing to condense. Mark fully condensed
+		// so PostCommit doesn't keep retrying this empty session.
+		logging.Info(logCtx, "eager condense skipped (no transcript or files), marking fully condensed",
+			slog.String("session_id", sessionID),
+		)
+		state.FullyCondensed = true
+		return s.saveSessionState(ctx, state)
 	}
 
 	// Update state — keep Phase = ENDED (unlike CondenseSessionByID which sets IDLE)

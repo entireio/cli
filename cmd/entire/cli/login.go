@@ -14,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/spf13/cobra"
 )
 
@@ -70,7 +71,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 
 	approvalURL := start.VerificationURI
 
-	if canPromptInteractively() {
+	if interactive.CanPromptInteractively() {
 		fmt.Fprintf(outW, "Press Enter to open %s in your browser and enter the generated device code...", approvalURL)
 
 		// Read from /dev/tty so we get a real keypress and don't consume piped stdin.

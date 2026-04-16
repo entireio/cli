@@ -804,6 +804,111 @@ func TestFetchMetadataBranch_UpdatesExistingLocalBranch(t *testing.T) {
 	assert.NotEqual(t, hash1, hash2, "FetchMetadataBranch should update existing local branch to new remote tip")
 }
 
+// TestFetchMetadataBranch_DoesNotRewindLocalAhead verifies that calling
+// FetchMetadataBranch with a remote whose entire/checkpoints/v1 is at commit A
+// does NOT rewind a local branch that is ahead at commit B (A's descendant).
+// The buggy version unconditionally SetReferences local := tmpRef.Hash(),
+// orphaning locally-committed-but-unpushed checkpoints.
+//
+// Not parallel: uses t.Chdir().
+func TestFetchMetadataBranch_DoesNotRewindLocalAhead(t *testing.T) {
+	ctx := context.Background()
+
+	// Set up remote with metadata branch at commit A.
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+
+	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	branchCmd.Dir = remoteDir
+	branchCmd.Env = testutil.GitIsolatedEnv()
+	branchOut, err := branchCmd.Output()
+	require.NoError(t, err)
+	defaultBranch := strings.TrimSpace(string(branchOut))
+
+	cmd := exec.CommandContext(ctx, "git", "checkout", "--orphan", "entire/checkpoints/v1")
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	cmd = exec.CommandContext(ctx, "git", "rm", "-rf", ".")
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	testutil.WriteFile(t, remoteDir, "metadata.json", `{"checkpoint": "A"}`)
+	testutil.GitAdd(t, remoteDir, "metadata.json")
+	cmd = exec.CommandContext(ctx, "git", "-c", "commit.gpgsign=false", "commit", "-m", "checkpoint A")
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	cmd = exec.CommandContext(ctx, "git", "checkout", defaultBranch)
+	cmd.Dir = remoteDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	// Set up local repo and fetch once so local metadata branch is at A.
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	t.Chdir(localDir)
+
+	require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+
+	hashCmd := exec.CommandContext(ctx, "git", "rev-parse", "entire/checkpoints/v1")
+	hashCmd.Dir = localDir
+	hashCmd.Env = testutil.GitIsolatedEnv()
+	aOut, err := hashCmd.Output()
+	require.NoError(t, err)
+	aHash := strings.TrimSpace(string(aOut))
+
+	// Advance local metadata branch to B (ahead of remote), without pushing.
+	cmd = exec.CommandContext(ctx, "git", "checkout", "entire/checkpoints/v1")
+	cmd.Dir = localDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	testutil.WriteFile(t, localDir, "metadata.json", `{"checkpoint": "B"}`)
+	testutil.GitAdd(t, localDir, "metadata.json")
+	cmd = exec.CommandContext(ctx, "git", "-c", "commit.gpgsign=false", "commit", "-m", "checkpoint B")
+	cmd.Dir = localDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	hashCmd = exec.CommandContext(ctx, "git", "rev-parse", "entire/checkpoints/v1")
+	hashCmd.Dir = localDir
+	hashCmd.Env = testutil.GitIsolatedEnv()
+	bOut, err := hashCmd.Output()
+	require.NoError(t, err)
+	bHash := strings.TrimSpace(string(bOut))
+	require.NotEqual(t, aHash, bHash, "test setup: local should have advanced beyond remote tip")
+
+	// Go back to default branch — matches how the CLI runs this codepath.
+	cmd = exec.CommandContext(ctx, "git", "checkout", defaultBranch)
+	cmd.Dir = localDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
+
+	// Fetch again — must NOT rewind local from B to A.
+	require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+
+	hashCmd = exec.CommandContext(ctx, "git", "rev-parse", "entire/checkpoints/v1")
+	hashCmd.Dir = localDir
+	hashCmd.Env = testutil.GitIsolatedEnv()
+	afterOut, err := hashCmd.Output()
+	require.NoError(t, err)
+	afterHash := strings.TrimSpace(string(afterOut))
+
+	assert.Equal(t, bHash, afterHash,
+		"FetchMetadataBranch must not rewind locally-ahead metadata branch; expected %s (B), got %s (A=%s)",
+		bHash, afterHash, aHash)
+}
+
 // v2RefSeq is a counter to ensure each call to createV2MainRef produces a distinct commit.
 var v2RefSeq int
 
@@ -928,4 +1033,103 @@ func TestFetchV2MainFromURL_UpdatesExistingRef(t *testing.T) {
 	hash2 := strings.TrimSpace(string(hash2Out))
 
 	assert.NotEqual(t, hash1, hash2, "FetchV2MainFromURL should update existing ref to new remote tip")
+}
+
+// TestFetchV2MainFromURL_DoesNotRewindLocalAhead verifies that fetching the v2
+// /main ref from a remote whose tip is at A does NOT rewind a locally-ahead
+// ref at B (A's descendant). The buggy version used a direct-write refspec
+// `+refs/entire/v2/main:refs/entire/v2/main` which git applies before Go can
+// intercept — orphaning locally-committed-but-unpushed v2 checkpoints.
+//
+// Not parallel: uses t.Chdir().
+func TestFetchV2MainFromURL_DoesNotRewindLocalAhead(t *testing.T) {
+	ctx := context.Background()
+
+	// Set up remote with v2 /main ref at commit A.
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	createV2MainRef(ctx, t, remoteDir)
+
+	// Set up local repo and fetch once so local v2 /main is at A.
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	t.Chdir(localDir)
+
+	require.NoError(t, FetchV2MainFromURL(ctx, remoteDir))
+
+	hashCmd := exec.CommandContext(ctx, "git", "rev-parse", paths.V2MainRefName)
+	hashCmd.Dir = localDir
+	hashCmd.Env = testutil.GitIsolatedEnv()
+	aOut, err := hashCmd.Output()
+	require.NoError(t, err)
+	aHash := strings.TrimSpace(string(aOut))
+
+	// Advance local v2 /main to B, with A as parent (descendant relationship).
+	// This mirrors the real flow where condensation appends a new checkpoint
+	// commit on top of the previous tip.
+	advanceV2MainOnTop(ctx, t, localDir, aHash)
+
+	hashCmd = exec.CommandContext(ctx, "git", "rev-parse", paths.V2MainRefName)
+	hashCmd.Dir = localDir
+	hashCmd.Env = testutil.GitIsolatedEnv()
+	bOut, err := hashCmd.Output()
+	require.NoError(t, err)
+	bHash := strings.TrimSpace(string(bOut))
+	require.NotEqual(t, aHash, bHash, "test setup: local v2 /main should have advanced beyond remote")
+
+	// Fetch from remote — must NOT rewind local from B to A.
+	require.NoError(t, FetchV2MainFromURL(ctx, remoteDir))
+
+	hashCmd = exec.CommandContext(ctx, "git", "rev-parse", paths.V2MainRefName)
+	hashCmd.Dir = localDir
+	hashCmd.Env = testutil.GitIsolatedEnv()
+	afterOut, err := hashCmd.Output()
+	require.NoError(t, err)
+	afterHash := strings.TrimSpace(string(afterOut))
+
+	assert.Equal(t, bHash, afterHash,
+		"FetchV2MainFromURL must not rewind locally-ahead v2 /main; expected %s (B), got %s (A=%s)",
+		bHash, afterHash, aHash)
+}
+
+// advanceV2MainOnTop creates a new v2 /main commit whose parent is parentHash,
+// and updates refs/entire/checkpoints/v2/main to point at it. Used to simulate
+// a locally-ahead ref in tests.
+func advanceV2MainOnTop(ctx context.Context, t *testing.T, repoDir, parentHash string) {
+	t.Helper()
+	v2RefSeq++
+
+	cmd := exec.CommandContext(ctx, "git", "hash-object", "-w", "--stdin")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"advance": %d}`, v2RefSeq))
+	blobOut, err := cmd.Output()
+	require.NoError(t, err)
+	blobHash := strings.TrimSpace(string(blobOut))
+
+	cmd = exec.CommandContext(ctx, "git", "mktree")
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	cmd.Stdin = strings.NewReader("100644 blob " + blobHash + "\tadvance.json\n")
+	treeOut, err := cmd.Output()
+	require.NoError(t, err)
+	treeHash := strings.TrimSpace(string(treeOut))
+
+	cmd = exec.CommandContext(ctx, "git", "commit-tree", "-p", parentHash, "-m", fmt.Sprintf("advance %d", v2RefSeq), treeHash)
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	commitOut, err := cmd.Output()
+	require.NoError(t, err)
+	commitHash := strings.TrimSpace(string(commitOut))
+
+	cmd = exec.CommandContext(ctx, "git", "update-ref", paths.V2MainRefName, commitHash)
+	cmd.Dir = repoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, cmd.Run())
 }
