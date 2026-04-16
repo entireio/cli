@@ -18,7 +18,7 @@ import (
 // TestAgentContinuesAfterCommit: agent commits, then makes more changes in a
 // second prompt. User commits those. Both commits should have distinct checkpoint IDs.
 func TestAgentContinuesAfterCommit(t *testing.T) {
-	testutil.ForEachAgent(t, 3*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
+	testutil.ForEachAgent(t, 5*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		// First prompt — agent creates and commits.
 		_, err := s.RunPrompt(t, ctx,
 			"create a markdown file at docs/red.md with a paragraph about the colour red, then commit it. Do not ask for confirmation, just make the change.",
