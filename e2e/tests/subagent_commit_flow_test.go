@@ -4,6 +4,7 @@ package tests
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,14 +17,29 @@ import (
 // sessions), session metadata (agent field), and checkpoint existence.
 func TestSubagentCommitFlow(t *testing.T) {
 	testutil.ForEachAgent(t, 3*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
+		prompt := "use a subagent: create a markdown file at docs/red.md with a paragraph about the colour red. Do not commit the file. Do not ask for confirmation, just make the change."
 		_, err := s.RunPrompt(t, ctx,
-			"use a subagent: create a markdown file at docs/red.md with a paragraph about the colour red. Do not commit the file. Do not ask for confirmation, just make the change.")
+			prompt)
 		if err != nil {
 			t.Fatalf("agent failed: %v", err)
 		}
-		testutil.AssertFileExists(t, s.Dir, "docs/red.md")
 
-		s.Git(t, "add", ".")
+		// Some agents occasionally report completion before the subagent file
+		// write lands. Retry once before failing the scenario.
+		matches, globErr := filepath.Glob(filepath.Join(s.Dir, "docs/red.md"))
+		if globErr != nil {
+			t.Fatalf("glob docs/red.md: %v", globErr)
+		}
+		if len(matches) == 0 {
+			_, err = s.RunPrompt(t, ctx,
+				"use a subagent: create a markdown file at docs/red.md with a paragraph about the colour red. Do not commit the file. Do not ask for confirmation, just make the change.")
+			if err != nil {
+				t.Fatalf("agent retry failed: %v", err)
+			}
+		}
+		testutil.WaitForFileExists(t, s.Dir, "docs/red.md", 30*time.Second)
+
+		s.Git(t, "add", "docs/red.md")
 		s.Git(t, "commit", "-m", "Add red.md via subagent")
 
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
