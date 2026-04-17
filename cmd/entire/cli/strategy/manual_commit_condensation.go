@@ -739,9 +739,10 @@ func calculateSessionAttributions(ctx context.Context, repo *git.Repository, sha
 	return attribution
 }
 
-// committedFilesExcludingMetadata returns committed files with CLI metadata paths filtered out.
-// `.entire/` files are created by `entire enable`, not by the agent, and should not be
-// attributed as agent work when used as a fallback for sessions with no FilesTouched.
+// committedFilesExcludingMetadata returns committed files with internal tracking paths filtered out.
+// Internal files managed by Entire itself (for example, `.entire/...` and the generated
+// `.opencode/plugins/entire.ts`) should not be attributed as agent work when this fallback
+// is used for sessions with no FilesTouched.
 func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []string {
 	result := make([]string, 0, len(committedFiles))
 	for f := range committedFiles {
