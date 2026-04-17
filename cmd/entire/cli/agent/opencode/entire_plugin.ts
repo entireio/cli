@@ -154,9 +154,12 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             // session.status fires in both TUI and non-interactive (run) mode.
             // session.idle is deprecated and not reliably emitted in run mode.
             const props = (event as any).properties
-            if (props?.status?.type !== "idle") break
+            const statusType = props?.status?.type
+            if (!statusType) break
             const sessionID = props?.sessionID ?? currentSessionID
             if (!sessionID) break
+            currentSessionID = sessionID
+            if (statusType !== "idle") break
             // Ignore duplicate/late idle events when no corresponding turn-start ran.
             if (!sessionsWithOpenTurn.has(sessionID)) break
             sessionsWithOpenTurn.delete(sessionID)

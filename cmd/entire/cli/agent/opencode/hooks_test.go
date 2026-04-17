@@ -232,6 +232,12 @@ func TestInstallHooks_TurnLifecycleGuardsArePresent(t *testing.T) {
 	if !strings.Contains(content, "if (!sessionsWithOpenTurn.has(sessionID)) break") {
 		t.Fatal("plugin file missing turn-end dedupe guard")
 	}
+	if !strings.Contains(content, "const statusType = props?.status?.type") {
+		t.Fatal("plugin file missing session.status type extraction")
+	}
+	if !strings.Contains(content, "if (!statusType) break") {
+		t.Fatal("plugin file missing session.status type guard")
+	}
 	if !strings.Contains(content, "sessionsWithOpenTurn.delete(sessionID)") {
 		t.Fatal("plugin file missing turn-end session cleanup")
 	}
