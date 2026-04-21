@@ -603,7 +603,7 @@ Trailers:
 
 ### `entire review` Command
 
-`entire review` runs a set of configured review skills inside a single agent session, letting the author address findings in-session or close the review with an empty marker commit. On each run it scans prior review commits on the current branch; if HEAD is already a review commit, the command prompts the user before re-running, preventing accidental redundant reviews.
+`entire review` runs a set of configured review skills inside a single agent session. The review session is an immutable fact attached to a checkpoint — no verdict, no status tracking, no empty commits. On the next `git commit`, the review session is condensed into the checkpoint metadata alongside normal sessions, permanently recording that the code was reviewed and which skills were run.
 
 #### Command Surface
 
@@ -611,13 +611,6 @@ Trailers:
 entire review                          # Normal run: load config, spawn configured agent
 entire review --edit                   # Re-open the skills picker before running
 entire review --track-only             # Write the pending-review marker; do not spawn agent
-```
-
-Hidden subcommands called by the `/entire-review:finish` in-session skill:
-
-```
-entire review --postreview --session <id>          # Post-review hook: present fix/close/skip TUI
-entire review --finalize fix|close|skip --session <id>   # Write outcome commit / update state
 ```
 
 #### Settings Schema
@@ -635,32 +628,29 @@ Review skills are configured per-agent in `.entire/settings.json`:
 
 The key is the agent name (matching the agent's `Name()` return value). The value is a list of skill invocations passed verbatim to the agent. Settings field: `EntireSettings.Review` in `cmd/entire/cli/settings/settings.go`.
 
-#### Session Kind and Review Status
+#### How It Works
 
-Review sessions are tagged `Kind = "review"` on the `session.State` struct (`cmd/entire/cli/session/state.go`). The `ReviewStatus` field tracks the outcome: `in-progress`, `closed`, `clean`, or `skipped`. The Stop-hook fallback in the lifecycle handler detects sessions that end without an explicit finalization call and marks them accordingly so state never stays permanently `in-progress`.
+1. `entire review` writes a pending-review marker before spawning the agent
+2. The agent's `UserPromptSubmit` lifecycle hook adopts the marker, tagging the session with `Kind = "review"` and recording the configured skills in `ReviewSkills`
+3. The agent runs the review skills and the session ends naturally
+4. On the next `git commit`, the PostCommit hook condenses the review session into the checkpoint on `entire/checkpoints/v1`, with `Kind` and `ReviewSkills` recorded in `CommittedMetadata`
+5. The `CheckpointSummary` sets `HasReview = true` for O(1) lookup
+6. `entire status` and the re-run guard in `entire review` read `HasReview` from the checkpoint metadata (no commit history walking)
 
-#### Review Commits
+#### Checkpoint Metadata
 
-Only the "Close" outcome lands a commit. "Fix" continues the agent session without committing (the user runs `entire review` again after addressing findings); "Skip" updates session state without touching the branch. On Close, an empty commit lands on the current branch carrying the following trailers:
+Review metadata is stored at two levels on `entire/checkpoints/v1`:
 
-- `Entire-Review-By: <user-email>` - Email of the user who ran the review (from `git config user.email`)
-- `Entire-Review-Agent: <agent-name>` - Agent name that produced the review (e.g. `claude-code`)
-- `Entire-Review-Skills: <skill1>,<skill2>,...` - Comma-joined list of skills run
-- `Entire-Review-Session: <session-id>` - Session identifier
-- `Entire-Review-Checkpoint: <checkpoint-id>` - Links to `entire/checkpoints/v1` metadata (may be empty in v1; resolution lands with follow-on work)
-- `Entire-Reviewed-Up-To: <commit-hash>` - HEAD at review time (used by the scanner)
-- `Entire-Review-Status: closed|clean` - Outcome (the `skipped` status lives only in session state, not in any commit trailer)
-
-Trailer constants and the `ReviewMetadata` struct live in `cmd/entire/cli/trailers/trailers.go`.
+- **`CommittedMetadata` (per-session)**: `kind: "review"`, `review_skills: ["/skill1", "/skill2"]`
+- **`CheckpointSummary` (per-checkpoint)**: `has_review: true` (set when any session in the checkpoint has `Kind == "review"`)
 
 #### Key Files
 
-- `cmd/entire/cli/review.go` - Command registration, flag handling, scanner, post-review TUI, finalize logic
-- `cmd/entire/cli/lifecycle.go` - Session adoption: pending-review marker promotes to `Kind=review` on `UserPromptSubmit`; Stop-hook fallback for un-finalized sessions
+- `cmd/entire/cli/review.go` - Command registration, config picker, agent spawn, re-run guard, pending marker management
+- `cmd/entire/cli/lifecycle.go` - Session adoption: pending-review marker promotes to `Kind=review` on `UserPromptSubmit`
 - `cmd/entire/cli/agent/agent.go` - `Launcher` interface used by `entire review` to spawn agents
 - `cmd/entire/cli/agent/{claudecode,codex,geminicli}/` - Per-agent `Launcher` implementations
-- `cmd/entire/cli/setup_subagents.go` - Installs the `/entire-review:finish` skill template into each agent's config directory
-- `cmd/entire/cli/trailers/trailers.go` - Trailer key constants, `ReviewMetadata` struct, parse helpers
+- `cmd/entire/cli/checkpoint/checkpoint.go` - `Kind` and `ReviewSkills` fields on `WriteCommittedOptions`, `CommittedMetadata`, and `HasReview` on `CheckpointSummary`
 - `cmd/entire/cli/settings/settings.go` - `EntireSettings.Review` field (`map[string][]string`) and `ReviewSkillsFor` helper
 
 # Important Notes
