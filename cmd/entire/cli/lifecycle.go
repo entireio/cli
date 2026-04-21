@@ -666,8 +666,6 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 		return nil
 	}
 
-	detectUnfinalizedReview(ctx, event.SessionID)
-
 	// Eagerly condense session data so PostCommit doesn't have to process it.
 	// This prevents zombie ENDED sessions from accumulating and causing O(N)
 	// overhead on every future commit (GitHub issue #591).
@@ -966,37 +964,5 @@ func persistEventMetadataToState(event *agent.Event, state *strategy.SessionStat
 	}
 	if event.ContextWindowSize > 0 {
 		state.ContextWindowSize = event.ContextWindowSize
-	}
-}
-
-// reviewFallbackHook is invoked by detectUnfinalizedReview when a review
-// session ends without being finalized via the /entire-review:finish skill.
-// Replaceable in tests to avoid rendering the TUI.
-var reviewFallbackHook = promptReviewFallback
-
-// detectUnfinalizedReview checks whether the given session was a review
-// session that ended without being finalized (fix/close/skip). If so, it
-// invokes reviewFallbackHook. Errors are logged but never bubble up — this
-// is a best-effort post-session helper.
-func detectUnfinalizedReview(ctx context.Context, sessionID string) {
-	logCtx := logging.WithComponent(ctx, "lifecycle")
-	state, err := strategy.LoadSessionState(ctx, sessionID)
-	if err != nil {
-		logging.Warn(logCtx, "detect unfinalized review: load session failed",
-			slog.String("error", err.Error()))
-		return
-	}
-	if state == nil {
-		return
-	}
-	if state.Kind != session.KindReview {
-		return
-	}
-	if state.ReviewStatus != session.ReviewStatusInProgress {
-		return
-	}
-	if err := reviewFallbackHook(ctx, sessionID); err != nil {
-		logging.Warn(logCtx, "review fallback hook failed",
-			slog.String("error", err.Error()))
 	}
 }

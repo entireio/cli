@@ -15,14 +15,12 @@ import (
 	"time"
 
 	"github.com/charmbracelet/huh"
+
 	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/object"
-	"github.com/go-git/go-git/v6/plumbing/storer"
-	"golang.org/x/term"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -150,7 +148,6 @@ func adoptPendingReviewMarkerInto(ctx context.Context, s session.State) (session
 		return s, false, nil
 	}
 	s.Kind = session.KindReview
-	s.ReviewStatus = session.ReviewStatusInProgress
 	s.ReviewSkills = m.Skills
 	if err := ClearPendingReviewMarker(); err != nil {
 		// Tagging succeeded; leftover marker self-heals on next session start
@@ -210,9 +207,6 @@ func runReviewConfigPicker(ctx context.Context, out io.Writer) (map[string][]str
 func newReviewCmd() *cobra.Command {
 	var edit bool
 	var trackOnly bool
-	var postreview bool
-	var finalize string
-	var sessionID string
 
 	cmd := &cobra.Command{
 		Use:   "review",
@@ -220,37 +214,19 @@ func newReviewCmd() *cobra.Command {
 		Long: `Run the review skills configured in .entire/settings.json against
 the current branch. On first run, an interactive picker writes the config.
 
-After the review session, choose to Fix findings in-session, Close with an
-empty review-marker commit, or Skip without committing.`,
+The review session is recorded as part of the next checkpoint, so the
+review metadata is permanently attached to the commit it covers.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			switch {
-			case postreview:
-				return runPostReview(ctx, cmd, sessionID)
-			case finalize != "":
-				return runFinalize(ctx, cmd, finalize, sessionID)
-			case edit:
+			if edit {
 				_, err := runReviewConfigPicker(ctx, cmd.OutOrStdout())
 				return err
-			default:
-				return runReview(ctx, cmd, trackOnly)
 			}
+			return runReview(ctx, cmd, trackOnly)
 		},
 	}
 	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the review config picker")
 	cmd.Flags().BoolVar(&trackOnly, "track-only", false, "write pending marker without spawning agent")
-	cmd.Flags().BoolVar(&postreview, "postreview", false, "hidden: print post-review options for finish skill")
-	cmd.Flags().StringVar(&finalize, "finalize", "", "hidden: finalize decision (fix|close|skip)")
-	cmd.Flags().StringVar(&sessionID, "session", "", "hidden: session id (used with --postreview/--finalize)")
-	if err := cmd.Flags().MarkHidden("postreview"); err != nil {
-		panic(err) // flag name is a compile-time constant; panic is appropriate
-	}
-	if err := cmd.Flags().MarkHidden("finalize"); err != nil {
-		panic(err)
-	}
-	if err := cmd.Flags().MarkHidden("session"); err != nil {
-		panic(err)
-	}
 	return cmd
 }
 
@@ -280,9 +256,19 @@ func runReview(ctx context.Context, cmd *cobra.Command, trackOnly bool) error {
 		return err
 	}
 
-	// 4. Re-run guard. (Real implementation lands in Chunk 8.)
-	if reviewed, meta := branchReviewedAtHead(ctx); reviewed {
-		if !confirmReRun(out, meta) {
+	// 4. Re-run guard: check if HEAD's checkpoint already has a review.
+	if reviewed, meta := headHasReviewCheckpoint(ctx); reviewed {
+		var proceed bool
+		form := NewAccessibleForm(huh.NewGroup(
+			huh.NewConfirm().
+				Title(fmt.Sprintf("Already reviewed: %s. Proceed anyway?", meta)).
+				Value(&proceed),
+		))
+		if err := form.Run(); err != nil {
+			fmt.Fprintln(out, "prompt cancelled")
+			return err //nolint:wrapcheck // propagate huh cancellation
+		}
+		if !proceed {
 			fmt.Fprintln(out, "Review cancelled.")
 			return nil
 		}
@@ -307,7 +293,6 @@ func runReview(ctx context.Context, cmd *cobra.Command, trackOnly bool) error {
 	if trackOnly {
 		fmt.Fprintln(out, "Pending review marker written.")
 		fmt.Fprintf(out, "Start %s and run these skills manually: %s\n", agentName, strings.Join(skills, ", "))
-		fmt.Fprintln(out, "When done, run `/entire-review:finish` in the agent.")
 		return nil
 	}
 
@@ -315,7 +300,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, trackOnly bool) error {
 	launcher, ok := agent.LauncherFor(types.AgentName(agentName))
 	if !ok {
 		fmt.Fprintf(out, "%s does not support subprocess launch yet. Falling back to --track-only.\n", agentName)
-		fmt.Fprintf(out, "Start %s manually and run: %s, then /entire-review:finish\n", agentName, strings.Join(skills, ", "))
+		fmt.Fprintf(out, "Start %s manually and run: %s\n", agentName, strings.Join(skills, ", "))
 		return nil
 	}
 	prompt := composeReviewPrompt(skills)
@@ -324,6 +309,9 @@ func runReview(ctx context.Context, cmd *cobra.Command, trackOnly bool) error {
 		return fmt.Errorf("launch %s: %w", agentName, err)
 	}
 	if err := execCmd.Run(); err != nil {
+		// Best-effort cleanup: clear the pending marker so a stale marker
+		// doesn't tag the next non-review session.
+		_ = ClearPendingReviewMarker() //nolint:errcheck // best-effort cleanup
 		return fmt.Errorf("agent exited: %w", err)
 	}
 	return nil
@@ -358,7 +346,6 @@ func composeReviewPrompt(skills []string) string {
 	for i, skill := range skills {
 		fmt.Fprintf(&sb, "  %d. %s\n", i+1, skill)
 	}
-	sb.WriteString("\nWhen all skills have completed, run /entire-review:finish to present options to the user.\n")
 	return sb.String()
 }
 
@@ -376,367 +363,39 @@ func currentHeadSHA(ctx context.Context) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-// reviewInfo summarizes the most recent review commit on the current branch.
-type reviewInfo struct {
-	CommitHash   plumbing.Hash
-	By           string
-	Agent        string
-	Session      string
-	Checkpoint   string
-	ReviewedUpTo string
-	Status       string
-	CommitsSince int // Number of commits between HEAD and the review commit (0 = HEAD is the review commit).
-}
-
-// findMostRecentReview walks HEAD's history backwards and returns the first
-// commit whose message parses as a review (has Entire-Review-* trailers).
-// Returns ok=false with err=nil when no review commit exists in history.
-func findMostRecentReview(ctx context.Context) (reviewInfo, bool, error) {
+// headHasReviewCheckpoint checks whether HEAD's checkpoint metadata includes
+// a review session. Returns (true, infoString) if HasReview is set.
+// This is O(1): read the Entire-Checkpoint trailer from HEAD, then read the
+// CheckpointSummary from entire/checkpoints/v1.
+func headHasReviewCheckpoint(ctx context.Context) (bool, string) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return reviewInfo{}, false, fmt.Errorf("resolve repo root: %w", err)
+		return false, ""
+	}
+	// Read HEAD commit message to extract checkpoint trailer.
+	execCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "log", "-1", "--format=%B")
+	output, err := execCmd.Output()
+	if err != nil {
+		return false, ""
+	}
+	cpID, ok := trailers.ParseCheckpoint(string(output))
+	if !ok {
+		return false, ""
 	}
 	repo, err := git.PlainOpen(repoRoot)
 	if err != nil {
-		return reviewInfo{}, false, fmt.Errorf("open repo: %w", err)
-	}
-	head, err := repo.Head()
-	if err != nil {
-		return reviewInfo{}, false, fmt.Errorf("resolve HEAD: %w", err)
-	}
-	iter, err := repo.Log(&git.LogOptions{From: head.Hash()})
-	if err != nil {
-		return reviewInfo{}, false, fmt.Errorf("walk history: %w", err)
-	}
-	defer iter.Close()
-
-	var found reviewInfo
-	var ok bool
-	walked := 0
-	iterErr := iter.ForEach(func(c *object.Commit) error {
-		if md, isReview := trailers.ParseReviewMetadata(c.Message); isReview {
-			found = reviewInfo{
-				CommitHash:   c.Hash,
-				By:           md.By,
-				Agent:        md.Agent,
-				Session:      md.Session,
-				Checkpoint:   md.Checkpoint,
-				ReviewedUpTo: md.ReviewedUpTo,
-				Status:       md.Status,
-				CommitsSince: walked,
-			}
-			ok = true
-			return storer.ErrStop
-		}
-		walked++
-		return nil
-	})
-	if iterErr != nil && !errors.Is(iterErr, storer.ErrStop) {
-		return reviewInfo{}, false, fmt.Errorf("walk commits: %w", iterErr)
-	}
-	return found, ok, nil
-}
-
-// branchReviewedAtHead reports whether the current branch's HEAD commit is
-// itself a review commit (CommitsSince == 0 on the scanner). Returns a short
-// human-readable meta string for the re-run prompt.
-func branchReviewedAtHead(ctx context.Context) (bool, string) {
-	info, ok, err := findMostRecentReview(ctx)
-	if err != nil || !ok {
 		return false, ""
 	}
-	if info.CommitsSince != 0 {
+	store := checkpoint.NewGitStore(repo)
+	summary, err := store.ReadCommitted(ctx, cpID)
+	if err != nil || summary == nil {
 		return false, ""
 	}
-	meta := info.By
-	if info.Agent != "" {
-		meta += " with " + info.Agent
+	if !summary.HasReview {
+		return false, ""
 	}
-	if info.Checkpoint != "" {
-		meta += " (checkpoint " + info.Checkpoint + ")"
-	}
-	return true, meta
-}
-
-// confirmReRun prompts the user to confirm re-running review when the branch
-// was already reviewed at HEAD. Returns true if user wants to proceed.
-func confirmReRun(out io.Writer, meta string) bool {
-	var proceed bool
-	form := NewAccessibleForm(huh.NewGroup(
-		huh.NewConfirm().
-			Title(fmt.Sprintf("Already reviewed: %s. Proceed anyway?", meta)).
-			Value(&proceed),
-	))
-	if err := form.Run(); err != nil {
-		fmt.Fprintln(out, "prompt cancelled")
-		return false
-	}
-	return proceed
-}
-
-func runPostReview(ctx context.Context, cmd *cobra.Command, sessionID string) error {
-	if sessionID == "" {
-		return errors.New("--session required with --postreview")
-	}
-	store, err := session.NewStateStore(ctx)
-	if err != nil {
-		return fmt.Errorf("open session store: %w", err)
-	}
-	state, err := store.Load(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("load session: %w", err)
-	}
-	if state == nil {
-		return fmt.Errorf("session %s not found", sessionID)
-	}
-	if state.Kind != session.KindReview {
-		return fmt.Errorf("session %s is not a review session", sessionID)
-	}
-	out := cmd.OutOrStdout()
-	checkpointID := mostRecentCheckpointID(state)
-	if checkpointID != "" {
-		fmt.Fprintf(out, "Review complete. Transcript: entire explain %s\n\n", checkpointID)
-	} else {
-		fmt.Fprintln(out, "Review complete.")
-		fmt.Fprintln(out)
-	}
-	fmt.Fprintln(out, "Ask the user to choose:")
-	fmt.Fprintln(out, "  - Fix    → run: entire review --finalize fix --session "+sessionID)
-	fmt.Fprintln(out, "  - Close  → run: entire review --finalize close --session "+sessionID)
-	fmt.Fprintln(out, "  - Skip   → run: entire review --finalize skip --session "+sessionID)
-	return nil
-}
-
-// mostRecentCheckpointID returns the most recent checkpoint ID for the given
-// session state, or "" if no checkpoint has been condensed yet. Reads the
-// LastCheckpointID field that the strategy updates at each condensation.
-func mostRecentCheckpointID(state *session.State) string {
-	if state == nil || state.LastCheckpointID.IsEmpty() {
-		return ""
-	}
-	return state.LastCheckpointID.String()
-}
-
-const (
-	finalizeChoiceFix   = "fix"
-	finalizeChoiceClose = "close"
-	finalizeChoiceSkip  = "skip"
-)
-
-func runFinalize(ctx context.Context, cmd *cobra.Command, decision, sessionID string) error {
-	if sessionID == "" {
-		return errors.New("--session required with --finalize")
-	}
-	switch decision {
-	case finalizeChoiceFix:
-		return finalizeFix(ctx, cmd, sessionID)
-	case finalizeChoiceClose:
-		return finalizeClose(ctx, cmd, sessionID)
-	case finalizeChoiceSkip:
-		return finalizeSkip(ctx, cmd, sessionID)
-	default:
-		return fmt.Errorf("unknown finalize decision: %s (expected fix|close|skip)", decision)
-	}
-}
-
-func finalizeFix(ctx context.Context, cmd *cobra.Command, sessionID string) error {
-	state, err := loadReviewSession(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-	_ = state // no state change on fix
-	fmt.Fprintln(cmd.OutOrStdout(),
-		"Continue addressing the findings above. Run `entire review` again after your fixes to verify.")
-	return nil
-}
-
-// loadReviewSession is a small helper shared by the finalize handlers.
-func loadReviewSession(ctx context.Context, sessionID string) (*session.State, error) {
-	store, err := session.NewStateStore(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("open session store: %w", err)
-	}
-	state, err := store.Load(ctx, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("load session: %w", err)
-	}
-	if state == nil {
-		return nil, fmt.Errorf("session %s not found", sessionID)
-	}
-	if state.Kind != session.KindReview {
-		return nil, fmt.Errorf("session %s is not a review session", sessionID)
-	}
-	return state, nil
-}
-
-func finalizeClose(ctx context.Context, cmd *cobra.Command, sessionID string) error {
-	state, err := loadReviewSession(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-	out := cmd.OutOrStdout()
-	checkpointID := mostRecentCheckpointID(state)
-	// Best-effort: author email used as review-by; omit if unavailable.
-	by := ""
-	if author, authErr := GetGitAuthor(ctx); authErr == nil && author != nil {
-		by = author.Email
-	}
-	// TODO(v2): detect clean reviews; for now default to closed.
-	status := trailers.ReviewStatusClosed
-	md := trailers.ReviewMetadata{
-		By:         by,
-		Agent:      pickAgentNameFromSession(state),
-		Skills:     state.ReviewSkills,
-		Session:    sessionID,
-		Checkpoint: checkpointID,
-		Status:     status,
-	}
-	hash, err := createReviewCommit(ctx, md)
-	if err != nil {
-		return err
-	}
-	// Record close in session state.
-	state.ReviewStatus = session.ReviewStatus(status)
-	store, err := session.NewStateStore(ctx)
-	if err != nil {
-		return fmt.Errorf("reopen session store: %w", err)
-	}
-	if err := store.Save(ctx, state); err != nil {
-		return fmt.Errorf("save session state: %w", err)
-	}
-	short := hash.String()
-	if len(short) > 12 {
-		short = short[:12]
-	}
-	fmt.Fprintf(out, "Review committed as %s. You may exit.\n", short)
-	return nil
-}
-
-// createReviewCommit writes an empty "Review" commit on the current branch
-// with review trailers. Reviewed-Up-To is set to HEAD (before the commit)
-// so it doesn't point at the new commit itself.
-func createReviewCommit(ctx context.Context, md trailers.ReviewMetadata) (plumbing.Hash, error) {
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("locate repo root: %w", err)
-	}
-	repo, err := git.PlainOpen(repoRoot)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("open repo: %w", err)
-	}
-	head, err := repo.Head()
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("resolve HEAD: %w", err)
-	}
-	if !head.Name().IsBranch() {
-		return plumbing.ZeroHash, errors.New("cannot create review commit: not on a branch (detached HEAD)")
-	}
-	parent, err := repo.CommitObject(head.Hash())
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("load parent commit: %w", err)
-	}
-	md.ReviewedUpTo = head.Hash().String()
-	message := trailers.AppendReviewTrailers("Review\n", md)
-
-	author, err := GetGitAuthor(ctx)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("resolve git author: %w", err)
-	}
-	now := time.Now()
-	commit := &object.Commit{
-		Author:       object.Signature{Name: author.Name, Email: author.Email, When: now},
-		Committer:    object.Signature{Name: author.Name, Email: author.Email, When: now},
-		Message:      message,
-		TreeHash:     parent.TreeHash,
-		ParentHashes: []plumbing.Hash{parent.Hash},
-	}
-	obj := repo.Storer.NewEncodedObject()
-	if err := commit.Encode(obj); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("encode commit: %w", err)
-	}
-	hash, err := repo.Storer.SetEncodedObject(obj)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("store commit: %w", err)
-	}
-	// Advance the current branch to point at the new commit.
-	ref := plumbing.NewHashReference(head.Name(), hash)
-	if err := repo.Storer.SetReference(ref); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("update branch ref: %w", err)
-	}
-	return hash, nil
-}
-
-// pickAgentNameFromSession extracts the agent name from session state.
-// Reads the AgentType field populated by strat.InitializeSession at turn
-// start. Returns "" when the session was never initialized with an agent
-// (e.g., legacy state files or manually constructed test states).
-func pickAgentNameFromSession(state *session.State) string {
-	if state == nil {
-		return ""
-	}
-	return string(state.AgentType)
-}
-
-func finalizeSkip(ctx context.Context, cmd *cobra.Command, sessionID string) error {
-	state, err := loadReviewSession(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-	state.ReviewStatus = session.ReviewStatusSkipped
-	store, err := session.NewStateStore(ctx)
-	if err != nil {
-		return fmt.Errorf("reopen session store: %w", err)
-	}
-	if err := store.Save(ctx, state); err != nil {
-		return fmt.Errorf("save session state: %w", err)
-	}
-	fmt.Fprintln(cmd.OutOrStdout(), "Review ended without commit. You may exit.")
-	return nil
-}
-
-// promptReviewFallback presents a three-choice TUI (Fix/Close/Skip) when a
-// review session ends without the /entire-review:finish skill finalizing it.
-// If stdin isn't a TTY (e.g., hook invoked by an agent subprocess without a
-// terminal), it logs guidance and returns without prompting — the user can
-// run `entire review --finalize <choice> --session <id>` manually next time.
-func promptReviewFallback(ctx context.Context, sessionID string) error {
-	if !term.IsTerminal(int(os.Stdin.Fd())) { //nolint:gosec // G115: uintptr->int is safe for fd
-		logging.Warn(ctx, "review session ended in non-terminal context; cannot prompt",
-			slog.String("session_id", sessionID),
-			slog.String("hint", "run: entire review --finalize close|fix|skip --session "+sessionID))
-		return nil
-	}
-
-	var choice string
-	form := NewAccessibleForm(huh.NewGroup(
-		huh.NewSelect[string]().
-			Title("Review session ended. What's next?").
-			Options(
-				huh.NewOption("Fix   — run `entire resume` after to continue", finalizeChoiceFix),
-				huh.NewOption("Close — commit review marker now", finalizeChoiceClose),
-				huh.NewOption("Skip  — end without committing", finalizeChoiceSkip),
-			).
-			Value(&choice),
-	))
-	if err := form.Run(); err != nil {
-		return fmt.Errorf("fallback TUI: %w", err)
-	}
-
-	// Build a dummy cobra.Command for the existing finalize handlers.
-	cmd := &cobra.Command{}
-	cmd.SetOut(os.Stdout)
-	cmd.SetErr(os.Stderr)
-
-	switch choice {
-	case finalizeChoiceFix:
-		return finalizeFix(ctx, cmd, sessionID)
-	case finalizeChoiceClose:
-		return finalizeClose(ctx, cmd, sessionID)
-	case finalizeChoiceSkip:
-		return finalizeSkip(ctx, cmd, sessionID)
-	default:
-		return nil
-	}
+	// Build a short description for the re-run prompt.
+	return true, fmt.Sprintf("checkpoint %s", cpID)
 }
 
 // saveReviewConfig persists the review map into .entire/settings.json while

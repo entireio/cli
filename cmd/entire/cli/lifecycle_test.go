@@ -984,9 +984,6 @@ func TestAdoptPendingReviewMarker(t *testing.T) {
 	if got.Kind != session.KindReview {
 		t.Errorf("Kind = %q, want review", got.Kind)
 	}
-	if got.ReviewStatus != session.ReviewStatusInProgress {
-		t.Errorf("ReviewStatus = %q", got.ReviewStatus)
-	}
 	if len(got.ReviewSkills) != 1 || got.ReviewSkills[0] != "/pr-review-toolkit:review-pr" {
 		t.Errorf("ReviewSkills = %v", got.ReviewSkills)
 	}
@@ -1037,7 +1034,7 @@ func TestAdoptPendingReviewMarker_AlreadyReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	// State already tagged — adoption should be a no-op (not a second re-tag).
-	in := session.State{SessionID: "s3", Kind: session.KindReview, ReviewStatus: session.ReviewStatusInProgress, ReviewSkills: []string{"/y"}}
+	in := session.State{SessionID: "s3", Kind: session.KindReview, ReviewSkills: []string{"/y"}}
 	got, modified, err := adoptPendingReviewMarkerInto(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
@@ -1055,123 +1052,5 @@ func TestAdoptPendingReviewMarker_AlreadyReview(t *testing.T) {
 	}
 	if !ok {
 		t.Error("expected marker preserved when adoption was a no-op")
-	}
-}
-
-func TestSessionEnd_DetectsUnfinalizedReview(t *testing.T) {
-	// Uses t.Chdir — no t.Parallel.
-	tmp := t.TempDir()
-	testutil.InitRepo(t, tmp)
-	testutil.WriteFile(t, tmp, "f.txt", "x")
-	testutil.GitAdd(t, tmp, "f.txt")
-	testutil.GitCommit(t, tmp, "init")
-	t.Chdir(tmp)
-
-	// Create a review session that's in-progress.
-	const sid = "2026-04-20-review-interrupted"
-	store, err := session.NewStateStore(context.Background())
-	if err != nil {
-		t.Fatalf("NewStateStore: %v", err)
-	}
-	state := &session.State{
-		SessionID:    sid,
-		Kind:         session.KindReview,
-		ReviewStatus: session.ReviewStatusInProgress,
-		StartedAt:    time.Now(),
-	}
-	if err := store.Save(context.Background(), state); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	// Swap in a test double for the fallback hook so we don't actually
-	// render a TUI. Restore after the test.
-	var invoked bool
-	var invokedSID string
-	prev := reviewFallbackHook
-	reviewFallbackHook = func(_ context.Context, sessionID string) error {
-		invoked = true
-		invokedSID = sessionID
-		return nil
-	}
-	t.Cleanup(func() { reviewFallbackHook = prev })
-
-	detectUnfinalizedReview(context.Background(), sid)
-
-	if !invoked {
-		t.Fatal("expected reviewFallbackHook to be invoked for in-progress review session")
-	}
-	if invokedSID != sid {
-		t.Errorf("invokedSID = %q, want %q", invokedSID, sid)
-	}
-}
-
-func TestSessionEnd_SkipsNonReviewSession(t *testing.T) {
-	tmp := t.TempDir()
-	testutil.InitRepo(t, tmp)
-	testutil.WriteFile(t, tmp, "f.txt", "x")
-	testutil.GitAdd(t, tmp, "f.txt")
-	testutil.GitCommit(t, tmp, "init")
-	t.Chdir(tmp)
-
-	const sid = "2026-04-20-normal"
-	store, err := session.NewStateStore(context.Background())
-	if err != nil {
-		t.Fatalf("NewStateStore: %v", err)
-	}
-	state := &session.State{SessionID: sid, StartedAt: time.Now()} // Kind = ""
-	if err := store.Save(context.Background(), state); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	var invoked bool
-	prev := reviewFallbackHook
-	reviewFallbackHook = func(_ context.Context, _ string) error {
-		invoked = true
-		return nil
-	}
-	t.Cleanup(func() { reviewFallbackHook = prev })
-
-	detectUnfinalizedReview(context.Background(), sid)
-
-	if invoked {
-		t.Error("fallback hook should not fire for non-review sessions")
-	}
-}
-
-func TestSessionEnd_SkipsAlreadyFinalizedReview(t *testing.T) {
-	tmp := t.TempDir()
-	testutil.InitRepo(t, tmp)
-	testutil.WriteFile(t, tmp, "f.txt", "x")
-	testutil.GitAdd(t, tmp, "f.txt")
-	testutil.GitCommit(t, tmp, "init")
-	t.Chdir(tmp)
-
-	const sid = "2026-04-20-review-closed"
-	store, err := session.NewStateStore(context.Background())
-	if err != nil {
-		t.Fatalf("NewStateStore: %v", err)
-	}
-	state := &session.State{
-		SessionID:    sid,
-		Kind:         session.KindReview,
-		ReviewStatus: session.ReviewStatusClosed,
-		StartedAt:    time.Now(),
-	}
-	if err := store.Save(context.Background(), state); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	var invoked bool
-	prev := reviewFallbackHook
-	reviewFallbackHook = func(_ context.Context, _ string) error {
-		invoked = true
-		return nil
-	}
-	t.Cleanup(func() { reviewFallbackHook = prev })
-
-	detectUnfinalizedReview(context.Background(), sid)
-
-	if invoked {
-		t.Error("fallback hook should not fire for already-finalized review sessions")
 	}
 }

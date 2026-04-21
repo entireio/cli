@@ -182,26 +182,13 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		}
 	}
 
-	// Show most recent review on the current branch, if any.
-	// Error is intentionally ignored — status rendering is best-effort.
-	if info, ok, _ := findMostRecentReview(ctx); ok { //nolint:errcheck // best-effort: skip review line on failure
+	// Show review status for HEAD's checkpoint, if any.
+	if reviewed, meta := headHasReviewCheckpoint(ctx); reviewed {
 		b.WriteString("\n")
 		b.WriteString(sty.render(sty.dim, "  Review · "))
-		if info.CommitsSince == 0 {
-			fmt.Fprintf(&b, "%s (at HEAD, %s)", info.By, info.Status)
-		} else {
-			fmt.Fprintf(&b, "%s (%d commit", info.By, info.CommitsSince)
-			if info.CommitsSince != 1 {
-				b.WriteString("s")
-			}
-			b.WriteString(" ago, ")
-			b.WriteString(info.Status)
-			b.WriteString(")")
-		}
-		if info.Checkpoint != "" {
-			b.WriteString(sty.render(sty.dim, " · entire explain "))
-			b.WriteString(info.Checkpoint)
-		}
+		b.WriteString("reviewed (")
+		b.WriteString(meta)
+		b.WriteString(")")
 	}
 
 	return b.String()
