@@ -98,12 +98,12 @@ func TestFetchLatestNightlyVersion(t *testing.T) {
 	githubReleasesURL = server.URL
 	t.Cleanup(func() { githubReleasesURL = original })
 
-	release, err := fetchLatestNightlyRelease(context.Background())
+	version, err := fetchLatestNightlyVersion(context.Background())
 	if err != nil {
-		t.Fatalf("fetchLatestNightlyRelease() error = %v", err)
+		t.Fatalf("fetchLatestNightlyVersion() error = %v", err)
 	}
-	if release.TagName != "v0.5.4-nightly.202604061200.abc1234" {
-		t.Errorf("fetchLatestNightlyRelease() = %q, want v0.5.4-nightly.202604061200.abc1234", release.TagName)
+	if version != "v0.5.4-nightly.202604061200.abc1234" {
+		t.Errorf("fetchLatestNightlyVersion() = %q, want v0.5.4-nightly.202604061200.abc1234", version)
 	}
 }
 
@@ -122,9 +122,9 @@ func TestFetchLatestNightlyVersion_NoNightlies(t *testing.T) {
 	githubReleasesURL = server.URL
 	t.Cleanup(func() { githubReleasesURL = original })
 
-	_, err := fetchLatestNightlyRelease(context.Background())
+	_, err := fetchLatestNightlyVersion(context.Background())
 	if err == nil {
-		t.Fatal("fetchLatestNightlyRelease() expected error when no nightlies, got nil")
+		t.Fatal("fetchLatestNightlyVersion() expected error when no nightlies, got nil")
 	}
 }
 
@@ -235,12 +235,12 @@ func TestFetchLatestVersion(t *testing.T) {
 	githubAPIURL = server.URL
 	t.Cleanup(func() { githubAPIURL = original })
 
-	release, err := fetchLatestRelease(context.Background())
+	version, err := fetchLatestVersion(context.Background())
 	if err != nil {
-		t.Fatalf("fetchLatestRelease(context.Background()) error = %v", err)
+		t.Fatalf("fetchLatestVersion(context.Background()) error = %v", err)
 	}
-	if release.TagName != "v1.2.3" {
-		t.Errorf("fetchLatestRelease(context.Background()) = %q, want v1.2.3", release.TagName)
+	if version != "v1.2.3" {
+		t.Errorf("fetchLatestVersion(context.Background()) = %q, want v1.2.3", version)
 	}
 }
 
@@ -260,7 +260,7 @@ func TestFetchLatestVersionPrerelease(t *testing.T) {
 	githubAPIURL = server.URL
 	t.Cleanup(func() { githubAPIURL = original })
 
-	_, err := fetchLatestRelease(context.Background())
+	_, err := fetchLatestVersion(context.Background())
 	if err == nil {
 		t.Fatal("fetchLatestVersion(context.Background()) expected error for prerelease, got nil")
 	}
@@ -276,7 +276,7 @@ func TestFetchLatestVersionServerError(t *testing.T) {
 	githubAPIURL = server.URL
 	t.Cleanup(func() { githubAPIURL = original })
 
-	_, err := fetchLatestRelease(context.Background())
+	_, err := fetchLatestVersion(context.Background())
 	if err == nil {
 		t.Fatal("fetchLatestVersion(context.Background()) expected error for 500 response, got nil")
 	}
@@ -302,11 +302,8 @@ func TestParseGitHubRelease(t *testing.T) {
 				t.Errorf("parseGitHubRelease() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.wantErr {
-				return
-			}
-			if got.TagName != tt.want {
-				t.Errorf("parseGitHubRelease() = %q, want %q", got.TagName, tt.want)
+			if got != tt.want {
+				t.Errorf("parseGitHubRelease() = %q, want %q", got, tt.want)
 			}
 		})
 	}

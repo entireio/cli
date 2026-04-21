@@ -4,16 +4,13 @@ import "time"
 
 // VersionCache represents the cached version check data.
 type VersionCache struct {
-	LastCheckTime         time.Time `json:"last_check_time"`
-	LastUpdateAttemptTime time.Time `json:"last_update_attempt_time,omitzero"`
-	LastUpdateAttemptOk   bool      `json:"last_update_attempt_ok,omitempty"`
+	LastCheckTime time.Time `json:"last_check_time"`
 }
 
 // GitHubRelease represents the GitHub API response for a release.
 type GitHubRelease struct {
-	TagName     string    `json:"tag_name"`
-	Prerelease  bool      `json:"prerelease"`
-	PublishedAt time.Time `json:"published_at"`
+	TagName    string `json:"tag_name"`
+	Prerelease bool   `json:"prerelease"`
 }
 
 // githubAPIURL is the GitHub API endpoint for fetching the latest stable release.

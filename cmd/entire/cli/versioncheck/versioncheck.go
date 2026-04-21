@@ -52,12 +52,12 @@ func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 		return
 	}
 
-	// Fetch the latest release from the appropriate channel
-	var release *GitHubRelease
+	// Fetch the latest version from the appropriate channel
+	var latestVersion string
 	if isNightly(currentVersion) {
-		release, err = fetchLatestNightlyRelease(ctx)
+		latestVersion, err = fetchLatestNightlyVersion(ctx)
 	} else {
-		release, err = fetchLatestRelease(ctx)
+		latestVersion, err = fetchLatestVersion(ctx)
 	}
 
 	// Always update cache to avoid retrying on every CLI invocation
@@ -73,10 +73,10 @@ func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 		return
 	}
 
-	// Show notification and (if configured) offer/run an auto-update when outdated
-	if isOutdated(currentVersion, release.TagName) {
-		printNotification(w, currentVersion, release.TagName)
-		MaybeAutoUpdate(ctx, w, currentVersion, release)
+	// Show notification and offer an interactive upgrade when outdated
+	if isOutdated(currentVersion, latestVersion) {
+		printNotification(w, currentVersion, latestVersion)
+		MaybeAutoUpdate(ctx, w, currentVersion)
 	}
 }
 
@@ -174,14 +174,14 @@ func saveCache(cache *VersionCache) error {
 	return nil
 }
 
-// fetchLatestRelease fetches the latest stable release from the GitHub API.
-func fetchLatestRelease(ctx context.Context) (*GitHubRelease, error) {
+// fetchLatestVersion fetches the latest stable version tag from the GitHub API.
+func fetchLatestVersion(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPIURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return "", fmt.Errorf("creating request: %w", err)
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -190,24 +190,24 @@ func fetchLatestRelease(ctx context.Context) (*GitHubRelease, error) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching release info: %w", err)
+		return "", fmt.Errorf("fetching release info: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
+		return "", fmt.Errorf("reading response: %w", err)
 	}
 
-	release, err := parseGitHubRelease(body)
+	version, err := parseGitHubRelease(body)
 	if err != nil {
-		return nil, fmt.Errorf("parsing release: %w", err)
+		return "", fmt.Errorf("parsing release: %w", err)
 	}
-	return release, nil
+	return version, nil
 }
 
 // isNightly returns true if the version string is a nightly build.
@@ -218,14 +218,14 @@ func isNightly(version string) bool {
 	return strings.Contains(semver.Prerelease(version), "nightly")
 }
 
-// fetchLatestNightlyRelease fetches the latest nightly release from the GitHub releases list.
-func fetchLatestNightlyRelease(ctx context.Context) (*GitHubRelease, error) {
+// fetchLatestNightlyVersion fetches the latest nightly version tag from the GitHub releases list.
+func fetchLatestNightlyVersion(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubReleasesURL+"?per_page=20", nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return "", fmt.Errorf("creating request: %w", err)
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -234,50 +234,50 @@ func fetchLatestNightlyRelease(ctx context.Context) (*GitHubRelease, error) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching releases: %w", err)
+		return "", fmt.Errorf("fetching releases: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
+		return "", fmt.Errorf("reading response: %w", err)
 	}
 
 	var releases []GitHubRelease
 	if err := json.Unmarshal(body, &releases); err != nil {
-		return nil, fmt.Errorf("parsing JSON: %w", err)
+		return "", fmt.Errorf("parsing JSON: %w", err)
 	}
 
-	for i, r := range releases {
+	for _, r := range releases {
 		if r.Prerelease && strings.Contains(r.TagName, "-nightly.") {
-			return &releases[i], nil
+			return r.TagName, nil
 		}
 	}
 
-	return nil, errors.New("no nightly release found")
+	return "", errors.New("no nightly release found")
 }
 
-// parseGitHubRelease parses the GitHub API response and returns the latest stable release.
+// parseGitHubRelease parses the GitHub API response and returns the latest stable version tag.
 // Filters out prerelease versions.
-func parseGitHubRelease(body []byte) (*GitHubRelease, error) {
+func parseGitHubRelease(body []byte) (string, error) {
 	var release GitHubRelease
 	if err := json.Unmarshal(body, &release); err != nil {
-		return nil, fmt.Errorf("parsing JSON: %w", err)
+		return "", fmt.Errorf("parsing JSON: %w", err)
 	}
 
 	if release.Prerelease {
-		return nil, errors.New("only prerelease versions available")
+		return "", errors.New("only prerelease versions available")
 	}
 
 	if release.TagName == "" {
-		return nil, errors.New("empty tag name")
+		return "", errors.New("empty tag name")
 	}
 
-	return &release, nil
+	return release.TagName, nil
 }
 
 // isOutdated compares current and latest versions using semantic versioning.

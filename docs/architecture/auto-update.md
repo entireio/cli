@@ -1,76 +1,41 @@
 # Auto-Update
 
-The Entire CLI can offer or install new releases automatically after its daily
-version check. The feature is **off by default** and opt-in.
+After the Entire CLI's daily version check detects a newer release, the
+standard notification is followed by an interactive Y/N prompt to run the
+installer.
 
-## Configuration
-
-Settings live at `~/.config/entire/settings.json` (machine-wide, not
-per-repository):
-
-```json
-{
-  "auto_update": "prompt"
-}
-```
-
-Values:
-
-- `off` (default) — show the notification only; no prompt, no execution.
-- `prompt` — after the notification, ask the user to confirm and run the installer on yes.
-- `auto` — install silently when guardrails pass (see below).
-
-### CLI subcommands
+## UX
 
 ```
-entire auto-update status              # print current mode + config path
-entire auto-update enable              # set mode to "prompt"
-entire auto-update disable             # set mode to "off"
-entire auto-update set <off|prompt|auto>
+A newer version of Entire CLI is available: v1.2.3 (current: v1.0.0)
+Run 'brew upgrade --cask entire' to update.
+
+? Install the new version now?  (Y/n)
 ```
 
-### Manual update
-
-```
-entire update              # resolve installer, prompt Y/N, run it
-entire update --yes        # skip confirmation
-entire update --check-only # print the installer command without running it
-```
+- Declining simply skips the upgrade. The 24-hour version-check cache means
+  the prompt will not reappear until the next day.
+- The installer command is whatever `versioncheck.updateCommand(current)`
+  returns — `brew upgrade --cask ...`, `mise upgrade entire`,
+  `scoop update entire/cli`, or the curl-pipe-bash fallback — including the
+  `--channel nightly` variant for nightly builds.
+- stdin, stdout and stderr are wired through so the user sees installer
+  output and can answer any password prompt.
 
 ## Guardrails
 
-The auto-update path refuses to execute unless all of the following hold:
+The prompt is skipped silently when any of the following holds:
 
-- `auto_update` is `prompt` or `auto`.
-- stdout is a terminal.
-- `CI` environment variable is empty.
-- `ENTIRE_NO_AUTO_UPDATE` environment variable is empty (kill switch).
+- stdout is not a terminal.
+- `CI` environment variable is set.
+- `ENTIRE_NO_AUTO_UPDATE` environment variable is set (kill switch).
 
-Additionally, `auto` mode requires:
+In those cases the user still sees the existing notification line pointing
+to the installer command.
 
-- `installManagerForCurrentBinary()` resolves to a known manager (brew, mise,
-  scoop). The curl fallback is not trusted for silent installs.
-- The release was published at least 24 hours ago (soak delay — cushion
-  against a bad release).
-- No failed attempt was recorded in the last 24 hours.
+## Not in scope
 
-## Installer mapping
-
-Derived from the running binary's path plus the release channel
-(stable / nightly). See `versioncheck.updateCommand` for the authoritative
-table.
-
-- Homebrew / Homebrew cask → `brew upgrade --cask entire[@nightly]`
-- mise → `mise upgrade entire`
-- scoop → `scoop update entire/cli`
-- unknown → `curl -fsSL https://entire.io/install.sh | bash [-s -- --channel nightly]`
-
-The installer is run via `sh -c` on Unix and `cmd /C` on Windows. stdin,
-stdout, and stderr are wired to the user so passwords and progress output
-flow through.
-
-## Failure handling
-
-Failed attempts are recorded in `~/.config/entire/version_check.json`.
-In `auto` mode the CLI backs off for 24 hours after a failure; `prompt` mode
-always re-prompts on the next run.
+- No "silent auto-install" mode — the prompt is always interactive.
+- No persisted preference — the kill-switch env is the escape hatch.
+- No dedicated `entire auto-update` / `entire update` subcommands; the
+  notification + prompt replaces them.
