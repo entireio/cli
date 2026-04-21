@@ -1182,12 +1182,6 @@ func setupAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, localDev,
 	}
 	reportSearchSubagentScaffold(w, ag, scaffoldResult)
 
-	reviewScaffoldResult, err := scaffoldReviewFinishSkill(ctx, ag)
-	if err != nil {
-		return 0, fmt.Errorf("failed to scaffold %s review finish skill: %w", ag.Name(), err)
-	}
-	reportReviewFinishSkillScaffold(w, ag, reviewScaffoldResult)
-
 	return count, nil
 }
 

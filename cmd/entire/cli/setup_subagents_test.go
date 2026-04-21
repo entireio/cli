@@ -1,14 +1,12 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
@@ -177,52 +175,5 @@ func assertStrictJSONSearchInstructions(t *testing.T, content string) {
 	}
 	if strings.Contains(content, "Your only history-search mechanism is the `entire search` command.") {
 		t.Fatal("scaffolded file should not present plain `entire search` as the required command")
-	}
-}
-
-func TestScaffoldReviewFinishSkill_CreatesFile(t *testing.T) {
-	cases := []struct {
-		name    string
-		agent   func() agent.Agent
-		relPath string
-	}{
-		{
-			name:    "claude",
-			agent:   claudecode.NewClaudeCodeAgent,
-			relPath: filepath.Join(".claude", "skills", "entire-review-finish.md"),
-		},
-		{
-			name:    "codex",
-			agent:   codex.NewCodexAgent,
-			relPath: filepath.Join(".codex", "skills", "entire-review-finish.md"),
-		},
-		{
-			name:    "gemini",
-			agent:   geminicli.NewGeminiCLIAgent,
-			relPath: filepath.Join(".gemini", "skills", "entire-review-finish.md"),
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tmp := setupTestDir(t)
-			result, err := scaffoldReviewFinishSkill(context.Background(), tc.agent())
-			if err != nil {
-				t.Fatalf("scaffoldReviewFinishSkill() error = %v", err)
-			}
-			if result.Status != reviewFinishSkillCreated {
-				t.Fatalf("status = %q, want %q", result.Status, reviewFinishSkillCreated)
-			}
-			if result.RelPath != tc.relPath {
-				t.Fatalf("relPath = %q, want %q", result.RelPath, tc.relPath)
-			}
-			// Confirm the file exists and contains the marker.
-			data, err := os.ReadFile(filepath.Join(tmp, tc.relPath))
-			if err != nil {
-				t.Fatalf("read skill file: %v", err)
-			}
-			if !bytes.Contains(data, []byte(entireManagedReviewFinishSkillMarker)) {
-				t.Errorf("skill file missing managed marker")
-			}
-		})
 	}
 }
