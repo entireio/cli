@@ -308,6 +308,12 @@ type WriteCommittedOptions struct {
 	// Written to v2 /main ref alongside metadata. May be nil if compaction
 	// was not performed (unknown agent, compaction error, empty transcript).
 	CompactTranscript []byte
+
+	// Kind identifies the session purpose (e.g., "review"). Empty for normal sessions.
+	Kind string
+
+	// ReviewSkills is the snapshot of skills used (only meaningful when Kind == "review").
+	ReviewSkills []string
 }
 
 // UpdateCommittedOptions contains options for updating an existing committed checkpoint.
@@ -472,6 +478,12 @@ type CommittedMetadata struct {
 	// PromptAttributions is the raw per-prompt attribution data used to compute InitialAttribution.
 	// Diagnostic field — shows which prompt recorded which "user" lines.
 	PromptAttributions json.RawMessage `json:"prompt_attributions,omitempty"`
+
+	// Kind identifies the session purpose (e.g., "review"). Empty for normal sessions.
+	Kind string `json:"kind,omitempty"`
+
+	// ReviewSkills lists the review skills that were run (only set when Kind == "review").
+	ReviewSkills []string `json:"review_skills,omitempty"`
 }
 
 // GetTranscriptStart returns the transcript line offset at which this checkpoint's data begins.
@@ -522,6 +534,9 @@ type CheckpointSummary struct {
 	Sessions            []SessionFilePaths  `json:"sessions"`
 	TokenUsage          *agent.TokenUsage   `json:"token_usage,omitempty"`
 	CombinedAttribution *InitialAttribution `json:"combined_attribution,omitempty"`
+
+	// HasReview is true when at least one session in this checkpoint has Kind == "review".
+	HasReview bool `json:"has_review,omitempty"`
 }
 
 // SessionMetrics contains hook-provided session metrics from agents that report

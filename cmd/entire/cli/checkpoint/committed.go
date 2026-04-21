@@ -406,6 +406,8 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 		PromptAttributions:          opts.PromptAttributionsJSON,
 		Summary:                     redactSummary(opts.Summary),
 		CLIVersion:                  versioninfo.Version,
+		Kind:                        opts.Kind,
+		ReviewSkills:                opts.ReviewSkills,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(sessionMetadata, "", "  ")
@@ -435,11 +437,15 @@ func (s *GitStore) writeCheckpointSummary(opts WriteCommittedOptions, basePath s
 	}
 
 	var combinedAttribution *InitialAttribution
+	hasReview := opts.Kind == "review"
 	rootMetadataPath := basePath + paths.MetadataFileName
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
 		if readErr == nil {
 			combinedAttribution = existingSummary.CombinedAttribution
+			if !hasReview {
+				hasReview = existingSummary.HasReview
+			}
 		}
 	}
 
@@ -453,6 +459,7 @@ func (s *GitStore) writeCheckpointSummary(opts WriteCommittedOptions, basePath s
 		Sessions:            sessions,
 		TokenUsage:          tokenUsage,
 		CombinedAttribution: combinedAttribution,
+		HasReview:           hasReview,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")

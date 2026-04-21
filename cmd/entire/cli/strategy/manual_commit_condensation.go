@@ -249,6 +249,8 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		InitialAttribution:          attribution,
 		PromptAttributionsJSON:      marshalPromptAttributionsIncludingPending(state),
 		Summary:                     summary,
+		Kind:                        string(state.Kind),
+		ReviewSkills:                state.ReviewSkills,
 	}
 
 	compactTranscriptDuration := buildCompactTranscript(ctx, ag, redactedTranscript, state, &writeOpts)
