@@ -12,13 +12,11 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli"
 	"github.com/spf13/cobra"
-
-	// Registers the default Auto ConfigLoader plugin, which lets
-	// repo.ConfigScoped resolve global/system git config from ~/.gitconfig.
-	_ "github.com/go-git/go-git/v6/x/plugin"
 )
 
 func main() {
+	cli.RegisterObjectSigner()
+
 	// Create context that cancels on interrupt
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -37,7 +35,6 @@ func main() {
 	// Create and execute root command
 	rootCmd := cli.NewRootCmd()
 	err := rootCmd.ExecuteContext(ctx)
-
 	if err != nil {
 		var silent *cli.SilentError
 

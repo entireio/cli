@@ -413,7 +413,7 @@ func corruptV2MainRef(t *testing.T, repo *git.Repository, checkpointID string) {
 	rootTreeHash, err := repo.Storer.SetEncodedObject(rootTreeObj)
 	require.NoError(t, err)
 
-	commitHash, err := checkpoint.CreateCommit(repo, rootTreeHash, parentHash,
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, rootTreeHash, parentHash,
 		"corrupt metadata for test", "Test", "test@test.com")
 	require.NoError(t, err)
 

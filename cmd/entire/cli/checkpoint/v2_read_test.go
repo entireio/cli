@@ -232,7 +232,7 @@ func TestV2ReadSessionContent_ChunkedTranscript(t *testing.T) {
 
 	parentHash, _, err := v2Store.GetRefState(refName)
 	require.NoError(t, err)
-	err = v2Store.updateRef(refName, newTreeHash, parentHash, "chunked test", "Test", "test@test.com")
+	err = v2Store.updateRef(ctx, refName, newTreeHash, parentHash, "chunked test", "Test", "test@test.com")
 	require.NoError(t, err)
 
 	// Read it back — should reassemble both chunks

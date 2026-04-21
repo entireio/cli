@@ -68,7 +68,7 @@ func (s *V2GitStore) ensureRef(ctx context.Context, refName plumbing.ReferenceNa
 	}
 
 	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-	commitHash, err := CreateCommit(s.repo, emptyTreeHash, plumbing.ZeroHash, "Initialize v2 ref", authorName, authorEmail)
+	commitHash, err := CreateCommit(ctx, s.repo, emptyTreeHash, plumbing.ZeroHash, "Initialize v2 ref", authorName, authorEmail)
 	if err != nil {
 		return fmt.Errorf("failed to create initial commit: %w", err)
 	}
@@ -97,8 +97,8 @@ func (s *V2GitStore) GetRefState(refName plumbing.ReferenceName) (parentHash, tr
 }
 
 // updateRef creates a new commit on a ref with the given tree, updating the ref to point to it.
-func (s *V2GitStore) updateRef(refName plumbing.ReferenceName, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) error {
-	commitHash, err := CreateCommit(s.repo, treeHash, parentHash, message, authorName, authorEmail)
+func (s *V2GitStore) updateRef(ctx context.Context, refName plumbing.ReferenceName, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) error {
+	commitHash, err := CreateCommit(ctx, s.repo, treeHash, parentHash, message, authorName, authorEmail)
 	if err != nil {
 		return fmt.Errorf("failed to create commit: %w", err)
 	}

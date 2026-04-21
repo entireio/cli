@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -426,15 +427,17 @@ func checkDisconnectedV2Main(cmd *cobra.Command, force bool) error {
 	}
 
 	ctx := cmd.Context()
-	remote, configured, resolveErr := strategy.ResolveCheckpointRemoteURL(ctx)
-	if configured && resolveErr != nil {
-		return fmt.Errorf("checkpoint_remote is configured but could not be resolved: %w", resolveErr)
-	}
-	if remote == "" {
-		remote = "origin"
+	configured := remote.Configured(ctx)
+	remoteName := migrateRemoteName
+	if configured {
+		resolvedRemote, resolveErr := remote.FetchURL(ctx)
+		if resolveErr != nil {
+			return fmt.Errorf("checkpoint_remote is configured but could not be resolved: %w", resolveErr)
+		}
+		remoteName = resolvedRemote
 	}
 
-	disconnected, err := strategy.IsV2MainDisconnected(ctx, repo, remote)
+	disconnected, err := strategy.IsV2MainDisconnected(ctx, repo, remoteName)
 	if err != nil {
 		// If no checkpoint_remote is configured and origin doesn't exist or is
 		// unreachable, treat as "can't check" rather than a hard failure — mirrors
@@ -478,7 +481,7 @@ func checkDisconnectedV2Main(cmd *cobra.Command, force bool) error {
 		}
 	}
 
-	if fixErr := strategy.ReconcileDisconnectedV2Ref(ctx, repo, remote, cmd.ErrOrStderr()); fixErr != nil {
+	if fixErr := strategy.ReconcileDisconnectedV2Ref(ctx, repo, remoteName, cmd.ErrOrStderr()); fixErr != nil {
 		return fmt.Errorf("failed to reconcile v2 /main ref: %w", fixErr)
 	}
 

@@ -334,6 +334,47 @@ type UpdateCommittedOptions struct {
 	// CompactTranscript is the updated Entire Transcript Format bytes.
 	// If non-nil, replaces the existing transcript.jsonl on v2 /main.
 	CompactTranscript []byte
+
+	// PrecomputedBlobs, if non-nil, provides chunk blob hashes and the
+	// content-hash blob hash computed once for this transcript. When set,
+	// UpdateCommitted skips the per-call ChunkTranscript + zlib work and
+	// reuses these hashes. Used by finalizeAllTurnCheckpoints to avoid
+	// re-compressing identical content N times.
+	PrecomputedBlobs *PrecomputedTranscriptBlobs
+}
+
+// PrecomputedTranscriptBlobs holds blob hashes for a transcript that was
+// chunked and written to the object store once, for reuse across multiple
+// UpdateCommitted calls sharing the same transcript content.
+//
+// Blob hashes are content-addressed (SHA-1 of chunk bytes), so the same
+// PrecomputedTranscriptBlobs works for both v1 (full.jsonl) and v2
+// (raw_transcript) paths — only the tree-entry filename differs.
+//
+// Callers should avoid constructing this for empty transcripts; agent.ChunkTranscript
+// would otherwise produce a single zero-length chunk and a hash for an empty
+// blob, which downstream stores would never reference.
+type PrecomputedTranscriptBlobs struct {
+	// ChunkHashes are the blob hashes for each transcript chunk, in order.
+	// Always non-empty when built via PrecomputeTranscriptBlobs (a non-empty
+	// transcript chunks to at least one entry; callers should skip precompute
+	// for empty transcripts).
+	ChunkHashes []plumbing.Hash
+
+	// ContentHashBlob is the blob hash of the "sha256:<hex>" content-hash
+	// string for the transcript.
+	ContentHashBlob plumbing.Hash
+
+	// ContentHash is the "sha256:<hex>" string itself, so the short-circuit
+	// path can compare without re-reading the blob.
+	ContentHash string
+}
+
+// isUsable reports whether the precomputed blobs satisfy the invariants that
+// consumers depend on: a non-zero content-hash blob and at least one chunk
+// hash. Callers should fall back to the fresh-write path when this is false.
+func (p *PrecomputedTranscriptBlobs) isUsable() bool {
+	return p != nil && !p.ContentHashBlob.IsZero() && len(p.ChunkHashes) > 0
 }
 
 // CommittedInfo contains summary information about a committed checkpoint.

@@ -96,7 +96,8 @@ func TestLoad_AcceptsValidKeys(t *testing.T) {
 		"telemetry": true,
 		"redaction": {"pii": {"enabled": true, "email": true, "phone": false}},
 		"external_agents": true,
-		"vercel": true
+		"vercel": true,
+		"sign_checkpoint_commits": false
 	}`
 	if err := os.WriteFile(settingsFile, []byte(settingsContent), 0644); err != nil {
 		t.Fatalf("failed to write settings file: %v", err)
@@ -152,6 +153,9 @@ func TestLoad_AcceptsValidKeys(t *testing.T) {
 	}
 	if !settings.Vercel {
 		t.Error("expected vercel to be true")
+	}
+	if settings.SignCheckpointCommits == nil || *settings.SignCheckpointCommits {
+		t.Error("expected sign_checkpoint_commits to be false")
 	}
 }
 

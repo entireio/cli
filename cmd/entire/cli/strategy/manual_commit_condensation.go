@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -1414,7 +1415,14 @@ func computeCompactTranscriptStart(ctx context.Context, ag agent.Agent, state *S
 // writeCommittedV2 writes checkpoint data to v2 refs unconditionally.
 // Callers decide whether to propagate or swallow the error (v2-only vs dual-write).
 func writeCommittedV2(ctx context.Context, repo *git.Repository, opts cpkg.WriteCommittedOptions) error {
-	v2Store := cpkg.NewV2GitStore(repo, ResolveCheckpointURL(ctx, "origin"))
+	v2URL, err := remote.FetchURL(ctx)
+	if err != nil {
+		logging.Debug(ctx, "manual-commit condensation: using origin for v2 write fetch remote",
+			slog.String("error", err.Error()),
+		)
+		v2URL = originRemote
+	}
+	v2Store := cpkg.NewV2GitStore(repo, v2URL)
 	if err := v2Store.WriteCommitted(ctx, opts); err != nil {
 		return fmt.Errorf("v2 write committed: %w", err)
 	}
@@ -1479,7 +1487,14 @@ func writeTaskMetadataV2IfEnabled(
 		return
 	}
 
-	v2Store := cpkg.NewV2GitStore(repo, ResolveCheckpointURL(ctx, "origin"))
+	v2URL, err := remote.FetchURL(ctx)
+	if err != nil {
+		logging.Debug(ctx, "manual-commit condensation: using origin for v2 task metadata fetch remote",
+			slog.String("error", err.Error()),
+		)
+		v2URL = originRemote
+	}
+	v2Store := cpkg.NewV2GitStore(repo, v2URL)
 	sessionIndex, err := resolveV2SessionIndexForCheckpoint(repo, checkpointID, sessionID)
 	if err != nil {
 		logging.Warn(ctx, "v2 dual-write task metadata copy skipped: failed to resolve session index",
@@ -1490,7 +1505,7 @@ func writeTaskMetadataV2IfEnabled(
 		return
 	}
 
-	if err := spliceTaskTreeToV2FullCurrent(repo, v2Store, checkpointID, sessionIndex, tasksTree.Hash); err != nil {
+	if err := spliceTaskTreeToV2FullCurrent(ctx, repo, v2Store, checkpointID, sessionIndex, tasksTree.Hash); err != nil {
 		logging.Warn(ctx, "v2 dual-write task metadata copy failed",
 			slog.String("checkpoint_id", checkpointID.String()),
 			slog.String("session_id", sessionID),
@@ -1559,6 +1574,7 @@ func resolveV2SessionIndexForCheckpoint(repo *git.Repository, checkpointID id.Ch
 }
 
 func spliceTaskTreeToV2FullCurrent(
+	ctx context.Context,
 	repo *git.Repository,
 	v2Store *cpkg.V2GitStore,
 	checkpointID id.CheckpointID,
@@ -1589,7 +1605,7 @@ func spliceTaskTreeToV2FullCurrent(
 	}
 
 	authorName, authorEmail := cpkg.GetGitAuthorFromRepo(repo)
-	commitHash, err := cpkg.CreateCommit(repo, newRootHash, parentHash,
+	commitHash, err := cpkg.CreateCommit(ctx, repo, newRootHash, parentHash,
 		fmt.Sprintf("Checkpoint: %s (task metadata)\n", checkpointID),
 		authorName, authorEmail)
 	if err != nil {

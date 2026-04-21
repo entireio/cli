@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -191,7 +192,7 @@ func fetchAndMergeRef(ctx context.Context, target string, refName plumbing.Refer
 		return fmt.Errorf("failed to build merged tree: %w", err)
 	}
 
-	mergeCommitHash, err := createMergeCommitCommon(repo, mergedTreeHash,
+	mergeCommitHash, err := createMergeCommitCommon(ctx, repo, mergedTreeHash,
 		[]plumbing.Hash{localRef.Hash(), remoteRef.Hash()},
 		"Merge remote "+shortRefName(refName))
 	if err != nil {
@@ -323,7 +324,7 @@ func handleRotationConflict(ctx context.Context, target, fetchTarget string, rep
 	}
 
 	// Create commit parented on archive's commit (fast-forward)
-	mergeCommitHash, err := createMergeCommitCommon(repo, mergedTreeHash,
+	mergeCommitHash, err := createMergeCommitCommon(ctx, repo, mergedTreeHash,
 		[]plumbing.Hash{archiveRef.Hash()},
 		"Merge local checkpoints into archived generation")
 	if err != nil {
@@ -411,7 +412,13 @@ func pushV2Refs(ctx context.Context, target string) {
 	if err != nil {
 		return
 	}
-	store := checkpoint.NewV2GitStore(repo, ResolveCheckpointURL(ctx, "origin"))
+	v2URL, err := remote.FetchURL(ctx)
+	if err != nil {
+		logging.Debug(ctx, "push-v2: using origin for archived generation fetch remote",
+			slog.String("error", err.Error()),
+		)
+	}
+	store := checkpoint.NewV2GitStore(repo, v2URL)
 	archived, err := store.ListArchivedGenerations()
 	if err != nil || len(archived) == 0 {
 		return

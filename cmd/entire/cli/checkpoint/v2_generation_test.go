@@ -108,7 +108,7 @@ func TestReadGenerationFromRef(t *testing.T) {
 
 	refName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-	commitHash, err := CreateCommit(repo, treeHash, plumbing.ZeroHash, "test", authorName, authorEmail)
+	commitHash, err := CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "test", authorName, authorEmail)
 	require.NoError(t, err)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))
 
@@ -297,7 +297,7 @@ func createArchivedRef(t *testing.T, repo *git.Repository, number int) {
 	require.NoError(t, err)
 
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-	commitHash, err := CreateCommit(repo, treeHash, plumbing.ZeroHash, "archived", authorName, authorEmail)
+	commitHash, err := CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "archived", authorName, authorEmail)
 	require.NoError(t, err)
 
 	refName := plumbing.ReferenceName(fmt.Sprintf("%s%013d", paths.V2FullRefPrefix, number))

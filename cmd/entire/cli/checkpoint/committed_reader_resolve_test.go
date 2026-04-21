@@ -248,7 +248,7 @@ func corruptV2MainMetadata(t *testing.T, repo *git.Repository, cpID id.Checkpoin
 	})
 	require.NoError(t, err)
 
-	commitHash, err := CreateCommit(repo, rootTreeHash, parentHash,
+	commitHash, err := CreateCommit(context.Background(), repo, rootTreeHash, parentHash,
 		"corrupt metadata for test", "Test", "test@test.com")
 	require.NoError(t, err)
 

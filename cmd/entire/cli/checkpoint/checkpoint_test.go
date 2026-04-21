@@ -545,7 +545,7 @@ func TestWriteCommitted_MergesVercelConfigOnMetadataBranch(t *testing.T) {
 	}
 
 	store := NewGitStore(repo)
-	commitHash, err := store.createCommit(treeHash, plumbing.ZeroHash, "Initialize metadata branch", "Test", "test@test.com")
+	commitHash, err := store.createCommit(context.Background(), treeHash, plumbing.ZeroHash, "Initialize metadata branch", "Test", "test@test.com")
 	if err != nil {
 		t.Fatalf("createCommit() error = %v", err)
 	}

@@ -811,7 +811,7 @@ func initBareWithV2MainRef(t *testing.T) string {
 	}
 	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, entries)
 	require.NoError(t, err)
-	commitHash, err := checkpoint.CreateCommit(repo, treeHash, plumbing.ZeroHash, "Checkpoint: abcdef012345", "test", "test@test.com")
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "Checkpoint: abcdef012345", "test", "test@test.com")
 	require.NoError(t, err)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.V2MainRefName), commitHash)))
 
@@ -881,7 +881,7 @@ func TestIsV2MainDisconnected_NoRemoteRef(t *testing.T) {
 	require.NoError(t, emptyTree.Encode(treeObj))
 	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
 	require.NoError(t, err)
-	commitHash, err := checkpoint.CreateCommit(repo, treeHash, plumbing.ZeroHash, "init v2", "test", "test@test.com")
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "init v2", "test", "test@test.com")
 	require.NoError(t, err)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.V2MainRefName), commitHash)))
 
@@ -909,7 +909,7 @@ func TestIsV2MainDisconnected_Disconnected(t *testing.T) {
 	}
 	localTreeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, localEntries)
 	require.NoError(t, err)
-	localCommitHash, err := checkpoint.CreateCommit(repo, localTreeHash, plumbing.ZeroHash, "local checkpoint", "test", "test@test.com")
+	localCommitHash, err := checkpoint.CreateCommit(context.Background(), repo, localTreeHash, plumbing.ZeroHash, "local checkpoint", "test", "test@test.com")
 	require.NoError(t, err)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.V2MainRefName), localCommitHash)))
 
@@ -947,7 +947,7 @@ func TestIsV2MainDisconnected_SharedAncestry(t *testing.T) {
 	}
 	newTreeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, existing)
 	require.NoError(t, err)
-	newCommitHash, err := checkpoint.CreateCommit(repo, newTreeHash, ref.Hash(), "local checkpoint 2", "test", "test@test.com")
+	newCommitHash, err := checkpoint.CreateCommit(context.Background(), repo, newTreeHash, ref.Hash(), "local checkpoint 2", "test", "test@test.com")
 	require.NoError(t, err)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.V2MainRefName), newCommitHash)))
 
@@ -975,7 +975,7 @@ func TestReconcileDisconnectedV2Ref_CherryPicksOntoRemote(t *testing.T) {
 	}
 	localTreeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, localEntries)
 	require.NoError(t, err)
-	localCommitHash, err := checkpoint.CreateCommit(repo, localTreeHash, plumbing.ZeroHash, "local checkpoint", "test", "test@test.com")
+	localCommitHash, err := checkpoint.CreateCommit(context.Background(), repo, localTreeHash, plumbing.ZeroHash, "local checkpoint", "test", "test@test.com")
 	require.NoError(t, err)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.V2MainRefName), localCommitHash)))
 

@@ -312,7 +312,7 @@ func (s *V2GitStore) rotateGeneration(ctx context.Context) error {
 	}
 
 	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-	archiveCommitHash, err := CreateCommit(s.repo, archiveTreeHash, currentRef.Hash(), "Archive generation", authorName, authorEmail)
+	archiveCommitHash, err := CreateCommit(ctx, s.repo, archiveTreeHash, currentRef.Hash(), "Archive generation", authorName, authorEmail)
 	if err != nil {
 		return fmt.Errorf("rotation: failed to create archive commit: %w", err)
 	}
@@ -329,7 +329,7 @@ func (s *V2GitStore) rotateGeneration(ctx context.Context) error {
 		return fmt.Errorf("rotation: failed to build empty tree: %w", err)
 	}
 
-	orphanCommitHash, err := CreateCommit(s.repo, emptyTreeHash, plumbing.ZeroHash, "Start generation", authorName, authorEmail)
+	orphanCommitHash, err := CreateCommit(ctx, s.repo, emptyTreeHash, plumbing.ZeroHash, "Start generation", authorName, authorEmail)
 	if err != nil {
 		return fmt.Errorf("rotation: failed to create orphan commit: %w", err)
 	}

@@ -127,7 +127,7 @@ func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOption
 	// Create checkpoint commit with trailers
 	commitMsg := trailers.FormatShadowCommit(opts.CommitMessage, opts.MetadataDir, opts.SessionID)
 
-	commitHash, err := s.createCommit(treeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
+	commitHash, err := s.createCommit(ctx, treeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
 	if err != nil {
 		return WriteTemporaryResult{}, fmt.Errorf("failed to create commit: %w", err)
 	}
@@ -285,7 +285,7 @@ func (s *GitStore) WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTa
 	}
 
 	// Create the commit
-	commitHash, err := s.createCommit(newTreeHash, parentHash, opts.CommitMessage, opts.AuthorName, opts.AuthorEmail)
+	commitHash, err := s.createCommit(ctx, newTreeHash, parentHash, opts.CommitMessage, opts.AuthorName, opts.AuthorEmail)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to create commit: %w", err)
 	}
@@ -790,8 +790,8 @@ func (s *GitStore) buildTreeWithChanges(
 }
 
 // createCommit creates a commit object.
-func (s *GitStore) createCommit(treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
-	return CreateCommit(s.repo, treeHash, parentHash, message, authorName, authorEmail)
+func (s *GitStore) createCommit(ctx context.Context, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
+	return CreateCommit(ctx, s.repo, treeHash, parentHash, message, authorName, authorEmail)
 }
 
 // Helper functions extracted from strategy/common.go

@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
@@ -79,7 +81,13 @@ func (s *ManualCommitStrategy) getV2CheckpointStore(ctx context.Context) (*check
 			s.v2CheckpointStoreErr = fmt.Errorf("failed to open repository: %w", err)
 			return
 		}
-		s.v2CheckpointStore = checkpoint.NewV2GitStore(repo, ResolveCheckpointURL(ctx, "origin"))
+		v2URL, err := remote.FetchURL(ctx)
+		if err != nil {
+			logging.Debug(ctx, "manual-commit: using origin for v2 store fetch remote",
+				"error", err.Error(),
+			)
+		}
+		s.v2CheckpointStore = checkpoint.NewV2GitStore(repo, v2URL)
 	})
 	return s.v2CheckpointStore, s.v2CheckpointStoreErr
 }

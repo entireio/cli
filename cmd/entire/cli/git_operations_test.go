@@ -654,7 +654,7 @@ func TestResolveCheckpointFetchTarget_NoCheckpointRemote(t *testing.T) {
 	t.Chdir(localDir)
 
 	target := resolveCheckpointFetchTarget(context.Background())
-	assert.Equal(t, "origin", target)
+	assert.Equal(t, "git@github.com:org/main-repo.git", target)
 }
 
 // Not parallel: uses t.Chdir()
@@ -694,7 +694,7 @@ func TestResolveCheckpointFetchTarget_FallsBackOnError(t *testing.T) {
 	testutil.GitAdd(t, localDir, "f.txt")
 	testutil.GitCommit(t, localDir, "init")
 
-	// No origin remote — ResolveCheckpointRemoteURL will fail to get origin URL
+	// No origin remote — FetchURL cannot resolve an effective fetch URL.
 
 	// Settings with checkpoint_remote configured but no origin to derive URL from
 	entireDir := filepath.Join(localDir, ".entire")
@@ -707,7 +707,7 @@ func TestResolveCheckpointFetchTarget_FallsBackOnError(t *testing.T) {
 
 	t.Chdir(localDir)
 
-	// Should fall back to "origin" when URL resolution fails
+	// Falls back to the origin remote name when URL resolution fails.
 	target := resolveCheckpointFetchTarget(context.Background())
 	assert.Equal(t, "origin", target)
 }

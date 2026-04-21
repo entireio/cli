@@ -768,7 +768,7 @@ func TestDisplayRestoredSessions_SingleSessionOutput(t *testing.T) {
 	if !strings.Contains(got, "✓ Restored session 2026-02-02-resume-output.\n") {
 		t.Fatalf("displayRestoredSessions() missing session header, got: %q", got)
 	}
-	if !strings.Contains(got, "\nTo continue this session, run:\n") {
+	if !strings.Contains(got, "\nTo continue this session:\n") {
 		t.Fatalf("displayRestoredSessions() missing continuation header, got: %q", got)
 	}
 	wantCommand := "  " + ag.FormatResumeCommand(session.SessionID) + "  # Implement auth\n"
@@ -801,7 +801,7 @@ func TestDisplayRestoredSessions_CodexShowsResumeCommand(t *testing.T) {
 	if !strings.Contains(got, "✓ Restored session 019d6d29-8cf7-7fe3-adc9-8c3e4d9d5603.\n") {
 		t.Fatalf("displayRestoredSessions() missing session header, got: %q", got)
 	}
-	if !strings.Contains(got, "\nTo continue this session, run:\n") {
+	if !strings.Contains(got, "\nTo continue this session:\n") {
 		t.Fatalf("displayRestoredSessions() missing continuation header, got: %q", got)
 	}
 	wantCommand := "  " + ag.FormatResumeCommand(session.SessionID) + "  # Can you take a look at the go code\n"
@@ -834,7 +834,7 @@ func TestPrintMultiSessionResumeCommands_SingleSessionHasCheckmark(t *testing.T)
 	if !strings.Contains(got, "✓ Restored session 2026-02-02-rewind-single.\n") {
 		t.Fatalf("printMultiSessionResumeCommands() single session missing ✓ header, got: %q", got)
 	}
-	if !strings.Contains(got, "\nTo continue this session, run:\n") {
+	if !strings.Contains(got, "\nTo continue this session:\n") {
 		t.Fatalf("printMultiSessionResumeCommands() missing continuation line, got: %q", got)
 	}
 	wantCommand := "  " + ag.FormatResumeCommand("2026-02-02-rewind-single") + "  # Fix the bug\n"
@@ -872,7 +872,7 @@ func TestPrintMultiSessionResumeCommands_OutputMatchesResumeStyle(t *testing.T) 
 	printMultiSessionResumeCommands(&output, &errOutput, sessions)
 
 	got := output.String()
-	if !strings.Contains(got, "\n✓ Restored 2 sessions. To continue, run:\n") {
+	if !strings.Contains(got, "\n✓ Restored 2 sessions. To continue:\n") {
 		t.Fatalf("printMultiSessionResumeCommands() missing multi-session header, got: %q", got)
 	}
 	oldCommand := "  " + ag.FormatResumeCommand("2026-02-02-rewind-old") + "  # Old prompt\n"

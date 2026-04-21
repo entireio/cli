@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/go-git/go-git/v6/x/plugin"
 	"github.com/spf13/cobra"
 )
 
@@ -65,6 +67,21 @@ func TestVersionFlag_ContainsExpectedInfo(t *testing.T) {
 		if !strings.Contains(output, c.contains) {
 			t.Errorf("--version output missing %s (%q):\n%s", c.name, c.contains, output)
 		}
+	}
+}
+
+func TestRegisterObjectSigner_RegistersPlugin(t *testing.T) {
+	resetPluginEntry("object-signer")
+	registerObjectSignerOnce = sync.Once{}
+	t.Cleanup(func() {
+		resetPluginEntry("object-signer")
+		registerObjectSignerOnce = sync.Once{}
+	})
+
+	RegisterObjectSigner()
+
+	if !plugin.Has(plugin.ObjectSigner()) {
+		t.Fatal("expected object signer plugin to be registered")
 	}
 }
 

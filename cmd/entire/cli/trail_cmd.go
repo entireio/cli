@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
@@ -71,7 +72,7 @@ func runTrailShow(ctx context.Context, w io.Writer, insecureHTTP bool) error {
 		return fmt.Errorf("authentication required: %w", err)
 	}
 
-	host, owner, repo, err := strategy.ResolveRemoteRepo(ctx, "origin")
+	host, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
 	if err != nil {
 		return fmt.Errorf("failed to resolve repository: %w", err)
 	}
@@ -134,7 +135,7 @@ func runTrailListAll(ctx context.Context, w io.Writer, statusFilter string, json
 		return fmt.Errorf("authentication required: %w", err)
 	}
 
-	host, owner, repo, err := strategy.ResolveRemoteRepo(ctx, "origin")
+	host, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
 	if err != nil {
 		return fmt.Errorf("failed to resolve repository: %w", err)
 	}
@@ -321,7 +322,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr str
 		return fmt.Errorf("authentication required: %w", err)
 	}
 
-	host, owner, repoName, err := strategy.ResolveRemoteRepo(ctx, "origin")
+	host, owner, repoName, err := gitremote.ResolveRemoteRepo(ctx, "origin")
 	if err != nil {
 		return fmt.Errorf("failed to resolve repository: %w", err)
 	}
@@ -408,7 +409,7 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, s
 		return fmt.Errorf("authentication required: %w", err)
 	}
 
-	host, owner, repoName, err := strategy.ResolveRemoteRepo(ctx, "origin")
+	host, owner, repoName, err := gitremote.ResolveRemoteRepo(ctx, "origin")
 	if err != nil {
 		return fmt.Errorf("failed to resolve repository: %w", err)
 	}

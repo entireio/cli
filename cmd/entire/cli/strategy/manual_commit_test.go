@@ -138,7 +138,7 @@ func TestShadowStrategy_ListAllSessionStates(t *testing.T) {
 
 	// Create a dummy commit to use as a base for the shadow branch
 	emptyTreeHash := plumbing.NewHash("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
-	dummyCommitHash, err := createCommit(repo, emptyTreeHash, plumbing.ZeroHash, "dummy commit", "test", "test@test.com")
+	dummyCommitHash, err := checkpoint.CreateCommit(context.Background(), repo, emptyTreeHash, plumbing.ZeroHash, "dummy commit", "test", "test@test.com")
 	if err != nil {
 		t.Fatalf("failed to create dummy commit: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestShadowStrategy_FindSessionsForCommit(t *testing.T) {
 
 	// Create a dummy commit to use as a base for the shadow branches
 	emptyTreeHash := plumbing.NewHash("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
-	dummyCommitHash, err := createCommit(repo, emptyTreeHash, plumbing.ZeroHash, "dummy commit", "test", "test@test.com")
+	dummyCommitHash, err := checkpoint.CreateCommit(context.Background(), repo, emptyTreeHash, plumbing.ZeroHash, "dummy commit", "test", "test@test.com")
 	if err != nil {
 		t.Fatalf("failed to create dummy commit: %v", err)
 	}
@@ -1278,7 +1278,7 @@ func TestDeleteShadowBranch(t *testing.T) {
 
 	// Create a dummy commit to use as branch target
 	emptyTreeHash := plumbing.NewHash("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
-	dummyCommitHash, err := createCommit(repo, emptyTreeHash, plumbing.ZeroHash, "dummy commit", "test", "test@test.com")
+	dummyCommitHash, err := checkpoint.CreateCommit(context.Background(), repo, emptyTreeHash, plumbing.ZeroHash, "dummy commit", "test", "test@test.com")
 	if err != nil {
 		t.Fatalf("failed to create dummy commit: %v", err)
 	}

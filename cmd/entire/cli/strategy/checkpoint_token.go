@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -31,9 +32,10 @@ var sshTokenWarningOnce sync.Once
 // For empty/unset tokens, the command is returned unmodified.
 //
 // The target parameter is used ONLY for protocol detection (SSH vs HTTPS) and does
-// not affect the command executed. It can be:
+// not affect the command executed. It should match the effective transport target
+// used in args after any checkpoint remote resolution. It can be:
 //   - A URL (e.g., "https://github.com/org/repo.git")
-//   - A remote name (e.g., "origin") — resolved via `git remote get-url`
+//   - A remote name (e.g., "origin") when the command is actually using that name
 //
 // The actual remote must be specified again inside args, which contains the full
 // git command arguments (e.g., "push", "--no-verify", remote, branch).
@@ -54,12 +56,12 @@ func CheckpointGitCommand(ctx context.Context, target string, args ...string) *e
 	protocol := resolveTargetProtocol(ctx, target)
 
 	switch protocol {
-	case protocolSSH:
+	case remote.ProtocolSSH:
 		sshTokenWarningOnce.Do(func() {
 			fmt.Fprintf(os.Stderr, "[entire] Warning: %s is set but remote uses SSH — token ignored for SSH remotes\n", CheckpointTokenEnvVar)
 		})
 		return cmd
-	case protocolHTTPS:
+	case remote.ProtocolHTTPS:
 		cmd.Env = appendCheckpointTokenEnv(os.Environ(), token)
 		return cmd
 	default:
@@ -110,7 +112,7 @@ func isValidToken(token string) bool {
 }
 
 // resolveTargetProtocol determines whether a push/fetch target uses SSH or HTTPS.
-// Returns protocolSSH, protocolHTTPS, or "" if unknown.
+// Returns remote.ProtocolSSH, remote.ProtocolHTTPS, or "" if unknown.
 func resolveTargetProtocol(ctx context.Context, target string) string {
 	var rawURL string
 	if isURL(target) {
@@ -118,17 +120,17 @@ func resolveTargetProtocol(ctx context.Context, target string) string {
 	} else {
 		// Remote name — resolve to URL
 		var err error
-		rawURL, err = getRemoteURL(ctx, target)
+		rawURL, err = remote.GetRemoteURL(ctx, target)
 		if err != nil {
 			return ""
 		}
 	}
 
-	info, err := parseGitRemoteURL(rawURL)
+	info, err := remote.ParseURL(rawURL)
 	if err != nil {
 		return ""
 	}
-	return info.protocol
+	return info.Protocol
 }
 
 // ResolveFetchTarget returns the git fetch target to use. When filtered
@@ -138,7 +140,11 @@ func ResolveFetchTarget(ctx context.Context, target string) (string, error) {
 	if isURL(target) || !settings.IsFilteredFetchesEnabled(ctx) {
 		return target, nil
 	}
-	return getRemoteURL(ctx, target)
+	url, err := remote.GetRemoteURL(ctx, target)
+	if err != nil {
+		return "", fmt.Errorf("get remote URL: %w", err)
+	}
+	return url, nil
 }
 
 // AppendFetchFilterArgs appends the partial-clone filter arguments when the

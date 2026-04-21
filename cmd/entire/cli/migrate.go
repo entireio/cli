@@ -223,7 +223,7 @@ func migrateOneCheckpoint(ctx context.Context, repo *git.Repository, v1Store *ch
 
 	// Copy task metadata trees from v1 to v2 /full/current
 	if shouldCopyTaskMetadata {
-		if taskErr := copyTaskMetadataToV2(repo, v1Store, v2Store, info.CheckpointID, summary); taskErr != nil {
+		if taskErr := copyTaskMetadataToV2(ctx, repo, v1Store, v2Store, info.CheckpointID, summary); taskErr != nil {
 			logging.Warn(ctx, "failed to copy task metadata to v2",
 				slog.String("checkpoint_id", string(info.CheckpointID)),
 				slog.String("error", taskErr.Error()),
@@ -511,7 +511,7 @@ func computeCompactOffset(ctx context.Context, fullTranscript, fullCompact []byt
 
 // copyTaskMetadataToV2 copies task metadata files (subagent transcripts, checkpoint JSONs)
 // from the v1 branch to the v2 /full/current ref via tree surgery.
-func copyTaskMetadataToV2(repo *git.Repository, _ *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, cpID id.CheckpointID, summary *checkpoint.CheckpointSummary) error {
+func copyTaskMetadataToV2(ctx context.Context, repo *git.Repository, _ *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, cpID id.CheckpointID, summary *checkpoint.CheckpointSummary) error {
 	// Resolve the v1 branch tree
 	v1Tree, err := resolveV1CheckpointTree(repo, cpID)
 	if err != nil {
@@ -523,7 +523,7 @@ func copyTaskMetadataToV2(repo *git.Repository, _ *checkpoint.GitStore, v2Store 
 	if rootTasksTree, rootTasksErr := v1Tree.Tree("tasks"); rootTasksErr == nil {
 		if len(summary.Sessions) > 0 {
 			latestSessionIdx := len(summary.Sessions) - 1
-			if spliceErr := spliceTasksTreeToV2(repo, v2Store, cpID, latestSessionIdx, rootTasksTree.Hash); spliceErr != nil {
+			if spliceErr := spliceTasksTreeToV2(ctx, repo, v2Store, cpID, latestSessionIdx, rootTasksTree.Hash); spliceErr != nil {
 				return fmt.Errorf("latest session task tree splice failed: %w", spliceErr)
 			}
 		}
@@ -541,7 +541,7 @@ func copyTaskMetadataToV2(repo *git.Repository, _ *checkpoint.GitStore, v2Store 
 			continue // No tasks directory in this session
 		}
 
-		if spliceErr := spliceTasksTreeToV2(repo, v2Store, cpID, sessionIdx, tasksTree.Hash); spliceErr != nil {
+		if spliceErr := spliceTasksTreeToV2(ctx, repo, v2Store, cpID, sessionIdx, tasksTree.Hash); spliceErr != nil {
 			return fmt.Errorf("session %d task tree splice failed: %w", sessionIdx, spliceErr)
 		}
 	}
@@ -580,7 +580,7 @@ func resolveV1CheckpointTree(repo *git.Repository, cpID id.CheckpointID) (*objec
 	return cpTree, nil
 }
 
-func spliceTasksTreeToV2(repo *git.Repository, v2Store *checkpoint.V2GitStore, cpID id.CheckpointID, sessionIdx int, tasksTreeHash plumbing.Hash) error {
+func spliceTasksTreeToV2(ctx context.Context, repo *git.Repository, v2Store *checkpoint.V2GitStore, cpID id.CheckpointID, sessionIdx int, tasksTreeHash plumbing.Hash) error {
 	refName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
 	parentHash, rootTreeHash, err := v2Store.GetRefState(refName)
 	if err != nil {
@@ -604,7 +604,7 @@ func spliceTasksTreeToV2(repo *git.Repository, v2Store *checkpoint.V2GitStore, c
 		return fmt.Errorf("tree surgery failed: %w", err)
 	}
 
-	commitHash, err := checkpoint.CreateCommit(repo, newRoot, parentHash,
+	commitHash, err := checkpoint.CreateCommit(ctx, repo, newRoot, parentHash,
 		fmt.Sprintf("Add task metadata for %s\n", cpID),
 		"Entire Migration", "migration@entire.dev")
 	if err != nil {

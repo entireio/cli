@@ -37,7 +37,6 @@ const (
 
 // EntireSettings represents the .entire/settings.json configuration
 type EntireSettings struct {
-
 	// Enabled indicates whether Entire is active. When false, CLI commands
 	// show a disabled message and hooks exit silently. Defaults to true.
 	Enabled bool `json:"enabled"`
@@ -90,6 +89,10 @@ type EntireSettings struct {
 	// generate path; present so settings round-trip for a follow-up change
 	// that wires it into the deadline selection.
 	SummaryTimeoutSeconds int `json:"summary_timeout_seconds,omitempty"`
+
+	// SignCheckpointCommits controls whether checkpoint commits are signed.
+	// nil/true = sign (default), false = skip signing.
+	SignCheckpointCommits *bool `json:"sign_checkpoint_commits,omitempty"`
 
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
@@ -280,7 +283,7 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 // mergeJSON merges JSON data into existing settings.
 // Only non-zero values from the JSON override existing settings.
 func mergeJSON(settings *EntireSettings, data []byte) error {
-	// First, validate that there are no unknown keys using strict decoding
+	// Validate that there are no unknown keys using strict decoding.
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var temp EntireSettings
@@ -288,111 +291,23 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		return fmt.Errorf("parsing JSON: %w", err)
 	}
 
-	// Parse into a map to check which fields are present
+	// Parse into a map to check which fields are present.
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("parsing JSON: %w", err)
 	}
 
-	// Override enabled if present
-	if enabledRaw, ok := raw["enabled"]; ok {
-		var e bool
-		if err := json.Unmarshal(enabledRaw, &e); err != nil {
-			return fmt.Errorf("parsing enabled field: %w", err)
-		}
-		settings.Enabled = e
+	if err := mergeScalarFields(settings, raw); err != nil {
+		return err
 	}
-
-	// Override local_dev if present
-	if localDevRaw, ok := raw["local_dev"]; ok {
-		var ld bool
-		if err := json.Unmarshal(localDevRaw, &ld); err != nil {
-			return fmt.Errorf("parsing local_dev field: %w", err)
-		}
-		settings.LocalDev = ld
+	if err := mergeStrategyOptions(settings, raw); err != nil {
+		return err
 	}
-
-	// Override absolute_git_hook_path if present
-	if ahpRaw, ok := raw["absolute_git_hook_path"]; ok {
-		var ahp bool
-		if err := json.Unmarshal(ahpRaw, &ahp); err != nil {
-			return fmt.Errorf("parsing absolute_git_hook_path field: %w", err)
-		}
-		settings.AbsoluteGitHookPath = ahp
+	if err := mergeSummaryGeneration(settings, raw); err != nil {
+		return err
 	}
-
-	// Override log_level if present and non-empty
-	if logLevelRaw, ok := raw["log_level"]; ok {
-		var ll string
-		if err := json.Unmarshal(logLevelRaw, &ll); err != nil {
-			return fmt.Errorf("parsing log_level field: %w", err)
-		}
-		if ll != "" {
-			settings.LogLevel = ll
-		}
-	}
-
-	// Merge strategy_options if present
-	if optionsRaw, ok := raw["strategy_options"]; ok {
-		var opts map[string]any
-		if err := json.Unmarshal(optionsRaw, &opts); err != nil {
-			return fmt.Errorf("parsing strategy_options field: %w", err)
-		}
-		if settings.StrategyOptions == nil {
-			settings.StrategyOptions = opts
-		} else {
-			for k, v := range opts {
-				settings.StrategyOptions[k] = v
-			}
-		}
-	}
-
-	// Override telemetry if present
-	if telemetryRaw, ok := raw["telemetry"]; ok {
-		var t bool
-		if err := json.Unmarshal(telemetryRaw, &t); err != nil {
-			return fmt.Errorf("parsing telemetry field: %w", err)
-		}
-		settings.Telemetry = &t
-	}
-
-	// Merge summary_generation sub-fields if present.
-	if summaryRaw, ok := raw["summary_generation"]; ok {
-		if settings.SummaryGeneration == nil {
-			settings.SummaryGeneration = &SummaryGenerationSettings{}
-		}
-
-		var summaryFields map[string]json.RawMessage
-		if err := json.Unmarshal(summaryRaw, &summaryFields); err != nil {
-			return fmt.Errorf("parsing summary_generation field: %w", err)
-		}
-
-		_, modelInOverride := summaryFields["model"]
-
-		if providerRaw, ok := summaryFields["provider"]; ok {
-			var provider string
-			if err := json.Unmarshal(providerRaw, &provider); err != nil {
-				return fmt.Errorf("parsing summary_generation.provider field: %w", err)
-			}
-			// If the override switches providers without also setting a
-			// model, the base's model was tuned to the old provider and
-			// would likely cause a runtime failure when handed to the new
-			// one (e.g. codex rejecting "sonnet"). Clear it so the new
-			// provider falls back to its own default. The configure CLI
-			// path enforces the same rule — keep the merge path consistent.
-			if provider != settings.SummaryGeneration.Provider && !modelInOverride {
-				settings.SummaryGeneration.Model = ""
-			}
-			settings.SummaryGeneration.Provider = provider
-		}
-
-		if modelRaw, ok := summaryFields["model"]; ok {
-			var model string
-			if err := json.Unmarshal(modelRaw, &model); err != nil {
-				return fmt.Errorf("parsing summary_generation.model field: %w", err)
-			}
-			settings.SummaryGeneration.Model = model
-		}
+	if err := mergeCommitLinking(settings, raw); err != nil {
+		return err
 	}
 
 	// Merge redaction sub-fields if present (field-level, not wholesale replace).
@@ -405,49 +320,171 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 		}
 	}
 
-	// Override commit_linking if present and non-empty
-	if commitLinkingRaw, ok := raw["commit_linking"]; ok {
-		var cl string
-		if err := json.Unmarshal(commitLinkingRaw, &cl); err != nil {
-			return fmt.Errorf("parsing commit_linking field: %w", err)
-		}
-		if cl != "" {
-			switch cl {
-			case CommitLinkingAlways, CommitLinkingPrompt:
-				settings.CommitLinking = cl
-			default:
-				return fmt.Errorf("invalid commit_linking value %q: must be %q or %q", cl, CommitLinkingAlways, CommitLinkingPrompt)
-			}
+	return nil
+}
+
+// mergeScalarFields merges simple bool, *bool, string, and int fields from raw JSON.
+func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage) error {
+	if err := mergeRawBool(raw, "enabled", &settings.Enabled); err != nil {
+		return err
+	}
+	if err := mergeRawBool(raw, "local_dev", &settings.LocalDev); err != nil {
+		return err
+	}
+	if err := mergeRawBool(raw, "absolute_git_hook_path", &settings.AbsoluteGitHookPath); err != nil {
+		return err
+	}
+	if err := mergeRawBool(raw, "external_agents", &settings.ExternalAgents); err != nil {
+		return err
+	}
+	if err := mergeRawBool(raw, "vercel", &settings.Vercel); err != nil {
+		return err
+	}
+	if err := mergeRawBoolPtr(raw, "telemetry", &settings.Telemetry); err != nil {
+		return err
+	}
+	if err := mergeRawBoolPtr(raw, "sign_checkpoint_commits", &settings.SignCheckpointCommits); err != nil {
+		return err
+	}
+	if err := mergeRawStringNonEmpty(raw, "log_level", &settings.LogLevel); err != nil {
+		return err
+	}
+	if err := mergeRawInt(raw, "summary_timeout_seconds", &settings.SummaryTimeoutSeconds); err != nil {
+		return err
+	}
+	return nil
+}
+
+func mergeRawBool(raw map[string]json.RawMessage, key string, dst *bool) error {
+	v, ok := raw[key]
+	if !ok {
+		return nil
+	}
+	return unmarshalField(key, v, dst)
+}
+
+func mergeRawBoolPtr(raw map[string]json.RawMessage, key string, dst **bool) error {
+	v, ok := raw[key]
+	if !ok {
+		return nil
+	}
+	var b bool
+	if err := unmarshalField(key, v, &b); err != nil {
+		return err
+	}
+	*dst = &b
+	return nil
+}
+
+func mergeRawStringNonEmpty(raw map[string]json.RawMessage, key string, dst *string) error {
+	v, ok := raw[key]
+	if !ok {
+		return nil
+	}
+	var s string
+	if err := unmarshalField(key, v, &s); err != nil {
+		return err
+	}
+	if s != "" {
+		*dst = s
+	}
+	return nil
+}
+
+func mergeRawInt(raw map[string]json.RawMessage, key string, dst *int) error {
+	v, ok := raw[key]
+	if !ok {
+		return nil
+	}
+	return unmarshalField(key, v, dst)
+}
+
+func unmarshalField(key string, data json.RawMessage, dst any) error {
+	if err := json.Unmarshal(data, dst); err != nil {
+		return fmt.Errorf("parsing %s field: %w", key, err)
+	}
+	return nil
+}
+
+func mergeStrategyOptions(settings *EntireSettings, raw map[string]json.RawMessage) error {
+	optionsRaw, ok := raw["strategy_options"]
+	if !ok {
+		return nil
+	}
+	var opts map[string]any
+	if err := unmarshalField("strategy_options", optionsRaw, &opts); err != nil {
+		return err
+	}
+	if settings.StrategyOptions == nil {
+		settings.StrategyOptions = opts
+	} else {
+		for k, v := range opts {
+			settings.StrategyOptions[k] = v
 		}
 	}
+	return nil
+}
 
-	// Override external_agents if present
-	if externalAgentsRaw, ok := raw["external_agents"]; ok {
-		var ea bool
-		if err := json.Unmarshal(externalAgentsRaw, &ea); err != nil {
-			return fmt.Errorf("parsing external_agents field: %w", err)
-		}
-		settings.ExternalAgents = ea
+func mergeSummaryGeneration(settings *EntireSettings, raw map[string]json.RawMessage) error {
+	summaryRaw, ok := raw["summary_generation"]
+	if !ok {
+		return nil
+	}
+	if settings.SummaryGeneration == nil {
+		settings.SummaryGeneration = &SummaryGenerationSettings{}
 	}
 
-	// Override vercel if present
-	if vercelRaw, ok := raw["vercel"]; ok {
-		var vercel bool
-		if err := json.Unmarshal(vercelRaw, &vercel); err != nil {
-			return fmt.Errorf("parsing vercel field: %w", err)
-		}
-		settings.Vercel = vercel
+	var summaryFields map[string]json.RawMessage
+	if err := unmarshalField("summary_generation", summaryRaw, &summaryFields); err != nil {
+		return err
 	}
 
-	// Override summary_timeout_seconds if present
-	if summaryTimeoutRaw, ok := raw["summary_timeout_seconds"]; ok {
-		var st int
-		if err := json.Unmarshal(summaryTimeoutRaw, &st); err != nil {
-			return fmt.Errorf("parsing summary_timeout_seconds field: %w", err)
+	_, modelInOverride := summaryFields["model"]
+
+	if providerRaw, ok := summaryFields["provider"]; ok {
+		var provider string
+		if err := unmarshalField("summary_generation.provider", providerRaw, &provider); err != nil {
+			return err
 		}
-		settings.SummaryTimeoutSeconds = st
+		// If the override switches providers without also setting a model,
+		// the base's model was tuned to the old provider and would likely
+		// cause a runtime failure when handed to the new one (e.g. codex
+		// rejecting "sonnet"). Clear it so the new provider falls back to
+		// its own default.
+		if provider != settings.SummaryGeneration.Provider && !modelInOverride {
+			settings.SummaryGeneration.Model = ""
+		}
+		settings.SummaryGeneration.Provider = provider
 	}
 
+	if modelRaw, ok := summaryFields["model"]; ok {
+		var model string
+		if err := unmarshalField("summary_generation.model", modelRaw, &model); err != nil {
+			return err
+		}
+		settings.SummaryGeneration.Model = model
+	}
+	return nil
+}
+
+func mergeCommitLinking(settings *EntireSettings, raw map[string]json.RawMessage) error {
+	commitLinkingRaw, ok := raw["commit_linking"]
+	if !ok {
+		return nil
+	}
+	var cl string
+	if err := unmarshalField("commit_linking", commitLinkingRaw, &cl); err != nil {
+		return err
+	}
+	if cl == "" {
+		return nil
+	}
+	switch cl {
+	case CommitLinkingAlways, CommitLinkingPrompt:
+		settings.CommitLinking = cl
+	default:
+		return fmt.Errorf("invalid commit_linking value %q: must be %q or %q", cl, CommitLinkingAlways, CommitLinkingPrompt)
+	}
 	return nil
 }
 
@@ -773,6 +810,22 @@ func IsExternalAgentsEnabled(ctx context.Context) bool {
 		return false
 	}
 	return s.ExternalAgents
+}
+
+// IsSignCheckpointCommitsEnabled returns true if checkpoint commits should be signed.
+// Defaults to true when the setting is not explicitly set.
+func (s *EntireSettings) IsSignCheckpointCommitsEnabled() bool {
+	return s.SignCheckpointCommits == nil || *s.SignCheckpointCommits
+}
+
+// IsSignCheckpointCommitsEnabled checks if checkpoint commit signing is enabled in settings.
+// Returns true by default if settings cannot be loaded or the key is missing.
+func IsSignCheckpointCommitsEnabled(ctx context.Context) bool {
+	s, err := Load(ctx)
+	if err != nil {
+		return true
+	}
+	return s.IsSignCheckpointCommitsEnabled()
 }
 
 // Save saves the settings to .entire/settings.json.

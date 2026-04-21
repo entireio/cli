@@ -36,6 +36,8 @@ import (
 const (
 	branchMain   = "main"
 	branchMaster = "master"
+	// originRemote is the default git remote name used for fetch/push fallbacks.
+	originRemote = "origin"
 	// Strategy name constants
 	StrategyNameManualCommit = "manual-commit"
 )
@@ -483,7 +485,7 @@ func EnsureMetadataBranch(repo *git.Repository) error {
 		return fmt.Errorf("failed to create metadata branch: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "✓ Created orphan branch '%s' for session metadata\n", paths.MetadataBranchName)
+	fmt.Fprintf(os.Stderr, "  ✓ Created orphan branch %s for session metadata\n", paths.MetadataBranchName)
 	return nil
 }
 
@@ -1583,40 +1585,6 @@ func ExtractSessionIDFromCommit(commit *object.Commit) string {
 // - treeNode, insertIntoTree, buildTreeObject (internal to checkpoint package)
 //
 // See push_common.go and session_test.go for usage examples.
-
-// createCommit creates a commit object
-func createCommit(repo *git.Repository, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) { //nolint:unparam // already present in codebase
-	now := time.Now()
-	sig := object.Signature{
-		Name:  authorName,
-		Email: authorEmail,
-		When:  now,
-	}
-
-	commit := &object.Commit{
-		TreeHash:  treeHash,
-		Author:    sig,
-		Committer: sig,
-		Message:   message,
-	}
-
-	// Add parent if not a new branch
-	if parentHash != plumbing.ZeroHash {
-		commit.ParentHashes = []plumbing.Hash{parentHash}
-	}
-
-	obj := repo.Storer.NewEncodedObject()
-	if err := commit.Encode(obj); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to encode commit: %w", err)
-	}
-
-	hash, err := repo.Storer.SetEncodedObject(obj)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to store commit: %w", err)
-	}
-
-	return hash, nil
-}
 
 // getSessionDescriptionFromTree reads the first line of prompt.txt from a git tree.
 // This is the tree-based equivalent of getSessionDescription (which reads from filesystem).

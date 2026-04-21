@@ -33,7 +33,7 @@ func createV2Ref(t *testing.T, repo *git.Repository, refName string) {
 	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, make(map[string]object.TreeEntry))
 	require.NoError(t, err)
 
-	commitHash, err := checkpoint.CreateCommit(repo, treeHash, plumbing.ZeroHash, "init v2 ref", "test", "test@test.com")
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "init v2 ref", "test", "test@test.com")
 	require.NoError(t, err)
 
 	ref := plumbing.NewHashReference(plumbing.ReferenceName(refName), commitHash)
@@ -75,7 +75,7 @@ func createV2RefWithCheckpoints(t *testing.T, repo *git.Repository, refName stri
 	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, entries)
 	require.NoError(t, err)
 
-	commitHash, err := checkpoint.CreateCommit(repo, treeHash, plumbing.ZeroHash, "v2 ref with checkpoints", "test", "test@test.com")
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "v2 ref with checkpoints", "test", "test@test.com")
 	require.NoError(t, err)
 
 	ref := plumbing.NewHashReference(plumbing.ReferenceName(refName), commitHash)
@@ -527,7 +527,7 @@ func createArchivedGeneration(t *testing.T, repo *git.Repository, generationNum 
 	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, entries)
 	require.NoError(t, err)
 
-	commitHash, err := checkpoint.CreateCommit(repo, treeHash, plumbing.ZeroHash, "archived generation", "test", "test@test.com")
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "archived generation", "test", "test@test.com")
 	require.NoError(t, err)
 
 	refName := fmt.Sprintf("%s%013d", paths.V2FullRefPrefix, generationNum)

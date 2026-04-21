@@ -168,7 +168,7 @@ func createCleanV2Ref(t *testing.T, repo *git.Repository, refName plumbing.Refer
 		t.Fatalf("failed to build empty tree for %s: %v", refName, err)
 	}
 
-	commitHash, err := checkpoint.CreateCommit(repo, treeHash, plumbing.ZeroHash, "init v2 ref", "test", "test@test.com")
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "init v2 ref", "test", "test@test.com")
 	if err != nil {
 		t.Fatalf("failed to create commit for %s: %v", refName, err)
 	}
@@ -220,7 +220,7 @@ func createArchivedGenerationRef(t *testing.T, repo *git.Repository, generation 
 		t.Fatalf("failed to build archived generation tree: %v", err)
 	}
 
-	commitHash, err := checkpoint.CreateCommit(repo, treeHash, plumbing.ZeroHash, "archived generation", "test", "test@test.com")
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "archived generation", "test", "test@test.com")
 	if err != nil {
 		t.Fatalf("failed to create archived generation commit: %v", err)
 	}
@@ -253,7 +253,7 @@ func createArchivedGenerationRefWithoutMetadata(t *testing.T, repo *git.Reposito
 		t.Fatalf("failed to build archived generation tree: %v", err)
 	}
 
-	commitHash, err := checkpoint.CreateCommit(repo, treeHash, plumbing.ZeroHash, "archived generation without metadata", "test", "test@test.com")
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "archived generation without metadata", "test", "test@test.com")
 	if err != nil {
 		t.Fatalf("failed to create archived generation commit: %v", err)
 	}

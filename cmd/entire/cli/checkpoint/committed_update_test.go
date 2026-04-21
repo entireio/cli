@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/redact"
@@ -586,3 +587,183 @@ func TestGetGitAuthorFromRepo_NoConfig(t *testing.T) {
 
 // Verify go-git config import is used (compile-time check).
 var _ = config.GlobalScope
+
+// TestUpdateCommitted_PrecomputedBlobs_Roundtrip verifies that passing
+// precomputed blob hashes produces the same on-disk tree content as the
+// non-precomputed path.
+func TestUpdateCommitted_PrecomputedBlobs_Roundtrip(t *testing.T) {
+	t.Parallel()
+	_, store, cpID := setupRepoForUpdate(t)
+
+	transcript := redact.AlreadyRedacted([]byte("line1\nline2\nline3 with some payload\n"))
+
+	precomputed, err := PrecomputeTranscriptBlobs(context.Background(), store.repo, transcript, "")
+	if err != nil {
+		t.Fatalf("PrecomputeTranscriptBlobs() error = %v", err)
+	}
+	if len(precomputed.ChunkHashes) == 0 {
+		t.Fatal("precompute returned no chunk hashes")
+	}
+	if precomputed.ContentHashBlob.IsZero() {
+		t.Fatal("precompute returned zero content-hash blob")
+	}
+
+	if err := store.UpdateCommitted(context.Background(), UpdateCommittedOptions{
+		CheckpointID:     cpID,
+		SessionID:        "session-001",
+		Transcript:       transcript,
+		PrecomputedBlobs: precomputed,
+	}); err != nil {
+		t.Fatalf("UpdateCommitted(precomputed) error = %v", err)
+	}
+
+	content, err := store.ReadSessionContent(context.Background(), cpID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
+	}
+	if string(content.Transcript) != string(transcript.Bytes()) {
+		t.Errorf("transcript mismatch via precomputed path\ngot:  %q\nwant: %q",
+			string(content.Transcript), string(transcript.Bytes()))
+	}
+}
+
+// TestUpdateCommitted_ContentHashShortCircuit verifies that a second update
+// with identical transcript content skips chunking entirely (short-circuit
+// fires before agent.ChunkTranscript is called).
+func TestUpdateCommitted_ContentHashShortCircuit(t *testing.T) {
+	// Cannot run in parallel: patches the package-level chunkTranscript hook.
+	_, store, cpID := setupRepoForUpdate(t)
+
+	transcript := redact.AlreadyRedacted([]byte("stable transcript content\n"))
+
+	if err := store.UpdateCommitted(context.Background(), UpdateCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-001",
+		Transcript:   transcript,
+	}); err != nil {
+		t.Fatalf("UpdateCommitted(first) error = %v", err)
+	}
+
+	// Install a counter. The second UpdateCommitted with identical content
+	// should never touch the chunking function.
+	calls := installChunkCounter(t)
+
+	if err := store.UpdateCommitted(context.Background(), UpdateCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-001",
+		Transcript:   transcript,
+	}); err != nil {
+		t.Fatalf("UpdateCommitted(second) error = %v", err)
+	}
+
+	if *calls != 0 {
+		t.Errorf("short-circuit failed: chunkTranscript was called %d time(s) on a no-op re-update; expected 0", *calls)
+	}
+}
+
+// installChunkCounter swaps the package-level chunkTranscript hook for a
+// counter and restores it when the test completes. Returns a pointer the
+// caller can dereference to read the running count.
+func installChunkCounter(t *testing.T) *int {
+	t.Helper()
+	original := chunkTranscript
+	t.Cleanup(func() { chunkTranscript = original })
+	var count int
+	chunkTranscript = func(ctx context.Context, content []byte, agentType types.AgentType) ([][]byte, error) {
+		count++
+		return original(ctx, content, agentType)
+	}
+	return &count
+}
+
+// TestUpdateCommitted_ContentChangedRewrites verifies the short-circuit does
+// not fire when content actually differs.
+func TestUpdateCommitted_ContentChangedRewrites(t *testing.T) {
+	t.Parallel()
+	repo, store, cpID := setupRepoForUpdate(t)
+
+	first := redact.AlreadyRedacted([]byte("first version\n"))
+	second := redact.AlreadyRedacted([]byte("second version with more content\n"))
+
+	if err := store.UpdateCommitted(context.Background(), UpdateCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-001",
+		Transcript:   first,
+	}); err != nil {
+		t.Fatalf("UpdateCommitted(first) error = %v", err)
+	}
+	hashBefore := readTranscriptBlobHash(t, repo, cpID)
+
+	if err := store.UpdateCommitted(context.Background(), UpdateCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-001",
+		Transcript:   second,
+	}); err != nil {
+		t.Fatalf("UpdateCommitted(second) error = %v", err)
+	}
+	hashAfter := readTranscriptBlobHash(t, repo, cpID)
+
+	if hashBefore == hashAfter {
+		t.Errorf("expected transcript blob to change; stayed at %v", hashBefore)
+	}
+
+	content, err := store.ReadSessionContent(context.Background(), cpID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
+	}
+	if string(content.Transcript) != string(second.Bytes()) {
+		t.Errorf("transcript content mismatch\ngot:  %q\nwant: %q",
+			string(content.Transcript), string(second.Bytes()))
+	}
+}
+
+// TestPrecomputeAndReuse_MatchesFreshWrite verifies that precomputed blob
+// hashes match the hashes produced by a fresh chunk + blob-write pass.
+func TestPrecomputeAndReuse_MatchesFreshWrite(t *testing.T) {
+	t.Parallel()
+	_, store, _ := setupRepoForUpdate(t)
+
+	transcript := redact.AlreadyRedacted([]byte("deterministic content for hash comparison\n"))
+
+	precomputed, err := PrecomputeTranscriptBlobs(context.Background(), store.repo, transcript, "")
+	if err != nil {
+		t.Fatalf("PrecomputeTranscriptBlobs() error = %v", err)
+	}
+
+	freshBlob, err := CreateBlobFromContent(store.repo, transcript.Bytes())
+	if err != nil {
+		t.Fatalf("CreateBlobFromContent() error = %v", err)
+	}
+
+	if len(precomputed.ChunkHashes) != 1 {
+		t.Fatalf("expected 1 chunk for small transcript; got %d", len(precomputed.ChunkHashes))
+	}
+	if precomputed.ChunkHashes[0] != freshBlob {
+		t.Errorf("precomputed chunk hash %v != fresh blob hash %v",
+			precomputed.ChunkHashes[0], freshBlob)
+	}
+}
+
+// readTranscriptBlobHash reads the transcript blob hash at session 0 from the
+// metadata branch.
+func readTranscriptBlobHash(t *testing.T, repo *git.Repository, cpID id.CheckpointID) plumbing.Hash {
+	t.Helper()
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get ref: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("failed to get commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+	transcriptPath := cpID.Path() + "/0/" + paths.TranscriptFileName
+	file, err := tree.File(transcriptPath)
+	if err != nil {
+		t.Fatalf("failed to find transcript blob at %s: %v", transcriptPath, err)
+	}
+	return file.Hash
+}

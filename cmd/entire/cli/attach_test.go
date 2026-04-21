@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"         // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid" // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"      // register agent
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -772,4 +774,76 @@ func readFileFromRef(t *testing.T, repo *git.Repository, refName, filePath strin
 		return "", false
 	}
 	return content, true
+}
+
+// TestAttach_DiscoversExternalAgents verifies that `entire attach --agent <external>`
+// gets past the agent registry check when external_agents is enabled and a
+// matching binary is on PATH. Without the DiscoverAndRegister call in the
+// attach command, this would fail with "unknown agent: <name>".
+//
+// This test does not verify end-to-end attach behavior — it asserts only
+// that discovery ran. The command is expected to fail later (transcript
+// resolution) because we don't stand up a real session.
+func TestAttach_DiscoversExternalAgents(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupAttachTestRepo(t)
+
+	// Overwrite settings to enable external_agents (enableEntire writes the
+	// file without it).
+	cwd := mustGetwd(t)
+	settingsPath := filepath.Join(cwd, ".entire", "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"enabled":true,"external_agents":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a unique name so concurrent test runs can't collide in the global
+	// agent registry.
+	agentName := types.AgentName("attachtest-discovery-agent")
+
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "entire-agent-"+string(agentName))
+	infoJSON := `{
+  "protocol_version": 1,
+  "name": "` + string(agentName) + `",
+  "type": "Attach Test Agent",
+  "description": "Agent for attach discovery test",
+  "is_preview": false,
+  "protected_dirs": [],
+  "hook_names": [],
+  "capabilities": {}
+}`
+	script := "#!/bin/sh\nif [ \"$1\" = \"info\" ]; then\n  echo '" + infoJSON + "'\nfi\n"
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write mock agent binary: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cmd := newAttachCmd()
+	// Pass a bogus session ID — the point is to exercise the registry check,
+	// not full attach flow.
+	cmd.SetArgs([]string{"--agent", string(agentName), "-f", "fake-session-id"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	err := cmd.Execute()
+	// We expect an error (no transcript), but it must not be the
+	// registry-lookup error. A regression (removing DiscoverAndRegister)
+	// would produce "unknown agent: attachtest-discovery-agent".
+	if err == nil {
+		t.Fatalf("expected attach to fail on missing transcript, got success\noutput: %s", out.String())
+	}
+	if strings.Contains(err.Error(), "unknown agent") {
+		t.Fatalf("attach did not discover external agent — got registry miss: %v", err)
+	}
+
+	// Also confirm the agent actually landed in the registry, so the check
+	// above is meaningful (not merely passing because some other error
+	// short-circuited before the registry lookup).
+	if _, lookupErr := agent.Get(agentName); lookupErr != nil {
+		t.Errorf("expected external agent %q in registry after attach, got: %v", agentName, lookupErr)
+	}
 }

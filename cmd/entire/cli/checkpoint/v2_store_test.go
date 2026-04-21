@@ -155,7 +155,7 @@ func TestV2GitStore_UpdateRef_CreatesCommit(t *testing.T) {
 	require.NotEqual(t, treeHash, newTreeHash)
 
 	// Update the ref
-	require.NoError(t, store.updateRef(refName, newTreeHash, parentHash, "test commit", "Test", "test@test.com"))
+	require.NoError(t, store.updateRef(context.Background(), refName, newTreeHash, parentHash, "test commit", "Test", "test@test.com"))
 
 	// Verify the ref now points to a commit with our tree
 	ref, err := repo.Reference(refName, true)
@@ -908,7 +908,7 @@ func TestV2GitStore_UpdateCommitted_PreservesExistingTaskMetadataInFullCurrent(t
 	require.NoError(t, err)
 
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-	commitHash, err := CreateCommit(repo, newRootHash, parentHash,
+	commitHash, err := CreateCommit(ctx, repo, newRootHash, parentHash,
 		fmt.Sprintf("Checkpoint: %s (task metadata)\n", cpID), authorName, authorEmail)
 	require.NoError(t, err)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))

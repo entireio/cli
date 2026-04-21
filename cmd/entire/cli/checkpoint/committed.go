@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
@@ -35,10 +37,17 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/utils/binary"
+	"github.com/go-git/go-git/v6/x/plugin"
 )
 
 // errStopIteration is used to stop commit iteration early in GetCheckpointAuthor.
 var errStopIteration = errors.New("stop iteration")
+
+// chunkTranscript is an indirection over agent.ChunkTranscript so tests can
+// count or intercept chunking calls (e.g., to verify the short-circuit avoids
+// re-chunking identical content). Production code paths always use the
+// unwrapped function.
+var chunkTranscript = agent.ChunkTranscript
 
 // WriteCommitted writes a committed checkpoint to the entire/checkpoints/v1 branch.
 // Checkpoints are stored at sharded paths: <id[:2]>/<id[2:]>/
@@ -109,7 +118,7 @@ func (s *GitStore) WriteCommitted(ctx context.Context, opts WriteCommittedOption
 	}
 
 	commitMsg := s.buildCommitMessage(opts, taskMetadataPath)
-	newCommitHash, err := s.createCommit(newTreeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
+	newCommitHash, err := s.createCommit(ctx, newTreeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
 	if err != nil {
 		return err
 	}
@@ -420,8 +429,7 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 // writeCheckpointSummary writes the root-level CheckpointSummary with aggregated statistics.
 // sessions is the complete sessions array (already built by the caller).
 func (s *GitStore) writeCheckpointSummary(opts WriteCommittedOptions, basePath string, entries map[string]object.TreeEntry, sessions []SessionFilePaths) error {
-	checkpointsCount, filesTouched, tokenUsage, err :=
-		s.reaggregateFromEntries(basePath, len(sessions), entries)
+	checkpointsCount, filesTouched, tokenUsage, err := s.reaggregateFromEntries(basePath, len(sessions), entries)
 	if err != nil {
 		return fmt.Errorf("failed to aggregate session stats: %w", err)
 	}
@@ -519,7 +527,7 @@ func (s *GitStore) UpdateCheckpointSummary(ctx context.Context, checkpointID id.
 
 	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 	commitMsg := fmt.Sprintf("Update checkpoint summary for %s", checkpointID)
-	newCommitHash, err := s.createCommit(newTreeHash, parentHash, commitMsg, authorName, authorEmail)
+	newCommitHash, err := s.createCommit(ctx, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
 	if err != nil {
 		return err
 	}
@@ -1230,7 +1238,7 @@ func (s *GitStore) UpdateSummary(ctx context.Context, checkpointID id.Checkpoint
 
 	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 	commitMsg := fmt.Sprintf("Update summary for checkpoint %s (session: %s)", checkpointID, existingMetadata.SessionID)
-	newCommitHash, err := s.createCommit(newTreeHash, parentHash, commitMsg, authorName, authorEmail)
+	newCommitHash, err := s.createCommit(ctx, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
 	if err != nil {
 		return err
 	}
@@ -1318,7 +1326,7 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 	// Replace transcript (full replace, not append).
 	// Transcript is pre-redacted by the caller (enforced by RedactedBytes type).
 	if opts.Transcript.Len() > 0 {
-		if err := s.replaceTranscript(ctx, opts.Transcript, opts.Agent, sessionPath, entries); err != nil {
+		if err := s.replaceTranscript(ctx, opts.Transcript, opts.Agent, opts.PrecomputedBlobs, sessionPath, entries); err != nil {
 			return fmt.Errorf("failed to replace transcript: %w", err)
 		}
 	}
@@ -1349,7 +1357,7 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 
 	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 	commitMsg := fmt.Sprintf("Finalize transcript for Checkpoint: %s", opts.CheckpointID)
-	newCommitHash, err := s.createCommit(newTreeHash, parentHash, commitMsg, authorName, authorEmail)
+	newCommitHash, err := s.createCommit(ctx, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
 	if err != nil {
 		return err
 	}
@@ -1365,7 +1373,41 @@ func (s *GitStore) UpdateCommitted(ctx context.Context, opts UpdateCommittedOpti
 
 // replaceTranscript writes the full transcript content, replacing any existing transcript.
 // Also removes any chunk files from a previous write and updates the content hash.
-func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.RedactedBytes, agentType types.AgentType, sessionPath string, entries map[string]object.TreeEntry) error {
+//
+// Short-circuits when the existing content_hash.txt already matches the new
+// transcript's sha256 — in that case the chunk entries are preserved as-is and
+// no chunking/zlib happens. Use precomputed (non-nil) to reuse blob hashes
+// computed once across multiple checkpoints.
+func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.RedactedBytes, agentType types.AgentType, precomputed *PrecomputedTranscriptBlobs, sessionPath string, entries map[string]object.TreeEntry) error {
+	// Ignore precompute if invariants are violated — fall back to fresh chunking.
+	if precomputed != nil && !precomputed.isUsable() {
+		precomputed = nil
+	}
+
+	// Compute the new content-hash string (cheap — SHA-256 over transcript bytes).
+	var newContentHash string
+	if precomputed != nil {
+		newContentHash = precomputed.ContentHash
+	} else {
+		newContentHash = fmt.Sprintf("sha256:%x", sha256.Sum256(transcript.Bytes()))
+	}
+
+	// Short-circuit: if the existing content_hash.txt already matches, the
+	// chunk entries currently in `entries` represent the same content. Leave
+	// everything as-is and skip chunking + zlib.
+	hashPath := sessionPath + paths.ContentHashFileName
+	if existing, ok := entries[hashPath]; ok {
+		if blob, err := s.repo.BlobObject(existing.Hash); err == nil {
+			if rdr, rerr := blob.Reader(); rerr == nil {
+				existingHash, readErr := io.ReadAll(rdr)
+				_ = rdr.Close()
+				if readErr == nil && string(existingHash) == newContentHash {
+					return nil
+				}
+			}
+		}
+	}
+
 	// Remove existing transcript files (base + any chunks)
 	transcriptBase := sessionPath + paths.TranscriptFileName
 	for key := range entries {
@@ -1374,19 +1416,28 @@ func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.Reda
 		}
 	}
 
-	// Chunk the transcript (matches writeTranscript behavior)
-	chunks, err := agent.ChunkTranscript(ctx, transcript.Bytes(), agentType)
-	if err != nil {
-		return fmt.Errorf("failed to chunk transcript: %w", err)
+	// Resolve chunk hashes from precompute, or chunk + blob-write now.
+	var chunkHashes []plumbing.Hash
+	if precomputed != nil {
+		chunkHashes = precomputed.ChunkHashes
+	} else {
+		chunks, err := chunkTranscript(ctx, transcript.Bytes(), agentType)
+		if err != nil {
+			return fmt.Errorf("failed to chunk transcript: %w", err)
+		}
+		chunkHashes = make([]plumbing.Hash, len(chunks))
+		for i, chunk := range chunks {
+			blobHash, err := CreateBlobFromContent(s.repo, chunk)
+			if err != nil {
+				return fmt.Errorf("failed to create transcript blob: %w", err)
+			}
+			chunkHashes[i] = blobHash
+		}
 	}
 
-	// Write chunk files
-	for i, chunk := range chunks {
+	// Record chunk files in the tree at v1 (full.jsonl) naming.
+	for i, blobHash := range chunkHashes {
 		chunkPath := sessionPath + agent.ChunkFileName(paths.TranscriptFileName, i)
-		blobHash, err := CreateBlobFromContent(s.repo, chunk)
-		if err != nil {
-			return fmt.Errorf("failed to create transcript blob: %w", err)
-		}
 		entries[chunkPath] = object.TreeEntry{
 			Name: chunkPath,
 			Mode: filemode.Regular,
@@ -1394,13 +1445,17 @@ func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.Reda
 		}
 	}
 
-	// Update content hash
-	contentHash := fmt.Sprintf("sha256:%x", sha256.Sum256(transcript.Bytes()))
-	hashBlob, err := CreateBlobFromContent(s.repo, []byte(contentHash))
-	if err != nil {
-		return fmt.Errorf("failed to create content hash blob: %w", err)
+	// Content-hash blob.
+	var hashBlob plumbing.Hash
+	if precomputed != nil {
+		hashBlob = precomputed.ContentHashBlob
+	} else {
+		h, err := CreateBlobFromContent(s.repo, []byte(newContentHash))
+		if err != nil {
+			return fmt.Errorf("failed to create content hash blob: %w", err)
+		}
+		hashBlob = h
 	}
-	hashPath := sessionPath + paths.ContentHashFileName
 	entries[hashPath] = object.TreeEntry{
 		Name: hashPath,
 		Mode: filemode.Regular,
@@ -1408,6 +1463,44 @@ func (s *GitStore) replaceTranscript(ctx context.Context, transcript redact.Reda
 	}
 
 	return nil
+}
+
+// PrecomputeTranscriptBlobs chunks the given transcript and writes each chunk
+// plus the content-hash blob to the object store once, returning the resulting
+// hashes for reuse across multiple UpdateCommitted calls that share the same
+// transcript content.
+//
+// The returned blobs work for both v1 (full.jsonl) and v2 (raw_transcript)
+// paths since blob hashes are content-addressed (SHA-1 of chunk bytes). Only
+// the tree-entry filenames differ between v1 and v2.
+func PrecomputeTranscriptBlobs(ctx context.Context, repo *git.Repository, transcript redact.RedactedBytes, agentType types.AgentType) (*PrecomputedTranscriptBlobs, error) {
+	raw := transcript.Bytes()
+
+	chunks, err := chunkTranscript(ctx, raw, agentType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to chunk transcript: %w", err)
+	}
+
+	chunkHashes := make([]plumbing.Hash, len(chunks))
+	for i, chunk := range chunks {
+		h, err := CreateBlobFromContent(repo, chunk)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create transcript blob: %w", err)
+		}
+		chunkHashes[i] = h
+	}
+
+	contentHash := fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
+	hashBlob, err := CreateBlobFromContent(repo, []byte(contentHash))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create content hash blob: %w", err)
+	}
+
+	return &PrecomputedTranscriptBlobs{
+		ChunkHashes:     chunkHashes,
+		ContentHashBlob: hashBlob,
+		ContentHash:     contentHash,
+	}, nil
 }
 
 // ensureSessionsBranch ensures the entire/checkpoints/v1 branch exists.
@@ -1429,7 +1522,7 @@ func (s *GitStore) ensureSessionsBranch(ctx context.Context) error {
 	}
 
 	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-	commitHash, err := s.createCommit(emptyTreeHash, plumbing.ZeroHash, "Initialize sessions branch", authorName, authorEmail)
+	commitHash, err := s.createCommit(ctx, emptyTreeHash, plumbing.ZeroHash, "Initialize sessions branch", authorName, authorEmail)
 	if err != nil {
 		return err
 	}
@@ -1639,6 +1732,21 @@ func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 		email = cfg.User.Email
 	}
 
+	// If not found in local config, try global config
+	if name == "" || email == "" {
+		//nolint:staticcheck // the v6 is not yet released, revisit once it is.
+		globalCfg, err := config.LoadConfig(config.GlobalScope)
+		if err == nil {
+			if name == "" {
+				name = globalCfg.User.Name
+			}
+			if email == "" {
+				email = globalCfg.User.Email
+			}
+		}
+	}
+
+	// Provide sensible defaults if git user is not configured
 	if name == "" {
 		name = "Unknown"
 	}
@@ -1651,7 +1759,7 @@ func GetGitAuthorFromRepo(repo *git.Repository) (name, email string) {
 
 // CreateCommit creates a git commit object with the given tree, parent, message, and author.
 // If parentHash is ZeroHash, the commit is created without a parent (orphan commit).
-func CreateCommit(repo *git.Repository, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
+func CreateCommit(ctx context.Context, repo *git.Repository, treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
 	now := time.Now()
 	sig := object.Signature{
 		Name:  authorName,
@@ -1670,6 +1778,8 @@ func CreateCommit(repo *git.Repository, treeHash, parentHash plumbing.Hash, mess
 		commit.ParentHashes = []plumbing.Hash{parentHash}
 	}
 
+	SignCommitBestEffort(ctx, commit)
+
 	obj := repo.Storer.NewEncodedObject()
 	if err := commit.Encode(obj); err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to encode commit: %w", err)
@@ -1681,6 +1791,51 @@ func CreateCommit(repo *git.Repository, treeHash, parentHash plumbing.Hash, mess
 	}
 
 	return hash, nil
+}
+
+// SignCommitBestEffort signs the commit using the registered ObjectSigner plugin.
+// If no signer is registered, signing is disabled via settings, or signing fails,
+// the commit is left unsigned and the error is logged.
+func SignCommitBestEffort(ctx context.Context, commit *object.Commit) {
+	// Check plugin availability first (in-memory) before hitting disk for settings.
+	if !plugin.Has(plugin.ObjectSigner()) {
+		return
+	}
+
+	if !settings.IsSignCheckpointCommitsEnabled(ctx) {
+		return
+	}
+
+	signer, err := plugin.Get(plugin.ObjectSigner())
+	if err != nil {
+		logging.Warn(ctx, "failed to get object signer", slog.String("error", err.Error()))
+		return
+	}
+
+	if signer == nil {
+		return
+	}
+
+	encoded := &plumbing.MemoryObject{}
+	if err = commit.EncodeWithoutSignature(encoded); err != nil {
+		logging.Warn(ctx, "failed to encode commit for signing", slog.String("error", err.Error()))
+		return
+	}
+
+	r, err := encoded.Reader()
+	if err != nil {
+		logging.Warn(ctx, "failed to read encoded commit", slog.String("error", err.Error()))
+		return
+	}
+	defer r.Close()
+
+	sig, err := signer.Sign(r)
+	if err != nil {
+		logging.Warn(ctx, "failed to sign commit", slog.String("error", err.Error()))
+		return
+	}
+
+	commit.Signature = string(sig)
 }
 
 // readTranscriptFromTree reads a transcript from a git tree, handling both chunked and non-chunked formats.

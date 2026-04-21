@@ -578,7 +578,7 @@ func removeV2SessionTranscriptFiles(t *testing.T, repo *git.Repository, v2Store 
 	)
 	require.NoError(t, updateErr)
 
-	commitHash, commitErr := checkpoint.CreateCommit(repo, newRootHash, parentHash, "test: remove full transcript\n", "Test", "test@test.com")
+	commitHash, commitErr := checkpoint.CreateCommit(context.Background(), repo, newRootHash, parentHash, "test: remove full transcript\n", "Test", "test@test.com")
 	require.NoError(t, commitErr)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))
 }
@@ -628,8 +628,8 @@ func TestSpliceTasksTreeToV2_MergesTaskDirectories(t *testing.T) {
 	rootTasksHash := buildTasksTreeHash(t, repo, "toolu_root")
 	sessionTasksHash := buildTasksTreeHash(t, repo, "toolu_session")
 
-	require.NoError(t, spliceTasksTreeToV2(repo, v2Store, cpID, 0, rootTasksHash))
-	require.NoError(t, spliceTasksTreeToV2(repo, v2Store, cpID, 0, sessionTasksHash))
+	require.NoError(t, spliceTasksTreeToV2(context.Background(), repo, v2Store, cpID, 0, rootTasksHash))
+	require.NoError(t, spliceTasksTreeToV2(context.Background(), repo, v2Store, cpID, 0, sessionTasksHash))
 
 	_, rootTreeHash, refErr := v2Store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
 	require.NoError(t, refErr)

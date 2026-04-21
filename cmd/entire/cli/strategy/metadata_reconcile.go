@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	remote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
@@ -359,16 +360,16 @@ func ReconcileDisconnectedV2Ref(
 
 // lsRemoteRef runs git ls-remote and returns the hash for a specific ref.
 // Returns plumbing.ZeroHash if the ref doesn't exist on the remote.
-func lsRemoteRef(ctx context.Context, repoPath, remote, refName string) (plumbing.Hash, error) {
+func lsRemoteRef(ctx context.Context, repoPath, remoteName, refName string) (plumbing.Hash, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	fetchTarget, err := ResolveFetchTarget(ctx, remote)
+	fetchTarget, err := ResolveFetchTarget(ctx, remoteName)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("resolve fetch target for ls-remote: %w", err)
 	}
 
-	cmd := CheckpointGitCommand(ctx, remote, "ls-remote", fetchTarget, refName)
+	cmd := CheckpointGitCommand(ctx, fetchTarget, "ls-remote", fetchTarget, refName)
 	cmd.Dir = repoPath
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
@@ -376,7 +377,7 @@ func lsRemoteRef(ctx context.Context, repoPath, remote, refName string) (plumbin
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("git ls-remote %s failed: %w", RedactURL(remote), err)
+		return plumbing.ZeroHash, fmt.Errorf("git ls-remote %s failed: %w", remote.RedactURL(fetchTarget), err)
 	}
 
 	line := strings.TrimSpace(string(output))
@@ -393,18 +394,18 @@ func lsRemoteRef(ctx context.Context, repoPath, remote, refName string) (plumbin
 }
 
 // fetchRefToTemp fetches a remote ref to a temporary local ref for comparison.
-func fetchRefToTemp(ctx context.Context, repoPath, remote, srcRef, dstRef string) error {
+func fetchRefToTemp(ctx context.Context, repoPath, remoteName, srcRef, dstRef string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	fetchTarget, err := ResolveFetchTarget(ctx, remote)
+	fetchTarget, err := ResolveFetchTarget(ctx, remoteName)
 	if err != nil {
 		return fmt.Errorf("resolve fetch target for doctor v2 fetch: %w", err)
 	}
 
 	refspec := fmt.Sprintf("+%s:%s", srcRef, dstRef)
 	fetchArgs := AppendFetchFilterArgs(ctx, []string{"fetch", "--no-tags", fetchTarget, refspec})
-	cmd := CheckpointGitCommand(ctx, remote, fetchArgs...)
+	cmd := CheckpointGitCommand(ctx, fetchTarget, fetchArgs...)
 	cmd.Dir = repoPath
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
@@ -412,8 +413,8 @@ func fetchRefToTemp(ctx context.Context, repoPath, remote, srcRef, dstRef string
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		redactedURL := RedactURL(remote)
-		msg := strings.TrimSpace(strings.ReplaceAll(string(output), remote, redactedURL))
+		redactedURL := remote.RedactURL(fetchTarget)
+		msg := strings.TrimSpace(strings.ReplaceAll(string(output), fetchTarget, redactedURL))
 		if msg != "" {
 			return fmt.Errorf("git fetch %s failed: %s: %w", redactedURL, msg, err)
 		}
@@ -571,7 +572,7 @@ func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Has
 		}
 
 		// Create new commit on top of current tip, preserving original message/author
-		newHash, err := createCherryPickCommit(repo, mergedTreeHash, currentTip, commit)
+		newHash, err := createCherryPickCommit(ctx, repo, mergedTreeHash, currentTip, commit)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to create cherry-pick commit: %w", err)
 		}
@@ -584,7 +585,7 @@ func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Has
 
 // createCherryPickCommit creates a new commit on top of parent, preserving the
 // original commit's message and author.
-func createCherryPickCommit(repo *git.Repository, treeHash, parent plumbing.Hash, original *object.Commit) (plumbing.Hash, error) {
+func createCherryPickCommit(ctx context.Context, repo *git.Repository, treeHash, parent plumbing.Hash, original *object.Commit) (plumbing.Hash, error) {
 	committerName, committerEmail := GetGitAuthorFromRepo(repo)
 	now := time.Now()
 
@@ -599,6 +600,8 @@ func createCherryPickCommit(repo *git.Repository, treeHash, parent plumbing.Hash
 		},
 		Message: original.Message,
 	}
+
+	checkpoint.SignCommitBestEffort(ctx, commit)
 
 	obj := repo.Storer.NewEncodedObject()
 	if err := commit.Encode(obj); err != nil {

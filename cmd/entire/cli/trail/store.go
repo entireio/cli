@@ -51,7 +51,7 @@ func (s *Store) EnsureBranch(ctx context.Context) error {
 	}
 
 	authorName, authorEmail := checkpoint.GetGitAuthorFromRepo(s.repo)
-	commitHash, err := checkpoint.CreateCommit(s.repo, emptyTreeHash, plumbing.ZeroHash, "Initialize trails branch", authorName, authorEmail)
+	commitHash, err := checkpoint.CreateCommit(ctx, s.repo, emptyTreeHash, plumbing.ZeroHash, "Initialize trails branch", authorName, authorEmail)
 	if err != nil {
 		return fmt.Errorf("failed to create initial commit: %w", err)
 	}
@@ -98,7 +98,7 @@ func (s *Store) Write(ctx context.Context, metadata *Metadata, discussion *Discu
 	}
 
 	commitMsg := fmt.Sprintf("Trail: %s (%s)", metadata.Title, metadata.TrailID)
-	return s.commitAndUpdateRef(newTreeHash, commitHash, commitMsg)
+	return s.commitAndUpdateRef(ctx, newTreeHash, commitHash, commitMsg)
 }
 
 // buildTrailEntries creates blob objects for a trail's 3 files and returns them as tree entries.
@@ -333,7 +333,7 @@ func (s *Store) AddCheckpoint(ctx context.Context, trailID ID, ref CheckpointRef
 	}
 
 	commitMsg := fmt.Sprintf("Add checkpoint to trail: %s", trailID)
-	return s.commitAndUpdateRef(newTreeHash, commitHash, commitMsg)
+	return s.commitAndUpdateRef(ctx, newTreeHash, commitHash, commitMsg)
 }
 
 // Delete removes a trail from the entire/trails/v1 branch.
@@ -372,7 +372,7 @@ func (s *Store) Delete(ctx context.Context, trailID ID) error {
 	}
 
 	commitMsg := fmt.Sprintf("Delete trail: %s", trailID)
-	return s.commitAndUpdateRef(newTreeHash, commitHash, commitMsg)
+	return s.commitAndUpdateRef(ctx, newTreeHash, commitHash, commitMsg)
 }
 
 // navigateToTrailTree walks rootTree → shard → suffix and returns the trail's subtree.
@@ -434,9 +434,9 @@ func (s *Store) readCheckpointsFromTrailTree(trailTree *object.Tree) (*Checkpoin
 }
 
 // commitAndUpdateRef creates a commit and updates the trails branch reference.
-func (s *Store) commitAndUpdateRef(treeHash, parentHash plumbing.Hash, message string) error {
+func (s *Store) commitAndUpdateRef(ctx context.Context, treeHash, parentHash plumbing.Hash, message string) error {
 	authorName, authorEmail := checkpoint.GetGitAuthorFromRepo(s.repo)
-	commitHash, err := checkpoint.CreateCommit(s.repo, treeHash, parentHash, message, authorName, authorEmail)
+	commitHash, err := checkpoint.CreateCommit(ctx, s.repo, treeHash, parentHash, message, authorName, authorEmail)
 	if err != nil {
 		return fmt.Errorf("failed to create commit: %w", err)
 	}

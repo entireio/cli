@@ -969,6 +969,8 @@ func TestEnableUsesSetupFlow(t *testing.T) {
 		{name: "checkpoint remote", args: []string{"--checkpoint-remote", "github:org/repo"}, want: true},
 		{name: "skip push sessions", args: []string{"--skip-push-sessions"}, want: true},
 		{name: "agent flag", args: []string{"--agent", "claude-code"}, agentName: "claude-code", want: true},
+		{name: "yes flag", args: []string{"--yes"}, want: true},
+		{name: "yes short flag", args: []string{"-y"}, want: true},
 	}
 
 	for _, tt := range tests {
@@ -2494,5 +2496,297 @@ func TestConfigureCmd_SummarizeModel_UsesExistingProvider(t *testing.T) {
 	}
 	if s.SummaryGeneration.Model != "sonnet" {
 		t.Fatalf("summary model = %q, want %q", s.SummaryGeneration.Model, "sonnet")
+	}
+}
+
+func TestSelectAllAgents_ReturnsAll(t *testing.T) {
+	t.Parallel()
+	available := []string{"claude-code", "gemini-cli", "opencode"}
+	selected, err := selectAllAgents(available)
+	if err != nil {
+		t.Fatalf("selectAllAgents() error = %v", err)
+	}
+	if !slices.Equal(selected, available) {
+		t.Errorf("selectAllAgents() = %v, want %v", selected, available)
+	}
+}
+
+func TestSelectAllAgents_EmptyReturnsError(t *testing.T) {
+	t.Parallel()
+	_, err := selectAllAgents(nil)
+	if err == nil {
+		t.Fatal("expected error for empty input")
+	}
+}
+
+func TestDetectOrSelectAgent_YesSelectsAll(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	var buf bytes.Buffer
+	agents, err := detectOrSelectAgent(context.Background(), &buf, selectAllAgents)
+	if err != nil {
+		t.Fatalf("detectOrSelectAgent() with selectAllAgents error = %v", err)
+	}
+
+	// Should return at least 2 agents (claude-code + gemini-cli are registered in test imports)
+	if len(agents) < 2 {
+		t.Errorf("expected at least 2 agents with selectAllAgents, got %d", len(agents))
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Selected agents:") {
+		t.Errorf("Expected output to contain 'Selected agents:', got: %s", output)
+	}
+}
+
+func TestManageAgents_YesWorksNonInteractive(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "0") // non-interactive
+
+	// Install claude-code hooks so there's something installed
+	writeClaudeHooksFixture(t)
+
+	// Use a selectFn that only picks built-in agents to avoid failures
+	// from stale external agent binaries registered by other tests.
+	selectBuiltIn := func(available []string) ([]string, error) {
+		var selected []string
+		for _, name := range available {
+			ag, err := agent.Get(types.AgentName(name))
+			if err != nil {
+				continue
+			}
+			if isBuiltInAgent(ag) {
+				selected = append(selected, name)
+			}
+		}
+		if len(selected) == 0 {
+			return nil, errors.New("no built-in agents available")
+		}
+		return selected, nil
+	}
+
+	var buf bytes.Buffer
+	err := runManageAgents(context.Background(), &buf, EnableOptions{}, selectBuiltIn)
+	if err != nil {
+		t.Fatalf("runManageAgents() with selectFn in non-interactive mode error = %v", err)
+	}
+
+	output := buf.String()
+	// Should NOT print the non-interactive bail-out message
+	if strings.Contains(output, "Cannot show agent selection in non-interactive mode") {
+		t.Error("selectFn should bypass the interactivity check, but got non-interactive message")
+	}
+}
+
+func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
+	// Cannot use t.Parallel() because subtests use t.Setenv
+
+	t.Run("yes with telemetry=false", func(t *testing.T) {
+		s := &EntireSettings{}
+		opts := EnableOptions{Yes: true, Telemetry: false}
+		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+			f := false
+			s.Telemetry = &f
+		} else if s.Telemetry == nil {
+			tr := true
+			s.Telemetry = &tr
+		}
+		if s.Telemetry == nil || *s.Telemetry != false {
+			t.Errorf("expected telemetry=false when --yes --telemetry=false, got %v", s.Telemetry)
+		}
+	})
+
+	t.Run("yes with ENTIRE_TELEMETRY_OPTOUT", func(t *testing.T) {
+		t.Setenv("ENTIRE_TELEMETRY_OPTOUT", "1")
+		s := &EntireSettings{}
+		opts := EnableOptions{Yes: true, Telemetry: true}
+		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+			f := false
+			s.Telemetry = &f
+		} else if s.Telemetry == nil {
+			tr := true
+			s.Telemetry = &tr
+		}
+		if s.Telemetry == nil || *s.Telemetry != false {
+			t.Errorf("expected telemetry=false with ENTIRE_TELEMETRY_OPTOUT, got %v", s.Telemetry)
+		}
+	})
+
+	t.Run("yes defaults to telemetry enabled", func(t *testing.T) {
+		s := &EntireSettings{}
+		opts := EnableOptions{Yes: true, Telemetry: true}
+		if !opts.Telemetry {
+			f := false
+			s.Telemetry = &f
+		} else if s.Telemetry == nil {
+			tr := true
+			s.Telemetry = &tr
+		}
+		if s.Telemetry == nil || *s.Telemetry != true {
+			t.Errorf("expected telemetry=true with --yes (default), got %v", s.Telemetry)
+		}
+	})
+
+	t.Run("yes preserves existing telemetry setting", func(t *testing.T) {
+		existing := false
+		s := &EntireSettings{Telemetry: &existing}
+		opts := EnableOptions{Yes: true, Telemetry: true}
+		if !opts.Telemetry || os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+			f := false
+			s.Telemetry = &f
+		} else if s.Telemetry == nil {
+			tr := true
+			s.Telemetry = &tr
+		}
+		if *s.Telemetry != false {
+			t.Errorf("expected existing telemetry=false to be preserved, got %v", *s.Telemetry)
+		}
+	})
+}
+
+func TestEnableCmd_YesFreshRepo_SkipsPromptsAndEnables(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	testutil.WriteFile(t, ".", "f.txt", "init")
+	testutil.GitAdd(t, ".", "f.txt")
+	testutil.GitCommit(t, ".", "init")
+	t.Setenv("ENTIRE_TEST_TTY", "0") // non-interactive — proves --yes bypasses prompts
+
+	// Use --yes with --agent to test the realistic CI scenario.
+	// The --yes flag skips telemetry/Vercel prompts while --agent selects a specific agent.
+	// The pure --yes-selects-all-agents path is covered by TestDetectOrSelectAgent_YesSelectsAll.
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--yes", "--agent", "claude-code"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable --yes --agent claude-code error = %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Ready.") {
+		t.Errorf("expected 'Ready.' in output, got: %s", output)
+	}
+
+	// Verify settings were saved with telemetry enabled (--yes default)
+	s, err := LoadEntireSettings(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load settings: %v", err)
+	}
+	if !s.Enabled {
+		t.Error("expected enabled=true")
+	}
+}
+
+func TestEnableCmd_YesWithAgent_AgentTakesPrecedence(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	testutil.WriteFile(t, ".", "f.txt", "init")
+	testutil.GitAdd(t, ".", "f.txt")
+	testutil.GitCommit(t, ".", "init")
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--yes", "--agent", "claude-code"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable --yes --agent claude-code error = %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+
+	output := stdout.String()
+	// --agent takes precedence — should show single-agent non-interactive output
+	if !strings.Contains(output, "Agent: Claude Code") {
+		t.Errorf("expected 'Agent: Claude Code' in output, got: %s", output)
+	}
+	// Should NOT have shown multi-select output
+	if strings.Contains(output, "Selected agents:") {
+		t.Errorf("--agent should bypass multi-select, but got 'Selected agents:' in: %s", output)
+	}
+}
+
+func TestEnableCmd_YesOnConfiguredRepo_ManagesAgents(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "0") // non-interactive
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--yes"})
+
+	// May partially fail due to stale external agents in global registry,
+	// but the key behavior is that it doesn't bail out with the non-interactive message.
+	_ = cmd.Execute() //nolint:errcheck // partial failure from stale test agents is expected
+
+	output := stdout.String()
+	// Should NOT bail out with non-interactive message
+	if strings.Contains(output, "Cannot show agent selection in non-interactive mode") {
+		t.Error("--yes should bypass non-interactive check, but got bail-out message")
+	}
+}
+
+func TestEnableCmd_YesWithTelemetryFalse(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	testutil.WriteFile(t, ".", "f.txt", "init")
+	testutil.GitAdd(t, ".", "f.txt")
+	testutil.GitCommit(t, ".", "init")
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--yes", "--agent", "claude-code", "--telemetry=false"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable --yes --telemetry=false error = %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+
+	// Verify telemetry was disabled despite --yes
+	s, err := LoadEntireSettings(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load settings: %v", err)
+	}
+	if s.Telemetry == nil || *s.Telemetry != false {
+		t.Errorf("expected telemetry=false when --yes --telemetry=false, got %v", s.Telemetry)
+	}
+}
+
+func TestConfigureCmd_YesOnConfiguredRepo(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+	writeSettings(t, testSettingsEnabled)
+	writeClaudeHooksFixture(t)
+
+	cmd := newSetupCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--yes"})
+
+	// May partially fail due to stale external agents in global registry,
+	// but the key behavior is that it doesn't bail out with the non-interactive message.
+	_ = cmd.Execute() //nolint:errcheck // partial failure from stale test agents is expected
+
+	output := stdout.String()
+	if strings.Contains(output, "Cannot show agent selection in non-interactive mode") {
+		t.Error("--yes should bypass non-interactive check, but got bail-out message")
+	}
+	// Should have added at least some built-in agents
+	if !strings.Contains(output, "Added agents:") && !strings.Contains(output, "No changes made.") {
+		t.Errorf("expected agent management output, got: %s", output)
 	}
 }

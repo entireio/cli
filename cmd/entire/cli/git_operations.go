@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -21,7 +22,7 @@ import (
 func formatFilteredFetchError(prefix, fetchTarget string, output []byte, fetchErr error) error {
 	redactedTarget := fetchTarget
 	if isFetchTargetURL(fetchTarget) {
-		redactedTarget = strategy.RedactURL(fetchTarget)
+		redactedTarget = remote.RedactURL(fetchTarget)
 	}
 
 	msg := strings.TrimSpace(string(output))
@@ -507,12 +508,13 @@ func fetchV2MainFromOrigin(ctx context.Context, shallow bool) error {
 // configured checkpoint_remote URL.
 // Returns an error if the fetch fails or no checkpoint_remote is configured.
 func FetchV2MetadataFromCheckpointRemote(ctx context.Context) error {
-	checkpointURL, hasCheckpointRemote, resolveErr := strategy.ResolveCheckpointRemoteURL(ctx)
-	if !hasCheckpointRemote {
+	configured := remote.Configured(ctx)
+	if !configured {
 		return errors.New("no checkpoint_remote configured")
 	}
-	if resolveErr != nil {
-		return fmt.Errorf("checkpoint_remote configured but could not resolve URL: %w", resolveErr)
+	checkpointURL, err := remote.FetchURL(ctx)
+	if err != nil {
+		return fmt.Errorf("checkpoint_remote configured but could not resolve URL: %w", err)
 	}
 
 	if err := strategy.FetchV2MainFromURL(ctx, checkpointURL); err != nil {
@@ -525,12 +527,13 @@ func FetchV2MetadataFromCheckpointRemote(ctx context.Context) error {
 // configured checkpoint_remote URL and updates the local branch.
 // Returns an error if the fetch fails or no checkpoint_remote is configured.
 func FetchMetadataFromCheckpointRemote(ctx context.Context) error {
-	checkpointURL, hasCheckpointRemote, resolveErr := strategy.ResolveCheckpointRemoteURL(ctx)
-	if !hasCheckpointRemote {
+	configured := remote.Configured(ctx)
+	if !configured {
 		return errors.New("no checkpoint_remote configured")
 	}
-	if resolveErr != nil {
-		return fmt.Errorf("checkpoint_remote configured but could not resolve URL: %w", resolveErr)
+	checkpointURL, err := remote.FetchURL(ctx)
+	if err != nil {
+		return fmt.Errorf("checkpoint_remote configured but could not resolve URL: %w", err)
 	}
 
 	if err := strategy.FetchMetadataBranch(ctx, checkpointURL); err != nil {
@@ -540,11 +543,12 @@ func FetchMetadataFromCheckpointRemote(ctx context.Context) error {
 }
 
 // resolveCheckpointFetchTarget returns the fetch target for checkpoint data.
-// When a checkpoint_remote is configured in settings, returns its resolved URL.
-// Otherwise falls back to "origin".
+// It prefers the effective URL resolved by checkpoint/remote.FetchURL, which is
+// the source of truth for checkpoint fetch location. If URL resolution fails, it
+// falls back to the origin remote name so callers can still attempt a fetch.
 func resolveCheckpointFetchTarget(ctx context.Context) string {
-	url, has, err := strategy.ResolveCheckpointRemoteURL(ctx)
-	if has && err == nil && url != "" {
+	url, err := remote.FetchURL(ctx)
+	if err == nil && url != "" {
 		return url
 	}
 	return "origin"
@@ -555,9 +559,8 @@ func resolveCheckpointFetchTarget(ctx context.Context) string {
 // unlike fetch-pack which bypasses them. Requires the server to support
 // uploadpack.allowReachableSHA1InWant (GitHub, GitLab, Bitbucket all do).
 //
-// The fetch target is resolved via resolveCheckpointFetchTarget: when a
-// checkpoint_remote is configured, blobs are fetched from there; otherwise
-// from origin.
+// The fetch target is resolved via resolveCheckpointFetchTarget, which defers to
+// checkpoint/remote.FetchURL for the effective remote URL when available.
 //
 // If fetching by hash fails, falls back to a full metadata branch fetch.
 func FetchBlobsByHash(ctx context.Context, hashes []plumbing.Hash) error {

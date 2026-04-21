@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/stretchr/testify/assert"
@@ -23,17 +24,17 @@ func TestResolveTargetProtocol(t *testing.T) {
 
 	t.Run("HTTPS URL", func(t *testing.T) {
 		t.Parallel()
-		assert.Equal(t, protocolHTTPS, resolveTargetProtocol(context.Background(), "https://github.com/org/repo.git"))
+		assert.Equal(t, remote.ProtocolHTTPS, resolveTargetProtocol(context.Background(), "https://github.com/org/repo.git"))
 	})
 
 	t.Run("SSH SCP URL", func(t *testing.T) {
 		t.Parallel()
-		assert.Equal(t, protocolSSH, resolveTargetProtocol(context.Background(), "git@github.com:org/repo.git"))
+		assert.Equal(t, remote.ProtocolSSH, resolveTargetProtocol(context.Background(), "git@github.com:org/repo.git"))
 	})
 
 	t.Run("SSH protocol URL", func(t *testing.T) {
 		t.Parallel()
-		assert.Equal(t, protocolSSH, resolveTargetProtocol(context.Background(), "ssh://git@github.com/org/repo.git"))
+		assert.Equal(t, remote.ProtocolSSH, resolveTargetProtocol(context.Background(), "ssh://git@github.com/org/repo.git"))
 	})
 
 	t.Run("local path returns empty", func(t *testing.T) {
@@ -64,7 +65,7 @@ func TestResolveTargetProtocol_RemoteName(t *testing.T) {
 
 	t.Chdir(tmpDir)
 
-	assert.Equal(t, protocolHTTPS, resolveTargetProtocol(ctx, "origin"))
+	assert.Equal(t, remote.ProtocolHTTPS, resolveTargetProtocol(ctx, "origin"))
 }
 
 // Not parallel: uses t.Chdir()
@@ -84,7 +85,7 @@ func TestResolveTargetProtocol_SSHRemoteName(t *testing.T) {
 
 	t.Chdir(tmpDir)
 
-	assert.Equal(t, protocolSSH, resolveTargetProtocol(ctx, "origin"))
+	assert.Equal(t, remote.ProtocolSSH, resolveTargetProtocol(ctx, "origin"))
 }
 
 // Not parallel: uses t.Chdir()

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -16,69 +17,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestParseGitRemoteURL(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		url      string
-		wantInfo *gitRemoteInfo
-		wantErr  bool
-	}{
-		{
-			name:     "SSH SCP format",
-			url:      "git@github.com:org/repo.git",
-			wantInfo: &gitRemoteInfo{protocol: protocolSSH, host: "github.com", owner: "org", repo: "repo"},
-		},
-		{
-			name:     "SSH SCP without .git",
-			url:      "git@github.com:org/repo",
-			wantInfo: &gitRemoteInfo{protocol: protocolSSH, host: "github.com", owner: "org", repo: "repo"},
-		},
-		{
-			name:     "HTTPS format",
-			url:      "https://github.com/org/repo.git",
-			wantInfo: &gitRemoteInfo{protocol: protocolHTTPS, host: "github.com", owner: "org", repo: "repo"},
-		},
-		{
-			name:     "HTTPS without .git",
-			url:      "https://github.com/org/repo",
-			wantInfo: &gitRemoteInfo{protocol: protocolHTTPS, host: "github.com", owner: "org", repo: "repo"},
-		},
-		{
-			name:     "SSH protocol format",
-			url:      "ssh://git@github.com/org/repo.git",
-			wantInfo: &gitRemoteInfo{protocol: protocolSSH, host: "github.com", owner: "org", repo: "repo"},
-		},
-		{
-			name:    "empty string",
-			url:     "",
-			wantErr: true,
-		},
-		{
-			name:    "no path",
-			url:     "https://github.com",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			info, err := parseGitRemoteURL(tt.url)
-			if tt.wantErr {
-				assert.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantInfo.protocol, info.protocol)
-			assert.Equal(t, tt.wantInfo.host, info.host)
-			assert.Equal(t, tt.wantInfo.owner, info.owner)
-			assert.Equal(t, tt.wantInfo.repo, info.repo)
-		})
-	}
-}
 
 func TestDeriveCheckpointURL(t *testing.T) {
 	t.Parallel()
@@ -126,67 +64,13 @@ func TestDeriveCheckpointURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			config := &settings.CheckpointRemoteConfig{Provider: "github", Repo: tt.checkpointRepo}
-			got, err := deriveCheckpointURL(tt.pushRemoteURL, config)
+			got, err := remote.DeriveCheckpointURL(tt.pushRemoteURL, config)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestExtractOwnerFromRemoteURL(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		url  string
-		want string
-	}{
-		{"SSH", "git@github.com:org/repo.git", "org"},
-		{"HTTPS", "https://github.com/org/repo.git", "org"},
-		{"invalid", "not-a-url", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, extractOwnerFromRemoteURL(tt.url))
-		})
-	}
-}
-
-func TestRedactURL(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		url  string
-		want string
-	}{
-		{
-			name: "HTTPS no creds",
-			url:  "https://github.com/org/repo.git",
-			want: "https://github.com/org/repo.git",
-		},
-		{
-			name: "HTTPS with token",
-			url:  "https://x-token:ghp_abc123@github.com/org/repo.git",
-			want: "https://github.com/org/repo.git",
-		},
-		{
-			name: "HTTPS with query token",
-			url:  "https://github.com/org/repo.git?token=secret",
-			want: "https://github.com/org/repo.git",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, RedactURL(tt.url))
 		})
 	}
 }
@@ -475,7 +359,7 @@ func TestResolvePushSettings_ForkDetection(t *testing.T) {
 	testutil.GitAdd(t, localDir, "f.txt")
 	testutil.GitCommit(t, localDir, "init")
 
-	// Origin is a fork (different owner)
+	// Origin remote owner differs from the configured checkpoint remote owner.
 	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", "git@github.com:alice/main-repo.git")
 	cmd.Dir = localDir
 	cmd.Env = testutil.GitIsolatedEnv()
@@ -492,7 +376,7 @@ func TestResolvePushSettings_ForkDetection(t *testing.T) {
 	t.Chdir(localDir)
 
 	ps := resolvePushSettings(ctx, "origin")
-	// Should fall back to origin since fork detected (alice != org)
+	// Should fall back to origin since the remote owner differs (alice != org).
 	assert.False(t, ps.hasCheckpointURL())
 	assert.Equal(t, "origin", ps.pushTarget())
 	assert.False(t, ps.pushDisabled)
@@ -557,7 +441,7 @@ func TestResolvePushSettings_LegacyStringConfigIgnored(t *testing.T) {
 }
 
 // Not parallel: uses t.Chdir()
-func TestResolveCheckpointRemoteURL_ReturnsURL(t *testing.T) {
+func TestFetchURL_ReturnsCheckpointRemoteURL(t *testing.T) {
 	ctx := context.Background()
 
 	localDir := t.TempDir()
@@ -581,14 +465,16 @@ func TestResolveCheckpointRemoteURL_ReturnsURL(t *testing.T) {
 
 	t.Chdir(localDir)
 
-	url, ok, err := ResolveCheckpointRemoteURL(ctx)
-	assert.True(t, ok)
+	configured := remote.Configured(ctx)
+	assert.True(t, configured)
+
+	url, err := remote.FetchURL(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "git@github.com:org/checkpoints.git", url)
 }
 
 // Not parallel: uses t.Chdir()
-func TestResolveCheckpointRemoteURL_NoConfig(t *testing.T) {
+func TestConfigured_NoCheckpointRemote(t *testing.T) {
 	localDir := t.TempDir()
 	testutil.InitRepo(t, localDir)
 	testutil.WriteFile(t, localDir, "f.txt", "init")
@@ -605,17 +491,16 @@ func TestResolveCheckpointRemoteURL_NoConfig(t *testing.T) {
 
 	t.Chdir(localDir)
 
-	url, ok, err := ResolveCheckpointRemoteURL(t.Context())
-	assert.False(t, ok)
-	require.NoError(t, err)
-	assert.Empty(t, url)
+	configured := remote.Configured(t.Context())
+	assert.False(t, configured)
 }
 
 // Not parallel: uses t.Chdir()
-// This is the key correctness test: ResolveCheckpointRemoteURL must NOT apply fork
-// detection. A forked clone should still be able to read checkpoints from the upstream
-// checkpoint repo. Fork detection is only for push (resolvePushSettings).
-func TestResolveCheckpointRemoteURL_IgnoresForkDetection(t *testing.T) {
+// This is the key correctness test: FetchURL must NOT apply push-side owner
+// mismatch checks. A clone whose origin owner differs from the checkpoint repo
+// owner should still be able to read checkpoints. That owner check is only for
+// push (resolvePushSettings).
+func TestFetchURL_IgnoresOwnerMismatchCheck(t *testing.T) {
 	ctx := context.Background()
 
 	localDir := t.TempDir()
@@ -624,7 +509,7 @@ func TestResolveCheckpointRemoteURL_IgnoresForkDetection(t *testing.T) {
 	testutil.GitAdd(t, localDir, "f.txt")
 	testutil.GitCommit(t, localDir, "init")
 
-	// Origin is a fork (alice != org)
+	// Origin remote owner differs from checkpoint remote owner (alice != org).
 	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", "git@github.com:alice/main-repo.git")
 	cmd.Dir = localDir
 	cmd.Env = testutil.GitIsolatedEnv()
@@ -640,16 +525,18 @@ func TestResolveCheckpointRemoteURL_IgnoresForkDetection(t *testing.T) {
 
 	t.Chdir(localDir)
 
-	// resolvePushSettings would reject this (fork detected), but ResolveCheckpointRemoteURL
+	configured := remote.Configured(ctx)
+	assert.True(t, configured)
+
+	// resolvePushSettings would reject this owner mismatch, but FetchURL
 	// must return the URL — reading checkpoints is always allowed.
-	url, ok, err := ResolveCheckpointRemoteURL(ctx)
-	assert.True(t, ok, "ResolveCheckpointRemoteURL should resolve even from forked clones")
+	url, err := remote.FetchURL(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "git@github.com:org/checkpoints.git", url)
 
 	// Contrast: push settings should reject the same config
 	ps := resolvePushSettings(ctx, "origin")
-	assert.False(t, ps.hasCheckpointURL(), "resolvePushSettings should reject forked origin")
+	assert.False(t, ps.hasCheckpointURL(), "resolvePushSettings should reject an origin with a different owner")
 }
 
 // Not parallel: uses t.Chdir()

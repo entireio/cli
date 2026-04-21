@@ -139,6 +139,12 @@ github.com/go-git/go-git-fixtures/v6 v6.0.0-20260405195209-b16dd39735e0 h1:XoTsd
 github.com/go-git/go-git-fixtures/v6 v6.0.0-20260405195209-b16dd39735e0/go.mod h1:1Lr7/vYEYyl6Ir9Ku0tKrCIRreM5zovv0Jdx2MPSM4s=
 github.com/go-git/go-git/v6 v6.0.0-alpha.2 h1:T3loNtDuAixNzXtlQxZhnYiYpaQ3CA4vn9RssAniEeI=
 github.com/go-git/go-git/v6 v6.0.0-alpha.2/go.mod h1:oCD3i19CTz7gBpeb11ZZqL91WzqbMq9avn5KpUYy/Ak=
+github.com/go-git/x/plugin/objectsigner/auto v0.0.0-20260330134459-33df49246da9 h1:kXhj69S4g73PBLPwE/HKaD3a4fGtz3si5wHevmcvJ10=
+github.com/go-git/x/plugin/objectsigner/auto v0.0.0-20260330134459-33df49246da9/go.mod h1:iP2cXPyXc//9v9THS3y/MLi0jnt7vEqwUDj11qQfFPg=
+github.com/go-git/x/plugin/objectsigner/gpg v0.1.0 h1:NEGVSOD+LPnus6j4iNkAZaHVTc4DNY223y1/I2Jq2yI=
+github.com/go-git/x/plugin/objectsigner/gpg v0.1.0/go.mod h1:1iosWq3OOqZxtNrwDHtcjicswuaOT45J5GMFyCk80wc=
+github.com/go-git/x/plugin/objectsigner/ssh v0.1.0 h1:lAeeDgc1oxsMMvVUed6ssrqJnD97UR1K/dXIDdeg1Yc=
+github.com/go-git/x/plugin/objectsigner/ssh v0.1.0/go.mod h1:6BvpZj9Yry1ZFNw4N5OZDc+7M1T8oyrZilLNFg2aTsM=
 github.com/go-gl/glfw v0.0.0-20190409004039-e6da0acd62b1/go.mod h1:vR7hzQXu2zJy9AVAgeJqvqgH9Q5CA+iKCZ2gyEVpxRU=
 github.com/go-gl/glfw/v3.3/glfw v0.0.0-20191125211704-12ad95a8df72/go.mod h1:tQ2UAYgL5IevRw8kRxooKSPJfGvJ9fJQFa0TUsXzTg8=
 github.com/goccy/go-json v0.10.5 h1:Fq85nIqj+gXn/S5ahsiTlK3TmC85qgirsdTP/+DeaC4=
@@ -191,6 +197,8 @@ github.com/hashicorp/golang-lru/v2 v2.0.7 h1:a+bsQ5rvGLjzHuww6tVxozPZFVghXaHOwFs
 github.com/hashicorp/golang-lru/v2 v2.0.7/go.mod h1:QeFd9opnmA6QUJc5vARoKUSoFhyfM2/ZepoAG6RGpeM=
 github.com/hashicorp/hcl v1.0.0 h1:0Anlzjpi4vEasTeNFn2mLJgTSwt0+6sfsiTG8qcWGx4=
 github.com/hashicorp/hcl v1.0.0/go.mod h1:E5yfLk+7swimpb2L/Alb/PJmXilQ/rhwaUYs4T20WEQ=
+github.com/hiddeco/sshsig v0.2.0 h1:gMWllgKCITXdydVkDL+Zro0PU96QI55LwUwebSwNTSw=
+github.com/hiddeco/sshsig v0.2.0/go.mod h1:nJc98aGgiH6Yql2doqH4CTBVHexQA40Q+hMMLHP4EqE=
 github.com/huandu/xstrings v1.5.0 h1:2ag3IFq9ZDANvthTwTiqSSZLjDc+BedvHPAp5tJy2TI=
 github.com/huandu/xstrings v1.5.0/go.mod h1:y5/lhBue+AyNmUVz9RLU9xbLR0o4KIIExikq4ovT0aE=
 github.com/ianlancetaylor/demangle v0.0.0-20181102032728-5e5cf60278f6/go.mod h1:aSSvb/t6k1mPoxDqO4vJh6VOCGPwU4O0C2/Eqndh1Sc=
@@ -262,8 +270,8 @@ github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINE
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRIccs7FGNTlIRMkT8wgtp5eCXdBlqhYGL6U=
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-github.com/posthog/posthog-go v1.11.3 h1:5rFFJxILDBBZa+sSvHZKIROaDUGi+vQHAQjSWlibXJY=
-github.com/posthog/posthog-go v1.11.3/go.mod h1:xsVOW9YImilUcazwPNEq4PJDqEZf2KeCS758zXjwkPg=
+github.com/posthog/posthog-go v1.12.1 h1:qZMHfC0frQOR1LT4js3ns+pXbDIyFsV+kWpvJEok3ms=
+github.com/posthog/posthog-go v1.12.1/go.mod h1:xsVOW9YImilUcazwPNEq4PJDqEZf2KeCS758zXjwkPg=
 github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
 github.com/rivo/uniseg v0.4.7 h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=
 github.com/rivo/uniseg v0.4.7/go.mod h1:FN3SvrM+Zdj16jyLfmOkMNblXMcoc8DfTHruCPUcx88=

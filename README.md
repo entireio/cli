@@ -381,6 +381,21 @@ Entire derives the git URL automatically using the same protocol (SSH or HTTPS) 
 - Skip pushing if a fork is detected (push remote owner differs from checkpoint repo owner)
 - If the remote is unreachable, warn and continue without blocking your main push
 
+#### `ENTIRE_CHECKPOINT_TOKEN`
+
+`ENTIRE_CHECKPOINT_TOKEN` allows you to provide a dedicated token for checkpoint repository operations, without modifying the credentials used for your primary repository.
+
+When this environment variable is set, Entire behaves as follows:
+
+- Injects the token into HTTPS Git operations used for checkpoint fetch and push
+- If `checkpoint_remote` is configured:
+  - Prefers an HTTPS URL for the checkpoint remote when a token is present, even if the repository’s `origin` uses SSH
+- If `checkpoint_remote` is not configured:
+  - Falls back to using the default `origin` remote
+- If `checkpoint_remote` configuration cannot be loaded:
+  - Falls back to `origin`
+  - If `origin` is a valid SSH or HTTPS Git remote, Entire converts it to an HTTPS URL to enable token-based authentication
+
 ### Auto-Summarization
 
 When enabled, Entire automatically generates AI summaries for checkpoints at commit time. Summaries capture intent, outcome, learnings, friction points, and open items from the session.

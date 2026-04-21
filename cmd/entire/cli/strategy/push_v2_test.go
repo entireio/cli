@@ -40,7 +40,7 @@ func setupRepoWithV2Ref(t *testing.T) string {
 	emptyTree, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, map[string]object.TreeEntry{})
 	require.NoError(t, err)
 
-	commitHash, err := checkpoint.CreateCommit(repo, emptyTree, plumbing.ZeroHash,
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, emptyTree, plumbing.ZeroHash,
 		"Init v2 main", "Test", "test@test.com")
 	require.NoError(t, err)
 
@@ -323,7 +323,7 @@ func TestFetchAndMergeRef_RotationConflict(t *testing.T) {
 	}
 	archiveTreeHash, err := remoteStore.AddGenerationJSONToTree(currentTreeHash, gen)
 	require.NoError(t, err)
-	archiveCommitHash, err := checkpoint.CreateCommit(remoteRepo, archiveTreeHash,
+	archiveCommitHash, err := checkpoint.CreateCommit(context.Background(), remoteRepo, archiveTreeHash,
 		currentRef.Hash(), "Archive", "Test", "test@test.com")
 	require.NoError(t, err)
 
@@ -334,7 +334,7 @@ func TestFetchAndMergeRef_RotationConflict(t *testing.T) {
 	// Create fresh orphan /full/current
 	emptyTree, err := checkpoint.BuildTreeFromEntries(context.Background(), remoteRepo, map[string]object.TreeEntry{})
 	require.NoError(t, err)
-	orphanHash, err := checkpoint.CreateCommit(remoteRepo, emptyTree, plumbing.ZeroHash,
+	orphanHash, err := checkpoint.CreateCommit(context.Background(), remoteRepo, emptyTree, plumbing.ZeroHash,
 		"Start generation", "Test", "test@test.com")
 	require.NoError(t, err)
 	require.NoError(t, remoteRepo.Storer.SetReference(
