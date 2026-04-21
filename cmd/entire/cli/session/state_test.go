@@ -660,7 +660,7 @@ func TestState_KindRoundTrip(t *testing.T) {
 		BaseCommit:   "abc",
 		StartedAt:    now,
 		Kind:         KindReview,
-		ReviewStatus: ReviewStatusInProgress,
+		ReviewSkills: []string{"/review-pr"},
 	}
 	data, err := json.Marshal(s)
 	if err != nil {
@@ -673,7 +673,7 @@ func TestState_KindRoundTrip(t *testing.T) {
 	if got.Kind != KindReview {
 		t.Errorf("Kind = %q", got.Kind)
 	}
-	if got.ReviewStatus != ReviewStatusInProgress {
-		t.Errorf("ReviewStatus = %q", got.ReviewStatus)
+	if len(got.ReviewSkills) != 1 || got.ReviewSkills[0] != "/review-pr" {
+		t.Errorf("ReviewSkills = %v", got.ReviewSkills)
 	}
 }

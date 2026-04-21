@@ -50,39 +50,8 @@ const (
 	AgentTrailerKey = "Entire-Agent"
 )
 
-// Review trailer keys — used on empty "Review" commits on the user's branch.
-const (
-	ReviewByTrailerKey         = "Entire-Review-By"
-	ReviewAgentTrailerKey      = "Entire-Review-Agent"
-	ReviewSkillsTrailerKey     = "Entire-Review-Skills"
-	ReviewSessionTrailerKey    = "Entire-Review-Session"
-	ReviewCheckpointTrailerKey = "Entire-Review-Checkpoint"
-	ReviewedUpToTrailerKey     = "Entire-Reviewed-Up-To"
-	ReviewStatusTrailerKey     = "Entire-Review-Status"
-)
-
-// ReviewStatus values. Strings, not enums, so unknown future values
-// deserialize without breaking.
-const (
-	ReviewStatusClosed  = "closed"
-	ReviewStatusClean   = "clean"
-	ReviewStatusSkipped = "skipped"
-)
-
-// ReviewMetadata captures all review-trailer values for a single review commit.
-type ReviewMetadata struct {
-	By           string
-	Agent        string
-	Skills       []string
-	Session      string
-	Checkpoint   string
-	ReviewedUpTo string
-	Status       string
-}
-
 // Pre-compiled regexes for trailer parsing.
 var (
-	// Trailer parsing regexes.
 	strategyTrailerRegex     = regexp.MustCompile(StrategyTrailerKey + `:\s*(.+)`)
 	metadataTrailerRegex     = regexp.MustCompile(MetadataTrailerKey + `:\s*(.+)`)
 	taskMetadataTrailerRegex = regexp.MustCompile(MetadataTaskTrailerKey + `:\s*(.+)`)
@@ -90,15 +59,6 @@ var (
 	condensationTrailerRegex = regexp.MustCompile(CondensationTrailerKey + `:\s*(.+)`)
 	sessionTrailerRegex      = regexp.MustCompile(SessionTrailerKey + `:\s*(.+)`)
 	checkpointTrailerRegex   = regexp.MustCompile(CheckpointTrailerKey + `:\s*(` + checkpointID.Pattern + `)(?:\s|$)`)
-
-	// Review trailer parsing regexes.
-	reviewByTrailerRegex         = regexp.MustCompile(ReviewByTrailerKey + `:\s*(.+)`)
-	reviewAgentTrailerRegex      = regexp.MustCompile(ReviewAgentTrailerKey + `:\s*(.+)`)
-	reviewSkillsTrailerRegex     = regexp.MustCompile(ReviewSkillsTrailerKey + `:\s*(.+)`)
-	reviewSessionTrailerRegex    = regexp.MustCompile(ReviewSessionTrailerKey + `:\s*(.+)`)
-	reviewCheckpointTrailerRegex = regexp.MustCompile(ReviewCheckpointTrailerKey + `:\s*([a-f0-9]{12})`)
-	reviewedUpToTrailerRegex     = regexp.MustCompile(ReviewedUpToTrailerKey + `:\s*([a-f0-9]{40})`)
-	reviewStatusTrailerRegex     = regexp.MustCompile(ReviewStatusTrailerKey + `:\s*(.+)`)
 )
 
 // ParseStrategy extracts strategy from commit message.
@@ -346,68 +306,4 @@ func appendTrailerLine(message, trailerLine string) string {
 func AppendCheckpointTrailer(message, checkpointID string) string {
 	trailer := fmt.Sprintf("%s: %s", CheckpointTrailerKey, checkpointID)
 	return appendTrailerLine(message, trailer)
-}
-
-// AppendReviewTrailers appends all Entire-Review-* trailers to a commit
-// message in trailer-aware format (single blank line separating body from
-// trailer block).
-func AppendReviewTrailers(message string, md ReviewMetadata) string {
-	trailers := []struct {
-		key, val string
-	}{
-		{ReviewByTrailerKey, md.By},
-		{ReviewAgentTrailerKey, md.Agent},
-		{ReviewSkillsTrailerKey, strings.Join(md.Skills, ",")},
-		{ReviewSessionTrailerKey, md.Session},
-		{ReviewCheckpointTrailerKey, md.Checkpoint},
-		{ReviewedUpToTrailerKey, md.ReviewedUpTo},
-		{ReviewStatusTrailerKey, md.Status},
-	}
-	out := message
-	for _, tr := range trailers {
-		if tr.val == "" {
-			continue
-		}
-		out = appendTrailerLine(out, fmt.Sprintf("%s: %s", tr.key, tr.val))
-	}
-	return out
-}
-
-// ParseReviewMetadata extracts review trailers from a commit message.
-// Returns ok=false when no review trailers are present (i.e., not a review commit).
-func ParseReviewMetadata(message string) (ReviewMetadata, bool) {
-	var md ReviewMetadata
-	found := false
-	if m := reviewByTrailerRegex.FindStringSubmatch(message); m != nil {
-		md.By = strings.TrimSpace(m[1])
-		found = true
-	}
-	if m := reviewAgentTrailerRegex.FindStringSubmatch(message); m != nil {
-		md.Agent = strings.TrimSpace(m[1])
-		found = true
-	}
-	if m := reviewSkillsTrailerRegex.FindStringSubmatch(message); m != nil {
-		raw := strings.TrimSpace(m[1])
-		if raw != "" {
-			md.Skills = strings.Split(raw, ",")
-		}
-		found = true
-	}
-	if m := reviewSessionTrailerRegex.FindStringSubmatch(message); m != nil {
-		md.Session = strings.TrimSpace(m[1])
-		found = true
-	}
-	if m := reviewCheckpointTrailerRegex.FindStringSubmatch(message); m != nil {
-		md.Checkpoint = strings.TrimSpace(m[1])
-		found = true
-	}
-	if m := reviewedUpToTrailerRegex.FindStringSubmatch(message); m != nil {
-		md.ReviewedUpTo = strings.TrimSpace(m[1])
-		found = true
-	}
-	if m := reviewStatusTrailerRegex.FindStringSubmatch(message); m != nil {
-		md.Status = strings.TrimSpace(m[1])
-		found = true
-	}
-	return md, found
 }

@@ -40,20 +40,8 @@ const (
 type Kind string
 
 const (
-	// KindReview tags a session created by `entire review`. Stop-hook
-	// fallback and status rendering key off this value.
+	// KindReview tags a session created by `entire review`.
 	KindReview Kind = "review"
-)
-
-// ReviewStatus values for session.State.ReviewStatus. Only meaningful when
-// Kind == KindReview.
-type ReviewStatus string
-
-const (
-	ReviewStatusInProgress ReviewStatus = "in-progress"
-	ReviewStatusClosed     ReviewStatus = "closed"
-	ReviewStatusClean      ReviewStatus = "clean"
-	ReviewStatusSkipped    ReviewStatus = "skipped"
 )
 
 // State represents the state of an active session.
@@ -98,13 +86,8 @@ type State struct {
 	// set to KindReview when the session was started by `entire review`.
 	Kind Kind `json:"kind,omitempty"`
 
-	// ReviewStatus is the lifecycle stage of a review session. Only set when
-	// Kind == KindReview. Transitions: "" -> in-progress -> {closed,clean,skipped}.
-	ReviewStatus ReviewStatus `json:"review_status,omitempty"`
-
 	// ReviewSkills is the snapshot of configured review skills at session start.
-	// Used by the Stop-hook fallback to report "you ran these skills" even if
-	// the config changes mid-session.
+	// Preserved so checkpoint metadata records which skills were run.
 	ReviewSkills []string `json:"review_skills,omitempty"`
 
 	// TurnID is a unique identifier for the current agent turn.
