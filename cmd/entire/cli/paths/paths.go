@@ -36,6 +36,7 @@ const (
 	MetadataFileName              = "metadata.json"
 	CheckpointFileName            = "checkpoint.json"
 	ContentHashFileName           = "content_hash.txt"
+	CommitLogFileName             = "commits.jsonl"
 	SettingsFileName              = "settings.json"
 )
 

@@ -383,6 +383,19 @@ func (s *GitStore) writeSessionToSubdirectory(ctx context.Context, opts WriteCom
 		filePaths.Prompt = "/" + sessionPath + paths.PromptFileName
 	}
 
+	// Write commit log (session timeline of condensed commits)
+	if len(opts.CommitLog) > 0 {
+		blobHash, err := CreateBlobFromContent(s.repo, opts.CommitLog)
+		if err != nil {
+			return filePaths, err
+		}
+		entries[sessionPath+paths.CommitLogFileName] = object.TreeEntry{
+			Name: sessionPath + paths.CommitLogFileName,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		}
+	}
+
 	// Write session-level metadata.json (CommittedMetadata with all fields including initial_attribution)
 	sessionMetadata := CommittedMetadata{
 		CheckpointID:                opts.CheckpointID,
@@ -997,6 +1010,13 @@ func (s *GitStore) ReadSessionContent(ctx context.Context, checkpointID id.Check
 	if file, fileErr := sessionTree.File(paths.PromptFileName); fileErr == nil {
 		if content, contentErr := file.Contents(); contentErr == nil {
 			result.Prompts = content
+		}
+	}
+
+	// Read commit log (auto-fetches blob if needed)
+	if file, fileErr := sessionTree.File(paths.CommitLogFileName); fileErr == nil {
+		if content, contentErr := file.Contents(); contentErr == nil {
+			result.CommitLog = []byte(content)
 		}
 	}
 

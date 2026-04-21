@@ -444,6 +444,19 @@ func (s *V2GitStore) writeMainSessionToSubdirectory(opts WriteCommittedOptions, 
 	}
 	filePaths.Metadata = "/" + sessionPath + paths.MetadataFileName
 
+	// Write commit log (session timeline of condensed commits)
+	if len(opts.CommitLog) > 0 {
+		blobHash, err := CreateBlobFromContent(s.repo, opts.CommitLog)
+		if err != nil {
+			return filePaths, err
+		}
+		entries[sessionPath+paths.CommitLogFileName] = object.TreeEntry{
+			Name: sessionPath + paths.CommitLogFileName,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		}
+	}
+
 	return filePaths, nil
 }
 

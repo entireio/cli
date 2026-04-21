@@ -103,6 +103,7 @@ type condenseOpts struct {
 	parentCommitHash string              // HEAD's first parent hash for per-commit non-agent file detection
 	headCommitHash   string              // HEAD commit hash (passed through for attribution)
 	allAgentFiles    map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
+	commitLog        []byte              // Pre-built commit log (commits.jsonl) bytes to include in checkpoint
 }
 
 var redactSessionJSONLBytes = redact.JSONLBytes
@@ -250,6 +251,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		InitialAttribution:          attribution,
 		PromptAttributionsJSON:      marshalPromptAttributionsIncludingPending(state),
 		Summary:                     summary,
+		CommitLog:                   o.commitLog,
 	}
 
 	compactTranscriptDuration := buildCompactTranscript(ctx, ag, redactedTranscript, state, &writeOpts)

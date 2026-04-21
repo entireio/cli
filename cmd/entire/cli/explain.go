@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -991,6 +993,19 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 	} else if associatedCommits != nil {
 		// associatedCommits is non-nil but empty - show "no commits found" message
 		sb.WriteString("\nCommits: No commits found on this branch\n")
+	}
+
+	// Session timeline from sidecar commit log
+	if entries := parseCommitLog(content.CommitLog); len(entries) > 1 {
+		sb.WriteString("\n")
+		fmt.Fprintf(&sb, "Session Timeline: (%d commits)\n", len(entries))
+		for _, e := range entries {
+			marker := "  "
+			if e.CheckpointID == string(checkpointID) {
+				marker = "→ "
+			}
+			fmt.Fprintf(&sb, "  %s%s %s %s [%s]\n", marker, e.ShortHash, e.Timestamp.Format("2006-01-02 15:04"), e.Subject, e.CheckpointID[:7])
+		}
 	}
 
 	sb.WriteString("\n")
@@ -2046,4 +2061,22 @@ func hasAnyChanges(commit *object.Commit) bool {
 		return true
 	}
 	return commit.TreeHash != parent.TreeHash
+}
+
+// parseCommitLog parses the sidecar commits.jsonl bytes into entries.
+func parseCommitLog(data []byte) []strategy.CommitLogEntry {
+	if len(data) == 0 {
+		return nil
+	}
+	var entries []strategy.CommitLogEntry
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var entry strategy.CommitLogEntry
+		if err := json.Unmarshal(line, &entry); err == nil {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
 }

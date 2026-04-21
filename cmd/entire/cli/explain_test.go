@@ -5014,3 +5014,102 @@ func createCommitWithTree(t *testing.T, repo *git.Repository, treeHash plumbing.
 	}
 	return hash
 }
+
+func TestParseCommitLog(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		entries := parseCommitLog(nil)
+		require.Empty(t, entries)
+	})
+
+	t.Run("single entry", func(t *testing.T) {
+		data := []byte(`{"hash":"abc","short_hash":"abc123d","subject":"Add login","timestamp":"2026-04-16T12:00:00Z","checkpoint_id":"a3b2c4d5e6f7","session_id":"s1"}` + "\n")
+		entries := parseCommitLog(data)
+		require.Len(t, entries, 1)
+		require.Equal(t, "abc123d", entries[0].ShortHash)
+		require.Equal(t, "Add login", entries[0].Subject)
+	})
+
+	t.Run("multiple entries", func(t *testing.T) {
+		data := []byte(`{"hash":"a","short_hash":"a123456","subject":"First","timestamp":"2026-04-16T12:00:00Z","checkpoint_id":"cp1aaaaaaaaa","session_id":"s1"}
+{"hash":"b","short_hash":"b234567","subject":"Second","timestamp":"2026-04-16T13:00:00Z","checkpoint_id":"cp2bbbbbbbbb","session_id":"s1"}
+`)
+		entries := parseCommitLog(data)
+		require.Len(t, entries, 2)
+		require.Equal(t, "First", entries[0].Subject)
+		require.Equal(t, "Second", entries[1].Subject)
+	})
+}
+
+func TestFormatCheckpointOutput_SessionTimeline(t *testing.T) {
+	cpID := id.MustCheckpointID("b4c3d5e6f7a8")
+
+	commitLog := []byte(`{"hash":"aaa","short_hash":"aaa1234","subject":"First commit","timestamp":"2026-04-16T12:00:00Z","checkpoint_id":"a3b2c4d5e6f7","session_id":"s1"}
+{"hash":"bbb","short_hash":"bbb5678","subject":"Second commit","timestamp":"2026-04-16T13:00:00Z","checkpoint_id":"b4c3d5e6f7a8","session_id":"s1"}
+`)
+
+	content := &checkpoint.SessionContent{
+		Metadata: checkpoint.CommittedMetadata{
+			CheckpointID: cpID,
+			SessionID:    "s1",
+			CreatedAt:    time.Date(2026, 4, 16, 13, 0, 0, 0, time.UTC),
+		},
+		Transcript: []byte(`{"type":"user","message":{"content":"test"}}`),
+		CommitLog:  commitLog,
+	}
+
+	output := formatCheckpointOutput(nil, content, cpID, nil, checkpoint.Author{}, false, false)
+
+	// Should show session timeline with 2 commits
+	require.Contains(t, output, "Session Timeline: (2 commits)")
+	// Should show both commits
+	require.Contains(t, output, "aaa1234")
+	require.Contains(t, output, "First commit")
+	require.Contains(t, output, "bbb5678")
+	require.Contains(t, output, "Second commit")
+	// Current checkpoint should be marked with arrow
+	require.Contains(t, output, "→ bbb5678")
+	// Truncated checkpoint IDs shown
+	require.Contains(t, output, "[a3b2c4d")
+	require.Contains(t, output, "[b4c3d5e")
+}
+
+func TestFormatCheckpointOutput_NoTimelineForSingleCommit(t *testing.T) {
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+
+	commitLog := []byte(`{"hash":"aaa","short_hash":"aaa1234","subject":"Only commit","timestamp":"2026-04-16T12:00:00Z","checkpoint_id":"a3b2c4d5e6f7","session_id":"s1"}
+`)
+
+	content := &checkpoint.SessionContent{
+		Metadata: checkpoint.CommittedMetadata{
+			CheckpointID: cpID,
+			SessionID:    "s1",
+			CreatedAt:    time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC),
+		},
+		Transcript: []byte(`{"type":"user","message":{"content":"test"}}`),
+		CommitLog:  commitLog,
+	}
+
+	output := formatCheckpointOutput(nil, content, cpID, nil, checkpoint.Author{}, false, false)
+
+	// Should NOT show timeline for single commit
+	require.NotContains(t, output, "Session Timeline")
+}
+
+func TestFormatCheckpointOutput_NoTimelineWhenEmpty(t *testing.T) {
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+
+	content := &checkpoint.SessionContent{
+		Metadata: checkpoint.CommittedMetadata{
+			CheckpointID: cpID,
+			SessionID:    "s1",
+			CreatedAt:    time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC),
+		},
+		Transcript: []byte(`{"type":"user","message":{"content":"test"}}`),
+		// No CommitLog — pre-existing checkpoint
+	}
+
+	output := formatCheckpointOutput(nil, content, cpID, nil, checkpoint.Author{}, false, false)
+
+	// Should NOT show timeline when no commit log
+	require.NotContains(t, output, "Session Timeline")
+}

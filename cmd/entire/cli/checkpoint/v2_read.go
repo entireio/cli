@@ -236,6 +236,13 @@ func (s *V2GitStore) ReadSessionMetadataAndPrompts(ctx context.Context, checkpoi
 		}
 	}
 
+	// Read commit log from the same session tree.
+	if file, fileErr := sessionTree.File(paths.CommitLogFileName); fileErr == nil {
+		if content, contentErr := file.Contents(); contentErr == nil {
+			result.CommitLog = []byte(content)
+		}
+	}
+
 	return result, nil
 }
 
@@ -285,6 +292,13 @@ func (s *V2GitStore) ReadSessionContent(ctx context.Context, checkpointID id.Che
 	if file, fileErr := sessionTree.File(paths.PromptFileName); fileErr == nil {
 		if content, contentErr := file.Contents(); contentErr == nil {
 			result.Prompts = content
+		}
+	}
+
+	// Read commit log from /main session tree
+	if file, fileErr := sessionTree.File(paths.CommitLogFileName); fileErr == nil {
+		if content, contentErr := file.Contents(); contentErr == nil {
+			result.CommitLog = []byte(content)
 		}
 	}
 

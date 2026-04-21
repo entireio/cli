@@ -367,3 +367,60 @@ func TestV2UpdateSummary_NotFound(t *testing.T) {
 	err := store.UpdateSummary(ctx, id.MustCheckpointID("000000000000"), &Summary{Intent: "x"})
 	require.ErrorIs(t, err, ErrCheckpointNotFound)
 }
+
+func TestV2CommitLog_WrittenAndReadable(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	cpID := id.MustCheckpointID("c1c2c3c4c5c6")
+	ctx := context.Background()
+
+	commitLog := []byte(`{"hash":"abc","short_hash":"abc1234","subject":"Test commit","checkpoint_id":"c1c2c3c4c5c6","session_id":"s1"}` + "\n")
+
+	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "s1",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"message": "hello"}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+		CommitLog:    commitLog,
+	})
+	require.NoError(t, err)
+
+	// Read via ReadSessionContent
+	content, err := store.ReadSessionContent(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, content)
+	assert.Equal(t, commitLog, content.CommitLog)
+
+	// Read via ReadSessionMetadataAndPrompts
+	metaContent, err := store.ReadSessionMetadataAndPrompts(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, metaContent)
+	assert.Equal(t, commitLog, metaContent.CommitLog)
+}
+
+func TestV2CommitLog_EmptyWhenNotSet(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	cpID := id.MustCheckpointID("d1d2d3d4d5d6")
+	ctx := context.Background()
+
+	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "s1",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"message": "hello"}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+		// No CommitLog
+	})
+	require.NoError(t, err)
+
+	content, err := store.ReadSessionContent(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, content)
+	assert.Empty(t, content.CommitLog)
+}

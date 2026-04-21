@@ -729,6 +729,20 @@ type postCommitActionHandler struct {
 	condensed bool
 }
 
+// buildCommitLogForSession builds commit log bytes for inclusion in a checkpoint.
+// Called only when condensation will proceed, to avoid unnecessary filesystem IO.
+func (h *postCommitActionHandler) buildCommitLogForSession(state *session.State) []byte {
+	entry := CommitLogEntry{
+		Hash:         h.commit.Hash.String(),
+		ShortHash:    h.commit.Hash.String()[:7],
+		Subject:      commitSubject(h.commit.Message),
+		Timestamp:    h.commit.Author.When.UTC(),
+		CheckpointID: h.checkpointID.String(),
+		SessionID:    state.SessionID,
+	}
+	return buildCommitLog(h.ctx, state.SessionID, entry)
+}
+
 // parentCommitHash returns the first parent's hash as a string, or empty for initial commits.
 func (h *postCommitActionHandler) parentCommitHash() string {
 	if h.commit.NumParents() > 0 && len(h.commit.ParentHashes) > 0 {
@@ -758,6 +772,7 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 			parentCommitHash: h.parentCommitHash(),
 			headCommitHash:   h.newHead,
 			allAgentFiles:    h.allAgentFiles,
+			commitLog:        h.buildCommitLogForSession(state),
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead)
@@ -787,6 +802,7 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 			parentCommitHash: h.parentCommitHash(),
 			headCommitHash:   h.newHead,
 			allAgentFiles:    h.allAgentFiles,
+			commitLog:        h.buildCommitLogForSession(state),
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead)
@@ -1323,6 +1339,25 @@ func (s *ManualCommitStrategy) postCommitProcessSession(
 	// transition ever changed, this guard would silently stop recording IDs.
 	if handler.condensed && state.Phase.IsActive() {
 		state.TurnCheckpointIDs = append(state.TurnCheckpointIDs, checkpointID.String())
+	}
+
+	// Persist sidecar commit log entry to filesystem so future checkpoints
+	// in this session accumulate the full timeline.
+	if handler.condensed {
+		entry := CommitLogEntry{
+			Hash:         commit.Hash.String(),
+			ShortHash:    commit.Hash.String()[:7],
+			Subject:      commitSubject(commit.Message),
+			Timestamp:    commit.Author.When.UTC(),
+			CheckpointID: checkpointID.String(),
+			SessionID:    state.SessionID,
+		}
+		if err := appendCommitLogEntry(ctx, state.SessionID, entry); err != nil {
+			logging.Warn(logCtx, "failed to append commit log entry",
+				slog.String("session_id", state.SessionID),
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 
 	// Carry forward remaining uncommitted files so the next commit gets its

@@ -4288,3 +4288,29 @@ func TestWriteTemporaryTask_ExcludesGitIgnoredFiles(t *testing.T) {
 		t.Error("SECURITY: gitignored file .env leaked into task checkpoint tree — secrets exposed on shadow branch via subagent")
 	}
 }
+
+func TestV1CommitLog_WrittenAndReadable(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo)
+	cpID := id.MustCheckpointID("c1c2c3c4c5c6")
+	ctx := context.Background()
+
+	commitLog := []byte(`{"hash":"abc","short_hash":"abc1234","subject":"Test commit","checkpoint_id":"c1c2c3c4c5c6","session_id":"s1"}` + "\n")
+
+	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "s1",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"message": "hello"}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+		CommitLog:    commitLog,
+	})
+	require.NoError(t, err)
+
+	content, err := store.ReadSessionContent(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, content)
+	require.Equal(t, commitLog, content.CommitLog)
+}
