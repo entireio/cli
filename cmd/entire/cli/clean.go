@@ -131,7 +131,7 @@ func runCleanCurrentHead(ctx context.Context, cmd *cobra.Command, force, dryRun 
 	if !force {
 		var confirmed bool
 
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title("Clean session data for current HEAD?").
@@ -241,7 +241,7 @@ func runCleanSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 		title := fmt.Sprintf("%s session %s?", actionVerb, sessionID)
 		description := fmt.Sprintf("Phase: %s, Checkpoints: %d", state.Phase, state.StepCount)
 
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title(title).
@@ -372,7 +372,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 
 		// Prompt for confirmation
 		var confirmed bool
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title(fmt.Sprintf("Delete %d %s?", totalItems, itemWord(totalItems))).

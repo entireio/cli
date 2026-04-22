@@ -103,7 +103,7 @@ func (c *Codex) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 	}
 	args = append(args, prompt)
 
-	env := append(filterEnv(os.Environ(), "ENTIRE_TEST_TTY", "CODEX_HOME"),
+	env := append(filterEnv(os.Environ(), "CODEX_HOME"),
 		"CODEX_HOME="+home,
 	)
 
@@ -212,7 +212,7 @@ func (c *Codex) ResumeSession(ctx context.Context, dir, home, sessionID string) 
 
 func (c *Codex) startTmuxSession(name, dir, home string, args ...string) (*TmuxSession, error) {
 	tmuxArgs := append([]string{"CODEX_HOME=" + home, "HOME=" + os.Getenv("HOME"), "TERM=" + os.Getenv("TERM")}, args...)
-	return NewTmuxSession(name, dir, []string{"CODEX_HOME", "ENTIRE_TEST_TTY"}, "env", tmuxArgs...)
+	return NewTmuxSession(name, dir, []string{"CODEX_HOME"}, "env", tmuxArgs...)
 }
 
 // seedCodexHome writes trust + feature flag config and links auth credentials

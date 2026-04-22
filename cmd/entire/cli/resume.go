@@ -658,7 +658,7 @@ func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branc
 func promptResumeFromOlderCheckpoint() (bool, error) {
 	var confirmed bool
 
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title("Resume from this older checkpoint?").
@@ -1011,7 +1011,7 @@ func resumeSingleSession(ctx context.Context, w, errW io.Writer, ag agent.Agent,
 func promptFetchFromRemote(branchName string) (bool, error) {
 	var confirmed bool
 
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title(fmt.Sprintf("Branch '%s' not found locally. Fetch from origin?", branchName)).

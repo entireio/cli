@@ -480,7 +480,7 @@ func runStopSession(ctx context.Context, cmd *cobra.Command, sessionID string, f
 
 	if !force {
 		var confirmed bool
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title(fmt.Sprintf("Stop session %s?", sessionID)).
@@ -508,7 +508,7 @@ func runStopAll(ctx context.Context, cmd *cobra.Command, activeSessions []*strat
 
 	if !force {
 		var confirmed bool
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title(fmt.Sprintf("Stop %d session(s)?", len(activeSessions))).
@@ -541,7 +541,7 @@ func runStopMultiSelect(ctx context.Context, cmd *cobra.Command, activeSessions 
 	}
 
 	var selectedIDs []string
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewMultiSelect[string]().
 				Title("Select sessions to stop").
@@ -568,7 +568,7 @@ func runStopMultiSelect(ctx context.Context, cmd *cobra.Command, activeSessions 
 	// Confirm only if not forcing
 	if !force {
 		var confirmed bool
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title(fmt.Sprintf("Stop %d session(s)?", len(selectedIDs))).

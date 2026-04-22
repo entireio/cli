@@ -835,7 +835,8 @@ func TestShadowStrategy_PrepareCommitMsg_SkipSources(t *testing.T) {
 func TestShadowStrategy_PrepareCommitMsg_SkipsSessionWhenContentCheckFails(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
+	stubAskConfirm(t, ttyResultLink)
 
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)

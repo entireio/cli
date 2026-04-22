@@ -77,7 +77,7 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 		// Run prepare-commit-msg
 		prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
 		prepCmd.Dir = env.RepoDir
-		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+		prepCmd.Env = testutil.GitIsolatedEnv()
 		prepOutput, prepErr := prepCmd.CombinedOutput()
 		t.Logf("prepare-commit-msg output: %s (err: %v)", prepOutput, prepErr)
 

@@ -1821,7 +1821,7 @@ func TestRunExplainCheckpoint_V2UsesCompactTranscriptForIntent(t *testing.T) {
 func TestRunExplainCheckpoint_V2PreferredGenerateWritesBothStores(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // prevent interactive summary provider prompt
+	forceNonInteractive(t) // prevent interactive summary provider prompt
 
 	testutil.InitRepo(t, tmpDir)
 	repo, err := git.PlainOpen(tmpDir)
@@ -1883,7 +1883,7 @@ func TestRunExplainCheckpoint_V2PreferredGenerateWritesBothStores(t *testing.T) 
 func TestRunExplainCheckpoint_V2OnlyGenerateSucceedsViaV2Store(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // prevent interactive summary provider prompt
+	forceNonInteractive(t) // prevent interactive summary provider prompt
 
 	testutil.InitRepo(t, tmpDir)
 	repo, err := git.PlainOpen(tmpDir)
@@ -1995,7 +1995,7 @@ func TestRunExplainCheckpoint_V2FallsBackToFullWhenCompactMissing(t *testing.T) 
 func TestRunExplainCheckpoint_V2CompactTranscriptNotUsedForGenerate(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // prevent interactive summary provider prompt
+	forceNonInteractive(t) // prevent interactive summary provider prompt
 
 	testutil.InitRepo(t, tmpDir)
 	repo, err := git.PlainOpen(tmpDir)

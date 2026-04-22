@@ -488,7 +488,7 @@ func fireHook(dir, hookName string, payload any) {
 	cmd := exec.Command("entire", "hooks", "vogon", hookName)
 	cmd.Dir = dir
 	cmd.Stdin = bytes.NewReader(data)
-	cmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0")
+	cmd.Env = os.Environ()
 	// Capture output but don't show it — hooks may output banners
 	out, err := cmd.CombinedOutput()
 	if err != nil {

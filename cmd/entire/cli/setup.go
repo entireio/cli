@@ -374,7 +374,7 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 			return fmt.Errorf("agent selection cancelled: %w", err)
 		}
 	} else {
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewMultiSelect[string]().
 					Title("Manage agents").
@@ -1316,7 +1316,7 @@ func detectOrSelectAgent(ctx context.Context, w io.Writer, selectFn func(availab
 			return nil, errors.New("no agents selected")
 		}
 	} else {
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewMultiSelect[string]().
 					Title("Select the agents you want to use").
@@ -1648,7 +1648,7 @@ func promptShellCompletion(w io.Writer) error {
 	}
 
 	var selected string
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title(fmt.Sprintf("Enable shell completion? (detected: %s)", shellName)).
@@ -1732,7 +1732,7 @@ func promptTelemetryConsent(settings *EntireSettings, telemetryFlag bool) error 
 	}
 
 	consent := true // Default to Yes
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title("Help improve Entire CLI?").
@@ -1837,7 +1837,7 @@ func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, target
 
 func promptVercelDeploymentDisable() (bool, error) {
 	disableDeployments := true
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title("Disable Vercel deployments for Entire metadata branch?").
@@ -1904,7 +1904,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		fmt.Fprintln(w)
 
 		var confirmed bool
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title("Are you sure you want to uninstall Entire?").

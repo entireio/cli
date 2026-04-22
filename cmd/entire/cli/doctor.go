@@ -322,7 +322,7 @@ func promptSessionAction(ss stuckSession) (string, error) {
 		huh.NewOption("Skip (leave as-is)", "skip"),
 	)
 
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title(fmt.Sprintf("Fix session %s?", ss.State.SessionID)).
@@ -391,7 +391,7 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 
 	if !force {
 		var confirmed bool
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title("Fix disconnected metadata branches?").
@@ -462,7 +462,7 @@ func checkDisconnectedV2Main(cmd *cobra.Command, force bool) error {
 
 	if !force {
 		var confirmed bool
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title("Fix disconnected v2 /main ref?").

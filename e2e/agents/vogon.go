@@ -43,7 +43,7 @@ func (v *Vogon) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 	cmd := exec.CommandContext(ctx, v.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	cmd.Env = filterEnv(os.Environ(), "ENTIRE_TEST_TTY")
+	cmd.Env = os.Environ()
 	setupProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -72,7 +72,7 @@ func (v *Vogon) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 
 func (v *Vogon) StartSession(_ context.Context, dir string) (Session, error) {
 	name := fmt.Sprintf("vogon-test-%d", time.Now().UnixNano())
-	s, err := NewTmuxSession(name, dir, []string{"ENTIRE_TEST_TTY"}, v.Binary())
+	s, err := NewTmuxSession(name, dir, nil, v.Binary())
 	if err != nil {
 		return nil, err
 	}

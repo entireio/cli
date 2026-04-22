@@ -312,7 +312,7 @@ func ghFlagsProvided(opts GitHubBootstrapOptions) bool {
 // CanPromptInteractively.
 func confirmCreateGitHubRepo() (bool, error) {
 	confirmed := true
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title("Create a matching repository on GitHub?").
@@ -346,7 +346,7 @@ func confirmInitRepo(_ io.Writer, cwd string, opts GitHubBootstrapOptions) (bool
 
 	folder := filepath.Base(cwd)
 	confirmed := true
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title(fmt.Sprintf("No git repository in %q. Initialize one here?", folder)).
@@ -421,7 +421,7 @@ func resolveOwner(w io.Writer, currentUser string, orgs []string, opts GitHubBoo
 		options = append(options, huh.NewOption(o, o))
 	}
 	selected := currentUser
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Choose the GitHub owner for the new repository").
@@ -481,7 +481,7 @@ func resolveRepoName(ctx context.Context, w, errW io.Writer, runner bootstrapRun
 	name := suggested
 	for {
 		var input string
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewInput().
 					Title("Repository name").
@@ -544,7 +544,7 @@ func resolveVisibility(owner, currentUser string, opts GitHubBootstrapOptions) (
 		options = append(options, huh.NewOption("Internal", visibilityInternal))
 	}
 	selected := visibilityPrivate
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Repository visibility").
@@ -584,7 +584,7 @@ func resolveCommitMessage(opts GitHubBootstrapOptions) (string, bool, error) {
 		choiceSkip      = "skip"
 	)
 	choice := choiceDefault
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Initial commit").
@@ -608,7 +608,7 @@ func resolveCommitMessage(opts GitHubBootstrapOptions) (string, bool, error) {
 		return "", false, nil
 	case choiceCustomize:
 		input := defaultMsg
-		custom := NewAccessibleForm(
+		custom := NewForm(
 			huh.NewGroup(
 				huh.NewInput().
 					Title("Initial commit message").
@@ -750,7 +750,7 @@ func resolveGitIdentity(w io.Writer, existingName, existingEmail, ghName, ghEmai
 	if email == "" {
 		fields = append(fields, huh.NewInput().Title("Git user.email").Value(&email))
 	}
-	form := NewAccessibleForm(huh.NewGroup(fields...))
+	form := NewForm(huh.NewGroup(fields...))
 	if err := form.Run(); err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
 			return "", "", errBootstrapInterrupted

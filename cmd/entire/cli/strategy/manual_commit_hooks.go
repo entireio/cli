@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -37,55 +38,6 @@ import (
 	"github.com/go-git/go-git/v6/utils/binary"
 )
 
-// hasTTY checks if /dev/tty is available for interactive prompts.
-// Returns false when running as an agent subprocess (no controlling terminal).
-//
-// In test environments, ENTIRE_TEST_TTY overrides the real check:
-//   - ENTIRE_TEST_TTY=1 → simulate human (TTY available)
-//   - ENTIRE_TEST_TTY=0 → simulate agent (no TTY)
-func hasTTY() bool {
-	if v := os.Getenv("ENTIRE_TEST_TTY"); v != "" {
-		return v == "1"
-	}
-
-	// Gemini CLI sets GEMINI_CLI=1 when running shell commands.
-	// Gemini subprocesses may have access to the user's TTY, but they can't
-	// actually respond to interactive prompts. Treat them as non-TTY.
-	// See: https://geminicli.com/docs/tools/shell/
-	if os.Getenv("GEMINI_CLI") != "" {
-		return false
-	}
-
-	// Copilot CLI sets COPILOT_CLI=1 when running hook subprocesses (v0.0.421+).
-	// Like Gemini, the subprocess may inherit the user's TTY but can't respond
-	// to interactive prompts.
-	if os.Getenv("COPILOT_CLI") != "" {
-		return false
-	}
-
-	// Pi Coding Agent sets PI_CODING_AGENT=true when running shell commands.
-	// Like other agents, the subprocess may inherit the TTY but can't respond
-	// to interactive prompts.
-	if os.Getenv("PI_CODING_AGENT") != "" {
-		return false
-	}
-
-	// GIT_TERMINAL_PROMPT=0 disables git's own terminal prompts.
-	// Factory AI Droid (and other non-interactive environments like CI) set this.
-	// Since we run as a git hook, respect it — if the environment doesn't want
-	// git prompting, our hook shouldn't prompt either.
-	if os.Getenv("GIT_TERMINAL_PROMPT") == "0" {
-		return false
-	}
-
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return false
-	}
-	_ = tty.Close()
-	return true
-}
-
 // ttyResult represents the outcome of a TTY confirmation prompt.
 type ttyResult int
 
@@ -95,22 +47,38 @@ const (
 	ttyResultLinkAlways                  // Link and remember: add trailer + save "always" preference
 )
 
-// askConfirmTTY prompts the user via /dev/tty whether to link a commit to session context.
-// This requires a controlling terminal — callers must check hasTTY() first and handle
-// the no-TTY case (agent subprocesses, CI) themselves.
+// askConfirmTTY is the package-level function variable that drives
+// /dev/tty confirmation prompts. Tests replace it via overrideAskConfirmForTest
+// so they don't need to drive a real terminal. Production always points to
+// realAskConfirmTTY.
+var askConfirmTTY = realAskConfirmTTY
+
+// overrideAskConfirmForTest swaps askConfirmTTY for the duration of a test.
+// The returned function restores the original implementation.
+func overrideAskConfirmForTest(fn func(header string, details []string, prompt string, defaultYes bool) ttyResult) func() {
+	old := askConfirmTTY
+	askConfirmTTY = fn
+	return func() { askConfirmTTY = old }
+}
+
+// realAskConfirmTTY prompts the user via /dev/tty whether to link a commit to session context.
+// This requires a controlling terminal — callers must check interactive.CanPromptInteractively()
+// first and handle the no-TTY case (agent subprocesses, CI) themselves.
 //
 // header is displayed as the first line (e.g., "Entire: Active Claude Code session").
 // detail lines are displayed indented below the header.
-func askConfirmTTY(header string, details []string, prompt string, defaultYes bool) ttyResult {
+func realAskConfirmTTY(header string, details []string, prompt string, defaultYes bool) ttyResult {
 	defaultResult := ttyResultSkip
 	if defaultYes {
 		defaultResult = ttyResultLink
 	}
 
-	// In test mode, don't try to interact with the real TTY — just use the default.
-	// ENTIRE_TEST_TTY=1 simulates "a human is present" for the hasTTY() check
-	// but we can't actually read from the TTY in tests.
-	if os.Getenv("ENTIRE_TEST_TTY") != "" {
+	// Integration-test subprocess bypass. In-process tests swap askConfirmTTY
+	// via overrideAskConfirmForTest; this check exists because subprocess tests
+	// cannot use that seam. When ENTIRE_TEST_TTY is set, return the default
+	// answer without touching /dev/tty so the hook never blocks on a real
+	// terminal read during tests.
+	if _, ok := os.LookupEnv("ENTIRE_TEST_TTY"); ok {
 		return defaultResult
 	}
 
@@ -546,7 +514,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	case "message":
 		// Using -m or -F: behavior depends on TTY availability and commit_linking setting
 		switch {
-		case !hasTTY():
+		case !interactive.CanPromptInteractively():
 			// No TTY (agent subprocess, CI) — auto-link without prompting
 			message = addCheckpointTrailer(message, checkpointID)
 		case commitLinking == settings.CommitLinkingAlways:
@@ -2051,7 +2019,7 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 //     have /dev/tty but can't respond to prompts, and content detection fails
 //     since the shadow branch doesn't exist yet).
 func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string) bool {
-	noTTY := !hasTTY()
+	noTTY := !interactive.CanPromptInteractively()
 	skipContentDetection := noTTY
 	if !skipContentDetection {
 		if stngs, err := settings.Load(ctx); err == nil {

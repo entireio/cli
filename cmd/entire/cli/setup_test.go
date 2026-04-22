@@ -994,7 +994,7 @@ func TestEnableUsesSetupFlow(t *testing.T) {
 
 func TestEnableCmd_ForceOnConfiguredRepo_UsesConfigureFlow(t *testing.T) {
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
@@ -1020,7 +1020,7 @@ func TestEnableCmd_ForceOnConfiguredRepo_UsesConfigureFlow(t *testing.T) {
 
 func TestEnableCmd_ForceOnConfiguredDisabledRepo_Reenables(t *testing.T) {
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	writeSettings(t, testSettingsDisabled)
 	writeClaudeHooksFixture(t)
 
@@ -1054,7 +1054,7 @@ func TestEnableCmd_ForceOnConfiguredDisabledRepo_Reenables(t *testing.T) {
 
 func TestEnableCmd_ForceAndStrategyFlagsOnConfiguredDisabledRepo_ReenablesAndUpdatesSettings(t *testing.T) {
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	writeSettings(t, testSettingsDisabled)
 	writeClaudeHooksFixture(t)
 
@@ -1174,7 +1174,7 @@ func TestDetectOrSelectAgent_OnlyExternalDetected_WithTTY_PromptsUser(t *testing
 	}
 
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 
 	externalAgentName := "ext-prompt-pi"
 	externalDir := t.TempDir()
@@ -1254,7 +1254,7 @@ func TestIsBuiltInAgent_BuiltInAgent_True(t *testing.T) {
 func TestDetectOrSelectAgent_NoDetection_NoTTY_FallsBackToDefault(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // No TTY available
+	forceNonInteractive(t) // No TTY available
 
 	// No .claude or .gemini directory - detection will fail
 
@@ -1284,7 +1284,7 @@ func TestDetectOrSelectAgent_NoDetection_NoTTY_FallsBackToDefault(t *testing.T) 
 func TestDetectOrSelectAgent_NoDetection_WithTTY_ShowsPromptMessages(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 
 	// No .claude or .gemini directory - detection will fail
 
@@ -1320,7 +1320,7 @@ func TestDetectOrSelectAgent_NoDetection_WithTTY_ShowsPromptMessages(t *testing.
 func TestDetectOrSelectAgent_SelectionCancelled(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 
 	selectFn := func(_ []string) ([]string, error) {
 		return nil, errors.New("user cancelled")
@@ -1339,7 +1339,7 @@ func TestDetectOrSelectAgent_SelectionCancelled(t *testing.T) {
 func TestDetectOrSelectAgent_NoneSelected(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 
 	selectFn := func(_ []string) ([]string, error) {
 		return []string{}, nil // user deselected everything
@@ -1358,7 +1358,7 @@ func TestDetectOrSelectAgent_NoneSelected(t *testing.T) {
 func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 
 	// Create both .claude and .gemini directories
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
@@ -1405,7 +1405,7 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 func TestDetectOrSelectAgent_BothDirectoriesExist_NoTTY_UsesAll(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // No TTY available
+	forceNonInteractive(t) // No TTY available
 
 	// Create both .claude and .gemini directories
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
@@ -1465,7 +1465,7 @@ func writeGeminiHooksFixture(t *testing.T) {
 func TestDetectOrSelectAgent_ReRun_AlwaysPromptsWithInstalledPreSelected(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 
 	// Install Claude Code hooks (simulates a previous `entire enable` run)
 	writeClaudeHooksFixture(t)
@@ -1510,7 +1510,7 @@ func TestDetectOrSelectAgent_ReRun_AlwaysPromptsWithInstalledPreSelected(t *test
 func TestDetectOrSelectAgent_ReRun_NoTTY_KeepsInstalled(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // No TTY available
+	forceNonInteractive(t) // No TTY available
 
 	// Install Claude Code hooks
 	writeClaudeHooksFixture(t)
@@ -1661,7 +1661,7 @@ func TestUninstallDeselectedAgentHooks_MultipleInstalled_DeselectOne(t *testing.
 func TestManageAgents_DeselectRemovesAgent(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 	writeSettings(t, testSettingsEnabled)
 
 	// Install Claude Code hooks
@@ -1697,7 +1697,7 @@ func TestManageAgents_DeselectRemovesAgent(t *testing.T) {
 func TestManageAgents_DeselectAll_RemovesAllAndShowsGuidance(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
@@ -1731,7 +1731,7 @@ func TestManageAgents_DeselectAll_RemovesAllAndShowsGuidance(t *testing.T) {
 func TestManageAgents_NoChanges(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
@@ -1753,7 +1753,7 @@ func TestManageAgents_NoChanges(t *testing.T) {
 
 func TestManageAgents_NoChanges_StillPersistsVercelSetting(t *testing.T) {
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
@@ -1796,7 +1796,7 @@ func TestManageAgents_NoChanges_StillPersistsVercelSetting(t *testing.T) {
 func TestManageAgents_ForceReinstallsSelectedAgentHooks(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
@@ -1840,7 +1840,7 @@ func TestManageAgents_ForceReinstallsSelectedAgentHooks(t *testing.T) {
 func TestManageAgents_ForceReportsReinstalledAgentsSeparately(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
@@ -1865,7 +1865,7 @@ func TestManageAgents_ForceReportsReinstalledAgentsSeparately(t *testing.T) {
 func TestManageAgents_AddAndRemove(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 	writeSettings(t, testSettingsEnabled)
 
 	// Install Claude Code hooks
@@ -2086,7 +2086,7 @@ func TestConfigureCmd_RemoveFlag_StillWorks(t *testing.T) {
 func TestDetectOrSelectAgent_ReRun_NewlyDetectedAgentAvailableNotPreSelected(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 
 	// Simulate: Claude Code hooks installed from a previous run
 	writeClaudeHooksFixture(t)
@@ -2129,7 +2129,7 @@ func TestDetectOrSelectAgent_ReRun_NewlyDetectedAgentAvailableNotPreSelected(t *
 func TestDetectOrSelectAgent_ReRun_EmptySelection_ReturnsError(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 
 	// Install Claude Code hooks (re-run scenario)
 	writeClaudeHooksFixture(t)
@@ -2522,7 +2522,7 @@ func TestSelectAllAgents_EmptyReturnsError(t *testing.T) {
 func TestDetectOrSelectAgent_YesSelectsAll(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 
 	var buf bytes.Buffer
 	agents, err := detectOrSelectAgent(context.Background(), &buf, selectAllAgents)
@@ -2544,7 +2544,7 @@ func TestDetectOrSelectAgent_YesSelectsAll(t *testing.T) {
 func TestManageAgents_YesWorksNonInteractive(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // non-interactive
+	forceNonInteractive(t) // non-interactive
 
 	// Install claude-code hooks so there's something installed
 	writeClaudeHooksFixture(t)
@@ -2653,7 +2653,7 @@ func TestEnableCmd_YesFreshRepo_SkipsPromptsAndEnables(t *testing.T) {
 	testutil.WriteFile(t, ".", "f.txt", "init")
 	testutil.GitAdd(t, ".", "f.txt")
 	testutil.GitCommit(t, ".", "init")
-	t.Setenv("ENTIRE_TEST_TTY", "0") // non-interactive — proves --yes bypasses prompts
+	forceNonInteractive(t) // non-interactive — proves --yes bypasses prompts
 
 	// Use --yes with --agent to test the realistic CI scenario.
 	// The --yes flag skips telemetry/Vercel prompts while --agent selects a specific agent.
@@ -2689,7 +2689,7 @@ func TestEnableCmd_YesWithAgent_AgentTakesPrecedence(t *testing.T) {
 	testutil.WriteFile(t, ".", "f.txt", "init")
 	testutil.GitAdd(t, ".", "f.txt")
 	testutil.GitCommit(t, ".", "init")
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 
 	cmd := newEnableCmd()
 	var stdout, stderr bytes.Buffer
@@ -2715,7 +2715,7 @@ func TestEnableCmd_YesWithAgent_AgentTakesPrecedence(t *testing.T) {
 func TestEnableCmd_YesOnConfiguredRepo_ManagesAgents(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0") // non-interactive
+	forceNonInteractive(t) // non-interactive
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 
@@ -2742,7 +2742,7 @@ func TestEnableCmd_YesWithTelemetryFalse(t *testing.T) {
 	testutil.WriteFile(t, ".", "f.txt", "init")
 	testutil.GitAdd(t, ".", "f.txt")
 	testutil.GitCommit(t, ".", "init")
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 
 	cmd := newEnableCmd()
 	var stdout, stderr bytes.Buffer
@@ -2767,7 +2767,7 @@ func TestEnableCmd_YesWithTelemetryFalse(t *testing.T) {
 func TestConfigureCmd_YesOnConfiguredRepo(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	writeSettings(t, testSettingsEnabled)
 	writeClaudeHooksFixture(t)
 

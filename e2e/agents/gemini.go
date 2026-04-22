@@ -75,8 +75,7 @@ func (g *Gemini) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 	cmd := exec.CommandContext(promptCtx, g.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	cmd.Env = append(
-		filterEnv(os.Environ(), "ENTIRE_TEST_TTY"),
+	cmd.Env = append(os.Environ(),
 		"ACCESSIBLE=1",
 		"HOME="+geminiTestHomeDir(dir),
 	)
@@ -125,7 +124,7 @@ func (g *Gemini) StartSession(_ context.Context, dir string) (Session, error) {
 	// it checks both in isHeadlessMode() and skips interactive TUI entirely.
 	args := append([]string{"env"}, envArgs...)
 	args = append(args, g.Binary(), "--model", geminiDefaultModel, "-y")
-	s, err := NewTmuxSession(name, dir, []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY", "HOME"}, args[0], args[1:]...)
+	s, err := NewTmuxSession(name, dir, []string{"CI", "GITHUB_ACTIONS", "HOME"}, args[0], args[1:]...)
 	if err != nil {
 		return nil, err
 	}

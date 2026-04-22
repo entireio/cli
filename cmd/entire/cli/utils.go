@@ -10,33 +10,55 @@ import (
 
 	"github.com/charmbracelet/huh"
 
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
-
-// IsAccessibleMode returns true if accessibility mode should be enabled.
-// This checks the ACCESSIBLE environment variable.
-// Set ACCESSIBLE=1 (or any non-empty value) to enable accessible mode,
-// which uses simpler prompts that work better with screen readers.
-func IsAccessibleMode() bool {
-	return os.Getenv("ACCESSIBLE") != ""
-}
 
 // entireTheme returns the Dracula theme for consistent styling.
 func entireTheme() *huh.Theme {
 	return huh.ThemeDracula()
 }
 
-// NewAccessibleForm creates a new huh form with accessibility mode
-// enabled if the ACCESSIBLE environment variable is set.
-// Note: WithAccessible() is only available on forms, not individual fields.
-// Always wrap confirmations and other prompts in a form to enable accessibility.
-func NewAccessibleForm(groups ...*huh.Group) *huh.Form {
-	form := huh.NewForm(groups...).WithTheme(entireTheme())
-	if IsAccessibleMode() {
-		form = form.WithAccessible(true)
+// forcePlainOutput reports whether the CLI should render huh forms in
+// plain-text (accessible) mode instead of the TUI. Controlled by the
+// ACCESSIBLE environment variable. This does NOT gate whether prompts run
+// at all — that is governed by interactive.CanPromptInteractively().
+// ACCESSIBLE is intended for screen-reader users and for agent
+// subprocesses (e2e tests, integration tests) that inherit a real TTY
+// but need plain-text output to parse.
+func forcePlainOutput() bool {
+	return os.Getenv("ACCESSIBLE") != ""
+}
+
+// Form wraps *huh.Form with automatic TTY gating and accessible-output
+// opt-in. Use NewForm to construct one.
+type Form struct {
+	inner *huh.Form
+}
+
+// NewForm creates a themed huh form. The returned form's Run method
+// automatically returns nil (leaving field values at their defaults)
+// when no controlling terminal is available, so callers do not need
+// to guard it themselves.
+func NewForm(groups ...*huh.Group) *Form {
+	return &Form{inner: huh.NewForm(groups...).WithTheme(entireTheme())}
+}
+
+// Run executes the form when a TTY is available. When ACCESSIBLE is set,
+// the form renders in plain-text accessible mode. Returns nil immediately
+// when no terminal is present (CI, piped input, known agent subprocesses).
+func (f *Form) Run() error {
+	if !interactive.CanPromptInteractively() {
+		return nil
 	}
-	return form
+	if forcePlainOutput() {
+		f.inner = f.inner.WithAccessible(true)
+	}
+	if err := f.inner.Run(); err != nil {
+		return fmt.Errorf("form run: %w", err)
+	}
+	return nil
 }
 
 // handleFormCancellation handles cancellation from huh form prompts.

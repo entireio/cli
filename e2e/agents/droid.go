@@ -151,7 +151,7 @@ func (d *Droid) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 	cmd := exec.CommandContext(ctx, d.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	cmd.Env = filterEnv(os.Environ(), "ENTIRE_TEST_TTY", "CI", "GITHUB_ACTIONS")
+	cmd.Env = filterEnv(os.Environ(), "CI", "GITHUB_ACTIONS")
 	setupProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -182,7 +182,7 @@ func (d *Droid) StartSession(ctx context.Context, dir string) (Session, error) {
 	name := fmt.Sprintf("droid-test-%d", time.Now().UnixNano())
 	// Unset CI and GITHUB_ACTIONS so Droid doesn't enter single-turn/headless
 	// mode — it checks these vars and skips interactive input after the first turn.
-	s, err := NewTmuxSession(name, dir, []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY"}, d.Binary())
+	s, err := NewTmuxSession(name, dir, []string{"CI", "GITHUB_ACTIONS"}, d.Binary())
 	if err != nil {
 		return nil, err
 	}

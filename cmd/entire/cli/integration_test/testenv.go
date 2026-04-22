@@ -133,11 +133,12 @@ func gitEmptyConfigPath() string {
 // Includes Claude, Gemini, and OpenCode project dirs so tests work for any agent.
 // Delegates to testutil.GitIsolatedEnv() for git config isolation.
 func (env *TestEnv) cliEnv() []string {
+	// No TTY toggle needed: integration-test subprocesses run without a PTY,
+	// so interactive.CanPromptInteractively() returns false naturally.
 	return append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
-		"ENTIRE_TEST_TTY=0", // Prevent interactive prompts from blocking in tests
 	)
 }
 
@@ -1095,8 +1096,12 @@ func (env *TestEnv) GitCommitWithShadowHooksAsAgent(message string, files ...str
 }
 
 // gitCommitWithShadowHooks is the shared implementation for committing with shadow hooks.
-// When simulateTTY is true, sets ENTIRE_TEST_TTY=1 to simulate a human at the terminal.
-// When false, filters it out to simulate an agent subprocess (no controlling terminal).
+// When simulateTTY is true the subprocess is told via ENTIRE_TEST_TTY=1 to pretend a
+// /dev/tty is available, so the hook takes the human-at-terminal branch (which stubs
+// the actual prompt to its default answer). When false, the subprocess runs with no
+// /dev/tty and takes the agent/fast-path branch. This env var is read only by
+// interactive.checkCanPrompt and only exists as a subprocess escape hatch for
+// integration tests; in-process tests use interactive.OverrideForTest instead.
 func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, files ...string) {
 	env.T.Helper()
 
@@ -1116,12 +1121,8 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
 	prepCmd.Dir = env.RepoDir
 	if simulateTTY {
-		// Simulate human at terminal: ENTIRE_TEST_TTY=1 makes hasTTY() return true
-		// and askConfirmTTY() return defaultYes without reading from /dev/tty.
 		prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=1")
 	} else {
-		// Simulate agent: ENTIRE_TEST_TTY=0 makes hasTTY() return false,
-		// triggering the fast path that adds trailers for ACTIVE sessions.
 		prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=0")
 	}
 	if output, err := prepCmd.CombinedOutput(); err != nil {
@@ -1194,7 +1195,7 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 	}
 
 	// Run prepare-commit-msg hook with "commit" source (indicates amend).
-	// Set ENTIRE_TEST_TTY=1 to simulate human (amend is always a human operation).
+	// Amend is a human operation — signal TTY via ENTIRE_TEST_TTY=1.
 	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "commit")
 	prepCmd.Dir = env.RepoDir
 	prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=1")
@@ -1280,8 +1281,8 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 	}
 
 	// Run prepare-commit-msg hook using the shared binary.
-	// Set ENTIRE_TEST_TTY=1 to simulate human (this tests the editor flow where
-	// the user removes the trailer before committing).
+	// Simulate human editor flow via ENTIRE_TEST_TTY=1; the hook adds the
+	// trailer, then the test removes it to exercise the opt-out behavior.
 	prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile)
 	prepCmd.Dir = env.RepoDir
 	prepCmd.Env = env.gitHookEnv("ENTIRE_TEST_TTY=1")
@@ -1366,6 +1367,7 @@ func (env *TestEnv) GitCommitStagedWithShadowHooks(message string) {
 }
 
 // gitCommitStagedWithShadowHooks is the shared implementation for committing staged changes with hooks.
+// See gitCommitWithShadowHooks for the simulateTTY semantics.
 func (env *TestEnv) gitCommitStagedWithShadowHooks(message string, simulateTTY bool) {
 	env.T.Helper()
 

@@ -92,7 +92,8 @@ func TestCommitHookPerformance(t *testing.T) {
 			seedHookPerfSessions(t, dir, baseCommits, sc.ended, sc.idle, sc.active)
 
 			// Simulate TTY path with commit_linking=always.
-			t.Setenv("ENTIRE_TEST_TTY", "1")
+			forceInteractive(t)
+			stubAskConfirm(t, ttyResultLink)
 			paths.ClearWorktreeRootCache()
 			session.ClearGitCommonDirCache()
 

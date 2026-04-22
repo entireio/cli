@@ -332,7 +332,7 @@ func TestDoInitialCommit_WithFiles(t *testing.T) {
 }
 
 func TestRunGitHubBootstrap_DeclinedInNonInteractive(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
@@ -343,7 +343,7 @@ func TestRunGitHubBootstrap_DeclinedInNonInteractive(t *testing.T) {
 }
 
 func TestRunGitHubBootstrap_NoGitHubFlow(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
@@ -377,7 +377,7 @@ func TestRunGitHubBootstrap_NoGitHubFlow(t *testing.T) {
 }
 
 func TestRunGitHubBootstrap_GhMissingFallsBackToLocal(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
@@ -400,7 +400,7 @@ func TestRunGitHubBootstrap_GhMissingFallsBackToLocal(t *testing.T) {
 }
 
 func TestRunGitHubBootstrap_FullNonInteractive(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
@@ -447,7 +447,7 @@ func TestRunGitHubBootstrap_FullNonInteractive(t *testing.T) {
 }
 
 func TestRunGitHubBootstrap_RepoExistsFails(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
@@ -505,7 +505,7 @@ func TestResolveCommitMessage_FlagTakesMessage(t *testing.T) {
 }
 
 func TestResolveCommitMessage_NonInteractiveDefault(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	msg, commit, err := resolveCommitMessage(GitHubBootstrapOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -522,7 +522,7 @@ func TestResolveCommitMessage_NonInteractiveDefault(t *testing.T) {
 // --skip-initial-commit still creates the GitHub repo (if requested) but
 // skips both commit and push. The local repo's files remain unstaged.
 func TestRunGitHubBootstrap_SkipCommitKeepsGitHub(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
@@ -599,7 +599,7 @@ func TestGhFlagsProvided(t *testing.T) {
 // non-interactive happy path still creates a GitHub repo when the user
 // didn't set any explicit flag (the confirm prompt is only interactive).
 func TestRunGitHubBootstrap_NonInteractive_NoFlagsDefaultsToGitHub(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
@@ -629,7 +629,7 @@ func TestRunGitHubBootstrap_NonInteractive_NoFlagsDefaultsToGitHub(t *testing.T)
 // file must end up in the initial commit (i.e. `git add -A` happens
 // after setup, not before).
 func TestRunGitHubBootstrap_InitBeforeFinalize(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
@@ -823,7 +823,7 @@ func TestEnsureGitIdentity_PreservesExistingEmail(t *testing.T) {
 }
 
 func TestEnsureGitIdentity_NonInteractiveNoGh_Errors(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	r := newFakeRunner()
 	r.set("git", []string{"config", "--get", "user.name"}, "", errors.New("not set"))
 	r.set("git", []string{"config", "--get", "user.email"}, "", errors.New("not set"))
@@ -859,7 +859,7 @@ func TestGhUserIdentity_NameFallsBackToLogin(t *testing.T) {
 // config. Regression guard for the issue where bootstrap commits failed
 // without a configured identity or because of commit.gpgsign=true.
 func TestBootstrap_FreshMachine_RealGit(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 
 	// Isolate from any global git config: point HOME + GIT_CONFIG_* at
 	// empty/missing locations, and force a broken GPG signing config that
@@ -941,7 +941,7 @@ func (r ghFailingRunner) RunInDir(ctx context.Context, dir, name string, args ..
 // test isn't sensitive to whether `gh` + GH_TOKEN/GITHUB_TOKEN are set
 // on the host.
 func TestBootstrap_FreshMachine_NoIdentity_RealGit(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 
 	emptyHome := t.TempDir()
 	t.Setenv("HOME", emptyHome)
@@ -1038,7 +1038,7 @@ func restoreCwd(t *testing.T, dir string) {
 func TestRunGitHubBootstrap_YesAcceptsAllDefaults(t *testing.T) {
 	// --yes should init repo, create GitHub repo under user's account (private),
 	// and use default commit message — without any interactive prompts.
-	t.Setenv("ENTIRE_TEST_TTY", "0") // non-interactive
+	forceNonInteractive(t) // non-interactive
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
@@ -1091,7 +1091,7 @@ func TestRunGitHubBootstrap_YesAcceptsAllDefaults(t *testing.T) {
 func TestRunGitHubBootstrap_YesRepoExistsNoTTY_Fails(t *testing.T) {
 	// When --yes is set, the repo name is taken, and there's no TTY,
 	// we should get a clear error instead of a silent gh failure.
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 
@@ -1122,7 +1122,7 @@ func TestResolveRepoName_YesRepoExistsWithTTY_FallsBackToPrompt(t *testing.T) {
 	// resolveRepoName should print a conflict message and fall through
 	// to the interactive prompt. We verify the conflict message was
 	// printed (proving the fallback path was taken).
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	forceInteractive(t)
 
 	// Force accessible (text-based) mode so the huh form reads from
 	// os.Stdin instead of trying to open /dev/tty via bubbletea.
@@ -1172,7 +1172,7 @@ func TestResolveRepoName_YesRepoExistsWithTTY_FallsBackToPrompt(t *testing.T) {
 
 func TestRunGitHubBootstrap_YesWithNoGitHub(t *testing.T) {
 	// --yes combined with --no-github should skip GitHub but still init + commit.
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 	dir := t.TempDir()
 	restoreCwd(t, dir)
 

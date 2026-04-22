@@ -74,7 +74,7 @@ func (c *CopilotCLI) RunPrompt(ctx context.Context, dir string, prompt string, o
 	cmd := exec.CommandContext(promptCtx, c.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	cmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0")
+	cmd.Env = os.Environ()
 	setupProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -301,7 +301,7 @@ func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, err
 
 	name := fmt.Sprintf("copilot-test-%d", time.Now().UnixNano())
 	// Strip CI env vars that may affect interactive mode.
-	unset := []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY"}
+	unset := []string{"CI", "GITHUB_ACTIONS"}
 	s, err := NewTmuxSession(name, dir, unset, args[0], args[1:]...)
 	if err != nil {
 		return nil, err

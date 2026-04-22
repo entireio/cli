@@ -61,7 +61,7 @@ func newResetCmd() *cobra.Command {
 			if !forceFlag {
 				var confirmed bool
 
-				form := NewAccessibleForm(
+				form := NewForm(
 					huh.NewGroup(
 						huh.NewConfirm().
 							Title("Reset session data?").

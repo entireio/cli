@@ -996,7 +996,7 @@ func PromptOverwriteNewerLogs(errW io.Writer, sessions []SessionRestoreInfo) (bo
 				Value(&confirmed),
 		),
 	)
-	if isAccessibleMode() {
+	if os.Getenv("ACCESSIBLE") != "" {
 		form = form.WithAccessible(true)
 	}
 

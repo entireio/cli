@@ -70,7 +70,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			hasFilters := authorFlag != "" || dateFlag != "" || branchFlag != "" || len(repos) > 0
 
 			// Fast-fail: no query + non-interactive mode = error (before auth/git checks)
-			if query == "" && !hasFilters && (jsonOutput || !isTerminal || IsAccessibleMode()) {
+			if query == "" && !hasFilters && (jsonOutput || !isTerminal || os.Getenv("ACCESSIBLE") != "") {
 				return errors.New("query required when using --json, accessible mode, or piped output. Usage: entire search <query>")
 			}
 
@@ -163,7 +163,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			styles := newStatusStyles(w)
 
 			// Accessible mode: static table
-			if IsAccessibleMode() {
+			if os.Getenv("ACCESSIBLE") != "" {
 				if len(resp.Results) == 0 {
 					fmt.Fprintln(w, "No results found.")
 					return nil

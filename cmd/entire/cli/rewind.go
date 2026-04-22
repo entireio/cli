@@ -163,7 +163,7 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 	options = append(options, huh.NewOption("Cancel", "cancel"))
 
 	var selectedID string
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Select a checkpoint to restore").
@@ -237,7 +237,7 @@ func runRewindInteractive(ctx context.Context, w, errW io.Writer) error { //noli
 	// Confirm rewind
 	var confirm bool
 	description := fmt.Sprintf("This will reset to: %s\nChanges after this point may be lost!", selectedPoint.Message)
-	confirmForm := NewAccessibleForm(
+	confirmForm := NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title(fmt.Sprintf("Reset to %s?", shortID)).
@@ -805,7 +805,7 @@ func restoreTaskCheckpointTranscript(ctx context.Context, w io.Writer, strat *st
 func handleLogsOnlyRewindInteractive(ctx context.Context, w, errW io.Writer, start *strategy.ManualCommitStrategy, point strategy.RewindPoint, shortID string) error {
 	var action string
 
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Logs-only point: "+shortID).
@@ -907,7 +907,7 @@ func handleLogsOnlyCheckout(ctx context.Context, w, errW io.Writer, start *strat
 
 	// Show warning about detached HEAD
 	var confirm bool
-	confirmForm := NewAccessibleForm(
+	confirmForm := NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title("Create detached HEAD?").
@@ -1005,7 +1005,7 @@ func handleLogsOnlyReset(ctx context.Context, w, errW io.Writer, start *strategy
 	}
 
 	var confirm bool
-	confirmForm := NewAccessibleForm(
+	confirmForm := NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title(confirmTitle).

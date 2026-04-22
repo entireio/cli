@@ -122,7 +122,7 @@ func promptForSummaryProvider(providers []checkpointSummaryProvider) (types.Agen
 	}
 
 	var selected string
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Choose a summary provider").

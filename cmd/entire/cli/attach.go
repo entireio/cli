@@ -443,7 +443,7 @@ func promptAmendCommit(ctx context.Context, w io.Writer, headCommit *object.Comm
 			fmt.Fprintf(w, "\nCopy to your commit message to attach:\n\n  Entire-Checkpoint: %s\n", checkpointIDStr)
 			return nil
 		}
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
 					Title("Amend the last commit in this branch?").

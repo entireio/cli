@@ -619,25 +619,19 @@ Trailers:
 - Handle all errors explicitly—don't leave them unchecked.
 - Reference `.golangci.yml` for enabled linters before writing Go code.
 
-## Accessibility
+## Interactive prompts and accessibility
 
-The CLI supports an accessibility mode for users who rely on screen readers. This mode uses simpler text prompts instead of interactive TUI elements.
+The CLI separates two concerns:
 
-### Environment Variable
+1. **Can we prompt at all?** — handled by `interactive.CanPromptInteractively()`. Returns false when no `/dev/tty` is available, or when running inside a known AI-agent subprocess (`GEMINI_CLI`, `COPILOT_CLI`, `PI_CODING_AGENT`, `GIT_TERMINAL_PROMPT=0`). Single source of truth.
+2. **If we do prompt, render in plain-text mode?** — controlled by the `ACCESSIBLE` environment variable. Set `ACCESSIBLE=1` for screen-reader users, or when an agent subprocess has a real TTY (tmux) but needs plain-text output for downstream parsing (integration tests, e2e agents).
 
-- `ACCESSIBLE=1` (or any non-empty value) enables accessibility mode
-- Users can set this in their shell profile (`.bashrc`, `.zshrc`) for persistent use
+### Writing forms in the `cli` package
 
-### Implementation Guidelines
-
-When adding new interactive forms or prompts using `huh`:
-
-**In the `cli` package:**
-Use `NewAccessibleForm()` instead of `huh.NewForm()`:
+Use `NewForm()` — it wraps `huh.Form` with automatic TTY gating and accessible-mode opt-in. When no TTY is available, `Run()` returns nil with field values left at their defaults, so callers do not need any guard:
 
 ```go
-// Good - respects ACCESSIBLE env var
-form := NewAccessibleForm(
+form := NewForm(
     huh.NewGroup(
         huh.NewSelect[string]().
             Title("Choose an option").
@@ -645,30 +639,39 @@ form := NewAccessibleForm(
             Value(&choice),
     ),
 )
-
-// Bad - ignores accessibility setting
-form := huh.NewForm(...)
+if err := form.Run(); err != nil {
+    return err
+}
 ```
 
-**In the `strategy` package:**
-Use the `isAccessibleMode()` helper. Note that `WithAccessible()` is only available on forms, not individual fields, so wrap confirmations in a form:
+Do not call `huh.NewForm` directly — it bypasses the TTY gate.
+
+### Writing forms in the `strategy` package
+
+The `strategy` package cannot import `cli` (cycle), but it can import `interactive`. Gate your own forms manually:
 
 ```go
+if !interactive.CanPromptInteractively() {
+    // non-interactive fallback
+    return fallback
+}
+
 form := huh.NewForm(
     huh.NewGroup(
-        huh.NewConfirm().
-            Title("Confirm action?").
-            Value(&confirmed),
+        huh.NewConfirm().Title("Confirm action?").Value(&confirmed),
     ),
 )
-if isAccessibleMode() {
+if os.Getenv("ACCESSIBLE") != "" {
     form = form.WithAccessible(true)
 }
 if err := form.Run(); err != nil { ... }
 ```
 
-### Key Points
+For TTY-level prompts that read `/dev/tty` directly (e.g. `askConfirmTTY`), assign them to a package-level function variable so tests can swap the implementation — see `askConfirmTTY` and `overrideAskConfirmForTest` in `manual_commit_hooks.go`.
 
-- Always use the accessibility helpers for any `huh` forms/prompts
-- Test new interactive features with `ACCESSIBLE=1` to ensure they work
-- The accessible mode is documented in `--help` output
+### Tests
+
+- Unit tests in the `cli` and `strategy` packages use `forceInteractive(t)` / `forceNonInteractive(t)` helpers, which swap `interactive.CanPromptInteractively()` via `interactive.OverrideForTest` for the duration of the test.
+- Tests that need a deterministic `/dev/tty` confirmation response use `stubAskConfirm(t, ttyResultLink)` (strategy package) to replace `askConfirmTTY` with a fixed-result stub.
+- Integration-test subprocesses never have a `/dev/tty`, so they always take the non-interactive path. Tests that need to exercise the "human at terminal" branch belong in the `strategy` package as unit tests using `stubAskConfirm`.
+- `ENTIRE_TEST_TTY` exists only as a subprocess escape hatch for integration tests: `=1` forces `CanPromptInteractively` true, `=0` forces false. Do not read it from production code paths — in-process tests use `interactive.OverrideForTest`. If you find yourself reaching for this variable outside `cmd/entire/cli/integration_test/`, the test belongs in a different package.

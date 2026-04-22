@@ -357,7 +357,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr str
 		shouldCheckout := checkout
 		if !shouldCheckout && !cmd.Flags().Changed("checkout") {
 			// Interactive: ask whether to checkout
-			form := NewAccessibleForm(
+			form := NewForm(
 				huh.NewGroup(
 					huh.NewConfirm().
 						Title(fmt.Sprintf("Check out branch %s?", branch)).
@@ -451,7 +451,7 @@ func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, s
 		title = metadata.Title
 		body = metadata.Body
 
-		form := NewAccessibleForm(
+		form := NewForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
 					Title("Status").
@@ -559,7 +559,7 @@ func formatValidStatuses() string {
 // Prompts for title, body, branch (derived from title), and status.
 func runTrailCreateInteractive(title, body, branch, statusStr *string) error {
 	// Step 1: Title and body
-	form := NewAccessibleForm(
+	form := NewForm(
 		huh.NewGroup(
 			huh.NewInput().
 				Title("Trail title").
@@ -594,7 +594,7 @@ func runTrailCreateInteractive(title, body, branch, statusStr *string) error {
 		*statusStr = string(trail.StatusDraft)
 	}
 
-	form = NewAccessibleForm(
+	form = NewForm(
 		huh.NewGroup(
 			huh.NewInput().
 				Title("Branch name").

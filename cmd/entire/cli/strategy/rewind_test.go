@@ -270,7 +270,7 @@ func TestResolveAgentForRewind(t *testing.T) {
 }
 
 func TestPromptOverwriteNewerLogs_NonInteractiveRequiresForce(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	forceNonInteractive(t)
 
 	var errW bytes.Buffer
 	_, err := PromptOverwriteNewerLogs(&errW, []SessionRestoreInfo{

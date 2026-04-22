@@ -545,7 +545,7 @@ func Git(t *testing.T, dir string, args ...string) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0")
+	cmd.Env = os.Environ()
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {

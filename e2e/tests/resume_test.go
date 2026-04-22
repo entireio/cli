@@ -147,7 +147,7 @@ func TestResumeSquashMergeMultipleCheckpoints(t *testing.T) {
 		// it use .git/SQUASH_MSG natively with all hooks running.
 		commitCmd := exec.Command("git", "commit")
 		commitCmd.Dir = s.Dir
-		commitCmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0", "GIT_EDITOR=true")
+		commitCmd.Env = append(os.Environ(), "GIT_EDITOR=true")
 		commitOut, commitErr := commitCmd.CombinedOutput()
 		fmt.Fprintf(s.ConsoleLog, "> git commit (GIT_EDITOR=true)\n%s\n", commitOut)
 		require.NoError(t, commitErr, "git commit with squash message failed: %s", commitOut)

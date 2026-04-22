@@ -200,7 +200,6 @@ func runLoginProcess(t *testing.T, apiBaseURL string) *loginProcess {
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
-		"ENTIRE_TEST_TTY=0",
 		"ENTIRE_API_BASE_URL="+apiBaseURL,
 	)
 
