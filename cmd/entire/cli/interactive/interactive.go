@@ -3,29 +3,54 @@
 // import cli).
 package interactive
 
-import "os"
+import (
+	"os"
 
-// canPrompt is the swappable TTY detection function. Tests replace it via
-// OverrideForTest; production uses checkCanPrompt.
-var canPrompt = checkCanPrompt
+	"golang.org/x/term"
+)
 
-// CanPromptInteractively reports whether interactive confirmation prompts
-// (huh forms, yes/no questions, etc.) can be shown. Returns false when
-// there is no controlling terminal, or when running inside a known AI
-// coding agent subprocess that inherits the user's TTY but cannot respond
-// to prompts on the user's behalf.
+// canPromptCLI and canPromptHook are swappable detection functions. Tests
+// replace them via OverrideForTest; production uses checkCLIPrompt /
+// checkHookPrompt.
+var (
+	canPromptCLI  = checkCLIPrompt
+	canPromptHook = checkHookPrompt
+)
+
+// CanPromptInteractively reports whether a regular CLI command (cobra
+// subcommand) can show interactive prompts. Uses term.IsTerminal on stdin,
+// which is the standard Go idiom. Returns false when stdin is a pipe, the
+// process runs inside a known AI agent subprocess, or stdin is not a
+// terminal for any other reason.
+//
+// Callers inside git hooks must use CanPromptFromHook instead — git
+// redirects stdin, so stdin-based detection always reports false there.
 func CanPromptInteractively() bool {
-	return canPrompt()
+	return canPromptCLI()
 }
 
-func checkCanPrompt() bool {
-	// Subprocess escape hatch for integration tests.
-	// Production callers do not set this variable. In-process unit tests use
-	// OverrideForTest instead. The only consumers are integration tests that
-	// spawn the entire CLI as a subprocess and cannot use OverrideForTest.
-	// Keeping the check *before* /dev/tty detection means it also lets tests
-	// force the non-interactive path deterministically (value "0" or similar)
-	// on systems where /dev/tty happens to be accessible.
+// CanPromptFromHook reports whether a git hook subprocess can show
+// interactive prompts. Git hooks run with redirected stdin/stdout, so
+// CanPromptInteractively would always report false. CanPromptFromHook
+// opens /dev/tty (the controlling terminal) instead, which survives git's
+// redirection.
+//
+// This path also honors ENTIRE_TEST_TTY as a subprocess escape hatch for
+// integration tests that spawn the entire CLI as a hook subprocess and
+// cannot use OverrideForTest. Production code outside the test harness
+// does not set this variable.
+func CanPromptFromHook() bool {
+	return canPromptHook()
+}
+
+func checkCLIPrompt() bool {
+	if isAgentSubprocess() {
+		return false
+	}
+	return term.IsTerminal(int(os.Stdin.Fd())) //nolint:gosec // stdin fd is 0; uintptr->int cannot overflow
+}
+
+func checkHookPrompt() bool {
 	if v, ok := os.LookupEnv("ENTIRE_TEST_TTY"); ok {
 		return v == "1"
 	}
@@ -58,14 +83,18 @@ func isAgentSubprocess() bool {
 	return false
 }
 
-// OverrideForTest replaces TTY detection for the duration of a test.
-// Returns a restore function that must be deferred (or passed to
-// t.Cleanup).
+// OverrideForTest replaces both CanPromptInteractively and CanPromptFromHook
+// detection for the duration of a test. Returns a restore function that
+// must be deferred (or passed to t.Cleanup).
 //
 //	restore := interactive.OverrideForTest(func() bool { return false })
 //	defer restore()
 func OverrideForTest(fn func() bool) func() {
-	old := canPrompt
-	canPrompt = fn
-	return func() { canPrompt = old }
+	oldCLI, oldHook := canPromptCLI, canPromptHook
+	canPromptCLI = fn
+	canPromptHook = fn
+	return func() {
+		canPromptCLI = oldCLI
+		canPromptHook = oldHook
+	}
 }

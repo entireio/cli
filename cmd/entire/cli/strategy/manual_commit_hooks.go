@@ -62,7 +62,7 @@ func overrideAskConfirmForTest(fn func(header string, details []string, prompt s
 }
 
 // realAskConfirmTTY prompts the user via /dev/tty whether to link a commit to session context.
-// This requires a controlling terminal — callers must check interactive.CanPromptInteractively()
+// This requires a controlling terminal — callers must check interactive.CanPromptFromHook()
 // first and handle the no-TTY case (agent subprocesses, CI) themselves.
 //
 // header is displayed as the first line (e.g., "Entire: Active Claude Code session").
@@ -514,7 +514,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	case "message":
 		// Using -m or -F: behavior depends on TTY availability and commit_linking setting
 		switch {
-		case !interactive.CanPromptInteractively():
+		case !interactive.CanPromptFromHook():
 			// No TTY (agent subprocess, CI) — auto-link without prompting
 			message = addCheckpointTrailer(message, checkpointID)
 		case commitLinking == settings.CommitLinkingAlways:
@@ -2019,7 +2019,7 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 //     have /dev/tty but can't respond to prompts, and content detection fails
 //     since the shadow branch doesn't exist yet).
 func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string) bool {
-	noTTY := !interactive.CanPromptInteractively()
+	noTTY := !interactive.CanPromptFromHook()
 	skipContentDetection := noTTY
 	if !skipContentDetection {
 		if stngs, err := settings.Load(ctx); err == nil {

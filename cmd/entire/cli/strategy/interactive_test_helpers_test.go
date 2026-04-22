@@ -6,17 +6,18 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 )
 
-// forceInteractive makes interactive.CanPromptInteractively() return true
-// for the duration of the test. Replaces the old t.Setenv("ENTIRE_TEST_TTY", "1").
-// When the hook path would try to read /dev/tty via askConfirmTTY, tests should
-// additionally override askConfirmTTY via overrideAskConfirmForTest to control the response.
+// forceInteractive makes both interactive.CanPromptInteractively and
+// interactive.CanPromptFromHook return true for the duration of the test.
+// When the hook path would try to read /dev/tty via askConfirmTTY, tests
+// should additionally call stubAskConfirm to control the response without
+// touching a real terminal.
 func forceInteractive(t testing.TB) {
 	t.Helper()
 	t.Cleanup(interactive.OverrideForTest(func() bool { return true }))
 }
 
-// forceNonInteractive makes interactive.CanPromptInteractively() return false
-// for the duration of the test. Replaces the old t.Setenv("ENTIRE_TEST_TTY", "0").
+// forceNonInteractive makes both interactive detection paths return false
+// for the duration of the test.
 func forceNonInteractive(t testing.TB) {
 	t.Helper()
 	t.Cleanup(interactive.OverrideForTest(func() bool { return false }))

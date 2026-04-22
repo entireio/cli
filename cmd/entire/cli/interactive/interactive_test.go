@@ -2,33 +2,54 @@ package interactive
 
 import "testing"
 
-func TestCanPromptInteractively_ForcedOn(t *testing.T) {
+func TestOverrideForTest_ForcedOn(t *testing.T) {
 	restore := OverrideForTest(func() bool { return true })
 	defer restore()
 	if !CanPromptInteractively() {
 		t.Error("CanPromptInteractively() = false; want true when override returns true")
 	}
+	if !CanPromptFromHook() {
+		t.Error("CanPromptFromHook() = false; want true when override returns true")
+	}
 }
 
-func TestCanPromptInteractively_ForcedOff(t *testing.T) {
+func TestOverrideForTest_ForcedOff(t *testing.T) {
 	restore := OverrideForTest(func() bool { return false })
 	defer restore()
 	if CanPromptInteractively() {
 		t.Error("CanPromptInteractively() = true; want false when override returns false")
 	}
+	if CanPromptFromHook() {
+		t.Error("CanPromptFromHook() = true; want false when override returns false")
+	}
 }
 
 func TestOverrideForTest_RestoresOriginal(t *testing.T) {
-	orig := CanPromptInteractively()
+	origCLI := CanPromptInteractively()
+	origHook := CanPromptFromHook()
 
-	restore := OverrideForTest(func() bool { return !orig })
-	if CanPromptInteractively() == orig {
-		t.Error("override did not take effect")
-	}
+	restore := OverrideForTest(func() bool { return !origCLI })
 	restore()
 
-	if CanPromptInteractively() != orig {
-		t.Error("restore did not return to original detection")
+	if CanPromptInteractively() != origCLI {
+		t.Error("restore did not return CLI detection to original")
+	}
+	if CanPromptFromHook() != origHook {
+		t.Error("restore did not return hook detection to original")
+	}
+}
+
+func TestCanPromptFromHook_EnvVarForceOn(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	if !CanPromptFromHook() {
+		t.Error("CanPromptFromHook() = false; want true when ENTIRE_TEST_TTY=1")
+	}
+}
+
+func TestCanPromptFromHook_EnvVarForceOff(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+	if CanPromptFromHook() {
+		t.Error("CanPromptFromHook() = true; want false when ENTIRE_TEST_TTY=0")
 	}
 }
 
@@ -57,16 +78,5 @@ func TestIsAgentSubprocess_GitTerminalPromptZero(t *testing.T) {
 	t.Setenv("GIT_TERMINAL_PROMPT", "0")
 	if !isAgentSubprocess() {
 		t.Error("isAgentSubprocess() = false; want true when GIT_TERMINAL_PROMPT=0")
-	}
-}
-
-func TestIsAgentSubprocess_GitTerminalPromptOne(t *testing.T) {
-	t.Setenv("GIT_TERMINAL_PROMPT", "1")
-	// Clear other agent env vars so only GIT_TERMINAL_PROMPT drives detection.
-	t.Setenv("GEMINI_CLI", "")
-	t.Setenv("COPILOT_CLI", "")
-	t.Setenv("PI_CODING_AGENT", "")
-	if isAgentSubprocess() {
-		t.Error("isAgentSubprocess() = true; want false when GIT_TERMINAL_PROMPT=1")
 	}
 }

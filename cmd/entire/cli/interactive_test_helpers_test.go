@@ -6,15 +6,15 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 )
 
-// forceInteractive makes interactive.CanPromptInteractively() return true
-// for the duration of the test. Replaces the old t.Setenv("ENTIRE_TEST_TTY", "1").
+// forceInteractive makes both interactive.CanPromptInteractively and
+// interactive.CanPromptFromHook return true for the duration of the test.
 func forceInteractive(t *testing.T) {
 	t.Helper()
 	t.Cleanup(interactive.OverrideForTest(func() bool { return true }))
 }
 
-// forceNonInteractive makes interactive.CanPromptInteractively() return false
-// for the duration of the test. Replaces the old t.Setenv("ENTIRE_TEST_TTY", "0").
+// forceNonInteractive makes both interactive detection paths return false
+// for the duration of the test.
 func forceNonInteractive(t *testing.T) {
 	t.Helper()
 	t.Cleanup(interactive.OverrideForTest(func() bool { return false }))

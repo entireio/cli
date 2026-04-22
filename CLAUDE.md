@@ -621,10 +621,11 @@ Trailers:
 
 ## Interactive prompts and accessibility
 
-The CLI separates two concerns:
+The CLI separates three concerns:
 
-1. **Can we prompt at all?** — handled by `interactive.CanPromptInteractively()`. Returns false when no `/dev/tty` is available, or when running inside a known AI-agent subprocess (`GEMINI_CLI`, `COPILOT_CLI`, `PI_CODING_AGENT`, `GIT_TERMINAL_PROMPT=0`). Single source of truth.
-2. **If we do prompt, render in plain-text mode?** — controlled by the `ACCESSIBLE` environment variable. Set `ACCESSIBLE=1` for screen-reader users, or when an agent subprocess has a real TTY (tmux) but needs plain-text output for downstream parsing (integration tests, e2e agents).
+1. **Can a cobra command prompt?** — `interactive.CanPromptInteractively()` uses `term.IsTerminal(os.Stdin.Fd())` plus agent-subprocess detection. Returns false when stdin is a pipe or the process runs inside a known AI-agent subprocess (`GEMINI_CLI`, `COPILOT_CLI`, `PI_CODING_AGENT`, `GIT_TERMINAL_PROMPT=0`). Use this from every cobra command.
+2. **Can a git hook prompt?** — `interactive.CanPromptFromHook()` uses `/dev/tty` because git redirects hook stdin. Same agent-subprocess filter. Only the git-hook code paths (`strategy/manual_commit_hooks.go`) should call this. The `ENTIRE_TEST_TTY` env var is honored here as a subprocess escape hatch for integration tests.
+3. **If we do prompt, render in plain-text mode?** — controlled by the `ACCESSIBLE` environment variable. Set `ACCESSIBLE=1` for screen-reader users, or when an agent subprocess has a real TTY (tmux) but needs plain-text output for downstream parsing (integration tests, e2e agents).
 
 ### Writing forms in the `cli` package
 
@@ -671,7 +672,7 @@ For TTY-level prompts that read `/dev/tty` directly (e.g. `askConfirmTTY`), assi
 
 ### Tests
 
-- Unit tests in the `cli` and `strategy` packages use `forceInteractive(t)` / `forceNonInteractive(t)` helpers, which swap `interactive.CanPromptInteractively()` via `interactive.OverrideForTest` for the duration of the test.
+- Unit tests in the `cli` and `strategy` packages use `forceInteractive(t)` / `forceNonInteractive(t)` helpers. These call `interactive.OverrideForTest`, which swaps **both** `CanPromptInteractively` and `CanPromptFromHook` at once for the duration of the test.
 - Tests that need a deterministic `/dev/tty` confirmation response use `stubAskConfirm(t, ttyResultLink)` (strategy package) to replace `askConfirmTTY` with a fixed-result stub.
 - Integration-test subprocesses never have a `/dev/tty`, so they always take the non-interactive path. Tests that need to exercise the "human at terminal" branch belong in the `strategy` package as unit tests using `stubAskConfirm`.
-- `ENTIRE_TEST_TTY` exists only as a subprocess escape hatch for integration tests: `=1` forces `CanPromptInteractively` true, `=0` forces false. Do not read it from production code paths — in-process tests use `interactive.OverrideForTest`. If you find yourself reaching for this variable outside `cmd/entire/cli/integration_test/`, the test belongs in a different package.
+- `ENTIRE_TEST_TTY` exists only as a subprocess escape hatch for integration tests that spawn the entire CLI as a git-hook subprocess: `=1` forces `CanPromptFromHook` true, `=0` forces false. It has no effect on `CanPromptInteractively`, which always uses real stdin detection. Do not read it from production code paths — in-process tests use `interactive.OverrideForTest`. If you find yourself reaching for this variable outside `cmd/entire/cli/integration_test/`, the test belongs in a different package.
