@@ -5,8 +5,18 @@ package interactive
 
 import (
 	"os"
+	"strings"
 
 	"golang.org/x/term"
+)
+
+const (
+	// PromptModeEnv controls CLI prompt policy.
+	PromptModeEnv = "ENTIRE_PROMPTS"
+
+	promptModeAuto  = "auto"
+	promptModeNever = "never"
+	promptModePlain = "plain"
 )
 
 // canPromptCLI and canPromptHook are swappable detection functions. Tests
@@ -43,18 +53,42 @@ func CanPromptFromHook() bool {
 	return canPromptHook()
 }
 
-func checkCLIPrompt() bool {
-	if isAgentSubprocess() {
-		return false
+// PromptMode returns the configured prompt policy.
+func PromptMode() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(PromptModeEnv))) {
+	case "", promptModeAuto:
+		return promptModeAuto
+	case promptModeNever:
+		return promptModeNever
+	case promptModePlain:
+		return promptModePlain
+	default:
+		return promptModeAuto
 	}
-	return term.IsTerminal(int(os.Stdin.Fd())) //nolint:gosec // stdin fd is 0; uintptr->int cannot overflow
+}
+
+func checkCLIPrompt() bool {
+	switch PromptMode() {
+	case promptModeNever:
+		return false
+	case promptModePlain:
+		return term.IsTerminal(int(os.Stdin.Fd())) //nolint:gosec // stdin fd is 0; uintptr->int cannot overflow
+	default:
+		if isAgentSubprocess() {
+			return false
+		}
+		return term.IsTerminal(int(os.Stdin.Fd())) //nolint:gosec // stdin fd is 0; uintptr->int cannot overflow
+	}
 }
 
 func checkHookPrompt() bool {
 	if v, ok := os.LookupEnv("ENTIRE_TEST_TTY"); ok {
 		return v == "1"
 	}
-	if isAgentSubprocess() {
+	if PromptMode() == promptModeNever {
+		return false
+	}
+	if PromptMode() == promptModeAuto && isAgentSubprocess() {
 		return false
 	}
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)

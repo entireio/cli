@@ -28,7 +28,7 @@ func entireTheme() *huh.Theme {
 // subprocesses (e2e tests, integration tests) that inherit a real TTY
 // but need plain-text output to parse.
 func forcePlainOutput() bool {
-	return os.Getenv("ACCESSIBLE") != ""
+	return os.Getenv("ACCESSIBLE") != "" || interactive.PromptMode() == "plain"
 }
 
 // Form wraps *huh.Form with automatic TTY gating and accessible-output
@@ -37,21 +37,35 @@ type Form struct {
 	inner *huh.Form
 }
 
+// ErrPromptUnavailable reports that a command required a prompt but no
+// interactive prompt path is available under the current environment/policy.
+var ErrPromptUnavailable = errors.New("interactive prompt unavailable; rerun with a TTY or pass flags to skip prompting")
+
 // NewForm creates a themed huh form. The returned form's Run method
-// automatically returns nil (leaving field values at their defaults)
-// when no controlling terminal is available, so callers do not need
-// to guard it themselves.
+// is for required prompts. Use RunOptional when the prompt may be skipped.
 func NewForm(groups ...*huh.Group) *Form {
 	return &Form{inner: huh.NewForm(groups...).WithTheme(entireTheme())}
 }
 
-// Run executes the form when a TTY is available. When ACCESSIBLE is set,
-// the form renders in plain-text accessible mode. Returns nil immediately
-// when no terminal is present (CI, piped input, known agent subprocesses).
+// Run executes a required form. When ACCESSIBLE or ENTIRE_PROMPTS=plain is
+// set, the form renders in plain-text accessible mode.
 func (f *Form) Run() error {
+	if !interactive.CanPromptInteractively() {
+		return ErrPromptUnavailable
+	}
+	return f.runInner()
+}
+
+// RunOptional executes the form when prompting is available and otherwise
+// returns nil, leaving field values at their defaults.
+func (f *Form) RunOptional() error {
 	if !interactive.CanPromptInteractively() {
 		return nil
 	}
+	return f.runInner()
+}
+
+func (f *Form) runInner() error {
 	if forcePlainOutput() {
 		f.inner = f.inner.WithAccessible(true)
 	}

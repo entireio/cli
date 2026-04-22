@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -12,6 +13,8 @@ import (
 
 // mockClient implements deviceAuthClient for unit tests.
 type mockClient struct {
+	start     *auth.DeviceAuthStart
+	startErr  error
 	responses []pollResponse
 	calls     int
 }
@@ -22,6 +25,12 @@ type pollResponse struct {
 }
 
 func (m *mockClient) StartDeviceAuth(_ context.Context) (*auth.DeviceAuthStart, error) {
+	if m.startErr != nil {
+		return nil, m.startErr
+	}
+	if m.start != nil {
+		return m.start, nil
+	}
 	return nil, errors.New("not implemented in mock")
 }
 
@@ -36,6 +45,63 @@ func (m *mockClient) PollDeviceAuth(_ context.Context, _ string) (*auth.DeviceAu
 	r := m.responses[m.calls]
 	m.calls++
 	return r.result, r.err
+}
+
+type stubTokenStore struct {
+	baseURL string
+	token   string
+}
+
+func (s *stubTokenStore) SaveToken(baseURL, token string) error {
+	s.baseURL = baseURL
+	s.token = token
+	return nil
+}
+
+func TestRunLogin_NoBrowser_PrintsApprovalURL(t *testing.T) {
+	t.Parallel()
+
+	client := &mockClient{
+		start: &auth.DeviceAuthStart{
+			UserCode:        "USER-CODE",
+			VerificationURI: "https://example.com/approve",
+			DeviceCode:      "device-code",
+			ExpiresIn:       60,
+			Interval:        0,
+		},
+		responses: []pollResponse{
+			{result: &auth.DeviceAuthPoll{AccessToken: "tok-123"}},
+		},
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	var openCalls int
+
+	store := &stubTokenStore{}
+	oldNewAuthStore := newAuthStore
+	newAuthStore = func() tokenStore { return store }
+	t.Cleanup(func() { newAuthStore = oldNewAuthStore })
+
+	err := runLogin(context.Background(), &out, &errOut, client, func(context.Context, string) error {
+		openCalls++
+		return nil
+	}, true)
+	if err != nil {
+		t.Fatalf("runLogin() error = %v", err)
+	}
+	if openCalls != 0 {
+		t.Fatalf("openBrowser called %d times, want 0", openCalls)
+	}
+	if got := out.String(); !strings.Contains(got, "Approval URL: https://example.com/approve") {
+		t.Fatalf("output missing approval URL:\n%s", got)
+	}
+	if strings.Contains(out.String(), "Press Enter to open") {
+		t.Fatalf("output should not contain interactive browser prompt:\n%s", out.String())
+	}
+	if store.baseURL != client.BaseURL() || store.token != "tok-123" {
+		t.Fatalf("saved token = (%q, %q), want (%q, %q)", store.baseURL, store.token, client.BaseURL(), "tok-123")
+	}
 }
 
 func TestWaitForApproval_ImmediateSuccess(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/huh"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -65,6 +66,30 @@ func TestHandleFormCancellation(t *testing.T) {
 			assert.Equal(t, tt.wantOut, out.String())
 		})
 	}
+}
+
+func TestFormRun_NoPromptAvailable_ReturnsErrPromptUnavailable(t *testing.T) {
+	t.Parallel()
+
+	forceNonInteractive(t)
+
+	form := NewForm(huh.NewGroup(huh.NewConfirm()))
+	err := form.Run()
+	require.ErrorIs(t, err, ErrPromptUnavailable)
+}
+
+func TestFormRunOptional_NoPromptAvailable_ReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	forceNonInteractive(t)
+
+	form := NewForm(huh.NewGroup(huh.NewConfirm()))
+	require.NoError(t, form.RunOptional())
+}
+
+func TestForcePlainOutput_UsesPromptModePlain(t *testing.T) {
+	t.Setenv(interactive.PromptModeEnv, "plain")
+	assert.True(t, forcePlainOutput())
 }
 
 func TestCopyFile_HappyPath(t *testing.T) {

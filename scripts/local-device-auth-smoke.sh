@@ -18,7 +18,7 @@ trap cleanup EXIT
 cd "${REPO_ROOT}"
 
 echo "Starting device auth login against ${ENTIRE_API_BASE_URL}"
-ENTIRE_TEST_TTY=0 ENTIRE_API_BASE_URL="${ENTIRE_API_BASE_URL}" go run ./cmd/entire login --insecure-http-auth >"${LOG_FILE}" 2>&1 &
+ENTIRE_API_BASE_URL="${ENTIRE_API_BASE_URL}" ENTIRE_PROMPTS=never go run ./cmd/entire login --insecure-http-auth --no-browser >"${LOG_FILE}" 2>&1 &
 LOGIN_PID=$!
 
 for _ in {1..100}; do

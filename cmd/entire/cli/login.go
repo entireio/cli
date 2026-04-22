@@ -27,6 +27,14 @@ const maxTransientErrors = 5
 // browserOpenFunc is the signature for opening a URL in the user's browser.
 type browserOpenFunc func(ctx context.Context, url string) error
 
+type tokenStore interface {
+	SaveToken(baseURL, token string) error
+}
+
+var newAuthStore = func() tokenStore {
+	return auth.NewStore()
+}
+
 // deviceAuthClient abstracts the auth client so runLogin and waitForApproval can be unit-tested.
 type deviceAuthClient interface {
 	StartDeviceAuth(ctx context.Context) (*auth.DeviceAuthStart, error)
@@ -36,6 +44,7 @@ type deviceAuthClient interface {
 
 func newLoginCmd() *cobra.Command {
 	var insecureHTTPAuth bool
+	var noBrowser bool
 
 	cmd := &cobra.Command{
 		Use:   "login",
@@ -49,11 +58,12 @@ func newLoginCmd() *cobra.Command {
 				}
 			}
 
-			return runLogin(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), client, openBrowser)
+			return runLogin(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), client, openBrowser, noBrowser)
 		},
 	}
 
 	cmd.Flags().BoolVar(&insecureHTTPAuth, "insecure-http-auth", false, "Allow authentication over plain HTTP (insecure, for local development only)")
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "Print the approval URL instead of waiting to open a browser interactively")
 	if err := cmd.Flags().MarkHidden("insecure-http-auth"); err != nil {
 		panic(fmt.Sprintf("hide insecure-http-auth flag: %v", err))
 	}
@@ -61,7 +71,7 @@ func newLoginCmd() *cobra.Command {
 	return cmd
 }
 
-func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient, openURL browserOpenFunc) error {
+func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient, openURL browserOpenFunc, noBrowser bool) error {
 	start, err := client.StartDeviceAuth(ctx)
 	if err != nil {
 		return fmt.Errorf("start login: %w", err)
@@ -71,7 +81,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 
 	approvalURL := start.VerificationURI
 
-	if interactive.CanPromptInteractively() {
+	if !noBrowser && interactive.CanPromptInteractively() {
 		fmt.Fprintf(outW, "Press Enter to open %s in your browser and enter the generated device code...", approvalURL)
 
 		// Read from /dev/tty so we get a real keypress and don't consume piped stdin.
@@ -96,7 +106,7 @@ func runLogin(ctx context.Context, outW, errW io.Writer, client deviceAuthClient
 		return fmt.Errorf("complete login: %w", err)
 	}
 
-	store := auth.NewStore()
+	store := newAuthStore()
 
 	if err := store.SaveToken(client.BaseURL(), token); err != nil {
 		return fmt.Errorf("save auth token: %w", err)

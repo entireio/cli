@@ -53,6 +53,27 @@ func TestCanPromptFromHook_EnvVarForceOff(t *testing.T) {
 	}
 }
 
+func TestPromptMode_DefaultsToAuto(t *testing.T) {
+	t.Setenv(PromptModeEnv, "")
+	if got := PromptMode(); got != "auto" {
+		t.Fatalf("PromptMode() = %q, want auto", got)
+	}
+}
+
+func TestPromptMode_Plain(t *testing.T) {
+	t.Setenv(PromptModeEnv, "plain")
+	if got := PromptMode(); got != "plain" {
+		t.Fatalf("PromptMode() = %q, want plain", got)
+	}
+}
+
+func TestPromptMode_InvalidFallsBackToAuto(t *testing.T) {
+	t.Setenv(PromptModeEnv, "bogus")
+	if got := PromptMode(); got != "auto" {
+		t.Fatalf("PromptMode() = %q, want auto", got)
+	}
+}
+
 func TestIsAgentSubprocess_GeminiCli(t *testing.T) {
 	t.Setenv("GEMINI_CLI", "1")
 	if !isAgentSubprocess() {

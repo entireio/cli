@@ -26,6 +26,9 @@ Environment Variables:
   ACCESSIBLE    Set to any value (e.g., ACCESSIBLE=1) to enable accessibility
                 mode. This uses simpler text prompts instead of interactive
                 TUI elements, which works better with screen readers.
+  ENTIRE_PROMPTS
+                Control prompt policy. Use 'never' to disable prompts, or
+                'plain' to force plain-text prompts when a TTY is available.
 `
 
 func NewRootCmd() *cobra.Command {
