@@ -46,37 +46,6 @@ func RenderStatic(view View, styles Styles, width int) string {
 	return b.String()
 }
 
-func renderSummaryBand(s SummaryBand, styles Styles) string {
-	kv := func(label, value string) string {
-		return styles.label.Render(label) + "  " + styles.value.Render(value)
-	}
-
-	dom := placeholderDash
-	if s.DominantLabel != "" {
-		dom = fmt.Sprintf("▪ %s  %d%%", s.DominantLabel, int(s.DominantLabelPct*100))
-	}
-
-	topAgent := s.TopAgent
-	if topAgent == "" {
-		topAgent = placeholderDash
-	}
-	if s.AgentFilter != "" {
-		topAgent = styles.accent.Render("["+s.AgentFilter+"]") + " (filter)"
-	}
-	topSkill := placeholderDash // skill wiring lives in a later chunk; keep the slot visible
-	topModel := s.TopModel
-	if topModel == "" {
-		topModel = placeholderDash
-	}
-
-	line1 := kv("Top agent", topAgent) + "  " + kv("Top skill", topSkill)
-	line2 := kv("Dominant ", dom) + "  " + kv("Top model", topModel)
-	totals := fmt.Sprintf("%d sessions · %d checkpoints · %s tokens · %d commits",
-		s.SessionCount, s.CheckpointCount, formatTokens(s.TokenTotal), s.CommitCount)
-	line3 := kv("Totals    ", totals)
-	return line1 + "\n" + line2 + "\n\n" + line3
-}
-
 func renderActivityStrip(view View, styles Styles) string {
 	if len(view.Activity) == 0 {
 		return styles.muted.Render("  (no activity in range)")

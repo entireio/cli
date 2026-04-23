@@ -83,6 +83,7 @@ type View struct {
 
 // SummaryBand holds the headline facts at the top of every view.
 type SummaryBand struct {
+	// Legacy fields — still populated by BuildView for backward compat.
 	TopAgent         string
 	TopAgentCount    int
 	TopModel         string
@@ -94,6 +95,28 @@ type SummaryBand struct {
 	TokenTotal       int
 	CommitCount      int
 	AgentFilter      string // non-empty when filtered — rendered as chip
+
+	// New fields for the you/team/top/context redesign (spec 2026-04-22).
+	RangeLabel string // e.g. "Last 90 days", "Today"
+
+	// "you" (current user) side.
+	YouSessions    int
+	YouCheckpoints int
+	YouTokens      int
+
+	// "team" (contributors) side.
+	TeamSessions    int
+	TeamCheckpoints int
+	TeamTokens      int
+
+	// Top signals — empty strings omit the slot.
+	TopSkill string
+	TopLabel string
+
+	// Context line counts.
+	AgentCount int
+	RepoCount  int
+	ActiveDays int
 }
 
 // SessionRow is a row in the middle panel's chronological list.
@@ -174,49 +197,7 @@ func BuildView(sessions []RecapSession, opts BuildOpts) View {
 		}
 	}
 
-	// Summary band.
-	agentCounts := map[string]int{}
-	modelCounts := map[string]int{}
-	labelCounts := map[string]int{}
-	for _, s := range filtered {
-		for _, a := range s.AgentsUsed {
-			agentCounts[a]++
-		}
-		for _, m := range s.ModelsUsed {
-			modelCounts[m]++
-		}
-	}
-	for _, cp := range cps {
-		for _, lbl := range cp.Labels {
-			labelCounts[lbl]++
-		}
-	}
-	topAgent, topAgentN := pickTop(agentCounts)
-	topModel, topModelN := pickTop(modelCounts)
-	domLabel, domOK := DominantLabel(labelCounts)
-	domPct := 0.0
-	if domOK {
-		total := 0
-		for _, c := range labelCounts {
-			total += c
-		}
-		if total > 0 {
-			domPct = float64(labelCounts[domLabel]) / float64(total)
-		}
-	}
-	view.Summary = SummaryBand{
-		TopAgent:         topAgent,
-		TopAgentCount:    topAgentN,
-		TopModel:         topModel,
-		TopModelCount:    topModelN,
-		DominantLabel:    domLabel,
-		DominantLabelPct: domPct,
-		SessionCount:     len(filtered),
-		CheckpointCount:  len(cps),
-		TokenTotal:       tokens,
-		CommitCount:      len(commits),
-		AgentFilter:      opts.AgentFilter,
-	}
+	view.Summary = buildSummaryBand(filtered, cps, tokens, commits, opts)
 
 	// Activity buckets: shape depends on range. Day = 24 hourly; others =
 	// daily cells across the span.
@@ -265,13 +246,31 @@ func BuildView(sessions []RecapSession, opts BuildOpts) View {
 	view.AgentCards = buildAgentCards(filtered)
 	applyContributors(view.AgentCards, opts.Contributors)
 
+	// Populate team side of SummaryBand from ContributorsData if available.
+	if opts.Contributors != nil {
+		for _, contrib := range opts.Contributors.ByAgent {
+			if contrib == nil {
+				continue
+			}
+			view.Summary.TeamSessions += contrib.TotalCount
+			view.Summary.TeamCheckpoints += contrib.TotalCount
+			view.Summary.TeamTokens += contrib.Tokens
+		}
+	}
+
 	// Label distribution lines (for the bottom-panel Labels column).
+	cpLabelCounts := map[string]int{}
+	for _, cp := range cps {
+		for _, lbl := range cp.Labels {
+			cpLabelCounts[lbl]++
+		}
+	}
 	totalLabels := 0
-	for _, c := range labelCounts {
+	for _, c := range cpLabelCounts {
 		totalLabels += c
 	}
-	view.Labels = make([]LabelLine, 0, len(labelCounts))
-	for lbl, n := range labelCounts {
+	view.Labels = make([]LabelLine, 0, len(cpLabelCounts))
+	for lbl, n := range cpLabelCounts {
 		pct := 0
 		if totalLabels > 0 {
 			pct = (n * 100) / totalLabels
@@ -381,6 +380,103 @@ func firstAgent(s RecapSession) string {
 		return ""
 	}
 	return s.AgentsUsed[0]
+}
+
+// buildSummaryBand computes all SummaryBand fields from filtered sessions,
+// in-range checkpoints, token totals, and commit set. Extracted from BuildView
+// to reduce cyclomatic complexity.
+func buildSummaryBand(
+	filtered []RecapSession,
+	cps []RecapCheckpoint,
+	tokens int,
+	commits map[string]bool,
+	opts BuildOpts,
+) SummaryBand {
+	agentCounts := map[string]int{}
+	modelCounts := map[string]int{}
+	labelCounts := map[string]int{}
+	for _, s := range filtered {
+		for _, a := range s.AgentsUsed {
+			agentCounts[a]++
+		}
+		for _, m := range s.ModelsUsed {
+			modelCounts[m]++
+		}
+	}
+	for _, cp := range cps {
+		for _, lbl := range cp.Labels {
+			labelCounts[lbl]++
+		}
+	}
+
+	topAgent, topAgentN := pickTop(agentCounts)
+	topModel, topModelN := pickTop(modelCounts)
+	topSkill, _ := pickTop(skillCounts(cps))
+	domLabel, domOK := DominantLabel(labelCounts)
+	domPct := 0.0
+	if domOK {
+		total := 0
+		for _, c := range labelCounts {
+			total += c
+		}
+		if total > 0 {
+			domPct = float64(labelCounts[domLabel]) / float64(total)
+		}
+	}
+
+	distinctRepos := map[string]bool{}
+	for _, s := range filtered {
+		if s.Repo != "" {
+			distinctRepos[s.Repo] = true
+		}
+	}
+	activeDaySet := map[string]bool{}
+	for _, cp := range cps {
+		key := cp.CreatedAt.Format("2006-01-02")
+		activeDaySet[key] = true
+	}
+
+	topLabel := ""
+	if domOK {
+		topLabel = domLabel
+	}
+
+	return SummaryBand{
+		// Legacy fields.
+		TopAgent:         topAgent,
+		TopAgentCount:    topAgentN,
+		TopModel:         topModel,
+		TopModelCount:    topModelN,
+		DominantLabel:    domLabel,
+		DominantLabelPct: domPct,
+		SessionCount:     len(filtered),
+		CheckpointCount:  len(cps),
+		TokenTotal:       tokens,
+		CommitCount:      len(commits),
+		AgentFilter:      opts.AgentFilter,
+
+		// New you/team/top/context fields.
+		RangeLabel:     opts.Range.Title(),
+		YouSessions:    len(filtered),
+		YouCheckpoints: len(cps),
+		YouTokens:      tokens,
+		TopSkill:       topSkill,
+		TopLabel:       topLabel,
+		AgentCount:     len(agentCounts),
+		RepoCount:      len(distinctRepos),
+		ActiveDays:     len(activeDaySet),
+	}
+}
+
+// skillCounts tallies skills across a slice of checkpoints.
+func skillCounts(cps []RecapCheckpoint) map[string]int {
+	out := map[string]int{}
+	for _, cp := range cps {
+		for _, sk := range cp.SkillsUsed {
+			out[sk]++
+		}
+	}
+	return out
 }
 
 func spanOf(s RecapSession) string {

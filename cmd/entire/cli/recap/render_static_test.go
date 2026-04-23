@@ -30,8 +30,9 @@ func TestRenderStatic_ProducesAllFourPanels(t *testing.T) {
 
 	out := RenderStatic(view, styles, 100)
 
-	// Each of the four panel concepts should appear in the rendered output.
-	for _, want := range []string{"Today", "Top agent", "claude-code", "Activity", "Sessions", "bug_fix"} {
+	// Each of the three panel concepts should appear in the rendered output.
+	// New summary shape: you/team rows + top line (no "Top agent" label row).
+	for _, want := range []string{"Today", "you", "claude-code", "Activity", "Sessions", "bug_fix"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("static output missing %q:\n%s", want, out)
 		}
