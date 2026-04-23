@@ -102,6 +102,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 	cmd.AddCommand(newMigrateCmd())
 	cmd.AddCommand(newActivityCmd())
+	cmd.AddCommand(newRecapCmd())
 
 	cmd.SetVersionTemplate(versionString())
 
