@@ -17,8 +17,9 @@ func TestBuildAgentCards_GroupsByAgent(t *testing.T) {
 			AgentsUsed: []string{testAgentClaude},
 			ModelsUsed: []string{"opus-4-7"},
 			Repo:       "entireio/cli",
+			TokenUsage: tokenUsageTotal(1000),
 			Checkpoints: []RecapCheckpoint{
-				{Labels: []string{"bug_fix"}, TokenUsage: tokenUsageTotal(1000)},
+				{Labels: []string{"bug_fix"}},
 			},
 		},
 		{
@@ -26,8 +27,9 @@ func TestBuildAgentCards_GroupsByAgent(t *testing.T) {
 			AgentsUsed: []string{testAgentClaude},
 			ModelsUsed: []string{"opus-4-7"},
 			Repo:       "entireio/cli",
+			TokenUsage: tokenUsageTotal(500),
 			Checkpoints: []RecapCheckpoint{
-				{Labels: []string{"feature_build"}, TokenUsage: tokenUsageTotal(500)},
+				{Labels: []string{"feature_build"}},
 			},
 		},
 		{

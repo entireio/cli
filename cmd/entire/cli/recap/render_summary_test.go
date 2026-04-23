@@ -24,8 +24,9 @@ func TestRenderSummaryBand_AllTopSignals(t *testing.T) {
 		ActiveDays:      14,
 	}
 	got := renderSummaryBand(s, NewStyles(false))
+	// Note: "Last 90 days" is rendered by the enclosing panel header
+	// (renderPanel uses view.Title), not by renderSummaryBand.
 	for _, want := range []string{
-		"Last 90 days",
 		"you", "40 sessions", "92 checkpoints", "3.5M tok",
 		"team", "5 sessions", "6 checkpoints", "17k tok",
 		"top", "Codex", "code-simplifier", "bug_fix", "claude-opus-4-7[1m]",

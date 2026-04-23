@@ -179,18 +179,20 @@ func BuildView(sessions []RecapSession, opts BuildOpts) View {
 	}
 
 	// Collect checkpoints in-range for aggregations that work at the cp level.
+	// Tokens live at the session level (cp.TokenUsage is always nil — see
+	// projectCheckpoint in load.go), so we sum them once per filtered session.
 	var cps []RecapCheckpoint
 	tokens := 0
 	commits := map[string]bool{}
 	for _, s := range filtered {
+		if s.TokenUsage != nil {
+			tokens += s.TokenUsage.InputTokens + s.TokenUsage.OutputTokens
+		}
 		for _, cp := range s.Checkpoints {
 			if cp.CreatedAt.Before(start) || !cp.CreatedAt.Before(end) {
 				continue
 			}
 			cps = append(cps, cp)
-			if cp.TokenUsage != nil {
-				tokens += cp.TokenUsage.InputTokens + cp.TokenUsage.OutputTokens
-			}
 			if cp.LinkedCommit != "" {
 				commits[cp.LinkedCommit] = true
 			}
@@ -392,12 +394,16 @@ func buildSummaryBand(
 	commits map[string]bool,
 	opts BuildOpts,
 ) SummaryBand {
+	// Weight top-agent by sessions + checkpoints so the agent doing the
+	// most *work* wins, not just the one with the most started sessions.
+	// A session with 0 checkpoints contributes 1; a session with 50
+	// checkpoints contributes 51. Matches the Agents panel sort.
 	agentCounts := map[string]int{}
 	modelCounts := map[string]int{}
 	labelCounts := map[string]int{}
 	for _, s := range filtered {
 		for _, a := range s.AgentsUsed {
-			agentCounts[a]++
+			agentCounts[a] += 1 + len(s.Checkpoints)
 		}
 		for _, m := range s.ModelsUsed {
 			modelCounts[m]++

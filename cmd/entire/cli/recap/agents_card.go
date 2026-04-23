@@ -71,11 +71,14 @@ func buildAgentCards(sessions []RecapSession) []AgentCard {
 				buckets[agent] = b
 			}
 			b.card.MeSessions++
+			// Tokens live at session level — projectCheckpoint in load.go
+			// intentionally leaves cp.TokenUsage nil. Count session tokens
+			// once per (session, agent) pair.
+			if s.TokenUsage != nil {
+				b.card.MeTokens += s.TokenUsage.InputTokens + s.TokenUsage.OutputTokens
+			}
 			for _, cp := range s.Checkpoints {
 				b.card.MeCheckpoints++
-				if cp.TokenUsage != nil {
-					b.card.MeTokens += cp.TokenUsage.InputTokens + cp.TokenUsage.OutputTokens
-				}
 				for _, lbl := range cp.Labels {
 					b.labelCounts[lbl]++
 				}

@@ -21,9 +21,8 @@ import (
 func renderSummaryBand(s SummaryBand, styles Styles) string {
 	var b strings.Builder
 
-	// Title line.
-	b.WriteString(styles.title.Render(s.RangeLabel))
-	b.WriteString("\n\n")
+	// Title is rendered by the enclosing panel header (renderPanel already
+	// shows view.Title). Rendering it here too produces a duplicate.
 
 	// you / team rows.
 	b.WriteString(renderSummaryRow("you", styles.accent,
