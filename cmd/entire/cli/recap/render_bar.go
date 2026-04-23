@@ -3,7 +3,7 @@ package recap
 import "strings"
 
 const (
-	barMinWidth = 9
+	barMinWidth = 12
 	barMaxWidth = 40
 )
 

@@ -41,12 +41,12 @@ func TestRenderComparisonBar_TeamGreater(t *testing.T) {
 
 func TestRenderComparisonBar_Equal(t *testing.T) {
 	t.Parallel()
-	// you=50, team=50, width=10 → striped (magenta ▒ on even, amber █ on odd).
-	got := renderComparisonBar(50, 50, 10, NewStyles(false))
+	// you=50, team=50, width=12 (barMinWidth) → striped (magenta ▒ on even, amber █ on odd).
+	got := renderComparisonBar(50, 50, 12, NewStyles(false))
 	amberCount := countRunes(got, '█')
 	dotCount := countRunes(got, '▒')
-	if amberCount != 5 || dotCount != 5 {
-		t.Errorf("expected 5 █ + 5 ▒ striped; got amber=%d dot=%d in %q", amberCount, dotCount, got)
+	if amberCount != 6 || dotCount != 6 {
+		t.Errorf("expected 6 █ + 6 ▒ striped; got amber=%d dot=%d in %q", amberCount, dotCount, got)
 	}
 }
 
