@@ -89,8 +89,6 @@ func renderActivityStrip(view View, styles Styles) string {
 		header = "Activity (7d)"
 	case RangeMonth:
 		header = "Activity (this month)"
-	case Range30d:
-		header = "Activity (30d)"
 	case Range90d:
 		header = "Activity (90d)"
 	default:

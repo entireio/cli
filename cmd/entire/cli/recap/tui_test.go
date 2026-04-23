@@ -38,8 +38,7 @@ func TestTUIModel_RangeKeysRebuildView(t *testing.T) {
 		{"1", RangeDay},
 		{"w", RangeWeek},
 		{"m", RangeMonth},
-		{"4", Range30d},
-		{"5", Range90d},
+		{"4", Range90d},
 	}
 	for _, c := range cases {
 		nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(c.key)})

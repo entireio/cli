@@ -24,7 +24,7 @@ import (
 
 type recapFlags struct {
 	// range selection (mutually exclusive)
-	day, week, month, d30, d90 bool
+	day, week, month, d90 bool
 	// agent filter (mutually exclusive, direct flags match agent names)
 	claudeCode, codex, gemini, opencode, cursor, factoryaiDroid, copilotCLI bool
 	// formatting
@@ -77,7 +77,6 @@ with local session state, then renders a 4-panel view over a time range.`,
 	cmd.Flags().BoolVar(&f.day, "day", false, "Today only (default)")
 	cmd.Flags().BoolVar(&f.week, "week", false, "Last 7 days")
 	cmd.Flags().BoolVar(&f.month, "month", false, "This calendar month")
-	cmd.Flags().BoolVar(&f.d30, "30", false, "Rolling 30 days")
 	cmd.Flags().BoolVar(&f.d90, "90", false, "Rolling 90 days")
 	cmd.Flags().BoolVar(&f.claudeCode, agentClaudeCode, false, "Filter to Claude Code sessions")
 	cmd.Flags().BoolVar(&f.codex, agentCodex, false, "Filter to Codex sessions")
@@ -90,7 +89,7 @@ with local session state, then renders a 4-panel view over a time range.`,
 	cmd.Flags().StringVar(&f.view, "view", "both", "Which columns to show: me, contributors, or both")
 	cmd.Flags().BoolVar(&f.refresh, "refresh", false, "Clear the local analysis cache and re-fetch from the server")
 	cmd.Flags().BoolVar(&f.insecureHTTP, "insecure-http-auth", false, "Allow plain-HTTP auth (local dev only; never set in production)")
-	cmd.MarkFlagsMutuallyExclusive("day", "week", "month", "30", "90")
+	cmd.MarkFlagsMutuallyExclusive("day", "week", "month", "90")
 	cmd.MarkFlagsMutuallyExclusive(agentFlagNames...)
 	return cmd
 }
@@ -101,8 +100,6 @@ func (f *recapFlags) rangeKey() recap.RangeKey {
 		return recap.RangeWeek
 	case f.month:
 		return recap.RangeMonth
-	case f.d30:
-		return recap.Range30d
 	case f.d90:
 		return recap.Range90d
 	}
@@ -282,7 +279,7 @@ func fetchContributorsWithDiag(
 		if data != nil && len(data.ByAgent) > 0 {
 			return data, nil
 		}
-		diag = append(diag, "No contributor activity for "+repo+" in this range — try a longer window (--week, --30, --90).")
+		diag = append(diag, "No contributor activity for "+repo+" in this range — try a longer window (--week, --90).")
 		return nil, diag
 	} else if err != nil {
 		logging.Debug(ctx, "recap: /me/recap failed; falling back", "repo", repo, "error", err.Error())
@@ -298,7 +295,7 @@ func fetchContributorsWithDiag(
 		return nil, diag
 	}
 	if data == nil || len(data.ByAgent) == 0 {
-		diag = append(diag, "No contributor activity for "+repo+" in this range — try a longer window (--week, --30, --90).")
+		diag = append(diag, "No contributor activity for "+repo+" in this range — try a longer window (--week, --90).")
 		return nil, diag
 	}
 	return data, nil

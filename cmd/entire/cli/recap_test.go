@@ -17,7 +17,6 @@ func TestRecapFlags_RangeKey(t *testing.T) {
 		{"day", recapFlags{day: true}, recap.RangeDay},
 		{"week", recapFlags{week: true}, recap.RangeWeek},
 		{"month", recapFlags{month: true}, recap.RangeMonth},
-		{"30d", recapFlags{d30: true}, recap.Range30d},
 		{"90d", recapFlags{d90: true}, recap.Range90d},
 	}
 	for _, c := range cases {
@@ -46,7 +45,7 @@ func TestRecapCmd_RegistersFlags(t *testing.T) {
 	t.Parallel()
 	cmd := newRecapCmd()
 	want := []string{
-		"day", "week", "month", "30", "90",
+		"day", "week", "month", "90",
 		"claude-code", "codex", "gemini-cli", "opencode", "cursor", "factoryai-droid", "copilot-cli",
 		"format", "view",
 	}

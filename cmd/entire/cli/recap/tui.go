@@ -66,8 +66,6 @@ func (m TUIModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //nolint:iret
 	case "3", "m":
 		m.view = rebuildView(m.sessions, RangeMonth, m.agentFilter, m.mode)
 	case "4":
-		m.view = rebuildView(m.sessions, Range30d, m.agentFilter, m.mode)
-	case "5":
 		m.view = rebuildView(m.sessions, Range90d, m.agentFilter, m.mode)
 	case "a":
 		m.agentFilter = cycleAgent(m.agents, m.agentFilter)
@@ -83,7 +81,7 @@ func (m TUIModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //nolint:iret
 // at the bottom so users discover the keybinds without reading docs.
 func (m TUIModel) View() string {
 	body := RenderStatic(m.view, m.styles, m.width)
-	help := m.styles.help.Render("  d w m 4 5  range  ·  a  agent filter  ·  v  view (me/contributors/both)  ·  q  quit")
+	help := m.styles.help.Render("  d w m 4  range  ·  a  agent filter  ·  v  view (me/contributors/both)  ·  q  quit")
 	return body + "\n" + help
 }
 

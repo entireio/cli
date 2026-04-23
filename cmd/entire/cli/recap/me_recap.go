@@ -130,7 +130,7 @@ func FetchMeRecap(
 // 90d maps to last-3-months.
 func TimeframeForRange(r RangeKey) string {
 	switch r {
-	case RangeDay, RangeWeek, Range30d, RangeMonth:
+	case RangeDay, RangeWeek, RangeMonth:
 		return "last-month"
 	case Range90d:
 		return "last-3-months"
