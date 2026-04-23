@@ -120,6 +120,9 @@ func applyContributors(cards []AgentCard, data *ContributorsData) {
 			cards[i].ContribCheckpoints = a.TotalCount
 			cards[i].ContribTokens = a.Tokens
 			cards[i].ContribCount = a.DistinctContribs
+			cards[i].ContribLabels = a.Labels
+			cards[i].ContribSkills = a.Skills
+			cards[i].ContribToolMix = a.ToolMix
 		}
 	}
 }
@@ -331,17 +334,12 @@ func formatLabelList(labels []LabelCount, styles Styles) string {
 	if n > 3 {
 		n = 3
 	}
-	total := 0
-	for _, l := range labels {
-		total += l.Count
-	}
 	parts := make([]string, 0, n)
 	for i := range n {
-		pct := 0
-		if total > 0 {
-			pct = (labels[i].Count * 100) / total
-		}
-		parts = append(parts, fmt.Sprintf("%s %d%%", labels[i].Label, pct))
+		// Each label gets its semantic color (from labelStyle in render_summary.go)
+		// so the dot + name pair matches the summary panel's top-line styling.
+		dot := labelStyle(labels[i].Label, styles).Render("●")
+		parts = append(parts, dot+" "+labels[i].Label)
 	}
 	return strings.Join(parts, "  ")
 }

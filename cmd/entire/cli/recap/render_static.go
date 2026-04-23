@@ -35,7 +35,8 @@ func RenderStatic(view View, styles Styles, width int) string {
 	// Panel 3: Agents (default) or Sessions (fallback when view has no AgentCards).
 	if len(view.AgentCards) > 0 {
 		innerWidth := width - 4 // 2 border chars + 1 padding char each side
-		b.WriteString(renderPanel("Agents", renderAgentsView(view.AgentCards, view.Mode, innerWidth, styles), width, styles))
+		agentsTitle := "Agents · " + rangeTag(view.Range)
+		b.WriteString(renderPanel(agentsTitle, renderAgentsView(view.AgentCards, view.Mode, innerWidth, styles), width, styles))
 	} else {
 		b.WriteString(renderPanel("Sessions", renderSessionList(view.Sessions, styles), width, styles))
 	}
