@@ -60,48 +60,135 @@ func TestBuildAgentCards_GroupsByAgent(t *testing.T) {
 	}
 }
 
-func TestRenderAgentsView_BothModeShowsColumns(t *testing.T) {
+func TestAgentCard_BothView_FullData(t *testing.T) {
 	t.Parallel()
-	cards := []AgentCard{
-		{
-			Agent:           testAgentClaude,
-			MeSessions:      12,
-			MeCheckpoints:   47,
-			MeTokens:        142000,
-			MeLabels:        []LabelCount{{Label: "bug_fix", Count: 5}},
-			ContribSessions: 89,
-			ContribTokens:   1_200_000,
-			ContribCount:    4,
-		},
+	c := AgentCard{
+		Agent:      "Claude Code",
+		MeSessions: 15, MeCheckpoints: 92, MeTokens: 2_900_000,
+		ContribSessions: 2, ContribCheckpoints: 2, ContribTokens: 1_000,
+		MeModels:       []string{"claude-opus-4-7[1m]"},
+		MeRepos:        []RepoInfo{{Repo: "entireio/cli", SessionCount: 15}},
+		ContribLabels:  []LabelCount{{"bug_fix", 1}, {"feature_build", 1}, {"refactor", 1}},
+		ContribSkills:  []string{"code-simplifier", "session-handoff"},
+		ContribToolMix: map[string]int{"fileOps": 61, "search": 18, "shell": 15},
 	}
-	out := renderAgentsView(cards, ViewBoth, NewStyles(false))
-	for _, want := range []string{testAgentClaude, "me", "contributors", "12", "89"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("Both mode missing %q:\n%s", want, out)
+	got := renderAgentCard(c, ViewBoth, 100, NewStyles(false))
+	for _, want := range []string{
+		"Claude Code", "tokens", "sessions", "checkpoints",
+		"2.9M / 1k", "15 / 2", "92 / 2",
+		"team labels", "bug_fix", "feature_build",
+		"team skills", "code-simplifier",
+		"team tool mix", "fileOps 61%",
+		"your models", "claude-opus-4-7[1m]",
+		"your repos", "entireio/cli (15)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("both-view card missing %q; got:\n%s", want, got)
 		}
 	}
 }
 
-func TestRenderAgentsView_MeModeHidesContrib(t *testing.T) {
+func TestAgentCard_TeamView_DropsYourRows(t *testing.T) {
 	t.Parallel()
-	cards := []AgentCard{{
-		Agent: testAgentClaude, MeSessions: 12,
-		ContribSessions: 89,
-	}}
-	out := renderAgentsView(cards, ViewMe, NewStyles(false))
-	if strings.Contains(out, "contributors") {
-		t.Errorf("me mode shouldn't mention contributors:\n%s", out)
+	c := AgentCard{
+		Agent:           "Claude Code",
+		ContribSessions: 2, ContribCheckpoints: 2, ContribTokens: 1_000,
+		ContribLabels:  []LabelCount{{"bug_fix", 1}},
+		ContribSkills:  []string{"code-simplifier"},
+		ContribToolMix: map[string]int{"fileOps": 61, "search": 18},
+		MeModels:       []string{"claude-opus-4-7[1m]"}, // present but must hide
+		MeRepos:        []RepoInfo{{Repo: "entireio/cli", SessionCount: 15}},
 	}
-	if !strings.Contains(out, "12") {
-		t.Errorf("me mode should show my count:\n%s", out)
+	got := renderAgentCard(c, ViewContributors, 100, NewStyles(false))
+	if strings.Contains(got, "your models") || strings.Contains(got, "your repos") {
+		t.Error("team-view should hide your-side blocks")
+	}
+	if strings.Contains(got, "team labels") {
+		t.Error("team-view should omit 'team' prefix (single-side mode)")
+	}
+	if !strings.Contains(got, "bug_fix") {
+		t.Errorf("team-view should show labels; got:\n%s", got)
 	}
 }
 
-func TestRenderAgentsView_EmptyCards(t *testing.T) {
+func TestAgentCard_YouView_DropsTeamRows(t *testing.T) {
 	t.Parallel()
-	out := renderAgentsView(nil, ViewBoth, NewStyles(false))
-	if !strings.Contains(out, "no agents") {
-		t.Errorf("empty cards should show placeholder:\n%s", out)
+	c := AgentCard{
+		Agent:      "Codex",
+		MeSessions: 24, MeTokens: 647_000,
+		MeModels:      []string{"gpt-5.4"},
+		MeRepos:       []RepoInfo{{Repo: "entireio/cli", SessionCount: 24}},
+		ContribLabels: []LabelCount{{"investigation", 1}}, // present but must be hidden
+	}
+	got := renderAgentCard(c, ViewMe, 100, NewStyles(false))
+	if strings.Contains(got, "team labels") {
+		t.Error("you-view should hide team labels")
+	}
+	if strings.Contains(got, "your models") {
+		t.Error("you-view should omit 'your' prefix")
+	}
+	if !strings.Contains(got, "gpt-5.4") {
+		t.Errorf("you-view should show models; got:\n%s", got)
+	}
+}
+
+func TestAgentCard_BothView_DropsZeroRows(t *testing.T) {
+	t.Parallel()
+	c := AgentCard{
+		Agent:      "Codex",
+		MeSessions: 24, MeTokens: 647_000,
+		MeCheckpoints: 0, ContribCheckpoints: 0, // both zero → row drops
+		MeModels: []string{"gpt-5.4"},
+	}
+	got := renderAgentCard(c, ViewBoth, 100, NewStyles(false))
+	if strings.Contains(got, "checkpoints") {
+		t.Errorf("checkpoints row should drop when both zero; got:\n%s", got)
+	}
+	if !strings.Contains(got, "tokens") {
+		t.Error("tokens row should render when you has value")
+	}
+}
+
+func TestRenderAgentsView_PanelHeader_BothView(t *testing.T) {
+	t.Parallel()
+	cards := []AgentCard{{Agent: "Claude Code", MeSessions: 1}}
+	got := renderAgentsView(cards, ViewBoth, 80, NewStyles(false))
+	if !strings.Contains(got, "you") || !strings.Contains(got, "team") {
+		t.Errorf("both-view panel should have you/team legend; got:\n%s", got)
+	}
+}
+
+func TestRenderAgentsView_PanelHeader_SingleView_NoLegend(t *testing.T) {
+	t.Parallel()
+	cards := []AgentCard{{Agent: "Claude Code", MeSessions: 1}}
+	got := renderAgentsView(cards, ViewMe, 80, NewStyles(false))
+	// Legend only appears in both view.
+	if strings.Contains(got, "███") && strings.Contains(got, "▒") {
+		t.Errorf("single-view panel should not have legend; got:\n%s", got)
+	}
+}
+
+func TestRenderAgentsView_SortByCombinedSessions_AlphabeticalTieBreak(t *testing.T) {
+	t.Parallel()
+	// Two agents tied on combined sessions — alphabetical tie-break means
+	// "Aardvark" comes before "Zebra".
+	cards := []AgentCard{
+		{Agent: "Zebra", MeSessions: 5, ContribSessions: 0},
+		{Agent: "Aardvark", MeSessions: 3, ContribSessions: 2},
+	}
+	got := renderAgentsView(cards, ViewBoth, 80, NewStyles(false))
+	aIdx := strings.Index(got, "Aardvark")
+	zIdx := strings.Index(got, "Zebra")
+	if aIdx < 0 || zIdx < 0 || aIdx >= zIdx {
+		t.Errorf("tie-break failed: Aardvark should come before Zebra; got\n%s", got)
+	}
+}
+
+func TestRenderAgentsView_EmptyShowsPlaceholder(t *testing.T) {
+	t.Parallel()
+	got := renderAgentsView(nil, ViewBoth, 80, NewStyles(false))
+	if !strings.Contains(got, "no agent activity") {
+		t.Errorf("empty panel should show placeholder; got:\n%s", got)
 	}
 }
 

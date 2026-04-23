@@ -5,8 +5,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/charmbracelet/lipgloss"
 )
 
 // LabelCount pairs a label with its occurrence count — used for ordered
@@ -31,6 +29,7 @@ type AgentCard struct {
 	MeSkills      []string
 	MeModels      []string
 	MeRepos       []RepoLine
+	MeToolMix     map[string]int
 
 	// "contributors" column — from repo-overview endpoints
 	// Empty when not logged in / repo not tracked / solo repo.
@@ -41,7 +40,12 @@ type AgentCard struct {
 	ContribSkills      []string
 	ContribModels      []string
 	ContribCount       int // distinct contributors including you
+	ContribToolMix     map[string]int
 }
+
+// RepoInfo is an alias for RepoLine used in test code and public APIs.
+// Both types represent a repo with a session count.
+type RepoInfo = RepoLine
 
 // buildAgentCards turns a list of filtered sessions into per-agent cards for
 // the "me" side. Contributor fields are left zero — the server-overview
@@ -126,127 +130,264 @@ const (
 	ViewBoth         ViewMode = "both"
 )
 
-// renderAgentsView draws the Agents view: one AgentCard panel per agent.
-// When mode is "me" only, the contributors column is suppressed; "contributors"
-// hides the me column; "both" shows side-by-side.
-func renderAgentsView(cards []AgentCard, mode ViewMode, styles Styles) string {
+// renderAgentsView composes the Agents panel body: optional legend row
+// + sorted agent cards separated by blank lines.
+// innerWidth is threaded from RenderStatic so narrow terminals cascade
+// down to the bar-rendering level. The caller computes it as
+// `terminalWidth - 4` (2 chars border + 1 char padding each side).
+func renderAgentsView(cards []AgentCard, mode ViewMode, innerWidth int, styles Styles) string {
 	if len(cards) == 0 {
-		return styles.muted.Render("(no agents in range)")
+		return styles.muted.Render("(no agent activity in range)")
 	}
-	var blocks []string
-	for _, c := range cards {
-		blocks = append(blocks, renderAgentCard(c, mode, styles))
+
+	sorted := append([]AgentCard(nil), cards...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		iSum := sorted[i].MeSessions + sorted[i].ContribSessions
+		jSum := sorted[j].MeSessions + sorted[j].ContribSessions
+		if iSum != jSum {
+			return iSum > jSum
+		}
+		return sorted[i].Agent < sorted[j].Agent
+	})
+
+	var parts []string
+	if mode == ViewBoth {
+		parts = append(parts, fmt.Sprintf("%s   %s",
+			styles.accent.Render("you ███"),
+			styles.team.Render("team ▒")))
 	}
-	return strings.Join(blocks, "\n\n")
+	for _, c := range sorted {
+		parts = append(parts, renderAgentCard(c, mode, innerWidth, styles))
+	}
+	return strings.Join(parts, "\n\n")
 }
 
-func renderAgentCard(c AgentCard, mode ViewMode, styles Styles) string {
+// renderAgentCard renders a single agent block. Field groups render in
+// fixed order: comparison bars → team qualitative → your qualitative.
+// Rows where both sides are zero are dropped. Blocks are skipped when
+// the view mode or data makes them irrelevant.
+func renderAgentCard(c AgentCard, mode ViewMode, innerWidth int, styles Styles) string {
 	var b strings.Builder
-	b.WriteString(styles.title.Render(c.Agent))
+	b.WriteString(styles.accent.Render(c.Agent))
 	b.WriteString("\n")
 
-	showMe := mode == ViewMe || mode == ViewBoth
-	showContrib := mode == ViewContributors || mode == ViewBoth
-
-	// Column headers.
-	switch mode {
-	case ViewBoth:
-		fmt.Fprintf(&b, "  %-24s %-14s %-14s\n",
-			"", styles.label.Render("me"), styles.label.Render("contributors"))
-	case ViewMe:
-		fmt.Fprintf(&b, "  %-24s %-14s\n", "", styles.label.Render("me"))
-	case ViewContributors:
-		fmt.Fprintf(&b, "  %-24s %-14s\n", "", styles.label.Render("contributors"))
+	bars := renderBarRows(c, mode, innerWidth, styles)
+	if bars != "" {
+		b.WriteString(bars)
 	}
 
-	// Numeric rows.
-	row := func(label, meVal, contribVal string) string {
-		switch mode {
-		case ViewBoth:
-			return fmt.Sprintf("  %-24s %s %s\n",
-				styles.muted.Render(label),
-				padValue(meVal, styles.value),
-				padValue(contribVal, styles.value))
-		case ViewMe:
-			return fmt.Sprintf("  %-24s %s\n",
-				styles.muted.Render(label),
-				padValue(meVal, styles.value))
-		case ViewContributors:
-			return fmt.Sprintf("  %-24s %s\n",
-				styles.muted.Render(label),
-				padValue(contribVal, styles.value))
+	if teamBlock := renderTeamBlock(c, mode, styles); teamBlock != "" {
+		b.WriteString("\n")
+		b.WriteString(teamBlock)
+	}
+	if yourBlock := renderYourBlock(c, mode, styles); yourBlock != "" {
+		b.WriteString("\n")
+		b.WriteString(yourBlock)
+	}
+	return b.String()
+}
+
+// renderBarRows emits up to 3 bar rows (tokens, sessions, checkpoints).
+// Drops rows where both sides are zero.
+func renderBarRows(c AgentCard, mode ViewMode, innerWidth int, styles Styles) string {
+	rows := []struct {
+		label string
+		you   int
+		team  int
+	}{
+		{"tokens", c.MeTokens, c.ContribTokens},
+		{"sessions", c.MeSessions, c.ContribSessions},
+		{"checkpoints", c.MeCheckpoints, c.ContribCheckpoints},
+	}
+	barWidth := innerWidth - 12 /*label*/ - 14 /*readout*/ - 4 /*padding*/
+	var lines []string
+	for _, r := range rows {
+		if r.you == 0 && r.team == 0 {
+			continue
 		}
+		bar := renderComparisonBar(singleSide(mode, r.you, r.team, true),
+			singleSide(mode, r.you, r.team, false), barWidth, styles)
+		readout := formatBarReadout(r.you, r.team, r.label, mode)
+		lines = append(lines, fmt.Sprintf("  %-12s %s  %s", r.label, bar, readout))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// singleSide returns the you or team value, respecting view mode. In
+// ViewMe we return 0 for the team slot so the bar renders amber-only;
+// in ViewContributors we flip. In ViewBoth both sides pass through.
+func singleSide(mode ViewMode, you, team int, isYou bool) int {
+	switch mode {
+	case ViewMe:
+		if isYou {
+			return you
+		}
+		return 0
+	case ViewContributors:
+		if isYou {
+			return 0
+		}
+		return team
+	case ViewBoth:
+		if isYou {
+			return you
+		}
+		return team
+	}
+	if isYou {
+		return you
+	}
+	return team
+}
+
+// formatBarReadout produces the right-side numeric text. In both mode
+// it's "<you> / <team>"; in single-side views it's just one value.
+func formatBarReadout(you, team int, metric string, mode ViewMode) string {
+	fmtVal := func(v int) string {
+		if metric == "tokens" {
+			return formatTokens(v)
+		}
+		return strconv.Itoa(v)
+	}
+	switch mode {
+	case ViewMe:
+		return fmtVal(you)
+	case ViewContributors:
+		return fmtVal(team)
+	case ViewBoth:
+		return fmt.Sprintf("%s / %s", fmtVal(you), fmtVal(team))
+	}
+	return fmt.Sprintf("%s / %s", fmtVal(you), fmtVal(team))
+}
+
+// renderTeamBlock renders the three team-qualitative rows. Skipped in
+// ViewMe or when no data. Prefix "team " only appears in ViewBoth.
+func renderTeamBlock(c AgentCard, mode ViewMode, styles Styles) string {
+	if mode == ViewMe {
 		return ""
 	}
-
-	meN := func(n int) string {
-		if !showMe {
-			return ""
-		}
-		return strconv.Itoa(n)
+	if len(c.ContribLabels) == 0 && len(c.ContribSkills) == 0 && len(c.ContribToolMix) == 0 {
+		return ""
 	}
-	contribN := func(n int) string {
-		if !showContrib {
-			return ""
+	var lines []string
+	lbl := func(name string) string {
+		if mode == ViewBoth {
+			return "  " + styles.team.Render("team "+name)
 		}
-		if n == 0 {
-			return styles.muted.Render("—")
-		}
-		return strconv.Itoa(n)
+		return "  " + styles.label.Render(name)
 	}
-
-	b.WriteString(row("Sessions", meN(c.MeSessions), contribN(c.ContribSessions)))
-	b.WriteString(row("Checkpoints", meN(c.MeCheckpoints), contribN(c.ContribCheckpoints)))
-	b.WriteString(row("Tokens", tokensIfAny(c.MeTokens, showMe), tokensIfAny(c.ContribTokens, showContrib)))
-	if mode == ViewBoth || mode == ViewContributors {
-		contribCount := "—"
-		if c.ContribCount > 0 {
-			contribCount = strconv.Itoa(c.ContribCount)
-		}
-		b.WriteString(row("Distinct contributors", "", styles.muted.Render(contribCount)))
+	if len(c.ContribLabels) > 0 {
+		lines = append(lines, lbl("labels")+"    "+formatLabelList(c.ContribLabels, styles))
 	}
-
-	// Labels: show sorted top-3, compact bars for me; contributors renders the
-	// server-provided sorted list when available.
-	if showMe || showContrib {
-		b.WriteString("\n")
-		b.WriteString(styles.muted.Render("  Top labels") + "\n")
-		meLabels := topLabelsInline(c.MeLabels, styles)
-		contribLabels := topLabelsInline(c.ContribLabels, styles)
-		switch mode {
-		case ViewBoth:
-			fmt.Fprintf(&b, "    %-30s   %-30s\n", meLabels, contribLabels)
-		case ViewMe:
-			b.WriteString("    " + meLabels + "\n")
-		case ViewContributors:
-			b.WriteString("    " + contribLabels + "\n")
-		}
+	if len(c.ContribSkills) > 0 {
+		lines = append(lines, lbl("skills")+"    "+formatList(c.ContribSkills, styles.info))
 	}
-
-	if showMe && (len(c.MeSkills) > 0 || len(c.MeModels) > 0 || len(c.MeRepos) > 0) {
-		b.WriteString("\n")
-		if len(c.MeSkills) > 0 {
-			fmt.Fprintf(&b, "  %s %s\n",
-				styles.muted.Render("Top skills"),
-				styles.info.Render(strings.Join(c.MeSkills, ", ")))
-		}
-		if len(c.MeModels) > 0 {
-			fmt.Fprintf(&b, "  %s %s\n",
-				styles.muted.Render("Top models"),
-				styles.value.Render(strings.Join(c.MeModels, ", ")))
-		}
-		if len(c.MeRepos) > 0 {
-			var repoLines []string
-			for _, r := range c.MeRepos {
-				repoLines = append(repoLines, fmt.Sprintf("%s (%d)", r.Repo, r.SessionCount))
-			}
-			fmt.Fprintf(&b, "  %s %s\n",
-				styles.muted.Render("Top repos "),
-				strings.Join(repoLines, ", "))
-		}
+	if len(c.ContribToolMix) > 0 {
+		lines = append(lines, lbl("tool mix")+"  "+formatToolMix(c.ContribToolMix))
 	}
+	return strings.Join(lines, "\n")
+}
 
-	return b.String()
+// renderYourBlock renders the two your-qualitative rows. Skipped in
+// ViewContributors or when no data.
+func renderYourBlock(c AgentCard, mode ViewMode, styles Styles) string {
+	if mode == ViewContributors {
+		return ""
+	}
+	if len(c.MeModels) == 0 && len(c.MeRepos) == 0 {
+		return ""
+	}
+	var lines []string
+	lbl := func(name string) string {
+		if mode == ViewBoth {
+			return "  " + styles.accent.Render("your "+name)
+		}
+		return "  " + styles.label.Render(name)
+	}
+	if len(c.MeModels) > 0 {
+		lines = append(lines, lbl("models")+"    "+formatList(c.MeModels, styles.value))
+	}
+	if len(c.MeRepos) > 0 {
+		lines = append(lines, lbl("repos")+"     "+formatRepoList(c.MeRepos))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// format helpers ------------------------------------------------------------
+
+// formatLabelList renders top-3 labels with percentage breakdowns.
+func formatLabelList(labels []LabelCount, styles Styles) string {
+	if len(labels) == 0 {
+		return styles.muted.Render("—")
+	}
+	n := len(labels)
+	if n > 3 {
+		n = 3
+	}
+	total := 0
+	for _, l := range labels {
+		total += l.Count
+	}
+	parts := make([]string, 0, n)
+	for i := range n {
+		pct := 0
+		if total > 0 {
+			pct = (labels[i].Count * 100) / total
+		}
+		parts = append(parts, fmt.Sprintf("%s %d%%", labels[i].Label, pct))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// formatList renders a slice of strings joined with commas using the given style.
+func formatList(items []string, style interface{ Render(s ...string) string }) string {
+	if len(items) == 0 {
+		return ""
+	}
+	return style.Render(strings.Join(items, ", "))
+}
+
+// formatToolMix renders a tool-mix map as "key pct%  key pct%" sorted by value desc.
+// Values are treated as percentages directly (e.g. fileOps:61 → "fileOps 61%").
+func formatToolMix(mix map[string]int) string {
+	if len(mix) == 0 {
+		return ""
+	}
+	type kv struct {
+		k string
+		v int
+	}
+	all := make([]kv, 0, len(mix))
+	for k, v := range mix {
+		all = append(all, kv{k, v})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].v != all[j].v {
+			return all[i].v > all[j].v
+		}
+		return all[i].k < all[j].k
+	})
+	n := len(all)
+	if n > 3 {
+		n = 3
+	}
+	parts := make([]string, 0, n)
+	for i := range n {
+		parts = append(parts, fmt.Sprintf("%s %d%%", all[i].k, all[i].v))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// formatRepoList renders a list of RepoLine entries as "repo (count), ..." .
+func formatRepoList(repos []RepoLine) string {
+	if len(repos) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(repos))
+	for _, r := range repos {
+		parts = append(parts, fmt.Sprintf("%s (%d)", r.Repo, r.SessionCount))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // helpers --------------------------------------------------------------------
@@ -305,48 +446,4 @@ func reposSorted(m map[string]int) []RepoLine {
 		out = out[:3]
 	}
 	return out
-}
-
-func topLabelsInline(labels []LabelCount, styles Styles) string {
-	if len(labels) == 0 {
-		return styles.muted.Render("—")
-	}
-	n := len(labels)
-	if n > 3 {
-		n = 3
-	}
-	total := 0
-	for _, l := range labels {
-		total += l.Count
-	}
-	parts := make([]string, 0, n)
-	for i := range n {
-		pct := 0
-		if total > 0 {
-			pct = (labels[i].Count * 100) / total
-		}
-		parts = append(parts, fmt.Sprintf("%s %d%%", styles.accent.Render(labels[i].Label), pct))
-	}
-	return strings.Join(parts, "  ")
-}
-
-func tokensIfAny(n int, show bool) string {
-	if !show {
-		return ""
-	}
-	if n == 0 {
-		return "—"
-	}
-	return formatTokens(n)
-}
-
-const cardValueWidth = 14
-
-// padValue renders a styled value padded to cardValueWidth. Uses a plain
-// left-pad since our values are ASCII-safe (digits + token suffixes).
-func padValue(s string, style lipgloss.Style) string {
-	if len(s) < cardValueWidth {
-		s += strings.Repeat(" ", cardValueWidth-len(s))
-	}
-	return style.Render(s)
 }
