@@ -39,10 +39,6 @@ func RenderStatic(view View, styles Styles, width int) string {
 	} else {
 		b.WriteString(renderPanel("Sessions", renderSessionList(view.Sessions, styles), width, styles))
 	}
-	b.WriteString("\n\n")
-
-	// Panel 4: Repos · Worktrees · Labels (3-column bottom panel).
-	b.WriteString(renderBottomPanel(view, styles))
 
 	return b.String()
 }
@@ -81,60 +77,6 @@ func renderSessionList(rows []SessionRow, styles Styles) string {
 		}
 	}
 	return b.String()
-}
-
-func renderBottomPanel(view View, styles Styles) string {
-	// 3 columns: Repos (optional), Worktrees, Labels.
-	// Simple left-aligned columns; width split handled by caller's terminal.
-	var cols []string
-
-	if len(view.Repos) > 0 {
-		var rb strings.Builder
-		rb.WriteString(styles.label.Render("Repos") + "\n")
-		for _, r := range view.Repos {
-			fmt.Fprintf(&rb, "%-20s %d sess\n", r.Repo, r.SessionCount)
-		}
-		cols = append(cols, strings.TrimRight(rb.String(), "\n"))
-	}
-
-	if len(view.Worktrees) > 0 {
-		var wb strings.Builder
-		wb.WriteString(styles.label.Render("Worktrees") + "\n")
-		for _, w := range view.Worktrees {
-			marker := " "
-			if w.HasUncommitted {
-				marker = styles.warn.Render("⇈")
-			}
-			id := w.WorktreeID
-			if id == "" {
-				id = "(default)"
-			}
-			fmt.Fprintf(&wb, "%-20s %d sess %s\n", id, w.SessionCount, marker)
-		}
-		cols = append(cols, strings.TrimRight(wb.String(), "\n"))
-	}
-
-	if len(view.Labels) > 0 {
-		var lb strings.Builder
-		lb.WriteString(styles.label.Render("Labels") + "\n")
-		// Use max count as scale for gradient bar so the topmost label is full.
-		maxCount := 0
-		for _, l := range view.Labels {
-			if l.Count > maxCount {
-				maxCount = l.Count
-			}
-		}
-		for _, l := range view.Labels {
-			bar := renderGradientBar(l.Count, maxCount, styles)
-			fmt.Fprintf(&lb, "%-16s %s\n", l.Label, bar)
-		}
-		cols = append(cols, strings.TrimRight(lb.String(), "\n"))
-	}
-
-	if len(cols) == 0 {
-		return ""
-	}
-	return strings.Join(cols, "\n\n")
 }
 
 // helpers -------------------------------------------------------------------
