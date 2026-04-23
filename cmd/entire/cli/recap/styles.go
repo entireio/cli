@@ -17,6 +17,7 @@ const (
 	colorInfo      = "6"   // cyan — resume
 	colorNeutral   = "7"   // light gray — default body
 	colorAccentDim = "240" // dim amber for faded accents
+	colorTeam      = "170" // magenta — team/contributors side accent
 )
 
 // Styles holds pre-built lipgloss styles by semantic role. Declaring
@@ -39,6 +40,7 @@ type Styles struct {
 	muted  lipgloss.Style
 	help   lipgloss.Style
 	key    lipgloss.Style
+	team   lipgloss.Style
 
 	// hintResume/Commit/Push/Clean map the ActionHint values to styles so
 	// the session list renders consistent colors without a switch at each
@@ -72,6 +74,7 @@ func NewStyles(useColor bool) Styles {
 		muted:      lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)),
 		help:       lipgloss.NewStyle().Foreground(lipgloss.Color(colorHelpSep)),
 		key:        lipgloss.NewStyle().Foreground(lipgloss.Color(colorHelpKey)).Bold(true),
+		team:       lipgloss.NewStyle().Foreground(lipgloss.Color(colorTeam)).Bold(true),
 		hintResume: lipgloss.NewStyle().Foreground(lipgloss.Color(colorInfo)),
 		hintCommit: lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)),
 		hintPush:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorAdd)),

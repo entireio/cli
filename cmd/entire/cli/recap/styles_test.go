@@ -30,6 +30,19 @@ func TestNewRecapStyles_ColorPreservesText(t *testing.T) {
 	}
 }
 
+func TestStyles_Team(t *testing.T) {
+	t.Parallel()
+	s := NewStyles(true)
+	out := s.team.Render("team")
+	if !strings.Contains(out, "team") {
+		t.Errorf("team style should render 'team'; got %q", out)
+	}
+	sOff := NewStyles(false)
+	if got := sOff.team.Render("team"); got != "team" {
+		t.Errorf("team style (color off) should be plain text; got %q", got)
+	}
+}
+
 func TestStyleForHint_PreservesTextForEveryHint(t *testing.T) {
 	t.Parallel()
 	s := NewStyles(true)
