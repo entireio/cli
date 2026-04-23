@@ -29,6 +29,7 @@ func RegisterObjectSigner() {
 
 			sysCfg := loadScopedConfig(cfgSource, config.SystemScope)
 			globalCfg := loadScopedConfig(cfgSource, config.GlobalScope)
+			hasCustomSSHProgram := hasCustomSSHSignProgram(sysCfg.Raw) || hasCustomSSHSignProgram(globalCfg.Raw)
 
 			// Merge system then global so that global settings take precedence.
 			merged := config.Merge(sysCfg, globalCfg)
@@ -43,7 +44,7 @@ func RegisterObjectSigner() {
 			// will be unsigned, which is acceptable since signing is best-effort.
 			// The default program is "ssh-keygen", which works with go-git's
 			// native SSH agent signing and does not need to be skipped.
-			if auto.Format(merged.GPG.Format) == auto.FormatSSH && hasCustomSSHSignProgram(merged.Raw) {
+			if auto.Format(merged.GPG.Format) == auto.FormatSSH && hasCustomSSHProgram {
 				logging.Debug(context.Background(), "skipping native SSH commit signing: custom gpg.ssh.program is configured")
 				return nil
 			}
