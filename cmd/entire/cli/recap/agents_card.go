@@ -208,7 +208,11 @@ func renderBarRows(c AgentCard, mode ViewMode, innerWidth int, styles Styles) st
 		bar := renderComparisonBar(singleSide(mode, r.you, r.team, true),
 			singleSide(mode, r.you, r.team, false), barWidth, styles)
 		readout := formatBarReadout(r.you, r.team, r.label, mode)
-		lines = append(lines, fmt.Sprintf("  %-12s %s  %s", r.label, bar, readout))
+		if bar == "" {
+			lines = append(lines, fmt.Sprintf("  %-12s %s", r.label, readout))
+		} else {
+			lines = append(lines, fmt.Sprintf("  %-12s %s  %s", r.label, bar, readout))
+		}
 	}
 	return strings.Join(lines, "\n")
 }

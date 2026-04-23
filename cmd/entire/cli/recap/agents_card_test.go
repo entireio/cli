@@ -204,6 +204,25 @@ func TestCycleMode_Progression(t *testing.T) {
 	}
 }
 
+func TestAgentCard_NarrowWidth_ReadoutOnly(t *testing.T) {
+	t.Parallel()
+	c := AgentCard{
+		Agent:           "Claude Code",
+		MeTokens:        2_900_000,
+		ContribTokens:   1_000,
+		MeSessions:      15,
+		ContribSessions: 2,
+	}
+	// innerWidth=36 → barWidth=36-12-14-4=6, below barMinWidth=12, bar drops
+	narrow := renderAgentCard(c, ViewBoth, 36, NewStyles(false))
+	if strings.Contains(narrow, "█") || strings.Contains(narrow, "▒") {
+		t.Errorf("narrow card should drop bars; got:\n%s", narrow)
+	}
+	if !strings.Contains(narrow, "2.9M / 1k") {
+		t.Errorf("narrow card should still show readout; got:\n%s", narrow)
+	}
+}
+
 // tokenUsageTotal is a tiny test helper: builds a TokenUsage whose
 // Input+Output sum to total so tests can assert token aggregation.
 func tokenUsageTotal(total int) *agent.TokenUsage {
