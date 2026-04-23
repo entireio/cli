@@ -159,6 +159,20 @@ func GitCommit(t *testing.T, repoDir, message string) {
 	}
 }
 
+// GitCommitWithMsg commits staged changes with an arbitrary message (may
+// include body / trailers). GPG signing is disabled so CI without keys
+// does not fail. Use this when GitCommit (subject-only) is too limiting.
+func GitCommitWithMsg(t *testing.T, repoDir, message string) {
+	t.Helper()
+
+	//nolint:noctx // test code, no context needed for git commit
+	cmd := exec.Command("git", "commit", "--no-gpg-sign", "-m", message)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit failed: %v\n%s", err, out)
+	}
+}
+
 // GitCheckoutNewBranch creates and checks out a new branch.
 // Uses git CLI to work around go-git v5 bug with checkout deleting untracked files.
 func GitCheckoutNewBranch(t *testing.T, repoDir, branchName string) {
