@@ -171,11 +171,11 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 	rangeKey := f.rangeKey()
 	now := time.Now()
 
-	// Contributors come from the repo-overview endpoints. Best-effort: a
-	// fetch failure just leaves the contributors columns as "—" rather than
-	// blocking the recap output. We also track *why* contributors might be
-	// empty so we can surface a helpful hint below.
-	contributors, diag := fetchContributorsWithDiag(ctx, worktreeRoot, rangeKey, now)
+	// Contributors come from /api/v1/me/recap. Best-effort: a fetch failure
+	// just leaves the contributors columns as "—" rather than blocking the
+	// recap output. We also track *why* contributors might be empty so we
+	// can surface a helpful hint below.
+	contributors, diag := fetchContributorsWithDiag(ctx, worktreeRoot, rangeKey)
 
 	view := recap.BuildView(act.Sessions, recap.BuildOpts{
 		Range:        rangeKey,
@@ -243,21 +243,16 @@ func terminalWidth(w io.Writer) int {
 	return width
 }
 
-// fetchContributorsWithDiag fetches contributor data and also returns a slice
-// of diagnostic strings for the cases where data is unavailable. Empty
-// diag slice means "data either came through or was intentionally skipped
-// without user-visible cause." Non-empty means we want the renderer to
-// surface a hint so users understand why the contributors column is empty.
-//
-// Tries /api/v1/me/recap first (new server-side aggregation, one call).
-// Falls back to the old per-endpoint fetch stack when the new endpoint
-// isn't deployed yet (404) or fails, so this keeps working against older
-// server deployments.
+// fetchContributorsWithDiag fetches contributor data via /api/v1/me/recap and
+// also returns a slice of diagnostic strings for the cases where data is
+// unavailable. Empty diag slice means "data either came through or was
+// intentionally skipped without user-visible cause." Non-empty means we want
+// the renderer to surface a hint so users understand why the contributors
+// column is empty.
 func fetchContributorsWithDiag(
 	ctx context.Context,
 	worktreeRoot string,
 	rangeKey recap.RangeKey,
-	now time.Time,
 ) (*recap.ContributorsData, []string) {
 	var diag []string
 	repo := recap.ResolveRepoFromWorktree(ctx, worktreeRoot)
@@ -272,28 +267,13 @@ func fetchContributorsWithDiag(
 	}
 	client := api.NewClient(token)
 
-	// Prefer the consolidated /me/recap endpoint. When it 200s we skip the
-	// older three-endpoint fetch path entirely.
-	if resp, err := recap.FetchMeRecap(ctx, client, recap.TimeframeForRange(rangeKey), repo, 500); err == nil && resp != nil && len(resp.Agents) > 0 {
-		data := recap.ContributorsFromMeRecap(resp)
-		if data != nil && len(data.ByAgent) > 0 {
-			return data, nil
-		}
-		diag = append(diag, "No contributor activity for "+repo+" in this range — try a longer window (--week, --90).")
-		return nil, diag
-	} else if err != nil {
-		logging.Debug(ctx, "recap: /me/recap failed; falling back", "repo", repo, "error", err.Error())
-	}
-
-	// Fallback: old per-endpoint fetch stack. Kept so the CLI still works
-	// against server deployments that don't have /me/recap yet.
-	start, end := rangeKey.Bounds(now)
-	data, err := recap.FetchContributors(ctx, client, repo, start, end)
+	resp, err := recap.FetchMeRecap(ctx, client, recap.TimeframeForRange(rangeKey), repo, 500)
 	if err != nil {
-		logging.Debug(ctx, "recap: fetch contributors failed", "repo", repo, "error", err.Error())
+		logging.Debug(ctx, "recap: /me/recap failed", "repo", repo, "error", err.Error())
 		diag = append(diag, "Could not fetch contributor data for "+repo+" — repo may not be tracked in entire.io yet.")
 		return nil, diag
 	}
+	data := recap.ContributorsFromMeRecap(resp)
 	if data == nil || len(data.ByAgent) == 0 {
 		diag = append(diag, "No contributor activity for "+repo+" in this range — try a longer window (--week, --90).")
 		return nil, diag
