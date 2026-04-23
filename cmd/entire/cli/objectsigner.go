@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/go-git/go-git/v6"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/go-git/go-git/v6/config"
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
@@ -29,10 +30,13 @@ func RegisterObjectSigner() {
 
 			sysCfg := loadScopedConfig(cfgSource, config.SystemScope)
 			globalCfg := loadScopedConfig(cfgSource, config.GlobalScope)
-			hasCustomSSHProgram := hasCustomSSHSignProgram(sysCfg.Raw) || hasCustomSSHSignProgram(globalCfg.Raw)
+			localCfg := loadLocalConfig()
+			hasCustomSSHProgram := hasCustomSSHSignProgram(sysCfg.Raw) ||
+				hasCustomSSHSignProgram(globalCfg.Raw) ||
+				hasCustomSSHSignProgram(localCfg.Raw)
 
-			// Merge system then global so that global settings take precedence.
-			merged := config.Merge(sysCfg, globalCfg)
+			// Merge system, global, then local so local settings take precedence.
+			merged := config.Merge(sysCfg, globalCfg, localCfg)
 
 			if !merged.Commit.GpgSign.IsTrue() {
 				return nil
@@ -116,6 +120,21 @@ func loadScopedConfig(source plugin.ConfigSource, scope config.Scope) *config.Co
 	cfg, err := storer.Config()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to parse %s git config: %v\n", name, err)
+		return config.NewConfig()
+	}
+
+	return cfg
+}
+
+func loadLocalConfig() *config.Config {
+	repo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
+	if err != nil {
+		return config.NewConfig()
+	}
+
+	cfg, err := repo.Storer.Config()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to parse local git config: %v\n", err)
 		return config.NewConfig()
 	}
 
