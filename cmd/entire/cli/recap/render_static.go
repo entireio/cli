@@ -46,32 +46,6 @@ func RenderStatic(view View, styles Styles, width int) string {
 	return b.String()
 }
 
-func renderActivityStrip(view View, styles Styles) string {
-	if len(view.Activity) == 0 {
-		return styles.muted.Render("  (no activity in range)")
-	}
-	var header string
-	switch view.Range {
-	case RangeDay:
-		header = "Activity (24h)"
-	case RangeWeek:
-		header = "Activity (7d)"
-	case RangeMonth:
-		header = "Activity (this month)"
-	case Range90d:
-		header = "Activity (90d)"
-	default:
-		header = "Activity"
-	}
-
-	if view.Range == RangeDay && len(view.Activity) == 24 {
-		var events [24]int
-		copy(events[:], view.Activity)
-		return styles.label.Render(header) + "\n" + renderIntraDayStrip(events, styles)
-	}
-	return styles.label.Render(header) + "\n" + renderHeatmapStrip(view.Activity, maxOf(view.Activity), styles)
-}
-
 func renderSessionList(rows []SessionRow, styles Styles) string {
 	if len(rows) == 0 {
 		return styles.muted.Render("(no sessions in range)")
@@ -163,16 +137,6 @@ func renderBottomPanel(view View, styles Styles) string {
 }
 
 // helpers -------------------------------------------------------------------
-
-func maxOf(xs []int) int {
-	m := 0
-	for _, v := range xs {
-		if v > m {
-			m = v
-		}
-	}
-	return m
-}
 
 // formatTokens renders a token count compactly: 142000 → "142k", 1500000 → "1.5M".
 func formatTokens(n int) string {
