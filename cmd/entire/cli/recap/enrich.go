@@ -55,6 +55,15 @@ func (e *Enricher) EnrichCheckpoint(ctx context.Context, cp RecapCheckpoint) (Re
 			"checkpoint", cpID, "error", err.Error())
 		return cp, nil // non-fatal
 	}
+	// Only "complete" responses carry usable analysis fields. Pending /
+	// generating / failed / not_available responses have zero-valued labels
+	// + toolProfile and would poison the cache (and the render) with
+	// blank rows. Skip merge and skip Put until the server has real data.
+	if !resp.IsComplete() {
+		logging.Debug(ctx, "recap: analysis not complete",
+			"checkpoint", cpID, "status", resp.Status)
+		return cp, nil
+	}
 	if e.cache != nil {
 		if putErr := e.cache.Put(cpID, resp); putErr != nil {
 			logging.Debug(ctx, "recap: cache put failed",
@@ -75,7 +84,11 @@ func (e *Enricher) fetch(ctx context.Context, repo, checkpointID string) (*Check
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return nil, fmt.Errorf("enrich: invalid repo %q (want \"org/name\")", repo)
 	}
-	path := fmt.Sprintf("/%s/%s/checkpoints/%s/analysis",
+	// Route mounted server-side at /api/v1/cache/:org/:repo/checkpoints/:id/analysis
+	// (api/src/routes/cache.ts:4585 under repoRoutes, repoRoutes under
+	// cacheRoutes, cacheRoutes under /api/v1/cache). Missing this prefix
+	// yielded 404s that silently disabled label enrichment.
+	path := fmt.Sprintf("/api/v1/cache/%s/%s/checkpoints/%s/analysis",
 		url.PathEscape(parts[0]),
 		url.PathEscape(parts[1]),
 		url.PathEscape(checkpointID))
@@ -116,6 +129,15 @@ func merge(cp RecapCheckpoint, resp *CheckpointAnalysisResponse) RecapCheckpoint
 			tp.Categories[k] = v
 		}
 		out.ToolProfile = &tp
+	}
+	if len(resp.SkillsUsed) > 0 {
+		out.SkillsUsed = append([]string(nil), resp.SkillsUsed...)
+	}
+	if len(resp.MCPServersUsed) > 0 {
+		out.MCPServers = make([]string, 0, len(resp.MCPServersUsed))
+		for _, m := range resp.MCPServersUsed {
+			out.MCPServers = append(out.MCPServers, m.Name)
+		}
 	}
 	out.Source = SourceMixed
 	return out

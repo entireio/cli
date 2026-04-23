@@ -128,7 +128,7 @@ func TestAggregateByWorktree_SkipsSessionsWithoutWorktree(t *testing.T) {
 
 func TestResolveRepoFromWorktree_EmptyPathReturnsUnknown(t *testing.T) {
 	t.Parallel()
-	if got := ResolveRepoFromWorktree(context.Background(), ""); got != "unknown" {
+	if got := ResolveRepoFromWorktree(context.Background(), ""); got != repoUnknown {
 		t.Errorf("empty path → %q, want unknown", got)
 	}
 }
@@ -137,7 +137,7 @@ func TestResolveRepoFromWorktree_NoRemoteReturnsUnknown(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	initRepo(t, dir) // git init, no remote
-	if got := ResolveRepoFromWorktree(context.Background(), dir); got != "unknown" {
+	if got := ResolveRepoFromWorktree(context.Background(), dir); got != repoUnknown {
 		t.Errorf("no-remote repo → %q, want unknown", got)
 	}
 }

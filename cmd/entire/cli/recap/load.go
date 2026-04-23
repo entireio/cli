@@ -143,6 +143,12 @@ func LoadRecap(ctx context.Context, opts LoadOpts) (*Recap, error) {
 		}
 	}
 
+	// Stamp the "<org>/<name>" slug on every session + checkpoint before
+	// enrichment so the enricher has a repo to hit. Without this, cp.Repo
+	// is empty and EnrichCheckpoint short-circuits with "enrich: empty repo"
+	// for every checkpoint — which silently disables all label loading.
+	stampRepos(ctx, out.Sessions)
+
 	if opts.EnrichFromAPI && opts.Scope != ScopeLocal {
 		enricher := buildEnricher(ctx, opts)
 		if enricher != nil {
@@ -150,6 +156,33 @@ func LoadRecap(ctx context.Context, opts LoadOpts) (*Recap, error) {
 		}
 	}
 	return out, nil
+}
+
+// stampRepos resolves the "<owner>/<name>" slug for each session's worktree
+// via git remote, then copies it onto the session and each of its committed
+// checkpoints. Cached per worktree path so we only shell out once per
+// distinct worktree. Unknown repos leave the field empty (enrichment skips
+// those checkpoints, which is the right behavior).
+func stampRepos(ctx context.Context, sessions []RecapSession) {
+	cache := map[string]string{}
+	for si := range sessions {
+		wt := sessions[si].WorktreePath
+		slug, ok := cache[wt]
+		if !ok {
+			slug = ResolveRepoFromWorktree(ctx, wt)
+			if slug == "unknown" {
+				slug = ""
+			}
+			cache[wt] = slug
+		}
+		if slug == "" {
+			continue
+		}
+		sessions[si].Repo = slug
+		for ci := range sessions[si].Checkpoints {
+			sessions[si].Checkpoints[ci].Repo = slug
+		}
+	}
 }
 
 // defaultTokenProvider reads from the OS keyring via auth.LookupCurrentToken.
@@ -319,5 +352,9 @@ func projectCheckpoint(info strategy.CheckpointInfo, sid string) RecapCheckpoint
 		CreatedAt:    info.CreatedAt,
 		FilesTouched: append([]string(nil), info.FilesTouched...),
 		Source:       SourceLocal,
+		// TokenUsage intentionally omitted: strategy.CheckpointInfo does not
+		// carry per-checkpoint token totals. Per-agent token attribution in
+		// the Agents view uses RecapSession.TokenUsage (session-scoped) in
+		// buildAgentCards — see agents_card.go.
 	}
 }

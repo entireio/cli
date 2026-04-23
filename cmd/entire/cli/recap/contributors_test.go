@@ -20,7 +20,7 @@ func TestMergeContributors_PopulatesFromAgentActivity(t *testing.T) {
 			{Date: "2026-04-21", Agent: "codex", Count: 2, Tokens: 30000},
 		},
 	}
-	data := mergeContributors("org/repo", act, nil, nil)
+	data := mergeContributors("org/repo", act, nil, nil, nil)
 	if c := data.ByAgent["claude-code"]; c == nil || c.TotalCount != 8 || c.Tokens != 150000 {
 		t.Errorf("claude-code: %+v, want count=8 tokens=150000", c)
 	}
@@ -44,7 +44,7 @@ func TestMergeContributors_CountsDistinctFromContributorAgents(t *testing.T) {
 			{Agents: map[string]int{"codex": 0, "claude-code": 1}}, // codex 0 excluded
 		},
 	}
-	data := mergeContributors("org/repo", nil, agents, nil)
+	data := mergeContributors("org/repo", nil, agents, nil, nil)
 	if c := data.ByAgent["claude-code"]; c == nil || c.DistinctContribs != 3 {
 		t.Errorf("claude-code distinct: %+v, want 3", c)
 	}
@@ -55,7 +55,7 @@ func TestMergeContributors_CountsDistinctFromContributorAgents(t *testing.T) {
 
 func TestMergeContributors_EmptyInputs(t *testing.T) {
 	t.Parallel()
-	data := mergeContributors("org/repo", nil, nil, nil)
+	data := mergeContributors("org/repo", nil, nil, nil, nil)
 	if data == nil {
 		t.Fatal("expected non-nil data even with all-nil inputs")
 	}

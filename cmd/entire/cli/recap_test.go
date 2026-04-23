@@ -13,7 +13,7 @@ func TestRecapFlags_RangeKey(t *testing.T) {
 		flags recapFlags
 		want  recap.RangeKey
 	}{
-		{"default_week", recapFlags{}, recap.RangeWeek},
+		{"default_day", recapFlags{}, recap.RangeDay},
 		{"day", recapFlags{day: true}, recap.RangeDay},
 		{"week", recapFlags{week: true}, recap.RangeWeek},
 		{"month", recapFlags{month: true}, recap.RangeMonth},

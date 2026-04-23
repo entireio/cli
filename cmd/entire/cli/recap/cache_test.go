@@ -43,7 +43,7 @@ func TestCache_InvalidatesOnPipelineVersionChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := &CheckpointAnalysisResponse{PipelineVersion: "2026-04-01.v1"}
+	old := &CheckpointAnalysisResponse{PipelineVersion: "2026-04-01.v1", TotalSteps: 1}
 	if err := c.Put("aa11bb22cc33", old); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestCache_CreatesDirLazily(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Put("xx", &CheckpointAnalysisResponse{PipelineVersion: "v"}); err != nil {
+	if err := c.Put("xx", &CheckpointAnalysisResponse{PipelineVersion: "v", TotalSteps: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(cacheDir); err != nil {
@@ -90,7 +90,7 @@ func TestCache_RejectsPathTraversalKeys(t *testing.T) {
 	}
 	bad := []string{"../escape", "a/b", "", "with space", "a\x00b"}
 	for _, k := range bad {
-		if err := c.Put(k, &CheckpointAnalysisResponse{PipelineVersion: "v"}); err == nil {
+		if err := c.Put(k, &CheckpointAnalysisResponse{PipelineVersion: "v", TotalSteps: 1}); err == nil {
 			t.Errorf("Put(%q) should have errored", k)
 		}
 		if _, ok := c.Get(k); ok {
@@ -106,7 +106,7 @@ func TestCache_AtomicWriteLeavesNoPartialFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp := &CheckpointAnalysisResponse{PipelineVersion: "v"}
+	resp := &CheckpointAnalysisResponse{PipelineVersion: "v", TotalSteps: 1}
 	if err := c.Put("aa11bb22cc33", resp); err != nil {
 		t.Fatal(err)
 	}

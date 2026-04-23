@@ -81,6 +81,10 @@ type View struct {
 	Repos      []RepoLine // nil when all sessions share one repo
 	Worktrees  []WorktreeRollup
 	Labels     []LabelLine
+	// Notes are diagnostic hints rendered at the bottom of the view — things
+	// like "not logged in" or "repo not tracked" that explain why a column
+	// might be empty. Plain strings; the renderer styles them.
+	Notes []string
 }
 
 // SummaryBand holds the headline facts at the top of every view.

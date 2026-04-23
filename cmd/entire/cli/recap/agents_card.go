@@ -12,8 +12,8 @@ import (
 // LabelCount pairs a label with its occurrence count — used for ordered
 // distribution rendering in the Labels column + Agents cards.
 type LabelCount struct {
-	Label string
-	Count int
+	Label string `json:"label"`
+	Count int    `json:"count"`
 }
 
 // AgentCard is the per-agent panel data used by the Agents view. Fields

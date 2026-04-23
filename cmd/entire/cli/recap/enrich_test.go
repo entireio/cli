@@ -36,8 +36,8 @@ func TestEnricher_PopulatesLabels(t *testing.T) {
 	// t.Parallel() omitted: t.Setenv is incompatible per CLAUDE.md.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeAnalysis(t, w, CheckpointAnalysisResponse{
-			PipelineVersion: "2026-04-10.v3",
-			Extraction:      CheckpointExtraction{Labels: []string{labelFeatureBuild, "testing"}},
+			Status: AnalysisStatusComplete, PipelineVersion: "2026-04-10.v3",
+			Extraction: CheckpointExtraction{Labels: []string{labelFeatureBuild, "testing"}},
 		})
 	}))
 	defer srv.Close()
@@ -64,8 +64,8 @@ func TestEnricher_UsesCache(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests++
 		writeAnalysis(t, w, CheckpointAnalysisResponse{
-			PipelineVersion: "v1",
-			Extraction:      CheckpointExtraction{Labels: []string{"bug_fix"}},
+			Status: AnalysisStatusComplete, PipelineVersion: "v1",
+			Extraction: CheckpointExtraction{Labels: []string{"bug_fix"}},
 		})
 	}))
 	defer srv.Close()
@@ -114,8 +114,8 @@ func TestEnricher_HTTPErrorYieldsLocalCheckpoint(t *testing.T) {
 func TestEnricher_DeepCopiesToolProfile(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeAnalysis(t, w, CheckpointAnalysisResponse{
-			PipelineVersion: "v1",
-			Extraction:      CheckpointExtraction{Labels: []string{labelFeatureBuild}},
+			Status: AnalysisStatusComplete, PipelineVersion: "v1",
+			Extraction: CheckpointExtraction{Labels: []string{labelFeatureBuild}},
 			ToolProfile: &ToolProfile{
 				Total:      5,
 				Categories: map[string]ToolCategoryMetrics{"shell": {Count: 5}},

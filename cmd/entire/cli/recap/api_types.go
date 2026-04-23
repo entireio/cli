@@ -26,9 +26,26 @@ func IsCanonicalLabel(s string) bool {
 	return ok
 }
 
-// CheckpointAnalysisResponse mirrors api/src/types.ts StoredCheckpointAnalysis.
-// Used only for unmarshaling server responses.
+// Analysis status values returned by the /checkpoints/:id/analysis
+// endpoint. The response is a discriminated union (see
+// frontend/src/domains/platform/checkpoints/api.ts: CheckpointAnalysisResponse).
+// Only "complete" carries the extraction/tool-profile/token fields — every
+// other status means "no data yet."
+const (
+	AnalysisStatusComplete     = "complete"
+	AnalysisStatusPending      = "pending"
+	AnalysisStatusGenerating   = "generating"
+	AnalysisStatusFailed       = "failed"
+	AnalysisStatusNotAvailable = "not_available"
+)
+
+// CheckpointAnalysisResponse mirrors api/src/types.ts StoredCheckpointAnalysis
+// plus the status discriminator. Used only for unmarshaling server responses.
+// Callers must check Status == AnalysisStatusComplete before trusting any
+// of the data fields — pending/generating/failed responses carry zero
+// values, not absent fields.
 type CheckpointAnalysisResponse struct {
+	Status                string               `json:"status"`
 	PipelineVersion       string               `json:"pipeline_version"`
 	TotalSteps            int                  `json:"totalSteps"`
 	TotalFilesChanged     int                  `json:"totalFilesChanged"`
@@ -39,6 +56,12 @@ type CheckpointAnalysisResponse struct {
 	MCPServersUsed        []MCPServerUsage     `json:"mcpServersUsed,omitempty"`
 	ModelsUsed            []string             `json:"modelsUsed,omitempty"`
 	AgentsUsed            []string             `json:"agentsUsed,omitempty"`
+}
+
+// IsComplete reports whether the response carries a finished analysis. A
+// nil receiver, missing status, or any non-"complete" status returns false.
+func (r *CheckpointAnalysisResponse) IsComplete() bool {
+	return r != nil && r.Status == AnalysisStatusComplete
 }
 
 // CheckpointExtraction mirrors the api's CheckpointExtraction.

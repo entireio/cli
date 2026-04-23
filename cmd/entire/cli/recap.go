@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/recap"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 type recapFlags struct {
@@ -26,8 +28,10 @@ type recapFlags struct {
 	// agent filter (mutually exclusive, direct flags match agent names)
 	claudeCode, codex, gemini, opencode, cursor, factoryaiDroid, copilotCLI bool
 	// formatting
-	format string
-	view   string // me | contributors | both
+	format       string
+	view         string // me | contributors | both
+	refresh      bool   // clear local analysis cache and re-fetch
+	insecureHTTP bool   // allow http:// API base URL (local dev)
 }
 
 // Canonical agent identifiers. Match session.State AgentType values so the
@@ -70,8 +74,8 @@ with local session state, then renders a 4-panel view over a time range.`,
 			return runRecap(cmd.Context(), cmd.OutOrStdout(), f)
 		},
 	}
-	cmd.Flags().BoolVar(&f.day, "day", false, "Today only")
-	cmd.Flags().BoolVar(&f.week, "week", false, "Last 7 days (default)")
+	cmd.Flags().BoolVar(&f.day, "day", false, "Today only (default)")
+	cmd.Flags().BoolVar(&f.week, "week", false, "Last 7 days")
 	cmd.Flags().BoolVar(&f.month, "month", false, "This calendar month")
 	cmd.Flags().BoolVar(&f.d30, "30", false, "Rolling 30 days")
 	cmd.Flags().BoolVar(&f.d90, "90", false, "Rolling 90 days")
@@ -84,6 +88,8 @@ with local session state, then renders a 4-panel view over a time range.`,
 	cmd.Flags().BoolVar(&f.copilotCLI, agentCopilotCLI, false, "Filter to GitHub Copilot CLI sessions")
 	cmd.Flags().StringVar(&f.format, "format", recapFormatAuto, "Output format: tui, static, or auto")
 	cmd.Flags().StringVar(&f.view, "view", "both", "Which columns to show: me, contributors, or both")
+	cmd.Flags().BoolVar(&f.refresh, "refresh", false, "Clear the local analysis cache and re-fetch from the server")
+	cmd.Flags().BoolVar(&f.insecureHTTP, "insecure-http-auth", false, "Allow plain-HTTP auth (local dev only; never set in production)")
 	cmd.MarkFlagsMutuallyExclusive("day", "week", "month", "30", "90")
 	cmd.MarkFlagsMutuallyExclusive(agentFlagNames...)
 	return cmd
@@ -91,8 +97,8 @@ with local session state, then renders a 4-panel view over a time range.`,
 
 func (f *recapFlags) rangeKey() recap.RangeKey {
 	switch {
-	case f.day:
-		return recap.RangeDay
+	case f.week:
+		return recap.RangeWeek
 	case f.month:
 		return recap.RangeMonth
 	case f.d30:
@@ -100,8 +106,8 @@ func (f *recapFlags) rangeKey() recap.RangeKey {
 	case f.d90:
 		return recap.Range90d
 	}
-	// --week is the default (no flag or explicit --week).
-	return recap.RangeWeek
+	// --day is the default (no flag or explicit --day).
+	return recap.RangeDay
 }
 
 func (f *recapFlags) mode() recap.ViewMode {
@@ -146,9 +152,19 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 		return NewSilentError(errors.New("not a git repository"))
 	}
 
+	// --refresh clears the on-disk analysis cache so this run re-fetches
+	// every checkpoint. Useful when server analysis has finished after a
+	// previous "pending" run cached empties.
+	if f.refresh {
+		if err := clearRecapCache(ctx); err != nil {
+			logging.Debug(ctx, "recap: could not clear cache (continuing)", "error", err.Error())
+		}
+	}
+
 	act, err := recap.LoadRecap(ctx, recap.LoadOpts{
 		Scope:         recap.ScopeCurrent,
 		EnrichFromAPI: true,
+		InsecureHTTP:  f.insecureHTTP,
 	})
 	if err != nil {
 		return fmt.Errorf("load recap: %w", err)
@@ -160,8 +176,9 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 
 	// Contributors come from the repo-overview endpoints. Best-effort: a
 	// fetch failure just leaves the contributors columns as "—" rather than
-	// blocking the recap output.
-	contributors := fetchContributorsBestEffort(ctx, worktreeRoot, rangeKey, now)
+	// blocking the recap output. We also track *why* contributors might be
+	// empty so we can surface a helpful hint below.
+	contributors, diag := fetchContributorsWithDiag(ctx, worktreeRoot, rangeKey, now)
 
 	view := recap.BuildView(act.Sessions, recap.BuildOpts{
 		Range:        rangeKey,
@@ -170,6 +187,15 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 		Contributors: contributors,
 		Now:          now,
 	})
+	view.Notes = append(view.Notes, diag...)
+
+	// Surface a hint when labels never populated despite having checkpoints —
+	// this is usually the analysis-pipeline still processing new checkpoints.
+	if view.Summary.CheckpointCount > 0 && labelsAllEmpty(view) {
+		view.Notes = append(view.Notes,
+			"Labels require server analysis (may take a few minutes after committing). "+
+				"Re-run shortly to see them populate.")
+	}
 
 	if resolveFormat(f.format, w) == recapFormatTUI {
 		return runRecapTUI(ctx, view, act.Sessions, agentFilter)
@@ -220,32 +246,111 @@ func terminalWidth(w io.Writer) int {
 	return width
 }
 
-// fetchContributorsBestEffort resolves the repo from the current worktree,
-// fetches the three repo-overview endpoints in parallel, and returns nil on
-// any failure. Contributors is optional enrichment — the CLI stays usable
-// when the user is offline, unauthed, or in a repo that isn't tracked.
-func fetchContributorsBestEffort(ctx context.Context, worktreeRoot string, rangeKey recap.RangeKey, now time.Time) *recap.ContributorsData {
+// fetchContributorsWithDiag fetches contributor data and also returns a slice
+// of diagnostic strings for the cases where data is unavailable. Empty
+// diag slice means "data either came through or was intentionally skipped
+// without user-visible cause." Non-empty means we want the renderer to
+// surface a hint so users understand why the contributors column is empty.
+//
+// Tries /api/v1/me/recap first (new server-side aggregation, one call).
+// Falls back to the old per-endpoint fetch stack when the new endpoint
+// isn't deployed yet (404) or fails, so this keeps working against older
+// server deployments.
+func fetchContributorsWithDiag(
+	ctx context.Context,
+	worktreeRoot string,
+	rangeKey recap.RangeKey,
+	now time.Time,
+) (*recap.ContributorsData, []string) {
+	var diag []string
 	repo := recap.ResolveRepoFromWorktree(ctx, worktreeRoot)
-	if repo == "" {
-		return nil
+	if repo == "" || repo == "unknown" {
+		diag = append(diag, "Contributor comparisons require a git remote — none detected on this worktree.")
+		return nil, diag
 	}
 	token, err := auth.LookupCurrentToken()
 	if err != nil || token == "" {
-		return nil
+		diag = append(diag, "Sign in with `entire login` to see contributor comparisons (team tokens, agents, skills).")
+		return nil, diag
 	}
 	client := api.NewClient(token)
+
+	// Prefer the consolidated /me/recap endpoint. When it 200s we skip the
+	// older three-endpoint fetch path entirely.
+	if resp, err := recap.FetchMeRecap(ctx, client, recap.TimeframeForRange(rangeKey), repo, 500); err == nil && resp != nil && len(resp.Agents) > 0 {
+		data := recap.ContributorsFromMeRecap(resp)
+		if data != nil && len(data.ByAgent) > 0 {
+			return data, nil
+		}
+		diag = append(diag, "No contributor activity for "+repo+" in this range — try a longer window (--week, --30, --90).")
+		return nil, diag
+	} else if err != nil {
+		logging.Debug(ctx, "recap: /me/recap failed; falling back", "repo", repo, "error", err.Error())
+	}
+
+	// Fallback: old per-endpoint fetch stack. Kept so the CLI still works
+	// against server deployments that don't have /me/recap yet.
 	start, end := rangeKey.Bounds(now)
 	data, err := recap.FetchContributors(ctx, client, repo, start, end)
 	if err != nil {
 		logging.Debug(ctx, "recap: fetch contributors failed", "repo", repo, "error", err.Error())
+		diag = append(diag, "Could not fetch contributor data for "+repo+" — repo may not be tracked in entire.io yet.")
+		return nil, diag
+	}
+	if data == nil || len(data.ByAgent) == 0 {
+		diag = append(diag, "No contributor activity for "+repo+" in this range — try a longer window (--week, --30, --90).")
+		return nil, diag
+	}
+	return data, nil
+}
+
+// clearRecapCache removes the recap analysis cache directory inside the
+// repo's .git dir. Best-effort — missing dir / permission error both return
+// nil so a failed clear doesn't block the recap from running.
+func clearRecapCache(ctx context.Context) error {
+	gitCommonDir, err := strategy.GetGitCommonDir(ctx)
+	if err != nil {
+		return nil //nolint:nilerr // best-effort; falling back to normal fetch path is fine
+	}
+	target := filepath.Join(gitCommonDir, "entire-recap-cache")
+	if _, err := os.Stat(target); os.IsNotExist(err) {
 		return nil
 	}
-	return data
+	if err := os.RemoveAll(target); err != nil {
+		return fmt.Errorf("remove recap cache: %w", err)
+	}
+	return nil
+}
+
+// labelsAllEmpty reports whether the view has no label data on either the
+// summary band or any agent card. Used to decide whether to surface the
+// "server analysis pending" hint.
+func labelsAllEmpty(v recap.View) bool {
+	if v.Summary.DominantLabel != "" {
+		return false
+	}
+	if len(v.Labels) > 0 {
+		return false
+	}
+	for _, card := range v.AgentCards {
+		if len(card.MeLabels) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func runRecapTUI(ctx context.Context, initial recap.View, sessions []recap.RecapSession, agentFilter string) error {
 	m := recap.NewTUIModel(sessions, initial, agentFilter)
-	p := tea.NewProgram(m, tea.WithContext(ctx), tea.WithAltScreen())
+	// Alt-screen + internal viewport scroll: content stays bounded by the
+	// terminal (no top-line cut-off), and arrow keys / pgup-pgdn / mouse
+	// wheel scroll the body inside the TUI so a tall recap stays fully
+	// reachable regardless of the host terminal's scroll behavior.
+	p := tea.NewProgram(m,
+		tea.WithContext(ctx),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+	)
 	_, err := p.Run()
 	if err != nil {
 		return fmt.Errorf("recap tui: %w", err)

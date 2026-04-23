@@ -45,18 +45,25 @@ func NewAnalysisCache(baseDir string) (*AnalysisCache, error) {
 }
 
 // Get returns the cached response for checkpointID, ignoring pipeline_version.
+// Cached responses that carry no useful signal (no labels, no toolProfile,
+// no skills, no agents) are treated as misses so a pending server-side
+// analysis doesn't stay stuck as an empty render forever.
 func (c *AnalysisCache) Get(checkpointID string) (*CheckpointAnalysisResponse, bool) {
 	if !isValidKey(checkpointID) {
 		return nil, false
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.read(checkpointID)
+	resp, ok := c.read(checkpointID)
+	if !ok || !hasUsefulSignal(resp) {
+		return nil, false
+	}
+	return resp, true
 }
 
 // GetAtVersion returns a cached response only when its pipeline_version
-// matches requiredVersion. An empty requiredVersion disables the check
-// (equivalent to Get). Version mismatch is a miss, not an error.
+// matches requiredVersion AND the response carries useful signal. Version
+// mismatch is a miss, not an error.
 func (c *AnalysisCache) GetAtVersion(checkpointID, requiredVersion string) (*CheckpointAnalysisResponse, bool) {
 	if !isValidKey(checkpointID) {
 		return nil, false
@@ -64,7 +71,7 @@ func (c *AnalysisCache) GetAtVersion(checkpointID, requiredVersion string) (*Che
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	resp, ok := c.read(checkpointID)
-	if !ok {
+	if !ok || !hasUsefulSignal(resp) {
 		return nil, false
 	}
 	if requiredVersion != "" && resp.PipelineVersion != requiredVersion {
@@ -73,10 +80,40 @@ func (c *AnalysisCache) GetAtVersion(checkpointID, requiredVersion string) (*Che
 	return resp, true
 }
 
-// Put writes the response to disk, overwriting any prior value.
+// hasUsefulSignal returns true when any of the server-populated fields
+// carries data. An "all zero" response means the server hasn't produced
+// analysis yet — don't let that poison the cache.
+func hasUsefulSignal(resp *CheckpointAnalysisResponse) bool {
+	if resp == nil {
+		return false
+	}
+	if len(resp.Extraction.Labels) > 0 {
+		return true
+	}
+	if resp.ToolProfile != nil && resp.ToolProfile.Total > 0 {
+		return true
+	}
+	if len(resp.SkillsUsed) > 0 || len(resp.MCPServersUsed) > 0 {
+		return true
+	}
+	if len(resp.AgentsUsed) > 0 || len(resp.ModelsUsed) > 0 {
+		return true
+	}
+	if resp.TotalTranscriptTokens > 0 || resp.TotalSteps > 0 {
+		return true
+	}
+	return false
+}
+
+// Put writes the response to disk, overwriting any prior value. Responses
+// without useful signal are refused so the cache never serves a hollow row
+// back to the renderer — the next enrichment call tries the server again.
 func (c *AnalysisCache) Put(checkpointID string, resp *CheckpointAnalysisResponse) error {
 	if !isValidKey(checkpointID) {
 		return fmt.Errorf("recap cache: invalid checkpoint id %q", checkpointID)
+	}
+	if !hasUsefulSignal(resp) {
+		return nil // not an error; just a policy not-cached
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

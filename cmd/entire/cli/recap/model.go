@@ -113,6 +113,8 @@ type RecapCheckpoint struct {
 	TurnID       string
 	Labels       []string // tier 3
 	ToolProfile  *ToolProfile
+	SkillsUsed   []string // tier 3 — from server analysis
+	MCPServers   []string // tier 3 — from server analysis, flattened names
 	Badges       []string
 	Source       DataSource
 }
