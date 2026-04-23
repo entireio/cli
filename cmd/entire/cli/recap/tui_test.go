@@ -104,6 +104,32 @@ func TestTUIModel_ViewIncludesHelpLine(t *testing.T) {
 	}
 }
 
+func TestTUIModel_VKeyCyclesViewMode(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	sessions := []RecapSession{{StartedAt: now, LastInteraction: now}}
+	view := BuildView(sessions, BuildOpts{Range: RangeDay, Now: now})
+	m := NewTUIModel(sessions, view, "")
+	// Start: ViewBoth → v → ViewMe
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	tm, _ := nm.(TUIModel) //nolint:errcheck // type from Update is guaranteed TUIModel
+	if tm.mode != ViewMe {
+		t.Errorf("after first v: mode = %q, want %q", tm.mode, ViewMe)
+	}
+	// ViewMe → v → ViewContributors
+	nm2, _ := tm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	tm2, _ := nm2.(TUIModel) //nolint:errcheck // type from Update is guaranteed TUIModel
+	if tm2.mode != ViewContributors {
+		t.Errorf("after second v: mode = %q, want %q", tm2.mode, ViewContributors)
+	}
+	// ViewContributors → v → ViewBoth
+	nm3, _ := tm2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	tm3, _ := nm3.(TUIModel) //nolint:errcheck // type from Update is guaranteed TUIModel
+	if tm3.mode != ViewBoth {
+		t.Errorf("after third v: mode = %q, want %q", tm3.mode, ViewBoth)
+	}
+}
+
 func TestCycleAgent_EmptyListStaysEmpty(t *testing.T) {
 	t.Parallel()
 	if got := cycleAgent(nil, "anything"); got != "" {
