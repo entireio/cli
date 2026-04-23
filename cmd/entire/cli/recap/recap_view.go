@@ -7,15 +7,13 @@ import (
 )
 
 // RangeKey names a pre-baked time range selectable via CLI flag or keyboard
-// toggle. Day is the default; Month is calendar-aligned, 30d and 90d are
-// rolling windows.
+// toggle. Day is the default; Month is calendar-aligned, 90d is a rolling window.
 type RangeKey string
 
 const (
 	RangeDay     RangeKey = "day"
 	RangeWeek    RangeKey = "week"
 	RangeMonth   RangeKey = "month"
-	Range30d     RangeKey = "30d"
 	Range90d     RangeKey = "90d"
 	rangeDefault          = RangeWeek // Agents view reads better over a week
 )
@@ -29,8 +27,6 @@ func (r RangeKey) Title() string {
 		return "Last 7 days"
 	case RangeMonth:
 		return "This month"
-	case Range30d:
-		return "Last 30 days"
 	case Range90d:
 		return "Last 90 days"
 	}
@@ -51,8 +47,6 @@ func (r RangeKey) Bounds(now time.Time) (time.Time, time.Time) {
 	case RangeMonth:
 		monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 		return monthStart, monthStart.AddDate(0, 1, 0)
-	case Range30d:
-		return dayEnd.AddDate(0, 0, -30), dayEnd
 	case Range90d:
 		return dayEnd.AddDate(0, 0, -90), dayEnd
 	}
