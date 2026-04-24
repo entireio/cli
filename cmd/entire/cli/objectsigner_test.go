@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
+	"github.com/go-git/go-git/v6/x/plugin"
+	pluginconfig "github.com/go-git/go-git/v6/x/plugin/config"
 	"github.com/go-git/x/plugin/objectsigner/auto"
 )
 
@@ -246,5 +249,52 @@ func TestObjectSignerConfigMerge_LocalConfigTakesPrecedence(t *testing.T) { //no
 	}
 	if !hasCustomSSHSignProgram(loadLocalConfig().Raw) {
 		t.Fatal("expected merged setup to see local custom gpg.ssh.program")
+	}
+}
+
+func TestRegisterObjectSigner_CachesLocalConfigAcrossGets(t *testing.T) {
+	t.Parallel()
+
+	resetPluginEntry("config_loader")
+	resetPluginEntry("object_signer")
+	t.Cleanup(func() {
+		resetPluginEntry("config_loader")
+		resetPluginEntry("object_signer")
+		registerObjectSignerOnce = sync.Once{}
+		loadLocalConfigFunc = loadLocalConfig
+	})
+
+	registerObjectSignerOnce = sync.Once{}
+
+	var loadCalls int
+	loadLocalConfigFunc = func() *config.Config {
+		loadCalls++
+
+		cfg := config.NewConfig()
+		cfg.Commit.GpgSign = config.NewOptBool(true)
+		cfg.GPG.Format = string(auto.FormatSSH)
+		cfg.User.SigningKey = "local-signing-key"
+
+		return cfg
+	}
+
+	if err := plugin.Register(plugin.ConfigLoader(), func() plugin.ConfigSource {
+		return pluginconfig.NewEmpty()
+	}); err != nil {
+		t.Fatalf("plugin.Register(config loader) error = %v", err)
+	}
+
+	RegisterObjectSigner()
+
+	for range 2 {
+		signer, err := plugin.Get(plugin.ObjectSigner())
+		if err != nil {
+			t.Fatalf("plugin.Get(object signer) error = %v", err)
+		}
+		_ = signer
+	}
+
+	if loadCalls != 1 {
+		t.Fatalf("loadLocalConfigFunc() calls = %d, want 1", loadCalls)
 	}
 }

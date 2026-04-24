@@ -17,9 +17,13 @@ import (
 )
 
 var registerObjectSignerOnce sync.Once
+var loadLocalConfigFunc = loadLocalConfig
 
 func RegisterObjectSigner() {
 	registerObjectSignerOnce.Do(func() {
+		var localCfgOnce sync.Once
+		var localCfg *config.Config
+
 		//nolint:errcheck,gosec // best-effort; if registration fails, commits are left unsigned
 		plugin.Register(plugin.ObjectSigner(), func() plugin.Signer {
 			cfgSource, err := plugin.Get(plugin.ConfigLoader())
@@ -30,7 +34,9 @@ func RegisterObjectSigner() {
 
 			sysCfg := loadScopedConfig(cfgSource, config.SystemScope)
 			globalCfg := loadScopedConfig(cfgSource, config.GlobalScope)
-			localCfg := loadLocalConfig()
+			localCfgOnce.Do(func() {
+				localCfg = loadLocalConfigFunc()
+			})
 			sshSignProgram := effectiveSSHSignProgram(sysCfg.Raw, globalCfg.Raw, localCfg.Raw)
 
 			// Merge system, global, then local so local settings take precedence.
