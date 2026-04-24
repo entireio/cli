@@ -33,16 +33,7 @@ func RegisterObjectSigner() {
 				return nil
 			}
 
-			sysCfg := loadScopedConfig(cfgSource, config.SystemScope)
-			globalCfg := loadScopedConfig(cfgSource, config.GlobalScope)
-			localCfg := loadRepoLocalConfig(repo)
-			sshSignProgram := effectiveSSHSignProgram(sysCfg.Raw, globalCfg.Raw, localCfg.Raw)
-
-			merged, err := repo.ConfigScoped(config.SystemScope)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to load merged git config: %v\n", err)
-				return nil
-			}
+			merged, sshSignProgram := loadObjectSignerConfig(cfgSource, repo)
 
 			if !merged.Commit.GpgSign.IsTrue() {
 				return nil
@@ -74,6 +65,15 @@ func RegisterObjectSigner() {
 			return signer
 		})
 	})
+}
+
+func loadObjectSignerConfig(source plugin.ConfigSource, repo *git.Repository) (*config.Config, string) {
+	sysCfg := loadScopedConfig(source, config.SystemScope)
+	globalCfg := loadScopedConfig(source, config.GlobalScope)
+	localCfg := loadRepoLocalConfig(repo)
+	sshSignProgram := effectiveSSHSignProgram(sysCfg.Raw, globalCfg.Raw, localCfg.Raw)
+	merged := config.Merge(sysCfg, globalCfg, localCfg)
+	return &merged, sshSignProgram
 }
 
 // connectSSHAgent connects to the SSH agent via SSH_AUTH_SOCK.

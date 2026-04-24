@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"sync"
 	"testing"
 
@@ -253,6 +254,42 @@ func TestObjectSignerConfigMerge_LocalConfigTakesPrecedence(t *testing.T) { //no
 	}
 }
 
+func TestLoadObjectSignerConfig_IgnoresUpperScopeLoadFailures(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("git.PlainOpen() error = %v", err)
+	}
+
+	localCfg := config.NewConfig()
+	localCfg.Commit.GpgSign = config.NewOptBool(true)
+	localCfg.GPG.Format = string(auto.FormatSSH)
+	localCfg.User.SigningKey = localSigningKey
+	localCfg.Raw.Section("gpg").Subsection("ssh").SetOption("program", "/Applications/1Password.app/Contents/MacOS/op-ssh-sign")
+	if err := repo.SetConfig(localCfg); err != nil {
+		t.Fatalf("repo.SetConfig() error = %v", err)
+	}
+
+	merged, sshSignProgram := loadObjectSignerConfig(failingConfigSource{}, repo)
+
+	if !merged.Commit.GpgSign.IsTrue() {
+		t.Fatal("expected local commit.gpgsign to survive upper-scope load failures")
+	}
+	if got := merged.GPG.Format; got != string(auto.FormatSSH) {
+		t.Fatalf("merged GPG.Format = %q, want %q", got, auto.FormatSSH)
+	}
+	if got := merged.User.SigningKey; got != localSigningKey {
+		t.Fatalf("merged User.SigningKey = %q, want %q", got, localSigningKey)
+	}
+	if !isCustomSSHSignProgram(sshSignProgram) {
+		t.Fatal("expected local custom gpg.ssh.program to survive upper-scope load failures")
+	}
+}
+
 func TestRegisterObjectSigner_ReturnsNilSignerForLocalCustomSSHProgram(t *testing.T) { //nolint:paralleltest // t.Chdir and plugin registry are process-global
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
@@ -288,4 +325,10 @@ func TestRegisterObjectSigner_ReturnsNilSignerForLocalCustomSSHProgram(t *testin
 	if signer != nil {
 		t.Fatal("expected nil signer when local gpg.ssh.program uses a custom signer")
 	}
+}
+
+type failingConfigSource struct{}
+
+func (failingConfigSource) Load(scope config.Scope) (config.ConfigStorer, error) {
+	return nil, errors.New("boom")
 }
