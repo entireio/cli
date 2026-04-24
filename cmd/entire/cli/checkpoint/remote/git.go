@@ -48,7 +48,7 @@ type FetchOptions struct {
 // resolve the name to a URL (to avoid persisting promisor settings) should call
 // ResolveFetchTarget first and pass the resolved target as opts.Remote.
 func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
-	args := []string{"fetch"}
+	args := []string{"fetch", "--no-auto-gc"}
 	if opts.NoTags {
 		args = append(args, "--no-tags")
 	}

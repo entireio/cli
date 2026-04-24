@@ -28,10 +28,10 @@ func TestExtractRemoteFromArgs(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"fetch with URL", []string{"fetch", "https://github.com/org/repo.git", "refs/heads/main"}, "https://github.com/org/repo.git"},
+		{"fetch with URL", []string{"fetch", "--no-auto-gc", "https://github.com/org/repo.git", "refs/heads/main"}, "https://github.com/org/repo.git"},
 		{"push with flags", []string{"push", "--no-verify", "--porcelain", "origin", "main"}, "origin"},
 		{"ls-remote", []string{"ls-remote", "origin", "refs/heads/*"}, "origin"},
-		{"fetch with filter", []string{"fetch", "--no-tags", "--filter=blob:none", "https://host/r.git", "+refs/heads/main:refs/tmp"}, "https://host/r.git"},
+		{"fetch with filter", []string{"fetch", "--no-auto-gc", "--no-tags", "--filter=blob:none", "https://host/r.git", "+refs/heads/main:refs/tmp"}, "https://host/r.git"},
 		{"empty args", []string{}, ""},
 		{"subcommand only", []string{"fetch"}, ""},
 		{"only flags", []string{"fetch", "--no-tags"}, ""},
@@ -655,7 +655,7 @@ func TestNewCommand_GIT_TERMINAL_PROMPT_Coexistence(t *testing.T) {
 	t.Setenv(CheckpointTokenEnvVar, "coexist-token")
 
 	cmd := newCommand(context.Background(),
-		"fetch", "--no-tags", "--filter=blob:none", "https://github.com/org/repo.git", "refs/heads/main")
+		"fetch", "--no-auto-gc", "--no-tags", "--filter=blob:none", "https://github.com/org/repo.git", "refs/heads/main")
 	require.NotNil(t, cmd.Env)
 
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
