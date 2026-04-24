@@ -65,9 +65,9 @@ func TestHasCustomSSHSignProgram(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := hasCustomSSHSignProgram(tt.raw)
+			got := isCustomSSHSignProgram(rawSSHSignProgram(tt.raw))
 			if got != tt.want {
-				t.Errorf("hasCustomSSHSignProgram() = %v, want %v", got, tt.want)
+				t.Errorf("isCustomSSHSignProgram(rawSSHSignProgram()) = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -82,11 +82,11 @@ func TestConfigMerge_DropsCustomSSHSignProgramFromRaw(t *testing.T) {
 
 	merged := config.Merge(sysCfg, config.NewConfig())
 
-	if !hasCustomSSHSignProgram(sysCfg.Raw) {
+	if !isCustomSSHSignProgram(rawSSHSignProgram(sysCfg.Raw)) {
 		t.Fatal("expected scoped raw config to report custom gpg.ssh.program")
 	}
 
-	if hasCustomSSHSignProgram(merged.Raw) {
+	if isCustomSSHSignProgram(rawSSHSignProgram(merged.Raw)) {
 		t.Fatal("expected merged raw config to lose custom gpg.ssh.program")
 	}
 }
@@ -154,13 +154,13 @@ func TestCustomSSHSignProgramDetection_UsesScopedRawBeforeMerge(t *testing.T) {
 			globalCfg.GPG.Format = string(auto.FormatSSH)
 			globalCfg.Raw = tt.globalRaw
 
-			got := hasCustomSSHSignProgram(sysCfg.Raw) || hasCustomSSHSignProgram(globalCfg.Raw)
+			got := isCustomSSHSignProgram(rawSSHSignProgram(sysCfg.Raw)) || isCustomSSHSignProgram(rawSSHSignProgram(globalCfg.Raw))
 			if got != tt.want {
 				t.Fatalf("scoped raw detection = %v, want %v", got, tt.want)
 			}
 
 			merged := config.Merge(sysCfg, globalCfg)
-			if got && hasCustomSSHSignProgram(merged.Raw) {
+			if got && isCustomSSHSignProgram(rawSSHSignProgram(merged.Raw)) {
 				t.Fatal("expected merged raw config not to preserve custom gpg.ssh.program")
 			}
 		})
@@ -207,8 +207,8 @@ func TestLoadLocalConfig_ReadsCustomSSHSignProgram(t *testing.T) { //nolint:para
 		t.Fatalf("repo.SetConfig() error = %v", err)
 	}
 
-	localCfg := loadLocalConfig()
-	if !hasCustomSSHSignProgram(localCfg.Raw) {
+	localCfg := loadRepoLocalConfig(repo)
+	if !isCustomSSHSignProgram(rawSSHSignProgram(localCfg.Raw)) {
 		t.Fatal("expected local config to report custom gpg.ssh.program")
 	}
 }
@@ -237,7 +237,7 @@ func TestObjectSignerConfigMerge_LocalConfigTakesPrecedence(t *testing.T) { //no
 	globalCfg.GPG.Format = "openpgp"
 	globalCfg.User.SigningKey = "global-signing-key"
 
-	merged := config.Merge(config.NewConfig(), globalCfg, loadLocalConfig())
+	merged := config.Merge(config.NewConfig(), globalCfg, loadRepoLocalConfig(repo))
 
 	if !merged.Commit.GpgSign.IsTrue() {
 		t.Fatal("expected local commit.gpgsign to override global config")
@@ -248,44 +248,44 @@ func TestObjectSignerConfigMerge_LocalConfigTakesPrecedence(t *testing.T) { //no
 	if got := merged.User.SigningKey; got != localSigningKey {
 		t.Fatalf("merged User.SigningKey = %q, want %q", got, localSigningKey)
 	}
-	if !hasCustomSSHSignProgram(loadLocalConfig().Raw) {
+	if !isCustomSSHSignProgram(rawSSHSignProgram(loadRepoLocalConfig(repo).Raw)) {
 		t.Fatal("expected merged setup to see local custom gpg.ssh.program")
 	}
 }
 
-func TestRegisterObjectSigner_CachesLocalConfigAcrossGets(t *testing.T) {
-	resetPluginEntry("object_signer")
+func TestRegisterObjectSigner_ReturnsNilSignerForLocalCustomSSHProgram(t *testing.T) { //nolint:paralleltest // t.Chdir and plugin registry are process-global
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatalf("git.PlainOpen() error = %v", err)
+	}
+
+	localCfg := config.NewConfig()
+	localCfg.Commit.GpgSign = config.NewOptBool(true)
+	localCfg.GPG.Format = string(auto.FormatSSH)
+	localCfg.User.SigningKey = localSigningKey
+	localCfg.Raw.Section("gpg").Subsection("ssh").SetOption("program", "/Applications/1Password.app/Contents/MacOS/op-ssh-sign")
+	if err := repo.SetConfig(localCfg); err != nil {
+		t.Fatalf("repo.SetConfig() error = %v", err)
+	}
+
+	resetPluginEntry("object-signer")
 	t.Cleanup(func() {
-		resetPluginEntry("object_signer")
+		resetPluginEntry("object-signer")
 		registerObjectSignerOnce = sync.Once{}
-		loadLocalConfigFunc = loadLocalConfig
 	})
 
 	registerObjectSignerOnce = sync.Once{}
-
-	var loadCalls int
-	loadLocalConfigFunc = func() *config.Config {
-		loadCalls++
-
-		cfg := config.NewConfig()
-		cfg.Commit.GpgSign = config.NewOptBool(true)
-		cfg.GPG.Format = string(auto.FormatSSH)
-		cfg.User.SigningKey = "local-signing-key"
-
-		return cfg
-	}
-
 	RegisterObjectSigner()
 
-	for range 2 {
-		signer, err := plugin.Get(plugin.ObjectSigner())
-		if err != nil {
-			t.Fatalf("plugin.Get(object signer) error = %v", err)
-		}
-		_ = signer
+	signer, err := plugin.Get(plugin.ObjectSigner())
+	if err != nil {
+		t.Fatalf("plugin.Get(object signer) error = %v", err)
 	}
-
-	if loadCalls != 1 {
-		t.Fatalf("loadLocalConfigFunc() calls = %d, want 1", loadCalls)
+	if signer != nil {
+		t.Fatal("expected nil signer when local gpg.ssh.program uses a custom signer")
 	}
 }

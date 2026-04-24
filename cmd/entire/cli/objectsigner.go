@@ -17,13 +17,9 @@ import (
 )
 
 var registerObjectSignerOnce sync.Once
-var loadLocalConfigFunc = loadLocalConfig
 
 func RegisterObjectSigner() {
 	registerObjectSignerOnce.Do(func() {
-		var localCfgOnce sync.Once
-		var localCfg *config.Config
-
 		//nolint:errcheck,gosec // best-effort; if registration fails, commits are left unsigned
 		plugin.Register(plugin.ObjectSigner(), func() plugin.Signer {
 			cfgSource, err := plugin.Get(plugin.ConfigLoader())
@@ -32,15 +28,21 @@ func RegisterObjectSigner() {
 				return nil
 			}
 
+			repo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
+			if err != nil {
+				return nil
+			}
+
 			sysCfg := loadScopedConfig(cfgSource, config.SystemScope)
 			globalCfg := loadScopedConfig(cfgSource, config.GlobalScope)
-			localCfgOnce.Do(func() {
-				localCfg = loadLocalConfigFunc()
-			})
+			localCfg := loadRepoLocalConfig(repo)
 			sshSignProgram := effectiveSSHSignProgram(sysCfg.Raw, globalCfg.Raw, localCfg.Raw)
 
-			// Merge system, global, then local so local settings take precedence.
-			merged := config.Merge(sysCfg, globalCfg, localCfg)
+			merged, err := repo.ConfigScoped(config.SystemScope)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to load merged git config: %v\n", err)
+				return nil
+			}
 
 			if !merged.Commit.GpgSign.IsTrue() {
 				return nil
@@ -96,18 +98,12 @@ var scopeName = map[config.Scope]string{
 	config.SystemScope: "system",
 }
 
-// hasCustomSSHSignProgram checks whether gpg.ssh.program is set to a
-// non-default value in the raw config. The git default is "ssh-keygen",
-// which works with go-git's native SSH agent signing. Custom programs
-// (e.g. 1Password's op-ssh-sign) use a separate signing mechanism that
-// go-git cannot invoke.
-// go-git's Config struct does not expose this field, so we read it directly.
-func hasCustomSSHSignProgram(raw *format.Config) bool {
+func rawSSHSignProgram(raw *format.Config) string {
 	if raw == nil {
-		return false
+		return ""
 	}
 
-	return isCustomSSHSignProgram(raw.Section("gpg").Subsection("ssh").Option("program"))
+	return raw.Section("gpg").Subsection("ssh").Option("program")
 }
 
 func isCustomSSHSignProgram(program string) bool {
@@ -121,7 +117,7 @@ func effectiveSSHSignProgram(raws ...*format.Config) string {
 			continue
 		}
 
-		program := raw.Section("gpg").Subsection("ssh").Option("program")
+		program := rawSSHSignProgram(raw)
 		if program != "" {
 			return program
 		}
@@ -148,12 +144,7 @@ func loadScopedConfig(source plugin.ConfigSource, scope config.Scope) *config.Co
 	return cfg
 }
 
-func loadLocalConfig() *config.Config {
-	repo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
-	if err != nil {
-		return config.NewConfig()
-	}
-
+func loadRepoLocalConfig(repo *git.Repository) *config.Config {
 	cfg, err := repo.Storer.Config()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to parse local git config: %v\n", err)
