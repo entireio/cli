@@ -457,7 +457,7 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 	}
 
 	// Only use the tree-only fetch path when filtered fetches are enabled.
-	// Otherwise this would degrade into an ordinary shallow fetch while the
+	// Otherwise this would degrade into an ordinary full fetch while the
 	// surrounding control flow still assumes the tree-only fast path.
 	if settings.IsFilteredFetchesEnabled(ctx) {
 		if fetchErr := FetchMetadataTreeOnly(ctx); fetchErr == nil {

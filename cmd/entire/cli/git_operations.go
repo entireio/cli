@@ -401,23 +401,21 @@ func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error 
 // creates/updates the local branch. The fetch is unfiltered (no --filter=blob:none)
 // because callers (resume, explain) need blob content, not just tree structure.
 func FetchMetadataBranch(ctx context.Context) error {
-	return fetchMetadataFromOrigin(ctx, false /* shallow */, true /* noFilter */)
+	return fetchMetadataFromOrigin(ctx, true /* noFilter */)
 }
 
-// FetchMetadataTreeOnly fetches the tip of the entire/checkpoints/v1 branch
-// from origin with --depth=1, downloading only the latest commit and its tree
-// objects. After this call, tree navigation via go-git works but blob reads
-// will fail for objects that weren't previously fetched.
+// FetchMetadataTreeOnly fetches the entire/checkpoints/v1 branch from origin
+// without blobs. After this call, tree navigation via go-git works but blob
+// reads will fail for objects that weren't previously fetched.
 func FetchMetadataTreeOnly(ctx context.Context) error {
-	return fetchMetadataFromOrigin(ctx, true /* shallow */, false /* noFilter */)
+	return fetchMetadataFromOrigin(ctx, false /* noFilter */)
 }
 
 // fetchMetadataFromOrigin fetches the v1 metadata branch from origin into the
 // remote-tracking ref refs/remotes/origin/<branch>, then safely advances the
-// local branch to match. When shallow is true, --depth=1 is added so only
-// the tip is downloaded. When noFilter is true, --filter=blob:none is suppressed
+// local branch to match. When noFilter is true, --filter=blob:none is suppressed
 // so blob content is included.
-func fetchMetadataFromOrigin(ctx context.Context, shallow, noFilter bool) error {
+func fetchMetadataFromOrigin(ctx context.Context, noFilter bool) error {
 	branchName := paths.MetadataBranchName
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -434,7 +432,6 @@ func fetchMetadataFromOrigin(ctx context.Context, shallow, noFilter bool) error 
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
-		Shallow:  shallow,
 		NoFilter: noFilter,
 	})
 	if fetchErr != nil {
@@ -459,25 +456,23 @@ func fetchMetadataFromOrigin(ctx context.Context, shallow, noFilter bool) error 
 	return nil
 }
 
-// FetchV2MainTreeOnly fetches the tip of the v2 /main ref from origin with
-// --depth=1, downloading only the latest commit and its tree objects.
+// FetchV2MainTreeOnly fetches the v2 /main ref from origin without blobs.
 // Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
 func FetchV2MainTreeOnly(ctx context.Context) error {
-	return fetchV2MainFromOrigin(ctx, true /* shallow */, false /* noFilter */)
+	return fetchV2MainFromOrigin(ctx, false /* noFilter */)
 }
 
 // FetchV2MainRef fetches the v2 /main ref from origin with full blob content.
 // The fetch is unfiltered so resume/explain can read metadata JSON blobs.
 // Uses explicit refspec since v2 refs are under refs/entire/, not refs/heads/.
 func FetchV2MainRef(ctx context.Context) error {
-	return fetchV2MainFromOrigin(ctx, false /* shallow */, true /* noFilter */)
+	return fetchV2MainFromOrigin(ctx, true /* noFilter */)
 }
 
 // fetchV2MainFromOrigin fetches the v2 /main ref from origin into the shared
-// staging ref, then promotes it via strategy.PromoteTmpRefSafely. When
-// shallow is true, --depth=1 is added so only the tip is downloaded.
-// When noFilter is true, --filter=blob:none is suppressed.
-func fetchV2MainFromOrigin(ctx context.Context, shallow, noFilter bool) error {
+// staging ref, then promotes it via strategy.PromoteTmpRefSafely. When noFilter
+// is true, --filter=blob:none is suppressed.
+func fetchV2MainFromOrigin(ctx context.Context, noFilter bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -492,7 +487,6 @@ func fetchV2MainFromOrigin(ctx context.Context, shallow, noFilter bool) error {
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
-		Shallow:  shallow,
 		NoFilter: noFilter,
 	})
 	if fetchErr != nil {

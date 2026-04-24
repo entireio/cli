@@ -31,7 +31,6 @@ var sshTokenWarningOnce sync.Once //nolint:gochecknoglobals // intentional per-p
 type FetchOptions struct {
 	Remote    string   // remote name or URL (required)
 	RefSpecs  []string // one or more refspecs / object hashes
-	Shallow   bool     // adds --depth=1
 	NoTags    bool     // adds --no-tags
 	NoFilter  bool     // when true, skips --filter=blob:none even if filtered fetches are enabled
 	Dir       string   // working directory (empty = CWD)
@@ -49,9 +48,6 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	args := []string{"fetch"}
 	if opts.NoTags {
 		args = append(args, "--no-tags")
-	}
-	if opts.Shallow {
-		args = append(args, "--depth=1")
 	}
 	args = append(args, opts.ExtraArgs...)
 	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {
