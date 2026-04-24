@@ -15,7 +15,7 @@ import (
 
 const localSigningKey = "local-signing-key"
 
-func TestHasCustomSSHSignProgram(t *testing.T) {
+func TestIsCustomSSHSignProgram(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {

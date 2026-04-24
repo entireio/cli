@@ -28,9 +28,10 @@ func RegisterObjectSigner() {
 				return nil
 			}
 
-			repo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
+			var repo *git.Repository
+			repo, err = git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
 			if err != nil {
-				return nil
+				repo = nil
 			}
 
 			merged, sshSignProgram := loadObjectSignerConfig(cfgSource, repo)
@@ -70,7 +71,10 @@ func RegisterObjectSigner() {
 func loadObjectSignerConfig(source plugin.ConfigSource, repo *git.Repository) (*config.Config, string) {
 	sysCfg := loadScopedConfig(source, config.SystemScope)
 	globalCfg := loadScopedConfig(source, config.GlobalScope)
-	localCfg := loadRepoLocalConfig(repo)
+	localCfg := config.NewConfig()
+	if repo != nil {
+		localCfg = loadRepoLocalConfig(repo)
+	}
 	sshSignProgram := effectiveSSHSignProgram(sysCfg.Raw, globalCfg.Raw, localCfg.Raw)
 	merged := config.Merge(sysCfg, globalCfg, localCfg)
 	return &merged, sshSignProgram
