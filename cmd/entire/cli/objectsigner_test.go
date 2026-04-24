@@ -9,9 +9,10 @@ import (
 	"github.com/go-git/go-git/v6/config"
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/x/plugin"
-	pluginconfig "github.com/go-git/go-git/v6/x/plugin/config"
 	"github.com/go-git/x/plugin/objectsigner/auto"
 )
+
+const localSigningKey = "local-signing-key"
 
 func TestHasCustomSSHSignProgram(t *testing.T) {
 	t.Parallel()
@@ -225,7 +226,7 @@ func TestObjectSignerConfigMerge_LocalConfigTakesPrecedence(t *testing.T) { //no
 	localCfg := config.NewConfig()
 	localCfg.Commit.GpgSign = config.NewOptBool(true)
 	localCfg.GPG.Format = string(auto.FormatSSH)
-	localCfg.User.SigningKey = "local-signing-key"
+	localCfg.User.SigningKey = localSigningKey
 	localCfg.Raw.Section("gpg").Subsection("ssh").SetOption("program", "/Applications/1Password.app/Contents/MacOS/op-ssh-sign")
 	if err := repo.SetConfig(localCfg); err != nil {
 		t.Fatalf("repo.SetConfig() error = %v", err)
@@ -244,8 +245,8 @@ func TestObjectSignerConfigMerge_LocalConfigTakesPrecedence(t *testing.T) { //no
 	if got := merged.GPG.Format; got != string(auto.FormatSSH) {
 		t.Fatalf("merged GPG.Format = %q, want %q", got, auto.FormatSSH)
 	}
-	if got := merged.User.SigningKey; got != "local-signing-key" {
-		t.Fatalf("merged User.SigningKey = %q, want %q", got, "local-signing-key")
+	if got := merged.User.SigningKey; got != localSigningKey {
+		t.Fatalf("merged User.SigningKey = %q, want %q", got, localSigningKey)
 	}
 	if !hasCustomSSHSignProgram(loadLocalConfig().Raw) {
 		t.Fatal("expected merged setup to see local custom gpg.ssh.program")
@@ -253,12 +254,8 @@ func TestObjectSignerConfigMerge_LocalConfigTakesPrecedence(t *testing.T) { //no
 }
 
 func TestRegisterObjectSigner_CachesLocalConfigAcrossGets(t *testing.T) {
-	t.Parallel()
-
-	resetPluginEntry("config_loader")
 	resetPluginEntry("object_signer")
 	t.Cleanup(func() {
-		resetPluginEntry("config_loader")
 		resetPluginEntry("object_signer")
 		registerObjectSignerOnce = sync.Once{}
 		loadLocalConfigFunc = loadLocalConfig
@@ -276,12 +273,6 @@ func TestRegisterObjectSigner_CachesLocalConfigAcrossGets(t *testing.T) {
 		cfg.User.SigningKey = "local-signing-key"
 
 		return cfg
-	}
-
-	if err := plugin.Register(plugin.ConfigLoader(), func() plugin.ConfigSource {
-		return pluginconfig.NewEmpty()
-	}); err != nil {
-		t.Fatalf("plugin.Register(config loader) error = %v", err)
 	}
 
 	RegisterObjectSigner()
