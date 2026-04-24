@@ -329,6 +329,6 @@ func TestRegisterObjectSigner_ReturnsNilSignerForLocalCustomSSHProgram(t *testin
 
 type failingConfigSource struct{}
 
-func (failingConfigSource) Load(scope config.Scope) (config.ConfigStorer, error) {
+func (failingConfigSource) Load(_ config.Scope) (config.ConfigStorer, error) { //nolint:ireturn // required by plugin.ConfigSource
 	return nil, errors.New("boom")
 }
