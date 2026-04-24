@@ -456,26 +456,30 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 		)
 	}
 
-	// Try treeless fetch from origin
-	if fetchErr := FetchMetadataTreeOnly(ctx); fetchErr == nil {
-		freshRepo, repoErr := openRepository(ctx)
-		if repoErr == nil {
-			logRefHash(freshRepo, "treeless-fetch")
-			metadataTree, treeErr := strategy.GetMetadataBranchTree(freshRepo)
-			if treeErr == nil {
-				logging.Debug(logCtx, "metadata tree obtained via treeless fetch",
-					slog.String("tree_hash", metadataTree.Hash.String()),
+	// Only use the tree-only fetch path when filtered fetches are enabled.
+	// Otherwise this would degrade into an ordinary shallow fetch while the
+	// surrounding control flow still assumes the tree-only fast path.
+	if settings.IsFilteredFetchesEnabled(ctx) {
+		if fetchErr := FetchMetadataTreeOnly(ctx); fetchErr == nil {
+			freshRepo, repoErr := openRepository(ctx)
+			if repoErr == nil {
+				logRefHash(freshRepo, "treeless-fetch")
+				metadataTree, treeErr := strategy.GetMetadataBranchTree(freshRepo)
+				if treeErr == nil {
+					logging.Debug(logCtx, "metadata tree obtained via treeless fetch",
+						slog.String("tree_hash", metadataTree.Hash.String()),
+					)
+					return metadataTree, freshRepo, nil
+				}
+				logging.Debug(logCtx, "treeless fetch succeeded but tree read failed",
+					slog.String("error", treeErr.Error()),
 				)
-				return metadataTree, freshRepo, nil
 			}
-			logging.Debug(logCtx, "treeless fetch succeeded but tree read failed",
-				slog.String("error", treeErr.Error()),
+		} else {
+			logging.Debug(logCtx, "treeless fetch failed, trying local",
+				slog.String("error", fetchErr.Error()),
 			)
 		}
-	} else {
-		logging.Debug(logCtx, "treeless fetch failed, trying local",
-			slog.String("error", fetchErr.Error()),
-		)
 	}
 
 	// Try local (may have been set by a prior fetch or push)
@@ -537,7 +541,12 @@ func getMetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error)
 // getV2MetadataTree resolves the v2 /main ref tree with the same
 // fetch fallback pattern as getMetadataTree, including checkpoint remote support.
 func getV2MetadataTree(ctx context.Context) (*object.Tree, *git.Repository, error) {
-	tree, repo, err := checkpoint.GetV2MetadataTree(ctx, FetchV2MainTreeOnly, FetchV2MainRef, openRepository)
+	var treeOnlyFetch checkpoint.FetchRefFunc
+	if settings.IsFilteredFetchesEnabled(ctx) {
+		treeOnlyFetch = FetchV2MainTreeOnly
+	}
+
+	tree, repo, err := checkpoint.GetV2MetadataTree(ctx, treeOnlyFetch, FetchV2MainRef, openRepository)
 	if err == nil {
 		return tree, repo, nil
 	}
