@@ -163,6 +163,28 @@ func TestCustomSSHSignProgramDetection_UsesScopedRawBeforeMerge(t *testing.T) {
 	}
 }
 
+func TestEffectiveSSHSignProgram_UsesHighestPrecedenceScope(t *testing.T) {
+	t.Parallel()
+
+	sysRaw := format.New()
+	sysRaw.Section("gpg").Subsection("ssh").SetOption("program", "/usr/local/bin/custom-system-signer")
+
+	globalRaw := format.New()
+	globalRaw.Section("gpg").Subsection("ssh").SetOption("program", "/Applications/1Password.app/Contents/MacOS/op-ssh-sign")
+
+	localRaw := format.New()
+	localRaw.Section("gpg").Subsection("ssh").SetOption("program", "ssh-keygen")
+
+	got := effectiveSSHSignProgram(sysRaw, globalRaw, localRaw)
+	if got != "ssh-keygen" {
+		t.Fatalf("effectiveSSHSignProgram() = %q, want %q", got, "ssh-keygen")
+	}
+
+	if isCustomSSHSignProgram(got) {
+		t.Fatal("expected highest-precedence ssh-keygen override not to be treated as custom")
+	}
+}
+
 func TestLoadLocalConfig_ReadsCustomSSHSignProgram(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)

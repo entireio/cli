@@ -7,8 +7,8 @@ import (
 	"os"
 	"sync"
 
-	"github.com/go-git/go-git/v6"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/x/plugin"
@@ -31,9 +31,7 @@ func RegisterObjectSigner() {
 			sysCfg := loadScopedConfig(cfgSource, config.SystemScope)
 			globalCfg := loadScopedConfig(cfgSource, config.GlobalScope)
 			localCfg := loadLocalConfig()
-			hasCustomSSHProgram := hasCustomSSHSignProgram(sysCfg.Raw) ||
-				hasCustomSSHSignProgram(globalCfg.Raw) ||
-				hasCustomSSHSignProgram(localCfg.Raw)
+			sshSignProgram := effectiveSSHSignProgram(sysCfg.Raw, globalCfg.Raw, localCfg.Raw)
 
 			// Merge system, global, then local so local settings take precedence.
 			merged := config.Merge(sysCfg, globalCfg, localCfg)
@@ -48,7 +46,7 @@ func RegisterObjectSigner() {
 			// will be unsigned, which is acceptable since signing is best-effort.
 			// The default program is "ssh-keygen", which works with go-git's
 			// native SSH agent signing and does not need to be skipped.
-			if auto.Format(merged.GPG.Format) == auto.FormatSSH && hasCustomSSHProgram {
+			if auto.Format(merged.GPG.Format) == auto.FormatSSH && isCustomSSHSignProgram(sshSignProgram) {
 				logging.Debug(context.Background(), "skipping native SSH commit signing: custom gpg.ssh.program is configured")
 				return nil
 			}
@@ -103,9 +101,27 @@ func hasCustomSSHSignProgram(raw *format.Config) bool {
 		return false
 	}
 
-	program := raw.Section("gpg").Subsection("ssh").Option("program")
+	return isCustomSSHSignProgram(raw.Section("gpg").Subsection("ssh").Option("program"))
+}
 
+func isCustomSSHSignProgram(program string) bool {
 	return program != "" && program != "ssh-keygen"
+}
+
+func effectiveSSHSignProgram(raws ...*format.Config) string {
+	for i := len(raws) - 1; i >= 0; i-- {
+		raw := raws[i]
+		if raw == nil {
+			continue
+		}
+
+		program := raw.Section("gpg").Subsection("ssh").Option("program")
+		if program != "" {
+			return program
+		}
+	}
+
+	return ""
 }
 
 func loadScopedConfig(source plugin.ConfigSource, scope config.Scope) *config.Config {
