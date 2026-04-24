@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path"
+	"strings"
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -100,7 +102,14 @@ func rawSSHSignProgram(raw *format.Config) string {
 }
 
 func isCustomSSHSignProgram(program string) bool {
-	return program != "" && program != "ssh-keygen"
+	program = strings.TrimSpace(program)
+	program = strings.Trim(program, `"'`)
+	if program == "" {
+		return false
+	}
+
+	name := path.Base(strings.ReplaceAll(program, `\`, "/"))
+	return !strings.EqualFold(name, "ssh-keygen") && !strings.EqualFold(name, "ssh-keygen.exe")
 }
 
 func effectiveSSHSignProgram(raws ...*format.Config) string {

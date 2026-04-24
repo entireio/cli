@@ -45,6 +45,33 @@ func TestIsCustomSSHSignProgram(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "absolute ssh-keygen path is not custom",
+			raw: func() *format.Config {
+				c := format.New()
+				c.Section("gpg").Subsection("ssh").SetOption("program", "/usr/bin/ssh-keygen")
+				return c
+			}(),
+			want: false,
+		},
+		{
+			name: "quoted ssh-keygen path is not custom",
+			raw: func() *format.Config {
+				c := format.New()
+				c.Section("gpg").Subsection("ssh").SetOption("program", "\"/usr/bin/ssh-keygen\"")
+				return c
+			}(),
+			want: false,
+		},
+		{
+			name: "windows ssh-keygen exe is not custom",
+			raw: func() *format.Config {
+				c := format.New()
+				c.Section("gpg").Subsection("ssh").SetOption("program", `C:\Windows\System32\OpenSSH\ssh-keygen.exe`)
+				return c
+			}(),
+			want: false,
+		},
+		{
 			name: "gpg section exists but no ssh.program",
 			raw: func() *format.Config {
 				c := format.New()
