@@ -39,6 +39,9 @@ type FetchOptions struct {
 
 // Fetch runs git fetch with checkpoint token injection and optional
 // filtered fetches (--filter=blob:none when settings enable it).
+// When filtered_fetches is enabled and the repository is shallow, Fetch also
+// adds --unshallow. This migrates users away from legacy shallow checkpoint
+// repositories because some Entire commands need checkpoint history.
 // GIT_TERMINAL_PROMPT=0 is always set.
 //
 // Callers that pass a remote name (e.g., "origin") and want filtered fetches to
@@ -50,7 +53,14 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		args = append(args, "--no-tags")
 	}
 	args = append(args, opts.ExtraArgs...)
-	if !opts.NoFilter && settings.IsFilteredFetchesEnabled(ctx) {
+	filteredFetchesEnabled := settings.IsFilteredFetchesEnabled(ctx)
+	if filteredFetchesEnabled && isShallowRepository(ctx, opts.Dir) {
+		// Filtered checkpoint fetches used to create shallow repositories.
+		// Unshallow on subsequent filtered fetches so commands that rely on
+		// checkpoint ancestry/history can operate correctly.
+		args = append(args, "--unshallow")
+	}
+	if !opts.NoFilter && filteredFetchesEnabled {
 		args = append(args, "--filter=blob:none")
 	}
 	args = append(args, opts.Remote)
@@ -303,6 +313,41 @@ func ResolveFetchTarget(ctx context.Context, target string) (string, error) {
 		return "", fmt.Errorf("get remote URL: %w", err)
 	}
 	return url, nil
+}
+
+func isShallowRepository(ctx context.Context, dir string) bool {
+	if !settings.IsFilteredFetchesEnabled(ctx) {
+		return false
+	}
+
+	repoDir, err := fetchWorkingDir(dir)
+	if err != nil {
+		return false
+	}
+
+	shallow, err := isShallowRepositoryInDir(ctx, repoDir)
+	if err != nil {
+		return false
+	}
+	return shallow
+}
+
+func fetchWorkingDir(dir string) (string, error) {
+	if dir != "" {
+		return filepath.Abs(dir)
+	}
+	return os.Getwd()
+}
+
+func isShallowRepositoryInDir(ctx context.Context, dir string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-shallow-repository")
+	cmd.Dir = dir
+	disableTerminalPrompt(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git rev-parse --is-shallow-repository: %w", err)
+	}
+	return strings.TrimSpace(string(out)) == "true", nil
 }
 
 // newCommand creates an exec.Cmd for a git operation that may need
