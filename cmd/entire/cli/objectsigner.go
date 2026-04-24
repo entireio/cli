@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/x/plugin"
@@ -28,13 +27,7 @@ func RegisterObjectSigner() {
 				return nil
 			}
 
-			var repo *git.Repository
-			repo, err = git.PlainOpenWithOptions(".", &git.PlainOpenOptions{DetectDotGit: true})
-			if err != nil {
-				repo = nil
-			}
-
-			merged, sshSignProgram := loadObjectSignerConfig(cfgSource, repo)
+			merged, sshSignProgram := loadObjectSignerConfig(cfgSource)
 
 			if !merged.Commit.GpgSign.IsTrue() {
 				return nil
@@ -68,15 +61,11 @@ func RegisterObjectSigner() {
 	})
 }
 
-func loadObjectSignerConfig(source plugin.ConfigSource, repo *git.Repository) (*config.Config, string) {
+func loadObjectSignerConfig(source plugin.ConfigSource) (*config.Config, string) {
 	sysCfg := loadScopedConfig(source, config.SystemScope)
 	globalCfg := loadScopedConfig(source, config.GlobalScope)
-	localCfg := config.NewConfig()
-	if repo != nil {
-		localCfg = loadRepoLocalConfig(repo)
-	}
-	sshSignProgram := effectiveSSHSignProgram(sysCfg.Raw, globalCfg.Raw, localCfg.Raw)
-	merged := config.Merge(sysCfg, globalCfg, localCfg)
+	sshSignProgram := effectiveSSHSignProgram(sysCfg.Raw, globalCfg.Raw)
+	merged := config.Merge(sysCfg, globalCfg)
 	return &merged, sshSignProgram
 }
 
@@ -142,16 +131,6 @@ func loadScopedConfig(source plugin.ConfigSource, scope config.Scope) *config.Co
 	cfg, err := storer.Config()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to parse %s git config: %v\n", name, err)
-		return config.NewConfig()
-	}
-
-	return cfg
-}
-
-func loadRepoLocalConfig(repo *git.Repository) *config.Config {
-	cfg, err := repo.Storer.Config()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to parse local git config: %v\n", err)
 		return config.NewConfig()
 	}
 

@@ -1,19 +1,12 @@
 package cli
 
 import (
-	"errors"
-	"sync"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
-	"github.com/go-git/go-git/v6/x/plugin"
 	"github.com/go-git/x/plugin/objectsigner/auto"
 )
-
-const localSigningKey = "local-signing-key"
 
 func TestIsCustomSSHSignProgram(t *testing.T) {
 	t.Parallel()
@@ -177,158 +170,12 @@ func TestEffectiveSSHSignProgram_UsesHighestPrecedenceScope(t *testing.T) {
 	globalRaw := format.New()
 	globalRaw.Section("gpg").Subsection("ssh").SetOption("program", "/Applications/1Password.app/Contents/MacOS/op-ssh-sign")
 
-	localRaw := format.New()
-	localRaw.Section("gpg").Subsection("ssh").SetOption("program", "ssh-keygen")
-
-	got := effectiveSSHSignProgram(sysRaw, globalRaw, localRaw)
-	if got != "ssh-keygen" {
-		t.Fatalf("effectiveSSHSignProgram() = %q, want %q", got, "ssh-keygen")
+	got := effectiveSSHSignProgram(sysRaw, globalRaw)
+	if got != "/Applications/1Password.app/Contents/MacOS/op-ssh-sign" {
+		t.Fatalf("effectiveSSHSignProgram() = %q, want %q", got, "/Applications/1Password.app/Contents/MacOS/op-ssh-sign")
 	}
 
-	if isCustomSSHSignProgram(got) {
-		t.Fatal("expected highest-precedence ssh-keygen override not to be treated as custom")
+	if !isCustomSSHSignProgram(got) {
+		t.Fatal("expected highest-precedence global override to be treated as custom")
 	}
-}
-
-func TestLoadLocalConfig_ReadsCustomSSHSignProgram(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	t.Chdir(repoDir)
-
-	repoCfg := config.NewConfig()
-	repoCfg.GPG.Format = string(auto.FormatSSH)
-	repoCfg.Raw.Section("gpg").Subsection("ssh").SetOption("program", "/Applications/1Password.app/Contents/MacOS/op-ssh-sign")
-
-	repo, err := git.PlainOpen(repoDir)
-	if err != nil {
-		t.Fatalf("git.PlainOpen() error = %v", err)
-	}
-
-	if err := repo.SetConfig(repoCfg); err != nil {
-		t.Fatalf("repo.SetConfig() error = %v", err)
-	}
-
-	localCfg := loadRepoLocalConfig(repo)
-	if !isCustomSSHSignProgram(rawSSHSignProgram(localCfg.Raw)) {
-		t.Fatal("expected local config to report custom gpg.ssh.program")
-	}
-}
-
-func TestObjectSignerConfigMerge_LocalConfigTakesPrecedence(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	t.Chdir(repoDir)
-
-	repo, err := git.PlainOpen(repoDir)
-	if err != nil {
-		t.Fatalf("git.PlainOpen() error = %v", err)
-	}
-
-	localCfg := config.NewConfig()
-	localCfg.Commit.GpgSign = config.NewOptBool(true)
-	localCfg.GPG.Format = string(auto.FormatSSH)
-	localCfg.User.SigningKey = localSigningKey
-	localCfg.Raw.Section("gpg").Subsection("ssh").SetOption("program", "/Applications/1Password.app/Contents/MacOS/op-ssh-sign")
-	if err := repo.SetConfig(localCfg); err != nil {
-		t.Fatalf("repo.SetConfig() error = %v", err)
-	}
-
-	globalCfg := config.NewConfig()
-	globalCfg.Commit.GpgSign = config.NewOptBool(false)
-	globalCfg.GPG.Format = "openpgp"
-	globalCfg.User.SigningKey = "global-signing-key"
-
-	merged := config.Merge(config.NewConfig(), globalCfg, loadRepoLocalConfig(repo))
-
-	if !merged.Commit.GpgSign.IsTrue() {
-		t.Fatal("expected local commit.gpgsign to override global config")
-	}
-	if got := merged.GPG.Format; got != string(auto.FormatSSH) {
-		t.Fatalf("merged GPG.Format = %q, want %q", got, auto.FormatSSH)
-	}
-	if got := merged.User.SigningKey; got != localSigningKey {
-		t.Fatalf("merged User.SigningKey = %q, want %q", got, localSigningKey)
-	}
-	if !isCustomSSHSignProgram(rawSSHSignProgram(loadRepoLocalConfig(repo).Raw)) {
-		t.Fatal("expected merged setup to see local custom gpg.ssh.program")
-	}
-}
-
-func TestLoadObjectSignerConfig_IgnoresUpperScopeLoadFailures(t *testing.T) {
-	t.Parallel()
-
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-
-	repo, err := git.PlainOpen(repoDir)
-	if err != nil {
-		t.Fatalf("git.PlainOpen() error = %v", err)
-	}
-
-	localCfg := config.NewConfig()
-	localCfg.Commit.GpgSign = config.NewOptBool(true)
-	localCfg.GPG.Format = string(auto.FormatSSH)
-	localCfg.User.SigningKey = localSigningKey
-	localCfg.Raw.Section("gpg").Subsection("ssh").SetOption("program", "/Applications/1Password.app/Contents/MacOS/op-ssh-sign")
-	if err := repo.SetConfig(localCfg); err != nil {
-		t.Fatalf("repo.SetConfig() error = %v", err)
-	}
-
-	merged, sshSignProgram := loadObjectSignerConfig(failingConfigSource{}, repo)
-
-	if !merged.Commit.GpgSign.IsTrue() {
-		t.Fatal("expected local commit.gpgsign to survive upper-scope load failures")
-	}
-	if got := merged.GPG.Format; got != string(auto.FormatSSH) {
-		t.Fatalf("merged GPG.Format = %q, want %q", got, auto.FormatSSH)
-	}
-	if got := merged.User.SigningKey; got != localSigningKey {
-		t.Fatalf("merged User.SigningKey = %q, want %q", got, localSigningKey)
-	}
-	if !isCustomSSHSignProgram(sshSignProgram) {
-		t.Fatal("expected local custom gpg.ssh.program to survive upper-scope load failures")
-	}
-}
-
-func TestRegisterObjectSigner_ReturnsNilSignerForLocalCustomSSHProgram(t *testing.T) { //nolint:paralleltest // t.Chdir and plugin registry are process-global
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	t.Chdir(repoDir)
-
-	repo, err := git.PlainOpen(repoDir)
-	if err != nil {
-		t.Fatalf("git.PlainOpen() error = %v", err)
-	}
-
-	localCfg := config.NewConfig()
-	localCfg.Commit.GpgSign = config.NewOptBool(true)
-	localCfg.GPG.Format = string(auto.FormatSSH)
-	localCfg.User.SigningKey = localSigningKey
-	localCfg.Raw.Section("gpg").Subsection("ssh").SetOption("program", "/Applications/1Password.app/Contents/MacOS/op-ssh-sign")
-	if err := repo.SetConfig(localCfg); err != nil {
-		t.Fatalf("repo.SetConfig() error = %v", err)
-	}
-
-	resetPluginEntry("object-signer")
-	t.Cleanup(func() {
-		resetPluginEntry("object-signer")
-		registerObjectSignerOnce = sync.Once{}
-	})
-
-	registerObjectSignerOnce = sync.Once{}
-	RegisterObjectSigner()
-
-	signer, err := plugin.Get(plugin.ObjectSigner())
-	if err != nil {
-		t.Fatalf("plugin.Get(object signer) error = %v", err)
-	}
-	if signer != nil {
-		t.Fatal("expected nil signer when local gpg.ssh.program uses a custom signer")
-	}
-}
-
-type failingConfigSource struct{}
-
-func (failingConfigSource) Load(_ config.Scope) (config.ConfigStorer, error) { //nolint:ireturn // required by plugin.ConfigSource
-	return nil, errors.New("boom")
 }
