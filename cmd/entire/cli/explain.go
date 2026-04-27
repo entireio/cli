@@ -904,13 +904,22 @@ func maybeCompactExternalTranscriptForSummary(ctx context.Context, scopedTranscr
 		}
 		return scopedTranscript
 	}
-	if !transcriptHasSummaryContent(compacted.Transcript, agentType) {
+
+	redacted, err := redact.JSONLBytes(compacted.Transcript)
+	if err != nil {
+		logging.Debug(ctx, "external summary compaction redaction failed",
+			slog.String("agent", string(agentType)),
+			slog.String("error", err.Error()))
+		return scopedTranscript
+	}
+	redactedTranscript := redacted.Bytes()
+	if !transcriptHasSummaryContent(redactedTranscript, agentType) {
 		return scopedTranscript
 	}
 
 	logging.Debug(ctx, "using external compact transcript for summary generation",
 		slog.String("agent", string(agentType)))
-	return compacted.Transcript
+	return redactedTranscript
 }
 
 func transcriptHasSummaryContent(transcriptBytes []byte, agentType types.AgentType) bool {
@@ -932,7 +941,8 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 	}
 	defer cancel()
 
-	// scopedTranscript is read from checkpoint storage, which redacts on write.
+	// scopedTranscript is either read from checkpoint storage (redacted on
+	// write) or replaced by external compact output redacted before use.
 	summary, err := generateTranscriptSummary(timeoutCtx, redact.AlreadyRedacted(scopedTranscript), filesTouched, agentType, generator)
 	if err != nil {
 		// Only classify as ctx cancel/deadline when the error chain actually
