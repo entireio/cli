@@ -155,6 +155,34 @@ func TestBuildSummaryGenerator_ExternalProvider(t *testing.T) { //nolint:paralle
 	}
 }
 
+func TestBuildSummaryGenerator_BuiltInProviderSkipsExternalDiscovery(t *testing.T) { //nolint:paralleltest // uses t.Chdir and package-level stubs
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".entire", "settings.json"),
+		[]byte(`{"enabled":true,"summary_generation":{"provider":"claude-code","model":"test-model"}}`),
+		0o644,
+	))
+
+	originalDiscover := discoverExternalSummaryProviders
+	originalAvailable := isSummaryProviderCLIAvailable
+	t.Cleanup(func() {
+		discoverExternalSummaryProviders = originalDiscover
+		isSummaryProviderCLIAvailable = originalAvailable
+	})
+	discoverExternalSummaryProviders = func(context.Context) {
+		t.Fatal("registered built-in summary provider should not trigger external discovery")
+	}
+	isSummaryProviderCLIAvailable = func(types.AgentName) bool { return true }
+
+	if generator := buildSummaryGenerator(context.Background()); generator == nil {
+		t.Fatal("buildSummaryGenerator() = nil for registered built-in provider")
+	}
+}
+
 func TestBuildCompactTranscript_UsesAgentTranscriptCompactor(t *testing.T) { //nolint:paralleltest // uses t.Chdir
 	dir := t.TempDir()
 	t.Chdir(dir)

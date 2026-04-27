@@ -40,6 +40,11 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
+var (
+	discoverExternalSummaryProviders = external.DiscoverAndRegister
+	isSummaryProviderCLIAvailable    = agent.IsSummaryCLIAvailable
+)
+
 // listCheckpoints returns all checkpoints from the metadata branch.
 // Uses checkpoint.GitStore.ListCommitted() for reading from entire/checkpoints/v1.
 func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
@@ -692,12 +697,15 @@ func buildSummaryGenerator(ctx context.Context) summarize.Generator {
 	}
 
 	providerName := types.AgentName(s.SummaryGeneration.Provider)
-	external.DiscoverAndRegister(ctx)
 	ag, err := agent.Get(providerName)
 	if err != nil {
-		logging.Warn(ctx, "configured summary provider not available, using default",
-			"provider", s.SummaryGeneration.Provider, "error", err.Error())
-		return nil
+		discoverExternalSummaryProviders(ctx)
+		ag, err = agent.Get(providerName)
+		if err != nil {
+			logging.Warn(ctx, "configured summary provider not available, using default",
+				"provider", s.SummaryGeneration.Provider, "error", err.Error())
+			return nil
+		}
 	}
 
 	tg, ok := agent.AsTextGenerator(ag)
@@ -711,7 +719,7 @@ func buildSummaryGenerator(ctx context.Context) summarize.Generator {
 	// for development while a different agent generates summaries. Fall back
 	// silently (Warn log) because this runs in the post-commit hook and a
 	// hard error would block the commit.
-	if !external.IsExternal(ag) && !agent.IsSummaryCLIAvailable(providerName) {
+	if !external.IsExternal(ag) && !isSummaryProviderCLIAvailable(providerName) {
 		logging.Warn(ctx, "configured summary provider CLI binary not on PATH, using default",
 			"provider", s.SummaryGeneration.Provider)
 		return nil

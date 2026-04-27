@@ -798,12 +798,11 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *
 	if len(scopedTranscript) == 0 {
 		return fmt.Errorf("checkpoint %s has no transcript content for this checkpoint (scoped)", checkpointID)
 	}
-	scopedTranscript = maybeCompactExternalTranscriptForSummary(ctx, scopedTranscript, content.Metadata.Agent)
-
 	provider, err := resolveCheckpointSummaryProvider(ctx, w)
 	if err != nil {
 		return fmt.Errorf("failed to resolve summary provider: %w", err)
 	}
+	scopedTranscript = maybeCompactExternalTranscriptForSummary(ctx, scopedTranscript, content.Metadata.Agent)
 
 	// Generate summary using shared helper
 	logging.Info(ctx, "generating checkpoint summary")
@@ -852,8 +851,11 @@ func maybeCompactExternalTranscriptForSummary(ctx context.Context, scopedTranscr
 		return scopedTranscript
 	}
 
-	external.DiscoverAndRegister(ctx)
 	ag, err := agent.GetByAgentType(agentType)
+	if err != nil {
+		external.DiscoverAndRegister(ctx)
+		ag, err = agent.GetByAgentType(agentType)
+	}
 	if err != nil || !external.IsExternal(ag) {
 		return scopedTranscript
 	}

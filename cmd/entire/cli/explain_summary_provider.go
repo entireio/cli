@@ -42,16 +42,16 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 		return nil, fmt.Errorf("loading settings: %w", err)
 	}
 
-	discoverSummaryProviders(ctx)
-
 	if s.SummaryGeneration != nil && s.SummaryGeneration.Provider != "" {
 		providerName := types.AgentName(s.SummaryGeneration.Provider)
+		discoverSummaryProviderIfMissing(ctx, providerName)
 		if err := ensureSummaryProviderPresent(ctx, providerName); err != nil {
 			return nil, err
 		}
 		return buildCheckpointSummaryProvider(providerName, s.SummaryGeneration.Model)
 	}
 
+	discoverSummaryProviders(ctx)
 	candidates := listEnabledSummaryProviders(ctx)
 
 	switch len(candidates) {
@@ -75,6 +75,13 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 		fmt.Fprintf(w, "Using %s for summary generation.\n", provider.DisplayName)
 		return provider, nil
 	}
+}
+
+func discoverSummaryProviderIfMissing(ctx context.Context, name types.AgentName) {
+	if _, err := getSummaryAgent(name); err == nil {
+		return
+	}
+	discoverSummaryProviders(ctx)
 }
 
 // autoSelectSummaryProvider builds a provider for an auto-selected candidate

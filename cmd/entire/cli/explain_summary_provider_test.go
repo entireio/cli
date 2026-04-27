@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,10 +54,12 @@ func TestResolveCheckpointSummaryProvider_UsesConfiguredProvider(t *testing.T) {
 	originalLoad := loadSummarySettings
 	originalGet := getSummaryAgent
 	originalCLI := isSummaryCLIAvailable
+	originalDiscover := discoverSummaryProviders
 	t.Cleanup(func() {
 		loadSummarySettings = originalLoad
 		getSummaryAgent = originalGet
 		isSummaryCLIAvailable = originalCLI
+		discoverSummaryProviders = originalDiscover
 	})
 
 	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
@@ -75,6 +78,9 @@ func TestResolveCheckpointSummaryProvider_UsesConfiguredProvider(t *testing.T) {
 		}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+	discoverSummaryProviders = func(context.Context) {
+		t.Fatal("configured registered provider should not trigger external discovery")
+	}
 
 	provider, err := resolveCheckpointSummaryProvider(ctx, &bytes.Buffer{})
 	if err != nil {
@@ -266,6 +272,10 @@ func TestResolveCheckpointSummaryProvider_ConfiguredProviderNotInstalledReturnsE
 func TestResolveCheckpointSummaryProvider_ConfiguredExternalProvider(t *testing.T) {
 	// Cannot use t.Parallel() because external agent discovery mutates the
 	// package-level agent registry.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)

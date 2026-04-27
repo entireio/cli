@@ -2401,6 +2401,10 @@ func TestConfigureCmd_SummarizeProvider_WritesToLocalFile(t *testing.T) {
 }
 
 func TestConfigureCmd_SummarizeProvider_ExternalEnablesExternalAgents(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 
