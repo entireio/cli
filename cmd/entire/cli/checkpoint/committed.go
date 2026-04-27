@@ -1870,7 +1870,7 @@ func SignCommitBestEffort(ctx context.Context, commit *object.Commit) {
 	commit.Signature = string(sig)
 }
 
-func loadObjectSigner(ctx context.Context) (plugin.Signer, bool) { //nolint:ireturn // signing uses the plugin.Signer interface
+func loadObjectSigner(ctx context.Context) (plugin.Signer, bool) {
 	cfgSource, err := plugin.Get(plugin.ConfigLoader())
 	if err != nil {
 		// No config loader registered; signing not possible.
@@ -1909,7 +1909,7 @@ func loadObjectSigner(ctx context.Context) (plugin.Signer, bool) { //nolint:iret
 
 // connectSSHAgent connects to the SSH agent via SSH_AUTH_SOCK.
 // Returns nil if the agent is unavailable.
-func connectSSHAgent(ctx context.Context) sshagent.Agent { //nolint:ireturn // must return the ssh agent interface
+func connectSSHAgent(ctx context.Context) sshagent.Agent {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
 		return nil

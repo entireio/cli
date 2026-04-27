@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -179,7 +181,7 @@ func TestResolveCheckpointSummaryProvider_NoCandidatesReturnsError(t *testing.T)
 	if err == nil {
 		t.Fatal("expected error when no summary-capable CLI is installed")
 	}
-	if !strings.Contains(err.Error(), "no summary-capable agent CLI is installed") {
+	if !strings.Contains(err.Error(), "no summary-capable provider is available") {
 		t.Fatalf("unexpected error text: %v", err)
 	}
 }
@@ -258,5 +260,46 @@ func TestResolveCheckpointSummaryProvider_ConfiguredProviderNotInstalledReturnsE
 	}
 	if !strings.Contains(err.Error(), "not on PATH") {
 		t.Fatalf("unexpected error text: %v", err)
+	}
+}
+
+func TestResolveCheckpointSummaryProvider_ConfiguredExternalProvider(t *testing.T) {
+	// Cannot use t.Parallel() because external agent discovery mutates the
+	// package-level agent registry.
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	const providerName = "external-summary-explain"
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true,"external_agents":true,"summary_generation":{"provider":"`+providerName+`","model":"external-model"}}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	provider, err := resolveCheckpointSummaryProvider(ctx, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("resolveCheckpointSummaryProvider() error = %v", err)
+	}
+	if provider.Name != types.AgentName(providerName) {
+		t.Fatalf("provider.Name = %q, want %q", provider.Name, providerName)
+	}
+	if provider.Model != "external-model" {
+		t.Fatalf("provider.Model = %q, want %q", provider.Model, "external-model")
+	}
+
+	summary, err := provider.Generator.Generate(ctx, summarize.Input{
+		Transcript: []summarize.Entry{{Type: summarize.EntryTypeUser, Content: "summarize"}},
+	})
+	if err != nil {
+		t.Fatalf("provider.Generator.Generate() error = %v", err)
+	}
+	if summary.Intent != "Intent" || summary.Outcome != "Outcome" {
+		t.Fatalf("summary = %+v, want generated Intent/Outcome", summary)
 	}
 }

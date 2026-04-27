@@ -944,6 +944,29 @@ func TestBuildCondensedTranscriptFromBytes_OpenCodeInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestBuildCondensedTranscriptFromBytes_CompactTranscriptFallback(t *testing.T) {
+	compactJSONL := `{"v":1,"agent":"pi","cli_version":"test","type":"user","ts":"2026-01-01T00:00:00Z","content":[{"text":"Create bye.txt"}]}
+{"v":1,"agent":"pi","cli_version":"test","type":"assistant","ts":"2026-01-01T00:00:01Z","content":[{"type":"tool_use","id":"tc1","name":"Write","input":{"path":"bye.txt"}},{"type":"text","text":"Created bye.txt"}]}
+`
+
+	entries, err := BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted([]byte(compactJSONL)), types.AgentType("Pi"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+	if entries[0].Type != EntryTypeUser || entries[0].Content != "Create bye.txt" {
+		t.Fatalf("unexpected first entry: %+v", entries[0])
+	}
+	if entries[1].Type != EntryTypeTool || entries[1].ToolName != "Write" || entries[1].ToolDetail != "bye.txt" {
+		t.Fatalf("unexpected tool entry: %+v", entries[1])
+	}
+	if entries[2].Type != EntryTypeAssistant || entries[2].Content != "Created bye.txt" {
+		t.Fatalf("unexpected assistant entry: %+v", entries[2])
+	}
+}
+
 func TestBuildCondensedTranscriptFromBytes_CursorRoleBasedJSONL(t *testing.T) {
 	// Cursor transcripts use "role" instead of "type" and wrap user text in <user_query> tags.
 	// The transcript parser normalizes role→type, so condensation should work.

@@ -16,6 +16,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -797,6 +798,7 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *
 	if len(scopedTranscript) == 0 {
 		return fmt.Errorf("checkpoint %s has no transcript content for this checkpoint (scoped)", checkpointID)
 	}
+	scopedTranscript = maybeCompactExternalTranscriptForSummary(ctx, scopedTranscript, content.Metadata.Agent)
 
 	provider, err := resolveCheckpointSummaryProvider(ctx, w)
 	if err != nil {
@@ -843,6 +845,75 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *
 	fmt.Fprintln(w, "✓ Summary generated and saved")
 	fmt.Fprint(w, formatSummaryProviderDetails(provider))
 	return nil
+}
+
+func maybeCompactExternalTranscriptForSummary(ctx context.Context, scopedTranscript []byte, agentType types.AgentType) []byte {
+	if transcriptHasSummaryContent(scopedTranscript, agentType) {
+		return scopedTranscript
+	}
+
+	external.DiscoverAndRegister(ctx)
+	ag, err := agent.GetByAgentType(agentType)
+	if err != nil || !external.IsExternal(ag) {
+		return scopedTranscript
+	}
+
+	compactor, ok := agent.AsTranscriptCompactor(ag)
+	if !ok {
+		return scopedTranscript
+	}
+
+	tmpFile, err := os.CreateTemp("", "entire-summary-transcript-*.jsonl")
+	if err != nil {
+		logging.Debug(ctx, "external summary compaction unavailable",
+			slog.String("agent", string(agentType)),
+			slog.String("error", err.Error()))
+		return scopedTranscript
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		if removeErr := os.Remove(tmpPath); removeErr != nil {
+			logging.Debug(ctx, "failed to remove temporary summary transcript",
+				slog.String("path", tmpPath),
+				slog.String("error", removeErr.Error()))
+		}
+	}()
+
+	if _, err := tmpFile.Write(scopedTranscript); err != nil {
+		_ = tmpFile.Close()
+		logging.Debug(ctx, "external summary compaction transcript write failed",
+			slog.String("agent", string(agentType)),
+			slog.String("error", err.Error()))
+		return scopedTranscript
+	}
+	if err := tmpFile.Close(); err != nil {
+		logging.Debug(ctx, "external summary compaction transcript close failed",
+			slog.String("agent", string(agentType)),
+			slog.String("error", err.Error()))
+		return scopedTranscript
+	}
+
+	compacted, err := compactor.CompactTranscript(ctx, tmpPath)
+	if err != nil || compacted == nil || len(compacted.Transcript) == 0 {
+		if err != nil {
+			logging.Debug(ctx, "external summary compaction failed",
+				slog.String("agent", string(agentType)),
+				slog.String("error", err.Error()))
+		}
+		return scopedTranscript
+	}
+	if !transcriptHasSummaryContent(compacted.Transcript, agentType) {
+		return scopedTranscript
+	}
+
+	logging.Debug(ctx, "using external compact transcript for summary generation",
+		slog.String("agent", string(agentType)))
+	return compacted.Transcript
+}
+
+func transcriptHasSummaryContent(transcriptBytes []byte, agentType types.AgentType) bool {
+	entries, err := summarize.BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted(transcriptBytes), agentType)
+	return err == nil && len(entries) > 0
 }
 
 // generateCheckpointAISummary returns the generated summary, the effective

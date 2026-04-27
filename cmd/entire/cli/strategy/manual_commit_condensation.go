@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
@@ -676,7 +677,9 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 // The return type is the summarize.Generator interface rather than the concrete
 // adapter pointer so callers can't accidentally hold a non-nil interface that
 // wraps a nil pointer (the classic Go nil-interface footgun).
-func buildSummaryGenerator(ctx context.Context) summarize.Generator { //nolint:ireturn // interface return for nil-safety
+//
+//nolint:ireturn // interface return for nil-safety
+func buildSummaryGenerator(ctx context.Context) summarize.Generator {
 	s, err := settings.Load(ctx)
 	if err != nil {
 		// Warn (not Debug): this is the auto-summarize hot path on every commit.
@@ -691,6 +694,7 @@ func buildSummaryGenerator(ctx context.Context) summarize.Generator { //nolint:i
 	}
 
 	providerName := types.AgentName(s.SummaryGeneration.Provider)
+	external.DiscoverAndRegister(ctx)
 	ag, err := agent.Get(providerName)
 	if err != nil {
 		logging.Warn(ctx, "configured summary provider not available, using default",
@@ -698,19 +702,19 @@ func buildSummaryGenerator(ctx context.Context) summarize.Generator { //nolint:i
 		return nil
 	}
 
-	// Check binary on PATH, not DetectPresence — a repo can use one agent
-	// for development while a different agent generates summaries. Fall back
-	// silently (Warn log) because this runs in the post-commit hook and a
-	// hard error would block the commit.
-	if !agent.IsSummaryCLIAvailable(providerName) {
-		logging.Warn(ctx, "configured summary provider CLI binary not on PATH, using default",
+	tg, ok := agent.AsTextGenerator(ag)
+	if !ok {
+		logging.Warn(ctx, "configured summary provider does not support text generation, using default",
 			"provider", s.SummaryGeneration.Provider)
 		return nil
 	}
 
-	tg, ok := agent.AsTextGenerator(ag)
-	if !ok {
-		logging.Warn(ctx, "configured summary provider does not support text generation, using default",
+	// Check binary on PATH, not DetectPresence — a repo can use one agent
+	// for development while a different agent generates summaries. Fall back
+	// silently (Warn log) because this runs in the post-commit hook and a
+	// hard error would block the commit.
+	if !external.IsExternal(ag) && !agent.IsSummaryCLIAvailable(providerName) {
+		logging.Warn(ctx, "configured summary provider CLI binary not on PATH, using default",
 			"provider", s.SummaryGeneration.Provider)
 		return nil
 	}

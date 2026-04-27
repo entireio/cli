@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -25,6 +26,7 @@ var (
 	getSummaryAgent             = agent.Get
 	listRegisteredAgents        = agent.List
 	isSummaryCLIAvailable       = agent.IsSummaryCLIAvailable
+	discoverSummaryProviders    = external.DiscoverAndRegister
 )
 
 type checkpointSummaryProvider struct {
@@ -40,6 +42,8 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 		return nil, fmt.Errorf("loading settings: %w", err)
 	}
 
+	discoverSummaryProviders(ctx)
+
 	if s.SummaryGeneration != nil && s.SummaryGeneration.Provider != "" {
 		providerName := types.AgentName(s.SummaryGeneration.Provider)
 		if err := ensureSummaryProviderPresent(ctx, providerName); err != nil {
@@ -52,7 +56,7 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 
 	switch len(candidates) {
 	case 0:
-		return nil, errors.New("no summary-capable agent CLI is installed on this machine; install one of claude, codex, gemini, cursor, or copilot, or set summary_generation.provider in settings")
+		return nil, errors.New("no summary-capable provider is available; install claude, codex, gemini, cursor, or copilot, install an external entire-agent-* plugin that declares text_generator, or set summary_generation.provider in settings")
 	case 1:
 		return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: single installed provider")
 	default:
@@ -102,9 +106,9 @@ func listEnabledSummaryProviders(_ context.Context) []checkpointSummaryProvider 
 		if _, ok := agent.AsTextGenerator(ag); !ok {
 			continue
 		}
-		// Check CLI binary on PATH, not DetectPresence — a repo can use
-		// Claude Code for development while Codex is the summary provider.
-		if !isSummaryCLIAvailable(name) {
+		// Check CLI binary on PATH for built-ins. External agents are already
+		// proven executable by discovery and are gated by text_generator.
+		if !isSummaryProviderAvailable(name, ag) {
 			continue
 		}
 		providers = append(providers, checkpointSummaryProvider{
@@ -113,6 +117,14 @@ func listEnabledSummaryProviders(_ context.Context) []checkpointSummaryProvider 
 		})
 	}
 	return providers
+}
+
+func isSummaryProviderAvailable(name types.AgentName, ag agent.Agent) bool {
+	if external.IsExternal(ag) {
+		_, ok := agent.AsTextGenerator(ag)
+		return ok
+	}
+	return isSummaryCLIAvailable(name)
 }
 
 func promptForSummaryProvider(providers []checkpointSummaryProvider) (types.AgentName, error) {
@@ -168,10 +180,14 @@ func buildCheckpointSummaryProvider(name types.AgentName, model string) (*checkp
 // configuration — a repo using Claude Code for development can still use Codex
 // or Gemini for summary generation as long as the binary is installed.
 func ensureSummaryProviderPresent(_ context.Context, name types.AgentName) error {
-	if _, err := getSummaryAgent(name); err != nil {
+	ag, err := getSummaryAgent(name)
+	if err != nil {
 		return fmt.Errorf("unknown summary provider %s: %w", name, err)
 	}
-	if !isSummaryCLIAvailable(name) {
+	if _, ok := agent.AsTextGenerator(ag); !ok {
+		return fmt.Errorf("agent %s does not support summary generation", name)
+	}
+	if !isSummaryProviderAvailable(name, ag) {
 		return fmt.Errorf("summary provider %q is configured but its CLI binary is not on PATH; install it or update summary_generation.provider in settings", name)
 	}
 	return nil
@@ -186,7 +202,7 @@ func validateSummaryProvider(provider string) error {
 	if _, ok := agent.AsTextGenerator(ag); !ok {
 		return fmt.Errorf("agent %q does not support summary generation", provider)
 	}
-	if !isSummaryCLIAvailable(name) {
+	if !isSummaryProviderAvailable(name, ag) {
 		return fmt.Errorf("summary provider %q is configured but its CLI binary is not on PATH; install it or choose another provider", provider)
 	}
 	return nil

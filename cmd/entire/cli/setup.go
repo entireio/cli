@@ -176,6 +176,9 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 		if err := validateSummaryProvider(provider); err != nil {
 			return err
 		}
+		if ag, getErr := getSummaryAgent(types.AgentName(provider)); getErr == nil && external.IsExternal(ag) {
+			s.ExternalAgents = true
+		}
 	}
 	if model != "" && provider == "" && s.SummaryGeneration.Provider == "" {
 		// The target file alone has no provider, but the merged runtime
