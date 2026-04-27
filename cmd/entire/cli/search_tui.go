@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	glamour "charm.land/glamour/v2"
@@ -17,6 +18,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/muesli/termenv"
 )
 
 // searchMode tracks whether the user is browsing results or editing the search bar.
@@ -166,6 +168,17 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		browseVP:  viewport.New(ss.width, 1), // height set on first WindowSizeMsg
 	}
 	m = m.refreshBrowseContent()
+
+	// Pre-warm the snippet renderer so the first detail-page entry doesn't
+	// pay the goldmark + chroma init cost. Errors are intentionally ignored —
+	// renderSnippetMarkdown will fall back to wrapText.
+	if ss.width > 0 {
+		go func(w int, dark bool) {
+			_, err := getSnippetRenderer(w, dark)
+			_ = err //nolint:wsl // intentionally fire-and-forget
+		}(ss.width, termenv.HasDarkBackground())
+	}
+
 	return m
 }
 
@@ -846,6 +859,42 @@ func derefStr(s *string, fallback string) string {
 
 // ─── Snippet Markdown ────────────────────────────────────────────────────────
 
+// snippetRendererKey identifies a cached glamour renderer by terminal width
+// and background mode. Keying on both means a window resize or theme switch
+// transparently rebuilds; same-shape repeats are cache hits.
+type snippetRendererKey struct {
+	width int
+	dark  bool
+}
+
+var (
+	snippetRendererMu    sync.Mutex
+	snippetRendererCache = map[snippetRendererKey]*glamour.TermRenderer{}
+)
+
+// getSnippetRenderer returns a glamour TermRenderer for the given width and
+// background mode, building and caching it on first request. TermRenderer is
+// safe to share across calls because Render allocates a fresh buffer each
+// invocation (see charm.land/glamour/v2 RenderBytes).
+func getSnippetRenderer(width int, dark bool) (*glamour.TermRenderer, error) {
+	key := snippetRendererKey{width: width, dark: dark}
+	snippetRendererMu.Lock()
+	defer snippetRendererMu.Unlock()
+	if r, ok := snippetRendererCache[key]; ok {
+		return r, nil
+	}
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStyles(snippetMarkdownStyles(dark)),
+		glamour.WithWordWrap(width),
+		glamour.WithPreservedNewLines(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("init glamour renderer: %w", err)
+	}
+	snippetRendererCache[key] = r
+	return r, nil
+}
+
 // renderSnippetMarkdown renders a search snippet as markdown using glamour v2.
 // It is used in the full-screen checkpoint detail view where the snippet has
 // room to breathe; the inline detail card keeps plain word-wrapping. On any
@@ -854,11 +903,7 @@ func renderSnippetMarkdown(snippet string, width int) string {
 	if width < 20 {
 		return wrapText(snippet, width)
 	}
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(snippetMarkdownStyles()),
-		glamour.WithWordWrap(width),
-		glamour.WithPreservedNewLines(),
-	)
+	renderer, err := getSnippetRenderer(width, termenv.HasDarkBackground())
 	if err != nil {
 		return wrapText(snippet, width)
 	}
@@ -870,14 +915,23 @@ func renderSnippetMarkdown(snippet string, width int) string {
 }
 
 // snippetMarkdownStyles returns a glamour style config tailored for inline
-// snippets: the default Document margin is dropped so the rendered block
-// aligns flush with the surrounding "SNIPPET" header.
-func snippetMarkdownStyles() ansi.StyleConfig {
-	s := glamourstyles.DarkStyleConfig
+// snippets. The body text colour is left nil so it inherits the terminal's
+// default foreground, which contrasts with whichever background the user has
+// chosen — ANSI palette numbers (e.g. "234") get remapped by terminal themes
+// and produce unreadable colours on cream / Solarized backgrounds.
+func snippetMarkdownStyles(dark bool) ansi.StyleConfig {
+	var s ansi.StyleConfig
+	if dark {
+		s = glamourstyles.DarkStyleConfig
+	} else {
+		s = glamourstyles.LightStyleConfig
+	}
 	zero := uint(0)
 	s.Document.Margin = &zero
 	s.Document.BlockPrefix = ""
 	s.Document.BlockSuffix = ""
+	s.Document.Color = nil
+	s.Paragraph.Color = nil
 	return s
 }
 
