@@ -103,6 +103,12 @@ type searchModel struct {
 	styles       searchStyles
 	detailVP     viewport.Model // full-screen detail view
 	browseVP     viewport.Model // scrollable browse view
+
+	// darkBg is captured once before bubbletea takes over the terminal so the
+	// snippet renderer never re-queries the terminal via OSC during the Update
+	// loop (which would race against bubbletea's stdin reader and stall).
+	darkBg          bool
+	prewarmedWidths map[int]struct{}
 }
 
 // pageResults returns the slice of results for the current page.
@@ -157,28 +163,19 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	}
 
 	m := searchModel{
-		results:   results,
-		total:     total,
-		width:     ss.width,
-		mode:      modeBrowse,
-		input:     ti,
-		searchCfg: cfg,
-		apiPage:   apiPage,
-		styles:    styles,
-		browseVP:  viewport.New(ss.width, 1), // height set on first WindowSizeMsg
+		results:         results,
+		total:           total,
+		width:           ss.width,
+		mode:            modeBrowse,
+		input:           ti,
+		searchCfg:       cfg,
+		apiPage:         apiPage,
+		styles:          styles,
+		browseVP:        viewport.New(ss.width, 1), // height set on first WindowSizeMsg
+		darkBg:          termenv.HasDarkBackground(),
+		prewarmedWidths: map[int]struct{}{},
 	}
 	m = m.refreshBrowseContent()
-
-	// Pre-warm the snippet renderer so the first detail-page entry doesn't
-	// pay the goldmark + chroma init cost. Errors are intentionally ignored —
-	// renderSnippetMarkdown will fall back to wrapText.
-	if ss.width > 0 {
-		go func(w int, dark bool) {
-			_, err := getSnippetRenderer(w, dark)
-			_ = err //nolint:wsl // intentionally fire-and-forget
-		}(ss.width, termenv.HasDarkBackground())
-	}
-
 	return m
 }
 
@@ -237,6 +234,17 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn
 			m.detailVP.Height = max(msg.Height-2, 1)
 		}
 		m = m.refreshBrowseContent()
+		// Pre-warm the snippet renderer for the bubbletea-reported width once
+		// per width so the first Enter into the detail page is a cache hit.
+		if msg.Width > 0 {
+			if _, done := m.prewarmedWidths[msg.Width]; !done {
+				m.prewarmedWidths[msg.Width] = struct{}{}
+				go func(w int, dark bool) {
+					_, err := getSnippetRenderer(w, dark)
+					_ = err //nolint:wsl // fire-and-forget; render path falls back to wrapText
+				}(msg.Width, m.darkBg)
+			}
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -606,7 +614,7 @@ func (m searchModel) renderDetailContent(r search.Result, contentWidth int, show
 		writeSection("SNIPPET")
 		switch {
 		case showSections:
-			content.WriteString(renderSnippetMarkdown(r.Meta.Snippet, contentWidth) + "\n")
+			content.WriteString(renderSnippetMarkdown(r.Meta.Snippet, contentWidth, m.darkBg) + "\n")
 		case valueWidth > 0:
 			content.WriteString(wrapText(r.Meta.Snippet, contentWidth) + "\n")
 		default:
@@ -899,11 +907,13 @@ func getSnippetRenderer(width int, dark bool) (*glamour.TermRenderer, error) {
 // It is used in the full-screen checkpoint detail view where the snippet has
 // room to breathe; the inline detail card keeps plain word-wrapping. On any
 // renderer error or impractically narrow widths it falls back to wrapText.
-func renderSnippetMarkdown(snippet string, width int) string {
+// dark must be detected before bubbletea owns the terminal — querying termenv
+// inside the Update loop races against bubbletea's stdin reader and stalls.
+func renderSnippetMarkdown(snippet string, width int, dark bool) string {
 	if width < 20 {
 		return wrapText(snippet, width)
 	}
-	renderer, err := getSnippetRenderer(width, termenv.HasDarkBackground())
+	renderer, err := getSnippetRenderer(width, dark)
 	if err != nil {
 		return wrapText(snippet, width)
 	}
