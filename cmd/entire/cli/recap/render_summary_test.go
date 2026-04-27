@@ -51,11 +51,13 @@ func TestRenderSummaryBand_TopLineReflows(t *testing.T) {
 		ActiveDays:  6,
 	}
 	got := renderSummaryBand(s, NewStyles(false))
-	if !strings.Contains(got, "top  Codex") && !strings.Contains(got, "top Codex") {
-		t.Errorf("top line should start with Codex; got:\n%s", got)
+	// Each signal is prefixed by its field name (agent/skill/label/model)
+	// so piped output isn't ambiguous about what each value represents.
+	if !strings.Contains(got, "agent Codex") {
+		t.Errorf("top line should contain 'agent Codex'; got:\n%s", got)
 	}
-	if !strings.Contains(got, "gpt-5.4") {
-		t.Errorf("top line should include gpt-5.4; got:\n%s", got)
+	if !strings.Contains(got, "model gpt-5.4") {
+		t.Errorf("top line should contain 'model gpt-5.4'; got:\n%s", got)
 	}
 	// Empty signals must not render placeholders.
 	if strings.Contains(got, "—") {

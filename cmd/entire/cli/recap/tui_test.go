@@ -15,7 +15,7 @@ func TestNewTUIModel_InitialStateMatchesView(t *testing.T) {
 		{SessionID: "a", StartedAt: now.Add(-1 * time.Hour), LastInteraction: now, AgentsUsed: []string{"claude-code"}},
 	}
 	view := BuildView(sessions, BuildOpts{Range: RangeDay, Now: now})
-	m := NewTUIModel(sessions, view, "")
+	m := NewTUIModel(sessions, view, "", nil, nil, nil)
 	if m.view.Range != RangeDay {
 		t.Errorf("initial Range = %q, want %q", m.view.Range, RangeDay)
 	}
@@ -29,7 +29,7 @@ func TestTUIModel_RangeKeysRebuildView(t *testing.T) {
 	now := time.Now()
 	sessions := []RecapSession{{StartedAt: now, LastInteraction: now}}
 	view := BuildView(sessions, BuildOpts{Range: RangeDay, Now: now})
-	m := NewTUIModel(sessions, view, "")
+	m := NewTUIModel(sessions, view, "", nil, nil, nil)
 
 	cases := []struct {
 		key  string
@@ -57,7 +57,7 @@ func TestTUIModel_AgentKeyCyclesThroughAgents(t *testing.T) {
 		{StartedAt: now, LastInteraction: now, AgentsUsed: []string{"codex"}},
 	}
 	view := BuildView(sessions, BuildOpts{Range: RangeDay, Now: now})
-	m := NewTUIModel(sessions, view, "")
+	m := NewTUIModel(sessions, view, "", nil, nil, nil)
 	// "" → first agent
 	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	tm, _ := nm.(TUIModel) //nolint:errcheck // type from Update is guaranteed TUIModel
@@ -74,7 +74,7 @@ func TestTUIModel_AgentKeyCyclesThroughAgents(t *testing.T) {
 
 func TestTUIModel_QuitKeysReturnTeaQuit(t *testing.T) {
 	t.Parallel()
-	m := NewTUIModel(nil, View{}, "")
+	m := NewTUIModel(nil, View{}, "", nil, nil, nil)
 	for _, key := range []string{"q", "esc", "ctrl+c"} {
 		var msg tea.KeyMsg
 		switch key {
@@ -94,7 +94,7 @@ func TestTUIModel_QuitKeysReturnTeaQuit(t *testing.T) {
 
 func TestTUIModel_ViewIncludesHelpLine(t *testing.T) {
 	t.Parallel()
-	m := NewTUIModel(nil, View{Title: "Today"}, "")
+	m := NewTUIModel(nil, View{Title: "Today"}, "", nil, nil, nil)
 	out := m.View()
 	if !strings.Contains(out, "range") {
 		t.Errorf("TUI view missing range hint in help:\n%s", out)
@@ -109,7 +109,7 @@ func TestTUIModel_VKeyCyclesViewMode(t *testing.T) {
 	now := time.Now()
 	sessions := []RecapSession{{StartedAt: now, LastInteraction: now}}
 	view := BuildView(sessions, BuildOpts{Range: RangeDay, Now: now})
-	m := NewTUIModel(sessions, view, "")
+	m := NewTUIModel(sessions, view, "", nil, nil, nil)
 	// Start: ViewBoth → v → ViewMe
 	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
 	tm, _ := nm.(TUIModel) //nolint:errcheck // type from Update is guaranteed TUIModel

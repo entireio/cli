@@ -171,17 +171,19 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 	rangeKey := f.rangeKey()
 	now := time.Now()
 
-	// Contributors come from /api/v1/me/recap. Best-effort: a fetch failure
-	// just leaves the contributors columns as "—" rather than blocking the
-	// recap output. We also track *why* contributors might be empty so we
-	// can surface a helpful hint below.
-	contributors, diag := fetchContributorsWithDiag(ctx, worktreeRoot, rangeKey)
+	// Both me-side and team-side come from /api/v1/me/recap — the server is
+	// the source of truth so the CLI numbers match entire.io's dashboard.
+	// Best-effort: if the fetch fails, the view falls back to pure-local
+	// me-side (offline mode) and shows team columns as "—".
+	serverMe, contributors, daily, diag := fetchRecapDataWithDiag(ctx, worktreeRoot, rangeKey, now)
 
 	view := recap.BuildView(act.Sessions, recap.BuildOpts{
 		Range:        rangeKey,
 		AgentFilter:  agentFilter,
 		Mode:         f.mode(),
+		ServerMe:     serverMe,
 		Contributors: contributors,
+		ServerDaily:  daily,
 		Now:          now,
 	})
 	view.Notes = append(view.Notes, diag...)
@@ -195,7 +197,7 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 	}
 
 	if resolveFormat(f.format, w) == recapFormatTUI {
-		return runRecapTUI(ctx, view, act.Sessions, agentFilter)
+		return runRecapTUI(ctx, view, act.Sessions, agentFilter, serverMe, contributors, daily)
 	}
 	styles := newStylesFor(w)
 	width := terminalWidth(w)
@@ -243,42 +245,52 @@ func terminalWidth(w io.Writer) int {
 	return width
 }
 
-// fetchContributorsWithDiag fetches contributor data via /api/v1/me/recap and
-// also returns a slice of diagnostic strings for the cases where data is
-// unavailable. Empty diag slice means "data either came through or was
-// intentionally skipped without user-visible cause." Non-empty means we want
-// the renderer to surface a hint so users understand why the contributors
-// column is empty.
-func fetchContributorsWithDiag(
+// fetchRecapDataWithDiag fetches BOTH me and team sides from /api/v1/me/recap
+// in one call, returning them plus any diagnostic strings. Using the server as
+// the source of truth for me-side metrics (checkpoints, tokens, labels, skills,
+// tool mix) keeps CLI and entire.io dashboard in sync — they read the same
+// query. Session / models / repos stay local since the server doesn't track
+// those concepts.
+//
+// Returns (me, team, diag). Either side can be nil if the endpoint failed or
+// the range has no data. Diagnostic strings surface as footer hints.
+func fetchRecapDataWithDiag(
 	ctx context.Context,
 	worktreeRoot string,
 	rangeKey recap.RangeKey,
-) (*recap.ContributorsData, []string) {
-	var diag []string
+	now time.Time,
+) (serverMe, contributors *recap.ContributorsData, daily []recap.DailyCount, diag []string) {
 	repo := recap.ResolveRepoFromWorktree(ctx, worktreeRoot)
 	if repo == "" || repo == "unknown" {
-		diag = append(diag, "Contributor comparisons require a git remote — none detected on this worktree.")
-		return nil, diag
+		diag = append(diag, "Server sync requires a git remote — none detected on this worktree.")
+		return nil, nil, nil, diag
 	}
 	token, err := auth.LookupCurrentToken()
 	if err != nil || token == "" {
-		diag = append(diag, "Sign in with `entire login` to see contributor comparisons (team tokens, agents, skills).")
-		return nil, diag
+		diag = append(diag, "Sign in with `entire login` to sync with entire.io (counts may drift from the dashboard otherwise).")
+		return nil, nil, nil, diag
 	}
 	client := api.NewClient(token)
 
-	resp, err := recap.FetchMeRecap(ctx, client, recap.TimeframeForRange(rangeKey), repo, 500)
+	// Pass the CLI's exact range bounds so the server's aggregation window
+	// matches the CLI's local-filtering window 1:1. No more "ask for today,
+	// get 30 days" — server respects --day / --week / --month / --90 exactly.
+	start, end := rangeKey.Bounds(now)
+	resp, err := recap.FetchMeRecap(ctx, client, start, end, repo, 500)
 	if err != nil {
 		logging.Debug(ctx, "recap: /me/recap failed", "repo", repo, "error", err.Error())
-		diag = append(diag, "Could not fetch contributor data for "+repo+" — repo may not be tracked in entire.io yet.")
-		return nil, diag
+		diag = append(diag, "Could not fetch recap data for "+repo+" — repo may not be tracked in entire.io yet.")
+		return nil, nil, nil, diag
 	}
-	data := recap.ContributorsFromMeRecap(resp)
-	if data == nil || len(data.ByAgent) == 0 {
-		diag = append(diag, "No contributor activity for "+repo+" in this range — try a longer window (--week, --90).")
-		return nil, diag
+
+	serverMe = recap.MeFromMeRecap(resp)
+	contributors = recap.ContributorsFromMeRecap(resp)
+	daily = resp.Daily
+	if (contributors == nil || len(contributors.ByAgent) == 0) &&
+		(serverMe == nil || len(serverMe.ByAgent) == 0) {
+		diag = append(diag, "No activity for "+repo+" in this range — try a longer window (--week, --90).")
 	}
-	return data, nil
+	return serverMe, contributors, daily, diag
 }
 
 // clearRecapCache removes the recap analysis cache directory inside the
@@ -317,8 +329,16 @@ func labelsAllEmpty(v recap.View) bool {
 	return true
 }
 
-func runRecapTUI(ctx context.Context, initial recap.View, sessions []recap.RecapSession, agentFilter string) error {
-	m := recap.NewTUIModel(sessions, initial, agentFilter)
+func runRecapTUI(
+	ctx context.Context,
+	initial recap.View,
+	sessions []recap.RecapSession,
+	agentFilter string,
+	serverMe *recap.ContributorsData,
+	contributors *recap.ContributorsData,
+	daily []recap.DailyCount,
+) error {
+	m := recap.NewTUIModel(sessions, initial, agentFilter, serverMe, contributors, daily)
 	// Alt-screen + internal viewport scroll: content stays bounded by the
 	// terminal (no top-line cut-off), and arrow keys / pgup-pgdn / mouse
 	// wheel scroll the body inside the TUI so a tall recap stays fully

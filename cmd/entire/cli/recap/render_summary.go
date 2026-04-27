@@ -53,18 +53,24 @@ func renderSummaryRow(label string, labelSty lipgloss.Style, sessions, checkpoin
 }
 
 func renderTopLine(s SummaryBand, styles Styles) string {
+	// Each signal carries its field name so the reader can tell them apart
+	// in piped / no-color output. In colored terminals the prefix is dimmed
+	// so the value still pops.
+	tag := func(label, value string, valueStyle lipgloss.Style) string {
+		return styles.muted.Render(label+" ") + valueStyle.Render(value)
+	}
 	var parts []string
 	if s.TopAgent != "" {
-		parts = append(parts, styles.accent.Render(s.TopAgent))
+		parts = append(parts, tag("agent", s.TopAgent, styles.accent))
 	}
 	if s.TopSkill != "" {
-		parts = append(parts, styles.info.Render(s.TopSkill))
+		parts = append(parts, tag("skill", s.TopSkill, styles.info))
 	}
 	if s.TopLabel != "" {
-		parts = append(parts, labelStyle(s.TopLabel, styles).Render(s.TopLabel))
+		parts = append(parts, tag("label", s.TopLabel, labelStyle(s.TopLabel, styles)))
 	}
 	if s.TopModel != "" {
-		parts = append(parts, styles.value.Render(s.TopModel))
+		parts = append(parts, tag("model", s.TopModel, styles.value))
 	}
 	if len(parts) == 0 {
 		return ""

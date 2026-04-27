@@ -35,8 +35,10 @@ func renderActivityStrip(view View, styles Styles) string {
 }
 
 // renderHeatmapStripDense renders every cell, including zero-activity days.
-// Zero cells use the darkest shade so the strip fills its full width
-// without looking broken.
+// Zero days render as '░' in the muted style so they're visibly present
+// (fills the strip's full width) but clearly distinct from active days,
+// which render in the accent color. Without the style split, zero days
+// and low-activity days both show as amber '░' and look identical.
 func renderHeatmapStripDense(buckets []int, styles Styles) string {
 	maxV := 0
 	for _, v := range buckets {
@@ -46,14 +48,13 @@ func renderHeatmapStripDense(buckets []int, styles Styles) string {
 	}
 	var b strings.Builder
 	for _, v := range buckets {
-		if maxV == 0 {
-			// All-zero range: render every cell at the darkest visible shade.
-			b.WriteRune(heatmapGlyphs[1])
-		} else {
-			b.WriteRune(heatmapGlyphRune(v, maxV))
+		if v <= 0 || maxV == 0 {
+			b.WriteString(styles.muted.Render(string(heatmapGlyphs[1])))
+			continue
 		}
+		b.WriteString(styles.accent.Render(string(heatmapGlyphRune(v, maxV))))
 	}
-	return styles.accent.Render(b.String())
+	return b.String()
 }
 
 // formatPeak returns "most active: <time>" where <time> is an hour string for

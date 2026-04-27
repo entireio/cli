@@ -2,6 +2,7 @@ package recap
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -125,6 +126,49 @@ func applyContributors(cards []AgentCard, data *ContributorsData) {
 			cards[i].ContribToolMix = a.ToolMix
 		}
 	}
+}
+
+// applyServerMe overrides AgentCard.Me* metric fields with the server's
+// authoritative view so the CLI matches entire.io's dashboard numbers. Only
+// touches metrics the server knows: checkpoints, tokens, labels, skills,
+// tool mix. Leaves MeSessions / MeModels / MeRepos alone — those are local
+// concepts the server doesn't track. Also creates a card for agents the
+// server knows about but local hasn't seen (e.g. commits from another
+// machine), so cross-machine work shows up.
+func applyServerMe(cards []AgentCard, data *ContributorsData) []AgentCard {
+	if data == nil || len(data.ByAgent) == 0 {
+		return cards
+	}
+	byName := make(map[string]int, len(cards))
+	for i, c := range cards {
+		byName[c.Agent] = i
+	}
+	for name, a := range data.ByAgent {
+		if a == nil {
+			continue
+		}
+		idx, ok := byName[name]
+		if !ok {
+			// Server knows about this agent but local doesn't — probably work
+			// pushed from another machine. Append a stub card; local-only
+			// fields (sessions/models/repos) stay zero.
+			cards = append(cards, AgentCard{
+				Agent:         name,
+				MeCheckpoints: a.TotalCount,
+				MeTokens:      a.Tokens,
+				MeLabels:      a.Labels,
+				MeSkills:      a.Skills,
+				MeToolMix:     a.ToolMix,
+			})
+			continue
+		}
+		cards[idx].MeCheckpoints = a.TotalCount
+		cards[idx].MeTokens = a.Tokens
+		cards[idx].MeLabels = a.Labels
+		cards[idx].MeSkills = a.Skills
+		cards[idx].MeToolMix = a.ToolMix
+	}
+	return cards
 }
 
 // ViewMode selects what data columns appear in the Agents view.
@@ -298,13 +342,17 @@ func renderTeamBlock(c AgentCard, mode ViewMode, styles Styles) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderYourBlock renders the two your-qualitative rows. Skipped in
-// ViewContributors or when no data.
+// renderYourBlock renders the your-qualitative rows. Skipped in
+// ViewContributors or when no data on any of the rows. Labels / skills /
+// tool mix come from server me-side data (populated by applyServerMe);
+// models / repos stay local-sourced.
 func renderYourBlock(c AgentCard, mode ViewMode, styles Styles) string {
 	if mode == ViewContributors {
 		return ""
 	}
-	if len(c.MeModels) == 0 && len(c.MeRepos) == 0 {
+	hasAny := len(c.MeLabels) > 0 || len(c.MeSkills) > 0 || len(c.MeToolMix) > 0 ||
+		len(c.MeModels) > 0 || len(c.MeRepos) > 0
+	if !hasAny {
 		return ""
 	}
 	var lines []string
@@ -313,6 +361,15 @@ func renderYourBlock(c AgentCard, mode ViewMode, styles Styles) string {
 			return "  " + styles.accent.Render("your "+name)
 		}
 		return "  " + styles.label.Render(name)
+	}
+	if len(c.MeLabels) > 0 {
+		lines = append(lines, lbl("labels")+"    "+formatLabelList(c.MeLabels, styles))
+	}
+	if len(c.MeSkills) > 0 {
+		lines = append(lines, lbl("skills")+"    "+formatList(c.MeSkills, styles.info))
+	}
+	if len(c.MeToolMix) > 0 {
+		lines = append(lines, lbl("tool mix")+"  "+formatToolMix(c.MeToolMix))
 	}
 	if len(c.MeModels) > 0 {
 		lines = append(lines, lbl("models")+"    "+formatList(c.MeModels, styles.value))
@@ -353,9 +410,20 @@ func formatList(items []string, style interface{ Render(s ...string) string }) s
 }
 
 // formatToolMix renders a tool-mix map as "key pct%  key pct%" sorted by value desc.
-// Values are treated as percentages directly (e.g. fileOps:61 → "fileOps 61%").
+// Input is raw tool-call counts from /me/recap (e.g. {"fileOps":73,"search":22,
+// "shell":18}); each value is normalized to a percentage of the full map's
+// total before being shown. Normalizing over the full map (not just the top 3)
+// keeps the percentages truthful — "fileOps 61%" means 61% of ALL tool calls,
+// not 61% of the three displayed buckets.
 func formatToolMix(mix map[string]int) string {
 	if len(mix) == 0 {
+		return ""
+	}
+	total := 0
+	for _, v := range mix {
+		total += v
+	}
+	if total == 0 {
 		return ""
 	}
 	type kv struct {
@@ -364,6 +432,9 @@ func formatToolMix(mix map[string]int) string {
 	}
 	all := make([]kv, 0, len(mix))
 	for k, v := range mix {
+		if v <= 0 {
+			continue
+		}
 		all = append(all, kv{k, v})
 	}
 	sort.Slice(all, func(i, j int) bool {
@@ -378,7 +449,11 @@ func formatToolMix(mix map[string]int) string {
 	}
 	parts := make([]string, 0, n)
 	for i := range n {
-		parts = append(parts, fmt.Sprintf("%s %d%%", all[i].k, all[i].v))
+		pct := int(math.Round(float64(all[i].v) * 100 / float64(total)))
+		if pct == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %d%%", all[i].k, pct))
 	}
 	return strings.Join(parts, "  ")
 }

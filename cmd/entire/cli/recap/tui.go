@@ -6,35 +6,55 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// TUIModel backs the interactive recap view. It keeps the raw sessions so
-// range + agent toggles can rebuild the View instantly without re-fetching.
+// TUIModel backs the interactive recap view. It keeps the raw sessions and
+// the server-fetched data so range + agent toggles can rebuild the View
+// instantly without re-fetching. Without the cached server data, every
+// keypress would drop the team columns and revert me-metrics to local-only.
 type TUIModel struct {
-	sessions    []RecapSession
-	view        View
-	agentFilter string
-	agents      []string // agents present in sessions, for cycling
-	mode        ViewMode // me / contributors / both
-	styles      Styles
-	width       int
-	height      int
+	sessions     []RecapSession
+	view         View
+	agentFilter  string
+	agents       []string          // agents present in sessions, for cycling
+	mode         ViewMode          // me / contributors / both
+	serverMe     *ContributorsData // server me-side, carried across rebuilds
+	contributors *ContributorsData // server team-side, carried across rebuilds
+	serverDaily  []DailyCount      // server per-day activity, carried across rebuilds
+	notes        []string          // diagnostic notes to preserve
+	styles       Styles
+	width        int
+	height       int
 }
 
 // NewTUIModel wraps a pre-built View with the state bubbletea needs for
 // interactive toggles. agentFilter is the initial filter ("" = all agents).
-func NewTUIModel(sessions []RecapSession, initial View, agentFilter string) TUIModel {
+// serverMe, contributors, and serverDaily must be passed through so view
+// rebuilds on keypress preserve server data — otherwise toggling range/view
+// wipes the team columns and reverts the activity strip to local-only.
+func NewTUIModel(
+	sessions []RecapSession,
+	initial View,
+	agentFilter string,
+	serverMe *ContributorsData,
+	contributors *ContributorsData,
+	serverDaily []DailyCount,
+) TUIModel {
 	mode := initial.Mode
 	if mode == "" {
 		mode = ViewBoth
 	}
 	return TUIModel{
-		sessions:    sessions,
-		view:        initial,
-		agentFilter: agentFilter,
-		agents:      distinctAgents(sessions),
-		mode:        mode,
-		styles:      NewStyles(true),
-		width:       100,
-		height:      24,
+		sessions:     sessions,
+		view:         initial,
+		agentFilter:  agentFilter,
+		agents:       distinctAgents(sessions),
+		mode:         mode,
+		serverMe:     serverMe,
+		contributors: contributors,
+		serverDaily:  serverDaily,
+		notes:        append([]string(nil), initial.Notes...),
+		styles:       NewStyles(true),
+		width:        100,
+		height:       24,
 	}
 }
 
@@ -60,19 +80,19 @@ func (m TUIModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //nolint:iret
 	case "q", "ctrl+c", "esc":
 		return m, tea.Quit
 	case "1", "d":
-		m.view = rebuildView(m.sessions, RangeDay, m.agentFilter, m.mode)
+		m.view = m.rebuildView(RangeDay, m.agentFilter, m.mode)
 	case "2", "w":
-		m.view = rebuildView(m.sessions, RangeWeek, m.agentFilter, m.mode)
+		m.view = m.rebuildView(RangeWeek, m.agentFilter, m.mode)
 	case "3", "m":
-		m.view = rebuildView(m.sessions, RangeMonth, m.agentFilter, m.mode)
+		m.view = m.rebuildView(RangeMonth, m.agentFilter, m.mode)
 	case "4":
-		m.view = rebuildView(m.sessions, Range90d, m.agentFilter, m.mode)
+		m.view = m.rebuildView(Range90d, m.agentFilter, m.mode)
 	case "a":
 		m.agentFilter = cycleAgent(m.agents, m.agentFilter)
-		m.view = rebuildView(m.sessions, m.view.Range, m.agentFilter, m.mode)
+		m.view = m.rebuildView(m.view.Range, m.agentFilter, m.mode)
 	case "v":
 		m.mode = cycleMode(m.mode)
-		m.view = rebuildView(m.sessions, m.view.Range, m.agentFilter, m.mode)
+		m.view = m.rebuildView(m.view.Range, m.agentFilter, m.mode)
 	}
 	return m, nil
 }
@@ -85,10 +105,21 @@ func (m TUIModel) View() string {
 	return body + "\n" + help
 }
 
-// rebuildView is a tiny wrapper that anchors Now at call time so range math
-// stays correct across long-running TUI sessions.
-func rebuildView(sessions []RecapSession, r RangeKey, agent string, mode ViewMode) View {
-	return BuildView(sessions, BuildOpts{Range: r, AgentFilter: agent, Mode: mode, Now: time.Now()})
+// rebuildView anchors Now at call time so range math stays correct across
+// long-running TUI sessions, and re-supplies the cached server data so team
+// columns and me-overrides persist through keypresses.
+func (m TUIModel) rebuildView(r RangeKey, agent string, mode ViewMode) View {
+	v := BuildView(m.sessions, BuildOpts{
+		Range:        r,
+		AgentFilter:  agent,
+		Mode:         mode,
+		ServerMe:     m.serverMe,
+		Contributors: m.contributors,
+		ServerDaily:  m.serverDaily,
+		Now:          time.Now(),
+	})
+	v.Notes = append(v.Notes, m.notes...)
+	return v
 }
 
 // cycleMode advances the view mode: both → me → contributors → both.

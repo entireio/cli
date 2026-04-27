@@ -68,11 +68,14 @@ func TestAgentCard_BothView_FullData(t *testing.T) {
 		Agent:      "Claude Code",
 		MeSessions: 15, MeCheckpoints: 92, MeTokens: 2_900_000,
 		ContribSessions: 2, ContribCheckpoints: 2, ContribTokens: 1_000,
-		MeModels:       []string{"claude-opus-4-7[1m]"},
-		MeRepos:        []RepoInfo{{Repo: "entireio/cli", SessionCount: 15}},
-		ContribLabels:  []LabelCount{{"bug_fix", 1}, {"feature_build", 1}, {"refactor", 1}},
-		ContribSkills:  []string{"code-simplifier", "session-handoff"},
-		ContribToolMix: map[string]int{"fileOps": 61, "search": 18, "shell": 15},
+		MeModels:      []string{"claude-opus-4-7[1m]"},
+		MeRepos:       []RepoInfo{{Repo: "entireio/cli", SessionCount: 15}},
+		ContribLabels: []LabelCount{{"bug_fix", 1}, {"feature_build", 1}, {"refactor", 1}},
+		ContribSkills: []string{"code-simplifier", "session-handoff"},
+		// Raw tool-call counts (as returned by /me/recap); formatToolMix
+		// normalizes to percent-of-total at render time. Sum here = 100,
+		// so the rendered numbers happen to equal the raw values.
+		ContribToolMix: map[string]int{"fileOps": 60, "search": 25, "shell": 15},
 	}
 	got := renderAgentCard(c, ViewBoth, 100, NewStyles(false))
 	for _, want := range []string{
@@ -80,7 +83,7 @@ func TestAgentCard_BothView_FullData(t *testing.T) {
 		"2.9M / 1k", "15 / 2", "92 / 2",
 		"team labels", "bug_fix", "feature_build",
 		"team skills", "code-simplifier",
-		"team tool mix", "fileOps 61%",
+		"team tool mix", "fileOps 60%",
 		"your models", "claude-opus-4-7[1m]",
 		"your repos", "entireio/cli (15)",
 	} {
@@ -229,4 +232,47 @@ func TestAgentCard_NarrowWidth_ReadoutOnly(t *testing.T) {
 // Input+Output sum to total so tests can assert token aggregation.
 func tokenUsageTotal(total int) *agent.TokenUsage {
 	return &agent.TokenUsage{InputTokens: total, OutputTokens: 0}
+}
+
+// formatToolMix takes raw API counts and renders top-3 buckets as
+// percentages of the FULL map's sum (not of the displayed top-3). This
+// regression test pins that behavior — when the API returns counts that
+// sum to >100, percentages must still total <=100, and untruncated
+// buckets must not be excluded from the denominator.
+func TestFormatToolMix_NormalizesRawCounts(t *testing.T) {
+	t.Parallel()
+	// Sum = 119 (matches a real /me/recap response shape). Top 3 are
+	// fileOps (73), search (22), shell (18). Percentages of 119:
+	// fileOps 61%, search 18%, shell 15% (rounded). Critically, we do
+	// NOT print "fileOps 73%" — that would falsely imply 73% of all calls.
+	mix := map[string]int{
+		"shell": 18, "fileOps": 73, "search": 22,
+		"mcp": 2, "agent": 3, "other": 1,
+	}
+	got := formatToolMix(mix)
+	for _, want := range []string{"fileOps 61%", "search 18%", "shell 15%"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("formatToolMix() missing %q; got %q", want, got)
+		}
+	}
+	for _, unwanted := range []string{"fileOps 73%", "search 22%", "shell 18%"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("formatToolMix() leaked raw count %q; got %q", unwanted, got)
+		}
+	}
+}
+
+// TestFormatToolMix_ZeroAndEmpty pins the edge cases — empty map and
+// all-zero map both produce empty output (not a divide-by-zero panic).
+func TestFormatToolMix_ZeroAndEmpty(t *testing.T) {
+	t.Parallel()
+	if got := formatToolMix(nil); got != "" {
+		t.Errorf("formatToolMix(nil) = %q, want empty", got)
+	}
+	if got := formatToolMix(map[string]int{}); got != "" {
+		t.Errorf("formatToolMix(empty) = %q, want empty", got)
+	}
+	if got := formatToolMix(map[string]int{"shell": 0, "fileOps": 0}); got != "" {
+		t.Errorf("formatToolMix(all-zero) = %q, want empty", got)
+	}
 }

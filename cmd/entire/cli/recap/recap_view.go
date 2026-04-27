@@ -58,7 +58,9 @@ type BuildOpts struct {
 	Range        RangeKey
 	AgentFilter  string            // empty = all agents
 	Mode         ViewMode          // defaults to ViewBoth
+	ServerMe     *ContributorsData // optional; overrides me-side metrics with server truth
 	Contributors *ContributorsData // optional; fills the contributors columns
+	ServerDaily  []DailyCount      // optional; per-day server activity for the strip
 	Now          time.Time         // injectable for deterministic tests
 }
 
@@ -204,6 +206,13 @@ func BuildView(sessions []RecapSession, opts BuildOpts) View {
 	// Activity buckets: shape depends on range. Day = 24 hourly; others =
 	// daily cells across the span.
 	view.Activity = buildActivityBuckets(cps, opts.Range, start, end)
+	// When the server returned per-day counts, prefer them — they cover
+	// cross-repo work and stay consistent with /me/recap me-side totals.
+	// Local cps only see this worktree's branch, so the strip would be
+	// sparse for users with multi-repo or multi-machine work otherwise.
+	if len(opts.ServerDaily) > 0 && opts.Range != RangeDay {
+		view.Activity = serverDailyToBuckets(opts.ServerDaily, start, end)
+	}
 
 	// Session rows in chronological order (oldest first).
 	sort.Slice(filtered, func(i, j int) bool {
@@ -246,6 +255,9 @@ func BuildView(sessions []RecapSession, opts BuildOpts) View {
 
 	view.Worktrees = AggregateByWorktree(filtered)
 	view.AgentCards = buildAgentCards(filtered)
+	// Server is source of truth for me-side metrics — apply BEFORE contributors
+	// so applyContributors doesn't accidentally stomp on them.
+	view.AgentCards = applyServerMe(view.AgentCards, opts.ServerMe)
 	applyContributors(view.AgentCards, opts.Contributors)
 
 	// Populate team side of SummaryBand from ContributorsData if available.
@@ -311,6 +323,30 @@ func buildActivityBuckets(cps []RecapCheckpoint, r RangeKey, start, end time.Tim
 			continue
 		}
 		buckets[offset]++
+	}
+	return buckets
+}
+
+// serverDailyToBuckets maps the response's daily array onto a buckets slice
+// indexed the same way buildActivityBuckets is — one bucket per day in
+// [start, end). Days the server didn't return stay zero.
+func serverDailyToBuckets(daily []DailyCount, start, end time.Time) []int {
+	days := int(end.Sub(start).Hours()/24) + 0
+	if days <= 0 {
+		days = 1
+	}
+	buckets := make([]int, days)
+	startDay := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
+	for _, d := range daily {
+		t, err := time.Parse("2006-01-02", d.Date)
+		if err != nil {
+			continue
+		}
+		offset := int(t.Sub(startDay).Hours() / 24)
+		if offset < 0 || offset >= days {
+			continue
+		}
+		buckets[offset] += d.Count
 	}
 	return buckets
 }
@@ -401,12 +437,18 @@ func buildSummaryBand(
 	agentCounts := map[string]int{}
 	modelCounts := map[string]int{}
 	labelCounts := map[string]int{}
+	// Weight every "top" signal by the same "work done" metric so they're
+	// comparable: 1 + len(Checkpoints) per session. Without this, TopModel
+	// (session-count) could pick a model from zero-checkpoint sessions
+	// while TopAgent (checkpoint-weighted) picks a different one, giving
+	// a confusing "top agent X / top model Y" where X and Y aren't related.
 	for _, s := range filtered {
+		w := 1 + len(s.Checkpoints)
 		for _, a := range s.AgentsUsed {
-			agentCounts[a] += 1 + len(s.Checkpoints)
+			agentCounts[a] += w
 		}
 		for _, m := range s.ModelsUsed {
-			modelCounts[m]++
+			modelCounts[m] += w
 		}
 	}
 	for _, cp := range cps {
@@ -447,6 +489,29 @@ func buildSummaryBand(
 		topLabel = domLabel
 	}
 
+	// Prefer server totals when available — this is what keeps CLI totals
+	// in sync with the entire.io dashboard (both read the same server query).
+	// When opts.ServerMe is nil (offline / not logged in), fall back to the
+	// local sums computed above.
+	youCheckpoints := len(cps)
+	youTokens := tokens
+	if opts.ServerMe != nil && len(opts.ServerMe.ByAgent) > 0 {
+		srvCp, srvTok := 0, 0
+		for _, a := range opts.ServerMe.ByAgent {
+			if a == nil {
+				continue
+			}
+			srvCp += a.TotalCount // holds checkpoint count per MeFromMeRecap
+			srvTok += a.Tokens
+		}
+		if srvCp > 0 {
+			youCheckpoints = srvCp
+		}
+		if srvTok > 0 {
+			youTokens = srvTok
+		}
+	}
+
 	return SummaryBand{
 		// Legacy fields.
 		TopAgent:         topAgent,
@@ -456,16 +521,16 @@ func buildSummaryBand(
 		DominantLabel:    domLabel,
 		DominantLabelPct: domPct,
 		SessionCount:     len(filtered),
-		CheckpointCount:  len(cps),
-		TokenTotal:       tokens,
+		CheckpointCount:  youCheckpoints,
+		TokenTotal:       youTokens,
 		CommitCount:      len(commits),
 		AgentFilter:      opts.AgentFilter,
 
 		// New you/team/top/context fields.
 		RangeLabel:     opts.Range.Title(),
 		YouSessions:    len(filtered),
-		YouCheckpoints: len(cps),
-		YouTokens:      tokens,
+		YouCheckpoints: youCheckpoints,
+		YouTokens:      youTokens,
 		TopSkill:       topSkill,
 		TopLabel:       topLabel,
 		AgentCount:     len(agentCounts),

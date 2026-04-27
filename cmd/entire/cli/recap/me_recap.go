@@ -8,21 +8,31 @@ import (
 	"io"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 // MeRecapResponse mirrors the shape returned by GET /api/v1/me/recap on
-// entire.io. Bearer-auth, repo-scoped (optional).
-//
-// Mirrors api/src/routes/recap.ts + api/src/lib/recap-aggregator.ts on the
-// server. Keep these types in sync when either side changes.
+// entire.io. Bearer-auth, repo-scoped (optional). Keep in sync with the
+// zod schema at api/src/routes/recap.ts when either side changes.
 type MeRecapResponse struct {
 	Timeframe    string                `json:"timeframe"`
 	Repo         *string               `json:"repo"`
+	Since        string                `json:"since"`
+	Until        string                `json:"until"`
 	Agents       map[string]AgentEntry `json:"agents"`
 	Contributors *ContribSummary       `json:"contributors"`
+	Daily        []DailyCount          `json:"daily"`
 	UpdatedAt    string                `json:"updated_at"`
+}
+
+// DailyCount is one entry in the response's daily activity array — one per
+// day in the window, with zero for days the user had no checkpoints.
+// Powers the CLI's activity strip (cross-repo sum of user's work per day).
+type DailyCount struct {
+	Date  string `json:"date"`
+	Count int    `json:"count"`
 }
 
 // AgentEntry is one agent row with both me + contributors columns.
@@ -77,37 +87,32 @@ type ContribSummary struct {
 	TotalCheckpoints int `json:"totalCheckpoints"`
 }
 
-// FetchMeRecap calls GET /api/v1/me/recap?timeframe=&repo=&limit= and
-// returns the decoded response. Any error (network, non-2xx, decode)
-// surfaces to the caller; this is the "fast path" that replaces the old
-// commits + batch-analyses + overview fetch stack once the server endpoint
-// is deployed.
-//
-// timeframe is one of the values the server accepts ("last-month",
-// "last-3-months", "last-6-months"). repo is "org/name" or empty.
+// FetchMeRecap calls GET /api/v1/me/recap?since=&until=&repo=&limit=
+// and returns the decoded response. The server accepts explicit ISO 8601
+// date bounds so the CLI's range math (--day / --week / --month / --90)
+// lines up exactly with the server's aggregation window. repo is
+// "org/name" or empty; when empty the response spans every repo the
+// user has activity in.
 func FetchMeRecap(
 	ctx context.Context,
 	client *api.Client,
-	timeframe, repo string,
+	since, until time.Time,
+	repo string,
 	limit int,
 ) (*MeRecapResponse, error) {
 	if client == nil {
 		return nil, errors.New("me/recap: nil client")
 	}
 	q := url.Values{}
-	if timeframe != "" {
-		q.Set("timeframe", timeframe)
-	}
+	q.Set("since", since.UTC().Format(time.RFC3339))
+	q.Set("until", until.UTC().Format(time.RFC3339))
 	if repo != "" {
 		q.Set("repo", repo)
 	}
 	if limit > 0 {
 		q.Set("limit", strconv.Itoa(limit))
 	}
-	path := "/api/v1/me/recap"
-	if encoded := q.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
+	path := "/api/v1/me/recap?" + q.Encode()
 	resp, err := client.Get(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("me/recap get: %w", err)
@@ -124,23 +129,8 @@ func FetchMeRecap(
 	return &out, nil
 }
 
-// TimeframeForRange maps our RangeKey to the timeframe value the server
-// endpoint accepts. The server only supports last-month / last-3-months /
-// last-6-months today; day / week / month are rounded up to last-month,
-// 90d maps to last-3-months.
-func TimeframeForRange(r RangeKey) string {
-	switch r {
-	case RangeDay, RangeWeek, RangeMonth:
-		return "last-month"
-	case Range90d:
-		return "last-3-months"
-	}
-	return "last-month"
-}
-
-// ContributorsFromMeRecap converts a MeRecapResponse into the
-// ContributorsData shape the rest of the recap package consumes. This
-// lets us drop in the new endpoint without changing downstream rendering.
+// ContributorsFromMeRecap converts the contributors side of a MeRecapResponse
+// into the ContributorsData shape the rest of the recap package consumes.
 func ContributorsFromMeRecap(resp *MeRecapResponse) *ContributorsData {
 	if resp == nil || len(resp.Agents) == 0 {
 		return nil
@@ -167,6 +157,38 @@ func ContributorsFromMeRecap(resp *MeRecapResponse) *ContributorsData {
 			ToolMix:          toolMixToMap(c.ToolMix),
 		}
 		agg.Labels = append(agg.Labels, c.Labels...)
+		out.ByAgent[name] = agg
+	}
+	return out
+}
+
+// MeFromMeRecap extracts the me-side of a MeRecapResponse — the server's
+// authoritative view of THIS user's work, used to override the CLI's
+// local-only numbers so CLI and entire.io dashboard show the same counts.
+// Returns nil if the response has no agent data at all.
+//
+// Fields we pull from server (authoritative): checkpoints, tokens,
+// transcriptTokens, filesChanged, labels, skills, mcpServers, toolMix.
+// Fields that stay local-only (server doesn't track them): sessions,
+// models, repos — see applyServerMe in agents_card.go.
+func MeFromMeRecap(resp *MeRecapResponse) *ContributorsData {
+	if resp == nil || len(resp.Agents) == 0 {
+		return nil
+	}
+	out := &ContributorsData{ByAgent: map[string]*AgentContrib{}}
+	if resp.Repo != nil {
+		out.Repo = *resp.Repo
+	}
+	for name, entry := range resp.Agents {
+		m := entry.Me
+		agg := &AgentContrib{
+			TotalCount: m.Checkpoints, // reused field — represents checkpoints here
+			Tokens:     m.Tokens,
+			Skills:     flattenSkills(m.Skills),
+			MCPServers: flattenMCP(m.MCPServers),
+			ToolMix:    toolMixToMap(m.ToolMix),
+		}
+		agg.Labels = append(agg.Labels, m.Labels...)
 		out.ByAgent[name] = agg
 	}
 	return out
