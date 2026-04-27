@@ -53,20 +53,27 @@ type searchStyles struct {
 	detailBorder lipgloss.Style // border style for detail card
 }
 
+// Search palette mirrors activity's dark-mode CSS variables (Tailwind 400-level).
+// orange-400 is the primary accent (matches Claude in activity); blue-400 is secondary.
+const (
+	searchAccentOrange = "#fb923c" // matches agentDisplayMap["claude"] in activity_render.go
+	searchAccentBlue   = "#60a5fa" // matches agentDisplayMap["gemini"] in activity_render.go
+)
+
 func newSearchStyles(ss statusStyles) searchStyles {
 	s := searchStyles{statusStyles: ss}
 	if !ss.colorEnabled {
 		return s
 	}
-	s.sectionTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("244"))
-	s.label = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	s.selected = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
-	s.helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	s.helpSep = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	s.detailTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	s.sectionTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccentOrange))
+	s.label = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true)
+	s.selected = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccentOrange))
+	s.helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true)
+	s.helpSep = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	s.detailTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccentBlue))
 	s.detailBorder = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("243")).
+		BorderForeground(lipgloss.Color("240")).
 		Padding(1, 2)
 	return s
 }
@@ -133,10 +140,10 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	ti.CharLimit = 200
 	ti.Width = max(ss.width-6, 30)
 	if ss.colorEnabled {
-		ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+		ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentOrange)).Bold(true)
 		ti.TextStyle = lipgloss.NewStyle()
 		ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-		ti.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+		ti.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentOrange))
 	}
 
 	var apiPage int
@@ -416,7 +423,7 @@ func (m searchModel) renderBrowseContent() string {
 	m.viewSearchHeader(&b)
 
 	query := m.input.Value()
-	b.WriteString(pad + m.styles.render(m.styles.agent, "›") + " " + m.styles.render(m.styles.bold, query))
+	b.WriteString(pad + m.styles.render(m.styles.sectionTitle, "›") + " " + m.styles.render(m.styles.bold, query))
 	b.WriteString("\n\n")
 
 	// Loading / error / empty states

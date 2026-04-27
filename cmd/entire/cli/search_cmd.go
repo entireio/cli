@@ -40,8 +40,7 @@ displayed in an interactive table. Use --json for machine-readable output.
 
 CLI queries also support inline filters like author:<name>, date:<week|month>,
 branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
-		Args:   cobra.ArbitraryArgs,
-		Hidden: true,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			query := strings.Join(args, " ")
