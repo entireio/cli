@@ -190,6 +190,10 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Filter by branch name")
 	cmd.Flags().StringVar(&repoFlag, "repo", "", "Filter by repository (owner/name or *)")
 
+	cmd.RegisterFlagCompletionFunc("date", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) { //nolint:errcheck,gosec // only fails if the flag isn't defined; defined directly above
+		return []string{"week", "month"}, cobra.ShellCompDirectiveNoFileComp
+	})
+
 	return cmd
 }
 
