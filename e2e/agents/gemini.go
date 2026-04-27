@@ -20,6 +20,8 @@ func init() {
 }
 
 const geminiDefaultModel = "gemini-2.5-flash"
+const geminiTrustWorkspaceEnvKey = "GEMINI_CLI_TRUST_WORKSPACE"
+const geminiTrustWorkspaceEnv = geminiTrustWorkspaceEnvKey + "=true"
 
 type Gemini struct{}
 
@@ -75,11 +77,7 @@ func (g *Gemini) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 	cmd := exec.CommandContext(promptCtx, g.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	cmd.Env = append(
-		filterEnv(os.Environ(), "ENTIRE_TEST_TTY"),
-		"ACCESSIBLE=1",
-		"HOME="+geminiTestHomeDir(dir),
-	)
+	cmd.Env = geminiPromptEnv(dir)
 	setupProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -114,7 +112,7 @@ func (g *Gemini) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 func (g *Gemini) StartSession(_ context.Context, dir string) (Session, error) {
 	name := fmt.Sprintf("gemini-test-%d", time.Now().UnixNano())
 
-	envArgs := []string{"ACCESSIBLE=1", "HOME=" + geminiTestHomeDir(dir)}
+	envArgs := []string{"ACCESSIBLE=1", geminiTrustWorkspaceEnv, "HOME=" + geminiTestHomeDir(dir)}
 	for _, key := range []string{"TERM"} {
 		if v := os.Getenv(key); v != "" {
 			envArgs = append(envArgs, key+"="+v)
@@ -150,4 +148,13 @@ func (g *Gemini) StartSession(_ context.Context, dir string) (Session, error) {
 
 func geminiTestHomeDir(repoDir string) string {
 	return filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-gemini-home")
+}
+
+func geminiPromptEnv(repoDir string) []string {
+	return append(
+		filterEnv(os.Environ(), "ENTIRE_TEST_TTY", geminiTrustWorkspaceEnvKey),
+		"ACCESSIBLE=1",
+		geminiTrustWorkspaceEnv,
+		"HOME="+geminiTestHomeDir(repoDir),
+	)
 }

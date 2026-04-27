@@ -238,19 +238,26 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 	}
 
 	// Subtract baseline to get the delta for this checkpoint range
-	result := &agent.TokenUsage{
-		InputTokens:     lastUsage.InputTokens,
-		CacheReadTokens: lastUsage.CachedInputTokens,
-		OutputTokens:    lastUsage.OutputTokens + lastUsage.ReasoningOutputTokens,
-		APICallCount:    apiCalls,
-	}
+	inputTokens := lastUsage.InputTokens
+	cacheReadTokens := lastUsage.CachedInputTokens
+	outputTokens := lastUsage.OutputTokens
 	if baselineUsage != nil {
-		result.InputTokens -= baselineUsage.InputTokens
-		result.CacheReadTokens -= baselineUsage.CachedInputTokens
-		result.OutputTokens -= baselineUsage.OutputTokens + baselineUsage.ReasoningOutputTokens
+		inputTokens -= baselineUsage.InputTokens
+		cacheReadTokens -= baselineUsage.CachedInputTokens
+		outputTokens -= baselineUsage.OutputTokens
 	}
 
-	return result, nil
+	freshInputTokens := inputTokens - cacheReadTokens
+	if freshInputTokens < 0 {
+		freshInputTokens = 0
+	}
+
+	return &agent.TokenUsage{
+		InputTokens:     freshInputTokens,
+		CacheReadTokens: cacheReadTokens,
+		OutputTokens:    outputTokens,
+		APICallCount:    apiCalls,
+	}, nil
 }
 
 // ExtractPrompts returns user prompts from the transcript starting at the given offset.

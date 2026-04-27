@@ -87,6 +87,28 @@ func TestDeriveCheckpointURL(t *testing.T) {
 	}
 }
 
+func TestIsURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{"remote name", "origin", false},
+		{"SSH SCP", "git@github.com:org/repo.git", true},
+		{"HTTPS", "https://github.com/org/repo.git", true},
+		{"SSH protocol", "ssh://git@github.com/org/repo.git", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, remote.IsURL(tt.val))
+		})
+	}
+}
+
 // Not parallel: uses t.Chdir()
 func TestFetchBranchIfMissing_CreatesLocalFromRemote(t *testing.T) {
 	ctx := context.Background()

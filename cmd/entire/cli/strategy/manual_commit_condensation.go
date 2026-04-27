@@ -170,24 +170,14 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 			slog.Bool("has_shadow_branch", hasShadowBranch),
 			slog.String("transcript_path", state.TranscriptPath),
 		)
-		return &CondenseResult{
-			CheckpointID: checkpointID,
-			SessionID:    state.SessionID,
-			Skipped:      true,
-		}, nil
+		return newSkippedResult(checkpointID, state.SessionID), nil
 	}
 
-	filterFilesTouched(sessionData, committedFiles)
+	filterFilesTouched(sessionData, committedFiles, state)
 
-	// On failure: drop transcript, continue with metadata (no retry path in hooks).
-	redactedTranscript, redactDuration, err := redactSessionTranscript(ctx, sessionData.Transcript)
-	if err != nil {
-		logging.Warn(logCtx, "failed to redact transcript secrets, dropping transcript for checkpoint",
-			slog.String("session_id", state.SessionID),
-			slog.String("checkpoint_id", checkpointID.String()),
-			slog.String("error", err.Error()),
-		)
-		redactedTranscript = redact.RedactedBytes{}
+	redactedTranscript, redactDuration := redactOrDrop(logCtx, sessionData.Transcript, state.SessionID, checkpointID)
+	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
+		return skipped, nil
 	}
 
 	// Get checkpoint store
@@ -324,6 +314,46 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}, nil
 }
 
+// redactOrDrop runs redactSessionTranscript and, on failure, logs a warning
+// and returns empty bytes. Drop-on-failure is the long-standing contract here:
+// hooks have no retry path, and a failed redaction must not block the commit.
+func redactOrDrop(logCtx context.Context, transcript []byte, sessionID string, checkpointID id.CheckpointID) (redact.RedactedBytes, time.Duration) {
+	redactedTranscript, redactDuration, err := redactSessionTranscript(logCtx, transcript)
+	if err != nil {
+		logging.Warn(logCtx, "failed to redact transcript secrets, dropping transcript for checkpoint",
+			slog.String("session_id", sessionID),
+			slog.String("checkpoint_id", checkpointID.String()),
+			slog.String("error", err.Error()),
+		)
+		return redact.RedactedBytes{}, redactDuration
+	}
+	return redactedTranscript, redactDuration
+}
+
+// skipIfPostRedactionEmpty returns a Skipped result when redaction emptied the
+// transcript AND the filtered FilesTouched is also empty. Without this, a
+// session that passed the pre-redaction gate but got its transcript dropped by
+// a malformed-JSONL redaction error would write a metadata-only stub.
+func skipIfPostRedactionEmpty(logCtx context.Context, redactedTranscript redact.RedactedBytes, sessionData *ExtractedSessionData, state *SessionState, checkpointID id.CheckpointID) *CondenseResult {
+	if redactedTranscript.Len() > 0 || len(sessionData.FilesTouched) > 0 {
+		return nil
+	}
+	logging.Info(logCtx, "session skipped: nothing to persist after redaction",
+		slog.String("session_id", state.SessionID),
+		slog.String("agent_type", string(state.AgentType)),
+		slog.String("checkpoint_id", checkpointID.String()),
+	)
+	return newSkippedResult(checkpointID, state.SessionID)
+}
+
+func newSkippedResult(checkpointID id.CheckpointID, sessionID string) *CondenseResult {
+	return &CondenseResult{
+		CheckpointID: checkpointID,
+		SessionID:    sessionID,
+		Skipped:      true,
+	}
+}
+
 // redactSessionTranscript redacts the transcript once for use by both the compact
 // package and the checkpoint stores. Returns the redacted bytes and the duration
 // of the redaction operation for perf logging.
@@ -358,10 +388,14 @@ func resolveShadowRef(repo *git.Repository, branchName string, preResolved *plum
 	return resolved, true
 }
 
-// filterFilesTouched narrows sessionData.FilesTouched to only files present in
-// committedFiles. When no prior files were recorded (mid-turn commit), it falls
-// back to the committed set minus Entire metadata paths.
-func filterFilesTouched(sessionData *ExtractedSessionData, committedFiles map[string]struct{}) {
+// filterFilesTouched narrows sessionData.FilesTouched to files present in
+// committedFiles. When no prior files were recorded, it falls back to the
+// committed set (minus Entire metadata) — but only when sessionHasEvidenceOfWork
+// is true. The fallback was originally unconditional, which let sessions that
+// were registered at SessionStart but never produced anything (e.g. ephemeral
+// Codex sessions whose hooks fired with a null transcript_path and never
+// reached SaveStep) inherit another session's committed files.
+func filterFilesTouched(sessionData *ExtractedSessionData, committedFiles map[string]struct{}, state *SessionState) {
 	if len(committedFiles) == 0 {
 		return
 	}
@@ -373,13 +407,24 @@ func filterFilesTouched(sessionData *ExtractedSessionData, committedFiles map[st
 			}
 		}
 		sessionData.FilesTouched = filtered
-	} else {
-		// Mid-turn commits can happen before SaveStep records FilesTouched.
-		// In that case, fall back to the actual committed files, excluding
-		// Entire's own metadata paths, so the checkpoint still reflects the
-		// files captured by this commit.
-		sessionData.FilesTouched = committedFilesExcludingMetadata(committedFiles)
+		return
 	}
+	if !sessionHasEvidenceOfWork(sessionData, state) {
+		return
+	}
+	sessionData.FilesTouched = committedFilesExcludingMetadata(committedFiles)
+}
+
+// sessionHasEvidenceOfWork returns true when the session looks like a real
+// participant — either it produced a readable transcript or a prior SaveStep
+// recorded a checkpoint (StepCount > 0). False means the session was likely
+// registered but never did anything; treating such a session as the author of
+// the committed files would attribute another session's work to it.
+func sessionHasEvidenceOfWork(sessionData *ExtractedSessionData, state *SessionState) bool {
+	if len(sessionData.Transcript) > 0 {
+		return true
+	}
+	return state != nil && state.StepCount > 0
 }
 
 // extractOrCreateSessionData tries to extract session data from the shadow branch,

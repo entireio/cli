@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.6] - 2026-04-24
+
+### Added
+
+- `entire activity` command to show recent session activity ([#999](https://github.com/entireio/cli/pull/999))
+- `entire dispatch` command to generate dispatches from checkpoints, using the `/api/v1/repositories` endpoint for the dispatch wizard ([#1004](https://github.com/entireio/cli/pull/1004), [#1023](https://github.com/entireio/cli/pull/1023))
+- `entire explain` accepts a checkpoint ID or commit SHA as a positional argument ([#990](https://github.com/entireio/cli/pull/990))
+- `entire explain --generate` summary provider with improved observability ([#887](https://github.com/entireio/cli/pull/887))
+- `--json` output for `entire status` ([#975](https://github.com/entireio/cli/pull/975))
+- Checkpoint commit signing (SSH/GPG), with object signer checks moved before registration and fixes for 1Password and bare public-key setups ([#960](https://github.com/entireio/cli/pull/960), [#1020](https://github.com/entireio/cli/pull/1020), [#1002](https://github.com/entireio/cli/pull/1002))
+- Filtered fetches for checkpoint refs to reduce clone/fetch size ([#996](https://github.com/entireio/cli/pull/996))
+- Session linkage preserved across `git rebase`, `git commit --amend`, and `git reset` ([#947](https://github.com/entireio/cli/pull/947), [#948](https://github.com/entireio/cli/pull/948))
+- External agents can register in the `entire attach` flow ([#986](https://github.com/entireio/cli/pull/986))
+- VS Code-compatible payloads for Copilot hooks ([#888](https://github.com/entireio/cli/pull/888))
+- Actionable, classified error messages for Claude CLI failures ([#963](https://github.com/entireio/cli/pull/963))
+- Inline auto-update prompt after version notification ([#997](https://github.com/entireio/cli/pull/997))
+- Warning when `entire enable` runs but the CLI is not installed in agent hooks ([#929](https://github.com/entireio/cli/pull/929))
+- Devcontainer setup for GitHub Codespaces / VS Code ([#940](https://github.com/entireio/cli/pull/940))
+- Vercel branch deploy config to exclude `entire/*` branches ([#904](https://github.com/entireio/cli/pull/904))
+- Checkpoints v2 (work in progress): `attach` command support, health checks in `entire doctor`, `checkpoints_version` setting with v2-only option, retention-based cleanup in `entire clean`, external-agent transcript compaction, transcript blob reuse across turn-end checkpoints, and `full.jsonl` renamed to `raw_transcript` ([#955](https://github.com/entireio/cli/pull/955), [#946](https://github.com/entireio/cli/pull/946), [#1001](https://github.com/entireio/cli/pull/1001), [#970](https://github.com/entireio/cli/pull/970), [#972](https://github.com/entireio/cli/pull/972), [#980](https://github.com/entireio/cli/pull/980), [#984](https://github.com/entireio/cli/pull/984), [#944](https://github.com/entireio/cli/pull/944))
+
+### Changed
+
+- Improved `entire enable` flow for folders that are not yet git repositories ([#978](https://github.com/entireio/cli/pull/978))
+- Reduced duplication between `enable` and `configure` flows ([#950](https://github.com/entireio/cli/pull/950))
+- Consolidated TTY detection into the `interactive` package; honor `PI_CODING_AGENT` to skip interactive prompts ([#1011](https://github.com/entireio/cli/pull/1011), [#926](https://github.com/entireio/cli/pull/926))
+- Guard `entire attach` against overwriting checkpoints created on other machines ([#1014](https://github.com/entireio/cli/pull/1014))
+- Strategy now guards against writing empty-session metadata stubs ([#1022](https://github.com/entireio/cli/pull/1022))
+- Hook messages renamed from "Powered by Entire" to "Entire CLI" ([#965](https://github.com/entireio/cli/pull/965))
+- Consistent rewind/resume continuation wording across agents ([#987](https://github.com/entireio/cli/pull/987))
+- More descriptive output checkpoints are pushed during normal `git push` ([#927](https://github.com/entireio/cli/pull/927))
+- Refactored checkpoint remote URL resolution and `ENTIRE_CHECKPOINT_TOKEN` handling ([#989](https://github.com/entireio/cli/pull/989))
+
+### Fixed
+
+- Codex token usage normalization ([#1021](https://github.com/entireio/cli/pull/1021))
+- Factory AI Droid fallback tool-use IDs ([#942](https://github.com/entireio/cli/pull/942))
+- `entire explain` fetches metadata from the remote when missing locally ([#953](https://github.com/entireio/cli/pull/953))
+- Fetch checkpoint blobs from `checkpoint_remote` instead of `origin` ([#976](https://github.com/entireio/cli/pull/976))
+- Checkpoints v2: dual-write and preserve task metadata; skip empty sessions to prevent phantom checkpoint paths ([#962](https://github.com/entireio/cli/pull/962), [#958](https://github.com/entireio/cli/pull/958))
+- Hanging summary TTY in local test runs ([#968](https://github.com/entireio/cli/pull/968))
+- Nightly release workflow now fails loudly instead of silently skipping when the tag already exists ([#966](https://github.com/entireio/cli/pull/966))
+- Build fix: qualify `isTerminalWriter` in `activity_cmd.go` ([#1013](https://github.com/entireio/cli/pull/1013))
+
+### Housekeeping
+
+- Single `mise run check` command runs fmt, lint, and full test suite needed for PRs to be green ([#949](https://github.com/entireio/cli/pull/949))
+- Require `mise run lint` before pushing any remote code update ([#1003](https://github.com/entireio/cli/pull/1003))
+- Refactored git commands and increased test coverage ([#995](https://github.com/entireio/cli/pull/995))
+- Prefer `testutil.InitRepo` in trivial git test setup ([#979](https://github.com/entireio/cli/pull/979))
+- Stabilized TTY-dependent local CI tests, OpenCode E2E, and Factory AI Droid pre/post-tool-call E2E tests ([#969](https://github.com/entireio/cli/pull/969), [#967](https://github.com/entireio/cli/pull/967), [#959](https://github.com/entireio/cli/pull/959), [#1000](https://github.com/entireio/cli/pull/1000), [#1025](https://github.com/entireio/cli/pull/1025))
+- Removed nightly Windows E2E schedule ([#925](https://github.com/entireio/cli/pull/925))
+- Added `entire sessions` command reference to docs ([#1010](https://github.com/entireio/cli/pull/1010))
+- Updated Code of Conduct community platform from Slack to Discord ([#810](https://github.com/entireio/cli/pull/810))
+- Dependency bumps: `go-git/v6` 6.0.0-alpha.1 → 6.0.0-alpha.2, `posthog-go` 1.11.2 → 1.12.1, `goreleaser-action` 7.0.0 → 7.1.0, `actions/create-github-app-token` 3.0.0 → 3.1.1 ([#977](https://github.com/entireio/cli/pull/977), [#951](https://github.com/entireio/cli/pull/951), [#992](https://github.com/entireio/cli/pull/992), [#991](https://github.com/entireio/cli/pull/991), [#943](https://github.com/entireio/cli/pull/943))
+
+### Thanks
+
+Thanks to @areporeporepo for updating the Code of Conduct community link!
+
 ## [0.5.5] - 2026-04-13
 
 ### Added

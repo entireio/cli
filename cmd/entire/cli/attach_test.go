@@ -18,9 +18,13 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid" // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"      // register agent
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -252,6 +256,223 @@ func TestAttach_V2DualWriteDisabled(t *testing.T) {
 	}
 	if _, err := repo.Reference(plumbing.ReferenceName(paths.V2FullCurrentRefName), true); err == nil {
 		t.Fatalf("did not expect %s when checkpoints_v2 is disabled", paths.V2FullCurrentRefName)
+	}
+}
+
+func TestAttach_AppendsAsAdditionalSessionWhenIDDiffers(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	firstSessionID := "first-session-a-original"
+	setupClaudeTranscript(t, firstSessionID, `{"type":"user","message":{"role":"user","content":"first"},"uuid":"u1"}
+`)
+	var out bytes.Buffer
+	if err := runAttach(context.Background(), &out, firstSessionID, agent.AgentNameClaudeCode, true); err != nil {
+		t.Fatalf("first attach failed: %v", err)
+	}
+
+	repoRoot := mustGetwd(t)
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRef, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	headCommit, err := repo.CommitObject(headRef.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	existingCheckpoints := trailers.ParseAllCheckpoints(headCommit.Message)
+	if len(existingCheckpoints) != 1 {
+		t.Fatalf("expected one Entire-Checkpoint trailer after first attach; got %v", existingCheckpoints)
+	}
+	checkpointID := existingCheckpoints[0]
+
+	secondSessionID := "second-session-b-append"
+	setupClaudeTranscript(t, secondSessionID, `{"type":"user","message":{"role":"user","content":"second"},"uuid":"u1"}
+`)
+	out.Reset()
+	if err := runAttach(context.Background(), &out, secondSessionID, agent.AgentNameClaudeCode, true); err != nil {
+		t.Fatalf("second attach failed: %v", err)
+	}
+
+	store := cpkg.NewGitStore(repo)
+	summary, err := store.ReadCommitted(context.Background(), checkpointID)
+	if err != nil {
+		t.Fatalf("ReadCommitted(%s): %v", checkpointID, err)
+	}
+	if summary == nil {
+		t.Fatalf("checkpoint %s summary nil after two attaches", checkpointID)
+	}
+	if len(summary.Sessions) != 2 {
+		t.Fatalf("checkpoint has %d sessions, want 2", len(summary.Sessions))
+	}
+
+	idx0, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent(0): %v", err)
+	}
+	idx1, err := store.ReadSessionContent(context.Background(), checkpointID, 1)
+	if err != nil {
+		t.Fatalf("ReadSessionContent(1): %v", err)
+	}
+	haveFirst := idx0.Metadata.SessionID == firstSessionID || idx1.Metadata.SessionID == firstSessionID
+	haveSecond := idx0.Metadata.SessionID == secondSessionID || idx1.Metadata.SessionID == secondSessionID
+	if !haveFirst {
+		t.Errorf("first session %q missing from checkpoint; got [%q, %q]",
+			firstSessionID, idx0.Metadata.SessionID, idx1.Metadata.SessionID)
+	}
+	if !haveSecond {
+		t.Errorf("second session %q missing from checkpoint; got [%q, %q]",
+			secondSessionID, idx0.Metadata.SessionID, idx1.Metadata.SessionID)
+	}
+}
+
+func TestAttach_RefusesWhenCheckpointMissingFromLocalBranch(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	runGitInDir(t, repoRoot, "commit", "--amend", "-m", "init\n\nEntire-Checkpoint: ffffffffeeee")
+
+	sessionID := "orphaned-attach-session"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"attach please"},"uuid":"u1"}
+`)
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, true)
+	if err == nil {
+		t.Fatal("expected error: checkpoint referenced by HEAD is missing locally and attach should refuse")
+	}
+	if !strings.Contains(err.Error(), "missing from the local entire/checkpoints/v1 branch") {
+		t.Errorf("error message should explain the missing-branch situation; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "git fetch origin entire/checkpoints/v1") {
+		t.Errorf("error message should include the fetch command to fix it; got: %v", err)
+	}
+
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := cpkg.NewGitStore(repo)
+	summary, err := store.ReadCommitted(context.Background(), "ffffffffeeee")
+	if err != nil {
+		t.Fatalf("ReadCommitted: %v", err)
+	}
+	if summary != nil {
+		t.Errorf("attach should NOT have created checkpoint ffffffffeeee locally; found %+v", summary)
+	}
+}
+
+// Regression for https://github.com/entireio/cli/pull/1014#pullrequestreview-copilot:
+// Bob clones a repo where Alice's checkpoint is on the remote-tracking ref
+// (refs/remotes/origin/entire/checkpoints/v1) but the local branch doesn't
+// exist yet. ReadCommitted falls back to the remote-tracking tree, so a naive
+// "read and check" guard would think all is well. But WriteCommitted would
+// then create a *fresh* orphan local branch, and Bob's push would clobber
+// Alice's data on origin. Attach must refuse in this shape.
+func TestAttach_RefusesWhenCheckpointOnlyInRemoteTrackingRef(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed the local branch with a checkpoint representing Alice's session.
+	alicesCheckpoint := id.MustCheckpointID("abcdef012345")
+	store := cpkg.NewGitStore(repo)
+	if writeErr := store.WriteCommitted(context.Background(), cpkg.WriteCommittedOptions{
+		CheckpointID: alicesCheckpoint,
+		SessionID:    "alice-original",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":"hi"}` + "\n")),
+		AuthorName:   "Alice",
+		AuthorEmail:  "alice@example.com",
+	}); writeErr != nil {
+		t.Fatalf("WriteCommitted: %v", writeErr)
+	}
+
+	// Move the populated branch to the remote-tracking ref, then delete the
+	// local ref. This is the shape `git clone` produces for a branch the user
+	// never explicitly checked out locally.
+	localRef := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	remoteTrackingRef := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
+	populated, err := repo.Reference(localRef, true)
+	if err != nil {
+		t.Fatalf("reading local ref: %v", err)
+	}
+	if setErr := repo.Storer.SetReference(plumbing.NewHashReference(remoteTrackingRef, populated.Hash())); setErr != nil {
+		t.Fatalf("SetReference remote-tracking: %v", setErr)
+	}
+	if rmErr := repo.Storer.RemoveReference(localRef); rmErr != nil {
+		t.Fatalf("RemoveReference local: %v", rmErr)
+	}
+
+	// Amend HEAD so attach treats this as an existing-checkpoint case.
+	runGitInDir(t, repoRoot, "commit", "--amend", "-m", "init\n\nEntire-Checkpoint: "+alicesCheckpoint.String())
+
+	sessionID := "bob-attempted-attach"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1"}
+`)
+
+	var out bytes.Buffer
+	err = runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, true)
+	if err == nil {
+		t.Fatal("expected attach to refuse when checkpoint is only in the remote-tracking ref")
+	}
+	if !strings.Contains(err.Error(), "missing from the local entire/checkpoints/v1 branch") {
+		t.Errorf("error should explain the local-branch gap; got: %v", err)
+	}
+
+	// Local branch must still not exist — attach should not have created a
+	// fresh orphan on refuse.
+	if _, refErr := repo.Reference(localRef, true); refErr == nil {
+		t.Error("local entire/checkpoints/v1 branch was created despite refuse; would clobber remote on push")
+	}
+
+	// Remote-tracking ref must still hold Alice's untouched data.
+	remoteRef, err := repo.Reference(remoteTrackingRef, true)
+	if err != nil {
+		t.Fatalf("remote-tracking ref missing: %v", err)
+	}
+	if remoteRef.Hash() != populated.Hash() {
+		t.Errorf("remote-tracking ref moved from %s to %s", populated.Hash(), remoteRef.Hash())
+	}
+}
+
+// In v2-only mode, the refuse hint must reference the v2 /main ref and
+// its fully-qualified refspec (refs/entire/checkpoints/v2/main lives under
+// refs/entire/, not refs/heads/, so a short refspec won't resolve).
+func TestAttach_RefuseHint_V2Only(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	setAttachCheckpointsV2Only(t, repoRoot)
+
+	runGitInDir(t, repoRoot, "commit", "--amend", "-m", "init\n\nEntire-Checkpoint: ffffffffeeee")
+
+	sessionID := "v2-orphaned-attach"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1"}
+`)
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, true)
+	if err == nil {
+		t.Fatal("expected v2-only attach to refuse when checkpoint is missing")
+	}
+	if !strings.Contains(err.Error(), "missing from the local v2 /main ref") {
+		t.Errorf("error should describe the v2 /main ref; got: %v", err)
+	}
+	v2Refspec := paths.V2MainRefName + ":" + paths.V2MainRefName
+	if !strings.Contains(err.Error(), v2Refspec) {
+		t.Errorf("error should include v2 refspec %q; got: %v", v2Refspec, err)
+	}
+	// And must NOT suggest the v1 refspec.
+	if strings.Contains(err.Error(), "entire/checkpoints/v1:entire/checkpoints/v1") {
+		t.Errorf("v2-only hint should not reference the v1 branch; got: %v", err)
 	}
 }
 
@@ -741,6 +962,18 @@ func setAttachCheckpointsV2Enabled(t *testing.T, repoDir string) {
 	}
 }
 
+func setAttachCheckpointsV2Only(t *testing.T, repoDir string) {
+	t.Helper()
+	entireDir := filepath.Join(repoDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	settingsContent := `{"enabled": true, "strategy_options": {"checkpoints_version": 2}}`
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func mustGetwd(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
@@ -845,5 +1078,14 @@ func TestAttach_DiscoversExternalAgents(t *testing.T) {
 	// short-circuited before the registry lookup).
 	if _, lookupErr := agent.Get(agentName); lookupErr != nil {
 		t.Errorf("expected external agent %q in registry after attach, got: %v", agentName, lookupErr)
+	}
+}
+
+func runGitInDir(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }

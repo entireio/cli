@@ -333,6 +333,29 @@ func (s *V2GitStore) writeMainCheckpointEntries(ctx context.Context, opts WriteC
 	// Determine session index
 	sessionIndex := s.gs.findSessionIndex(ctx, basePath, existingSummary, entries, opts.SessionID)
 
+	// Refuse if slot 0 already holds metadata for a DIFFERENT session ID.
+	// Mirrors GitStore.writeStandardCheckpointEntries: findSessionIndex only
+	// picks slot 0 when existingSummary is nil or when the summary claims slot 0
+	// belongs to us, so the actual tree holding session-0 metadata for someone
+	// else is a corruption / stale-summary shape. Read BEFORE
+	// writeMainSessionToSubdirectory clears the subtree, or we'd only ever see
+	// our own write.
+	if sessionIndex == 0 {
+		if entry, exists := entries[fmt.Sprintf("%s0/%s", basePath, paths.MetadataFileName)]; exists {
+			if existingMeta, readErr := s.gs.readMetadataFromBlob(entry.Hash); readErr == nil && existingMeta.SessionID != opts.SessionID {
+				logging.Error(ctx, "refusing v2 checkpoint write: session 0 holds a different sessionID",
+					slog.String("checkpoint_id", opts.CheckpointID.String()),
+					slog.String("existing_session_id", existingMeta.SessionID),
+					slog.String("write_session_id", opts.SessionID),
+					slog.Bool("existing_summary_nil", existingSummary == nil))
+				return 0, fmt.Errorf(
+					"refusing to overwrite session 0 of checkpoint %s: existing session ID %q differs from write session ID %q. The v2 checkpoint tree is inconsistent (session 0 belongs to a different session than this write claims). No automated repair exists for this shape — please report it along with the output of `git ls-tree %s %s/`",
+					opts.CheckpointID, existingMeta.SessionID, opts.SessionID, paths.V2MainRefName, opts.CheckpointID.Path(),
+				)
+			}
+		}
+	}
+
 	// Write session files (metadata and prompts — no transcript or content hash)
 	sessionPath := fmt.Sprintf("%s%d/", basePath, sessionIndex)
 	sessionFilePaths, err := s.writeMainSessionToSubdirectory(opts, sessionPath, entries)

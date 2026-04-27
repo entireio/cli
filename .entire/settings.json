@@ -3,6 +3,7 @@
   "local_dev": true,
   "strategy": "manual-commit",
   "strategy_options": {
+    "filtered_fetches": true,
     "checkpoint_remote": {
       "provider": "github",
       "repo": "entireio/cli-checkpoints"

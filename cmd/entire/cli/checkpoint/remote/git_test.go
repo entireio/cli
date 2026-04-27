@@ -247,6 +247,12 @@ func TestResolveFetchTarget(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "https://github.com/org/repo.git", target)
 	})
+
+	t.Run("local path target stays unchanged", func(t *testing.T) {
+		target, err := ResolveFetchTarget(ctx, "../repo.git")
+		require.NoError(t, err)
+		assert.Equal(t, "../repo.git", target)
+	})
 }
 
 func TestAppendCheckpointTokenEnv(t *testing.T) {
@@ -572,6 +578,29 @@ func TestIsURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, IsURL(tt.val))
+		})
+	}
+}
+
+func TestIsLocalPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{"remote name", "origin", false},
+		{"absolute path", "/tmp/repo.git", true},
+		{"current dir relative", "./repo.git", true},
+		{"parent relative", "../repo.git", true},
+		{"https", "https://github.com/org/repo.git", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, isLocalPath(tt.val))
 		})
 	}
 }

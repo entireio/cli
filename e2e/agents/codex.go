@@ -62,10 +62,22 @@ func (c *Codex) IsTransientError(out Output, err error) bool {
 
 // codexHome creates an isolated CODEX_HOME for a test run.
 // Auth still works via OPENAI_API_KEY env var or symlinked auth.json.
+//
+// The directory lives under the user's home (not the system temp dir) because
+// recent Codex versions refuse to install PATH helper binaries when CODEX_HOME
+// sits under /tmp, which breaks subsequent tool calls.
 func codexHome() (string, func(), error) {
-	dir, err := os.MkdirTemp("", "codex-home-*")
+	cache, err := os.UserCacheDir()
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("resolve user cache dir: %w", err)
+	}
+	base := filepath.Join(cache, "entire-e2e")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", nil, fmt.Errorf("create codex home base %q: %w", base, err)
+	}
+	dir, err := os.MkdirTemp(base, "codex-home-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temporary codex home under %q: %w", base, err)
 	}
 	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }

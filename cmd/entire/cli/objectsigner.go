@@ -16,53 +16,61 @@ import (
 )
 
 var registerObjectSignerOnce sync.Once
+var objectSignerLoader = loadObjectSigner
 
 func RegisterObjectSigner() {
 	registerObjectSignerOnce.Do(func() {
+		signer, ok := objectSignerLoader()
+		if !ok {
+			return
+		}
+
 		//nolint:errcheck,gosec // best-effort; if registration fails, commits are left unsigned
 		plugin.Register(plugin.ObjectSigner(), func() plugin.Signer {
-			cfgSource, err := plugin.Get(plugin.ConfigLoader())
-			if err != nil {
-				// No config loader registered; signing not possible.
-				return nil
-			}
-
-			sysCfg := loadScopedConfig(cfgSource, config.SystemScope)
-			globalCfg := loadScopedConfig(cfgSource, config.GlobalScope)
-
-			// Merge system then global so that global settings take precedence.
-			merged := config.Merge(sysCfg, globalCfg)
-
-			if !merged.Commit.GpgSign.IsTrue() {
-				return nil
-			}
-
-			// When a custom gpg.ssh.program is configured (e.g. 1Password's
-			// op-ssh-sign), signing happens via an external binary that go-git
-			// cannot invoke. Skip native signing silently — checkpoint commits
-			// will be unsigned, which is acceptable since signing is best-effort.
-			// The default program is "ssh-keygen", which works with go-git's
-			// native SSH agent signing and does not need to be skipped.
-			if auto.Format(merged.GPG.Format) == auto.FormatSSH && hasCustomSSHSignProgram(merged.Raw) {
-				logging.Debug(context.Background(), "skipping native SSH commit signing: custom gpg.ssh.program is configured")
-				return nil
-			}
-
-			cfg := auto.Config{
-				SigningKey: merged.User.SigningKey,
-				Format:     auto.Format(merged.GPG.Format),
-				SSHAgent:   connectSSHAgent(),
-			}
-
-			signer, err := auto.FromConfig(cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to create object signer: %v\n", err)
-				return nil
-			}
-
 			return signer
 		})
 	})
+}
+
+func loadObjectSigner() (plugin.Signer, bool) { //nolint:ireturn // plugin registration requires the plugin.Signer interface
+	cfgSource, err := plugin.Get(plugin.ConfigLoader())
+	if err != nil {
+		// No config loader registered; signing not possible.
+		return nil, false
+	}
+
+	sysCfg := loadScopedConfig(cfgSource, config.SystemScope)
+	globalCfg := loadScopedConfig(cfgSource, config.GlobalScope)
+
+	// Merge system then global so that global settings take precedence.
+	merged := config.Merge(sysCfg, globalCfg)
+
+	if !merged.Commit.GpgSign.IsTrue() {
+		return nil, false
+	}
+
+	// When a custom gpg.ssh.program is configured (e.g. 1Password's
+	// op-ssh-sign), signing happens via an external binary that go-git
+	// cannot invoke. Skip native signing silently — checkpoint commits
+	// will be unsigned, which is acceptable since signing is best-effort.
+	// The default program is "ssh-keygen", which works with go-git's
+	// native SSH agent signing and does not need to be skipped.
+	if auto.Format(merged.GPG.Format) == auto.FormatSSH && hasCustomSSHSignProgram(merged.Raw) {
+		logging.Debug(context.Background(), "skipping native SSH commit signing: custom gpg.ssh.program is configured")
+		return nil, false
+	}
+
+	signer, err := auto.FromConfig(auto.Config{
+		SigningKey: merged.User.SigningKey,
+		Format:     auto.Format(merged.GPG.Format),
+		SSHAgent:   connectSSHAgent(),
+	})
+	if err != nil {
+		logging.Debug(context.Background(), "failed to create object signer", "error", err.Error())
+		return nil, false
+	}
+
+	return signer, true
 }
 
 // connectSSHAgent connects to the SSH agent via SSH_AUTH_SOCK.

@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 // defaultRunTimeout is the maximum time an external binary call may take when
@@ -434,9 +435,9 @@ func (e *Agent) run(ctx context.Context, stdin []byte, args ...string) ([]byte, 
 	// so cmd.Run() doesn't block waiting for pipe reads.
 	cmd.WaitDelay = 3 * time.Second
 
-	// Set environment: repo root + protocol version
 	cmd.Env = append(cmd.Environ(),
 		"ENTIRE_PROTOCOL_VERSION="+strconv.Itoa(ProtocolVersion),
+		"ENTIRE_CLI_VERSION="+versioninfo.Version,
 	)
 	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
 		cmd.Env = append(cmd.Env, "ENTIRE_REPO_ROOT="+repoRoot)

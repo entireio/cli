@@ -145,7 +145,7 @@ func IsURL(target string) bool {
 // fetches are enabled, configured remotes are resolved to their URL so git does
 // not persist promisor settings onto the remote name.
 func ResolveFetchTarget(ctx context.Context, target string) (string, error) {
-	if IsURL(target) || !settings.IsFilteredFetchesEnabled(ctx) {
+	if IsURL(target) || isLocalPath(target) || !settings.IsFilteredFetchesEnabled(ctx) {
 		return target, nil
 	}
 	url, err := GetRemoteURL(ctx, target)

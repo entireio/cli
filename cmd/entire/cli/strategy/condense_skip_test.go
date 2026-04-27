@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/assert"
@@ -109,6 +111,153 @@ func TestCondenseSession_DoesNotSkipWhenFilesTouchedButNoTranscript(t *testing.T
 	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, committedFiles)
 	require.NoError(t, err)
 	assert.False(t, result.Skipped, "should not skip when files are touched even without transcript")
+}
+
+// Regression: a session whose tracked files don't overlap with this commit AND
+// whose transcript is dropped by redaction (malformed JSONL) must be skipped
+// instead of writing a metadata-only stub. The pre-redaction skip gate cannot
+// catch this combination because both Transcript and FilesTouched are non-empty
+// before the filter and redaction run.
+func TestCondenseSession_SkipsWhenNoOverlapAndRedactionFails(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// Commit a file so committedFiles is non-empty.
+	committedTestFile := filepath.Join(dir, "committed.txt")
+	require.NoError(t, os.WriteFile(committedTestFile, []byte("committed change"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("committed.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("modify committed.txt", &git.CommitOptions{})
+	require.NoError(t, err)
+
+	// Session tracks an UNRELATED file so the intersect in filterFilesTouched
+	// produces an empty result. Transcript is readable so the pre-redaction
+	// skip gate won't fire.
+	sessionID := "redaction-failure-no-overlap"
+	transcriptPath := filepath.Join(dir, "fake-rollout.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"any":"jsonl line"}`+"\n"), 0o644))
+
+	state := &SessionState{
+		SessionID:      sessionID,
+		AgentType:      "Codex",
+		BaseCommit:     commitHash.String(),
+		Phase:          session.PhaseActive,
+		TranscriptPath: transcriptPath,
+		FilesTouched:   []string{"unrelated.txt"}, // not in committedFiles
+	}
+
+	// Force the redactor to fail so redactedTranscript ends up empty.
+	originalRedactor := redactSessionJSONLBytes
+	redactSessionJSONLBytes = func(_ []byte) (redact.RedactedBytes, error) {
+		return redact.RedactedBytes{}, errors.New("simulated redaction failure")
+	}
+	t.Cleanup(func() { redactSessionJSONLBytes = originalRedactor })
+
+	s := &ManualCommitStrategy{}
+	checkpointID := id.MustCheckpointID("d4e5f6a1b2c3")
+	committedFiles := map[string]struct{}{"committed.txt": {}}
+
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, committedFiles)
+	require.NoError(t, err)
+	assert.True(t, result.Skipped, "should skip when no file overlap AND redaction drops transcript")
+}
+
+// filterFilesTouched should still apply the all-committed-files fallback for a
+// legitimate mid-turn commit where the session has run SaveStep before but
+// hasn't recorded files for the current turn yet (StepCount > 0 is the
+// evidence-of-work signal).
+func TestFilterFilesTouched_AppliesFallbackForMidTurnCommit(t *testing.T) {
+	t.Parallel()
+
+	sessionData := &ExtractedSessionData{
+		Transcript:   nil,
+		FilesTouched: nil,
+	}
+	state := &SessionState{
+		SessionID: "mid-turn",
+		StepCount: 2, // prior SaveStep evidence
+	}
+	committedFiles := map[string]struct{}{
+		"app/foo.go":       {},
+		".entire/internal": {},
+		"app/bar.go":       {},
+	}
+
+	filterFilesTouched(sessionData, committedFiles, state)
+
+	require.ElementsMatch(t, []string{"app/foo.go", "app/bar.go"}, sessionData.FilesTouched,
+		"should fall back to committed files (excluding .entire/) when session has SaveStep evidence")
+}
+
+// A first-turn mid-session commit can happen before SaveStep records the
+// touched files. In that case StepCount==0 but we have a non-empty transcript,
+// which is enough evidence to apply the committed-files fallback. This is the
+// happy-path case for the fallback (e.g. Claude Code mid-turn user commits).
+func TestFilterFilesTouched_AppliesFallbackWithTranscriptEvidence(t *testing.T) {
+	t.Parallel()
+
+	sessionData := &ExtractedSessionData{
+		Transcript:   []byte(`{"role":"user","content":"hi"}` + "\n"),
+		FilesTouched: nil,
+	}
+	state := &SessionState{
+		SessionID: "first-turn",
+		StepCount: 0,
+	}
+	committedFiles := map[string]struct{}{"app/foo.go": {}}
+
+	filterFilesTouched(sessionData, committedFiles, state)
+
+	require.Equal(t, []string{"app/foo.go"}, sessionData.FilesTouched,
+		"should fall back when transcript is non-empty even without StepCount")
+}
+
+// filterFilesTouched must NOT apply the fallback when there is no evidence the
+// session did anything (no transcript, no prior SaveStep). This is the bug
+// scenario that produced false attribution to ephemeral Codex sessions.
+func TestFilterFilesTouched_SkipsFallbackWithoutEvidence(t *testing.T) {
+	t.Parallel()
+
+	sessionData := &ExtractedSessionData{
+		Transcript:   nil,
+		FilesTouched: nil,
+	}
+	state := &SessionState{
+		SessionID: "no-evidence",
+		StepCount: 0,
+	}
+	committedFiles := map[string]struct{}{"app/foo.go": {}, "app/bar.go": {}}
+
+	filterFilesTouched(sessionData, committedFiles, state)
+
+	assert.Empty(t, sessionData.FilesTouched,
+		"must not attribute committed files to a session with no evidence of work")
+}
+
+// filterFilesTouched should still intersect when sessionData already has
+// FilesTouched populated, regardless of evidence-of-work signals.
+func TestFilterFilesTouched_IntersectsWhenFilesTouchedPopulated(t *testing.T) {
+	t.Parallel()
+
+	sessionData := &ExtractedSessionData{
+		Transcript:   nil,
+		FilesTouched: []string{"app/foo.go", "app/bar.go", "app/unrelated.go"},
+	}
+	state := &SessionState{
+		SessionID: "intersect-case",
+		StepCount: 0, // no evidence of work, but FilesTouched is populated
+	}
+	committedFiles := map[string]struct{}{"app/foo.go": {}, "app/bar.go": {}}
+
+	filterFilesTouched(sessionData, committedFiles, state)
+
+	require.ElementsMatch(t, []string{"app/foo.go", "app/bar.go"}, sessionData.FilesTouched,
+		"should intersect existing FilesTouched with committedFiles")
 }
 
 func TestCondenseSessionByID_SkippedPreservesState(t *testing.T) {

@@ -15,8 +15,6 @@ import (
 )
 
 func main() {
-	cli.RegisterObjectSigner()
-
 	// Create context that cancels on interrupt
 	ctx, cancel := context.WithCancel(context.Background())
 

@@ -205,7 +205,7 @@ const v2DoctorTmpRef = "refs/entire-fetch-tmp/doctor-v2-main"
 // v2 /main ref exist but share no common ancestor. Uses git ls-remote to
 // discover the remote ref (custom refs don't have remote-tracking refs).
 //
-// remote is the git remote URL or path to check against.
+// remote is the git remote name, URL, or local path to check against.
 // Returns (false, nil) if either ref doesn't exist or they share ancestry.
 func IsV2MainDisconnected(ctx context.Context, repo *git.Repository, remote string) (bool, error) {
 	refName := plumbing.ReferenceName(paths.V2MainRefName)
@@ -258,7 +258,7 @@ func IsV2MainDisconnected(ctx context.Context, repo *git.Repository, remote stri
 // v2 /main refs. Same strategy as v1: cherry-pick local commits onto remote tip.
 // The remote is discovered via git ls-remote and fetched to a temp ref.
 //
-// remote is the git remote URL or path.
+// remote is the git remote name, URL, or local path.
 func ReconcileDisconnectedV2Ref(
 	ctx context.Context,
 	repo *git.Repository,

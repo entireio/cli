@@ -50,7 +50,7 @@ func setupSigningEnv(t *testing.T, disableSigning bool) {
 	paths.ClearWorktreeRootCache()
 	t.Chdir(dir)
 	t.Cleanup(func() {
-		resetPluginEntry("object-signer")
+		objectSignerLoader = loadObjectSigner
 		paths.ClearWorktreeRootCache()
 	})
 }
@@ -72,11 +72,8 @@ func newTestCommit() *object.Commit {
 func TestSignCommitBestEffort_Signs(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
 	setupSigningEnv(t, false)
 
-	err := plugin.Register(plugin.ObjectSigner(), func() plugin.Signer {
-		return &stubSigner{sig: []byte("FAKESIG")}
-	})
-	if err != nil {
-		t.Fatal(err)
+	objectSignerLoader = func(context.Context) (plugin.Signer, bool) {
+		return &stubSigner{sig: []byte("FAKESIG")}, true
 	}
 
 	commit := newTestCommit()
@@ -90,12 +87,9 @@ func TestSignCommitBestEffort_Signs(t *testing.T) { //nolint:paralleltest // t.C
 func TestSignCommitBestEffort_SkipsWhenDisabled(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
 	setupSigningEnv(t, true)
 
-	err := plugin.Register(plugin.ObjectSigner(), func() plugin.Signer {
+	objectSignerLoader = func(context.Context) (plugin.Signer, bool) {
 		t.Fatal("signer should not be called when signing is disabled")
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+		return nil, true
 	}
 
 	commit := newTestCommit()
@@ -109,11 +103,8 @@ func TestSignCommitBestEffort_SkipsWhenDisabled(t *testing.T) { //nolint:paralle
 func TestSignCommitBestEffort_ErrorIsBestEffort(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
 	setupSigningEnv(t, false)
 
-	err := plugin.Register(plugin.ObjectSigner(), func() plugin.Signer {
-		return &stubSigner{err: errors.New("signing failed")}
-	})
-	if err != nil {
-		t.Fatal(err)
+	objectSignerLoader = func(context.Context) (plugin.Signer, bool) {
+		return &stubSigner{err: errors.New("signing failed")}, true
 	}
 
 	commit := newTestCommit()
@@ -127,6 +118,10 @@ func TestSignCommitBestEffort_ErrorIsBestEffort(t *testing.T) { //nolint:paralle
 func TestSignCommitBestEffort_NoSignerRegistered(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
 	setupSigningEnv(t, false)
 
+	objectSignerLoader = func(context.Context) (plugin.Signer, bool) {
+		return nil, false
+	}
+
 	commit := newTestCommit()
 	SignCommitBestEffort(context.Background(), commit)
 
@@ -138,11 +133,8 @@ func TestSignCommitBestEffort_NoSignerRegistered(t *testing.T) { //nolint:parall
 func TestSignCommitBestEffort_NilSigner(t *testing.T) { //nolint:paralleltest // t.Chdir requires non-parallel
 	setupSigningEnv(t, false)
 
-	err := plugin.Register(plugin.ObjectSigner(), func() plugin.Signer {
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+	objectSignerLoader = func(context.Context) (plugin.Signer, bool) {
+		return nil, true
 	}
 
 	commit := newTestCommit()
