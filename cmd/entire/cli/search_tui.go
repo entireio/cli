@@ -58,10 +58,12 @@ type searchStyles struct {
 }
 
 // Search palette mirrors activity's dark-mode CSS variables (Tailwind 400-level).
-// orange-400 is the primary accent (matches Claude in activity); purple-400 frames detail.
+// orange-400 is the primary accent (matches Claude in activity); purple-400 frames
+// detail; blue-400 is reserved for links inside markdown snippets.
 const (
 	searchAccentOrange = "#fb923c" // matches agentDisplayMap["claude"] in activity_render.go
 	searchAccentPurple = "#c084fc" // matches agentDisplayMap["kiro"] in activity_render.go
+	searchAccentBlue   = "#60a5fa" // matches agentDisplayMap["gemini"] in activity_render.go
 )
 
 func newSearchStyles(ss statusStyles) searchStyles {
@@ -920,8 +922,6 @@ func snippetMarkdownStyles(dark bool) ansi.StyleConfig {
 	s.Strong.Color = nil
 	s.Emph.Color = nil
 	s.Strikethrough.Color = nil
-	s.Link.Color = nil
-	s.LinkText.Color = nil
 	s.Heading.Color = nil
 	s.H1.Color = nil
 	s.H2.Color = nil
@@ -932,6 +932,12 @@ func snippetMarkdownStyles(dark bool) ansi.StyleConfig {
 	s.Item.Color = nil
 	s.Enumeration.Color = nil
 	s.List.Color = nil
+
+	// Links are the one place we *want* a colour: an underline alone is easy
+	// to miss inline. Use an explicit hex so it survives theme remapping.
+	linkColor := searchAccentBlue
+	s.Link.Color = &linkColor
+	s.LinkText.Color = &linkColor
 
 	return s
 }
