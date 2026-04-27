@@ -54,10 +54,10 @@ type searchStyles struct {
 }
 
 // Search palette mirrors activity's dark-mode CSS variables (Tailwind 400-level).
-// orange-400 is the primary accent (matches Claude in activity); blue-400 is secondary.
+// orange-400 is the primary accent (matches Claude in activity); purple-400 frames detail.
 const (
 	searchAccentOrange = "#fb923c" // matches agentDisplayMap["claude"] in activity_render.go
-	searchAccentBlue   = "#60a5fa" // matches agentDisplayMap["gemini"] in activity_render.go
+	searchAccentPurple = "#c084fc" // matches agentDisplayMap["kiro"] in activity_render.go
 )
 
 func newSearchStyles(ss statusStyles) searchStyles {
@@ -70,10 +70,10 @@ func newSearchStyles(ss statusStyles) searchStyles {
 	s.selected = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccentOrange))
 	s.helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true)
 	s.helpSep = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	s.detailTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccentBlue))
+	s.detailTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(searchAccentPurple))
 	s.detailBorder = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("240")).
+		BorderForeground(lipgloss.Color(searchAccentPurple)).
 		Padding(1, 2)
 	return s
 }
