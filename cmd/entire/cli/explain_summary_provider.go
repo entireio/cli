@@ -20,13 +20,14 @@ import (
 )
 
 var (
-	loadSummarySettings         = LoadEntireSettings
-	loadSummarySettingsFromFile = settings.LoadFromFile
-	saveLocalSummarySettings    = SaveEntireSettingsLocal
-	getSummaryAgent             = agent.Get
-	listRegisteredAgents        = agent.List
-	isSummaryCLIAvailable       = agent.IsSummaryCLIAvailable
-	discoverSummaryProviders    = external.DiscoverAndRegister
+	loadSummarySettings            = LoadEntireSettings
+	loadSummarySettingsFromFile    = settings.LoadFromFile
+	saveLocalSummarySettings       = SaveEntireSettingsLocal
+	getSummaryAgent                = agent.Get
+	listRegisteredAgents           = agent.List
+	isSummaryCLIAvailable          = agent.IsSummaryCLIAvailable
+	discoverSummaryProviders       = external.DiscoverAndRegister
+	discoverSummaryProvidersAlways = external.DiscoverAndRegisterAlways
 )
 
 type checkpointSummaryProvider struct {
@@ -51,7 +52,12 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 		return buildCheckpointSummaryProvider(providerName, s.SummaryGeneration.Model)
 	}
 
-	discoverSummaryProviders(ctx)
+	// Use the always-variant so installed external plugins surface in the
+	// picker even when external_agents is currently off. Installation
+	// (placing entire-agent-* on $PATH) is the user's opt-in to "this
+	// plugin exists"; selecting it in the picker is when external_agents
+	// flips on (handled by persistSummaryProviderSelection).
+	discoverSummaryProvidersAlways(ctx)
 	candidates := listEnabledSummaryProviders(ctx)
 
 	switch len(candidates) {
@@ -94,10 +100,14 @@ func autoSelectSummaryProvider(ctx context.Context, w io.Writer, name types.Agen
 	if err != nil {
 		return nil, err
 	}
-	if saveErr := persistSummaryProviderSelection(ctx, provider.Name, provider.Model); saveErr != nil {
+	flagFlipped, saveErr := persistSummaryProviderSelection(ctx, provider.Name, provider.Model)
+	if saveErr != nil {
 		logging.Warn(ctx, "failed to save summary provider selection, continuing without persistence",
 			"error", saveErr.Error())
 		fmt.Fprintf(w, "Warning: could not save provider selection: %v\nUse `entire configure --summarize-provider %s` to set it manually.\n", saveErr, provider.Name)
+	}
+	if flagFlipped {
+		fmt.Fprintln(w, externalAgentsAutoEnabledNotice)
 	}
 	return provider, nil
 }
@@ -215,10 +225,13 @@ func validateSummaryProvider(provider string) error {
 	return nil
 }
 
-func persistSummaryProviderSelection(ctx context.Context, provider types.AgentName, model string) error {
-	// Always write to settings.local.json: the provider choice is based on
-	// which CLI binaries are on the local PATH, so it is machine-specific
-	// and should not dirty the tracked settings.json.
+// persistSummaryProviderSelection writes the chosen provider to
+// settings.local.json. When the chosen provider is an external agent and
+// external_agents is not yet enabled, it also flips that setting on so the
+// plugin can actually run; in that case it returns flagFlipped=true so the
+// caller can surface a one-time notice. The flag is written to local because
+// the provider choice is already machine-specific (depends on $PATH).
+func persistSummaryProviderSelection(ctx context.Context, provider types.AgentName, model string) (flagFlipped bool, err error) {
 	targetFileAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
 	if err != nil {
 		targetFileAbs = settings.EntireSettingsLocalFile
@@ -226,17 +239,22 @@ func persistSummaryProviderSelection(ctx context.Context, provider types.AgentNa
 
 	s, err := loadSummarySettingsFromFile(targetFileAbs)
 	if err != nil {
-		return fmt.Errorf("loading settings for update: %w", err)
+		return false, fmt.Errorf("loading settings for update: %w", err)
 	}
 	if s.SummaryGeneration == nil {
 		s.SummaryGeneration = &settings.SummaryGenerationSettings{}
 	}
 	s.SummaryGeneration.SetProvider(string(provider), model)
 
-	if err := saveLocalSummarySettings(ctx, s); err != nil {
-		return fmt.Errorf("saving summary provider selection: %w", err)
+	if ag, getErr := getSummaryAgent(provider); getErr == nil && external.IsExternal(ag) && !s.ExternalAgents {
+		s.ExternalAgents = true
+		flagFlipped = true
 	}
-	return nil
+
+	if err := saveLocalSummarySettings(ctx, s); err != nil {
+		return false, fmt.Errorf("saving summary provider selection: %w", err)
+	}
+	return flagFlipped, nil
 }
 
 func formatSummaryProviderDetails(provider *checkpointSummaryProvider) string {

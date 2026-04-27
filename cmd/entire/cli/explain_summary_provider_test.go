@@ -313,3 +313,114 @@ func TestResolveCheckpointSummaryProvider_ConfiguredExternalProvider(t *testing.
 		t.Fatalf("summary = %+v, want generated Intent/Outcome", summary)
 	}
 }
+
+func TestPersistSummaryProviderSelection_ExternalFlipsFlagAndReturnsSignal(t *testing.T) {
+	// Cannot use t.Parallel(): mutates the package-level agent registry via discovery.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	const providerName = "external-summary-persist"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Discover so getSummaryAgent returns a wrapped external (the type IsExternal recognizes).
+	discoverSummaryProvidersAlways(ctx)
+
+	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "")
+	if err != nil {
+		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
+	}
+	if !flagFlipped {
+		t.Fatal("expected flagFlipped=true when external_agents was off and provider is external")
+	}
+
+	s, err := settings.LoadFromFile(filepath.Join(tmpDir, ".entire", "settings.local.json"))
+	if err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	if !s.ExternalAgents {
+		t.Fatal("external_agents should be true in settings.local.json after picking an external")
+	}
+	if s.SummaryGeneration == nil || s.SummaryGeneration.Provider != providerName {
+		t.Fatalf("provider not persisted; got %+v", s.SummaryGeneration)
+	}
+}
+
+func TestPersistSummaryProviderSelection_BuiltInDoesNotFlipFlag(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir mutates process-global cwd.
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	flagFlipped, err := persistSummaryProviderSelection(ctx, agent.AgentNameClaudeCode, "")
+	if err != nil {
+		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
+	}
+	if flagFlipped {
+		t.Fatal("expected flagFlipped=false for a built-in provider")
+	}
+
+	s, err := settings.LoadFromFile(filepath.Join(tmpDir, ".entire", "settings.local.json"))
+	if err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	if s.ExternalAgents {
+		t.Fatal("external_agents must not flip when picking a built-in provider")
+	}
+}
+
+func TestPersistSummaryProviderSelection_ExternalAlreadyEnabledNoSignal(t *testing.T) {
+	// Cannot use t.Parallel(): mutates the package-level agent registry via discovery.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.local.json"), []byte(`{"external_agents":true}`), 0o644); err != nil {
+		t.Fatalf("write settings.local.json: %v", err)
+	}
+
+	const providerName = "external-summary-already"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	discoverSummaryProvidersAlways(ctx)
+
+	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "")
+	if err != nil {
+		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
+	}
+	if flagFlipped {
+		t.Fatal("expected flagFlipped=false when external_agents was already enabled")
+	}
+}

@@ -2436,6 +2436,37 @@ func TestConfigureCmd_SummarizeProvider_ExternalEnablesExternalAgents(t *testing
 	if !s.ExternalAgents {
 		t.Fatal("external summary provider should enable external_agents")
 	}
+	if !strings.Contains(stdout.String(), externalAgentsAutoEnabledNotice) {
+		t.Fatalf("expected notice surfacing the external_agents flip, got stdout:\n%s", stdout.String())
+	}
+}
+
+func TestConfigureCmd_SummarizeProvider_ExternalAlreadyEnabled_NoNotice(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "external_agents": true}`)
+
+	const provider = "external-summary-already-on"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, provider)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--summarize-provider", provider})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --summarize-provider external failed: %v", err)
+	}
+
+	if strings.Contains(stdout.String(), externalAgentsAutoEnabledNotice) {
+		t.Fatalf("notice should not fire when external_agents was already enabled, got stdout:\n%s", stdout.String())
+	}
 }
 
 func TestConfigureCmd_SummarizeProvider_InvalidProvider(t *testing.T) {
