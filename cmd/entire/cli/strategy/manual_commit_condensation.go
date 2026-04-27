@@ -677,8 +677,6 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 // The return type is the summarize.Generator interface rather than the concrete
 // adapter pointer so callers can't accidentally hold a non-nil interface that
 // wraps a nil pointer (the classic Go nil-interface footgun).
-//
-//nolint:ireturn // interface return for nil-safety
 func buildSummaryGenerator(ctx context.Context) summarize.Generator {
 	s, err := settings.Load(ctx)
 	if err != nil {
