@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 	"time"
 
 	glamour "charm.land/glamour/v2"
@@ -107,8 +106,7 @@ type searchModel struct {
 	// darkBg is captured once before bubbletea takes over the terminal so the
 	// snippet renderer never re-queries the terminal via OSC during the Update
 	// loop (which would race against bubbletea's stdin reader and stall).
-	darkBg          bool
-	prewarmedWidths map[int]struct{}
+	darkBg bool
 }
 
 // pageResults returns the slice of results for the current page.
@@ -163,17 +161,16 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	}
 
 	m := searchModel{
-		results:         results,
-		total:           total,
-		width:           ss.width,
-		mode:            modeBrowse,
-		input:           ti,
-		searchCfg:       cfg,
-		apiPage:         apiPage,
-		styles:          styles,
-		browseVP:        viewport.New(ss.width, 1), // height set on first WindowSizeMsg
-		darkBg:          termenv.HasDarkBackground(),
-		prewarmedWidths: map[int]struct{}{},
+		results:   results,
+		total:     total,
+		width:     ss.width,
+		mode:      modeBrowse,
+		input:     ti,
+		searchCfg: cfg,
+		apiPage:   apiPage,
+		styles:    styles,
+		browseVP:  viewport.New(ss.width, 1), // height set on first WindowSizeMsg
+		darkBg:    termenv.HasDarkBackground(),
 	}
 	m = m.refreshBrowseContent()
 	return m
@@ -234,17 +231,6 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn
 			m.detailVP.Height = max(msg.Height-2, 1)
 		}
 		m = m.refreshBrowseContent()
-		// Pre-warm the snippet renderer for the bubbletea-reported width once
-		// per width so the first Enter into the detail page is a cache hit.
-		if msg.Width > 0 {
-			if _, done := m.prewarmedWidths[msg.Width]; !done {
-				m.prewarmedWidths[msg.Width] = struct{}{}
-				go func(w int, dark bool) {
-					_, err := getSnippetRenderer(w, dark)
-					_ = err //nolint:wsl // fire-and-forget; render path falls back to wrapText
-				}(msg.Width, m.darkBg)
-			}
-		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -867,53 +853,28 @@ func derefStr(s *string, fallback string) string {
 
 // ─── Snippet Markdown ────────────────────────────────────────────────────────
 
-// snippetRendererKey identifies a cached glamour renderer by terminal width
-// and background mode. Keying on both means a window resize or theme switch
-// transparently rebuilds; same-shape repeats are cache hits.
-type snippetRendererKey struct {
-	width int
-	dark  bool
-}
-
-var (
-	snippetRendererMu    sync.Mutex
-	snippetRendererCache = map[snippetRendererKey]*glamour.TermRenderer{}
-)
-
-// getSnippetRenderer returns a glamour TermRenderer for the given width and
-// background mode, building and caching it on first request. TermRenderer is
-// safe to share across calls because Render allocates a fresh buffer each
-// invocation (see charm.land/glamour/v2 RenderBytes).
-func getSnippetRenderer(width int, dark bool) (*glamour.TermRenderer, error) {
-	key := snippetRendererKey{width: width, dark: dark}
-	snippetRendererMu.Lock()
-	defer snippetRendererMu.Unlock()
-	if r, ok := snippetRendererCache[key]; ok {
-		return r, nil
-	}
-	r, err := glamour.NewTermRenderer(
-		glamour.WithStyles(snippetMarkdownStyles(dark)),
-		glamour.WithWordWrap(width),
-		glamour.WithPreservedNewLines(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("init glamour renderer: %w", err)
-	}
-	snippetRendererCache[key] = r
-	return r, nil
-}
-
 // renderSnippetMarkdown renders a search snippet as markdown using glamour v2.
 // It is used in the full-screen checkpoint detail view where the snippet has
 // room to breathe; the inline detail card keeps plain word-wrapping. On any
 // renderer error or impractically narrow widths it falls back to wrapText.
+//
 // dark must be detected before bubbletea owns the terminal — querying termenv
 // inside the Update loop races against bubbletea's stdin reader and stalls.
+//
+// A fresh TermRenderer is built per call. *TermRenderer carries shared mutable
+// state via ansi.RenderContext.blockStack, so caching the renderer would
+// require serialising every Render call; construction is cheap (just goldmark
+// + ANSI option setup, no chroma init unless a fenced code block forces it),
+// so we just rebuild and avoid the concurrency hazard altogether.
 func renderSnippetMarkdown(snippet string, width int, dark bool) string {
 	if width < 20 {
 		return wrapText(snippet, width)
 	}
-	renderer, err := getSnippetRenderer(width, dark)
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStyles(snippetMarkdownStyles(dark)),
+		glamour.WithWordWrap(width),
+		glamour.WithPreservedNewLines(),
+	)
 	if err != nil {
 		return wrapText(snippet, width)
 	}
@@ -925,10 +886,17 @@ func renderSnippetMarkdown(snippet string, width int, dark bool) string {
 }
 
 // snippetMarkdownStyles returns a glamour style config tailored for inline
-// snippets. The body text colour is left nil so it inherits the terminal's
-// default foreground, which contrasts with whichever background the user has
-// chosen — ANSI palette numbers (e.g. "234") get remapped by terminal themes
-// and produce unreadable colours on cream / Solarized backgrounds.
+// snippets. Foreground colours are nilled across every text-bearing element
+// so the snippet inherits the terminal's default foreground colour. ANSI
+// palette numbers like "234" embedded in glamour's stock styles get remapped
+// by terminal themes and produce unreadable colours on cream / Solarized
+// backgrounds — letting the terminal pick the colour avoids that entirely.
+//
+// IMPORTANT: this function copies a package-level glamourstyles var by value,
+// then re-assigns its pointer fields. *Re-assigning* (`= nil`, `= &x`) is
+// safe — it rebinds the local field. *Dereferencing* through the pointer
+// (`*s.Document.Color = "x"`) would mutate the shared global and pollute
+// every other glamour caller in the process. Don't do that.
 func snippetMarkdownStyles(dark bool) ansi.StyleConfig {
 	var s ansi.StyleConfig
 	if dark {
@@ -940,8 +908,31 @@ func snippetMarkdownStyles(dark bool) ansi.StyleConfig {
 	s.Document.Margin = &zero
 	s.Document.BlockPrefix = ""
 	s.Document.BlockSuffix = ""
+
+	// Null foreground on every primitive that contributes to flowing text so
+	// nothing relies on theme-remappable ANSI palette numbers. Code/CodeBlock
+	// keep their styling because BackgroundColor is enough to differentiate
+	// them visually.
 	s.Document.Color = nil
 	s.Paragraph.Color = nil
+	s.Text.Color = nil
+	s.BlockQuote.Color = nil
+	s.Strong.Color = nil
+	s.Emph.Color = nil
+	s.Strikethrough.Color = nil
+	s.Link.Color = nil
+	s.LinkText.Color = nil
+	s.Heading.Color = nil
+	s.H1.Color = nil
+	s.H2.Color = nil
+	s.H3.Color = nil
+	s.H4.Color = nil
+	s.H5.Color = nil
+	s.H6.Color = nil
+	s.Item.Color = nil
+	s.Enumeration.Color = nil
+	s.List.Color = nil
+
 	return s
 }
 
