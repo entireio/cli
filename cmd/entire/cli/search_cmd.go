@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -193,8 +194,33 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	cmd.RegisterFlagCompletionFunc("date", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) { //nolint:errcheck,gosec // only fails if the flag isn't defined; defined directly above
 		return []string{"week", "month"}, cobra.ShellCompDirectiveNoFileComp
 	})
+	cmd.RegisterFlagCompletionFunc("repo", completeRepoFlag) //nolint:errcheck,gosec // only fails if the flag isn't defined; defined directly above
 
 	return cmd
+}
+
+// completeRepoFlag returns shell-completion suggestions for the search
+// command's --repo flag. "*" is always offered so the wildcard works
+// regardless of auth state. Errors are swallowed (rather than surfaced via
+// ShellCompDirectiveError) because completion runs on every TAB press and
+// must never pollute the user's prompt with error output.
+func completeRepoFlag(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+	suggestions := []string{"*"}
+	client, err := NewAuthenticatedAPIClient(false)
+	if err != nil {
+		return suggestions, cobra.ShellCompDirectiveNoFileComp
+	}
+	repos, err := client.ListRepositories(cmd.Context(), api.RepositorySortRecent)
+	if err != nil {
+		return suggestions, cobra.ShellCompDirectiveNoFileComp
+	}
+	for _, r := range repos {
+		if r.CheckpointCount == 0 {
+			continue // searching a repo with no checkpoints would always be empty
+		}
+		suggestions = append(suggestions, r.FullName)
+	}
+	return suggestions, cobra.ShellCompDirectiveNoFileComp
 }
 
 // writeSearchJSON writes client-side paginated search results as JSON.
