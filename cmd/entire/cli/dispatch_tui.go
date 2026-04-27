@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/ansi"
+	glamourstyles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 	"github.com/muesli/termenv"
@@ -163,9 +164,9 @@ func dispatchMarkdownStyles() ansi.StyleConfig {
 func dispatchMarkdownStylesForBackground(darkBackground bool) ansi.StyleConfig {
 	var styles ansi.StyleConfig
 	if darkBackground {
-		styles = glamour.DarkStyleConfig
+		styles = glamourstyles.DarkStyleConfig
 	} else {
-		styles = glamour.LightStyleConfig
+		styles = glamourstyles.LightStyleConfig
 	}
 
 	if darkBackground {

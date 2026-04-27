@@ -254,7 +254,7 @@ main() {
     # Check if the installed binary is the one that will be found in PATH
     local path_binary
     path_binary=$(command -v "entire" 2>/dev/null || true)
-    if [[ -n "$path_binary" && "$path_binary" != "$install_path" ]]; then
+    if [[ -n "$path_binary" && ! "$path_binary" -ef "$install_path" ]]; then
         # This case is a bit weird, because some other 'entire' is found on PATH.  Warn user.
         echo ""
         echo -e "${YELLOW}!${NC} ${BOLD}WARNING: PATH conflict detected${NC}"
