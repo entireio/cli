@@ -7,6 +7,9 @@ import (
 	"strings"
 	"time"
 
+	glamour "charm.land/glamour/v2"
+	"charm.land/glamour/v2/ansi"
+	glamourstyles "charm.land/glamour/v2/styles"
 	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -588,9 +591,12 @@ func (m searchModel) renderDetailContent(r search.Result, contentWidth int, show
 	// ── SNIPPET ──
 	if r.Meta.Snippet != "" {
 		writeSection("SNIPPET")
-		if valueWidth > 0 {
+		switch {
+		case showSections:
+			content.WriteString(renderSnippetMarkdown(r.Meta.Snippet, contentWidth) + "\n")
+		case valueWidth > 0:
 			content.WriteString(wrapText(r.Meta.Snippet, contentWidth) + "\n")
-		} else {
+		default:
 			content.WriteString(r.Meta.Snippet + "\n")
 		}
 	}
@@ -836,6 +842,43 @@ func derefStr(s *string, fallback string) string {
 		return fallback
 	}
 	return *s
+}
+
+// ─── Snippet Markdown ────────────────────────────────────────────────────────
+
+// renderSnippetMarkdown renders a search snippet as markdown using glamour v2.
+// It is used in the full-screen checkpoint detail view where the snippet has
+// room to breathe; the inline detail card keeps plain word-wrapping. On any
+// renderer error or impractically narrow widths it falls back to wrapText.
+func renderSnippetMarkdown(snippet string, width int) string {
+	if width < 20 {
+		return wrapText(snippet, width)
+	}
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStyles(snippetMarkdownStyles()),
+		glamour.WithWordWrap(width),
+		glamour.WithPreservedNewLines(),
+	)
+	if err != nil {
+		return wrapText(snippet, width)
+	}
+	rendered, err := renderer.Render(snippet)
+	if err != nil {
+		return wrapText(snippet, width)
+	}
+	return strings.TrimRight(rendered, "\n")
+}
+
+// snippetMarkdownStyles returns a glamour style config tailored for inline
+// snippets: the default Document margin is dropped so the rendered block
+// aligns flush with the surrounding "SNIPPET" header.
+func snippetMarkdownStyles() ansi.StyleConfig {
+	s := glamourstyles.DarkStyleConfig
+	zero := uint(0)
+	s.Document.Margin = &zero
+	s.Document.BlockPrefix = ""
+	s.Document.BlockSuffix = ""
+	return s
 }
 
 // ─── Static Fallback ─────────────────────────────────────────────────────────
