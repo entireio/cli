@@ -23,6 +23,7 @@ type Window struct {
 
 type RepoGroup struct {
 	FullName string
+	URL      string
 	Sections []Section
 }
 

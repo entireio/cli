@@ -72,6 +72,24 @@ func TestDispatchStatusModel_ViewRendersInlineCard(t *testing.T) {
 	}
 }
 
+func TestDefaultRenderTerminalMarkdown_RendersHyperlinks(t *testing.T) {
+	t.Parallel()
+
+	rendered, err := defaultRenderTerminalMarkdown(io.Discard, "[Entire](https://entire.dev)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "\x1b]8;") {
+		t.Fatalf("expected OSC 8 hyperlink sequence, got %q", rendered)
+	}
+	if !strings.Contains(rendered, ";https://entire.dev\x07") {
+		t.Fatalf("expected hyperlink target, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "\x1b]8;;\x07") {
+		t.Fatalf("expected OSC 8 hyperlink reset, got %q", rendered)
+	}
+}
+
 func TestDefaultRunInteractiveDispatch_ClearsLoadingCardBeforeReturn(t *testing.T) {
 	t.Parallel()
 

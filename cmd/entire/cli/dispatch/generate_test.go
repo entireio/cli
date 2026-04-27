@@ -43,6 +43,12 @@ func TestGenerateLocalDispatch_UsesVoiceAndBullets(t *testing.T) {
 	if !strings.Contains(mock.prompt, "Fixed tests.") {
 		t.Fatalf("missing bullet in prompt: %s", mock.prompt)
 	}
+	if !strings.Contains(mock.prompt, testRepoURL) {
+		t.Fatalf("missing trusted repo URL in prompt: %s", mock.prompt)
+	}
+	if !strings.Contains(mock.prompt, "## [<full_name>](<url>)") {
+		t.Fatalf("missing linked repo heading instruction in prompt: %s", mock.prompt)
+	}
 	if !strings.Contains(mock.prompt, "Write the final dispatch in markdown.") {
 		t.Fatalf("missing final dispatch instruction in prompt: %s", mock.prompt)
 	}
@@ -196,6 +202,18 @@ func TestMarshalDispatchPromptPayload_OmitsZeroCheckpointTimesAndDeduplicatesBra
 	}
 	if len(branches) != 2 || branches[0] != testDefaultBranchName || branches[1] != "release" {
 		t.Fatalf("unexpected deduplicated branches: %v", branches)
+	}
+
+	repos, ok := body["repos"].([]any)
+	if !ok || len(repos) != 1 {
+		t.Fatalf("expected one repo payload, got %T %v", body["repos"], body["repos"])
+	}
+	repo, ok := repos[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected repo object, got %T", repos[0])
+	}
+	if repo["url"] != testRepoURL {
+		t.Fatalf("unexpected repo URL: %v", repo["url"])
 	}
 }
 

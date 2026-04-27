@@ -2,6 +2,7 @@ package dispatch
 
 const (
 	testRepoFullName           = "entireio/cli"
+	testRepoURL                = "https://github.com/" + testRepoFullName
 	testRepoRemoteURL          = "https://github.com/" + testRepoFullName + ".git"
 	testCheckpointID           = "a1b2c3d4e5f6"
 	testLocalFallbackText      = "local fallback summary"
