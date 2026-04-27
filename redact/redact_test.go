@@ -2,6 +2,7 @@ package redact
 
 import (
 	"bytes"
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -9,6 +10,23 @@ import (
 
 // highEntropySecret is a string with Shannon entropy > 4.5 that will trigger redaction.
 const highEntropySecret = "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
+
+var fakeOpenSSHPrivateKey = makeFakeOpenSSHPrivateKey(`b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACB7ZlJ8tkWCKdRJRGF1BngP3bkNbz8bMF6Yl5xLJp9m1QAAAJj2M3UO9jN1
+DgAAAAtzc2gtZWQyNTUxOQAAACB7ZlJ8tkWCKdRJRGF1BngP3bkNbz8bMF6Yl5xLJp9m1QA
+AAEAGZmFrZS1rZXktZm9yLXJlZGFjdGlvbi10ZXN0LW9ubHkBAgMEBQY=`)
+
+func makeFakeOpenSSHPrivateKey(payload string) string {
+	return strings.Join([]string{
+		openSSHPrivateKeyMarker("BEGIN"),
+		payload,
+		openSSHPrivateKeyMarker("END"),
+	}, "\n")
+}
+
+func openSSHPrivateKeyMarker(kind string) string {
+	return "-----" + kind + " " + "OPEN" + "SSH" + " " + "PRIVATE" + " KEY-----"
+}
 
 func TestBytes_NoSecrets(t *testing.T) {
 	input := []byte("hello world, this is normal text")
@@ -240,7 +258,7 @@ func TestShouldSkipJSONLField_RedactionBehavior(t *testing.T) {
 
 func TestString_PatternDetection(t *testing.T) {
 	// These secrets have entropy below 4.5 so entropy-only detection misses them.
-	// Gitleaks pattern matching should catch them.
+	// Betterleaks pattern matching should catch them.
 	tests := []struct {
 		name  string
 		input string
@@ -277,6 +295,110 @@ func TestString_PatternDetection(t *testing.T) {
 				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestString_CredentialedURIs(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "postgres URI",
+			input: "DATABASE_URL=postgres://app:pwd123@db.example.com:5432/app",
+			want:  "DATABASE_URL=REDACTED",
+		},
+		{
+			name:  "postgresql URI with query",
+			input: `dsn="postgresql://svc:moderatepw@localhost/app?sslmode=require"`,
+			want:  `dsn="REDACTED"`,
+		},
+		{
+			name:  "mongodb srv URI",
+			input: "mongo=mongodb+srv://user:pass123@cluster0.example.mongodb.net/app?retryWrites=true",
+			want:  "mongo=REDACTED",
+		},
+		{
+			name:  "mysql URI",
+			input: "mysql://root:p@localhost:3306/app",
+			want:  "REDACTED",
+		},
+		{
+			name:  "redis URI with empty username",
+			input: "cache redis://:hunter2@localhost:6379/0",
+			want:  "cache REDACTED",
+		},
+		{
+			name:  "generic credentialed URL",
+			input: "proxy=https://user:pass@example.com/path",
+			want:  "proxy=REDACTED",
+		},
+		{
+			name:  "URL without password is preserved",
+			input: "repo=ssh://git@github.com/entireio/cli",
+			want:  "repo=ssh://git@github.com/entireio/cli",
+		},
+		{
+			name:  "colon and at-sign in path are preserved",
+			input: "url=https://example.com/a:b@c",
+			want:  "url=https://example.com/a:b@c",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := String(tt.input)
+			if got != tt.want {
+				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestString_OpenSSHPrivateKeyBlock(t *testing.T) {
+	input := "key:\n" + fakeOpenSSHPrivateKey + "\nend"
+	want := "key:\nREDACTED\nend"
+
+	got := String(input)
+	if got != want {
+		t.Errorf("String(private key block) = %q, want %q", got, want)
+	}
+	if strings.Contains(got, openSSHPrivateKeyMarker("BEGIN")) || strings.Contains(got, openSSHPrivateKeyMarker("END")) {
+		t.Errorf("private key block markers should be fully redacted, got %q", got)
+	}
+}
+
+func TestJSONLContent_CredentialedURI(t *testing.T) {
+	input := `{"type":"text","content":"DATABASE_URL=postgres://app:pwd123@db.example.com:5432/app"}`
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if strings.Contains(result, "postgres://app:pwd123@db.example.com:5432/app") {
+		t.Error("credentialed database URI was not redacted")
+	}
+	if !strings.Contains(result, "DATABASE_URL=REDACTED") {
+		t.Errorf("expected credentialed URI replacement, got %q", result)
+	}
+}
+
+func TestJSONLContent_OpenSSHPrivateKeyBlock(t *testing.T) {
+	content, err := json.Marshal("key:\n" + fakeOpenSSHPrivateKey + "\nend")
+	if err != nil {
+		t.Fatalf("marshal content: %v", err)
+	}
+	input := `{"type":"text","content":` + string(content) + `}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(result, openSSHPrivateKeyMarker("BEGIN")) || strings.Contains(result, openSSHPrivateKeyMarker("END")) {
+		t.Errorf("private key block markers should be fully redacted, got %q", result)
+	}
+	if !strings.Contains(result, `key:\nREDACTED\nend`) {
+		t.Errorf("expected whole private key block replacement, got %q", result)
 	}
 }
 
