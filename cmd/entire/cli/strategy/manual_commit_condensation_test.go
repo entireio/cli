@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 	"github.com/stretchr/testify/require"
 
@@ -84,6 +87,31 @@ func calculateTokenUsage(agentType types.AgentType, data []byte, offset int) *ag
 	return agent.CalculateTokenUsage(context.Background(), ag, data, offset, "")
 }
 
+func writeStrategyExternalSummaryAgentBinary(t *testing.T, dir, name string) {
+	t.Helper()
+
+	script := `#!/bin/sh
+case "$1" in
+  info)
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External summary test agent","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":false,"text_generator":true,"hook_response_writer":false,"subagent_aware_extractor":false}}'
+    ;;
+  detect)
+    echo '{"present": true}'
+    ;;
+  generate-text)
+    echo '{"text":"{\"intent\":\"Intent\",\"outcome\":\"Outcome\",\"learnings\":{\"repo\":[],\"code\":[],\"workflow\":[]},\"friction\":[],\"open_items\":[]}"}'
+    ;;
+  *)
+    echo '{}'
+    ;;
+esac
+`
+
+	if err := os.WriteFile(filepath.Join(dir, "entire-agent-"+name), []byte(script), 0o755); err != nil {
+		t.Fatalf("write external summary agent binary: %v", err)
+	}
+}
+
 func TestCalculateTokenUsage_CursorReturnsNil(t *testing.T) {
 	t.Parallel()
 
@@ -98,6 +126,60 @@ func TestCalculateTokenUsage_CursorReturnsNil(t *testing.T) {
 	result := agent.CalculateTokenUsage(context.Background(), ag, transcript, 0, "")
 	if result != nil {
 		t.Errorf("CalculateTokenUsage(Cursor) = %+v, want nil", result)
+	}
+}
+
+func TestBuildSummaryGenerator_ExternalProvider(t *testing.T) { //nolint:paralleltest // uses t.Chdir and t.Setenv
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	const provider = "strategy-external-summary"
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".entire", "settings.json"),
+		[]byte(`{"enabled":true,"external_agents":true,"summary_generation":{"provider":"`+provider+`","model":"test-model"}}`),
+		0o644,
+	))
+
+	externalDir := t.TempDir()
+	writeStrategyExternalSummaryAgentBinary(t, externalDir, provider)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if generator := buildSummaryGenerator(context.Background()); generator == nil {
+		t.Fatal("buildSummaryGenerator() = nil for external text_generator provider")
+	}
+}
+
+func TestBuildSummaryGenerator_BuiltInProviderSkipsExternalDiscovery(t *testing.T) { //nolint:paralleltest // uses t.Chdir and package-level stubs
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".entire", "settings.json"),
+		[]byte(`{"enabled":true,"summary_generation":{"provider":"claude-code","model":"test-model"}}`),
+		0o644,
+	))
+
+	originalDiscover := discoverExternalSummaryProviders
+	originalAvailable := isSummaryProviderCLIAvailable
+	t.Cleanup(func() {
+		discoverExternalSummaryProviders = originalDiscover
+		isSummaryProviderCLIAvailable = originalAvailable
+	})
+	discoverExternalSummaryProviders = func(context.Context) {
+		t.Fatal("registered built-in summary provider should not trigger external discovery")
+	}
+	isSummaryProviderCLIAvailable = func(types.AgentName) bool { return true }
+
+	if generator := buildSummaryGenerator(context.Background()); generator == nil {
+		t.Fatal("buildSummaryGenerator() = nil for registered built-in provider")
 	}
 }
 

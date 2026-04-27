@@ -19,7 +19,7 @@ If your repository is **public**, this data is visible to the entire internet.
 Entire automatically scans transcript and metadata content before writing it to the `entire/checkpoints/v1` branch. Two detection methods run during condensation:
 
 1. **Entropy scoring** — Identifies high-entropy strings (Shannon entropy > 4.5) that look like randomly generated secrets, even if they don't match a known pattern.
-2. **Pattern matching** — Uses [gitleaks](https://github.com/gitleaks/gitleaks) built-in rules to detect known secret formats.
+2. **Pattern matching** — Uses [Betterleaks](https://github.com/betterleaks/betterleaks) built-in rules to detect known secret formats.
 
 Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. This is **always on** and cannot be disabled.
 
@@ -35,7 +35,7 @@ If your AI sessions will touch sensitive data:
 
 ### Secrets (always on)
 
-Gitleaks pattern matching covers cloud providers (AWS, GCP, Azure), version control platforms (GitHub, GitLab, Bitbucket), payment processors (Stripe, Square), communication tools (Slack, Discord, Twilio), database connection strings, private key blocks (RSA, DSA, EC, PGP), and generic credentials (bearer tokens, basic auth, JWTs). Entropy scoring catches secrets that don't match any known pattern.
+Betterleaks pattern matching covers cloud providers (AWS, GCP, Azure), version control platforms (GitHub, GitLab, Bitbucket), payment processors (Stripe, Square), communication tools (Slack, Discord, Twilio), private key blocks (RSA, DSA, EC, PGP), and generic credentials (bearer tokens, basic auth, JWTs). Entire also redacts database connection strings and other credentialed URLs containing `://user:password@host`. Entropy scoring catches secrets that don't match any known pattern.
 
 All detected secrets are replaced with `REDACTED`.
 

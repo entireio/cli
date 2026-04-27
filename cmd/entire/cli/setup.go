@@ -41,6 +41,12 @@ const (
 	checkpointProviderGitHub = "github"
 )
 
+// externalAgentsAutoEnabledNotice is printed when picking an external summary
+// provider implicitly turns the external_agents setting on. It tells the user
+// that the change applies beyond summary generation, without exposing the
+// underlying flag name or discovery mechanics.
+const externalAgentsAutoEnabledNotice = "Note: external agents are now enabled for the rest of Entire too — not just summaries."
+
 // EnableOptions holds the flags for `entire enable`.
 type EnableOptions struct {
 	LocalDev            bool
@@ -175,6 +181,12 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 	if provider != "" {
 		if err := validateSummaryProvider(provider); err != nil {
 			return err
+		}
+		if ag, getErr := getSummaryAgent(types.AgentName(provider)); getErr == nil && external.IsExternal(ag) {
+			if !s.ExternalAgents {
+				s.ExternalAgents = true
+				fmt.Fprintln(w, externalAgentsAutoEnabledNotice)
+			}
 		}
 	}
 	if model != "" && provider == "" && s.SummaryGeneration.Provider == "" {

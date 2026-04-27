@@ -308,6 +308,45 @@ func TestExternalAgent_Identity(t *testing.T) {
 	}
 }
 
+func TestIsExternal_WithProtectedFilesWrapper(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	infoJSON := `{
+  "protocol_version": 1,
+  "name": "test",
+  "type": "Test Agent",
+  "description": "A test agent",
+  "is_preview": false,
+  "protected_dirs": [".test"],
+  "protected_files": [".test/config.json"],
+  "hook_names": [],
+  "capabilities": {
+    "hooks": false,
+    "transcript_analyzer": false,
+    "transcript_preparer": false,
+    "token_calculator": false,
+    "compact_transcript": false,
+    "text_generator": true,
+    "hook_response_writer": false,
+    "subagent_aware_extractor": false
+  }
+}`
+
+	binPath := testBinaryDir(t, mockInfoScript(infoJSON))
+	ea := newExternalAgent(t, binPath)
+	wrapped, err := Wrap(ea)
+	if err != nil {
+		t.Fatalf("Wrap() error = %v", err)
+	}
+	if !IsExternal(wrapped) {
+		t.Fatal("IsExternal() = false for external wrapper with protected_files")
+	}
+}
+
 func TestExternalAgent_DetectPresence(t *testing.T) {
 	t.Parallel()
 

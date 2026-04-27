@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
@@ -37,6 +38,11 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+)
+
+var (
+	discoverExternalSummaryProviders = external.DiscoverAndRegister
+	isSummaryProviderCLIAvailable    = agent.IsSummaryCLIAvailable
 )
 
 // listCheckpoints returns all checkpoints from the metadata branch.
@@ -693,8 +699,19 @@ func buildSummaryGenerator(ctx context.Context) summarize.Generator {
 	providerName := types.AgentName(s.SummaryGeneration.Provider)
 	ag, err := agent.Get(providerName)
 	if err != nil {
-		logging.Warn(ctx, "configured summary provider not available, using default",
-			"provider", s.SummaryGeneration.Provider, "error", err.Error())
+		discoverExternalSummaryProviders(ctx)
+		ag, err = agent.Get(providerName)
+		if err != nil {
+			logging.Warn(ctx, "configured summary provider not available, using default",
+				"provider", s.SummaryGeneration.Provider, "error", err.Error())
+			return nil
+		}
+	}
+
+	tg, ok := agent.AsTextGenerator(ag)
+	if !ok {
+		logging.Warn(ctx, "configured summary provider does not support text generation, using default",
+			"provider", s.SummaryGeneration.Provider)
 		return nil
 	}
 
@@ -702,15 +719,8 @@ func buildSummaryGenerator(ctx context.Context) summarize.Generator {
 	// for development while a different agent generates summaries. Fall back
 	// silently (Warn log) because this runs in the post-commit hook and a
 	// hard error would block the commit.
-	if !agent.IsSummaryCLIAvailable(providerName) {
+	if !external.IsExternal(ag) && !isSummaryProviderCLIAvailable(providerName) {
 		logging.Warn(ctx, "configured summary provider CLI binary not on PATH, using default",
-			"provider", s.SummaryGeneration.Provider)
-		return nil
-	}
-
-	tg, ok := agent.AsTextGenerator(ag)
-	if !ok {
-		logging.Warn(ctx, "configured summary provider does not support text generation, using default",
 			"provider", s.SummaryGeneration.Provider)
 		return nil
 	}

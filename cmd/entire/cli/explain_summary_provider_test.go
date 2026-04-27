@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -51,10 +54,12 @@ func TestResolveCheckpointSummaryProvider_UsesConfiguredProvider(t *testing.T) {
 	originalLoad := loadSummarySettings
 	originalGet := getSummaryAgent
 	originalCLI := isSummaryCLIAvailable
+	originalDiscover := discoverSummaryProviders
 	t.Cleanup(func() {
 		loadSummarySettings = originalLoad
 		getSummaryAgent = originalGet
 		isSummaryCLIAvailable = originalCLI
+		discoverSummaryProviders = originalDiscover
 	})
 
 	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
@@ -73,6 +78,9 @@ func TestResolveCheckpointSummaryProvider_UsesConfiguredProvider(t *testing.T) {
 		}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+	discoverSummaryProviders = func(context.Context) {
+		t.Fatal("configured registered provider should not trigger external discovery")
+	}
 
 	provider, err := resolveCheckpointSummaryProvider(ctx, &bytes.Buffer{})
 	if err != nil {
@@ -179,7 +187,7 @@ func TestResolveCheckpointSummaryProvider_NoCandidatesReturnsError(t *testing.T)
 	if err == nil {
 		t.Fatal("expected error when no summary-capable CLI is installed")
 	}
-	if !strings.Contains(err.Error(), "no summary-capable agent CLI is installed") {
+	if !strings.Contains(err.Error(), "no summary-capable provider is available") {
 		t.Fatalf("unexpected error text: %v", err)
 	}
 }
@@ -258,5 +266,161 @@ func TestResolveCheckpointSummaryProvider_ConfiguredProviderNotInstalledReturnsE
 	}
 	if !strings.Contains(err.Error(), "not on PATH") {
 		t.Fatalf("unexpected error text: %v", err)
+	}
+}
+
+func TestResolveCheckpointSummaryProvider_ConfiguredExternalProvider(t *testing.T) {
+	// Cannot use t.Parallel() because external agent discovery mutates the
+	// package-level agent registry.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	const providerName = "external-summary-explain"
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true,"external_agents":true,"summary_generation":{"provider":"`+providerName+`","model":"external-model"}}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	provider, err := resolveCheckpointSummaryProvider(ctx, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("resolveCheckpointSummaryProvider() error = %v", err)
+	}
+	if provider.Name != types.AgentName(providerName) {
+		t.Fatalf("provider.Name = %q, want %q", provider.Name, providerName)
+	}
+	if provider.Model != "external-model" {
+		t.Fatalf("provider.Model = %q, want %q", provider.Model, "external-model")
+	}
+
+	summary, err := provider.Generator.Generate(ctx, summarize.Input{
+		Transcript: []summarize.Entry{{Type: summarize.EntryTypeUser, Content: "summarize"}},
+	})
+	if err != nil {
+		t.Fatalf("provider.Generator.Generate() error = %v", err)
+	}
+	if summary.Intent != "Intent" || summary.Outcome != "Outcome" {
+		t.Fatalf("summary = %+v, want generated Intent/Outcome", summary)
+	}
+}
+
+func TestPersistSummaryProviderSelection_ExternalFlipsFlagAndReturnsSignal(t *testing.T) {
+	// Cannot use t.Parallel(): mutates the package-level agent registry via discovery.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	const providerName = "external-summary-persist"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Discover so getSummaryAgent returns a wrapped external (the type IsExternal recognizes).
+	discoverSummaryProvidersAlways(ctx)
+
+	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "")
+	if err != nil {
+		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
+	}
+	if !flagFlipped {
+		t.Fatal("expected flagFlipped=true when external_agents was off and provider is external")
+	}
+
+	s, err := settings.LoadFromFile(filepath.Join(tmpDir, ".entire", "settings.local.json"))
+	if err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	if !s.ExternalAgents {
+		t.Fatal("external_agents should be true in settings.local.json after picking an external")
+	}
+	if s.SummaryGeneration == nil || s.SummaryGeneration.Provider != providerName {
+		t.Fatalf("provider not persisted; got %+v", s.SummaryGeneration)
+	}
+}
+
+func TestPersistSummaryProviderSelection_BuiltInDoesNotFlipFlag(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir mutates process-global cwd.
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	flagFlipped, err := persistSummaryProviderSelection(ctx, agent.AgentNameClaudeCode, "")
+	if err != nil {
+		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
+	}
+	if flagFlipped {
+		t.Fatal("expected flagFlipped=false for a built-in provider")
+	}
+
+	s, err := settings.LoadFromFile(filepath.Join(tmpDir, ".entire", "settings.local.json"))
+	if err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	if s.ExternalAgents {
+		t.Fatal("external_agents must not flip when picking a built-in provider")
+	}
+}
+
+func TestPersistSummaryProviderSelection_ExternalAlreadyEnabledNoSignal(t *testing.T) {
+	// Cannot use t.Parallel(): mutates the package-level agent registry via discovery.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.local.json"), []byte(`{"external_agents":true}`), 0o644); err != nil {
+		t.Fatalf("write settings.local.json: %v", err)
+	}
+
+	const providerName = "external-summary-already"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	discoverSummaryProvidersAlways(ctx)
+
+	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "")
+	if err != nil {
+		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
+	}
+	if flagFlipped {
+		t.Fatal("expected flagFlipped=false when external_agents was already enabled")
 	}
 }
