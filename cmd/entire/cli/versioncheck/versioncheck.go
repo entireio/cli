@@ -82,8 +82,18 @@ func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 
 	// Show notification and offer an interactive upgrade when outdated
 	if isOutdated(currentVersion, latestVersion) {
-		printNotification(w, currentVersion, latestVersion)
-		MaybeAutoUpdate(ctx, w, currentVersion)
+		if cache.SkippedVersion == versionCacheKey(latestVersion) {
+			return
+		}
+
+		action := MaybeAutoUpdate(ctx, w, currentVersion, latestVersion)
+		if action == autoUpdateActionSkipUntilNextVersion {
+			cache.SkippedVersion = versionCacheKey(latestVersion)
+			if saveErr := saveCache(cache); saveErr != nil {
+				logging.Debug(ctx, "version check: failed to save skipped version",
+					"error", saveErr.Error())
+			}
+		}
 	}
 }
 
@@ -309,6 +319,21 @@ func isOutdated(current, latest string) bool {
 	return semver.Compare(current, latest) < 0
 }
 
+func versionCacheKey(version string) string {
+	if version == "" || strings.HasPrefix(version, "v") {
+		return version
+	}
+	return "v" + version
+}
+
+func displayVersion(version string) string {
+	return strings.TrimPrefix(version, "v")
+}
+
+func releaseNotesURL(version string) string {
+	return downloadsURL + "/tag/" + versionCacheKey(version)
+}
+
 // executablePath is the function used to get the current executable path.
 // It's a variable so tests can override it.
 var executablePath = os.Executable
@@ -372,9 +397,9 @@ func updateCommand(currentVersion string) string {
 	switch installManagerForCurrentBinary() {
 	case installManagerBrew:
 		if releaseChannel(currentVersion) == installChannelNightly {
-			return "brew upgrade --cask entire@nightly"
+			return "brew upgrade entire@nightly"
 		}
-		return "brew upgrade --cask entire"
+		return "brew upgrade entire"
 	case installManagerMise:
 		return "mise upgrade entire"
 	case installManagerScoop:
@@ -389,7 +414,6 @@ func updateCommand(currentVersion string) string {
 
 // printNotification prints the version update notification to the user.
 func printNotification(w io.Writer, current, latest string) {
-	msg := fmt.Sprintf("\nA newer version of Entire CLI is available: %s (current: %s)\n",
-		latest, current)
-	fmt.Fprint(w, msg)
+	fmt.Fprintf(w, "\nUpdate available! %s -> %s\nRelease notes: %s\n",
+		displayVersion(current), displayVersion(latest), releaseNotesURL(latest))
 }

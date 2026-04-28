@@ -16,6 +16,8 @@ type autoUpdateFixture struct {
 	lastCommand  string
 	confirmValue bool
 	confirmErr   error
+	chooseValue  AutoUpdateAction
+	chooseErr    error
 }
 
 func newAutoUpdateFixture(t *testing.T) *autoUpdateFixture {
@@ -25,7 +27,7 @@ func newAutoUpdateFixture(t *testing.T) *autoUpdateFixture {
 	// Force interactive mode on by default; individual tests can opt out.
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
-	f := &autoUpdateFixture{confirmValue: true}
+	f := &autoUpdateFixture{confirmValue: true, chooseValue: autoUpdateActionUpdate}
 
 	origRun := runInstaller
 	runInstaller = func(_ context.Context, cmd string) error {
@@ -35,12 +37,15 @@ func newAutoUpdateFixture(t *testing.T) *autoUpdateFixture {
 	}
 	origConfirm := confirmUpdate
 	confirmUpdate = func() (bool, error) { return f.confirmValue, f.confirmErr }
+	origChoose := chooseBrewUpdate
+	chooseBrewUpdate = func(io.Writer) (AutoUpdateAction, error) { return f.chooseValue, f.chooseErr }
 	origIsTerminalOut := isTerminalOut
 	isTerminalOut = func(_ io.Writer) bool { return true }
 
 	t.Cleanup(func() {
 		runInstaller = origRun
 		confirmUpdate = origConfirm
+		chooseBrewUpdate = origChoose
 		isTerminalOut = origIsTerminalOut
 	})
 	return f
@@ -63,8 +68,14 @@ func assertManualHint(t *testing.T, out string) {
 	if !strings.Contains(out, "To update, run:") {
 		t.Errorf("missing manual-update hint: %q", out)
 	}
-	if !strings.Contains(out, "brew upgrade --cask entire") {
+	if !strings.Contains(out, "brew upgrade entire") {
 		t.Errorf("manual hint missing installer command: %q", out)
+	}
+	if strings.Contains(out, "1. Update now") ||
+		strings.Contains(out, "2. Skip") ||
+		strings.Contains(out, "3. Skip until next version") ||
+		strings.Contains(out, "Press enter to continue") {
+		t.Errorf("non-interactive output included interactive menu: %q", out)
 	}
 }
 
@@ -74,7 +85,7 @@ func TestMaybeAutoUpdate_KillSwitch(t *testing.T) {
 	t.Setenv(envKillSwitch, "1")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0")
+	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer called with kill-switch set")
@@ -89,7 +100,7 @@ func TestMaybeAutoUpdate_NoTTY(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_TTY", "0")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0")
+	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer called without TTY")
@@ -105,7 +116,7 @@ func TestMaybeAutoUpdate_CIEnv(t *testing.T) {
 	t.Setenv("CI", "true")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0")
+	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer called on CI (CI=true)")
@@ -119,7 +130,7 @@ func TestMaybeAutoUpdate_NonTerminalWriter(t *testing.T) {
 	isTerminalOut = func(_ io.Writer) bool { return false }
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0")
+	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer called with non-terminal output writer")
@@ -146,7 +157,7 @@ func TestMaybeAutoUpdate_WindowsUnknownInstallerNoAutoRun(t *testing.T) {
 	t.Cleanup(func() { goos = origGOOS })
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0")
+	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer was auto-run on Windows + unknown install manager")
@@ -177,7 +188,7 @@ func TestMaybeAutoUpdate_WindowsScoopStillAutoRuns(t *testing.T) {
 	t.Cleanup(func() { goos = origGOOS })
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0")
+	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 1 {
 		t.Fatalf("scoop install should auto-run on Windows; calls=%d", f.installCalls)
@@ -190,13 +201,45 @@ func TestMaybeAutoUpdate_WindowsScoopStillAutoRuns(t *testing.T) {
 func TestMaybeAutoUpdate_UserDeclines(t *testing.T) {
 	f := newAutoUpdateFixture(t)
 	useBrewExecutable(t)
-	f.confirmValue = false
+	f.chooseValue = autoUpdateActionSkip
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0")
+	action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer called after user declined")
+	}
+	if action != autoUpdateActionSkip {
+		t.Errorf("action = %q, want %q", action, autoUpdateActionSkip)
+	}
+}
+
+func TestMaybeAutoUpdate_BrewSkipUntilNextVersion(t *testing.T) {
+	f := newAutoUpdateFixture(t)
+	useBrewExecutable(t)
+	f.chooseValue = autoUpdateActionSkipUntilNextVersion
+
+	var buf bytes.Buffer
+	action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+
+	if f.installCalls != 0 {
+		t.Errorf("installer called after skip-until-next-version")
+	}
+	if action != autoUpdateActionSkipUntilNextVersion {
+		t.Errorf("action = %q, want %q", action, autoUpdateActionSkipUntilNextVersion)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"Update available! 1.0.0 -> 2.0.0",
+		"Release notes: https://github.com/entireio/cli/releases/tag/v2.0.0",
+		"1. Update now (runs `brew upgrade entire`)",
+		"2. Skip",
+		"3. Skip until next version",
+		"Press enter to continue",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in output: %q", want, out)
+		}
 	}
 }
 
@@ -205,13 +248,16 @@ func TestMaybeAutoUpdate_HappyPath(t *testing.T) {
 	useBrewExecutable(t)
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0")
+	action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 1 {
 		t.Fatalf("installer called %d times, want 1", f.installCalls)
 	}
-	if f.lastCommand != "brew upgrade --cask entire" {
-		t.Errorf("installer got %q, want brew upgrade --cask entire", f.lastCommand)
+	if f.lastCommand != "brew upgrade entire" {
+		t.Errorf("installer got %q, want brew upgrade entire", f.lastCommand)
+	}
+	if action != autoUpdateActionUpdate {
+		t.Errorf("action = %q, want %q", action, autoUpdateActionUpdate)
 	}
 	if !strings.Contains(buf.String(), "Update complete") {
 		t.Errorf("missing success message: %q", buf.String())
@@ -224,7 +270,7 @@ func TestMaybeAutoUpdate_InstallerFailurePrintedToUser(t *testing.T) {
 	f.installErr = errors.New("boom")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0")
+	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 1 {
 		t.Fatalf("installer called %d times, want 1", f.installCalls)
@@ -237,7 +283,54 @@ func TestMaybeAutoUpdate_InstallerFailurePrintedToUser(t *testing.T) {
 	if !strings.Contains(out, "Try again later running:") {
 		t.Errorf("missing retry hint: %q", out)
 	}
-	if !strings.Contains(out, "brew upgrade --cask entire") {
+	if !strings.Contains(out, "brew upgrade entire") {
 		t.Errorf("retry hint missing installer command: %q", out)
+	}
+}
+
+func TestParseBrewUpdateChoice(t *testing.T) {
+	tests := []struct {
+		input string
+		want  AutoUpdateAction
+		ok    bool
+	}{
+		{input: "", want: autoUpdateActionUpdate, ok: true},
+		{input: "\n", want: autoUpdateActionUpdate, ok: true},
+		{input: "1", want: autoUpdateActionUpdate, ok: true},
+		{input: "2", want: autoUpdateActionSkip, ok: true},
+		{input: "3", want: autoUpdateActionSkipUntilNextVersion, ok: true},
+		{input: "nope", want: autoUpdateActionSkip, ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, ok := parseBrewUpdateChoice(tt.input)
+			if got != tt.want || ok != tt.ok {
+				t.Errorf("parseBrewUpdateChoice(%q) = (%q, %v), want (%q, %v)",
+					tt.input, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func TestChooseBrewUpdateFromReader_EmptyEOFSkips(t *testing.T) {
+	var buf bytes.Buffer
+	action, err := chooseBrewUpdateFromReader(&buf, strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("chooseBrewUpdateFromReader() error = %v", err)
+	}
+	if action != autoUpdateActionSkip {
+		t.Errorf("action = %q, want %q", action, autoUpdateActionSkip)
+	}
+}
+
+func TestChooseBrewUpdateFromReader_EnterUpdates(t *testing.T) {
+	var buf bytes.Buffer
+	action, err := chooseBrewUpdateFromReader(&buf, strings.NewReader("\n"))
+	if err != nil {
+		t.Fatalf("chooseBrewUpdateFromReader() error = %v", err)
+	}
+	if action != autoUpdateActionUpdate {
+		t.Errorf("action = %q, want %q", action, autoUpdateActionUpdate)
 	}
 }

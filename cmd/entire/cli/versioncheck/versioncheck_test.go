@@ -319,28 +319,28 @@ func TestUpdateCommand(t *testing.T) {
 		want           string
 	}{
 		{
-			name:           "homebrew stable cellar path uses cask command",
+			name:           "homebrew stable cellar path uses brew command",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return "/opt/homebrew/Cellar/entire/1.0.0/bin/entire", nil },
-			want:           "brew upgrade --cask entire",
+			want:           "brew upgrade entire",
 		},
 		{
-			name:           "homebrew stable cask path uses cask command",
+			name:           "homebrew stable cask path uses brew command",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return "/opt/homebrew/bin/entire", nil },
-			want:           "brew upgrade --cask entire",
+			want:           "brew upgrade entire",
 		},
 		{
-			name:           "homebrew nightly path uses cask command",
+			name:           "homebrew nightly path uses brew command",
 			currentVersion: "1.0.1-nightly.202604101200.abc1234",
 			execPath:       func() (string, error) { return "/opt/homebrew/bin/entire", nil },
-			want:           "brew upgrade --cask entire@nightly",
+			want:           "brew upgrade entire@nightly",
 		},
 		{
 			name:           "linuxbrew path",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return "/home/linuxbrew/.linuxbrew/bin/entire", nil },
-			want:           "brew upgrade --cask entire",
+			want:           "brew upgrade entire",
 		},
 		{
 			name:           "mise path",
@@ -419,6 +419,16 @@ func newVersionServer(t *testing.T, version string) *httptest.Server {
 	return server
 }
 
+func seedVersionCache(t *testing.T, cache *VersionCache) {
+	t.Helper()
+	if err := ensureGlobalConfigDir(); err != nil {
+		t.Fatalf("ensureGlobalConfigDir() error = %v", err)
+	}
+	if err := saveCache(cache); err != nil {
+		t.Fatalf("saveCache() error = %v", err)
+	}
+}
+
 func TestCheckAndNotify_SkipsDevVersion(t *testing.T) {
 	server := newVersionServer(t, "v9.9.9")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
@@ -480,6 +490,50 @@ func TestCheckAndNotify_PrintsNotificationWhenOutdated(t *testing.T) {
 	}
 }
 
+func TestCheckAndNotify_BrewSkipUntilNextVersionCachesLatest(t *testing.T) {
+	server := newVersionServer(t, "v2.0.0")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+	f := newAutoUpdateFixture(t)
+	useBrewExecutable(t)
+	f.chooseValue = autoUpdateActionSkipUntilNextVersion
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	if f.installCalls != 0 {
+		t.Fatalf("installer called %d times, want 0", f.installCalls)
+	}
+	cache, err := loadCache()
+	if err != nil {
+		t.Fatalf("loadCache() error = %v", err)
+	}
+	if cache.SkippedVersion != "v2.0.0" {
+		t.Errorf("SkippedVersion = %q, want v2.0.0", cache.SkippedVersion)
+	}
+	if !strings.Contains(buf.String(), "3. Skip until next version") {
+		t.Errorf("expected brew update options, got %q", buf.String())
+	}
+}
+
+func TestCheckAndNotify_SkipsVersionMarkedSkipped(t *testing.T) {
+	server := newVersionServer(t, "v2.0.0")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+	f := newAutoUpdateFixture(t)
+	useBrewExecutable(t)
+	seedVersionCache(t, &VersionCache{
+		LastCheckTime:  time.Now().Add(-checkInterval - time.Minute),
+		SkippedVersion: "v2.0.0",
+	})
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	if f.installCalls != 0 {
+		t.Fatalf("installer called %d times for skipped version, want 0", f.installCalls)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for skipped version, got %q", buf.String())
+	}
+}
+
 func TestCheckAndNotify_NoNotificationWhenUpToDate(t *testing.T) {
 	server := newVersionServer(t, "v1.0.0")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
@@ -503,6 +557,12 @@ func TestCheckAndNotify_InstallerFailureKeepsCacheFresh(t *testing.T) {
 	origConfirm := confirmUpdate
 	confirmUpdate = func() (bool, error) { return true, nil }
 	t.Cleanup(func() { confirmUpdate = origConfirm })
+
+	origChoose := chooseBrewUpdate
+	chooseBrewUpdate = func(io.Writer) (AutoUpdateAction, error) {
+		return autoUpdateActionUpdate, nil
+	}
+	t.Cleanup(func() { chooseBrewUpdate = origChoose })
 
 	origRun := runInstaller
 	runInstaller = func(_ context.Context, _ string) error { return errors.New("boom") }
