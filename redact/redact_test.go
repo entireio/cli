@@ -1189,12 +1189,8 @@ func TestJSONLContent_SecretsInContentStillCaught(t *testing.T) {
 	}
 }
 
-// TestString_MysqlShellShorthandIsNotRedacted pins current behavior: a CLI
-// shell invocation like `mysql --password=...` is not redacted because none of
-// the layered detectors match `--password=` (no DB-prefix on the assignment
-// key, no semicolon/keyword DSN structure, no URI scheme). This is a known
-// gap; flipping it to redaction would require a shell-shorthand detector
-// scoped narrowly enough not to over-match real prose.
+// Pins a known gap: shell shorthand `--password=...` is not redacted because
+// no detector matches `--password=` (no DB-prefix, no DSN structure, no URI).
 func TestString_MysqlShellShorthandIsNotRedacted(t *testing.T) {
 	t.Parallel()
 	assertStringRedactionCases(t, []stringRedactionCase{
@@ -1211,11 +1207,8 @@ func TestString_MysqlShellShorthandIsNotRedacted(t *testing.T) {
 	})
 }
 
-// TestString_RedactionIsIdempotent pins that String is idempotent on its own
-// output. After one pass, the credentialed URI / DSN regions have collapsed
-// to "REDACTED" and a second pass leaves the result unchanged. Regression
-// guard against any future change that would cause "REDACTED" itself to
-// match a detector.
+// Pins f(f(x)) == f(x): once-redacted output must not match any detector on
+// a second pass.
 func TestString_RedactionIsIdempotent(t *testing.T) {
 	t.Parallel()
 	inputs := []string{
@@ -1237,13 +1230,9 @@ func TestString_RedactionIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestJSONLContent_CrossContextValueCollision pins current behavior of the
-// keyed-JSON replacement scanner: when the same value (e.g. "shared-secret")
-// appears under a credential key (db.password) and a non-credential key
-// (misc.password), both occurrences are redacted because replacement is
-// keyed by (key, value), not (path, value). This errs on the side of safety
-// — the cost is a small over-redaction of unrelated fields that happen to
-// share both the key name and the value with a real credential.
+// Pins keyed-JSON replacement as (key, value) rather than (path, value): a
+// shared value under the same key name redacts in every context, not just
+// the credential one. Conservative on purpose — flag if changed.
 func TestJSONLContent_CrossContextValueCollision(t *testing.T) {
 	t.Parallel()
 	input := `{"db":{"host":"db.example.com","user":"svc","password":"shared-secret"},"misc":{"password":"shared-secret"}}`
