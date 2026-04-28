@@ -1188,3 +1188,74 @@ func TestJSONLContent_SecretsInContentStillCaught(t *testing.T) {
 		t.Error("expected REDACTED in output")
 	}
 }
+
+// TestString_MysqlShellShorthandIsNotRedacted pins current behavior: a CLI
+// shell invocation like `mysql --password=...` is not redacted because none of
+// the layered detectors match `--password=` (no DB-prefix on the assignment
+// key, no semicolon/keyword DSN structure, no URI scheme). This is a known
+// gap; flipping it to redaction would require a shell-shorthand detector
+// scoped narrowly enough not to over-match real prose.
+func TestString_MysqlShellShorthandIsNotRedacted(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "mysql cli flag",
+			input: "mysql -u svc --password=hunter2 -h db.example.com app",
+			want:  "mysql -u svc --password=hunter2 -h db.example.com app",
+		},
+		{
+			name:  "psql cli flag",
+			input: "psql --password=hunter2 -U svc -h db.example.com app",
+			want:  "psql --password=hunter2 -U svc -h db.example.com app",
+		},
+	})
+}
+
+// TestString_RedactionIsIdempotent pins that String is idempotent on its own
+// output. After one pass, the credentialed URI / DSN regions have collapsed
+// to "REDACTED" and a second pass leaves the result unchanged. Regression
+// guard against any future change that would cause "REDACTED" itself to
+// match a detector.
+func TestString_RedactionIsIdempotent(t *testing.T) {
+	t.Parallel()
+	inputs := []string{
+		"DATABASE_URL=postgres://svc:hunter2@db.example.com/app",
+		"DB_PASSWORD=hunter2",
+		`conn=Server=db.example.com;User ID=svc;Password="se;cret;here";Encrypt=true`,
+		"jdbc:postgresql://db.example.com:5432/app?user=svc&password=hunter2",
+		"my key is " + highEntropySecret + " ok",
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			once := String(input)
+			twice := String(once)
+			if once != twice {
+				t.Errorf("not idempotent for %q:\n  once:  %q\n  twice: %q", input, once, twice)
+			}
+		})
+	}
+}
+
+// TestJSONLContent_CrossContextValueCollision pins current behavior of the
+// keyed-JSON replacement scanner: when the same value (e.g. "shared-secret")
+// appears under a credential key (db.password) and a non-credential key
+// (misc.password), both occurrences are redacted because replacement is
+// keyed by (key, value), not (path, value). This errs on the side of safety
+// — the cost is a small over-redaction of unrelated fields that happen to
+// share both the key name and the value with a real credential.
+func TestJSONLContent_CrossContextValueCollision(t *testing.T) {
+	t.Parallel()
+	input := `{"db":{"host":"db.example.com","user":"svc","password":"shared-secret"},"misc":{"password":"shared-secret"}}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(result, "shared-secret") {
+		t.Errorf("expected shared-secret to be redacted in both contexts, got: %s", result)
+	}
+	if strings.Count(result, `"password":"REDACTED"`) != 2 {
+		t.Errorf("expected both password fields redacted, got: %s", result)
+	}
+}
