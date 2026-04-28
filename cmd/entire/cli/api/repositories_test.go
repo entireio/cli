@@ -39,8 +39,8 @@ func TestClient_ListRepositories_SendsSortAndDecodesResponse(t *testing.T) {
 	if gotRawQuery != "sort=recent" {
 		t.Errorf("query = %q, want sort=recent", gotRawQuery)
 	}
-	if gotAuth != "Bearer tok" {
-		t.Errorf("Authorization = %q, want Bearer tok", gotAuth)
+	if gotAuth != testBearerHeader {
+		t.Errorf("Authorization = %q, want %q", gotAuth, testBearerHeader)
 	}
 
 	if len(repos) != 2 {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -59,8 +60,6 @@ var newDispatchProgram = func(model tea.Model, outW io.Writer, altScreen bool) d
 	}
 	return tea.NewProgram(model, options...)
 }
-
-const tuiEscKey = "esc"
 
 func defaultRunInteractiveDispatch(ctx context.Context, outW io.Writer, opts dispatchpkg.Options) (string, error) {
 	runCtx, cancel := context.WithCancel(ctx)
@@ -381,8 +380,7 @@ func (m dispatchStatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.result = msg
 		return m, tea.Quit
 	case tea.KeyMsg:
-		switch msg.String() {
-		case tea.KeyCtrlC.String(), tuiEscKey, "q":
+		if key.Matches(msg, keys.Quit) || key.Matches(msg, keys.Back) {
 			if m.cancel != nil {
 				m.cancel()
 			}

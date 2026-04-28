@@ -11,6 +11,7 @@ import (
 	"charm.land/glamour/v2/ansi"
 	glamourstyles "charm.land/glamour/v2/styles"
 	"github.com/charmbracelet/bubbles/cursor"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -82,6 +83,13 @@ func newSearchStyles(ss statusStyles) searchStyles {
 		BorderForeground(lipgloss.Color(searchAccentPurple)).
 		Padding(1, 2)
 	return s
+}
+
+// helpItem renders a "<key> <desc>" pair for a TUI help footer using the
+// shared helpKey style. keyLabel may come from a key.Binding's Help().Key or
+// be a composite literal like "j/k".
+func (s searchStyles) helpItem(keyLabel, desc string) string {
+	return s.render(s.helpKey, keyLabel) + " " + desc
 }
 
 const resultsPerPage = 25
@@ -249,13 +257,13 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn
 }
 
 func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea pattern
-	switch msg.String() {
-	case tuiEscKey:
+	switch {
+	case key.Matches(msg, keys.Back):
 		m.mode = modeBrowse
 		m.input.Blur()
 		m = m.refreshBrowseContent()
 		return m, nil
-	case "enter":
+	case key.Matches(msg, keys.Confirm):
 		raw := strings.TrimSpace(m.input.Value())
 		if raw == "" {
 			return m, nil
@@ -291,25 +299,25 @@ func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 
 func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea pattern
 	pageLen := len(m.pageResults())
-	switch msg.String() {
-	case "q", "ctrl+c", tuiEscKey, "h":
+	switch {
+	case key.Matches(msg, keys.Quit), key.Matches(msg, keys.Back), msg.String() == "h":
 		return m, tea.Quit
-	case "up", "k":
+	case key.Matches(msg, keys.Up):
 		if m.cursor > 0 {
 			m.cursor--
 			m = m.refreshBrowseContent()
 		}
-	case "down", "j":
+	case key.Matches(msg, keys.Down):
 		if m.cursor < pageLen-1 {
 			m.cursor++
 			m = m.refreshBrowseContent()
 		}
-	case "home", "g":
+	case key.Matches(msg, keys.Home):
 		m.page = 0
 		m.cursor = 0
 		m = m.refreshBrowseContent()
 		m.browseVP.GotoTop()
-	case "end", "G":
+	case key.Matches(msg, keys.End):
 		if len(m.results) > 0 {
 			lastLoaded := len(m.results) - 1
 			m.page = min(lastLoaded/resultsPerPage, m.totalPages()-1)
@@ -319,7 +327,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 			m = m.refreshBrowseContent()
 			m.browseVP.GotoBottom()
 		}
-	case "n", "right":
+	case key.Matches(msg, keys.NextPage):
 		if m.page < m.totalPages()-1 {
 			m.page++
 			m.cursor = 0
@@ -333,14 +341,14 @@ func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 			}
 			m = m.refreshBrowseContent()
 		}
-	case "p", "left":
+	case key.Matches(msg, keys.PrevPage):
 		if m.page > 0 {
 			m.page--
 			m.cursor = 0
 			m.browseVP.GotoTop()
 			m = m.refreshBrowseContent()
 		}
-	case "enter":
+	case key.Matches(msg, keys.Confirm):
 		if r := m.selectedResult(); r != nil {
 			m.mode = modeDetail
 			content := m.renderDetailContent(*r, m.width, true)
@@ -348,7 +356,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 			m.detailVP.SetContent(content)
 			return m, nil
 		}
-	case "/":
+	case key.Matches(msg, keys.Search):
 		m.mode = modeSearch
 		m.input.Focus()
 		return m, m.input.Cursor.SetMode(cursor.CursorBlink)
@@ -362,13 +370,13 @@ func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 }
 
 func (m searchModel) updateDetailMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea pattern
-	switch msg.String() {
-	case tuiEscKey, "backspace":
+	switch {
+	case key.Matches(msg, keys.Quit):
+		return m, tea.Quit
+	case key.Matches(msg, keys.Back), msg.String() == "backspace":
 		m.mode = modeBrowse
 		return m, nil
-	case "q", "ctrl+c":
-		return m, tea.Quit
-	case "/":
+	case key.Matches(msg, keys.Search):
 		m.mode = modeSearch
 		m.input.Focus()
 		return m, m.input.Cursor.SetMode(cursor.CursorBlink)
@@ -693,11 +701,10 @@ func (m searchModel) viewDetailFull() string {
 
 	// Scroll indicator + help
 	scrollPct := m.styles.render(m.styles.dim, fmt.Sprintf("%3.f%%", m.detailVP.ScrollPercent()*100))
-	help := m.styles.render(m.styles.helpKey, "j/k") + " scroll" +
-		m.styles.render(m.styles.helpSep, " · ") +
-		m.styles.render(m.styles.helpKey, tuiEscKey) + " back" +
-		m.styles.render(m.styles.helpSep, " · ") +
-		m.styles.render(m.styles.helpKey, "q") + " quit"
+	dot := m.styles.render(m.styles.helpSep, " · ")
+	help := m.styles.helpItem("j/k", "scroll") + dot +
+		m.styles.helpItem(keys.Back.Help().Key, keys.Back.Help().Desc) + dot +
+		m.styles.helpItem(keys.Quit.Help().Key, keys.Quit.Help().Desc)
 
 	gap := m.width - lipgloss.Width(help) - lipgloss.Width(scrollPct) - 2
 	if gap < 1 {
@@ -712,19 +719,19 @@ func (m searchModel) viewHelp() string {
 	dot := m.styles.render(m.styles.helpSep, " · ")
 
 	if m.mode == modeSearch {
-		return m.styles.render(m.styles.helpKey, "enter") + " search" + dot +
-			m.styles.render(m.styles.helpKey, tuiEscKey) + " cancel" + "\n"
+		return m.styles.helpItem(keys.Confirm.Help().Key, "search") + dot +
+			m.styles.helpItem(keys.Back.Help().Key, "cancel") + "\n"
 	}
 
 	pages := m.totalPages()
 
-	left := m.styles.render(m.styles.helpKey, "/") + " search" + dot +
-		m.styles.render(m.styles.helpKey, "↑/↓, j/k") + " scroll" + dot +
-		m.styles.render(m.styles.helpKey, "home/end, g/G") + " top/bottom"
+	left := m.styles.helpItem(keys.Search.Help().Key, keys.Search.Help().Desc) + dot +
+		m.styles.helpItem("↑/↓, j/k", "scroll") + dot +
+		m.styles.helpItem("home/end, g/G", "top/bottom")
 	if pages > 1 {
-		left += dot + m.styles.render(m.styles.helpKey, "n/p") + " page"
+		left += dot + m.styles.helpItem("n/p", "page")
 	}
-	left += dot + m.styles.render(m.styles.helpKey, "q") + " quit"
+	left += dot + m.styles.helpItem(keys.Quit.Help().Key, keys.Quit.Help().Desc)
 
 	right := fmt.Sprintf("%d results", m.total)
 	if pages > 1 {

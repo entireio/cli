@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -148,28 +149,49 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
+// HTTPError is returned by CheckResponse for non-2xx responses. Callers can use
+// errors.As to inspect the HTTP status, or IsHTTPErrorStatus for a quick check.
+type HTTPError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *HTTPError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("API error: %s (status %d)", e.Message, e.StatusCode)
+	}
+	return fmt.Sprintf("API error: status %d", e.StatusCode)
+}
+
+// IsHTTPErrorStatus reports whether err wraps an *HTTPError with the given HTTP status.
+func IsHTTPErrorStatus(err error, status int) bool {
+	var ae *HTTPError
+	return errors.As(err, &ae) && ae.StatusCode == status
+}
+
 // CheckResponse returns an error if the response status code indicates failure.
-// For non-2xx responses, it reads and parses the error message from the body.
-// The caller is responsible for closing resp.Body.
+// For non-2xx responses, it reads and parses the error message from the body
+// and returns it as an *HTTPError. The caller is responsible for closing resp.Body.
 func CheckResponse(resp *http.Response) error {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
 	}
 
+	apiError := &HTTPError{StatusCode: resp.StatusCode}
+
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return fmt.Errorf("API error: status %d", resp.StatusCode)
+		return apiError
 	}
 
-	var apiErr ErrorResponse
-	if err := json.Unmarshal(body, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
-		return fmt.Errorf("API error: %s (status %d)", apiErr.Error, resp.StatusCode)
+	var parsed ErrorResponse
+	if err := json.Unmarshal(body, &parsed); err == nil && strings.TrimSpace(parsed.Error) != "" {
+		apiError.Message = parsed.Error
+		return apiError
 	}
 
-	text := strings.TrimSpace(string(body))
-	if text != "" {
-		return fmt.Errorf("API error: %s (status %d)", text, resp.StatusCode)
+	if text := strings.TrimSpace(string(body)); text != "" {
+		apiError.Message = text
 	}
-
-	return fmt.Errorf("API error: status %d", resp.StatusCode)
+	return apiError
 }

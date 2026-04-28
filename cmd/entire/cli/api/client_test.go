@@ -9,6 +9,8 @@ import (
 	"testing"
 )
 
+const testBearerHeader = "Bearer tok"
+
 func TestBearerTransport_InjectsAuthHeader(t *testing.T) {
 	t.Parallel()
 
