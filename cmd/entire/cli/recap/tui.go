@@ -72,9 +72,9 @@ type TUIModel struct {
 	styles       Styles
 	width        int
 	height       int
-	viewport viewport.Model
-	ready    bool // true once we've received a WindowSizeMsg and sized the viewport
-	loading  bool // true while the user's currently-displayed range has no cached data and a Fetcher call is in flight
+	viewport     viewport.Model
+	ready        bool // true once we've received a WindowSizeMsg and sized the viewport
+	loading      bool // true while the user's currently-displayed range has no cached data and a Fetcher call is in flight
 	// cache stores prior fetch results keyed by range so toggling between
 	// ranges hits the network at most once per range, per session.
 	cache map[RangeKey]FetcherResult
