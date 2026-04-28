@@ -197,7 +197,7 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 	}
 
 	if resolveFormat(f.format, w) == recapFormatTUI {
-		return runRecapTUI(ctx, view, act.Sessions, agentFilter, serverMe, contributors, daily)
+		return runRecapTUI(ctx, worktreeRoot, view, act.Sessions, agentFilter, serverMe, contributors, daily)
 	}
 	styles := newStylesFor(w)
 	width := terminalWidth(w)
@@ -331,6 +331,7 @@ func labelsAllEmpty(v recap.View) bool {
 
 func runRecapTUI(
 	ctx context.Context,
+	worktreeRoot string,
 	initial recap.View,
 	sessions []recap.RecapSession,
 	agentFilter string,
@@ -338,7 +339,20 @@ func runRecapTUI(
 	contributors *recap.ContributorsData,
 	daily []recap.DailyCount,
 ) error {
-	m := recap.NewTUIModel(sessions, initial, agentFilter, serverMe, contributors, daily)
+	// Build the refetch callback once and hand it to the TUI. Closing over
+	// worktreeRoot lets the model re-call /me/recap with new bounds when
+	// the user toggles range, without leaking auth/api dependencies into
+	// the recap subpackage.
+	fetcher := recap.Fetcher(func(ctx context.Context, rangeKey recap.RangeKey, now time.Time) recap.FetcherResult {
+		me, contrib, dly, diag := fetchRecapDataWithDiag(ctx, worktreeRoot, rangeKey, now)
+		return recap.FetcherResult{
+			ServerMe:     me,
+			Contributors: contrib,
+			Daily:        dly,
+			Diag:         diag,
+		}
+	})
+	m := recap.NewTUIModel(ctx, fetcher, sessions, initial, agentFilter, serverMe, contributors, daily)
 	// Alt-screen + internal viewport scroll: content stays bounded by the
 	// terminal (no top-line cut-off), and arrow keys / pgup-pgdn / mouse
 	// wheel scroll the body inside the TUI so a tall recap stays fully

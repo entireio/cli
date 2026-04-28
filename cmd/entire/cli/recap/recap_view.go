@@ -483,6 +483,22 @@ func buildSummaryBand(
 		key := cp.CreatedAt.Format("2006-01-02")
 		activeDaySet[key] = true
 	}
+	activeDays := len(activeDaySet)
+	// When the server returned per-day counts, prefer them — they cover
+	// every repo + worktree, not just this checkout, so the active-day
+	// total matches the dashboard instead of undercounting cross-worktree
+	// activity. Falls back to the local checkpoint scan when offline.
+	if len(opts.ServerDaily) > 0 {
+		serverActive := 0
+		for _, d := range opts.ServerDaily {
+			if d.Count > 0 {
+				serverActive++
+			}
+		}
+		if serverActive > 0 {
+			activeDays = serverActive
+		}
+	}
 
 	topLabel := ""
 	if domOK {
@@ -535,7 +551,7 @@ func buildSummaryBand(
 		TopLabel:       topLabel,
 		AgentCount:     len(agentCounts),
 		RepoCount:      len(distinctRepos),
-		ActiveDays:     len(activeDaySet),
+		ActiveDays:     activeDays,
 	}
 }
 
