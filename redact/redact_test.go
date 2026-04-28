@@ -449,6 +449,16 @@ func TestString_DatabaseConnectionStringRedaction(t *testing.T) {
 			input: "jdbc:sqlserver://db.example.com:1433;databaseName=app;user=svc;password=secret;encrypt=true",
 			want:  "REDACTED",
 		},
+		{
+			name:  "ado.net quoted password with embedded semicolons",
+			input: `conn=Server=db.example.com;User ID=svc;Password="se;cret;here";Encrypt=true`,
+			want:  "conn=REDACTED",
+		},
+		{
+			name:  "ado.net single-quoted password with embedded semicolons",
+			input: `conn=Server=db.example.com;User ID=svc;Password='se;cret;here';Encrypt=true`,
+			want:  "conn=REDACTED",
+		},
 	})
 }
 

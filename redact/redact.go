@@ -26,10 +26,14 @@ var secretPattern = regexp.MustCompile(`[A-Za-z0-9+_=-]{10,}`)
 var credentialedURIPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,31}://[^\s/?#@"'` + "`" + `<>:]*:[^\s/?#@"'` + "`" + `<>]+@[^\s"'` + "`" + `<>]+`)
 
 var (
-	jdbcPattern          = regexp.MustCompile(`(?i)\bjdbc:[^\s"'<>` + "`" + `]+`)
-	databaseURLPattern   = regexp.MustCompile(`(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s"'<>` + "`" + `]+`)
-	keywordDSNPattern    = regexp.MustCompile(`(?i)\b[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)(?:\s+[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)){2,}`)
-	semicolonConnPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|[^=;"'\s]+)(?:;[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|[^=;"'\s]+)){2,}`)
+	jdbcPattern        = regexp.MustCompile(`(?i)\bjdbc:[^\s"'<>` + "`" + `]+`)
+	databaseURLPattern = regexp.MustCompile(`(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s"'<>` + "`" + `]+`)
+	keywordDSNPattern  = regexp.MustCompile(`(?i)\b[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)(?:\s+[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)){2,}`)
+	// semicolonConnPattern matches ADO.NET / ODBC style connection strings.
+	// The value class accepts `{…}`, `"…"`, and `'…'` so quoted ADO.NET values
+	// with embedded semicolons (e.g. `Password="se;cret;here"`) are captured
+	// as a single value rather than splitting at the inner `;`.
+	semicolonConnPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|"[^"]*"|'[^']*'|[^=;"'\s]+)(?:;[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|"[^"]*"|'[^']*'|[^=;"'\s]+)){2,}`)
 	// credentialValuePattern matches DB-prefixed credential assignments. The prefix
 	// must start at a non-alphanumeric boundary (so APP_DB_PASSWORD matches via the
 	// leading `_`, but mydbpassword does not). Between the vendor prefix and the
