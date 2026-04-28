@@ -620,6 +620,41 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			input: "MYSQL_USER_ID=alice",
 			want:  "MYSQL_USER_ID=alice",
 		},
+		{
+			name:  "angle bracket placeholder is preserved",
+			input: "DB_PASSWORD=<password>",
+			want:  "DB_PASSWORD=<password>",
+		},
+		{
+			name:  "your_password placeholder is preserved",
+			input: "DB_PASSWORD=your_password",
+			want:  "DB_PASSWORD=your_password",
+		},
+		{
+			name:  "your-db-password placeholder is preserved",
+			input: "DB_PASSWORD=<your-db-password>",
+			want:  "DB_PASSWORD=<your-db-password>",
+		},
+		{
+			name:  "asterisk mask placeholder is preserved",
+			input: "DB_PASSWORD=*****",
+			want:  "DB_PASSWORD=*****",
+		},
+		{
+			name:  "dot mask placeholder is preserved",
+			input: "DB_PASSWORD=......",
+			want:  "DB_PASSWORD=......",
+		},
+		{
+			name:  "secret_here placeholder is preserved",
+			input: "DB_PASSWORD=secret_here",
+			want:  "DB_PASSWORD=secret_here",
+		},
+		{
+			name:  "placeholder literal is preserved",
+			input: "DB_PASSWORD=placeholder",
+			want:  "DB_PASSWORD=placeholder",
+		},
 	})
 }
 
@@ -737,6 +772,27 @@ func TestJSONLContent_NormalizedCredentialKeysRedacted(t *testing.T) {
 	}
 	if strings.Contains(result, `"DB Password":"correct-horse-db"`) {
 		t.Fatalf("expected normalized credential key to be redacted, got: %s", result)
+	}
+}
+
+func TestJSONLContent_DottedCredentialKeysRedacted(t *testing.T) {
+	t.Parallel()
+	input := `{"config":{"db.password":"correct-horse-db","mysql.root.password":"correct-horse-mysql","note":"correct-horse-db"}}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, redacted := range []string{
+		`"db.password":"REDACTED"`,
+		`"mysql.root.password":"REDACTED"`,
+	} {
+		if !strings.Contains(result, redacted) {
+			t.Fatalf("expected %q in output, got: %s", redacted, result)
+		}
+	}
+	if !strings.Contains(result, `"note":"correct-horse-db"`) {
+		t.Fatalf("expected unrelated note field to be preserved, got: %s", result)
 	}
 }
 

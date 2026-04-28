@@ -383,15 +383,45 @@ func isPlaceholderSecretValue(value string) bool {
 	if strings.HasPrefix(normalized, "${") && strings.HasSuffix(normalized, "}") {
 		return true
 	}
+	// Documentation placeholders like <password> or <your-db-password>.
+	if strings.HasPrefix(normalized, "<") && strings.HasSuffix(normalized, ">") && len(normalized) > 2 {
+		return true
+	}
 	if _, ok := redactedPlaceholderForms[normalized]; ok {
 		return true
 	}
+	if isRepeatedCharPlaceholder(normalized) {
+		return true
+	}
 	switch normalized {
-	case "xxx", "xxxx", "changeme", "example":
+	case "changeme", "example", "placeholder",
+		"your_password", "your_db_password", "your_secret",
+		"secret_here":
 		return true
 	default:
 		return false
 	}
+}
+
+// isRepeatedCharPlaceholder reports whether s is a non-empty run of a single
+// masking character commonly used to redact values in docs and screenshots,
+// e.g. "***", "xxxx", "....", "----".
+func isRepeatedCharPlaceholder(s string) bool {
+	if s == "" {
+		return false
+	}
+	first := s[0]
+	switch first {
+	case '*', 'x', '.', '-':
+	default:
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] != first {
+			return false
+		}
+	}
+	return true
 }
 
 func isCredentialJSONSecretKey(key string, credentialContext bool) bool {
@@ -422,6 +452,9 @@ func normalizeCredentialJSONKey(key string) string {
 	key = strings.ToLower(strings.TrimSpace(key))
 	key = strings.ReplaceAll(key, "-", "_")
 	key = strings.ReplaceAll(key, " ", "_")
+	// Flattened-config exporters (Spring, dotnet, Hashicorp Vault) emit dotted keys
+	// like "db.password" or "mysql.root.password"; treat them like underscored.
+	key = strings.ReplaceAll(key, ".", "_")
 	return key
 }
 
