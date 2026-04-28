@@ -658,6 +658,46 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 	})
 }
 
+// Pins that single-char "masks" and arbitrary <…> wrappers do NOT count as
+// placeholders, so credentials that happen to be short or bracket-wrapped
+// still get redacted. The opposite cases (`***`, `<password>`, etc.) are
+// covered above in TestString_BoundedCredentialValueOverRedactionGuards.
+func TestString_ShortAndOpaquePlaceholdersFallThrough(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "single x is not a mask",
+			input: "DB_PASSWORD=x",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single dash is not a mask",
+			input: "DB_PASSWORD=-",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "single asterisk is not a mask",
+			input: "DB_PASSWORD=*",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "two-char repeat is not a mask",
+			input: "DB_PASSWORD=xx",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "bracketed value with digits is not a placeholder",
+			input: "DB_PASSWORD=<hunter2>",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "bracketed mixed-case value is not a placeholder",
+			input: "DB_PASSWORD=<RealPassword>",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+	})
+}
+
 func TestString_OpenSSHPrivateKeyBlock(t *testing.T) {
 	input := "key:\n" + fakeOpenSSHPrivateKey + "\nend"
 	want := "key:\nREDACTED\nend"

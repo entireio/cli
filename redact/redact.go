@@ -381,15 +381,15 @@ func hasNonPlaceholderPasswordValue(value string) bool {
 }
 
 func isPlaceholderSecretValue(value string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(value))
-	normalized = strings.Trim(normalized, `"'`)
-	if normalized == "" {
+	trimmed := strings.Trim(strings.TrimSpace(value), `"'`)
+	if trimmed == "" {
 		return true
 	}
+	if isBracketedPlaceholder(trimmed) {
+		return true
+	}
+	normalized := strings.ToLower(trimmed)
 	if strings.HasPrefix(normalized, "${") && strings.HasSuffix(normalized, "}") {
-		return true
-	}
-	if len(normalized) > 2 && strings.HasPrefix(normalized, "<") && strings.HasSuffix(normalized, ">") {
 		return true
 	}
 	if _, ok := placeholderSecretValues[normalized]; ok {
@@ -398,11 +398,28 @@ func isPlaceholderSecretValue(value string) bool {
 	return isRepeatedCharPlaceholder(normalized)
 }
 
-// isRepeatedCharPlaceholder reports whether s is a non-empty run of a single
-// masking character commonly used to redact values in docs and screenshots,
-// e.g. "***", "xxxx", "....", "----".
+// bracketedPlaceholderInteriorRE matches the inside of a "<…>" placeholder
+// shape: lowercase letters joined by `-` or `_`. Digits, mixed case, and
+// special chars are rejected so values like `<hunter2>` or `<RealPassword>`
+// still fall through to redaction.
+var bracketedPlaceholderInteriorRE = regexp.MustCompile(`^[a-z][a-z_-]*$`)
+
+// isBracketedPlaceholder reports whether s is a "<name>" doc placeholder
+// (e.g. "<password>", "<your-db-password>"). The minimum total length of 5
+// keeps this from firing on `<a>` / `<ab>`.
+func isBracketedPlaceholder(s string) bool {
+	if len(s) < 5 || s[0] != '<' || s[len(s)-1] != '>' {
+		return false
+	}
+	return bracketedPlaceholderInteriorRE.MatchString(s[1 : len(s)-1])
+}
+
+// isRepeatedCharPlaceholder reports whether s is a run of a single masking
+// character commonly used to redact values in docs and screenshots, e.g.
+// "***", "xxxx", "....", "----". The minimum length of 3 keeps single-char
+// or 2-char values like `x` or `**` from being treated as masks.
 func isRepeatedCharPlaceholder(s string) bool {
-	if s == "" {
+	if len(s) < 3 {
 		return false
 	}
 	first := s[0]
