@@ -26,18 +26,28 @@ var secretPattern = regexp.MustCompile(`[A-Za-z0-9+_=-]{10,}`)
 var credentialedURIPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,31}://[^\s/?#@"'` + "`" + `<>:]*:[^\s/?#@"'` + "`" + `<>]+@[^\s"'` + "`" + `<>]+`)
 
 var (
-	jdbcPattern            = regexp.MustCompile(`(?i)\bjdbc:[^\s"'<>` + "`" + `]+`)
-	databaseURLPattern     = regexp.MustCompile(`(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s"'<>` + "`" + `]+`)
-	keywordDSNPattern      = regexp.MustCompile(`(?i)\b[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)(?:\s+[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)){2,}`)
-	semicolonConnPattern   = regexp.MustCompile(`(?i)\b[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|[^=;"'\s]+)(?:;[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|[^=;"'\s]+)){2,}`)
-	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])((?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)[_-]?(?:password|passwd|pwd)|pgpassword|mysql_pwd|redis_password|mongo_password|mongodb_password)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	jdbcPattern          = regexp.MustCompile(`(?i)\bjdbc:[^\s"'<>` + "`" + `]+`)
+	databaseURLPattern   = regexp.MustCompile(`(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s"'<>` + "`" + `]+`)
+	keywordDSNPattern    = regexp.MustCompile(`(?i)\b[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)(?:\s+[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)){2,}`)
+	semicolonConnPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|[^=;"'\s]+)(?:;[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|[^=;"'\s]+)){2,}`)
+	// credentialValuePattern matches DB-prefixed credential assignments. The prefix
+	// must start at a non-alphanumeric boundary (so APP_DB_PASSWORD matches via the
+	// leading `_`, but mydbpassword does not). Between the vendor prefix and the
+	// password/passwd/pwd suffix we allow zero or more `_word`/`-word` segments and
+	// any run of `_`/`-` separators, so MYSQL_ROOT_PASSWORD, MARIADB_ROOT_PASSWORD,
+	// MONGO_INITDB_ROOT_PASSWORD, MSSQL_SA_PASSWORD, and DB__PASSWORD all match.
+	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])((?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)(?:[_-]+[a-z0-9]+)*[_-]*(?:password|passwd|pwd))\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
 
 	keywordHostPattern      = regexp.MustCompile(`(?i)(?:^|\s)host=`)
 	keywordUserPattern      = regexp.MustCompile(`(?i)(?:^|\s)user=`)
 	semicolonServerPattern  = regexp.MustCompile(`(?i)(?:^|;)\s*(?:server|data source|datasource|addr|address|network address)\s*=`)
 	semicolonUserPattern    = regexp.MustCompile(`(?i)(?:^|;)\s*(?:user id|userid|user|uid)\s*=`)
 	passwordAssignmentRegex = regexp.MustCompile(`(?i)(?:^|[?&;\s])(?:password|pwd)=("[^"]*"|'[^']*'|[^&;\s"']+)`)
-	credentialJSONKeyRegex  = regexp.MustCompile(`(?i)^(?:(?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)[_-]?(?:password|passwd|pwd)|pgpassword|mysql_pwd|redis_password|mongo_password|mongodb_password)$`)
+	// credentialJSONKeyRegex matches normalized JSON credential keys. Mirrors the
+	// internal-segment shape of credentialValuePattern so keys like
+	// mysql_root_password and mongo_initdb_root_password are recognized.
+	// Operates on output of normalizeCredentialJSONKey (lowercased, `-`/` ` → `_`).
+	credentialJSONKeyRegex  = regexp.MustCompile(`^(?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)(?:[_-]+[a-z0-9]+)*[_-]*(?:password|passwd|pwd)$`)
 	genericPasswordKeyRegex = regexp.MustCompile(`(?i)^(?:password|passwd|pwd)$`)
 )
 

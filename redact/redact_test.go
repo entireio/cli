@@ -529,6 +529,31 @@ func TestString_BoundedCredentialValueRedaction(t *testing.T) {
 			input: "PROD_MYSQL_PWD=secret123",
 			want:  "PROD_MYSQL_PWD=REDACTED",
 		},
+		{
+			name:  "mysql root password env var",
+			input: "MYSQL_ROOT_PASSWORD=secret123",
+			want:  "MYSQL_ROOT_PASSWORD=REDACTED",
+		},
+		{
+			name:  "mariadb root password env var",
+			input: "MARIADB_ROOT_PASSWORD=secret123",
+			want:  "MARIADB_ROOT_PASSWORD=REDACTED",
+		},
+		{
+			name:  "mongo initdb root password env var",
+			input: "MONGO_INITDB_ROOT_PASSWORD=secret123",
+			want:  "MONGO_INITDB_ROOT_PASSWORD=REDACTED",
+		},
+		{
+			name:  "mssql sa password env var",
+			input: "MSSQL_SA_PASSWORD=secret123",
+			want:  "MSSQL_SA_PASSWORD=REDACTED",
+		},
+		{
+			name:  "double underscore separator",
+			input: "DB__PASSWORD=secret123",
+			want:  "DB__PASSWORD=REDACTED",
+		},
 	})
 }
 
@@ -574,6 +599,16 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			name:  "generic https password query is preserved",
 			input: "https://example.com/callback?user=svc&password=not-a-db-credential&debug=true",
 			want:  "https://example.com/callback?user=svc&password=not-a-db-credential&debug=true",
+		},
+		{
+			name:  "db password hash field is preserved",
+			input: "DB_PASSWORD_HASH=abcdef",
+			want:  "DB_PASSWORD_HASH=abcdef",
+		},
+		{
+			name:  "non-credential mysql field is preserved",
+			input: "MYSQL_USER_ID=alice",
+			want:  "MYSQL_USER_ID=alice",
 		},
 	})
 }
@@ -692,6 +727,30 @@ func TestJSONLContent_NormalizedCredentialKeysRedacted(t *testing.T) {
 	}
 	if strings.Contains(result, `"DB Password":"correct-horse-db"`) {
 		t.Fatalf("expected normalized credential key to be redacted, got: %s", result)
+	}
+}
+
+func TestJSONLContent_RootPasswordJSONKeysRedacted(t *testing.T) {
+	t.Parallel()
+	input := `{"env":{"MYSQL_ROOT_PASSWORD":"correct-horse-mysql","MONGO_INITDB_ROOT_PASSWORD":"correct-horse-mongo","MSSQL_SA_PASSWORD":"correct-horse-mssql"}}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, redacted := range []string{
+		`"MYSQL_ROOT_PASSWORD":"REDACTED"`,
+		`"MONGO_INITDB_ROOT_PASSWORD":"REDACTED"`,
+		`"MSSQL_SA_PASSWORD":"REDACTED"`,
+	} {
+		if !strings.Contains(result, redacted) {
+			t.Fatalf("expected %q in output, got: %s", redacted, result)
+		}
+	}
+	for _, leaked := range []string{"correct-horse-mysql", "correct-horse-mongo", "correct-horse-mssql"} {
+		if strings.Contains(result, leaked) {
+			t.Fatalf("expected %q to be redacted, got: %s", leaked, result)
+		}
 	}
 }
 
