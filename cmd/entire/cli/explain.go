@@ -1536,7 +1536,7 @@ func buildFilesMarkdown(files []string) string {
 	var sb strings.Builder
 	sb.WriteString("\n## Files\n\n")
 	for _, f := range files {
-		fmt.Fprintf(&sb, "- %s\n", f)
+		fmt.Fprintf(&sb, "- `%s`\n", escapeInlineCodeText(f))
 	}
 	return sb.String()
 }
@@ -1618,61 +1618,11 @@ func escapeSummaryText(s string) string {
 	return strings.ReplaceAll(strings.TrimSpace(s), "`", "‘")
 }
 
-// formatSummaryDetails formats the detailed sections of an AI summary.
-func formatSummaryDetails(sb *strings.Builder, summary *checkpoint.Summary) {
-	// Learnings section
-	hasLearnings := len(summary.Learnings.Repo) > 0 ||
-		len(summary.Learnings.Code) > 0 ||
-		len(summary.Learnings.Workflow) > 0
-
-	if hasLearnings {
-		sb.WriteString("\nLearnings:\n")
-
-		if len(summary.Learnings.Repo) > 0 {
-			sb.WriteString("  Repository:\n")
-			for _, learning := range summary.Learnings.Repo {
-				fmt.Fprintf(sb, "    - %s\n", learning)
-			}
-		}
-
-		if len(summary.Learnings.Code) > 0 {
-			sb.WriteString("  Code:\n")
-			for _, learning := range summary.Learnings.Code {
-				if learning.Line > 0 {
-					if learning.EndLine > 0 {
-						fmt.Fprintf(sb, "    - %s:%d-%d: %s\n", learning.Path, learning.Line, learning.EndLine, learning.Finding)
-					} else {
-						fmt.Fprintf(sb, "    - %s:%d: %s\n", learning.Path, learning.Line, learning.Finding)
-					}
-				} else {
-					fmt.Fprintf(sb, "    - %s: %s\n", learning.Path, learning.Finding)
-				}
-			}
-		}
-
-		if len(summary.Learnings.Workflow) > 0 {
-			sb.WriteString("  Workflow:\n")
-			for _, learning := range summary.Learnings.Workflow {
-				fmt.Fprintf(sb, "    - %s\n", learning)
-			}
-		}
-	}
-
-	// Friction section
-	if len(summary.Friction) > 0 {
-		sb.WriteString("\nFriction:\n")
-		for _, item := range summary.Friction {
-			fmt.Fprintf(sb, "  - %s\n", item)
-		}
-	}
-
-	// Open items section
-	if len(summary.OpenItems) > 0 {
-		sb.WriteString("\nOpen Items:\n")
-		for _, item := range summary.OpenItems {
-			fmt.Fprintf(sb, "  - %s\n", item)
-		}
-	}
+func escapeInlineCodeText(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.ReplaceAll(s, "`", "‘")
 }
 
 // runExplainDefault shows all checkpoints on the current branch.
@@ -2230,9 +2180,30 @@ func buildPagerCmd(ctx context.Context) (*exec.Cmd, string) {
 
 	cmd := exec.CommandContext(ctx, pager)
 	if pager == lessPagerName && pagerLookupEnv(pagerEnvVar) == "" && pagerLookupEnv(lessEnvVar) == "" {
-		cmd.Env = append(os.Environ(), lessRawControlEnv)
+		cmd.Env = upsertEnv(os.Environ(), lessEnvVar, "-R")
 	}
 	return cmd, pager
+}
+
+func upsertEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	entry := prefix + value
+	result := make([]string, 0, len(env)+1)
+	replaced := false
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			if !replaced {
+				result = append(result, entry)
+				replaced = true
+			}
+			continue
+		}
+		result = append(result, e)
+	}
+	if !replaced {
+		result = append(result, entry)
+	}
+	return result
 }
 
 // outputWithPager outputs content through a pager if stdout is a terminal and content is long.

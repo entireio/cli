@@ -2534,77 +2534,6 @@ func TestFormatCheckpointOutput_SummaryStartsAfterTightHeaderRule(t *testing.T) 
 	}
 }
 
-func TestFormatSummaryDetails(t *testing.T) {
-	summary := &checkpoint.Summary{
-		Intent:  "Test intent",
-		Outcome: "Test outcome",
-		Learnings: checkpoint.LearningsSummary{
-			Repo:     []string{"Repo learning 1", "Repo learning 2"},
-			Code:     []checkpoint.CodeLearning{{Path: "test.go", Line: 10, EndLine: 20, Finding: "Code finding"}},
-			Workflow: []string{"Workflow learning"},
-		},
-		Friction:  []string{"Friction item"},
-		OpenItems: []string{"Open item 1", "Open item 2"},
-	}
-
-	var sb strings.Builder
-	formatSummaryDetails(&sb, summary)
-	output := sb.String()
-
-	// Check learnings
-	if !strings.Contains(output, "Learnings:") {
-		t.Error("should have Learnings section")
-	}
-	if !strings.Contains(output, "Repo learning 1") {
-		t.Error("should include repo learnings")
-	}
-	if !strings.Contains(output, "test.go:10-20:") {
-		t.Error("should show code learning with line range")
-	}
-
-	// Check friction
-	if !strings.Contains(output, "Friction:") {
-		t.Error("should have Friction section")
-	}
-	if !strings.Contains(output, "Friction item") {
-		t.Error("should include friction items")
-	}
-
-	// Check open items
-	if !strings.Contains(output, "Open Items:") {
-		t.Error("should have Open Items section")
-	}
-	if !strings.Contains(output, "Open item 1") {
-		t.Error("should include open items")
-	}
-}
-
-func TestFormatSummaryDetails_EmptyCategories(t *testing.T) {
-	// Test with empty learnings - should not show Learnings section
-	summary := &checkpoint.Summary{
-		Intent:    "Test intent",
-		Outcome:   "Test outcome",
-		Learnings: checkpoint.LearningsSummary{},
-		Friction:  []string{},
-		OpenItems: []string{},
-	}
-
-	var sb strings.Builder
-	formatSummaryDetails(&sb, summary)
-	output := sb.String()
-
-	// Empty summary should have no sections
-	if strings.Contains(output, "Learnings:") {
-		t.Error("empty learnings should not show Learnings section")
-	}
-	if strings.Contains(output, "Friction:") {
-		t.Error("empty friction should not show Friction section")
-	}
-	if strings.Contains(output, "Open Items:") {
-		t.Error("empty open items should not show Open Items section")
-	}
-}
-
 func TestBuildSummaryMarkdown_FullSummary(t *testing.T) {
 	t.Parallel()
 
@@ -2768,6 +2697,27 @@ func TestBuildSummaryMarkdown_NilSummary(t *testing.T) {
 
 	if got := buildSummaryMarkdown(nil); got != "" {
 		t.Errorf("expected empty string for nil summary, got %q", got)
+	}
+}
+
+func TestBuildFilesMarkdown_RendersPathsAsInlineCode(t *testing.T) {
+	t.Parallel()
+
+	got := buildFilesMarkdown([]string{
+		"normal.go",
+		"- tricky [path].go",
+		"dir/`quoted`.go",
+	})
+
+	wantLines := []string{
+		"- `normal.go`",
+		"- `- tricky [path].go`",
+		"- `dir/‘quoted‘.go`",
+	}
+	for _, line := range wantLines {
+		if !strings.Contains(got, line) {
+			t.Errorf("expected escaped file line %q in output, got:\n%s", line, got)
+		}
 	}
 }
 
@@ -2986,7 +2936,43 @@ func TestBuildPagerCmd_LessRInjectedWhenEnvUnset(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("expected LESS=-R in cmd.Env, got %v", cmd.Env)
+		t.Error("expected LESS=-R in cmd.Env")
+	}
+}
+
+func TestBuildPagerCmd_ReplacesEmptyLessEnv(t *testing.T) {
+	t.Setenv(lessEnvVar, "")
+
+	oldEnv := pagerLookupEnv
+	t.Cleanup(func() { pagerLookupEnv = oldEnv })
+
+	pagerLookupEnv = func(key string) string {
+		if key == pagerEnvVar || key == lessEnvVar {
+			return ""
+		}
+		return os.Getenv(key)
+	}
+
+	cmd, pager := buildPagerCmd(context.Background())
+
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("LESS injection only applies to less on Unix")
+	}
+	if pager != lessPagerName {
+		t.Fatalf("expected resolved pager 'less' on non-Windows, got %q", pager)
+	}
+
+	lessEntries := 0
+	for _, e := range cmd.Env {
+		if strings.HasPrefix(e, lessEnvVar+"=") {
+			lessEntries++
+			if e != lessRawControlEnv {
+				t.Errorf("expected %s, got %q", lessRawControlEnv, e)
+			}
+		}
+	}
+	if lessEntries != 1 {
+		t.Errorf("expected exactly one LESS entry, got %d", lessEntries)
 	}
 }
 
@@ -3009,7 +2995,7 @@ func TestBuildPagerCmd_LessRSkippedWhenLessEnvSet(t *testing.T) {
 
 	for _, e := range cmd.Env {
 		if e == lessRawControlEnv {
-			t.Errorf("did not expect LESS=-R when user set LESS=-FRX, got %v", cmd.Env)
+			t.Error("did not expect LESS=-R when user set LESS=-FRX")
 		}
 	}
 }
@@ -3032,7 +3018,7 @@ func TestBuildPagerCmd_HonorsCustomPager(t *testing.T) {
 	}
 	for _, e := range cmd.Env {
 		if e == lessRawControlEnv {
-			t.Errorf("did not expect LESS=-R when user picked a custom pager, got %v", cmd.Env)
+			t.Error("did not expect LESS=-R when user picked a custom pager")
 		}
 	}
 }
