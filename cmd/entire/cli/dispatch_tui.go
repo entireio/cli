@@ -94,7 +94,7 @@ func defaultRunInteractiveDispatch(ctx context.Context, outW io.Writer, opts dis
 
 func defaultRenderTerminalMarkdown(w io.Writer, markdown string) (string, error) {
 	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(dispatchMarkdownStyles()),
+		glamour.WithStyles(entireBrandMarkdownStyles()),
 		glamour.WithWordWrap(getTerminalWidth(w)),
 		glamour.WithPreservedNewLines(),
 	)
@@ -158,11 +158,11 @@ func newDispatchStatusStyles(ss statusStyles) dispatchStatusStyles {
 	return styles
 }
 
-func dispatchMarkdownStyles() ansi.StyleConfig {
-	return dispatchMarkdownStylesForBackground(termenv.HasDarkBackground())
+func entireBrandMarkdownStyles() ansi.StyleConfig {
+	return entireBrandMarkdownStylesForBackground(termenv.HasDarkBackground())
 }
 
-func dispatchMarkdownStylesForBackground(darkBackground bool) ansi.StyleConfig {
+func entireBrandMarkdownStylesForBackground(darkBackground bool) ansi.StyleConfig {
 	var styles ansi.StyleConfig
 	if darkBackground {
 		styles = glamourstyles.DarkStyleConfig
