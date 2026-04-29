@@ -2508,6 +2508,32 @@ func TestFormatCheckpointOutput_WithSummary(t *testing.T) {
 	}
 }
 
+func TestFormatCheckpointOutput_SummaryStartsAfterTightHeaderRule(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("abc123456789")
+	summary := &checkpoint.CheckpointSummary{CheckpointID: cpID}
+	content := &checkpoint.SessionContent{
+		Metadata: checkpoint.CommittedMetadata{
+			CheckpointID: cpID,
+			SessionID:    "2026-01-22-test-session",
+			CreatedAt:    time.Date(2026, 1, 22, 10, 30, 0, 0, time.UTC),
+			Summary: &checkpoint.Summary{
+				Intent:  "Implement user authentication",
+				Outcome: "Added login and logout functionality",
+			},
+		},
+	}
+
+	output := formatCheckpointOutput(summary, content, cpID, nil, checkpoint.Author{}, false, false, &bytes.Buffer{})
+	rule := strings.Repeat("─", 60)
+	want := "  created  2026-01-22 10:30:00\n" + rule + "\n## Intent"
+
+	if !strings.Contains(output, want) {
+		t.Fatalf("expected summary to start immediately after header rule, got:\n%s", output)
+	}
+}
+
 func TestFormatSummaryDetails(t *testing.T) {
 	summary := &checkpoint.Summary{
 		Intent:  "Test intent",

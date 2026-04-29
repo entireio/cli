@@ -1333,9 +1333,8 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 	scopedPrompts := extractPromptsFromTranscript(scopedTranscript, meta.Agent)
 
 	sb.WriteString(formatCheckpointHeader(summary, meta, checkpointID, associatedCommits, author, styles))
-	sb.WriteString("\n")
 	sb.WriteString(styles.horizontalRule(styles.width))
-	sb.WriteString("\n\n")
+	sb.WriteString("\n")
 
 	if meta.Summary != nil {
 		md := buildSummaryMarkdown(meta.Summary)
