@@ -25,19 +25,30 @@ var secretPattern = regexp.MustCompile(`[A-Za-z0-9+_=-]{10,}`)
 // moderate entropy and are not reliably covered by vendor-specific scanners.
 var credentialedURIPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,31}://[^\s/?#@"'` + "`" + `<>:]*:[^\s/?#@"'` + "`" + `<>]+@[^\s"'` + "`" + `<>]+`)
 
+// dbPasswordKeyShape matches a DB-prefixed credential key (vendor prefix +
+// optional `_word`/`-word` segments + `password`/`passwd`/`pwd`). Used to
+// compose both the env-var assignment regex and the JSON-key regex so the
+// vendor list stays in one place.
+const dbPasswordKeyShape = `(?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)(?:[_-]+[a-z0-9]+)*[_-]*(?:password|passwd|pwd)` //nolint:gosec // regex literal, not a credential
+
 var (
-	jdbcPattern            = regexp.MustCompile(`(?i)\bjdbc:[^\s"'<>` + "`" + `]+`)
-	databaseURLPattern     = regexp.MustCompile(`(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s"'<>` + "`" + `]+`)
-	keywordDSNPattern      = regexp.MustCompile(`(?i)\b[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)(?:\s+[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)){2,}`)
-	semicolonConnPattern   = regexp.MustCompile(`(?i)\b[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|[^=;"'\s]+)(?:;[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|[^=;"'\s]+)){2,}`)
-	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])((?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)[_-]?(?:password|passwd|pwd)|pgpassword|mysql_pwd|redis_password|mongo_password|mongodb_password)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	jdbcPattern          = regexp.MustCompile(`(?i)\bjdbc:[^\s"'<>` + "`" + `]+`)
+	databaseURLPattern   = regexp.MustCompile(`(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s"'<>` + "`" + `]+`)
+	keywordDSNPattern    = regexp.MustCompile(`(?i)\b[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)(?:\s+[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)){2,}`)
+	semicolonConnPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|"[^"]*"|'[^']*'|[^=;"'\s]+)(?:;[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|"[^"]*"|'[^']*'|[^=;"'\s]+)){2,}`)
+	// credentialValuePattern requires the prefix to start at a non-alphanumeric
+	// boundary, so APP_DB_PASSWORD matches via the leading `_` but mydbpassword
+	// does not.
+	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + dbPasswordKeyShape + `)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
 
 	keywordHostPattern      = regexp.MustCompile(`(?i)(?:^|\s)host=`)
 	keywordUserPattern      = regexp.MustCompile(`(?i)(?:^|\s)user=`)
 	semicolonServerPattern  = regexp.MustCompile(`(?i)(?:^|;)\s*(?:server|data source|datasource|addr|address|network address)\s*=`)
 	semicolonUserPattern    = regexp.MustCompile(`(?i)(?:^|;)\s*(?:user id|userid|user|uid)\s*=`)
 	passwordAssignmentRegex = regexp.MustCompile(`(?i)(?:^|[?&;\s])(?:password|pwd)=("[^"]*"|'[^']*'|[^&;\s"']+)`)
-	credentialJSONKeyRegex  = regexp.MustCompile(`(?i)^(?:(?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)[_-]?(?:password|passwd|pwd)|pgpassword|mysql_pwd|redis_password|mongo_password|mongodb_password)$`)
+	// credentialJSONKeyRegex operates on output of normalizeCredentialJSONKey
+	// (already lowercased, `-`/` `/`.` → `_`), so the `(?i)` flag is unnecessary.
+	credentialJSONKeyRegex  = regexp.MustCompile(`^` + dbPasswordKeyShape + `$`)
 	genericPasswordKeyRegex = regexp.MustCompile(`(?i)^(?:password|passwd|pwd)$`)
 )
 
@@ -50,15 +61,24 @@ const entropyThreshold = 4.5
 // RedactedPlaceholder is the replacement text used for redacted secrets.
 const RedactedPlaceholder = "REDACTED"
 
-// redactedPlaceholderForms holds the lowercase variants of RedactedPlaceholder
-// used to recognize already-redacted values (so we don't double-redact).
-var redactedPlaceholderForms = func() map[string]struct{} {
+// placeholderSecretValues lists lowercase values that should be treated as
+// non-secrets when they appear as a credential value: prior redactions
+// (REDACTED / [REDACTED] / <REDACTED>), common documentation placeholders,
+// and obviously-non-real defaults. Values matched by shape (mask runs,
+// `<…>` brackets, `${…}` shell expansion) are handled separately.
+var placeholderSecretValues = func() map[string]struct{} {
 	lower := strings.ToLower(RedactedPlaceholder)
-	return map[string]struct{}{
-		lower:             {},
-		"[" + lower + "]": {},
-		"<" + lower + ">": {},
+	values := []string{
+		lower, "[" + lower + "]", "<" + lower + ">",
+		"changeme", "example", "placeholder",
+		"your_password", "your_db_password", "your_secret",
+		"secret_here",
 	}
+	out := make(map[string]struct{}, len(values))
+	for _, v := range values {
+		out[v] = struct{}{}
+	}
+	return out
 }()
 
 // RedactedBytes represents transcript data that has been through secret
@@ -361,23 +381,59 @@ func hasNonPlaceholderPasswordValue(value string) bool {
 }
 
 func isPlaceholderSecretValue(value string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(value))
-	normalized = strings.Trim(normalized, `"'`)
-	if normalized == "" {
+	trimmed := strings.Trim(strings.TrimSpace(value), `"'`)
+	if trimmed == "" {
 		return true
 	}
+	if isBracketedPlaceholder(trimmed) {
+		return true
+	}
+	normalized := strings.ToLower(trimmed)
 	if strings.HasPrefix(normalized, "${") && strings.HasSuffix(normalized, "}") {
 		return true
 	}
-	if _, ok := redactedPlaceholderForms[normalized]; ok {
+	if _, ok := placeholderSecretValues[normalized]; ok {
 		return true
 	}
-	switch normalized {
-	case "xxx", "xxxx", "changeme", "example":
-		return true
+	return isRepeatedCharPlaceholder(normalized)
+}
+
+// bracketedPlaceholderInteriorRE matches the inside of a "<…>" placeholder
+// shape: lowercase letters joined by `-` or `_`. Digits, mixed case, and
+// special chars are rejected so values like `<hunter2>` or `<RealPassword>`
+// still fall through to redaction.
+var bracketedPlaceholderInteriorRE = regexp.MustCompile(`^[a-z][a-z_-]*$`)
+
+// isBracketedPlaceholder reports whether s is a "<name>" doc placeholder
+// (e.g. "<password>", "<your-db-password>"). The minimum total length of 5
+// keeps this from firing on `<a>` / `<ab>`.
+func isBracketedPlaceholder(s string) bool {
+	if len(s) < 5 || s[0] != '<' || s[len(s)-1] != '>' {
+		return false
+	}
+	return bracketedPlaceholderInteriorRE.MatchString(s[1 : len(s)-1])
+}
+
+// isRepeatedCharPlaceholder reports whether s is a run of a single masking
+// character commonly used to redact values in docs and screenshots, e.g.
+// "***", "xxxx", "....", "----". The minimum length of 3 keeps single-char
+// or 2-char values like `x` or `**` from being treated as masks.
+func isRepeatedCharPlaceholder(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	first := s[0]
+	switch first {
+	case '*', 'x', '.', '-':
 	default:
 		return false
 	}
+	for i := 1; i < len(s); i++ {
+		if s[i] != first {
+			return false
+		}
+	}
+	return true
 }
 
 func isCredentialJSONSecretKey(key string, credentialContext bool) bool {
@@ -408,6 +464,9 @@ func normalizeCredentialJSONKey(key string) string {
 	key = strings.ToLower(strings.TrimSpace(key))
 	key = strings.ReplaceAll(key, "-", "_")
 	key = strings.ReplaceAll(key, " ", "_")
+	// Flattened-config exporters (Spring, dotnet, Hashicorp Vault) emit dotted keys
+	// like "db.password" or "mysql.root.password"; treat them like underscored.
+	key = strings.ReplaceAll(key, ".", "_")
 	return key
 }
 
