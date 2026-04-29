@@ -50,7 +50,7 @@ func TestAttachSessionCreatesCheckpoint(t *testing.T) {
 
 		s.Git(t, "checkout", mainBranch)
 		explainOut := entire.Explain(t, s.Dir, checkpointID)
-		assert.Contains(t, explainOut, "Checkpoint: "+checkpointID)
+		assert.Contains(t, explainOut, "● Checkpoint "+checkpointID)
 	})
 }
 

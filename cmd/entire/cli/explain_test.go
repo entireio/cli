@@ -5,13 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -27,6 +30,7 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1651,7 +1655,7 @@ func TestRunExplainCheckpoint_V2OnlyCheckpoint(t *testing.T) {
 	}
 
 	output := buf.String()
-	if !strings.Contains(output, "Checkpoint: 777777777777") {
+	if !strings.Contains(output, "● Checkpoint 777777777777") {
 		t.Fatalf("expected checkpoint header in output, got: %s", output)
 	}
 	if !strings.Contains(output, "session-v2") {
@@ -2258,7 +2262,7 @@ func TestFormatCheckpointOutput_Short(t *testing.T) {
 	}
 
 	// Default mode: empty commit message (not shown anyway in default mode)
-	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, false, false)
+	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, false, false, &bytes.Buffer{})
 
 	// Should show checkpoint ID
 	if !strings.Contains(output, "abc123def456") {
@@ -2272,8 +2276,8 @@ func TestFormatCheckpointOutput_Short(t *testing.T) {
 	if !strings.Contains(output, "2026-01-21") {
 		t.Error("expected timestamp in output")
 	}
-	// Should show token usage (10000 + 5000 = 15000)
-	if !strings.Contains(output, "15000") {
+	// Should show token usage (10000 + 5000 = 15000), formatted compactly.
+	if !strings.Contains(output, "  tokens   15k") {
 		t.Error("expected token count in output")
 	}
 	// Should show Intent label
@@ -2321,7 +2325,7 @@ func TestFormatCheckpointOutput_Verbose(t *testing.T) {
 		Transcript: transcriptContent,
 	}
 
-	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false)
+	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false, &bytes.Buffer{})
 
 	// Should show checkpoint ID (like default)
 	if !strings.Contains(output, "abc123def456") {
@@ -2346,7 +2350,7 @@ func TestFormatCheckpointOutput_Verbose(t *testing.T) {
 		t.Error("verbose output should have Files section")
 	}
 	// Verbose should show scoped transcript section
-	if !strings.Contains(output, "Transcript (checkpoint scope):") {
+	if !strings.Contains(output, "Transcript (checkpoint scope)") {
 		t.Error("verbose output should have Transcript (checkpoint scope) section")
 	}
 	if !strings.Contains(output, "Add a new feature") {
@@ -2372,9 +2376,9 @@ func TestFormatCheckpointOutput_Verbose_NoCommitMessage(t *testing.T) {
 	}
 
 	// When commit message is empty, should not show Commit section
-	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false)
+	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false, &bytes.Buffer{})
 
-	if strings.Contains(output, "Commits:") {
+	if strings.Contains(output, "  commits") {
 		t.Error("verbose output should not show Commits section when nil (not searched)")
 	}
 }
@@ -2409,7 +2413,7 @@ func TestFormatCheckpointOutput_Full(t *testing.T) {
 		Transcript: []byte(transcriptData),
 	}
 
-	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, false, true)
+	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, false, true, &bytes.Buffer{})
 
 	// Should show checkpoint ID (like default)
 	if !strings.Contains(output, "abc123def456") {
@@ -2420,7 +2424,7 @@ func TestFormatCheckpointOutput_Full(t *testing.T) {
 		t.Error("full output should include files section")
 	}
 	// Full shows full session transcript (not scoped)
-	if !strings.Contains(output, "Transcript (full session):") {
+	if !strings.Contains(output, "Transcript (full session)") {
 		t.Error("full output should have Transcript (full session) section")
 	}
 	// Should contain actual transcript content (parsed format)
@@ -2460,46 +2464,46 @@ func TestFormatCheckpointOutput_WithSummary(t *testing.T) {
 	}
 
 	// Test default output (non-verbose) with summary
-	output := formatCheckpointOutput(summary, content, cpID, nil, checkpoint.Author{}, false, false)
+	output := formatCheckpointOutput(summary, content, cpID, nil, checkpoint.Author{}, false, false, &bytes.Buffer{})
 
-	// Should show AI-generated intent and outcome
-	if !strings.Contains(output, "Intent: Implement user authentication") {
+	// Should show AI-generated intent and outcome as markdown.
+	if !strings.Contains(output, "## Intent\n\nImplement user authentication") {
 		t.Errorf("expected AI intent in output, got:\n%s", output)
 	}
-	if !strings.Contains(output, "Outcome: Added login and logout functionality") {
+	if !strings.Contains(output, "## Outcome\n\nAdded login and logout functionality") {
 		t.Errorf("expected AI outcome in output, got:\n%s", output)
 	}
-	// Non-verbose should NOT show learnings
-	if strings.Contains(output, "Learnings:") {
-		t.Errorf("non-verbose should not show learnings, got:\n%s", output)
+	// Summary markdown includes all generated summary sections.
+	if !strings.Contains(output, "## Learnings") {
+		t.Errorf("summary output should show learnings, got:\n%s", output)
 	}
 
 	// Test verbose output with summary
-	verboseOutput := formatCheckpointOutput(summary, content, cpID, nil, checkpoint.Author{}, true, false)
+	verboseOutput := formatCheckpointOutput(summary, content, cpID, nil, checkpoint.Author{}, true, false, &bytes.Buffer{})
 
 	// Verbose should show learnings sections
-	if !strings.Contains(verboseOutput, "Learnings:") {
+	if !strings.Contains(verboseOutput, "## Learnings") {
 		t.Errorf("verbose output should show learnings, got:\n%s", verboseOutput)
 	}
-	if !strings.Contains(verboseOutput, "Repository:") {
+	if !strings.Contains(verboseOutput, "### Repository") {
 		t.Errorf("verbose output should show repository learnings, got:\n%s", verboseOutput)
 	}
 	if !strings.Contains(verboseOutput, "Uses JWT for auth tokens") {
 		t.Errorf("verbose output should show repo learning content, got:\n%s", verboseOutput)
 	}
-	if !strings.Contains(verboseOutput, "Code:") {
+	if !strings.Contains(verboseOutput, "### Code") {
 		t.Errorf("verbose output should show code learnings, got:\n%s", verboseOutput)
 	}
-	if !strings.Contains(verboseOutput, "auth.go:42:") {
+	if !strings.Contains(verboseOutput, "`auth.go:42`") {
 		t.Errorf("verbose output should show code learning with line number, got:\n%s", verboseOutput)
 	}
-	if !strings.Contains(verboseOutput, "Workflow:") {
+	if !strings.Contains(verboseOutput, "### Workflow") {
 		t.Errorf("verbose output should show workflow learnings, got:\n%s", verboseOutput)
 	}
-	if !strings.Contains(verboseOutput, "Friction:") {
+	if !strings.Contains(verboseOutput, "## Friction") {
 		t.Errorf("verbose output should show friction, got:\n%s", verboseOutput)
 	}
-	if !strings.Contains(verboseOutput, "Open Items:") {
+	if !strings.Contains(verboseOutput, "## Open Items") {
 		t.Errorf("verbose output should show open items, got:\n%s", verboseOutput)
 	}
 }
@@ -2572,6 +2576,438 @@ func TestFormatSummaryDetails_EmptyCategories(t *testing.T) {
 	}
 	if strings.Contains(output, "Open Items:") {
 		t.Error("empty open items should not show Open Items section")
+	}
+}
+
+func TestBuildSummaryMarkdown_FullSummary(t *testing.T) {
+	t.Parallel()
+
+	summary := &checkpoint.Summary{
+		Intent:  "Rotate session tokens on logout",
+		Outcome: "Logout now mints a new token",
+		Learnings: checkpoint.LearningsSummary{
+			Repo: []string{"Auth lives behind the auth_v2 gate"},
+			Code: []checkpoint.CodeLearning{
+				{Path: "auth/session.go", Line: 42, Finding: "Rotate before cookie clear"},
+			},
+			Workflow: []string{"Manual curl confirmed the path"},
+		},
+		Friction:  []string{"go-git v5 reset deleted .entire"},
+		OpenItems: []string{"Backfill rotation for legacy cookies"},
+	}
+
+	got := buildSummaryMarkdown(summary)
+
+	want := "## Intent\n\n" +
+		"Rotate session tokens on logout\n\n" +
+		"## Outcome\n\n" +
+		"Logout now mints a new token\n\n" +
+		"## Learnings\n\n" +
+		"### Repository\n\n" +
+		"- Auth lives behind the auth_v2 gate\n\n" +
+		"### Code\n\n" +
+		"- `auth/session.go:42` — Rotate before cookie clear\n\n" +
+		"### Workflow\n\n" +
+		"- Manual curl confirmed the path\n\n" +
+		"## Friction\n\n" +
+		"- go-git v5 reset deleted .entire\n\n" +
+		"## Open Items\n\n" +
+		"- Backfill rotation for legacy cookies\n"
+
+	if got != want {
+		t.Errorf("buildSummaryMarkdown mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestBuildSummaryMarkdown_NoLearnings(t *testing.T) {
+	t.Parallel()
+
+	summary := &checkpoint.Summary{
+		Intent:  "Trivial fix",
+		Outcome: "Fixed",
+	}
+
+	got := buildSummaryMarkdown(summary)
+
+	if strings.Contains(got, "## Learnings") {
+		t.Errorf("expected no Learnings heading when all subsections empty, got:\n%s", got)
+	}
+	if !strings.Contains(got, "## Intent\n\nTrivial fix\n\n") {
+		t.Errorf("expected Intent block, got:\n%s", got)
+	}
+	if !strings.Contains(got, "## Outcome\n\nFixed\n") {
+		t.Errorf("expected Outcome block, got:\n%s", got)
+	}
+}
+
+func TestBuildSummaryMarkdown_PartialLearnings(t *testing.T) {
+	t.Parallel()
+
+	summary := &checkpoint.Summary{
+		Intent:  "i",
+		Outcome: "o",
+		Learnings: checkpoint.LearningsSummary{
+			Code: []checkpoint.CodeLearning{
+				{Path: "a.go", Finding: "x"},
+			},
+		},
+	}
+
+	got := buildSummaryMarkdown(summary)
+
+	if !strings.Contains(got, "## Learnings") {
+		t.Errorf("expected Learnings heading when Code populated, got:\n%s", got)
+	}
+	if !strings.Contains(got, "### Code") {
+		t.Errorf("expected Code subsection, got:\n%s", got)
+	}
+	if strings.Contains(got, "### Repository") {
+		t.Errorf("did not expect Repository subsection, got:\n%s", got)
+	}
+	if strings.Contains(got, "### Workflow") {
+		t.Errorf("did not expect Workflow subsection, got:\n%s", got)
+	}
+}
+
+func TestBuildSummaryMarkdown_CodeLineVariants(t *testing.T) {
+	t.Parallel()
+
+	summary := &checkpoint.Summary{
+		Intent:  "i",
+		Outcome: "o",
+		Learnings: checkpoint.LearningsSummary{
+			Code: []checkpoint.CodeLearning{
+				{Path: "a.go", Line: 10, EndLine: 20, Finding: "range"},
+				{Path: "b.go", Line: 5, Finding: "single"},
+				{Path: "c.go", Finding: "no-line"},
+			},
+		},
+	}
+
+	got := buildSummaryMarkdown(summary)
+
+	wantLines := []string{
+		"- `a.go:10-20` — range",
+		"- `b.go:5` — single",
+		"- `c.go` — no-line",
+	}
+	for _, line := range wantLines {
+		if !strings.Contains(got, line) {
+			t.Errorf("expected line %q in output, got:\n%s", line, got)
+		}
+	}
+}
+
+func TestBuildSummaryMarkdown_EmptyFrictionAndOpenItems(t *testing.T) {
+	t.Parallel()
+
+	summary := &checkpoint.Summary{
+		Intent:  "i",
+		Outcome: "o",
+	}
+
+	got := buildSummaryMarkdown(summary)
+
+	if strings.Contains(got, "## Friction") {
+		t.Errorf("did not expect Friction heading, got:\n%s", got)
+	}
+	if strings.Contains(got, "## Open Items") {
+		t.Errorf("did not expect Open Items heading, got:\n%s", got)
+	}
+}
+
+func TestBuildSummaryMarkdown_BacktickEscape(t *testing.T) {
+	t.Parallel()
+
+	summary := &checkpoint.Summary{
+		Intent:  "Use the `foo` command",
+		Outcome: "Wrapped in `bar`",
+	}
+
+	got := buildSummaryMarkdown(summary)
+
+	if strings.Contains(got, "`foo`") {
+		t.Errorf("expected backticks to be neutralized in Intent, got:\n%s", got)
+	}
+	if strings.Contains(got, "`bar`") {
+		t.Errorf("expected backticks to be neutralized in Outcome, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Use the ‘foo‘ command") {
+		t.Errorf("expected U+2018 substitution in Intent, got:\n%s", got)
+	}
+}
+
+func TestBuildSummaryMarkdown_NilSummary(t *testing.T) {
+	t.Parallel()
+
+	if got := buildSummaryMarkdown(nil); got != "" {
+		t.Errorf("expected empty string for nil summary, got %q", got)
+	}
+}
+
+func TestFormatCheckpointHeader_FullMetadataPlain(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+	summary := &checkpoint.CheckpointSummary{
+		TokenUsage: &agent.TokenUsage{InputTokens: 18432},
+	}
+	meta := checkpoint.CommittedMetadata{
+		SessionID: "2026-04-29-7f3c1a",
+		CreatedAt: time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
+	}
+	commits := []associatedCommit{{
+		ShortSHA: "9f2c11a",
+		Message:  "feat(auth): rotate session tokens on logout",
+		Date:     time.Date(2026, 4, 29, 0, 0, 0, 0, time.UTC),
+	}}
+	author := checkpoint.Author{Name: "Peyton Montei", Email: "peyton@entire.io"}
+	styles := statusStyles{colorEnabled: false, width: 60}
+
+	got := formatCheckpointHeader(summary, meta, cpID, commits, author, styles)
+
+	wantLines := []string{
+		"● Checkpoint a3b2c4d5e6f7",
+		"  session  2026-04-29-7f3c1a",
+		"  created  2026-04-29 14:22:08",
+		"  author   Peyton Montei <peyton@entire.io>",
+		"  tokens   18.4k",
+		"  commits  9f2c11a feat(auth): rotate session tokens on logout",
+	}
+	for _, line := range wantLines {
+		if !strings.Contains(got, line) {
+			t.Errorf("expected line %q in header, got:\n%s", line, got)
+		}
+	}
+}
+
+func TestFormatCheckpointHeader_NoAuthor(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+	meta := checkpoint.CommittedMetadata{
+		SessionID: "s",
+		CreatedAt: time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
+	}
+	styles := statusStyles{colorEnabled: false, width: 60}
+
+	got := formatCheckpointHeader(nil, meta, cpID, nil, checkpoint.Author{}, styles)
+
+	if strings.Contains(got, "  author") {
+		t.Errorf("did not expect author row when Name empty, got:\n%s", got)
+	}
+}
+
+func TestFormatCheckpointHeader_NoCommits(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+	meta := checkpoint.CommittedMetadata{
+		SessionID: "s",
+		CreatedAt: time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
+	}
+	styles := statusStyles{colorEnabled: false, width: 60}
+
+	got := formatCheckpointHeader(nil, meta, cpID, nil, checkpoint.Author{}, styles)
+
+	if strings.Contains(got, "  commits") {
+		t.Errorf("did not expect commits row when commits is nil, got:\n%s", got)
+	}
+}
+
+func TestFormatCheckpointHeader_MultipleCommits(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+	meta := checkpoint.CommittedMetadata{
+		SessionID: "s",
+		CreatedAt: time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
+	}
+	commits := []associatedCommit{
+		{ShortSHA: "aaa1111", Message: "first", Date: time.Date(2026, 4, 29, 0, 0, 0, 0, time.UTC)},
+		{ShortSHA: "bbb2222", Message: "second", Date: time.Date(2026, 4, 29, 0, 0, 0, 0, time.UTC)},
+	}
+	styles := statusStyles{colorEnabled: false, width: 60}
+
+	got := formatCheckpointHeader(nil, meta, cpID, commits, checkpoint.Author{}, styles)
+
+	if !strings.Contains(got, "  commits  (2)") {
+		t.Errorf("expected commits row with count (2), got:\n%s", got)
+	}
+	if !strings.Contains(got, "           aaa1111 2026-04-29 first") {
+		t.Errorf("expected first commit line aligned under value column, got:\n%s", got)
+	}
+	if !strings.Contains(got, "           bbb2222 2026-04-29 second") {
+		t.Errorf("expected second commit line aligned under value column, got:\n%s", got)
+	}
+}
+
+func TestFormatCheckpointHeader_EmptyCommitsSlice(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+	meta := checkpoint.CommittedMetadata{
+		SessionID: "s",
+		CreatedAt: time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
+	}
+	styles := statusStyles{colorEnabled: false, width: 60}
+
+	got := formatCheckpointHeader(nil, meta, cpID, []associatedCommit{}, checkpoint.Author{}, styles)
+
+	if !strings.Contains(got, "  commits  (none on this branch)") {
+		t.Errorf("expected explicit none row when commits slice is empty, got:\n%s", got)
+	}
+}
+
+func TestFormatCheckpointHeader_NoTokenUsage(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+	meta := checkpoint.CommittedMetadata{
+		SessionID: "s",
+		CreatedAt: time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
+	}
+	styles := statusStyles{colorEnabled: false, width: 60}
+
+	got := formatCheckpointHeader(nil, meta, cpID, nil, checkpoint.Author{}, styles)
+
+	if strings.Contains(got, "  tokens") {
+		t.Errorf("did not expect tokens row when both meta and summary are nil, got:\n%s", got)
+	}
+}
+
+func TestFormatCheckpointHeader_TokensFromSummaryFallback(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+	meta := checkpoint.CommittedMetadata{
+		SessionID:  "s",
+		CreatedAt:  time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
+		TokenUsage: nil,
+	}
+	summary := &checkpoint.CheckpointSummary{
+		TokenUsage: &agent.TokenUsage{InputTokens: 1234},
+	}
+	styles := statusStyles{colorEnabled: false, width: 60}
+
+	got := formatCheckpointHeader(summary, meta, cpID, nil, checkpoint.Author{}, styles)
+
+	if !strings.Contains(got, "  tokens   1.2k") {
+		t.Errorf("expected tokens row from summary fallback, got:\n%s", got)
+	}
+}
+
+func TestFormatCheckpointHeader_ColorEnabledRenders(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+	meta := checkpoint.CommittedMetadata{
+		SessionID:  "s",
+		CreatedAt:  time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
+		TokenUsage: &agent.TokenUsage{InputTokens: 1234},
+	}
+	renderer := lipgloss.NewRenderer(io.Discard)
+	renderer.SetColorProfile(termenv.TrueColor)
+
+	plainStyles := statusStyles{colorEnabled: false, width: 60}
+	colorStyles := statusStyles{
+		colorEnabled: true,
+		width:        60,
+		bold:         renderer.NewStyle().Bold(true),
+		dim:          renderer.NewStyle().Faint(true),
+		yellow:       renderer.NewStyle().Foreground(lipgloss.Color("3")),
+	}
+
+	plain := formatCheckpointHeader(nil, meta, cpID, nil, checkpoint.Author{}, plainStyles)
+	styled := formatCheckpointHeader(nil, meta, cpID, nil, checkpoint.Author{}, colorStyles)
+
+	if !strings.Contains(plain, "●") {
+		t.Errorf("expected ● glyph in plain output, got:\n%s", plain)
+	}
+	if !strings.Contains(styled, "●") {
+		t.Errorf("expected ● glyph in styled output, got:\n%s", styled)
+	}
+	if len(styled) <= len(plain) {
+		t.Errorf("expected styled length (%d) > plain length (%d)", len(styled), len(plain))
+	}
+}
+
+func TestBuildPagerCmd_LessRInjectedWhenEnvUnset(t *testing.T) {
+	oldEnv := pagerLookupEnv
+	t.Cleanup(func() { pagerLookupEnv = oldEnv })
+
+	pagerLookupEnv = func(key string) string {
+		if key == pagerEnvVar || key == lessEnvVar {
+			return ""
+		}
+		return os.Getenv(key)
+	}
+
+	cmd, pager := buildPagerCmd(context.Background())
+
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("LESS injection only applies to less on Unix")
+	}
+	if pager != lessPagerName {
+		t.Fatalf("expected resolved pager 'less' on non-Windows, got %q", pager)
+	}
+
+	found := false
+	for _, e := range cmd.Env {
+		if e == lessRawControlEnv {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected LESS=-R in cmd.Env, got %v", cmd.Env)
+	}
+}
+
+func TestBuildPagerCmd_LessRSkippedWhenLessEnvSet(t *testing.T) {
+	oldEnv := pagerLookupEnv
+	t.Cleanup(func() { pagerLookupEnv = oldEnv })
+
+	pagerLookupEnv = func(key string) string {
+		switch key {
+		case pagerEnvVar:
+			return ""
+		case lessEnvVar:
+			return "-FRX"
+		default:
+			return os.Getenv(key)
+		}
+	}
+
+	cmd, _ := buildPagerCmd(context.Background())
+
+	for _, e := range cmd.Env {
+		if e == lessRawControlEnv {
+			t.Errorf("did not expect LESS=-R when user set LESS=-FRX, got %v", cmd.Env)
+		}
+	}
+}
+
+func TestBuildPagerCmd_HonorsCustomPager(t *testing.T) {
+	oldEnv := pagerLookupEnv
+	t.Cleanup(func() { pagerLookupEnv = oldEnv })
+
+	pagerLookupEnv = func(key string) string {
+		if key == pagerEnvVar {
+			return "bat"
+		}
+		return os.Getenv(key)
+	}
+
+	cmd, pager := buildPagerCmd(context.Background())
+
+	if pager != "bat" {
+		t.Errorf("expected resolved pager 'bat', got %q", pager)
+	}
+	for _, e := range cmd.Env {
+		if e == lessRawControlEnv {
+			t.Errorf("did not expect LESS=-R when user picked a custom pager, got %v", cmd.Env)
+		}
 	}
 }
 
@@ -3613,7 +4049,7 @@ func TestFormatCheckpointOutput_UsesScopedPrompts(t *testing.T) {
 	}
 
 	// Verbose output should use scoped prompts
-	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false)
+	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false, &bytes.Buffer{})
 
 	// Should show ONLY the second prompt (scoped)
 	if !strings.Contains(output, "Second prompt - SHOULD appear") {
@@ -3645,7 +4081,7 @@ func TestFormatCheckpointOutput_FallsBackToStoredPrompts(t *testing.T) {
 	}
 
 	// Verbose output should fall back to stored prompts
-	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false)
+	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, true, false, &bytes.Buffer{})
 
 	// Intent should use stored prompt
 	if !strings.Contains(output, "Stored prompt from older checkpoint") {
@@ -3677,7 +4113,7 @@ func TestFormatCheckpointOutput_FullShowsEntireTranscript(t *testing.T) {
 	}
 
 	// Full mode should show the ENTIRE transcript (not scoped)
-	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, false, true)
+	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, checkpoint.Author{}, false, true, &bytes.Buffer{})
 
 	// Should show the full transcript including first prompt (even though scoped prompts exclude it)
 	if !strings.Contains(output, "First prompt") {
@@ -3952,9 +4388,9 @@ func TestFormatCheckpointOutput_WithAuthor(t *testing.T) {
 	}
 
 	// With author, should show author line
-	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, author, true, false)
+	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, author, true, false, &bytes.Buffer{})
 
-	if !strings.Contains(output, "Author: Alice Developer <alice@example.com>") {
+	if !strings.Contains(output, "  author   Alice Developer <alice@example.com>") {
 		t.Errorf("expected author line in output, got:\n%s", output)
 	}
 }
@@ -3980,9 +4416,9 @@ func TestFormatCheckpointOutput_EmptyAuthor(t *testing.T) {
 	// Empty author - should not show author line
 	author := checkpoint.Author{}
 
-	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, author, true, false)
+	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), nil, author, true, false, &bytes.Buffer{})
 
-	if strings.Contains(output, "Author:") {
+	if strings.Contains(output, "  author") {
 		t.Errorf("expected no author line for empty author, got:\n%s", output)
 	}
 }
@@ -4254,10 +4690,10 @@ func TestFormatCheckpointOutput_WithAssociatedCommits(t *testing.T) {
 		},
 	}
 
-	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), associatedCommits, checkpoint.Author{}, true, false)
+	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), associatedCommits, checkpoint.Author{}, true, false, &bytes.Buffer{})
 
 	// Should show commits section with count
-	if !strings.Contains(output, "Commits: (2)") {
+	if !strings.Contains(output, "  commits  (2)") {
 		t.Errorf("expected 'Commits: (2)' in output, got:\n%s", output)
 	}
 	// Should show commit details
@@ -4713,10 +5149,10 @@ func TestFormatCheckpointOutput_NoCommitsOnBranch(t *testing.T) {
 	// No associated commits - use empty slice (not nil) to indicate "searched but found none"
 	associatedCommits := []associatedCommit{}
 
-	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), associatedCommits, checkpoint.Author{}, true, false)
+	output := formatCheckpointOutput(summary, content, id.MustCheckpointID("abc123def456"), associatedCommits, checkpoint.Author{}, true, false, &bytes.Buffer{})
 
 	// Should show message indicating no commits found
-	if !strings.Contains(output, "Commits: No commits found on this branch") {
+	if !strings.Contains(output, "  commits  (none on this branch)") {
 		t.Errorf("expected 'Commits: No commits found on this branch' in output, got:\n%s", output)
 	}
 }

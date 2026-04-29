@@ -34,6 +34,7 @@ import (
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
 	"github.com/entireio/cli/redact"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -44,6 +45,14 @@ import (
 )
 
 const defaultCheckpointSummaryTimeout = 30 * time.Second
+
+const (
+	pagerEnvVar       = "PAGER"
+	lessEnvVar        = "LESS"
+	lessPagerName     = "less"
+	lessRawControlEnv = "LESS=-R"
+	windowsGOOS       = "windows"
+)
 
 var checkpointSummaryTimeout = defaultCheckpointSummaryTimeout
 
@@ -638,7 +647,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	}
 
 	// Format and output
-	output := formatCheckpointOutput(summary, content, fullCheckpointID, associatedCommits, author, verbose, full)
+	output := formatCheckpointOutput(summary, content, fullCheckpointID, associatedCommits, author, verbose, full, w)
 	outputExplainContent(w, output, noPager)
 	return nil
 }
@@ -1160,6 +1169,14 @@ func explainTemporaryCheckpoint(ctx context.Context, w io.Writer, repo *git.Repo
 			}
 		}
 	}
+	if verbose || full {
+		sb.WriteString("\n")
+		if full {
+			sb.WriteString("Transcript (full session):\n")
+		} else {
+			sb.WriteString("Transcript (checkpoint scope):\n")
+		}
+	}
 	appendTranscriptSection(&sb, verbose, full, fullTranscript, scopedTranscript, sessionPrompt, agentType)
 
 	return sb.String(), true
@@ -1302,9 +1319,10 @@ func extractPromptsFromTranscript(transcriptBytes []byte, agentType types.AgentT
 //
 // Author is displayed when available (only for committed checkpoints).
 // Associated commits are git commits that reference this checkpoint via Entire-Checkpoint trailer.
-func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, checkpointID id.CheckpointID, associatedCommits []associatedCommit, author checkpoint.Author, verbose, full bool) string {
+func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, checkpointID id.CheckpointID, associatedCommits []associatedCommit, author checkpoint.Author, verbose, full bool, w io.Writer) string {
 	var sb strings.Builder
 	meta := content.Metadata
+	styles := newStatusStyles(w)
 
 	// Scope the transcript to this checkpoint's portion
 	// If CheckpointTranscriptStart > 0, we slice the transcript to only include
@@ -1314,54 +1332,32 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 	// Extract prompts from the scoped transcript for intent extraction
 	scopedPrompts := extractPromptsFromTranscript(scopedTranscript, meta.Agent)
 
-	// Header - always shown
-	// Note: CheckpointID is always exactly 12 characters, matching checkpointIDDisplayLength
-	fmt.Fprintf(&sb, "Checkpoint: %s\n", checkpointID)
-	fmt.Fprintf(&sb, "Session: %s\n", meta.SessionID)
-	fmt.Fprintf(&sb, "Created: %s\n", meta.CreatedAt.Format("2006-01-02 15:04:05"))
-
-	// Author (only for committed checkpoints with known author)
-	if author.Name != "" {
-		fmt.Fprintf(&sb, "Author: %s <%s>\n", author.Name, author.Email)
-	}
-
-	// Token usage - prefer content metadata, fall back to summary
-	tokenUsage := meta.TokenUsage
-	if tokenUsage == nil && summary != nil {
-		tokenUsage = summary.TokenUsage
-	}
-	if tokenUsage != nil {
-		totalTokens := tokenUsage.InputTokens + tokenUsage.CacheCreationTokens +
-			tokenUsage.CacheReadTokens + tokenUsage.OutputTokens
-		fmt.Fprintf(&sb, "Tokens: %d\n", totalTokens)
-	}
-
-	// Associated commits section
-	if len(associatedCommits) > 0 {
-		sb.WriteString("\n")
-		fmt.Fprintf(&sb, "Commits: (%d)\n", len(associatedCommits))
-		for _, c := range associatedCommits {
-			fmt.Fprintf(&sb, "  %s %s %s\n", c.ShortSHA, c.Date.Format("2006-01-02"), c.Message)
-		}
-	} else if associatedCommits != nil {
-		// associatedCommits is non-nil but empty - show "no commits found" message
-		sb.WriteString("\nCommits: No commits found on this branch\n")
-	}
-
+	sb.WriteString(formatCheckpointHeader(summary, meta, checkpointID, associatedCommits, author, styles))
 	sb.WriteString("\n")
+	sb.WriteString(styles.horizontalRule(styles.width))
+	sb.WriteString("\n\n")
 
-	// Intent and Outcome from AI summary, or fallback to prompt text
 	if meta.Summary != nil {
-		fmt.Fprintf(&sb, "Intent: %s\n", meta.Summary.Intent)
-		fmt.Fprintf(&sb, "Outcome: %s\n", meta.Summary.Outcome)
+		md := buildSummaryMarkdown(meta.Summary)
+		if verbose || full {
+			md += buildFilesMarkdown(meta.FilesTouched)
+		}
+		if shouldUseColor(w) {
+			rendered, err := defaultRenderTerminalMarkdown(w, md)
+			if err != nil {
+				logging.Debug(context.Background(), "explain markdown render failed", slog.String("error", err.Error()))
+				sb.WriteString(md)
+			} else {
+				sb.WriteString(rendered)
+			}
+		} else {
+			sb.WriteString(md)
+		}
 	} else {
-		// Fallback: use first line of scoped prompts for intent,
-		// or fall back to result.Prompts for backwards compatibility with older checkpoints
 		intent := "(not generated)"
 		if len(scopedPrompts) > 0 && scopedPrompts[0] != "" {
 			intent = strategy.TruncateDescription(scopedPrompts[0], maxIntentDisplayLength)
 		} else if content.Prompts != "" {
-			// Backwards compatibility: use stored prompts if no transcript available
 			lines := strings.Split(content.Prompts, "\n")
 			if len(lines) > 0 && lines[0] != "" {
 				intent = strategy.TruncateDescription(lines[0], maxIntentDisplayLength)
@@ -1369,30 +1365,30 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 		}
 		fmt.Fprintf(&sb, "Intent: %s\n", intent)
 		sb.WriteString("Outcome: (not generated)\n")
-	}
 
-	// Verbose: add learnings, friction, files, and scoped transcript
-	if verbose || full {
-		// AI Summary details (learnings, friction, open items)
-		if meta.Summary != nil {
-			formatSummaryDetails(&sb, meta.Summary)
-		}
-
-		sb.WriteString("\n")
-
-		// Files section
-		if len(meta.FilesTouched) > 0 {
-			fmt.Fprintf(&sb, "Files: (%d)\n", len(meta.FilesTouched))
-			for _, file := range meta.FilesTouched {
-				fmt.Fprintf(&sb, "  - %s\n", file)
+		if verbose || full {
+			sb.WriteString("\n")
+			if len(meta.FilesTouched) > 0 {
+				fmt.Fprintf(&sb, "Files: (%d)\n", len(meta.FilesTouched))
+				for _, file := range meta.FilesTouched {
+					fmt.Fprintf(&sb, "  - %s\n", file)
+				}
+			} else {
+				sb.WriteString("Files: (none)\n")
 			}
-		} else {
-			sb.WriteString("Files: (none)\n")
 		}
 	}
 
-	// Transcript section: full shows entire session, verbose shows checkpoint scope
-	appendTranscriptSection(&sb, verbose, full, content.Transcript, scopedTranscript, content.Prompts, meta.Agent)
+	if verbose || full {
+		label := "Transcript (checkpoint scope)"
+		if full {
+			label = "Transcript (full session)"
+		}
+		sb.WriteString("\n")
+		sb.WriteString(styles.sectionRule(label, styles.width))
+		sb.WriteString("\n")
+		appendTranscriptSection(&sb, verbose, full, content.Transcript, scopedTranscript, content.Prompts, meta.Agent)
+	}
 
 	return sb.String()
 }
@@ -1404,13 +1400,9 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 func appendTranscriptSection(sb *strings.Builder, verbose, full bool, fullTranscript, scopedTranscript []byte, scopedFallback string, agentType types.AgentType) {
 	switch {
 	case full:
-		sb.WriteString("\n")
-		sb.WriteString("Transcript (full session):\n")
 		sb.WriteString(formatTranscriptBytes(fullTranscript, "", agentType))
 
 	case verbose:
-		sb.WriteString("\n")
-		sb.WriteString("Transcript (checkpoint scope):\n")
 		sb.WriteString(formatTranscriptBytes(scopedTranscript, scopedFallback, agentType))
 	}
 }
@@ -1465,6 +1457,166 @@ func buildCondensedCompactTranscriptEntries(transcriptBytes []byte) ([]summarize
 	}
 
 	return entries, nil
+}
+
+// formatCheckpointHeader builds the metadata block above the summary body.
+// When color is enabled, values are styled with the shared status palette;
+// otherwise the same compact shape is returned as plain text.
+func formatCheckpointHeader(
+	summary *checkpoint.CheckpointSummary,
+	meta checkpoint.CommittedMetadata,
+	cpID id.CheckpointID,
+	commits []associatedCommit,
+	author checkpoint.Author,
+	styles statusStyles,
+) string {
+	var sb strings.Builder
+
+	headline := "● Checkpoint " + cpID.String()
+	if styles.colorEnabled {
+		bullet := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
+		key := styles.render(styles.bold, "Checkpoint")
+		val := styles.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), cpID.String())
+		headline = bullet + " " + key + " " + val
+	}
+	sb.WriteString(headline)
+	sb.WriteString("\n")
+
+	writeRow := func(label, value string) {
+		paddedLabel := fmt.Sprintf("%-9s", label)
+		if styles.colorEnabled {
+			paddedLabel = styles.render(styles.dim, paddedLabel)
+		}
+		fmt.Fprintf(&sb, "  %s%s\n", paddedLabel, value)
+	}
+
+	writeRow("session", meta.SessionID)
+	writeRow("created", meta.CreatedAt.Format("2006-01-02 15:04:05"))
+	if author.Name != "" {
+		writeRow("author", fmt.Sprintf("%s <%s>", author.Name, author.Email))
+	}
+
+	tokenUsage := meta.TokenUsage
+	if tokenUsage == nil && summary != nil {
+		tokenUsage = summary.TokenUsage
+	}
+	if tokenUsage != nil {
+		total := tokenUsage.InputTokens + tokenUsage.CacheCreationTokens +
+			tokenUsage.CacheReadTokens + tokenUsage.OutputTokens
+		tokensVal := formatTokenCount(total)
+		if styles.colorEnabled {
+			tokensVal = styles.render(styles.yellow, tokensVal)
+		}
+		writeRow("tokens", tokensVal)
+	}
+
+	switch {
+	case commits == nil:
+	case len(commits) == 0:
+		writeRow("commits", "(none on this branch)")
+	case len(commits) == 1:
+		c := commits[0]
+		writeRow("commits", fmt.Sprintf("%s %s", c.ShortSHA, c.Message))
+	default:
+		writeRow("commits", fmt.Sprintf("(%d)", len(commits)))
+		for _, c := range commits {
+			fmt.Fprintf(&sb, "           %s %s %s\n",
+				c.ShortSHA, c.Date.Format("2006-01-02"), c.Message)
+		}
+	}
+
+	return sb.String()
+}
+
+// buildFilesMarkdown renders touched files as a markdown block for verbose
+// and full output when an AI summary is present.
+func buildFilesMarkdown(files []string) string {
+	if len(files) == 0 {
+		return "\n## Files\n\n*(none)*\n"
+	}
+	var sb strings.Builder
+	sb.WriteString("\n## Files\n\n")
+	for _, f := range files {
+		fmt.Fprintf(&sb, "- %s\n", f)
+	}
+	return sb.String()
+}
+
+// buildSummaryMarkdown renders a checkpoint AI summary into the brand
+// markdown shape used by entire's TTY renderer. The output is also the
+// source of truth for non-TTY callers, which write it verbatim.
+func buildSummaryMarkdown(s *checkpoint.Summary) string {
+	if s == nil {
+		return ""
+	}
+	var sb strings.Builder
+
+	fmt.Fprintf(&sb, "## Intent\n\n%s\n\n", escapeSummaryText(s.Intent))
+	fmt.Fprintf(&sb, "## Outcome\n\n%s\n\n", escapeSummaryText(s.Outcome))
+
+	if hasAnyLearning(s.Learnings) {
+		sb.WriteString("## Learnings\n\n")
+		if len(s.Learnings.Repo) > 0 {
+			sb.WriteString("### Repository\n\n")
+			for _, item := range s.Learnings.Repo {
+				fmt.Fprintf(&sb, "- %s\n", escapeSummaryText(item))
+			}
+			sb.WriteString("\n")
+		}
+		if len(s.Learnings.Code) > 0 {
+			sb.WriteString("### Code\n\n")
+			for _, item := range s.Learnings.Code {
+				fmt.Fprintf(&sb, "- %s\n", formatCodeLearning(item))
+			}
+			sb.WriteString("\n")
+		}
+		if len(s.Learnings.Workflow) > 0 {
+			sb.WriteString("### Workflow\n\n")
+			for _, item := range s.Learnings.Workflow {
+				fmt.Fprintf(&sb, "- %s\n", escapeSummaryText(item))
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	if len(s.Friction) > 0 {
+		sb.WriteString("## Friction\n\n")
+		for _, item := range s.Friction {
+			fmt.Fprintf(&sb, "- %s\n", escapeSummaryText(item))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(s.OpenItems) > 0 {
+		sb.WriteString("## Open Items\n\n")
+		for _, item := range s.OpenItems {
+			fmt.Fprintf(&sb, "- %s\n", escapeSummaryText(item))
+		}
+		sb.WriteString("\n")
+	}
+
+	return strings.TrimRight(sb.String(), "\n") + "\n"
+}
+
+func hasAnyLearning(l checkpoint.LearningsSummary) bool {
+	return len(l.Repo) > 0 || len(l.Code) > 0 || len(l.Workflow) > 0
+}
+
+func formatCodeLearning(c checkpoint.CodeLearning) string {
+	path := escapeSummaryText(c.Path)
+	finding := escapeSummaryText(c.Finding)
+	switch {
+	case c.Line > 0 && c.EndLine > 0:
+		return fmt.Sprintf("`%s:%d-%d` — %s", path, c.Line, c.EndLine, finding)
+	case c.Line > 0:
+		return fmt.Sprintf("`%s:%d` — %s", path, c.Line, finding)
+	default:
+		return fmt.Sprintf("`%s` — %s", path, finding)
+	}
+}
+
+func escapeSummaryText(s string) string {
+	return strings.ReplaceAll(strings.TrimSpace(s), "`", "‘")
 }
 
 // formatSummaryDetails formats the detailed sections of an AI summary.
@@ -2061,6 +2213,29 @@ func formatSessionInfo(session *strategy.Session, sourceRef string, checkpoints 
 	return sb.String()
 }
 
+// pagerLookupEnv is overridable for tests so pager env-gate behavior can be
+// asserted without depending on the host's PAGER / LESS settings.
+var pagerLookupEnv = os.Getenv
+
+// buildPagerCmd constructs the pager subprocess and injects LESS=-R when the
+// default Unix pager is less and the user has not customized PAGER or LESS.
+func buildPagerCmd(ctx context.Context) (*exec.Cmd, string) {
+	pager := pagerLookupEnv(pagerEnvVar)
+	if pager == "" {
+		if runtime.GOOS == windowsGOOS {
+			pager = "more"
+		} else {
+			pager = lessPagerName
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, pager)
+	if pager == lessPagerName && pagerLookupEnv(pagerEnvVar) == "" && pagerLookupEnv(lessEnvVar) == "" {
+		cmd.Env = append(os.Environ(), lessRawControlEnv)
+	}
+	return cmd, pager
+}
+
 // outputWithPager outputs content through a pager if stdout is a terminal and content is long.
 func outputWithPager(w io.Writer, content string) {
 	// Check if we're writing to stdout and it's a terminal
@@ -2076,21 +2251,12 @@ func outputWithPager(w io.Writer, content string) {
 
 		// Use pager if content exceeds terminal height
 		if lineCount > height-2 {
-			pager := os.Getenv("PAGER")
-			if pager == "" {
-				if runtime.GOOS == "windows" {
-					pager = "more"
-				} else {
-					pager = "less"
-				}
-			}
-
 			// Use context.Background() intentionally — pagers are interactive
 			// processes that handle signals (including SIGINT) themselves.
 			// Using the cancellable ctx would cause exec.CommandContext to
 			// SIGKILL the pager on Ctrl+C, preventing it from restoring
 			// terminal state (raw mode, echo, etc.).
-			cmd := exec.CommandContext(context.Background(), pager)
+			cmd, _ := buildPagerCmd(context.Background())
 			cmd.Stdin = strings.NewReader(content)
 			cmd.Stdout = f
 			cmd.Stderr = os.Stderr

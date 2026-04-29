@@ -38,7 +38,7 @@ func TestExplainCheckpoint(t *testing.T) {
 		s.Git(t, "checkout", mainBranch)
 
 		out := entire.Explain(t, s.Dir, checkpointID)
-		assert.Contains(t, out, "Checkpoint: "+checkpointID, "explain output should include the checkpoint ID")
+		assert.Contains(t, out, "● Checkpoint "+checkpointID, "explain output should include the checkpoint ID")
 		assert.Contains(t, out, "feature module", "explain output should include the checkpoint intent")
 	})
 }
@@ -85,7 +85,7 @@ func TestExplainCheckpointFromClonedRepo(t *testing.T) {
 		testutil.CommitIfDirty(t, cloneDir, "Enable entire in clone")
 
 		out := entire.Explain(t, cloneDir, checkpointID)
-		assert.Contains(t, out, "Checkpoint: "+checkpointID, "explain output should include the checkpoint ID")
+		assert.Contains(t, out, "● Checkpoint "+checkpointID, "explain output should include the checkpoint ID")
 		assert.Contains(t, out, "remote checkpoint", "explain output should include the checkpoint intent")
 	})
 }

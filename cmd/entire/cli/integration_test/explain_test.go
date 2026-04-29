@@ -156,7 +156,7 @@ func TestExplain_CommitWithCheckpointTrailer(t *testing.T) {
 	// We expect an error because the checkpoint abc123def456 doesn't exist
 	if err == nil {
 		// If it succeeded, check if it found the checkpoint (it shouldn't)
-		if strings.Contains(output, "Checkpoint:") {
+		if strings.Contains(output, "● Checkpoint") {
 			t.Logf("checkpoint was found (unexpected but ok if test created one)")
 		}
 	} else {
@@ -197,7 +197,7 @@ func TestExplain_CheckpointV2EnabledFallsBackToV1(t *testing.T) {
 	output, err := env.RunCLIWithError("explain", "--checkpoint", checkpointID[:6])
 	require.NoError(t, err, "expected explain checkpoint fallback to v1 to succeed: %s", output)
 
-	if !strings.Contains(output, "Checkpoint: "+checkpointID) {
+	if !strings.Contains(output, "● Checkpoint "+checkpointID) {
 		t.Errorf("expected checkpoint ID in output, got: %s", output)
 	}
 	if !strings.Contains(output, "Intent: Create v1 fallback file") {
@@ -317,7 +317,7 @@ func TestExplain_CheckpointV2NoFullTranscriptUsesCompact(t *testing.T) {
 	output, err := env.RunCLIWithError("explain", "--checkpoint", checkpointID[:6])
 	require.NoError(t, err, "expected explain to succeed with compact transcript when /full/* is missing: %s", output)
 
-	require.Contains(t, output, "Checkpoint: "+checkpointID)
+	require.Contains(t, output, "● Checkpoint "+checkpointID)
 	// Intent should come from the v2 compact transcript, not the v1 marker.
 	require.Contains(t, output, "Intent: Create compact-only file")
 	require.NotContains(t, output, "v1 marker prompt",
@@ -362,7 +362,7 @@ func TestExplain_CheckpointV2MalformedFallsBackToV1(t *testing.T) {
 	output, err := env.RunCLIWithError("explain", "--checkpoint", checkpointID[:6])
 	require.NoError(t, err, "expected explain to fall back to v1 when v2 is malformed: %s", output)
 
-	require.Contains(t, output, "Checkpoint: "+checkpointID)
+	require.Contains(t, output, "● Checkpoint "+checkpointID)
 	require.Contains(t, output, "Intent: Create v1 resilience file")
 }
 
