@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/compact"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
@@ -31,16 +32,12 @@ func newMigrateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "migrate",
 		Short:  "Migrate Entire data to newer formats",
-		Long:   `Migrate Entire data to newer formats. Currently supports migrating v1 checkpoints to v2.`,
+		Long:   `Migrate Entire data to newer formats. Currently supports migrating v1 checkpoints to v2 or gmeta.`,
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if checkpointsFlag == "" {
 				return cmd.Help()
 			}
-			if checkpointsFlag != "v2" {
-				return fmt.Errorf("unsupported checkpoints version: %q (only \"v2\" is supported)", checkpointsFlag)
-			}
-
 			ctx := cmd.Context()
 
 			if _, err := paths.WorktreeRoot(ctx); err != nil {
@@ -55,7 +52,14 @@ func newMigrateCmd() *cobra.Command {
 			} else {
 				defer logging.Close()
 			}
-			return runMigrateCheckpointsV2(ctx, cmd, forceFlag)
+			switch checkpointsFlag {
+			case "v2":
+				return runMigrateCheckpointsV2(ctx, cmd, forceFlag)
+			case "gmeta":
+				return runMigrateCheckpointsGmeta(ctx, cmd)
+			default:
+				return fmt.Errorf("unsupported checkpoints version: %q (supported: \"v2\", \"gmeta\")", checkpointsFlag)
+			}
 		},
 	}
 
@@ -102,6 +106,34 @@ func runMigrateCheckpointsV2(ctx context.Context, cmd *cobra.Command, force bool
 	return nil
 }
 
+func runMigrateCheckpointsGmeta(ctx context.Context, cmd *cobra.Command) error {
+	repo, err := strategy.OpenRepository(ctx)
+	if err != nil {
+		cmd.SilenceUsage = true
+		fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run from within a git repository.")
+		return NewSilentError(err)
+	}
+
+	v1Store := checkpoint.NewGitStore(repo)
+	gmetaStore := checkpoint.NewGmetaStore(repo)
+	out := cmd.OutOrStdout()
+
+	result, err := migrateCheckpointsGmeta(ctx, v1Store, gmetaStore, out)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(out, "\nMigration complete: %d migrated, %d skipped, %d failed\n",
+		result.migrated, result.skipped, result.failed)
+
+	if result.failed > 0 {
+		fmt.Fprintf(out, "%d checkpoint(s) failed to migrate. Check .entire/logs/ for details.\n", result.failed)
+		return NewSilentError(fmt.Errorf("%d checkpoint(s) failed to migrate", result.failed))
+	}
+
+	return nil
+}
+
 var (
 	errAlreadyMigrated          = errors.New("already migrated")
 	errTranscriptNotGeneratable = errors.New("transcript.jsonl could not be generated")
@@ -110,6 +142,11 @@ var (
 const migrateRemoteName = "origin"
 
 func migrateCheckpointsV2(ctx context.Context, repo *git.Repository, v1Store *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, out io.Writer, force bool) (*migrateResult, error) {
+	var gmetaStore *checkpoint.GmetaStore
+	if settings.IsGmetaEnabled(ctx) {
+		gmetaStore = checkpoint.NewGmetaStore(repo)
+	}
+
 	v1List, err := v1Store.ListCommitted(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list v1 checkpoints: %w", err)
@@ -131,7 +168,7 @@ func migrateCheckpointsV2(ctx context.Context, repo *git.Repository, v1Store *ch
 	for i, info := range v1List {
 		prefix := fmt.Sprintf("  [%d/%d] Migrating checkpoint %s...", i+1, total, info.CheckpointID)
 
-		if migrateErr := migrateOneCheckpoint(ctx, repo, v1Store, v2Store, info, out, prefix, force); migrateErr != nil {
+		if migrateErr := migrateOneCheckpoint(ctx, repo, v1Store, v2Store, gmetaStore, info, out, prefix, force); migrateErr != nil {
 			switch {
 			case errors.Is(migrateErr, errAlreadyMigrated):
 				fmt.Fprintf(out, "%s skipped (already in v2)\n", prefix)
@@ -156,7 +193,47 @@ func migrateCheckpointsV2(ctx context.Context, repo *git.Repository, v1Store *ch
 	return result, nil
 }
 
-func migrateOneCheckpoint(ctx context.Context, repo *git.Repository, v1Store *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, info checkpoint.CommittedInfo, out io.Writer, prefix string, force bool) error {
+func migrateCheckpointsGmeta(ctx context.Context, v1Store *checkpoint.GitStore, gmetaStore *checkpoint.GmetaStore, out io.Writer) (*migrateResult, error) {
+	v1List, err := v1Store.ListCommitted(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list v1 checkpoints: %w", err)
+	}
+
+	if len(v1List) == 0 {
+		fmt.Fprintln(out, "Nothing to migrate: no v1 checkpoints found")
+		return &migrateResult{}, nil
+	}
+
+	fmt.Fprintln(out, "Migrating v1 checkpoints to gmeta...")
+	total := len(v1List)
+	result := &migrateResult{}
+
+	for i, info := range v1List {
+		prefix := fmt.Sprintf("  [%d/%d] Migrating checkpoint %s...", i+1, total, info.CheckpointID)
+
+		if migrateErr := migrateOneCheckpointGmeta(ctx, v1Store, gmetaStore, info, out, prefix); migrateErr != nil {
+			switch {
+			case errors.Is(migrateErr, errAlreadyMigrated):
+				fmt.Fprintf(out, "%s skipped (already in gmeta)\n", prefix)
+				result.skipped++
+			default:
+				fmt.Fprintf(out, "%s failed\n", prefix)
+				logging.Error(ctx, "gmeta checkpoint migration failed",
+					slog.String("checkpoint_id", string(info.CheckpointID)),
+					slog.String("error", migrateErr.Error()),
+				)
+				result.failed++
+			}
+			continue
+		}
+
+		result.migrated++
+	}
+
+	return result, nil
+}
+
+func migrateOneCheckpoint(ctx context.Context, repo *git.Repository, v1Store *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, gmetaStore *checkpoint.GmetaStore, info checkpoint.CommittedInfo, out io.Writer, prefix string, force bool) error {
 	existing, err := v2Store.ReadCommitted(ctx, info.CheckpointID)
 	if err != nil {
 		return fmt.Errorf("failed to check v2 for checkpoint %s: %w", info.CheckpointID, err)
@@ -226,6 +303,17 @@ func migrateOneCheckpoint(ctx context.Context, repo *git.Repository, v1Store *ch
 		if writeErr := v2Store.WriteCommitted(ctx, opts); writeErr != nil {
 			return fmt.Errorf("failed to write v2 session %d: %w", sessionIdx, writeErr)
 		}
+
+		// Gmeta dual-write (session data only, no task metadata)
+		if gmetaStore != nil && !content.Metadata.IsTask {
+			if gmetaErr := gmetaStore.WriteCommitted(ctx, opts); gmetaErr != nil {
+				logging.Warn(ctx, "gmeta migrate write failed",
+					slog.String("checkpoint_id", string(info.CheckpointID)),
+					slog.Int("session_index", sessionIdx),
+					slog.String("error", gmetaErr.Error()),
+				)
+			}
+		}
 	}
 
 	// Copy task metadata trees from v1 to v2 /full/current
@@ -244,6 +332,55 @@ func migrateOneCheckpoint(ctx context.Context, repo *git.Repository, v1Store *ch
 		fmt.Fprintf(out, "%s done\n", prefix)
 	}
 
+	return nil
+}
+
+func migrateOneCheckpointGmeta(ctx context.Context, v1Store *checkpoint.GitStore, gmetaStore *checkpoint.GmetaStore, info checkpoint.CommittedInfo, out io.Writer, prefix string) error {
+	existing, err := gmetaStore.ReadCommitted(ctx, info.CheckpointID)
+	if err != nil {
+		return fmt.Errorf("failed to check gmeta for checkpoint %s: %w", info.CheckpointID, err)
+	}
+	if existing != nil {
+		return errAlreadyMigrated
+	}
+
+	summary, err := v1Store.ReadCommitted(ctx, info.CheckpointID)
+	if err != nil {
+		return fmt.Errorf("failed to read v1 summary: %w", err)
+	}
+	if summary == nil {
+		return fmt.Errorf("v1 checkpoint %s has no summary", info.CheckpointID)
+	}
+
+	wroteAnySession := false
+	for sessionIdx := range len(summary.Sessions) {
+		content, readErr := v1Store.ReadSessionContent(ctx, info.CheckpointID, sessionIdx)
+		if readErr != nil {
+			return fmt.Errorf("failed to read v1 session %d: %w", sessionIdx, readErr)
+		}
+		if content.Metadata.IsTask {
+			continue
+		}
+
+		opts := buildMigrateWriteOpts(content, info)
+		if writeErr := gmetaStore.WriteCommitted(ctx, opts); writeErr != nil {
+			return fmt.Errorf("failed to write gmeta session %d: %w", sessionIdx, writeErr)
+		}
+		wroteAnySession = true
+	}
+
+	if !wroteAnySession {
+		fmt.Fprintf(out, "%s skipped (no session-level data for gmeta)\n", prefix)
+		return errAlreadyMigrated
+	}
+
+	if summary.CombinedAttribution != nil {
+		if updateErr := gmetaStore.UpdateCheckpointSummary(ctx, info.CheckpointID, summary.CombinedAttribution); updateErr != nil {
+			return fmt.Errorf("failed to write gmeta combined attribution: %w", updateErr)
+		}
+	}
+
+	fmt.Fprintf(out, "%s done\n", prefix)
 	return nil
 }
 

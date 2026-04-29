@@ -47,5 +47,12 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 		pushV2Span.End()
 	}
 
+	// Push gmeta ref when gmeta is enabled.
+	if settings.IsGmetaEnabled(ctx) {
+		_, pushGmetaSpan := perf.Start(ctx, "push_gmeta_ref")
+		pushGmetaRef(ctx, ps.pushTarget())
+		pushGmetaSpan.End()
+	}
+
 	return err
 }

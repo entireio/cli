@@ -788,6 +788,116 @@ func TestIsCheckpointsV2Enabled_LocalOverride(t *testing.T) {
 	}
 }
 
+func TestIsGmetaEnabled_DefaultsFalse(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{Enabled: true}
+	if s.IsGmetaEnabled() {
+		t.Error("expected IsGmetaEnabled to default to false")
+	}
+}
+
+func TestIsGmetaEnabled_EmptyStrategyOptions(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{Enabled: true, StrategyOptions: map[string]any{}}
+	if s.IsGmetaEnabled() {
+		t.Error("expected IsGmetaEnabled to be false with empty strategy_options")
+	}
+}
+
+func TestIsGmetaEnabled_True(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{
+		Enabled:         true,
+		StrategyOptions: map[string]any{"gmeta": true},
+	}
+	if !s.IsGmetaEnabled() {
+		t.Error("expected IsGmetaEnabled to be true")
+	}
+}
+
+func TestIsGmetaEnabled_ExplicitlyFalse(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{
+		Enabled:         true,
+		StrategyOptions: map[string]any{"gmeta": false},
+	}
+	if s.IsGmetaEnabled() {
+		t.Error("expected IsGmetaEnabled to be false when explicitly set to false")
+	}
+}
+
+func TestIsGmetaEnabled_WrongType(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{
+		Enabled:         true,
+		StrategyOptions: map[string]any{"gmeta": "yes"},
+	}
+	if s.IsGmetaEnabled() {
+		t.Error("expected IsGmetaEnabled to be false for non-bool value")
+	}
+}
+
+func TestIsGmetaEnabled_LoadFromFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	settingsFile := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true, "strategy_options": {"gmeta": true}}`), 0o644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatalf("failed to create .git directory: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !s.IsGmetaEnabled() {
+		t.Error("expected IsGmetaEnabled to be true after loading from file")
+	}
+}
+
+func TestIsGmetaEnabled_LocalOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	settingsFile := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+
+	localFile := filepath.Join(entireDir, "settings.local.json")
+	if err := os.WriteFile(localFile, []byte(`{"strategy_options": {"gmeta": true}}`), 0o644); err != nil {
+		t.Fatalf("failed to write local settings file: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatalf("failed to create .git directory: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !s.IsGmetaEnabled() {
+		t.Error("expected IsGmetaEnabled to be true from local override")
+	}
+}
+
 func TestCheckpointsVersion(t *testing.T) {
 	t.Parallel()
 

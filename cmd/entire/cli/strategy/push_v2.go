@@ -420,6 +420,168 @@ func pushV2Refs(ctx context.Context, target string) {
 	_ = pushRefIfNeeded(ctx, target, plumbing.ReferenceName(paths.V2FullRefPrefix+latest)) //nolint:errcheck // pushRefIfNeeded handles errors internally
 }
 
+// pushGmetaRef pushes the gmeta local ref to the remote as refs/meta/main.
+// Per gmeta spec, local metadata lives at refs/meta/local/main but is pushed
+// to refs/meta/main on the remote server.
+func pushGmetaRef(ctx context.Context, target string) {
+	localRef := plumbing.ReferenceName(checkpoint.GmetaRefName)
+
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return
+	}
+	if _, err := repo.Reference(localRef, true); err != nil {
+		return // Ref doesn't exist locally, nothing to push
+	}
+
+	if err := doPushMappedRef(ctx, target, localRef, plumbing.ReferenceName(checkpoint.GmetaRemoteRefName), "gmeta"); err != nil {
+		logging.Warn(ctx, "gmeta push failed",
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+func doPushMappedRef(ctx context.Context, target string, localRef, remoteRef plumbing.ReferenceName, label string) error {
+	displayTarget := target
+	if remote.IsURL(target) {
+		displayTarget = "checkpoint remote"
+	}
+
+	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", label, displayTarget)
+	stop := startProgressDots(os.Stderr)
+
+	if result, err := tryPushMappedRef(ctx, target, localRef, remoteRef); err == nil {
+		finishPush(ctx, stop, result, target)
+		return nil
+	}
+	stop("")
+
+	fmt.Fprintf(os.Stderr, "[entire] Syncing %s with remote...", label)
+	stop = startProgressDots(os.Stderr)
+
+	if err := fetchAndMergeMappedRef(ctx, target, localRef, remoteRef); err != nil {
+		stop("")
+		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", label, err)
+		printCheckpointRemoteHint(target)
+		return nil
+	}
+	stop(" done")
+
+	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", label, displayTarget)
+	stop = startProgressDots(os.Stderr)
+
+	if result, err := tryPushMappedRef(ctx, target, localRef, remoteRef); err != nil {
+		stop("")
+		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", label, err)
+		printCheckpointRemoteHint(target)
+	} else {
+		finishPush(ctx, stop, result, target)
+	}
+
+	return nil
+}
+
+func tryPushMappedRef(ctx context.Context, target string, localRef, remoteRef plumbing.ReferenceName) (pushResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	refSpec := fmt.Sprintf("%s:%s", localRef, remoteRef)
+	result, err := remote.Push(ctx, target, refSpec)
+	outputStr := result.Output
+	if err != nil {
+		if strings.Contains(outputStr, "non-fast-forward") || strings.Contains(outputStr, "rejected") {
+			return pushResult{}, errors.New("non-fast-forward")
+		}
+		return pushResult{}, fmt.Errorf("push failed: %s", outputStr)
+	}
+
+	return parsePushResult(outputStr), nil
+}
+
+func fetchAndMergeMappedRef(ctx context.Context, target string, localRef, remoteRef plumbing.ReferenceName) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
+	if err != nil {
+		return fmt.Errorf("resolve fetch target: %w", err)
+	}
+
+	tmpRefName := plumbing.ReferenceName("refs/entire-fetch-tmp/" + strings.NewReplacer("/", "-", ":", "-").Replace(string(remoteRef)))
+	refSpec := fmt.Sprintf("+%s:%s", remoteRef, tmpRefName)
+	if output, err := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
+	}); err != nil {
+		return fmt.Errorf("fetch failed: %s", output)
+	}
+
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+	defer func() {
+		_ = repo.Storer.RemoveReference(tmpRefName) //nolint:errcheck // cleanup is best-effort
+	}()
+
+	localReference, err := repo.Reference(localRef, true)
+	if err != nil {
+		return fmt.Errorf("failed to get local ref: %w", err)
+	}
+	localCommit, err := repo.CommitObject(localReference.Hash())
+	if err != nil {
+		return fmt.Errorf("failed to get local commit: %w", err)
+	}
+	localTree, err := localCommit.Tree()
+	if err != nil {
+		return fmt.Errorf("failed to get local tree: %w", err)
+	}
+
+	remoteReference, err := repo.Reference(tmpRefName, true)
+	if err != nil {
+		return fmt.Errorf("failed to get remote ref: %w", err)
+	}
+	remoteCommit, err := repo.CommitObject(remoteReference.Hash())
+	if err != nil {
+		return fmt.Errorf("failed to get remote commit: %w", err)
+	}
+	remoteTree, err := remoteCommit.Tree()
+	if err != nil {
+		return fmt.Errorf("failed to get remote tree: %w", err)
+	}
+
+	if localReference.Hash() == remoteReference.Hash() {
+		return nil
+	}
+
+	entries := make(map[string]object.TreeEntry)
+	if err := checkpoint.FlattenTree(repo, remoteTree, "", entries); err != nil {
+		return fmt.Errorf("failed to flatten remote tree: %w", err)
+	}
+	if err := checkpoint.FlattenTree(repo, localTree, "", entries); err != nil {
+		return fmt.Errorf("failed to flatten local tree: %w", err)
+	}
+
+	mergedTreeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, entries)
+	if err != nil {
+		return fmt.Errorf("failed to build merged tree: %w", err)
+	}
+
+	mergeCommitHash, err := createMergeCommitCommon(ctx, repo, mergedTreeHash,
+		[]plumbing.Hash{localReference.Hash(), remoteReference.Hash()},
+		"Merge remote "+string(remoteRef))
+	if err != nil {
+		return fmt.Errorf("failed to create merge commit: %w", err)
+	}
+
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(localRef, mergeCommitHash)); err != nil {
+		return fmt.Errorf("failed to update local ref: %w", err)
+	}
+
+	return nil
+}
+
 // shortRefName returns a human-readable short form of a ref name for log output.
 // e.g., "refs/entire/checkpoints/v2/main" -> "v2/main"
 func shortRefName(refName plumbing.ReferenceName) string {

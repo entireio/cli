@@ -2,6 +2,8 @@ package strategy
 
 import (
 	"context"
+	"crypto/sha1"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -145,6 +147,20 @@ func writeV2Checkpoint(t *testing.T, repo *git.Repository, cpID id.CheckpointID,
 	require.NoError(t, err)
 }
 
+func writeGmetaCheckpoint(t *testing.T, repo *git.Repository, cpID id.CheckpointID, sessionID string) {
+	t.Helper()
+	store := checkpoint.NewGmetaStore(repo)
+	err := store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    sessionID,
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"from":"` + sessionID + `"}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})
+	require.NoError(t, err)
+}
+
 // TestFetchAndMergeRef_MergesTrees verifies that fetchAndMergeRef correctly
 // merges divergent trees from two repos sharing a common ref.
 // Not parallel: uses t.Chdir()
@@ -259,6 +275,76 @@ func TestPushV2Refs_PushesAllRefs(t *testing.T) {
 
 	_, err = bareRepo.Reference(plumbing.ReferenceName(paths.V2FullRefPrefix+"0000000000001"), true)
 	assert.Error(t, err, "older archived generation should NOT be pushed")
+}
+
+// TestPushGmetaRef_RecoversFromNonFastForward verifies that gmeta push fetches,
+// merges, and retries when another writer has already updated refs/meta/main.
+// Not parallel: uses t.Chdir().
+func TestPushGmetaRef_RecoversFromNonFastForward(t *testing.T) {
+	ctx := context.Background()
+
+	srcDir := setupRepoWithV2Ref(t)
+	srcRepo, err := git.PlainOpen(srcDir)
+	require.NoError(t, err)
+	writeGmetaCheckpoint(t, srcRepo, id.MustCheckpointID("aabbccddeeff"), "shared-session")
+
+	bareDir := t.TempDir()
+	initCmd := exec.CommandContext(ctx, "git", "init", "--bare")
+	initCmd.Dir = bareDir
+	initCmd.Env = testutil.GitIsolatedEnv()
+	require.NoError(t, initCmd.Run())
+
+	pushCmd := exec.CommandContext(ctx, "git", "push", bareDir,
+		checkpoint.GmetaRefName+":"+checkpoint.GmetaRemoteRefName)
+	pushCmd.Dir = srcDir
+	require.NoError(t, pushCmd.Run())
+
+	localDir := setupRepoWithV2Ref(t)
+	localFetch := exec.CommandContext(ctx, "git", "fetch", bareDir,
+		"+"+checkpoint.GmetaRemoteRefName+":"+checkpoint.GmetaRefName)
+	localFetch.Dir = localDir
+	require.NoError(t, localFetch.Run())
+
+	localRepo, err := git.PlainOpen(localDir)
+	require.NoError(t, err)
+	writeGmetaCheckpoint(t, localRepo, id.MustCheckpointID("112233445566"), "local-session")
+
+	remoteDir := setupRepoWithV2Ref(t)
+	remoteFetch := exec.CommandContext(ctx, "git", "fetch", bareDir,
+		"+"+checkpoint.GmetaRemoteRefName+":"+checkpoint.GmetaRefName)
+	remoteFetch.Dir = remoteDir
+	require.NoError(t, remoteFetch.Run())
+
+	remoteRepo, err := git.PlainOpen(remoteDir)
+	require.NoError(t, err)
+	writeGmetaCheckpoint(t, remoteRepo, id.MustCheckpointID("ffeeddccbbaa"), "remote-session")
+
+	pushRemote := exec.CommandContext(ctx, "git", "push", bareDir,
+		checkpoint.GmetaRefName+":"+checkpoint.GmetaRemoteRefName)
+	pushRemote.Dir = remoteDir
+	require.NoError(t, pushRemote.Run())
+
+	t.Chdir(localDir)
+	pushGmetaRef(ctx, bareDir)
+
+	bareRepo, err := git.PlainOpen(bareDir)
+	require.NoError(t, err)
+	ref, err := bareRepo.Reference(plumbing.ReferenceName(checkpoint.GmetaRemoteRefName), true)
+	require.NoError(t, err)
+	commit, err := bareRepo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+
+	_, err = tree.Tree("change-id/" + gmetaFanoutForTest("112233445566") + "/112233445566")
+	require.NoError(t, err, "remote ref should contain local checkpoint after recovery push")
+	_, err = tree.Tree("change-id/" + gmetaFanoutForTest("ffeeddccbbaa") + "/ffeeddccbbaa")
+	require.NoError(t, err, "remote ref should retain remote checkpoint after recovery push")
+}
+
+func gmetaFanoutForTest(value string) string {
+	sum := sha1.Sum([]byte(value)) //nolint:gosec // test helper matches gmeta fanout semantics
+	return fmt.Sprintf("%02x", sum[0])
 }
 
 // TestFetchAndMergeRef_RotationConflict verifies that when /full/current push

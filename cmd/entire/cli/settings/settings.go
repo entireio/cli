@@ -656,6 +656,16 @@ func IsFilteredFetchesEnabled(ctx context.Context) bool {
 	return s.IsFilteredFetchesEnabled()
 }
 
+// IsGmetaEnabled checks if gmeta exchange format writes are enabled in settings.
+// Returns false by default if settings cannot be loaded or the key is missing.
+func IsGmetaEnabled(ctx context.Context) bool {
+	s, err := Load(ctx)
+	if err != nil {
+		return false
+	}
+	return s.IsGmetaEnabled()
+}
+
 // IsSummarizeEnabled checks if auto-summarize is enabled in settings.
 // Returns false by default if settings cannot be loaded or the key is missing.
 func IsSummarizeEnabled(ctx context.Context) bool {
@@ -827,6 +837,15 @@ func (s *EntireSettings) IsFilteredFetchesEnabled() bool {
 		return false
 	}
 	val, ok := s.StrategyOptions["filtered_fetches"].(bool)
+	return ok && val
+}
+
+// IsGmetaEnabled checks if gmeta exchange format writes are enabled.
+func (s *EntireSettings) IsGmetaEnabled() bool {
+	if s.StrategyOptions == nil {
+		return false
+	}
+	val, ok := s.StrategyOptions["gmeta"].(bool)
 	return ok && val
 }
 

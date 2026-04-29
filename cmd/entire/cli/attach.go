@@ -206,6 +206,17 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 		}
 	}
 
+	// Gmeta dual-write (best-effort)
+	if settings.IsGmetaEnabled(logCtx) {
+		gmetaStore := cpkg.NewGmetaStore(repo)
+		if err := gmetaStore.WriteCommitted(ctx, writeOpts); err != nil {
+			logging.Warn(logCtx, "gmeta write failed",
+				slog.String("checkpoint_id", checkpointID.String()),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+
 	// Create or update session state.
 	if err := saveAttachSessionState(logCtx, existingState, sessionID, ag.Type(), transcriptPath, checkpointID, meta, tokenUsage); err != nil {
 		logging.Warn(logCtx, "failed to save session state", "error", err)

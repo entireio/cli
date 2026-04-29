@@ -1195,8 +1195,23 @@ func LookupSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to open git repository: %w", err)
 	}
+
+	// Try v1 first
 	store := NewGitStore(repo)
-	return store.GetSessionLog(ctx, cpID)
+	transcript, sessionID, v1Err := store.GetSessionLog(ctx, cpID)
+	if v1Err == nil {
+		return transcript, sessionID, nil
+	}
+
+	// Fall back to gmeta (best-effort — only if the ref exists)
+	gmetaStore := NewGmetaStore(repo)
+	gTranscript, gSessionID, gErr := gmetaStore.GetSessionLog(ctx, cpID)
+	if gErr == nil {
+		return gTranscript, gSessionID, nil
+	}
+
+	// Return original v1 error
+	return nil, "", v1Err
 }
 
 // UpdateSummary updates the summary field in the latest session's metadata.

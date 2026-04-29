@@ -928,6 +928,20 @@ func resumeSingleSession(ctx context.Context, w, errW io.Writer, ag agent.Agent,
 			}
 		}
 	}
+	if len(logContent) == 0 && settings.IsGmetaEnabled(ctx) {
+		repo, repoErr := openRepository(ctx)
+		if repoErr == nil {
+			gmetaStore := checkpoint.NewGmetaStore(repo)
+			var gmetaErr error
+			logContent, _, gmetaErr = gmetaStore.GetSessionLog(ctx, checkpointID)
+			if gmetaErr != nil {
+				logging.Debug(ctx, "gmeta GetSessionLog failed, falling back to v1",
+					slog.String("checkpoint_id", checkpointID.String()),
+					slog.String("error", gmetaErr.Error()),
+				)
+			}
+		}
+	}
 	if len(logContent) == 0 {
 		logContent, _, err = checkpoint.LookupSessionLog(ctx, checkpointID)
 	}
