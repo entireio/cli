@@ -5846,3 +5846,81 @@ func createCommitWithTree(t *testing.T, repo *git.Repository, treeHash plumbing.
 	}
 	return hash
 }
+
+func TestExtractIntent_PrefersScopedPrompt(t *testing.T) {
+	t.Parallel()
+	got := extractIntent([]string{"add explain --generate flag", "later prompt"}, "fallback prompt\nline2")
+	want := "add explain --generate flag"
+	if got != want {
+		t.Errorf("extractIntent scoped\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestExtractIntent_FallsBackToFirstLineOfContent(t *testing.T) {
+	t.Parallel()
+	got := extractIntent(nil, "first content line\nsecond line")
+	want := "first content line"
+	if got != want {
+		t.Errorf("extractIntent fallback\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestExtractIntent_EmptyReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	if got := extractIntent(nil, ""); got != "" {
+		t.Errorf("extractIntent empty: got %q want empty", got)
+	}
+	if got := extractIntent([]string{""}, ""); got != "" {
+		t.Errorf("extractIntent empty-string-prompt: got %q want empty", got)
+	}
+}
+
+func TestExtractIntent_TruncatesLongPrompts(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("a", 500)
+	got := extractIntent([]string{long}, "")
+	if len(got) >= len(long) {
+		t.Errorf("expected truncation; got %d chars", len(got))
+	}
+}
+
+func TestBuildNoSummaryMarkdown_IntentAndAffordance(t *testing.T) {
+	t.Parallel()
+	got := buildNoSummaryMarkdown("add explain --generate flag", nil, "Run `entire explain --generate abc`.")
+	if !strings.Contains(got, "## Intent\n\nadd explain --generate flag\n") {
+		t.Fatalf("missing intent section:\n%s", got)
+	}
+	// escapeSummaryText replaces every backtick with U+2018 (‘), so both
+	// backticks in "Run `entire explain --generate abc`." map to ‘.
+	if !strings.Contains(got, "## Summary\n\n*Run ‘entire explain --generate abc‘.*\n") {
+		t.Fatalf("missing italic summary affordance:\n%s", got)
+	}
+	if strings.Contains(got, "## Files") {
+		t.Fatalf("did not expect Files when files=nil:\n%s", got)
+	}
+}
+
+func TestBuildNoSummaryMarkdown_RendersFilesWhenProvided(t *testing.T) {
+	t.Parallel()
+	got := buildNoSummaryMarkdown("intent", []string{"a.go", "b.go"}, "hint")
+	if !strings.Contains(got, "## Files (2)\n\n- `a.go`\n- `b.go`\n") {
+		t.Fatalf("expected Files section with count and list:\n%s", got)
+	}
+}
+
+func TestBuildNoSummaryMarkdown_EmptyIntentShowsPlaceholder(t *testing.T) {
+	t.Parallel()
+	got := buildNoSummaryMarkdown("", nil, "hint")
+	if !strings.Contains(got, "## Intent\n\n*(no prompt recorded)*\n") {
+		t.Fatalf("expected italic placeholder:\n%s", got)
+	}
+}
+
+func TestRenderExplainBody_NoColorReturnsRawMarkdown(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer // not a TTY → shouldUseColor false
+	got := renderExplainBody(&buf, "## Intent\n\nfoo\n")
+	if got != "## Intent\n\nfoo\n" {
+		t.Errorf("expected raw markdown when no color\n got: %q", got)
+	}
+}

@@ -1309,6 +1309,67 @@ func extractPromptsFromTranscript(transcriptBytes []byte, agentType types.AgentT
 	return prompts
 }
 
+// extractIntent picks the user-facing intent line from available prompt sources.
+// Preference: first non-empty entry of scopedPrompts, then first non-empty line
+// of fallbackPrompts, then "". Truncates to maxIntentDisplayLength.
+func extractIntent(scopedPrompts []string, fallbackPrompts string) string {
+	for _, p := range scopedPrompts {
+		if p == "" {
+			continue
+		}
+		return strategy.TruncateDescription(p, maxIntentDisplayLength)
+	}
+	for _, line := range strings.Split(fallbackPrompts, "\n") {
+		if line == "" {
+			continue
+		}
+		return strategy.TruncateDescription(line, maxIntentDisplayLength)
+	}
+	return ""
+}
+
+// buildNoSummaryMarkdown renders the body for a checkpoint that does not yet
+// have an AI summary. It mirrors the `## Intent` / `## Summary` / `## Files`
+// shape of the generated case so the brand markdown renderer can take the same
+// path. The italic *summary* paragraph is the affordance pointing the user at
+// `--generate` (or, for temporary checkpoints, at committing first).
+func buildNoSummaryMarkdown(intent string, files []string, summaryHint string) string {
+	var sb strings.Builder
+
+	sb.WriteString("## Intent\n\n")
+	if intent == "" {
+		sb.WriteString("*(no prompt recorded)*\n\n")
+	} else {
+		fmt.Fprintf(&sb, "%s\n\n", escapeSummaryText(intent))
+	}
+
+	fmt.Fprintf(&sb, "## Summary\n\n*%s*\n", escapeSummaryText(summaryHint))
+
+	if len(files) > 0 {
+		fmt.Fprintf(&sb, "\n## Files (%d)\n\n", len(files))
+		for _, f := range files {
+			fmt.Fprintf(&sb, "- `%s`\n", escapeInlineCodeText(f))
+		}
+	}
+
+	return sb.String()
+}
+
+// renderExplainBody routes a markdown body through the brand renderer when
+// the writer supports color, and returns the markdown source verbatim
+// otherwise. Single point of policy for every explain body section.
+func renderExplainBody(w io.Writer, md string) string {
+	if !shouldUseColor(w) {
+		return md
+	}
+	rendered, err := defaultRenderTerminalMarkdown(w, md)
+	if err != nil {
+		logging.Debug(context.Background(), "explain markdown render failed", slog.String("error", err.Error()))
+		return md
+	}
+	return rendered
+}
+
 // formatCheckpointOutput formats checkpoint data based on verbosity level.
 // When verbose is false: summary only (ID, session, timestamp, tokens, intent).
 // When verbose is true: adds files, associated commits, and scoped transcript for this checkpoint.

@@ -150,6 +150,36 @@ func (s statusStyles) failureBullet(label string) string {
 	return fmt.Sprintf("%s %s\n", s.render(s.red, "✗"), s.render(s.bold, label))
 }
 
+// renderIdentity returns identityBullet + metadataRows + horizontalRule + trailing newline.
+// This is the exact shape used by formatCheckpointHeader; rendering an entire
+// header block is one call instead of three.
+func (s statusStyles) renderIdentity(label, id string, rows []explainRow) string {
+	var b strings.Builder
+	b.WriteString(s.identityBullet(label, id))
+	b.WriteString(s.metadataRows(rows))
+	b.WriteString(s.horizontalRule(s.width))
+	b.WriteString("\n")
+	return b.String()
+}
+
+// renderSuccess returns successBullet + metadataRows. No trailing rule (success
+// blocks are short and don't precede a body section).
+func (s statusStyles) renderSuccess(label string, rows []explainRow) string {
+	if len(rows) == 0 {
+		return s.successBullet(label)
+	}
+	return s.successBullet(label) + s.metadataRows(rows)
+}
+
+// renderFailure returns failureBullet + metadataRows. Used when a command
+// prints a styled error block to errW before returning *SilentError.
+func (s statusStyles) renderFailure(label string, rows []explainRow) string {
+	if len(rows) == 0 {
+		return s.failureBullet(label)
+	}
+	return s.failureBullet(label) + s.metadataRows(rows)
+}
+
 // metadataRow renders a single key/value row using a 7-char min-padded label.
 // 7-char-pad + 2-space-gutter is visually equivalent to the existing
 // formatCheckpointHeader's %-9s + no-gutter (see explain.go) for any label up

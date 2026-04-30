@@ -2,6 +2,7 @@ package cli
 
 import (
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -83,5 +84,59 @@ func TestFailureBullet_NoColor(t *testing.T) {
 	want := "✗ No associated Entire checkpoint\n"
 	if got != want {
 		t.Errorf("failureBullet no-color\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestRenderIdentity_BulletRowsRule(t *testing.T) {
+	t.Parallel()
+	s := newStatusStyles(io.Discard)
+	got := s.renderIdentity("Checkpoint", "abc123",
+		[]explainRow{{Label: "session", Value: "s1"}, {Label: "tokens", Value: "1.2k"}},
+	)
+	if !strings.HasPrefix(got, "● Checkpoint abc123\n") {
+		t.Fatalf("missing identity bullet header in:\n%s", got)
+	}
+	if !strings.Contains(got, "  session  s1\n") {
+		t.Fatalf("missing session row in:\n%s", got)
+	}
+	if !strings.Contains(got, "  tokens   1.2k\n") {
+		t.Fatalf("missing tokens row in:\n%s", got)
+	}
+	if !strings.Contains(got, strings.Repeat("─", 4)) {
+		t.Fatalf("missing horizontal rule in:\n%s", got)
+	}
+}
+
+func TestRenderSuccess_BulletThenRows(t *testing.T) {
+	t.Parallel()
+	s := newStatusStyles(io.Discard)
+	got := s.renderSuccess("Summary generated for abc",
+		[]explainRow{{Label: "provider", Value: "claude-code"}},
+	)
+	want := "✓ Summary generated for abc\n  provider  claude-code\n"
+	if got != want {
+		t.Errorf("renderSuccess\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestRenderFailure_BulletThenRows(t *testing.T) {
+	t.Parallel()
+	s := newStatusStyles(io.Discard)
+	got := s.renderFailure("Commit not found",
+		[]explainRow{{Label: "ref", Value: "deadbeef"}},
+	)
+	want := "✗ Commit not found\n  ref      deadbeef\n"
+	if got != want {
+		t.Errorf("renderFailure\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestRenderFailure_NoRows(t *testing.T) {
+	t.Parallel()
+	s := newStatusStyles(io.Discard)
+	got := s.renderFailure("Operation failed", nil)
+	want := "✗ Operation failed\n"
+	if got != want {
+		t.Errorf("renderFailure no-rows\n got: %q\nwant: %q", got, want)
 	}
 }
