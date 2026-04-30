@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"strconv"
-	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -164,7 +163,7 @@ func migrateOneCheckpoint(ctx context.Context, repo *git.Repository, v1Store *ch
 
 	// Already in v2 — when not forcing, check if any aspect of sessions are missing and backfill
 	if existing != nil && !force {
-		repaired, repairErr := repairPartialV2Checkpoint(ctx, repo, v1Store, v2Store, info, existing)
+		repaired, repairErr := repairPartialV2Checkpoint(ctx, v1Store, v2Store, info, existing)
 		if repairErr != nil {
 			return repairErr
 		}
@@ -247,13 +246,13 @@ func migrateOneCheckpoint(ctx context.Context, repo *git.Repository, v1Store *ch
 	return nil
 }
 
-func repairPartialV2Checkpoint(ctx context.Context, repo *git.Repository, v1Store *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, info checkpoint.CommittedInfo, v2Summary *checkpoint.CheckpointSummary) (bool, error) {
+func repairPartialV2Checkpoint(ctx context.Context, v1Store *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, info checkpoint.CommittedInfo, v2Summary *checkpoint.CheckpointSummary) (bool, error) {
 	repaired := false
 
-	// Spot-check already present sessions: ensure required /full/current artifacts exist.
+	// Spot-check already present sessions: ensure required /full/* artifacts exist.
 	existingSessionCount := len(v2Summary.Sessions)
 	for sessionIdx := range existingSessionCount {
-		ok, checkErr := hasCurrentFullSessionArtifacts(repo, v2Store, info.CheckpointID, sessionIdx)
+		ok, checkErr := hasFullSessionArtifacts(v2Store, info.CheckpointID, sessionIdx)
 		if checkErr != nil {
 			return false, fmt.Errorf("failed to check v2 session %d artifacts: %w", sessionIdx, checkErr)
 		}
@@ -288,39 +287,12 @@ func repairPartialV2Checkpoint(ctx context.Context, repo *git.Repository, v1Stor
 	return repaired, nil
 }
 
-func hasCurrentFullSessionArtifacts(repo *git.Repository, v2Store *checkpoint.V2GitStore, cpID id.CheckpointID, sessionIdx int) (bool, error) {
-	_, rootTreeHash, err := v2Store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
+func hasFullSessionArtifacts(v2Store *checkpoint.V2GitStore, cpID id.CheckpointID, sessionIdx int) (bool, error) {
+	ok, err := v2Store.HasFullSessionArtifacts(cpID, sessionIdx)
 	if err != nil {
-		return false, nil //nolint:nilerr // Missing /full/current ref means required artifacts are absent.
+		return false, fmt.Errorf("failed to check v2 full artifacts for session %d: %w", sessionIdx, err)
 	}
-
-	rootTree, err := repo.TreeObject(rootTreeHash)
-	if err != nil {
-		return false, fmt.Errorf("failed to read /full/current tree: %w", err)
-	}
-
-	sessionPath := fmt.Sprintf("%s/%d", cpID.Path(), sessionIdx)
-	sessionTree, err := rootTree.Tree(sessionPath)
-	if err != nil {
-		return false, nil //nolint:nilerr // Missing session path means artifacts are absent, not a hard error.
-	}
-
-	hasTranscript := false
-	for _, entry := range sessionTree.Entries {
-		if entry.Name == paths.V2RawTranscriptFileName || strings.HasPrefix(entry.Name, paths.V2RawTranscriptFileName+".") {
-			hasTranscript = true
-			break
-		}
-	}
-	if !hasTranscript {
-		return false, nil
-	}
-
-	if _, err := sessionTree.File(paths.V2RawTranscriptHashFileName); err != nil {
-		return false, nil //nolint:nilerr // Missing content hash indicates incomplete /full/current artifacts.
-	}
-
-	return true, nil
+	return ok, nil
 }
 
 // backfillCompactTranscripts checks sessions in an already-migrated v2 checkpoint

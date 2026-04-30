@@ -154,7 +154,7 @@ func promptForSummaryProvider(providers []checkpointSummaryProvider) (types.Agen
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Choose a summary provider").
-				Description("This choice will be saved. Use `entire configure` to change it later.").
+				Description("This choice will be saved. Use `entire configure --summarize-provider <name>` to change it later.").
 				Options(options...).
 				Value(&selected),
 		),

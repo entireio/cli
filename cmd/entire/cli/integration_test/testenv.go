@@ -739,7 +739,7 @@ func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	env.T.Helper()
 
 	// Run rewind --list using the shared binary
-	cmd := exec.Command(getTestBinary(), "rewind", "--list")
+	cmd := exec.Command(getTestBinary(), "checkpoint", "rewind", "--list")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 
@@ -787,7 +787,7 @@ func (env *TestEnv) Rewind(commitID string) error {
 	env.T.Helper()
 
 	// Run rewind --to <commitID> using the shared binary
-	cmd := exec.Command(getTestBinary(), "rewind", "--to", commitID)
+	cmd := exec.Command(getTestBinary(), "checkpoint", "rewind", "--to", commitID)
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 
@@ -806,7 +806,7 @@ func (env *TestEnv) RewindLogsOnly(commitID string) error {
 	env.T.Helper()
 
 	// Run rewind --to <commitID> --logs-only using the shared binary
-	cmd := exec.Command(getTestBinary(), "rewind", "--to", commitID, "--logs-only")
+	cmd := exec.Command(getTestBinary(), "checkpoint", "rewind", "--to", commitID, "--logs-only")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 
@@ -825,7 +825,7 @@ func (env *TestEnv) RewindReset(commitID string) error {
 	env.T.Helper()
 
 	// Run rewind --to <commitID> --reset using the shared binary
-	cmd := exec.Command(getTestBinary(), "rewind", "--to", commitID, "--reset")
+	cmd := exec.Command(getTestBinary(), "checkpoint", "rewind", "--to", commitID, "--reset")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 

@@ -63,6 +63,11 @@ be condensed will be discarded.`,
 
 	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Auto-fix all issues without prompting")
 
+	// Diagnostic subcommands.
+	cmd.AddCommand(newTraceCmd())
+	cmd.AddCommand(newDoctorLogsCmd())
+	cmd.AddCommand(newDoctorBundleCmd())
+
 	return cmd
 }
 

@@ -437,6 +437,58 @@ func TestRotateGeneration_ArchivesCurrentAndCreatesNewOrphan(t *testing.T) {
 	assert.Empty(t, freshTree.Entries, "fresh tree should be empty (no generation.json)")
 }
 
+func TestUpdateCommittedFullTranscript_UpdatesArchivedGeneration(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	store.maxCheckpointsPerGeneration = 1
+	ctx := context.Background()
+
+	cpID := id.MustCheckpointID("abc123def456")
+	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-archived-update",
+		Strategy:     "manual-commit",
+		Agent:        agent.AgentTypeClaudeCode,
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"assistant","message":"provisional"}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})
+	require.NoError(t, err)
+
+	archived, err := store.ListArchivedGenerations()
+	require.NoError(t, err)
+	require.Len(t, archived, 1)
+
+	_, currentTreeHash, err := store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
+	require.NoError(t, err)
+	currentCount, err := store.CountCheckpointsInTree(currentTreeHash)
+	require.NoError(t, err)
+	require.Equal(t, 0, currentCount, "rotation should leave /full/current empty")
+
+	finalTranscript := redact.AlreadyRedacted([]byte(`{"type":"assistant","message":"final"}`))
+	err = store.UpdateCommitted(ctx, UpdateCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-archived-update",
+		Transcript:   finalTranscript,
+		Agent:        agent.AgentTypeClaudeCode,
+	})
+	require.NoError(t, err)
+
+	_, currentTreeHash, err = store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
+	require.NoError(t, err)
+	currentCount, err = store.CountCheckpointsInTree(currentTreeHash)
+	require.NoError(t, err)
+	assert.Equal(t, 0, currentCount, "finalization must not rehydrate archived checkpoints into /full/current")
+
+	_, archiveTreeHash, err := store.GetRefState(plumbing.ReferenceName(paths.V2FullRefPrefix + archived[0]))
+	require.NoError(t, err)
+	archiveTree, err := repo.TreeObject(archiveTreeHash)
+	require.NoError(t, err)
+	got := v2ReadFile(t, archiveTree, cpID.Path()+"/0/"+paths.V2RawTranscriptFileName)
+	assert.Equal(t, string(finalTranscript.Bytes()), got)
+}
+
 func TestRotateGeneration_SequentialNumbering(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)

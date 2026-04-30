@@ -171,7 +171,8 @@ func hasUnmigratedV1Checkpoints(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	v1List, err := checkpoint.NewGitStore(repo).ListCommitted(ctx)
+	v1Store := checkpoint.NewGitStore(repo)
+	v1List, err := v1Store.ListCommitted(ctx)
 	if err != nil || len(v1List) == 0 {
 		return false
 	}
@@ -185,6 +186,10 @@ func hasUnmigratedV1Checkpoints(ctx context.Context) bool {
 	}
 	for _, info := range v1List {
 		if _, ok := v2Set[info.CheckpointID.String()]; !ok {
+			summary, readErr := v1Store.ReadCommitted(ctx, info.CheckpointID)
+			if readErr != nil || summary == nil {
+				continue
+			}
 			return true
 		}
 	}

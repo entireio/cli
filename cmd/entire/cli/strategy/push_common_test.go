@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/stretchr/testify/assert"
@@ -1281,6 +1282,28 @@ func writeV1Checkpoint(t *testing.T, repo *git.Repository, cpID id.CheckpointID,
 	require.NoError(t, err)
 }
 
+func writeMalformedV1CheckpointWithoutSummary(t *testing.T, repo *git.Repository, cpID id.CheckpointID) {
+	t.Helper()
+	ctx := context.Background()
+
+	blobHash, err := checkpoint.CreateBlobFromContent(repo, []byte("transcript without root metadata"))
+	require.NoError(t, err)
+
+	treeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, map[string]object.TreeEntry{
+		cpID.Path() + "/0/" + paths.TranscriptFileName: {
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		},
+	})
+	require.NoError(t, err)
+
+	commitHash, err := checkpoint.CreateCommit(ctx, repo, treeHash, plumbing.ZeroHash, "malformed v1 checkpoint", "Test", "test@test.com")
+	require.NoError(t, err)
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))
+}
+
 func TestPrintCheckpointsV2MigrationHint(t *testing.T) {
 	t.Run("suppressed when no v1 checkpoints exist", func(t *testing.T) {
 		checkpointsV2MigrationHintOnce = sync.Once{}
@@ -1364,6 +1387,13 @@ func TestHasUnmigratedV1Checkpoints(t *testing.T) {
 		writeV1Checkpoint(t, repo, missing, "session-c")
 
 		assert.True(t, hasUnmigratedV1Checkpoints(context.Background()))
+	})
+
+	t.Run("false when only malformed v1 checkpoint entries are missing from v2", func(t *testing.T) {
+		repo := setupCheckpointsV2CommittedRepo(t)
+		writeMalformedV1CheckpointWithoutSummary(t, repo, id.MustCheckpointID("666666666666"))
+
+		assert.False(t, hasUnmigratedV1Checkpoints(context.Background()))
 	})
 }
 

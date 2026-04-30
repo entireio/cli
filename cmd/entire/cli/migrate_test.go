@@ -512,7 +512,7 @@ func TestMigrateCheckpointsV2_RepairsMissingFullTranscriptBeforeBackfill(t *test
 	assert.NotEmpty(t, content.Transcript, "raw full transcript should be restored in /full/current")
 }
 
-func TestMigrateCheckpointsV2_RepairsCurrentFullEvenWhenArchiveExists(t *testing.T) {
+func TestMigrateCheckpointsV2_SkipsRepairWhenArchivedFullExists(t *testing.T) {
 	t.Parallel()
 	repo := initMigrateTestRepo(t)
 	v1Store, v2Store := newMigrateStores(repo)
@@ -543,16 +543,20 @@ func TestMigrateCheckpointsV2_RepairsCurrentFullEvenWhenArchiveExists(t *testing
 	require.NoError(t, archivedReadErr)
 	assert.NotEmpty(t, archivedRead.Transcript)
 
-	// Re-run migration: should still repair /full/current.
+	// Re-run migration: archived /full/* artifacts are sufficient, so it should
+	// not rehydrate old raw transcripts into /full/current.
 	var rerun bytes.Buffer
 	result2, rerunErr := migrateCheckpointsV2(context.Background(), repo, v1Store, v2Store, &rerun, false)
 	require.NoError(t, rerunErr)
-	assert.Equal(t, 1, result2.migrated)
-	assert.Contains(t, rerun.String(), "repaired partial v2 checkpoint state")
+	assert.Equal(t, 0, result2.migrated)
+	assert.Equal(t, 1, result2.skipped)
+	assert.NotContains(t, rerun.String(), "repaired partial v2 checkpoint state")
 
-	ok, checkErr := hasCurrentFullSessionArtifacts(repo, v2Store, cpID, 0)
+	ok, checkErr := hasFullSessionArtifacts(v2Store, cpID, 0)
 	require.NoError(t, checkErr)
-	assert.True(t, ok, "expected /full/current artifacts to be restored")
+	assert.True(t, ok, "expected archived /full/* artifacts to count as present")
+	assert.False(t, hasCurrentFullSessionArtifactsForTest(t, repo, v2Store, cpID, 0),
+		"migration rerun must not copy archived artifacts back into /full/current")
 }
 
 func removeV2SessionTranscriptFiles(t *testing.T, repo *git.Repository, v2Store *checkpoint.V2GitStore, cpID id.CheckpointID, sessionIdx int) {
@@ -582,6 +586,36 @@ func removeV2SessionTranscriptFiles(t *testing.T, repo *git.Repository, v2Store 
 	commitHash, commitErr := checkpoint.CreateCommit(context.Background(), repo, newRootHash, parentHash, "test: remove full transcript\n", "Test", "test@test.com")
 	require.NoError(t, commitErr)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))
+}
+
+func hasCurrentFullSessionArtifactsForTest(t *testing.T, repo *git.Repository, v2Store *checkpoint.V2GitStore, cpID id.CheckpointID, sessionIdx int) bool {
+	t.Helper()
+
+	_, rootTreeHash, err := v2Store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
+	require.NoError(t, err)
+
+	rootTree, err := repo.TreeObject(rootTreeHash)
+	require.NoError(t, err)
+
+	sessionPath := cpID.Path() + "/" + strconv.Itoa(sessionIdx)
+	sessionTree, err := rootTree.Tree(sessionPath)
+	if err != nil {
+		return false
+	}
+
+	hasTranscript := false
+	for _, entry := range sessionTree.Entries {
+		if entry.Name == paths.V2RawTranscriptFileName || strings.HasPrefix(entry.Name, paths.V2RawTranscriptFileName+".") {
+			hasTranscript = true
+			break
+		}
+	}
+	if !hasTranscript {
+		return false
+	}
+
+	_, err = sessionTree.File(paths.V2RawTranscriptHashFileName)
+	return err == nil
 }
 
 func TestBuildMigrateWriteOpts_PromptSeparatorRoundTrip(t *testing.T) {

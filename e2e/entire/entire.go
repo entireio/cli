@@ -67,7 +67,7 @@ func CleanForce(t *testing.T, dir string) string {
 // RewindList runs `entire rewind --list` and parses the JSON output.
 func RewindList(t *testing.T, dir string) []RewindPoint {
 	t.Helper()
-	out := run(t, dir, "rewind", "--list")
+	out := run(t, dir, "checkpoint", "rewind", "--list")
 
 	var points []RewindPoint
 	if err := json.Unmarshal([]byte(out), &points); err != nil {
@@ -80,13 +80,13 @@ func RewindList(t *testing.T, dir string) []RewindPoint {
 // failing the test, since callers may test failure cases.
 func Rewind(t *testing.T, dir, id string) error {
 	t.Helper()
-	return runErr(dir, "rewind", "--to", id)
+	return runErr(dir, "checkpoint", "rewind", "--to", id)
 }
 
 // RewindLogsOnly runs `entire rewind --to <id> --logs-only`.
 func RewindLogsOnly(t *testing.T, dir, id string) error {
 	t.Helper()
-	return runErr(dir, "rewind", "--to", id, "--logs-only")
+	return runErr(dir, "checkpoint", "rewind", "--to", id, "--logs-only")
 }
 
 // run executes an `entire` subcommand in dir and fails the test on error.
@@ -138,35 +138,35 @@ func (e *ExecError) Unwrap() error {
 // Explain runs `entire explain --checkpoint <id>` and returns the output.
 func Explain(t *testing.T, dir, checkpointID string) string {
 	t.Helper()
-	return run(t, dir, "explain", "--checkpoint", checkpointID)
+	return run(t, dir, "checkpoint", "explain", "--checkpoint", checkpointID)
 }
 
 // ExplainGenerate runs `entire explain --checkpoint <id> --generate`.
 // Returns (output, error) — doesn't fail test since callers may test failure cases.
 func ExplainGenerate(dir, checkpointID string) (string, error) {
-	return runOutput(dir, "explain", "--checkpoint", checkpointID, "--generate")
+	return runOutput(dir, "checkpoint", "explain", "--checkpoint", checkpointID, "--generate")
 }
 
 // ExplainCommit runs `entire explain --commit <ref>`.
 // Returns (output, error) — for testing failure cases.
 func ExplainCommit(dir, ref string) (string, error) {
-	return runOutput(dir, "explain", "--commit", ref)
+	return runOutput(dir, "checkpoint", "explain", "--commit", ref)
 }
 
 // AttachWithEnv runs `entire attach <session-id> --agent <agent> --force`
 // with extra env vars.
 func AttachWithEnv(dir string, extraEnv []string, sessionID, agent string) (string, error) {
-	return runOutputEnv(dir, extraEnv, "attach", sessionID, "--agent", agent, "--force")
+	return runOutputEnv(dir, extraEnv, "session", "attach", sessionID, "--agent", agent, "--force")
 }
 
 // Resume runs `entire resume <branch> --force` and returns the output.
 func Resume(dir, branch string) (string, error) {
-	return runOutput(dir, "resume", branch, "--force")
+	return runOutput(dir, "session", "resume", branch, "--force")
 }
 
 // ResumeWithEnv runs `entire resume <branch> --force` with extra env vars.
 func ResumeWithEnv(dir, branch string, extraEnv []string) (string, error) {
-	return runOutputEnv(dir, extraEnv, "resume", branch, "--force")
+	return runOutputEnv(dir, extraEnv, "session", "resume", branch, "--force")
 }
 
 // runOutput executes an `entire` subcommand and returns (output, error).

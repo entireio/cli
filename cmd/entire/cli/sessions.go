@@ -21,20 +21,27 @@ import (
 
 func newSessionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "sessions",
-		Short: "Manage agent sessions tracked by Entire",
+		Use:     "session",
+		Aliases: []string{"sessions"},
+		Short:   "Manage agent sessions tracked by Entire",
 		Long: `View and manage agent sessions tracked by Entire.
 
 Commands:
-  list    List all sessions across all worktrees
-  info    Show detailed information for a specific session
-  stop    Stop one or more active sessions
+  list     List all sessions across all worktrees
+  info     Show detailed information for a specific session
+  stop     Stop one or more active sessions
+  current  Show the active session for the current worktree
+  attach   Attach an existing agent session
+  resume   Switch to a branch and resume its session
 
 Examples:
-  entire sessions list                     List all sessions
-  entire sessions info <session-id>        Show session details
-  entire sessions info <session-id> --json Output as JSON
-  entire sessions stop                     Interactive stop`,
+  entire session list                      List all sessions
+  entire session info <session-id>         Show session details
+  entire session info <session-id> --json  Output as JSON
+  entire session stop                      Interactive stop
+  entire session current                   Active session for cwd
+  entire session attach <session-id>       Attach an external session
+  entire session resume <branch>           Resume from a branch`,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
 				return errors.New("not a git repository")
@@ -46,6 +53,9 @@ Examples:
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newInfoCmd())
 	cmd.AddCommand(newStopCmd())
+	cmd.AddCommand(newSessionCurrentCmd())
+	cmd.AddCommand(newAttachCmd())
+	cmd.AddCommand(newResumeCmd())
 
 	return cmd
 }

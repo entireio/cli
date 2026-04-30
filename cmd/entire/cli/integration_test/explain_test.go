@@ -23,7 +23,7 @@ func TestExplain_NoCurrentSession(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 	// Without any flags, explain shows the branch view (not an error)
-	output, err := env.RunCLIWithError("explain")
+	output, err := env.RunCLIWithError("checkpoint", "explain")
 
 	if err != nil {
 		t.Errorf("expected success for branch view, got error: %v, output: %s", err, output)
@@ -44,7 +44,7 @@ func TestExplain_SessionFilter(t *testing.T) {
 	env := NewFeatureBranchEnv(t)
 	// --session now filters the list view instead of showing session details
 	// A nonexistent session ID should show an empty list, not an error
-	output, err := env.RunCLIWithError("explain", "--session", "nonexistent-session-id")
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--session", "nonexistent-session-id")
 
 	if err != nil {
 		t.Errorf("expected success (empty list) for session filter, got error: %v, output: %s", err, output)
@@ -71,7 +71,7 @@ func TestExplain_MutualExclusivity(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 	// Try to provide both --session and --commit flags
-	output, err := env.RunCLIWithError("explain", "--session", "test-session", "--commit", "abc123")
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--session", "test-session", "--commit", "abc123")
 
 	if err == nil {
 		t.Errorf("expected error when both flags provided, got output: %s", output)
@@ -87,7 +87,7 @@ func TestExplain_CheckpointNotFound(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 	// Try to explain a non-existent checkpoint
-	output, err := env.RunCLIWithError("explain", "--checkpoint", "nonexistent123")
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--checkpoint", "nonexistent123")
 
 	if err == nil {
 		t.Errorf("expected error for nonexistent checkpoint, got output: %s", output)
@@ -103,7 +103,7 @@ func TestExplain_CheckpointMutualExclusivity(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 	// Try to provide --checkpoint with --session
-	output, err := env.RunCLIWithError("explain", "--session", "test-session", "--checkpoint", "abc123")
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--session", "test-session", "--checkpoint", "abc123")
 
 	if err == nil {
 		t.Errorf("expected error when both flags provided, got output: %s", output)
@@ -127,7 +127,7 @@ func TestExplain_CommitWithoutCheckpoint(t *testing.T) {
 	commitHash := env.GetHeadHash()
 
 	// Run explain --commit
-	output, err := env.RunCLIWithError("explain", "--commit", commitHash[:7])
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--commit", commitHash[:7])
 	if err != nil {
 		t.Fatalf("unexpected error: %v, output: %s", err, output)
 	}
@@ -154,7 +154,7 @@ func TestExplain_CommitWithCheckpointTrailer(t *testing.T) {
 
 	// Run explain --commit - it should try to look up the checkpoint
 	// Since the checkpoint doesn't actually exist in the store, it should error
-	output, err := env.RunCLIWithError("explain", "--commit", commitHash[:7])
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--commit", commitHash[:7])
 
 	// We expect an error because the checkpoint abc123def456 doesn't exist
 	if err == nil {
@@ -197,7 +197,7 @@ func TestExplain_CheckpointV2EnabledFallsBackToV1(t *testing.T) {
 		"strategy_options": map[string]any{"checkpoints_v2": true},
 	})
 
-	output, err := env.RunCLIWithError("explain", "--checkpoint", checkpointID[:6])
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--checkpoint", checkpointID[:6])
 	require.NoError(t, err, "expected explain checkpoint fallback to v1 to succeed: %s", output)
 
 	if !strings.Contains(output, "● Checkpoint "+checkpointID) {
@@ -257,7 +257,7 @@ func TestExplain_CheckpointV2EnabledPrefersV2WhenDualWriteExists(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	output, err := env.RunCLIWithError("explain", "--checkpoint", checkpointID[:6])
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--checkpoint", checkpointID[:6])
 	require.NoError(t, err, "expected explain to prefer v2 checkpoint data: %s", output)
 
 	if !strings.Contains(output, "Create v2 preferred file") {
@@ -317,7 +317,7 @@ func TestExplain_CheckpointV2NoFullTranscriptUsesCompact(t *testing.T) {
 	require.NoError(t, err)
 
 	// Default explain (not --full) should succeed using compact transcript from v2 /main.
-	output, err := env.RunCLIWithError("explain", "--checkpoint", checkpointID[:6])
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--checkpoint", checkpointID[:6])
 	require.NoError(t, err, "expected explain to succeed with compact transcript when /full/* is missing: %s", output)
 
 	require.Contains(t, output, "● Checkpoint "+checkpointID)
@@ -362,7 +362,7 @@ func TestExplain_CheckpointV2MalformedFallsBackToV1(t *testing.T) {
 	corruptV2MainRef(t, repo, checkpointID)
 
 	// Explain should fall back to the valid v1 checkpoint.
-	output, err := env.RunCLIWithError("explain", "--checkpoint", checkpointID[:6])
+	output, err := env.RunCLIWithError("checkpoint", "explain", "--checkpoint", checkpointID[:6])
 	require.NoError(t, err, "expected explain to fall back to v1 when v2 is malformed: %s", output)
 
 	require.Contains(t, output, "● Checkpoint "+checkpointID)
@@ -462,7 +462,7 @@ func TestExplain_BranchListingShowsCheckpointsAndPrompts(t *testing.T) {
 			env.GitCommitWithShadowHooks("Implement user authentication", "auth.go")
 
 			// `entire explain` (no flags) should show the branch listing with the checkpoint.
-			output, err := env.RunCLIWithError("explain")
+			output, err := env.RunCLIWithError("checkpoint", "explain")
 			require.NoError(t, err, "explain should succeed: %s", output)
 
 			require.Contains(t, output, "branch  ")
@@ -532,7 +532,7 @@ func TestExplain_CheckpointFetchesFromRemoteWhenMissingLocally(t *testing.T) {
 	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "remote-tracking metadata ref should be absent")
 
 	// This should succeed by fetching metadata from the remote
-	output := env.RunCLI("explain", "--checkpoint", checkpointID)
+	output := env.RunCLI("checkpoint", "explain", "--checkpoint", checkpointID)
 
 	// Verify the output contains checkpoint content (prompt text)
 	if !strings.Contains(output, "Add feature module") {
@@ -608,7 +608,7 @@ func TestExplain_CheckpointV2FetchesFromRemoteWhenMissingLocally(t *testing.T) {
 	}
 
 	// This should succeed by fetching metadata from the remote
-	output := env.RunCLI("explain", "--checkpoint", checkpointID)
+	output := env.RunCLI("checkpoint", "explain", "--checkpoint", checkpointID)
 
 	if !strings.Contains(output, "Add v2 feature") {
 		t.Errorf("expected output to contain prompt text, got:\n%s", output)
@@ -666,7 +666,7 @@ func TestExplain_CheckpointFetchDoesNotRewindLocalAheadBranch(t *testing.T) {
 	// unlikely to collide with a real checkpoint ID.
 	// The command is expected to fail (no such checkpoint) — we're testing the
 	// side effect on the local ref, not the command's success.
-	_, _ = env.RunCLIWithError("explain", "--checkpoint", "000000000000")
+	_, _ = env.RunCLIWithError("checkpoint", "explain", "--checkpoint", "000000000000")
 
 	// Re-open repo (go-git caches ref state per handle).
 	repo, err = git.PlainOpen(env.RepoDir)
@@ -677,7 +677,7 @@ func TestExplain_CheckpointFetchDoesNotRewindLocalAheadBranch(t *testing.T) {
 		"local metadata branch must not be rewound by fetch-on-miss; locally-ahead checkpoints would otherwise be orphaned")
 
 	// Independently, checkpoint B must still be discoverable by explain.
-	output := env.RunCLI("explain", "--checkpoint", checkpointB)
+	output := env.RunCLI("checkpoint", "explain", "--checkpoint", checkpointB)
 	require.Contains(t, output, "Add module B",
 		"locally-committed checkpoint must remain discoverable after fetch-on-miss")
 }
@@ -737,7 +737,7 @@ func TestExplain_CheckpointV2FetchDoesNotRewindLocalAheadRefs(t *testing.T) {
 	// Run explain with a non-matching prefix to force the fetch-on-miss path
 	// for both v1 and v2. The command is expected to fail; we're testing the
 	// side effect on the local v2 ref.
-	_, _ = env.RunCLIWithError("explain", "--checkpoint", "000000000000")
+	_, _ = env.RunCLIWithError("checkpoint", "explain", "--checkpoint", "000000000000")
 
 	repo, err = git.PlainOpen(env.RepoDir)
 	require.NoError(t, err)
@@ -747,7 +747,7 @@ func TestExplain_CheckpointV2FetchDoesNotRewindLocalAheadRefs(t *testing.T) {
 		"local v2 /main ref must not be rewound by fetch-on-miss; locally-ahead v2 checkpoints would otherwise be orphaned")
 
 	// Independently, checkpoint B must still be discoverable.
-	output := env.RunCLI("explain", "--checkpoint", checkpointB)
+	output := env.RunCLI("checkpoint", "explain", "--checkpoint", checkpointB)
 	require.Contains(t, output, "Add v2 module B",
 		"locally-committed v2 checkpoint must remain discoverable after fetch-on-miss")
 }
@@ -783,7 +783,7 @@ func TestExplain_BranchListingV2OnlyAfterV1Deleted(t *testing.T) {
 	_ = repo.Storer.RemoveReference(plumbing.NewBranchReferenceName("entire/checkpoints/v1"))
 
 	// Branch listing should still work using v2 data.
-	output, err := env.RunCLIWithError("explain")
+	output, err := env.RunCLIWithError("checkpoint", "explain")
 	require.NoError(t, err, "explain should succeed with v2 only: %s", output)
 
 	require.Contains(t, output, "checkpoints  1",
