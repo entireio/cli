@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -30,7 +30,6 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
-	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -3064,16 +3063,13 @@ func TestFormatCheckpointHeader_ColorEnabledRenders(t *testing.T) {
 		CreatedAt:  time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
 		TokenUsage: &agent.TokenUsage{InputTokens: 1234},
 	}
-	renderer := lipgloss.NewRenderer(io.Discard)
-	renderer.SetColorProfile(termenv.TrueColor)
-
 	plainStyles := statusStyles{colorEnabled: false, width: 60}
 	colorStyles := statusStyles{
 		colorEnabled: true,
 		width:        60,
-		bold:         renderer.NewStyle().Bold(true),
-		dim:          renderer.NewStyle().Faint(true),
-		yellow:       renderer.NewStyle().Foreground(lipgloss.Color("3")),
+		bold:         lipgloss.NewStyle().Bold(true),
+		dim:          lipgloss.NewStyle().Faint(true),
+		yellow:       lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
 	}
 
 	plain := formatCheckpointHeader(nil, meta, cpID, nil, checkpoint.Author{}, plainStyles)

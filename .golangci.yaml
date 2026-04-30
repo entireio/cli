@@ -106,13 +106,13 @@ linters:
         - empty
         - stdlib
         - grpc.DialOption
+        - github.com/entireio/cli/cmd/entire/cli/summarize.Generator
         - github.com/entireio/cli/cmd/entire/cli/agent\..+
         - github.com/entireio/cli/cmd/entire/cli/checkpoint.CommittedReader
         - github.com/entireio/cli/cmd/entire/cli/strategy.Strategy
-        - github.com/entireio/cli/cmd/entire/cli/summarize.Generator
+        - github.com/go-git/go-git/v6/x/plugin.Signer
         - github.com/go-git/go-git/v6/plumbing/storer.ReferenceIter
         - github.com/go-git/go-git/v6/plumbing.EncodedObject
-        - github.com/go-git/go-git/v6/x/plugin.Signer
         - github.com/go-git/go-git/v6/storage.Storer
         - github.com/go-git/go-git/v6/plumbing/storer.EncodedObjectIter
         - github.com/entireio/cli/e2e/agents.Session

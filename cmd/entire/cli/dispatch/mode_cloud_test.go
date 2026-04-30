@@ -184,6 +184,26 @@ func TestServerMode_ExplicitReposDoNotRequireCurrentRepo(t *testing.T) {
 	}
 }
 
+func TestAPIToDispatch_DerivesRepoURLs(t *testing.T) {
+	t.Parallel()
+
+	got := apiToDispatch(&CreateDispatchResponse{
+		Repos: []APIRepo{
+			{FullName: testRepoFullName},
+			{FullName: "bad/repo)"},
+		},
+	})
+	if len(got.Repos) != 2 {
+		t.Fatalf("expected two repos, got %+v", got.Repos)
+	}
+	if got.Repos[0].URL != testRepoURL {
+		t.Fatalf("unexpected valid repo URL: %q", got.Repos[0].URL)
+	}
+	if got.Repos[1].URL != "" {
+		t.Fatalf("expected unsafe repo URL to be omitted, got %q", got.Repos[1].URL)
+	}
+}
+
 func TestServerMode_RequiresGeneratedMarkdown(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)

@@ -1,6 +1,6 @@
 package cli
 
-import "github.com/charmbracelet/bubbles/key"
+import "charm.land/bubbles/v2/key"
 
 // keyMap defines the keybindings used across the CLI's TUIs. Single source of
 // truth so help text and matching logic stay aligned, and so the strings "esc",

@@ -90,10 +90,13 @@ homebrew_casks:
     description: "CLI for Entire"
     binaries:
       - entire
-    completions:
-      bash: "completions/entire.bash"
-      zsh: "completions/entire.zsh"
-      fish: "completions/entire.fish"
+    generate_completions_from_executable:
+      executable: entire
+      shell_parameter_format: cobra
+      shells:
+        - bash
+        - zsh
+        - fish
     conflicts:
       - cask: entire@nightly
     skip_upload: auto
@@ -108,10 +111,13 @@ homebrew_casks:
     description: "CLI for Entire (nightly build)"
     binaries:
       - entire
-    completions:
-      bash: "completions/entire.bash"
-      zsh: "completions/entire.zsh"
-      fish: "completions/entire.fish"
+    generate_completions_from_executable:
+      executable: entire
+      shell_parameter_format: cobra
+      shells:
+        - bash
+        - zsh
+        - fish
     conflicts:
       - cask: entire
     skip_upload: "{{ if not .Prerelease }}true{{ end }}"

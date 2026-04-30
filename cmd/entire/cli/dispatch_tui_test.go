@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 )
 
@@ -60,7 +60,7 @@ func TestDispatchStatusModel_ViewRendersInlineCard(t *testing.T) {
 	model.width = 80
 	model.height = 24
 
-	view := model.View()
+	view := model.View().Content
 	if !strings.HasPrefix(view, "\n") {
 		t.Fatalf("expected inline view with a leading blank line: %q", view)
 	}
@@ -69,6 +69,24 @@ func TestDispatchStatusModel_ViewRendersInlineCard(t *testing.T) {
 	}
 	if got := strings.Count(view, "\n"); got >= 20 {
 		t.Fatalf("expected compact inline card, got %d lines", got+1)
+	}
+}
+
+func TestDefaultRenderTerminalMarkdown_RendersHyperlinks(t *testing.T) {
+	t.Parallel()
+
+	rendered, err := defaultRenderTerminalMarkdown(io.Discard, "[Entire](https://entire.dev)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "\x1b]8;") {
+		t.Fatalf("expected OSC 8 hyperlink sequence, got %q", rendered)
+	}
+	if !strings.Contains(rendered, ";https://entire.dev\x07") {
+		t.Fatalf("expected hyperlink target, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "\x1b]8;;\x07") {
+		t.Fatalf("expected OSC 8 hyperlink reset, got %q", rendered)
 	}
 }
 

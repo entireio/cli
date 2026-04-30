@@ -7,15 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	glamour "charm.land/glamour/v2"
 	"charm.land/glamour/v2/ansi"
 	glamourstyles "charm.land/glamour/v2/styles"
-	"github.com/charmbracelet/bubbles/cursor"
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/muesli/termenv"
@@ -157,12 +156,17 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	ti.Prompt = " › "
 	ti.Placeholder = "search checkpoints... (author:name date:week branch:main repo:owner/name or repo:*)"
 	ti.CharLimit = 200
-	ti.Width = max(ss.width-6, 30)
+	ti.SetWidth(max(ss.width-6, 30))
+	ti.SetVirtualCursor(true)
 	if ss.colorEnabled {
-		ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentOrange)).Bold(true)
-		ti.TextStyle = lipgloss.NewStyle()
-		ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-		ti.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentOrange))
+		s := ti.Styles()
+		focused := s.Focused
+		focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccentOrange)).Bold(true)
+		focused.Text = lipgloss.NewStyle()
+		focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+		s.Focused = focused
+		s.Cursor.Color = lipgloss.Color(searchAccentOrange)
+		ti.SetStyles(s)
 	}
 
 	var apiPage int
@@ -179,7 +183,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		searchCfg: cfg,
 		apiPage:   apiPage,
 		styles:    styles,
-		browseVP:  viewport.New(ss.width, 1), // height set on first WindowSizeMsg
+		browseVP:  viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
 		darkBg:    termenv.HasDarkBackground(),
 	}
 	m = m.refreshBrowseContent()
@@ -233,17 +237,17 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.input.Width = max(msg.Width-6, 30)
-		m.browseVP.Width = msg.Width
-		m.browseVP.Height = max(msg.Height-1, 1) // reserve 1 line for footer
+		m.input.SetWidth(max(msg.Width-6, 30))
+		m.browseVP.SetWidth(msg.Width)
+		m.browseVP.SetHeight(max(msg.Height-1, 1)) // reserve 1 line for footer
 		if m.mode == modeDetail {
-			m.detailVP.Width = msg.Width
-			m.detailVP.Height = max(msg.Height-2, 1)
+			m.detailVP.SetWidth(msg.Width)
+			m.detailVP.SetHeight(max(msg.Height-2, 1))
 		}
 		m = m.refreshBrowseContent()
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch m.mode {
 		case modeSearch:
 			return m.updateSearchMode(msg)
@@ -256,7 +260,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn
 	return m, nil
 }
 
-func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea pattern
+func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea pattern
 	switch {
 	case key.Matches(msg, keys.Back):
 		m.mode = modeBrowse
@@ -297,7 +301,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 	return m, cmd
 }
 
-func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea pattern
+func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea pattern
 	pageLen := len(m.pageResults())
 	switch {
 	case key.Matches(msg, keys.Quit), key.Matches(msg, keys.Back), msg.String() == "h":
@@ -352,14 +356,14 @@ func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 		if r := m.selectedResult(); r != nil {
 			m.mode = modeDetail
 			content := m.renderDetailContent(*r, m.width, true)
-			m.detailVP = viewport.New(m.width, max(m.height-2, 1))
+			m.detailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(max(m.height-2, 1)))
 			m.detailVP.SetContent(content)
 			return m, nil
 		}
 	case key.Matches(msg, keys.Search):
 		m.mode = modeSearch
 		m.input.Focus()
-		return m, m.input.Cursor.SetMode(cursor.CursorBlink)
+		return m, textinput.Blink
 	default:
 		// Forward unhandled keys (pgup/pgdn/ctrl+u/ctrl+d/g/G/etc.) to viewport for scrolling
 		var cmd tea.Cmd
@@ -369,7 +373,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 	return m, nil
 }
 
-func (m searchModel) updateDetailMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea pattern
+func (m searchModel) updateDetailMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea pattern
 	switch {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
@@ -379,7 +383,7 @@ func (m searchModel) updateDetailMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) { //n
 	case key.Matches(msg, keys.Search):
 		m.mode = modeSearch
 		m.input.Focus()
-		return m, m.input.Cursor.SetMode(cursor.CursorBlink)
+		return m, textinput.Blink
 	}
 	var cmd tea.Cmd
 	m.detailVP, cmd = m.detailVP.Update(msg)
@@ -409,21 +413,21 @@ func fetchMoreResults(cfg search.Config, page int) tea.Cmd {
 
 // ─── View ────────────────────────────────────────────────────────────────────
 
-func (m searchModel) View() string {
+func (m searchModel) View() tea.View {
+	v := tea.View{AltScreen: true}
 	if m.width == 0 {
-		return ""
+		return v
 	}
 
-	if m.mode == modeDetail {
-		return m.viewDetailFull()
+	switch m.mode {
+	case modeDetail:
+		v.SetContent(m.viewDetailFull())
+	case modeSearch:
+		v.SetContent(m.viewSearchMode())
+	case modeBrowse:
+		v.SetContent(m.browseVP.View() + "\n" + m.viewHelp())
 	}
-
-	if m.mode == modeSearch {
-		return m.viewSearchMode()
-	}
-
-	// Browse mode: scrollable viewport + fixed footer.
-	return m.browseVP.View() + "\n" + m.viewHelp()
+	return v
 }
 
 func (m searchModel) viewSearchHeader(b *strings.Builder) {

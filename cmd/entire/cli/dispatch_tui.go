@@ -7,13 +7,13 @@ import (
 	"io"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/glamour/ansi"
-	glamourstyles "github.com/charmbracelet/glamour/styles"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
+	"charm.land/glamour/v2/ansi"
+	glamourstyles "charm.land/glamour/v2/styles"
+	"charm.land/lipgloss/v2"
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 	"github.com/muesli/termenv"
 )
@@ -53,12 +53,10 @@ type dispatchProgram interface {
 
 // newDispatchProgram is overridden by tests via assignment. Tests that mutate
 // it cannot use t.Parallel() — they would race each other's factory.
-var newDispatchProgram = func(model tea.Model, outW io.Writer, altScreen bool) dispatchProgram {
-	options := []tea.ProgramOption{tea.WithOutput(outW)}
-	if altScreen {
-		options = append(options, tea.WithAltScreen())
-	}
-	return tea.NewProgram(model, options...)
+// altScreen is unused in v2 (set on tea.View instead) but retained for backward
+// compatibility with existing test fakes.
+var newDispatchProgram = func(model tea.Model, outW io.Writer, _ bool) dispatchProgram {
+	return tea.NewProgram(model, tea.WithOutput(outW))
 }
 
 func defaultRunInteractiveDispatch(ctx context.Context, outW io.Writer, opts dispatchpkg.Options) (string, error) {
@@ -85,7 +83,7 @@ func defaultRunInteractiveDispatch(ctx context.Context, outW io.Writer, opts dis
 	if !ok {
 		return "", errors.New("unexpected dispatch loading state")
 	}
-	clearDispatchInlineView(outW, finished.View())
+	clearDispatchInlineView(outW, finished.View().Content)
 	if finished.result.err != nil {
 		return "", finished.result.err
 	}
@@ -379,7 +377,7 @@ func (m dispatchStatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dispatchRenderResult:
 		m.result = msg
 		return m, tea.Quit
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if key.Matches(msg, keys.Quit) || key.Matches(msg, keys.Back) {
 			if m.cancel != nil {
 				m.cancel()
@@ -391,7 +389,7 @@ func (m dispatchStatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m dispatchStatusModel) View() string {
+func (m dispatchStatusModel) View() tea.View {
 	cardWidth := min(max(m.width-8, 44), 76)
 
 	lines := []string{
@@ -404,7 +402,7 @@ func (m dispatchStatusModel) View() string {
 	}
 	lines = append(lines, "", m.styles.footer.Render(m.footer))
 
-	return "\n" + m.styles.card.Width(cardWidth).Render(strings.Join(lines, "\n"))
+	return tea.NewView("\n" + m.styles.card.Width(cardWidth).Render(strings.Join(lines, "\n")))
 }
 
 func (m dispatchStatusModel) runDispatch() tea.Cmd {

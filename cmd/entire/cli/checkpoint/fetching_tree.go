@@ -51,56 +51,57 @@ func NewFetchingTree(ctx context.Context, tree *object.Tree, s storer.EncodedObj
 	}
 }
 
-// File returns the file at the given path. If the blob is not available
-// locally (e.g. after a treeless fetch), it is fetched on demand. If go-git's
-// storer still can't see the blob after fetching (due to cached packfile index),
-// the blob is read via "git cat-file" and an in-memory File is returned.
+// File returns the file at the given path. Resolution order:
+//  1. go-git's storer (fast path, in-memory).
+//  2. `git cat-file -p` against the on-disk object store (handles
+//     partial-clone-filtered blobs that go-git can't see, plus packfiles
+//     created by external git commands after this process opened the repo).
+//  3. Remote fetch via the configured fetcher, then cat-file again.
+//
+// Trying cat-file BEFORE the remote fetch is critical: in partial-clone
+// repos, blobs are commonly on disk but invisible to go-git's storer
+// (filtered out, or in a packfile not in go-git's index cache). Without
+// this short-circuit, every File() would burn a multi-second network
+// round-trip even though the blob is already local.
 func (t *FetchingTree) File(path string) (*object.File, error) {
-	// Fast path: blob already available in go-git's storer.
-	file, err := t.inner.File(path)
-	if err == nil {
+	if file, err := t.inner.File(path); err == nil {
 		return file, nil
 	}
 
-	if t.fetch == nil {
-		return nil, err //nolint:wrapcheck // pass-through wrapper
-	}
-
-	// Find the tree entry to get the blob hash without resolving the blob.
-	// FindEntry only navigates tree objects (available after --filter=blob:none).
 	entry, findErr := t.inner.FindEntry(path)
 	if findErr != nil {
 		logging.Debug(t.ctx, "FetchingTree.File: entry not found",
 			slog.String("path", path),
 			slog.String("error", findErr.Error()),
 		)
-		return nil, err //nolint:wrapcheck // return original File() error
+		return nil, findErr //nolint:wrapcheck // return original error
 	}
 
-	logging.Debug(t.ctx, "FetchingTree.File: blob missing, fetching",
+	if file, gitErr := t.readFileViaGit(path, entry); gitErr == nil {
+		return file, nil
+	}
+
+	if t.fetch == nil {
+		return nil, fmt.Errorf("blob %s not available locally and no fetcher configured", entry.Hash.String()[:12])
+	}
+
+	logging.Debug(t.ctx, "FetchingTree.File: blob missing locally, fetching from remote",
 		slog.String("path", path),
 		slog.String("hash", entry.Hash.String()[:12]),
 	)
-
-	// Fetch the blob from the remote.
 	if fetchErr := t.fetch(t.ctx, []plumbing.Hash{entry.Hash}); fetchErr != nil {
 		logging.Warn(t.ctx, "FetchingTree.File: blob fetch failed",
 			slog.String("path", path),
 			slog.String("hash", entry.Hash.String()[:12]),
 			slog.String("error", fetchErr.Error()),
 		)
-		return nil, err //nolint:wrapcheck // return original File() error
+		return nil, fetchErr
 	}
 
-	// Try go-git again — works if blob was stored as a loose object.
-	file, err = t.inner.File(path)
-	if err == nil {
+	if file, err := t.inner.File(path); err == nil {
 		return file, nil
 	}
 
-	// go-git's storer caches the packfile index and won't see new packs
-	// created by external git commands. Fall back to "git cat-file" which
-	// reads directly from the on-disk object store.
 	logging.Debug(t.ctx, "FetchingTree.File: storer cache stale, reading via git cat-file",
 		slog.String("path", path),
 		slog.String("hash", entry.Hash.String()[:12]),
@@ -134,13 +135,21 @@ func (t *FetchingTree) PreFetch() (int, error) {
 	return len(missing), nil
 }
 
+// CollectMissingBlobs returns the hashes of every blob entry in this tree
+// (recursively) that isn't present in the local object store. Useful for
+// callers that want to decide whether network work is needed before
+// running PreFetch (e.g., to avoid showing a spinner in fast no-op cases).
+func (t *FetchingTree) CollectMissingBlobs() []plumbing.Hash {
+	return t.collectMissingBlobs(t.inner)
+}
+
 // collectMissingBlobs recursively walks a tree and returns hashes of blob
 // entries that are not present in the local object store.
 func (t *FetchingTree) collectMissingBlobs(tree *object.Tree) []plumbing.Hash {
 	var missing []plumbing.Hash
 	for _, entry := range tree.Entries {
 		if entry.Mode.IsFile() {
-			if t.storer.HasEncodedObject(entry.Hash) != nil {
+			if t.storer.HasEncodedObject(entry.Hash) != nil && !t.blobOnDisk(entry.Hash) {
 				missing = append(missing, entry.Hash)
 			}
 		} else {
@@ -152,6 +161,16 @@ func (t *FetchingTree) collectMissingBlobs(tree *object.Tree) []plumbing.Hash {
 		}
 	}
 	return missing
+}
+
+// blobOnDisk returns true if `git cat-file -e <hash>` finds the blob in
+// the local object store. Used as a second-opinion check before deciding
+// a blob needs to be fetched: in partial-clone repos a blob can be on
+// disk but invisible to go-git's storer (filtered out, or in a packfile
+// not in the cached index). We'd rather skip a wasted network round-trip.
+func (t *FetchingTree) blobOnDisk(hash plumbing.Hash) bool {
+	cmd := exec.CommandContext(t.ctx, "git", "cat-file", "-e", hash.String())
+	return cmd.Run() == nil
 }
 
 // readFileViaGit reads a blob via "git cat-file -p <hash>" and returns an

@@ -4,13 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func testActivityTUIModel() activityModel {
-	vp := viewport.New(80, 3)
+	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(3))
 	vp.SetContent(strings.Join([]string{
 		"line 1",
 		"line 2",
@@ -39,8 +39,8 @@ func updateActivityModel(t *testing.T, m activityModel, msg tea.Msg) (activityMo
 	return result, cmd
 }
 
-func activityRuneKey(r rune) tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+func activityRuneKey(r rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: r, Text: string(r)}
 }
 
 func TestActivityModel_ScrollKeys(t *testing.T) {
@@ -48,9 +48,9 @@ func TestActivityModel_ScrollKeys(t *testing.T) {
 
 	tests := []struct {
 		name string
-		key  tea.KeyMsg
+		key  tea.KeyPressMsg
 	}{
-		{name: "arrow down", key: tea.KeyMsg{Type: tea.KeyDown}},
+		{name: "arrow down", key: tea.KeyPressMsg{Code: tea.KeyDown}},
 		{name: "vim down", key: activityRuneKey('j')},
 	}
 
@@ -59,8 +59,8 @@ func TestActivityModel_ScrollKeys(t *testing.T) {
 			t.Parallel()
 
 			m, _ := updateActivityModel(t, testActivityTUIModel(), tt.key)
-			if m.viewport.YOffset != 1 {
-				t.Fatalf("YOffset = %d, want 1", m.viewport.YOffset)
+			if m.viewport.YOffset() != 1 {
+				t.Fatalf("YOffset = %d, want 1", m.viewport.YOffset())
 			}
 		})
 	}
@@ -71,9 +71,9 @@ func TestActivityModel_ScrollUpKeys(t *testing.T) {
 
 	tests := []struct {
 		name string
-		key  tea.KeyMsg
+		key  tea.KeyPressMsg
 	}{
-		{name: "arrow up", key: tea.KeyMsg{Type: tea.KeyUp}},
+		{name: "arrow up", key: tea.KeyPressMsg{Code: tea.KeyUp}},
 		{name: "vim up", key: activityRuneKey('k')},
 	}
 
@@ -84,8 +84,8 @@ func TestActivityModel_ScrollUpKeys(t *testing.T) {
 			m := testActivityTUIModel()
 			m.viewport.SetYOffset(2)
 			m, _ = updateActivityModel(t, m, tt.key)
-			if m.viewport.YOffset != 1 {
-				t.Fatalf("YOffset = %d, want 1", m.viewport.YOffset)
+			if m.viewport.YOffset() != 1 {
+				t.Fatalf("YOffset = %d, want 1", m.viewport.YOffset())
 			}
 		})
 	}
@@ -96,13 +96,13 @@ func TestActivityModel_TopBottomKeys(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		key      tea.KeyMsg
+		key      tea.KeyPressMsg
 		gotoTop  bool
 		wantDesc string
 	}{
-		{name: "home", key: tea.KeyMsg{Type: tea.KeyHome}, gotoTop: true, wantDesc: "top"},
+		{name: "home", key: tea.KeyPressMsg{Code: tea.KeyHome}, gotoTop: true, wantDesc: "top"},
 		{name: "vim top", key: activityRuneKey('g'), gotoTop: true, wantDesc: "top"},
-		{name: "end", key: tea.KeyMsg{Type: tea.KeyEnd}, wantDesc: "bottom"},
+		{name: "end", key: tea.KeyPressMsg{Code: tea.KeyEnd}, wantDesc: "bottom"},
 		{name: "vim bottom", key: activityRuneKey('G'), wantDesc: "bottom"},
 	}
 
@@ -117,10 +117,10 @@ func TestActivityModel_TopBottomKeys(t *testing.T) {
 			m, _ = updateActivityModel(t, m, tt.key)
 
 			if tt.gotoTop && !m.viewport.AtTop() {
-				t.Fatalf("viewport should be at %s, YOffset = %d", tt.wantDesc, m.viewport.YOffset)
+				t.Fatalf("viewport should be at %s, YOffset = %d", tt.wantDesc, m.viewport.YOffset())
 			}
 			if !tt.gotoTop && !m.viewport.AtBottom() {
-				t.Fatalf("viewport should be at %s, YOffset = %d", tt.wantDesc, m.viewport.YOffset)
+				t.Fatalf("viewport should be at %s, YOffset = %d", tt.wantDesc, m.viewport.YOffset())
 			}
 		})
 	}
@@ -129,10 +129,10 @@ func TestActivityModel_TopBottomKeys(t *testing.T) {
 func TestActivityModel_QuitKeys(t *testing.T) {
 	t.Parallel()
 
-	quitKeys := []tea.KeyMsg{
+	quitKeys := []tea.KeyPressMsg{
 		activityRuneKey('q'),
-		{Type: tea.KeyCtrlC},
-		{Type: tea.KeyEsc},
+		{Code: 'c', Mod: tea.ModCtrl},
+		{Code: tea.KeyEscape},
 	}
 
 	for _, key := range quitKeys {

@@ -447,7 +447,11 @@ func groupBulletsByRepo(used []repoBullet) []RepoGroup {
 				Bullets: sectionMap[label],
 			})
 		}
-		out = append(out, RepoGroup{FullName: repoName, Sections: sections})
+		out = append(out, RepoGroup{
+			FullName: repoName,
+			URL:      githubRepoURL(repoName),
+			Sections: sections,
+		})
 	}
 
 	return out

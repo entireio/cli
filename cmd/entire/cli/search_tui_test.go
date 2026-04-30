@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 )
 
@@ -74,7 +74,7 @@ func testModel() searchModel {
 // initTestViewport sets a simulated terminal height and initializes the browse viewport for tests that call View().
 func initTestViewport(m searchModel) searchModel {
 	m.height = 60
-	m.browseVP.Height = 59
+	m.browseVP.SetHeight(59)
 	m = m.refreshBrowseContent()
 	return m
 }
@@ -98,22 +98,22 @@ func TestSearchModel_Navigation(t *testing.T) {
 		t.Fatalf("initial cursor = %d, want 0", m.cursor)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.cursor != 1 {
 		t.Errorf("after down: cursor = %d, want 1", m.cursor)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.cursor != 1 {
 		t.Errorf("after down at bottom: cursor = %d, want 1", m.cursor)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if m.cursor != 0 {
 		t.Errorf("after up: cursor = %d, want 0", m.cursor)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if m.cursor != 0 {
 		t.Errorf("after up at top: cursor = %d, want 0", m.cursor)
 	}
@@ -123,12 +123,12 @@ func TestSearchModel_VimNavigationAliases(t *testing.T) {
 	t.Parallel()
 	m := testModel()
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.cursor != 1 {
 		t.Errorf("after j: cursor = %d, want 1", m.cursor)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.cursor != 0 {
 		t.Errorf("after k: cursor = %d, want 0", m.cursor)
 	}
@@ -144,7 +144,7 @@ func TestSearchModel_TopBottomNavigation(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		key         tea.KeyMsg
+		key         tea.KeyPressMsg
 		startPage   int
 		startCursor int
 		wantPage    int
@@ -152,7 +152,7 @@ func TestSearchModel_TopBottomNavigation(t *testing.T) {
 	}{
 		{
 			name:        "home",
-			key:         tea.KeyMsg{Type: tea.KeyHome},
+			key:         tea.KeyPressMsg{Code: tea.KeyHome},
 			startPage:   1,
 			startCursor: 4,
 			wantPage:    0,
@@ -160,7 +160,7 @@ func TestSearchModel_TopBottomNavigation(t *testing.T) {
 		},
 		{
 			name:        "g",
-			key:         tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}},
+			key:         tea.KeyPressMsg{Code: 'g', Text: "g"},
 			startPage:   1,
 			startCursor: 4,
 			wantPage:    0,
@@ -168,7 +168,7 @@ func TestSearchModel_TopBottomNavigation(t *testing.T) {
 		},
 		{
 			name:        "end",
-			key:         tea.KeyMsg{Type: tea.KeyEnd},
+			key:         tea.KeyPressMsg{Code: tea.KeyEnd},
 			startPage:   0,
 			startCursor: 0,
 			wantPage:    1,
@@ -176,7 +176,7 @@ func TestSearchModel_TopBottomNavigation(t *testing.T) {
 		},
 		{
 			name:        "G",
-			key:         tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}},
+			key:         tea.KeyPressMsg{Code: 'G', Text: "G"},
 			startPage:   0,
 			startCursor: 0,
 			wantPage:    1,
@@ -210,11 +210,11 @@ func TestSearchModel_Quit(t *testing.T) {
 	t.Parallel()
 	m := testModel()
 
-	quitKeys := []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune{'q'}},
-		{Type: tea.KeyCtrlC},
-		{Type: tea.KeyEsc},
-		{Type: tea.KeyRunes, Runes: []rune{'h'}},
+	quitKeys := []tea.KeyPressMsg{
+		{Code: 'q', Text: "q"},
+		{Code: 'c', Mod: tea.ModCtrl},
+		{Code: tea.KeyEscape},
+		{Code: 'h', Text: "h"},
 	}
 
 	for _, key := range quitKeys {
@@ -238,12 +238,12 @@ func TestSearchModel_SearchMode(t *testing.T) {
 		t.Fatalf("initial mode = %d, want modeBrowse", m.mode)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	if m.mode != modeSearch {
 		t.Errorf("after /: mode = %d, want modeSearch", m.mode)
 	}
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.mode != modeBrowse {
 		t.Errorf("after esc: mode = %d, want modeBrowse", m.mode)
 	}
@@ -254,12 +254,12 @@ func TestSearchModel_SearchModeEnter(t *testing.T) {
 	m := testModel()
 
 	// Enter search mode
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	// Type a query
 	m.input.SetValue(newQuery)
 
 	// Press enter — should set loading and return to browse mode
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -280,11 +280,11 @@ func TestSearchModel_SearchModeEnterEmpty(t *testing.T) {
 	m := testModel()
 
 	// Enter search mode with empty query
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue("   ")
 
 	// Press enter — should be a no-op (stay in search mode)
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.mode != modeSearch {
 		t.Errorf("after enter with empty query: mode = %d, want modeSearch", m.mode)
 	}
@@ -296,7 +296,7 @@ func TestSearchModel_SearchModeEnterEmpty(t *testing.T) {
 func TestSearchModel_View(t *testing.T) {
 	t.Parallel()
 	m := testModel()
-	view := m.View()
+	view := m.View().Content
 
 	// Section headers
 	if !strings.Contains(view, "SEARCH") {
@@ -424,7 +424,7 @@ func TestSearchModel_ViewSearchModeIncludesRepoHint(t *testing.T) {
 	m.mode = modeSearch
 	m.input.Focus()
 
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "repo:<owner/name|*>") {
 		t.Error("view missing repo filter hint")
 	}
@@ -438,7 +438,7 @@ func TestSearchModel_ViewNoResults(t *testing.T) {
 	ss := statusStyles{colorEnabled: false, width: 80}
 	cfg := search.Config{}
 	m := initTestViewport(newSearchModel(nil, "nothing", 0, cfg, ss))
-	view := m.View()
+	view := m.View().Content
 
 	if !strings.Contains(view, "No results found") {
 		t.Error("view should show no results message")
@@ -462,7 +462,7 @@ func TestSearchModel_ViewZeroWidth(t *testing.T) {
 	m := newSearchModel(testResults(), "auth", 2, cfg, ss)
 	m.width = 0
 
-	if view := m.View(); view != "" {
+	if view := m.View().Content; view != "" {
 		t.Errorf("view with zero width should be empty, got %q", view)
 	}
 }
@@ -732,7 +732,7 @@ func TestSearchModel_FetchMoreOnNavigate(t *testing.T) {
 	m := newSearchModel(make([]search.Result, 25), "q", 50, cfg, ss)
 
 	// Navigate to page 2 — should trigger fetch
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -762,7 +762,7 @@ func TestSearchModel_NoFetchWhenResultsLoaded(t *testing.T) {
 	m := newSearchModel(results, "q", 50, cfg, ss)
 
 	// Navigate to page 2 — should NOT trigger fetch (data already loaded)
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -845,7 +845,7 @@ func TestSearchModel_PageNavigation(t *testing.T) {
 	}
 
 	// Navigate to next page
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
 	if m.page != 1 {
 		t.Errorf("after 'n': page = %d, want 1", m.page)
 	}
@@ -854,19 +854,19 @@ func TestSearchModel_PageNavigation(t *testing.T) {
 	}
 
 	// Can't go past last page
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
 	if m.page != 1 {
 		t.Errorf("after 'n' on last page: page = %d, want 1", m.page)
 	}
 
 	// Navigate back
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'p', Text: "p"})
 	if m.page != 0 {
 		t.Errorf("after 'p': page = %d, want 0", m.page)
 	}
 
 	// Can't go before first page
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: 'p', Text: "p"})
 	if m.page != 0 {
 		t.Errorf("after 'p' on first page: page = %d, want 0", m.page)
 	}
@@ -884,13 +884,13 @@ func TestSearchModel_NewSearchClearsFilters(t *testing.T) {
 	m := newSearchModel(testResults(), "auth", 2, cfg, ss)
 
 	// Enter search mode
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 
 	// Type a query without filters
 	m.input.SetValue(newQuery)
 
 	// Press enter — should trigger search with cleared filters
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -973,7 +973,7 @@ func TestSearchModel_ViewFetchingMore(t *testing.T) {
 	m.fetchingMore = true
 	m = m.refreshBrowseContent()
 
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "Loading more results...") {
 		t.Error("view should show loading message when fetchingMore and page has no data")
 	}
@@ -987,10 +987,10 @@ func TestSearchModel_NewSearchPersistsFilters(t *testing.T) {
 	m := newSearchModel(testResults(), "old", 2, cfg, ss)
 
 	// Enter search mode and type query with filters
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue(newQuery + " author:bob date:month")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -1019,10 +1019,10 @@ func TestSearchModel_NewSearchPersistsRepoFilters(t *testing.T) {
 	}
 	m := newSearchModel(testResults(), "old", 2, cfg, ss)
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue(newQuery + " repo:entirehq/entire.io")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -1049,10 +1049,10 @@ func TestSearchModel_NewSearchClearsExplicitRepoFilters(t *testing.T) {
 	}
 	m := newSearchModel(testResults(), "auth", 2, cfg, ss)
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue(newQuery)
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -1078,10 +1078,10 @@ func TestSearchModel_NewSearchAllReposFilter(t *testing.T) {
 	}
 	m := newSearchModel(testResults(), "old", 2, cfg, ss)
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue(newQuery + " repo:*")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)
@@ -1104,10 +1104,10 @@ func TestSearchModel_NewSearchRejectsMultipleExplicitRepos(t *testing.T) {
 	}
 	m := newSearchModel(testResults(), "old", 2, cfg, ss)
 
-	m = updateModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
 	m.input.SetValue(newQuery + " repo:entirehq/entire.io,entireio/cli")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m, ok := updated.(searchModel)
 	if !ok {
 		t.Fatalf("Update returned %T, want searchModel", updated)

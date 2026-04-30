@@ -7,11 +7,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
@@ -63,7 +63,7 @@ func runActivityTUI(ctx context.Context, client *api.Client) error {
 		client:   client,
 		useColor: shouldUseColor(os.Stdout),
 	}
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("activity TUI: %w", err)
 	}
@@ -113,7 +113,7 @@ func (m activityModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:iretu
 		m.loadErr = msg.err
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if key.Matches(msg, keys.Quit) || key.Matches(msg, keys.Back) {
 			return m, tea.Quit
 		}
@@ -164,27 +164,30 @@ func (m activityModel) withViewport() activityModel {
 	}
 
 	if !m.ready {
-		m.viewport = viewport.New(m.width, vpHeight)
+		m.viewport = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(vpHeight))
 		m.ready = true
 	} else {
-		m.viewport.Width = m.width
-		m.viewport.Height = vpHeight
+		m.viewport.SetWidth(m.width)
+		m.viewport.SetHeight(vpHeight)
 	}
 	m.viewport.SetContent(m.renderCommits())
 	return m
 }
 
-func (m activityModel) View() string {
+func (m activityModel) View() tea.View {
+	v := tea.View{AltScreen: true}
 	if m.loadErr != nil {
-		return fmt.Sprintf("\n  Failed to load activity: %s\n\n  Press q to quit.\n", m.loadErr)
+		v.SetContent(fmt.Sprintf("\n  Failed to load activity: %s\n\n  Press q to quit.\n", m.loadErr))
+		return v
 	}
 
 	if m.loading {
-		return fmt.Sprintf("\n  %s Loading activity...\n", m.spinner.View())
+		v.SetContent(fmt.Sprintf("\n  %s Loading activity...\n", m.spinner.View()))
+		return v
 	}
 
 	if !m.ready {
-		return ""
+		return v
 	}
 
 	var b strings.Builder
@@ -192,7 +195,8 @@ func (m activityModel) View() string {
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
 	b.WriteString(m.renderFooter())
-	return b.String()
+	v.SetContent(b.String())
+	return v
 }
 
 func (m activityModel) renderHeader() string {
@@ -238,7 +242,7 @@ func (m activityModel) renderFooter() string {
 	quitHelp := keyStyle.Render(keys.Quit.Help().Key) + helpStyle.Render(" "+keys.Quit.Help().Desc)
 	helpChoices := []string{fullHelp, standardHelp, shortHelp, quitHelp}
 
-	if m.viewport.TotalLineCount() <= m.viewport.Height {
+	if m.viewport.TotalLineCount() <= m.viewport.Height() {
 		for _, help := range helpChoices {
 			if m.width <= 0 || lipgloss.Width(help) <= m.width {
 				return help

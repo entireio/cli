@@ -4,12 +4,19 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 	"github.com/stretchr/testify/require"
 
@@ -790,4 +797,227 @@ func TestExplain_BranchListingV2OnlyAfterV1Deleted(t *testing.T) {
 		"checkpoint should be visible from v2 after v1 deletion")
 	require.Contains(t, output, "Create v2 resilience file",
 		"prompt/intent should be readable from v2 after v1 deletion")
+}
+
+// TestExplain_CheckpointSucceedsAfterTreelessFetch is the regression test
+// for the partial-clone bug: when a metadata blob is on the remote but
+// absent locally (the typical aftermath of a `--filter=blob:none` fetch),
+// `entire explain --checkpoint <id>` used to fail with "checkpoint not
+// found" because go-git's `Tree.File()` returns ErrFileNotFound for
+// missing blobs and ReadCommitted treated that as "checkpoint doesn't
+// exist".
+//
+// To genuinely reproduce the bug, the test runs explain in a *fresh*
+// clone of the bare remote — one that never held the blobs locally. Just
+// deleting refs in the original env wouldn't suffice because the blobs
+// remain on disk in the existing pack files, hiding the bug.
+func TestExplain_CheckpointSucceedsAfterTreelessFetch(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	bareURL := env.SetupBareRemote()
+
+	checkpointID := createAndPushCheckpoint(t, env, "treeless_v1.go", "Treeless v1 prompt")
+
+	cloneDir := setupTreelessClone(t, bareURL, "+refs/heads/"+paths.MetadataBranchName+":refs/heads/"+paths.MetadataBranchName)
+	requireBlobMissing(t, cloneDir, checkpointID, false /* v1 */)
+
+	output := runExplainInDir(t, cloneDir, checkpointID)
+	require.Contains(t, output, "Treeless v1 prompt",
+		"explain should succeed and surface the prompt despite blobs being absent locally")
+}
+
+// TestExplain_CheckpointV2SucceedsAfterTreelessFetch is the v2 mirror —
+// guards V2GitStore's read path against the same blob-missing regression.
+// Required because v2 will be enabled by default soon and reaches the
+// same Tree.File() trap as v1.
+func TestExplain_CheckpointV2SucceedsAfterTreelessFetch(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	env.PatchSettings(map[string]any{
+		"strategy_options": map[string]any{
+			"checkpoints_v2": true,
+			"push_v2_refs":   true,
+		},
+	})
+
+	bareURL := env.SetupBareRemote()
+	checkpointID := createAndPushCheckpoint(t, env, "treeless_v2.go", "Treeless v2 prompt")
+
+	cloneDir := setupTreelessClone(t, bareURL, "+"+paths.V2MainRefName+":"+paths.V2MainRefName)
+	writeV2Settings(t, cloneDir)
+	requireBlobMissing(t, cloneDir, checkpointID, true /* v2 */)
+
+	output := runExplainInDir(t, cloneDir, checkpointID)
+	require.Contains(t, output, "Treeless v2 prompt",
+		"explain should succeed against v2 with blobs absent locally")
+}
+
+// createAndPushCheckpoint runs a session-create-stop cycle in env and
+// pushes the resulting checkpoint to origin. Returns the checkpoint ID.
+func createAndPushCheckpoint(t *testing.T, env *TestEnv, fileName, prompt string) string {
+	t.Helper()
+	session := env.NewSession()
+	transcriptPath := session.CreateTranscript(prompt, []FileChange{
+		{Path: fileName, Content: "package treeless"},
+	})
+	require.NoError(t, env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(session.ID, prompt, transcriptPath))
+	env.WriteFile(fileName, "package treeless")
+	env.GitAdd(fileName)
+	require.NoError(t, env.SimulateStop(session.ID, transcriptPath))
+	env.GitCommitWithShadowHooks("Add "+fileName, fileName)
+	cpID := env.GetLatestCheckpointID()
+	require.NotEmpty(t, cpID, "expected a checkpoint after condensation")
+	env.RunPrePush("origin")
+	return cpID
+}
+
+// setupTreelessClone creates a fresh git repo in a fresh TempDir, fetches
+// the given refspec from bareURL with --filter=blob:none --depth=1 (so
+// trees but no blobs land locally), and writes a minimal entire settings
+// file pointing at bareURL as the checkpoint_remote. Returns the new dir.
+//
+// Note: the bare and the fetch must go through the smart protocol for
+// --filter to be honored; the default local-path transport optimization
+// copies packs verbatim and ignores filters. We set
+// uploadpack.allowFilter=true on the bare and use a file:// URL with
+// protocol.file.allow=always to force the smart path.
+func setupTreelessClone(t *testing.T, barePath, refspec string) string {
+	t.Helper()
+	gitEnv := testutil.GitIsolatedEnv()
+	enableFilterOnBare(t, barePath, gitEnv)
+
+	cloneDir := t.TempDir()
+	fileURL := "file://" + barePath
+
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"-c", "protocol.file.allow=always", "fetch", "--filter=blob:none", "--depth=1", "--no-tags", fileURL, refspec},
+	} {
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = cloneDir
+		cmd.Env = gitEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	require.NoError(t, writeMinimalEntireSettings(cloneDir, barePath))
+	return cloneDir
+}
+
+// enableFilterOnBare sets uploadpack.allowFilter=true on the bare repo so
+// that --filter=blob:none on fetch is honored.
+func enableFilterOnBare(t *testing.T, barePath string, gitEnv []string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "-C", barePath, "config", "uploadpack.allowFilter", "true")
+	cmd.Env = gitEnv
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to set uploadpack.allowFilter on bare: %v\n%s", err, out)
+	}
+	cmd = exec.CommandContext(t.Context(), "git", "-C", barePath, "config", "uploadpack.allowAnySHA1InWant", "true")
+	cmd.Env = gitEnv
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to set uploadpack.allowAnySHA1InWant on bare: %v\n%s", err, out)
+	}
+}
+
+// writeMinimalEntireSettings writes the smallest valid settings.json that
+// configures the manual-commit strategy with filtered_fetches enabled and
+// a custom checkpoint_remote URL — the partial-clone setup that triggered
+// the original bug.
+func writeMinimalEntireSettings(dir, bareURL string) error {
+	entireDir := filepath.Join(dir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		return err
+	}
+	settings := map[string]any{
+		"enabled":   true,
+		"local_dev": true,
+		"strategy":  "manual-commit",
+		"strategy_options": map[string]any{
+			"filtered_fetches": true,
+			"checkpoint_remote": map[string]any{
+				"provider": "url",
+				"url":      bareURL,
+			},
+		},
+	}
+	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(entireDir, paths.SettingsFileName), data, 0o644)
+}
+
+// writeV2Settings overlays checkpoints_v2 enablement on the settings written
+// by writeMinimalEntireSettings.
+func writeV2Settings(t *testing.T, dir string) {
+	t.Helper()
+	settingsPath := filepath.Join(dir, ".entire", paths.SettingsFileName)
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+
+	var settings map[string]any
+	require.NoError(t, json.Unmarshal(data, &settings))
+
+	opts, _ := settings["strategy_options"].(map[string]any)
+	opts["checkpoints_v2"] = true
+	settings["strategy_options"] = opts
+
+	updated, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(settingsPath, updated, 0o644))
+}
+
+// runExplainInDir runs `entire explain --checkpoint <id>` in dir and
+// returns combined output. Fails the test if the command errors. Uses
+// execx.NonInteractive (project rule for spawning the entire binary in
+// tests) so the child has no controlling terminal.
+func runExplainInDir(t *testing.T, dir, checkpointID string) string {
+	t.Helper()
+	cmd := execx.NonInteractive(t.Context(), getTestBinary(), "explain", "--checkpoint", checkpointID)
+	cmd.Dir = dir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("explain failed: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+// requireBlobMissing asserts that at least one metadata blob for the
+// checkpoint is genuinely absent from the local object store. Confirms the
+// treeless-clone setup actually reproduces the bug-triggering state — if
+// every blob were locally available, the test would pass without
+// exercising the fix.
+func requireBlobMissing(t *testing.T, dir, checkpointID string, isV2 bool) {
+	t.Helper()
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	var ref *plumbing.Reference
+	if isV2 {
+		ref, err = repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
+	} else {
+		ref, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	}
+	require.NoError(t, err, "metadata ref should exist after treeless fetch")
+
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	rootTree, err := commit.Tree()
+	require.NoError(t, err)
+	cpSubtree, err := rootTree.Tree(checkpointID[:2] + "/" + checkpointID[2:])
+	require.NoError(t, err, "cp subtree should be navigable from local trees")
+
+	for _, entry := range cpSubtree.Entries {
+		if !entry.Mode.IsFile() {
+			continue
+		}
+		if _, err := repo.BlobObject(entry.Hash); err != nil {
+			return // confirmed: at least one blob is missing
+		}
+	}
+	t.Fatalf("expected at least one metadata blob to be missing in fresh treeless clone (cp=%s, v2=%v)", checkpointID, isV2)
 }

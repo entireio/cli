@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -114,7 +114,7 @@ func realChooseUpdate(ctx context.Context, currentVersion, latestVersion, cmdStr
 			huh.NewOption("Skip until next version", autoUpdateActionSkipUntilNextVersion),
 		).
 		Value(&action)
-	form := huh.NewForm(huh.NewGroup(sel)).WithTheme(huh.ThemeDracula())
+	form := huh.NewForm(huh.NewGroup(sel)).WithTheme(huh.ThemeFunc(huh.ThemeDracula))
 	if os.Getenv("ACCESSIBLE") != "" {
 		form = form.WithAccessible(true)
 	}

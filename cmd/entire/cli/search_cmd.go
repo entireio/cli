@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -137,7 +137,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				model := newSearchModel(nil, "", 0, searchCfg, styles)
 				model.mode = modeSearch
 				model.input.Focus()
-				p := tea.NewProgram(model, tea.WithAltScreen())
+				p := tea.NewProgram(model)
 				if _, err := p.Run(); err != nil {
 					return fmt.Errorf("TUI error: %w", err)
 				}
@@ -176,7 +176,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// Interactive TUI
 			model := newSearchModel(resp.Results, query, resp.Total, searchCfg, styles)
-			p := tea.NewProgram(model, tea.WithAltScreen())
+			p := tea.NewProgram(model)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)
 			}

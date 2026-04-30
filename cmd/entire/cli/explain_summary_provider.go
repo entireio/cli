@@ -15,7 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 )
 
 var (

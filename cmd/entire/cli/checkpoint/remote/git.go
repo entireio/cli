@@ -70,21 +70,29 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 }
 
 // FetchBlobs fetches specific objects (typically blobs) by hash from a remote.
-// Unlike Fetch, this never applies --filter=blob:none (which would be
-// contradictory — the point is to download specific blobs) and always uses
-// --no-write-fetch-head to avoid polluting FETCH_HEAD.
+// Uses `git fetch-pack` rather than `git fetch` because the high-level
+// porcelain enforces partial-clone integrity checks that reject blob-only
+// responses with "did not send all necessary objects". Plumbing skips those
+// checks — it just downloads the requested objects into .git/objects/pack
+// and exits — which is exactly what we want when grabbing individual blobs
+// by SHA. Works against GitHub for any reachable object, including blobs.
 //
 // The remote should be a URL (not a remote name) to avoid persisting promisor
 // settings onto the named remote. Use FetchURL to obtain the URL.
 func FetchBlobs(ctx context.Context, remote string, hashes []string) error {
-	args := []string{"fetch", "--no-tags", "--no-write-fetch-head", remote}
+	args := []string{"fetch-pack", remote}
 	args = append(args, hashes...)
 
 	cmd := newCommand(ctx, args...)
 	disableTerminalPrompt(cmd)
-	_, err := cmd.CombinedOutput()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git fetch blobs: %w", err)
+		redactedURL := RedactURL(remote)
+		msg := strings.TrimSpace(strings.ReplaceAll(string(output), remote, redactedURL))
+		if msg != "" {
+			return fmt.Errorf("git fetch-pack from %s: %s: %w", redactedURL, msg, err)
+		}
+		return fmt.Errorf("git fetch-pack from %s: %w", redactedURL, err)
 	}
 	return nil
 }

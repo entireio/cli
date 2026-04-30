@@ -116,6 +116,7 @@ func apiToDispatch(response *CreateDispatchResponse) *Dispatch {
 		}
 		repos = append(repos, RepoGroup{
 			FullName: repo.FullName,
+			URL:      githubRepoURL(repo.FullName),
 			Sections: sections,
 		})
 	}
