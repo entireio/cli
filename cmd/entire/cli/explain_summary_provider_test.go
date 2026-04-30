@@ -16,6 +16,43 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
+func rowsContain(rows []explainRow, label, value string) bool {
+	for _, r := range rows {
+		if r.Label == label && r.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSummaryProviderRows_PopulatesProviderAndModel(t *testing.T) {
+	t.Parallel()
+	p := &checkpointSummaryProvider{DisplayName: "claude-code", Model: "claude-sonnet-4-6"}
+	rows := summaryProviderRows(p)
+	if !rowsContain(rows, "provider", "claude-code") {
+		t.Errorf("missing provider row: %+v", rows)
+	}
+	if !rowsContain(rows, "model", "claude-sonnet-4-6") {
+		t.Errorf("missing model row: %+v", rows)
+	}
+}
+
+func TestSummaryProviderRows_EmptyModelRendersDefault(t *testing.T) {
+	t.Parallel()
+	p := &checkpointSummaryProvider{DisplayName: "claude-code", Model: ""}
+	rows := summaryProviderRows(p)
+	if !rowsContain(rows, "model", "provider default") {
+		t.Errorf("expected provider-default fallback: %+v", rows)
+	}
+}
+
+func TestSummaryProviderRows_NilProviderReturnsNil(t *testing.T) {
+	t.Parallel()
+	if rows := summaryProviderRows(nil); rows != nil {
+		t.Errorf("expected nil for nil provider, got %+v", rows)
+	}
+}
+
 type stubTextAgent struct {
 	name types.AgentName
 	kind types.AgentType

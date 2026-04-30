@@ -67,6 +67,36 @@ func TestIdentityBullet_NoColor(t *testing.T) {
 	}
 }
 
+func TestIdentityBullet_EmptyIdSkipsTrailingSpace(t *testing.T) {
+	t.Parallel()
+	s := newStatusStyles(io.Discard)
+	got := s.identityBullet("Checkpoint abc [temporary]", "")
+	want := "● Checkpoint abc [temporary]\n"
+	if got != want {
+		t.Errorf("identityBullet empty id\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestListIdentityBullet_NoColor(t *testing.T) {
+	t.Parallel()
+	s := newStatusStyles(io.Discard)
+	got := s.listIdentityBullet("a3b2c4d5e6f7", `[Task]  "refactor"`)
+	want := "● a3b2c4d5e6f7  [Task]  \"refactor\"\n"
+	if got != want {
+		t.Errorf("listIdentityBullet\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestListIdentityBullet_NoSuffix(t *testing.T) {
+	t.Parallel()
+	s := newStatusStyles(io.Discard)
+	got := s.listIdentityBullet("a3b2c4d5e6f7", "")
+	want := "● a3b2c4d5e6f7\n"
+	if got != want {
+		t.Errorf("listIdentityBullet no-suffix\n got: %q\nwant: %q", got, want)
+	}
+}
+
 func TestSuccessBullet_NoColor(t *testing.T) {
 	t.Parallel()
 	s := newStatusStyles(io.Discard)

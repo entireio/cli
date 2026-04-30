@@ -78,46 +78,69 @@ func TestExplainCmd_SearchAllFlag(t *testing.T) {
 	}
 }
 
+// rowsHaveValue searches rows for a value substring (in either Label or Value).
+// Used by formatCheckpointSummaryError tests to assert that envelope text or
+// hint phrasing surfaces somewhere in the structured rows.
+func rowsHaveValue(rows []explainRow, want string) bool {
+	for _, r := range rows {
+		if strings.Contains(r.Value, want) || strings.Contains(r.Label, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestFormatCheckpointSummaryError_Auth(t *testing.T) {
 	t.Parallel()
-	err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorAuth, Message: "Invalid API key"}, 0)
-	msg := err.Error()
-	if !strings.Contains(strings.ToLower(msg), "authentication failed") {
-		t.Errorf("missing 'authentication failed' in %q", msg)
+	label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorAuth, Message: "Invalid API key"}, 0)
+	if !strings.Contains(strings.ToLower(label), "authentication failed") {
+		t.Errorf("missing 'authentication failed' in label %q", label)
 	}
-	if !strings.Contains(msg, "Invalid API key") {
-		t.Errorf("missing envelope message in %q", msg)
+	if !rowsHaveValue(rows, "Invalid API key") {
+		t.Errorf("missing envelope message in rows: %+v", rows)
+	}
+	if err == nil {
+		t.Fatal("expected structured error")
 	}
 }
 
 func TestFormatCheckpointSummaryError_RateLimit(t *testing.T) {
 	t.Parallel()
-	err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorRateLimit, Message: "429"}, 0)
-	if !strings.Contains(err.Error(), "rate limit") {
-		t.Errorf("missing rate-limit phrasing: %q", err)
+	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorRateLimit, Message: "429"}, 0)
+	if !strings.Contains(label, "rate limit") {
+		t.Errorf("missing rate-limit phrasing in label: %q", label)
+	}
+	if err == nil {
+		t.Fatal("expected structured error")
 	}
 }
 
 func TestFormatCheckpointSummaryError_Config(t *testing.T) {
 	t.Parallel()
-	err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorConfig, Message: "model not found"}, 0)
-	if !strings.Contains(err.Error(), "model not found") {
-		t.Errorf("envelope message not surfaced: %q", err)
+	_, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorConfig, Message: "model not found"}, 0)
+	if !rowsHaveValue(rows, "model not found") {
+		t.Errorf("envelope message not surfaced in rows: %+v", rows)
+	}
+	if err == nil {
+		t.Fatal("expected structured error")
 	}
 }
 
 func TestFormatCheckpointSummaryError_CLIMissing(t *testing.T) {
 	t.Parallel()
-	err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorCLIMissing}, 0)
-	if !strings.Contains(err.Error(), "not installed") {
-		t.Errorf("missing cli-missing phrasing: %q", err)
+	label, _, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: claudecode.ClaudeErrorCLIMissing}, 0)
+	if !strings.Contains(label, "not installed") {
+		t.Errorf("missing cli-missing phrasing in label: %q", label)
+	}
+	if err == nil {
+		t.Fatal("expected structured error")
 	}
 }
 
 // TestFormatCheckpointSummaryError_TypedBranchesHandleEmptyMessage guards against
 // the null-result-envelope regression: Claude can emit is_error:true with a real
 // HTTP status (401/429/4xx) but result:null, producing a ClaudeError with Message="".
-// The Auth/RateLimit/Config branches must not render a bare colon in that case.
+// The Auth/RateLimit/Config branches must not render a bare colon in label or rows.
 func TestFormatCheckpointSummaryError_TypedBranchesHandleEmptyMessage(t *testing.T) {
 	t.Parallel()
 	kinds := []claudecode.ClaudeErrorKind{
@@ -128,13 +151,18 @@ func TestFormatCheckpointSummaryError_TypedBranchesHandleEmptyMessage(t *testing
 	for _, kind := range kinds {
 		t.Run(string(kind), func(t *testing.T) {
 			t.Parallel()
-			err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: kind}, 0)
-			msg := err.Error()
-			// Must not end any line with a bare colon (the classic regression
-			// of rendering "...: " with nothing after it).
-			for _, line := range strings.Split(msg, "\n") {
-				if strings.HasSuffix(strings.TrimSpace(line), ":") {
-					t.Errorf("line ends with bare colon: %q (full: %q)", line, msg)
+			label, rows, err := formatCheckpointSummaryError(&claudecode.ClaudeError{Kind: kind}, 0)
+			if err == nil {
+				t.Fatal("expected structured error")
+			}
+			// Label must not end with a bare colon (the classic regression of
+			// rendering "...: " with nothing after it).
+			if strings.HasSuffix(strings.TrimSpace(label), ":") {
+				t.Errorf("label ends with bare colon: %q", label)
+			}
+			for _, r := range rows {
+				if strings.HasSuffix(strings.TrimSpace(r.Value), ":") {
+					t.Errorf("row value ends with bare colon: %q (full: %+v)", r.Value, rows)
 				}
 			}
 		})
@@ -143,38 +171,63 @@ func TestFormatCheckpointSummaryError_TypedBranchesHandleEmptyMessage(t *testing
 
 func TestFormatCheckpointSummaryError_DeadlineExceeded(t *testing.T) {
 	t.Parallel()
-	err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.DeadlineExceeded), 5*time.Minute)
-	msg := err.Error()
-	for _, want := range []string{"5m", "safety deadline"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("missing %q in %q", want, msg)
-		}
+	label, rows, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.DeadlineExceeded), 5*time.Minute)
+	if !strings.Contains(label, "timed out") {
+		t.Errorf("expected 'timed out' in label, got %q", label)
+	}
+	if !strings.Contains(label, "5m") {
+		t.Errorf("expected '5m' in label, got %q", label)
+	}
+	if len(rows) == 0 {
+		t.Fatal("expected rows for causes/try")
+	}
+	if err == nil {
+		t.Fatal("expected structured error")
+	}
+	if !strings.Contains(err.Error(), "safety deadline") {
+		t.Errorf("expected 'safety deadline' in structured error, got %q", err)
 	}
 	// Negative guards against regressions:
-	//   - summary_timeout_seconds advice was removed because the setting is
-	//     not wired yet (follow-up PR). Reintroducing it would re-mislead users.
 	//   - Hardcoded "Claude" / "sonnet" / "Anthropic" would misdirect users of
 	//     alternate summary providers (codex, gemini).
+	combined := label + "\n" + err.Error()
+	var combinedSb194 strings.Builder
+	for _, r := range rows {
+		combinedSb194.WriteString("\n" + r.Label + " " + r.Value)
+	}
+	combined += combinedSb194.String()
 	for _, unwanted := range []string{"summary_timeout_seconds", "Claude", "sonnet", "Anthropic", "anthropic.com"} {
-		if strings.Contains(msg, unwanted) {
-			t.Errorf("unexpected %q in provider-neutral timeout message: %q", unwanted, msg)
+		if strings.Contains(combined, unwanted) {
+			t.Errorf("unexpected %q in provider-neutral timeout message: %q", unwanted, combined)
 		}
 	}
 }
 
 func TestFormatCheckpointSummaryError_Canceled(t *testing.T) {
 	t.Parallel()
-	err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.Canceled), 0)
-	if !strings.Contains(err.Error(), "canceled") {
-		t.Errorf("missing canceled: %q", err)
+	label, _, err := formatCheckpointSummaryError(fmt.Errorf("wrapped: %w", context.Canceled), 0)
+	if !strings.Contains(label, "canceled") {
+		t.Errorf("missing canceled in label: %q", label)
+	}
+	if err == nil {
+		t.Fatal("expected structured error")
 	}
 }
 
 func TestFormatCheckpointSummaryError_Passthrough(t *testing.T) {
 	t.Parallel()
-	err := formatCheckpointSummaryError(errors.New("something else"), 0)
-	if !strings.Contains(err.Error(), "something else") {
-		t.Errorf("original error not preserved: %q", err)
+	_, rows, err := formatCheckpointSummaryError(errors.New("something else"), 0)
+	if err == nil {
+		t.Fatal("expected structured error")
+	}
+	combined := err.Error()
+	var combinedSb219 strings.Builder
+	for _, r := range rows {
+		combinedSb219.WriteString(" " + r.Value)
+	}
+	combined += combinedSb219.String()
+	if !strings.Contains(combined, "something else") {
+		t.Errorf("original error not preserved in structured error or rows: %q rows=%+v", err, rows)
 	}
 }
 
@@ -187,7 +240,7 @@ func TestFormatCheckpointSummaryError_Unknown(t *testing.T) {
 	tests := []struct {
 		name string
 		err  *claudecode.ClaudeError
-		want string // substring that must appear in the rendered message
+		want string // substring that must appear in the label or rows
 	}{
 		{"APIStatus when Message empty", &claudecode.ClaudeError{Kind: claudecode.ClaudeErrorUnknown, APIStatus: 500}, "500"},
 		{"ExitCode when Message empty", &claudecode.ClaudeError{Kind: claudecode.ClaudeErrorUnknown, ExitCode: 137}, "137"},
@@ -198,12 +251,21 @@ func TestFormatCheckpointSummaryError_Unknown(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			msg := formatCheckpointSummaryError(tc.err, 0).Error()
-			if strings.HasSuffix(strings.TrimSpace(msg), ":") {
-				t.Errorf("user-facing message ends with bare colon: %q", msg)
+			label, rows, err := formatCheckpointSummaryError(tc.err, 0)
+			if err == nil {
+				t.Fatal("expected structured error")
 			}
-			if !strings.Contains(msg, tc.want) {
-				t.Errorf("missing %q in %q", tc.want, msg)
+			if strings.HasSuffix(strings.TrimSpace(label), ":") {
+				t.Errorf("label ends with bare colon: %q", label)
+			}
+			combined := label
+			var combinedSb260 strings.Builder
+			for _, r := range rows {
+				combinedSb260.WriteString(" " + r.Value)
+			}
+			combined += combinedSb260.String()
+			if !strings.Contains(combined, tc.want) {
+				t.Errorf("missing %q in %q", tc.want, combined)
 			}
 		})
 	}
@@ -327,7 +389,7 @@ func TestRunExplainAuto_CommitWithoutTrailer(t *testing.T) {
 		wantErr     bool
 		wantContain string // substring required in err (if wantErr) or out (if !wantErr)
 	}{
-		{"read-only prints friendly message", false, false, false, "No associated Entire checkpoint"},
+		{"read-only prints friendly message", false, false, false, "✗ No associated Entire checkpoint"},
 		{"--generate errors", false, true, true, "cannot generate summary"},
 		{"--raw-transcript errors", true, false, true, "cannot show raw transcript"},
 	}
@@ -428,6 +490,31 @@ func TestRunExplainAuto_GenerateTemporaryCheckpointDoesNotFallBackToCommit(t *te
 	require.NotContains(t, err.Error(), "no Entire-Checkpoint trailer")
 }
 
+// TestRunExplainAuto_TemporaryCheckpointRendersIdentityBullet verifies the
+// brand identity-bullet shape is used for temporary checkpoints, with the
+// "after commit" affordance text in the summary block.
+func TestRunExplainAuto_TemporaryCheckpointRendersIdentityBullet(t *testing.T) {
+	tempCheckpointSHA := writeTemporaryCheckpointForExplainTest(t)
+	shortID := tempCheckpointSHA[:7]
+
+	var out, errOut bytes.Buffer
+	// noPager=true to suppress the pager's terminal-only path so output lands
+	// in the buffer; generate=false so we read (and don't try to summarize).
+	err := runExplainAuto(context.Background(), &out, &errOut, tempCheckpointSHA, true, false, false, false, false, false, false)
+	require.NoError(t, err)
+
+	output := out.String()
+	if !strings.Contains(output, fmt.Sprintf("● Checkpoint %s [temporary]", shortID)) {
+		t.Errorf("expected '● Checkpoint %s [temporary]' identity bullet, got:\n%s", shortID, output)
+	}
+	if !strings.Contains(output, "## Summary") {
+		t.Errorf("expected '## Summary' heading in temporary output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "Temporary checkpoints can be summarized after commit") {
+		t.Errorf("expected 'after commit' affordance in temporary output, got:\n%s", output)
+	}
+}
+
 // collidingShaPrefix creates commits until two share a 2-char SHA prefix
 // and returns that prefix. 2 chars is the smallest even-byte boundary
 // HashesWithPrefix uses, so a collision at this length reliably exercises
@@ -469,10 +556,41 @@ func TestResolveCommitUnambiguous_MultipleCommitMatches(t *testing.T) {
 
 	prefix := collidingShaPrefix(t, repo, tmpDir)
 
-	_, err = resolveCommitUnambiguous(repo, prefix)
+	_, matches, err := resolveCommitUnambiguous(repo, prefix)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errAmbiguousCommitPrefix)
-	require.ErrorContains(t, err, prefix)
+	require.GreaterOrEqual(t, len(matches), 2, "expected ambiguous matches slice")
+}
+
+// TestRunExplainCommit_AmbiguousPrintsToErrWAndReturnsSilent verifies the
+// ambiguous-prefix path: the styled failure block lands on errW, the
+// returned error is a *SilentError (so main.go does not double-print),
+// and stdout stays empty.
+func TestRunExplainCommit_AmbiguousPrintsToErrWAndReturnsSilent(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	prefix := collidingShaPrefix(t, repo, tmpDir)
+
+	var out, errOut bytes.Buffer
+	err = runExplainCommit(context.Background(), &out, &errOut, prefix, true, false, false, false, false, false, false)
+
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Fatalf("expected *SilentError, got %T: %v", err, err)
+	}
+	if !strings.Contains(errOut.String(), "✗ Ambiguous checkpoint prefix") {
+		t.Errorf("missing styled failure on errW:\n%s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "matches") {
+		t.Errorf("expected 'matches' row in errW:\n%s", errOut.String())
+	}
+	if out.String() != "" {
+		t.Errorf("did not expect anything on stdout:\n%s", out.String())
+	}
 }
 
 // TestResolveCommitUnambiguous_UniquePrefixSucceeds verifies a full SHA
@@ -482,8 +600,9 @@ func TestResolveCommitUnambiguous_UniquePrefixSucceeds(t *testing.T) {
 	repo, err := git.PlainOpen(".")
 	require.NoError(t, err)
 
-	got, err := resolveCommitUnambiguous(repo, initial.String())
+	got, matches, err := resolveCommitUnambiguous(repo, initial.String())
 	require.NoError(t, err)
+	require.Nil(t, matches, "no ambiguous matches expected")
 	require.Equal(t, initial, got)
 }
 
@@ -899,9 +1018,12 @@ func TestExplainCommit_NoEntireData(t *testing.T) {
 
 	output := stdout.String()
 
-	// Should show message indicating no Entire checkpoint (new behavior)
-	if !strings.Contains(output, "No associated Entire checkpoint") {
-		t.Errorf("expected output to indicate no Entire checkpoint, got: %s", output)
+	// Should show message indicating no Entire checkpoint (new failure-block shape)
+	if !strings.Contains(output, "✗ No associated Entire checkpoint") {
+		t.Errorf("expected styled failure block on output, got: %s", output)
+	}
+	if !strings.Contains(output, "  reason") {
+		t.Errorf("expected reason row, got: %s", output)
 	}
 	// Should mention the commit hash
 	if !strings.Contains(output, commitHash.String()[:7]) {
@@ -968,9 +1090,12 @@ func TestExplainCommit_WithMetadataTrailerButNoCheckpoint(t *testing.T) {
 
 	output := stdout.String()
 
-	// New behavior: should show "no checkpoint" message since there's no Entire-Checkpoint trailer
-	if !strings.Contains(output, "No associated Entire checkpoint") {
-		t.Errorf("expected 'No associated Entire checkpoint' message, got: %s", output)
+	// New behavior: should show "no checkpoint" failure block since there's no Entire-Checkpoint trailer
+	if !strings.Contains(output, "✗ No associated Entire checkpoint") {
+		t.Errorf("expected styled failure block, got: %s", output)
+	}
+	if !strings.Contains(output, "  reason") {
+		t.Errorf("expected reason row, got: %s", output)
 	}
 	// Should mention the commit hash
 	if !strings.Contains(output, commitHash.String()[:7]) {
@@ -1023,13 +1148,13 @@ func TestExplainDefault_ShowsBranchView(t *testing.T) {
 	}
 
 	output := stdout.String()
-	// Should show branch header
-	if !strings.Contains(output, "Branch:") {
-		t.Errorf("expected 'Branch:' in output, got: %s", output)
+	// Should show branch header (new metadata-row shape: "branch  <name>")
+	if !strings.Contains(output, "branch  ") {
+		t.Errorf("expected 'branch' row in output, got: %s", output)
 	}
 	// Should show checkpoints count (likely 0)
-	if !strings.Contains(output, "Checkpoints:") {
-		t.Errorf("expected 'Checkpoints:' in output, got: %s", output)
+	if !strings.Contains(output, "checkpoints") {
+		t.Errorf("expected 'checkpoints' row in output, got: %s", output)
 	}
 }
 
@@ -1078,9 +1203,9 @@ func TestExplainDefault_NoCheckpoints_ShowsHelpfulMessage(t *testing.T) {
 	}
 
 	output := stdout.String()
-	// Should show checkpoints count as 0
-	if !strings.Contains(output, "Checkpoints: 0") {
-		t.Errorf("expected 'Checkpoints: 0' in output, got: %s", output)
+	// Should show checkpoints count as 0 (new metadata-row shape)
+	if !strings.Contains(output, "checkpoints  0") {
+		t.Errorf("expected 'checkpoints  0' in output, got: %s", output)
 	}
 	// Should show helpful message about checkpoints appearing after saves
 	if !strings.Contains(output, "Checkpoints will appear") || !strings.Contains(output, "Claude session") {
@@ -1152,27 +1277,27 @@ func TestFormatSessionInfo(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(session, "", checkpointDetails)
+	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
 
-	// Verify output contains expected sections
-	if !strings.Contains(output, "Session:") {
-		t.Error("expected output to contain 'Session:'")
+	// Verify output contains expected sections (new identity-bullet shape)
+	if !strings.Contains(output, "● Session "+session.ID) {
+		t.Errorf("expected output to contain '● Session <id>', got:\n%s", output)
 	}
-	if !strings.Contains(output, session.ID) {
-		t.Error("expected output to contain session ID")
-	}
-	if !strings.Contains(output, "Strategy:") {
-		t.Error("expected output to contain 'Strategy:'")
+	if !strings.Contains(output, "strategy") {
+		t.Error("expected output to contain 'strategy' row")
 	}
 	if !strings.Contains(output, "manual-commit") {
 		t.Error("expected output to contain strategy name")
 	}
-	if !strings.Contains(output, "Checkpoints: 2") {
-		t.Error("expected output to contain 'Checkpoints: 2'")
+	if !strings.Contains(output, "checkpoints  2") {
+		t.Errorf("expected output to contain 'checkpoints  2', got:\n%s", output)
 	}
-	// Check checkpoint details
+	// Check checkpoint details (new section-rule prefix)
 	if !strings.Contains(output, "Checkpoint 1") {
 		t.Error("expected output to contain 'Checkpoint 1'")
+	}
+	if !strings.Contains(output, "── ") {
+		t.Errorf("expected section-rule prefix '── ', got:\n%s", output)
 	}
 	if !strings.Contains(output, "## Prompt") {
 		t.Error("expected output to contain '## Prompt'")
@@ -1212,11 +1337,11 @@ func TestFormatSessionInfo_WithSourceRef(t *testing.T) {
 
 	// Test with source ref provided
 	sourceRef := "entire/metadata@abc123def456"
-	output := formatSessionInfo(session, sourceRef, checkpointDetails)
+	output := formatSessionInfo(io.Discard, session, sourceRef, checkpointDetails)
 
-	// Verify source ref is displayed
-	if !strings.Contains(output, "Source Ref:") {
-		t.Error("expected output to contain 'Source Ref:'")
+	// Verify source ref is displayed (new metadata-row shape)
+	if !strings.Contains(output, "source ref") {
+		t.Error("expected output to contain 'source ref' row")
 	}
 	if !strings.Contains(output, sourceRef) {
 		t.Errorf("expected output to contain source ref %q, got:\n%s", sourceRef, output)
@@ -1278,7 +1403,7 @@ func TestFormatSessionInfo_CheckpointNumberingReversed(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(session, "", checkpointDetails)
+	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
 
 	// Verify checkpoint ordering in output
 	// Checkpoint 3 should appear before Checkpoint 2 which should appear before Checkpoint 1
@@ -1313,10 +1438,10 @@ func TestFormatSessionInfo_EmptyCheckpoints(t *testing.T) {
 		Checkpoints: []strategy.Checkpoint{},
 	}
 
-	output := formatSessionInfo(session, "", nil)
+	output := formatSessionInfo(io.Discard, session, "", nil)
 
-	if !strings.Contains(output, "Checkpoints: 0") {
-		t.Errorf("expected output to contain 'Checkpoints: 0', got:\n%s", output)
+	if !strings.Contains(output, "checkpoints  0") {
+		t.Errorf("expected output to contain 'checkpoints  0', got:\n%s", output)
 	}
 }
 
@@ -1343,7 +1468,7 @@ func TestFormatSessionInfo_CheckpointWithTaskMarker(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(session, "", checkpointDetails)
+	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
 
 	if !strings.Contains(output, "[Task]") {
 		t.Errorf("expected output to contain '[Task]' marker, got:\n%s", output)
@@ -1369,7 +1494,7 @@ func TestFormatSessionInfo_CheckpointWithDate(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(session, "", checkpointDetails)
+	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
 
 	// Should contain "2025-12-10 14:35" in the checkpoint header
 	if !strings.Contains(output, "2025-12-10 14:35") {
@@ -1399,7 +1524,7 @@ func TestFormatSessionInfo_ShowsMessageWhenNoInteractions(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(session, "", checkpointDetails)
+	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
 
 	// Should show the commit message when there are no interactions
 	if !strings.Contains(output, "Starting 'dev' agent: Implement feature X (toolu_01ABC)") {
@@ -1437,7 +1562,7 @@ func TestFormatSessionInfo_ShowsMessageAndFilesWhenNoInteractions(t *testing.T) 
 		},
 	}
 
-	output := formatSessionInfo(session, "", checkpointDetails)
+	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
 
 	// Should show the commit message
 	if !strings.Contains(output, "Running tests for API endpoint (toolu_02DEF)") {
@@ -1481,7 +1606,7 @@ func TestFormatSessionInfo_DoesNotShowMessageWhenHasInteractions(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(session, "", checkpointDetails)
+	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
 
 	// Should show the interaction content
 	if !strings.Contains(output, "Implement the feature") {
@@ -1866,7 +1991,10 @@ func TestRunExplainCheckpoint_V2UsesCompactTranscriptForIntent(t *testing.T) {
 	}
 
 	output := buf.String()
-	if !strings.Contains(output, "Intent: compact prompt text") {
+	if !strings.Contains(output, "## Intent") {
+		t.Fatalf("expected '## Intent' heading in no-color output, got: %s", output)
+	}
+	if !strings.Contains(output, "compact prompt text") {
 		t.Fatalf("expected compact transcript to drive intent extraction, got: %s", output)
 	}
 }
@@ -2280,9 +2408,16 @@ func TestFormatCheckpointOutput_Short(t *testing.T) {
 	if !strings.Contains(output, "  tokens   15k") {
 		t.Error("expected token count in output")
 	}
-	// Should show Intent label
-	if !strings.Contains(output, "Intent:") {
-		t.Error("expected Intent label in output")
+	// Should show Intent heading (markdown body)
+	if !strings.Contains(output, "## Intent") {
+		t.Errorf("expected '## Intent' heading in no-color output, got:\n%s", output)
+	}
+	// Should show Summary heading with --generate hint affordance
+	if !strings.Contains(output, "## Summary") {
+		t.Errorf("expected '## Summary' heading in no-color output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "entire explain --generate") {
+		t.Errorf("expected --generate hint in summary affordance, got:\n%s", output)
 	}
 	// Should NOT show full file list in default mode
 	if strings.Contains(output, "main.go") {
@@ -2335,19 +2470,19 @@ func TestFormatCheckpointOutput_Verbose(t *testing.T) {
 	if !strings.Contains(output, "2026-01-21-test-session") {
 		t.Error("expected session ID in output")
 	}
-	// Verbose should show files
-	if !strings.Contains(output, "main.go") {
+	// Verbose should show files (with backticks in markdown list items)
+	if !strings.Contains(output, "`main.go`") {
 		t.Error("verbose output should show files")
 	}
-	if !strings.Contains(output, "util.go") {
+	if !strings.Contains(output, "`util.go`") {
 		t.Error("verbose output should show all files")
 	}
-	if !strings.Contains(output, "config.yaml") {
+	if !strings.Contains(output, "`config.yaml`") {
 		t.Error("verbose output should show all files")
 	}
-	// Should show "Files:" section header
-	if !strings.Contains(output, "Files:") {
-		t.Error("verbose output should have Files section")
+	// Should show "## Files (N)" markdown heading
+	if !strings.Contains(output, "## Files (3)") {
+		t.Errorf("verbose output should have '## Files (3)' heading, got:\n%s", output)
 	}
 	// Verbose should show scoped transcript section
 	if !strings.Contains(output, "Transcript (checkpoint scope)") {
@@ -2419,9 +2554,9 @@ func TestFormatCheckpointOutput_Full(t *testing.T) {
 	if !strings.Contains(output, "abc123def456") {
 		t.Error("expected checkpoint ID in output")
 	}
-	// Full should also include verbose sections (files)
-	if !strings.Contains(output, "Files:") {
-		t.Error("full output should include files section")
+	// Full should also include verbose sections (## Files heading)
+	if !strings.Contains(output, "## Files (2)") {
+		t.Errorf("full output should include '## Files (2)' heading, got:\n%s", output)
 	}
 	// Full shows full session transcript (not scoped)
 	if !strings.Contains(output, "Transcript (full session)") {
@@ -3044,16 +3179,16 @@ func TestFormatBranchCheckpoints_BasicOutput(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("feature/my-branch", points, "")
+	output := formatBranchCheckpoints(io.Discard, "feature/my-branch", points, "")
 
 	// Should show branch name
 	if !strings.Contains(output, "feature/my-branch") {
 		t.Errorf("expected branch name in output, got:\n%s", output)
 	}
 
-	// Should show checkpoint count
-	if !strings.Contains(output, "Checkpoints: 2") {
-		t.Errorf("expected 'Checkpoints: 2' in output, got:\n%s", output)
+	// Should show checkpoint count (new metadata-row shape)
+	if !strings.Contains(output, "checkpoints  2") {
+		t.Errorf("expected 'checkpoints  2' in output, got:\n%s", output)
 	}
 
 	// Should show checkpoint messages
@@ -3097,13 +3232,13 @@ func TestFormatBranchCheckpoints_GroupedByCheckpointID(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("main", points, "")
+	output := formatBranchCheckpoints(io.Discard, "main", points, "")
 
-	// Should group by checkpoint ID - check for checkpoint headers
-	if !strings.Contains(output, "[chk111111111]") {
+	// Should group by checkpoint ID - check for checkpoint headers (identity bullet)
+	if !strings.Contains(output, "● chk111111111") {
 		t.Errorf("expected checkpoint ID header in output, got:\n%s", output)
 	}
-	if !strings.Contains(output, "[chk333333333]") {
+	if !strings.Contains(output, "● chk333333333") {
 		t.Errorf("expected checkpoint ID header in output, got:\n%s", output)
 	}
 
@@ -3124,15 +3259,15 @@ func TestFormatBranchCheckpoints_GroupedByCheckpointID(t *testing.T) {
 }
 
 func TestFormatBranchCheckpoints_NoCheckpoints(t *testing.T) {
-	output := formatBranchCheckpoints("feature/empty-branch", nil, "")
+	output := formatBranchCheckpoints(io.Discard, "feature/empty-branch", nil, "")
 
 	// Should show branch name
 	if !strings.Contains(output, "feature/empty-branch") {
 		t.Errorf("expected branch name in output, got:\n%s", output)
 	}
 
-	// Should indicate no checkpoints
-	if !strings.Contains(output, "Checkpoints: 0") && !strings.Contains(output, "No checkpoints") {
+	// Should indicate no checkpoints (new metadata-row shape: "checkpoints  0")
+	if !strings.Contains(output, "checkpoints  0") && !strings.Contains(output, "No checkpoints") {
 		t.Errorf("expected indication of no checkpoints, got:\n%s", output)
 	}
 }
@@ -3150,7 +3285,7 @@ func TestFormatBranchCheckpoints_ShowsSessionInfo(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("main", points, "")
+	output := formatBranchCheckpoints(io.Discard, "main", points, "")
 
 	// Should show session prompt
 	if !strings.Contains(output, "This is my test prompt") {
@@ -3179,7 +3314,7 @@ func TestFormatBranchCheckpoints_ShowsTemporaryIndicator(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("main", points, "")
+	output := formatBranchCheckpoints(io.Discard, "main", points, "")
 
 	// Should indicate temporary (non-committed) checkpoints with [temporary]
 	if !strings.Contains(output, "[temporary]") {
@@ -3210,11 +3345,54 @@ func TestFormatBranchCheckpoints_ShowsTaskCheckpoints(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("main", points, "")
+	output := formatBranchCheckpoints(io.Discard, "main", points, "")
 
 	// Should indicate task checkpoint
 	if !strings.Contains(output, "[Task]") && !strings.Contains(output, "task") {
 		t.Errorf("expected task checkpoint indicator, got:\n%s", output)
+	}
+}
+
+// TestFormatCheckpointGroup_NoPromptNoCommitShowsPlaceholder verifies the
+// (no prompt recorded) placeholder appears only when neither a session prompt
+// nor a commit message is available.
+func TestFormatCheckpointGroup_NoPromptNoCommitShowsPlaceholder(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	styles := newStatusStyles(io.Discard)
+	formatCheckpointGroup(&sb, checkpointGroup{
+		checkpointID: "temporary",
+		prompt:       "",
+		isTemporary:  true,
+		commits:      []commitEntry{{date: time.Now(), gitSHA: "deadbee", message: ""}},
+	}, styles)
+	out := sb.String()
+	if !strings.Contains(out, "(no prompt recorded)") {
+		t.Errorf("expected '(no prompt recorded)' placeholder:\n%s", out)
+	}
+}
+
+// TestFormatCheckpointGroup_FallsBackToCommitMessage verifies the cascade:
+// when SessionPrompt is empty but a commit message is present, the headline
+// renders the commit message bare (not the placeholder).
+func TestFormatCheckpointGroup_FallsBackToCommitMessage(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	styles := newStatusStyles(io.Discard)
+	formatCheckpointGroup(&sb, checkpointGroup{
+		checkpointID: "abc123def456",
+		prompt:       "",
+		commits:      []commitEntry{{date: time.Now(), gitSHA: "deadbee", message: "feat(cli): wire up paging"}},
+	}, styles)
+	out := sb.String()
+	if !strings.Contains(out, "● abc123def456") {
+		t.Errorf("expected identity bullet headline:\n%s", out)
+	}
+	if !strings.Contains(out, "feat(cli): wire up paging") {
+		t.Errorf("expected commit-message fallback in headline:\n%s", out)
+	}
+	if strings.Contains(out, "(no prompt recorded)") {
+		t.Errorf("did not expect dimmed placeholder when commit message available:\n%s", out)
 	}
 }
 
@@ -3231,7 +3409,7 @@ func TestFormatBranchCheckpoints_TruncatesLongMessages(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints("main", points, "")
+	output := formatBranchCheckpoints(io.Discard, "main", points, "")
 
 	// Output should not contain the full 200 character message
 	if strings.Contains(output, longMessage) {
@@ -4172,8 +4350,11 @@ func TestRunExplainCommit_NoCheckpointTrailer(t *testing.T) {
 	}
 
 	output := buf.String()
-	if !strings.Contains(output, "No associated Entire checkpoint") {
-		t.Errorf("expected 'No associated Entire checkpoint' message, got: %s", output)
+	if !strings.Contains(output, "✗ No associated Entire checkpoint") {
+		t.Errorf("expected styled failure block, got: %s", output)
+	}
+	if !strings.Contains(output, "  reason") {
+		t.Errorf("expected reason row, got: %s", output)
 	}
 }
 
@@ -4255,11 +4436,11 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 	}
 
 	t.Run("no filter shows all checkpoints", func(t *testing.T) {
-		output := formatBranchCheckpoints("main", points, "")
+		output := formatBranchCheckpoints(io.Discard, "main", points, "")
 
-		// Should show all checkpoints
-		if !strings.Contains(output, "Checkpoints: 3") {
-			t.Errorf("expected 'Checkpoints: 3' in output, got:\n%s", output)
+		// Should show all checkpoints (new metadata-row shape)
+		if !strings.Contains(output, "checkpoints  3") {
+			t.Errorf("expected 'checkpoints  3' in output, got:\n%s", output)
 		}
 		// Should show prompts from both sessions
 		if !strings.Contains(output, "Task for session alpha") {
@@ -4271,11 +4452,11 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 	})
 
 	t.Run("filter by exact session ID", func(t *testing.T) {
-		output := formatBranchCheckpoints("main", points, "2026-01-22-session-alpha")
+		output := formatBranchCheckpoints(io.Discard, "main", points, "2026-01-22-session-alpha")
 
 		// Should show only alpha checkpoints (2 of them)
-		if !strings.Contains(output, "Checkpoints: 2") {
-			t.Errorf("expected 'Checkpoints: 2' in output, got:\n%s", output)
+		if !strings.Contains(output, "checkpoints  2") {
+			t.Errorf("expected 'checkpoints  2' in output, got:\n%s", output)
 		}
 		if !strings.Contains(output, "Task for session alpha") {
 			t.Errorf("expected alpha session prompt in output, got:\n%s", output)
@@ -4284,18 +4465,18 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 		if strings.Contains(output, "Task for session beta") {
 			t.Errorf("expected output to NOT contain beta session prompt, got:\n%s", output)
 		}
-		// Should show filter info
-		if !strings.Contains(output, "Filtered by session:") {
-			t.Errorf("expected 'Filtered by session:' in output, got:\n%s", output)
+		// Should show filter info as a metadata row (label aligned to widest "checkpoints")
+		if !strings.Contains(output, "session      2026-01-22-session-alpha") {
+			t.Errorf("expected 'session ... 2026-01-22-session-alpha' in output, got:\n%s", output)
 		}
 	})
 
 	t.Run("filter by session ID prefix", func(t *testing.T) {
-		output := formatBranchCheckpoints("main", points, "2026-01-22-session-b")
+		output := formatBranchCheckpoints(io.Discard, "main", points, "2026-01-22-session-b")
 
 		// Should show only beta checkpoint (1)
-		if !strings.Contains(output, "Checkpoints: 1") {
-			t.Errorf("expected 'Checkpoints: 1' in output, got:\n%s", output)
+		if !strings.Contains(output, "checkpoints  1") {
+			t.Errorf("expected 'checkpoints  1' in output, got:\n%s", output)
 		}
 		if !strings.Contains(output, "Task for session beta") {
 			t.Errorf("expected beta session prompt in output, got:\n%s", output)
@@ -4303,15 +4484,15 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 	})
 
 	t.Run("filter with no matches", func(t *testing.T) {
-		output := formatBranchCheckpoints("main", points, "nonexistent-session")
+		output := formatBranchCheckpoints(io.Discard, "main", points, "nonexistent-session")
 
 		// Should show 0 checkpoints
-		if !strings.Contains(output, "Checkpoints: 0") {
-			t.Errorf("expected 'Checkpoints: 0' in output, got:\n%s", output)
+		if !strings.Contains(output, "checkpoints  0") {
+			t.Errorf("expected 'checkpoints  0' in output, got:\n%s", output)
 		}
-		// Should show filter info even with no matches
-		if !strings.Contains(output, "Filtered by session:") {
-			t.Errorf("expected 'Filtered by session:' in output, got:\n%s", output)
+		// Should show filter info even with no matches (label aligned to widest "checkpoints")
+		if !strings.Contains(output, "session      nonexistent-session") {
+			t.Errorf("expected 'session ... nonexistent-session' in output, got:\n%s", output)
 		}
 	})
 }

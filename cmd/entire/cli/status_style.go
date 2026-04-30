@@ -124,14 +124,42 @@ type explainRow struct {
 }
 
 // identityBullet renders "● <label> <id>\n". Bullet is brand orange when color
-// is enabled; ID is also orange to mirror the existing checkpoint header.
+// is enabled; ID is also orange to mirror the existing checkpoint header. When
+// id is empty (e.g., temporary checkpoints append "[temporary]" to the label
+// instead of using an id slot), the trailing space + id is suppressed.
 func (s statusStyles) identityBullet(label, id string) string {
+	if id == "" {
+		if !s.colorEnabled {
+			return fmt.Sprintf("● %s\n", label)
+		}
+		bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
+		return fmt.Sprintf("%s %s\n", bullet, s.render(s.bold, label))
+	}
 	if !s.colorEnabled {
 		return fmt.Sprintf("● %s %s\n", label, id)
 	}
 	bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
 	idStyled := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), id)
 	return fmt.Sprintf("%s %s %s\n", bullet, s.render(s.bold, label), idStyled)
+}
+
+// listIdentityBullet renders "● <id>  <suffix>\n" — orange bullet, bold-orange ID,
+// then plain (or dimmed) suffix. Used by the explain list view where the ID is
+// the primary identifier (different ordering from identityBullet, which puts
+// the static label first).
+func (s statusStyles) listIdentityBullet(id, suffix string) string {
+	if !s.colorEnabled {
+		if suffix == "" {
+			return fmt.Sprintf("● %s\n", id)
+		}
+		return fmt.Sprintf("● %s  %s\n", id, suffix)
+	}
+	bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
+	idStyled := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true), id)
+	if suffix == "" {
+		return fmt.Sprintf("%s %s\n", bullet, idStyled)
+	}
+	return fmt.Sprintf("%s %s  %s\n", bullet, idStyled, suffix)
 }
 
 // successBullet renders "✓ <label>\n" — green checkmark + bold label.

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,9 +87,14 @@ func generateOrRawLabel(generate bool) string {
 // repo so the hash can be abbreviated to the minimum unique length for
 // this repo's object set (matching git's --abbrev behavior).
 func printNoTrailerMessage(w io.Writer, repo *git.Repository, hash plumbing.Hash) {
-	fmt.Fprintln(w, "No associated Entire checkpoint")
-	fmt.Fprintf(w, "\nCommit %s does not have an Entire-Checkpoint trailer.\n", abbreviateCommitHash(repo, hash))
-	fmt.Fprintln(w, "This commit was not created during an Entire session, or the trailer was removed.")
+	styles := newStatusStyles(w)
+	rows := []explainRow{
+		{Label: "commit", Value: abbreviateCommitHash(repo, hash)},
+		{Label: "reason", Value: "no Entire-Checkpoint trailer"},
+		{Label: "hint", Value: "this commit was not created during an Entire session,"},
+		{Label: "", Value: "or the trailer was removed"},
+	}
+	fmt.Fprint(w, styles.renderFailure("No associated Entire checkpoint", rows))
 }
 
 // errAmbiguousCommitPrefix is returned by resolveCommitUnambiguous when a
@@ -136,26 +142,26 @@ func commitHashesWithPrefix(repo *git.Repository, prefix string) []plumbing.Hash
 }
 
 // resolveCommitUnambiguous resolves a ref to a commit hash, returning
-// errAmbiguousCommitPrefix (wrapped) when a hex-prefix input matches more
-// than one commit. go-git v6's ResolveRevision silently picks the first
-// candidate in ambiguous cases (its source explicitly says "for speed
-// purposes don't bother to detect the ambiguity"), which could pick the
-// wrong commit. Non-hex refs (HEAD, branch names, HEAD~1) bypass the
+// errAmbiguousCommitPrefix (and the matching hashes) when a hex-prefix input
+// matches more than one commit. go-git v6's ResolveRevision silently picks
+// the first candidate in ambiguous cases (its source explicitly says "for
+// speed purposes don't bother to detect the ambiguity"), which could pick
+// the wrong commit. Non-hex refs (HEAD, branch names, HEAD~1) bypass the
 // ambiguity check via commitHashesWithPrefix returning nil.
-func resolveCommitUnambiguous(repo *git.Repository, ref string) (plumbing.Hash, error) {
+//
+// The structured ambiguous return lets callers render a styled failure
+// block (with each match's timestamp/session) without re-resolving the
+// matches themselves.
+func resolveCommitUnambiguous(repo *git.Repository, ref string) (plumbing.Hash, []plumbing.Hash, error) {
 	hash, err := repo.ResolveRevision(plumbing.Revision(ref))
 	if err != nil {
-		return plumbing.ZeroHash, err //nolint:wrapcheck // caller contextualizes
+		return plumbing.ZeroHash, nil, err //nolint:wrapcheck // caller contextualizes
 	}
 	matches := commitHashesWithPrefix(repo, ref)
 	if len(matches) <= 1 {
-		return *hash, nil
+		return *hash, nil, nil
 	}
-	examples := make([]string, 0, 5)
-	for i := 0; i < len(matches) && i < 5; i++ {
-		examples = append(examples, abbreviateCommitHash(repo, matches[i]))
-	}
-	return plumbing.ZeroHash, fmt.Errorf("%w: %q matches %d commits: %s\nUse a longer prefix or a full SHA", errAmbiguousCommitPrefix, ref, len(matches), strings.Join(examples, ", "))
+	return plumbing.ZeroHash, matches, errAmbiguousCommitPrefix
 }
 
 // abbreviateCommitHash returns the shortest prefix of hash unique among
@@ -396,10 +402,11 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		// two lines (one per error) and users act on the first/stale one.
 		return fmt.Errorf("no checkpoint matched %q, and commit fallback failed: %w", target, lookupErr)
 	}
-	hash, resolveErr := resolveCommitUnambiguous(lookup.repo, target)
+	hash, ambiguousMatches, resolveErr := resolveCommitUnambiguous(lookup.repo, target)
 	if resolveErr != nil {
 		if errors.Is(resolveErr, errAmbiguousCommitPrefix) {
-			return resolveErr
+			renderAmbiguousPrefixFailure(errW, target, "commits", buildAmbiguousCommitMatches(lookup.repo, ambiguousMatches))
+			return NewSilentError(resolveErr)
 		}
 		logging.Debug(ctx, "explain auto: git ref resolution failed",
 			slog.String("target", target),
@@ -547,17 +554,16 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		// layer, so rawTranscript is always false when generate is true; the
 		// direct-to-w write path inside explainTemporaryCheckpoint is not
 		// reachable here and won't leak partial output on error.
-		output, found := explainTemporaryCheckpoint(ctx, w, lookup.repo, lookup.v1Store, checkpointIDPrefix, verbose, full, rawTranscript)
+		output, found, tempErr := explainTemporaryCheckpoint(ctx, w, errW, lookup.repo, lookup.v1Store, checkpointIDPrefix, verbose, full, rawTranscript)
+		if tempErr != nil {
+			return tempErr
+		}
 		if found {
 			if generate {
 				return fmt.Errorf("%w %s (only committed checkpoints supported)", errCannotGenerateTemporaryCheckpoint, checkpointIDPrefix)
 			}
 			outputExplainContent(w, output, noPager)
 			return nil
-		}
-		// If output is non-empty, it contains an error message (e.g., ambiguous prefix)
-		if output != "" {
-			return errors.New(output)
 		}
 		return fmt.Errorf("%w: %s", checkpoint.ErrCheckpointNotFound, checkpointIDPrefix)
 	case 1:
@@ -794,18 +800,25 @@ func readV2ContentFromMain(ctx context.Context, v2Reader *checkpoint.V2GitStore,
 func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool) error {
 	// Check if summary already exists
 	if content.Metadata.Summary != nil && !force {
-		return fmt.Errorf("checkpoint %s already has a summary (use --force to regenerate)", checkpointID)
+		return renderExplainFailure(errW, "Summary already exists", []explainRow{
+			{Label: "id", Value: checkpointID.String()},
+			{Label: "try", Value: fmt.Sprintf("entire explain --generate --force %s", checkpointID)},
+		}, fmt.Errorf("checkpoint %s already has a summary", checkpointID))
 	}
 
 	// Check if transcript exists
 	if len(content.Transcript) == 0 {
-		return fmt.Errorf("checkpoint %s has no transcript to summarize", checkpointID)
+		return renderExplainFailure(errW, "Checkpoint has no transcript", []explainRow{
+			{Label: "id", Value: checkpointID.String()},
+		}, fmt.Errorf("checkpoint %s has no transcript to summarize", checkpointID))
 	}
 
 	// Scope the transcript to only this checkpoint's portion
 	scopedTranscript := scopeTranscriptForCheckpoint(content.Transcript, content.Metadata.GetTranscriptStart(), content.Metadata.Agent)
 	if len(scopedTranscript) == 0 {
-		return fmt.Errorf("checkpoint %s has no transcript content for this checkpoint (scoped)", checkpointID)
+		return renderExplainFailure(errW, "Checkpoint has no transcript content (scoped)", []explainRow{
+			{Label: "id", Value: checkpointID.String()},
+		}, fmt.Errorf("checkpoint %s has no transcript content for this checkpoint (scoped)", checkpointID))
 	}
 	provider, err := resolveCheckpointSummaryProvider(ctx, w)
 	if err != nil {
@@ -819,10 +832,15 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *
 		fmt.Fprintln(errW, "Generating checkpoint summary...")
 	}
 
+	start := time.Now()
 	summary, appliedDeadline, err := generateCheckpointAISummary(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent, provider.Generator)
 	if err != nil {
-		return formatCheckpointSummaryError(err, appliedDeadline)
+		label, rows, structured := formatCheckpointSummaryError(err, appliedDeadline)
+		styles := newStatusStyles(errW)
+		fmt.Fprint(errW, styles.renderFailure(label, rows))
+		return NewSilentError(structured)
 	}
+	elapsed := time.Since(start)
 
 	// Persist to both stores; at least one must succeed.
 	v1Err := v1Store.UpdateSummary(ctx, checkpointID, summary)
@@ -850,9 +868,16 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *
 		)
 	}
 
-	fmt.Fprintln(w, "✓ Summary generated and saved")
-	fmt.Fprint(w, formatSummaryProviderDetails(provider))
+	styles := newStatusStyles(w)
+	rows := summaryProviderRows(provider)
+	rows = append(rows, explainRow{Label: "duration", Value: formatSummaryDuration(elapsed)})
+	fmt.Fprint(w, styles.renderSuccess(fmt.Sprintf("Summary generated for %s", checkpointID), rows))
 	return nil
+}
+
+// formatSummaryDuration rounds wall-clock generation time to a human-friendly value.
+func formatSummaryDuration(d time.Duration) string {
+	return d.Round(100 * time.Millisecond).String()
 }
 
 func maybeCompactExternalTranscriptForSummary(ctx context.Context, scopedTranscript []byte, agentType types.AgentType) []byte {
@@ -972,39 +997,74 @@ func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, f
 }
 
 // formatCheckpointSummaryError maps typed Claude CLI errors and context
-// sentinels to user-facing messages.
-func formatCheckpointSummaryError(err error, deadline time.Duration) error {
+// sentinels to a structured failure block: a user-visible label, supporting
+// rows, and a structured error suitable for wrapping in NewSilentError.
+//
+// The styled rendering happens in the caller (generateCheckpointSummary), which
+// renders to errW via newStatusStyles(...).renderFailure(label, rows). This
+// split keeps the formatting policy in one place (the failure block) while
+// letting the caller still return a *SilentError for main.go's exit handling.
+func formatCheckpointSummaryError(err error, deadline time.Duration) (string, []explainRow, error) {
 	var claudeErr *claudecode.ClaudeError
 	switch {
 	case errors.As(err, &claudeErr):
 		switch claudeErr.Kind { //nolint:exhaustive // ClaudeErrorUnknown handled by default
 		case claudecode.ClaudeErrorAuth:
-			return fmt.Errorf("Claude authentication failed%s\nRun `claude login` and retry", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005: capitalized because Claude is a proper noun
+			label := "Claude authentication failed"
+			rows := []explainRow{
+				{Label: "try", Value: "run `claude login` and retry"},
+			}
+			if claudeErr.Message != "" {
+				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+			}
+			return label, rows, fmt.Errorf("Claude authentication failed%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005: Claude is a proper noun
 		case claudecode.ClaudeErrorRateLimit:
-			return fmt.Errorf("Claude rejected the summary request due to rate limits or quota%s\nWait and retry", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005
+			label := "Claude rejected the summary request due to rate limits or quota"
+			rows := []explainRow{
+				{Label: "try", Value: "wait and retry"},
+			}
+			if claudeErr.Message != "" {
+				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+			}
+			return label, rows, fmt.Errorf("Claude rejected the summary request due to rate limits or quota%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005
 		case claudecode.ClaudeErrorConfig:
-			return fmt.Errorf("Claude rejected the summary request%s\nCheck your Claude CLI config and selected model", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005
+			label := "Claude rejected the summary request"
+			rows := []explainRow{
+				{Label: "try", Value: "check your Claude CLI config and selected model"},
+			}
+			if claudeErr.Message != "" {
+				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+			}
+			return label, rows, fmt.Errorf("Claude rejected the summary request%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005
 		case claudecode.ClaudeErrorCLIMissing:
-			return errors.New("Claude CLI is not installed or not on PATH") //nolint:staticcheck // ST1005
+			label := "Claude CLI is not installed or not on PATH"
+			return label, nil, errors.New("Claude CLI is not installed or not on PATH") //nolint:staticcheck // ST1005
 		default:
-			return fmt.Errorf("Claude failed to generate the summary%s", formatClaudeErrorSuffix(claudeErr)) //nolint:staticcheck // ST1005
+			label := "Claude failed to generate the summary"
+			suffix := formatClaudeErrorSuffix(claudeErr)
+			rows := []explainRow{
+				{Label: "detail", Value: strings.TrimPrefix(strings.TrimPrefix(suffix, ": "), " ")},
+			}
+			return label, rows, fmt.Errorf("Claude failed to generate the summary%s", suffix) //nolint:staticcheck // ST1005
 		}
 	case errors.Is(err, context.DeadlineExceeded):
 		// Deliberately provider-neutral: explain --generate supports multiple
 		// summary providers (claude-code, codex, gemini, ...), so hardcoding
 		// "Claude" / "sonnet" / "Anthropic" here would misdirect users who
 		// selected a different provider in .entire/settings.json.
-		return fmt.Errorf(
-			"summary generation did not return within the %s safety deadline. This usually means one of:\n"+
-				"  - the selected model is taking longer than expected on a large transcript\n"+
-				"  - the summary provider's CLI cannot reach its API (network, VPN, firewall)\n"+
-				"    Try: run the provider CLI directly to confirm it works\n"+
-				"  - the provider's API is degraded",
-			formatSummaryTimeout(deadline))
+		label := "Summary generation timed out after " + formatSummaryTimeout(deadline)
+		rows := []explainRow{
+			{Label: "causes", Value: ""},
+			{Label: "", Value: "• the selected model is taking longer than expected on a large transcript"},
+			{Label: "", Value: "• the summary provider's CLI cannot reach its API (network, VPN, firewall)"},
+			{Label: "", Value: "• the provider's API is degraded"},
+			{Label: "try", Value: "run the provider CLI directly to confirm it works"},
+		}
+		return label, rows, fmt.Errorf("summary generation did not return within the %s safety deadline", formatSummaryTimeout(deadline))
 	case errors.Is(err, context.Canceled):
-		return errors.New("summary generation canceled")
+		return "Summary generation canceled", nil, errors.New("summary generation canceled")
 	default:
-		return fmt.Errorf("failed to generate summary: %w", err)
+		return "Failed to generate summary", []explainRow{{Label: "detail", Value: err.Error()}}, fmt.Errorf("failed to generate summary: %w", err)
 	}
 }
 
@@ -1055,16 +1115,19 @@ func formatSummaryTimeout(d time.Duration) string {
 }
 
 // explainTemporaryCheckpoint finds and formats a temporary checkpoint by shadow commit hash prefix.
-// Returns the formatted output and whether the checkpoint was found.
+// Returns the formatted output, whether the checkpoint was found, and an
+// optional error. When err is non-nil, the function has already rendered a
+// styled failure block to errW; the caller should wrap and return as
+// SilentError without printing again.
 // Searches ALL shadow branches, not just the one for current HEAD, to find checkpoints
 // created from different base commits (e.g., if HEAD advanced since session start).
 // The writer w is used for raw transcript output to bypass the pager.
-func explainTemporaryCheckpoint(ctx context.Context, w io.Writer, repo *git.Repository, store *checkpoint.GitStore, shaPrefix string, verbose, full, rawTranscript bool) (string, bool) {
+func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *git.Repository, store *checkpoint.GitStore, shaPrefix string, verbose, full, rawTranscript bool) (string, bool, error) {
 	// List temporary checkpoints from ALL shadow branches
 	// This ensures we find checkpoints even if HEAD has advanced since the session started
 	tempCheckpoints, err := store.ListAllTemporaryCheckpoints(ctx, "", branchCheckpointsLimit)
 	if err != nil {
-		return "", false
+		return "", false, nil //nolint:nilerr // best-effort: caller falls back to ErrCheckpointNotFound when no temp checkpoint is found
 	}
 
 	// Find checkpoints matching the SHA prefix - check for ambiguity
@@ -1076,22 +1139,25 @@ func explainTemporaryCheckpoint(ctx context.Context, w io.Writer, repo *git.Repo
 	}
 
 	if len(matches) == 0 {
-		return "", false
+		return "", false, nil
 	}
 
 	if len(matches) > 1 {
-		// Multiple matches - return ambiguous error (consistent with committed checkpoint behavior)
-		var sb strings.Builder
-		fmt.Fprintf(&sb, "ambiguous checkpoint prefix %q matches %d temporary checkpoints:\n", shaPrefix, len(matches))
+		// Multiple matches: render styled failure block, return SilentError.
+		ambiguous := make([]ambiguousMatch, 0, len(matches))
 		for _, m := range matches {
-			shortID := m.CommitHash.String()[:7]
-			fmt.Fprintf(&sb, "  %s  %s  session %s\n",
-				shortID,
-				m.Timestamp.Format("2006-01-02 15:04:05"),
-				m.SessionID)
+			shortID := m.CommitHash.String()
+			if len(shortID) > 7 {
+				shortID = shortID[:7]
+			}
+			ambiguous = append(ambiguous, ambiguousMatch{
+				ShortID:   shortID,
+				Timestamp: m.Timestamp,
+				SessionID: m.SessionID,
+			})
 		}
-		// Return as "not found" with error message - caller will use this as error
-		return sb.String(), false
+		renderAmbiguousPrefixFailure(errW, shaPrefix, "temporary checkpoints", ambiguous)
+		return "", false, NewSilentError(fmt.Errorf("%w: %s matches %d temporary checkpoints", errAmbiguousCommitPrefix, shaPrefix, len(matches)))
 	}
 
 	tc := matches[0]
@@ -1099,12 +1165,12 @@ func explainTemporaryCheckpoint(ctx context.Context, w io.Writer, repo *git.Repo
 	// Get shadow commit and tree to read metadata
 	shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
 	if commitErr != nil {
-		return "", false
+		return "", false, nil //nolint:nilerr // best-effort: missing shadow commit is treated as not-found
 	}
 
 	shadowTree, treeErr := shadowCommit.Tree()
 	if treeErr != nil {
-		return "", false
+		return "", false, nil //nolint:nilerr // best-effort: missing shadow tree is treated as not-found
 	}
 
 	// Read agent type from shadow branch metadata (stored during checkpoint creation)
@@ -1114,14 +1180,16 @@ func explainTemporaryCheckpoint(ctx context.Context, w io.Writer, repo *git.Repo
 	if rawTranscript {
 		transcriptBytes, transcriptErr := store.GetTranscriptFromCommit(ctx, tc.CommitHash, tc.MetadataDir, agentType)
 		if transcriptErr != nil || len(transcriptBytes) == 0 {
-			// Return specific error message (consistent with committed checkpoints)
-			return fmt.Sprintf("checkpoint %s has no transcript", tc.CommitHash.String()[:7]), false
+			shortID := tc.CommitHash.String()[:7]
+			return "", false, renderExplainFailure(errW, "Checkpoint has no transcript", []explainRow{
+				{Label: "id", Value: shortID},
+			}, fmt.Errorf("checkpoint %s has no transcript", shortID))
 		}
 		// Write directly to writer (no pager, no formatting) - matches committed checkpoint behavior
 		if _, writeErr := fmt.Fprint(w, string(transcriptBytes)); writeErr != nil {
-			return fmt.Sprintf("failed to write transcript: %v", writeErr), false
+			return "", false, fmt.Errorf("failed to write transcript: %w", writeErr)
 		}
-		return "", true
+		return "", true, nil
 	}
 
 	// Read prompts from shadow branch
@@ -1130,21 +1198,18 @@ func explainTemporaryCheckpoint(ctx context.Context, w io.Writer, repo *git.Repo
 	// Build output similar to formatCheckpointOutput but for temporary
 	var sb strings.Builder
 	shortID := tc.CommitHash.String()[:7]
-	fmt.Fprintf(&sb, "Checkpoint: %s [temporary]\n", shortID)
-	fmt.Fprintf(&sb, "Session: %s\n", tc.SessionID)
-	fmt.Fprintf(&sb, "Created: %s\n", tc.Timestamp.Format("2006-01-02 15:04:05"))
-	sb.WriteString("\n")
+	styles := newStatusStyles(w)
 
-	// Intent from prompt
-	intent := "(not available)"
-	if sessionPrompt != "" {
-		lines := strings.Split(sessionPrompt, "\n")
-		if len(lines) > 0 && lines[0] != "" {
-			intent = strategy.TruncateDescription(lines[0], maxIntentDisplayLength)
-		}
+	label := fmt.Sprintf("Checkpoint %s [temporary]", shortID)
+	rows := []explainRow{
+		{Label: "session", Value: tc.SessionID},
+		{Label: "created", Value: tc.Timestamp.Format("2006-01-02 15:04:05")},
 	}
-	fmt.Fprintf(&sb, "Intent: %s\n", intent)
-	sb.WriteString("Outcome: (not generated)\n")
+	sb.WriteString(styles.renderIdentity(label, "", rows))
+
+	intent := extractIntent(nil, sessionPrompt)
+	hint := "Not generated. Temporary checkpoints can be summarized after commit. Run `entire explain --generate` on the resulting commit."
+	sb.WriteString(renderExplainBody(w, buildNoSummaryMarkdown(intent, nil, hint)))
 
 	// Transcript section: full shows entire session, verbose shows checkpoint scope
 	// For temporary checkpoints, load transcript and compute scope from parent commit
@@ -1179,7 +1244,7 @@ func explainTemporaryCheckpoint(ctx context.Context, w io.Writer, repo *git.Repo
 	}
 	appendTranscriptSection(&sb, verbose, full, fullTranscript, scopedTranscript, sessionPrompt, agentType)
 
-	return sb.String(), true
+	return sb.String(), true, nil
 }
 
 // getAssociatedCommits finds git commits that reference the given checkpoint ID.
@@ -1355,6 +1420,67 @@ func buildNoSummaryMarkdown(intent string, files []string, summaryHint string) s
 	return sb.String()
 }
 
+// ambiguousMatch describes one match in an ambiguous-prefix failure.
+// SessionID is optional and only set for temporary-checkpoint matches.
+type ambiguousMatch struct {
+	ShortID   string
+	Timestamp time.Time
+	SessionID string
+}
+
+// renderAmbiguousPrefixFailure prints a styled failure block describing an
+// ambiguous prefix. kind is a noun phrase like "commits" or "temporary
+// checkpoints" used in the "matches N <kind>" header row.
+func renderAmbiguousPrefixFailure(errW io.Writer, prefix, kind string, matches []ambiguousMatch) {
+	styles := newStatusStyles(errW)
+	rows := []explainRow{
+		{Label: "matches", Value: fmt.Sprintf("%d %s", len(matches), kind)},
+	}
+	for _, m := range matches {
+		ts := ""
+		if !m.Timestamp.IsZero() {
+			ts = "  " + m.Timestamp.Format("2006-01-02 15:04:05")
+		}
+		sess := ""
+		if m.SessionID != "" {
+			sess = "  session " + m.SessionID
+		}
+		rows = append(rows, explainRow{Label: "", Value: "• " + m.ShortID + ts + sess})
+	}
+	rows = append(rows, explainRow{Label: "hint", Value: "use a longer prefix or a full SHA"})
+	label := fmt.Sprintf("Ambiguous checkpoint prefix %q", prefix)
+	fmt.Fprint(errW, styles.renderFailure(label, rows))
+}
+
+// renderExplainFailure prints a styled failure block to errW and returns the
+// error wrapped as *SilentError so main.go does not double-print. Used at
+// every explain call site that has a friendly, structured error to surface.
+func renderExplainFailure(errW io.Writer, label string, rows []explainRow, structured error) error {
+	fmt.Fprint(errW, newStatusStyles(errW).renderFailure(label, rows))
+	return NewSilentError(structured)
+}
+
+// buildAmbiguousCommitMatches converts a slice of plumbing.Hash matches
+// (from resolveCommitUnambiguous) into ambiguousMatch entries with
+// abbreviated short IDs and author timestamps. Caps at 5 entries to keep
+// the failure block readable when a short prefix collides on many
+// commits.
+func buildAmbiguousCommitMatches(repo *git.Repository, hashes []plumbing.Hash) []ambiguousMatch {
+	const maxMatches = 5
+	matches := make([]ambiguousMatch, 0, len(hashes))
+	for i, h := range hashes {
+		if i >= maxMatches {
+			break
+		}
+		m := ambiguousMatch{ShortID: abbreviateCommitHash(repo, h)}
+		if commit, err := repo.CommitObject(h); err == nil {
+			m.Timestamp = commit.Author.When
+		}
+		matches = append(matches, m)
+	}
+	return matches
+}
+
 // renderExplainBody routes a markdown body through the brand renderer when
 // the writer supports color, and returns the markdown source verbatim
 // otherwise. Single point of policy for every explain body section.
@@ -1414,29 +1540,16 @@ func formatCheckpointOutput(summary *checkpoint.CheckpointSummary, content *chec
 			sb.WriteString(md)
 		}
 	} else {
-		intent := "(not generated)"
-		if len(scopedPrompts) > 0 && scopedPrompts[0] != "" {
-			intent = strategy.TruncateDescription(scopedPrompts[0], maxIntentDisplayLength)
-		} else if content.Prompts != "" {
-			lines := strings.Split(content.Prompts, "\n")
-			if len(lines) > 0 && lines[0] != "" {
-				intent = strategy.TruncateDescription(lines[0], maxIntentDisplayLength)
-			}
-		}
-		fmt.Fprintf(&sb, "Intent: %s\n", intent)
-		sb.WriteString("Outcome: (not generated)\n")
+		intent := extractIntent(scopedPrompts, content.Prompts)
 
+		var files []string
 		if verbose || full {
-			sb.WriteString("\n")
-			if len(meta.FilesTouched) > 0 {
-				fmt.Fprintf(&sb, "Files: (%d)\n", len(meta.FilesTouched))
-				for _, file := range meta.FilesTouched {
-					fmt.Fprintf(&sb, "  - %s\n", file)
-				}
-			} else {
-				sb.WriteString("Files: (none)\n")
-			}
+			files = meta.FilesTouched
 		}
+
+		hint := fmt.Sprintf("Not generated yet. Run `entire explain --generate %s` to create an AI summary.", checkpointID)
+		md := buildNoSummaryMarkdown(intent, files, hint)
+		sb.WriteString(renderExplainBody(w, md))
 	}
 
 	if verbose || full {
@@ -2079,7 +2192,7 @@ func runExplainBranchWithFilter(ctx context.Context, w io.Writer, noPager bool, 
 	}
 
 	// Format output
-	output := formatBranchCheckpoints(branchName, points, sessionFilter)
+	output := formatBranchCheckpoints(w, branchName, points, sessionFilter)
 
 	outputExplainContent(w, output, noPager)
 	return nil
@@ -2111,12 +2224,15 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 
 	// Resolve the commit reference, erroring on hex-prefix ambiguity
 	// instead of silently picking the first matching commit.
-	hash, err := resolveCommitUnambiguous(repo, commitRef)
+	hash, ambiguousMatches, err := resolveCommitUnambiguous(repo, commitRef)
 	if err != nil {
 		if errors.Is(err, errAmbiguousCommitPrefix) {
-			return err
+			renderAmbiguousPrefixFailure(errW, commitRef, "commits", buildAmbiguousCommitMatches(repo, ambiguousMatches))
+			return NewSilentError(err)
 		}
-		return fmt.Errorf("commit not found: %s", commitRef)
+		return renderExplainFailure(errW, "Commit not found", []explainRow{
+			{Label: "ref", Value: commitRef},
+		}, fmt.Errorf("commit not found: %s", commitRef))
 	}
 
 	commit, err := repo.CommitObject(hash)
@@ -2142,85 +2258,83 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 }
 
 // formatSessionInfo formats session information for display.
-func formatSessionInfo(session *strategy.Session, sourceRef string, checkpoints []checkpointDetail) string {
+func formatSessionInfo(w io.Writer, session *strategy.Session, sourceRef string, checkpoints []checkpointDetail) string {
 	var sb strings.Builder
+	styles := newStatusStyles(w)
 
-	// Session header
-	fmt.Fprintf(&sb, "Session: %s\n", session.ID)
-	fmt.Fprintf(&sb, "Strategy: %s\n", session.Strategy)
-
+	rows := []explainRow{
+		{Label: "strategy", Value: session.Strategy},
+	}
 	if !session.StartTime.IsZero() {
-		fmt.Fprintf(&sb, "Started: %s\n", session.StartTime.Format("2006-01-02 15:04:05"))
+		rows = append(rows, explainRow{Label: "started", Value: session.StartTime.Format("2006-01-02 15:04:05")})
 	}
-
 	if sourceRef != "" {
-		fmt.Fprintf(&sb, "Source Ref: %s\n", sourceRef)
+		rows = append(rows, explainRow{Label: "source ref", Value: sourceRef})
 	}
+	rows = append(rows, explainRow{Label: "checkpoints", Value: strconv.Itoa(len(checkpoints))})
+	sb.WriteString(styles.renderIdentity("Session", session.ID, rows))
 
-	fmt.Fprintf(&sb, "Checkpoints: %d\n", len(checkpoints))
-
-	// Checkpoint details
 	for _, cp := range checkpoints {
 		sb.WriteString("\n")
 
-		// Checkpoint header
-		taskMarker := ""
+		label := fmt.Sprintf("Checkpoint %d  %s  %s", cp.Index, cp.ShortID, cp.Timestamp.Format("2006-01-02 15:04"))
 		if cp.IsTaskCheckpoint {
-			taskMarker = " [Task]"
+			label += "  [Task]"
 		}
-		fmt.Fprintf(&sb, "─── Checkpoint %d [%s] %s%s ───\n",
-			cp.Index, cp.ShortID, cp.Timestamp.Format("2006-01-02 15:04"), taskMarker)
-		sb.WriteString("\n")
+		sb.WriteString(styles.sectionRule(label, styles.width))
+		sb.WriteString("\n\n")
 
-		// Display all interactions in this checkpoint
-		for i, inter := range cp.Interactions {
-			// For multiple interactions, add a sub-header
-			if len(cp.Interactions) > 1 {
-				fmt.Fprintf(&sb, "### Interaction %d\n\n", i+1)
-			}
-
-			// Prompt section
-			if inter.Prompt != "" {
-				sb.WriteString("## Prompt\n\n")
-				sb.WriteString(inter.Prompt)
-				sb.WriteString("\n\n")
-			}
-
-			// Response section
-			if len(inter.Responses) > 0 {
-				sb.WriteString("## Responses\n\n")
-				sb.WriteString(strings.Join(inter.Responses, "\n\n"))
-				sb.WriteString("\n\n")
-			}
-
-			// Files modified for this interaction
-			if len(inter.Files) > 0 {
-				fmt.Fprintf(&sb, "Files Modified (%d):\n", len(inter.Files))
-				for _, file := range inter.Files {
-					fmt.Fprintf(&sb, "  - %s\n", file)
-				}
-				sb.WriteString("\n")
-			}
-		}
-
-		// If no interactions, show message and/or files
-		if len(cp.Interactions) == 0 {
-			// Show commit message as summary when no transcript available
-			if cp.Message != "" {
-				sb.WriteString(cp.Message)
-				sb.WriteString("\n\n")
-			}
-			// Show aggregate files if available
-			if len(cp.Files) > 0 {
-				fmt.Fprintf(&sb, "Files Modified (%d):\n", len(cp.Files))
-				for _, file := range cp.Files {
-					fmt.Fprintf(&sb, "  - %s\n", file)
-				}
-			}
-		}
+		md := buildSessionCheckpointMarkdown(cp)
+		sb.WriteString(renderExplainBody(w, md))
 	}
 
 	return sb.String()
+}
+
+// buildSessionCheckpointMarkdown returns the markdown body for a single
+// checkpoint inside the session view: ## Prompt / ## Responses / ## Files
+// (or commit-message + ## Files when there are no interactions). Extracted
+// from formatSessionInfo so the brand markdown renderer can take the same
+// path and so the body is testable in isolation.
+func buildSessionCheckpointMarkdown(cp checkpointDetail) string {
+	var sb strings.Builder
+	for i, inter := range cp.Interactions {
+		if len(cp.Interactions) > 1 {
+			fmt.Fprintf(&sb, "### Interaction %d\n\n", i+1)
+		}
+		if inter.Prompt != "" {
+			sb.WriteString("## Prompt\n\n")
+			sb.WriteString(inter.Prompt)
+			sb.WriteString("\n\n")
+		} else {
+			sb.WriteString("## Prompt\n\n*(no prompt recorded)*\n\n")
+		}
+		if len(inter.Responses) > 0 {
+			sb.WriteString("## Responses\n\n")
+			sb.WriteString(strings.Join(inter.Responses, "\n\n"))
+			sb.WriteString("\n\n")
+		}
+		if len(inter.Files) > 0 {
+			fmt.Fprintf(&sb, "## Files Modified (%d)\n\n", len(inter.Files))
+			for _, f := range inter.Files {
+				fmt.Fprintf(&sb, "- `%s`\n", escapeInlineCodeText(f))
+			}
+			sb.WriteString("\n")
+		}
+	}
+	if len(cp.Interactions) == 0 {
+		if cp.Message != "" {
+			sb.WriteString(cp.Message)
+			sb.WriteString("\n\n")
+		}
+		if len(cp.Files) > 0 {
+			fmt.Fprintf(&sb, "## Files Modified (%d)\n\n", len(cp.Files))
+			for _, f := range cp.Files {
+				fmt.Fprintf(&sb, "- `%s`\n", escapeInlineCodeText(f))
+			}
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n") + "\n"
 }
 
 // pagerLookupEnv is overridable for tests so pager env-gate behavior can be
@@ -2319,13 +2433,11 @@ const (
 // formatBranchCheckpoints formats checkpoint information for a branch.
 // Groups commits by checkpoint ID and shows the prompt for each checkpoint.
 // If sessionFilter is non-empty, only shows checkpoints matching that session ID (or prefix).
-func formatBranchCheckpoints(branchName string, points []strategy.RewindPoint, sessionFilter string) string {
+func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.RewindPoint, sessionFilter string) string {
 	var sb strings.Builder
+	styles := newStatusStyles(w)
 
-	// Branch header
-	fmt.Fprintf(&sb, "Branch: %s\n", branchName)
-
-	// Filter by session if specified
+	// Filter by session if specified (must happen before counting)
 	if sessionFilter != "" {
 		var filtered []strategy.RewindPoint
 		for _, p := range points {
@@ -2336,28 +2448,29 @@ func formatBranchCheckpoints(branchName string, points []strategy.RewindPoint, s
 		points = filtered
 	}
 
-	if len(points) == 0 {
-		sb.WriteString("Checkpoints: 0\n")
-		if sessionFilter != "" {
-			fmt.Fprintf(&sb, "Filtered by session: %s\n", sessionFilter)
-		}
-		sb.WriteString("\nNo checkpoints found on this branch.\n")
+	// Group by checkpoint ID so the count matches the rendered group count
+	groups := groupByCheckpointID(points)
+
+	branchRows := []explainRow{
+		{Label: "branch", Value: branchName},
+	}
+	if sessionFilter != "" {
+		branchRows = append(branchRows, explainRow{Label: "session", Value: sessionFilter})
+	}
+	branchRows = append(branchRows, explainRow{Label: "checkpoints", Value: strconv.Itoa(len(groups))})
+
+	sb.WriteString(styles.metadataRows(branchRows))
+	sb.WriteString("\n")
+
+	if len(groups) == 0 {
+		sb.WriteString("No checkpoints found on this branch.\n")
 		sb.WriteString("Checkpoints will appear here after you save changes during a Claude session.\n")
 		return sb.String()
 	}
 
-	// Group by checkpoint ID
-	groups := groupByCheckpointID(points)
-
-	fmt.Fprintf(&sb, "Checkpoints: %d\n", len(groups))
-	if sessionFilter != "" {
-		fmt.Fprintf(&sb, "Filtered by session: %s\n", sessionFilter)
-	}
-	sb.WriteString("\n")
-
 	// Output each checkpoint group
 	for _, group := range groups {
-		formatCheckpointGroup(&sb, group)
+		formatCheckpointGroup(&sb, group, styles)
 		sb.WriteString("\n")
 	}
 
@@ -2469,15 +2582,16 @@ func groupByCheckpointID(points []strategy.RewindPoint) []checkpointGroup {
 }
 
 // formatCheckpointGroup formats a single checkpoint group for display.
-func formatCheckpointGroup(sb *strings.Builder, group checkpointGroup) {
-	// Checkpoint ID (truncated for display)
+// The list view headline puts the checkpoint ID first (in bold orange),
+// followed by indicators and the prompt — which cascades from
+// SessionPrompt → latest commit message → dimmed `(no prompt recorded)`.
+func formatCheckpointGroup(sb *strings.Builder, group checkpointGroup, styles statusStyles) {
 	cpID := group.checkpointID
 	if len(cpID) > checkpointIDDisplayLength {
 		cpID = cpID[:checkpointIDDisplayLength]
 	}
 
-	// Build status indicators
-	// Skip [temporary] indicator when cpID is already "temporary" to avoid redundancy
+	// Indicators (Task / temporary). Skip [temporary] when cpID already says so.
 	var indicators []string
 	if group.isTask {
 		indicators = append(indicators, "[Task]")
@@ -2486,26 +2600,32 @@ func formatCheckpointGroup(sb *strings.Builder, group checkpointGroup) {
 		indicators = append(indicators, "[temporary]")
 	}
 
-	indicatorStr := ""
-	if len(indicators) > 0 {
-		indicatorStr = " " + strings.Join(indicators, " ")
+	// Prompt cascade: SessionPrompt → latest commit message → dimmed placeholder.
+	// Quote user prompts; commit subjects render bare.
+	var promptText string
+	var promptIsPlaceholder bool
+	switch {
+	case group.prompt != "":
+		promptText = fmt.Sprintf("%q", strategy.TruncateDescription(group.prompt, maxPromptDisplayLength))
+	case len(group.commits) > 0 && group.commits[0].message != "":
+		promptText = strategy.TruncateDescription(group.commits[0].message, maxPromptDisplayLength)
+	default:
+		promptText = "(no prompt recorded)"
+		promptIsPlaceholder = true
+	}
+	if promptIsPlaceholder {
+		promptText = styles.render(styles.dim, promptText)
 	}
 
-	// Prompt (truncated)
-	var promptStr string
-	if group.prompt == "" {
-		promptStr = "(no prompt)"
-	} else {
-		// Quote actual prompts
-		promptStr = fmt.Sprintf("%q", strategy.TruncateDescription(group.prompt, maxPromptDisplayLength))
-	}
+	// Build suffix: "[Task]  [temporary]  <prompt>" with two-space separators.
+	parts := append([]string{}, indicators...)
+	parts = append(parts, promptText)
+	suffix := strings.Join(parts, "  ")
 
-	// Checkpoint header: [checkpoint_id] [indicators] prompt
-	fmt.Fprintf(sb, "[%s]%s %s\n", cpID, indicatorStr, promptStr)
+	sb.WriteString(styles.listIdentityBullet(cpID, suffix))
 
-	// List commits under this checkpoint
+	// List commits under this checkpoint.
 	for _, commit := range group.commits {
-		// Format: "  MM-DD HH:MM (git_sha) message"
 		dateTimeStr := commit.date.Format("01-02 15:04")
 		message := strategy.TruncateDescription(commit.message, maxMessageDisplayLength)
 		fmt.Fprintf(sb, "  %s (%s) %s\n", dateTimeStr, commit.gitSHA, message)
