@@ -2284,83 +2284,91 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 }
 
 // formatSessionInfo formats session information for display.
-func formatSessionInfo(w io.Writer, session *strategy.Session, sourceRef string, checkpoints []checkpointDetail) string {
+//
+// NOTE: This function has no production caller — `entire explain --session`
+// flows through formatBranchCheckpoints (the list view filtered by session),
+// not through here. It is kept for tests that exercise the per-checkpoint
+// markdown body shape used elsewhere; restyling it for the brand format was
+// not worth the diff. If the CLI ever grows a session-detail surface, revisit.
+func formatSessionInfo(session *strategy.Session, sourceRef string, checkpoints []checkpointDetail) string {
 	var sb strings.Builder
-	styles := newStatusStyles(w)
 
-	rows := []explainRow{
-		{Label: "strategy", Value: session.Strategy},
-	}
+	// Session header
+	fmt.Fprintf(&sb, "Session: %s\n", session.ID)
+	fmt.Fprintf(&sb, "Strategy: %s\n", session.Strategy)
+
 	if !session.StartTime.IsZero() {
-		rows = append(rows, explainRow{Label: "started", Value: session.StartTime.Format("2006-01-02 15:04:05")})
+		fmt.Fprintf(&sb, "Started: %s\n", session.StartTime.Format("2006-01-02 15:04:05"))
 	}
-	if sourceRef != "" {
-		rows = append(rows, explainRow{Label: "source ref", Value: sourceRef})
-	}
-	rows = append(rows, explainRow{Label: "checkpoints", Value: strconv.Itoa(len(checkpoints))})
-	sb.WriteString(styles.renderIdentity("Session", session.ID, rows))
 
+	if sourceRef != "" {
+		fmt.Fprintf(&sb, "Source Ref: %s\n", sourceRef)
+	}
+
+	fmt.Fprintf(&sb, "Checkpoints: %d\n", len(checkpoints))
+
+	// Checkpoint details
 	for _, cp := range checkpoints {
 		sb.WriteString("\n")
 
-		label := fmt.Sprintf("Checkpoint %d  %s  %s", cp.Index, cp.ShortID, cp.Timestamp.Format("2006-01-02 15:04"))
+		// Checkpoint header
+		taskMarker := ""
 		if cp.IsTaskCheckpoint {
-			label += "  [Task]"
+			taskMarker = " [Task]"
 		}
-		sb.WriteString(styles.sectionRule(label, styles.width))
-		sb.WriteString("\n\n")
+		fmt.Fprintf(&sb, "─── Checkpoint %d [%s] %s%s ───\n",
+			cp.Index, cp.ShortID, cp.Timestamp.Format("2006-01-02 15:04"), taskMarker)
+		sb.WriteString("\n")
 
-		md := buildSessionCheckpointMarkdown(cp)
-		sb.WriteString(renderExplainBody(w, md))
+		// Display all interactions in this checkpoint
+		for i, inter := range cp.Interactions {
+			// For multiple interactions, add a sub-header
+			if len(cp.Interactions) > 1 {
+				fmt.Fprintf(&sb, "### Interaction %d\n\n", i+1)
+			}
+
+			// Prompt section
+			if inter.Prompt != "" {
+				sb.WriteString("## Prompt\n\n")
+				sb.WriteString(inter.Prompt)
+				sb.WriteString("\n\n")
+			}
+
+			// Response section
+			if len(inter.Responses) > 0 {
+				sb.WriteString("## Responses\n\n")
+				sb.WriteString(strings.Join(inter.Responses, "\n\n"))
+				sb.WriteString("\n\n")
+			}
+
+			// Files modified for this interaction
+			if len(inter.Files) > 0 {
+				fmt.Fprintf(&sb, "Files Modified (%d):\n", len(inter.Files))
+				for _, file := range inter.Files {
+					fmt.Fprintf(&sb, "  - %s\n", file)
+				}
+				sb.WriteString("\n")
+			}
+		}
+
+		// If no interactions, show message and/or files
+		if len(cp.Interactions) == 0 {
+			// Show commit message as summary when no transcript available
+			if cp.Message != "" {
+				sb.WriteString(cp.Message)
+				sb.WriteString("\n\n")
+			}
+			// Show aggregate files if available
+			if len(cp.Files) > 0 {
+				fmt.Fprintf(&sb, "Files Modified (%d):\n", len(cp.Files))
+				for _, file := range cp.Files {
+					fmt.Fprintf(&sb, "  - %s\n", file)
+				}
+			}
+		}
 	}
 
 	return sb.String()
-}
-
-// buildSessionCheckpointMarkdown returns the markdown body for a single
-// checkpoint inside the session view: ## Prompt / ## Responses / ## Files
-// (or commit-message + ## Files when there are no interactions). Extracted
-// from formatSessionInfo so the brand markdown renderer can take the same
-// path and so the body is testable in isolation.
-func buildSessionCheckpointMarkdown(cp checkpointDetail) string {
-	var sb strings.Builder
-	for i, inter := range cp.Interactions {
-		if len(cp.Interactions) > 1 {
-			fmt.Fprintf(&sb, "### Interaction %d\n\n", i+1)
-		}
-		if inter.Prompt != "" {
-			sb.WriteString("## Prompt\n\n")
-			sb.WriteString(inter.Prompt)
-			sb.WriteString("\n\n")
-		} else {
-			sb.WriteString("## Prompt\n\n*(no prompt recorded)*\n\n")
-		}
-		if len(inter.Responses) > 0 {
-			sb.WriteString("## Responses\n\n")
-			sb.WriteString(strings.Join(inter.Responses, "\n\n"))
-			sb.WriteString("\n\n")
-		}
-		if len(inter.Files) > 0 {
-			fmt.Fprintf(&sb, "## Files Modified (%d)\n\n", len(inter.Files))
-			for _, f := range inter.Files {
-				fmt.Fprintf(&sb, "- `%s`\n", escapeInlineCodeText(f))
-			}
-			sb.WriteString("\n")
-		}
-	}
-	if len(cp.Interactions) == 0 {
-		if cp.Message != "" {
-			sb.WriteString(cp.Message)
-			sb.WriteString("\n\n")
-		}
-		if len(cp.Files) > 0 {
-			fmt.Fprintf(&sb, "## Files Modified (%d)\n\n", len(cp.Files))
-			for _, f := range cp.Files {
-				fmt.Fprintf(&sb, "- `%s`\n", escapeInlineCodeText(f))
-			}
-		}
-	}
-	return strings.TrimRight(sb.String(), "\n") + "\n"
 }
 
 // pagerLookupEnv is overridable for tests so pager env-gate behavior can be

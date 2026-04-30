@@ -1324,27 +1324,27 @@ func TestFormatSessionInfo(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
+	output := formatSessionInfo(session, "", checkpointDetails)
 
-	// Verify output contains expected sections (new identity-bullet shape)
-	if !strings.Contains(output, "● Session "+session.ID) {
-		t.Errorf("expected output to contain '● Session <id>', got:\n%s", output)
+	// Verify output contains expected sections
+	if !strings.Contains(output, "Session:") {
+		t.Error("expected output to contain 'Session:'")
 	}
-	if !strings.Contains(output, "strategy") {
-		t.Error("expected output to contain 'strategy' row")
+	if !strings.Contains(output, session.ID) {
+		t.Error("expected output to contain session ID")
+	}
+	if !strings.Contains(output, "Strategy:") {
+		t.Error("expected output to contain 'Strategy:'")
 	}
 	if !strings.Contains(output, "manual-commit") {
 		t.Error("expected output to contain strategy name")
 	}
-	if !strings.Contains(output, "checkpoints  2") {
-		t.Errorf("expected output to contain 'checkpoints  2', got:\n%s", output)
+	if !strings.Contains(output, "Checkpoints: 2") {
+		t.Error("expected output to contain 'Checkpoints: 2'")
 	}
-	// Check checkpoint details (new section-rule prefix)
+	// Check checkpoint details
 	if !strings.Contains(output, "Checkpoint 1") {
 		t.Error("expected output to contain 'Checkpoint 1'")
-	}
-	if !strings.Contains(output, "── ") {
-		t.Errorf("expected section-rule prefix '── ', got:\n%s", output)
 	}
 	if !strings.Contains(output, "## Prompt") {
 		t.Error("expected output to contain '## Prompt'")
@@ -1384,11 +1384,11 @@ func TestFormatSessionInfo_WithSourceRef(t *testing.T) {
 
 	// Test with source ref provided
 	sourceRef := "entire/metadata@abc123def456"
-	output := formatSessionInfo(io.Discard, session, sourceRef, checkpointDetails)
+	output := formatSessionInfo(session, sourceRef, checkpointDetails)
 
-	// Verify source ref is displayed (new metadata-row shape)
-	if !strings.Contains(output, "source ref") {
-		t.Error("expected output to contain 'source ref' row")
+	// Verify source ref is displayed
+	if !strings.Contains(output, "Source Ref:") {
+		t.Error("expected output to contain 'Source Ref:'")
 	}
 	if !strings.Contains(output, sourceRef) {
 		t.Errorf("expected output to contain source ref %q, got:\n%s", sourceRef, output)
@@ -1450,7 +1450,7 @@ func TestFormatSessionInfo_CheckpointNumberingReversed(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
+	output := formatSessionInfo(session, "", checkpointDetails)
 
 	// Verify checkpoint ordering in output
 	// Checkpoint 3 should appear before Checkpoint 2 which should appear before Checkpoint 1
@@ -1485,10 +1485,10 @@ func TestFormatSessionInfo_EmptyCheckpoints(t *testing.T) {
 		Checkpoints: []strategy.Checkpoint{},
 	}
 
-	output := formatSessionInfo(io.Discard, session, "", nil)
+	output := formatSessionInfo(session, "", nil)
 
-	if !strings.Contains(output, "checkpoints  0") {
-		t.Errorf("expected output to contain 'checkpoints  0', got:\n%s", output)
+	if !strings.Contains(output, "Checkpoints: 0") {
+		t.Errorf("expected output to contain 'Checkpoints: 0', got:\n%s", output)
 	}
 }
 
@@ -1515,7 +1515,7 @@ func TestFormatSessionInfo_CheckpointWithTaskMarker(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
+	output := formatSessionInfo(session, "", checkpointDetails)
 
 	if !strings.Contains(output, "[Task]") {
 		t.Errorf("expected output to contain '[Task]' marker, got:\n%s", output)
@@ -1541,7 +1541,7 @@ func TestFormatSessionInfo_CheckpointWithDate(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
+	output := formatSessionInfo(session, "", checkpointDetails)
 
 	// Should contain "2025-12-10 14:35" in the checkpoint header
 	if !strings.Contains(output, "2025-12-10 14:35") {
@@ -1571,7 +1571,7 @@ func TestFormatSessionInfo_ShowsMessageWhenNoInteractions(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
+	output := formatSessionInfo(session, "", checkpointDetails)
 
 	// Should show the commit message when there are no interactions
 	if !strings.Contains(output, "Starting 'dev' agent: Implement feature X (toolu_01ABC)") {
@@ -1609,7 +1609,7 @@ func TestFormatSessionInfo_ShowsMessageAndFilesWhenNoInteractions(t *testing.T) 
 		},
 	}
 
-	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
+	output := formatSessionInfo(session, "", checkpointDetails)
 
 	// Should show the commit message
 	if !strings.Contains(output, "Running tests for API endpoint (toolu_02DEF)") {
@@ -1653,7 +1653,7 @@ func TestFormatSessionInfo_DoesNotShowMessageWhenHasInteractions(t *testing.T) {
 		},
 	}
 
-	output := formatSessionInfo(io.Discard, session, "", checkpointDetails)
+	output := formatSessionInfo(session, "", checkpointDetails)
 
 	// Should show the interaction content
 	if !strings.Contains(output, "Implement the feature") {
