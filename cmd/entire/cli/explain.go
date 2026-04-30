@@ -2145,7 +2145,7 @@ func formatBranchCheckpoints(branchName string, points []strategy.RewindPoint, s
 			fmt.Fprintf(&sb, "Filtered by session: %s\n", sessionFilter)
 		}
 		sb.WriteString("\nNo checkpoints found on this branch.\n")
-		sb.WriteString("Checkpoints will appear here after you save changes during a Claude session.\n")
+		sb.WriteString("Checkpoints will appear here after you save changes during an agent session.\n")
 		return sb.String()
 	}
 

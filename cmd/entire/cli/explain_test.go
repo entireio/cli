@@ -1079,7 +1079,7 @@ func TestExplainDefault_NoCheckpoints_ShowsHelpfulMessage(t *testing.T) {
 		t.Errorf("expected 'Checkpoints: 0' in output, got: %s", output)
 	}
 	// Should show helpful message about checkpoints appearing after saves
-	if !strings.Contains(output, "Checkpoints will appear") || !strings.Contains(output, "Claude session") {
+	if !strings.Contains(output, "Checkpoints will appear") || !strings.Contains(output, "agent session") {
 		t.Errorf("expected helpful message about checkpoints, got: %s", output)
 	}
 }
