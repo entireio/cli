@@ -117,6 +117,69 @@ func totalTokens(tu *agent.TokenUsage) int {
 	return total
 }
 
+// explainRow is one entry in a metadata block: dim label + plain value.
+type explainRow struct {
+	Label string
+	Value string
+}
+
+// metadataRow renders a single key/value row using a 7-char min-padded label.
+// 7-char-pad + 2-space-gutter is visually equivalent to the existing
+// formatCheckpointHeader's %-9s + no-gutter (see explain.go) for any label up
+// to 9 chars, and the explicit gutter scales cleanly when a longer label
+// (e.g. "checkpoints", 11 chars) is present.
+//
+// Use metadataRows for multi-row blocks where alignment depends on the
+// widest label.
+func (s statusStyles) metadataRow(label, value string) string {
+	width := 7
+	if l := len(label); l > width {
+		width = l
+	}
+	return s.metadataRowsWithWidth([]explainRow{{Label: label, Value: value}}, width)
+}
+
+// metadataRows joins rows with consistent label-column width:
+// max(7, widest label in slice). See metadataRow for the 7 vs 9
+// equivalence note.
+func (s statusStyles) metadataRows(rows []explainRow) string {
+	width := 7
+	for _, r := range rows {
+		if l := len(r.Label); l > width {
+			width = l
+		}
+	}
+	return s.metadataRowsWithWidth(rows, width)
+}
+
+// metadataRowsWithWidth is the underlying renderer used by metadataRow and
+// metadataRows. The caller computes the column width; this function owns the
+// byte layout (2-space indent, padded label, 2-space gutter, value, newline)
+// and the empty-label continuation branch (4-space hanging indent, no dim
+// styling — used for multi-line items beneath a parent label like "causes").
+//
+// The min=7 default chosen by metadataRow/metadataRows produces output
+// identical to formatCheckpointHeader's %-9s + no-gutter rendering at
+// explain.go for any label up to 9 chars.
+func (s statusStyles) metadataRowsWithWidth(rows []explainRow, width int) string {
+	var b strings.Builder
+	for _, r := range rows {
+		// Empty-label rows are continuation lines (e.g., bullet items under a "causes" row).
+		// They render with a 4-space hanging indent and no dim styling.
+		if r.Label == "" {
+			fmt.Fprintf(&b, "    %s\n", r.Value)
+			continue
+		}
+		paddedLabel := fmt.Sprintf("%-*s", width, r.Label)
+		if s.colorEnabled {
+			paddedLabel = s.render(s.dim, paddedLabel)
+		}
+		// Two-space indent + padded label + two-space gutter + value + newline.
+		fmt.Fprintf(&b, "  %s  %s\n", paddedLabel, r.Value)
+	}
+	return b.String()
+}
+
 // horizontalRule renders a dimmed horizontal rule of the given width.
 func (s statusStyles) horizontalRule(width int) string {
 	rule := strings.Repeat("─", width)
