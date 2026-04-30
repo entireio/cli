@@ -123,6 +123,33 @@ type explainRow struct {
 	Value string
 }
 
+// identityBullet renders "● <label> <id>\n". Bullet is brand orange when color
+// is enabled; ID is also orange to mirror the existing checkpoint header.
+func (s statusStyles) identityBullet(label, id string) string {
+	if !s.colorEnabled {
+		return fmt.Sprintf("● %s %s\n", label, id)
+	}
+	bullet := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), "●")
+	idStyled := s.render(lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")), id)
+	return fmt.Sprintf("%s %s %s\n", bullet, s.render(s.bold, label), idStyled)
+}
+
+// successBullet renders "✓ <label>\n" — green checkmark + bold label.
+func (s statusStyles) successBullet(label string) string {
+	if !s.colorEnabled {
+		return fmt.Sprintf("✓ %s\n", label)
+	}
+	return fmt.Sprintf("%s %s\n", s.render(s.green, "✓"), s.render(s.bold, label))
+}
+
+// failureBullet renders "✗ <label>\n" — red ✗ + bold label.
+func (s statusStyles) failureBullet(label string) string {
+	if !s.colorEnabled {
+		return fmt.Sprintf("✗ %s\n", label)
+	}
+	return fmt.Sprintf("%s %s\n", s.render(s.red, "✗"), s.render(s.bold, label))
+}
+
 // metadataRow renders a single key/value row using a 7-char min-padded label.
 // 7-char-pad + 2-space-gutter is visually equivalent to the existing
 // formatCheckpointHeader's %-9s + no-gutter (see explain.go) for any label up

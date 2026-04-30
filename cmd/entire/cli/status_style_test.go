@@ -55,3 +55,33 @@ func TestMetadataRows_EmptyLabelContinuationLine(t *testing.T) {
 		t.Errorf("metadataRows continuation\n got: %q\nwant: %q", got, want)
 	}
 }
+
+func TestIdentityBullet_NoColor(t *testing.T) {
+	t.Parallel()
+	s := newStatusStyles(io.Discard)
+	got := s.identityBullet("Checkpoint", "a3b2c4d5e6f7")
+	want := "● Checkpoint a3b2c4d5e6f7\n"
+	if got != want {
+		t.Errorf("identityBullet no-color\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestSuccessBullet_NoColor(t *testing.T) {
+	t.Parallel()
+	s := newStatusStyles(io.Discard)
+	got := s.successBullet("Summary generated")
+	want := "✓ Summary generated\n"
+	if got != want {
+		t.Errorf("successBullet no-color\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestFailureBullet_NoColor(t *testing.T) {
+	t.Parallel()
+	s := newStatusStyles(io.Discard)
+	got := s.failureBullet("No associated Entire checkpoint")
+	want := "✗ No associated Entire checkpoint\n"
+	if got != want {
+		t.Errorf("failureBullet no-color\n got: %q\nwant: %q", got, want)
+	}
+}
