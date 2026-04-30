@@ -569,12 +569,12 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	case 1:
 		fullCheckpointID = matches[0]
 	default:
-		// Ambiguous prefix - show up to 5 examples
-		examples := make([]string, 0, 5)
-		for i := 0; i < len(matches) && i < 5; i++ {
-			examples = append(examples, matches[i].String())
-		}
-		return fmt.Errorf("ambiguous checkpoint prefix %q matches %d checkpoints: %s", checkpointIDPrefix, len(matches), strings.Join(examples, ", "))
+		// Ambiguous prefix: render styled failure block, return SilentError so
+		// main.go does not double-print. Matches the temporary-side and
+		// commit-side ambiguity paths.
+		ambig := buildAmbiguousCheckpointMatches(matches, lookup.committed)
+		renderAmbiguousPrefixFailure(errW, checkpointIDPrefix, "committed checkpoints", ambig)
+		return NewSilentError(fmt.Errorf("%w: %s matches %d checkpoints", errAmbiguousCommitPrefix, checkpointIDPrefix, len(matches)))
 	}
 
 	// Resolve store and load checkpoint summary with v2 -> v1 fallback.
@@ -1235,12 +1235,13 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 		}
 	}
 	if verbose || full {
-		sb.WriteString("\n")
+		label := "Transcript (checkpoint scope)"
 		if full {
-			sb.WriteString("Transcript (full session):\n")
-		} else {
-			sb.WriteString("Transcript (checkpoint scope):\n")
+			label = "Transcript (full session)"
 		}
+		sb.WriteString("\n")
+		sb.WriteString(styles.sectionRule(label, styles.width))
+		sb.WriteString("\n")
 	}
 	appendTranscriptSection(&sb, verbose, full, fullTranscript, scopedTranscript, sessionPrompt, agentType)
 
@@ -1475,6 +1476,31 @@ func buildAmbiguousCommitMatches(repo *git.Repository, hashes []plumbing.Hash) [
 		m := ambiguousMatch{ShortID: abbreviateCommitHash(repo, h)}
 		if commit, err := repo.CommitObject(h); err == nil {
 			m.Timestamp = commit.Author.When
+		}
+		matches = append(matches, m)
+	}
+	return matches
+}
+
+// buildAmbiguousCheckpointMatches converts a slice of CheckpointID matches
+// into ambiguousMatch entries enriched with timestamps and session IDs from
+// the loaded committed-checkpoint listing. Caps at 5 entries to keep the
+// failure block readable when a short prefix collides on many checkpoints.
+func buildAmbiguousCheckpointMatches(ids []id.CheckpointID, committed []checkpoint.CommittedInfo) []ambiguousMatch {
+	const maxMatches = 5
+	infoByID := make(map[id.CheckpointID]checkpoint.CommittedInfo, len(committed))
+	for _, info := range committed {
+		infoByID[info.CheckpointID] = info
+	}
+	matches := make([]ambiguousMatch, 0, len(ids))
+	for i, cpID := range ids {
+		if i >= maxMatches {
+			break
+		}
+		m := ambiguousMatch{ShortID: cpID.String()}
+		if info, ok := infoByID[cpID]; ok {
+			m.Timestamp = info.CreatedAt
+			m.SessionID = info.SessionID
 		}
 		matches = append(matches, m)
 	}

@@ -593,6 +593,53 @@ func TestRunExplainCommit_AmbiguousPrintsToErrWAndReturnsSilent(t *testing.T) {
 	}
 }
 
+// TestRunExplainCheckpoint_AmbiguousCommittedPrefixPrintsToErrWAndReturnsSilent
+// verifies that an ambiguous prefix matching multiple committed checkpoints
+// renders the styled failure block to errW (not stdout) and returns a
+// *SilentError so main.go does not double-print. Mirrors the commit-side
+// ambiguity test.
+func TestRunExplainCheckpoint_AmbiguousCommittedPrefixPrintsToErrWAndReturnsSilent(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+
+	// Seed two committed checkpoints sharing a hex prefix.
+	store := checkpoint.NewGitStore(repo)
+	transcriptBytes := redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n"))
+	for _, cpID := range []id.CheckpointID{
+		id.MustCheckpointID("e7aaaaaaaaaa"),
+		id.MustCheckpointID("e7bbbbbbbbbb"),
+	} {
+		require.NoError(t, store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+			CheckpointID: cpID,
+			SessionID:    "session-" + cpID.String(),
+			Strategy:     "manual-commit",
+			Transcript:   transcriptBytes,
+			AuthorName:   "Test",
+			AuthorEmail:  "test@example.com",
+		}))
+	}
+
+	var out, errOut bytes.Buffer
+	err := runExplainCheckpoint(ctx, &out, &errOut, "e7", true, false, false, false, false, false, false)
+
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Fatalf("expected *SilentError, got %T: %v", err, err)
+	}
+	if !strings.Contains(errOut.String(), "✗ Ambiguous checkpoint prefix") {
+		t.Errorf("missing styled failure on errW:\n%s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "matches") {
+		t.Errorf("expected 'matches' row in errW:\n%s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "committed checkpoints") {
+		t.Errorf("expected 'committed checkpoints' kind in errW:\n%s", errOut.String())
+	}
+	if out.String() != "" {
+		t.Errorf("did not expect anything on stdout:\n%s", out.String())
+	}
+}
+
 // TestResolveCommitUnambiguous_UniquePrefixSucceeds verifies a full SHA
 // resolves to the expected hash without triggering ambiguity detection.
 func TestResolveCommitUnambiguous_UniquePrefixSucceeds(t *testing.T) {
