@@ -50,6 +50,7 @@ branch, or lists all trails if no trail exists for the current branch.`,
 	cmd.AddCommand(newTrailListCmd())
 	cmd.AddCommand(newTrailCreateCmd())
 	cmd.AddCommand(newTrailUpdateCmd())
+	cmd.AddCommand(newTrailLinkCmd())
 
 	return cmd
 }
@@ -92,7 +93,11 @@ func runTrailShow(ctx context.Context, w io.Writer, insecureHTTP bool) error {
 func printTrailDetails(w io.Writer, m *trail.Metadata) {
 	fmt.Fprintf(w, "Trail: %s\n", m.Title)
 	fmt.Fprintf(w, "  ID:      %s\n", m.TrailID)
-	fmt.Fprintf(w, "  Branch:  %s\n", m.Branch)
+	if m.Branch != "" {
+		fmt.Fprintf(w, "  Branch:  %s\n", m.Branch)
+	} else {
+		fmt.Fprintf(w, "  Branch:  (none)\n")
+	}
 	fmt.Fprintf(w, "  Base:    %s\n", m.Base)
 	fmt.Fprintf(w, "  Status:  %s\n", m.Status)
 	fmt.Fprintf(w, "  Author:  %s\n", m.AuthorLogin())
@@ -218,7 +223,11 @@ func runTrailListAll(ctx context.Context, w io.Writer, statusFilter string, json
 	// Table output
 	fmt.Fprintf(w, "%-30s %-40s %-13s %-15s %s\n", "BRANCH", "TITLE", "STATUS", "AUTHOR", "UPDATED")
 	for _, t := range trails {
-		branch := stringutil.TruncateRunes(t.Branch, 30, "...")
+		branchDisplay := t.Branch
+		if branchDisplay == "" {
+			branchDisplay = "(none)"
+		}
+		branch := stringutil.TruncateRunes(branchDisplay, 30, "...")
 		title := stringutil.TruncateRunes(t.Title, 40, "...")
 		fmt.Fprintf(w, "%-30s %-40s %-13s %-15s %s\n",
 			branch, title, t.Status, stringutil.TruncateRunes(t.AuthorLogin(), 15, "..."), timeAgo(t.UpdatedAt))
@@ -541,6 +550,148 @@ func buildTrailUpdateRequest(current *api.TrailResource, statusStr, title, body 
 	}
 
 	return req
+}
+
+func newTrailLinkCmd() *cobra.Command {
+	var branch string
+
+	cmd := &cobra.Command{
+		Use:   "link [trail-id]",
+		Short: "Link a trail to a branch",
+		Long: `Link a trail that has no branch to a git branch. By default, the trail is
+linked to the currently checked-out branch. Use --branch to specify a different branch.
+
+Each branch can only be linked to one trail. If the branch is already linked
+to another trail, the command will fail.
+
+If no trail ID is provided, an interactive picker shows all trails without a branch.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var trailID string
+			if len(args) > 0 {
+				trailID = args[0]
+			}
+			return runTrailLink(cmd, trailID, branch)
+		},
+	}
+
+	cmd.Flags().StringVar(&branch, "branch", "", "Branch to link (defaults to current branch)")
+
+	return cmd
+}
+
+func runTrailLink(cmd *cobra.Command, trailID, branch string) error {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	// Determine target branch
+	if branch == "" {
+		var err error
+		branch, err = GetCurrentBranch(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to determine current branch (use --branch to specify): %w", err)
+		}
+	}
+
+	client, err := NewAuthenticatedAPIClient(trailInsecureHTTP(cmd))
+	if err != nil {
+		return fmt.Errorf("authentication required: %w", err)
+	}
+
+	host, owner, repoName, err := strategy.ResolveRemoteRepo(ctx, "origin")
+	if err != nil {
+		return fmt.Errorf("failed to resolve repository: %w", err)
+	}
+
+	// If no trail ID provided, show interactive picker of branchless trails
+	if trailID == "" {
+		picked, err := pickBranchlessTrail(ctx, cmd, client, host, owner, repoName)
+		if err != nil {
+			return err
+		}
+		trailID = picked
+	}
+
+	// PATCH the trail to set the branch
+	updateReq := api.TrailUpdateRequest{
+		Branch: &branch,
+	}
+
+	resp, err := client.Patch(ctx, trailsBasePath(host, owner, repoName)+"/"+trailID, updateReq)
+	if err != nil {
+		return fmt.Errorf("failed to link trail: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusConflict {
+		return fmt.Errorf("branch %q is already linked to another trail — each branch can only be linked to one trail", branch)
+	}
+	if err := checkTrailResponse(resp); err != nil {
+		return err
+	}
+
+	var updateResp api.TrailUpdateResponse
+	if err := api.DecodeJSON(resp, &updateResp); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	fmt.Fprintf(w, "Linked trail %q to branch %s\n", updateResp.Trail.Title, branch)
+	return nil
+}
+
+// pickBranchlessTrail fetches all trails and presents an interactive picker
+// for trails that have no branch assigned.
+func pickBranchlessTrail(ctx context.Context, cmd *cobra.Command, client *api.Client, host, owner, repo string) (string, error) {
+	w := cmd.OutOrStdout()
+
+	resp, err := client.Get(ctx, trailsBasePath(host, owner, repo))
+	if err != nil {
+		return "", fmt.Errorf("failed to list trails: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return "", err
+	}
+
+	var listResp api.TrailListResponse
+	if err := api.DecodeJSON(resp, &listResp); err != nil {
+		return "", fmt.Errorf("failed to decode trail list: %w", err)
+	}
+
+	// Filter to trails without a branch
+	var branchless []api.TrailResource
+	for _, t := range listResp.Trails {
+		if t.Branch == "" {
+			branchless = append(branchless, t)
+		}
+	}
+
+	if len(branchless) == 0 {
+		fmt.Fprintln(w, "No trails without a branch found.")
+		fmt.Fprintln(w, "Use 'entire trail create' to create a new trail, or pass a trail ID directly.")
+		return "", NewSilentError(errors.New("no branchless trails"))
+	}
+
+	// Build options for the picker
+	options := make([]huh.Option[string], 0, len(branchless))
+	for _, t := range branchless {
+		label := fmt.Sprintf("%s (%s)", t.Title, t.TrailID)
+		options = append(options, huh.NewOption(label, t.TrailID))
+	}
+
+	var selected string
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Select a trail to link").
+				Options(options...).
+				Value(&selected),
+		),
+	)
+	if err := form.Run(); err != nil {
+		return "", handleFormCancellation(w, "Trail link", err)
+	}
+	return selected, nil
 }
 
 // defaultBaseBranch is the fallback base branch name when it cannot be determined.
