@@ -32,7 +32,7 @@ func RegisterObjectSigner() {
 	})
 }
 
-func loadObjectSigner() (plugin.Signer, bool) { //nolint:ireturn // plugin registration requires the plugin.Signer interface
+func loadObjectSigner() (plugin.Signer, bool) {
 	cfgSource, err := plugin.Get(plugin.ConfigLoader())
 	if err != nil {
 		// No config loader registered; signing not possible.
@@ -75,7 +75,7 @@ func loadObjectSigner() (plugin.Signer, bool) { //nolint:ireturn // plugin regis
 
 // connectSSHAgent connects to the SSH agent via SSH_AUTH_SOCK.
 // Returns nil if the agent is unavailable.
-func connectSSHAgent() agent.Agent { //nolint:ireturn // must return the ssh agent interface
+func connectSSHAgent() agent.Agent {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
 		return nil
