@@ -106,11 +106,18 @@ func renderViewSelector(view ViewMode, styles staticStyles) string {
 
 func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles staticStyles) string {
 	me := resp.Summary.Me
-	if me == (SummaryTotals{}) {
+	agentFiltered := opts.Agent != "" && opts.Agent != AgentAll
+	if agentFiltered || me == (SummaryTotals{}) {
 		me = sumMe(resp, opts)
 	}
 	team := resp.Summary.Team
-	if team == nil {
+	if agentFiltered {
+		if totals := sumTeam(resp, opts); totals != (SummaryTotals{}) {
+			team = &totals
+		} else {
+			team = nil
+		}
+	} else if team == nil {
 		if totals := sumTeam(resp, opts); totals != (SummaryTotals{}) {
 			team = &totals
 		}

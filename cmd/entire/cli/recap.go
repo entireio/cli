@@ -14,6 +14,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/recap"
 )
@@ -23,6 +24,7 @@ type recapFlags struct {
 	view                  string
 	agent                 string
 	color                 string
+	static                bool
 	insecureHTTP          bool
 }
 
@@ -48,6 +50,7 @@ func newRecapCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.agent, "agent", recap.AgentAll, "Agent id to show, or all")
 	cmd.Flags().StringVar(&f.view, "view", string(recap.ViewBoth), "Which columns to show: you, team, or both")
 	cmd.Flags().StringVar(&f.color, "color", recapColorAuto, "Color output: auto, always, or never")
+	cmd.Flags().BoolVar(&f.static, "static", false, "Print static output instead of opening the interactive recap")
 	cmd.Flags().BoolVar(&f.insecureHTTP, "insecure-http-auth", false, "Allow plain-HTTP auth (local dev only)")
 	cmd.MarkFlagsMutuallyExclusive("day", "week", "month", "90")
 	return cmd
@@ -100,6 +103,10 @@ func (f *recapFlags) colorEnabled(w io.Writer) (bool, error) {
 	}
 }
 
+func (f *recapFlags) useTUI(isTerminal, accessible bool) bool {
+	return isTerminal && !accessible && !f.static
+}
+
 func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 	if _, err := paths.WorktreeRoot(ctx); err != nil {
 		fmt.Fprintln(w, "Not a git repository. Run 'entire recap' from within a git repository.")
@@ -119,8 +126,18 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 		return NewSilentError(err)
 	}
 	rangeKey := f.rangeKey()
+	repoSlug := currentRepoSlug(ctx)
+	if f.useTUI(interactive.IsTerminalWriter(w), IsAccessibleMode()) {
+		return runRecapTUI(ctx, client, recapTUIOptions{
+			Range: rangeKey,
+			View:  mode,
+			Agent: f.agentName(),
+			Repo:  repoSlug,
+			Color: color,
+		})
+	}
 	start, end := rangeKey.Bounds(time.Now())
-	resp, err := recap.FetchMeRecap(ctx, client, start, end, currentRepoSlug(ctx), 0)
+	resp, err := recap.FetchMeRecap(ctx, client, start, end, repoSlug, 0)
 	if err != nil {
 		return fmt.Errorf("fetch recap: %w", err)
 	}

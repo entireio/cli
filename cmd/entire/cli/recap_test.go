@@ -58,10 +58,35 @@ func TestRecapFlags_Mode(t *testing.T) {
 func TestRecapCmd_RegistersStaticFlags(t *testing.T) {
 	t.Parallel()
 	cmd := newRecapCmd()
-	for _, name := range []string{"day", "week", "month", "90", "agent", "view", "color", "insecure-http-auth"} {
+	for _, name := range []string{"day", "week", "month", "90", "agent", "view", "color", "static", "insecure-http-auth"} {
 		if flag := cmd.Flag(name); flag == nil {
 			t.Errorf("flag --%s not registered", name)
 		}
+	}
+}
+
+func TestRecapFlags_UseTUI(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		flags      recapFlags
+		terminal   bool
+		accessible bool
+		want       bool
+	}{
+		{name: "terminal default", terminal: true, want: true},
+		{name: "non terminal static", terminal: false, want: false},
+		{name: "static flag", flags: recapFlags{static: true}, terminal: true, want: false},
+		{name: "accessible static", terminal: true, accessible: true, want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := c.flags.useTUI(c.terminal, c.accessible); got != c.want {
+				t.Fatalf("useTUI() = %v, want %v", got, c.want)
+			}
+		})
 	}
 }
 

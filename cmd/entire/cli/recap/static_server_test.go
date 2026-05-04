@@ -100,6 +100,60 @@ func TestRenderStaticRecap_TeamViewOmitsYouSummary(t *testing.T) {
 	}
 }
 
+func TestRenderStaticRecap_AgentFilterSummarizesFilteredAgent(t *testing.T) {
+	t.Parallel()
+	resp := &MeRecapResponse{
+		Summary: Summary{
+			Me:   SummaryTotals{Sessions: 99, Checkpoints: 99, Tokens: 99_000},
+			Team: &SummaryTotals{Sessions: 88, Checkpoints: 88, Tokens: 88_000},
+		},
+		Agents: map[string]AgentEntry{
+			"claude": {
+				AgentID:    "claude",
+				AgentLabel: "Claude Code",
+				Me: AgentAggregate{
+					Sessions:    10,
+					Checkpoints: 20,
+					Tokens:      30_000,
+				},
+			},
+			"codex": {
+				AgentID:    "codex",
+				AgentLabel: "Codex",
+				Me: AgentAggregate{
+					Sessions:    2,
+					Checkpoints: 3,
+					Tokens:      400,
+				},
+				Contributors: &AgentAggregate{
+					Sessions:    4,
+					Checkpoints: 5,
+					Tokens:      600,
+				},
+			},
+		},
+	}
+
+	got := RenderStaticRecap(resp, RenderOptions{Range: RangeWeek, View: ViewBoth, Agent: "codex", Width: 78})
+	for _, want := range []string{
+		"agent: [codex]",
+		"you   2 sessions    3 checkpoints    400 tok",
+		"team  4 sessions    5 checkpoints    600 tok",
+		"1 agent",
+		"Codex",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "99 sessions") || strings.Contains(got, "88 sessions") {
+		t.Fatalf("agent-filtered summary should not use all-agent totals:\n%s", got)
+	}
+	if strings.Contains(got, "Claude Code") {
+		t.Fatalf("agent-filtered output should omit other agents:\n%s", got)
+	}
+}
+
 func TestRenderStaticRecap_ColorWhenEnabled(t *testing.T) {
 	t.Parallel()
 	resp := &MeRecapResponse{
