@@ -208,19 +208,22 @@ func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) st
 
 // timeAgo formats a time as a human-readable relative duration.
 func timeAgo(t time.Time) string {
-	d := time.Since(t)
+	return formatRelativeDuration(time.Since(t))
+}
+
+// formatRelativeDuration renders a positive duration as "just now" / "Xm ago"
+// / "Xh ago" / "Xd ago". Shared between `entire status` and `entire auth list`
+// so the bucket thresholds and labels stay consistent.
+func formatRelativeDuration(d time.Duration) string {
 	switch {
 	case d < time.Minute:
-		return "just now"
+		return lastUsedJustNow
 	case d < time.Hour:
-		m := int(d.Minutes())
-		return fmt.Sprintf("%dm ago", m)
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
 	case d < 24*time.Hour:
-		h := int(d.Hours())
-		return fmt.Sprintf("%dh ago", h)
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	default:
-		days := int(d.Hours() / 24)
-		return fmt.Sprintf("%dd ago", days)
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
 

@@ -140,10 +140,10 @@ func TestRenderStaticRecap_ColorWhenEnabled(t *testing.T) {
 	if !strings.Contains(colored, "\x1b[1;38;5;214m█") {
 		t.Fatalf("expected peak activity cells to be highlighted:\n%s", colored)
 	}
-	if !strings.Contains(colored, "\x1b[38;5;203m● bug_fix\x1b[0m") {
+	if !strings.Contains(colored, "\x1b[38;5;203m● bug_fix") {
 		t.Fatalf("expected labels to use semantic colors:\n%s", colored)
 	}
-	if !strings.Contains(colored, "\x1b[36mcode-simplifier\x1b[0m") {
+	if !strings.Contains(colored, "\x1b[36mcode-simplifier") {
 		t.Fatalf("expected skills to be colorized:\n%s", colored)
 	}
 

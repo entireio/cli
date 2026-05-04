@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 )
 
@@ -25,8 +25,8 @@ func (p fakeDispatchProgram) Run() (tea.Model, error) {
 }
 
 func TestDefaultRunInteractiveDispatch_DoesNotUseAltScreen(t *testing.T) {
-	t.Parallel()
-
+	// Cannot run in parallel: mutates package-level newDispatchProgram, which
+	// races with TestDefaultRunInteractiveDispatch_ClearsLoadingCardBeforeReturn.
 	oldProgramFactory := newDispatchProgram
 	newDispatchProgram = func(model tea.Model, _ io.Writer, altScreen bool) dispatchProgram {
 		if altScreen {
@@ -60,7 +60,7 @@ func TestDispatchStatusModel_ViewRendersInlineCard(t *testing.T) {
 	model.width = 80
 	model.height = 24
 
-	view := model.View()
+	view := model.View().Content
 	if !strings.HasPrefix(view, "\n") {
 		t.Fatalf("expected inline view with a leading blank line: %q", view)
 	}
@@ -72,9 +72,27 @@ func TestDispatchStatusModel_ViewRendersInlineCard(t *testing.T) {
 	}
 }
 
-func TestDefaultRunInteractiveDispatch_ClearsLoadingCardBeforeReturn(t *testing.T) {
+func TestDefaultRenderTerminalMarkdown_RendersHyperlinks(t *testing.T) {
 	t.Parallel()
 
+	rendered, err := defaultRenderTerminalMarkdown(io.Discard, "[Entire](https://entire.dev)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "\x1b]8;") {
+		t.Fatalf("expected OSC 8 hyperlink sequence, got %q", rendered)
+	}
+	if !strings.Contains(rendered, ";https://entire.dev\x07") {
+		t.Fatalf("expected hyperlink target, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "\x1b]8;;\x07") {
+		t.Fatalf("expected OSC 8 hyperlink reset, got %q", rendered)
+	}
+}
+
+func TestDefaultRunInteractiveDispatch_ClearsLoadingCardBeforeReturn(t *testing.T) {
+	// Cannot run in parallel: mutates package-level newDispatchProgram, which
+	// races with TestDefaultRunInteractiveDispatch_DoesNotUseAltScreen.
 	oldProgramFactory := newDispatchProgram
 	newDispatchProgram = func(model tea.Model, _ io.Writer, _ bool) dispatchProgram {
 		return fakeDispatchProgram{model: model}

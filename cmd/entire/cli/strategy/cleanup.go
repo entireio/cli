@@ -2,19 +2,23 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
+	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
@@ -350,55 +354,196 @@ func ListEligibleV2Generations(ctx context.Context, s *settings.EntireSettings) 
 	}
 
 	store := checkpoint.NewV2GitStore(repo, "origin")
-	archived, err := store.ListArchivedGenerations()
+	candidates, tempRefs, warnings, err := listArchivedV2GenerationCandidates(ctx, repo, store)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to list archived generations: %w", err)
 	}
+	defer removeTempRefs(repo, tempRefs)
 
 	cutoff := time.Now().AddDate(0, 0, -s.GetFullTranscriptGenerationRetentionDays())
-	cleanupItems := make([]CleanupItem, 0, len(archived))
-	var warnings []string
+	cleanupItems := make([]CleanupItem, 0, len(candidates))
 
-	for _, name := range archived {
-		refName := plumbing.ReferenceName(paths.V2FullRefPrefix + name)
-		commitHash, treeHash, refErr := store.GetRefState(refName)
+	for _, candidate := range candidates {
+		commitHash, treeHash, refErr := store.GetRefState(candidate.RefName)
 		if refErr != nil {
-			warnings = append(warnings, fmt.Sprintf("generation %s: cannot read ref: %v", name, refErr))
+			warnings = append(warnings, fmt.Sprintf("generation %s: cannot read ref: %v", candidate.Name, refErr))
 			continue
 		}
 
-		gen, genErr := store.ReadGeneration(treeHash)
-		if genErr != nil {
-			warnings = append(warnings, fmt.Sprintf("generation %s: failed to read generation.json: %v", name, genErr))
+		gen, foundCheckpointTimes, timestampErr := store.ComputeGenerationTimestampsFromTrees(treeHash, nil)
+		if timestampErr != nil {
+			warnings = append(warnings, fmt.Sprintf("generation %s: failed to compute raw transcript timestamps: %v", candidate.Name, timestampErr))
 			continue
+		}
+		if !foundCheckpointTimes {
+			var genErr error
+			gen, genErr = store.ReadGeneration(treeHash)
+			if genErr != nil {
+				warnings = append(warnings, fmt.Sprintf("generation %s: failed to read generation.json: %v", candidate.Name, genErr))
+				continue
+			}
 		}
 
 		hasOldest := !gen.OldestCheckpointAt.IsZero()
 		hasNewest := !gen.NewestCheckpointAt.IsZero()
 		switch {
 		case !hasOldest && !hasNewest:
-			warnings = append(warnings, fmt.Sprintf("generation %s: missing generation.json", name))
+			warnings = append(warnings, fmt.Sprintf("generation %s: missing generation.json", candidate.Name))
 			continue
 		case hasOldest != hasNewest:
-			warnings = append(warnings, fmt.Sprintf("generation %s: incomplete generation.json", name))
+			warnings = append(warnings, fmt.Sprintf("generation %s: incomplete generation.json", candidate.Name))
 			continue
 		case gen.OldestCheckpointAt.After(gen.NewestCheckpointAt):
-			warnings = append(warnings, fmt.Sprintf("generation %s: invalid timestamps", name))
+			warnings = append(warnings, fmt.Sprintf("generation %s: invalid timestamps", candidate.Name))
 			continue
 		}
 		if !gen.NewestCheckpointAt.Before(cutoff) {
 			continue
 		}
 
+		refOID := candidate.RefOID
+		if refOID == "" {
+			refOID = commitHash.String()
+		}
 		cleanupItems = append(cleanupItems, CleanupItem{
 			Type:   CleanupTypeV2Generation,
-			ID:     name,
-			RefOID: commitHash.String(),
+			ID:     candidate.Name,
+			RefOID: refOID,
 			Reason: "expired archived full transcript generation",
 		})
 	}
 
 	return cleanupItems, warnings, nil
+}
+
+type archivedV2GenerationCandidate struct {
+	Name      string
+	RefName   plumbing.ReferenceName
+	RefOID    string
+	HasRemote bool
+}
+
+func listArchivedV2GenerationCandidates(
+	ctx context.Context,
+	repo *git.Repository,
+	store *checkpoint.V2GitStore,
+) ([]archivedV2GenerationCandidate, []plumbing.ReferenceName, []string, error) {
+	localNames, err := store.ListArchivedGenerations()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("list local archived generations: %w", err)
+	}
+
+	candidatesByName := make(map[string]archivedV2GenerationCandidate, len(localNames))
+	for _, name := range localNames {
+		refName := plumbing.ReferenceName(paths.V2FullRefPrefix + name)
+		ref, refErr := repo.Reference(refName, true)
+		if refErr != nil {
+			continue
+		}
+		candidatesByName[name] = archivedV2GenerationCandidate{
+			Name:    name,
+			RefName: refName,
+			RefOID:  ref.Hash().String(),
+		}
+	}
+
+	var warnings []string
+	var tempRefs []plumbing.ReferenceName
+	target, targetErr := remote.FetchURL(ctx)
+	if targetErr == nil && target != "" {
+		remoteRefs, remoteErr := listRemoteArchivedV2GenerationRefs(ctx, target)
+		if remoteErr != nil {
+			warnings = append(warnings, fmt.Sprintf("failed to list remote v2 generations: %v", remoteErr))
+		} else {
+			fetchTarget, fetchTargetErr := remote.ResolveFetchTarget(ctx, target)
+			if fetchTargetErr != nil {
+				warnings = append(warnings, fmt.Sprintf("failed to resolve remote for v2 generation fetch: %v", fetchTargetErr))
+			} else {
+				for name, remoteOID := range remoteRefs {
+					if candidate, ok := candidatesByName[name]; ok {
+						if candidate.RefOID == remoteOID {
+							candidate.HasRemote = true
+							candidatesByName[name] = candidate
+							continue
+						}
+						warnings = append(warnings, fmt.Sprintf("generation %s: local archived ref OID %s differs from remote OID %s; skipping cleanup", name, candidate.RefOID, remoteOID))
+						delete(candidatesByName, name)
+						continue
+					}
+					tempRef, fetchErr := fetchArchivedV2Generation(ctx, fetchTarget, name)
+					if fetchErr != nil {
+						warnings = append(warnings, fmt.Sprintf("generation %s: failed to fetch remote ref: %v", name, fetchErr))
+						continue
+					}
+					tempRefs = append(tempRefs, tempRef)
+					candidatesByName[name] = archivedV2GenerationCandidate{
+						Name:      name,
+						RefName:   tempRef,
+						RefOID:    remoteOID,
+						HasRemote: true,
+					}
+				}
+			}
+		}
+	}
+
+	names := make([]string, 0, len(candidatesByName))
+	for name := range candidatesByName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	candidates := make([]archivedV2GenerationCandidate, 0, len(names))
+	for _, name := range names {
+		candidates = append(candidates, candidatesByName[name])
+	}
+	return candidates, tempRefs, warnings, nil
+}
+
+func listRemoteArchivedV2GenerationRefs(ctx context.Context, target string) (map[string]string, error) {
+	output, err := remote.LsRemote(ctx, target, paths.V2FullRefPrefix+"*")
+	if err != nil {
+		return nil, fmt.Errorf("ls remote v2 generations: %w", err)
+	}
+
+	refs := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		refName := parts[1]
+		suffix := strings.TrimPrefix(refName, paths.V2FullRefPrefix)
+		if suffix == "current" || !checkpoint.GenerationRefPattern.MatchString(suffix) {
+			continue
+		}
+		refs[suffix] = parts[0]
+	}
+	return refs, nil
+}
+
+func fetchArchivedV2Generation(ctx context.Context, fetchTarget, name string) (plumbing.ReferenceName, error) {
+	refName := paths.V2FullRefPrefix + name
+	tempRef := plumbing.ReferenceName("refs/entire-clean-tmp/v2/full/" + name)
+	refSpec := fmt.Sprintf("+%s:%s", refName, tempRef)
+	if output, err := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
+		NoFilter: true,
+	}); err != nil {
+		return "", fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return tempRef, nil
+}
+
+func removeTempRefs(repo *git.Repository, refs []plumbing.ReferenceName) {
+	for _, ref := range refs {
+		_ = repo.Storer.RemoveReference(ref) //nolint:errcheck // cleanup is best-effort
+	}
 }
 
 // V2GenerationRef pairs a generation name with the OID observed at listing time.
@@ -415,16 +560,56 @@ func DeleteV2Generations(ctx context.Context, generations []V2GenerationRef) (de
 		return []string{}, []string{}, nil
 	}
 
+	pushTarget, _, pushTargetErr := remote.PushURL(ctx, "origin")
+
 	for _, gen := range generations {
 		refName := plumbing.ReferenceName(paths.V2FullRefPrefix + gen.Name)
-		if err := DeleteRefCLI(ctx, refName.String(), gen.RefOID); err != nil {
+		localErr := DeleteRefCLI(ctx, refName.String(), gen.RefOID)
+		if errors.Is(localErr, ErrRefNotFound) {
+			localErr = nil
+		}
+		if localErr != nil {
 			failed = append(failed, gen.Name)
 			continue
+		}
+		if pushTargetErr == nil && pushTarget != "" {
+			if remoteErr := deleteRemoteRef(ctx, pushTarget, refName.String(), gen.RefOID); remoteErr != nil {
+				failed = append(failed, gen.Name)
+				continue
+			}
 		}
 		deleted = append(deleted, gen.Name)
 	}
 
 	return deleted, failed, nil
+}
+
+func deleteRemoteRef(ctx context.Context, target, refName, expectedOID string) error {
+	return pushWithLease(ctx, target, ":"+refName, refName, expectedOID,
+		"delete remote ref "+refName)
+}
+
+// pushWithLease runs `git push <target> <refSpec>` with an optional
+// `--force-with-lease=<leaseRef>:<expectedOID>` guard. errCtx prefixes the
+// error message when no stderr output is available from the push.
+func pushWithLease(ctx context.Context, target, refSpec, leaseRef, expectedOID, errCtx string) error {
+	extraArgs := []string{}
+	if expectedOID != "" {
+		extraArgs = append(extraArgs, fmt.Sprintf("--force-with-lease=%s:%s", leaseRef, expectedOID))
+	}
+	result, err := remote.PushWithOptions(ctx, remote.PushOptions{
+		Remote:    target,
+		RefSpecs:  []string{refSpec},
+		ExtraArgs: extraArgs,
+	})
+	if err != nil {
+		output := strings.TrimSpace(result.Output)
+		if output != "" {
+			return fmt.Errorf("%s: %w", output, err)
+		}
+		return fmt.Errorf("%s: %w", errCtx, err)
+	}
+	return nil
 }
 
 // ListAllItems returns all Entire items for full cleanup.

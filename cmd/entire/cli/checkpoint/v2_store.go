@@ -30,6 +30,12 @@ type V2GitStore struct {
 	// fetching /full/* refs during entire resume). Defaults to "origin".
 	// Set to the checkpoint remote URL when checkpoint_remote is configured.
 	FetchRemote string
+
+	// blobFetcher fetches missing blobs by hash. When set, read paths wrap
+	// trees with FetchingTree so missing blobs are auto-recovered (and the
+	// cat-file fallback covers partial-clone-filtered blobs that go-git's
+	// storer can't see).
+	blobFetcher BlobFetchFunc
 }
 
 // maxCheckpoints returns the effective rotation threshold.
@@ -52,6 +58,22 @@ func NewV2GitStore(repo *git.Repository, fetchRemote string) *V2GitStore {
 		gs:          &GitStore{repo: repo},
 		FetchRemote: fetchRemote,
 	}
+}
+
+// SetBlobFetcher configures the store to automatically fetch missing blobs
+// on demand when reading from /main trees. Mirrors GitStore.SetBlobFetcher.
+// Required for reads against partial-clone repos where blobs may be absent
+// or invisible to go-git's cached packfile index.
+func (s *V2GitStore) SetBlobFetcher(f BlobFetchFunc) {
+	s.blobFetcher = f
+}
+
+// wrapWithFetcher returns the input tree wrapped in a FetchingTree using
+// the configured blob fetcher. Callers use the returned tree's File() /
+// Tree() methods instead of the raw go-git ones so missing blobs are
+// recovered via the fetcher and the cat-file fallback.
+func (s *V2GitStore) wrapWithFetcher(ctx context.Context, tree *object.Tree) *FetchingTree {
+	return NewFetchingTree(ctx, tree, s.repo.Storer, s.blobFetcher)
 }
 
 // ensureRef ensures that a custom ref exists, creating an orphan commit

@@ -35,7 +35,7 @@ func TestCloudClient_CreateDispatch_Happy(t *testing.T) {
 			t.Fatalf("bad body: %v", body)
 		}
 		repos, ok := body["repos"].([]any)
-		if !ok || len(repos) != 1 || repos[0] != "entireio/cli" {
+		if !ok || len(repos) != 1 || repos[0] != testRepoFullName {
 			t.Fatalf("bad repos payload: %v", body["repos"])
 		}
 		if _, ok := body["repo"]; ok {
@@ -53,7 +53,7 @@ func TestCloudClient_CreateDispatch_Happy(t *testing.T) {
 
 	client := NewCloudClient(CloudConfig{BaseURL: srv.URL, Token: "t"})
 	got, err := client.CreateDispatch(ctx, CreateDispatchRequest{
-		Repos:    []string{"entireio/cli"},
+		Repos:    []string{testRepoFullName},
 		Since:    "2026-04-09T00:00:00Z",
 		Until:    "2026-04-16T00:00:00Z",
 		Generate: true,

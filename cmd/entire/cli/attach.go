@@ -30,7 +30,7 @@ import (
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -55,7 +55,7 @@ If the last commit already has a checkpoint, the session is added to it.
 Otherwise a new checkpoint is created.
 
 Works with any registered agent, including external agents enabled via
-external_agents in settings. Run 'entire configure' to see the full list.`,
+external_agents in settings. Run 'entire agent list' to see the full list.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return cmd.Help()
@@ -71,7 +71,7 @@ external_agents in settings. Run 'entire configure' to see the full list.`,
 		},
 	}
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation and amend the last commit with the checkpoint trailer")
-	cmd.Flags().StringVarP(&agentFlag, "agent", "a", string(agent.DefaultAgentName), "Agent that created the session (see 'entire configure' for registered agents, including external)")
+	cmd.Flags().StringVarP(&agentFlag, "agent", "a", string(agent.DefaultAgentName), "Agent that created the session (see 'entire agent list' for registered agents, including external)")
 	return cmd
 }
 
@@ -207,7 +207,7 @@ func runAttach(ctx context.Context, w io.Writer, sessionID string, agentName typ
 	}
 
 	// Create or update session state.
-	if err := saveAttachSessionState(logCtx, existingState, sessionID, ag.Type(), transcriptPath, checkpointID, meta, tokenUsage); err != nil {
+	if err := saveAttachSessionState(logCtx, repo, existingState, sessionID, ag.Type(), transcriptPath, checkpointID, meta, tokenUsage); err != nil {
 		logging.Warn(logCtx, "failed to save session state", "error", err)
 	}
 
@@ -398,7 +398,7 @@ func resolveCheckpointID(headCommit *object.Commit) (id.CheckpointID, bool) {
 
 // saveAttachSessionState creates or updates the session state file for the attached session.
 // If existingState is non-nil, it is updated in place (avoids a redundant disk load).
-func saveAttachSessionState(ctx context.Context, existingState *session.State, sessionID string, agentType types.AgentType, transcriptPath string, checkpointID id.CheckpointID, meta transcriptMetadata, tokenUsage *agent.TokenUsage) error {
+func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingState *session.State, sessionID string, agentType types.AgentType, transcriptPath string, checkpointID id.CheckpointID, meta transcriptMetadata, tokenUsage *agent.TokenUsage) error {
 	stateStore, err := session.NewStateStore(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open session store: %w", err)
@@ -413,12 +413,26 @@ func saveAttachSessionState(ctx context.Context, existingState *session.State, s
 		}
 	}
 
+	// Populate BaseCommit from HEAD if not already set, so the session becomes
+	// active and future commits in the same session receive Entire-Checkpoint trailers.
+	if state.BaseCommit == "" {
+		if head, headErr := repo.Head(); headErr == nil {
+			headHash := head.Hash().String()
+			state.BaseCommit = headHash
+			state.AttributionBaseCommit = headHash
+		}
+	}
+
 	state.CLIVersion = versioninfo.Version
 	state.AttachedManually = true
 	state.AgentType = agentType
 	state.TranscriptPath = transcriptPath
 	state.LastCheckpointID = checkpointID
-	state.Phase = session.PhaseEnded
+	// Only transition to Ended if the session is not already active — avoid
+	// breaking an ongoing session whose BaseCommit has just been restored above.
+	if !state.Phase.IsActive() {
+		state.Phase = session.PhaseEnded
+	}
 	state.LastInteractionTime = &now
 	if meta.TurnCount > 0 {
 		state.SessionTurnCount = meta.TurnCount

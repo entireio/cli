@@ -2,12 +2,15 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -265,6 +268,125 @@ func LoadModelHint(ctx context.Context, sessionID string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// StoreAgentTypeHint records the agent type that owns a session before
+// SessionState exists. Used by the lifecycle dispatcher when SessionStart fires
+// (state isn't created until TurnStart, so we need a place to remember which
+// agent claimed the session first).
+//
+// Semantics: first writer wins. When multiple agents fire hooks for the same
+// session ID — e.g., Cursor IDE running cursor-agent while also forwarding to
+// Claude Code's hook system — only the agent that fires SessionStart first
+// gets recorded. Subsequent calls return nil without overwriting.
+//
+// At TurnStart, InitializeSession reads this hint to override agentType when
+// the hook firing isn't the same agent that owns the session. After the state
+// file is written, the hint is unused but remains until ClearSessionState
+// removes it alongside the state file.
+//
+// Returns (created=true) when this call wrote the hint, (created=false) when
+// the hint already existed (no-op) or agentType was empty/Unknown.
+//
+// Banner display is gated separately via ClaimSessionStartBanner — winning
+// the ownership claim does NOT mean this agent should also print the banner,
+// because the winner may not implement HookResponseWriter (e.g., Cursor).
+func StoreAgentTypeHint(ctx context.Context, sessionID string, agentType types.AgentType) (created bool, err error) {
+	if vErr := validation.ValidateSessionID(sessionID); vErr != nil {
+		return false, fmt.Errorf("invalid session ID: %w", vErr)
+	}
+	if agentType == "" || agentType == agent.AgentTypeUnknown {
+		return false, nil
+	}
+
+	stateDir, sErr := getSessionStateDir(ctx)
+	if sErr != nil {
+		return false, fmt.Errorf("failed to get session state directory: %w", sErr)
+	}
+	if mErr := os.MkdirAll(stateDir, 0o750); mErr != nil {
+		return false, fmt.Errorf("failed to create session state directory: %w", mErr)
+	}
+
+	hintFile := filepath.Join(stateDir, sessionID+".agent")
+	f, oErr := os.OpenFile(hintFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // hintFile path is built from validated sessionID
+	if oErr != nil {
+		if errors.Is(oErr, os.ErrExist) {
+			// First-writer-wins: another caller already claimed this session.
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to create agent hint file: %w", oErr)
+	}
+	defer f.Close()
+	if _, wErr := f.WriteString(string(agentType)); wErr != nil {
+		return false, fmt.Errorf("failed to write agent hint file: %w", wErr)
+	}
+	return true, nil
+}
+
+// ClaimSessionStartBanner records that the SessionStart banner has been emitted
+// for a session. First-writer-wins semantics, separate from StoreAgentTypeHint
+// so a non-banner-capable agent winning the ownership race (e.g. Cursor, which
+// doesn't implement HookResponseWriter) doesn't suppress the banner from a
+// banner-capable agent that fires SessionStart for the same session.
+//
+// Callers MUST only invoke this from within the HookResponseWriter branch — the
+// claim represents "a banner was actually shown", not just "an agent considered
+// showing one". Otherwise a non-writer claimant would re-introduce the bug.
+//
+// Returns (claimed=true) when this call won the race and the caller should
+// emit the banner; (claimed=false) when an earlier call already claimed it.
+func ClaimSessionStartBanner(ctx context.Context, sessionID string) (claimed bool, err error) {
+	if vErr := validation.ValidateSessionID(sessionID); vErr != nil {
+		return false, fmt.Errorf("invalid session ID: %w", vErr)
+	}
+
+	stateDir, sErr := getSessionStateDir(ctx)
+	if sErr != nil {
+		return false, fmt.Errorf("failed to get session state directory: %w", sErr)
+	}
+	if mErr := os.MkdirAll(stateDir, 0o750); mErr != nil {
+		return false, fmt.Errorf("failed to create session state directory: %w", mErr)
+	}
+
+	markerFile := filepath.Join(stateDir, sessionID+".banner")
+	f, oErr := os.OpenFile(markerFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // markerFile path is built from validated sessionID
+	if oErr != nil {
+		if errors.Is(oErr, os.ErrExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to create banner marker file: %w", oErr)
+	}
+	_ = f.Close()
+	return true, nil
+}
+
+// LoadAgentTypeHint reads the agent type hint written by SessionStart.
+// Returns empty string if the hint file doesn't exist, can't be read, or the
+// value isn't a registered agent type.
+func LoadAgentTypeHint(ctx context.Context, sessionID string) types.AgentType {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return ""
+	}
+
+	stateDir, err := getSessionStateDir(ctx)
+	if err != nil {
+		logging.Warn(logging.WithComponent(ctx, "session"), "failed to resolve state dir for agent hint",
+			slog.String("session_id", sessionID),
+			slog.Any("error", err))
+		return ""
+	}
+
+	hintPath := filepath.Join(stateDir, sessionID+".agent")
+	data, err := os.ReadFile(hintPath) //nolint:gosec // sessionID is validated above
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logging.Warn(logging.WithComponent(ctx, "session"), "failed to read agent hint file",
+				slog.String("path", hintPath),
+				slog.Any("error", err))
+		}
+		return ""
+	}
+	return types.AgentType(strings.TrimSpace(string(data)))
 }
 
 // ClearSessionState removes the session state file for the given session ID.

@@ -431,6 +431,18 @@ Only `input_tokens` and `output_tokens` are required. The optional fields (`cach
 
 Required when `capabilities.text_generator` is `true`.
 
+External agents that declare `capabilities.text_generator: true` can be used as
+summary providers for `entire explain --generate` and checkpoint auto-summarize.
+Configure them with:
+
+```bash
+entire configure --summarize-provider <agent-name> [--summarize-model <model>]
+```
+
+The provider name is derived from the executable name `entire-agent-<agent-name>`.
+The CLI passes Entire's summary prompt on stdin to `generate-text --model <model>`
+and expects `{"text":"..."}` on stdout.
+
 #### `generate-text --model <model>`
 
 Generates text using the agent's underlying LLM.

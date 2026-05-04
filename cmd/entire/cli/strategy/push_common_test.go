@@ -3,6 +3,7 @@ package strategy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/stretchr/testify/assert"
@@ -1281,6 +1283,28 @@ func writeV1Checkpoint(t *testing.T, repo *git.Repository, cpID id.CheckpointID,
 	require.NoError(t, err)
 }
 
+func writeMalformedV1CheckpointWithoutSummary(t *testing.T, repo *git.Repository, cpID id.CheckpointID) {
+	t.Helper()
+	ctx := context.Background()
+
+	blobHash, err := checkpoint.CreateBlobFromContent(repo, []byte("transcript without root metadata"))
+	require.NoError(t, err)
+
+	treeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, map[string]object.TreeEntry{
+		cpID.Path() + "/0/" + paths.TranscriptFileName: {
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		},
+	})
+	require.NoError(t, err)
+
+	commitHash, err := checkpoint.CreateCommit(ctx, repo, treeHash, plumbing.ZeroHash, "malformed v1 checkpoint", "Test", "test@test.com")
+	require.NoError(t, err)
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))
+}
+
 func TestPrintCheckpointsV2MigrationHint(t *testing.T) {
 	t.Run("suppressed when no v1 checkpoints exist", func(t *testing.T) {
 		checkpointsV2MigrationHintOnce = sync.Once{}
@@ -1364,6 +1388,13 @@ func TestHasUnmigratedV1Checkpoints(t *testing.T) {
 		writeV1Checkpoint(t, repo, missing, "session-c")
 
 		assert.True(t, hasUnmigratedV1Checkpoints(context.Background()))
+	})
+
+	t.Run("false when only malformed v1 checkpoint entries are missing from v2", func(t *testing.T) {
+		repo := setupCheckpointsV2CommittedRepo(t)
+		writeMalformedV1CheckpointWithoutSummary(t, repo, id.MustCheckpointID("666666666666"))
+
+		assert.False(t, hasUnmigratedV1Checkpoints(context.Background()))
 	})
 }
 
@@ -1466,4 +1497,108 @@ func TestDoPushBranch_NewContent_SaysDone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, output, " done", "should say 'done' when new content was pushed")
 	assert.NotContains(t, output, "already up-to-date", "should not say 'already up-to-date' when content was pushed")
+}
+
+func TestIsProtectedRefRejection(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		output string
+		want   bool
+	}{
+		"GH013 marker":           {"remote: error: GH013: Repository rule violations found", true},
+		"cannot update phrase":   {"remote: error: Cannot update this protected ref.", true},
+		"legacy hook declined":   {"! [remote rejected] main -> main (protected branch hook declined)", true},
+		"plain non-fast-forward": {"! [rejected] v1 -> v1 (non-fast-forward)", false},
+		"empty":                  {"", false},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, isProtectedRefRejection(tc.output))
+		})
+	}
+}
+
+func TestClassifyPushOutput(t *testing.T) {
+	t.Parallel()
+
+	t.Run("protected-ref wins over 'rejected' keyword", func(t *testing.T) {
+		t.Parallel()
+		output := "remote: error: GH013\n! [remote rejected] v1 -> v1"
+
+		var perr *protectedRefError
+		require.ErrorAs(t, classifyPushOutput(output), &perr)
+		assert.Equal(t, output, perr.output)
+	})
+
+	t.Run("non-fast-forward maps to NFF error", func(t *testing.T) {
+		t.Parallel()
+		err := classifyPushOutput("! [rejected] v1 -> v1 (non-fast-forward)")
+
+		var perr *protectedRefError
+		assert.NotErrorAs(t, err, &perr)
+		require.ErrorIs(t, err, errNonFastForward)
+		assert.EqualError(t, err, "non-fast-forward")
+	})
+
+	t.Run("fetch-first maps to NFF error", func(t *testing.T) {
+		t.Parallel()
+		err := classifyPushOutput("!\trefs/heads/main:refs/heads/main\t[rejected] (fetch first)")
+
+		assert.ErrorIs(t, err, errNonFastForward)
+	})
+
+	t.Run("generic rejected output stays generic", func(t *testing.T) {
+		t.Parallel()
+		err := classifyPushOutput("remote: rejected credentials")
+
+		require.Error(t, err)
+		require.NotErrorIs(t, err, errNonFastForward)
+		assert.ErrorContains(t, err, "push failed: remote: rejected credentials")
+	})
+
+	t.Run("other output is wrapped as push failed", func(t *testing.T) {
+		t.Parallel()
+		err := classifyPushOutput("fatal: Could not resolve host")
+		assert.ErrorContains(t, err, "push failed: fatal: Could not resolve host")
+	})
+
+	t.Run("empty output preserves push error", func(t *testing.T) {
+		t.Parallel()
+		pushErr := errors.New("exit status 128")
+		err := classifyPushFailure(context.Background(), "", pushErr)
+
+		require.Error(t, err)
+		require.ErrorIs(t, err, pushErr)
+		assert.ErrorContains(t, err, "push failed")
+	})
+}
+
+func TestPrintProtectedRefBlock(t *testing.T) {
+	t.Parallel()
+
+	t.Run("remote-name target", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		printProtectedRefBlock(&buf, "entire/checkpoints/v1", "origin")
+
+		out := buf.String()
+		for _, want := range []string{"BLOCKED", "entire/checkpoints/v1", "e.g. GH013", "entire/*", "checkpoints are saved locally", "checkpoint_remote"} {
+			assert.Contains(t, out, want)
+		}
+		banner := strings.Repeat("=", 20)
+		assert.GreaterOrEqual(t, strings.Count(out, banner), 2, "block must be bracketed by banner lines")
+	})
+
+	t.Run("URL target is masked", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		printProtectedRefBlock(&buf, "entire/checkpoints/v1", "git@github.com:org/repo.git")
+
+		out := buf.String()
+		assert.Contains(t, out, displayPushTarget("git@github.com:org/repo.git"))
+		assert.NotContains(t, out, "git@github.com:org/repo.git")
+	})
 }

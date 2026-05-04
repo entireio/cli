@@ -103,10 +103,10 @@ func TestRewindBlockedWhenDisabled(t *testing.T) {
 	// Disable Entire
 	env.SetEnabled(false)
 
-	// Try to run rewind --list - should show disabled message (not error)
-	stdout, err := env.RunCLIWithError("rewind", "--list")
+	// Try to run checkpoint rewind --list - should show disabled message (not error)
+	stdout, err := env.RunCLIWithError("checkpoint", "rewind", "--list")
 	if err != nil {
-		t.Fatalf("rewind --list command failed unexpectedly: %v\nOutput: %s", err, stdout)
+		t.Fatalf("checkpoint rewind --list command failed unexpectedly: %v\nOutput: %s", err, stdout)
 	}
 	if !strings.Contains(stdout, "Entire is disabled") {
 		t.Errorf("Expected disabled message, got: %s", stdout)

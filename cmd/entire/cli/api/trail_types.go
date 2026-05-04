@@ -22,7 +22,7 @@ type TrailResource struct {
 	Title           string           `json:"title"`
 	Body            string           `json:"body"`
 	Status          string           `json:"status"`
-	Author          string           `json:"author"`
+	Author          *trail.Author    `json:"author"`
 	Assignees       []string         `json:"assignees"`
 	Labels          []string         `json:"labels"`
 	Priority        string           `json:"priority,omitempty"`

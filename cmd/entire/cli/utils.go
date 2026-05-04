@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -23,8 +23,8 @@ func IsAccessibleMode() bool {
 }
 
 // entireTheme returns the Dracula theme for consistent styling.
-func entireTheme() *huh.Theme {
-	return huh.ThemeDracula()
+func entireTheme() huh.Theme { //nolint:ireturn // huh.Theme is an interface in v2
+	return huh.ThemeFunc(huh.ThemeDracula)
 }
 
 // NewAccessibleForm creates a new huh form with accessibility mode

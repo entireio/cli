@@ -12,15 +12,16 @@ import (
 // Span tracks timing for an operation and its substeps.
 // A Span is not safe for concurrent use from multiple goroutines.
 type Span struct {
-	name     string
-	start    time.Time
-	parent   *Span
-	children []*Span
-	duration time.Duration
-	attrs    []slog.Attr
-	ctx      context.Context
-	ended    bool
-	err      error
+	name       string
+	start      time.Time
+	parent     *Span
+	children   []*Span
+	duration   time.Duration
+	attrs      []slog.Attr
+	ctx        context.Context
+	ended      bool
+	err        error
+	isLoopIter bool
 }
 
 // Start begins a new span. If ctx already has a span, the new one becomes a child.
@@ -64,61 +65,67 @@ func (s *Span) End() {
 		return
 	}
 
-	// Build log attributes: op, duration_ms, error flag, then child step durations.
-	// Component is set via context so it appears exactly once in the log line.
 	logCtx := logging.WithComponent(s.ctx, "perf")
-	grandchildren := 0
-	for _, c := range s.children {
-		grandchildren += len(c.children)
-	}
-	attrs := make([]any, 0, 3+2*len(s.children)+2*grandchildren+len(s.attrs))
+	attrs := make([]any, 0, 3+len(s.attrs)+countChildStepAttrs(s))
 	attrs = append(attrs, slog.String("op", s.name))
 	attrs = append(attrs, slog.Int64("duration_ms", s.duration.Milliseconds()))
 	if s.err != nil {
 		attrs = append(attrs, slog.Bool("error", true))
 	}
 
-	// Add child step durations (and error flags) as flat keys.
-	// Disambiguate duplicate child names (from loops) with ~1, ~2, etc. suffixes
-	// to prevent later values from overwriting earlier ones in JSON output.
-	//
-	// Group spans (children that have their own children) also emit grandchildren
-	// with 0-based indexing: steps.<name>.0_ms, steps.<name>.1_ms, etc. The ~N
-	// suffix avoids collisions with this .0, .1, ... iteration indexing.
-	seen := make(map[string]int, len(s.children))
-	for _, child := range s.children {
-		// Auto-end children that were not explicitly ended
-		if !child.ended {
-			child.End()
-		}
-		stepKey := childStepKey(child.name, seen)
-		key := fmt.Sprintf("steps.%s_ms", stepKey)
-		attrs = append(attrs, slog.Int64(key, child.duration.Milliseconds()))
-		if child.err != nil {
-			errKey := fmt.Sprintf("steps.%s_err", stepKey)
-			attrs = append(attrs, slog.Bool(errKey, true))
-		}
+	attrs = appendChildStepAttrs(attrs, s, "")
 
-		// Emit grandchildren (group iterations) with 0-based indexing
-		for i, gc := range child.children {
-			if !gc.ended {
-				gc.End()
-			}
-			gcKey := fmt.Sprintf("steps.%s.%d_ms", stepKey, i)
-			attrs = append(attrs, slog.Int64(gcKey, gc.duration.Milliseconds()))
-			if gc.err != nil {
-				gcErrKey := fmt.Sprintf("steps.%s.%d_err", stepKey, i)
-				attrs = append(attrs, slog.Bool(gcErrKey, true))
-			}
-		}
-	}
-
-	// Add any extra attributes from Start()
 	for _, a := range s.attrs {
 		attrs = append(attrs, a)
 	}
 
 	logging.Debug(logCtx, "perf", attrs...)
+}
+
+// appendChildStepAttrs emits the full child timing tree under parent.
+//
+// Normal children use their span names, with ~N suffixes for duplicate sibling
+// names. Loop iterations (from LoopSpan.Iteration) keep the historical numeric
+// keys: steps.<loopName>.0_ms, steps.<loopName>.1_ms, etc.
+func appendChildStepAttrs(attrs []any, parent *Span, parentKey string) []any {
+	seen := make(map[string]int, len(parent.children))
+	loopIndex := 0
+	for _, child := range parent.children {
+		if !child.ended {
+			child.End()
+		}
+
+		var stepKey string
+		if child.isLoopIter && parentKey != "" {
+			stepKey = fmt.Sprintf("%s.%d", parentKey, loopIndex)
+			loopIndex++
+		} else {
+			stepKey = childStepKey(child.name, seen)
+			if parentKey != "" {
+				stepKey = parentKey + "." + stepKey
+			}
+		}
+
+		attrs = append(attrs, slog.Int64("steps."+stepKey+"_ms", child.duration.Milliseconds()))
+		if child.err != nil {
+			attrs = append(attrs, slog.Bool("steps."+stepKey+"_err", true))
+		}
+
+		attrs = appendChildStepAttrs(attrs, child, stepKey)
+	}
+	return attrs
+}
+
+func countChildStepAttrs(parent *Span) int {
+	count := 0
+	for _, child := range parent.children {
+		count++
+		if child.err != nil {
+			count++
+		}
+		count += countChildStepAttrs(child)
+	}
+	return count
 }
 
 // childStepKey returns a unique key for a child span name.
@@ -161,7 +168,9 @@ func StartLoop(ctx context.Context, name string, attrs ...slog.Attr) (context.Co
 // Iteration creates a child span for a single loop iteration. The caller must
 // call End() on the returned span when the iteration completes.
 func (l *LoopSpan) Iteration(ctx context.Context) (context.Context, *Span) {
-	return Start(ctx, l.span.name)
+	ctx, s := Start(ctx, l.span.name)
+	s.isLoopIter = true
+	return ctx, s
 }
 
 // End completes the loop span, auto-ending any unended iteration children first

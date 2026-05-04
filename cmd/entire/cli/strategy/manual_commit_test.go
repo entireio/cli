@@ -1002,62 +1002,6 @@ func TestAddCheckpointTrailer_ExistingTrailers(t *testing.T) {
 	}
 }
 
-func TestCheckpointInfo_JSONRoundTrip(t *testing.T) {
-	original := CheckpointInfo{
-		CheckpointID:     "a1b2c3d4e5f6",
-		SessionID:        "session-123",
-		CreatedAt:        time.Date(2025, 12, 2, 10, 0, 0, 0, time.UTC),
-		CheckpointsCount: 5,
-		FilesTouched:     []string{"file1.go", "file2.go"},
-	}
-
-	data, err := json.Marshal(original)
-	if err != nil {
-		t.Fatalf("json.Marshal() error = %v", err)
-	}
-
-	var loaded CheckpointInfo
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-
-	if loaded.CheckpointID != original.CheckpointID {
-		t.Errorf("CheckpointID = %q, want %q", loaded.CheckpointID, original.CheckpointID)
-	}
-	if loaded.SessionID != original.SessionID {
-		t.Errorf("SessionID = %q, want %q", loaded.SessionID, original.SessionID)
-	}
-}
-
-func TestSessionState_JSONRoundTrip(t *testing.T) {
-	original := SessionState{
-		SessionID:  "session-123",
-		BaseCommit: "abc123def456",
-		StartedAt:  time.Date(2025, 12, 2, 10, 0, 0, 0, time.UTC),
-		StepCount:  10,
-	}
-
-	data, err := json.Marshal(original)
-	if err != nil {
-		t.Fatalf("json.Marshal() error = %v", err)
-	}
-
-	var loaded SessionState
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-
-	if loaded.SessionID != original.SessionID {
-		t.Errorf("SessionID = %q, want %q", loaded.SessionID, original.SessionID)
-	}
-	if loaded.BaseCommit != original.BaseCommit {
-		t.Errorf("BaseCommit = %q, want %q", loaded.BaseCommit, original.BaseCommit)
-	}
-	if loaded.StepCount != original.StepCount {
-		t.Errorf("StepCount = %d, want %d", loaded.StepCount, original.StepCount)
-	}
-}
-
 func TestShadowStrategy_GetCheckpointLog_WithCheckpointID(t *testing.T) {
 	// This test verifies that GetCheckpointLog correctly uses the checkpoint ID
 	// to look up the log. Since getCheckpointLog requires a full git setup
@@ -4718,11 +4662,13 @@ func TestCommittedFilesExcludingMetadata(t *testing.T) {
 		".entire/settings.json": {},
 		".entire/.gitignore":    {},
 		".claude/settings.json": {},
+		".cursor/hooks.json":    {},
+		"opencode.json":         {},
 	}
 
 	result := committedFilesExcludingMetadata(input)
 
-	// .entire/ files should be excluded, everything else kept
+	// .entire/, agent ProtectedDirs, and agent ProtectedFiles all excluded.
 	resultSet := make(map[string]struct{}, len(result))
 	for _, f := range result {
 		resultSet[f] = struct{}{}
@@ -4730,10 +4676,12 @@ func TestCommittedFilesExcludingMetadata(t *testing.T) {
 
 	require.Contains(t, resultSet, "docs/blue.md")
 	require.Contains(t, resultSet, "docs/red.md")
-	require.Contains(t, resultSet, ".claude/settings.json")
 	require.NotContains(t, resultSet, ".entire/settings.json", ".entire/ should be excluded")
 	require.NotContains(t, resultSet, ".entire/.gitignore", ".entire/ should be excluded")
-	require.Len(t, result, 3)
+	require.NotContains(t, resultSet, ".claude/settings.json", ".claude/ should be excluded (claude-code ProtectedDirs)")
+	require.NotContains(t, resultSet, ".cursor/hooks.json", ".cursor/ should be excluded (cursor ProtectedDirs)")
+	require.NotContains(t, resultSet, "opencode.json", "opencode.json should be excluded (opencode ProtectedFiles)")
+	require.Len(t, result, 2)
 }
 
 func TestMarshalPromptAttributionsIncludingPending_IncludesPending(t *testing.T) {

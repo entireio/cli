@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func strPtr(s string) *string { return &s }
+
 // initTestRepo creates a test git repository with an initial commit.
 func initTestRepo(t *testing.T) *git.Repository {
 	t.Helper()
@@ -88,7 +90,7 @@ func TestStore_WriteAndRead(t *testing.T) {
 		Title:     "Test trail",
 		Body:      "A test trail",
 		Status:    StatusDraft,
-		Author:    "tester",
+		Author:    &Author{ID: "1", Login: strPtr("tester")},
 		Assignees: []string{},
 		Labels:    []string{"test"},
 		CreatedAt: now,
@@ -146,7 +148,7 @@ func TestStore_FindByBranch(t *testing.T) {
 			Base:      "main",
 			Title:     HumanizeBranchName(branch),
 			Status:    StatusDraft,
-			Author:    "test",
+			Author:    &Author{ID: "1", Login: strPtr("test")},
 			Assignees: []string{},
 			Labels:    []string{},
 			CreatedAt: now,
@@ -203,7 +205,7 @@ func TestStore_List(t *testing.T) {
 		Base:      "main",
 		Title:     "Test",
 		Status:    StatusDraft,
-		Author:    "test",
+		Author:    &Author{ID: "1", Login: strPtr("test")},
 		Assignees: []string{},
 		Labels:    []string{},
 		CreatedAt: now,
@@ -241,7 +243,7 @@ func TestStore_Update(t *testing.T) {
 		Base:      "main",
 		Title:     "Original",
 		Status:    StatusDraft,
-		Author:    "test",
+		Author:    &Author{ID: "1", Login: strPtr("test")},
 		Assignees: []string{},
 		Labels:    []string{},
 		CreatedAt: now,
@@ -295,7 +297,7 @@ func TestStore_Delete(t *testing.T) {
 		Base:      "main",
 		Title:     "To delete",
 		Status:    StatusDraft,
-		Author:    "test",
+		Author:    &Author{ID: "1", Login: strPtr("test")},
 		Assignees: []string{},
 		Labels:    []string{},
 		CreatedAt: now,
@@ -386,7 +388,7 @@ func TestStore_AddCheckpointPreservesOtherFields(t *testing.T) {
 		Title:     "Preservation test",
 		Body:      "Verify AddCheckpoint doesn't corrupt other fields",
 		Status:    StatusInProgress,
-		Author:    "tester",
+		Author:    &Author{ID: "1", Login: strPtr("tester")},
 		Assignees: []string{"alice"},
 		Labels:    []string{"important"},
 		CreatedAt: now,

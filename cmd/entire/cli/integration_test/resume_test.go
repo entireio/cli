@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -486,13 +487,12 @@ func (env *TestEnv) RunResume(branchName string) (string, error) {
 	env.T.Helper()
 
 	ctx := env.T.Context()
-	cmd := exec.CommandContext(ctx, getTestBinary(), "resume", branchName)
+	// Detach from controlling terminal so huh can't open /dev/tty for prompts.
+	cmd := execx.NonInteractive(ctx, getTestBinary(), "resume", branchName)
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 	)
-	// Detach from controlling terminal so huh can't open /dev/tty for interactive prompts
-	detachFromTerminal(cmd)
 
 	output, err := cmd.CombinedOutput()
 	return string(output), err

@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -62,6 +62,11 @@ be condensed will be discarded.`,
 	}
 
 	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Auto-fix all issues without prompting")
+
+	// Diagnostic subcommands.
+	cmd.AddCommand(newTraceCmd())
+	cmd.AddCommand(newDoctorLogsCmd())
+	cmd.AddCommand(newDoctorBundleCmd())
 
 	return cmd
 }

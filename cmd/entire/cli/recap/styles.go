@@ -1,11 +1,6 @@
 package recap
 
-import (
-	"io"
-
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
-)
+import "charm.land/lipgloss/v2"
 
 const (
 	colorAccent = "214"
@@ -51,26 +46,24 @@ func newStaticStyles(useColor bool) staticStyles {
 	if !useColor {
 		return staticStyles{}
 	}
-	renderer := lipgloss.NewRenderer(io.Discard)
-	renderer.SetColorProfile(termenv.ANSI256)
 	return staticStyles{
-		accent:        renderer.NewStyle().Foreground(lipgloss.Color(colorAccent)),
-		activityEmpty: renderer.NewStyle().Foreground(lipgloss.Color(colorActivityEmpty)),
-		activityHigh:  renderer.NewStyle().Foreground(lipgloss.Color(colorActivityMid)).Bold(true),
-		activityLow:   renderer.NewStyle().Foreground(lipgloss.Color(colorActivityLow)),
-		activityMid:   renderer.NewStyle().Foreground(lipgloss.Color(colorActivityMid)),
-		border:        renderer.NewStyle().Foreground(lipgloss.Color(colorBorder)),
-		info:          renderer.NewStyle().Foreground(lipgloss.Color(colorInfo)),
-		labelFeature:  renderer.NewStyle().Foreground(lipgloss.Color(colorLabelFeature)),
-		labelFix:      renderer.NewStyle().Foreground(lipgloss.Color(colorLabelFix)),
-		labelInfo:     renderer.NewStyle().Foreground(lipgloss.Color(colorLabelInformation)),
-		labelPerf:     renderer.NewStyle().Foreground(lipgloss.Color(colorLabelPerformance)),
-		labelRefactor: renderer.NewStyle().Foreground(lipgloss.Color(colorLabelRefactor)),
-		labelTesting:  renderer.NewStyle().Foreground(lipgloss.Color(colorLabelTesting)),
-		muted:         renderer.NewStyle().Foreground(lipgloss.Color(colorMuted)),
-		skill:         renderer.NewStyle().Foreground(lipgloss.Color(colorInfo)),
-		team:          renderer.NewStyle().Foreground(lipgloss.Color(colorTeam)).Bold(true),
-		title:         renderer.NewStyle().Foreground(lipgloss.Color(colorAccent)).Bold(true),
-		value:         renderer.NewStyle().Bold(true),
+		accent:        lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)),
+		activityEmpty: lipgloss.NewStyle().Foreground(lipgloss.Color(colorActivityEmpty)),
+		activityHigh:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorActivityMid)).Bold(true),
+		activityLow:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorActivityLow)),
+		activityMid:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorActivityMid)),
+		border:        lipgloss.NewStyle().Foreground(lipgloss.Color(colorBorder)),
+		info:          lipgloss.NewStyle().Foreground(lipgloss.Color(colorInfo)),
+		labelFeature:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorLabelFeature)),
+		labelFix:      lipgloss.NewStyle().Foreground(lipgloss.Color(colorLabelFix)),
+		labelInfo:     lipgloss.NewStyle().Foreground(lipgloss.Color(colorLabelInformation)),
+		labelPerf:     lipgloss.NewStyle().Foreground(lipgloss.Color(colorLabelPerformance)),
+		labelRefactor: lipgloss.NewStyle().Foreground(lipgloss.Color(colorLabelRefactor)),
+		labelTesting:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorLabelTesting)),
+		muted:         lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)),
+		skill:         lipgloss.NewStyle().Foreground(lipgloss.Color(colorInfo)),
+		team:          lipgloss.NewStyle().Foreground(lipgloss.Color(colorTeam)).Bold(true),
+		title:         lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)).Bold(true),
+		value:         lipgloss.NewStyle().Bold(true),
 	}
 }

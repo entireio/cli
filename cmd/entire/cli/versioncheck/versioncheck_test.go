@@ -310,6 +310,11 @@ func TestParseGitHubRelease(t *testing.T) {
 	}
 }
 
+// brewUpgradeCmd is the install command produced for any brew-installed
+// binary on a stable channel. Hoisted to a const so tests can reference
+// it without tripping goconst on repeated string literals.
+const brewUpgradeCmd = "brew upgrade entire"
+
 func TestUpdateCommand(t *testing.T) {
 	const plainBinPath = "/usr/local/bin/entire"
 	tests := []struct {
@@ -319,28 +324,28 @@ func TestUpdateCommand(t *testing.T) {
 		want           string
 	}{
 		{
-			name:           "homebrew stable cellar path uses cask command",
+			name:           "homebrew stable cellar path uses brew command",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return "/opt/homebrew/Cellar/entire/1.0.0/bin/entire", nil },
-			want:           "brew upgrade --cask entire",
+			want:           brewUpgradeCmd,
 		},
 		{
-			name:           "homebrew stable cask path uses cask command",
+			name:           "homebrew stable cask path uses brew command",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return "/opt/homebrew/bin/entire", nil },
-			want:           "brew upgrade --cask entire",
+			want:           brewUpgradeCmd,
 		},
 		{
-			name:           "homebrew nightly path uses cask command",
+			name:           "homebrew nightly path uses brew command",
 			currentVersion: "1.0.1-nightly.202604101200.abc1234",
 			execPath:       func() (string, error) { return "/opt/homebrew/bin/entire", nil },
-			want:           "brew upgrade --cask entire@nightly",
+			want:           "brew upgrade entire@nightly",
 		},
 		{
 			name:           "linuxbrew path",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return "/home/linuxbrew/.linuxbrew/bin/entire", nil },
-			want:           "brew upgrade --cask entire",
+			want:           brewUpgradeCmd,
 		},
 		{
 			name:           "mise path",
@@ -395,10 +400,6 @@ func setupCheckAndNotifyTest(t *testing.T, serverURL string) (*cobra.Command, *b
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Prevent MaybeAutoUpdate from opening an interactive prompt when the
-	// test binary runs in a real terminal (dev laptop, not just CI).
-	t.Setenv("ENTIRE_TEST_TTY", "0")
-
 	origURL := githubAPIURL
 	githubAPIURL = serverURL
 	t.Cleanup(func() { githubAPIURL = origURL })
@@ -421,6 +422,16 @@ func newVersionServer(t *testing.T, version string) *httptest.Server {
 	}))
 	t.Cleanup(server.Close)
 	return server
+}
+
+func seedVersionCache(t *testing.T, cache *VersionCache) {
+	t.Helper()
+	if err := ensureGlobalConfigDir(); err != nil {
+		t.Fatalf("ensureGlobalConfigDir() error = %v", err)
+	}
+	if err := saveCache(cache); err != nil {
+		t.Fatalf("saveCache() error = %v", err)
+	}
 }
 
 func TestCheckAndNotify_SkipsDevVersion(t *testing.T) {
@@ -484,6 +495,77 @@ func TestCheckAndNotify_PrintsNotificationWhenOutdated(t *testing.T) {
 	}
 }
 
+func TestCheckAndNotify_BrewSkipUntilNextVersionCachesLatest(t *testing.T) {
+	server := newVersionServer(t, "v2.0.0")
+	cmd, _ := setupCheckAndNotifyTest(t, server.URL)
+	f := newAutoUpdateFixture(t)
+	useBrewExecutable(t)
+	f.chooseValue = autoUpdateActionSkipUntilNextVersion
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	if f.installCalls != 0 {
+		t.Fatalf("installer called %d times, want 0", f.installCalls)
+	}
+	cache, err := loadCache()
+	if err != nil {
+		t.Fatalf("loadCache() error = %v", err)
+	}
+	if cache.SkippedVersion != "v2.0.0" {
+		t.Errorf("SkippedVersion = %q, want v2.0.0", cache.SkippedVersion)
+	}
+	if f.lastCmdStr != brewUpgradeCmd {
+		t.Errorf("prompt got cmd %q, want brew upgrade entire", f.lastCmdStr)
+	}
+}
+
+// TestCheckAndNotify_MiseSkipUntilNextVersionCachesLatest verifies the
+// skip-until-next-version persistence works for non-brew installers too.
+// The cache flow is installer-agnostic; this locks that contract in.
+func TestCheckAndNotify_MiseSkipUntilNextVersionCachesLatest(t *testing.T) {
+	server := newVersionServer(t, "v2.0.0")
+	cmd, _ := setupCheckAndNotifyTest(t, server.URL)
+	f := newAutoUpdateFixture(t)
+	useMiseExecutable(t)
+	f.chooseValue = autoUpdateActionSkipUntilNextVersion
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	if f.installCalls != 0 {
+		t.Fatalf("installer called %d times, want 0", f.installCalls)
+	}
+	cache, err := loadCache()
+	if err != nil {
+		t.Fatalf("loadCache() error = %v", err)
+	}
+	if cache.SkippedVersion != "v2.0.0" {
+		t.Errorf("SkippedVersion = %q, want v2.0.0", cache.SkippedVersion)
+	}
+	if f.lastCmdStr != "mise upgrade entire" {
+		t.Errorf("prompt got cmd %q, want mise upgrade entire", f.lastCmdStr)
+	}
+}
+
+func TestCheckAndNotify_SkipsVersionMarkedSkipped(t *testing.T) {
+	server := newVersionServer(t, "v2.0.0")
+	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
+	f := newAutoUpdateFixture(t)
+	useBrewExecutable(t)
+	seedVersionCache(t, &VersionCache{
+		LastCheckTime:  time.Now().Add(-checkInterval - time.Minute),
+		SkippedVersion: "v2.0.0",
+	})
+
+	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
+
+	if f.installCalls != 0 {
+		t.Fatalf("installer called %d times for skipped version, want 0", f.installCalls)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for skipped version, got %q", buf.String())
+	}
+}
+
 func TestCheckAndNotify_NoNotificationWhenUpToDate(t *testing.T) {
 	server := newVersionServer(t, "v1.0.0")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
@@ -504,9 +586,11 @@ func TestCheckAndNotify_InstallerFailureKeepsCacheFresh(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 	useBrewExecutable(t)
 
-	origConfirm := confirmUpdate
-	confirmUpdate = func() (bool, error) { return true, nil }
-	t.Cleanup(func() { confirmUpdate = origConfirm })
+	origChoose := chooseUpdate
+	chooseUpdate = func(_ context.Context, _, _, _ string) (AutoUpdateAction, error) {
+		return autoUpdateActionUpdate, nil
+	}
+	t.Cleanup(func() { chooseUpdate = origChoose })
 
 	origRun := runInstaller
 	runInstaller = func(_ context.Context, _ string) error { return errors.New("boom") }

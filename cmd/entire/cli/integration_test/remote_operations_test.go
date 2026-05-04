@@ -696,7 +696,7 @@ func TestResume_FetchesPrimaryBranchFullyWithFilteredFetches(t *testing.T) {
 	// Run resume — this fetches the feature branch from origin and checks it out.
 	// With filtered_fetches enabled, the fetch must still be unfiltered so the
 	// source file blob (auth.go) is available after checkout.
-	output, err := cloneEnv.RunCLIWithError("resume", "--force", "feature/test-branch")
+	output, err := cloneEnv.RunCLIWithError("session", "resume", "--force", "feature/test-branch")
 	t.Logf("resume output: %s", output)
 
 	if err != nil {

@@ -17,8 +17,8 @@ import (
 
 // TestResumeFromClonedRepo: agent creates a file on a feature branch and user
 // commits, then the repo is cloned (simulating a teammate). The clone has no
-// local entire/checkpoints/v1 branch. `entire resume feature` should fetch
-// the metadata branch automatically and restore the session.
+// local checkpoint metadata ref for the active suite mode. `entire resume feature`
+// should fetch that ref automatically and restore the session.
 func TestResumeFromClonedRepo(t *testing.T) {
 	testutil.ForEachAgent(t, 3*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		// Set up a bare remote so we can push and clone.
@@ -41,25 +41,27 @@ func TestResumeFromClonedRepo(t *testing.T) {
 		s.Git(t, "add", ".")
 		s.Git(t, "commit", "-m", "Add hello doc")
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
+		checkpointID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
+		sessionMeta := testutil.WaitForSessionMetadata(t, s.Dir, checkpointID, 0, 30*time.Second)
 
-		// Push feature branch and metadata branch to the bare remote.
+		// Push feature branch and checkpoint refs to the bare remote.
 		s.Git(t, "push", "-u", "origin", "feature")
-		s.Git(t, "push", "origin", "entire/checkpoints/v1:entire/checkpoints/v1")
+		testutil.PushCheckpointRefs(t, s.Dir)
 
 		// Clone the repo to a new directory (simulating a teammate).
 		cloneDir := t.TempDir()
 		if resolved, symErr := filepath.EvalSymlinks(cloneDir); symErr == nil {
 			cloneDir = resolved
 		}
-		// Remove the dir because git clone wants to create it
+		// Remove the dir because git clone wants to create it.
 		require.NoError(t, os.RemoveAll(cloneDir))
 		testutil.Git(t, "", "clone", bareDir, cloneDir)
 		testutil.Git(t, cloneDir, "config", "user.name", "E2E Clone")
 		testutil.Git(t, cloneDir, "config", "user.email", "e2e-clone@test.local")
 
-		// Verify the metadata branch does NOT exist locally in the clone.
-		_, err = testutil.GitOutputErr(cloneDir, "rev-parse", "--verify", "refs/heads/entire/checkpoints/v1")
-		require.Error(t, err, "metadata branch should not exist locally in clone")
+		// Verify the checkpoint metadata ref does NOT exist locally in the clone.
+		_, err = testutil.GitOutputErr(cloneDir, "rev-parse", "--verify", testutil.CheckpointVerifyRef())
+		require.Error(t, err, "checkpoint metadata ref should not exist locally in clone")
 
 		// Create the local feature branch (clone only has origin/feature as remote tracking ref).
 		// Then switch back to the default branch so resume can switch to it.
@@ -69,8 +71,8 @@ func TestResumeFromClonedRepo(t *testing.T) {
 
 		// Enable entire in the cloned repo and commit the enable files.
 		entire.Enable(t, cloneDir, s.Agent.EntireAgent())
-		testutil.Git(t, cloneDir, "add", ".")
-		testutil.Git(t, cloneDir, "commit", "-m", "Enable entire in clone")
+		testutil.ApplySuiteCheckpointsMode(t, cloneDir)
+		testutil.CommitIfDirty(t, cloneDir, "Enable entire in clone")
 
 		// Run resume from the clone — should fetch metadata and succeed.
 		out, err := entire.Resume(cloneDir, "feature")
@@ -80,14 +82,19 @@ func TestResumeFromClonedRepo(t *testing.T) {
 		assert.Equal(t, "feature", current, "should be on feature branch after resume")
 		assert.Contains(t, out, "To continue", "resume output should show resume instructions")
 
-		// Verify the metadata branch now exists locally.
-		_, err = testutil.GitOutputErr(cloneDir, "rev-parse", "--verify", "refs/heads/entire/checkpoints/v1")
-		assert.NoError(t, err, "metadata branch should exist locally after resume")
+		// Verify the checkpoint metadata ref now exists locally.
+		_, err = testutil.GitOutputErr(cloneDir, "rev-parse", "--verify", testutil.CheckpointVerifyRef())
+		assert.NoError(t, err, "checkpoint metadata ref should exist locally after resume")
+
+		if restoredTranscript, ok := testutil.RestoredSessionTranscriptPath(t, cloneDir, sessionMeta); ok {
+			_, err = os.Stat(restoredTranscript)
+			assert.NoError(t, err, "restored session transcript should exist at %s after resume", restoredTranscript)
+		}
 	})
 }
 
 // TestResumeMetadataBranchAlreadyLocal: same setup as TestResumeFromClonedRepo
-// but the metadata branch already exists locally. Resume should still work
+// but the checkpoint metadata ref already exists locally. Resume should still work
 // (fetch updates local to latest).
 func TestResumeMetadataBranchAlreadyLocal(t *testing.T) {
 	testutil.ForEachAgent(t, 3*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {

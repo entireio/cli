@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -534,6 +535,66 @@ func TestLogging_ContextSessionID_WhenNoGlobalSet(t *testing.T) {
 	}
 
 	resetLogger()
+}
+
+func TestLogging_ConcurrentInitAndLog(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	initGitRepo(t, tmpDir)
+
+	if err := Init(context.Background(), ""); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	defer Close()
+
+	const (
+		logGoroutines   = 8
+		initGoroutines  = 4
+		closeGoroutines = 2
+		iterations      = 200
+	)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := range logGoroutines {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			<-start
+			for j := range iterations {
+				Info(context.Background(), "concurrent log", slog.Int("worker", worker), slog.Int("iteration", j))
+			}
+		}(i)
+	}
+
+	for range initGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range iterations {
+				if err := Init(context.Background(), ""); err != nil {
+					t.Errorf("Init() error = %v", err)
+					return
+				}
+			}
+		}()
+	}
+
+	for range closeGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range iterations {
+				Close()
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
 }
 
 func TestInit_RejectsInvalidSessionIDs(t *testing.T) {

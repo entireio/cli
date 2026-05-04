@@ -1379,6 +1379,9 @@ func TestReadSessionContent_InvalidIndex(t *testing.T) {
 	if !strings.Contains(err.Error(), "session 1 not found") {
 		t.Errorf("error should mention session not found, got: %v", err)
 	}
+	if !errors.Is(err, ErrCheckpointNotFound) {
+		t.Errorf("ReadSessionContent(1) error = %v, want ErrCheckpointNotFound", err)
+	}
 }
 
 // TestReadLatestSessionContent verifies that ReadLatestSessionContent returns

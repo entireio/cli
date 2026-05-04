@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -48,54 +49,6 @@ func setupRepoWithV2Ref(t *testing.T) string {
 	require.NoError(t, repo.Storer.SetReference(ref))
 
 	return tmpDir
-}
-
-// Not parallel: uses t.Chdir()
-func TestPushRefIfNeeded_NoLocalRef_ReturnsNil(t *testing.T) {
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "f.txt", "init")
-	testutil.GitAdd(t, tmpDir, "f.txt")
-	testutil.GitCommit(t, tmpDir, "init")
-	t.Chdir(tmpDir)
-
-	ctx := context.Background()
-	err := pushRefIfNeeded(ctx, "origin", plumbing.ReferenceName(paths.V2MainRefName))
-	assert.NoError(t, err)
-}
-
-// Not parallel: uses t.Chdir()
-func TestPushRefIfNeeded_LocalBareRepo_PushesSuccessfully(t *testing.T) {
-	ctx := context.Background()
-
-	tmpDir := setupRepoWithV2Ref(t)
-	t.Chdir(tmpDir)
-
-	bareDir := t.TempDir()
-	initCmd := exec.CommandContext(ctx, "git", "init", "--bare")
-	initCmd.Dir = bareDir
-	initCmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, initCmd.Run())
-
-	err := pushRefIfNeeded(ctx, bareDir, plumbing.ReferenceName(paths.V2MainRefName))
-	require.NoError(t, err)
-
-	// Verify ref exists in bare repo
-	bareRepo, err := git.PlainOpen(bareDir)
-	require.NoError(t, err)
-	_, err = bareRepo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
-	assert.NoError(t, err, "v2 /main ref should exist in bare repo after push")
-}
-
-// Not parallel: uses t.Chdir()
-func TestPushRefIfNeeded_UnreachableTarget_ReturnsNil(t *testing.T) {
-	tmpDir := setupRepoWithV2Ref(t)
-	t.Chdir(tmpDir)
-
-	ctx := context.Background()
-	nonExistentPath := filepath.Join(t.TempDir(), "does-not-exist")
-	err := pushRefIfNeeded(ctx, nonExistentPath, plumbing.ReferenceName(paths.V2MainRefName))
-	assert.NoError(t, err, "pushRefIfNeeded should return nil when target is unreachable")
 }
 
 func TestShortRefName(t *testing.T) {
@@ -242,7 +195,9 @@ func TestPushV2Refs_PushesAllRefs(t *testing.T) {
 	initCmd.Env = testutil.GitIsolatedEnv()
 	require.NoError(t, initCmd.Run())
 
+	restore := captureStderr(t)
 	pushV2Refs(ctx, bareDir)
+	output := restore()
 
 	// Verify all three refs exist in bare repo
 	bareRepo, err := git.PlainOpen(bareDir)
@@ -258,7 +213,111 @@ func TestPushV2Refs_PushesAllRefs(t *testing.T) {
 	require.NoError(t, err, "latest archived generation should exist in bare repo")
 
 	_, err = bareRepo.Reference(plumbing.ReferenceName(paths.V2FullRefPrefix+"0000000000001"), true)
-	assert.Error(t, err, "older archived generation should NOT be pushed")
+	require.Error(t, err, "older archived generation should NOT be pushed")
+
+	assert.Contains(t, output, "[entire] Syncing and pushing v2 checkpoints...")
+	assert.Contains(t, output, "[entire] Pushing v2/main, v2/full/current, v2/full/0000000000002...")
+	assert.Contains(t, output, "[entire] All v2 checkpoints pushed")
+	assert.NotContains(t, output, "[entire] Successfully pushed", "successful refs should only be listed on partial failure")
+	assert.NotContains(t, output, "Pushing v2/main to", "per-ref progress should stay quiet")
+	assert.NotContains(t, output, "Syncing v2/main with remote", "per-ref sync progress should stay quiet")
+}
+
+func TestPrintV2PartialPushResult(t *testing.T) {
+	t.Parallel()
+
+	var output strings.Builder
+	printV2PartialPushResult(
+		&output,
+		[]plumbing.ReferenceName{plumbing.ReferenceName(paths.V2MainRefName)},
+		[]error{errors.New("couldn't sync v2/full/current: fetch failed")},
+	)
+
+	assert.Contains(t, output.String(), "[entire] Successfully pushed v2/main")
+	assert.Contains(t, output.String(), "[entire] Warning: couldn't sync v2/full/current: fetch failed")
+	assert.NotContains(t, output.String(), "[entire] All v2 checkpoints pushed")
+}
+
+func TestParsePushRefResults_MultiRefPorcelain(t *testing.T) {
+	t.Parallel()
+
+	refs := []plumbing.ReferenceName{
+		plumbing.ReferenceName(paths.V2MainRefName),
+		plumbing.ReferenceName(paths.V2FullCurrentRefName),
+		plumbing.ReferenceName(paths.V2FullRefPrefix + "0000000000002"),
+	}
+	output := strings.Join([]string{
+		"To https://example.com/repo.git",
+		"*\trefs/entire/checkpoints/v2/main:refs/entire/checkpoints/v2/main\t[new reference]",
+		"!\trefs/entire/checkpoints/v2/full/current:refs/entire/checkpoints/v2/full/current\t[rejected] (non-fast-forward)",
+		"=\trefs/entire/checkpoints/v2/full/0000000000002:refs/entire/checkpoints/v2/full/0000000000002\tup to date",
+	}, "\n")
+
+	results := parsePushRefResults(context.Background(), output, refs, errors.New("git push failed"))
+
+	require.Len(t, results, 3)
+	assert.Equal(t, plumbing.ReferenceName(paths.V2MainRefName), results[0].refName)
+	require.NoError(t, results[0].err)
+	assert.False(t, results[0].result.upToDate)
+	assert.Equal(t, plumbing.ReferenceName(paths.V2FullCurrentRefName), results[1].refName)
+	require.ErrorContains(t, results[1].err, "non-fast-forward")
+	assert.Equal(t, plumbing.ReferenceName(paths.V2FullRefPrefix+"0000000000002"), results[2].refName)
+	require.NoError(t, results[2].err)
+	assert.True(t, results[2].result.upToDate)
+}
+
+func TestParsePushRefResults_MissingStatusUsesStatusMissing(t *testing.T) {
+	t.Parallel()
+
+	refs := []plumbing.ReferenceName{
+		plumbing.ReferenceName(paths.V2MainRefName),
+		plumbing.ReferenceName(paths.V2FullCurrentRefName),
+	}
+	output := strings.Join([]string{
+		"To https://example.com/repo.git",
+		"*\trefs/entire/checkpoints/v2/main:refs/entire/checkpoints/v2/main\t[new reference]",
+	}, "\n")
+
+	results := parsePushRefResults(context.Background(), output, refs, errors.New("git push failed"))
+
+	require.Len(t, results, 2)
+	require.NoError(t, results[0].err)
+	require.ErrorContains(t, results[1].err, "status missing for v2/full/current")
+}
+
+func TestParsePushRefResults_GenericRejectionDoesNotBecomeNonFastForward(t *testing.T) {
+	t.Parallel()
+
+	refs := []plumbing.ReferenceName{plumbing.ReferenceName(paths.V2MainRefName)}
+	output := "!\trefs/entire/checkpoints/v2/main:refs/entire/checkpoints/v2/main\t[remote rejected] auth rejected by server"
+
+	results := parsePushRefResults(context.Background(), output, refs, errors.New("git push failed"))
+
+	require.Len(t, results, 1)
+	require.Error(t, results[0].err)
+	require.NotErrorIs(t, results[0].err, errNonFastForward)
+	assert.ErrorContains(t, results[0].err, "push failed")
+}
+
+// TestPushV2Refs_UnreachableTarget_NamesFailedRef verifies that aggregated v2
+// push output still identifies the ref that could not be pushed.
+//
+// Not parallel: uses t.Chdir() and os.Stderr redirection.
+func TestPushV2Refs_UnreachableTarget_NamesFailedRef(t *testing.T) {
+	tmpDir := setupRepoWithV2Ref(t)
+	t.Chdir(tmpDir)
+
+	nonExistentPath := filepath.Join(t.TempDir(), "does-not-exist")
+	restore := captureStderr(t)
+	pushV2Refs(context.Background(), nonExistentPath)
+	output := restore()
+
+	assert.Contains(t, output, "[entire] Syncing and pushing v2 checkpoints...")
+	assert.Contains(t, output, "[entire] Pushing v2/main...")
+	assert.Contains(t, output, "[entire] Warning: failed to push v2/main:")
+	assert.NotContains(t, output, "[entire] Warning: couldn't sync v2/main:")
+	assert.NotContains(t, output, "[entire] All v2 checkpoints pushed")
+	assert.NotContains(t, output, "Pushing v2/main to", "failed aggregated pushes should avoid per-ref progress")
 }
 
 // TestFetchAndMergeRef_RotationConflict verifies that when /full/current push

@@ -2,6 +2,8 @@ package geminicli
 
 import (
 	"context"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -470,4 +472,51 @@ func TestReadAndParse_AgentHookInput(t *testing.T) {
 	if result.HookEventName != "before-agent" {
 		t.Errorf("expected hook_event_name 'before-agent', got %q", result.HookEventName)
 	}
+}
+
+// captureStdout swaps os.Stdout for a pipe, runs fn, and returns what was
+// written. Sequential (no t.Parallel) because os.Stdout is process-global.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	original := os.Stdout
+	os.Stdout = w
+
+	done := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(r) //nolint:errcheck // best-effort drain
+		done <- data
+	}()
+
+	fn()
+	require.NoError(t, w.Close())
+	os.Stdout = original
+	got := <-done
+	require.NoError(t, r.Close())
+	return string(got)
+}
+
+// TestWriteHookResponse_PlainText_NoJSON verifies the response is emitted as
+// plain text (not JSON). Gemini CLI v0.40.0 double-displays JSON systemMessage
+// (once with the [hookName] tag, once without) — plain text takes only the
+// non-tagged path so the user sees the banner once.
+func TestWriteHookResponse_PlainText_NoJSON(t *testing.T) {
+	ag := &GeminiCLIAgent{}
+	out := captureStdout(t, func() {
+		require.NoError(t, ag.WriteHookResponse("hello banner"))
+	})
+
+	require.Equal(t, "hello banner\n", out, "expected exact plain-text output (no JSON envelope)")
+	require.False(t, strings.HasPrefix(strings.TrimSpace(out), "{"),
+		"output must not start with '{' — gemini's JSON parser would route it through the duplicate-display path")
+}
+
+func TestWriteHookResponse_EmptyMessage_WritesNothing(t *testing.T) {
+	ag := &GeminiCLIAgent{}
+	out := captureStdout(t, func() {
+		require.NoError(t, ag.WriteHookResponse(""))
+	})
+	require.Empty(t, out, "empty message should produce no output")
 }

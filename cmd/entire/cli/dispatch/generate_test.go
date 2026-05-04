@@ -43,6 +43,12 @@ func TestGenerateLocalDispatch_UsesVoiceAndBullets(t *testing.T) {
 	if !strings.Contains(mock.prompt, "Fixed tests.") {
 		t.Fatalf("missing bullet in prompt: %s", mock.prompt)
 	}
+	if !strings.Contains(mock.prompt, testRepoURL) {
+		t.Fatalf("missing trusted repo URL in prompt: %s", mock.prompt)
+	}
+	if !strings.Contains(mock.prompt, "## [<full_name>](<url>)") {
+		t.Fatalf("missing linked repo heading instruction in prompt: %s", mock.prompt)
+	}
 	if !strings.Contains(mock.prompt, "Write the final dispatch in markdown.") {
 		t.Fatalf("missing final dispatch instruction in prompt: %s", mock.prompt)
 	}
@@ -196,6 +202,57 @@ func TestMarshalDispatchPromptPayload_OmitsZeroCheckpointTimesAndDeduplicatesBra
 	}
 	if len(branches) != 2 || branches[0] != testDefaultBranchName || branches[1] != "release" {
 		t.Fatalf("unexpected deduplicated branches: %v", branches)
+	}
+
+	repos, ok := body["repos"].([]any)
+	if !ok || len(repos) != 1 {
+		t.Fatalf("expected one repo payload, got %T %v", body["repos"], body["repos"])
+	}
+	repo, ok := repos[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected repo object, got %T", repos[0])
+	}
+	if repo["url"] != testRepoURL {
+		t.Fatalf("unexpected repo URL: %v", repo["url"])
+	}
+}
+
+func TestMarshalDispatchPromptPayload_OmitsRepoURLWhenFullNameSanitized(t *testing.T) {
+	t.Parallel()
+
+	payload, err := marshalDispatchPromptPayload(&Dispatch{
+		Repos: []RepoGroup{{
+			FullName: "entireio/\u200Bcli",
+			Sections: []Section{{
+				Label: "Updates",
+				Bullets: []Bullet{{
+					Text: "Fixed tests.",
+				}},
+			}},
+		}},
+	}, "neutral")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal([]byte(payload), &body); err != nil {
+		t.Fatal(err)
+	}
+
+	repos, ok := body["repos"].([]any)
+	if !ok || len(repos) != 1 {
+		t.Fatalf("expected one repo payload, got %T %v", body["repos"], body["repos"])
+	}
+	repo, ok := repos[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected repo object, got %T", repos[0])
+	}
+	if repo["full_name"] != "entireio/cli" {
+		t.Fatalf("unexpected sanitized full name: %v", repo["full_name"])
+	}
+	if _, ok := repo["url"]; ok {
+		t.Fatalf("expected URL to be omitted when full_name changed during sanitization, got %v", repo["url"])
 	}
 }
 

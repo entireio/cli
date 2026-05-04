@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -296,6 +298,52 @@ func TestListEligibleV2Generations_UsesProvidedSettings(t *testing.T) {
 	}
 	if len(warnings) != 0 {
 		t.Fatalf("ListEligibleV2Generations() warnings = %d, want 0", len(warnings))
+	}
+}
+
+func TestListArchivedV2GenerationCandidates_SkipsDivergedLocalAndRemote(t *testing.T) {
+	repo, repoRoot := initGenerationRepairTestRepo(t)
+	remoteRoot := filepath.Join(t.TempDir(), "origin.git")
+	runGenerationRepairGit(t, "", "init", "--bare", remoteRoot)
+	runGenerationRepairGit(t, repoRoot, "remote", "add", "origin", remoteRoot)
+
+	refName := plumbing.ReferenceName(paths.V2FullRefPrefix + "0000000000009")
+	staleGen := checkpoint.GenerationMetadata{
+		OldestCheckpointAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		NewestCheckpointAt: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC),
+	}
+	createRepairArchivedGenerationRef(t, repo, refName, id.MustCheckpointID("100000000009"), staleGen,
+		time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 2, 1, 1, 0, 0, 0, time.UTC),
+	)
+	runGenerationRepairGit(t, repoRoot, "push", "origin", refName.String()+":"+refName.String())
+
+	localOID := createRepairArchivedGenerationRef(t, repo, refName, id.MustCheckpointID("200000000009"), staleGen,
+		time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC),
+	)
+
+	store := checkpoint.NewV2GitStore(repo, "origin")
+	candidates, tempRefs, warnings, err := listArchivedV2GenerationCandidates(context.Background(), repo, store)
+	if err != nil {
+		t.Fatalf("listArchivedV2GenerationCandidates() error = %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("listArchivedV2GenerationCandidates() candidates = %d, want 0", len(candidates))
+	}
+	if len(tempRefs) != 0 {
+		t.Fatalf("listArchivedV2GenerationCandidates() tempRefs = %d, want 0", len(tempRefs))
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "differs from remote") {
+		t.Fatalf("warnings = %#v, want divergence warning", warnings)
+	}
+
+	ref, err := repo.Reference(refName, true)
+	if err != nil {
+		t.Fatalf("local ref should remain readable: %v", err)
+	}
+	if ref.Hash() != localOID {
+		t.Fatalf("local ref hash = %s, want %s", ref.Hash(), localOID)
 	}
 }
 

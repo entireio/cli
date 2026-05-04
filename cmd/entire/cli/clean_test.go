@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/go-git/go-git/v6"
@@ -123,6 +126,28 @@ func writeCleanSettingsFile(t *testing.T, repoRoot, content string) {
 	}
 }
 
+func runCleanGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %s: %v", strings.Join(args, " "), strings.TrimSpace(string(output)), err)
+	}
+	return string(output)
+}
+
+func addCleanBareOrigin(t *testing.T, repoRoot string) {
+	t.Helper()
+
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	runCleanGit(t, "", "init", "--bare", remoteDir)
+	runCleanGit(t, repoRoot, "remote", "add", "origin", remoteDir)
+}
+
 func TestCleanLongDescription_DefaultIsGeneric(t *testing.T) {
 	repo, _ := setupCleanTestRepo(t)
 
@@ -229,6 +254,152 @@ func createArchivedGenerationRef(t *testing.T, repo *git.Repository, generation 
 	ref := plumbing.NewHashReference(refName, commitHash)
 	if err := repo.Storer.SetReference(ref); err != nil {
 		t.Fatalf("failed to create archived generation ref %s: %v", refName, err)
+	}
+}
+
+func createArchivedGenerationRefWithRawTranscript(
+	t *testing.T,
+	repo *git.Repository,
+	generation string,
+	cpID id.CheckpointID,
+	generationOldest time.Time,
+	generationNewest time.Time,
+	rawOldest time.Time,
+	rawNewest time.Time,
+) {
+	t.Helper()
+
+	gen := checkpoint.GenerationMetadata{
+		OldestCheckpointAt: generationOldest.UTC(),
+		NewestCheckpointAt: generationNewest.UTC(),
+	}
+	genJSON, err := json.Marshal(gen)
+	if err != nil {
+		t.Fatalf("failed to marshal generation metadata: %v", err)
+	}
+	genBlobHash, err := checkpoint.CreateBlobFromContent(repo, genJSON)
+	if err != nil {
+		t.Fatalf("failed to create generation blob: %v", err)
+	}
+
+	transcript := `{"type":"user","timestamp":` + strconv.Quote(rawOldest.UTC().Format(time.RFC3339Nano)) + "}\n" +
+		`{"type":"assistant","timestamp":` + strconv.Quote(rawNewest.UTC().Format(time.RFC3339Nano)) + "}\n"
+	transcriptBlobHash, err := checkpoint.CreateBlobFromContent(repo, []byte(transcript))
+	if err != nil {
+		t.Fatalf("failed to create transcript blob: %v", err)
+	}
+
+	entries := map[string]object.TreeEntry{
+		paths.GenerationFileName: {
+			Name: paths.GenerationFileName,
+			Mode: filemode.Regular,
+			Hash: genBlobHash,
+		},
+		cpID.Path() + "/0/" + paths.V2RawTranscriptFileName: {
+			Name: paths.V2RawTranscriptFileName,
+			Mode: filemode.Regular,
+			Hash: transcriptBlobHash,
+		},
+	}
+
+	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, entries)
+	if err != nil {
+		t.Fatalf("failed to build archived generation tree: %v", err)
+	}
+
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "archived generation", "test", "test@test.com")
+	if err != nil {
+		t.Fatalf("failed to create archived generation commit: %v", err)
+	}
+
+	refName := plumbing.ReferenceName(paths.V2FullRefPrefix + generation)
+	ref := plumbing.NewHashReference(refName, commitHash)
+	if err := repo.Storer.SetReference(ref); err != nil {
+		t.Fatalf("failed to create archived generation ref %s: %v", refName, err)
+	}
+}
+
+func createRemoteOnlyArchivedGenerationRef(
+	t *testing.T,
+	repo *git.Repository,
+	repoRoot string,
+	generation string,
+	oldest time.Time,
+	newest time.Time,
+) string {
+	t.Helper()
+
+	createArchivedGenerationRef(t, repo, generation, oldest, newest)
+	refName := paths.V2FullRefPrefix + generation
+	ref, err := repo.Reference(plumbing.ReferenceName(refName), true)
+	if err != nil {
+		t.Fatalf("failed to read archived generation ref %s: %v", refName, err)
+	}
+	runCleanGit(t, repoRoot, "push", "origin", refName+":"+refName)
+	if err := strategy.DeleteRefCLI(context.Background(), refName, ref.Hash().String()); err != nil {
+		t.Fatalf("failed to remove local archived generation ref %s: %v", refName, err)
+	}
+	return ref.Hash().String()
+}
+
+func createV2MainMetadataRef(t *testing.T, repo *git.Repository, cpID id.CheckpointID, createdAt time.Time) {
+	t.Helper()
+
+	sessionMetadata := checkpoint.CommittedMetadata{
+		CheckpointID: cpID,
+		SessionID:    "session-" + cpID.String(),
+		Strategy:     "manual-commit",
+		CreatedAt:    createdAt.UTC(),
+	}
+	sessionMetadataJSON, err := json.Marshal(sessionMetadata)
+	if err != nil {
+		t.Fatalf("failed to marshal session metadata: %v", err)
+	}
+	sessionMetadataHash, err := checkpoint.CreateBlobFromContent(repo, sessionMetadataJSON)
+	if err != nil {
+		t.Fatalf("failed to create session metadata blob: %v", err)
+	}
+
+	summary := checkpoint.CheckpointSummary{
+		CheckpointID: cpID,
+		Strategy:     "manual-commit",
+		Sessions: []checkpoint.SessionFilePaths{
+			{Metadata: "/" + cpID.Path() + "/0/" + paths.MetadataFileName},
+		},
+	}
+	summaryJSON, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("failed to marshal checkpoint summary: %v", err)
+	}
+	summaryHash, err := checkpoint.CreateBlobFromContent(repo, summaryJSON)
+	if err != nil {
+		t.Fatalf("failed to create checkpoint summary blob: %v", err)
+	}
+
+	entries := map[string]object.TreeEntry{
+		cpID.Path() + "/" + paths.MetadataFileName: {
+			Name: paths.MetadataFileName,
+			Mode: filemode.Regular,
+			Hash: summaryHash,
+		},
+		cpID.Path() + "/0/" + paths.MetadataFileName: {
+			Name: paths.MetadataFileName,
+			Mode: filemode.Regular,
+			Hash: sessionMetadataHash,
+		},
+	}
+
+	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, entries)
+	if err != nil {
+		t.Fatalf("failed to build v2 main tree: %v", err)
+	}
+	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "v2 main", "test", "test@test.com")
+	if err != nil {
+		t.Fatalf("failed to create v2 main commit: %v", err)
+	}
+	ref := plumbing.NewHashReference(plumbing.ReferenceName(paths.V2MainRefName), commitHash)
+	if err := repo.Storer.SetReference(ref); err != nil {
+		t.Fatalf("failed to create v2 main ref: %v", err)
 	}
 }
 
@@ -852,6 +1023,115 @@ func TestCleanCmd_All_DryRunListsEligibleV2Generations(t *testing.T) {
 	}
 	if !strings.Contains(output, "0000000000001") {
 		t.Fatalf("expected archived generation ref in output, got: %s", output)
+	}
+}
+
+func TestCleanCmd_All_DryRunListsRemoteOnlyEligibleV2Generations(t *testing.T) {
+	repo, _ := setupCleanTestRepo(t)
+
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	repoRoot := wt.Filesystem.Root()
+
+	writeCleanSettingsFile(t, repoRoot, `{"enabled": true, "strategy_options": {"checkpoints_v2": true, "full_transcript_generation_retention_days": 14}}`)
+	addCleanBareOrigin(t, repoRoot)
+	createRemoteOnlyArchivedGenerationRef(t, repo, repoRoot, "0000000000001", time.Now().AddDate(0, 0, -20), time.Now().AddDate(0, 0, -15))
+
+	cmd := newCleanCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--all", "--dry-run"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("clean --all --dry-run error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Archived v2 generations (1):") {
+		t.Fatalf("expected archived v2 generation section, got: %s", output)
+	}
+	if !strings.Contains(output, "0000000000001") {
+		t.Fatalf("expected remote-only archived generation ref in output, got: %s", output)
+	}
+	if _, err := repo.Reference(plumbing.ReferenceName(paths.V2FullRefPrefix+"0000000000001"), true); err == nil {
+		t.Fatal("dry-run should not leave remote-only archived generation as a local ref")
+	}
+	if _, err := repo.Reference(plumbing.ReferenceName("refs/entire-clean-tmp/v2/full/0000000000001"), true); err == nil {
+		t.Fatal("dry-run should remove temporary fetched generation ref")
+	}
+}
+
+func TestCleanCmd_All_UsesRawTranscriptTimeForV2GenerationRetention(t *testing.T) {
+	repo, _ := setupCleanTestRepo(t)
+
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	repoRoot := wt.Filesystem.Root()
+
+	writeCleanSettingsFile(t, repoRoot, `{"enabled": true, "strategy_options": {"checkpoints_v2": true, "full_transcript_generation_retention_days": 14}}`)
+
+	cpID := id.MustCheckpointID("aabbccddeeff")
+	createV2MainMetadataRef(t, repo, cpID, time.Now())
+	createArchivedGenerationRefWithRawTranscript(t, repo, "0000000000005", cpID,
+		time.Now(), time.Now(),
+		time.Now().AddDate(0, 0, -20), time.Now().AddDate(0, 0, -15))
+
+	cmd := newCleanCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--all", "--dry-run"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("clean --all --dry-run error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Archived v2 generations (1):") {
+		t.Fatalf("expected archived v2 generation section, got: %s", output)
+	}
+	if !strings.Contains(output, "0000000000005") {
+		t.Fatalf("expected generation to be eligible by raw transcript timestamps, got: %s", output)
+	}
+}
+
+func TestCleanCmd_All_ForceDeletesRemoteOnlyEligibleV2Generations(t *testing.T) {
+	repo, _ := setupCleanTestRepo(t)
+
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	repoRoot := wt.Filesystem.Root()
+
+	writeCleanSettingsFile(t, repoRoot, `{"enabled": true, "strategy_options": {"checkpoints_v2": true, "full_transcript_generation_retention_days": 14}}`)
+	addCleanBareOrigin(t, repoRoot)
+	refOID := createRemoteOnlyArchivedGenerationRef(t, repo, repoRoot, "0000000000006", time.Now().AddDate(0, 0, -20), time.Now().AddDate(0, 0, -15))
+
+	cmd := newCleanCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--all", "--force"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("clean --all --force error = %v", err)
+	}
+
+	if _, err := repo.Reference(plumbing.ReferenceName(paths.V2FullRefPrefix+"0000000000006"), true); err == nil {
+		t.Fatal("remote-only archived generation should not be left locally")
+	}
+	remoteOutput := runCleanGit(t, repoRoot, "ls-remote", "origin", paths.V2FullRefPrefix+"0000000000006")
+	if strings.Contains(remoteOutput, refOID) {
+		t.Fatalf("expected remote archived generation to be deleted, got: %s", remoteOutput)
+	}
+	if !strings.Contains(stdout.String(), "Archived v2 generations") {
+		t.Fatalf("expected deletion output to include archived v2 generations, got: %s", stdout.String())
 	}
 }
 

@@ -70,21 +70,29 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 }
 
 // FetchBlobs fetches specific objects (typically blobs) by hash from a remote.
-// Unlike Fetch, this never applies --filter=blob:none (which would be
-// contradictory — the point is to download specific blobs) and always uses
-// --no-write-fetch-head to avoid polluting FETCH_HEAD.
+// Uses `git fetch-pack` rather than `git fetch` because the high-level
+// porcelain enforces partial-clone integrity checks that reject blob-only
+// responses with "did not send all necessary objects". Plumbing skips those
+// checks — it just downloads the requested objects into .git/objects/pack
+// and exits — which is exactly what we want when grabbing individual blobs
+// by SHA. Works against GitHub for any reachable object, including blobs.
 //
 // The remote should be a URL (not a remote name) to avoid persisting promisor
 // settings onto the named remote. Use FetchURL to obtain the URL.
 func FetchBlobs(ctx context.Context, remote string, hashes []string) error {
-	args := []string{"fetch", "--no-tags", "--no-write-fetch-head", remote}
+	args := []string{"fetch-pack", remote}
 	args = append(args, hashes...)
 
 	cmd := newCommand(ctx, args...)
 	disableTerminalPrompt(cmd)
-	_, err := cmd.CombinedOutput()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git fetch blobs: %w", err)
+		redactedURL := RedactURL(remote)
+		msg := strings.TrimSpace(strings.ReplaceAll(string(output), remote, redactedURL))
+		if msg != "" {
+			return fmt.Errorf("git fetch-pack from %s: %s: %w", redactedURL, msg, err)
+		}
+		return fmt.Errorf("git fetch-pack from %s: %w", redactedURL, err)
 	}
 	return nil
 }
@@ -94,15 +102,40 @@ type PushResult struct {
 	Output string
 }
 
+// PushOptions configures a git push operation.
+type PushOptions struct {
+	Remote    string
+	RefSpecs  []string
+	ExtraArgs []string // additional flags before remote
+	Dir       string
+}
+
 // Push runs git push --no-verify --porcelain with token injection.
 // GIT_TERMINAL_PROMPT=0 is always set.
 func Push(ctx context.Context, remote, refSpec string) (PushResult, error) {
-	pushTarget, err := resolvePushCommandTarget(ctx, remote)
+	return PushWithOptions(ctx, PushOptions{
+		Remote:   remote,
+		RefSpecs: []string{refSpec},
+	})
+}
+
+// PushWithOptions runs git push --no-verify --porcelain with token injection.
+// GIT_TERMINAL_PROMPT=0 is always set.
+func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) {
+	pushTarget, err := resolvePushCommandTarget(ctx, opts.Remote)
 	if err != nil {
 		return PushResult{}, fmt.Errorf("resolve push target: %w", err)
 	}
 
-	cmd := newCommand(ctx, "push", "--no-verify", "--porcelain", pushTarget, refSpec)
+	args := []string{"push", "--no-verify", "--porcelain"}
+	args = append(args, opts.ExtraArgs...)
+	args = append(args, pushTarget)
+	args = append(args, opts.RefSpecs...)
+
+	cmd := newCommand(ctx, args...)
+	if opts.Dir != "" {
+		cmd.Dir = opts.Dir
+	}
 	disableTerminalPrompt(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

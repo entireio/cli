@@ -26,7 +26,7 @@ const (
 	EntireSettingsLocalFile = ".entire/settings.local.json"
 	// defaultGenerationRetentionDays is the default retention window for archived
 	// checkpoints v2 raw-transcript generations when no override is configured.
-	defaultGenerationRetentionDays = 60
+	defaultGenerationRetentionDays = 14
 )
 
 var checkpointsVersionWarningOnce sync.Once

@@ -24,23 +24,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// pushRefIfNeeded pushes a custom ref to the given target if it exists locally.
-// Custom refs (under refs/entire/) don't have remote-tracking refs, so there's
-// no "has unpushed" optimization — we always attempt the push and let git handle
-// the no-op case.
-func pushRefIfNeeded(ctx context.Context, target string, refName plumbing.ReferenceName) error {
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil //nolint:nilerr // Hook must be silent on failure
-	}
-
-	if _, err := repo.Reference(refName, true); err != nil {
-		return nil //nolint:nilerr // Ref doesn't exist locally, nothing to push
-	}
-
-	return doPushRef(ctx, target, refName)
-}
-
 // tryPushRef attempts to push a custom ref using an explicit refspec.
 func tryPushRef(ctx context.Context, target string, refName plumbing.ReferenceName) (pushResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -50,56 +33,166 @@ func tryPushRef(ctx context.Context, target string, refName plumbing.ReferenceNa
 	result, err := remote.Push(ctx, target, refSpec)
 	outputStr := result.Output
 	if err != nil {
-		if strings.Contains(outputStr, "non-fast-forward") ||
-			strings.Contains(outputStr, "rejected") {
-			return pushResult{}, errors.New("non-fast-forward")
-		}
-		return pushResult{}, fmt.Errorf("push failed: %s", outputStr)
+		return pushResult{}, classifyPushFailure(ctx, outputStr, err)
 	}
 
 	return parsePushResult(outputStr), nil
 }
 
-// doPushRef pushes a custom ref with fetch+merge recovery on conflict.
-func doPushRef(ctx context.Context, target string, refName plumbing.ReferenceName) error {
-	displayTarget := target
-	if remote.IsURL(target) {
-		displayTarget = "checkpoint remote"
+type v2RefPushResult struct {
+	refName plumbing.ReferenceName
+	result  pushResult
+	err     error
+}
+
+func tryPushV2Refs(ctx context.Context, target string, refs []plumbing.ReferenceName) []v2RefPushResult {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	result, err := remote.PushWithOptions(ctx, remote.PushOptions{
+		Remote:   target,
+		RefSpecs: refSpecsForRefs(refs),
+	})
+	return parsePushRefResults(ctx, result.Output, refs, err)
+}
+
+func pushV2RefsWithRecovery(ctx context.Context, target string, refs []plumbing.ReferenceName) []v2RefPushResult {
+	resultsByRef := make(map[plumbing.ReferenceName]v2RefPushResult, len(refs))
+	var retryRefs []plumbing.ReferenceName
+
+	for _, result := range tryPushV2Refs(ctx, target, refs) {
+		if result.err == nil {
+			resultsByRef[result.refName] = result
+			continue
+		}
+		if !errors.Is(result.err, errNonFastForward) {
+			resultsByRef[result.refName] = result
+			continue
+		}
+
+		shortRef := shortRefName(result.refName)
+		if err := fetchAndMergeRef(ctx, target, result.refName); err != nil {
+			resultsByRef[result.refName] = v2RefPushResult{
+				refName: result.refName,
+				err:     fmt.Errorf("couldn't sync %s: %w", shortRef, err),
+			}
+			continue
+		}
+		retryRefs = append(retryRefs, result.refName)
 	}
 
-	shortRef := shortRefName(refName)
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", shortRef, displayTarget)
-	stop := startProgressDots(os.Stderr)
-
-	if result, err := tryPushRef(ctx, target, refName); err == nil {
-		finishPush(ctx, stop, result, target)
-		return nil
-	}
-	stop("")
-
-	fmt.Fprintf(os.Stderr, "[entire] Syncing %s with remote...", shortRef)
-	stop = startProgressDots(os.Stderr)
-
-	if err := fetchAndMergeRef(ctx, target, refName); err != nil {
-		stop("")
-		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", shortRef, err)
-		printCheckpointRemoteHint(target)
-		return nil
-	}
-	stop(" done")
-
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", shortRef, displayTarget)
-	stop = startProgressDots(os.Stderr)
-
-	if result, err := tryPushRef(ctx, target, refName); err != nil {
-		stop("")
-		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", shortRef, err)
-		printCheckpointRemoteHint(target)
-	} else {
-		finishPush(ctx, stop, result, target)
+	if len(retryRefs) > 0 {
+		for _, result := range tryPushV2Refs(ctx, target, retryRefs) {
+			if result.err != nil {
+				result.err = fmt.Errorf("failed to push %s after sync: %w", shortRefName(result.refName), result.err)
+			}
+			resultsByRef[result.refName] = result
+		}
 	}
 
-	return nil
+	results := make([]v2RefPushResult, 0, len(refs))
+	for _, refName := range refs {
+		result, ok := resultsByRef[refName]
+		if !ok {
+			result = v2RefPushResult{
+				refName: refName,
+				err:     errors.New("push result missing"),
+			}
+		}
+		results = append(results, result)
+	}
+	return results
+}
+
+func refSpecsForRefs(refs []plumbing.ReferenceName) []string {
+	refSpecs := make([]string, 0, len(refs))
+	for _, refName := range refs {
+		refSpecs = append(refSpecs, fmt.Sprintf("%s:%s", refName, refName))
+	}
+	return refSpecs
+}
+
+func parsePushRefResults(ctx context.Context, output string, refs []plumbing.ReferenceName, pushErr error) []v2RefPushResult {
+	parsed := make(map[plumbing.ReferenceName]v2RefPushResult, len(refs))
+	for _, line := range strings.Split(output, "\n") {
+		result, ok := parsePushRefStatusLine(line)
+		if ok {
+			parsed[result.refName] = result
+		}
+	}
+
+	var fallbackErr error
+	if pushErr != nil {
+		fallbackErr = classifyPushFailure(ctx, output, pushErr)
+		if len(parsed) > 0 && len(parsed) < len(refs) {
+			logging.Debug(ctx, "push-v2: incomplete push porcelain output",
+				slog.Int("parsed_refs", len(parsed)),
+				slog.Int("expected_refs", len(refs)),
+				slog.String("error", pushErr.Error()),
+				slog.String("output", output),
+			)
+		}
+	}
+
+	results := make([]v2RefPushResult, 0, len(refs))
+	for _, refName := range refs {
+		if result, ok := parsed[refName]; ok {
+			results = append(results, result)
+			continue
+		}
+		if pushErr != nil && len(parsed) > 0 {
+			results = append(results, v2RefPushResult{
+				refName: refName,
+				err:     fmt.Errorf("status missing for %s", shortRefName(refName)),
+			})
+			continue
+		}
+		err := fallbackErr
+		if err != nil {
+			err = fmt.Errorf("failed to push %s: %w", shortRefName(refName), err)
+		}
+		results = append(results, v2RefPushResult{
+			refName: refName,
+			err:     err,
+		})
+	}
+	return results
+}
+
+func parsePushRefStatusLine(line string) (v2RefPushResult, bool) {
+	fields := strings.Split(line, "\t")
+	if len(fields) < 2 || fields[0] == "" {
+		return v2RefPushResult{}, false
+	}
+
+	refName, ok := pushStatusRef(fields[1])
+	if !ok {
+		return v2RefPushResult{}, false
+	}
+
+	switch fields[0][0] {
+	case '!':
+		err := classifyPushOutput(strings.Join(fields[2:], "\t"))
+		return v2RefPushResult{
+			refName: refName,
+			err:     fmt.Errorf("failed to push %s: %w", shortRefName(refName), err),
+		}, true
+	case '=':
+		return v2RefPushResult{
+			refName: refName,
+			result:  pushResult{upToDate: true},
+		}, true
+	default:
+		return v2RefPushResult{refName: refName}, true
+	}
+}
+
+func pushStatusRef(statusRef string) (plumbing.ReferenceName, bool) {
+	_, dst, ok := strings.Cut(statusRef, ":")
+	if !ok || dst == "" {
+		return "", false
+	}
+	return plumbing.ReferenceName(dst), true
 }
 
 // fetchAndMergeRef fetches a remote custom ref and merges it into the local ref.
@@ -123,9 +216,10 @@ func fetchAndMergeRef(ctx context.Context, target string, refName plumbing.Refer
 	refSpec := fmt.Sprintf("+%s:%s", refName, tmpRefName)
 
 	if output, err := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{refSpec},
-		NoTags:   true,
+		Remote:    fetchTarget,
+		RefSpecs:  []string{refSpec},
+		NoTags:    true,
+		ExtraArgs: []string{"--no-write-fetch-head"},
 	}); err != nil {
 		return fmt.Errorf("fetch failed: %s", output)
 	}
@@ -250,9 +344,10 @@ func handleRotationConflict(ctx context.Context, target, fetchTarget string, rep
 	archiveTmpRef := plumbing.ReferenceName("refs/entire-fetch-tmp/archive-" + latestArchive)
 	archiveRefSpec := fmt.Sprintf("+%s:%s", archiveRefName, archiveTmpRef)
 	if output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:   fetchTarget,
-		RefSpecs: []string{archiveRefSpec},
-		NoTags:   true,
+		Remote:    fetchTarget,
+		RefSpecs:  []string{archiveRefSpec},
+		NoTags:    true,
+		ExtraArgs: []string{"--no-write-fetch-head"},
 	}); fetchErr != nil {
 		return fmt.Errorf("fetch archived generation failed: %s", output)
 	}
@@ -394,30 +489,92 @@ func updateGenerationTimestamps(repo *git.Repository, genBlobHash plumbing.Hash,
 }
 
 // pushV2Refs pushes v2 checkpoint refs to the target.
-// Pushes /main, /full/current, and the latest archived generation (if any).
-// Older archived generations are immutable and were pushed when created.
+// Pushes /main, /full/current, and the latest archived generation (if any) in
+// one git push. Older archived generations are immutable and were pushed when created.
 func pushV2Refs(ctx context.Context, target string) {
-	_ = pushRefIfNeeded(ctx, target, plumbing.ReferenceName(paths.V2MainRefName))        //nolint:errcheck // pushRefIfNeeded handles errors internally
-	_ = pushRefIfNeeded(ctx, target, plumbing.ReferenceName(paths.V2FullCurrentRefName)) //nolint:errcheck // pushRefIfNeeded handles errors internally
+	refs := v2RefsToPush(ctx)
+	if len(refs) == 0 {
+		return
+	}
 
-	// Push only the latest archived generation (most likely to be newly created)
+	fmt.Fprintln(os.Stderr, "[entire] Syncing and pushing v2 checkpoints...")
+	fmt.Fprintf(os.Stderr, "[entire] Pushing %s...\n", strings.Join(shortRefNames(refs), ", "))
+
+	results := pushV2RefsWithRecovery(ctx, target, refs)
+	var failures []error
+	var successfulRefs []plumbing.ReferenceName
+	pushedContent := false
+	for _, result := range results {
+		if result.err != nil {
+			failures = append(failures, result.err)
+			continue
+		}
+		successfulRefs = append(successfulRefs, result.refName)
+		if !result.result.upToDate {
+			pushedContent = true
+		}
+	}
+
+	if len(failures) > 0 {
+		printV2PartialPushResult(os.Stderr, successfulRefs, failures)
+		printCheckpointRemoteHint(target)
+		if pushedContent {
+			printSettingsCommitHint(ctx, target)
+		}
+		printCheckpointsV2MigrationHint(ctx)
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "[entire] All v2 checkpoints pushed")
+	if pushedContent {
+		printSettingsCommitHint(ctx, target)
+	}
+	printCheckpointsV2MigrationHint(ctx)
+}
+
+func printV2PartialPushResult(w io.Writer, successfulRefs []plumbing.ReferenceName, failures []error) {
+	if len(successfulRefs) > 0 {
+		fmt.Fprintf(w, "[entire] Successfully pushed %s\n", strings.Join(shortRefNames(successfulRefs), ", "))
+	}
+	for _, err := range failures {
+		fmt.Fprintf(w, "[entire] Warning: %v\n", err)
+	}
+}
+
+func v2RefsToPush(ctx context.Context) []plumbing.ReferenceName {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return
+		return nil
 	}
-	v2URL, err := remote.FetchURL(ctx)
-	if err != nil {
-		logging.Debug(ctx, "push-v2: using origin for archived generation fetch remote",
-			slog.String("error", err.Error()),
-		)
+
+	var refs []plumbing.ReferenceName
+	for _, refName := range []plumbing.ReferenceName{
+		plumbing.ReferenceName(paths.V2MainRefName),
+		plumbing.ReferenceName(paths.V2FullCurrentRefName),
+	} {
+		if _, err := repo.Reference(refName, true); err == nil {
+			refs = append(refs, refName)
+		}
 	}
-	store := checkpoint.NewV2GitStore(repo, v2URL)
+
+	// Push only the latest archived generation (most likely to be newly created).
+	store := checkpoint.NewV2GitStore(repo, "")
 	archived, err := store.ListArchivedGenerations()
 	if err != nil || len(archived) == 0 {
-		return
+		return refs
 	}
 	latest := archived[len(archived)-1]
-	_ = pushRefIfNeeded(ctx, target, plumbing.ReferenceName(paths.V2FullRefPrefix+latest)) //nolint:errcheck // pushRefIfNeeded handles errors internally
+	refs = append(refs, plumbing.ReferenceName(paths.V2FullRefPrefix+latest))
+
+	return refs
+}
+
+func shortRefNames(refs []plumbing.ReferenceName) []string {
+	names := make([]string, 0, len(refs))
+	for _, refName := range refs {
+		names = append(names, shortRefName(refName))
+	}
+	return names
 }
 
 // shortRefName returns a human-readable short form of a ref name for log output.

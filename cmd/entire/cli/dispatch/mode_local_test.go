@@ -60,6 +60,9 @@ func TestLocalMode_EnumeratesCheckpoints(t *testing.T) {
 	if got.Repos[0].FullName != testRepoFullName {
 		t.Fatalf("unexpected repo group: %+v", got.Repos[0])
 	}
+	if got.Repos[0].URL != testRepoURL {
+		t.Fatalf("unexpected repo URL: %q", got.Repos[0].URL)
+	}
 	if got.Repos[0].Sections[0].Bullets[0].Text != testLocalFallbackText {
 		t.Fatalf("unexpected bullet: %+v", got.Repos[0].Sections[0].Bullets[0])
 	}

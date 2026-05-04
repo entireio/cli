@@ -27,6 +27,10 @@ func TestMain(m *testing.M) {
 
 	// Resolve the entire binary (set by mise run build via E2E_ENTIRE_BIN).
 	entireBin := entire.BinPath()
+	if err := ensureHookEntireBinary(entireBin); err != nil {
+		fmt.Fprintf(os.Stderr, "preflight: prepare hook entire binary: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Prepend the binary's directory to PATH so that git hooks and agent
 	// hooks (which call bare "entire") resolve to the same binary the test
@@ -75,4 +79,28 @@ func TestMain(m *testing.M) {
 	os.Setenv("GIT_CONFIG_GLOBAL", emptyConfig)
 
 	os.Exit(m.Run())
+}
+
+func ensureHookEntireBinary(entireBin string) error {
+	dir := filepath.Dir(entireBin)
+	hookName := "entire"
+	if runtime.GOOS == "windows" {
+		hookName = "entire.exe"
+	}
+	hookBin := filepath.Join(dir, hookName)
+	if filepath.Clean(entireBin) == filepath.Clean(hookBin) {
+		return nil
+	}
+
+	_ = os.Remove(hookBin)
+
+	if runtime.GOOS == "windows" {
+		data, err := os.ReadFile(entireBin)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(hookBin, data, 0o755)
+	}
+
+	return os.Symlink(entireBin, hookBin)
 }

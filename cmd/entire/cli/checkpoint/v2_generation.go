@@ -1,10 +1,13 @@
 package checkpoint
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"regexp"
 	"sort"
@@ -149,12 +152,77 @@ func (s *V2GitStore) AddGenerationJSONToTree(rootTreeHash plumbing.Hash, gen Gen
 		UpdateSubtreeOptions{MergeMode: MergeKeepExisting})
 }
 
+// ComputeGenerationCheckpointTimestamps derives timestamps from the checkpoints
+// present in a /full/* tree. It prefers created_at from v2 /main metadata and
+// falls back to top-level transcript event timestamps for older or partial v2 data.
+func (s *V2GitStore) ComputeGenerationCheckpointTimestamps(rootTreeHash plumbing.Hash) (GenerationMetadata, bool, error) {
+	mainTree, mainTreeErr := s.v2MainTree()
+	if mainTreeErr != nil {
+		mainTree = nil
+	}
+	return s.ComputeGenerationTimestampsFromTrees(rootTreeHash, mainTree)
+}
+
+// ComputeGenerationTimestampsFromTrees walks every checkpoint in rootTreeHash
+// and aggregates per-checkpoint timestamps. When mainTree is non-nil, /main
+// metadata.json is consulted before falling back to the raw transcript inside
+// the checkpoint's full-tree. Returns found=false when any checkpoint cannot
+// produce a timestamp; callers decide their own fallback (e.g. read existing
+// generation.json, recompute from in-memory data, or surface an error).
+func (s *V2GitStore) ComputeGenerationTimestampsFromTrees(rootTreeHash plumbing.Hash, mainTree *object.Tree) (GenerationMetadata, bool, error) {
+	if rootTreeHash == plumbing.ZeroHash {
+		return GenerationMetadata{}, false, nil
+	}
+
+	rootTree, err := s.repo.TreeObject(rootTreeHash)
+	if err != nil {
+		return GenerationMetadata{}, false, fmt.Errorf("failed to read generation tree: %w", err)
+	}
+
+	var gen GenerationMetadata
+	found := false
+	missingCheckpointTimestamp := false
+	err = WalkCheckpointShards(s.repo, rootTree, func(cpID id.CheckpointID, cpTreeHash plumbing.Hash) error {
+		if mainTree != nil {
+			if cpGen, ok := s.checkpointTimestampRangeFromMain(mainTree, cpID); ok {
+				mergeGenerationRange(&gen, &found, cpGen)
+				return nil
+			}
+		}
+
+		cpTree, treeErr := s.repo.TreeObject(cpTreeHash)
+		if treeErr != nil {
+			missingCheckpointTimestamp = true
+			return nil //nolint:nilerr // Skip unreadable checkpoint trees and fall back to generation.json.
+		}
+		if cpGen, ok := checkpointTimestampRangeFromFullTree(cpTree); ok {
+			mergeGenerationRange(&gen, &found, cpGen)
+			return nil
+		}
+		missingCheckpointTimestamp = true
+		return nil
+	})
+	if err != nil {
+		return GenerationMetadata{}, false, err
+	}
+	if missingCheckpointTimestamp {
+		return GenerationMetadata{}, false, nil
+	}
+
+	return gen, found, nil
+}
+
 // computeGenerationTimestamps derives timestamps for a generation being archived.
-// Uses the commit history of the /full/current ref: oldest = first commit time,
-// newest = latest commit time. Falls back to time.Now() if the ref has no history.
-// Note: /full/* trees don't contain session metadata (that's on /main), so we
-// derive timestamps from git commit times rather than walking the tree.
-func (s *V2GitStore) computeGenerationTimestamps() GenerationMetadata {
+// It uses checkpoint metadata/transcript timestamps rather than git commit times
+// so migration and ref-repair commits don't reset retention age.
+func (s *V2GitStore) computeGenerationTimestamps(rootTreeHash plumbing.Hash) GenerationMetadata {
+	if gen, ok, err := s.ComputeGenerationCheckpointTimestamps(rootTreeHash); err == nil && ok {
+		return gen
+	}
+	return s.computeGenerationTimestampsFromCommitHistory()
+}
+
+func (s *V2GitStore) computeGenerationTimestampsFromCommitHistory() GenerationMetadata {
 	now := time.Now().UTC()
 	fallback := GenerationMetadata{OldestCheckpointAt: now, NewestCheckpointAt: now}
 
@@ -185,6 +253,137 @@ func (s *V2GitStore) computeGenerationTimestamps() GenerationMetadata {
 	return GenerationMetadata{
 		OldestCheckpointAt: oldest,
 		NewestCheckpointAt: newest,
+	}
+}
+
+func (s *V2GitStore) v2MainTree() (*object.Tree, error) {
+	ref, err := s.repo.Reference(plumbing.ReferenceName(paths.V2MainRefName), true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read v2 main ref: %w", err)
+	}
+	commit, err := s.repo.CommitObject(ref.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("failed to read v2 main commit: %w", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read v2 main tree: %w", err)
+	}
+	return tree, nil
+}
+
+func (s *V2GitStore) checkpointTimestampRangeFromMain(mainTree *object.Tree, cpID id.CheckpointID) (GenerationMetadata, bool) {
+	cpTree, err := mainTree.Tree(cpID.Path())
+	if err != nil {
+		return GenerationMetadata{}, false
+	}
+
+	var gen GenerationMetadata
+	found := false
+	for _, entry := range cpTree.Entries {
+		if entry.Mode != filemode.Dir {
+			continue
+		}
+		if _, err := strconv.Atoi(entry.Name); err != nil {
+			continue
+		}
+		sessionTree, err := s.repo.TreeObject(entry.Hash)
+		if err != nil {
+			continue
+		}
+		metadataFile, err := sessionTree.File(paths.MetadataFileName)
+		if err != nil {
+			continue
+		}
+		metadataContent, err := metadataFile.Contents()
+		if err != nil {
+			continue
+		}
+		var metadata CommittedMetadata
+		if err := json.Unmarshal([]byte(metadataContent), &metadata); err != nil || metadata.CreatedAt.IsZero() {
+			continue
+		}
+		MergeGenerationTime(&gen, &found, metadata.CreatedAt.UTC())
+	}
+	return gen, found
+}
+
+func checkpointTimestampRangeFromFullTree(cpTree *object.Tree) (GenerationMetadata, bool) {
+	var gen GenerationMetadata
+	found := false
+	for _, entry := range cpTree.Entries {
+		if entry.Mode != filemode.Dir {
+			continue
+		}
+		if _, err := strconv.Atoi(entry.Name); err != nil {
+			continue
+		}
+		sessionTree, err := cpTree.Tree(entry.Name)
+		if err != nil {
+			continue
+		}
+		transcript, err := readTranscriptFromObjectTree(sessionTree, "")
+		if err != nil || len(transcript) == 0 {
+			continue
+		}
+		if transcriptGen, ok := timestampRangeFromTranscript(transcript); ok {
+			mergeGenerationRange(&gen, &found, transcriptGen)
+		}
+	}
+	return gen, found
+}
+
+func timestampRangeFromTranscript(transcript []byte) (GenerationMetadata, bool) {
+	reader := bufio.NewReader(bytes.NewReader(transcript))
+	var gen GenerationMetadata
+	found := false
+
+	for {
+		line, err := reader.ReadBytes('\n')
+		if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
+			var event struct {
+				Timestamp string `json:"timestamp"`
+			}
+			if jsonErr := json.Unmarshal(trimmed, &event); jsonErr == nil && event.Timestamp != "" {
+				if ts, parseErr := time.Parse(time.RFC3339Nano, event.Timestamp); parseErr == nil {
+					MergeGenerationTime(&gen, &found, ts.UTC())
+				}
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	return gen, found
+}
+
+func mergeGenerationRange(dst *GenerationMetadata, found *bool, src GenerationMetadata) {
+	MergeGenerationTime(dst, found, src.OldestCheckpointAt)
+	MergeGenerationTime(dst, found, src.NewestCheckpointAt)
+}
+
+// MergeGenerationTime expands the generation timestamp envelope to include ts.
+// The found flag is set the first time a non-zero timestamp is observed.
+func MergeGenerationTime(gen *GenerationMetadata, found *bool, ts time.Time) {
+	if ts.IsZero() {
+		return
+	}
+	ts = ts.UTC()
+	if !*found {
+		gen.OldestCheckpointAt = ts
+		gen.NewestCheckpointAt = ts
+		*found = true
+		return
+	}
+	if ts.Before(gen.OldestCheckpointAt) {
+		gen.OldestCheckpointAt = ts
+	}
+	if ts.After(gen.NewestCheckpointAt) {
+		gen.NewestCheckpointAt = ts
 	}
 }
 
@@ -223,9 +422,9 @@ func (s *V2GitStore) ListArchivedGenerations() ([]string, error) {
 	return archived, nil
 }
 
-// nextGenerationNumber returns the next sequential generation number for archiving.
+// NextGenerationNumber returns the next sequential generation number for archiving.
 // Scans existing archived refs and returns max+1. Returns 1 if no archives exist.
-func (s *V2GitStore) nextGenerationNumber() (int, error) {
+func (s *V2GitStore) NextGenerationNumber() (int, error) {
 	archived, err := s.ListArchivedGenerations()
 	if err != nil {
 		return 0, err
@@ -273,7 +472,7 @@ func (s *V2GitStore) rotateGeneration(ctx context.Context) error {
 		return fmt.Errorf("rotation: failed to read /full/current ref: %w", err)
 	}
 
-	archiveNumber, err := s.nextGenerationNumber()
+	archiveNumber, err := s.NextGenerationNumber()
 	if err != nil {
 		return fmt.Errorf("rotation: failed to determine next generation number: %w", err)
 	}
@@ -305,7 +504,7 @@ func (s *V2GitStore) rotateGeneration(ctx context.Context) error {
 	}
 
 	// Write generation.json to the current tree before archiving.
-	gen := s.computeGenerationTimestamps()
+	gen := s.computeGenerationTimestamps(currentTreeHash)
 	archiveTreeHash, err := s.AddGenerationJSONToTree(currentTreeHash, gen)
 	if err != nil {
 		return fmt.Errorf("rotation: failed to add generation.json: %w", err)

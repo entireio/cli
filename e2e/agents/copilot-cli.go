@@ -74,7 +74,12 @@ func (c *CopilotCLI) RunPrompt(ctx context.Context, dir string, prompt string, o
 	cmd := exec.CommandContext(promptCtx, c.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	cmd.Env = append(os.Environ(), "ENTIRE_TEST_TTY=0")
+	// GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS opts in to .github/hooks/*.json loading
+	// in -p mode; gated since Copilot 1.0.40 (2026-05-01).
+	cmd.Env = append(os.Environ(),
+		"ENTIRE_TEST_TTY=0",
+		"GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS=true",
+	)
 	setupProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 

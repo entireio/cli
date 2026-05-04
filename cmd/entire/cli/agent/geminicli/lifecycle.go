@@ -18,14 +18,21 @@ var (
 	_ agent.HookResponseWriter = (*GeminiCLIAgent)(nil)
 )
 
-// WriteHookResponse outputs a JSON hook response to stdout.
-// Gemini CLI reads this JSON and displays the systemMessage to the user.
+// WriteHookResponse outputs a hook response message as plain text to stdout.
+//
+// Why plain text and not JSON? Gemini CLI (as of v0.40.0) double-displays
+// systemMessage when it arrives in JSON form: once via emitHookSystemMessage
+// (rendered with the [hookName] source tag) and again via the SessionStart
+// path's direct historyManager.addItem (rendered without a tag). With plain
+// text, gemini's convertPlainTextToHookOutput synthesizes a systemMessage
+// internally, the JSON-only emitHookSystemMessage event doesn't fire, and
+// the user sees the banner exactly once.
 func (g *GeminiCLIAgent) WriteHookResponse(message string) error {
-	resp := struct {
-		SystemMessage string `json:"systemMessage,omitempty"`
-	}{SystemMessage: message}
-	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
-		return fmt.Errorf("failed to encode hook response: %w", err)
+	if message == "" {
+		return nil
+	}
+	if _, err := fmt.Fprintln(os.Stdout, message); err != nil {
+		return fmt.Errorf("failed to write hook response: %w", err)
 	}
 	return nil
 }

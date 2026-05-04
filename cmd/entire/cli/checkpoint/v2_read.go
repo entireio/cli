@@ -44,7 +44,8 @@ func (s *V2GitStore) ReadCommitted(ctx context.Context, checkpointID id.Checkpoi
 		return nil, nil //nolint:nilnil,nilerr // Checkpoint subtree not found
 	}
 
-	metadataFile, err := cpTree.File(paths.MetadataFileName)
+	cpFT := s.wrapWithFetcher(ctx, cpTree)
+	metadataFile, err := cpFT.File(paths.MetadataFileName)
 	if err != nil {
 		return nil, nil //nolint:nilnil,nilerr // metadata.json not found
 	}
@@ -165,7 +166,8 @@ func (s *V2GitStore) ReadSessionCompactTranscript(ctx context.Context, checkpoin
 		return nil, ErrCheckpointNotFound
 	}
 
-	compactFile, err := sessionTree.File(paths.CompactTranscriptFileName)
+	sessionFT := s.wrapWithFetcher(ctx, sessionTree)
+	compactFile, err := sessionFT.File(paths.CompactTranscriptFileName)
 	if err != nil {
 		return nil, ErrNoTranscript
 	}
@@ -214,8 +216,9 @@ func (s *V2GitStore) ReadSessionMetadataAndPrompts(ctx context.Context, checkpoi
 	}
 
 	result := &SessionContent{}
+	sessionFT := s.wrapWithFetcher(ctx, sessionTree)
 
-	if metadataFile, fileErr := sessionTree.File(paths.MetadataFileName); fileErr == nil {
+	if metadataFile, fileErr := sessionFT.File(paths.MetadataFileName); fileErr == nil {
 		if content, contentErr := metadataFile.Contents(); contentErr == nil {
 			if jsonErr := json.Unmarshal([]byte(content), &result.Metadata); jsonErr != nil {
 				return nil, fmt.Errorf("failed to parse session metadata: %w", jsonErr)
@@ -223,14 +226,14 @@ func (s *V2GitStore) ReadSessionMetadataAndPrompts(ctx context.Context, checkpoi
 		}
 	}
 
-	if file, fileErr := sessionTree.File(paths.PromptFileName); fileErr == nil {
+	if file, fileErr := sessionFT.File(paths.PromptFileName); fileErr == nil {
 		if content, contentErr := file.Contents(); contentErr == nil {
 			result.Prompts = content
 		}
 	}
 
 	// Read compact transcript from the same session tree (avoids a second tree walk).
-	if compactFile, fileErr := sessionTree.File(paths.CompactTranscriptFileName); fileErr == nil {
+	if compactFile, fileErr := sessionFT.File(paths.CompactTranscriptFileName); fileErr == nil {
 		if content, contentErr := compactFile.Contents(); contentErr == nil && content != "" {
 			result.Transcript = []byte(content)
 		}
@@ -273,8 +276,9 @@ func (s *V2GitStore) ReadSessionContent(ctx context.Context, checkpointID id.Che
 	}
 
 	result := &SessionContent{}
+	sessionFT := s.wrapWithFetcher(ctx, sessionTree)
 
-	if metadataFile, fileErr := sessionTree.File(paths.MetadataFileName); fileErr == nil {
+	if metadataFile, fileErr := sessionFT.File(paths.MetadataFileName); fileErr == nil {
 		if content, contentErr := metadataFile.Contents(); contentErr == nil {
 			if jsonErr := json.Unmarshal([]byte(content), &result.Metadata); jsonErr != nil {
 				return nil, fmt.Errorf("failed to parse session metadata: %w", jsonErr)
@@ -282,7 +286,7 @@ func (s *V2GitStore) ReadSessionContent(ctx context.Context, checkpointID id.Che
 		}
 	}
 
-	if file, fileErr := sessionTree.File(paths.PromptFileName); fileErr == nil {
+	if file, fileErr := sessionFT.File(paths.PromptFileName); fileErr == nil {
 		if content, contentErr := file.Contents(); contentErr == nil {
 			result.Prompts = content
 		}

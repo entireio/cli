@@ -137,7 +137,7 @@ jobs:
           echo "agents=$failed" >> "$GITHUB_OUTPUT"
 
       - name: Notify Slack of E2E failure
-        uses: slackapi/slack-github-action@af78098f536edbc4de71162a307590698245be95 # v3.0.1
+        uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
         with:
           webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook

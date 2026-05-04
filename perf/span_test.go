@@ -3,6 +3,7 @@ package perf
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -286,6 +287,96 @@ func TestEnd_DuplicateChildNames_AllPreserved(t *testing.T) {
 		names[2] != "check_content" || names[3] != "save_state" {
 		t.Errorf("children names = %v, expected [check_content save_state check_content save_state]", names)
 	}
+}
+
+func TestEnd_SerializesLoopIterationsWithNumericKeys(t *testing.T) {
+	t.Parallel()
+
+	iter0 := testEndedSpan("process_sessions", 100*time.Millisecond)
+	iter0.isLoopIter = true
+	iter1 := testEndedSpan("process_sessions", 200*time.Millisecond)
+	iter1.isLoopIter = true
+	processSessions := testEndedSpan("process_sessions", 300*time.Millisecond, iter0, iter1)
+	root := testEndedSpan("post-commit", 350*time.Millisecond, processSessions)
+
+	attrs := testAttrMap(t, appendChildStepAttrs(nil, root, ""))
+
+	require.Equal(t, int64(300), attrs["steps.process_sessions_ms"])
+	require.Equal(t, int64(100), attrs["steps.process_sessions.0_ms"])
+	require.Equal(t, int64(200), attrs["steps.process_sessions.1_ms"])
+}
+
+func TestEnd_SerializesNestedNamedSpansWithNames(t *testing.T) {
+	t.Parallel()
+
+	readSession := testEndedSpan("why_checkpoint_read_session", 120*time.Millisecond)
+	checkpointInfo := testEndedSpan("why_checkpoint_info", 200*time.Millisecond, readSession)
+	enrichCommits := testEndedSpan("enrich_commits", 300*time.Millisecond, checkpointInfo)
+	root := testEndedSpan("why", 500*time.Millisecond, enrichCommits)
+
+	attrs := testAttrMap(t, appendChildStepAttrs(nil, root, ""))
+
+	require.Equal(t, int64(300), attrs["steps.enrich_commits_ms"])
+	require.Equal(t, int64(200), attrs["steps.enrich_commits.why_checkpoint_info_ms"])
+	require.Equal(t, int64(120), attrs["steps.enrich_commits.why_checkpoint_info.why_checkpoint_read_session_ms"])
+	require.NotContains(t, attrs, "steps.enrich_commits.0_ms")
+}
+
+func TestEnd_SerializesDuplicateNestedSiblingNames(t *testing.T) {
+	t.Parallel()
+
+	firstInfo := testEndedSpan("why_checkpoint_info", 100*time.Millisecond)
+	secondInfo := testEndedSpan("why_checkpoint_info", 150*time.Millisecond)
+	enrichCommits := testEndedSpan("enrich_commits", 300*time.Millisecond, firstInfo, secondInfo)
+	root := testEndedSpan("why", 500*time.Millisecond, enrichCommits)
+
+	attrs := testAttrMap(t, appendChildStepAttrs(nil, root, ""))
+
+	require.Equal(t, int64(100), attrs["steps.enrich_commits.why_checkpoint_info_ms"])
+	require.Equal(t, int64(150), attrs["steps.enrich_commits.why_checkpoint_info~1_ms"])
+}
+
+func TestEnd_SerializesNestedErrorFlags(t *testing.T) {
+	t.Parallel()
+
+	readSession := testEndedSpan("why_checkpoint_read_session", 120*time.Millisecond)
+	readSession.err = errors.New("read session failed")
+	checkpointInfo := testEndedSpan("why_checkpoint_info", 200*time.Millisecond, readSession)
+	checkpointInfo.err = errors.New("checkpoint info failed")
+	enrichCommits := testEndedSpan("enrich_commits", 300*time.Millisecond, checkpointInfo)
+	root := testEndedSpan("why", 500*time.Millisecond, enrichCommits)
+
+	attrs := testAttrMap(t, appendChildStepAttrs(nil, root, ""))
+
+	require.Equal(t, true, attrs["steps.enrich_commits.why_checkpoint_info_err"])
+	require.Equal(t, true, attrs["steps.enrich_commits.why_checkpoint_info.why_checkpoint_read_session_err"])
+}
+
+func testEndedSpan(name string, duration time.Duration, children ...*Span) *Span {
+	span := &Span{
+		name:     name,
+		duration: duration,
+		ended:    true,
+		children: children,
+	}
+	for _, child := range children {
+		child.parent = span
+	}
+	return span
+}
+
+func testAttrMap(t *testing.T, attrs []any) map[string]any {
+	t.Helper()
+
+	out := make(map[string]any, len(attrs))
+	for _, raw := range attrs {
+		attr, ok := raw.(slog.Attr)
+		if !ok {
+			t.Fatalf("attr has type %T, want slog.Attr", raw)
+		}
+		out[attr.Key] = attr.Value.Any()
+	}
+	return out
 }
 
 func TestStartLoop_CreatesGroupSpan(t *testing.T) {

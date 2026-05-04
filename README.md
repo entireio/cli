@@ -74,7 +74,7 @@ cd your-project && entire enable
 entire status
 ```
 
-After the initial setup, use `entire configure` to add/remove agents or update setup-related options, and use `entire enable` / `entire disable` to toggle Entire on or off.
+After the initial setup, use `entire agent` to add or remove agents, `entire configure` to update non-agent settings, and `entire enable` / `entire disable` to toggle Entire on or off.
 
 ## Release Channels
 
@@ -104,7 +104,8 @@ On a repo that has not been enabled yet, `entire enable` runs the initial enable
 After setup:
 
 - Use `entire enable` to turn Entire back on if the repo is currently disabled.
-- Use `entire configure` to change which agents are installed or to update setup-related settings.
+- Use `entire agent` to add or remove agents.
+- Use `entire configure` to update non-agent settings (telemetry, hooks, checkpoint remote, summary provider).
 
 The hooks capture session data as you work. Checkpoints are created when you or the agent make a git commit. Your code commits stay clean, Entire never creates commits on your active branch. All session metadata is stored on a separate `entire/checkpoints/v1` branch.
 
@@ -121,7 +122,7 @@ entire status  # Check current session status anytime
 If you want to undo some changes and go back to an earlier checkpoint:
 
 ```
-entire rewind
+entire checkpoint rewind
 ```
 
 This shows all available checkpoints in the current session. Select one to restore your code to that exact state.
@@ -131,7 +132,7 @@ This shows all available checkpoints in the current session. Select one to resto
 To restore the latest checkpointed session metadata for a branch:
 
 ```
-entire resume <branch>
+entire session resume <branch>
 ```
 
 Entire checks out the branch, restores the latest checkpointed session metadata (one or more sessions), and prints command(s) to continue.
@@ -232,16 +233,20 @@ go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
 | Command          | Description                                                                                       |
 | ---------------- | ------------------------------------------------------------------------------------------------- |
 | `entire clean`   | Clean up session data and orphaned Entire data (use `--all` for repo-wide cleanup)                |
-| `entire configure` | Configure agents and setup options for the current repository                                  |
+| `entire agent`   | Add, remove, or list agent integrations for the current repository                                |
+| `entire configure` | Update non-agent settings (telemetry, git hook, strategy options, summary provider)            |
 | `entire disable` | Remove Entire hooks from repository                                                               |
 | `entire doctor`  | Fix or clean up stuck sessions                                                                    |
 | `entire enable`  | Enable Entire in your repository                                                                  |
-| `entire explain` | Explain a session or commit                                                                       |
+| `entire checkpoint`        | List, explain, rewind, and search checkpoints                                           |
+| `entire checkpoint explain` | Explain a session, commit, or checkpoint                                               |
+| `entire checkpoint rewind` | Rewind to a previous checkpoint                                                         |
 | `entire login`   | Authenticate the CLI with Entire device auth                                                      |
-| `entire resume`  | Switch to a branch, restore latest checkpointed session metadata, and show command(s) to continue |
-| `entire rewind`  | Rewind to a previous checkpoint                                                                   |
+| `entire session` | View and manage agent sessions tracked by Entire                                                  |
+| `entire session resume`    | Switch to a branch, restore latest checkpointed session metadata, and show command(s) |
+| `entire session attach`    | Attach to a previously detached session                                                |
 | `entire status`  | Show current session info                                                                         |
-| `entire sessions` | View and manage agent sessions tracked by Entire                                                 |
+| `entire doctor trace` | Show hook performance traces                                                                 |
 | `entire version` | Show Entire CLI version                                                                           |
 
 ### `entire enable` Flags
@@ -272,33 +277,37 @@ entire enable --force
 entire enable --local
 ```
 
-`entire enable` is primarily for turning Entire on. On an unconfigured repo it will also bootstrap setup, but once the repo is already configured, `entire configure` is the clearer command for managing agents and setup options.
+`entire enable` is primarily for turning Entire on. On an unconfigured repo it will also bootstrap setup. Use `entire agent` for adding or removing agents, and `entire configure` for non-agent settings.
 
 ### `entire configure`
 
-Use `entire configure` after the repo is already set up and you want to change the configuration without framing the action as an enable/disable toggle.
+Use `entire configure` to update non-agent settings on a repo that's already set up. Agent installation lives under `entire agent`.
 
 Typical uses:
 
-- Add another agent
-- Remove an agent
-- Reinstall hooks for selected agents
-- Update settings such as `--checkpoint-remote` or `--skip-push-sessions`
+- Toggle telemetry
+- Reinstall the Entire git hook (`--force`, `--absolute-git-hook-path`)
+- Update strategy options such as `--checkpoint-remote` or `--skip-push-sessions`
+- Pick a summary provider for `entire explain --generate`
 
 **Examples:**
 
 ```bash
-# Add or remove agents interactively
+# Show help and the hint pointing to 'entire agent'
 entire configure
 
-# Install or refresh hooks for one agent non-interactively
-entire configure --agent claude-code --force
+# Opt out of telemetry
+entire configure --telemetry=false
 
-# Update setup settings on an existing repo
+# Reinstall the Entire git hook with an absolute binary path
+entire configure --absolute-git-hook-path
+
+# Update strategy options on an existing repo
 entire configure --checkpoint-remote github:myorg/checkpoints-private
 
-# Remove one agent's hooks
-entire configure --remove claude-code
+# Add or remove an agent
+entire agent add claude-code
+entire agent remove claude-code
 ```
 
 ## Configuration

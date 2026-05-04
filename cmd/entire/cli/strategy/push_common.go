@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v6"
@@ -64,23 +66,35 @@ func hasUnpushedSessionsCommon(repo *git.Repository, remoteName string, localHas
 	return localHash != remoteRef.Hash()
 }
 
+func displayPushTarget(target string) string {
+	if remote.IsURL(target) {
+		return "checkpoint remote"
+	}
+	return target
+}
+
 // doPushBranch pushes the given branch to the target with fetch+merge recovery.
 // The target can be a remote name or a URL.
 func doPushBranch(ctx context.Context, target, branchName string) error {
-	displayTarget := target
-	if remote.IsURL(target) {
-		displayTarget = "checkpoint remote"
-	}
+	displayTarget := displayPushTarget(target)
 
 	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", branchName, displayTarget)
 	stop := startProgressDots(os.Stderr)
 
 	// Try pushing first
-	if result, err := tryPushSessionsCommon(ctx, target, branchName); err == nil {
+	result, err := tryPushSessionsCommon(ctx, target, branchName)
+	if err == nil {
 		finishPush(ctx, stop, result, target)
 		return nil
 	}
 	stop("")
+
+	// Protected refs cannot be fixed by syncing and retrying.
+	var protectedErr *protectedRefError
+	if errors.As(err, &protectedErr) {
+		printProtectedRefBlock(os.Stderr, branchName, target)
+		return nil
+	}
 
 	// Push failed - likely non-fast-forward. Try to fetch and rebase.
 	fmt.Fprintf(os.Stderr, "[entire] Syncing %s with remote...", branchName)
@@ -171,7 +185,8 @@ func hasUnmigratedV1Checkpoints(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	v1List, err := checkpoint.NewGitStore(repo).ListCommitted(ctx)
+	v1Store := checkpoint.NewGitStore(repo)
+	v1List, err := v1Store.ListCommitted(ctx)
 	if err != nil || len(v1List) == 0 {
 		return false
 	}
@@ -185,6 +200,10 @@ func hasUnmigratedV1Checkpoints(ctx context.Context) bool {
 	}
 	for _, info := range v1List {
 		if _, ok := v2Set[info.CheckpointID.String()]; !ok {
+			summary, readErr := v1Store.ReadCommitted(ctx, info.CheckpointID)
+			if readErr != nil || summary == nil {
+				continue
+			}
 			return true
 		}
 	}
@@ -267,14 +286,88 @@ func tryPushSessionsCommon(ctx context.Context, remoteName, branchName string) (
 	result, err := remote.Push(ctx, remoteName, branchName)
 	outputStr := result.Output
 	if err != nil {
-		if strings.Contains(outputStr, "non-fast-forward") ||
-			strings.Contains(outputStr, "rejected") {
-			return pushResult{}, errors.New("non-fast-forward")
-		}
-		return pushResult{}, fmt.Errorf("push failed: %s", outputStr)
+		return pushResult{}, classifyPushFailure(ctx, outputStr, err)
 	}
 
 	return parsePushResult(outputStr), nil
+}
+
+// protectedRefError means the remote is blocking writes to the ref itself.
+type protectedRefError struct {
+	output string
+}
+
+func (e *protectedRefError) Error() string {
+	return "remote rejected push to protected ref"
+}
+
+// isProtectedRefRejection detects GitHub ruleset and branch-protection failures.
+func isProtectedRefRejection(output string) bool {
+	return strings.Contains(output, "GH013") ||
+		strings.Contains(output, "Cannot update this protected ref") ||
+		strings.Contains(output, "protected branch hook declined")
+}
+
+var errNonFastForward = errors.New("non-fast-forward")
+
+func isNonFastForwardRejection(output string) bool {
+	if strings.Contains(output, "non-fast-forward") {
+		return true
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "[rejected]") && strings.Contains(line, "(fetch first)") {
+			return true
+		}
+	}
+	return strings.Contains(output, "Updates were rejected because the tip of your current branch is behind") ||
+		strings.Contains(output, "Updates were rejected because the remote contains work that you do not have locally")
+}
+
+// classifyPushOutput maps failing push stderr to a typed error.
+func classifyPushOutput(output string) error {
+	if isProtectedRefRejection(output) {
+		return &protectedRefError{output: output}
+	}
+	if isNonFastForwardRejection(output) {
+		return errNonFastForward
+	}
+	if strings.TrimSpace(output) == "" {
+		return errors.New("push failed")
+	}
+	return fmt.Errorf("push failed: %s", output)
+}
+
+func classifyPushFailure(ctx context.Context, output string, pushErr error) error {
+	if strings.TrimSpace(output) != "" {
+		if pushErr != nil {
+			logging.Debug(ctx, "git push failed",
+				slog.String("error", pushErr.Error()),
+				slog.String("output", output),
+			)
+		}
+		return classifyPushOutput(output)
+	}
+	if pushErr != nil {
+		logging.Debug(ctx, "git push failed without output",
+			slog.String("error", pushErr.Error()),
+		)
+		return fmt.Errorf("push failed: %w", pushErr)
+	}
+	return errors.New("push failed")
+}
+
+// printProtectedRefBlock explains that checkpoint syncing was blocked remotely.
+func printProtectedRefBlock(w io.Writer, ref, target string) {
+	const banner = "[entire] ============================================================"
+	displayTarget := displayPushTarget(target)
+	fmt.Fprintln(w, banner)
+	fmt.Fprintf(w, "[entire] BLOCKED: remote rejected push to %s\n", ref)
+	fmt.Fprintln(w, "[entire] Reason:  GitHub branch protection or repository ruleset (e.g. GH013)")
+	fmt.Fprintf(w, "[entire] Target:  %s\n", displayTarget)
+	fmt.Fprintln(w, "[entire] Impact:  checkpoints are saved locally but NOT synced to this remote.")
+	fmt.Fprintln(w, "[entire] Action:  allow pushes to `entire/*` in your ruleset, or set")
+	fmt.Fprintln(w, "[entire]          `checkpoint_remote` in .entire/settings.json to a separate repo.")
+	fmt.Fprintln(w, banner)
 }
 
 // fetchAndRebaseSessionsCommon fetches remote sessions and rebases local commits

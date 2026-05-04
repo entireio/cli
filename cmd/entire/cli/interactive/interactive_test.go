@@ -7,25 +7,40 @@ import (
 )
 
 func TestCanPromptInteractively_ForcedOn(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Setenv(EnvTestTTY, "1")
 	if !CanPromptInteractively() {
-		t.Error("CanPromptInteractively() = false; want true when ENTIRE_TEST_TTY=1")
+		t.Errorf("CanPromptInteractively() = false; want true when %s=1", EnvTestTTY)
 	}
 }
 
 func TestCanPromptInteractively_ForcedOff(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "0")
+	t.Setenv(EnvTestTTY, "0")
 	if CanPromptInteractively() {
-		t.Error("CanPromptInteractively() = true; want false when ENTIRE_TEST_TTY=0")
+		t.Errorf("CanPromptInteractively() = true; want false when %s=0", EnvTestTTY)
 	}
 }
 
-func TestCanPromptInteractively_AgentEnvGuards(t *testing.T) {
-	// Unset ENTIRE_TEST_TTY so agent-env guards run. Force an explicit unset
-	// since the top-level check short-circuits on presence, not value.
-	t.Setenv("ENTIRE_TEST_TTY", "")
-	_ = os.Unsetenv("ENTIRE_TEST_TTY")
+// Under `go test` without an explicit override, testing.Testing() short-circuits
+// to non-interactive.
+func TestCanPromptInteractively_TestingDefaultsOff(t *testing.T) {
+	t.Setenv(EnvTestTTY, "")
+	if CanPromptInteractively() {
+		t.Error("CanPromptInteractively() = true; want false under testing.Testing()")
+	}
+}
 
+// CI=false is the `is-ci` escape hatch: a dev may set it to override an
+// inherited CI=true. With EnvTestTTY=1 standing in for a real TTY, the gate
+// must not short-circuit to false.
+func TestCanPromptInteractively_CIFalseOverride(t *testing.T) {
+	t.Setenv("CI", "false")
+	t.Setenv(EnvTestTTY, "1")
+	if !CanPromptInteractively() {
+		t.Error("CanPromptInteractively() = false; want true when CI=false")
+	}
+}
+
+func TestIsAgentSubprocessEnv(t *testing.T) {
 	cases := []struct {
 		name, key, val string
 	}{
@@ -37,30 +52,26 @@ func TestCanPromptInteractively_AgentEnvGuards(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv(c.key, c.val)
-			if CanPromptInteractively() {
-				t.Errorf("CanPromptInteractively() = true; want false when %s=%s", c.key, c.val)
+			if !isAgentSubprocessEnv() {
+				t.Errorf("isAgentSubprocessEnv() = false; want true when %s=%s", c.key, c.val)
 			}
 		})
 	}
 }
 
-func TestCanPromptInteractively_CIEnv(t *testing.T) {
-	t.Setenv("ENTIRE_TEST_TTY", "")
-	_ = os.Unsetenv("ENTIRE_TEST_TTY")
-	t.Setenv("CI", "true")
-	if CanPromptInteractively() {
-		t.Error("CanPromptInteractively() = true; want false when CI=true")
+// GIT_TERMINAL_PROMPT only counts when explicitly set to "0". Other values
+// (or absence) shouldn't trigger the guard.
+func TestIsAgentSubprocessEnv_GitTerminalPromptOnIsNotAgent(t *testing.T) {
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	if isAgentSubprocessEnv() {
+		t.Error("isAgentSubprocessEnv() = true; want false when GIT_TERMINAL_PROMPT=1")
 	}
 }
 
-// CI=false is the `is-ci` escape hatch: a dev may set it to override an
-// inherited CI=true. Verify the CI branch doesn't short-circuit to false,
-// using ENTIRE_TEST_TTY=1 to stand in for a real TTY in the test host.
-func TestCanPromptInteractively_CIFalseOverride(t *testing.T) {
-	t.Setenv("CI", "false")
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-	if !CanPromptInteractively() {
-		t.Error("CanPromptInteractively() = false; want true when CI=false")
+func TestUnderTest_TrueByTestingHarness(t *testing.T) {
+	t.Setenv(EnvTestTTY, "")
+	if !UnderTest() {
+		t.Error("UnderTest() = false; want true under testing.Testing()")
 	}
 }
 

@@ -110,6 +110,125 @@ func TestAttach_Success(t *testing.T) {
 	}
 }
 
+// TestAttach_PopulatesBaseCommitFromHEAD is a regression for
+// https://github.com/entireio/cli/issues/411 / PR #1102.
+//
+// When `entire attach` ran on an existing session whose state had an empty
+// BaseCommit (e.g., after a hook initialization failure on session start, or
+// for sessions started before `entire enable` ran), saveAttachSessionState
+// left BaseCommit empty. The prepare-commit-msg hook then refused to
+// recognize the session as active and never wrote Entire-Checkpoint trailers
+// onto subsequent commits in that session.
+//
+// After attach, BaseCommit (and AttributionBaseCommit) must be populated
+// from HEAD so the session is recognized as active.
+func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoRoot := mustGetwd(t)
+	repo, err := git.PlainOpen(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRef, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	headHash := headRef.Hash().String()
+
+	sessionID := "test-attach-empty-base-commit"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
+`)
+
+	// Pre-create a session state with empty BaseCommit — simulates a session
+	// that started while hook init failed, or a session that pre-dates `entire
+	// enable`. State exists, but BaseCommit was never populated.
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), &session.State{
+		SessionID: sessionID,
+		AgentType: agent.AgentTypeClaudeCode,
+		StartedAt: time.Now(),
+		// BaseCommit and AttributionBaseCommit deliberately empty.
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, true); err != nil {
+		t.Fatalf("runAttach failed: %v", err)
+	}
+
+	state, err := store.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil {
+		t.Fatal("expected session state to exist after attach")
+	}
+	if state.BaseCommit != headHash {
+		t.Errorf("BaseCommit = %q, want %q (HEAD); attach did not populate empty BaseCommit",
+			state.BaseCommit, headHash)
+	}
+	if state.AttributionBaseCommit != headHash {
+		t.Errorf("AttributionBaseCommit = %q, want %q (HEAD); attach did not populate empty AttributionBaseCommit",
+			state.AttributionBaseCommit, headHash)
+	}
+}
+
+// TestAttach_PreservesActivePhase is a regression for PR #1102.
+//
+// `entire attach` could be called against a session that is currently active
+// (e.g., the user runs attach mid-session to repair a missed checkpoint).
+// Previously, saveAttachSessionState unconditionally set Phase to PhaseEnded,
+// which broke the running session: the prepare-commit-msg hook then treated
+// the session as ended and skipped Entire-Checkpoint trailers on every
+// subsequent commit until the agent restarted.
+//
+// Attach must preserve PhaseActive when the session is already active.
+func TestAttach_PreservesActivePhase(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	sessionID := "test-attach-active-session"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
+`)
+
+	// Pre-create an ACTIVE session — agent is mid-turn when the user runs attach.
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), &session.State{
+		SessionID: sessionID,
+		AgentType: agent.AgentTypeClaudeCode,
+		StartedAt: time.Now(),
+		Phase:     session.PhaseActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, true); err != nil {
+		t.Fatalf("runAttach failed: %v", err)
+	}
+
+	state, err := store.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil {
+		t.Fatal("expected session state to exist after attach")
+	}
+	if state.Phase != session.PhaseActive {
+		t.Errorf("Phase = %q, want %q; attach clobbered an active session into PhaseEnded",
+			state.Phase, session.PhaseActive)
+	}
+}
+
 func TestAttach_SessionAlreadyTracked_NoCheckpoint(t *testing.T) {
 	setupAttachTestRepo(t)
 
@@ -213,6 +332,63 @@ func TestAttach_V2DualWriteEnabled(t *testing.T) {
 	}
 
 	cpPath := state.LastCheckpointID.Path()
+	mainCompact, found := readFileFromRef(t, repo, paths.V2MainRefName, cpPath+"/0/"+paths.CompactTranscriptFileName)
+	if !found {
+		t.Fatalf("expected %s on %s", paths.CompactTranscriptFileName, paths.V2MainRefName)
+	}
+	if !strings.Contains(mainCompact, "create hello.txt") {
+		t.Errorf("compact transcript missing prompt, got:\n%s", mainCompact)
+	}
+
+	fullTranscript, found := readFileFromRef(t, repo, paths.V2FullCurrentRefName, cpPath+"/0/"+paths.V2RawTranscriptFileName)
+	if !found {
+		t.Fatalf("expected %s on %s", paths.V2RawTranscriptFileName, paths.V2FullCurrentRefName)
+	}
+	if !strings.Contains(fullTranscript, "hello.txt") {
+		t.Errorf("raw transcript missing file content, got:\n%s", fullTranscript)
+	}
+}
+
+func TestAttach_CheckpointsVersion2(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	repoDir := mustGetwd(t)
+	setAttachCheckpointsV2Only(t, repoDir)
+
+	sessionID := "test-attach-v2-only"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"create hello.txt"},"uuid":"uuid-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Write","input":{"file_path":"hello.txt","content":"hello"}}]},"uuid":"uuid-2"}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":"wrote file"}]},"uuid":"uuid-3"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]},"uuid":"uuid-4"}
+`)
+
+	var out bytes.Buffer
+	if err := runAttach(context.Background(), &out, sessionID, agent.AgentNameClaudeCode, true); err != nil {
+		t.Fatalf("runAttach failed: %v", err)
+	}
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.LastCheckpointID.IsEmpty() {
+		t.Fatal("expected attach to persist a checkpoint ID")
+	}
+
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cpPath := state.LastCheckpointID.Path()
+	if _, found := readFileFromRef(t, repo, paths.MetadataBranchName, cpPath+"/"+paths.MetadataFileName); found {
+		t.Fatalf("did not expect %s metadata for %s when checkpoints_version is 2", paths.MetadataBranchName, cpPath)
+	}
+
 	mainCompact, found := readFileFromRef(t, repo, paths.V2MainRefName, cpPath+"/0/"+paths.CompactTranscriptFileName)
 	if !found {
 		t.Fatalf("expected %s on %s", paths.CompactTranscriptFileName, paths.V2MainRefName)

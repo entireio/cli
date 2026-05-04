@@ -90,6 +90,7 @@ type APIWindow struct {
 
 type APIRepo struct {
 	FullName string       `json:"full_name"`
+	URL      string       `json:"url,omitempty"`
 	Sections []APISection `json:"sections"`
 }
 

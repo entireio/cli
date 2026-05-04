@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-05-04
+
+### Added
+
+- Detection of pushes to protected branches, with a clearer warning before the push proceeds ([#1033](https://github.com/entireio/cli/pull/1033))
+- Improved auth token management in the CLI ([#1050](https://github.com/entireio/cli/pull/1050))
+- `entire explain --generate` now supports external agents for summary generation ([#1044](https://github.com/entireio/cli/pull/1044))
+- `entire search` TUI gains a unified palette with the activity view, markdown snippet rendering, and shell completions ([#1053](https://github.com/entireio/cli/pull/1053))
+- Homebrew now prompts users to update when a new version is released, and Homebrew cask completions are generated at install time ([#1057](https://github.com/entireio/cli/pull/1057), [#1085](https://github.com/entireio/cli/pull/1085))
+- Nested perf spans render in traces for richer debugging ([#1073](https://github.com/entireio/cli/pull/1073))
+
+### Changed
+
+- CLI restructured around `session` / `checkpoint` / `agent` / `auth` / `doctor` command groups ([#1062](https://github.com/entireio/cli/pull/1062))
+- Charm TUI stack upgraded to v2; dispatch repo links added to the dispatch wizard ([#1048](https://github.com/entireio/cli/pull/1048))
+- TUI navigation help aligned across `entire activity` and `entire search` ([#1058](https://github.com/entireio/cli/pull/1058), [#1064](https://github.com/entireio/cli/pull/1064))
+- `entire explain` generated summary is now formatted ([#1078](https://github.com/entireio/cli/pull/1078))
+- Auto-update prompt aligned across all installers ([#1083](https://github.com/entireio/cli/pull/1083))
+- TTY detection simplified via `testing.Testing()` and OS-level process detachment ([#1029](https://github.com/entireio/cli/pull/1029))
+- Switched secret scanning back to betterleaks, with tightened redaction coverage and improved database credential redaction ([#1043](https://github.com/entireio/cli/pull/1043), [#1045](https://github.com/entireio/cli/pull/1045), [#1068](https://github.com/entireio/cli/pull/1068))
+- Checkpoints v2 (work in progress): expose CLI version to external agents for compact transcripts; cleaner migration output and completion message; use checkpoint creation time for generation calc with a lower default retention; push v2 refs in parallel ([#1032](https://github.com/entireio/cli/pull/1032), [#1059](https://github.com/entireio/cli/pull/1059), [#1088](https://github.com/entireio/cli/pull/1088), [#1089](https://github.com/entireio/cli/pull/1089), [#1094](https://github.com/entireio/cli/pull/1094))
+
+### Fixed
+
+- Cursor sessions no longer get mis-identified as Claude Code ([#1082](https://github.com/entireio/cli/pull/1082))
+- `entire explain` works with partial-clone checkpoint repositories ([#1069](https://github.com/entireio/cli/pull/1069))
+- Agent-neutral wording in the `entire explain` empty-state message ([#1086](https://github.com/entireio/cli/pull/1086))
+- False PATH conflict detection in the installer ([#1038](https://github.com/entireio/cli/pull/1038))
+- Checkpoints v2 migration: preserve attribution metadata; clean up v1-named transcript files on `/full/current`; handle missing v1 sessions; check archived v2 transcripts; correct generation packing ([#1035](https://github.com/entireio/cli/pull/1035), [#1034](https://github.com/entireio/cli/pull/1034), [#1071](https://github.com/entireio/cli/pull/1071), [#1080](https://github.com/entireio/cli/pull/1080), [#1091](https://github.com/entireio/cli/pull/1091))
+
+### Housekeeping
+
+- Centralized TUI keybindings via `bubbles/key` in preparation for Bubble Tea v2 ([#1060](https://github.com/entireio/cli/pull/1060))
+- Expanded checkpoints v2 validation coverage and pruned subsumed tests in the strategy package ([#1012](https://github.com/entireio/cli/pull/1012), [#1077](https://github.com/entireio/cli/pull/1077))
+- Dependency bumps: go-dependencies group (incl. `posthog-go` 1.12.1 → 1.12.4), `goreleaser/goreleaser-action` 7.1.0 → 7.2.1, `slackapi/slack-github-action` 3.0.1 → 3.0.3 ([#1031](https://github.com/entireio/cli/pull/1031), [#1087](https://github.com/entireio/cli/pull/1087), [#1055](https://github.com/entireio/cli/pull/1055), [#1016](https://github.com/entireio/cli/pull/1016), [#1095](https://github.com/entireio/cli/pull/1095))
+
+### Thanks
+
+Thanks to @KuaaMU for making the `entire explain` empty-state message agent-neutral!
+
 ## [0.5.6] - 2026-04-24
 
 ### Added

@@ -4,18 +4,19 @@ package integration
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -194,13 +195,12 @@ func runLoginProcess(t *testing.T, apiBaseURL string) *loginProcess {
 
 	env := NewTestEnv(t)
 
-	cmd := exec.Command(getTestBinary(), "login", "--insecure-http-auth")
+	cmd := execx.NonInteractive(context.Background(), getTestBinary(), "login", "--insecure-http-auth")
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
 		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
-		"ENTIRE_TEST_TTY=0",
 		"ENTIRE_API_BASE_URL="+apiBaseURL,
 	)
 

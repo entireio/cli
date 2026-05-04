@@ -175,3 +175,70 @@ func TestPersistentPostRun_ParentHiddenWalk(t *testing.T) {
 		})
 	}
 }
+
+func TestRoot_NounGroupShorthandsUseCobraAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		alias     string
+		canonical string
+	}{
+		{alias: "sessions", canonical: "session"},
+		{alias: "cp", canonical: "checkpoint"},
+		{alias: "checkpoints", canonical: "checkpoint"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.alias, func(t *testing.T) {
+			t.Parallel()
+
+			root := NewRootCmd()
+			cmd, _, err := root.Find([]string{tt.alias})
+			if err != nil {
+				t.Fatalf("root.Find(%q): %v", tt.alias, err)
+			}
+			if cmd.Name() != tt.canonical {
+				t.Fatalf("alias %q resolved to %q, want %q", tt.alias, cmd.Name(), tt.canonical)
+			}
+			if !containsString(cmd.Aliases, tt.alias) {
+				t.Fatalf("%q should be registered in %q Aliases, got %v", tt.alias, tt.canonical, cmd.Aliases)
+			}
+			for _, direct := range root.Commands() {
+				if direct.Name() == tt.alias {
+					t.Fatalf("%q should be a Cobra alias, not a duplicate root command", tt.alias)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckpointSearchIsVisibleButTopLevelSearchIsHidden(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+
+	checkpointSearch, _, err := root.Find([]string{"checkpoint", "search"})
+	if err != nil {
+		t.Fatalf("find checkpoint search: %v", err)
+	}
+	if checkpointSearch.Hidden {
+		t.Fatal("checkpoint search should be visible in checkpoint help")
+	}
+
+	topLevelSearch, _, err := root.Find([]string{"search"})
+	if err != nil {
+		t.Fatalf("find top-level search: %v", err)
+	}
+	if !topLevelSearch.Hidden {
+		t.Fatal("top-level search should remain hidden as a compatibility alias")
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

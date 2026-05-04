@@ -119,7 +119,7 @@ CP1="$(git log -1 --format=%B | sed -n 's/^Entire-Checkpoint: //p' | tail -n1)"
 entire explain --checkpoint "$CP1" --no-pager
 ```
 
-Record the `Tokens:` value for checkpoint 1 as `CP1_TOKENS_INITIAL`.
+Record the `tokens` row value for checkpoint 1 as `CP1_TOKENS_INITIAL`.
 
 ### 3. Run Turn 2 in the Same Copilot Session and Commit
 
@@ -193,7 +193,7 @@ entire explain --checkpoint "$CP1" --no-pager
 
 Expected:
 
-- Checkpoint 1 still shows the same `Tokens:` value as `CP1_TOKENS_INITIAL`
+- Checkpoint 1 still shows the same `tokens` row value as `CP1_TOKENS_INITIAL`
 - Checkpoint 1 does not jump to `SESSION_TOTAL`
 - Checkpoint 1 will usually be lower than `SESSION_TOTAL`
 

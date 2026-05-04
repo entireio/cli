@@ -207,6 +207,11 @@ type WriteCommittedOptions struct {
 	// SessionID is the session identifier
 	SessionID string
 
+	// CreatedAt is when the checkpoint was originally created.
+	// When zero, writers use the current time. Migration sets this to preserve
+	// the original v1 checkpoint time in v2 metadata and retention decisions.
+	CreatedAt time.Time
+
 	// Strategy is the name of the strategy that created this checkpoint
 	Strategy string
 
@@ -295,6 +300,11 @@ type WriteCommittedOptions struct {
 	// which "user" lines, enabling root cause analysis of attribution bugs.
 	// Uses json.RawMessage to avoid importing session package.
 	PromptAttributionsJSON json.RawMessage
+
+	// CombinedAttribution is holistic attribution across all sessions.
+	// Used during migration to preserve v1 root summary attribution.
+	// During normal condensation this is nil (computed post-commit via UpdateCheckpointSummary).
+	CombinedAttribution *InitialAttribution
 
 	// Summary is an optional AI-generated summary for this checkpoint.
 	// This field may be nil when:

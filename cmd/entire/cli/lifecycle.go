@@ -28,6 +28,17 @@ import (
 	"github.com/entireio/cli/perf"
 )
 
+// eventBypassesAgentOwnershipCheck reports whether an event must run
+// regardless of the recorded session-owning agent:
+//   - SessionStart fires before SessionState exists; the hint file dedup
+//     in handleLifecycleSessionStart already prevents a duplicate banner.
+//   - TurnStart needs to reach InitializeSession so transcript-path
+//     resolution can repair a wrongly-set AgentType. Skipping here would
+//     lock in a bad state.
+func eventBypassesAgentOwnershipCheck(t agent.EventType) bool {
+	return t == agent.SessionStart || t == agent.TurnStart
+}
+
 // DispatchLifecycleEvent routes a normalized lifecycle event to the appropriate handler.
 // Returns nil if the event was handled successfully.
 func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Event) error {
@@ -36,6 +47,23 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 	if event == nil {
 		return errors.New("event cannot be nil")
+	}
+
+	// Filter forwarded hooks: when Cursor IDE forwards events to both
+	// .cursor/hooks.json and .claude/settings.json, only the agent that owns
+	// the session should process them — otherwise checkpoints, metadata
+	// writes, and step counts double.
+	if event.SessionID != "" && !eventBypassesAgentOwnershipCheck(event.Type) {
+		if state, _ := strategy.LoadSessionState(ctx, event.SessionID); state != nil && state.AgentType != "" && state.AgentType != ag.Type() { //nolint:errcheck // a load failure means we can't filter; let the event reach its handler, which surfaces its own load error
+			logging.Info(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()),
+				"skipping forwarded hook for non-owning agent",
+				slog.String("event", event.Type.String()),
+				slog.String("session_id", event.SessionID),
+				slog.String("owning_agent", string(state.AgentType)),
+				slog.String("firing_agent", string(ag.Type())),
+			)
+			return nil
+		}
 	}
 
 	switch event.Type {
@@ -78,6 +106,16 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 		return fmt.Errorf("invalid %s event: %w", event.Type, err)
 	}
 
+	// Claim the session for this agent. First-writer-wins: subsequent agents
+	// firing SessionStart for the same session ID are no-ops. Used by
+	// InitializeSession (TurnStart) and the dispatcher skip in
+	// DispatchLifecycleEvent for cross-agent disambiguation when Cursor IDE
+	// forwards hooks to both .cursor/hooks.json and .claude/settings.json.
+	if _, hintErr := strategy.StoreAgentTypeHint(ctx, event.SessionID, ag.Type()); hintErr != nil {
+		logging.Warn(logCtx, "failed to store agent hint on session start",
+			slog.String("error", hintErr.Error()))
+	}
+
 	// Build informational message — warn early if repo has no commits yet,
 	// since checkpoints require at least one commit to work.
 	message := sessionStartMessage(ag.Name(), false)
@@ -100,15 +138,30 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// Output informational message if the agent supports hook responses.
 	// Claude Code reads JSON from stdout; agents that don't implement
 	// HookResponseWriter silently skip (avoids raw JSON in their terminal).
+	//
+	// Banner display is gated by ClaimSessionStartBanner — separate from the
+	// agent-ownership claim above. If the ownership winner can't write banners
+	// (Cursor), we'd suppress the banner entirely on a Cursor+Claude race;
+	// the banner marker is only claimed inside this branch so a non-writer
+	// winner can't consume the user's only banner.
 	_, hookResponseSpan := perf.Start(ctx, "write_hook_response")
 	if event.ResponseMessage != "" {
 		message = event.ResponseMessage
 	}
 	if writer, ok := agent.AsHookResponseWriter(ag); ok {
-		if err := writer.WriteHookResponse(message); err != nil {
-			hookResponseSpan.RecordError(err)
-			hookResponseSpan.End()
-			return fmt.Errorf("failed to write hook response: %w", err)
+		bannerFirst, bErr := strategy.ClaimSessionStartBanner(ctx, event.SessionID)
+		if bErr != nil {
+			// Better to duplicate the banner than to suppress the only one.
+			logging.Warn(logCtx, "failed to claim session start banner marker",
+				slog.String("error", bErr.Error()))
+			bannerFirst = true
+		}
+		if bannerFirst {
+			if err := writer.WriteHookResponse(message); err != nil {
+				hookResponseSpan.RecordError(err)
+				hookResponseSpan.End()
+				return fmt.Errorf("failed to write hook response: %w", err)
+			}
 		}
 	}
 	hookResponseSpan.End()

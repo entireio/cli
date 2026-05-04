@@ -7,6 +7,8 @@
     "checkpoint_remote": {
       "provider": "github",
       "repo": "entireio/cli-checkpoints"
-    }
+    },
+    "checkpoints_v2": true,
+    "push_v2_refs": true
   }
 }

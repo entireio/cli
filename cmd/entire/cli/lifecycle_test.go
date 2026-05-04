@@ -118,6 +118,214 @@ func TestDispatchLifecycleEvent_NilEvent(t *testing.T) {
 	}
 }
 
+// TestDispatchLifecycleEvent_SkipsForwardedHookFromNonOwningAgent verifies the
+// dispatcher-level dedup: when SessionState records a different owning agent,
+// non-SessionStart / non-TurnStart events from forwarded hooks no-op. This
+// covers the Cursor IDE → .claude/settings.json forwarding scenario for Stop,
+// SubagentStart/End, Compaction, SessionEnd, and ModelUpdate events.
+func TestDispatchLifecycleEvent_SkipsForwardedHookFromNonOwningAgent(t *testing.T) {
+	setupStopTestRepo(t)
+
+	sessionID := "test-skip-nonowning"
+	require.NoError(t, strategy.SaveSessionState(context.Background(), &strategy.SessionState{
+		SessionID:  sessionID,
+		AgentType:  agent.AgentTypeCursor,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}))
+
+	// Claude Code fires SessionEnd for Cursor's session (Cursor IDE forwarded hook).
+	claudeAgent := newMockAgent()
+	claudeAgent.agentType = agent.AgentTypeClaudeCode
+
+	require.NoError(t, DispatchLifecycleEvent(context.Background(), claudeAgent, &agent.Event{
+		Type:      agent.SessionEnd,
+		SessionID: sessionID,
+		Timestamp: time.Now(),
+	}))
+
+	// If the dispatcher had let the event through, markSessionEnded would have
+	// transitioned to ENDED and set EndedAt.
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Nil(t, state.EndedAt, "non-owning agent's SessionEnd must not transition the session")
+}
+
+// TestDispatchLifecycleEvent_AllowsTurnStartFromMismatchedAgent verifies that
+// TurnStart bypasses the dispatcher-level skip so InitializeSession runs (and
+// can repair a wrongly-set AgentType via transcript-path resolution).
+func TestDispatchLifecycleEvent_AllowsTurnStartFromMismatchedAgent(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	repo, err := strategy.OpenRepository(ctx)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	sessionID := "test-turnstart-mismatch"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		AgentType:  agent.AgentTypeClaudeCode,
+		BaseCommit: head.Hash().String(),
+		StartedAt:  time.Now(),
+	}))
+
+	cursorAgent := newMockAgent()
+	cursorAgent.agentType = agent.AgentTypeCursor
+
+	require.NoError(t, DispatchLifecycleEvent(ctx, cursorAgent, &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Timestamp: time.Now(),
+	}))
+
+	// InitializeSession generates a fresh TurnID on every dispatch. If the
+	// dispatcher had skipped, TurnID would still be empty.
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.NotEmpty(t, state.TurnID, "TurnStart must dispatch (and generate a TurnID) even when the firing agent disagrees with the recorded owner")
+}
+
+// TestDispatchLifecycleEvent_SkipsAllNonBypassEventsFromNonOwner verifies the
+// skip applies uniformly to every non-bypass event type. If the dispatcher
+// had let any of these through, downstream handlers would either error
+// (transcript file not found, etc.) or mutate state — both are detectable.
+func TestDispatchLifecycleEvent_SkipsAllNonBypassEventsFromNonOwner(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	sessionID := "test-skip-all-events"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		AgentType:  agent.AgentTypeCursor,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+		ModelName:  "initial-model",
+	}))
+
+	nonOwner := newMockAgent()
+	nonOwner.agentType = agent.AgentTypeClaudeCode
+
+	skipEligible := []agent.EventType{
+		agent.TurnEnd,
+		agent.Compaction,
+		agent.SubagentStart,
+		agent.SubagentEnd,
+		agent.ModelUpdate,
+		agent.SessionEnd,
+	}
+
+	for _, et := range skipEligible {
+		t.Run(et.String(), func(t *testing.T) {
+			err := DispatchLifecycleEvent(ctx, nonOwner, &agent.Event{
+				Type:       et,
+				SessionID:  sessionID,
+				SessionRef: "/nonexistent/transcript.jsonl", // would fail in handler
+				Model:      "would-overwrite-on-modelupdate",
+				Timestamp:  time.Now(),
+			})
+			require.NoError(t, err, "skip must return nil; downstream handler would have errored on missing transcript")
+		})
+	}
+
+	// Side-effect assertions: the handlers most likely to mutate state never ran.
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Nil(t, state.EndedAt, "SessionEnd skipped: EndedAt should remain nil")
+	require.Equal(t, "initial-model", state.ModelName, "ModelUpdate skipped: ModelName should not have been overwritten")
+}
+
+// TestDispatchLifecycleEvent_DoesNotSkipWhenOwnerMatches verifies that when
+// the firing agent IS the recorded owner, the event runs normally.
+func TestDispatchLifecycleEvent_DoesNotSkipWhenOwnerMatches(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	sessionID := "test-owner-match"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		AgentType:  agent.AgentTypeCursor,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}))
+
+	owner := newMockAgent()
+	owner.agentType = agent.AgentTypeCursor
+
+	require.NoError(t, DispatchLifecycleEvent(ctx, owner, &agent.Event{
+		Type:      agent.SessionEnd,
+		SessionID: sessionID,
+		Timestamp: time.Now(),
+	}))
+
+	// Owner's SessionEnd must run markSessionEnded → EndedAt is set.
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.NotNil(t, state.EndedAt, "SessionEnd from the owning agent must transition the session")
+}
+
+// TestDispatchLifecycleEvent_DoesNotSkipWhenAgentTypeUnset verifies the early
+// bootstrap window: SessionStart fired but TurnStart hasn't yet, so
+// state.AgentType is empty. The skip must NOT engage in this state.
+func TestDispatchLifecycleEvent_DoesNotSkipWhenAgentTypeUnset(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	sessionID := "test-agenttype-unset"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		AgentType:  "", // unset
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}))
+
+	ag := newMockAgent()
+	ag.agentType = agent.AgentTypeClaudeCode
+
+	require.NoError(t, DispatchLifecycleEvent(ctx, ag, &agent.Event{
+		Type:      agent.SessionEnd,
+		SessionID: sessionID,
+		Timestamp: time.Now(),
+	}))
+
+	// Without a recorded owner, the dispatcher cannot tell who is forwarded;
+	// the event must reach the handler.
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.NotNil(t, state.EndedAt, "with no recorded owner, SessionEnd must run regardless of firing agent")
+}
+
+func TestEventBypassesAgentOwnershipCheck(t *testing.T) {
+	t.Parallel()
+
+	bypassed := []agent.EventType{agent.SessionStart, agent.TurnStart}
+	for _, et := range bypassed {
+		if !eventBypassesAgentOwnershipCheck(et) {
+			t.Errorf("%s must bypass the ownership check", et)
+		}
+	}
+
+	notBypassed := []agent.EventType{
+		agent.TurnEnd,
+		agent.Compaction,
+		agent.SubagentStart,
+		agent.SubagentEnd,
+		agent.ModelUpdate,
+		agent.SessionEnd,
+	}
+	for _, et := range notBypassed {
+		if eventBypassesAgentOwnershipCheck(et) {
+			t.Errorf("%s must be subject to the ownership check", et)
+		}
+	}
+}
+
 func TestDispatchLifecycleEvent_UnknownEventType(t *testing.T) {
 	t.Parallel()
 
@@ -177,6 +385,139 @@ func newMockHookResponseAgent() *mockHookResponseAgent {
 			agentType: "Mock HRW Agent",
 		},
 	}
+}
+
+// TestHandleLifecycleSessionStart_StoresAgentTypeHint verifies the
+// SessionStart hook claims the session for its agent so a wrapper agent's
+// later TurnStart hook (e.g., Cursor IDE forwarding to Claude Code's hook
+// system) cannot re-label the session.
+func TestHandleLifecycleSessionStart_StoresAgentTypeHint(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ag := newMockHookResponseAgent()
+	ag.agentType = agent.AgentTypeCursor
+	event := &agent.Event{
+		Type:      agent.SessionStart,
+		SessionID: "test-agent-hint",
+		Timestamp: time.Now(),
+	}
+	require.NoError(t, handleLifecycleSessionStart(context.Background(), ag, event))
+
+	got := strategy.LoadAgentTypeHint(context.Background(), "test-agent-hint")
+	require.Equal(t, agent.AgentTypeCursor, got)
+}
+
+// TestHandleLifecycleSessionStart_AgentTypeHintFirstWriterWins verifies that
+// when multiple agents fire SessionStart for the same session ID, only the
+// first agent's claim is recorded AND only the first emits the banner. This
+// matches both the Cursor cross-agent and the Gemini repeat-source
+// (startup → resume) cases — the user must see the banner only once.
+func TestHandleLifecycleSessionStart_AgentTypeHintFirstWriterWins(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	sessionID := "test-agent-hint-race"
+
+	first := newMockHookResponseAgent()
+	first.agentType = agent.AgentTypeCursor
+	require.NoError(t, handleLifecycleSessionStart(ctx, first, &agent.Event{
+		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
+	}))
+	require.NotEmpty(t, first.lastMessage, "first SessionStart must emit the banner")
+
+	second := newMockHookResponseAgent()
+	second.agentType = agent.AgentTypeClaudeCode
+	require.NoError(t, handleLifecycleSessionStart(ctx, second, &agent.Event{
+		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
+	}))
+	require.Empty(t, second.lastMessage, "subsequent SessionStarts for the same session must not emit the banner again")
+
+	got := strategy.LoadAgentTypeHint(ctx, sessionID)
+	require.Equal(t, agent.AgentTypeCursor, got, "first SessionStart caller must own the session")
+}
+
+// TestHandleLifecycleSessionStart_NonWriterClaimDoesNotSuppressBanner covers
+// the Cursor + Claude Code forwarding race: Cursor IDE forwards SessionStart
+// to both .cursor/hooks.json (Cursor agent — no HookResponseWriter) and
+// .claude/settings.json (Claude Code — has HookResponseWriter). When Cursor
+// wins the ownership claim, Claude Code must still emit the banner; otherwise
+// the user sees nothing ~50% of the time (the original Bugbot finding).
+func TestHandleLifecycleSessionStart_NonWriterClaimDoesNotSuppressBanner(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	sessionID := "test-non-writer-claim"
+
+	// Non-writer agent (Cursor) wins the ownership race.
+	nonWriter := newMockAgent()
+	nonWriter.agentType = agent.AgentTypeCursor
+	require.NoError(t, handleLifecycleSessionStart(ctx, nonWriter, &agent.Event{
+		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
+	}))
+
+	// Writer-capable agent (Claude Code) fires SessionStart for the same session.
+	writer := newMockHookResponseAgent()
+	writer.agentType = agent.AgentTypeClaudeCode
+	require.NoError(t, handleLifecycleSessionStart(ctx, writer, &agent.Event{
+		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
+	}))
+	require.NotEmpty(t, writer.lastMessage,
+		"banner-capable agent must emit the banner even after a non-writer claimed ownership")
+
+	// Ownership still belongs to whoever called StoreAgentTypeHint first.
+	require.Equal(t, agent.AgentTypeCursor, strategy.LoadAgentTypeHint(ctx, sessionID),
+		"first SessionStart caller still owns the session")
+}
+
+// TestHandleLifecycleSessionStart_BannerClaimedOnce verifies that once a
+// banner-capable agent has shown the banner, a subsequent banner-capable
+// agent firing SessionStart for the same session ID does not duplicate it.
+func TestHandleLifecycleSessionStart_BannerClaimedOnce(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	sessionID := "test-banner-claimed-once"
+
+	first := newMockHookResponseAgent()
+	first.agentType = agent.AgentTypeClaudeCode
+	require.NoError(t, handleLifecycleSessionStart(ctx, first, &agent.Event{
+		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
+	}))
+	require.NotEmpty(t, first.lastMessage)
+
+	second := newMockHookResponseAgent()
+	second.agentType = agent.AgentTypeGemini
+	require.NoError(t, handleLifecycleSessionStart(ctx, second, &agent.Event{
+		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
+	}))
+	require.Empty(t, second.lastMessage,
+		"banner must not be re-emitted once a writer agent has shown it")
+}
+
+// TestHandleLifecycleSessionStart_GeminiRepeatSourceDoesNotDuplicate covers
+// the specific case the user reported: Gemini fires SessionStart twice for
+// the same session (e.g., source=startup followed by source=resume) and we
+// were emitting the banner both times.
+func TestHandleLifecycleSessionStart_GeminiRepeatSourceDoesNotDuplicate(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	sessionID := "test-gemini-repeat"
+
+	ag := newMockHookResponseAgent()
+	ag.agentType = agent.AgentTypeGemini
+
+	require.NoError(t, handleLifecycleSessionStart(ctx, ag, &agent.Event{
+		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
+	}))
+	first := ag.lastMessage
+	require.NotEmpty(t, first)
+
+	ag.lastMessage = ""
+	require.NoError(t, handleLifecycleSessionStart(ctx, ag, &agent.Event{
+		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
+	}))
+	require.Empty(t, ag.lastMessage, "second SessionStart from the same agent must not re-emit the banner")
 }
 
 func TestHandleLifecycleSessionStart_EmptyRepoWarning(t *testing.T) {
