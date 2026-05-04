@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/recap"
 )
+
+const recapTestAgentCodex = "codex"
 
 func TestRecapFlags_RangeKey(t *testing.T) {
 	t.Parallel()
@@ -23,34 +26,40 @@ func TestRecapFlags_RangeKey(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			if got := c.flags.rangeKey(); got != c.want {
-				t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+				t.Errorf("rangeKey() = %q, want %q", got, c.want)
 			}
 		})
 	}
 }
 
-func TestRecapCmd_MutuallyExclusiveRangeFlags(t *testing.T) {
+func TestRecapFlags_Mode(t *testing.T) {
 	t.Parallel()
-	cmd := newRecapCmd()
-	// Providing two range flags should be rejected.
-	cmd.SetArgs([]string{"--day", "--week"})
-	if err := cmd.ValidateArgs(nil); err != nil {
-		// ValidateArgs isn't what catches mutex; cobra does it during flag processing.
-		// This is a smoke test — full rejection path tested via runtime execution.
-		_ = err
+	cases := []struct {
+		view string
+		want recap.ViewMode
+	}{
+		{"", recap.ViewBoth},
+		{"both", recap.ViewBoth},
+		{"you", recap.ViewYou},
+		{"me", recap.ViewYou},
+		{"team", recap.ViewTeam},
+		{"contributors", recap.ViewTeam},
+	}
+	for _, c := range cases {
+		t.Run(c.view, func(t *testing.T) {
+			t.Parallel()
+			if got := (&recapFlags{view: c.view}).mode(); got != c.want {
+				t.Errorf("mode() = %q, want %q", got, c.want)
+			}
+		})
 	}
 }
 
-func TestRecapCmd_RegistersFlags(t *testing.T) {
+func TestRecapCmd_RegistersStaticFlags(t *testing.T) {
 	t.Parallel()
 	cmd := newRecapCmd()
-	want := []string{
-		"day", "week", "month", "90",
-		"claude-code", "codex", "gemini-cli", "opencode", "cursor", "factoryai-droid", "copilot-cli",
-		"format", "view",
-	}
-	for _, name := range want {
-		if f := cmd.Flag(name); f == nil {
+	for _, name := range []string{"day", "week", "month", "90", "agent", "view", "color", "insecure-http-auth"} {
+		if flag := cmd.Flag(name); flag == nil {
 			t.Errorf("flag --%s not registered", name)
 		}
 	}
@@ -58,50 +67,43 @@ func TestRecapCmd_RegistersFlags(t *testing.T) {
 
 func TestRecapFlags_AgentName(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name  string
-		flags recapFlags
-		want  string
-	}{
-		{"none", recapFlags{}, ""},
-		{"claude-code", recapFlags{claudeCode: true}, "claude-code"},
-		{"codex", recapFlags{codex: true}, "codex"},
-		{"gemini-cli", recapFlags{gemini: true}, "gemini-cli"},
-		{"opencode", recapFlags{opencode: true}, "opencode"},
-		{"cursor", recapFlags{cursor: true}, "cursor"},
-		{"factoryai-droid", recapFlags{factoryaiDroid: true}, "factoryai-droid"},
-		{"copilot-cli", recapFlags{copilotCLI: true}, "copilot-cli"},
+	if got := (&recapFlags{}).agentName(); got != recap.AgentAll {
+		t.Errorf("default agent = %q, want all", got)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			if got := c.flags.agentName(); got != c.want {
-				t.Errorf("%s: got %q, want %q", c.name, got, c.want)
-			}
-		})
+	if got := (&recapFlags{agent: " Codex "}).agentName(); got != recapTestAgentCodex {
+		t.Errorf("agent = %q, want %s", got, recapTestAgentCodex)
 	}
 }
 
-func TestResolveFormat_AccessibleEnvForcesStatic(t *testing.T) {
-	// No t.Parallel() — t.Setenv can't run in parallel tests.
-	t.Setenv("ACCESSIBLE", "1")
-	if got := resolveFormat("auto", nil); got != recapFormatStatic {
-		t.Errorf("ACCESSIBLE=1 → %q, want %q", got, recapFormatStatic)
-	}
-}
-
-func TestResolveFormat_ExplicitTUIStillRespected(t *testing.T) {
+func TestRecapFlags_ColorEnabled(t *testing.T) {
 	t.Parallel()
-	// Explicit --format tui should win over auto-detection.
-	if got := resolveFormat(recapFormatTUI, nil); got != recapFormatTUI {
-		t.Errorf("explicit tui → %q, want tui", got)
-	}
-}
+	var out bytes.Buffer
 
-func TestResolveFormat_NonTTYDefaultsToStatic(t *testing.T) {
-	t.Parallel()
-	// nil writer is not a *os.File, so isatty check fails → static.
-	if got := resolveFormat("auto", nil); got != recapFormatStatic {
-		t.Errorf("non-tty auto → %q, want static", got)
+	got, err := (&recapFlags{color: "always"}).colorEnabled(&out)
+	if err != nil {
+		t.Fatalf("colorEnabled(always) error = %v", err)
+	}
+	if !got {
+		t.Fatal("colorEnabled(always) = false, want true")
+	}
+
+	got, err = (&recapFlags{color: "never"}).colorEnabled(&out)
+	if err != nil {
+		t.Fatalf("colorEnabled(never) error = %v", err)
+	}
+	if got {
+		t.Fatal("colorEnabled(never) = true, want false")
+	}
+
+	got, err = (&recapFlags{color: "auto"}).colorEnabled(&out)
+	if err != nil {
+		t.Fatalf("colorEnabled(auto) error = %v", err)
+	}
+	if got {
+		t.Fatal("colorEnabled(auto non-tty) = true, want false")
+	}
+
+	if _, err := (&recapFlags{color: "rainbow"}).colorEnabled(&out); err == nil {
+		t.Fatal("colorEnabled(invalid) error = nil, want error")
 	}
 }
