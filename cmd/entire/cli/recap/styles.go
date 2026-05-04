@@ -17,6 +17,13 @@ const (
 	colorActivityEmpty = "240"
 	colorActivityLow   = "6"
 	colorActivityMid   = "214"
+
+	colorLabelFeature     = "42"
+	colorLabelFix         = "203"
+	colorLabelInformation = "81"
+	colorLabelPerformance = "214"
+	colorLabelRefactor    = "220"
+	colorLabelTesting     = "170"
 )
 
 type staticStyles struct {
@@ -27,7 +34,14 @@ type staticStyles struct {
 	activityMid   lipgloss.Style
 	border        lipgloss.Style
 	info          lipgloss.Style
+	labelFeature  lipgloss.Style
+	labelFix      lipgloss.Style
+	labelInfo     lipgloss.Style
+	labelPerf     lipgloss.Style
+	labelRefactor lipgloss.Style
+	labelTesting  lipgloss.Style
 	muted         lipgloss.Style
+	skill         lipgloss.Style
 	team          lipgloss.Style
 	title         lipgloss.Style
 	value         lipgloss.Style
@@ -47,7 +61,14 @@ func newStaticStyles(useColor bool) staticStyles {
 		activityMid:   renderer.NewStyle().Foreground(lipgloss.Color(colorActivityMid)),
 		border:        renderer.NewStyle().Foreground(lipgloss.Color(colorBorder)),
 		info:          renderer.NewStyle().Foreground(lipgloss.Color(colorInfo)),
+		labelFeature:  renderer.NewStyle().Foreground(lipgloss.Color(colorLabelFeature)),
+		labelFix:      renderer.NewStyle().Foreground(lipgloss.Color(colorLabelFix)),
+		labelInfo:     renderer.NewStyle().Foreground(lipgloss.Color(colorLabelInformation)),
+		labelPerf:     renderer.NewStyle().Foreground(lipgloss.Color(colorLabelPerformance)),
+		labelRefactor: renderer.NewStyle().Foreground(lipgloss.Color(colorLabelRefactor)),
+		labelTesting:  renderer.NewStyle().Foreground(lipgloss.Color(colorLabelTesting)),
 		muted:         renderer.NewStyle().Foreground(lipgloss.Color(colorMuted)),
+		skill:         renderer.NewStyle().Foreground(lipgloss.Color(colorInfo)),
 		team:          renderer.NewStyle().Foreground(lipgloss.Color(colorTeam)).Bold(true),
 		title:         renderer.NewStyle().Foreground(lipgloss.Color(colorAccent)).Bold(true),
 		value:         renderer.NewStyle().Bold(true),

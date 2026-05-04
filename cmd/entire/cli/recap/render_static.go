@@ -115,7 +115,7 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 			team = &totals
 		}
 	}
-	top := topSignals(resp, opts)
+	top := topSignals(resp, opts, styles)
 	lines := []string{opts.Range.Title(), ""}
 	if opts.View != ViewTeam {
 		lines = append(lines, fmt.Sprintf("%s   %-12s  %-15s  %s",
@@ -210,7 +210,7 @@ func qualitativeRows(prefix string, agg AgentAggregate, styles staticStyles) []s
 		rows = append(rows, "  "+styles.muted.Render(prefix+" labels")+"    "+formatLabels(agg.Labels, styles))
 	}
 	if len(agg.Skills) > 0 {
-		rows = append(rows, "  "+styles.muted.Render(prefix+" skills")+"    "+formatSkills(agg.Skills))
+		rows = append(rows, "  "+styles.muted.Render(prefix+" skills")+"    "+formatSkills(agg.Skills, styles))
 	}
 	if mix := formatToolMix(agg.ToolMix); mix != "" {
 		rows = append(rows, "  "+styles.muted.Render(prefix+" tool mix")+"  "+mix)
@@ -263,7 +263,7 @@ func sumTeam(resp *MeRecapResponse, opts RenderOptions) SummaryTotals {
 	return out
 }
 
-func topSignals(resp *MeRecapResponse, opts RenderOptions) []string {
+func topSignals(resp *MeRecapResponse, opts RenderOptions, styles staticStyles) []string {
 	agents := filteredAgents(resp, opts)
 	var parts []string
 	if len(agents) > 0 {
@@ -271,13 +271,13 @@ func topSignals(resp *MeRecapResponse, opts RenderOptions) []string {
 		if label == "" {
 			label = agents[0].AgentID
 		}
-		parts = append(parts, label)
+		parts = append(parts, styles.accent.Render(label))
 	}
 	if skill := topSkill(agents); skill != "" {
-		parts = append(parts, skill)
+		parts = append(parts, styles.skill.Render(skill))
 	}
 	if label := topLabel(agents); label != "" {
-		parts = append(parts, label)
+		parts = append(parts, labelStyle(label, styles).Render(label))
 	}
 	return parts
 }
@@ -383,18 +383,37 @@ func formatLabels(labels []LabelCount, styles staticStyles) string {
 	limit := min(len(labels), 3)
 	parts := make([]string, 0, limit)
 	for i := range limit {
-		parts = append(parts, styles.accent.Render("●")+" "+labels[i].Label)
+		parts = append(parts, labelStyle(labels[i].Label, styles).Render("● "+labels[i].Label))
 	}
 	return strings.Join(parts, "  ")
 }
 
-func formatSkills(skills []SkillCount) string {
+func formatSkills(skills []SkillCount, styles staticStyles) string {
 	limit := min(len(skills), 3)
 	parts := make([]string, 0, limit)
 	for i := range limit {
-		parts = append(parts, skills[i].Skill)
+		parts = append(parts, styles.skill.Render(skills[i].Skill))
 	}
 	return strings.Join(parts, ", ")
+}
+
+func labelStyle(name string, styles staticStyles) interface{ Render(s ...string) string } {
+	switch name {
+	case "feature_build", "enhancement":
+		return styles.labelFeature
+	case "bug_fix", "security_fix":
+		return styles.labelFix
+	case "refactor", "optimization":
+		return styles.labelRefactor
+	case "testing":
+		return styles.labelTesting
+	case "configuration", "dependencies", "documentation", "investigation":
+		return styles.labelInfo
+	case "performance":
+		return styles.labelPerf
+	default:
+		return styles.value
+	}
 }
 
 func formatToolMix(mix ToolMix) string {

@@ -113,7 +113,13 @@ func TestRenderStaticRecap_ColorWhenEnabled(t *testing.T) {
 			"codex": {
 				AgentID:    "codex",
 				AgentLabel: "Codex",
-				Me:         AgentAggregate{Sessions: 1, Checkpoints: 2, Tokens: 300},
+				Me: AgentAggregate{
+					Sessions:    1,
+					Checkpoints: 2,
+					Tokens:      300,
+					Labels:      []LabelCount{{Label: "bug_fix", Count: 1}},
+					Skills:      []SkillCount{{Skill: "code-simplifier", Count: 1}},
+				},
 			},
 		},
 	}
@@ -133,6 +139,12 @@ func TestRenderStaticRecap_ColorWhenEnabled(t *testing.T) {
 	}
 	if !strings.Contains(colored, "\x1b[1;38;5;214m█") {
 		t.Fatalf("expected peak activity cells to be highlighted:\n%s", colored)
+	}
+	if !strings.Contains(colored, "\x1b[38;5;203m● bug_fix\x1b[0m") {
+		t.Fatalf("expected labels to use semantic colors:\n%s", colored)
+	}
+	if !strings.Contains(colored, "\x1b[36mcode-simplifier\x1b[0m") {
+		t.Fatalf("expected skills to be colorized:\n%s", colored)
 	}
 
 	plain := RenderStaticRecap(resp, RenderOptions{
