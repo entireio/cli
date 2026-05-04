@@ -411,26 +411,36 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 		return fmt.Errorf("failed to marshal session state: %w", err)
 	}
 
-	// Use os.Root for traversal-resistant write of temp file.
-	// Rename is not available on os.Root, so we keep using os.Rename.
-	root, err := os.OpenRoot(s.stateDir)
-	if err != nil {
-		return fmt.Errorf("failed to open session state directory: %w", err)
-	}
-	defer root.Close()
-
+	stateFile := s.stateFilePath(state.SessionID)
 	fileName := state.SessionID + ".json"
-	tmpFileName := fileName + ".tmp"
-	if err := osroot.WriteFile(root, tmpFileName, data, 0o600); err != nil {
+
+	// Use a unique temp file per save. Concurrent hook processes can write the
+	// same session ID, so a fixed "<session>.json.tmp" path can corrupt JSON.
+	tmpFile, err := os.CreateTemp(s.stateDir, fileName+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary session state file: %w", err)
+	}
+	tmpFileName := tmpFile.Name()
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.Remove(tmpFileName)
+		}
+	}()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
 		return fmt.Errorf("failed to write session state: %w", err)
 	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close session state file: %w", err)
+	}
 
-	// Atomic rename: not available on os.Root, use os.Rename with validated paths.
-	stateFile := s.stateFilePath(state.SessionID)
-	tmpFile := stateFile + ".tmp"
-	if err := os.Rename(tmpFile, stateFile); err != nil {
+	// Atomic rename into the validated final path.
+	if err := os.Rename(tmpFileName, stateFile); err != nil {
 		return fmt.Errorf("failed to rename session state file: %w", err)
 	}
+	removeTmp = false
 	return nil
 }
 
