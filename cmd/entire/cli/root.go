@@ -85,6 +85,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newAgentGroupCmd())      // 'agent'
 	cmd.AddCommand(newAuthCmd())            // 'auth'
 	cmd.AddCommand(newDoctorCmd())          // 'doctor' (group: trace/logs/bundle)
+	cmd.AddCommand(newPluginGroupCmd())     // 'plugin'
 
 	// Top-level lifecycle and standalone commands.
 	cmd.AddCommand(newCleanCmd())

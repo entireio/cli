@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/entireio/cli/cmd/entire/cli"
+	"github.com/entireio/cli/cmd/entire/cli/plugin"
 	"github.com/spf13/cobra"
 )
 
@@ -40,6 +41,17 @@ func main() {
 		case errors.As(err, &silent):
 			// Command already printed the error
 		case strings.Contains(err.Error(), "unknown command") || strings.Contains(err.Error(), "unknown flag"):
+			handled, pluginErr := plugin.Dispatch(ctx, rootCmd, os.Args[1:])
+			if handled {
+				code := plugin.PropagateExitCode(pluginErr)
+				if code < 0 {
+					// Local failure (e.g. exec lookup) before the child ran.
+					fmt.Fprintln(rootCmd.OutOrStderr(), pluginErr)
+					code = 1
+				}
+				cancel()
+				os.Exit(code)
+			}
 			showSuggestion(rootCmd, err)
 		default:
 			fmt.Fprintln(rootCmd.OutOrStderr(), err)
