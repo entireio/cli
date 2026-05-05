@@ -103,8 +103,8 @@ func (f *recapFlags) colorEnabled(w io.Writer) (bool, error) {
 	}
 }
 
-func (f *recapFlags) useTUI(isTerminal, accessible bool) bool {
-	return isTerminal && !accessible && !f.static
+func (f *recapFlags) useTUI(isTerminal, canPrompt, accessible bool) bool {
+	return isTerminal && canPrompt && !accessible && !f.static
 }
 
 func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
@@ -127,7 +127,7 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 	}
 	rangeKey := f.rangeKey()
 	repoSlug := currentRepoSlug(ctx)
-	if f.useTUI(interactive.IsTerminalWriter(w), IsAccessibleMode()) {
+	if f.useTUI(interactive.IsTerminalWriter(w), interactive.CanPromptInteractively(), IsAccessibleMode()) {
 		return runRecapTUI(ctx, client, recapTUIOptions{
 			Range: rangeKey,
 			View:  mode,

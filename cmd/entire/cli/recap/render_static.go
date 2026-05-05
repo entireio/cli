@@ -52,8 +52,10 @@ func RenderStaticRecap(resp *MeRecapResponse, opts RenderOptions) string {
 	b.WriteString(renderControls(opts, styles))
 	b.WriteString("\n\n")
 	b.WriteString(renderSummary(resp, opts, width, styles))
-	b.WriteString("\n\n")
-	b.WriteString(renderActivity(resp, opts, width, styles))
+	if !hasAgentFilter(opts) {
+		b.WriteString("\n\n")
+		b.WriteString(renderActivity(resp, opts, width, styles))
+	}
 	b.WriteString("\n\n")
 	b.WriteString(renderAgents(resp, opts, width, styles))
 	b.WriteString("\n\n  ")
@@ -106,7 +108,7 @@ func renderViewSelector(view ViewMode, styles staticStyles) string {
 
 func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles staticStyles) string {
 	me := resp.Summary.Me
-	agentFiltered := opts.Agent != "" && opts.Agent != AgentAll
+	agentFiltered := hasAgentFilter(opts)
 	if agentFiltered || me == (SummaryTotals{}) {
 		me = sumMe(resp, opts)
 	}
@@ -145,9 +147,15 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 	if resp.Summary.RepoCount > 0 {
 		context = append(context, plural(resp.Summary.RepoCount, "repo"))
 	}
-	context = append(context, plural(resp.Summary.ActiveDays, "active day"))
+	if !agentFiltered {
+		context = append(context, plural(resp.Summary.ActiveDays, "active day"))
+	}
 	lines = append(lines, "", styles.muted.Render(strings.Join(context, " · ")))
 	return renderBox("", lines, width, styles)
+}
+
+func hasAgentFilter(opts RenderOptions) bool {
+	return opts.Agent != "" && opts.Agent != AgentAll
 }
 
 func renderActivity(resp *MeRecapResponse, opts RenderOptions, width int, styles staticStyles) string {

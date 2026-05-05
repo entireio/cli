@@ -25,11 +25,13 @@ type recapTUIOptions struct {
 }
 
 type recapDataMsg struct {
-	resp *recap.MeRecapResponse
+	requestID int
+	resp      *recap.MeRecapResponse
 }
 
 type recapErrMsg struct {
-	err error
+	requestID int
+	err       error
 }
 
 type recapTUIModel struct {
@@ -42,9 +44,10 @@ type recapTUIModel struct {
 	agent    string
 	color    bool
 
-	resp    *recap.MeRecapResponse
-	loadErr error
-	loading bool
+	resp      *recap.MeRecapResponse
+	loadErr   error
+	loading   bool
+	requestID int
 
 	viewport viewport.Model
 	width    int
@@ -71,36 +74,42 @@ func newRecapTUIModel(ctx context.Context, client *api.Client, opts recapTUIOpti
 		opts.Agent = recap.AgentAll
 	}
 	return recapTUIModel{
-		ctx:      ctx,
-		client:   client,
-		repo:     opts.Repo,
-		rangeKey: opts.Range,
-		view:     opts.View,
-		agent:    opts.Agent,
-		color:    opts.Color,
-		loading:  true,
-		width:    recap.DefaultWidth,
-		height:   24,
-		viewport: viewport.New(viewport.WithWidth(recap.DefaultWidth), viewport.WithHeight(23)),
+		ctx:       ctx,
+		client:    client,
+		repo:      opts.Repo,
+		rangeKey:  opts.Range,
+		view:      opts.View,
+		agent:     opts.Agent,
+		color:     opts.Color,
+		loading:   true,
+		requestID: 1,
+		width:     recap.DefaultWidth,
+		height:    24,
+		viewport:  viewport.New(viewport.WithWidth(recap.DefaultWidth), viewport.WithHeight(23)),
 	}
 }
 
 func (m recapTUIModel) Init() tea.Cmd {
-	return m.fetch
+	return m.fetch(m.requestID)
 }
 
-func (m recapTUIModel) fetch() tea.Msg { //nolint:ireturn // bubbletea Cmd signature requires tea.Msg return
-	start, end := m.rangeKey.Bounds(time.Now())
-	resp, err := recap.FetchMeRecap(m.ctx, m.client, start, end, m.repo, 0)
-	if err != nil {
-		return recapErrMsg{err: err}
+func (m recapTUIModel) fetch(requestID int) tea.Cmd {
+	return func() tea.Msg {
+		start, end := m.rangeKey.Bounds(time.Now())
+		resp, err := recap.FetchMeRecap(m.ctx, m.client, start, end, m.repo, 0)
+		if err != nil {
+			return recapErrMsg{requestID: requestID, err: err}
+		}
+		return recapDataMsg{requestID: requestID, resp: resp}
 	}
-	return recapDataMsg{resp: resp}
 }
 
 func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea interface
 	switch msg := msg.(type) {
 	case recapDataMsg:
+		if msg.requestID != m.requestID {
+			return m, nil
+		}
 		m.loading = false
 		m.loadErr = nil
 		m.resp = msg.resp
@@ -108,6 +117,9 @@ func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:iretu
 		return m, nil
 
 	case recapErrMsg:
+		if msg.requestID != m.requestID {
+			return m, nil
+		}
 		m.loading = false
 		m.loadErr = msg.err
 		return m, nil
@@ -127,10 +139,11 @@ func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:iretu
 		switch msg.String() {
 		case "t":
 			m.rangeKey = nextRecapRange(m.rangeKey)
+			m.requestID++
 			m.loading = true
 			m.loadErr = nil
 			m.resp = nil
-			return m.withViewport(), m.fetch
+			return m.withViewport(), m.fetch(m.requestID)
 		case "v":
 			m.view = nextRecapView(m.view)
 			return m.withViewport(), nil
@@ -138,9 +151,10 @@ func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:iretu
 			m.agent = m.nextAgent()
 			return m.withViewport(), nil
 		case "r":
+			m.requestID++
 			m.loading = true
 			m.loadErr = nil
-			return m, m.fetch
+			return m, m.fetch(m.requestID)
 		}
 		if key.Matches(msg, keys.Home) {
 			m.viewport.GotoTop()

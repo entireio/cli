@@ -104,8 +104,14 @@ func TestRenderStaticRecap_AgentFilterSummarizesFilteredAgent(t *testing.T) {
 	t.Parallel()
 	resp := &MeRecapResponse{
 		Summary: Summary{
-			Me:   SummaryTotals{Sessions: 99, Checkpoints: 99, Tokens: 99_000},
-			Team: &SummaryTotals{Sessions: 88, Checkpoints: 88, Tokens: 88_000},
+			Me:         SummaryTotals{Sessions: 99, Checkpoints: 99, Tokens: 99_000},
+			Team:       &SummaryTotals{Sessions: 88, Checkpoints: 88, Tokens: 88_000},
+			RepoCount:  1,
+			ActiveDays: 12,
+		},
+		Daily: []DailyCount{
+			{Date: "2026-04-01", Count: 9},
+			{Date: "2026-04-02", Count: 4},
 		},
 		Agents: map[string]AgentEntry{
 			"claude": {
@@ -148,6 +154,12 @@ func TestRenderStaticRecap_AgentFilterSummarizesFilteredAgent(t *testing.T) {
 	}
 	if strings.Contains(got, "99 sessions") || strings.Contains(got, "88 sessions") {
 		t.Fatalf("agent-filtered summary should not use all-agent totals:\n%s", got)
+	}
+	if strings.Contains(got, "Activity · week") {
+		t.Fatalf("agent-filtered output should not show all-agent activity:\n%s", got)
+	}
+	if strings.Contains(got, "12 active days") {
+		t.Fatalf("agent-filtered output should not show all-agent active days:\n%s", got)
 	}
 	if strings.Contains(got, "Claude Code") {
 		t.Fatalf("agent-filtered output should omit other agents:\n%s", got)

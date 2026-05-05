@@ -72,18 +72,20 @@ func TestRecapFlags_UseTUI(t *testing.T) {
 		name       string
 		flags      recapFlags
 		terminal   bool
+		canPrompt  bool
 		accessible bool
 		want       bool
 	}{
-		{name: "terminal default", terminal: true, want: true},
-		{name: "non terminal static", terminal: false, want: false},
-		{name: "static flag", flags: recapFlags{static: true}, terminal: true, want: false},
-		{name: "accessible static", terminal: true, accessible: true, want: false},
+		{name: "terminal default", terminal: true, canPrompt: true, want: true},
+		{name: "non terminal static", terminal: false, canPrompt: true, want: false},
+		{name: "cannot prompt static", terminal: true, canPrompt: false, want: false},
+		{name: "static flag", flags: recapFlags{static: true}, terminal: true, canPrompt: true, want: false},
+		{name: "accessible static", terminal: true, canPrompt: true, accessible: true, want: false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			if got := c.flags.useTUI(c.terminal, c.accessible); got != c.want {
+			if got := c.flags.useTUI(c.terminal, c.canPrompt, c.accessible); got != c.want {
 				t.Fatalf("useTUI() = %v, want %v", got, c.want)
 			}
 		})
