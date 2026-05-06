@@ -188,11 +188,11 @@ func reviewSummaryText(summary *checkpoint.Summary) string {
 		return ""
 	}
 	parts := []string{
-		compactReviewContextText(summary.Intent),
-		compactReviewContextText(summary.Outcome),
+		stringutil.CollapseWhitespace(summary.Intent),
+		stringutil.CollapseWhitespace(summary.Outcome),
 	}
 	for _, item := range summary.OpenItems {
-		if text := compactReviewContextText(item); text != "" {
+		if text := stringutil.CollapseWhitespace(item); text != "" {
 			parts = append(parts, "open: "+text)
 			break
 		}
@@ -203,7 +203,7 @@ func reviewSummaryText(summary *checkpoint.Summary) string {
 func reviewPromptText(promptContent string) string {
 	prompts := checkpoint.SplitPromptContent(promptContent)
 	for i := len(prompts) - 1; i >= 0; i-- {
-		if text := compactReviewContextText(prompts[i]); text != "" {
+		if text := stringutil.CollapseWhitespace(prompts[i]); text != "" {
 			return truncateReviewContextText(text)
 		}
 	}
@@ -218,10 +218,6 @@ func nonEmptyReviewContextParts(parts []string) []string {
 		}
 	}
 	return result
-}
-
-func compactReviewContextText(value string) string {
-	return stringutil.CollapseWhitespace(value)
 }
 
 func truncateReviewContextText(value string) string {

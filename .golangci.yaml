@@ -156,6 +156,9 @@ linters:
       - path: ^internal/sim/
         linters:
           - wrapcheck
+      - path: ^cmd/entire/cli/review/tui_model\.go$
+        linters:
+          - ireturn
       - text: "`strat` is a misspelling"
         linters:
           - misspell
