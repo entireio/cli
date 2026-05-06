@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	git "github.com/go-git/go-git/v6"
@@ -16,10 +17,16 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
-const reviewContextMaxDetailRunes = 320
+const (
+	reviewContextMaxDetailRunes  = 320
+	reviewContextMaxCheckpoints  = 20
+	reviewContextMaxCommitScans  = 200
+	reviewContextCommitSeparator = "\x1e"
+)
 
 type reviewContextSessionMetadataReader interface {
 	ReadSessionMetadata(ctx context.Context, checkpointID checkpointid.CheckpointID, sessionIndex int) (*checkpoint.CommittedMetadata, error)
@@ -34,10 +41,10 @@ func reviewCheckpointContext(ctx context.Context, worktreeRoot string, scopeBase
 		return ""
 	}
 
-	commits, err := reviewContextGitLines(ctx, worktreeRoot, "rev-list", scopeBaseRef+"..HEAD")
-	if err != nil || len(commits) == 0 {
+	messages, commitsTruncated, err := reviewContextCommitMessages(ctx, worktreeRoot, scopeBaseRef, reviewContextMaxCommitScans)
+	if err != nil || len(messages) == 0 {
 		if err != nil {
-			logging.Debug(ctx, "review checkpoint context: list commits", slog.String("error", err.Error()))
+			logging.Debug(ctx, "review checkpoint context: list commit messages", slog.String("error", err.Error()))
 		}
 		return ""
 	}
@@ -53,30 +60,43 @@ func reviewCheckpointContext(ctx context.Context, worktreeRoot string, scopeBase
 		logging.Debug(ctx, "review checkpoint context: no v2 fetch remote", slog.String("error", urlErr.Error()))
 	}
 	v2 := checkpoint.NewV2GitStore(repo, v2URL)
+	preferCheckpointsV2 := settings.IsCheckpointsV2Enabled(ctx)
 
 	var lines []string
 	seen := map[checkpointid.CheckpointID]bool{}
-	for _, commit := range commits {
-		message := reviewContextGitString(ctx, worktreeRoot, "show", "-s", "--format=%B", commit)
-		cpID, ok := trailers.ParseCheckpoint(message)
-		if !ok || seen[cpID] {
-			continue
-		}
-		seen[cpID] = true
+	omittedCheckpoints := 0
+	for _, message := range messages {
+		for _, cpID := range trailers.ParseAllCheckpoints(message) {
+			if seen[cpID] {
+				continue
+			}
+			seen[cpID] = true
 
-		reader, summary, err := checkpoint.ResolveCommittedReaderForCheckpoint(ctx, cpID, v1, v2, settings.IsCheckpointsV2Enabled(ctx))
-		if err != nil || summary == nil {
-			lines = append(lines, fmt.Sprintf("- %s: checkpoint metadata unavailable", cpID))
-			continue
+			if len(lines) >= reviewContextMaxCheckpoints {
+				omittedCheckpoints++
+				continue
+			}
+
+			reader, summary, err := checkpoint.ResolveCommittedReaderForCheckpoint(ctx, cpID, v1, v2, preferCheckpointsV2)
+			if err != nil || summary == nil {
+				lines = append(lines, fmt.Sprintf("- %s: checkpoint metadata unavailable", cpID))
+				continue
+			}
+			detail := reviewCheckpointDetail(ctx, reader, cpID, summary)
+			if detail == "" {
+				detail = "no summary or prompt recorded"
+			}
+			lines = append(lines, fmt.Sprintf("- %s: %s", cpID, detail))
 		}
-		detail := reviewCheckpointDetail(ctx, reader, cpID, summary)
-		if detail == "" {
-			detail = "no summary or prompt recorded"
-		}
-		lines = append(lines, fmt.Sprintf("- %s: %s", cpID, detail))
 	}
 	if len(lines) == 0 {
 		return ""
+	}
+	if omittedCheckpoints > 0 {
+		lines = append(lines, fmt.Sprintf("- ... %d more %s omitted", omittedCheckpoints, reviewContextCheckpointNoun(omittedCheckpoints)))
+	}
+	if commitsTruncated {
+		lines = append(lines, fmt.Sprintf("- ... older commits omitted after scanning latest %d commits", reviewContextMaxCommitScans))
 	}
 
 	return "Checkpoint context from commits in scope:\n" +
@@ -90,21 +110,21 @@ func reviewCheckpointDetail(
 	cpID checkpointid.CheckpointID,
 	summary *checkpoint.CheckpointSummary,
 ) string {
+	sessions := make([]reviewContextSessionDetail, 0, len(summary.Sessions))
 	for i := len(summary.Sessions) - 1; i >= 0; i-- {
 		meta, err := readReviewContextSessionMetadata(ctx, reader, cpID, i)
 		if err != nil || meta == nil || session.Kind(meta.Kind).IsReview() {
 			continue
 		}
+		sessions = append(sessions, reviewContextSessionDetail{
+			index: i,
+		})
 		if text := reviewSummaryText(meta.Summary); text != "" {
 			return "summary: " + text
 		}
 	}
-	for i := len(summary.Sessions) - 1; i >= 0; i-- {
-		meta, err := readReviewContextSessionMetadata(ctx, reader, cpID, i)
-		if err != nil || meta == nil || session.Kind(meta.Kind).IsReview() {
-			continue
-		}
-		prompts, err := readReviewContextSessionPrompts(ctx, reader, cpID, i)
+	for _, sessionDetail := range sessions {
+		prompts, err := readReviewContextSessionPrompts(ctx, reader, cpID, sessionDetail.index)
 		if err == nil {
 			if text := reviewPromptText(prompts); text != "" {
 				return "prompt: " + text
@@ -112,6 +132,10 @@ func reviewCheckpointDetail(
 		}
 	}
 	return ""
+}
+
+type reviewContextSessionDetail struct {
+	index int
 }
 
 func readReviewContextSessionMetadata(
@@ -197,7 +221,7 @@ func nonEmptyReviewContextParts(parts []string) []string {
 }
 
 func compactReviewContextText(value string) string {
-	return strings.Join(strings.Fields(value), " ")
+	return stringutil.CollapseWhitespace(value)
 }
 
 func truncateReviewContextText(value string) string {
@@ -208,23 +232,48 @@ func truncateReviewContextText(value string) string {
 	return strings.TrimSpace(string(runes[:reviewContextMaxDetailRunes-3])) + "..."
 }
 
-func reviewContextGitLines(ctx context.Context, repoRoot string, args ...string) ([]string, error) {
+func reviewContextCheckpointNoun(count int) string {
+	if count == 1 {
+		return "checkpoint"
+	}
+	return "checkpoints"
+}
+
+func reviewContextCommitMessages(ctx context.Context, repoRoot string, scopeBaseRef string, maxCommits int) ([]string, bool, error) {
+	if maxCommits <= 0 {
+		return nil, false, nil
+	}
+	records, err := reviewContextGitRecords(
+		ctx,
+		repoRoot,
+		"log",
+		"--max-count="+strconv.Itoa(maxCommits+1),
+		"--format="+reviewContextCommitSeparator+"%B",
+		scopeBaseRef+"..HEAD",
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	truncated := len(records) > maxCommits
+	if truncated {
+		records = records[:maxCommits]
+	}
+	return records, truncated, nil
+}
+
+func reviewContextGitRecords(ctx context.Context, repoRoot string, args ...string) ([]string, error) {
 	full := append([]string{"-C", repoRoot}, args...)
 	output, err := exec.CommandContext(ctx, "git", full...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
-	trimmed := strings.TrimSpace(string(output))
-	if trimmed == "" {
-		return nil, nil
+	parts := strings.Split(string(output), reviewContextCommitSeparator)
+	records := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			records = append(records, trimmed)
+		}
 	}
-	return strings.Split(trimmed, "\n"), nil
-}
-
-func reviewContextGitString(ctx context.Context, repoRoot string, args ...string) string {
-	lines, err := reviewContextGitLines(ctx, repoRoot, args...)
-	if err != nil {
-		return ""
-	}
-	return strings.Join(lines, "\n")
+	return records, nil
 }

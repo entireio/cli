@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,73 @@ func TestReviewCheckpointContext_IncludesSummaryAndPromptFallback(t *testing.T) 
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("review checkpoint context contains %q:\n%s", unwanted, got)
 		}
+	}
+}
+
+func TestReviewCheckpointContext_CapsCheckpointLines(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := newReviewContextRepo(t)
+	var oldestCheckpointID string
+	for i := range reviewContextMaxCheckpoints + 1 {
+		checkpointID := fmt.Sprintf("c%011x", i)
+		if i == 0 {
+			oldestCheckpointID = checkpointID
+		}
+		writeReviewContextCheckpoint(t, repoRoot, checkpointID, reviewContextCheckpointOptions{
+			filesTouched: []string{fmt.Sprintf("checkpoint-%02d.go", i)},
+			agentType:    agent.AgentTypeClaudeCode,
+			summary: &checkpoint.Summary{
+				Intent: fmt.Sprintf("checkpoint summary %02d", i),
+			},
+			transcript: `{"event":"test"}` + "\n",
+		})
+		commitReviewContextChange(
+			t,
+			repoRoot,
+			fmt.Sprintf("checkpoint-%02d.go", i),
+			fmt.Sprintf("checkpoint %02d\n", i),
+			fmt.Sprintf("checkpoint change %02d", i),
+			"Entire-Checkpoint: "+checkpointID,
+		)
+	}
+
+	got := reviewCheckpointContext(context.Background(), repoRoot, "master")
+	if count := strings.Count(got, "summary: checkpoint summary"); count != reviewContextMaxCheckpoints {
+		t.Fatalf("checkpoint context summary count = %d, want %d:\n%s", count, reviewContextMaxCheckpoints, got)
+	}
+	if strings.Contains(got, oldestCheckpointID) {
+		t.Fatalf("checkpoint context includes oldest checkpoint %s despite cap:\n%s", oldestCheckpointID, got)
+	}
+	if !strings.Contains(got, "1 more checkpoint omitted") {
+		t.Fatalf("checkpoint context missing truncation notice:\n%s", got)
+	}
+}
+
+func TestReviewCheckpointDetail_ReadsSessionMetadataOnceForPromptFallback(t *testing.T) {
+	t.Parallel()
+
+	cpID := checkpointid.MustCheckpointID("d1b2c3d4e5f6")
+	reader := &countingReviewContextReader{
+		metadata: checkpoint.CommittedMetadata{
+			CheckpointID: cpID,
+			SessionID:    "session-1",
+		},
+		prompts: "Fallback prompt from checkpoint",
+	}
+	summary := &checkpoint.CheckpointSummary{
+		Sessions: []checkpoint.SessionFilePaths{{}},
+	}
+
+	got := reviewCheckpointDetail(context.Background(), reader, cpID, summary)
+	if got != "prompt: Fallback prompt from checkpoint" {
+		t.Fatalf("reviewCheckpointDetail() = %q", got)
+	}
+	if reader.metadataCalls != 1 {
+		t.Fatalf("metadata calls = %d, want 1", reader.metadataCalls)
+	}
+	if reader.promptCalls != 1 {
+		t.Fatalf("prompt calls = %d, want 1", reader.promptCalls)
 	}
 }
 
@@ -217,4 +285,52 @@ printf 'smoke review ok\n'
 	if err := os.WriteFile(filepath.Join(stubDir, "claude"), []byte(script), 0o700); err != nil {
 		t.Fatalf("write claude stub: %v", err)
 	}
+}
+
+type countingReviewContextReader struct {
+	metadata      checkpoint.CommittedMetadata
+	prompts       string
+	metadataErr   error
+	promptErr     error
+	metadataCalls int
+	promptCalls   int
+}
+
+func (r *countingReviewContextReader) ReadCommitted(
+	context.Context,
+	checkpointid.CheckpointID,
+) (*checkpoint.CheckpointSummary, error) {
+	return nil, checkpoint.ErrCheckpointNotFound
+}
+
+func (r *countingReviewContextReader) ReadSessionContent(
+	context.Context,
+	checkpointid.CheckpointID,
+	int,
+) (*checkpoint.SessionContent, error) {
+	return &checkpoint.SessionContent{
+		Metadata: r.metadata,
+		Prompts:  r.prompts,
+	}, nil
+}
+
+func (r *countingReviewContextReader) ReadSessionMetadata(
+	context.Context,
+	checkpointid.CheckpointID,
+	int,
+) (*checkpoint.CommittedMetadata, error) {
+	r.metadataCalls++
+	return &r.metadata, r.metadataErr
+}
+
+func (r *countingReviewContextReader) ReadSessionMetadataAndPrompts(
+	context.Context,
+	checkpointid.CheckpointID,
+	int,
+) (*checkpoint.SessionContent, error) {
+	r.promptCalls++
+	return &checkpoint.SessionContent{
+		Metadata: r.metadata,
+		Prompts:  r.prompts,
+	}, r.promptErr
 }
