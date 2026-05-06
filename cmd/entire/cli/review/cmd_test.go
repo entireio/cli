@@ -55,7 +55,7 @@ func TestReviewCmd_Help(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"review", "--edit", "--agent", "attach", "Lab command"} {
+	for _, want := range []string{"review", "--edit", "--agent", "attach", "Labs entry"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--help output missing %q: %s", want, out)
 		}

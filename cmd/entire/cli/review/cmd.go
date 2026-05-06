@@ -103,7 +103,7 @@ func NewCommand(deps Deps) *cobra.Command {
 		Long: `Run the review skills configured in .entire/settings.json against
 the current branch. On first run, an interactive picker writes the config.
 
-Lab command: review is experimental. We are actively refining it based on user
+Labs entry: review is experimental. We are actively refining it based on user
 feedback.
 
 The review session is recorded as part of the next checkpoint, so the

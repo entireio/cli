@@ -7,13 +7,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type labCommandInfo struct {
+type experimentalCommandInfo struct {
 	Name       string
 	Invocation string
 	Summary    string
 }
 
-var labCommands = []labCommandInfo{
+var experimentalCommands = []experimentalCommandInfo{
 	{
 		Name:       "review",
 		Invocation: "entire review",
@@ -21,49 +21,49 @@ var labCommands = []labCommandInfo{
 	},
 }
 
-func newLabCmd() *cobra.Command {
+func newLabsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "lab",
+		Use:   "labs",
 		Short: "Explore experimental Entire workflows",
-		Long:  labOverview(),
+		Long:  labsOverview(),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return nil
 			}
-			err := fmt.Errorf("unknown lab topic %q", args[0])
+			err := fmt.Errorf("unknown labs topic %q", args[0])
 			fmt.Fprintf(cmd.ErrOrStderr(),
-				"%v\n\nRun `entire lab` to see available lab commands, or run `entire review --help` for command-specific help.\n",
+				"%v\n\nRun `entire labs` to see available experimental commands, or run `entire review --help` for command-specific help.\n",
 				err)
 			return NewSilentError(err)
 		},
 		Run: func(cmd *cobra.Command, _ []string) {
-			fmt.Fprint(cmd.OutOrStdout(), labOverview())
+			fmt.Fprint(cmd.OutOrStdout(), labsOverview())
 		},
 	}
 	return cmd
 }
 
-func labOverview() string {
-	if len(labCommands) == 0 {
-		return `Lab commands
+func labsOverview() string {
+	if len(experimentalCommands) == 0 {
+		return `Labs
 
-No lab commands are available in this build.
+No experimental commands are available in this build.
 `
 	}
 
-	return `Lab commands
+	return `Labs
 
 These are newer Entire workflows we are actively refining. They are available
 to try now, but details may change based on feedback.
 
-Available lab commands:
-` + renderLabCommands(labCommands) + `
+Available experimental commands:
+` + renderExperimentalCommands(experimentalCommands) + `
 Try:
   entire review --help
 `
 }
 
-func renderLabCommands(commands []labCommandInfo) string {
+func renderExperimentalCommands(commands []experimentalCommandInfo) string {
 	var out strings.Builder
 	for _, info := range commands {
 		out.WriteString("  ")

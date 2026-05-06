@@ -86,7 +86,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newAgentGroupCmd())      // 'agent'
 	cmd.AddCommand(newAuthCmd())            // 'auth'
 	cmd.AddCommand(newDoctorCmd())          // 'doctor' (group: trace/logs/bundle)
-	cmd.AddCommand(newLabCmd())             // 'lab' (experimental workflow discovery)
+	cmd.AddCommand(newLabsCmd())            // 'labs' (experimental workflow discovery)
 
 	// Top-level lifecycle and standalone commands.
 	cmd.AddCommand(cliReview.NewCommand(buildReviewDeps(newReviewAttachCmd()))) // hidden during maturation; runs configured review skills
