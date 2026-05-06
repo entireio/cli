@@ -1,6 +1,7 @@
 package review
 
 import (
+	"strings"
 	"testing"
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -60,14 +61,35 @@ func TestComposeReviewPrompt_AllSectionsWithScope(t *testing.T) {
 	}
 }
 
+func TestComposeReviewPrompt_IncludesCheckpointContext(t *testing.T) {
+	t.Parallel()
+	cfg := reviewtypes.RunConfig{
+		Skills:            []string{"/x"},
+		ScopeBaseRef:      "main",
+		CheckpointContext: "Commits in scope (newest first):\n  abc123 checkpoint data\n",
+	}
+	got := ComposeReviewPrompt(cfg)
+	for _, want := range []string{
+		"/x",
+		"Scope: review only the commits unique to this branch vs main.",
+		"Commits in scope (newest first):",
+		"abc123 checkpoint data",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestComposeReviewPrompt_PromptOverrideIsVerbatim(t *testing.T) {
 	t.Parallel()
 	cfg := reviewtypes.RunConfig{
-		Skills:         []string{"/review"},
-		AlwaysPrompt:   "always-on instructions",
-		PerRunPrompt:   "per-run focus",
-		ScopeBaseRef:   "main",
-		PromptOverride: "custom prompt\nleave untouched",
+		Skills:            []string{"/review"},
+		AlwaysPrompt:      "always-on instructions",
+		PerRunPrompt:      "per-run focus",
+		ScopeBaseRef:      "main",
+		CheckpointContext: "Commits in scope (newest first):\n  abc123 checkpoint data\n",
+		PromptOverride:    "custom prompt\nleave untouched",
 	}
 	got := ComposeReviewPrompt(cfg)
 	want := "custom prompt\nleave untouched"

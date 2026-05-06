@@ -91,6 +91,13 @@ type RunConfig struct {
 	// base for `git diff` operations the agent may perform.
 	ScopeBaseRef string
 
+	// CheckpointContext is best-effort context derived from checkpoints in the
+	// branch review scope. It is appended to generated prompts so every agent
+	// can use checkpoint IDs, file summaries, and transcript lookup commands
+	// while reviewing. PromptOverride remains verbatim and does not receive
+	// this context.
+	CheckpointContext string
+
 	// StartingSHA is HEAD at invocation time, propagated to the lifecycle
 	// hook via ENTIRE_REVIEW_STARTING_SHA so checkpoint metadata records
 	// the commit that was reviewed.

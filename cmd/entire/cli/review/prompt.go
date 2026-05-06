@@ -45,6 +45,9 @@ func ComposeReviewPrompt(cfg reviewtypes.RunConfig) string {
 	if cfg.ScopeBaseRef != "" {
 		sections = append(sections, "Scope: review only the commits unique to this branch vs "+cfg.ScopeBaseRef+".")
 	}
+	if trimmed := strings.TrimRight(cfg.CheckpointContext, "\n\r "); trimmed != "" {
+		sections = append(sections, trimmed)
+	}
 
 	return strings.Join(sections, "\n\n")
 }

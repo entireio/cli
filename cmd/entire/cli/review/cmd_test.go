@@ -327,7 +327,7 @@ type stubDispatchReviewer struct {
 }
 
 func (r *stubDispatchReviewer) Name() string { return r.name }
-func (r *stubDispatchReviewer) Start(_ context.Context, _ reviewtypes.RunConfig) (reviewtypes.Process, error) {
+func (r *stubDispatchReviewer) Start(context.Context, reviewtypes.RunConfig) (reviewtypes.Process, error) {
 	return &stubDispatchProcess{}, nil
 }
 

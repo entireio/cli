@@ -55,6 +55,11 @@ type Deps struct {
 	// Injected to avoid an import cycle: review → checkpoint → codex → review.
 	HeadHasReviewCheckpoint func(ctx context.Context) (bool, string)
 
+	// ReviewCheckpointContext returns best-effort checkpoint context for the
+	// branch review scope. Injected from the cli package because checkpoint
+	// readers cannot be imported here without cycling through agent reviewers.
+	ReviewCheckpointContext func(ctx context.Context, worktreeRoot string, scopeBaseRef string) string
+
 	// ReviewerFor maps an agent registry name to its AgentReviewer
 	// implementation. Returns nil for non-launchable agents (cursor, opencode,
 	// factoryai-droid, copilot-cli). Injected to break the import cycle:
@@ -323,12 +328,17 @@ func runSingleAgentPath(
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
 	scopeBaseRef := detectScope(ctx, worktreeRoot, out)
+	checkpointContext := ""
+	if deps.ReviewCheckpointContext != nil {
+		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
+	}
 
 	runCfg := reviewtypes.RunConfig{
-		PromptOverride: cfg.Prompt,
-		Skills:         cfg.Skills,
-		ScopeBaseRef:   scopeBaseRef,
-		StartingSHA:    headSHA,
+		PromptOverride:    cfg.Prompt,
+		Skills:            cfg.Skills,
+		ScopeBaseRef:      scopeBaseRef,
+		CheckpointContext: checkpointContext,
+		StartingSHA:       headSHA,
 	}
 
 	// 7. Branch on launchability.
@@ -407,6 +417,10 @@ func runMultiAgentPath(
 	}
 
 	scopeBaseRef := detectScope(ctx, worktreeRoot, out)
+	checkpointContext := ""
+	if deps.ReviewCheckpointContext != nil {
+		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
+	}
 
 	// Build per-agent reviewers with individual RunConfigs (each agent has
 	// its own skills + always-prompt from s.Review[name]).
@@ -428,11 +442,12 @@ func runMultiAgentPath(
 		reviewers = append(reviewers, &perAgentConfiguredReviewer{
 			inner: reviewer,
 			cfg: reviewtypes.RunConfig{
-				PromptOverride: agentCfg.Prompt,
-				Skills:         agentCfg.Skills,
-				PerRunPrompt:   picked.PerRun,
-				ScopeBaseRef:   scopeBaseRef,
-				StartingSHA:    headSHA,
+				PromptOverride:    agentCfg.Prompt,
+				Skills:            agentCfg.Skills,
+				PerRunPrompt:      picked.PerRun,
+				ScopeBaseRef:      scopeBaseRef,
+				CheckpointContext: checkpointContext,
+				StartingSHA:       headSHA,
 			},
 		})
 	}

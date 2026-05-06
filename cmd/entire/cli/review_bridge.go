@@ -40,6 +40,7 @@ func buildReviewDeps(attachCmd *cobra.Command) cliReview.Deps {
 			return NewSilentError(err)
 		},
 		HeadHasReviewCheckpoint: headHasReviewCheckpoint,
+		ReviewCheckpointContext: reviewCheckpointContext,
 		ReviewerFor:             launchableReviewerFor,
 		PromptForAgentFn:        nil, // use real PromptForAgent
 		AttachCmd:               attachCmd,
