@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os/exec"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -24,6 +26,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/storage"
 	"github.com/spf13/cobra"
 )
 
@@ -194,7 +197,7 @@ type migratedFullSession struct {
 	content      *checkpoint.SessionContent
 }
 
-// migrateCheckpointsV2 returns the /full/<n> refs the packer wrote so callers
+// migrateCheckpointsV2 returns the /full/<n> refs migration wrote so callers
 // can pass them as exclusions to the generation-metadata repair pass.
 func migrateCheckpointsV2(ctx context.Context, repo *git.Repository, v1Store *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, progressOut io.Writer, force bool) (*migrateResult, []plumbing.ReferenceName, error) {
 	v1List, err := v1Store.ListCommitted(ctx)
@@ -222,7 +225,10 @@ func migrateCheckpointsV2(ctx context.Context, repo *git.Repository, v1Store *ch
 		return nil, nil, fmt.Errorf("build v2 /full/* presence index: %w", err)
 	}
 
-	packer := newGenerationPacker(repo, v2Store)
+	batchSize := migrateFullBatchSize()
+	pendingFull := make([]migratedFullCheckpoint, 0, batchSize)
+	var writtenRefs []plumbing.ReferenceName
+	nextGeneration := 0
 
 	for _, info := range v1List {
 		fullCheckpoint, outcome, migrateErr := migrateOneCheckpoint(ctx, repo, v1Store, v2Store, info, force, fullArtifactsIndex)
@@ -251,8 +257,24 @@ func migrateCheckpointsV2(ctx context.Context, repo *git.Repository, v1Store *ch
 		}
 
 		if fullCheckpoint != nil {
-			if packErr := packer.add(ctx, *fullCheckpoint); packErr != nil {
-				return result, packer.writtenRefs, fmt.Errorf("failed to pack migrated raw transcripts: %w", packErr)
+			pendingFull = append(pendingFull, *fullCheckpoint)
+			if len(pendingFull) == batchSize {
+				if nextGeneration == 0 {
+					// Resolve the archive slot only when the first full batch is ready;
+					// force migration may prune existing archived refs earlier in the loop.
+					next, nextErr := v2Store.NextGenerationNumber()
+					if nextErr != nil {
+						return result, writtenRefs, fmt.Errorf("list archived v2 generations: %w", nextErr)
+					}
+					nextGeneration = next
+				}
+				refName := checkpoint.ArchivedGenerationRefName(nextGeneration)
+				if packErr := writeMigratedFullGeneration(ctx, repo, refName, pendingFull); packErr != nil {
+					return result, writtenRefs, fmt.Errorf("failed to pack migrated raw transcripts: %w", packErr)
+				}
+				writtenRefs = append(writtenRefs, refName)
+				nextGeneration++
+				pendingFull = make([]migratedFullCheckpoint, 0, batchSize)
 			}
 		}
 		result.migrated++
@@ -261,13 +283,30 @@ func migrateCheckpointsV2(ctx context.Context, repo *git.Repository, v1Store *ch
 
 	progress.Finish()
 	stopFinalize := startSpinner(progressOut, "Packing migrated raw transcripts")
-	if err := packer.finalize(ctx, !fullCurrentExistsBefore); err != nil {
-		stopFinalize(false)
-		return result, packer.writtenRefs, fmt.Errorf("failed to pack migrated raw transcripts: %w", err)
+	if len(pendingFull) > 0 {
+		if err := writeMigratedFinalFullCurrent(ctx, repo, v2Store, pendingFull); err != nil {
+			stopFinalize(false)
+			return result, writtenRefs, fmt.Errorf("failed to pack migrated raw transcripts: %w", err)
+		}
+		// If /full/current already had checkpoints, this final migration write can
+		// briefly push the generation past the threshold before rotation. That
+		// mirrors other v2 ref-merge cases where a generation may exceed the soft
+		// threshold by a small amount.
+		if refName, rotated, err := v2Store.RotateCurrentGenerationIfNeeded(ctx, batchSize); err != nil {
+			stopFinalize(false)
+			return result, writtenRefs, fmt.Errorf("failed to rotate migrated full/current generation: %w", err)
+		} else if rotated {
+			writtenRefs = append(writtenRefs, refName)
+		}
+	} else if len(writtenRefs) > 0 && !fullCurrentExistsBefore {
+		if err := ensureEmptyV2FullCurrent(ctx, repo); err != nil {
+			stopFinalize(false)
+			return result, writtenRefs, fmt.Errorf("failed to pack migrated raw transcripts: %w", err)
+		}
 	}
 	stopFinalize(true)
 
-	return result, packer.writtenRefs, nil
+	return result, writtenRefs, nil
 }
 
 func logCheckpointMigrationSkip(ctx context.Context, checkpointID id.CheckpointID, reason string, err error) {
@@ -278,6 +317,9 @@ func logCheckpointMigrationSkip(ctx context.Context, checkpointID id.CheckpointI
 	)
 }
 
+// sortMigratableCheckpoints sorts oldest-first so archived generations
+// preserve chronological order. Zero timestamps sort last; CheckpointID
+// breaks ties for deterministic reruns.
 func sortMigratableCheckpoints(checkpoints []checkpoint.CommittedInfo) {
 	sort.SliceStable(checkpoints, func(i, j int) bool {
 		left := checkpoints[i].CreatedAt
@@ -428,89 +470,125 @@ func migrateOneCheckpoint(ctx context.Context, repo *git.Repository, v1Store *ch
 	return fullCheckpoint, outcome, nil
 }
 
-// generationPacker buffers up to batchSize migrated checkpoints and flushes
-// them into a single archived /full/<n> ref each time the buffer fills, so
-// peak heap stays bounded by one batch worth of transcripts instead of
-// growing with the total v1 list. The next generation number is resolved
-// lazily on first flush so force-migration prune steps that remove existing
-// archived refs are visible before we pick the next slot.
-type generationPacker struct {
-	repo           *git.Repository
-	v2Store        *checkpoint.V2GitStore
-	batchSize      int
-	nextGeneration int
-	numbered       bool
-	pending        []migratedFullCheckpoint
-	flushed        bool
-	// writtenRefs records every /full/<n> ref this packer creates so the
-	// caller can exclude them from the generation-metadata repair pass.
-	writtenRefs []plumbing.ReferenceName
-}
-
-func newGenerationPacker(repo *git.Repository, v2Store *checkpoint.V2GitStore) *generationPacker {
+func migrateFullBatchSize() int {
 	batchSize := migrateMaxCheckpointsPerGeneration
 	if batchSize <= 0 {
-		batchSize = checkpoint.DefaultMaxCheckpointsPerGeneration
+		return checkpoint.DefaultMaxCheckpointsPerGeneration
 	}
-	return &generationPacker{
-		repo:      repo,
-		v2Store:   v2Store,
-		batchSize: batchSize,
-	}
+	return batchSize
 }
 
-func (p *generationPacker) add(ctx context.Context, cp migratedFullCheckpoint) error {
-	p.pending = append(p.pending, cp)
-	if len(p.pending) >= p.batchSize {
-		return p.flush(ctx)
-	}
-	return nil
-}
-
-func (p *generationPacker) flush(ctx context.Context) error {
-	if len(p.pending) == 0 {
+func writeMigratedFinalFullCurrent(ctx context.Context, repo *git.Repository, v2Store *checkpoint.V2GitStore, checkpoints []migratedFullCheckpoint) error {
+	if len(checkpoints) == 0 {
 		return nil
 	}
-	if !p.numbered {
-		next, err := p.v2Store.NextGenerationNumber()
+
+	refName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
+	parentHash, rootTreeHash, err := v2Store.GetRefState(refName)
+	if err != nil && !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return fmt.Errorf("read v2 full/current ref: %w", err)
+	}
+
+	entries := make(map[string]object.TreeEntry)
+	if rootTreeHash != plumbing.ZeroHash {
+		rootTree, err := repo.TreeObject(rootTreeHash)
 		if err != nil {
-			return fmt.Errorf("list archived v2 generations: %w", err)
+			return fmt.Errorf("read v2 full/current tree: %w", err)
 		}
-		p.nextGeneration = next
-		p.numbered = true
+		if err := checkpoint.FlattenTree(repo, rootTree, "", entries); err != nil {
+			return fmt.Errorf("flatten v2 full/current tree: %w", err)
+		}
+		delete(entries, paths.GenerationFileName)
 	}
-	refName := plumbing.ReferenceName(fmt.Sprintf("%s%013d", paths.V2FullRefPrefix, p.nextGeneration))
-	if err := writeMigratedFullGeneration(ctx, p.repo, refName, p.pending); err != nil {
-		return err
+
+	// Evict any pre-existing raw transcript artifacts for the sessions we're
+	// about to write so a shrinking chunk count can't leave stale .N files
+	// behind from a prior migration of the same checkpoint.
+	for _, cp := range checkpoints {
+		for _, session := range cp.sessions {
+			evictMigratedRawArtifacts(entries, cp.checkpointID, session.sessionIndex)
+		}
 	}
-	p.writtenRefs = append(p.writtenRefs, refName)
-	p.nextGeneration++
-	p.pending = nil
-	p.flushed = true
+	pendingEntries, err := buildMigratedFullEntrySet(ctx, repo, checkpoints)
+	if err != nil {
+		return fmt.Errorf("write migrated full/current entries: %w", err)
+	}
+	pendingEntries.mergeInto(entries)
+
+	treeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, entries)
+	if err != nil {
+		return fmt.Errorf("build migrated full/current tree: %w", err)
+	}
+
+	commitHash, err := checkpoint.CreateCommit(ctx, repo, treeHash, parentHash,
+		"Write migrated partial generation\n",
+		migrateAuthorName, migrateAuthorEmail)
+	if err != nil {
+		return fmt.Errorf("create migrated full/current commit: %w", err)
+	}
+
+	return updateV2FullCurrentRef(ctx, repo, parentHash, commitHash)
+}
+
+func updateV2FullCurrentRef(ctx context.Context, repo *git.Repository, expectedHash, newHash plumbing.Hash) error {
+	refName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
+	newRef := plumbing.NewHashReference(refName, newHash)
+	if expectedHash == plumbing.ZeroHash {
+		return createV2FullCurrentRefIfMissing(ctx, repo, refName, newHash)
+	}
+
+	oldRef := plumbing.NewHashReference(refName, expectedHash)
+	if err := repo.Storer.CheckAndSetReference(newRef, oldRef); err != nil {
+		return fmt.Errorf("update %s: %w", refName, err)
+	}
 	return nil
 }
 
-func (p *generationPacker) finalize(ctx context.Context, ensureEmptyCurrent bool) error {
-	if err := p.flush(ctx); err != nil {
-		return err
+func createV2FullCurrentRefIfMissing(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, newHash plumbing.Hash) error {
+	root, err := repoWorktreeRoot(repo)
+	if err != nil {
+		return fmt.Errorf("resolve worktree root for %s update: %w", refName, err)
 	}
-	if p.flushed && ensureEmptyCurrent {
-		return ensureEmptyV2FullCurrent(ctx, p.repo)
+
+	cmd := exec.CommandContext(ctx, "git", "update-ref", "--no-deref", refName.String(), newHash.String(), "")
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
 	}
-	return nil
+
+	if currentRef, refErr := repo.Reference(refName, true); refErr == nil {
+		if currentRef.Hash() == newHash {
+			return nil
+		}
+		return fmt.Errorf("update %s: %w", refName, storage.ErrReferenceHasChanged)
+	}
+	if len(output) > 0 {
+		return fmt.Errorf("update %s: %w: %s", refName, err, strings.TrimSpace(string(output)))
+	}
+	return fmt.Errorf("update %s: %w", refName, err)
+}
+
+func repoWorktreeRoot(repo *git.Repository) (string, error) {
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return "", fmt.Errorf("open worktree: %w", err)
+	}
+	root := worktree.Filesystem.Root()
+	if root == "" {
+		return "", errors.New("repository worktree filesystem has no root path")
+	}
+	return root, nil
 }
 
 func writeMigratedFullGeneration(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, checkpoints []migratedFullCheckpoint) error {
-	entries := make(map[string]object.TreeEntry)
-
-	for _, cp := range checkpoints {
-		for _, session := range cp.sessions {
-			if err := writeMigratedFullSessionEntries(ctx, repo, cp, session, entries); err != nil {
-				return fmt.Errorf("write full session entries for checkpoint %s session %d: %w", cp.checkpointID, session.sessionIndex, err)
-			}
-		}
+	fullEntries, err := buildMigratedFullEntrySet(ctx, repo, checkpoints)
+	if err != nil {
+		return fmt.Errorf("write migrated generation entries: %w", err)
 	}
 
+	entries := make(map[string]object.TreeEntry, len(fullEntries.rawEntries)+len(fullEntries.taskEntries))
+	fullEntries.mergeInto(entries)
 	treeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, entries)
 	if err != nil {
 		return fmt.Errorf("build migrated generation tree: %w", err)
@@ -576,57 +654,103 @@ func generationMetadataFromMigratedSessions(checkpoints []migratedFullCheckpoint
 	return gen, found
 }
 
-func writeMigratedFullSessionEntries(ctx context.Context, repo *git.Repository, cp migratedFullCheckpoint, session migratedFullSession, entries map[string]object.TreeEntry) error {
+type migratedFullEntrySet struct {
+	rawEntries  []object.TreeEntry
+	taskEntries []object.TreeEntry
+}
+
+// mergeInto merges this entry set into dst. Raw entries override existing
+// entries at the same path; task entries do not override.
+func (s migratedFullEntrySet) mergeInto(dst map[string]object.TreeEntry) {
+	for _, entry := range s.rawEntries {
+		dst[entry.Name] = entry
+	}
+	for _, entry := range s.taskEntries {
+		if _, exists := dst[entry.Name]; exists {
+			continue
+		}
+		dst[entry.Name] = entry
+	}
+}
+
+// evictMigratedRawArtifacts removes any pre-existing raw transcript blobs
+// (`transcript.jsonl`, chunk-suffixed variants, and the hash file) for the
+// given checkpoint session from entries.
+func evictMigratedRawArtifacts(entries map[string]object.TreeEntry, checkpointID id.CheckpointID, sessionIndex int) {
+	sessionPath := fmt.Sprintf("%s/%d/", checkpointID.Path(), sessionIndex)
+	transcriptPath := sessionPath + paths.V2RawTranscriptFileName
+	hashPath := sessionPath + paths.V2RawTranscriptHashFileName
+	for key := range entries {
+		if key == transcriptPath || strings.HasPrefix(key, transcriptPath+".") || key == hashPath {
+			delete(entries, key)
+		}
+	}
+}
+
+func buildMigratedFullEntrySet(ctx context.Context, repo *git.Repository, checkpoints []migratedFullCheckpoint) (migratedFullEntrySet, error) {
+	var entries migratedFullEntrySet
+	for _, cp := range checkpoints {
+		for _, session := range cp.sessions {
+			sessionEntries, err := buildMigratedFullSessionEntrySet(ctx, repo, cp, session)
+			if err != nil {
+				return migratedFullEntrySet{}, fmt.Errorf("checkpoint %s session %d: %w", cp.checkpointID, session.sessionIndex, err)
+			}
+			entries.rawEntries = append(entries.rawEntries, sessionEntries.rawEntries...)
+			entries.taskEntries = append(entries.taskEntries, sessionEntries.taskEntries...)
+		}
+	}
+	return entries, nil
+}
+
+func buildMigratedFullSessionEntrySet(ctx context.Context, repo *git.Repository, cp migratedFullCheckpoint, session migratedFullSession) (migratedFullEntrySet, error) {
 	sessionPath := fmt.Sprintf("%s/%d/", cp.checkpointID.Path(), session.sessionIndex)
 	transcript := session.content.Transcript
+	rawHashPath := sessionPath + paths.V2RawTranscriptHashFileName
+	var entries migratedFullEntrySet
 
 	chunks, err := agent.ChunkTranscript(ctx, transcript, session.content.Metadata.Agent)
 	if err != nil {
-		return fmt.Errorf("chunk transcript: %w", err)
+		return migratedFullEntrySet{}, fmt.Errorf("chunk transcript: %w", err)
 	}
 	for i, chunk := range chunks {
 		blobHash, blobErr := checkpoint.CreateBlobFromContent(repo, chunk)
 		if blobErr != nil {
-			return fmt.Errorf("create transcript blob: %w", blobErr)
+			return migratedFullEntrySet{}, fmt.Errorf("create transcript blob: %w", blobErr)
 		}
 		path := sessionPath + agent.ChunkFileName(paths.V2RawTranscriptFileName, i)
-		entries[path] = object.TreeEntry{
+		entries.rawEntries = append(entries.rawEntries, object.TreeEntry{
 			Name: path,
 			Mode: filemode.Regular,
 			Hash: blobHash,
-		}
+		})
 	}
 
-	hashPath := sessionPath + paths.V2RawTranscriptHashFileName
 	contentHash := fmt.Sprintf("sha256:%x", sha256.Sum256(transcript))
 	hashBlob, err := checkpoint.CreateBlobFromContent(repo, []byte(contentHash))
 	if err != nil {
-		return fmt.Errorf("create transcript hash blob: %w", err)
+		return migratedFullEntrySet{}, fmt.Errorf("create transcript hash blob: %w", err)
 	}
-	entries[hashPath] = object.TreeEntry{
-		Name: hashPath,
+	entries.rawEntries = append(entries.rawEntries, object.TreeEntry{
+		Name: rawHashPath,
 		Mode: filemode.Regular,
 		Hash: hashBlob,
-	}
+	})
 
 	for _, taskTreeHash := range cp.taskTrees[session.sessionIndex] {
 		taskTree, treeErr := repo.TreeObject(taskTreeHash)
 		if treeErr != nil {
-			return fmt.Errorf("read task metadata tree: %w", treeErr)
+			return migratedFullEntrySet{}, fmt.Errorf("read task metadata tree: %w", treeErr)
 		}
 		taskEntries := make(map[string]object.TreeEntry)
 		if flattenErr := checkpoint.FlattenTree(repo, taskTree, sessionPath+"tasks", taskEntries); flattenErr != nil {
-			return fmt.Errorf("flatten task metadata tree: %w", flattenErr)
+			return migratedFullEntrySet{}, fmt.Errorf("flatten task metadata tree: %w", flattenErr)
 		}
-		for path, entry := range taskEntries {
-			if _, exists := entries[path]; exists {
-				continue
-			}
-			entries[path] = entry
+		for _, entry := range taskEntries {
+			entries.taskEntries = append(entries.taskEntries, entry)
 		}
 	}
 
-	return nil
+	return entries, nil
 }
 
 func ensureEmptyV2FullCurrent(ctx context.Context, repo *git.Repository) error {
@@ -1071,8 +1195,8 @@ func resolveV1CheckpointTree(repo *git.Repository, cpID id.CheckpointID) (*objec
 // collectMissingFullCheckpointForPacking returns a migratedFullCheckpoint
 // scoped to the sessions that lack /full/* artifacts on this v2 checkpoint,
 // reading their content from v1 so the caller can hand it to the same
-// generationPacker fresh migrations use. Returns errAlreadyMigrated when
-// every session is already packed.
+// batched archive flow used for fresh migrations. Returns errAlreadyMigrated
+// when every session is already packed.
 func collectMissingFullCheckpointForPacking(
 	ctx context.Context,
 	repo *git.Repository,

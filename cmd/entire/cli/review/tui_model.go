@@ -108,9 +108,7 @@ func (m reviewTUIModel) Init() tea.Cmd {
 }
 
 // Update handles all incoming messages.
-//
-//nolint:ireturn // tea.Model is an interface; required by Bubble Tea
-func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea interface
 	switch msg := msg.(type) {
 	case agentEventMsg:
 		return m.handleAgentEvent(msg)
@@ -168,9 +166,7 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // handleAgentEvent processes an agentEventMsg, updating the relevant row.
-//
-//nolint:ireturn // tea.Model is an interface; required by Bubble Tea
-func (m reviewTUIModel) handleAgentEvent(msg agentEventMsg) (tea.Model, tea.Cmd) {
+func (m reviewTUIModel) handleAgentEvent(msg agentEventMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea interface
 	idx, ok := m.rowIdx[msg.agent]
 	if !ok {
 		return m, nil
@@ -233,9 +229,7 @@ func (m reviewTUIModel) handleAgentEvent(msg agentEventMsg) (tea.Model, tea.Cmd)
 }
 
 // handleKey processes keyboard input.
-//
-//nolint:ireturn // tea.Model is an interface; required by Bubble Tea
-func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea interface
 	// Any key after finished dismisses.
 	if m.finished {
 		return m, tea.Quit

@@ -22,6 +22,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/storage"
 )
 
 // DefaultMaxCheckpointsPerGeneration is the rotation threshold.
@@ -407,6 +408,11 @@ func MergeGenerationTime(gen *GenerationMetadata, found *bool, ts time.Time) {
 // generationRefWidth is the zero-padded width of archived generation ref names.
 const generationRefWidth = 13
 
+// ArchivedGenerationRefName returns the full ref name for an archived generation number.
+func ArchivedGenerationRefName(number int) plumbing.ReferenceName {
+	return plumbing.ReferenceName(fmt.Sprintf("%s%0*d", paths.V2FullRefPrefix, generationRefWidth, number))
+}
+
 // GenerationRefPattern matches exactly 13 digits (the archived generation ref suffix format).
 var GenerationRefPattern = regexp.MustCompile(`^\d{13}$`)
 
@@ -460,52 +466,58 @@ func (s *V2GitStore) NextGenerationNumber() (int, error) {
 	return int(maxNum) + 1, nil
 }
 
-// rotateGeneration archives the current /full/current generation and creates
-// a fresh orphan. This is a 2-phase operation:
-//
-//  1. Archive: determine the next generation number, create a new ref pointing
-//     to the current /full/current commit.
-//  2. Reset: create a fresh orphan commit with an empty tree + seed generation.json,
-//     point /full/current at it.
-func (s *V2GitStore) rotateGeneration(ctx context.Context) error {
+// RotateCurrentGenerationIfNeeded archives /full/current when it has reached
+// maxCheckpoints. It returns the archived ref name when this call completes
+// a rotation.
+func (s *V2GitStore) RotateCurrentGenerationIfNeeded(ctx context.Context, maxCheckpoints int) (plumbing.ReferenceName, bool, error) {
+	if maxCheckpoints <= 0 {
+		maxCheckpoints = s.maxCheckpoints()
+	}
+
+	// This is a 2-phase operation:
+	//
+	//  1. Archive: determine the next generation number, create a new ref pointing
+	//     to the current /full/current commit.
+	//  2. Reset: create a fresh orphan commit with an empty tree, point
+	//     /full/current at it.
 	refName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
 
 	// Guard against concurrent rotation: re-read /full/current and check if
 	// it's still above the threshold. If not, another instance already rotated.
 	_, currentTreeHash, err := s.GetRefState(refName)
 	if err != nil {
-		return fmt.Errorf("rotation: failed to read /full/current: %w", err)
+		return "", false, fmt.Errorf("rotation: failed to read /full/current: %w", err)
 	}
 	checkpointCount, err := s.CountCheckpointsInTree(currentTreeHash)
 	if err != nil {
-		return fmt.Errorf("rotation: failed to count checkpoints: %w", err)
+		return "", false, fmt.Errorf("rotation: failed to count checkpoints: %w", err)
 	}
-	if checkpointCount < s.maxCheckpoints() {
-		return nil
+	if checkpointCount < maxCheckpoints {
+		return "", false, nil
 	}
 
 	currentRef, err := s.repo.Reference(refName, true)
 	if err != nil {
-		return fmt.Errorf("rotation: failed to read /full/current ref: %w", err)
+		return "", false, fmt.Errorf("rotation: failed to read /full/current ref: %w", err)
 	}
 
 	archiveNumber, err := s.NextGenerationNumber()
 	if err != nil {
-		return fmt.Errorf("rotation: failed to determine next generation number: %w", err)
+		return "", false, fmt.Errorf("rotation: failed to determine next generation number: %w", err)
 	}
 
 	// Phase 1: Archive — create ref pointing to the current commit.
 	// If the archive ref already exists, another instance already rotated — skip.
-	archiveRefName := plumbing.ReferenceName(fmt.Sprintf("%s%0*d", paths.V2FullRefPrefix, generationRefWidth, archiveNumber))
+	archiveRefName := ArchivedGenerationRefName(archiveNumber)
 	if _, refErr := s.repo.Reference(archiveRefName, true); refErr == nil {
 		logging.Info(ctx, "rotation: archive ref already exists, skipping",
 			slog.String("archive_ref", string(archiveRefName)),
 		)
-		return nil
+		return archiveRefName, false, nil
 	}
 	archiveRef := plumbing.NewHashReference(archiveRefName, currentRef.Hash())
 	if err := s.repo.Storer.SetReference(archiveRef); err != nil {
-		return fmt.Errorf("rotation: failed to create archived ref %s: %w", archiveRefName, err)
+		return "", false, fmt.Errorf("rotation: failed to create archived ref %s: %w", archiveRefName, err)
 	}
 
 	// Verify /full/current hasn't been advanced by another writer since we read it.
@@ -513,46 +525,49 @@ func (s *V2GitStore) rotateGeneration(ctx context.Context) error {
 	// and the next writer will trigger rotation again.
 	postArchiveRef, err := s.repo.Reference(refName, true)
 	if err != nil {
-		return fmt.Errorf("rotation: failed to re-read /full/current: %w", err)
+		return "", false, fmt.Errorf("rotation: failed to re-read /full/current: %w", err)
 	}
 	if postArchiveRef.Hash() != currentRef.Hash() {
 		logging.Info(ctx, "rotation: /full/current changed during rotation, aborting reset")
-		return nil
+		return archiveRefName, false, nil
 	}
 
 	// Write generation.json to the current tree before archiving.
 	gen := s.computeGenerationTimestamps(currentTreeHash)
 	archiveTreeHash, err := s.AddGenerationJSONToTree(currentTreeHash, gen)
 	if err != nil {
-		return fmt.Errorf("rotation: failed to add generation.json: %w", err)
+		return "", false, fmt.Errorf("rotation: failed to add generation.json: %w", err)
 	}
 
 	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 	archiveCommitHash, err := CreateCommit(ctx, s.repo, archiveTreeHash, currentRef.Hash(), "Archive generation", authorName, authorEmail)
 	if err != nil {
-		return fmt.Errorf("rotation: failed to create archive commit: %w", err)
+		return "", false, fmt.Errorf("rotation: failed to create archive commit: %w", err)
 	}
 
 	// Update the archive ref to point to the commit with generation.json
 	archiveRef = plumbing.NewHashReference(archiveRefName, archiveCommitHash)
 	if err := s.repo.Storer.SetReference(archiveRef); err != nil {
-		return fmt.Errorf("rotation: failed to update archived ref %s: %w", archiveRefName, err)
+		return "", false, fmt.Errorf("rotation: failed to update archived ref %s: %w", archiveRefName, err)
 	}
 
 	// Phase 2: Create fresh orphan /full/current (empty tree, no generation.json)
 	emptyTreeHash, err := BuildTreeFromEntries(ctx, s.repo, make(map[string]object.TreeEntry))
 	if err != nil {
-		return fmt.Errorf("rotation: failed to build empty tree: %w", err)
+		return "", false, fmt.Errorf("rotation: failed to build empty tree: %w", err)
 	}
 
 	orphanCommitHash, err := CreateCommit(ctx, s.repo, emptyTreeHash, plumbing.ZeroHash, "Start generation", authorName, authorEmail)
 	if err != nil {
-		return fmt.Errorf("rotation: failed to create orphan commit: %w", err)
+		return "", false, fmt.Errorf("rotation: failed to create orphan commit: %w", err)
 	}
 
-	orphanRef := plumbing.NewHashReference(refName, orphanCommitHash)
-	if err := s.repo.Storer.SetReference(orphanRef); err != nil {
-		return fmt.Errorf("rotation: failed to reset /full/current: %w", err)
+	reset, err := s.resetFullCurrentRefIfUnchanged(ctx, refName, postArchiveRef, orphanCommitHash)
+	if err != nil {
+		return "", false, err
+	}
+	if !reset {
+		return archiveRefName, false, nil
 	}
 
 	logging.Info(ctx, "generation rotation complete",
@@ -560,5 +575,22 @@ func (s *V2GitStore) rotateGeneration(ctx context.Context) error {
 		slog.String("archive_ref", string(archiveRefName)),
 	)
 
-	return nil
+	return archiveRefName, true, nil
+}
+
+func (s *V2GitStore) resetFullCurrentRefIfUnchanged(ctx context.Context, refName plumbing.ReferenceName, expectedRef *plumbing.Reference, newHash plumbing.Hash) (bool, error) {
+	newRef := plumbing.NewHashReference(refName, newHash)
+	if err := s.repo.Storer.CheckAndSetReference(newRef, expectedRef); err != nil {
+		if errors.Is(err, storage.ErrReferenceHasChanged) {
+			logging.Info(ctx, "rotation: /full/current changed before reset, leaving current ref intact")
+			return false, nil
+		}
+		return false, fmt.Errorf("rotation: failed to reset /full/current: %w", err)
+	}
+	return true, nil
+}
+
+func (s *V2GitStore) rotateGeneration(ctx context.Context) error {
+	_, _, err := s.RotateCurrentGenerationIfNeeded(ctx, s.maxCheckpoints())
+	return err
 }
