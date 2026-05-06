@@ -27,12 +27,11 @@ type SinkComposeInputs struct {
 }
 
 type SingleAgentSinkComposeInputs struct {
-	Out               io.Writer
-	IsTTY             bool
-	CanPrompt         bool
-	AgentName         string
-	CancelRun         context.CancelFunc
-	SynthesisProvider SynthesisProvider
+	Out       io.Writer
+	IsTTY     bool
+	CanPrompt bool
+	AgentName string
+	CancelRun context.CancelFunc
 }
 
 // ExposedComposeMultiAgentSinks exposes composeMultiAgentSinks for tests.

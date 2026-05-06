@@ -387,8 +387,9 @@ func TestRunReview_ConfigPromptAugmentsSelectedSkills(t *testing.T) {
 		},
 	}
 
+	out := &bytes.Buffer{}
 	cmd := review.NewCommand(deps)
-	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetOut(out)
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{})
 
@@ -403,43 +404,6 @@ func TestRunReview_ConfigPromptAugmentsSelectedSkills(t *testing.T) {
 	}
 	if len(reviewer.got.Skills) != 1 || reviewer.got.Skills[0] != "/review" {
 		t.Fatalf("Skills = %v, want [/review]", reviewer.got.Skills)
-	}
-}
-
-func TestRunReview_SingleAgentNonTTYPrintsRunningLine(t *testing.T) {
-	setupCmdTestRepo(t)
-
-	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		"claude-code": {Skills: []string{"/review"}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	reviewer := &captureRunConfigReviewer{name: "claude-code"}
-	deps := review.Deps{
-		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
-			return []types.AgentName{"claude-code"}
-		},
-		NewSilentError: func(err error) error { return err },
-		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
-			return false, ""
-		},
-		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
-			if agentName == "claude-code" {
-				return reviewer
-			}
-			return nil
-		},
-	}
-
-	out := &bytes.Buffer{}
-	cmd := review.NewCommand(deps)
-	cmd.SetOut(out)
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{})
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("unexpected error: %v", err)
 	}
 	if !strings.Contains(out.String(), "Running review with claude-code...") {
 		t.Fatalf("output missing running line:\n%s", out.String())
@@ -751,7 +715,6 @@ func TestComposeSingleAgentSinks(t *testing.T) {
 	t.Parallel()
 
 	noopCancel := func() {}
-	provider := &stubCmdSynthesisProvider{}
 
 	tests := []struct {
 		name       string
@@ -759,7 +722,6 @@ func TestComposeSingleAgentSinks(t *testing.T) {
 		canPrompt  bool
 		wantTUI    bool
 		wantDump   bool
-		wantSynth  bool
 		wantTotal  int
 		wantOutput string
 	}{
@@ -793,12 +755,11 @@ func TestComposeSingleAgentSinks(t *testing.T) {
 
 			out := &bytes.Buffer{}
 			sinks := review.ExposedComposeSingleAgentSinks(review.SingleAgentSinkComposeInputs{
-				Out:               out,
-				IsTTY:             tt.isTTY,
-				CanPrompt:         tt.canPrompt,
-				AgentName:         "agent-a",
-				CancelRun:         noopCancel,
-				SynthesisProvider: provider,
+				Out:       out,
+				IsTTY:     tt.isTTY,
+				CanPrompt: tt.canPrompt,
+				AgentName: "agent-a",
+				CancelRun: noopCancel,
 			})
 			if got := len(sinks); got != tt.wantTotal {
 				t.Fatalf("len(sinks)=%d, want %d", got, tt.wantTotal)
@@ -819,8 +780,8 @@ func TestComposeSingleAgentSinks(t *testing.T) {
 			if hasDump != tt.wantDump {
 				t.Errorf("DumpSink present=%v, want %v", hasDump, tt.wantDump)
 			}
-			if hasSynth != tt.wantSynth {
-				t.Errorf("SynthesisSink present=%v, want %v", hasSynth, tt.wantSynth)
+			if hasSynth {
+				t.Error("SynthesisSink should not be present for single-agent reviews")
 			}
 			if tt.wantOutput != "" && !strings.Contains(out.String(), tt.wantOutput) {
 				t.Errorf("output missing %q:\n%s", tt.wantOutput, out.String())
