@@ -501,7 +501,7 @@ func BuildReviewPickerFields(
 
 	text := huh.NewText().
 		Title("Additional instructions (optional)").
-		Description("Used verbatim as the review prompt when set. Leave blank to use the default 'run these skills in order' template.")
+		Description("Added after selected skills. If no skills are selected, this becomes the full review prompt.")
 	if promptOut != nil {
 		*promptOut = previousPrompt
 		text = text.Value(promptOut)

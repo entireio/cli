@@ -204,9 +204,9 @@ type ReviewConfig struct {
 	// for this agent. May be empty when Prompt carries the full request.
 	Skills []string `json:"skills,omitempty"`
 
-	// Prompt, when non-empty, is used verbatim as the review prompt
-	// instead of the skills-composed template. Lets users include
-	// context (e.g. "focus on security issues, then run /X").
+	// Prompt, when non-empty, carries saved review instructions. When
+	// Skills is non-empty it is appended after the selected skills; when
+	// Skills is empty it is the full prompt for prompt-only review configs.
 	Prompt string `json:"prompt,omitempty"`
 }
 

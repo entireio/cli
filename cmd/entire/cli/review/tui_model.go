@@ -1,7 +1,7 @@
 // Package review — see env.go for package-level rationale.
 //
 // tui_model.go provides reviewTUIModel, the Bubble Tea Model for the
-// multi-agent review dashboard. The model renders a per-agent status table
+// review dashboard. The model renders a per-agent status table
 // during the run and supports Ctrl+O drill-in mode for inspecting one agent's
 // live event buffer on the alt screen.
 package review
@@ -48,7 +48,7 @@ type runFinishedMsg struct {
 // tickMsg triggers spinner and duration column updates.
 type tickMsg time.Time
 
-// reviewTUIModel is the Bubble Tea model for the multi-agent review dashboard.
+// reviewTUIModel is the Bubble Tea model for the review dashboard.
 type reviewTUIModel struct {
 	rows         []agentRow
 	rowIdx       map[string]int // agent name → row index (O(1) lookup)

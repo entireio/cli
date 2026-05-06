@@ -347,6 +347,105 @@ func (p *stubDispatchProcess) Wait() error { return nil }
 var _ reviewtypes.AgentReviewer = (*stubDispatchReviewer)(nil)
 var _ reviewtypes.Process = (*stubDispatchProcess)(nil)
 
+type captureRunConfigReviewer struct {
+	name string
+	got  reviewtypes.RunConfig
+}
+
+func (r *captureRunConfigReviewer) Name() string { return r.name }
+func (r *captureRunConfigReviewer) Start(_ context.Context, cfg reviewtypes.RunConfig) (reviewtypes.Process, error) {
+	r.got = cfg
+	return &stubDispatchProcess{}, nil
+}
+
+func TestRunReview_ConfigPromptAugmentsSelectedSkills(t *testing.T) {
+	setupCmdTestRepo(t)
+
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		"claude-code": {
+			Skills: []string{"/review"},
+			Prompt: "Focus on auth regressions.",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewer := &captureRunConfigReviewer{name: "claude-code"}
+	deps := review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{"claude-code"}
+		},
+		NewSilentError: func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			if agentName == "claude-code" {
+				return reviewer
+			}
+			return nil
+		},
+	}
+
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reviewer.got.PromptOverride != "" {
+		t.Fatalf("PromptOverride = %q, want empty so skills still run", reviewer.got.PromptOverride)
+	}
+	if reviewer.got.AlwaysPrompt != "Focus on auth regressions." {
+		t.Fatalf("AlwaysPrompt = %q, want saved prompt as additional instructions", reviewer.got.AlwaysPrompt)
+	}
+	if len(reviewer.got.Skills) != 1 || reviewer.got.Skills[0] != "/review" {
+		t.Fatalf("Skills = %v, want [/review]", reviewer.got.Skills)
+	}
+}
+
+func TestRunReview_SingleAgentNonTTYPrintsRunningLine(t *testing.T) {
+	setupCmdTestRepo(t)
+
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		"claude-code": {Skills: []string{"/review"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewer := &captureRunConfigReviewer{name: "claude-code"}
+	deps := review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{"claude-code"}
+		},
+		NewSilentError: func(err error) error { return err },
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			if agentName == "claude-code" {
+				return reviewer
+			}
+			return nil
+		},
+	}
+
+	out := &bytes.Buffer{}
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out.String(), "Running review with claude-code...") {
+		t.Fatalf("output missing running line:\n%s", out.String())
+	}
+}
+
 // TestDispatchFork_TwoLaunchableNoOverride verifies that when 2+ launchable
 // agents are configured and --agent is empty, the multi-picker is invoked
 // and RunMulti is called (not the single-agent path).
@@ -643,6 +742,91 @@ func TestComposeMultiAgentSinks(t *testing.T) {
 			}
 			if hasSynth != tt.wantSynth {
 				t.Errorf("SynthesisSink present=%v, want %v", hasSynth, tt.wantSynth)
+			}
+		})
+	}
+}
+
+func TestComposeSingleAgentSinks(t *testing.T) {
+	t.Parallel()
+
+	noopCancel := func() {}
+	provider := &stubCmdSynthesisProvider{}
+
+	tests := []struct {
+		name       string
+		isTTY      bool
+		canPrompt  bool
+		wantTUI    bool
+		wantDump   bool
+		wantSynth  bool
+		wantTotal  int
+		wantOutput string
+	}{
+		{
+			name:       "non-tty prints running line and uses dump only",
+			wantDump:   true,
+			wantTotal:  1,
+			wantOutput: "Running review with agent-a...",
+		},
+		{
+			name:      "tty uses tui and dump",
+			isTTY:     true,
+			canPrompt: true,
+			wantTUI:   true,
+			wantDump:  true,
+			wantTotal: 2,
+		},
+		{
+			name:       "tty without prompt falls back to running line",
+			isTTY:      true,
+			canPrompt:  false,
+			wantDump:   true,
+			wantTotal:  1,
+			wantOutput: "Running review with agent-a...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			out := &bytes.Buffer{}
+			sinks := review.ExposedComposeSingleAgentSinks(review.SingleAgentSinkComposeInputs{
+				Out:               out,
+				IsTTY:             tt.isTTY,
+				CanPrompt:         tt.canPrompt,
+				AgentName:         "agent-a",
+				CancelRun:         noopCancel,
+				SynthesisProvider: provider,
+			})
+			if got := len(sinks); got != tt.wantTotal {
+				t.Fatalf("len(sinks)=%d, want %d", got, tt.wantTotal)
+			}
+			_, hasTUI := review.ExposedFindTUISink(sinks)
+			if hasTUI != tt.wantTUI {
+				t.Errorf("findTUISink found=%v, want %v", hasTUI, tt.wantTUI)
+			}
+			var hasDump, hasSynth bool
+			for _, s := range sinks {
+				switch s.(type) {
+				case review.DumpSink:
+					hasDump = true
+				case review.SynthesisSink:
+					hasSynth = true
+				}
+			}
+			if hasDump != tt.wantDump {
+				t.Errorf("DumpSink present=%v, want %v", hasDump, tt.wantDump)
+			}
+			if hasSynth != tt.wantSynth {
+				t.Errorf("SynthesisSink present=%v, want %v", hasSynth, tt.wantSynth)
+			}
+			if tt.wantOutput != "" && !strings.Contains(out.String(), tt.wantOutput) {
+				t.Errorf("output missing %q:\n%s", tt.wantOutput, out.String())
+			}
+			if tt.wantOutput == "" && out.Len() != 0 {
+				t.Errorf("expected no pre-run output, got:\n%s", out.String())
 			}
 		})
 	}

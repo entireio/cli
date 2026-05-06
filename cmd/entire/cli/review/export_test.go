@@ -26,6 +26,15 @@ type SinkComposeInputs struct {
 	PerRunPrompt      string
 }
 
+type SingleAgentSinkComposeInputs struct {
+	Out               io.Writer
+	IsTTY             bool
+	CanPrompt         bool
+	AgentName         string
+	CancelRun         context.CancelFunc
+	SynthesisProvider SynthesisProvider
+}
+
 // ExposedComposeMultiAgentSinks exposes composeMultiAgentSinks for tests.
 func ExposedComposeMultiAgentSinks(in SinkComposeInputs) []reviewtypes.Sink {
 	return composeMultiAgentSinks(multiAgentSinkInputs{
@@ -37,6 +46,17 @@ func ExposedComposeMultiAgentSinks(in SinkComposeInputs) []reviewtypes.Sink {
 		synthesisProvider: in.SynthesisProvider,
 		promptYN:          in.PromptYN,
 		perRunPrompt:      in.PerRunPrompt,
+	})
+}
+
+// ExposedComposeSingleAgentSinks exposes composeSingleAgentSinks for tests.
+func ExposedComposeSingleAgentSinks(in SingleAgentSinkComposeInputs) []reviewtypes.Sink {
+	return composeSingleAgentSinks(singleAgentSinkInputs{
+		out:       in.Out,
+		isTTY:     in.IsTTY,
+		canPrompt: in.CanPrompt,
+		agentName: in.AgentName,
+		cancelRun: in.CancelRun,
 	})
 }
 

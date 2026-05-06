@@ -30,11 +30,41 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 // buildCodexReviewCmd builds the exec.Cmd for a codex review run.
 // Exposed at package level for test inspection of argv, stdin, and env.
 func buildCodexReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
-	prompt := review.ComposeReviewPrompt(cfg)
-	cmd := exec.CommandContext(ctx, "codex", "exec", "--skip-git-repo-check", "-")
+	promptCfg := cfg
+	args := []string{"exec", "--skip-git-repo-check", "-"}
+	if usesCodexBuiltinReview(cfg.Skills) {
+		promptCfg.Skills = withoutCodexBuiltinReview(cfg.Skills)
+		args = []string{"exec", "review", "--skip-git-repo-check"}
+		if cfg.ScopeBaseRef != "" {
+			args = append(args, "--base", cfg.ScopeBaseRef)
+		}
+		args = append(args, "-")
+	}
+	prompt := review.ComposeReviewPrompt(promptCfg)
+	cmd := exec.CommandContext(ctx, "codex", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "codex", cfg, prompt)
 	return cmd
+}
+
+func usesCodexBuiltinReview(skills []string) bool {
+	for _, skill := range skills {
+		if skill == "/review" {
+			return true
+		}
+	}
+	return false
+}
+
+func withoutCodexBuiltinReview(skills []string) []string {
+	out := make([]string, 0, len(skills))
+	for _, skill := range skills {
+		if skill == "/review" {
+			continue
+		}
+		out = append(out, skill)
+	}
+	return out
 }
 
 // parseCodexOutput wraps the reader with the chrome filter and converts

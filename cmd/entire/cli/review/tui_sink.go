@@ -1,10 +1,9 @@
 // Package review — see env.go for package-level rationale.
 //
 // tui_sink.go provides TUISink, a Sink implementation that renders a Bubble
-// Tea status dashboard during a multi-agent review run and supports Ctrl+O
+// Tea status dashboard during a review run and supports Ctrl+O
 // drill-in mode for inspecting one agent's live event buffer. Used in
-// interactive (TTY) multi-agent runs; non-TTY runs and single-agent runs use
-// DumpSink instead.
+// interactive (TTY) runs; non-TTY runs use DumpSink instead.
 package review
 
 import (

@@ -86,6 +86,42 @@ func TestCodexReviewer_ArgvShape(t *testing.T) {
 	}
 }
 
+func TestCodexReviewer_BuiltinReviewUsesExecReview(t *testing.T) {
+	t.Parallel()
+	cfg := reviewtypes.RunConfig{
+		Skills:            []string{"/review"},
+		AlwaysPrompt:      "Focus on auth regressions.",
+		ScopeBaseRef:      "main",
+		CheckpointContext: "Commits in scope (newest first):\n  abc123 summary\n",
+	}
+	cmd := buildCodexReviewCmd(context.Background(), cfg)
+
+	want := []string{wantCodexAgentName, "exec", "review", "--skip-git-repo-check", "--base", "main", "-"}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("len(Args) = %d, want %d: %v", len(cmd.Args), len(want), cmd.Args)
+	}
+	for i, w := range want {
+		if cmd.Args[i] != w {
+			t.Errorf("Args[%d] = %q, want %q", i, cmd.Args[i], w)
+		}
+	}
+
+	prompt := readCodexCmdStdin(t, cmd)
+	if strings.Contains(prompt, "/review") {
+		t.Fatalf("builtin review prompt should not include /review when using codex exec review:\n%s", prompt)
+	}
+	for _, wantText := range []string{
+		"Focus on auth regressions.",
+		"Scope: review only the commits unique to this branch vs main.",
+		"Commits in scope (newest first):",
+		"abc123 summary",
+	} {
+		if !strings.Contains(prompt, wantText) {
+			t.Fatalf("builtin review prompt missing %q:\n%s", wantText, prompt)
+		}
+	}
+}
+
 func TestCodexReviewer_NoBinaryRequiredAtConstruction(t *testing.T) {
 	// No t.Parallel — uses t.Setenv.
 	t.Setenv("PATH", "")
@@ -254,6 +290,15 @@ func drainCodexEvents(ch <-chan reviewtypes.Event) {
 	for ev := range ch {
 		_ = ev
 	}
+}
+
+func readCodexCmdStdin(t *testing.T, cmd *exec.Cmd) string {
+	t.Helper()
+	b, err := io.ReadAll(cmd.Stdin)
+	if err != nil {
+		t.Fatalf("read stdin: %v", err)
+	}
+	return string(b)
 }
 
 func envToMap(env []string) map[string]string {
