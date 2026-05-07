@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/huh/v2"
@@ -53,17 +54,24 @@ func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string) err
 		snapshotSize = info.Size()
 	}
 
+	// Single owner of the Close() call. Either the cancel goroutine fires
+	// it (to unblock io.ReadAll) or the defer fires it (normal path);
+	// sync.Once prevents the double close that would otherwise trip the
+	// race detector under heavy fd reuse.
+	var closeOnce sync.Once
+	closeFn := func() { closeOnce.Do(func() { _ = f.Close() }) }
+
 	closeOnDone := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = f.Close()
+			closeFn()
 		case <-closeOnDone:
 		}
 	}()
 	defer func() {
 		close(closeOnDone)
-		_ = f.Close()
+		closeFn()
 	}()
 
 	var reader io.Reader = f

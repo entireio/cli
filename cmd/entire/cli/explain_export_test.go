@@ -383,6 +383,24 @@ func TestExplainCmd_SessionIndexRequiresTranscriptFlag(t *testing.T) {
 	)
 }
 
+// TestRunExplainExport_NoModeFlagFailsLoudly guards the bugbot finding that
+// `opts.json` was never read: previously, calling runExplainExport with all
+// three mode flags false would silently dispatch to JSON output. The
+// explicit default branch now returns an internal error so future
+// regressions don't silently produce JSON for unmoded callers.
+func TestRunExplainExport_NoModeFlagFailsLoudly(t *testing.T) {
+	setupExportRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       "any",
+		sessionIndex: -1,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "without an output mode")
+	require.Empty(t, stdout.String(), "must not emit JSON when no mode is set")
+}
+
 func TestExplainCmd_TranscriptAndJSONMutuallyExclusive(t *testing.T) {
 	setupExportRepo(t)
 

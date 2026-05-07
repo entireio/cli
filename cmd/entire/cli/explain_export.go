@@ -37,7 +37,8 @@ type explainExportOptions struct {
 func runExplainExport(ctx context.Context, w, errW io.Writer, opts explainExportOptions) error {
 	hasTarget := opts.target != "" || opts.commitRef != "" || opts.checkpointFlag != ""
 
-	if opts.transcript || opts.rawTranscript {
+	switch {
+	case opts.transcript || opts.rawTranscript:
 		if !hasTarget {
 			flagName := "--transcript"
 			if opts.rawTranscript {
@@ -46,13 +47,17 @@ func runExplainExport(ctx context.Context, w, errW io.Writer, opts explainExport
 			return fmt.Errorf("%s requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag", flagName)
 		}
 		return runExplainStreamTranscript(ctx, w, errW, opts)
+	case opts.json:
+		if !hasTarget {
+			return runExplainListJSON(ctx, w, opts.sessionFilter)
+		}
+		return runExplainCheckpointJSON(ctx, w, errW, opts)
+	default:
+		// The cobra layer guarantees at least one mode flag is set before
+		// dispatching here; this branch is a defensive guard against a
+		// future caller invoking runExplainExport directly with no mode.
+		return errors.New("internal: runExplainExport called without an output mode (json, transcript, or raw-transcript)")
 	}
-
-	// JSON mode.
-	if !hasTarget {
-		return runExplainListJSON(ctx, w, opts.sessionFilter)
-	}
-	return runExplainCheckpointJSON(ctx, w, errW, opts)
 }
 
 // resolveExplainCheckpointID resolves a target to a fully-qualified checkpoint
