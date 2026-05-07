@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -232,6 +233,50 @@ func TestExplainCmd_RawTranscriptWithSessionIndexRoutesToExportPath(t *testing.T
 	require.Equal(t, raw0, stdout.Bytes())
 }
 
+// TestExplainCmd_RawTranscriptMultiSessionDistinctContent guards the H2
+// finding from the code review: the previous one-session test could not
+// catch a regression where --session-index was silently ignored. This
+// fixture has two sessions with byte-distinct transcripts; we assert
+// that index 0 and index 1 return different content matching the
+// per-session transcript that was written.
+func TestExplainCmd_RawTranscriptMultiSessionDistinctContent(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	cpID := id.MustCheckpointID("9999bbbb1111")
+	rawSession0 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"SESSION-ZERO-MARKER"}]}}` + "\n")
+	rawSession1 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"SESSION-ONE-DIFFERENT-MARKER"}]}}` + "\n")
+
+	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+		SessionID:  "session-zero",
+		Transcript: redact.AlreadyRedacted(rawSession0),
+	})
+	// Second WriteCommitted with the same checkpoint ID appends session 1.
+	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+		SessionID:  "session-one",
+		Transcript: redact.AlreadyRedacted(rawSession1),
+	})
+
+	runIdx := func(idx string) []byte {
+		t.Helper()
+		cmd := newExplainCmd()
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"9999bbbb", "--raw-transcript", "--session-index", idx})
+		require.NoError(t, cmd.ExecuteContext(context.Background()))
+		return stdout.Bytes()
+	}
+
+	got0 := runIdx("0")
+	got1 := runIdx("1")
+
+	require.NotEqual(t, got0, got1, "session 0 and session 1 must yield different bytes")
+	require.Contains(t, string(got0), "SESSION-ZERO-MARKER")
+	require.Contains(t, string(got1), "SESSION-ONE-DIFFERENT-MARKER")
+	require.NotContains(t, string(got0), "SESSION-ONE-DIFFERENT-MARKER",
+		"session 0 output must not leak session 1 content")
+}
+
 func TestRunExplainExport_TranscriptRequiresTarget(t *testing.T) {
 	setupExportRepo(t)
 
@@ -400,6 +445,74 @@ func TestRunExplainExport_NoModeFlagFailsLoudly(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "without an output mode")
 	require.Empty(t, stdout.String(), "must not emit JSON when no mode is set")
+}
+
+// stubCommittedReader is a minimal CommittedReader that returns canned
+// metadata or errors per session index. Used to exercise the partial-failure
+// path in buildCheckpointJSONEnvelope without corrupting a real git tree.
+type stubCommittedReader struct {
+	summary  *checkpoint.CheckpointSummary
+	contents map[int]*checkpoint.SessionContent // idx -> content (nil ⇒ return error)
+	err      error                              // err returned for indexes not in contents
+}
+
+func (s *stubCommittedReader) ReadCommitted(_ context.Context, _ id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+	return s.summary, nil
+}
+
+func (s *stubCommittedReader) ReadSessionContent(_ context.Context, _ id.CheckpointID, idx int) (*checkpoint.SessionContent, error) {
+	if c, ok := s.contents[idx]; ok && c != nil {
+		return c, nil
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	return nil, errors.New("stub: session not configured")
+}
+
+// TestBuildCheckpointJSONEnvelope_PartialFailureFromMockReader exercises the
+// H3 partial-failure path end-to-end against the envelope builder. A real
+// v2-tree corruption test isn't feasible from the cli package (the splice
+// helper is unexported); the mock reader hits the same default branch in
+// readSessionMetadataForExport that a v3-or-future store would hit, which
+// IS the public surface this contract guarantees.
+func TestBuildCheckpointJSONEnvelope_PartialFailureFromMockReader(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("eeee99998888")
+	summary := &checkpoint.CheckpointSummary{
+		Strategy:         "manual-commit",
+		CheckpointsCount: 2,
+		Sessions: []checkpoint.SessionFilePaths{
+			{Metadata: "ee/ee99998888/0/metadata.json"},
+			{Metadata: "ee/ee99998888/1/metadata.json"},
+		},
+	}
+	reader := &stubCommittedReader{
+		summary: summary,
+		contents: map[int]*checkpoint.SessionContent{
+			0: {Metadata: checkpoint.CommittedMetadata{
+				SessionID: "good-session",
+				Agent:     "Claude Code",
+			}},
+			// idx 1 not configured ⇒ stub returns error, simulating an
+			// unreadable session metadata blob.
+		},
+	}
+
+	envelope, failed := buildCheckpointJSONEnvelope(context.Background(), reader, summary, cpID)
+
+	require.True(t, envelope.Partial, "envelope.Partial must be true when any session metadata read fails")
+	require.Equal(t, []int{1}, failed, "failed-sessions slice must list the broken indexes")
+	require.Len(t, envelope.Sessions, 2)
+
+	require.Equal(t, "good-session", envelope.Sessions[0].SessionID)
+	require.Empty(t, envelope.Sessions[0].Error)
+
+	require.Equal(t, 1, envelope.Sessions[1].Index)
+	require.Empty(t, envelope.Sessions[1].SessionID, "stub entry must not carry data that looks real")
+	require.Empty(t, envelope.Sessions[1].Agent)
+	require.NotEmpty(t, envelope.Sessions[1].Error, "stub entry must surface the underlying read error")
 }
 
 // TestCheckpointExportJSON_PartialContract pins the JSON shape that signals

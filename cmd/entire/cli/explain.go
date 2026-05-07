@@ -228,6 +228,7 @@ func newExplainCmd() *cobra.Command {
 	var jsonFlag bool
 	var transcriptFlag bool
 	sessionIndex := -1
+	listLimit := 0 // 0 means "use default (branchCheckpointsLimit)"
 
 	cmd := &cobra.Command{
 		Use:   "explain [checkpoint-id | commit-sha]",
@@ -264,6 +265,9 @@ Machine-readable export modes (additive surface for external consumers):
   --session-index  Pick a session within a multi-session checkpoint (0-based).
                    Defaults to the latest session. Only meaningful with
                    --transcript or --raw-transcript.
+  --limit          Cap the number of checkpoints returned by the list view.
+                   Defaults to 100. When the cap is hit, a stderr note
+                   says how many were skipped. Only meaningful with --json.
 
 Summary generation:
   --generate    Generate an AI summary for the checkpoint
@@ -332,6 +336,14 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 					return errors.New("--session-index must be non-negative")
 				}
 			}
+			if cmd.Flags().Changed("limit") {
+				if !jsonFlag {
+					return errors.New("--limit only applies with --json")
+				}
+				if listLimit <= 0 {
+					return errors.New("--limit must be positive")
+				}
+			}
 
 			// Export modes — emit machine-readable output and skip the prose pipeline.
 			// --raw-transcript also routes here when --session-index is explicit; the
@@ -348,6 +360,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 					transcript:     transcriptFlag,
 					rawTranscript:  rawTranscriptFlag,
 					sessionIndex:   sessionIndex,
+					listLimit:      listLimit,
 				})
 			}
 
@@ -370,6 +383,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output metadata as JSON (no transcript bytes)")
 	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream compact normalized transcript bytes to stdout (pair with --raw-transcript for the per-agent raw transcript)")
 	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
+	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100). Only meaningful with --json.")
 
 	// Verbosity / transcript output modes are mutually exclusive
 	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")

@@ -57,11 +57,15 @@ func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string, age
 
 	// Bound the snapshot to the file size at open. Without this, the read
 	// would also include bytes the agent appends while in flight, silently
-	// extending the "snapshot" past command-start.
-	var snapshotSize int64 = -1
-	if info, statErr := f.Stat(); statErr == nil {
-		snapshotSize = info.Size()
+	// extending the "snapshot" past command-start. Stat() failure here means
+	// we can't honor the snapshot guarantee — fail loudly rather than
+	// emitting an unbounded read with a misleading "snapshot" promise.
+	info, statErr := f.Stat()
+	if statErr != nil {
+		_ = f.Close()
+		return fmt.Errorf("stat transcript (snapshot bound unavailable): %w", statErr)
 	}
+	snapshotSize := info.Size()
 
 	// Single owner of Close. Either the cancel goroutine fires it (to
 	// unblock the read) or the defer fires it (normal path); sync.Once
@@ -83,10 +87,7 @@ func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string, age
 		closeFn()
 	}()
 
-	var reader io.Reader = f
-	if snapshotSize >= 0 {
-		reader = io.LimitReader(f, snapshotSize)
-	}
+	reader := io.LimitReader(f, snapshotSize)
 
 	if isWholeDocumentJSONAgent(agentType) {
 		return writeWholeDocumentJSONTranscript(ctx, w, reader)

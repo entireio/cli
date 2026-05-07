@@ -46,6 +46,9 @@ type explainExportOptions struct {
 	transcript     bool
 	rawTranscript  bool
 	sessionIndex   int
+	// listLimit caps the JSON list view at N entries. 0 means use the
+	// default (branchCheckpointsLimit). Only consulted in list mode.
+	listLimit int
 }
 
 // runExplainExport handles --json, --transcript, and --raw-transcript with an
@@ -67,7 +70,7 @@ func runExplainExport(ctx context.Context, w, errW io.Writer, opts explainExport
 		return runExplainStreamTranscript(ctx, w, errW, opts)
 	case opts.json:
 		if !hasTarget {
-			return runExplainListJSON(ctx, w, opts.sessionFilter)
+			return runExplainListJSON(ctx, w, errW, opts.sessionFilter, opts.listLimit)
 		}
 		return runExplainCheckpointJSON(ctx, w, errW, opts)
 	default:
@@ -81,14 +84,16 @@ func runExplainExport(ctx context.Context, w, errW io.Writer, opts explainExport
 // resolveExplainCheckpointID resolves a target to a fully-qualified checkpoint
 // ID. Resolution order matches the prose explain command:
 //
-//  1. --commit <ref>  → resolve as a git commit, read Entire-Checkpoint trailer.
+//  1. --commit <ref>  → resolve as a git commit, read Entire-Checkpoint
+//     trailer; remote metadata fetch-on-miss when the trailer points at
+//     an unknown checkpoint.
 //  2. --checkpoint <id> or positional checkpoint-id-prefix → match against
 //     committed checkpoints, with remote metadata fetch-on-miss.
 //  3. Positional that fails as a checkpoint prefix falls back to commit-ref
 //     resolution (mirrors runExplainAuto).
 func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explainExportOptions) (id.CheckpointID, *explainCheckpointLookup, error) {
 	if opts.commitRef != "" {
-		return resolveCheckpointFromCommitRef(ctx, opts.commitRef)
+		return resolveCheckpointFromCommitRef(ctx, errW, opts.commitRef)
 	}
 
 	prefix := opts.checkpointFlag
@@ -113,7 +118,7 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 		// one more shot as a commit ref before failing — mirrors the prose
 		// runExplainAuto behavior so `--json <commit-sha>` works.
 		if opts.target != "" && opts.checkpointFlag == "" {
-			cpID, freshLookup, commitErr := resolveCheckpointFromCommitRef(ctx, opts.target)
+			cpID, freshLookup, commitErr := resolveCheckpointFromCommitRef(ctx, errW, opts.target)
 			if commitErr == nil {
 				return cpID, freshLookup, nil
 			}
@@ -124,10 +129,13 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 	}
 }
 
-// resolveCheckpointFromCommitRef opens the repo, resolves a git commit-ish, and
-// extracts the Entire-Checkpoint trailer. Returns a fresh lookup so the caller
-// can read the checkpoint metadata.
-func resolveCheckpointFromCommitRef(ctx context.Context, commitRef string) (id.CheckpointID, *explainCheckpointLookup, error) {
+// resolveCheckpointFromCommitRef opens the repo, resolves a git commit-ish,
+// and extracts the Entire-Checkpoint trailer. If the resolved checkpoint
+// isn't present in the local committed list, retries once after fetching
+// metadata from the remote — symmetry with the prefix path so
+// `--commit <sha>` and `--checkpoint <prefix>` share the same fetch
+// behavior.
+func resolveCheckpointFromCommitRef(ctx context.Context, errW io.Writer, commitRef string) (id.CheckpointID, *explainCheckpointLookup, error) {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return id.CheckpointID(""), nil, fmt.Errorf("not a git repository: %w", err)
@@ -148,7 +156,27 @@ func resolveCheckpointFromCommitRef(ctx context.Context, commitRef string) (id.C
 	if lookupErr != nil {
 		return id.CheckpointID(""), nil, lookupErr
 	}
+
+	// If the trailer points at a checkpoint we don't have locally, do the
+	// same remote-fetch retry the prefix path uses; otherwise downstream
+	// metadata reads would fail with an immediate "not found".
+	if !lookupHasCheckpoint(lookup, cpID) {
+		if matches, fresh := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, cpID.String()); len(matches) == 1 {
+			lookup = fresh
+		}
+	}
 	return cpID, lookup, nil
+}
+
+// lookupHasCheckpoint reports whether cpID is in the lookup's local committed
+// list. Callers use this before triggering a remote-fetch retry.
+func lookupHasCheckpoint(lookup *explainCheckpointLookup, cpID id.CheckpointID) bool {
+	for _, info := range lookup.committed {
+		if info.CheckpointID == cpID {
+			return true
+		}
+	}
+	return false
 }
 
 // matchCheckpointPrefixWithRemoteFallback returns all committed checkpoints
@@ -216,7 +244,11 @@ func resolveSessionIndex(summary *checkpoint.CheckpointSummary, requested int) (
 
 // runExplainStreamTranscript streams either the compact transcript (default)
 // or the raw transcript (when --raw-transcript is set) for the selected
-// session of the resolved checkpoint.
+// session of the resolved checkpoint. When --transcript is used on a
+// v1-only checkpoint (compact transcripts are a v2-only artifact), falls
+// through to the raw transcript with a one-line stderr note rather than
+// erroring — the consumer's stated intent is "give me transcript bytes",
+// and we have a way to satisfy it without making them re-run.
 func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts explainExportOptions) error {
 	cpID, lookup, err := resolveExplainCheckpointID(ctx, errW, opts)
 	if err != nil {
@@ -228,29 +260,30 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 
+	v2Reader, isV2 := reader.(*checkpoint.V2GitStore)
+	wantCompact := !opts.rawTranscript
+
 	idx, err := resolveSessionIndex(summary, opts.sessionIndex)
 	if err != nil {
 		return err
 	}
 
-	if opts.rawTranscript {
+	// Compact transcripts are only stored on v2; transparently fall through
+	// to raw on v1 so consumers don't need to retry.
+	if wantCompact && !isV2 {
+		fmt.Fprintln(errW, "note: compact transcript unavailable on v1 checkpoint, falling back to raw transcript")
+		wantCompact = false
+	}
+
+	if !wantCompact {
 		content, readErr := reader.ReadSessionContent(ctx, cpID, idx)
 		if readErr != nil {
 			return fmt.Errorf("failed to read session content: %w", readErr)
-		}
-		if len(content.Transcript) == 0 {
-			return fmt.Errorf("checkpoint %s session %d has no raw transcript", cpID, idx)
 		}
 		if _, err := w.Write(content.Transcript); err != nil {
 			return fmt.Errorf("failed to write transcript: %w", err)
 		}
 		return nil
-	}
-
-	// Compact transcript path: only v2 stores have a normalized transcript.jsonl.
-	v2Reader, ok := reader.(*checkpoint.V2GitStore)
-	if !ok {
-		return errors.New("compact transcript is only available for v2 checkpoints (try --raw-transcript)")
 	}
 
 	compact, err := v2Reader.ReadSessionCompactTranscript(ctx, cpID, idx)
@@ -331,6 +364,34 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 
+	envelope, failedSessions := buildCheckpointJSONEnvelope(ctx, reader, summary, cpID)
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(envelope); err != nil {
+		return fmt.Errorf("failed to encode checkpoint json: %w", err)
+	}
+
+	// Fail hard so automation can't mistake incomplete metadata for a clean
+	// export. The envelope (with its `partial` flag and per-session error
+	// fields) has already been written to stdout; using SilentError keeps
+	// the diagnostic on stderr from interleaving with that output.
+	if envelope.Partial {
+		fmt.Fprintf(errW, "checkpoint %s: failed to read metadata for %d session(s) (indexes %v)\n",
+			cpID, len(failedSessions), failedSessions)
+		return NewSilentError(fmt.Errorf("checkpoint %s export incomplete: %d session(s) unreadable", cpID, len(failedSessions)))
+	}
+	return nil
+}
+
+// buildCheckpointJSONEnvelope builds the JSON envelope for a single checkpoint,
+// reading each session's metadata via the supplied reader. Returns the envelope
+// plus the list of session indexes that failed to read; a non-empty failed
+// list means envelope.Partial is true. Extracted from runExplainCheckpointJSON
+// so the envelope-building behavior (per-session error fields, partial flag)
+// can be tested independently of the v2 git tree, which the cli package
+// can't easily corrupt.
+func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpoint.CommittedReader, summary *checkpoint.CheckpointSummary, cpID id.CheckpointID) (checkpointExportJSON, []int) {
 	envelope := checkpointExportJSON{
 		CheckpointID:     cpID.String(),
 		Strategy:         summary.Strategy,
@@ -360,23 +421,7 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 		envelope.Sessions = append(envelope.Sessions, sessionMetadataToJSON(idx, meta))
 	}
 	envelope.Partial = len(failedSessions) > 0
-
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(envelope); err != nil {
-		return fmt.Errorf("failed to encode checkpoint json: %w", err)
-	}
-
-	// Fail hard so automation can't mistake incomplete metadata for a clean
-	// export. The envelope (with its `partial` flag and per-session error
-	// fields) has already been written to stdout; using SilentError keeps
-	// the diagnostic on stderr from interleaving with that output.
-	if envelope.Partial {
-		fmt.Fprintf(errW, "checkpoint %s: failed to read metadata for %d session(s) (indexes %v)\n",
-			cpID, len(failedSessions), failedSessions)
-		return NewSilentError(fmt.Errorf("checkpoint %s export incomplete: %d session(s) unreadable", cpID, len(failedSessions)))
-	}
-	return nil
+	return envelope, failedSessions
 }
 
 // readSessionMetadataForExport reads only metadata.json for a session — no
@@ -460,14 +505,27 @@ type branchCheckpointJSON struct {
 }
 
 // runExplainListJSON emits a JSON array of branch checkpoints, optionally
-// filtered by session ID prefix (mirrors the prose list view).
-func runExplainListJSON(ctx context.Context, w io.Writer, sessionFilter string) error {
+// filtered by session ID prefix (mirrors the prose list view). The cap
+// defaults to branchCheckpointsLimit; pass listLimit > 0 to override.
+//
+// Truncation detection: we ask the underlying lister for one more than the
+// effective cap. If we got that many back, we know there were at least
+// `cap` checkpoints we didn't return — emit a stderr note so the consumer
+// knows to set --limit higher. The JSON shape stays a flat array so jq
+// pipelines don't have to unwrap.
+func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter string, listLimit int) error {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
 	}
 
-	points, err := getBranchCheckpoints(ctx, repo, branchCheckpointsLimit)
+	limit := listLimit
+	if limit <= 0 {
+		limit = branchCheckpointsLimit
+	}
+
+	// Probe one extra so we can detect truncation.
+	points, err := getBranchCheckpoints(ctx, repo, limit+1)
 	if err != nil {
 		if ctx.Err() != nil {
 			return NewSilentError(ctx.Err())
@@ -476,6 +534,10 @@ func runExplainListJSON(ctx context.Context, w io.Writer, sessionFilter string) 
 		// swallow the error. Surface it so scripts get a non-zero exit and
 		// a real diagnostic instead of silently degraded output.
 		return fmt.Errorf("failed to list checkpoints: %w", err)
+	}
+	truncated := len(points) > limit
+	if truncated {
+		points = points[:limit]
 	}
 
 	out := make([]branchCheckpointJSON, 0, len(points))
@@ -505,6 +567,10 @@ func runExplainListJSON(ctx context.Context, w io.Writer, sessionFilter string) 
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(out); err != nil {
 		return fmt.Errorf("failed to encode checkpoint list: %w", err)
+	}
+
+	if truncated {
+		fmt.Fprintf(errW, "note: list capped at %d checkpoints; rerun with --limit <N> to see more\n", limit)
 	}
 	return nil
 }
