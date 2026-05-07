@@ -442,6 +442,11 @@ func BuildReviewPickerFields(
 ) []huh.Field {
 	var fields []huh.Field
 
+	if builtinPicksOut != nil && len(*builtinPicksOut) == 0 &&
+		len(builtins) == 1 && strings.TrimSpace(previousPrompt) == "" {
+		*builtinPicksOut = []string{builtins[0].Name}
+	}
+
 	builtinPreselected := preselectedSet(builtinPicksOut)
 	discoveredPreselected := preselectedSet(discoveredPicksOut)
 
@@ -454,7 +459,10 @@ func BuildReviewPickerFields(
 			}
 			opts = append(opts, opt)
 		}
-		ms := huh.NewMultiSelect[string]().Title("Built-in commands").Options(opts...)
+		ms := huh.NewMultiSelect[string]().
+			Title("Built-in commands").
+			Options(opts...).
+			Height(len(opts) + 1)
 		if builtinPicksOut != nil {
 			ms = ms.Value(builtinPicksOut)
 		}
@@ -474,7 +482,10 @@ func BuildReviewPickerFields(
 			}
 			opts = append(opts, opt)
 		}
-		ms := huh.NewMultiSelect[string]().Title("Installed plugin skills").Options(opts...)
+		ms := huh.NewMultiSelect[string]().
+			Title("Installed plugin skills").
+			Options(opts...).
+			Height(len(opts) + 1)
 		if discoveredPicksOut != nil {
 			ms = ms.Value(discoveredPicksOut)
 		}

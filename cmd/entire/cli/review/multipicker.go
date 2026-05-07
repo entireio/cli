@@ -64,10 +64,7 @@ func PickAgents(ctx context.Context, eligible []AgentChoice) (PickedAgents, erro
 
 	var picked []string
 	multiForm := newAccessibleForm(huh.NewGroup(
-		huh.NewMultiSelect[string]().
-			Title("Which agents should run this review?").
-			Options(options...).
-			Value(&picked),
+		buildAgentMultiSelect(options, &picked),
 	))
 	if err := multiForm.RunWithContext(ctx); err != nil {
 		return PickedAgents{}, ErrPickerCancelled
@@ -95,4 +92,12 @@ func PickAgents(ctx context.Context, eligible []AgentChoice) (PickedAgents, erro
 	}
 
 	return PickedAgents{Names: picked, PerRun: perRun}, nil
+}
+
+func buildAgentMultiSelect(options []huh.Option[string], picked *[]string) *huh.MultiSelect[string] {
+	return huh.NewMultiSelect[string]().
+		Title("Which agents should run this review?").
+		Options(options...).
+		Height(len(options) + 1).
+		Value(picked)
 }

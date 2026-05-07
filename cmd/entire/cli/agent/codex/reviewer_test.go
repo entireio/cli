@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -86,7 +87,7 @@ func TestCodexReviewer_ArgvShape(t *testing.T) {
 	}
 }
 
-func TestCodexReviewer_BuiltinReviewUsesExecReview(t *testing.T) {
+func TestCodexReviewer_BuiltinReviewExpandsToScopedExecPrompt(t *testing.T) {
 	t.Parallel()
 	cfg := reviewtypes.RunConfig{
 		Skills:            []string{"/review"},
@@ -96,7 +97,7 @@ func TestCodexReviewer_BuiltinReviewUsesExecReview(t *testing.T) {
 	}
 	cmd := buildCodexReviewCmd(context.Background(), cfg)
 
-	want := []string{wantCodexAgentName, "exec", "review", "--skip-git-repo-check", "--base", "main", "-"}
+	want := []string{wantCodexAgentName, "exec", "--skip-git-repo-check", "-"}
 	if len(cmd.Args) != len(want) {
 		t.Fatalf("len(Args) = %d, want %d: %v", len(cmd.Args), len(want), cmd.Args)
 	}
@@ -108,9 +109,10 @@ func TestCodexReviewer_BuiltinReviewUsesExecReview(t *testing.T) {
 
 	prompt := readCodexCmdStdin(t, cmd)
 	if strings.Contains(prompt, "/review") {
-		t.Fatalf("builtin review prompt should not include /review when using codex exec review:\n%s", prompt)
+		t.Fatalf("builtin review prompt should not include raw /review:\n%s", prompt)
 	}
 	for _, wantText := range []string{
+		"Review the current branch changes and report actionable findings.",
 		"Focus on auth regressions.",
 		"Scope: review only the commits unique to this branch vs main.",
 		"Commits in scope (newest first):",
@@ -230,10 +232,17 @@ func TestCodexReviewer_EventStream(t *testing.T) {
 
 	// Verify narrative content appears and chrome is absent.
 	var combined strings.Builder
+	sawToolCall := false
 	for _, ev := range events {
-		if at, ok := ev.(reviewtypes.AssistantText); ok {
+		switch e := ev.(type) {
+		case reviewtypes.AssistantText:
+			at := e
 			combined.WriteString(at.Text)
 			combined.WriteString("\n")
+		case reviewtypes.ToolCall:
+			if e.Name == codexExecCommand && strings.Contains(e.Args, "git status --short") {
+				sawToolCall = true
+			}
 		}
 	}
 	text := combined.String()
@@ -252,7 +261,6 @@ func TestCodexReviewer_EventStream(t *testing.T) {
 		"workdir:",
 		"[hooks]",
 		"firing user-prompt-submit",
-		"I will inspect the reviewer contracts.",
 		"git status",
 		"go test ./cmd/entire/cli/review",
 		"TestExample",
@@ -266,6 +274,12 @@ func TestCodexReviewer_EventStream(t *testing.T) {
 	if strings.Count(text, "No findings.") != 1 {
 		t.Errorf("final response should appear once after duplicate summary filtering; got:\n%s", text)
 	}
+	if !strings.Contains(text, "I will inspect the reviewer contracts.") {
+		t.Error("expected live assistant progress in AssistantText events")
+	}
+	if !sawToolCall {
+		t.Errorf("expected exec block to emit a ToolCall event; got %#v", events)
+	}
 
 	// CSI escape sequences must not leak into AssistantText events.
 	for _, ev := range events {
@@ -277,6 +291,76 @@ func TestCodexReviewer_EventStream(t *testing.T) {
 	}
 }
 
+func TestParseCodexOutput_StreamsEventsBeforeEOF(t *testing.T) {
+	t.Parallel()
+
+	r, w := io.Pipe()
+	events := parseCodexOutput(r)
+
+	select {
+	case ev, ok := <-events:
+		if !ok {
+			t.Fatal("events closed before Started event arrived")
+		}
+		if _, ok := ev.(reviewtypes.Started); !ok {
+			t.Fatalf("first event = %T, want Started", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Started event")
+	}
+
+	input := strings.Join([]string{
+		"codex",
+		"I will inspect the code before finalizing.",
+		"exec",
+		`/bin/zsh -lc "git status --short" in /repo`,
+	}, "\n") + "\n"
+	if _, err := w.Write([]byte(input)); err != nil {
+		t.Fatalf("write streaming input: %v", err)
+	}
+
+	sawText := false
+	sawToolCall := false
+	deadline := time.After(2 * time.Second)
+	for !sawText || !sawToolCall {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				t.Fatalf("events closed before streaming assertions passed")
+			}
+			switch e := ev.(type) {
+			case reviewtypes.AssistantText:
+				if strings.Contains(e.Text, "I will inspect the code") {
+					sawText = true
+				}
+			case reviewtypes.ToolCall:
+				if e.Name == codexExecCommand && strings.Contains(e.Args, "git status --short") {
+					sawToolCall = true
+				}
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for streaming events before EOF; sawText=%v sawToolCall=%v", sawText, sawToolCall)
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	sawFinished := false
+	for ev := range events {
+		if fin, ok := ev.(reviewtypes.Finished); ok {
+			if !fin.Success {
+				t.Fatalf("Finished.Success = false, want true")
+			}
+			sawFinished = true
+		}
+	}
+	if !sawFinished {
+		t.Fatal("expected Finished event after EOF")
+	}
+}
+
+//nolint:ireturn // test helper intentionally records heterogeneous event values.
 func collectCodexEvents(ch <-chan reviewtypes.Event) []reviewtypes.Event {
 	var events []reviewtypes.Event
 	for ev := range ch {

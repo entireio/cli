@@ -101,9 +101,8 @@ func Strip(r io.Reader) io.Reader {
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 		state := codexStripNormal
-		var currentAssistant []string
 		for scanner.Scan() {
-			done, err := collectFinalCodexLine(scanner.Text(), &state, &currentAssistant, pw)
+			done, err := collectFinalCodexLine(scanner.Text(), &state, pw)
 			if err != nil {
 				_ = pw.CloseWithError(err)
 				return
@@ -115,12 +114,6 @@ func Strip(r io.Reader) io.Reader {
 		if err := scanner.Err(); err != nil {
 			_ = pw.CloseWithError(err)
 			return
-		}
-		if state != codexStripAfterTokens {
-			if err := writeCodexAssistantBlock(pw, currentAssistant); err != nil {
-				_ = pw.CloseWithError(err)
-				return
-			}
 		}
 		_ = pw.Close()
 	}()
@@ -137,7 +130,7 @@ const (
 	codexStripAfterTokens
 )
 
-func collectFinalCodexLine(raw string, state *codexStripState, currentAssistant *[]string, w io.Writer) (bool, error) {
+func collectFinalCodexLine(raw string, state *codexStripState, w io.Writer) (bool, error) {
 	cleaned := csiRegex.ReplaceAllString(raw, "")
 	trimmed := strings.TrimSpace(cleaned)
 	trimmedRight := strings.TrimRight(cleaned, " \t")
@@ -146,26 +139,24 @@ func collectFinalCodexLine(raw string, state *codexStripState, currentAssistant 
 		return true, nil
 	}
 	if isTokensUsedMarker(trimmed) {
-		return true, writeCodexAssistantBlock(w, *currentAssistant)
+		return true, nil
 	}
 
 	switch *state {
 	case codexStripUserBlock:
 		if isCodexRoleMarker(trimmed) {
 			*state = codexStripAssistantBlock
-			*currentAssistant = nil
 		}
 		return false, nil
 	case codexStripAssistantBlock:
 		if isCodexRoleMarker(trimmed) {
-			*currentAssistant = nil
 			return false, nil
 		}
 		if isUserRoleMarker(trimmed) {
 			*state = codexStripUserBlock
 			return false, nil
 		}
-		if trimmedRight == "exec" || execBlockRegex.MatchString(trimmedRight) {
+		if trimmedRight == codexExecCommand || execBlockRegex.MatchString(trimmedRight) {
 			*state = codexStripExecBlock
 			return false, nil
 		}
@@ -173,7 +164,9 @@ func collectFinalCodexLine(raw string, state *codexStripState, currentAssistant 
 			return false, nil
 		}
 		if line, ok := FilterLine(raw); ok {
-			*currentAssistant = append(*currentAssistant, line)
+			if err := writeCodexLine(w, line); err != nil {
+				return false, err
+			}
 		}
 		return false, nil
 	case codexStripExecBlock:
@@ -183,7 +176,6 @@ func collectFinalCodexLine(raw string, state *codexStripState, currentAssistant 
 		}
 		if isCodexRoleMarker(trimmed) {
 			*state = codexStripAssistantBlock
-			*currentAssistant = nil
 			return false, nil
 		}
 		return false, nil
@@ -199,13 +191,12 @@ func collectFinalCodexLine(raw string, state *codexStripState, currentAssistant 
 	}
 	if isCodexRoleMarker(trimmed) {
 		*state = codexStripAssistantBlock
-		*currentAssistant = nil
 		return false, nil
 	}
 	if isCodexMetadataLine(trimmed) {
 		return false, nil
 	}
-	if trimmedRight == "exec" {
+	if trimmedRight == codexExecCommand {
 		*state = codexStripExecBlock
 		return false, nil
 	}
@@ -213,14 +204,17 @@ func collectFinalCodexLine(raw string, state *codexStripState, currentAssistant 
 		return false, nil
 	}
 
+	if line, ok := FilterLine(raw); ok {
+		if err := writeCodexLine(w, line); err != nil {
+			return false, err
+		}
+	}
 	return false, nil
 }
 
-func writeCodexAssistantBlock(w io.Writer, lines []string) error {
-	for _, line := range lines {
-		if _, err := w.Write([]byte(line + "\n")); err != nil {
-			return fmt.Errorf("write filtered codex output: %w", err)
-		}
+func writeCodexLine(w io.Writer, line string) error {
+	if _, err := w.Write([]byte(line + "\n")); err != nil {
+		return fmt.Errorf("write filtered codex output: %w", err)
 	}
 	return nil
 }

@@ -182,6 +182,31 @@ func TestFilterLine_VersionNarrativeKept(t *testing.T) {
 	}
 }
 
+func TestStrip_PlainExecOutputPassesThrough(t *testing.T) {
+	t.Parallel()
+
+	input := strings.Join([]string{
+		"Review findings:",
+		"- Missing regression coverage in review picker.",
+		"- Codex output should appear in the final dump.",
+	}, "\n")
+
+	data, err := io.ReadAll(Strip(strings.NewReader(input)))
+	if err != nil {
+		t.Fatalf("Strip read: %v", err)
+	}
+	output := string(data)
+	for _, want := range []string{
+		"Review findings:",
+		"- Missing regression coverage in review picker.",
+		"- Codex output should appear in the final dump.",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("plain output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestStrip_FullFixture(t *testing.T) {
 	t.Parallel()
 
@@ -229,19 +254,13 @@ func TestStrip_FullFixture(t *testing.T) {
 
 	// Narrative must survive.
 	narrativeMustSurvive := []string{
+		"This is the narrative output from the agent.",
+		"It spans multiple lines.",
 		"Final conclusion: no issues found.",
 	}
 	for _, want := range narrativeMustSurvive {
 		if !strings.Contains(output, want) {
 			t.Errorf("narrative %q missing from filtered output; got:\n%s", want, output)
-		}
-	}
-	for _, unwanted := range []string{
-		"This is the narrative output from the agent.",
-		"It spans multiple lines.",
-	} {
-		if strings.Contains(output, unwanted) {
-			t.Errorf("pre-final narrative %q should not appear in filtered output; got:\n%s", unwanted, output)
 		}
 	}
 }
@@ -291,7 +310,6 @@ func TestStrip_DropsExecBlocksAndDuplicateSummary(t *testing.T) {
 		"OpenAI Codex",
 		"workdir:",
 		"Please run these review skills",
-		"I will inspect the code.",
 		"git status",
 		"cmd/entire/cli/review.go",
 		"go test ./...",
@@ -305,6 +323,9 @@ func TestStrip_DropsExecBlocksAndDuplicateSummary(t *testing.T) {
 	}
 	if strings.Count(output, "No findings.") != 1 {
 		t.Fatalf("filtered output should contain final response once, got:\n%s", output)
+	}
+	if !strings.Contains(output, "I will inspect the code.") {
+		t.Fatalf("filtered output missing live assistant progress line:\n%s", output)
 	}
 	if !strings.Contains(output, "Residual risk: tests were not run in this sandbox.") {
 		t.Fatalf("filtered output missing final residual-risk line:\n%s", output)

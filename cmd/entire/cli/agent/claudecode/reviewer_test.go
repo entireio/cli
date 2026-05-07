@@ -95,6 +95,11 @@ func TestReviewer_ArgvShape(t *testing.T) {
 	if cmd.Args[2] == "" {
 		t.Error("Args[2] (prompt) is empty")
 	}
+	for _, arg := range cmd.Args {
+		if arg == "--continue" || arg == "-c" || arg == "--resume" || arg == "-r" {
+			t.Fatalf("Args must start a fresh Claude review, got resume/continue flag in %v", cmd.Args)
+		}
+	}
 	// Stdin must be nil — claude receives prompt via argv, not stdin.
 	if cmd.Stdin != nil {
 		t.Errorf("cmd.Stdin = %v, want nil (claude uses argv, not stdin)", cmd.Stdin)

@@ -348,12 +348,14 @@ var _ reviewtypes.AgentReviewer = (*stubDispatchReviewer)(nil)
 var _ reviewtypes.Process = (*stubDispatchProcess)(nil)
 
 type captureRunConfigReviewer struct {
-	name string
-	got  reviewtypes.RunConfig
+	name   string
+	called bool
+	got    reviewtypes.RunConfig
 }
 
 func (r *captureRunConfigReviewer) Name() string { return r.name }
 func (r *captureRunConfigReviewer) Start(_ context.Context, cfg reviewtypes.RunConfig) (reviewtypes.Process, error) {
+	r.called = true
 	r.got = cfg
 	return &stubDispatchProcess{}, nil
 }
@@ -447,6 +449,87 @@ func TestDispatchFork_TwoLaunchableNoOverride(t *testing.T) {
 	}
 	if !multiPickerCalled {
 		t.Error("expected multi-picker to be invoked for 2 launchable agents with no --agent override")
+	}
+}
+
+func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
+	setupCmdTestRepo(t)
+
+	if err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		"claude-code": {
+			Skills: []string{"/review"},
+			Prompt: "Claude saved prompt.",
+		},
+		"codex": {
+			Skills: []string{"/review"},
+			Prompt: "Codex saved prompt.",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	claudeReviewer := &captureRunConfigReviewer{name: "claude-code"}
+	codexReviewer := &captureRunConfigReviewer{name: "codex"}
+	multiPickerFn := func(_ context.Context, _ []review.AgentChoice) (review.PickedAgents, error) {
+		return review.PickedAgents{
+			Names:  []string{"claude-code", "codex"},
+			PerRun: "Focus this run on regressions.",
+		}, nil
+	}
+
+	deps := review.Deps{
+		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
+			return []types.AgentName{"claude-code", "codex"}
+		},
+		NewSilentError: func(err error) error { return err },
+		MultiPickerFn:  multiPickerFn,
+		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {
+			return false, ""
+		},
+		ReviewerFor: func(agentName string) reviewtypes.AgentReviewer {
+			switch agentName {
+			case "claude-code":
+				return claudeReviewer
+			case "codex":
+				return codexReviewer
+			default:
+				return nil
+			}
+		},
+	}
+
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		reviewer   *captureRunConfigReviewer
+		wantPrompt string
+	}{
+		{name: "claude-code", reviewer: claudeReviewer, wantPrompt: "Claude saved prompt."},
+		{name: "codex", reviewer: codexReviewer, wantPrompt: "Codex saved prompt."},
+	} {
+		if !tc.reviewer.called {
+			t.Fatalf("%s reviewer was not started", tc.name)
+		}
+		if got := tc.reviewer.got.Skills; len(got) != 1 || got[0] != "/review" {
+			t.Fatalf("%s Skills = %v, want [/review]", tc.name, got)
+		}
+		if tc.reviewer.got.AlwaysPrompt != tc.wantPrompt {
+			t.Fatalf("%s AlwaysPrompt = %q, want %q", tc.name, tc.reviewer.got.AlwaysPrompt, tc.wantPrompt)
+		}
+		if tc.reviewer.got.PerRunPrompt != "Focus this run on regressions." {
+			t.Fatalf("%s PerRunPrompt = %q", tc.name, tc.reviewer.got.PerRunPrompt)
+		}
+		if tc.reviewer.got.StartingSHA == "" {
+			t.Fatalf("%s StartingSHA is empty", tc.name)
+		}
 	}
 }
 

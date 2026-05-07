@@ -34,8 +34,16 @@ const DefaultTerminalWidth = 80
 //
 // Errors only on glamour renderer construction or render failure — both
 // of which indicate a malformed StyleConfig (programmer error) rather
-// than a runtime condition.
-func Render(markdown string, width int, darkBackground bool) (string, error) {
+// than a runtime condition. Renderer panics are recovered and returned as
+// errors so callers can fall back to raw markdown instead of crashing.
+func Render(markdown string, width int, darkBackground bool) (rendered string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			rendered = ""
+			err = fmt.Errorf("render markdown panic: %v", r)
+		}
+	}()
+
 	renderer, err := glamour.NewTermRenderer(
 		glamour.WithStyles(stylesForBackground(darkBackground)),
 		glamour.WithWordWrap(width),
@@ -44,7 +52,7 @@ func Render(markdown string, width int, darkBackground bool) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("initialize markdown renderer: %w", err)
 	}
-	rendered, err := renderer.Render(markdown)
+	rendered, err = renderer.Render(markdown)
 	if err != nil {
 		return "", fmt.Errorf("render markdown: %w", err)
 	}
@@ -167,12 +175,12 @@ func chromaForBackground(darkBackground bool) *ansi.Chroma {
 	textColor := "#2A2A2A"
 	commentColor := "#8D8D8D"
 	punctColor := "#7A7A7A"
-	bgColor := "254"
+	bgColor := "#E4E4E4"
 	if darkBackground {
-		textColor = "252"
-		commentColor = "245"
-		punctColor = "244"
-		bgColor = "236"
+		textColor = "#D0D0D0"
+		commentColor = "#8A8A8A"
+		punctColor = "#808080"
+		bgColor = "#303030"
 	}
 	return &ansi.Chroma{
 		Text:            ansi.StylePrimitive{Color: strPtr(textColor)},
@@ -188,8 +196,8 @@ func chromaForBackground(darkBackground bool) *ansi.Chroma {
 		LiteralNumber:   ansi.StylePrimitive{Color: strPtr("#fbbf24")},
 		Operator:        ansi.StylePrimitive{Color: strPtr(punctColor)},
 		Punctuation:     ansi.StylePrimitive{Color: strPtr(punctColor)},
-		GenericDeleted:  ansi.StylePrimitive{Color: strPtr("1")},
-		GenericInserted: ansi.StylePrimitive{Color: strPtr("2")},
+		GenericDeleted:  ansi.StylePrimitive{Color: strPtr("#EF4444")},
+		GenericInserted: ansi.StylePrimitive{Color: strPtr("#22C55E")},
 		Background:      ansi.StylePrimitive{BackgroundColor: strPtr(bgColor)},
 	}
 }

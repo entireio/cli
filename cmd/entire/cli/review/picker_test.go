@@ -258,6 +258,37 @@ func TestBuildReviewPickerFields_HintSectionOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestBuildReviewPickerFields_SingleBuiltinDefaultsSelectedAndRenders(t *testing.T) {
+	t.Parallel()
+
+	var builtinPicks []string
+	fields := review.BuildReviewPickerFields(
+		"codex",
+		[]skilldiscovery.CuratedSkill{{Name: "/review", Desc: "Review current changes"}},
+		nil,
+		nil,
+		"",
+		&builtinPicks, nil, nil,
+	)
+
+	if len(fields) == 0 {
+		t.Fatal("expected picker fields")
+	}
+	got, ok := fields[0].GetValue().([]string)
+	if !ok {
+		t.Fatalf("built-in field value has type %T, want []string", fields[0].GetValue())
+	}
+	if !reflect.DeepEqual(got, []string{"/review"}) {
+		t.Fatalf("built-in defaults = %v, want [/review]", got)
+	}
+
+	field := fields[0].WithWidth(80)
+	field.Focus()
+	if got := field.View(); !strings.Contains(got, "/review") {
+		t.Fatalf("single built-in option did not render:\n%s", got)
+	}
+}
+
 // TestSaveReviewConfig_PersistsSettings verifies SaveReviewConfig writes and
 // the settings can be read back.
 func TestSaveReviewConfig_PersistsSettings(t *testing.T) {

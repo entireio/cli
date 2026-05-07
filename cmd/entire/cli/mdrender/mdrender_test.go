@@ -45,6 +45,35 @@ func TestRender_LightBackgroundAlsoProducesAnsi(t *testing.T) {
 	}
 }
 
+func TestRender_CodeBlockDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	const md = "```go\nfunc main() {\n\tprintln(\"ok\")\n}\n```\n"
+	cases := []struct {
+		name string
+		dark bool
+	}{
+		{name: "dark", dark: true},
+		{name: "light", dark: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			out, err := mdrender.Render(md, 80, tc.dark)
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if !strings.Contains(out, "func") {
+				t.Errorf("expected rendered code block to contain code, got: %q", out)
+			}
+			if !strings.Contains(out, "\x1b[") {
+				t.Errorf("expected rendered code block to contain ANSI styling, got: %q", out)
+			}
+		})
+	}
+}
+
 // TestRenderForWriter_NonTTYReturnsRawMarkdown verifies the TTY-aware path
 // passes markdown through unchanged when w is a *bytes.Buffer (not a TTY).
 // This is the path entire review uses when stdout is redirected, so the

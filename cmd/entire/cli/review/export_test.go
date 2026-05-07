@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 
+	"charm.land/huh/v2"
+
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
@@ -57,6 +59,10 @@ func ExposedComposeSingleAgentSinks(in SingleAgentSinkComposeInputs) []reviewtyp
 		agentName: in.AgentName,
 		cancelRun: in.CancelRun,
 	})
+}
+
+func ExposedBuildAgentMultiSelect(options []huh.Option[string], picked *[]string) *huh.MultiSelect[string] {
+	return buildAgentMultiSelect(options, picked)
 }
 
 // ExposedFindTUISink exposes findTUISink for tests.

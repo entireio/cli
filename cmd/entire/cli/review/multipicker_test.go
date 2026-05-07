@@ -3,7 +3,10 @@ package review_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+
+	"charm.land/huh/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/review"
 )
@@ -71,5 +74,23 @@ func TestPickedAgentsSentinels(t *testing.T) {
 	}
 	if errors.Is(review.ErrNoAgentsSelected, review.ErrPickerCancelled) {
 		t.Error("ErrNoAgentsSelected and ErrPickerCancelled must be distinct")
+	}
+}
+
+func TestAgentMultiSelectRendersAllEligibleAgents(t *testing.T) {
+	t.Parallel()
+
+	var picked []string
+	field := review.ExposedBuildAgentMultiSelect([]huh.Option[string]{
+		huh.NewOption("claude-code   (3 skills configured)", "claude-code").Selected(true),
+		huh.NewOption("codex   (1 skills configured)", "codex").Selected(true),
+	}, &picked).WithWidth(80)
+	field.Focus()
+
+	view := field.View()
+	for _, want := range []string{"claude-code", "codex"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("agent picker did not render %q:\n%s", want, view)
+		}
 	}
 }
