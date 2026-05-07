@@ -73,6 +73,10 @@ type EntireSettings struct {
 	// that agent. When empty, `entire review` triggers the first-run picker.
 	Review map[string]ReviewConfig `json:"review,omitempty"`
 
+	// ReviewFixAgent is the default agent used when applying aggregate or
+	// multi-agent review findings with `entire review --fix`.
+	ReviewFixAgent string `json:"review_fix_agent,omitempty"`
+
 	// CommitLinking controls how commits are linked to agent sessions.
 	// "always" = auto-link without prompting, "prompt" = ask on each commit.
 	// Defaults to "prompt" (preserves existing user behavior).
@@ -394,6 +398,9 @@ func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage)
 		return err
 	}
 	if err := mergeRawStringNonEmpty(raw, "log_level", &settings.LogLevel); err != nil {
+		return err
+	}
+	if err := mergeRawStringNonEmpty(raw, "review_fix_agent", &settings.ReviewFixAgent); err != nil {
 		return err
 	}
 	if err := mergeRawInt(raw, "summary_timeout_seconds", &settings.SummaryTimeoutSeconds); err != nil {

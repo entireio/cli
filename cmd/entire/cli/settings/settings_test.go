@@ -978,6 +978,7 @@ func TestEntireSettings_ReviewRoundTrip(t *testing.T) {
 	t.Parallel()
 	raw := []byte(`{
       "enabled": true,
+      "review_fix_agent": "codex",
       "review": {
         "claude-code": {
           "skills": ["/pr-review-toolkit:review-pr", "/test-auditor"],
@@ -991,6 +992,9 @@ func TestEntireSettings_ReviewRoundTrip(t *testing.T) {
 	var s EntireSettings
 	if err := json.Unmarshal(raw, &s); err != nil {
 		t.Fatalf("unmarshal: %v", err)
+	}
+	if s.ReviewFixAgent != "codex" {
+		t.Fatalf("review_fix_agent = %q, want codex", s.ReviewFixAgent)
 	}
 	claude := s.Review["claude-code"]
 	if len(claude.Skills) != 2 || claude.Skills[0] != "/pr-review-toolkit:review-pr" {

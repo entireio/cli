@@ -47,6 +47,7 @@ type SynthesisSink struct {
 	PerRunPrompt    string          // if non-empty, included in the synthesis prompt for context
 	RunContext      context.Context // optional; nil falls back to context.Background()
 	ProviderTimeout time.Duration   // optional; zero uses defaultSynthesisProviderTimeout
+	OnResult        func(result string)
 }
 
 // Compile-time interface check.
@@ -106,6 +107,9 @@ func (s SynthesisSink) RunFinished(summary reviewtypes.RunSummary) {
 	if provErr != nil {
 		fmt.Fprintf(s.Writer, "synthesis unavailable: %v\n", provErr)
 		return
+	}
+	if s.OnResult != nil {
+		s.OnResult(result)
 	}
 	// The synthesis verdict is markdown — render it through the same palette
 	// dispatch / DumpSink use, so multi-agent reviews finish with a visually

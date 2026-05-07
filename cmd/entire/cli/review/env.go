@@ -109,6 +109,17 @@ func AppendReviewEnv(base []string, agentName string, cfg reviewtypes.RunConfig,
 	)
 }
 
+func withoutReviewEnv(base []string) []string {
+	out := make([]string, 0, len(base))
+	for _, kv := range base {
+		if isReviewEnvEntry(kv) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // isReviewEnvEntry reports whether kv is a "KEY=VALUE" entry whose key is
 // one of the ENTIRE_REVIEW_* contract variables.
 func isReviewEnvEntry(kv string) bool {

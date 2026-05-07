@@ -97,6 +97,9 @@ type runReviewDeps struct {
 func NewCommand(deps Deps) *cobra.Command {
 	var edit bool
 	var agentOverride string
+	var findings bool
+	var fix bool
+	var all bool
 
 	cmd := &cobra.Command{
 		Use: "review",
@@ -116,22 +119,56 @@ review metadata is permanently attached to the commit it covers.
 
 Flags:
   --edit         re-open the review config picker
+  --findings     browse local review findings
+  --fix          apply review findings in a normal agent session
+  --all          with --fix, apply all sources/findings without selectors
   --agent NAME   select a specific configured agent when more than one is
                  configured (default: alphabetically first)
 
 Subcommands:
   attach <id>    tag an existing session as a review (equivalent to
                  'entire attach --review <id>')`,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) > 1 {
+				return fmt.Errorf("accepts at most one review session id, received %d", len(args))
+			}
+			if len(args) == 1 && !fix {
+				return errors.New("review session id is only valid with --fix")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			// Discover external agents so review configs that target them
 			// resolve correctly — without this, GetAgentsWithHooksInstalled
 			// and agent.Get can't see them.
 			external.DiscoverAndRegister(ctx)
 
+			if all && !fix {
+				return errors.New("--all requires --fix")
+			}
+			modes := 0
+			for _, enabled := range []bool{edit, findings, fix} {
+				if enabled {
+					modes++
+				}
+			}
+			if modes > 1 {
+				return errors.New("--edit, --findings, and --fix are mutually exclusive")
+			}
 			if edit {
 				_, err := RunReviewConfigPicker(ctx, cmd.OutOrStdout(), deps.GetAgentsWithHooksInstalled)
 				return err
+			}
+			if findings {
+				return runReviewFindings(ctx, cmd)
+			}
+			if fix {
+				target := ""
+				if len(args) == 1 {
+					target = args[0]
+				}
+				return runReviewFix(ctx, cmd, target, all, agentOverride)
 			}
 			innerDeps := runReviewDeps{
 				promptForAgentFn: deps.PromptForAgentFn,
@@ -141,6 +178,9 @@ Subcommands:
 		},
 	}
 	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the review config picker")
+	cmd.Flags().BoolVar(&findings, "findings", false, "browse local review findings")
+	cmd.Flags().BoolVar(&fix, "fix", false, "apply review findings in a normal agent session")
+	cmd.Flags().BoolVar(&all, "all", false, "with --fix, apply all sources/findings without selectors")
 	cmd.Flags().StringVar(&agentOverride, "agent", "", "select a specific configured agent (default: alphabetically first)")
 	if deps.AttachCmd != nil {
 		cmd.AddCommand(deps.AttachCmd)
@@ -363,7 +403,8 @@ func runSingleAgentPath(
 		defer tuiSink.Wait()
 	}
 
-	_, waitErr := Run(runCtx, reviewer, runCfg, sinks)
+	summary, waitErr := Run(runCtx, reviewer, runCfg, sinks)
+	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, "")
 	if waitErr != nil && runCtx.Err() == nil && ctx.Err() == nil {
 		// Non-cancellation error: surface to caller.
 		return fmt.Errorf("review run: %w", waitErr)
@@ -480,6 +521,7 @@ func runMultiAgentPath(
 	for i, r := range reviewers {
 		agentNames[i] = r.Name()
 	}
+	aggregateOutput := ""
 
 	// TUI requires both:
 	//   - terminal stdout (otherwise ANSI codes corrupt redirected output)
@@ -497,13 +539,17 @@ func runMultiAgentPath(
 		synthesisProvider: deps.SynthesisProvider,
 		promptYN:          deps.PromptYN,
 		perRunPrompt:      picked.PerRun,
+		onSynthesisResult: func(result string) {
+			aggregateOutput = result
+		},
 	})
 	if tuiSink, ok := findTUISink(sinks); ok {
 		tuiSink.Start()
 		defer tuiSink.Wait()
 	}
 
-	_, waitErr := RunMulti(runCtx, reviewers, reviewtypes.RunConfig{}, sinks)
+	summary, waitErr := RunMulti(runCtx, reviewers, reviewtypes.RunConfig{}, sinks)
+	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput)
 	if waitErr != nil && runCtx.Err() == nil && ctx.Err() == nil {
 		return fmt.Errorf("review run: %w", waitErr)
 	}
@@ -544,6 +590,7 @@ type multiAgentSinkInputs struct {
 	synthesisProvider SynthesisProvider
 	promptYN          func(ctx context.Context, question string, def bool) (bool, error)
 	perRunPrompt      string
+	onSynthesisResult func(result string)
 }
 
 type singleAgentSinkInputs struct {
@@ -581,9 +628,37 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 			PromptYN:     in.promptYN,
 			PerRunPrompt: in.perRunPrompt,
 			RunContext:   in.runContext,
+			OnResult:     in.onSynthesisResult,
 		})
 	}
 	return sinks
+}
+
+func writePostReviewManifest(
+	ctx context.Context,
+	out io.Writer,
+	worktreeRoot string,
+	headSHA string,
+	summary reviewtypes.RunSummary,
+	aggregateOutput string,
+) {
+	if summary.Cancelled || len(summary.AgentRuns) == 0 {
+		return
+	}
+	manifest, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
+	if err != nil {
+		logging.Debug(ctx, "review manifest not written", slog.String("error", err.Error()))
+		return
+	}
+	if len(manifest.Sources) == 0 {
+		logging.Debug(ctx, "review manifest not written: no matching review sessions")
+		return
+	}
+	if err := writeLocalReviewManifest(ctx, manifest); err != nil {
+		logging.Debug(ctx, "review manifest write failed", slog.String("error", err.Error()))
+		return
+	}
+	writeReviewCompletionFooter(out, manifest)
 }
 
 func composeSingleAgentSinks(in singleAgentSinkInputs) []reviewtypes.Sink {

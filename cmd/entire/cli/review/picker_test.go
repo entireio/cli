@@ -316,6 +316,54 @@ func TestSaveReviewConfig_PersistsSettings(t *testing.T) {
 	}
 }
 
+func TestSaveReviewConfig_PreservesReviewFixAgent(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+
+	entireDir := filepath.Join(tmp, ".entire")
+	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte(`{"enabled":true,"review_fix_agent":"` + testCodexAgent + `"}`)
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
+		testAgentName: {Skills: []string{testReviewSkill}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := settings.Load(context.Background())
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if s.ReviewFixAgent != testCodexAgent {
+		t.Fatalf("ReviewFixAgent = %q, want %s", s.ReviewFixAgent, testCodexAgent)
+	}
+}
+
+func TestSaveReviewFixAgent_PersistsSettings(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+
+	if err := review.SaveReviewFixAgent(context.Background(), testCodexAgent); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := settings.Load(context.Background())
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if s.ReviewFixAgent != testCodexAgent {
+		t.Fatalf("ReviewFixAgent = %q, want %s", s.ReviewFixAgent, testCodexAgent)
+	}
+}
+
 // TestSaveReviewConfig_ReturnsErrorOnMalformedSettings ensures SaveReviewConfig
 // does not overwrite existing settings when settings.json is malformed.
 func TestSaveReviewConfig_ReturnsErrorOnMalformedSettings(t *testing.T) {

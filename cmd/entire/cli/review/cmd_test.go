@@ -55,7 +55,7 @@ func TestReviewCmd_Help(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"review", "--edit", "--agent", "attach", "Labs entry"} {
+	for _, want := range []string{"review", "--edit", "--findings", "--fix", "--all", "--agent", "attach", "Labs entry"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--help output missing %q: %s", want, out)
 		}
@@ -460,7 +460,7 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 			Skills: []string{"/review"},
 			Prompt: "Claude saved prompt.",
 		},
-		"codex": {
+		testCodexAgent: {
 			Skills: []string{"/review"},
 			Prompt: "Codex saved prompt.",
 		},
@@ -469,17 +469,17 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 	}
 
 	claudeReviewer := &captureRunConfigReviewer{name: "claude-code"}
-	codexReviewer := &captureRunConfigReviewer{name: "codex"}
+	codexReviewer := &captureRunConfigReviewer{name: testCodexAgent}
 	multiPickerFn := func(_ context.Context, _ []review.AgentChoice) (review.PickedAgents, error) {
 		return review.PickedAgents{
-			Names:  []string{"claude-code", "codex"},
+			Names:  []string{"claude-code", testCodexAgent},
 			PerRun: "Focus this run on regressions.",
 		}, nil
 	}
 
 	deps := review.Deps{
 		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
-			return []types.AgentName{"claude-code", "codex"}
+			return []types.AgentName{"claude-code", testCodexAgent}
 		},
 		NewSilentError: func(err error) error { return err },
 		MultiPickerFn:  multiPickerFn,
@@ -490,7 +490,7 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 			switch agentName {
 			case "claude-code":
 				return claudeReviewer
-			case "codex":
+			case testCodexAgent:
 				return codexReviewer
 			default:
 				return nil
