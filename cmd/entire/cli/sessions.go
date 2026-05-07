@@ -239,6 +239,8 @@ func sessionPhaseLabel(s *strategy.SessionState) string {
 }
 
 func newListCmd() *cobra.Command {
+	var jsonFlag bool
+
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all sessions",
@@ -247,16 +249,18 @@ func newListCmd() *cobra.Command {
 For active sessions only, use 'entire status'.
 
 Examples:
-  entire sessions list    List all sessions across all worktrees`,
+  entire sessions list           List all sessions across all worktrees
+  entire sessions list --json    Same list as a metadata-only JSON array`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runSessionList(cmd.Context(), cmd)
+			return runSessionList(cmd.Context(), cmd, jsonFlag)
 		},
 	}
 
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
 	return cmd
 }
 
-func runSessionList(ctx context.Context, cmd *cobra.Command) error {
+func runSessionList(ctx context.Context, cmd *cobra.Command, jsonOutput bool) error {
 	states, err := strategy.ListSessionStates(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list sessions: %w", err)
@@ -269,17 +273,21 @@ func runSessionList(ctx context.Context, cmd *cobra.Command) error {
 		}
 	}
 
+	// Sort by StartedAt descending (newest first); same order as the prose view.
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].StartedAt.After(filtered[j].StartedAt)
+	})
+
 	w := cmd.OutOrStdout()
+
+	if jsonOutput {
+		return writeSessionListJSON(w, filtered)
+	}
 
 	if len(filtered) == 0 {
 		fmt.Fprintln(w, "No sessions.")
 		return nil
 	}
-
-	// Sort by StartedAt descending (newest first)
-	sort.Slice(filtered, func(i, j int) bool {
-		return filtered[i].StartedAt.After(filtered[j].StartedAt)
-	})
 
 	sty := newStatusStyles(w)
 
@@ -299,6 +307,24 @@ func runSessionList(ctx context.Context, cmd *cobra.Command) error {
 	}
 	fmt.Fprintln(w)
 
+	return nil
+}
+
+// writeSessionListJSON emits the list as a JSON array of the same per-session
+// envelope returned by `entire session info --json`. Always emits a valid
+// array (`[]` for the empty case) so consumers can pipe through `jq` without
+// special-casing "no sessions".
+func writeSessionListJSON(w io.Writer, states []*strategy.SessionState) error {
+	out := make([]sessionInfoJSON, 0, len(states))
+	for _, state := range states {
+		out = append(out, buildSessionInfoJSON(state, sessionPhaseLabel(state)))
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
+		return fmt.Errorf("failed to encode session list: %w", err)
+	}
 	return nil
 }
 
@@ -477,7 +503,9 @@ type tokenInfoJSON struct {
 	Output     int `json:"output"`
 }
 
-func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status string) error {
+// buildSessionInfoJSON converts a SessionState into the JSON envelope shared
+// by `session info --json`, `session current --json`, and `session list --json`.
+func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionInfoJSON {
 	agentLabel := string(state.AgentType)
 	if agentLabel == "" {
 		agentLabel = unknownPlaceholder
@@ -507,10 +535,13 @@ func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status stri
 			Output:     state.TokenUsage.OutputTokens,
 		}
 	}
+	return info
+}
 
+func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status string) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(info); err != nil {
+	if err := enc.Encode(buildSessionInfoJSON(state, status)); err != nil {
 		return fmt.Errorf("failed to encode session info: %w", err)
 	}
 	return nil

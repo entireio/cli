@@ -20,6 +20,7 @@ import (
 
 const (
 	testAgentClaude    = "Claude Code"
+	testAgentGemini    = "Gemini CLI"
 	testCheckpointID   = "a3b2c4d5e6f7"
 	testPromptFixLogin = "fix the login bug"
 )
@@ -654,7 +655,7 @@ func TestListCmd_ShowsAllSessions(t *testing.T) {
 	active.StartedAt = time.Now().Add(-1 * time.Hour)
 
 	idle := makeSessionState("test-list-idle", session.PhaseIdle)
-	idle.AgentType = "Gemini CLI"
+	idle.AgentType = testAgentGemini
 	idle.WorktreeID = "other-wt"
 	idle.LastCheckpointID = testCheckpointID
 	idle.StartedAt = time.Now().Add(-2 * time.Hour)
@@ -706,6 +707,92 @@ func TestListCmd_ShowsAllSessions(t *testing.T) {
 	endedIdx := strings.Index(out, "test-list-ended")
 	if activeIdx > idleIdx || idleIdx > endedIdx {
 		t.Errorf("expected newest-first sort order, got active@%d idle@%d ended@%d", activeIdx, idleIdx, endedIdx)
+	}
+}
+
+func TestListCmd_JSONNoSessionsEmitsEmptyArray(t *testing.T) {
+	setupStopTestRepo(t)
+
+	cmd := newListCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"--json"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("ExecuteContext: %v", err)
+	}
+
+	var got []sessionInfoJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("expected valid JSON array, got parse error: %v\noutput: %s", err, stdout.String())
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty array, got %d entries", len(got))
+	}
+}
+
+func TestListCmd_JSONReturnsAllSessionsSorted(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	older := makeSessionState("test-list-json-older", session.PhaseIdle)
+	older.AgentType = testAgentClaude
+	older.StartedAt = time.Now().Add(-2 * time.Hour)
+	older.WorktreeID = "wt-a"
+	older.LastCheckpointID = testCheckpointID
+
+	newer := makeSessionState("test-list-json-newer", session.PhaseActive)
+	newer.AgentType = testAgentGemini
+	newer.ModelName = "gemini-2.5-pro"
+	newer.StartedAt = time.Now().Add(-30 * time.Minute)
+	newer.WorktreeID = "wt-b"
+	newer.LastPrompt = testPromptFixLogin
+
+	for _, s := range []*strategy.SessionState{older, newer} {
+		if err := strategy.SaveSessionState(ctx, s); err != nil {
+			t.Fatalf("SaveSessionState: %v", err)
+		}
+	}
+
+	cmd := newListCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("ExecuteContext: %v", err)
+	}
+
+	var got []sessionInfoJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("expected valid JSON array, got parse error: %v\noutput: %s", err, stdout.String())
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(got))
+	}
+
+	// Newest first — same order as the prose view.
+	if got[0].SessionID != "test-list-json-newer" {
+		t.Errorf("expected newest session first, got %q", got[0].SessionID)
+	}
+	if got[1].SessionID != "test-list-json-older" {
+		t.Errorf("expected older session second, got %q", got[1].SessionID)
+	}
+
+	// Envelope must carry the same fields a Baton-style consumer needs.
+	if got[0].Agent != testAgentGemini {
+		t.Errorf("expected agent='Gemini CLI', got %q", got[0].Agent)
+	}
+	if got[0].Model != "gemini-2.5-pro" {
+		t.Errorf("expected model='gemini-2.5-pro', got %q", got[0].Model)
+	}
+	if got[0].LastPrompt != testPromptFixLogin {
+		t.Errorf("expected last_prompt set, got %q", got[0].LastPrompt)
+	}
+	if got[0].WorktreeID != "wt-b" {
+		t.Errorf("expected worktree_id='wt-b', got %q", got[0].WorktreeID)
+	}
+	if got[1].LastCheckpoint != testCheckpointID {
+		t.Errorf("expected last_checkpoint_id=%q, got %q", testCheckpointID, got[1].LastCheckpoint)
 	}
 }
 
