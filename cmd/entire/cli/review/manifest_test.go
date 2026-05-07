@@ -13,6 +13,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
+const manifestTestCodexAgent = "codex"
+
 func TestLocalReviewManifest_ResolveByAnySessionID(t *testing.T) {
 	repoRoot := t.TempDir()
 	testutil.InitRepo(t, repoRoot)
@@ -32,7 +34,7 @@ func TestLocalReviewManifest_ResolveByAnySessionID(t *testing.T) {
 			},
 			{
 				SessionID: "codex-session",
-				Agent:     "codex",
+				Agent:     manifestTestCodexAgent,
 				Label:     "Codex",
 				Output:    "M1. Codex finding",
 			},
@@ -59,6 +61,45 @@ func TestLocalReviewManifest_ResolveByAnySessionID(t *testing.T) {
 	}
 }
 
+func TestLocalReviewManifest_PrefixMatchWithinSameManifestDoesNotAmbiguate(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.InitRepo(t, repoRoot)
+	t.Chdir(repoRoot)
+
+	manifest := LocalReviewManifest{
+		Version:      1,
+		WorktreePath: repoRoot,
+		CreatedAt:    time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC),
+		StartingSHA:  "abc123",
+		Sources: []ManifestSource{
+			{
+				SessionID: "review-session-claude",
+				Agent:     "claude-code",
+				Label:     "Claude Code",
+				Output:    "H1. Claude finding",
+			},
+			{
+				SessionID: "review-session-codex",
+				Agent:     manifestTestCodexAgent,
+				Label:     "Codex",
+				Output:    "M1. Codex finding",
+			},
+		},
+	}
+
+	if err := writeLocalReviewManifest(context.Background(), manifest); err != nil {
+		t.Fatalf("writeLocalReviewManifest: %v", err)
+	}
+
+	got, _, err := resolveLocalReviewManifestBySessionID(context.Background(), repoRoot, "review-session")
+	if err != nil {
+		t.Fatalf("resolveLocalReviewManifestBySessionID: %v", err)
+	}
+	if len(got.Sources) != 2 {
+		t.Fatalf("sources = %d, want 2", len(got.Sources))
+	}
+}
+
 func TestComposeReviewFixPrompt_UsesSelectedSources(t *testing.T) {
 	manifest := LocalReviewManifest{
 		WorktreePath: "/repo",
@@ -71,7 +112,7 @@ func TestComposeReviewFixPrompt_UsesSelectedSources(t *testing.T) {
 			},
 			{
 				SessionID: "codex-session",
-				Agent:     "codex",
+				Agent:     manifestTestCodexAgent,
 				Label:     "Codex",
 				Output:    "M1. Codex finding",
 			},
@@ -157,7 +198,7 @@ func TestReviewFixSourcesForManifest_AddsAggregateFallbackForMultipleAgents(t *t
 			},
 			{
 				SessionID: "codex-session",
-				Agent:     "codex",
+				Agent:     manifestTestCodexAgent,
 				Label:     "Codex",
 				Output:    "M1. Codex finding",
 			},
@@ -205,13 +246,13 @@ func TestReviewFixSourcePickerTitle_IncludesSessionHandle(t *testing.T) {
 
 func TestReviewFixAgentFromSelectedSources_UsesSingleAgentSource(t *testing.T) {
 	got, ok := reviewFixAgentFromSelectedSources([]reviewFixSource{
-		{Kind: reviewFixSourceAgent, Agent: "codex", Label: "Codex findings"},
+		{Kind: reviewFixSourceAgent, Agent: manifestTestCodexAgent, Label: "Codex findings"},
 	})
 
 	if !ok {
 		t.Fatal("expected single-source agent inference")
 	}
-	if got != "codex" {
+	if got != manifestTestCodexAgent {
 		t.Fatalf("agent = %q, want codex", got)
 	}
 }
@@ -231,7 +272,7 @@ func TestReviewFixAgentFromSelectedSources_DoesNotInferForAggregateOrMultiple(t 
 			name: "multiple agents",
 			sources: []reviewFixSource{
 				{Kind: reviewFixSourceAgent, Agent: "claude-code"},
-				{Kind: reviewFixSourceAgent, Agent: "codex"},
+				{Kind: reviewFixSourceAgent, Agent: manifestTestCodexAgent},
 			},
 		},
 	}
@@ -248,15 +289,15 @@ func TestReviewFixAgentFromSelectedSources_DoesNotInferForAggregateOrMultiple(t 
 func TestSavedReviewFixAgentPick_UsesSavedWhenAvailable(t *testing.T) {
 	choices := []AgentChoice{
 		{Name: "claude-code", Label: "Claude Code"},
-		{Name: "codex", Label: "Codex"},
+		{Name: manifestTestCodexAgent, Label: "Codex"},
 	}
 
-	got, ok := savedReviewFixAgentPick(choices, "codex")
+	got, ok := savedReviewFixAgentPick(choices, manifestTestCodexAgent)
 
 	if !ok {
 		t.Fatal("expected saved agent match")
 	}
-	if got != "codex" {
+	if got != manifestTestCodexAgent {
 		t.Fatalf("saved pick = %q, want codex", got)
 	}
 }
@@ -264,10 +305,22 @@ func TestSavedReviewFixAgentPick_UsesSavedWhenAvailable(t *testing.T) {
 func TestSavedReviewFixAgentPick_RejectsUnknownSavedAgent(t *testing.T) {
 	choices := []AgentChoice{{Name: "claude-code", Label: "Claude Code"}}
 
-	got, ok := savedReviewFixAgentPick(choices, "codex")
+	got, ok := savedReviewFixAgentPick(choices, manifestTestCodexAgent)
 
 	if ok {
 		t.Fatalf("saved pick = %q, want no match", got)
+	}
+}
+
+func TestPickReviewFixAgentPreference_PreservesCurrentWhenNoChoices(t *testing.T) {
+	t.Parallel()
+
+	got, err := pickReviewFixAgentPreference(context.Background(), nil, manifestTestCodexAgent)
+	if err != nil {
+		t.Fatalf("pickReviewFixAgentPreference: %v", err)
+	}
+	if got != manifestTestCodexAgent {
+		t.Fatalf("fix agent = %q, want codex", got)
 	}
 }
 
@@ -284,7 +337,7 @@ func TestBuildLocalReviewManifestFromSummary_GroupsAgentSessionsAndAggregate(t *
 				},
 			},
 			{
-				Name:   "codex",
+				Name:   manifestTestCodexAgent,
 				Status: reviewtypes.AgentStatusSucceeded,
 				Buffer: []reviewtypes.Event{
 					reviewtypes.AssistantText{Text: "Codex finding"},

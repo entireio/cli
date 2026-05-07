@@ -193,6 +193,7 @@ func resolveLocalReviewManifestBySessionID(ctx context.Context, worktreeRoot, se
 			if source.SessionID == sessionID || strings.HasPrefix(source.SessionID, sessionID) {
 				matches = append(matches, manifest)
 				sourceMatches = append(sourceMatches, source)
+				break
 			}
 		}
 	}

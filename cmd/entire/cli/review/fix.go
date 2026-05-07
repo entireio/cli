@@ -45,12 +45,12 @@ type reviewFinding struct {
 	Body  string
 }
 
-func runReviewFindings(ctx context.Context, cmd *cobra.Command) error {
+func runReviewFindings(ctx context.Context, cmd *cobra.Command, silentErr func(error) error) error {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		cmd.SilenceUsage = true
 		fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run `entire enable` first.")
-		return fmt.Errorf("resolve worktree root: %w", err)
+		return wrapReviewSilentError(silentErr, errors.New("not a git repository"))
 	}
 	manifests, err := loadLocalReviewManifests(ctx, worktreeRoot)
 	if err != nil {
@@ -72,12 +72,19 @@ func runReviewFindings(ctx context.Context, cmd *cobra.Command) error {
 	return nil
 }
 
-func runReviewFix(ctx context.Context, cmd *cobra.Command, target string, all bool, agentOverride string) error {
+func runReviewFix(
+	ctx context.Context,
+	cmd *cobra.Command,
+	target string,
+	all bool,
+	agentOverride string,
+	silentErr func(error) error,
+) error {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		cmd.SilenceUsage = true
 		fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run `entire enable` first.")
-		return fmt.Errorf("resolve worktree root: %w", err)
+		return wrapReviewSilentError(silentErr, errors.New("not a git repository"))
 	}
 
 	manifest, err := resolveReviewFixManifest(ctx, cmd, worktreeRoot, target)
@@ -99,6 +106,13 @@ func runReviewFix(ctx context.Context, cmd *cobra.Command, target string, all bo
 	}
 	prompt := composeReviewFixPrompt(manifest, reviewFixSourcesFromFindings(findings))
 	return launchReviewFixAgent(ctx, fixAgent, prompt)
+}
+
+func wrapReviewSilentError(silentErr func(error) error, err error) error {
+	if silentErr == nil {
+		return err
+	}
+	return silentErr(err)
 }
 
 func resolveReviewFixManifest(ctx context.Context, cmd *cobra.Command, worktreeRoot string, target string) (LocalReviewManifest, error) {

@@ -161,14 +161,14 @@ Subcommands:
 				return err
 			}
 			if findings {
-				return runReviewFindings(ctx, cmd)
+				return runReviewFindings(ctx, cmd, deps.NewSilentError)
 			}
 			if fix {
 				target := ""
 				if len(args) == 1 {
 					target = args[0]
 				}
-				return runReviewFix(ctx, cmd, target, all, agentOverride)
+				return runReviewFix(ctx, cmd, target, all, agentOverride, deps.NewSilentError)
 			}
 			innerDeps := runReviewDeps{
 				promptForAgentFn: deps.PromptForAgentFn,

@@ -304,7 +304,7 @@ func pickReviewFixAgentPreference(ctx context.Context, review map[string]setting
 	choices := reviewFixAgentChoices(review)
 	switch len(choices) {
 	case 0:
-		return "", nil
+		return current, nil
 	case 1:
 		return choices[0].Name, nil
 	default:
