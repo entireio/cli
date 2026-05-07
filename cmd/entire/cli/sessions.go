@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -24,40 +26,47 @@ import (
 
 // streamTranscriptToStdout copies the contents of the file at path to w.
 // Cancellation is wired through a goroutine that closes the file on
-// <-ctx.Done(), so io.ReadAll returns promptly when the user hits Ctrl-C on a
+// <-ctx.Done(), so reads return promptly when the user hits Ctrl-C on a
 // multi-MB transcript instead of blocking until EOF.
 //
 // Snapshot semantics: the read is bounded to the file size observed at open
 // (via io.LimitReader) so writes the agent appends after command start are
-// excluded. Output shaping is content-aware:
+// excluded.
 //
-//   - Whole-document JSON transcripts (e.g. Gemini's session-*.json) are
-//     emitted intact. Trimming would cut off the closing brace.
-//   - JSONL transcripts (Claude Code, Cursor, Codex, etc.) get a trailing
-//     partial-line trim so consumers never see a truncated record.
+// Output shaping is agent-aware so the streaming path stays bounded-memory
+// for the unbounded case (JSONL transcripts grow with conversation length):
+//
+//   - JSONL agents (Claude Code, Cursor, Codex, etc.) — line-buffered copy.
+//     Only one line is held in memory at a time. A trailing partial line
+//     (agent mid-write) is silently dropped so consumers never see a
+//     truncated record.
+//   - Whole-document JSON agents (Gemini) — read snapshot into memory and
+//     validate with json.Valid before emitting. These transcripts are
+//     bounded by conversation size and rarely exceed a few MB even for
+//     long sessions, so buffering is acceptable here.
 //
 // path comes from a session-state file that Entire writes exclusively
 // under the user's own .git/. The path is therefore as trusted as any
 // other entry the local user has on disk; we do not validate it against a
 // confinement root.
-func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string) error {
+func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string, agentType types.AgentType) error {
 	f, err := os.Open(path) //nolint:gosec // see comment above on trust model
 	if err != nil {
 		return fmt.Errorf("open transcript: %w", err)
 	}
 
-	// Bound the snapshot to the file size at open. Without this, io.ReadAll
-	// would also include bytes the agent appends while the read is in flight,
-	// silently extending the "snapshot" past command-start.
+	// Bound the snapshot to the file size at open. Without this, the read
+	// would also include bytes the agent appends while in flight, silently
+	// extending the "snapshot" past command-start.
 	var snapshotSize int64 = -1
 	if info, statErr := f.Stat(); statErr == nil {
 		snapshotSize = info.Size()
 	}
 
-	// Single owner of the Close() call. Either the cancel goroutine fires
-	// it (to unblock io.ReadAll) or the defer fires it (normal path);
-	// sync.Once prevents the double close that would otherwise trip the
-	// race detector under heavy fd reuse.
+	// Single owner of Close. Either the cancel goroutine fires it (to
+	// unblock the read) or the defer fires it (normal path); sync.Once
+	// prevents the double close that would otherwise trip the race
+	// detector under heavy fd reuse.
 	var closeOnce sync.Once
 	closeFn := func() { closeOnce.Do(func() { _ = f.Close() }) }
 
@@ -78,33 +87,62 @@ func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string) err
 	if snapshotSize >= 0 {
 		reader = io.LimitReader(f, snapshotSize)
 	}
-	buf, err := io.ReadAll(reader)
+
+	if isWholeDocumentJSONAgent(agentType) {
+		return writeWholeDocumentJSONTranscript(ctx, w, reader)
+	}
+	return writeJSONLTranscript(ctx, w, reader)
+}
+
+// isWholeDocumentJSONAgent reports whether an agent's on-disk transcript is
+// a single JSON document (e.g. Gemini's session-*.json) versus JSONL.
+func isWholeDocumentJSONAgent(agentType types.AgentType) bool {
+	return agentType == agent.AgentTypeGemini
+}
+
+// writeJSONLTranscript copies a JSONL transcript line-by-line. Each completed
+// line (including its newline) is written to w. A trailing partial line at
+// EOF is dropped so consumers never see a truncated record.
+func writeJSONLTranscript(ctx context.Context, w io.Writer, r io.Reader) error {
+	br := bufio.NewReader(r)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			if _, werr := w.Write(line); werr != nil {
+				return fmt.Errorf("write transcript: %w", werr)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr //nolint:wrapcheck // propagating context cancellation
+			}
+			return fmt.Errorf("read transcript: %w", err)
+		}
+	}
+}
+
+// writeWholeDocumentJSONTranscript reads the snapshot, validates it parses as
+// JSON, and emits it intact. Trim-to-last-newline would cut the closing
+// brace and produce malformed output for these agents.
+func writeWholeDocumentJSONTranscript(ctx context.Context, w io.Writer, r io.Reader) error {
+	buf, err := io.ReadAll(r)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr //nolint:wrapcheck // propagating context cancellation
 		}
 		return fmt.Errorf("read transcript: %w", err)
 	}
-
-	if _, err := w.Write(shapeTranscriptSnapshot(buf)); err != nil {
+	if !json.Valid(buf) {
+		// Snapshot is mid-write or otherwise malformed; emit nothing rather
+		// than a truncated document. Consumer can re-run the export.
+		return nil
+	}
+	if _, err := w.Write(buf); err != nil {
 		return fmt.Errorf("write transcript: %w", err)
 	}
-	return nil
-}
-
-// shapeTranscriptSnapshot returns the snapshot bytes a consumer should see.
-// If the buffer is a single valid JSON document (Gemini-style), it is emitted
-// intact. Otherwise it is treated as JSONL and trimmed to the last newline so
-// no partial trailing record reaches the consumer.
-func shapeTranscriptSnapshot(buf []byte) []byte {
-	if json.Valid(buf) {
-		return buf
-	}
-	if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
-		return buf[:i+1]
-	}
-	// Single non-terminated, non-JSON record (vanishingly rare for live
-	// transcripts) — return empty rather than a truncated record.
 	return nil
 }
 
@@ -505,7 +543,7 @@ func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *stra
 		return NewSilentError(fmt.Errorf("transcript unavailable: %w", err))
 	}
 
-	return streamTranscriptToStdout(ctx, cmd.OutOrStdout(), path)
+	return streamTranscriptToStdout(ctx, cmd.OutOrStdout(), path, state.AgentType)
 }
 
 // sessionInfoJSON is the JSON output structure for sessions info --json.

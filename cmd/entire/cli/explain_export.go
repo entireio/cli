@@ -11,8 +11,26 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
+
+// checkpointMatchesSessionFilter returns true when any session that
+// contributed to this checkpoint has an ID prefixed by sessionFilter.
+// Multi-session checkpoints expose archived contributors via SessionIDs;
+// matching only against SessionID (the latest contributor) silently drops
+// any checkpoint where the requested session was archived.
+func checkpointMatchesSessionFilter(p strategy.RewindPoint, sessionFilter string) bool {
+	if strings.HasPrefix(p.SessionID, sessionFilter) {
+		return true
+	}
+	for _, sid := range p.SessionIDs {
+		if strings.HasPrefix(sid, sessionFilter) {
+			return true
+		}
+	}
+	return false
+}
 
 // explainExportOptions describes a request for one of the machine-readable
 // output modes of `entire checkpoint explain`. Exactly one of json,
@@ -248,6 +266,12 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 // checkpointExportJSON is the metadata-only envelope returned by
 // `entire checkpoint explain --json`. It exposes only existing CheckpointSummary
 // and CommittedMetadata fields — no schema invention, no transcript bytes.
+//
+// `partial` is true when any session metadata read failed; the offending
+// entries surface their cause via Sessions[].error. Consumers that don't
+// want to inspect every entry can branch on this single top-level flag.
+// The command also exits non-zero in that case so automation doesn't
+// mistake incomplete data for a clean export.
 type checkpointExportJSON struct {
 	CheckpointID     string                  `json:"checkpoint_id"`
 	Strategy         string                  `json:"strategy,omitempty"`
@@ -257,6 +281,7 @@ type checkpointExportJSON struct {
 	HasReview        bool                    `json:"has_review,omitempty"`
 	SessionCount     int                     `json:"session_count"`
 	Sessions         []checkpointSessionJSON `json:"sessions"`
+	Partial          bool                    `json:"partial,omitempty"`
 }
 
 type checkpointSessionJSON struct {
@@ -317,25 +342,39 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 	}
 
 	envelope.Sessions = make([]checkpointSessionJSON, 0, len(summary.Sessions))
+	var failedSessions []int
 	for idx := range summary.Sessions {
 		meta, metaErr := readSessionMetadataForExport(ctx, reader, cpID, idx)
 		if metaErr != nil {
 			// Surface the per-session error as a stub entry with an explicit
 			// error string rather than failing the whole envelope or silently
-			// returning empty fields. Consumers branch on the `error` field.
+			// returning empty fields. Consumers branch on the `error` field
+			// and the top-level `partial` flag.
 			envelope.Sessions = append(envelope.Sessions, checkpointSessionJSON{
 				Index: idx,
 				Error: metaErr.Error(),
 			})
+			failedSessions = append(failedSessions, idx)
 			continue
 		}
 		envelope.Sessions = append(envelope.Sessions, sessionMetadataToJSON(idx, meta))
 	}
+	envelope.Partial = len(failedSessions) > 0
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(envelope); err != nil {
 		return fmt.Errorf("failed to encode checkpoint json: %w", err)
+	}
+
+	// Fail hard so automation can't mistake incomplete metadata for a clean
+	// export. The envelope (with its `partial` flag and per-session error
+	// fields) has already been written to stdout; using SilentError keeps
+	// the diagnostic on stderr from interleaving with that output.
+	if envelope.Partial {
+		fmt.Fprintf(errW, "checkpoint %s: failed to read metadata for %d session(s) (indexes %v)\n",
+			cpID, len(failedSessions), failedSessions)
+		return NewSilentError(fmt.Errorf("checkpoint %s export incomplete: %d session(s) unreadable", cpID, len(failedSessions)))
 	}
 	return nil
 }
@@ -441,7 +480,7 @@ func runExplainListJSON(ctx context.Context, w io.Writer, sessionFilter string) 
 
 	out := make([]branchCheckpointJSON, 0, len(points))
 	for _, p := range points {
-		if sessionFilter != "" && !strings.HasPrefix(p.SessionID, sessionFilter) {
+		if sessionFilter != "" && !checkpointMatchesSessionFilter(p, sessionFilter) {
 			continue
 		}
 		entry := branchCheckpointJSON{

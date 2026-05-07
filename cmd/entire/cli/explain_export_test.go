@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
@@ -399,6 +400,83 @@ func TestRunExplainExport_NoModeFlagFailsLoudly(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "without an output mode")
 	require.Empty(t, stdout.String(), "must not emit JSON when no mode is set")
+}
+
+// TestCheckpointExportJSON_PartialContract pins the JSON shape that signals
+// a partial-failure export to consumers (codex finding 3): the top-level
+// `partial` flag plus per-session `error` fields. Consumers branch on
+// either; the command also exits non-zero so automation can't trust an
+// envelope where partial=true.
+func TestCheckpointExportJSON_PartialContract(t *testing.T) {
+	t.Parallel()
+
+	envelope := checkpointExportJSON{
+		CheckpointID: "abcdef123456",
+		SessionCount: 2,
+		Sessions: []checkpointSessionJSON{
+			{Index: 0, SessionID: "good", Agent: "Claude Code"},
+			{Index: 1, Error: "read v2 session metadata: blob 0xdead missing"},
+		},
+		Partial: true,
+	}
+
+	buf, err := json.Marshal(envelope)
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(buf, &got))
+
+	require.Equal(t, true, got["partial"], "envelope must surface partial=true at top level")
+	sessions, ok := got["sessions"].([]any)
+	require.True(t, ok)
+	require.Len(t, sessions, 2)
+
+	failed, ok := sessions[1].(map[string]any)
+	require.True(t, ok)
+	idx, ok := failed["index"].(float64)
+	require.True(t, ok)
+	require.InEpsilon(t, float64(1), idx, 0.0001)
+	require.Equal(t, "read v2 session metadata: blob 0xdead missing", failed["error"])
+	// The unreadable session must NOT carry stub fields that look like real data.
+	require.NotContains(t, failed, "session_id")
+	require.NotContains(t, failed, "agent")
+}
+
+// TestCheckpointMatchesSessionFilter guards the codex high finding: when a
+// caller asks for `entire checkpoint explain --json --session <prefix>`, the
+// filter must match against ALL contributing sessions, not just the latest.
+// Multi-session checkpoints expose archived contributors via SessionIDs.
+func TestCheckpointMatchesSessionFilter(t *testing.T) {
+	t.Parallel()
+
+	multi := strategy.RewindPoint{
+		SessionID:  "9f44f514-b012", // latest
+		SessionIDs: []string{"older-session-aaaa", "9f44f514-b012"},
+	}
+	single := strategy.RewindPoint{
+		SessionID: "lone-session-bbbb",
+	}
+
+	tests := []struct {
+		name   string
+		point  strategy.RewindPoint
+		filter string
+		want   bool
+	}{
+		{name: "matches latest session id", point: multi, filter: "9f44f514", want: true},
+		{name: "matches archived session id", point: multi, filter: "older-session", want: true},
+		{name: "no match", point: multi, filter: "deadbeef", want: false},
+		{name: "single-session match", point: single, filter: "lone", want: true},
+		{name: "single-session miss", point: single, filter: "older-session", want: false},
+		{name: "empty filter not handled here", point: multi, filter: "", want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := checkpointMatchesSessionFilter(tc.point, tc.filter)
+			require.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func TestExplainCmd_TranscriptAndJSONMutuallyExclusive(t *testing.T) {
