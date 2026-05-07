@@ -128,7 +128,7 @@ func IsOnDefaultBranch(ctx context.Context) (bool, string, error) {
 	// If we couldn't determine from remote, use common defaults
 	if defaultBranch == "" {
 		// Check if current branch is a common default name
-		if currentBranch == "main" || currentBranch == "master" {
+		if currentBranch == defaultBaseBranch || currentBranch == masterBaseBranch {
 			return true, currentBranch, nil
 		}
 		return false, currentBranch, nil
@@ -151,11 +151,11 @@ func getDefaultBranchFromRemote(repo *git.Repository) string {
 	}
 
 	// Fallback: check if origin/main or origin/master exists
-	if _, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", "main"), true); err == nil {
-		return "main"
+	if _, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", defaultBaseBranch), true); err == nil {
+		return defaultBaseBranch
 	}
-	if _, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", "master"), true); err == nil {
-		return "master"
+	if _, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", masterBaseBranch), true); err == nil {
+		return masterBaseBranch
 	}
 
 	return ""

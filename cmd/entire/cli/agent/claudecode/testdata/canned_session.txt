@@ -1,0 +1,13 @@
+I'll review the changes on this branch against the base ref.
+
+Looking at the diff, the primary change adds a new `AgentReviewer` interface and associated types in `cmd/entire/cli/review/types/`. The implementation is clean and well-structured.
+
+**Findings:**
+
+1. The interface is correctly sealed via the unexported `isEvent()` method — external packages cannot add event variants without a contract change, which is the intended design.
+
+2. `RunConfig` uses a zero-value-friendly struct with no required-field constructors. This is consistent with Go conventions.
+
+3. The `Process.Wait()` contract is clearly documented: callers must call it exactly once. This is a reasonable constraint.
+
+**No blocking issues found.** The implementation matches the spec requirements from CU2.

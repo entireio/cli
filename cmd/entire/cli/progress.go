@@ -22,19 +22,15 @@ const (
 )
 
 // startSpinner prints msg followed by an animated spinner to w when the
-// operation takes longer than spinnerInitialDelay. Returns a stop function
-// that clears the spinner line and prints suffix (with a newline) if
-// non-empty. Fast operations that call stop before the initial delay
-// elapses produce no output at all.
-//
-// When w is not a terminal (CI, redirected output, agent subprocess), the
-// spinner and the suppression message are both omitted — non-interactive
-// callers get clean output without progress chatter.
-func startSpinner(w io.Writer, msg string) func(suffix string) {
+// operation takes longer than spinnerInitialDelay. stop(true) leaves
+// "✓ msg" on the line; stop(false) erases the line and writes nothing.
+// On non-terminal writers the animation is omitted but stop(true) still
+// prints the completion line.
+func startSpinner(w io.Writer, msg string) func(success bool) {
 	if !interactive.IsTerminalWriter(w) {
-		return func(suffix string) {
-			if suffix != "" {
-				fmt.Fprintln(w, suffix)
+		return func(success bool) {
+			if success {
+				fmt.Fprintf(w, "✓ %s\n", msg)
 			}
 		}
 	}
@@ -63,25 +59,25 @@ func startSpinner(w io.Writer, msg string) func(suffix string) {
 			}
 		}
 	}()
-	return func(suffix string) {
+	return func(success bool) {
 		close(done)
 		<-stopped
-		// \r\033[K is a no-op on a line that was never drawn; on a drawn
-		// line it returns the cursor and clears it.
-		fmt.Fprint(w, "\r\033[K")
-		if suffix != "" {
-			fmt.Fprintln(w, suffix)
+		if success {
+			fmt.Fprintf(w, "\r\033[K✓ %s\n", msg)
+			return
 		}
+		fmt.Fprint(w, "\r\033[K")
 	}
 }
 
 type progressBar struct {
-	w       io.Writer
-	label   string
-	total   int
-	current int
-	width   int
-	enabled bool
+	w        io.Writer
+	label    string
+	total    int
+	current  int
+	width    int
+	enabled  bool
+	finished bool
 }
 
 func startProgressBar(w io.Writer, label string, total int) *progressBar {
@@ -112,7 +108,12 @@ func (p *progressBar) Increment() {
 }
 
 func (p *progressBar) Finish() {
-	if !p.enabled {
+	if !p.enabled || p.finished {
+		return
+	}
+	p.finished = true
+	if p.current >= p.total {
+		fmt.Fprintln(p.w)
 		return
 	}
 	fmt.Fprint(p.w, "\r\033[K")

@@ -2,6 +2,8 @@ package checkpoint
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -10,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -164,6 +167,115 @@ func TestV2ReadSessionMetadataAndPrompts_ReturnsWithoutTranscript(t *testing.T) 
 	assert.Equal(t, "session-meta-only", content.Metadata.SessionID)
 	assert.Contains(t, content.Prompts, "test prompt")
 	assert.Empty(t, content.Transcript)
+}
+
+func TestV2ReadSessionMetadata_DoesNotRequireRawTranscript(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	cpID := id.MustCheckpointID("f2f3f4f5f6f7")
+	ctx := context.Background()
+
+	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-1",
+		Strategy:     "manual-commit",
+		Prompts:      []string{"prompt"},
+		Agent:        "Claude Code",
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})
+	require.NoError(t, err)
+
+	metadata, err := store.ReadSessionMetadata(ctx, cpID, 0)
+	require.NoError(t, err)
+	require.NotNil(t, metadata)
+	assert.Equal(t, "session-1", metadata.SessionID)
+	assert.Equal(t, "Claude Code", string(metadata.Agent))
+}
+
+func TestV2ReadSessionMetadata_ContextCancellation(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	cpID := id.MustCheckpointID("f2f3f4f5f6f8")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.ReadSessionMetadata(ctx, cpID, 0)
+	require.ErrorIs(t, err, context.Canceled, "ReadSessionMetadata error = %v, want context.Canceled", err)
+
+	_, err = store.ReadSessionMetadataAndPrompts(ctx, cpID, 0)
+	require.ErrorIs(t, err, context.Canceled, "ReadSessionMetadataAndPrompts error = %v, want context.Canceled", err)
+}
+
+func TestV2ReadSessionMetadata_ReturnsMetadata(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	cpID := id.MustCheckpointID("f1f2f3f4f5fa")
+	ctx := context.Background()
+
+	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-metadata-only",
+		Strategy:     "manual-commit",
+		Prompts:      []string{"test prompt"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})
+	require.NoError(t, err)
+
+	meta, err := store.ReadSessionMetadata(ctx, cpID, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "session-metadata-only", meta.SessionID)
+}
+
+func TestV2ReadSessionMetadata_FetchesMissingMetadataBlob(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	cpID := id.MustCheckpointID("f1f2f3f4f5fb")
+	ctx := context.Background()
+
+	err := store.WriteCommitted(ctx, WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-fetch-metadata",
+		Strategy:     "manual-commit",
+		Prompts:      []string{"test prompt"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})
+	require.NoError(t, err)
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	repoRoot := wt.Filesystem.Root()
+	mainTree := v2MainTree(t, repo)
+	sessionTree, err := mainTree.Tree(cpID.Path() + "/0")
+	require.NoError(t, err)
+	metadataEntry, err := sessionTree.FindEntry(paths.MetadataFileName)
+	require.NoError(t, err)
+	metadataContent := v2ReadFile(t, mainTree, cpID.Path()+"/0/"+paths.MetadataFileName)
+
+	metadataObjectPath := filepath.Join(repoRoot, ".git", "objects", metadataEntry.Hash.String()[:2], metadataEntry.Hash.String()[2:])
+	require.NoError(t, os.Remove(metadataObjectPath))
+
+	reopenedRepo, err := git.PlainOpen(repoRoot)
+	require.NoError(t, err)
+	reopenedStore := NewV2GitStore(reopenedRepo, "origin")
+	fetchCalled := false
+	reopenedStore.SetBlobFetcher(func(_ context.Context, hashes []plumbing.Hash) error {
+		fetchCalled = true
+		require.Equal(t, []plumbing.Hash{metadataEntry.Hash}, hashes)
+		_, createErr := CreateBlobFromContent(reopenedRepo, []byte(metadataContent))
+		return createErr
+	})
+
+	meta, err := reopenedStore.ReadSessionMetadata(ctx, cpID, 0)
+	require.NoError(t, err)
+	assert.True(t, fetchCalled)
+	assert.Equal(t, "session-fetch-metadata", meta.SessionID)
 }
 
 func TestV2ReadSessionMetadataAndPrompts_MissingCheckpoint(t *testing.T) {

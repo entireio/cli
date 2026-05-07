@@ -377,7 +377,7 @@ func runExplain(ctx context.Context, w, errW io.Writer, sessionID, commitRef, ch
 func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool) error {
 	stop := startSpinner(errW, "Loading checkpoints")
 	lookup, lookupErr := newExplainCheckpointLookup(ctx)
-	stop("")
+	stop(false)
 	if generate {
 		if err := runExplainAutoAmbiguityGuard(ctx, target, lookup, lookupErr); err != nil {
 			return err
@@ -524,7 +524,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 				v2OK = true
 			}
 		}
-		stop("")
+		stop(false)
 		if v1Err == nil || v2OK {
 			if freshLookup, freshErr := newExplainCheckpointLookup(ctx); freshErr == nil {
 				lookup = freshLookup
@@ -586,14 +586,14 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 
 	resolvedReader, summary, content, err := loadCheckpointForExplain(ctx, errW, lookup, fullCheckpointID, full, generate, rawTranscript)
 	if err != nil {
-		stopLoad("")
+		stopLoad(false)
 		return err
 	}
 	v2Reader, isCheckpointsV2 := resolvedReader.(*checkpoint.V2GitStore)
 
 	// Handle summary generation — uses raw transcript.
 	if generate {
-		stopLoad("") // generation prints its own progress to w/errW
+		stopLoad(false) // generation prints its own progress to w/errW
 		if err := generateCheckpointSummary(ctx, w, errW, lookup.v1Store, lookup.v2Store, fullCheckpointID, summary, content, force); err != nil {
 			return err
 		}
@@ -606,14 +606,14 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 			content, err = readLatestSessionContentForExplain(ctx, resolvedReader, fullCheckpointID, summary)
 		}
 		if err != nil {
-			stopLoad("")
+			stopLoad(false)
 			return fmt.Errorf("failed to reload checkpoint: %w", err)
 		}
 	}
 
 	// Handle raw transcript output
 	if rawTranscript {
-		stopLoad("")
+		stopLoad(false)
 		rawLog, _, rawErr := checkpoint.ResolveRawSessionLogForCheckpoint(ctx, fullCheckpointID, lookup.v1Store, lookup.v2Store, lookup.preferCheckpointsV2)
 		if rawErr != nil {
 			return fmt.Errorf("failed to read raw transcript: %w", rawErr)
@@ -646,7 +646,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 
 	// Format and output. Stop spinner BEFORE any write to w to keep stderr
 	// frames and stdout content from interleaving.
-	stopLoad("")
+	stopLoad(false)
 	output := formatCheckpointOutput(summary, content, fullCheckpointID, associatedCommits, author, verbose, full, w)
 	outputExplainContent(w, output, noPager)
 	return nil

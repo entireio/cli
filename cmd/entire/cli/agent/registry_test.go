@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -460,3 +461,44 @@ type protectedDirAgent struct {
 
 func (p *protectedDirAgent) ProtectedDirs() []string  { return p.dirs }
 func (p *protectedDirAgent) ProtectedFiles() []string { return p.files }
+
+func TestLauncherFor(t *testing.T) {
+	t.Parallel()
+	// Claude Code should be found. (claudecode init() registers it via the blank
+	// import in generate_external_test.go — but registry_test.go is package agent,
+	// so we register a launcher directly here.)
+	Register(types.AgentName("launcher-test-agent"), func() Agent {
+		return &mockLauncherAgent{}
+	})
+	t.Cleanup(func() {
+		registryMu.Lock()
+		delete(registry, types.AgentName("launcher-test-agent"))
+		registryMu.Unlock()
+	})
+
+	l, ok := LauncherFor(types.AgentName("launcher-test-agent"))
+	if !ok {
+		t.Fatal("expected launcher-test-agent to implement Launcher")
+	}
+	if l == nil {
+		t.Fatal("expected non-nil Launcher")
+	}
+	// A non-existent agent should return false.
+	l2, ok2 := LauncherFor(types.AgentName("does-not-exist"))
+	if ok2 {
+		t.Error("expected ok=false for unknown agent")
+	}
+	if l2 != nil {
+		t.Error("expected nil Launcher for unknown agent")
+	}
+}
+
+// mockLauncherAgent implements Agent and Launcher for testing.
+type mockLauncherAgent struct {
+	mockAgent
+}
+
+//nolint:unparam // error is always nil in this mock; satisfies the Launcher interface.
+func (m *mockLauncherAgent) LaunchCmd(ctx context.Context, _ string) (*exec.Cmd, error) {
+	return exec.CommandContext(ctx, "true"), nil
+}

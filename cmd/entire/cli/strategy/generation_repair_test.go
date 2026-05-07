@@ -34,7 +34,7 @@ func TestRepairV2GenerationMetadata_RewritesGenerationJSONFromRawTranscripts(t *
 		NewestCheckpointAt: time.Date(2026, 1, 2, 1, 0, 0, 0, time.UTC),
 	}, rawOldest, rawNewest)
 
-	result, err := RepairV2GenerationMetadata(context.Background())
+	result, err := RepairV2GenerationMetadata(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{"0000000000001"}, result.Repaired)
 	assert.Empty(t, result.Failed)
@@ -73,7 +73,7 @@ func TestRepairV2GenerationMetadata_RepairsRemoteOnlyGenerationWithLease(t *test
 	runGenerationRepairGit(t, repoRoot, "push", "origin", refName.String()+":"+refName.String())
 	require.NoError(t, DeleteRefCLI(context.Background(), refName.String(), oldCommitHash.String()))
 
-	result, err := RepairV2GenerationMetadata(context.Background())
+	result, err := RepairV2GenerationMetadata(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{"0000000000002"}, result.Repaired)
 	assert.Empty(t, result.Failed)
@@ -103,10 +103,34 @@ func TestRepairV2GenerationMetadata_RepairsRemoteOnlyGenerationWithLease(t *test
 	assert.True(t, gen.NewestCheckpointAt.Equal(rawNewest))
 }
 
+func TestRepairV2GenerationMetadata_ExcludeRefsSkipsListedRefs(t *testing.T) {
+	repo, _ := initGenerationRepairTestRepo(t)
+
+	cpID := id.MustCheckpointID("aabb22334455")
+	rawOldest := time.Date(2025, 10, 1, 8, 0, 0, 0, time.UTC)
+	rawNewest := time.Date(2025, 10, 1, 8, 30, 0, 0, time.UTC)
+
+	excludedRef := plumbing.ReferenceName(paths.V2FullRefPrefix + "0000000000007")
+	wrongGen := checkpoint.GenerationMetadata{
+		OldestCheckpointAt: time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC),
+		NewestCheckpointAt: time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	beforeCommit := createRepairArchivedGenerationRef(t, repo, excludedRef, cpID, wrongGen, rawOldest, rawNewest)
+
+	result, err := RepairV2GenerationMetadata(context.Background(), []plumbing.ReferenceName{excludedRef})
+	require.NoError(t, err)
+	assert.Empty(t, result.Repaired, "excluded ref must not be repaired")
+	assert.Empty(t, result.Skipped, "excluded ref must not appear in skipped — it should never reach the per-candidate loop")
+
+	ref, err := repo.Reference(excludedRef, true)
+	require.NoError(t, err)
+	assert.Equal(t, beforeCommit, ref.Hash(), "excluded ref must not advance even when its generation.json is wrong")
+}
+
 func TestRepairV2GenerationMetadata_NoCandidatesIsNoOp(t *testing.T) {
 	initGenerationRepairTestRepo(t)
 
-	result, err := RepairV2GenerationMetadata(context.Background())
+	result, err := RepairV2GenerationMetadata(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, result.Repaired)
 	assert.Empty(t, result.Skipped)
@@ -126,7 +150,7 @@ func TestRepairV2GenerationMetadata_AlreadyCorrectIsSkipped(t *testing.T) {
 		NewestCheckpointAt: rawNewest,
 	}, rawOldest, rawNewest)
 
-	result, err := RepairV2GenerationMetadata(context.Background())
+	result, err := RepairV2GenerationMetadata(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"0000000000003"}, result.Skipped)
 	assert.Empty(t, result.Repaired)

@@ -52,7 +52,6 @@ const (
 
 // Pre-compiled regexes for trailer parsing.
 var (
-	// Trailer parsing regexes.
 	strategyTrailerRegex     = regexp.MustCompile(StrategyTrailerKey + `:\s*(.+)`)
 	metadataTrailerRegex     = regexp.MustCompile(MetadataTrailerKey + `:\s*(.+)`)
 	taskMetadataTrailerRegex = regexp.MustCompile(MetadataTaskTrailerKey + `:\s*(.+)`)
@@ -261,12 +260,12 @@ func IsTrailerLine(line string) bool {
 	return trailerLineRe.MatchString(line)
 }
 
-// AppendCheckpointTrailer appends Entire-Checkpoint in trailer-aware format.
-// If the message already ends with a trailer paragraph, append directly to it;
-// otherwise add a blank line before starting a new trailer block.
-func AppendCheckpointTrailer(message, checkpointID string) string {
+// appendTrailerLine appends a single pre-formatted trailer line (e.g. "Key: value")
+// to message in trailer-block-aware format. If the message already ends with a
+// trailer paragraph the line is joined directly to it; otherwise a blank line is
+// inserted first to start a new trailer block.
+func appendTrailerLine(message, trailerLine string) string {
 	trimmed := strings.TrimRight(message, "\n")
-	trailer := fmt.Sprintf("%s: %s", CheckpointTrailerKey, checkpointID)
 
 	lines := strings.Split(trimmed, "\n")
 	i := len(lines) - 1
@@ -296,7 +295,15 @@ func AppendCheckpointTrailer(message, checkpointID string) string {
 	}
 
 	if hasTrailerBlock {
-		return trimmed + "\n" + trailer + "\n"
+		return trimmed + "\n" + trailerLine + "\n"
 	}
-	return trimmed + "\n\n" + trailer + "\n"
+	return trimmed + "\n\n" + trailerLine + "\n"
+}
+
+// AppendCheckpointTrailer appends Entire-Checkpoint in trailer-aware format.
+// If the message already ends with a trailer paragraph, append directly to it;
+// otherwise add a blank line before starting a new trailer block.
+func AppendCheckpointTrailer(message, checkpointID string) string {
+	trailer := fmt.Sprintf("%s: %s", CheckpointTrailerKey, checkpointID)
+	return appendTrailerLine(message, trailer)
 }

@@ -546,6 +546,12 @@ func buildTrailUpdateRequest(current *api.TrailResource, statusStr, title, body 
 // defaultBaseBranch is the fallback base branch name when it cannot be determined.
 const defaultBaseBranch = "main"
 
+// masterBaseBranch is the secondary fallback for repos still using "master"
+// (pre-git-2.28 defaults, forks of older projects, etc.). Extracted as a
+// constant so goconst stays quiet across the several call sites in the cli
+// package.
+const masterBaseBranch = "master"
+
 func formatValidStatuses() string {
 	statuses := trail.ValidStatuses()
 	names := make([]string, len(statuses))

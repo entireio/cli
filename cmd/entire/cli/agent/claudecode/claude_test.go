@@ -4,8 +4,38 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
+
+func TestClaudeCodeAgent_LaunchCmd(t *testing.T) {
+	t.Parallel()
+	a := NewClaudeCodeAgent()
+	launcher, ok := a.(agent.Launcher)
+	if !ok {
+		t.Fatal("ClaudeCodeAgent does not implement agent.Launcher")
+	}
+	// Binary may not be on PATH in CI; ErrNotFound is acceptable for this test.
+	cmd, err := launcher.LaunchCmd(context.Background(), "hello world")
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			t.Skip("claude binary not on PATH; skipping cmd shape check")
+		}
+		t.Fatalf("LaunchCmd: %v", err)
+	}
+	if cmd == nil {
+		t.Fatal("nil cmd")
+	}
+	if cmd.Path == "" {
+		t.Error("cmd.Path empty")
+	}
+	joined := strings.Join(cmd.Args, " ")
+	if !strings.Contains(joined, "hello world") {
+		t.Errorf("args missing prompt: %v", cmd.Args)
+	}
+}
 
 func TestResolveSessionFile(t *testing.T) {
 	t.Parallel()

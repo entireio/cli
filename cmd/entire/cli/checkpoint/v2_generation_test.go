@@ -301,8 +301,17 @@ func createArchivedRef(t *testing.T, repo *git.Repository, number int) {
 	commitHash, err := CreateCommit(context.Background(), repo, treeHash, plumbing.ZeroHash, "archived", authorName, authorEmail)
 	require.NoError(t, err)
 
-	refName := plumbing.ReferenceName(fmt.Sprintf("%s%013d", paths.V2FullRefPrefix, number))
+	refName := ArchivedGenerationRefName(number)
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))
+}
+
+func TestArchivedGenerationRefName(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t,
+		plumbing.ReferenceName(paths.V2FullRefPrefix+"0000000000001"),
+		ArchivedGenerationRefName(1),
+	)
 }
 
 func TestListArchivedGenerations_Empty(t *testing.T) {
@@ -399,8 +408,8 @@ func TestRotateGeneration_ArchivesCurrentAndCreatesNewOrphan(t *testing.T) {
 	cpIDs := populateFullCurrent(t, store, 3, 0)
 
 	// --- Verify archived ref ---
-	archiveRefName := fmt.Sprintf("%s%013d", paths.V2FullRefPrefix, 1)
-	archiveRef, err := repo.Reference(plumbing.ReferenceName(archiveRefName), true)
+	archiveRefName := ArchivedGenerationRefName(1)
+	archiveRef, err := repo.Reference(archiveRefName, true)
 	require.NoError(t, err, "archived ref should exist")
 
 	// Archived ref should contain generation.json with timestamps
@@ -436,6 +445,38 @@ func TestRotateGeneration_ArchivesCurrentAndCreatesNewOrphan(t *testing.T) {
 	freshTree, err := freshCommit.Tree()
 	require.NoError(t, err)
 	assert.Empty(t, freshTree.Entries, "fresh tree should be empty (no generation.json)")
+}
+
+func TestResetFullCurrentRefIfUnchangedRejectsConcurrentChange(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	ctx := context.Background()
+
+	treeHash, err := BuildTreeFromEntries(ctx, repo, map[string]object.TreeEntry{})
+	require.NoError(t, err)
+	baseCommit, err := CreateCommit(ctx, repo, treeHash, plumbing.ZeroHash,
+		"base current\n", "Test", "test@test.com")
+	require.NoError(t, err)
+	concurrentCommit, err := CreateCommit(ctx, repo, treeHash, baseCommit,
+		"concurrent current\n", "Test", "test@test.com")
+	require.NoError(t, err)
+	orphanCommit, err := CreateCommit(ctx, repo, treeHash, plumbing.ZeroHash,
+		"Start generation\n", "Test", "test@test.com")
+	require.NoError(t, err)
+
+	refName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
+	expectedRef := plumbing.NewHashReference(refName, baseCommit)
+	require.NoError(t, repo.Storer.SetReference(expectedRef))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, concurrentCommit)))
+
+	reset, err := store.resetFullCurrentRefIfUnchanged(ctx, refName, expectedRef, orphanCommit)
+	require.NoError(t, err)
+	assert.False(t, reset)
+
+	currentRef, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	assert.Equal(t, concurrentCommit, currentRef.Hash())
 }
 
 func TestRotateGeneration_UsesCheckpointCreatedAt(t *testing.T) {

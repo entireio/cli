@@ -6,6 +6,7 @@ package agent
 import (
 	"context"
 	"io"
+	"os/exec"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
@@ -252,6 +253,50 @@ type RestoredSessionPathResolver interface {
 type TestOnly interface {
 	Agent
 	IsTestOnly() bool
+}
+
+// Launcher is implemented by agents that `entire` can subprocess-spawn.
+// This is used by `entire review` to start an agent with a pre-composed
+// initial prompt; other commands may use it later.
+//
+// Contract:
+//   - LaunchCmd builds an *exec.Cmd with stdin/stdout/stderr wired to the
+//     caller's TTY. The agent runs in the foreground and the call blocks.
+//   - The returned cmd is ready to Run() or Start(); it must NOT be modified
+//     by the caller except to set environment variables or working dir.
+//   - initialPrompt is the first user message to send to the agent.
+type Launcher interface {
+	LaunchCmd(ctx context.Context, initialPrompt string) (*exec.Cmd, error)
+}
+
+// DiscoveredSkill describes one review-adjacent skill found on disk by a
+// SkillDiscoverer. Name is the agent-native invocation form (e.g. a
+// slash-prefixed command); Description is scraped from on-disk metadata
+// if available; SourcePath is kept for debug logging and is not shown to
+// the user.
+type DiscoveredSkill struct {
+	Name        string
+	Description string
+	SourcePath  string
+}
+
+// SkillDiscoverer is implemented by agents that can enumerate review-adjacent
+// skills installed locally on disk (e.g. plugin skills under
+// ~/.claude/plugins/...). This powers the "Installed plugin skills" section
+// of the `entire review` picker and the runtime verification that configured
+// skills still exist before spawn.
+//
+// Contract:
+//   - Safe to call on fresh installs where no plugin dir exists yet —
+//     return (nil, nil), not an error.
+//   - Malformed individual skill metadata must be skipped with a Debug log,
+//     not propagated as an error.
+//   - A (nil, non-nil) error means "discovery could not run at all" (e.g.
+//     home dir inaccessible). Callers may treat all errors as "found nothing"
+//     and log at Debug — discovery must never block the picker.
+type SkillDiscoverer interface {
+	Agent
+	DiscoverReviewSkills(ctx context.Context) ([]DiscoveredSkill, error)
 }
 
 // SessionBaseDirProvider is implemented by agents that store transcripts in a

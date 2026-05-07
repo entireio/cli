@@ -108,6 +108,9 @@ linters:
         - grpc.DialOption
         - github.com/entireio/cli/cmd/entire/cli/summarize.Generator
         - github.com/entireio/cli/cmd/entire/cli/agent\..+
+        - github.com/entireio/cli/cmd/entire/cli/review/types.Process
+        - github.com/entireio/cli/cmd/entire/cli/review/types.AgentReviewer
+        - github.com/entireio/cli/cmd/entire/cli/review.SynthesisProvider
         - github.com/entireio/cli/cmd/entire/cli/checkpoint.CommittedReader
         - github.com/entireio/cli/cmd/entire/cli/strategy.Strategy
         - github.com/go-git/go-git/v6/x/plugin.Signer
@@ -153,6 +156,9 @@ linters:
       - path: ^internal/sim/
         linters:
           - wrapcheck
+      - path: ^cmd/entire/cli/review/tui_model\.go$
+        linters:
+          - ireturn
       - text: "`strat` is a misspelling"
         linters:
           - misspell

@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
@@ -319,6 +321,23 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	if err := strat.InitializeSession(ctx, sessionID, ag.Type(), event.SessionRef, event.Prompt, event.Model); err != nil {
 		logging.Warn(logCtx, "failed to initialize session state",
 			slog.String("error", err.Error()))
+	}
+
+	// Best-effort: adopt ENTIRE_REVIEW_* env vars set by `entire review` on
+	// the spawned agent process. Each agent process has its own env, so there
+	// is no file race across worktrees. Errors in load/save must not fail the turn.
+	if state, loadErr := strategy.LoadSessionState(ctx, sessionID); loadErr != nil {
+		logging.Warn(logCtx, "failed to load session state for review env adoption",
+			slog.String("error", loadErr.Error()))
+	} else if state != nil {
+		updated := *state
+		adoptReviewEnv(logCtx, &updated, string(ag.Name()))
+		if updated.Kind != state.Kind || updated.ReviewPrompt != state.ReviewPrompt || !slices.Equal(updated.ReviewSkills, state.ReviewSkills) {
+			if saveErr := strategy.SaveSessionState(ctx, &updated); saveErr != nil {
+				logging.Warn(logCtx, "failed to save session state after review env adoption",
+					slog.String("error", saveErr.Error()))
+			}
+		}
 	}
 	initSpan.End()
 
@@ -998,4 +1017,55 @@ func persistEventMetadataToState(event *agent.Event, state *strategy.SessionStat
 	if event.ContextWindowSize > 0 {
 		state.ContextWindowSize = event.ContextWindowSize
 	}
+}
+
+// adoptReviewEnv tags the session as a review session when ENTIRE_REVIEW_*
+// env vars are present on the current process. `entire review` sets these
+// vars on the spawned agent process; the lifecycle hook (a child of the agent)
+// inherits them naturally. Agent and starting-SHA checks protect against stale
+// ENTIRE_REVIEW_* values inherited from a parent shell or a nested invocation.
+//
+// Adoption is idempotent: if state.Kind is already set (subsequent turns of
+// a review session) the function returns without modifying state.
+//
+// Failure modes are silent at the user level but logged for diagnostics:
+//   - EnvSession unset or not "1": not a review session; return, no tagging.
+//   - EnvAgent does not match the hook agent: leave session untagged.
+//   - EnvStartingSHA does not match the session base commit: leave untagged.
+//   - EnvSkills malformed JSON: log warning, leave session untagged to avoid
+//     corrupting metadata with junk data.
+func adoptReviewEnv(ctx context.Context, state *session.State, expectedAgent string) {
+	// Already tagged — don't re-apply on subsequent turns.
+	if state.Kind != "" {
+		return
+	}
+	if os.Getenv(review.EnvSession) != "1" {
+		return
+	}
+	envAgent := os.Getenv(review.EnvAgent)
+	if envAgent != expectedAgent {
+		logging.Warn(ctx, "review env adoption skipped: agent mismatch",
+			slog.String("env_agent", envAgent),
+			slog.String("hook_agent", expectedAgent))
+		return
+	}
+	startingSHA := os.Getenv(review.EnvStartingSHA)
+	if startingSHA == "" || state.BaseCommit == "" || startingSHA != state.BaseCommit {
+		logging.Warn(ctx, "review env adoption skipped: starting SHA mismatch",
+			slog.String("env_starting_sha", startingSHA),
+			slog.String("state_base_commit", state.BaseCommit))
+		return
+	}
+	skills, err := review.DecodeSkills(os.Getenv(review.EnvSkills))
+	if err != nil {
+		logging.Warn(ctx, "review env adoption failed: invalid skills JSON",
+			slog.String("err", err.Error()))
+		return
+	}
+	state.Kind = session.KindAgentReview
+	state.ReviewSkills = skills
+	state.ReviewPrompt = os.Getenv(review.EnvPrompt)
+	logging.Debug(ctx, "adopted review env",
+		slog.String("agent", envAgent),
+		slog.Int("skill_count", len(skills)))
 }

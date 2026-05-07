@@ -2786,14 +2786,24 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 
 	precomputed := precomputeTranscriptBlobsForFinalize(logCtx, repo, redactedTranscript, state)
 
-	// Resolve the agent and try external compaction once before the loop —
-	// external compaction is invariant across checkpoints (same session/transcript).
-	// Internal compaction must remain per-checkpoint due to per-checkpoint startLine.
+	// Resolve the agent and produce the compact transcripts once before the loop.
+	// Compact transcripts are invariant across checkpoints within a turn: v2 /main
+	// stores a single cumulative transcript.jsonl per session and each checkpoint's
+	// metadata.json indexes into it via checkpoint_transcript_start. Producing a
+	// per-checkpoint scoped delta here would replace the cumulative transcript with
+	// only the latest turn's lines while leaving each metadata's start offset pointing
+	// at the original cumulative position — yielding metadata that claims start=N for
+	// a transcript with K<N lines. Always pass startLine=0 to keep the cumulative
+	// invariant from buildInternalCompactTranscript intact.
 	finalAg, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil; compactTranscriptForV2 handles nil
 	var externalCompact []byte
+	var internalCompact []byte
 	var isExternalAgent bool
 	if v2Store != nil {
 		externalCompact, isExternalAgent = compactAndRedactExternalTranscript(logCtx, finalAg, state)
+		if !isExternalAgent && redactedTranscript.Len() > 0 {
+			internalCompact = compactTranscriptForV2(logCtx, finalAg, redactedTranscript, 0)
+		}
 	}
 
 	// Update each checkpoint with the full transcript
@@ -2821,8 +2831,8 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		if v2Store != nil {
 			if isExternalAgent {
 				updateOpts.CompactTranscript = externalCompact
-			} else if redactedTranscript.Len() > 0 {
-				updateOpts.CompactTranscript = finalizeInternalCompactTranscript(logCtx, finalAg, cpID, state, redactedTranscript, store, v2Store, v2)
+			} else {
+				updateOpts.CompactTranscript = internalCompact
 			}
 		}
 
@@ -2867,44 +2877,6 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	state.TurnCheckpointIDs = nil
 
 	return errCount
-}
-
-// finalizeInternalCompactTranscript resolves the per-checkpoint startLine and
-// produces the compact transcript for built-in agents during finalization.
-func finalizeInternalCompactTranscript(
-	ctx context.Context,
-	ag agent.Agent,
-	cpID id.CheckpointID,
-	state *SessionState,
-	redactedTranscript redact.RedactedBytes,
-	store *checkpoint.GitStore,
-	v2Store *checkpoint.V2GitStore,
-	v2 bool,
-) []byte {
-	var (
-		content *checkpoint.SessionContent
-		readErr error
-	)
-	if v2 {
-		content, readErr = v2Store.ReadSessionContentByID(ctx, cpID, state.SessionID)
-	} else {
-		content, readErr = store.ReadSessionContentByID(ctx, cpID, state.SessionID)
-	}
-	startLine := 0
-	if readErr == nil && content != nil {
-		startLine = content.Metadata.GetTranscriptStart()
-	} else {
-		errMsg := "unknown"
-		if readErr != nil {
-			errMsg = readErr.Error()
-		}
-		logging.Debug(ctx, "finalize: failed to read checkpoint metadata, using full transcript for compact output",
-			slog.String("checkpoint_id", cpID.String()),
-			slog.String("session_id", state.SessionID),
-			slog.String("error", errMsg),
-		)
-	}
-	return compactTranscriptForV2(ctx, ag, redactedTranscript, startLine)
 }
 
 // filesChangedInCommit returns the set of files changed in a commit using git diff-tree.

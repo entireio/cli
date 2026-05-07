@@ -11,7 +11,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -58,37 +57,13 @@ func LoadSessionState(ctx context.Context, sessionID string) (*SessionState, err
 
 // SaveSessionState saves the session state atomically.
 func SaveSessionState(ctx context.Context, state *SessionState) error {
-	// Validate session ID to prevent path traversal
-	if err := validation.ValidateSessionID(state.SessionID); err != nil {
-		return fmt.Errorf("invalid session ID: %w", err)
-	}
-
-	stateDir, err := getSessionStateDir(ctx)
+	store, err := session.NewStateStore(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get session state directory: %w", err)
+		return fmt.Errorf("failed to create state store: %w", err)
 	}
 
-	if err := os.MkdirAll(stateDir, 0o750); err != nil {
-		return fmt.Errorf("failed to create session state directory: %w", err)
-	}
-
-	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal session state: %w", err)
-	}
-
-	stateFile, err := sessionStateFile(ctx, state.SessionID)
-	if err != nil {
-		return fmt.Errorf("failed to get session state file path: %w", err)
-	}
-
-	// Atomic write: write to temp file, then rename
-	tmpFile := stateFile + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0o600); err != nil {
-		return fmt.Errorf("failed to write session state: %w", err)
-	}
-	if err := os.Rename(tmpFile, stateFile); err != nil {
-		return fmt.Errorf("failed to rename session state file: %w", err)
+	if err := store.Save(ctx, state); err != nil {
+		return fmt.Errorf("failed to save session state: %w", err)
 	}
 	return nil
 }

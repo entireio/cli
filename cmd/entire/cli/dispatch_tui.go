@@ -10,12 +10,11 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/glamour/v2"
-	"charm.land/glamour/v2/ansi"
-	glamourstyles "charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
-	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 	"github.com/muesli/termenv"
+
+	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
+	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 )
 
 type dispatchRenderResult struct {
@@ -90,21 +89,12 @@ func defaultRunInteractiveDispatch(ctx context.Context, outW io.Writer, opts dis
 	return finished.result.markdown, nil
 }
 
+// defaultRenderTerminalMarkdown renders dispatch's LLM markdown output via
+// the shared mdrender palette. Always renders (no TTY check) — dispatch's
+// existing behavior is to emit ANSI codes even when redirected so that
+// `entire dispatch | less -R` still shows colors.
 func defaultRenderTerminalMarkdown(w io.Writer, markdown string) (string, error) {
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(entireBrandMarkdownStyles()),
-		glamour.WithWordWrap(getTerminalWidth(w)),
-		glamour.WithPreservedNewLines(),
-	)
-	if err != nil {
-		return "", fmt.Errorf("initialize markdown renderer: %w", err)
-	}
-
-	rendered, err := renderer.Render(markdown)
-	if err != nil {
-		return "", fmt.Errorf("render markdown: %w", err)
-	}
-	return rendered, nil
+	return mdrender.Render(markdown, getTerminalWidth(w), termenv.HasDarkBackground()) //nolint:wrapcheck // mdrender already wraps glamour's errors with package context
 }
 
 func newDispatchStatusModel(
@@ -154,185 +144,6 @@ func newDispatchStatusStyles(ss statusStyles) dispatchStatusStyles {
 	styles.footer = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	styles.spinner = lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c")).Bold(true)
 	return styles
-}
-
-func entireBrandMarkdownStyles() ansi.StyleConfig {
-	return entireBrandMarkdownStylesForBackground(termenv.HasDarkBackground())
-}
-
-func entireBrandMarkdownStylesForBackground(darkBackground bool) ansi.StyleConfig {
-	var styles ansi.StyleConfig
-	if darkBackground {
-		styles = glamourstyles.DarkStyleConfig
-	} else {
-		styles = glamourstyles.LightStyleConfig
-	}
-
-	if darkBackground {
-		styles.Document.Color = stringPtr("252")
-		styles.Heading.Color = stringPtr("252")
-		styles.Code.BackgroundColor = stringPtr("236")
-		styles.CodeBlock.Color = stringPtr("252")
-	} else {
-		styles.Document.Color = stringPtr("234")
-		styles.Heading.Color = stringPtr("234")
-		styles.Code.BackgroundColor = stringPtr("254")
-		styles.CodeBlock.Color = stringPtr("242")
-	}
-	styles.Heading.Bold = boolPtr(true)
-
-	styles.H1.Prefix = "# "
-	styles.H1.Suffix = ""
-	styles.H1.Color = stringPtr("#fb923c")
-	styles.H1.BackgroundColor = nil
-	styles.H1.Bold = boolPtr(true)
-
-	styles.H2.Color = stringPtr("#22d3ee")
-	styles.H2.Bold = boolPtr(true)
-	styles.H3.Color = stringPtr("#818cf8")
-	styles.H3.Bold = boolPtr(true)
-	styles.H4.Color = stringPtr("252")
-	styles.H4.Bold = boolPtr(true)
-	styles.H5.Color = stringPtr("245")
-	styles.H5.Bold = boolPtr(true)
-	styles.H6.Color = stringPtr("245")
-	styles.H6.Bold = boolPtr(false)
-
-	styles.HorizontalRule.Color = stringPtr("240")
-	styles.Item.Color = stringPtr("#fb923c")
-	styles.Enumeration.Color = stringPtr("#818cf8")
-	styles.BlockQuote.Color = stringPtr("245")
-
-	styles.Link.Color = stringPtr("#22d3ee")
-	styles.Link.Underline = boolPtr(true)
-	styles.LinkText.Color = stringPtr("#818cf8")
-	styles.LinkText.Bold = boolPtr(true)
-
-	styles.Code.Color = stringPtr("#fb923c")
-	if darkBackground {
-		styles.CodeBlock.Chroma = &ansi.Chroma{
-			Text: ansi.StylePrimitive{
-				Color: stringPtr("252"),
-			},
-			Error: ansi.StylePrimitive{
-				Color: stringPtr("252"),
-			},
-			Comment: ansi.StylePrimitive{
-				Color:  stringPtr("245"),
-				Italic: boolPtr(true),
-			},
-			Keyword: ansi.StylePrimitive{
-				Color: stringPtr("#818cf8"),
-				Bold:  boolPtr(true),
-			},
-			KeywordReserved: ansi.StylePrimitive{
-				Color: stringPtr("#818cf8"),
-				Bold:  boolPtr(true),
-			},
-			Name: ansi.StylePrimitive{
-				Color: stringPtr("252"),
-			},
-			NameFunction: ansi.StylePrimitive{
-				Color: stringPtr("#22d3ee"),
-			},
-			NameBuiltin: ansi.StylePrimitive{
-				Color: stringPtr("#818cf8"),
-			},
-			Literal: ansi.StylePrimitive{
-				Color: stringPtr("#fbbf24"),
-			},
-			LiteralString: ansi.StylePrimitive{
-				Color: stringPtr("#fbbf24"),
-			},
-			LiteralNumber: ansi.StylePrimitive{
-				Color: stringPtr("#fbbf24"),
-			},
-			Operator: ansi.StylePrimitive{
-				Color: stringPtr("244"),
-			},
-			Punctuation: ansi.StylePrimitive{
-				Color: stringPtr("244"),
-			},
-			GenericDeleted: ansi.StylePrimitive{
-				Color: stringPtr("1"),
-			},
-			GenericInserted: ansi.StylePrimitive{
-				Color: stringPtr("2"),
-			},
-			Background: ansi.StylePrimitive{
-				BackgroundColor: stringPtr("236"),
-			},
-		}
-	} else {
-		styles.CodeBlock.Chroma = &ansi.Chroma{
-			Text: ansi.StylePrimitive{
-				Color: stringPtr("#2A2A2A"),
-			},
-			Error: ansi.StylePrimitive{
-				Color: stringPtr("#2A2A2A"),
-			},
-			Comment: ansi.StylePrimitive{
-				Color:  stringPtr("#8D8D8D"),
-				Italic: boolPtr(true),
-			},
-			Keyword: ansi.StylePrimitive{
-				Color: stringPtr("#818cf8"),
-				Bold:  boolPtr(true),
-			},
-			KeywordReserved: ansi.StylePrimitive{
-				Color: stringPtr("#818cf8"),
-				Bold:  boolPtr(true),
-			},
-			Name: ansi.StylePrimitive{
-				Color: stringPtr("#2A2A2A"),
-			},
-			NameFunction: ansi.StylePrimitive{
-				Color: stringPtr("#22d3ee"),
-			},
-			NameBuiltin: ansi.StylePrimitive{
-				Color: stringPtr("#818cf8"),
-			},
-			Literal: ansi.StylePrimitive{
-				Color: stringPtr("#fbbf24"),
-			},
-			LiteralString: ansi.StylePrimitive{
-				Color: stringPtr("#fbbf24"),
-			},
-			LiteralNumber: ansi.StylePrimitive{
-				Color: stringPtr("#fbbf24"),
-			},
-			Operator: ansi.StylePrimitive{
-				Color: stringPtr("#7A7A7A"),
-			},
-			Punctuation: ansi.StylePrimitive{
-				Color: stringPtr("#7A7A7A"),
-			},
-			GenericDeleted: ansi.StylePrimitive{
-				Color: stringPtr("1"),
-			},
-			GenericInserted: ansi.StylePrimitive{
-				Color: stringPtr("2"),
-			},
-			Background: ansi.StylePrimitive{
-				BackgroundColor: stringPtr("254"),
-			},
-		}
-	}
-
-	styles.Table.Color = stringPtr("245")
-	styles.Table.CenterSeparator = stringPtr(" ")
-	styles.Table.ColumnSeparator = stringPtr(" ")
-	styles.Table.RowSeparator = stringPtr("-")
-
-	return styles
-}
-
-func boolPtr(v bool) *bool {
-	return &v
-}
-
-func stringPtr(v string) *string {
-	return &v
 }
 
 func dispatchStatusDetails(opts dispatchpkg.Options) []string {

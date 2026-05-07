@@ -182,6 +182,15 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		}
 	}
 
+	// Show review status for HEAD's checkpoint, if any.
+	if reviewed, meta := headHasReviewCheckpoint(ctx); reviewed {
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.dim, "  Review · "))
+		b.WriteString("reviewed (")
+		b.WriteString(meta)
+		b.WriteString(")")
+	}
+
 	return b.String()
 }
 

@@ -1629,6 +1629,122 @@ func TestHandleTurnEnd_V2ExternalTranscriptCompactor_UpdatesAllTurnCheckpoints(t
 	require.Equal(t, initialStart2, finalContent2.Metadata.CheckpointTranscriptStart, "finalization must preserve per-checkpoint line references")
 }
 
+// TestHandleTurnEnd_V2InternalCompactor_PreservesCumulativeTranscript locks the
+// invariant that v2 /main stores a single CUMULATIVE compact transcript per
+// session — every mid-turn checkpoint shares the same transcript.jsonl bytes,
+// and each metadata.json indexes into it via checkpoint_transcript_start.
+//
+// Regression for the 6bc86e5832db desync (metadata says start=237 but the
+// transcript only has 17 lines): finalize used each checkpoint's stored
+// startLine to scope-compact the transcript, then wrote the scoped result on
+// top of the cumulative one. metadata.json was left untouched, so a
+// non-zero start began pointing past the end of the (now-shorter) transcript.
+func TestHandleTurnEnd_V2InternalCompactor_PreservesCumulativeTranscript(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(testCheckpointsV2SettingsJSON), 0o644))
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-turn-end-internal-cumulative"
+
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.AgentType = agent.AgentTypeClaudeCode
+	state.Phase = session.PhaseActive
+	state.TranscriptPath = filepath.Join(dir, ".entire", "metadata", sessionID, paths.TranscriptFileName)
+	state.TurnCheckpointIDs = nil
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// Checkpoint 1 — first mid-turn commit, cumulative compact starts at line 0.
+	cpID1 := testTrailerCheckpointID.String()
+	commitWithCheckpointTrailer(t, repo, dir, cpID1)
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	// Grow the transcript and create a second mid-turn checkpoint. Its
+	// checkpoint_transcript_start will be non-zero — that's the offset finalize
+	// previously fed back into the compactor as a scope window.
+	expandedTranscript := testTranscriptPromptResponse +
+		"{\"type\":\"human\",\"message\":{\"content\":\"another prompt\"}}\n" +
+		"{\"type\":\"assistant\",\"message\":{\"content\":\"another response\"}}\n"
+	require.NoError(t, os.WriteFile(state.TranscriptPath, []byte(expandedTranscript), 0o644))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "second.txt"), []byte("second"), 0o644))
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:      sessionID,
+		ModifiedFiles:  []string{"test.txt"},
+		NewFiles:       []string{"second.txt"},
+		MetadataDir:    metadataDir,
+		MetadataDirAbs: metadataDirAbs,
+		CommitMessage:  "Checkpoint 2",
+		AuthorName:     "Test",
+		AuthorEmail:    "test@test.com",
+	}))
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.AgentType = agent.AgentTypeClaudeCode
+	state.Phase = session.PhaseActive
+	state.TranscriptPath = filepath.Join(dir, ".entire", "metadata", sessionID, paths.TranscriptFileName)
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	cpID2 := "b2c3d4e5f6a1"
+	commitFilesWithTrailer(t, repo, dir, cpID2, "second.txt")
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	v2Store := checkpoint.NewV2GitStore(repo, "origin")
+	initialContent2, err := v2Store.ReadSessionContentByID(context.Background(), id.MustCheckpointID(cpID2), sessionID)
+	require.NoError(t, err)
+	initialStart2 := initialContent2.Metadata.CheckpointTranscriptStart
+	require.Positive(t, initialStart2,
+		"second checkpoint should have a non-zero checkpoint_transcript_start so the bug path is exercised")
+
+	// Add the rest of the turn — the content that arrives between checkpoint 2's
+	// PostCommit and Stop time, when HandleTurnEnd runs.
+	finalTranscript := expandedTranscript +
+		"{\"type\":\"human\",\"message\":{\"content\":\"final prompt\"}}\n" +
+		"{\"type\":\"assistant\",\"message\":{\"content\":\"final response\"}}\n"
+	require.NoError(t, os.WriteFile(state.TranscriptPath, []byte(finalTranscript), 0o644))
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, []string{cpID1, cpID2}, state.TurnCheckpointIDs)
+
+	require.NoError(t, s.HandleTurnEnd(context.Background(), state))
+
+	// Both checkpoints must end up with byte-identical compact transcripts: the
+	// single cumulative stream covering the whole turn. The pre-fix code wrote a
+	// scoped slice for cp2 (bytes from source line >= initialStart2 only) which
+	// disagreed with cp1's cumulative bytes.
+	finalCompact1, err := v2Store.ReadSessionCompactTranscript(context.Background(), id.MustCheckpointID(cpID1), 0)
+	require.NoError(t, err)
+	finalCompact2, err := v2Store.ReadSessionCompactTranscript(context.Background(), id.MustCheckpointID(cpID2), 0)
+	require.NoError(t, err)
+	require.Equal(t, finalCompact1, finalCompact2,
+		"all turn checkpoints must share the same cumulative compact transcript after finalize")
+
+	// And the per-checkpoint start offset must still be a valid index into that
+	// transcript (this is the exact desync from issue 6bc86e5832db).
+	finalContent1, err := v2Store.ReadSessionContentByID(context.Background(), id.MustCheckpointID(cpID1), sessionID)
+	require.NoError(t, err)
+	finalContent2, err := v2Store.ReadSessionContentByID(context.Background(), id.MustCheckpointID(cpID2), sessionID)
+	require.NoError(t, err)
+
+	finalLines := bytes.Count(finalCompact2, []byte{'\n'})
+	require.GreaterOrEqual(t, finalLines, finalContent1.Metadata.CheckpointTranscriptStart,
+		"transcript.jsonl line count must be >= checkpoint_transcript_start for cp1")
+	require.GreaterOrEqual(t, finalLines, finalContent2.Metadata.CheckpointTranscriptStart,
+		"transcript.jsonl line count must be >= checkpoint_transcript_start for cp2 (the metadata-vs-transcript desync)")
+}
+
 // setupSessionWithCheckpoint initializes a session and creates one checkpoint
 // on the shadow branch so there is content available for condensation.
 // Also modifies test.txt to "agent modified content" and includes it in the checkpoint,

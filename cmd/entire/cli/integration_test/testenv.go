@@ -614,6 +614,39 @@ func (env *TestEnv) GitCommitWithMultipleCheckpoints(message string, checkpointI
 	}
 }
 
+// WriteSettings writes arbitrary JSON to .entire/settings.json. Used in
+// tests that need to seed specific config shapes before running a CLI
+// command. Overwrites any existing file.
+func (env *TestEnv) WriteSettings(m map[string]any) {
+	env.T.Helper()
+	dir := filepath.Join(env.RepoDir, ".entire")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		env.T.Fatalf("mkdir .entire: %v", err)
+	}
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		env.T.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), data, 0o600); err != nil {
+		env.T.Fatalf("write settings.json: %v", err)
+	}
+}
+
+// composeReviewPromptForTest mirrors the prompt shape runReview composes
+// so integration tests can assert against the same ReviewPrompt format
+// that spawn would produce.
+func composeReviewPromptForTest(skills []string) string {
+	if len(skills) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("Please run these review skills in order:\n")
+	for i, skill := range skills {
+		fmt.Fprintf(&sb, "  %d. %s\n", i+1, skill)
+	}
+	return sb.String()
+}
+
 // GetHeadHash returns the current HEAD commit hash.
 func (env *TestEnv) GetHeadHash() string {
 	env.T.Helper()

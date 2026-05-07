@@ -265,6 +265,18 @@ func AllProtectedFiles() []string {
 	return files
 }
 
+// LauncherFor returns the Launcher implementation for the given agent name,
+// or ok=false if the agent does not support subprocess launching. Callers
+// should tell the user to start the agent manually in that case.
+func LauncherFor(name types.AgentName) (Launcher, bool) {
+	a, err := Get(name)
+	if err != nil {
+		return nil, false
+	}
+	l, ok := a.(Launcher)
+	return l, ok
+}
+
 // Default returns the default agent.
 // Returns nil if the default agent is not registered.
 //

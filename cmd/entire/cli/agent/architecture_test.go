@@ -54,6 +54,7 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 		repoPrefix + "telemetry",  // telemetry
 		repoPrefix + "validation", // validation utilities
 		repoPrefix + "settings",   // settings (read-only access)
+		repoPrefix + "review",     // review env contract + AgentReviewer types (used by per-agent reviewer.go files)
 	}
 
 	agentDir := findAgentDir(t)
@@ -126,9 +127,10 @@ func discoverAgentPackages(t *testing.T, agentDir string) []string {
 	t.Helper()
 
 	skipDirs := map[string]bool{
-		"types":    true, // contract types, not an agent implementation
-		"testutil": true, // shared test utilities
-		"external": true, // external agent adapter, not a self-registering agent
+		"types":          true, // contract types, not an agent implementation
+		"testutil":       true, // shared test utilities
+		"external":       true, // external agent adapter, not a self-registering agent
+		"skilldiscovery": true, // shared capability helper (registries, match), not an agent
 	}
 
 	entries, err := os.ReadDir(agentDir)

@@ -318,6 +318,24 @@ type WriteCommittedOptions struct {
 	// Written to v2 /main ref alongside metadata. May be nil if compaction
 	// was not performed (unknown agent, compaction error, empty transcript).
 	CompactTranscript []byte
+
+	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
+	Kind string
+
+	// ReviewSkills is the snapshot of skills used (only meaningful when Kind is a review kind).
+	// May be empty when a review is attached post-hoc without declared skills.
+	ReviewSkills []string
+
+	// ReviewPrompt is the actual text of the review request (composed prompt
+	// for spawn, first user prompt for attach). Only meaningful when Kind is
+	// a review kind.
+	ReviewPrompt string
+
+	// HasReview is set by the caller when this session should mark its
+	// checkpoint as reviewed. The caller computes this (e.g. via
+	// session.Kind.IsReview) because checkpoint can't import session
+	// — the session package imports checkpoint, creating a cycle.
+	HasReview bool
 }
 
 // UpdateCommittedOptions contains options for updating an existing committed checkpoint.
@@ -482,6 +500,18 @@ type CommittedMetadata struct {
 	// PromptAttributions is the raw per-prompt attribution data used to compute InitialAttribution.
 	// Diagnostic field — shows which prompt recorded which "user" lines.
 	PromptAttributions json.RawMessage `json:"prompt_attributions,omitempty"`
+
+	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
+	Kind string `json:"kind,omitempty"`
+
+	// ReviewSkills lists the review skills that were run (only set when Kind is a review kind).
+	// May be empty when a review was attached post-hoc without declared skills.
+	ReviewSkills []string `json:"review_skills,omitempty"`
+
+	// ReviewPrompt is the actual text of the review request (composed prompt
+	// for spawn, first user prompt for attach). Only set when Kind is a
+	// review kind.
+	ReviewPrompt string `json:"review_prompt,omitempty"`
 }
 
 // GetTranscriptStart returns the transcript line offset at which this checkpoint's data begins.
@@ -532,6 +562,13 @@ type CheckpointSummary struct {
 	Sessions            []SessionFilePaths  `json:"sessions"`
 	TokenUsage          *agent.TokenUsage   `json:"token_usage,omitempty"`
 	CombinedAttribution *InitialAttribution `json:"combined_attribution,omitempty"`
+
+	// HasReview is the umbrella "any review happened" flag: true when at least
+	// one session in this checkpoint has a review-kind Kind (currently
+	// "agent_review"). When new review kinds are introduced they should also
+	// cause this flag to be set so callers can keep asking "was this reviewed
+	// in any way?" without caring about the variant.
+	HasReview bool `json:"has_review,omitempty"`
 }
 
 // SessionMetrics contains hook-provided session metrics from agents that report

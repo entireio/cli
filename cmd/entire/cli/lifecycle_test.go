@@ -12,6 +12,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/review"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
@@ -1291,4 +1293,309 @@ func TestHandleLifecycleTurnEnd_BackfillsPromptFromOpenCodeTranscript(t *testing
 	require.NoError(t, loadErr)
 	require.NotNil(t, updated)
 	require.Contains(t, updated.LastPrompt, "create a file called notes/deep.md")
+}
+
+// TestAdoptReviewEnv_TagsSession verifies that when ENTIRE_REVIEW_* env vars
+// are set on the process (as `entire review` sets them on the spawned agent),
+// handleLifecycleTurnStart tags the session state with Kind=agent_review,
+// ReviewSkills, and ReviewPrompt.
+func TestAdoptReviewEnv_TagsSession(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	t.Setenv(review.EnvSession, "1")
+	t.Setenv(review.EnvAgent, string(ag.Name()))
+	t.Setenv(review.EnvStartingSHA, testutil.GetHeadHash(t, tmp))
+	skillsJSON, encErr := review.EncodeSkills([]string{"/pr-review-toolkit:review-pr"})
+	if encErr != nil {
+		t.Fatalf("encode skills: %v", encErr)
+	}
+	t.Setenv(review.EnvSkills, skillsJSON)
+	t.Setenv(review.EnvPrompt, "Review this branch.")
+
+	sessionID := "test-review-env-001"
+	event := &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    "Review this branch.",
+		Timestamp: time.Now(),
+	}
+	if err := handleLifecycleTurnStart(context.Background(), ag, event); err != nil {
+		t.Fatalf("handleLifecycleTurnStart: %v", err)
+	}
+
+	state, loadErr := strategy.LoadSessionState(context.Background(), sessionID)
+	if loadErr != nil {
+		t.Fatalf("load state: %v", loadErr)
+	}
+	if state == nil {
+		t.Fatal("state is nil after turn start")
+	}
+	if state.Kind != session.KindAgentReview {
+		t.Errorf("Kind: got %q, want agent_review", state.Kind)
+	}
+	if len(state.ReviewSkills) != 1 || state.ReviewSkills[0] != "/pr-review-toolkit:review-pr" {
+		t.Errorf("ReviewSkills: got %v", state.ReviewSkills)
+	}
+	if state.ReviewPrompt != "Review this branch." {
+		t.Errorf("ReviewPrompt: got %q", state.ReviewPrompt)
+	}
+}
+
+// TestAdoptReviewEnv_NormalSession verifies that when ENTIRE_REVIEW_SESSION is
+// not set, handleLifecycleTurnStart leaves Kind empty (normal coding session).
+func TestAdoptReviewEnv_NormalSession(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	// Explicitly ensure the review env vars are absent.
+	t.Setenv(review.EnvSession, "")
+
+	sessionID := "test-review-env-002"
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    "Hello.",
+		Timestamp: time.Now(),
+	}
+	if err := handleLifecycleTurnStart(context.Background(), ag, event); err != nil {
+		t.Fatalf("handleLifecycleTurnStart: %v", err)
+	}
+
+	state, loadErr := strategy.LoadSessionState(context.Background(), sessionID)
+	if loadErr != nil {
+		t.Fatalf("load state: %v", loadErr)
+	}
+	if state == nil {
+		t.Fatal("state is nil after turn start")
+	}
+	if state.Kind != "" {
+		t.Errorf("Kind: got %q, want empty (normal session)", state.Kind)
+	}
+}
+
+func TestAdoptReviewEnv_WrongAgentLeavesUntagged(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	t.Setenv(review.EnvSession, "1")
+	t.Setenv(review.EnvAgent, "other-agent")
+	t.Setenv(review.EnvStartingSHA, testutil.GetHeadHash(t, tmp))
+	t.Setenv(review.EnvSkills, "[]")
+	t.Setenv(review.EnvPrompt, "Review this branch.")
+
+	sessionID := "test-review-env-wrong-agent"
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    "Review this branch.",
+		Timestamp: time.Now(),
+	}
+	if err := handleLifecycleTurnStart(context.Background(), ag, event); err != nil {
+		t.Fatalf("handleLifecycleTurnStart: %v", err)
+	}
+
+	state, loadErr := strategy.LoadSessionState(context.Background(), sessionID)
+	if loadErr != nil {
+		t.Fatalf("load state: %v", loadErr)
+	}
+	if state == nil {
+		t.Fatal("state is nil after turn start")
+	}
+	if state.Kind != "" {
+		t.Errorf("Kind: got %q, want empty for wrong agent", state.Kind)
+	}
+}
+
+func TestAdoptReviewEnv_StaleStartingSHALeavesUntagged(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	t.Setenv(review.EnvSession, "1")
+	t.Setenv(review.EnvAgent, string(ag.Name()))
+	t.Setenv(review.EnvStartingSHA, strings.Repeat("0", 40))
+	t.Setenv(review.EnvSkills, "[]")
+	t.Setenv(review.EnvPrompt, "Review this branch.")
+
+	sessionID := "test-review-env-stale-sha"
+	event := &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    "Review this branch.",
+		Timestamp: time.Now(),
+	}
+	if err := handleLifecycleTurnStart(context.Background(), ag, event); err != nil {
+		t.Fatalf("handleLifecycleTurnStart: %v", err)
+	}
+
+	state, loadErr := strategy.LoadSessionState(context.Background(), sessionID)
+	if loadErr != nil {
+		t.Fatalf("load state: %v", loadErr)
+	}
+	if state == nil {
+		t.Fatal("state is nil after turn start")
+	}
+	if state.Kind != "" {
+		t.Errorf("Kind: got %q, want empty for stale starting SHA", state.Kind)
+	}
+}
+
+// TestAdoptReviewEnv_MalformedSkillsLeavesUntagged verifies that when
+// ENTIRE_REVIEW_SKILLS contains malformed JSON, adoptReviewEnv logs a warning
+// and leaves the session untagged rather than corrupting metadata.
+func TestAdoptReviewEnv_MalformedSkillsLeavesUntagged(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	ag := newMockAgent()
+	t.Setenv(review.EnvSession, "1")
+	t.Setenv(review.EnvSkills, "not json {[") // malformed JSON
+	t.Setenv(review.EnvAgent, string(ag.Name()))
+	t.Setenv(review.EnvStartingSHA, testutil.GetHeadHash(t, tmp))
+	t.Setenv(review.EnvPrompt, "anything")
+
+	sessionID := "test-review-env-malformed"
+	event := &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    "anything",
+		Timestamp: time.Now(),
+	}
+	if err := handleLifecycleTurnStart(context.Background(), ag, event); err != nil {
+		t.Fatalf("handleLifecycleTurnStart: %v", err)
+	}
+
+	state, loadErr := strategy.LoadSessionState(context.Background(), sessionID)
+	if loadErr != nil {
+		t.Fatalf("load state: %v", loadErr)
+	}
+	if state == nil {
+		t.Fatal("state is nil after turn start")
+	}
+	if state.Kind != "" {
+		t.Errorf("Kind: got %q, want empty (malformed skills must not tag session)", state.Kind)
+	}
+	if len(state.ReviewSkills) != 0 {
+		t.Errorf("ReviewSkills: got %v, want empty", state.ReviewSkills)
+	}
+	if state.ReviewPrompt != "" {
+		t.Errorf("ReviewPrompt: got %q, want empty", state.ReviewPrompt)
+	}
+}
+
+// TestAdoptReviewEnv_AlreadyTaggedNotOverwritten verifies that adoptReviewEnv
+// is idempotent: when state.Kind is already set (e.g. on a subsequent turn of
+// a review session), the function returns without modifying state.
+func TestAdoptReviewEnv_AlreadyTaggedNotOverwritten(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir() and t.Setenv()
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	testutil.WriteFile(t, tmp, "f.txt", "x")
+	testutil.GitAdd(t, tmp, "f.txt")
+	testutil.GitCommit(t, tmp, "init")
+	t.Chdir(tmp)
+	paths.ClearWorktreeRootCache()
+
+	sessionID := "test-review-env-already-tagged"
+	ag := newMockAgent()
+
+	// Run a full first turn with ENTIRE_REVIEW_* set so the session is tagged.
+	t.Setenv(review.EnvSession, "1")
+	oldSkillsJSON, encErr := review.EncodeSkills([]string{"/old-skill"})
+	if encErr != nil {
+		t.Fatalf("encode old skills: %v", encErr)
+	}
+	t.Setenv(review.EnvSkills, oldSkillsJSON)
+	t.Setenv(review.EnvAgent, string(ag.Name()))
+	t.Setenv(review.EnvStartingSHA, testutil.GetHeadHash(t, tmp))
+	t.Setenv(review.EnvPrompt, "old prompt")
+
+	firstTurn := &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    "old prompt",
+		Timestamp: time.Now(),
+	}
+	if err := handleLifecycleTurnStart(context.Background(), ag, firstTurn); err != nil {
+		t.Fatalf("first handleLifecycleTurnStart: %v", err)
+	}
+
+	// Verify the first turn tagged the session correctly.
+	stateAfterFirst, loadErr := strategy.LoadSessionState(context.Background(), sessionID)
+	if loadErr != nil {
+		t.Fatalf("load state after first turn: %v", loadErr)
+	}
+	if stateAfterFirst == nil || stateAfterFirst.Kind != session.KindAgentReview {
+		t.Fatalf("first turn did not tag session; Kind=%q", stateAfterFirst.Kind)
+	}
+
+	// Now change env vars to DIFFERENT values and run a second turn.
+	// adoptReviewEnv must short-circuit because Kind is already set.
+	newSkillsJSON, encErr2 := review.EncodeSkills([]string{"/new-skill"})
+	if encErr2 != nil {
+		t.Fatalf("encode new skills: %v", encErr2)
+	}
+	t.Setenv(review.EnvSkills, newSkillsJSON)
+	t.Setenv(review.EnvPrompt, "new prompt")
+
+	secondTurn := &agent.Event{
+		Type:      agent.TurnStart,
+		SessionID: sessionID,
+		Prompt:    "new prompt",
+		Timestamp: time.Now(),
+	}
+	if err := handleLifecycleTurnStart(context.Background(), ag, secondTurn); err != nil {
+		t.Fatalf("second handleLifecycleTurnStart: %v", err)
+	}
+
+	state, loadErr2 := strategy.LoadSessionState(context.Background(), sessionID)
+	if loadErr2 != nil {
+		t.Fatalf("load state after second turn: %v", loadErr2)
+	}
+	if state == nil {
+		t.Fatal("state is nil after second turn")
+	}
+	if state.Kind != session.KindAgentReview {
+		t.Errorf("Kind: got %q, want agent_review", state.Kind)
+	}
+	if len(state.ReviewSkills) != 1 || state.ReviewSkills[0] != "/old-skill" {
+		t.Errorf("ReviewSkills: got %v, want [/old-skill] (must not be overwritten on second turn)", state.ReviewSkills)
+	}
+	if state.ReviewPrompt != "old prompt" {
+		t.Errorf("ReviewPrompt: got %q, want %q (must not be overwritten on second turn)", state.ReviewPrompt, "old prompt")
+	}
 }

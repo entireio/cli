@@ -30,22 +30,42 @@ type RepairV2GenerationMetadataResult struct {
 // generation refs using the timestamp envelope from raw transcripts. Remote
 // archived refs are repaired with force-with-lease when they exist on the
 // checkpoint remote.
-func RepairV2GenerationMetadata(ctx context.Context) (*RepairV2GenerationMetadataResult, error) {
+//
+// excludeRefs lists archived /full/<n> refs to skip. Callers that just wrote
+// a ref with correct generation.json (e.g. the migration packer) pass it here
+// so the repair pass doesn't re-derive timestamps from those refs'
+// transcript blobs unnecessarily.
+func RepairV2GenerationMetadata(ctx context.Context, excludeRefs []plumbing.ReferenceName) (*RepairV2GenerationMetadataResult, error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
 
 	store := checkpoint.NewV2GitStore(repo, "origin")
-	return repairV2GenerationMetadata(ctx, repo, store)
+	return repairV2GenerationMetadata(ctx, repo, store, excludeRefs)
 }
 
-func repairV2GenerationMetadata(ctx context.Context, repo *git.Repository, store *checkpoint.V2GitStore) (*RepairV2GenerationMetadataResult, error) {
+func repairV2GenerationMetadata(ctx context.Context, repo *git.Repository, store *checkpoint.V2GitStore, excludeRefs []plumbing.ReferenceName) (*RepairV2GenerationMetadataResult, error) {
 	candidates, tempRefs, warnings, err := listArchivedV2GenerationCandidates(ctx, repo, store)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list archived generations: %w", err)
 	}
 	defer removeTempRefs(repo, tempRefs)
+
+	if len(excludeRefs) > 0 {
+		excluded := make(map[plumbing.ReferenceName]struct{}, len(excludeRefs))
+		for _, refName := range excludeRefs {
+			excluded[refName] = struct{}{}
+		}
+		filtered := candidates[:0]
+		for _, candidate := range candidates {
+			if _, skip := excluded[candidate.RefName]; skip {
+				continue
+			}
+			filtered = append(filtered, candidate)
+		}
+		candidates = filtered
+	}
 
 	result := &RepairV2GenerationMetadataResult{
 		Warnings: warnings,

@@ -1,7 +1,10 @@
 package codex
 
 import (
+	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -161,5 +164,32 @@ func requireJSONL(t *testing.T, expected string, actual string) {
 	require.Len(t, actualLines, len(expectedLines))
 	for i := range expectedLines {
 		require.JSONEq(t, expectedLines[i], actualLines[i])
+	}
+}
+
+func TestCodexAgent_LaunchCmd(t *testing.T) {
+	t.Parallel()
+	a := NewCodexAgent()
+	launcher, ok := a.(agent.Launcher)
+	if !ok {
+		t.Fatal("CodexAgent does not implement agent.Launcher")
+	}
+	// Binary may not be on PATH in CI; ErrNotFound is acceptable for this test.
+	cmd, err := launcher.LaunchCmd(context.Background(), "hello world")
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			t.Skip("codex binary not on PATH; skipping cmd shape check")
+		}
+		t.Fatalf("LaunchCmd: %v", err)
+	}
+	if cmd == nil {
+		t.Fatal("nil cmd")
+	}
+	if cmd.Path == "" {
+		t.Error("cmd.Path empty")
+	}
+	joined := strings.Join(cmd.Args, " ")
+	if !strings.Contains(joined, "hello world") {
+		t.Errorf("args missing prompt: %v", cmd.Args)
 	}
 }

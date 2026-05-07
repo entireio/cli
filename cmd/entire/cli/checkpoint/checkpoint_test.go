@@ -4291,3 +4291,74 @@ func TestWriteTemporaryTask_ExcludesGitIgnoredFiles(t *testing.T) {
 		t.Error("SECURITY: gitignored file .env leaked into task checkpoint tree — secrets exposed on shadow branch via subagent")
 	}
 }
+
+// TestCommittedMetadata_ReviewFields pins the JSON wire format for review
+// fields on CommittedMetadata. Any refactor that silently drops or renames
+// these JSON tags would break the entire/checkpoints/v1 branch format. We
+// assert on the actual marshalled JSON keys (not just round-trip identity)
+// because a coordinated rename of struct field + tag would otherwise pass
+// the round-trip but break on-disk readers of older checkpoints.
+func TestCommittedMetadata_ReviewFields(t *testing.T) {
+	t.Parallel()
+	m := CommittedMetadata{
+		Kind:         "agent_review",
+		ReviewSkills: []string{"/skill1", "/skill2"},
+		ReviewPrompt: "Review this branch.",
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// Inspect the marshalled JSON to confirm field names match the on-disk
+	// contract. A map round-trip surfaces the actual key strings that any
+	// older entire/checkpoints/v1 reader expects.
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	if got, ok := raw["kind"].(string); !ok || got != "agent_review" {
+		t.Errorf(`expected "kind":"agent_review", got %v (raw: %s)`, raw["kind"], string(b))
+	}
+	skills, ok := raw["review_skills"].([]any)
+	if !ok {
+		t.Errorf(`expected "review_skills" key holding []any, got %T (raw: %s)`, raw["review_skills"], string(b))
+	} else if len(skills) != 2 || skills[0] != "/skill1" || skills[1] != "/skill2" {
+		t.Errorf(`expected review_skills=["/skill1","/skill2"], got %v`, skills)
+	}
+	if got, ok := raw["review_prompt"].(string); !ok || got != "Review this branch." {
+		t.Errorf(`expected "review_prompt":"Review this branch.", got %v (raw: %s)`, raw["review_prompt"], string(b))
+	}
+}
+
+// TestCheckpointSummary_HasReview pins the JSON wire format for the HasReview
+// umbrella flag on CheckpointSummary. Callers such as the re-run guard in
+// `entire review` and `entire status` depend on the on-disk shape, so we
+// assert on the actual marshalled key (not a self-consistent round-trip).
+func TestCheckpointSummary_HasReview(t *testing.T) {
+	t.Parallel()
+
+	// True case: the key must marshal as "has_review": true.
+	bTrue, err := json.Marshal(CheckpointSummary{HasReview: true})
+	if err != nil {
+		t.Fatalf("marshal true: %v", err)
+	}
+	var rawTrue map[string]any
+	if err := json.Unmarshal(bTrue, &rawTrue); err != nil {
+		t.Fatalf("unmarshal true: %v", err)
+	}
+	if got, ok := rawTrue["has_review"].(bool); !ok || !got {
+		t.Errorf(`expected "has_review":true, got %v (raw: %s)`, rawTrue["has_review"], string(bTrue))
+	}
+
+	// Zero-value case: HasReview has the omitempty tag, so a freshly-zeroed
+	// summary must NOT include the key (older checkpoints shouldn't be made
+	// to look like they have a review when they don't).
+	bZero, err := json.Marshal(CheckpointSummary{})
+	if err != nil {
+		t.Fatalf("marshal zero: %v", err)
+	}
+	if strings.Contains(string(bZero), "has_review") {
+		t.Errorf(`expected zero-value summary to omit "has_review" key, got %s`, string(bZero))
+	}
+}

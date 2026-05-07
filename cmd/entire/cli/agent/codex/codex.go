@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"time"
@@ -220,6 +221,23 @@ func restoredRolloutPath(codexHome, agentSessionID string, startTime time.Time) 
 	)
 	filename := fmt.Sprintf("rollout-%s-%s.jsonl", timestamp.Format("2006-01-02T15-04-05"), agentSessionID)
 	return filepath.Join(datePath, filename)
+}
+
+// LaunchCmd builds an exec.Cmd for `codex "<initialPrompt>"`. Stdio is wired
+// to the caller's TTY so the agent runs foreground and the user interacts
+// normally. The call site is expected to Run() and wait. Hooks inherit the
+// parent environment.
+func (c *CodexAgent) LaunchCmd(ctx context.Context, initialPrompt string) (*exec.Cmd, error) {
+	bin, err := exec.LookPath("codex")
+	if err != nil {
+		return nil, fmt.Errorf("codex binary not on PATH: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, bin, initialPrompt)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	return cmd, nil
 }
 
 func findRolloutBySessionID(codexHome, agentSessionID string) string {

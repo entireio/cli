@@ -1,0 +1,11 @@
+I've reviewed the changes on this branch.
+
+The `AgentReviewer` interface and `Process` type are well-designed abstractions. The sealed `Event` sum type prevents external packages from extending the event taxonomy — a sound design choice for a stable contract.
+
+**Summary of findings:**
+
+- Interface segregation is clean: `AgentReviewer` owns construction, `Process` owns the runtime lifecycle.
+- The buffered channel (capacity 32) is appropriate for backpressure without blocking agent output parsing.
+- `RunConfig` fields are all optional; zero value is safe to use.
+
+Overall the implementation looks correct. Ready to proceed to CU3 implementations.
