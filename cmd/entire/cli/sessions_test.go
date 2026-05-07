@@ -1144,6 +1144,48 @@ func TestInfoCmd_TranscriptEmitsWholeJSONDocument(t *testing.T) {
 	}
 }
 
+// TestInfoCmd_TranscriptInvalidJSONErrorsLoudly guards the bugbot finding
+// that whole-document JSON agents (Gemini) silently produced empty output
+// when the snapshot didn't parse as JSON. Machine consumers can't tell
+// "no data" from "data unavailable, retry" if exit-code 0 + empty stdout
+// is the same in both cases. The mid-write case must now error.
+func TestInfoCmd_TranscriptInvalidJSONErrorsLoudly(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	transcriptDir := t.TempDir()
+	transcriptPath := filepath.Join(transcriptDir, "session.json")
+	// Truncated JSON document — what Gemini would produce mid-write.
+	written := `{"sessionId":"abc","messages":[{"role":"user","content":"trun`
+	if err := os.WriteFile(transcriptPath, []byte(written), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	state := makeSessionState("test-info-invalid-json", session.PhaseActive)
+	state.AgentType = testAgentGemini
+	state.TranscriptPath = transcriptPath
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"test-info-invalid-json", "--transcript"})
+
+	err := cmd.ExecuteContext(ctx)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON snapshot, got nil")
+	}
+	if !strings.Contains(err.Error(), "not valid JSON") {
+		t.Errorf("expected 'not valid JSON' in error, got: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("expected empty stdout on JSON-validation failure, got: %q", stdout.String())
+	}
+}
+
 // TestInfoCmd_TranscriptBoundsSnapshotAtOpen verifies copilot finding 2:
 // bytes the agent appends after the command opens the file must NOT appear
 // in the output (snapshot is bounded at command start, not "current EOF").

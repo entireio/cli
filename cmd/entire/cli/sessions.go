@@ -127,7 +127,11 @@ func writeJSONLTranscript(ctx context.Context, w io.Writer, r io.Reader) error {
 
 // writeWholeDocumentJSONTranscript reads the snapshot, validates it parses as
 // JSON, and emits it intact. Trim-to-last-newline would cut the closing
-// brace and produce malformed output for these agents.
+// brace and produce malformed output for these agents. An invalid snapshot
+// (agent mid-write or genuinely corrupt) is reported as an error rather
+// than emitting empty output, so machine consumers can distinguish "no
+// data" from "data unavailable, retry" — exit-code 0 + empty stdout would
+// otherwise look identical to a successfully-empty transcript.
 func writeWholeDocumentJSONTranscript(ctx context.Context, w io.Writer, r io.Reader) error {
 	buf, err := io.ReadAll(r)
 	if err != nil {
@@ -136,10 +140,13 @@ func writeWholeDocumentJSONTranscript(ctx context.Context, w io.Writer, r io.Rea
 		}
 		return fmt.Errorf("read transcript: %w", err)
 	}
-	if !json.Valid(buf) {
-		// Snapshot is mid-write or otherwise malformed; emit nothing rather
-		// than a truncated document. Consumer can re-run the export.
+	// Empty file is a valid snapshot for an agent that hasn't yet written
+	// anything; emit nothing and succeed. Non-empty but invalid is an error.
+	if len(buf) == 0 {
 		return nil
+	}
+	if !json.Valid(buf) {
+		return errors.New("transcript snapshot is not valid JSON (agent may be mid-write); retry the command")
 	}
 	if _, err := w.Write(buf); err != nil {
 		return fmt.Errorf("write transcript: %w", err)
@@ -544,6 +551,10 @@ func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *stra
 		return NewSilentError(fmt.Errorf("transcript unavailable: %w", err))
 	}
 
+	// Errors from streaming are runtime issues (Stat failure, mid-write JSON,
+	// etc.), not flag-usage problems — don't print cobra's usage block on top
+	// of any partial stdout output.
+	cmd.SilenceUsage = true
 	return streamTranscriptToStdout(ctx, cmd.OutOrStdout(), path, state.AgentType)
 }
 
