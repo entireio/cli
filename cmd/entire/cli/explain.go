@@ -551,40 +551,8 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		return lookupErr
 	}
 
-	// Collect all matching checkpoint IDs to detect ambiguity
-	var matches []id.CheckpointID
-	for _, info := range lookup.committed {
-		if strings.HasPrefix(info.CheckpointID.String(), checkpointIDPrefix) {
-			matches = append(matches, info.CheckpointID)
-		}
-	}
-
-	// If not found locally, fetch metadata from remote and retry. Reuses
-	// resume's getMetadataTree / getV2MetadataTree helpers — they already
-	// implement the checkpoint_remote → treeless origin → full origin chain
-	// and return a fresh repo handle (which we discard; the post-fetch
-	// rebuild via newExplainCheckpointLookup opens its own).
-	if len(matches) == 0 {
-		stop := startSpinner(errW, "Fetching checkpoint metadata from remote")
-		_, _, v1Err := getMetadataTree(ctx)
-		v2OK := false
-		if lookup.preferCheckpointsV2 {
-			if _, _, v2Err := getV2MetadataTree(ctx); v2Err == nil {
-				v2OK = true
-			}
-		}
-		stop(false)
-		if v1Err == nil || v2OK {
-			if freshLookup, freshErr := newExplainCheckpointLookup(ctx); freshErr == nil {
-				lookup = freshLookup
-				for _, info := range lookup.committed {
-					if strings.HasPrefix(info.CheckpointID.String(), checkpointIDPrefix) {
-						matches = append(matches, info.CheckpointID)
-					}
-				}
-			}
-		}
-	}
+	// Match the prefix locally; on miss, fetch from remote and retry once.
+	matches, lookup := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, checkpointIDPrefix)
 
 	var fullCheckpointID id.CheckpointID
 	switch len(matches) {

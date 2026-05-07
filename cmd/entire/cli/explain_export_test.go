@@ -102,6 +102,45 @@ func TestRunExplainExport_JSONSingleCheckpoint(t *testing.T) {
 	require.Equal(t, 0, envelope.Sessions[0].Index)
 }
 
+// TestRunExplainExport_JSONUsesMetadataOnlyReader verifies the codex finding 3:
+// the v1 fallback for --json must read metadata.json directly, not via
+// ReadSessionContent (which depends on transcript availability). We exercise
+// this by writing a v1 checkpoint with v2 disabled, then asserting the
+// envelope has populated per-session fields (not a stub entry).
+func TestRunExplainExport_JSONUsesMetadataOnlyReader(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	// Disable v2 in settings to force the v1 path. setupExportRepo wrote
+	// `checkpoints_v2: true`; overwrite it.
+	require.NoError(t, os.WriteFile(".entire/settings.json", []byte(`{"enabled": true}`), 0o600))
+
+	cpID := id.MustCheckpointID("777711112222")
+	v1 := checkpoint.NewGitStore(repo)
+	require.NoError(t, v1.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID: cpID,
+		SessionID:    "session-v1-only",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"raw"}]}}` + "\n")),
+		AuthorName:   exportTestAuthorName,
+		AuthorEmail:  exportTestAuthorEmail,
+	}))
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       "777711",
+		json:         true,
+		sessionIndex: -1,
+	})
+	require.NoError(t, err)
+
+	var envelope checkpointExportJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	require.Len(t, envelope.Sessions, 1)
+	require.Equal(t, "session-v1-only", envelope.Sessions[0].SessionID,
+		"v1 envelope must populate session_id from metadata-only reader (not stub entry)")
+	require.Empty(t, envelope.Sessions[0].Error, "well-formed v1 read must not surface a per-session error")
+}
+
 func TestRunExplainExport_JSONNeverEmbedsTranscript(t *testing.T) {
 	repo := setupExportRepo(t)
 
@@ -243,25 +282,88 @@ func TestResolveSessionIndex(t *testing.T) {
 		{name: "explicit middle", summary: threeSessions, requested: 1, want: 1},
 		{name: "explicit last", summary: threeSessions, requested: 2, want: 2},
 		{name: "out of range", summary: threeSessions, requested: 3, wantErr: "out of range"},
-		{name: "empty summary", summary: &checkpoint.CheckpointSummary{}, requested: -1, wantErr: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := resolveSessionIndex(tc.summary, tc.requested)
-			switch {
-			case tc.wantErr == "" && tc.summary != nil && len(tc.summary.Sessions) > 0:
-				require.NoError(t, err)
-				require.Equal(t, tc.want, got)
-			case tc.wantErr != "":
+			if tc.wantErr != "" {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), tc.wantErr)
-			default:
-				// empty-summary case returns ErrCheckpointNotFound; just ensure we got an error.
-				require.Error(t, err)
+				return
 			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// TestResolveSessionIndex_EmptyVsMissing distinguishes the two error sentinels
+// after the Claude D fix: nil summary means "checkpoint not found", empty
+// Sessions means "checkpoint exists but has no sessions".
+func TestResolveSessionIndex_EmptyVsMissing(t *testing.T) {
+	t.Parallel()
+
+	_, errNil := resolveSessionIndex(nil, -1)
+	require.ErrorIs(t, errNil, checkpoint.ErrCheckpointNotFound)
+
+	_, errEmpty := resolveSessionIndex(&checkpoint.CheckpointSummary{}, -1)
+	require.ErrorIs(t, errEmpty, errCheckpointHasNoSessions)
+	require.NotErrorIs(t, errEmpty, checkpoint.ErrCheckpointNotFound,
+		"empty-checkpoint case must not look like 'checkpoint not found'")
+}
+
+// TestRunExplainExport_RawTranscriptRequiresTarget guards the error message
+// contract: when --raw-transcript reaches runExplainExport without a target,
+// the error must reference --raw-transcript (not --transcript).
+func TestRunExplainExport_RawTranscriptRequiresTarget(t *testing.T) {
+	setupExportRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		rawTranscript: true,
+		sessionIndex:  -1,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--raw-transcript requires")
+}
+
+// TestRunExplainExport_PositionalCommitSHAFallback covers the codex finding:
+// a positional that doesn't match a checkpoint prefix should be re-resolved
+// as a commit ref (with Entire-Checkpoint trailer) before failing.
+func TestRunExplainExport_PositionalCommitSHAFallback(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	cpID := id.MustCheckpointID("aaaabbbb1234")
+	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+		SessionID:         "session-via-commit",
+		Transcript:        redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
+		CompactTranscript: []byte(`{"v":1}` + "\n"),
+	})
+
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "trailing.txt"), []byte("trailing"), 0o600))
+	_, err = wt.Add("trailing.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("trailing\n\nEntire-Checkpoint: "+cpID.String()+"\n", &git.CommitOptions{
+		Author: &object.Signature{Name: exportTestAuthorName, Email: exportTestAuthorEmail, When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       commitHash.String(),
+		json:         true,
+		sessionIndex: -1,
+	})
+	require.NoError(t, err, "positional commit SHA should fall back to commit-ref resolution")
+
+	var envelope checkpointExportJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope))
+	require.Equal(t, cpID.String(), envelope.CheckpointID)
 }
 
 func TestExplainCmd_SessionIndexRequiresTranscriptFlag(t *testing.T) {

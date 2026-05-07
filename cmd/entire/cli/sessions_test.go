@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -922,7 +923,7 @@ func TestInfoCmd_TranscriptStreamsRawAgentBytes(t *testing.T) {
 	ctx := context.Background()
 
 	transcriptDir := t.TempDir()
-	transcriptPath := transcriptDir + "/session.jsonl"
+	transcriptPath := filepath.Join(transcriptDir, "session.jsonl")
 	want := []byte(`{"role":"user","content":"hi"}` + "\n" + `{"role":"assistant","content":"hello"}` + "\n")
 	if err := os.WriteFile(transcriptPath, want, 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -971,6 +972,46 @@ func TestInfoCmd_TranscriptMissingPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no transcript path") {
 		t.Errorf("expected 'no transcript path' error, got: %v", err)
+	}
+	// User-visible cause: must be on stderr (not silently swallowed by SilentError).
+	if !strings.Contains(stderr.String(), "no transcript path") {
+		t.Errorf("expected stderr to surface 'no transcript path', got: %q", stderr.String())
+	}
+}
+
+// TestInfoCmd_TranscriptTrimsPartialTrailingLine verifies the snapshot-shape
+// guarantee documented in --help: if the agent is mid-write of a JSONL line
+// when we hit EOF, consumers receive only the complete prefix.
+func TestInfoCmd_TranscriptTrimsPartialTrailingLine(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	transcriptDir := t.TempDir()
+	transcriptPath := filepath.Join(transcriptDir, "session.jsonl")
+	// Two complete records + one truncated record (no trailing newline).
+	full := `{"v":1,"role":"user"}` + "\n" + `{"v":1,"role":"assistant"}` + "\n"
+	written := full + `{"v":1,"role":"user","content":"trunc`
+	if err := os.WriteFile(transcriptPath, []byte(written), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	state := makeSessionState("test-info-trim", session.PhaseActive)
+	state.AgentType = testAgentClaude
+	state.TranscriptPath = transcriptPath
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"test-info-trim", "--transcript"})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("ExecuteContext: %v", err)
+	}
+
+	if got := stdout.String(); got != full {
+		t.Errorf("expected partial trailing line trimmed.\n  want: %q\n  got:  %q", full, got)
 	}
 }
 

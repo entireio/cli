@@ -45,7 +45,7 @@ Examples:
 				return nil
 			}
 
-			return runSessionInfo(ctx, cmd, sessionID, jsonFlag, transcriptFlag)
+			return runSessionInfo(ctx, cmd, sessionID, sessionOutputModeFromFlags(jsonFlag, transcriptFlag))
 		},
 	}
 

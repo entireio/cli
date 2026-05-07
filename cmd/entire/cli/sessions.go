@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,19 +21,60 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// openSessionTranscript opens the session transcript file for streaming.
-// Indirected via a package var so tests can stub the os.Open call.
-var openSessionTranscript = func(path string) (io.ReadCloser, error) {
-	return os.Open(path) //nolint:gosec // path is resolved from validated session state
-}
-
-// copySessionTranscript copies transcript bytes to w, honoring ctx cancellation.
-// Indirected via a package var so tests can swap behavior.
-var copySessionTranscript = func(ctx context.Context, w io.Writer, r io.Reader) (int64, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err //nolint:wrapcheck // Propagating context cancellation
+// streamTranscriptToStdout copies the contents of the file at path to w.
+// Cancellation is wired through a goroutine that closes the file on
+// <-ctx.Done(), so io.ReadAll returns promptly when the user hits Ctrl-C on a
+// multi-MB transcript instead of blocking until EOF.
+//
+// Snapshot semantics: if the agent is mid-write when we hit EOF the trailing
+// partial line is trimmed so consumers never see a truncated JSONL record.
+//
+// state.TranscriptPath comes from a session-state file that Entire writes
+// exclusively under the user's own .git/. The path is therefore as trusted
+// as any other entry the local user has on disk; we do not validate it
+// against a confinement root.
+func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string) error {
+	f, err := os.Open(path) //nolint:gosec // see comment above on trust model
+	if err != nil {
+		return fmt.Errorf("open transcript: %w", err)
 	}
-	return io.Copy(w, r)
+
+	closeOnDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+		case <-closeOnDone:
+		}
+	}()
+	defer func() {
+		close(closeOnDone)
+		_ = f.Close()
+	}()
+
+	// Read into memory so we can shape-clean the trailing partial line. A
+	// single session transcript is bounded (low MB to ~100 MB at the
+	// extreme), which is fine for buffered handling.
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr //nolint:wrapcheck // propagating context cancellation
+		}
+		return fmt.Errorf("read transcript: %w", err)
+	}
+
+	if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
+		buf = buf[:i+1]
+	} else {
+		// File holds a single non-terminated record — return empty rather
+		// than a truncated record. Vanishingly rare for live transcripts.
+		buf = nil
+	}
+
+	if _, err := w.Write(buf); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
+	}
+	return nil
 }
 
 func newSessionsCmd() *cobra.Command {
@@ -301,6 +343,18 @@ func writeSessionCard(w io.Writer, s *strategy.SessionState, sty statusStyles) {
 	fmt.Fprintln(w)
 }
 
+// sessionOutputMode describes how `entire session info` / `session current`
+// should render the resolved session. Cobra enforces mutual exclusion at the
+// flag layer; the enum makes the trichotomy total in code so we can't
+// accidentally combine modes by passing two booleans.
+type sessionOutputMode int
+
+const (
+	sessionOutputText sessionOutputMode = iota
+	sessionOutputJSON
+	sessionOutputTranscript
+)
+
 func newInfoCmd() *cobra.Command {
 	var jsonFlag bool
 	var transcriptFlag bool
@@ -318,6 +372,8 @@ Output modes:
   --json        Metadata-only JSON envelope (no transcript bytes).
   --transcript  Stream the live raw agent transcript bytes to stdout
                 (per-agent JSONL format from the on-disk transcript).
+                Snapshot semantics: ends at EOF at command-start; trailing
+                partial line (if the agent is mid-write) is trimmed.
 
 Examples:
   entire sessions info <session-id>
@@ -325,7 +381,7 @@ Examples:
   entire sessions info <session-id> --transcript > session.jsonl`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionInfo(cmd.Context(), cmd, args[0], jsonFlag, transcriptFlag)
+			return runSessionInfo(cmd.Context(), cmd, args[0], sessionOutputModeFromFlags(jsonFlag, transcriptFlag))
 		},
 	}
 
@@ -336,7 +392,18 @@ Examples:
 	return cmd
 }
 
-func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, jsonOutput, transcriptOutput bool) error {
+func sessionOutputModeFromFlags(jsonFlag, transcriptFlag bool) sessionOutputMode {
+	switch {
+	case transcriptFlag:
+		return sessionOutputTranscript
+	case jsonFlag:
+		return sessionOutputJSON
+	default:
+		return sessionOutputText
+	}
+}
+
+func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, mode sessionOutputMode) error {
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to load session: %w", err)
@@ -349,13 +416,16 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, j
 
 	status := sessionPhaseLabel(state)
 
-	if transcriptOutput {
+	switch mode {
+	case sessionOutputTranscript:
 		return writeSessionTranscript(ctx, cmd, state)
-	}
-	if jsonOutput {
+	case sessionOutputJSON:
 		return writeSessionInfoJSON(cmd.OutOrStdout(), state, status)
+	case sessionOutputText:
+		return writeSessionInfoText(cmd.OutOrStdout(), state, status)
+	default:
+		return fmt.Errorf("unknown session output mode: %d", mode)
 	}
-	return writeSessionInfoText(cmd.OutOrStdout(), state, status)
 }
 
 // writeSessionTranscript streams the live raw agent transcript for a session
@@ -365,25 +435,19 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, j
 func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *strategy.SessionState) error {
 	if state.TranscriptPath == "" {
 		cmd.SilenceUsage = true
-		return NewSilentError(fmt.Errorf("session %s has no transcript path recorded", state.SessionID))
+		msg := fmt.Sprintf("session %s has no transcript path recorded", state.SessionID)
+		fmt.Fprintln(cmd.ErrOrStderr(), msg)
+		return NewSilentError(errors.New(msg))
 	}
 
 	path, err := strategy.ResolveTranscriptPath(state)
 	if err != nil {
 		cmd.SilenceUsage = true
+		fmt.Fprintf(cmd.ErrOrStderr(), "transcript unavailable: %v\n", err)
 		return NewSilentError(fmt.Errorf("transcript unavailable: %w", err))
 	}
 
-	f, err := openSessionTranscript(path)
-	if err != nil {
-		return fmt.Errorf("failed to open transcript: %w", err)
-	}
-	defer f.Close()
-
-	if _, err := copySessionTranscript(ctx, cmd.OutOrStdout(), f); err != nil {
-		return fmt.Errorf("failed to stream transcript: %w", err)
-	}
-	return nil
+	return streamTranscriptToStdout(ctx, cmd.OutOrStdout(), path)
 }
 
 // sessionInfoJSON is the JSON output structure for sessions info --json.

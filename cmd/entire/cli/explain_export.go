@@ -37,7 +37,11 @@ func runExplainExport(ctx context.Context, w, errW io.Writer, opts explainExport
 
 	if opts.transcript || opts.rawTranscript {
 		if !hasTarget {
-			return errors.New("--transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+			flagName := "--transcript"
+			if opts.rawTranscript {
+				flagName = "--raw-transcript"
+			}
+			return fmt.Errorf("%s requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag", flagName)
 		}
 		return runExplainStreamTranscript(ctx, w, errW, opts)
 	}
@@ -49,32 +53,17 @@ func runExplainExport(ctx context.Context, w, errW io.Writer, opts explainExport
 	return runExplainCheckpointJSON(ctx, w, errW, opts)
 }
 
-// resolveExplainCheckpointID resolves a target (positional, --checkpoint, or
-// --commit) to a fully-qualified checkpoint ID using the existing lookup
-// infrastructure (including remote metadata fetch on miss).
+// resolveExplainCheckpointID resolves a target to a fully-qualified checkpoint
+// ID. Resolution order matches the prose explain command:
+//
+//  1. --commit <ref>  → resolve as a git commit, read Entire-Checkpoint trailer.
+//  2. --checkpoint <id> or positional checkpoint-id-prefix → match against
+//     committed checkpoints, with remote metadata fetch-on-miss.
+//  3. Positional that fails as a checkpoint prefix falls back to commit-ref
+//     resolution (mirrors runExplainAuto).
 func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explainExportOptions) (id.CheckpointID, *explainCheckpointLookup, error) {
 	if opts.commitRef != "" {
-		repo, err := openRepository(ctx)
-		if err != nil {
-			return id.CheckpointID(""), nil, fmt.Errorf("not a git repository: %w", err)
-		}
-		hash, _, err := resolveCommitUnambiguous(repo, opts.commitRef)
-		if err != nil {
-			return id.CheckpointID(""), nil, fmt.Errorf("commit not found: %s: %w", opts.commitRef, err)
-		}
-		commit, err := repo.CommitObject(hash)
-		if err != nil {
-			return id.CheckpointID(""), nil, fmt.Errorf("failed to read commit: %w", err)
-		}
-		cpID, found := trailers.ParseCheckpoint(commit.Message)
-		if !found {
-			return id.CheckpointID(""), nil, fmt.Errorf("commit %s has no Entire-Checkpoint trailer", commit.Hash)
-		}
-		lookup, lookupErr := newExplainCheckpointLookup(ctx)
-		if lookupErr != nil {
-			return id.CheckpointID(""), nil, lookupErr
-		}
-		return cpID, lookup, nil
+		return resolveCheckpointFromCommitRef(ctx, opts.commitRef)
 	}
 
 	prefix := opts.checkpointFlag
@@ -90,33 +79,80 @@ func resolveExplainCheckpointID(ctx context.Context, errW io.Writer, opts explai
 		return id.CheckpointID(""), nil, lookupErr
 	}
 
-	matches := matchCheckpointPrefix(lookup, prefix)
-	if len(matches) == 0 {
-		stop := startSpinner(errW, "Fetching checkpoint metadata from remote")
-		_, _, v1Err := getMetadataTree(ctx)
-		v2OK := false
-		if lookup.preferCheckpointsV2 {
-			if _, _, v2Err := getV2MetadataTree(ctx); v2Err == nil {
-				v2OK = true
-			}
-		}
-		stop(false)
-		if v1Err == nil || v2OK {
-			if fresh, freshErr := newExplainCheckpointLookup(ctx); freshErr == nil {
-				lookup = fresh
-				matches = matchCheckpointPrefix(lookup, prefix)
-			}
-		}
-	}
-
+	matches, lookup := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, prefix)
 	switch len(matches) {
-	case 0:
-		return id.CheckpointID(""), lookup, fmt.Errorf("%w: %s", checkpoint.ErrCheckpointNotFound, prefix)
 	case 1:
 		return matches[0], lookup, nil
+	case 0:
+		// If the user passed a positional target (not --checkpoint), give it
+		// one more shot as a commit ref before failing — mirrors the prose
+		// runExplainAuto behavior so `--json <commit-sha>` works.
+		if opts.target != "" && opts.checkpointFlag == "" {
+			cpID, freshLookup, commitErr := resolveCheckpointFromCommitRef(ctx, opts.target)
+			if commitErr == nil {
+				return cpID, freshLookup, nil
+			}
+		}
+		return id.CheckpointID(""), lookup, fmt.Errorf("%w: %s", checkpoint.ErrCheckpointNotFound, prefix)
 	default:
 		return id.CheckpointID(""), lookup, fmt.Errorf("%w: %s matches %d checkpoints", errAmbiguousCommitPrefix, prefix, len(matches))
 	}
+}
+
+// resolveCheckpointFromCommitRef opens the repo, resolves a git commit-ish, and
+// extracts the Entire-Checkpoint trailer. Returns a fresh lookup so the caller
+// can read the checkpoint metadata.
+func resolveCheckpointFromCommitRef(ctx context.Context, commitRef string) (id.CheckpointID, *explainCheckpointLookup, error) {
+	repo, err := openRepository(ctx)
+	if err != nil {
+		return id.CheckpointID(""), nil, fmt.Errorf("not a git repository: %w", err)
+	}
+	hash, _, err := resolveCommitUnambiguous(repo, commitRef)
+	if err != nil {
+		return id.CheckpointID(""), nil, fmt.Errorf("commit not found: %s: %w", commitRef, err)
+	}
+	commit, err := repo.CommitObject(hash)
+	if err != nil {
+		return id.CheckpointID(""), nil, fmt.Errorf("failed to read commit: %w", err)
+	}
+	cpID, found := trailers.ParseCheckpoint(commit.Message)
+	if !found {
+		return id.CheckpointID(""), nil, fmt.Errorf("commit %s has no Entire-Checkpoint trailer", commit.Hash)
+	}
+	lookup, lookupErr := newExplainCheckpointLookup(ctx)
+	if lookupErr != nil {
+		return id.CheckpointID(""), nil, lookupErr
+	}
+	return cpID, lookup, nil
+}
+
+// matchCheckpointPrefixWithRemoteFallback returns all committed checkpoints
+// whose ID starts with prefix. On a local miss, fetches metadata from the
+// remote (treeless origin → full origin chain) and retries once with a fresh
+// lookup. The returned lookup may differ from the input on retry.
+func matchCheckpointPrefixWithRemoteFallback(ctx context.Context, errW io.Writer, lookup *explainCheckpointLookup, prefix string) ([]id.CheckpointID, *explainCheckpointLookup) {
+	matches := matchCheckpointPrefix(lookup, prefix)
+	if len(matches) > 0 {
+		return matches, lookup
+	}
+
+	stop := startSpinner(errW, "Fetching checkpoint metadata from remote")
+	_, _, v1Err := getMetadataTree(ctx)
+	v2OK := false
+	if lookup.preferCheckpointsV2 {
+		if _, _, v2Err := getV2MetadataTree(ctx); v2Err == nil {
+			v2OK = true
+		}
+	}
+	stop(false)
+	if v1Err != nil && !v2OK {
+		return nil, lookup
+	}
+	fresh, freshErr := newExplainCheckpointLookup(ctx)
+	if freshErr != nil {
+		return nil, lookup
+	}
+	return matchCheckpointPrefix(fresh, prefix), fresh
 }
 
 func matchCheckpointPrefix(lookup *explainCheckpointLookup, prefix string) []id.CheckpointID {
@@ -129,12 +165,20 @@ func matchCheckpointPrefix(lookup *explainCheckpointLookup, prefix string) []id.
 	return matches
 }
 
+// errCheckpointHasNoSessions distinguishes "this checkpoint has zero sessions"
+// from checkpoint.ErrCheckpointNotFound — callers using errors.Is on the
+// not-found sentinel were getting wrong-fault UX (e.g. "did you mistype the
+// ID?") for a legitimate empty-checkpoint edge case.
+var errCheckpointHasNoSessions = errors.New("checkpoint has no sessions")
+
 // resolveSessionIndex maps the user's --session-index value (or the implicit
-// default) onto a valid 0-based offset within summary.Sessions. Returns an
-// error when the requested index exceeds the available range.
+// default) onto a valid 0-based offset within summary.Sessions.
 func resolveSessionIndex(summary *checkpoint.CheckpointSummary, requested int) (int, error) {
-	if summary == nil || len(summary.Sessions) == 0 {
+	if summary == nil {
 		return 0, checkpoint.ErrCheckpointNotFound
+	}
+	if len(summary.Sessions) == 0 {
+		return 0, errCheckpointHasNoSessions
 	}
 	if requested < 0 {
 		return len(summary.Sessions) - 1, nil
@@ -222,6 +266,11 @@ type checkpointSessionJSON struct {
 	FilesTouched []string                  `json:"files_touched,omitempty"`
 	TokenUsage   *checkpointSessionTokens  `json:"token_usage,omitempty"`
 	Summary      *checkpointSessionSummary `json:"summary,omitempty"`
+
+	// Error is set when this session's metadata could not be read. The Index
+	// field remains valid; all other content fields are zero. Consumers can
+	// detect this by checking for a non-empty Error.
+	Error string `json:"error,omitempty"`
 }
 
 type checkpointSessionTokens struct {
@@ -264,9 +313,13 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 	for idx := range summary.Sessions {
 		meta, metaErr := readSessionMetadataForExport(ctx, reader, cpID, idx)
 		if metaErr != nil {
-			// Surface the per-session error as a stub entry rather than failing
-			// the whole envelope — partial metadata is still useful to consumers.
-			envelope.Sessions = append(envelope.Sessions, checkpointSessionJSON{Index: idx})
+			// Surface the per-session error as a stub entry with an explicit
+			// error string rather than failing the whole envelope or silently
+			// returning empty fields. Consumers branch on the `error` field.
+			envelope.Sessions = append(envelope.Sessions, checkpointSessionJSON{
+				Index: idx,
+				Error: metaErr.Error(),
+			})
 			continue
 		}
 		envelope.Sessions = append(envelope.Sessions, sessionMetadataToJSON(idx, meta))
@@ -281,22 +334,35 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 }
 
 // readSessionMetadataForExport reads only metadata.json for a session — no
-// transcript or prompt bytes. Prefers v2's cheap metadata-only reader when
-// available, falls back to the v1 ReadSessionContent path otherwise.
+// transcript or prompt bytes. Both v1 and v2 stores expose a metadata-only
+// reader, so this never depends on transcript availability (which would
+// cause an unrelated ErrNoTranscript on v1 checkpoints whose raw transcript
+// has been pruned).
 func readSessionMetadataForExport(ctx context.Context, reader checkpoint.CommittedReader, cpID id.CheckpointID, idx int) (*checkpoint.CommittedMetadata, error) {
-	if v2, ok := reader.(*checkpoint.V2GitStore); ok {
-		meta, err := v2.ReadSessionMetadata(ctx, cpID, idx)
+	switch r := reader.(type) {
+	case *checkpoint.V2GitStore:
+		meta, err := r.ReadSessionMetadata(ctx, cpID, idx)
 		if err != nil {
 			return nil, fmt.Errorf("read v2 session metadata: %w", err)
 		}
 		return meta, nil
+	case *checkpoint.GitStore:
+		meta, err := r.ReadSessionMetadata(ctx, cpID, idx)
+		if err != nil {
+			return nil, fmt.Errorf("read v1 session metadata: %w", err)
+		}
+		return meta, nil
+	default:
+		// CommittedReader doesn't promise a metadata-only method; fall back
+		// to the heavier ReadSessionContent path. Reachable only if a third
+		// store implementation is added without updating this switch.
+		content, err := reader.ReadSessionContent(ctx, cpID, idx)
+		if err != nil {
+			return nil, fmt.Errorf("read session content: %w", err)
+		}
+		meta := content.Metadata
+		return &meta, nil
 	}
-	content, err := reader.ReadSessionContent(ctx, cpID, idx)
-	if err != nil {
-		return nil, fmt.Errorf("read session content: %w", err)
-	}
-	meta := content.Metadata
-	return &meta, nil
 }
 
 func sessionMetadataToJSON(idx int, meta *checkpoint.CommittedMetadata) checkpointSessionJSON {
@@ -360,7 +426,10 @@ func runExplainListJSON(ctx context.Context, w io.Writer, sessionFilter string) 
 		if ctx.Err() != nil {
 			return NewSilentError(ctx.Err())
 		}
-		points = nil
+		// JSON consumers cannot distinguish "[]" from "fetch failed" if we
+		// swallow the error. Surface it so scripts get a non-zero exit and
+		// a real diagnostic instead of silently degraded output.
+		return fmt.Errorf("failed to list checkpoints: %w", err)
 	}
 
 	out := make([]branchCheckpointJSON, 0, len(points))
