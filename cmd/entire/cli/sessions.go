@@ -26,17 +26,31 @@ import (
 // <-ctx.Done(), so io.ReadAll returns promptly when the user hits Ctrl-C on a
 // multi-MB transcript instead of blocking until EOF.
 //
-// Snapshot semantics: if the agent is mid-write when we hit EOF the trailing
-// partial line is trimmed so consumers never see a truncated JSONL record.
+// Snapshot semantics: the read is bounded to the file size observed at open
+// (via io.LimitReader) so writes the agent appends after command start are
+// excluded. Output shaping is content-aware:
 //
-// state.TranscriptPath comes from a session-state file that Entire writes
-// exclusively under the user's own .git/. The path is therefore as trusted
-// as any other entry the local user has on disk; we do not validate it
-// against a confinement root.
+//   - Whole-document JSON transcripts (e.g. Gemini's session-*.json) are
+//     emitted intact. Trimming would cut off the closing brace.
+//   - JSONL transcripts (Claude Code, Cursor, Codex, etc.) get a trailing
+//     partial-line trim so consumers never see a truncated record.
+//
+// path comes from a session-state file that Entire writes exclusively
+// under the user's own .git/. The path is therefore as trusted as any
+// other entry the local user has on disk; we do not validate it against a
+// confinement root.
 func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string) error {
 	f, err := os.Open(path) //nolint:gosec // see comment above on trust model
 	if err != nil {
 		return fmt.Errorf("open transcript: %w", err)
+	}
+
+	// Bound the snapshot to the file size at open. Without this, io.ReadAll
+	// would also include bytes the agent appends while the read is in flight,
+	// silently extending the "snapshot" past command-start.
+	var snapshotSize int64 = -1
+	if info, statErr := f.Stat(); statErr == nil {
+		snapshotSize = info.Size()
 	}
 
 	closeOnDone := make(chan struct{})
@@ -52,10 +66,11 @@ func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string) err
 		_ = f.Close()
 	}()
 
-	// Read into memory so we can shape-clean the trailing partial line. A
-	// single session transcript is bounded (low MB to ~100 MB at the
-	// extreme), which is fine for buffered handling.
-	buf, err := io.ReadAll(f)
+	var reader io.Reader = f
+	if snapshotSize >= 0 {
+		reader = io.LimitReader(f, snapshotSize)
+	}
+	buf, err := io.ReadAll(reader)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr //nolint:wrapcheck // propagating context cancellation
@@ -63,17 +78,25 @@ func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string) err
 		return fmt.Errorf("read transcript: %w", err)
 	}
 
-	if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
-		buf = buf[:i+1]
-	} else {
-		// File holds a single non-terminated record — return empty rather
-		// than a truncated record. Vanishingly rare for live transcripts.
-		buf = nil
-	}
-
-	if _, err := w.Write(buf); err != nil {
+	if _, err := w.Write(shapeTranscriptSnapshot(buf)); err != nil {
 		return fmt.Errorf("write transcript: %w", err)
 	}
+	return nil
+}
+
+// shapeTranscriptSnapshot returns the snapshot bytes a consumer should see.
+// If the buffer is a single valid JSON document (Gemini-style), it is emitted
+// intact. Otherwise it is treated as JSONL and trimmed to the last newline so
+// no partial trailing record reaches the consumer.
+func shapeTranscriptSnapshot(buf []byte) []byte {
+	if json.Valid(buf) {
+		return buf
+	}
+	if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
+		return buf[:i+1]
+	}
+	// Single non-terminated, non-JSON record (vanishingly rare for live
+	// transcripts) — return empty rather than a truncated record.
 	return nil
 }
 
@@ -396,10 +419,11 @@ and files touched. Works for both active and ended sessions.
 Output modes:
   Default       Human-readable summary.
   --json        Metadata-only JSON envelope (no transcript bytes).
-  --transcript  Stream the live raw agent transcript bytes to stdout
-                (per-agent JSONL format from the on-disk transcript).
-                Snapshot semantics: ends at EOF at command-start; trailing
-                partial line (if the agent is mid-write) is trimmed.
+  --transcript  Stream the live raw agent transcript bytes to stdout in
+                the agent's native format (JSONL for Claude/Cursor/Codex,
+                JSON for Gemini). Snapshot is bounded to the file size
+                observed at open. JSONL streams have a trailing partial
+                line trimmed; JSON documents are emitted intact.
 
 Examples:
   entire sessions info <session-id>

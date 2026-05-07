@@ -15,8 +15,10 @@ import (
 )
 
 // explainExportOptions describes a request for one of the machine-readable
-// output modes of `entire checkpoint explain`. Exactly one of the json or
-// transcript flags is set when this struct is dispatched.
+// output modes of `entire checkpoint explain`. Exactly one of json,
+// transcript, or rawTranscript is set when this struct reaches
+// runExplainExport. sessionIndex is meaningful only for transcript /
+// rawTranscript requests; cobra-layer validation rejects it elsewhere.
 type explainExportOptions struct {
 	sessionFilter  string
 	commitRef      string
@@ -228,11 +230,11 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 		return errors.New("compact transcript is only available for v2 checkpoints (try --raw-transcript)")
 	}
 
-	bytes, err := v2Reader.ReadSessionCompactTranscript(ctx, cpID, idx)
+	compact, err := v2Reader.ReadSessionCompactTranscript(ctx, cpID, idx)
 	if err != nil {
 		return fmt.Errorf("failed to read compact transcript: %w", err)
 	}
-	if _, err := w.Write(bytes); err != nil {
+	if _, err := w.Write(compact); err != nil {
 		return fmt.Errorf("failed to write transcript: %w", err)
 	}
 	return nil
