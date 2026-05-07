@@ -360,7 +360,6 @@ func TestParseCodexOutput_StreamsEventsBeforeEOF(t *testing.T) {
 	}
 }
 
-//nolint:ireturn // test helper intentionally records heterogeneous event values.
 func collectCodexEvents(ch <-chan reviewtypes.Event) []reviewtypes.Event {
 	var events []reviewtypes.Event
 	for ev := range ch {
