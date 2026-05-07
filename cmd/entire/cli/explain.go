@@ -225,6 +225,9 @@ func newExplainCmd() *cobra.Command {
 	var generateFlag bool
 	var forceFlag bool
 	var searchAllFlag bool
+	var jsonFlag bool
+	var transcriptFlag bool
+	sessionIndex := -1
 
 	cmd := &cobra.Command{
 		Use:   "explain [checkpoint-id | commit-sha]",
@@ -250,6 +253,17 @@ Output verbosity levels (when explaining a specific item):
   --short          Summary only (ID, session, timestamp, tokens, intent)
   --full           Parsed full transcript (all prompts/responses from entire session)
   --raw-transcript Raw transcript file (JSONL format)
+
+Machine-readable export modes (additive surface for external consumers):
+  --json           Metadata-only JSON. Lists checkpoints when no target is given;
+                   emits a single checkpoint envelope when a target is supplied.
+                   Transcript bytes are NEVER embedded in the JSON envelope.
+  --transcript     Stream the normalized compact transcript bytes (JSONL on
+                   /main) to stdout for the selected session. Pair with
+                   --raw-transcript for the per-agent raw transcript instead.
+  --session-index  Pick a session within a multi-session checkpoint (0-based).
+                   Defaults to the latest session. Only meaningful with
+                   --transcript or --raw-transcript.
 
 Summary generation:
   --generate    Generate an AI summary for the checkpoint
@@ -307,6 +321,35 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 			if rawTranscriptFlag && !hasCheckpointTarget {
 				return errors.New("--raw-transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
 			}
+			if transcriptFlag && !hasCheckpointTarget {
+				return errors.New("--transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+			}
+			if cmd.Flags().Changed("session-index") {
+				if !transcriptFlag && !rawTranscriptFlag {
+					return errors.New("--session-index only applies with --transcript or --raw-transcript")
+				}
+				if sessionIndex < 0 {
+					return errors.New("--session-index must be non-negative")
+				}
+			}
+
+			// Export modes — emit machine-readable output and skip the prose pipeline.
+			// --raw-transcript also routes here when --session-index is explicit; the
+			// legacy raw-transcript path (with spinner + prefetch) handles the default
+			// case where the caller wants the latest session.
+			rawWithSessionIndex := rawTranscriptFlag && cmd.Flags().Changed("session-index")
+			if jsonFlag || transcriptFlag || rawWithSessionIndex {
+				return runExplainExport(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), explainExportOptions{
+					sessionFilter:  sessionFlag,
+					commitRef:      commitFlag,
+					checkpointFlag: checkpointFlag,
+					target:         positional,
+					json:           jsonFlag,
+					transcript:     transcriptFlag,
+					rawTranscript:  rawTranscriptFlag,
+					sessionIndex:   sessionIndex,
+				})
+			}
 
 			// Convert short flag to verbose (verbose = !short)
 			verbose := !shortFlag
@@ -324,11 +367,17 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&generateFlag, "generate", false, "Generate an AI summary for the checkpoint")
 	cmd.Flags().BoolVar(&forceFlag, "force", false, "Regenerate summary even if one already exists (requires --generate)")
 	cmd.Flags().BoolVar(&searchAllFlag, "search-all", false, "Search all commits (no branch/depth limit, may be slow)")
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output metadata as JSON (no transcript bytes)")
+	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream compact normalized transcript bytes to stdout (pair with --raw-transcript for the per-agent raw transcript)")
+	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
 
-	// Make --short, --full, and --raw-transcript mutually exclusive
-	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript")
+	// Verbosity / transcript output modes are mutually exclusive
+	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")
 	// --generate and --raw-transcript are incompatible (summary would be generated but not shown)
 	cmd.MarkFlagsMutuallyExclusive("generate", "raw-transcript")
+	// --generate is a write op; export modes are reader-only
+	cmd.MarkFlagsMutuallyExclusive("generate", "json")
+	cmd.MarkFlagsMutuallyExclusive("generate", "transcript")
 
 	return cmd
 }

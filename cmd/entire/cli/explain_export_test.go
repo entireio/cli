@@ -1,0 +1,295 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/stretchr/testify/require"
+)
+
+const (
+	exportTestAuthorName  = "Test"
+	exportTestAuthorEmail = "export-test@entire.local"
+)
+
+// setupExportRepo creates a git repo with v2 checkpoints enabled and an
+// initial commit (required for HEAD-resolving operations). The caller is
+// responsible for chdir; this helper does NOT call t.Parallel because tests
+// using t.Chdir cannot parallelize.
+func setupExportRepo(t *testing.T) *git.Repository {
+	t.Helper()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	testFile := filepath.Join(tmpDir, "f.txt")
+	require.NoError(t, os.WriteFile(testFile, []byte("init"), 0o600))
+	_, err = wt.Add("f.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("init", &git.CommitOptions{
+		Author: &object.Signature{Name: exportTestAuthorName, Email: exportTestAuthorEmail, When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_v2": true}}`),
+		0o600,
+	))
+
+	return repo
+}
+
+func writeV2CheckpointForExport(t *testing.T, repo *git.Repository, cpID id.CheckpointID, opts checkpoint.WriteCommittedOptions) {
+	t.Helper()
+	store := checkpoint.NewV2GitStore(repo, "origin")
+	opts.CheckpointID = cpID
+	if opts.AuthorName == "" {
+		opts.AuthorName = exportTestAuthorName
+	}
+	if opts.AuthorEmail == "" {
+		opts.AuthorEmail = exportTestAuthorEmail
+	}
+	if opts.Strategy == "" {
+		opts.Strategy = "manual-commit"
+	}
+	require.NoError(t, store.WriteCommitted(context.Background(), opts))
+}
+
+func TestRunExplainExport_JSONSingleCheckpoint(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	cpID := id.MustCheckpointID("aaaa11112222")
+	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+		SessionID:         "session-json",
+		Transcript:        redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
+		CompactTranscript: []byte(`{"v":1,"type":"user"}` + "\n"),
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       "aaaa1111",
+		json:         true,
+		sessionIndex: -1,
+	})
+	require.NoError(t, err)
+
+	var envelope checkpointExportJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &envelope), "output: %s", stdout.String())
+
+	require.Equal(t, cpID.String(), envelope.CheckpointID)
+	require.Equal(t, 1, envelope.SessionCount)
+	require.Len(t, envelope.Sessions, 1)
+	require.Equal(t, "session-json", envelope.Sessions[0].SessionID)
+	require.Equal(t, 0, envelope.Sessions[0].Index)
+}
+
+func TestRunExplainExport_JSONNeverEmbedsTranscript(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	cpID := id.MustCheckpointID("bbbb11112222")
+	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+		SessionID:         "session-no-leak",
+		Transcript:        redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"SECRET-RAW"}]}}` + "\n")),
+		CompactTranscript: []byte(`{"v":1,"text":"SECRET-COMPACT"}` + "\n"),
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       "bbbb1111",
+		json:         true,
+		sessionIndex: -1,
+	})
+	require.NoError(t, err)
+
+	out := stdout.String()
+	require.NotContains(t, out, "SECRET-RAW", "JSON envelope must not embed raw transcript")
+	require.NotContains(t, out, "SECRET-COMPACT", "JSON envelope must not embed compact transcript")
+}
+
+func TestRunExplainExport_TranscriptStreamsCompactBytes(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	cpID := id.MustCheckpointID("cccc11112222")
+	compact := []byte(`{"v":1,"type":"user","content":[{"text":"compact line 1"}]}` + "\n" + `{"v":1,"type":"assistant","content":[{"text":"compact line 2"}]}` + "\n")
+	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+		SessionID:         "session-compact",
+		Transcript:        redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"raw line"}]}}` + "\n")),
+		CompactTranscript: compact,
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       "cccc1111",
+		transcript:   true,
+		sessionIndex: -1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, compact, stdout.Bytes())
+}
+
+func TestRunExplainExport_RawTranscriptStreamsRawBytes(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	cpID := id.MustCheckpointID("dddd11112222")
+	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello raw"}]}}` + "\n")
+	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+		SessionID:         "session-raw",
+		Transcript:        redact.AlreadyRedacted(raw),
+		CompactTranscript: []byte(`{"v":1,"type":"user"}` + "\n"),
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:        "dddd1111",
+		rawTranscript: true,
+		sessionIndex:  -1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, raw, stdout.Bytes())
+}
+
+// TestExplainCmd_RawTranscriptWithSessionIndexRoutesToExportPath guards the
+// cobra-layer dispatch: --raw-transcript --session-index must reach the
+// export path (which honors the index). Before the fix, the legacy
+// raw-transcript path silently ignored --session-index because the dispatch
+// only forked on --json or --transcript.
+func TestExplainCmd_RawTranscriptWithSessionIndexRoutesToExportPath(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	cpID := id.MustCheckpointID("ffff11112222")
+	raw0 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello session 0"}]}}` + "\n")
+	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+		SessionID:  "session-zero",
+		Transcript: redact.AlreadyRedacted(raw0),
+	})
+
+	cmd := newExplainCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"ffff1111", "--raw-transcript", "--session-index", "0"})
+
+	require.NoError(t, cmd.ExecuteContext(context.Background()))
+	require.Equal(t, raw0, stdout.Bytes())
+}
+
+func TestRunExplainExport_TranscriptRequiresTarget(t *testing.T) {
+	setupExportRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		transcript:   true,
+		sessionIndex: -1,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--transcript requires")
+}
+
+func TestRunExplainExport_TranscriptOutOfRangeSessionIndex(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	cpID := id.MustCheckpointID("eeee11112222")
+	writeV2CheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+		SessionID:         "session-only",
+		Transcript:        redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
+		CompactTranscript: []byte(`{"v":1}` + "\n"),
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       "eeee1111",
+		transcript:   true,
+		sessionIndex: 5,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "out of range")
+}
+
+func TestResolveSessionIndex(t *testing.T) {
+	t.Parallel()
+
+	threeSessions := &checkpoint.CheckpointSummary{
+		Sessions: make([]checkpoint.SessionFilePaths, 3),
+	}
+
+	tests := []struct {
+		name      string
+		summary   *checkpoint.CheckpointSummary
+		requested int
+		want      int
+		wantErr   string
+	}{
+		{name: "default picks latest", summary: threeSessions, requested: -1, want: 2},
+		{name: "explicit 0", summary: threeSessions, requested: 0, want: 0},
+		{name: "explicit middle", summary: threeSessions, requested: 1, want: 1},
+		{name: "explicit last", summary: threeSessions, requested: 2, want: 2},
+		{name: "out of range", summary: threeSessions, requested: 3, wantErr: "out of range"},
+		{name: "empty summary", summary: &checkpoint.CheckpointSummary{}, requested: -1, wantErr: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := resolveSessionIndex(tc.summary, tc.requested)
+			switch {
+			case tc.wantErr == "" && tc.summary != nil && len(tc.summary.Sessions) > 0:
+				require.NoError(t, err)
+				require.Equal(t, tc.want, got)
+			case tc.wantErr != "":
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tc.wantErr)
+			default:
+				// empty-summary case returns ErrCheckpointNotFound; just ensure we got an error.
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestExplainCmd_SessionIndexRequiresTranscriptFlag(t *testing.T) {
+	setupExportRepo(t)
+
+	cmd := newExplainCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"some-checkpoint", "--session-index", "1"})
+
+	err := cmd.ExecuteContext(context.Background())
+	require.Error(t, err)
+	require.Contains(t,
+		err.Error(), "--session-index only applies",
+		"expected --session-index validation error, got: %v", err,
+	)
+}
+
+func TestExplainCmd_TranscriptAndJSONMutuallyExclusive(t *testing.T) {
+	setupExportRepo(t)
+
+	cmd := newExplainCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"some-checkpoint", "--json", "--transcript"})
+
+	err := cmd.ExecuteContext(context.Background())
+	require.Error(t, err)
+}

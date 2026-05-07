@@ -10,6 +10,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
+// ResolveTranscriptPath is the exported wrapper around resolveTranscriptPath
+// for callers outside the strategy package (e.g. CLI commands streaming a
+// live transcript to stdout). The underlying function may update
+// state.TranscriptPath when an agent has relocated the file mid-session.
+func ResolveTranscriptPath(state *SessionState) (string, error) {
+	return resolveTranscriptPath(state)
+}
+
 // resolveTranscriptPath returns the current path to the session's transcript file.
 // If the file exists at state.TranscriptPath, that path is returned immediately.
 //

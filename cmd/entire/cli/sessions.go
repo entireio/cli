@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,6 +19,21 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/spf13/cobra"
 )
+
+// openSessionTranscript opens the session transcript file for streaming.
+// Indirected via a package var so tests can stub the os.Open call.
+var openSessionTranscript = func(path string) (io.ReadCloser, error) {
+	return os.Open(path) //nolint:gosec // path is resolved from validated session state
+}
+
+// copySessionTranscript copies transcript bytes to w, honoring ctx cancellation.
+// Indirected via a package var so tests can swap behavior.
+var copySessionTranscript = func(ctx context.Context, w io.Writer, r io.Reader) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err //nolint:wrapcheck // Propagating context cancellation
+	}
+	return io.Copy(w, r)
+}
 
 func newSessionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -287,6 +303,7 @@ func writeSessionCard(w io.Writer, s *strategy.SessionState, sty statusStyles) {
 
 func newInfoCmd() *cobra.Command {
 	var jsonFlag bool
+	var transcriptFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "info <session-id>",
@@ -296,21 +313,30 @@ func newInfoCmd() *cobra.Command {
 Shows agent, model, status, worktree, timing, token usage, checkpoint linkage,
 and files touched. Works for both active and ended sessions.
 
+Output modes:
+  Default       Human-readable summary.
+  --json        Metadata-only JSON envelope (no transcript bytes).
+  --transcript  Stream the live raw agent transcript bytes to stdout
+                (per-agent JSONL format from the on-disk transcript).
+
 Examples:
   entire sessions info <session-id>
-  entire sessions info <session-id> --json`,
+  entire sessions info <session-id> --json
+  entire sessions info <session-id> --transcript > session.jsonl`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionInfo(cmd.Context(), cmd, args[0], jsonFlag)
+			return runSessionInfo(cmd.Context(), cmd, args[0], jsonFlag, transcriptFlag)
 		},
 	}
 
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream raw agent transcript bytes to stdout")
+	cmd.MarkFlagsMutuallyExclusive("json", "transcript")
 
 	return cmd
 }
 
-func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, jsonOutput bool) error {
+func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, jsonOutput, transcriptOutput bool) error {
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to load session: %w", err)
@@ -323,10 +349,41 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, j
 
 	status := sessionPhaseLabel(state)
 
+	if transcriptOutput {
+		return writeSessionTranscript(ctx, cmd, state)
+	}
 	if jsonOutput {
 		return writeSessionInfoJSON(cmd.OutOrStdout(), state, status)
 	}
 	return writeSessionInfoText(cmd.OutOrStdout(), state, status)
+}
+
+// writeSessionTranscript streams the live raw agent transcript for a session
+// to stdout. The transcript bytes are exactly what the agent has written to
+// disk in its native per-agent format (JSONL for Claude Code/Cursor, JSON for
+// Gemini, etc.) — Entire performs no normalization here.
+func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *strategy.SessionState) error {
+	if state.TranscriptPath == "" {
+		cmd.SilenceUsage = true
+		return NewSilentError(fmt.Errorf("session %s has no transcript path recorded", state.SessionID))
+	}
+
+	path, err := strategy.ResolveTranscriptPath(state)
+	if err != nil {
+		cmd.SilenceUsage = true
+		return NewSilentError(fmt.Errorf("transcript unavailable: %w", err))
+	}
+
+	f, err := openSessionTranscript(path)
+	if err != nil {
+		return fmt.Errorf("failed to open transcript: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := copySessionTranscript(ctx, cmd.OutOrStdout(), f); err != nil {
+		return fmt.Errorf("failed to stream transcript: %w", err)
+	}
+	return nil
 }
 
 // sessionInfoJSON is the JSON output structure for sessions info --json.

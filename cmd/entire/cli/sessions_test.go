@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -912,6 +913,79 @@ func TestInfoCmd_EndedSession(t *testing.T) {
 	}
 	if !strings.Contains(out, "Checkpoint:  b79b35cd956d") {
 		t.Errorf("expected checkpoint ID in output, got:\n%s", out)
+	}
+}
+
+func TestInfoCmd_TranscriptStreamsRawAgentBytes(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+
+	transcriptDir := t.TempDir()
+	transcriptPath := transcriptDir + "/session.jsonl"
+	want := []byte(`{"role":"user","content":"hi"}` + "\n" + `{"role":"assistant","content":"hello"}` + "\n")
+	if err := os.WriteFile(transcriptPath, want, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	state := makeSessionState("test-info-transcript", session.PhaseActive)
+	state.AgentType = testAgentClaude
+	state.TranscriptPath = transcriptPath
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"test-info-transcript", "--transcript"})
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("ExecuteContext: %v", err)
+	}
+
+	if !bytes.Equal(stdout.Bytes(), want) {
+		t.Errorf("transcript output mismatch.\n  want: %q\n  got:  %q", want, stdout.Bytes())
+	}
+}
+
+func TestInfoCmd_TranscriptMissingPath(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	state := makeSessionState("test-info-no-transcript", session.PhaseActive)
+	state.AgentType = testAgentClaude
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"test-info-no-transcript", "--transcript"})
+
+	err := cmd.ExecuteContext(ctx)
+	if err == nil {
+		t.Fatal("expected error when transcript path is empty")
+	}
+	if !strings.Contains(err.Error(), "no transcript path") {
+		t.Errorf("expected 'no transcript path' error, got: %v", err)
+	}
+}
+
+func TestInfoCmd_TranscriptAndJSONMutuallyExclusive(t *testing.T) {
+	setupStopTestRepo(t)
+
+	cmd := newInfoCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"some-id", "--json", "--transcript"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected error when --json and --transcript are combined")
 	}
 }
 
