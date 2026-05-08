@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -139,7 +141,7 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 	start, end := rangeKey.Bounds(time.Now())
 	resp, err := recap.FetchMeRecap(ctx, client, start, end, repoSlug, 0)
 	if err != nil {
-		return fmt.Errorf("fetch recap: %w", err)
+		return handleRecapFetchError(w, err)
 	}
 	fmt.Fprint(w, recap.RenderStaticRecap(resp, recap.RenderOptions{
 		Range: rangeKey,
@@ -150,6 +152,25 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 	}))
 	fmt.Fprintln(w)
 	return nil
+}
+
+func handleRecapFetchError(w io.Writer, err error) error {
+	if shouldShowRecapLoadErrorMessage(err) {
+		fmt.Fprintln(w, recapLoadErrorMessage(err))
+		return NewSilentError(err)
+	}
+	return fmt.Errorf("fetch recap: %w", err)
+}
+
+func shouldShowRecapLoadErrorMessage(err error) bool {
+	var apiErr *api.HTTPError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusUnauthorized ||
+			apiErr.StatusCode == http.StatusBadRequest ||
+			apiErr.StatusCode == http.StatusNotFound ||
+			apiErr.StatusCode >= http.StatusInternalServerError
+	}
+	return isRecapNetworkError(err)
 }
 
 func terminalWidth(w io.Writer) int {

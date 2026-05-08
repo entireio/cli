@@ -2,7 +2,11 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -177,7 +181,7 @@ func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m recapTUIModel) View() tea.View {
 	v := tea.View{AltScreen: true}
 	if m.loadErr != nil {
-		v.SetContent(fmt.Sprintf("\n  Failed to load recap: %s\n\n  Press r to retry or q to quit.\n", m.loadErr))
+		v.SetContent(fmt.Sprintf("\n  Failed to load recap: %s\n\n  Press r to retry or q to quit.\n", recapLoadErrorMessage(m.loadErr)))
 		return v
 	}
 	if m.loading && m.resp == nil {
@@ -194,6 +198,49 @@ func (m recapTUIModel) View() tea.View {
 	b.WriteString(m.renderFooter())
 	v.SetContent(b.String())
 	return v
+}
+
+func recapLoadErrorMessage(err error) string {
+	var apiErr *api.HTTPError
+	if errors.As(err, &apiErr) {
+		detail := recapErrorDetail(apiErr)
+		switch apiErr.StatusCode {
+		case http.StatusUnauthorized:
+			return "Run `entire login` to re-authenticate."
+		case http.StatusBadRequest:
+			return "Entire sent an invalid recap time range. Please update Entire CLI and retry. Details: " + detail
+		case http.StatusNotFound:
+			return "entire.io could not find your account. Run `entire logout` then `entire login`; if it still fails, contact Entire support. Details: " + detail
+		default:
+			if apiErr.StatusCode >= http.StatusInternalServerError {
+				return "entire.io could not build the recap. Please retry in a moment; if it still fails, contact Entire support. Details: " + detail
+			}
+			return err.Error()
+		}
+	}
+	if isRecapNetworkError(err) {
+		return fmt.Sprintf("Could not reach entire.io. Check your internet connection and ENTIRE_API_BASE_URL if you use a custom API host. Details: %v", err)
+	}
+	return err.Error()
+}
+
+func recapErrorDetail(err *api.HTTPError) string {
+	if strings.TrimSpace(err.Message) != "" {
+		return fmt.Sprintf("HTTP %d: %s", err.StatusCode, err.Message)
+	}
+	if text := http.StatusText(err.StatusCode); text != "" {
+		return fmt.Sprintf("HTTP %d: %s", err.StatusCode, text)
+	}
+	return fmt.Sprintf("HTTP %d", err.StatusCode)
+}
+
+func isRecapNetworkError(err error) bool {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr)
 }
 
 func (m recapTUIModel) withViewport() recapTUIModel {

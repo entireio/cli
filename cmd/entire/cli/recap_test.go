@@ -2,8 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/recap"
 )
 
@@ -132,5 +138,157 @@ func TestRecapFlags_ColorEnabled(t *testing.T) {
 
 	if _, err := (&recapFlags{color: "rainbow"}).colorEnabled(&out); err == nil {
 		t.Fatal("colorEnabled(invalid) error = nil, want error")
+	}
+}
+
+func TestHandleRecapFetchError_UnauthorizedPromptsLogin(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	err := handleRecapFetchError(&out, &api.HTTPError{
+		StatusCode: http.StatusUnauthorized,
+		Message:    "Token expired",
+	})
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Fatalf("error = %T %v, want SilentError", err, err)
+	}
+	if !strings.Contains(out.String(), "Run `entire login` to re-authenticate.") {
+		t.Fatalf("output missing re-authentication prompt: %q", out.String())
+	}
+}
+
+func TestHandleRecapFetchError_PrintsMappedMessage(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "bad request",
+			err: &api.HTTPError{
+				StatusCode: http.StatusBadRequest,
+				Message:    "since must be on or before until",
+			},
+			want: "invalid recap time range",
+		},
+		{
+			name: "missing account",
+			err: &api.HTTPError{
+				StatusCode: http.StatusNotFound,
+				Message:    "User not found",
+			},
+			want: "could not find your account",
+		},
+		{
+			name: "server failure",
+			err: &api.HTTPError{
+				StatusCode: http.StatusInternalServerError,
+				Message:    "Failed to build recap",
+			},
+			want: "entire.io could not build the recap",
+		},
+		{
+			name: "network",
+			err:  &net.DNSError{Name: "entire.io", Err: "no such host"},
+			want: "Could not reach entire.io",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			err := handleRecapFetchError(&out, c.err)
+			var silent *SilentError
+			if !errors.As(err, &silent) {
+				t.Fatalf("error = %T %v, want SilentError", err, err)
+			}
+			if !strings.Contains(out.String(), c.want) {
+				t.Fatalf("output missing %q: %q", c.want, out.String())
+			}
+		})
+	}
+}
+
+func TestRecapLoadErrorMessage_HTTPStatuses(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want []string
+	}{
+		{
+			name: "bad recap time range",
+			err: &api.HTTPError{
+				StatusCode: http.StatusBadRequest,
+				Message:    "since must be on or before until",
+			},
+			want: []string{
+				"Entire sent an invalid recap time range.",
+				"update Entire CLI",
+				"HTTP 400",
+				"since must be on or before until",
+			},
+		},
+		{
+			name: "missing server user",
+			err: &api.HTTPError{
+				StatusCode: http.StatusNotFound,
+				Message:    "User not found",
+			},
+			want: []string{
+				"entire.io could not find your account",
+				"entire logout",
+				"entire login",
+				"HTTP 404",
+				"User not found",
+			},
+		},
+		{
+			name: "server failure",
+			err: &api.HTTPError{
+				StatusCode: http.StatusInternalServerError,
+				Message:    "Failed to build recap",
+			},
+			want: []string{
+				"entire.io could not build the recap",
+				"retry",
+				"HTTP 500",
+				"Failed to build recap",
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := recapLoadErrorMessage(fmt.Errorf("me/recap: %w", c.err))
+			for _, want := range c.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("message missing %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRecapLoadErrorMessage_NetworkError(t *testing.T) {
+	t.Parallel()
+
+	dnsErr := &net.DNSError{Name: "entire.io", Err: "no such host"}
+	got := recapLoadErrorMessage(fmt.Errorf("me/recap get: %w", dnsErr))
+	for _, want := range []string{
+		"Could not reach entire.io",
+		"Check your internet connection",
+		"ENTIRE_API_BASE_URL",
+		"no such host",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("message missing %q:\n%s", want, got)
+		}
 	}
 }
