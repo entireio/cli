@@ -122,6 +122,61 @@ func TestRecapTUIModel_TogglesRange(t *testing.T) {
 	}
 }
 
+func TestRecapTUIModel_UsesDirectRangeKeys(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		key  rune
+		want recap.RangeKey
+	}{
+		{'d', recap.RangeDay},
+		{'w', recap.RangeWeek},
+		{'m', recap.RangeMonth},
+		{'r', recap.Range90d},
+	}
+	for _, tt := range cases {
+		t.Run(string(tt.key), func(t *testing.T) {
+			t.Parallel()
+
+			start := testRecapTUIModel()
+			start.rangeKey = recap.RangeMonth
+			m, cmd := updateRecapTUIModel(t, start, recapRuneKey(tt.key))
+			if m.rangeKey != tt.want {
+				t.Fatalf("range = %q, want %q", m.rangeKey, tt.want)
+			}
+			if tt.want == recap.RangeMonth {
+				if cmd != nil {
+					t.Fatal("pressing the current range key should not refetch")
+				}
+				return
+			}
+			if !m.loading {
+				t.Fatal("range key should mark model loading")
+			}
+			if cmd == nil {
+				t.Fatal("range key should refetch recap data")
+			}
+		})
+	}
+}
+
+func TestRecapTUIModel_UppercaseRRefreshes(t *testing.T) {
+	t.Parallel()
+
+	start := testRecapTUIModel()
+	start.rangeKey = recap.RangeWeek
+	m, cmd := updateRecapTUIModel(t, start, recapRuneKey('R'))
+	if m.rangeKey != recap.RangeWeek {
+		t.Fatalf("refresh should keep range = %q, want week", m.rangeKey)
+	}
+	if !m.loading {
+		t.Fatal("refresh should mark model loading")
+	}
+	if cmd == nil {
+		t.Fatal("refresh should refetch recap data")
+	}
+}
+
 func TestRecapTUIModel_TogglesView(t *testing.T) {
 	t.Parallel()
 
@@ -218,7 +273,7 @@ func TestRecapTUIModel_FooterFitsWidth(t *testing.T) {
 	if got := lipgloss.Width(footer); got > m.width {
 		t.Fatalf("wide footer width = %d, want <= %d: %q", got, m.width, footer)
 	}
-	for _, want := range []string{"t range", "v view", "a agent", "r refresh", "↑/↓ scroll", "q quit"} {
+	for _, want := range []string{"d day", "w week", "m month", "r 90d", "v view", "a agent", "R reload", "q quit"} {
 		if !strings.Contains(footer, want) {
 			t.Fatalf("wide footer missing %q: %q", want, footer)
 		}

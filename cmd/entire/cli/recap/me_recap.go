@@ -16,6 +16,7 @@ import (
 type MeRecapResponse struct {
 	Timeframe    string                `json:"timeframe"`
 	Repo         *string               `json:"repo"`
+	Repos        []string              `json:"repos"`
 	Since        string                `json:"since"`
 	Until        string                `json:"until"`
 	Agents       map[string]AgentEntry `json:"agents"`

@@ -3,12 +3,15 @@ package recap
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRenderStaticRecap_ServerBackedBoth90(t *testing.T) {
 	t.Parallel()
 	resp := &MeRecapResponse{
-		Repo: ptr("entireio/cli"),
+		Repo:  ptr("entireio/cli"),
+		Since: "2026-05-02T04:00:00Z",
+		Until: "2026-05-09T04:00:00Z",
 		Summary: Summary{
 			Me:         SummaryTotals{Sessions: 40, Checkpoints: 92, Tokens: 3_500_000},
 			Team:       &SummaryTotals{Sessions: 5, Checkpoints: 6, Tokens: 17_000},
@@ -54,10 +57,11 @@ func TestRenderStaticRecap_ServerBackedBoth90(t *testing.T) {
 	}
 
 	got := RenderStaticRecap(resp, RenderOptions{
-		Range: Range90d,
-		View:  ViewBoth,
-		Agent: "all",
-		Width: 78,
+		Range:    Range90d,
+		View:     ViewBoth,
+		Agent:    "all",
+		Width:    78,
+		Location: time.FixedZone("EDT", -4*60*60),
 	})
 
 	for _, want := range []string{
@@ -65,9 +69,10 @@ func TestRenderStaticRecap_ServerBackedBoth90(t *testing.T) {
 		"agent: [all]",
 		"view: you team [both]",
 		"Last 90 days",
+		"window May 2, 2026 00:00 EDT - May 9, 2026 00:00 EDT",
 		"you   40 sessions   92 checkpoints   3.5M tok",
 		"team  5 sessions    6 checkpoints    17k tok",
-		"1 repo · 14 active days",
+		"repo entireio/cli · 14 active days",
 		"Activity · 90d",
 		"Agents · last 90 days",
 		"Claude Code",
@@ -80,6 +85,30 @@ func TestRenderStaticRecap_ServerBackedBoth90(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("output missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestRenderStaticRecap_ListsMultipleRepoNames(t *testing.T) {
+	t.Parallel()
+
+	resp := &MeRecapResponse{
+		Repos: []string{"org/a", "org/b", "org/c", "org/d"},
+		Summary: Summary{
+			Me:         SummaryTotals{Sessions: 1},
+			RepoCount:  4,
+			ActiveDays: 2,
+		},
+	}
+
+	got := RenderStaticRecap(resp, RenderOptions{
+		Range: RangeWeek,
+		View:  ViewBoth,
+		Agent: AgentAll,
+		Width: 90,
+	})
+
+	if !strings.Contains(got, "repos org/a, org/b, org/c +1 more · 2 active days") {
+		t.Fatalf("output should list repo names with overflow count:\n%s", got)
 	}
 }
 

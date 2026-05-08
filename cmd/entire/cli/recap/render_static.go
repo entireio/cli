@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -18,11 +19,12 @@ const (
 )
 
 type RenderOptions struct {
-	Range RangeKey
-	View  ViewMode
-	Agent string
-	Width int
-	Color bool
+	Range    RangeKey
+	View     ViewMode
+	Agent    string
+	Width    int
+	Color    bool
+	Location *time.Location
 }
 
 // RenderStaticRecap renders the server-backed static recap view.
@@ -126,6 +128,9 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 	}
 	top := topSignals(resp, opts, styles)
 	lines := []string{opts.Range.Title(), ""}
+	if window := renderWindow(resp, opts, styles); window != "" {
+		lines = []string{opts.Range.Title(), window, ""}
+	}
 	if opts.View != ViewTeam {
 		lines = append(lines, fmt.Sprintf("%s   %-12s  %-15s  %s",
 			styles.accent.Render("you"),
@@ -144,14 +149,80 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 		lines = append(lines, "", styles.muted.Render("top")+"  "+strings.Join(top, styles.muted.Render(" · ")))
 	}
 	context := []string{plural(len(filteredAgents(resp, opts)), "agent")}
-	if resp.Summary.RepoCount > 0 {
-		context = append(context, plural(resp.Summary.RepoCount, "repo"))
+	if repoScope := repoScopeText(resp); repoScope != "" {
+		context = append(context, repoScope)
 	}
 	if !agentFiltered {
 		context = append(context, plural(resp.Summary.ActiveDays, "active day"))
 	}
 	lines = append(lines, "", styles.muted.Render(strings.Join(context, " · ")))
 	return renderBox("", lines, width, styles)
+}
+
+func renderWindow(resp *MeRecapResponse, opts RenderOptions, styles staticStyles) string {
+	if resp.Since == "" || resp.Until == "" {
+		return ""
+	}
+	since, err := time.Parse(time.RFC3339, resp.Since)
+	if err != nil {
+		return ""
+	}
+	until, err := time.Parse(time.RFC3339, resp.Until)
+	if err != nil {
+		return ""
+	}
+	loc := opts.Location
+	if loc == nil {
+		loc = time.Local
+	}
+	return styles.muted.Render("window " + formatWindowTime(since.In(loc)) + " - " + formatWindowTime(until.In(loc)))
+}
+
+func formatWindowTime(t time.Time) string {
+	return t.Format("Jan 2, 2006 15:04 MST")
+}
+
+func repoScopeText(resp *MeRecapResponse) string {
+	repos := recapRepoNames(resp)
+	switch {
+	case len(repos) == 1:
+		return "repo " + repos[0]
+	case len(repos) > 1:
+		limit := min(len(repos), 3)
+		text := "repos " + strings.Join(repos[:limit], ", ")
+		if extra := len(repos) - limit; extra > 0 {
+			text += fmt.Sprintf(" +%d more", extra)
+		}
+		return text
+	case resp.Summary.RepoCount > 0:
+		return plural(resp.Summary.RepoCount, "repo")
+	default:
+		return ""
+	}
+}
+
+func recapRepoNames(resp *MeRecapResponse) []string {
+	if resp.Repo != nil && strings.TrimSpace(*resp.Repo) != "" {
+		return []string{strings.TrimSpace(*resp.Repo)}
+	}
+	if len(resp.Repos) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	repos := make([]string, 0, len(resp.Repos))
+	for _, repo := range resp.Repos {
+		repo = strings.TrimSpace(repo)
+		if repo == "" {
+			continue
+		}
+		if _, ok := seen[repo]; ok {
+			continue
+		}
+		seen[repo] = struct{}{}
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
+	return repos
 }
 
 func hasAgentFilter(opts RenderOptions) bool {

@@ -137,20 +137,23 @@ func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		switch msg.String() {
+		case "d":
+			return m.setRange(recap.RangeDay)
+		case "w":
+			return m.setRange(recap.RangeWeek)
+		case "m":
+			return m.setRange(recap.RangeMonth)
+		case "r":
+			return m.setRange(recap.Range90d)
 		case "t":
-			m.rangeKey = nextRecapRange(m.rangeKey)
-			m.requestID++
-			m.loading = true
-			m.loadErr = nil
-			m.resp = nil
-			return m.withViewport(), m.fetch(m.requestID)
+			return m.setRange(nextRecapRange(m.rangeKey))
 		case "v":
 			m.view = nextRecapView(m.view)
 			return m.withViewport(), nil
 		case "a":
 			m.agent = m.nextAgent()
 			return m.withViewport(), nil
-		case "r":
+		case "R":
 			m.requestID++
 			m.loading = true
 			m.loadErr = nil
@@ -172,6 +175,18 @@ func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+func (m recapTUIModel) setRange(next recap.RangeKey) (recapTUIModel, tea.Cmd) {
+	if next == "" || next == m.rangeKey {
+		return m.withViewport(), nil
+	}
+	m.rangeKey = next
+	m.requestID++
+	m.loading = true
+	m.loadErr = nil
+	m.resp = nil
+	return m.withViewport(), m.fetch(m.requestID)
 }
 
 func (m recapTUIModel) View() tea.View {
@@ -223,21 +238,23 @@ func (m recapTUIModel) withViewport() recapTUIModel {
 func (m recapTUIModel) renderFooter() string {
 	choices := []string{
 		recapFooterLine(m.color, []recapHelpItem{
-			{"t", "range"},
+			{"d", "day"},
+			{"w", "week"},
+			{"m", "month"},
+			{"r", "90d"},
 			{"v", "view"},
 			{"a", "agent"},
-			{"r", "refresh"},
-			{"↑/↓", "scroll"},
+			{"R", "reload"},
 			{"q", "quit"},
 		}),
 		recapFooterLine(m.color, []recapHelpItem{
-			{"t", "range"},
+			{"d/w/m/r", "range"},
 			{"v", "view"},
 			{"a", "agent"},
 			{"q", "quit"},
 		}),
 		recapFooterLine(m.color, []recapHelpItem{
-			{"t", "range"},
+			{"d/w/m/r", "range"},
 			{"v", "view"},
 			{"q", "quit"},
 		}),
