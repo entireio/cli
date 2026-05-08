@@ -143,6 +143,9 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if run.Tokens.In > 0 || run.Tokens.Out > 0 {
 				m.rows[i].tokens = run.Tokens
 			}
+			if m.rows[i].err == nil && run.Err != nil {
+				m.rows[i].err = run.Err
+			}
 			if m.rows[i].runEnd.IsZero() && !m.rows[i].runStart.IsZero() {
 				m.rows[i].runEnd = now
 			}

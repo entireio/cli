@@ -634,6 +634,28 @@ func TestTUIModel_RunFinishedMsg_SyncsTokensFromSummary(t *testing.T) {
 	}
 }
 
+func TestTUIModel_RunFinishedMsg_SyncsErrorFromSummary(t *testing.T) {
+	t.Parallel()
+	m := newReviewTUIModel([]string{"codex"}, nil)
+	m.termWidth = 200
+
+	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{
+		AgentRuns: []reviewtypes.AgentRun{
+			{
+				Name:   "codex",
+				Status: reviewtypes.AgentStatusFailed,
+				Err:    errors.New("binary not found"),
+			},
+		},
+	}})
+	m = mustModel(t, updated)
+
+	out := m.dashboardView()
+	if !strings.Contains(out, "binary not found") {
+		t.Fatalf("expected summary error in dashboard preview, got:\n%s", out)
+	}
+}
+
 // TestTUIModel_RunErrorSticky_FinishedDoesNotFlipToSucceeded pins the
 // CU3-fix-loop contract that RunError implies Failed and is sticky against
 // a subsequent Finished{Success: true}. Mirrors classifyStatus from CU4
