@@ -37,10 +37,23 @@ func recapLoadErrorMessage(err error) string {
 			return err.Error()
 		}
 	}
+	if host, ok := dnsNotFoundHost(err); ok {
+		return fmt.Sprintf("Could not resolve API host %q (DNS lookup failed). Check ENTIRE_API_BASE_URL — the host may be misspelled or the env var may be pointing at a non-existent server. Details: %v", host, err)
+	}
 	if isRecapNetworkError(err) {
 		return fmt.Sprintf("Could not reach entire.io. Check your internet connection and ENTIRE_API_BASE_URL if you use a custom API host. Details: %v", err)
 	}
 	return err.Error()
+}
+
+// dnsNotFoundHost reports an NXDOMAIN-style failure, distinguishing "host
+// doesn't exist" from generic connectivity loss.
+func dnsNotFoundHost(err error) (string, bool) {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return dnsErr.Name, true
+	}
+	return "", false
 }
 
 func recapErrorDetail(err *api.HTTPError) string {

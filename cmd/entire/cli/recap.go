@@ -15,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -122,10 +123,13 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	if err != nil {
 		return err
 	}
-	client, err := NewAuthenticatedAPIClient(f.insecureHTTP)
+	client, err := newRecapClient(f.insecureHTTP)
 	if err != nil {
-		fmt.Fprintln(errW, "Sign in with `entire login` to use `entire recap`.")
-		return NewSilentError(err)
+		if errors.Is(err, api.ErrInsecureHTTP) {
+			fmt.Fprintf(errW, "ENTIRE_API_BASE_URL is set to an insecure http:// URL (%s). Use https:// for production, or pass --insecure-http-auth for local dev.\n", api.BaseURL())
+			return NewSilentError(err)
+		}
+		return err
 	}
 	rangeKey := f.rangeKey()
 	repoSlug := currentRepoSlug(ctx)
@@ -152,6 +156,19 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	}))
 	fmt.Fprintln(w)
 	return nil
+}
+
+// newRecapClient does not gate on a missing token; FetchMeRecap surfaces 401s
+// via recapLoadErrorMessage so flag effects (--week, --agent, ...) and the
+// real auth error are not collapsed into one "sign in" hint.
+func newRecapClient(insecureHTTP bool) (*api.Client, error) {
+	token, _ := auth.LookupCurrentToken() //nolint:errcheck // keyring errors are non-fatal here; the API call surfaces auth failure with the right hint
+	if token != "" && !insecureHTTP {
+		if err := api.RequireSecureURL(api.BaseURL()); err != nil {
+			return nil, fmt.Errorf("base URL check: %w", err)
+		}
+	}
+	return api.NewClient(token), nil
 }
 
 func handleRecapFetchError(w io.Writer, err error) error {
