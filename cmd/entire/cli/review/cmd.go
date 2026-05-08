@@ -648,17 +648,33 @@ func writePostReviewManifest(
 	manifest, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
 	if err != nil {
 		logging.Debug(ctx, "review manifest not written", slog.String("error", err.Error()))
+		warnManifestNotWritten(out, "could not load session state: "+err.Error())
 		return
 	}
 	if len(manifest.Sources) == 0 {
 		logging.Debug(ctx, "review manifest not written: no matching review sessions")
+		warnManifestNotWritten(out, "review session was not tagged as a review (env-var handshake did not reach the hook)")
 		return
 	}
 	if err := writeLocalReviewManifest(ctx, manifest); err != nil {
 		logging.Debug(ctx, "review manifest write failed", slog.String("error", err.Error()))
+		warnManifestNotWritten(out, "write to disk failed: "+err.Error())
 		return
 	}
 	writeReviewCompletionFooter(out, manifest)
+}
+
+// warnManifestNotWritten prints a user-visible note explaining that the
+// review skills ran but findings were not persisted, so `entire review
+// --findings` and `entire review --fix` will not see this run. The reason
+// string is appended verbatim and should describe the underlying cause in
+// terms the user can act on (or at least diagnose with debug logs).
+func warnManifestNotWritten(out io.Writer, reason string) {
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Note: review skills ran successfully but findings were not persisted.")
+	fmt.Fprintf(out, "  Reason: %s\n", reason)
+	fmt.Fprintln(out, "  `entire review --findings` and `entire review --fix` will not see this run.")
+	fmt.Fprintln(out, "  Re-run with `ENTIRE_LOG_LEVEL=debug` for diagnostic detail.")
 }
 
 func composeSingleAgentSinks(in singleAgentSinkInputs) []reviewtypes.Sink {
