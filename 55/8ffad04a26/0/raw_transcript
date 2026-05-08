@@ -4,7 +4,13 @@
     "slug": "misty-orchid",
     "projectID": "e72157d04022f74eb1af25d0a2ca9cd92933f715",
     "directory": "/Users/peter/code/devenv/cli",
+    "path": "",
     "title": "Exit behavior for entire commands",
+    "agent": "build",
+    "model": {
+      "id": "gpt-5.5",
+      "providerID": "openai"
+    },
     "version": "1.14.40",
     "summary": {
       "additions": 56385,
@@ -13,7 +19,7 @@
     },
     "time": {
       "created": 1778143280817,
-      "updated": 1778233742634
+      "updated": 1778233764807
     }
   },
   "messages": [
@@ -53302,19 +53308,22 @@
         },
         "cost": 0,
         "tokens": {
-          "input": 0,
-          "output": 0,
+          "total": 161531,
+          "input": 677,
+          "output": 86,
           "reasoning": 0,
           "cache": {
-            "read": 0,
-            "write": 0
+            "write": 0,
+            "read": 160768
           }
         },
         "modelID": "gpt-5.5",
         "providerID": "openai",
         "time": {
-          "created": 1778233741738
+          "created": 1778233741738,
+          "completed": 1778233763890
         },
+        "finish": "tool-calls",
         "id": "msg_e06fd91aa001A23y05InfpMaoI",
         "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF"
       },
@@ -53331,19 +53340,24 @@
           "tool": "bash",
           "callID": "call_ibgfx49ZRV9Xi9rFbpTh0n1P",
           "state": {
-            "metadata": {
-              "output": "",
-              "description": "Commits and pushes session stop guidance cleanup"
-            },
-            "status": "running",
+            "status": "completed",
             "input": {
               "command": "git add cmd/entire/cli/sessions.go cmd/entire/cli/sessions_test.go && git commit -m \"fix(cli): avoid duplicate session stop guidance\" && git push",
               "timeout": 120000,
               "workdir": "/Users/peter/code/devenv/cli",
               "description": "Commits and pushes session stop guidance cleanup"
             },
+            "output": "[keyboard-exit-behavior c31cc2c12] fix(cli): avoid duplicate session stop guidance\n 2 files changed, 18 deletions(-)\n[entire] Pushing entire/checkpoints/v1 to checkpoint remote..... done\n[entire] Syncing and pushing v2 checkpoints...\n[entire] Pushing v2/main, v2/full/current, v2/full/0000000000034...\n[entire] All v2 checkpoints pushed\nTo github.com:entireio/cli.git\n   27bd49736..c31cc2c12  keyboard-exit-behavior -> keyboard-exit-behavior\n",
+            "metadata": {
+              "output": "[keyboard-exit-behavior c31cc2c12] fix(cli): avoid duplicate session stop guidance\n 2 files changed, 18 deletions(-)\n[entire] Pushing entire/checkpoints/v1 to checkpoint remote..... done\n[entire] Syncing and pushing v2 checkpoints...\n[entire] Pushing v2/main, v2/full/current, v2/full/0000000000034...\n[entire] All v2 checkpoints pushed\nTo github.com:entireio/cli.git\n   27bd49736..c31cc2c12  keyboard-exit-behavior -> keyboard-exit-behavior\n",
+              "exit": 0,
+              "description": "Commits and pushes session stop guidance cleanup",
+              "truncated": false
+            },
+            "title": "Commits and pushes session stop guidance cleanup",
             "time": {
-              "start": 1778233748072
+              "start": 1778233763794,
+              "end": 1778233763797
             }
           },
           "metadata": {
@@ -53354,6 +53368,102 @@
           "id": "prt_e06fd9c09001OuIlX5qaCrd6I6",
           "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF",
           "messageID": "msg_e06fd91aa001A23y05InfpMaoI"
+        },
+        {
+          "reason": "tool-calls",
+          "snapshot": "9df98e5ea52fa14dd12abb4097107730f255b56d",
+          "type": "step-finish",
+          "tokens": {
+            "total": 161531,
+            "input": 677,
+            "output": 86,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 160768
+            }
+          },
+          "cost": 0,
+          "id": "prt_e06fde809001F5EzFtbcYlTZlU",
+          "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF",
+          "messageID": "msg_e06fd91aa001A23y05InfpMaoI"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_e06fcb36100148Bld992mzAhIt",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/Users/peter/code/devenv/cli",
+          "root": "/Users/peter/code/devenv/cli"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 161839,
+          "input": 911,
+          "output": 160,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 160768
+          }
+        },
+        "modelID": "gpt-5.5",
+        "providerID": "openai",
+        "time": {
+          "created": 1778233763896,
+          "completed": 1778233771186
+        },
+        "finish": "stop",
+        "id": "msg_e06fde838001IayZ165tKN9Yl2",
+        "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF"
+      },
+      "parts": [
+        {
+          "snapshot": "9df98e5ea52fa14dd12abb4097107730f255b56d",
+          "type": "step-start",
+          "id": "prt_e06fdee7f001zPBsFN9xz5IHLY",
+          "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF",
+          "messageID": "msg_e06fde838001IayZ165tKN9Yl2"
+        },
+        {
+          "type": "text",
+          "text": "That extra line was the wrong fix. The built-in `huh` confirm footer already shows the actionable shortcuts:\n\n```text\n←/→ toggle • enter submit • y Yes • n No\n```\n\nAdding a description produced duplicated “above and below” shortcut guidance. I removed that follow-up and pushed:\n\n`c31cc2c12 fix(cli): avoid duplicate session stop guidance`\n\nVerified:\n- `go test ./cmd/entire/cli -run 'TestStopSessionSelectionDescription|TestDispatchWizardKeyMapQuitsWithEscAndCtrlC|TestDispatchStatusModel_FooterDocumentsCancelKeys' -count=1`\n- `mise run lint`\n\nSo `entire session stop` confirm should now look like main again, without the extra description line.",
+          "time": {
+            "start": 1778233767546,
+            "end": 1778233770943
+          },
+          "metadata": {
+            "openai": {
+              "itemId": "msg_0ab1c1e150553aad0169fdb1a783b4819198afb9f5970bdc83",
+              "phase": "final_answer"
+            }
+          },
+          "id": "prt_e06fdf67a001zvmLd0OwETdwCs",
+          "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF",
+          "messageID": "msg_e06fde838001IayZ165tKN9Yl2"
+        },
+        {
+          "reason": "stop",
+          "snapshot": "9df98e5ea52fa14dd12abb4097107730f255b56d",
+          "type": "step-finish",
+          "tokens": {
+            "total": 161839,
+            "input": 911,
+            "output": 160,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 160768
+            }
+          },
+          "cost": 0,
+          "id": "prt_e06fe0489001Ue43vuj5oppwCC",
+          "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF",
+          "messageID": "msg_e06fde838001IayZ165tKN9Yl2"
         }
       ]
     }
