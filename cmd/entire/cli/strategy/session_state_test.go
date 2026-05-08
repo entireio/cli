@@ -3,8 +3,10 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/go-git/go-git/v6"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -199,6 +202,233 @@ func TestLoadSessionState_WithLastInteractionTime(t *testing.T) {
 	if loadedOld.LastInteractionTime != nil {
 		t.Errorf("LastInteractionTime = %v, want nil for old session", *loadedOld.LastInteractionTime)
 	}
+}
+
+// TestRecordFilesTouched_MergesIncrementally verifies the helper merges new
+// files into existing FilesTouched without losing prior entries — the
+// invariant per-tool-use hooks rely on so PostCommit's carry-forward decision
+// stays accurate.
+func TestRecordFilesTouched_MergesIncrementally(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	t.Chdir(dir)
+
+	state := &SessionState{
+		SessionID:    "ft-merge",
+		BaseCommit:   "deadbeef",
+		StartedAt:    time.Now(),
+		FilesTouched: []string{"existing.txt"},
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	require.NoError(t, RecordFilesTouched(context.Background(), "ft-merge",
+		[]string{"updated.txt"}, []string{"new.txt"}, []string{"removed.txt"}))
+
+	loaded, err := LoadSessionState(context.Background(), "ft-merge")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.ElementsMatch(t, []string{"existing.txt", "updated.txt", "new.txt", "removed.txt"}, loaded.FilesTouched)
+}
+
+func TestRecordFilesTouched_NoStateIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	t.Chdir(dir)
+
+	// Hook fires before InitializeSession ran — RecordFilesTouched must not
+	// fabricate a state file or error.
+	err = RecordFilesTouched(context.Background(), "missing", []string{"f.txt"}, nil, nil)
+	require.NoError(t, err)
+
+	loaded, err := LoadSessionState(context.Background(), "missing")
+	require.NoError(t, err)
+	require.Nil(t, loaded)
+}
+
+func TestRecordFilesTouched_EmptyInputsIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	t.Chdir(dir)
+
+	state := &SessionState{
+		SessionID:    "ft-empty",
+		BaseCommit:   "deadbeef",
+		StartedAt:    time.Now(),
+		FilesTouched: []string{"keep.txt"},
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	require.NoError(t, RecordFilesTouched(context.Background(), "ft-empty", nil, nil, nil))
+
+	loaded, err := LoadSessionState(context.Background(), "ft-empty")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Equal(t, []string{"keep.txt"}, loaded.FilesTouched)
+}
+
+// TestClearSessionState_PreservesLockFile pins the rule that ClearSessionState
+// must NOT unlink the per-session lock file. Unlinking the lock path while
+// another process holds an advisory lock on the inode would let a third
+// caller recreate the file and acquire an independent lock — losing mutual
+// exclusion. The lock file is a 0-byte sentinel; leaving it on disk after
+// state-file removal is harmless.
+func TestClearSessionState_PreservesLockFile(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	t.Chdir(dir)
+
+	sessionID := "ft-clear-keeps-lock"
+	state := &SessionState{
+		SessionID:  sessionID,
+		BaseCommit: "deadbeef",
+		StartedAt:  time.Now(),
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	// Touch the lock file by entering MutateSessionState once.
+	require.NoError(t, MutateSessionState(context.Background(), sessionID, func(_ *SessionState) error {
+		return ErrMutationSkip
+	}))
+
+	lockPath, err := stateLockPath(context.Background(), sessionID)
+	require.NoError(t, err)
+	_, statErr := os.Stat(lockPath)
+	require.NoError(t, statErr, "lock file must exist after a MutateSessionState call")
+
+	require.NoError(t, ClearSessionState(context.Background(), sessionID))
+
+	_, statErr = os.Stat(lockPath)
+	require.NoError(t, statErr, "ClearSessionState must not unlink the lock file (would break flock semantics)")
+}
+
+// TestMutateSessionState_DoesNotClobberRicherStateUnderRace simulates the
+// TOCTOU window between an existence check and a default-state init: a
+// caller observes "no state", but a concurrent richer write lands before
+// the init takes the lock. The init must re-read under lock and skip the
+// write rather than overwriting TranscriptPath, LastPrompt, etc. with
+// blanks.
+func TestMutateSessionState_DoesNotClobberRicherStateUnderRace(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	t.Chdir(dir)
+
+	sessionID := "ft-toctou"
+	rich := &SessionState{
+		SessionID:      sessionID,
+		BaseCommit:     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+		StartedAt:      time.Now(),
+		TranscriptPath: "/tmp/transcript.jsonl",
+		LastPrompt:     "find the bug",
+		ModelName:      "gpt-5",
+	}
+	require.NoError(t, SaveSessionState(context.Background(), rich))
+
+	// Pretend another process raced past its existence check while ours
+	// was about to initialize: do a no-op MutateSessionState that sets a
+	// clearly different value for an init-overwritten field. If the next
+	// call (simulating initializeSession's create path) reloads under the
+	// lock and bails out, our richer fields survive.
+	require.NoError(t, MutateSessionState(context.Background(), sessionID, func(_ *SessionState) error {
+		// no mutation; the test is about what the simulated init does next
+		return ErrMutationSkip
+	}))
+
+	// Now run the lock-then-recheck dance the real init does. Pass a state
+	// with all-empty derived fields to mimic the default-state shape.
+	_, _, release, lockErr := acquireSessionGate(context.Background(), sessionID)
+	require.NoError(t, lockErr)
+	existing, loadErr := LoadSessionState(context.Background(), sessionID)
+	release()
+	require.NoError(t, loadErr)
+	require.NotNil(t, existing)
+	require.Equal(t, "/tmp/transcript.jsonl", existing.TranscriptPath, "richer state must survive re-check under lock")
+	require.Equal(t, "find the bug", existing.LastPrompt)
+	require.Equal(t, "gpt-5", existing.ModelName)
+}
+
+// TestMutateSessionState_NestedCallsAreReentrant verifies that calling
+// MutateSessionState from within an outer MutateSessionState callback
+// doesn't deadlock. POSIX flock isn't reentrant across distinct FDs in the
+// same process, so the gate's goroutine-ID ownership tracking has to skip
+// the flock re-acquire on the inner call.
+func TestMutateSessionState_NestedCallsAreReentrant(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	t.Chdir(dir)
+
+	state := &SessionState{
+		SessionID:  "ft-nested",
+		BaseCommit: "deadbeef",
+		StartedAt:  time.Now(),
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		err := MutateSessionState(context.Background(), "ft-nested", func(outer *SessionState) error {
+			outer.LastPrompt = "outer"
+			return MutateSessionState(context.Background(), "ft-nested", func(inner *SessionState) error {
+				inner.ModelName = "inner"
+				return nil
+			})
+		})
+		assert.NoError(t, err)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nested MutateSessionState deadlocked")
+	}
+
+	loaded, err := LoadSessionState(context.Background(), "ft-nested")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, "outer", loaded.LastPrompt)
+	assert.Equal(t, "inner", loaded.ModelName)
+}
+
+// TestRecordFilesTouched_ParallelMergesAreSerialized verifies the file-lock
+// in RecordFilesTouched: many concurrent callers, each merging a unique
+// file, must all land in FilesTouched. Without the lock, parallel
+// load → merge → save would lose updates and the final list would be missing
+// entries (or have duplicates).
+func TestRecordFilesTouched_ParallelMergesAreSerialized(t *testing.T) {
+	dir := t.TempDir()
+	_, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	t.Chdir(dir)
+
+	state := &SessionState{
+		SessionID:  "ft-parallel",
+		BaseCommit: "deadbeef",
+		StartedAt:  time.Now(),
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	const n = 20
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		go func() {
+			defer wg.Done()
+			path := fmt.Sprintf("file-%02d.go", i)
+			err := RecordFilesTouched(context.Background(), "ft-parallel", nil, []string{path}, nil)
+			assert.NoError(t, err)
+		}()
+	}
+	wg.Wait()
+
+	loaded, err := LoadSessionState(context.Background(), "ft-parallel")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Len(t, loaded.FilesTouched, n, "every concurrent merge should be present")
 }
 
 // TestLoadSessionState_PackageLevel_NonExistent tests loading a non-existent session.

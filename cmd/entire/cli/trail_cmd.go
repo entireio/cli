@@ -91,7 +91,12 @@ func runTrailShow(ctx context.Context, w io.Writer, insecureHTTP bool) error {
 
 func printTrailDetails(w io.Writer, m *trail.Metadata) {
 	fmt.Fprintf(w, "Trail: %s\n", m.Title)
-	fmt.Fprintf(w, "  ID:      %s\n", m.TrailID)
+	if m.Number > 0 {
+		fmt.Fprintf(w, "  Number:  %d\n", m.Number)
+	}
+	if !m.TrailID.IsEmpty() {
+		fmt.Fprintf(w, "  ID:      %s\n", m.TrailID)
+	}
 	fmt.Fprintf(w, "  Branch:  %s\n", m.Branch)
 	fmt.Fprintf(w, "  Base:    %s\n", m.Base)
 	fmt.Fprintf(w, "  Status:  %s\n", m.Status)

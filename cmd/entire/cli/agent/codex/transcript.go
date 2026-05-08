@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -73,9 +74,19 @@ type tokenUsageData struct {
 	TotalTokens           int `json:"total_tokens"`
 }
 
-// applyPatchFileRegex extracts file paths from apply_patch input.
-// Matches "*** Add File: <path>", "*** Update File: <path>", "*** Delete File: <path>"
-var applyPatchFileRegex = regexp.MustCompile(`\*\*\* (?:Add|Update|Delete) File: (.+)`)
+// Apply-patch envelope verbs Codex uses in tool_input.command — see
+// codex-rs/core/src/tools/handlers/apply_patch.rs. Capture group 1 is the
+// verb, group 2 is the path.
+const (
+	applyPatchVerbAdd    = "Add"
+	applyPatchVerbUpdate = "Update"
+	applyPatchVerbDelete = "Delete"
+)
+
+var (
+	applyPatchFileRegex = regexp.MustCompile(`\*\*\* (Add|Update|Delete) File: (.+)`)
+	applyPatchMoveRegex = regexp.MustCompile(`\*\*\* Move to: (.+)`)
+)
 
 // GetTranscriptPosition returns the current line count of a Codex rollout transcript.
 func (c *CodexAgent) GetTranscriptPosition(path string) (int, error) {
@@ -176,22 +187,80 @@ func extractFilesFromLine(lineData []byte) []string {
 	return nil
 }
 
-// extractFilesFromApplyPatch parses apply_patch input for file paths.
-// Format: "*** Add File: <path>" or "*** Update File: <path>" or "*** Delete File: <path>"
+// extractFilesFromApplyPatch returns every file path in an apply_patch envelope,
+// across Add/Update/Delete entries, deduplicated.
 func extractFilesFromApplyPatch(input string) []string {
-	matches := applyPatchFileRegex.FindAllStringSubmatch(input, -1)
-	var files []string
-	seen := make(map[string]struct{})
-	for _, m := range matches {
-		path := strings.TrimSpace(m[1])
-		if path != "" {
-			if _, ok := seen[path]; !ok {
-				seen[path] = struct{}{}
-				files = append(files, path)
+	added, modified, deleted := classifyApplyPatchPaths(input)
+	total := len(added) + len(modified) + len(deleted)
+	if total == 0 {
+		return nil
+	}
+	files := make([]string, 0, total)
+	files = append(files, added...)
+	files = append(files, modified...)
+	files = append(files, deleted...)
+	return files
+}
+
+// classifyApplyPatchPaths splits an apply_patch envelope into added, modified,
+// and deleted file paths. The grammar (codex-rs/apply-patch/src/parser.rs)
+// supports renames via "*** Update File: old\n*** Move to: new", which we
+// reclassify as a Delete on the source path and an Add on the destination.
+// Add and Delete are sticky — subsequent Updates on the same path don't
+// downgrade them. Each bucket is sorted for deterministic output.
+func classifyApplyPatchPaths(input string) (added, modified, deleted []string) {
+	bucket := make(map[string]string)
+	var lastUpdate string
+	for _, line := range strings.Split(input, "\n") {
+		if m := applyPatchFileRegex.FindStringSubmatch(line); m != nil {
+			verb := m[1]
+			path := strings.TrimSpace(m[2])
+			if path == "" {
+				continue
 			}
+			if verb == applyPatchVerbUpdate {
+				lastUpdate = path
+			} else {
+				lastUpdate = ""
+			}
+			if existing, ok := bucket[path]; ok {
+				if existing == applyPatchVerbAdd || existing == applyPatchVerbDelete {
+					continue
+				}
+			}
+			bucket[path] = verb
+			continue
+		}
+		if m := applyPatchMoveRegex.FindStringSubmatch(line); m != nil {
+			target := strings.TrimSpace(m[1])
+			if target == "" {
+				continue
+			}
+			if lastUpdate != "" {
+				if existing, ok := bucket[lastUpdate]; !ok || (existing != applyPatchVerbAdd && existing != applyPatchVerbDelete) {
+					bucket[lastUpdate] = applyPatchVerbDelete
+				}
+			}
+			if existing, ok := bucket[target]; !ok || (existing != applyPatchVerbAdd && existing != applyPatchVerbDelete) {
+				bucket[target] = applyPatchVerbAdd
+			}
+			lastUpdate = ""
 		}
 	}
-	return files
+	for path, verb := range bucket {
+		switch verb {
+		case applyPatchVerbAdd:
+			added = append(added, path)
+		case applyPatchVerbUpdate:
+			modified = append(modified, path)
+		case applyPatchVerbDelete:
+			deleted = append(deleted, path)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(modified)
+	sort.Strings(deleted)
+	return added, modified, deleted
 }
 
 // CalculateTokenUsage computes token usage from the transcript starting at the given line offset.

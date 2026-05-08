@@ -918,6 +918,49 @@ func TestComposeSingleAgentSinks(t *testing.T) {
 	}
 }
 
+func TestComposeSinks_TUIWritersRunBeforePostRunWriters(t *testing.T) {
+	t.Parallel()
+	provider := &stubSynthesisProvider{}
+
+	multi := review.ExposedComposeMultiAgentSinks(review.SinkComposeInputs{
+		Out:               &bytes.Buffer{},
+		IsTTY:             true,
+		CanPrompt:         true,
+		AgentNames:        []string{"a", "b"},
+		CancelRun:         func() {},
+		SynthesisProvider: provider,
+	})
+	if len(multi) != 3 {
+		t.Fatalf("multi sinks len = %d, want 3", len(multi))
+	}
+	if _, ok := multi[0].(*review.TUISink); !ok {
+		t.Fatalf("multi sink[0] = %T, want *TUISink", multi[0])
+	}
+	if _, ok := multi[1].(review.DumpSink); !ok {
+		t.Fatalf("multi sink[1] = %T, want DumpSink", multi[1])
+	}
+	if _, ok := multi[2].(review.SynthesisSink); !ok {
+		t.Fatalf("multi sink[2] = %T, want SynthesisSink", multi[2])
+	}
+
+	single := review.ExposedComposeSingleAgentSinks(review.SingleAgentSinkComposeInputs{
+		Out:       &bytes.Buffer{},
+		IsTTY:     true,
+		CanPrompt: true,
+		AgentName: "a",
+		CancelRun: func() {},
+	})
+	if len(single) != 2 {
+		t.Fatalf("single sinks len = %d, want 2", len(single))
+	}
+	if _, ok := single[0].(*review.TUISink); !ok {
+		t.Fatalf("single sink[0] = %T, want *TUISink", single[0])
+	}
+	if _, ok := single[1].(review.DumpSink); !ok {
+		t.Fatalf("single sink[1] = %T, want DumpSink", single[1])
+	}
+}
+
 // TestFindTUISink_NoTUIInSlice covers the not-found path so the caller's
 // `if tuiSink, ok := findTUISink(sinks); ok` branch is exercised in both
 // directions.

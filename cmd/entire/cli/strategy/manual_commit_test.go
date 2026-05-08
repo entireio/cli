@@ -1649,8 +1649,12 @@ func TestShadowStrategy_MigrateAndPersistIfNeeded_PersistsBaseCommitWithoutShado
 		t.Fatalf("saveSessionState() error = %v", err)
 	}
 
-	if err := s.migrateAndPersistIfNeeded(context.Background(), repo, state); err != nil {
-		t.Fatalf("migrateAndPersistIfNeeded() error = %v", err)
+	mutErr := MutateSessionState(context.Background(), state.SessionID, func(state *SessionState) error {
+		_, _, err := s.migrateShadowBranchIfNeeded(context.Background(), repo, state)
+		return err
+	})
+	if mutErr != nil {
+		t.Fatalf("MutateSessionState(migrate) error = %v", mutErr)
 	}
 
 	loaded, err := s.loadSessionState(context.Background(), state.SessionID)

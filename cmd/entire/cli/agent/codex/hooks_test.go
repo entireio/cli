@@ -27,7 +27,7 @@ func TestInstallHooks_CreatesConfig(t *testing.T) {
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 3, count) // SessionStart, UserPromptSubmit, Stop
+	require.Equal(t, 4, count) // SessionStart, UserPromptSubmit, Stop, PostToolUse
 
 	// Verify hooks.json was created in the repo
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
@@ -40,12 +40,15 @@ func TestInstallHooks_CreatesConfig(t *testing.T) {
 	assertHookCommand(t, hooksFile.Hooks.SessionStart, agentpkg.WrapProductionJSONWarningHookCommand("entire hooks codex session-start", agentpkg.WarningFormatSingleLine), "SessionStart")
 	assertHookCommand(t, hooksFile.Hooks.UserPromptSubmit, agentpkg.WrapProductionSilentHookCommand("entire hooks codex user-prompt-submit"), "UserPromptSubmit")
 	assertHookCommand(t, hooksFile.Hooks.Stop, agentpkg.WrapProductionSilentHookCommand("entire hooks codex stop"), "Stop")
+	assertHookCommand(t, hooksFile.Hooks.PostToolUse, agentpkg.WrapProductionSilentHookCommand("entire hooks codex post-tool-use"), "PostToolUse")
 
-	// Verify project-level config.toml enables codex_hooks feature (per-repo)
+	// Verify project-level config.toml enables the hooks feature (per-repo)
 	projectConfig := filepath.Join(tempDir, ".codex", configFileName)
 	projectData, err := os.ReadFile(projectConfig)
 	require.NoError(t, err)
-	require.Contains(t, string(projectData), "codex_hooks = true")
+	require.Contains(t, string(projectData), "hooks = true")
+	require.NotContains(t, string(projectData), "codex_hooks = true",
+		"deprecated codex_hooks line must not be written by fresh installs")
 	require.Contains(t, string(projectData), "[features]")
 }
 
@@ -56,7 +59,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 
 	count1, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
-	require.Equal(t, 3, count1)
+	require.Equal(t, 4, count1)
 
 	count2, err := ag.InstallHooks(context.Background(), false, false)
 	require.NoError(t, err)
@@ -69,12 +72,13 @@ func TestInstallHooks_LocalDev(t *testing.T) {
 	ag := &CodexAgent{}
 	count, err := ag.InstallHooks(context.Background(), true, false)
 	require.NoError(t, err)
-	require.Equal(t, 3, count)
+	require.Equal(t, 4, count)
 
 	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
 	data, err := os.ReadFile(hooksPath)
 	require.NoError(t, err)
 	require.Contains(t, string(data), `go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks codex session-start`)
+	require.Contains(t, string(data), `go run \"$(git rev-parse --show-toplevel)\"/cmd/entire/main.go hooks codex post-tool-use`)
 }
 
 func TestInstallHooks_Force(t *testing.T) {
@@ -87,7 +91,7 @@ func TestInstallHooks_Force(t *testing.T) {
 
 	count, err := ag.InstallHooks(context.Background(), false, true)
 	require.NoError(t, err)
-	require.Equal(t, 3, count)
+	require.Equal(t, 4, count)
 }
 
 func TestUninstallHooks(t *testing.T) {
@@ -276,6 +280,32 @@ func TestInstallHooks_DoesNotModifyUserConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(configData), "model = \"gpt-4.1\"")
 	require.NotContains(t, string(configData), `trust_level = "trusted"`)
+}
+
+// TestInstallHooks_RewritesLegacyFeatureLine pins the rule that an existing
+// `codex_hooks = true` line — written by older entire CLI versions — must
+// be rewritten to the new `hooks = true` form on the next install. Codex
+// 0.129.0 still accepts the legacy alias but prints a deprecation warning
+// at every startup; rewriting silences it without forcing the user to
+// touch their .codex/config.toml.
+func TestInstallHooks_RewritesLegacyFeatureLine(t *testing.T) {
+	tempDir := setupTestEnv(t)
+
+	codexDir := filepath.Join(tempDir, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	existingConfig := "[features]\ncodex_hooks = true\n"
+	configPath := filepath.Join(codexDir, configFileName)
+	require.NoError(t, os.WriteFile(configPath, []byte(existingConfig), 0o600))
+
+	ag := &CodexAgent{}
+	_, err := ag.InstallHooks(context.Background(), false, false)
+	require.NoError(t, err)
+
+	configData, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	require.Contains(t, string(configData), "hooks = true")
+	require.NotContains(t, string(configData), "codex_hooks = true",
+		"legacy codex_hooks line must be replaced, not left alongside the new form")
 }
 
 // assertHookCommand verifies that one of the hook entries in groups contains the expected command.

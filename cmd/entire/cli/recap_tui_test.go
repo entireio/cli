@@ -2,12 +2,15 @@ package cli
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/recap"
 )
 
@@ -228,6 +231,24 @@ func TestRecapTUIModel_FooterFitsWidth(t *testing.T) {
 	}
 	if !strings.Contains(footer, "q quit") {
 		t.Fatalf("narrow footer should keep quit help: %q", footer)
+	}
+}
+
+func TestRecapTUIModel_ViewShowsLoginPromptForUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	m := testRecapTUIModel()
+	m.loadErr = fmt.Errorf("me/recap: %w", &api.HTTPError{
+		StatusCode: http.StatusUnauthorized,
+		Message:    "Token expired",
+	})
+
+	got := m.View().Content
+	if !strings.Contains(got, "Run `entire login` to re-authenticate.") {
+		t.Fatalf("View() missing re-authentication prompt:\n%s", got)
+	}
+	if strings.Contains(got, `{"error":"Token expired"}`) {
+		t.Fatalf("View() should not render raw API JSON:\n%s", got)
 	}
 }
 

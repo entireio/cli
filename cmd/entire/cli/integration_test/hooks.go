@@ -612,6 +612,73 @@ func (env *TestEnv) WriteSessionState(sessionID string, state *strategy.SessionS
 	return nil
 }
 
+// CodexHookRunner executes Codex hooks in the test environment.
+type CodexHookRunner struct {
+	RepoDir string
+	T       interface {
+		Helper()
+		Fatalf(format string, args ...interface{})
+		Logf(format string, args ...interface{})
+	}
+}
+
+// NewCodexHookRunner creates a new Codex hook runner for the given repo directory.
+func NewCodexHookRunner(repoDir string, t interface {
+	Helper()
+	Fatalf(format string, args ...interface{})
+	Logf(format string, args ...interface{})
+}) *CodexHookRunner {
+	return &CodexHookRunner{
+		RepoDir: repoDir,
+		T:       t,
+	}
+}
+
+// runCodexHook runs a Codex hook subcommand with the given JSON stdin.
+func (r *CodexHookRunner) runCodexHook(hookName string, inputJSON []byte) error {
+	r.T.Helper()
+	cmd := exec.Command(getTestBinary(), "hooks", "codex", hookName)
+	cmd.Dir = r.RepoDir
+	cmd.Stdin = bytes.NewReader(inputJSON)
+	cmd.Env = testutil.GitIsolatedEnv()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("hook %s failed: %w\nInput: %s\nOutput: %s",
+			hookName, err, inputJSON, output)
+	}
+	r.T.Logf("Codex hook %s output: %s", hookName, output)
+	return nil
+}
+
+// SimulateCodexPostToolUseApplyPatch simulates the Codex PostToolUse hook for an
+// apply_patch tool invocation. The patch envelope is the canonical Codex
+// plain-text format ("*** Add File: …", etc.) carried in tool_input.command,
+// matching the on-wire shape of codex-rs PostToolUseCommandInput. The
+// lifecycle dispatcher routes it to handleLifecycleToolUse, which merges the
+// extracted paths into the session's FilesTouched.
+func (r *CodexHookRunner) SimulateCodexPostToolUseApplyPatch(sessionID, cwd, patch string) error {
+	r.T.Helper()
+	input := map[string]any{
+		"session_id":      sessionID,
+		"turn_id":         "test-turn",
+		"transcript_path": nil,
+		"cwd":             cwd,
+		"hook_event_name": "PostToolUse",
+		"model":           "gpt-5",
+		"permission_mode": "default",
+		"tool_name":       "apply_patch",
+		"tool_use_id":     "test-call",
+		"tool_input":      map[string]string{"command": patch},
+		"tool_response":   "Success.",
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("marshal hook input: %w", err)
+	}
+	return r.runCodexHook("post-tool-use", inputJSON)
+}
+
 // GeminiHookRunner executes Gemini CLI hooks in the test environment.
 type GeminiHookRunner struct {
 	RepoDir          string
