@@ -135,16 +135,17 @@ func TestRecapTUIModel_UsesDirectRangeKeys(t *testing.T) {
 		{'r', recap.Range90d},
 	}
 	for _, tt := range cases {
-		t.Run(string(tt.key), func(t *testing.T) {
+		key, want := tt.key, tt.want
+		t.Run(string(key), func(t *testing.T) {
 			t.Parallel()
 
 			start := testRecapTUIModel()
 			start.rangeKey = recap.RangeMonth
-			m, cmd := updateRecapTUIModel(t, start, recapRuneKey(tt.key))
-			if m.rangeKey != tt.want {
-				t.Fatalf("range = %q, want %q", m.rangeKey, tt.want)
+			m, cmd := updateRecapTUIModel(t, start, recapRuneKey(key))
+			if m.rangeKey != want {
+				t.Fatalf("range = %q, want %q", m.rangeKey, want)
 			}
-			if tt.want == recap.RangeMonth {
+			if want == recap.RangeMonth {
 				if cmd != nil {
 					t.Fatal("pressing the current range key should not refetch")
 				}
@@ -157,6 +158,21 @@ func TestRecapTUIModel_UsesDirectRangeKeys(t *testing.T) {
 				t.Fatal("range key should refetch recap data")
 			}
 		})
+	}
+}
+
+func TestRecapTUIModel_LoadErrorShowsUppercaseRetryKey(t *testing.T) {
+	t.Parallel()
+
+	m := testRecapTUIModel()
+	m.loadErr = errors.New("boom")
+
+	view := m.View()
+	if !strings.Contains(view.Content, "Press R to retry or q to quit.") {
+		t.Fatalf("load error view = %q, want uppercase retry key", view.Content)
+	}
+	if strings.Contains(view.Content, "Press r to retry") {
+		t.Fatalf("load error view still references lowercase retry key: %q", view.Content)
 	}
 }
 

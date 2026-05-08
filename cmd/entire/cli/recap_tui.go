@@ -192,7 +192,7 @@ func (m recapTUIModel) setRange(next recap.RangeKey) (recapTUIModel, tea.Cmd) {
 func (m recapTUIModel) View() tea.View {
 	v := tea.View{AltScreen: true}
 	if m.loadErr != nil {
-		v.SetContent(fmt.Sprintf("\n  Failed to load recap: %s\n\n  Press r to retry or q to quit.\n", recapLoadErrorMessage(m.loadErr)))
+		v.SetContent(fmt.Sprintf("\n  Failed to load recap: %s\n\n  Press R to retry or q to quit.\n", recapLoadErrorMessage(m.loadErr)))
 		return v
 	}
 	if m.loading && m.resp == nil {
