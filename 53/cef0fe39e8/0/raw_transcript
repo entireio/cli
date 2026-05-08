@@ -4,7 +4,13 @@
     "slug": "misty-orchid",
     "projectID": "e72157d04022f74eb1af25d0a2ca9cd92933f715",
     "directory": "/Users/peter/code/devenv/cli",
+    "path": "",
     "title": "Exit behavior for entire commands",
+    "agent": "build",
+    "model": {
+      "id": "gpt-5.5",
+      "providerID": "openai"
+    },
     "version": "1.14.40",
     "summary": {
       "additions": 56403,
@@ -13,7 +19,7 @@
     },
     "time": {
       "created": 1778143280817,
-      "updated": 1778232507847
+      "updated": 1778232560740
     }
   },
   "messages": [
@@ -52415,19 +52421,22 @@
         },
         "cost": 0,
         "tokens": {
-          "input": 0,
-          "output": 0,
+          "total": 155210,
+          "input": 502,
+          "output": 84,
           "reasoning": 0,
           "cache": {
-            "read": 0,
-            "write": 0
+            "write": 0,
+            "read": 154624
           }
         },
         "modelID": "gpt-5.5",
         "providerID": "openai",
         "time": {
-          "created": 1778232506895
+          "created": 1778232506895,
+          "completed": 1778232559774
         },
+        "finish": "tool-calls",
         "id": "msg_e06eaba0f001j4azB6ZACNIc3q",
         "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF"
       },
@@ -52444,19 +52453,24 @@
           "tool": "bash",
           "callID": "call_mWjtiyHHvSshjKWyNhlhz38q",
           "state": {
-            "metadata": {
-              "output": "",
-              "description": "Commits and pushes stop prompt guidance"
-            },
-            "status": "running",
+            "status": "completed",
             "input": {
               "command": "git add cmd/entire/cli/sessions.go cmd/entire/cli/sessions_test.go && git commit -m \"fix(cli): document session stop cancellation\" && git push",
               "timeout": 120000,
               "workdir": "/Users/peter/code/devenv/cli",
               "description": "Commits and pushes stop prompt guidance"
             },
+            "output": "[keyboard-exit-behavior 27bd4973] fix(cli): document session stop cancellation\n 2 files changed, 18 insertions(+)\n[entire] Pushing entire/checkpoints/v1 to checkpoint remote....\n[entire] Syncing entire/checkpoints/v1 with remote........[entire] Detected disconnected session metadata (local and remote share no common ancestor)\n[entire] Cherry-picking 1 local checkpoint(s) onto remote...\n..[entire] Done — all local and remote checkpoints preserved\n... done\n[entire] Pushing entire/checkpoints/v1 to checkpoint remote....... done\n[entire] Syncing and pushing v2 checkpoints...\n[entire] Pushing v2/main, v2/full/current...\n[entire] All v2 checkpoints pushed\nTo github.com:entireio/cli.git\n   57db5a96..27bd4973  keyboard-exit-behavior -> keyboard-exit-behavior\n",
+            "metadata": {
+              "output": "[keyboard-exit-behavior 27bd4973] fix(cli): document session stop cancellation\n 2 files changed, 18 insertions(+)\n[entire] Pushing entire/checkpoints/v1 to checkpoint remote....\n[entire] Syncing entire/checkpoints/v1 with remote........[entire] Detected disconnected session metadata (local and remote share no common ancestor)\n[entire] Cherry-picking 1 local checkpoint(s) onto remote...\n..[entire] Done — all local and remote checkpoints preserved\n... done\n[entire] Pushing entire/checkpoints/v1 to checkpoint remote....... done\n[entire] Syncing and pushing v2 checkpoints...\n[entire] Pushing v2/main, v2/full/current...\n[entire] All v2 checkpoints pushed\nTo github.com:entireio/cli.git\n   57db5a96..27bd4973  keyboard-exit-behavior -> keyboard-exit-behavior\n",
+              "exit": 0,
+              "description": "Commits and pushes stop prompt guidance",
+              "truncated": false
+            },
+            "title": "Commits and pushes stop prompt guidance",
             "time": {
-              "start": 1778232512345
+              "start": 1778232559692,
+              "end": 1778232559694
             }
           },
           "metadata": {
@@ -52467,6 +52481,102 @@
           "id": "prt_e06eacb24001lSSahfGBAei1rB",
           "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF",
           "messageID": "msg_e06eaba0f001j4azB6ZACNIc3q"
+        },
+        {
+          "reason": "tool-calls",
+          "snapshot": "3185774245cfd89eb611d6f70b5217e391cfd2d5",
+          "type": "step-finish",
+          "tokens": {
+            "total": 155210,
+            "input": 502,
+            "output": 84,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 154624
+            }
+          },
+          "cost": 0,
+          "id": "prt_e06eb8877001IBdVbQvXAoA8mp",
+          "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF",
+          "messageID": "msg_e06eaba0f001j4azB6ZACNIc3q"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_e06e95c2c0011r7LXfODATJ1pC",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/Users/peter/code/devenv/cli",
+          "root": "/Users/peter/code/devenv/cli"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 155624,
+          "input": 801,
+          "output": 199,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 154624
+          }
+        },
+        "modelID": "gpt-5.5",
+        "providerID": "openai",
+        "time": {
+          "created": 1778232559781,
+          "completed": 1778232565714
+        },
+        "finish": "stop",
+        "id": "msg_e06eb88a4001MPQL8wl2RKM977",
+        "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF"
+      },
+      "parts": [
+        {
+          "snapshot": "3185774245cfd89eb611d6f70b5217e391cfd2d5",
+          "type": "step-start",
+          "id": "prt_e06eb8ce2001jgcd2cMcV9QIWX",
+          "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF",
+          "messageID": "msg_e06eb88a4001MPQL8wl2RKM977"
+        },
+        {
+          "type": "text",
+          "text": "You were right. I checked the wrong session-stop path earlier.\n\nRoot cause:\n- Your screenshot is the single-session confirm prompt.\n- The PR only added guidance to the multi-session selector.\n- The single-session confirm, stop-all confirm, and post-selection confirm had no description, so `huh` only showed its default footer.\n\nPushed fix to the PR branch:\n\n`27bd4973 fix(cli): document session stop cancellation`\n\nWhat changed:\n- Single-session stop confirm now includes:\n  `Press enter to submit, y/n to choose, or ctrl+c to cancel.`\n- Stop-all confirm and multi-selection follow-up confirm use the same guidance.\n\nVerified:\n- `go test ./cmd/entire/cli -run 'TestStopSessionConfirmDescription|TestStopSessionSelectionDescription|TestDispatchWizardKeyMapQuitsWithEscAndCtrlC|TestDispatchStatusModel_FooterDocumentsCancelKeys' -count=1`\n- `mise run lint`",
+          "time": {
+            "start": 1778232563027,
+            "end": 1778232565606
+          },
+          "metadata": {
+            "openai": {
+              "itemId": "msg_0fa04a7b0ad51eda0169fdacf300f88191bea00f412ae7a0d6",
+              "phase": "final_answer"
+            }
+          },
+          "id": "prt_e06eb9553001ZP47YfCXHQrC0Z",
+          "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF",
+          "messageID": "msg_e06eb88a4001MPQL8wl2RKM977"
+        },
+        {
+          "reason": "stop",
+          "snapshot": "3185774245cfd89eb611d6f70b5217e391cfd2d5",
+          "type": "step-finish",
+          "tokens": {
+            "total": 155624,
+            "input": 801,
+            "output": 199,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 154624
+            }
+          },
+          "cost": 0,
+          "id": "prt_e06eb9fac001AhpDax9yh2JHiX",
+          "sessionID": "ses_1fe66c14effeU5Zvqjz7WOGWaF",
+          "messageID": "msg_e06eb88a4001MPQL8wl2RKM977"
         }
       ]
     }
