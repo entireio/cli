@@ -2,9 +2,12 @@ package review
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/charmbracelet/x/ansi"
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -72,6 +75,9 @@ func TestDetailView_HeaderContainsAgentNameAndCount(t *testing.T) {
 	if !strings.Contains(firstLine, "3 events") {
 		t.Errorf("header missing event count: %q", firstLine)
 	}
+	if !strings.HasSuffix(firstLine, "─") {
+		t.Errorf("header should fill remaining width with rule characters: %q", firstLine)
+	}
 }
 
 func TestDetailView_FooterPresent(t *testing.T) {
@@ -101,6 +107,30 @@ func TestDetailView_LineTruncation_RuneSafe(t *testing.T) {
 		if runes > termWidth {
 			t.Errorf("line %d has %d runes (>%d): %q", i, runes, termWidth, line)
 		}
+	}
+}
+
+func TestDetailView_LinesFitTerminalWidth(t *testing.T) {
+	t.Parallel()
+	row := agentRow{
+		name: "claude-code-with-a-very-wide-name",
+		buffer: []reviewtypes.Event{
+			reviewtypes.AssistantText{Text: strings.Repeat("界", 20)},
+			reviewtypes.ToolCall{Name: "wide", Args: strings.Repeat("🚀", 20)},
+			reviewtypes.RunError{Err: errors.New(strings.Repeat("日", 20))},
+		},
+	}
+
+	for _, width := range []int{1, 2, 5, 10, 20, 40, 80} {
+		t.Run(fmt.Sprintf("width %d", width), func(t *testing.T) {
+			t.Parallel()
+			out := detailView(row, 2, width, 8)
+			for i, line := range strings.Split(out, "\n") {
+				if got := ansi.StringWidth(line); got > width {
+					t.Fatalf("line %d width = %d, want <= %d:\n%q", i, got, width, line)
+				}
+			}
+		})
 	}
 }
 

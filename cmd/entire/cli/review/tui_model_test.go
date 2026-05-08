@@ -2,12 +2,14 @@ package review
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -334,6 +336,90 @@ func TestTUIModel_View_DashboardMode(t *testing.T) {
 	for _, name := range []string{"agent-a", "agent-b"} {
 		if !strings.Contains(v.Content, name) {
 			t.Errorf("View() missing agent %q", name)
+		}
+	}
+}
+
+func TestTUIModel_DashboardLinesFitTerminalWidth(t *testing.T) {
+	t.Parallel()
+
+	for _, width := range []int{1, 2, 10, 20, 24, 30, 40, 53, 54, 55, 60, 80, 120} {
+		t.Run(fmt.Sprintf("running width %d", width), func(t *testing.T) {
+			t.Parallel()
+			m := runningDashboardModel(t, width)
+			assertDashboardFitsWidth(t, m)
+		})
+		t.Run(fmt.Sprintf("finished width %d", width), func(t *testing.T) {
+			t.Parallel()
+			m := runningDashboardModel(t, width)
+			for _, name := range []string{"claude-code-with-a-long-name", "codex"} {
+				updated, _ := m.Update(agentEventMsg{agent: name, ev: reviewtypes.Finished{Success: true}})
+				m = mustModel(t, updated)
+			}
+			updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{
+				AgentRuns: []reviewtypes.AgentRun{
+					{Name: "claude-code-with-a-long-name", Status: reviewtypes.AgentStatusSucceeded},
+					{Name: "codex", Status: reviewtypes.AgentStatusSucceeded},
+				},
+			}})
+			m = mustModel(t, updated)
+			assertDashboardFitsWidth(t, m)
+		})
+	}
+}
+
+func TestTUIModel_DashboardPreviewStripsControlSequences(t *testing.T) {
+	t.Parallel()
+	m := newReviewTUIModel([]string{"codex"}, nil)
+	m.termWidth = 80
+
+	updated, _ := m.Update(agentEventMsg{
+		agent: "codex",
+		ev:    reviewtypes.AssistantText{Text: "hello\x1b[?25lworld\x1b[?25h"},
+	})
+	m = mustModel(t, updated)
+	out := m.dashboardView()
+
+	if strings.Contains(out, "\x1b[?25") {
+		t.Fatalf("dashboard preview leaked control sequence:\n%q", out)
+	}
+	if !strings.Contains(out, "helloworld") {
+		t.Fatalf("dashboard preview missing stripped text:\n%s", out)
+	}
+}
+
+func TestTUIModel_WindowResizeKeepsDashboardWithinNewWidth(t *testing.T) {
+	t.Parallel()
+	m := runningDashboardModel(t, 120)
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 30, Height: 24})
+	m = mustModel(t, updated)
+
+	assertDashboardFitsWidth(t, m)
+}
+
+func runningDashboardModel(t *testing.T, width int) reviewTUIModel {
+	t.Helper()
+	m := newReviewTUIModel([]string{"claude-code-with-a-long-name", "codex"}, nil)
+	m.termWidth = width
+
+	longPreview := strings.Repeat("review finding with enough text to overflow ", 4)
+	for _, name := range []string{"claude-code-with-a-long-name", "codex"} {
+		updated, _ := m.Update(agentEventMsg{agent: name, ev: reviewtypes.Started{}})
+		m = mustModel(t, updated)
+		updated, _ = m.Update(agentEventMsg{agent: name, ev: reviewtypes.Tokens{In: 1_234_567, Out: 987_654}})
+		m = mustModel(t, updated)
+		updated, _ = m.Update(agentEventMsg{agent: name, ev: reviewtypes.AssistantText{Text: longPreview}})
+		m = mustModel(t, updated)
+	}
+	return m
+}
+
+func assertDashboardFitsWidth(t *testing.T, m reviewTUIModel) {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSuffix(m.dashboardView(), "\n"), "\n") {
+		if got := ansi.StringWidth(line); got > m.termWidth {
+			t.Fatalf("dashboard line width = %d, want <= %d:\n%s", got, m.termWidth, line)
 		}
 	}
 }

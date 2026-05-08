@@ -9,29 +9,14 @@ package review
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
-	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
-// ansiCSIRegex strips ANSI/CSI escape sequences including cursor-control bytes
-// that agents (e.g. codex) emit on stdout. The pattern catches:
-//   - Standard CSI: \x1b[ followed by optional digits/semicolons and a letter.
-//   - Extended CSI with ? prefix: \x1b[? used for cursor-hide (\x1b[?25l) etc.
-//
-// Pattern: \x1b\[[?;0-9]*[a-zA-Z]
-var ansiCSIRegex = regexp.MustCompile(`\x1b\[[?;0-9]*[a-zA-Z]`)
-
-// stripANSI removes ANSI/CSI escape sequences from s so the text renders
-// cleanly in the alt-screen without shifting the cursor.
-func stripANSI(s string) string {
-	return ansiCSIRegex.ReplaceAllString(s, "")
-}
-
 // eventLine converts a single Event to a single display line for the detail
-// view. The line is stripped of ANSI sequences and truncated to maxWidth runes.
+// view. The line is stripped of control sequences and truncated to maxWidth
+// display cells.
 func eventLine(ev reviewtypes.Event, maxWidth int) string {
 	var raw string
 	switch e := ev.(type) {
@@ -59,12 +44,7 @@ func eventLine(ev reviewtypes.Event, maxWidth int) string {
 		raw = "[unknown event]"
 	}
 
-	// Collapse to a single line (remove embedded newlines) so each event maps
-	// to exactly one display row.
-	line := strings.ReplaceAll(raw, "\n", " ")
-	line = strings.ReplaceAll(line, "\r", "")
-	line = stripANSI(line)
-	return stringutil.TruncateRunes(line, maxWidth, "…")
+	return truncateDisplayWidth(sanitizeDisplayText(raw), maxWidth)
 }
 
 // detailView renders the alt-screen drill-in for one agent. row is the agentRow
@@ -73,7 +53,7 @@ func eventLine(ev reviewtypes.Event, maxWidth int) string {
 // Rendering:
 //  1. Header line: "─── <name> (<n> events) ─────────────" (filled to termWidth)
 //  2. Body: events from row.buffer scrolled to detailScroll, one line each,
-//     truncated to termWidth via TruncateRunes. ANSI/CSI stripped.
+//     sanitized and truncated to termWidth display cells.
 //  3. Footer line: "←/→ switch agent · Esc back · ↑/↓ scroll"
 //
 // CRITICAL: the rendered string is padded to exactly termHeight lines so every
@@ -94,13 +74,8 @@ func detailView(row agentRow, detailScroll, termWidth, termHeight int) string {
 	}
 
 	// 1. Header line.
-	headerContent := fmt.Sprintf("─── %s (%d events) ", row.name, len(row.buffer))
-	remaining := termWidth - len([]rune(headerContent))
-	if remaining < 0 {
-		remaining = 0
-	}
-	header := headerContent + strings.Repeat("─", remaining)
-	header = stringutil.TruncateRunes(header, termWidth, "")
+	headerContent := fmt.Sprintf("─── %s (%d events) ", sanitizeDisplayText(row.name), len(row.buffer))
+	header := padDisplayWidthWith(headerContent, termWidth, "─")
 
 	// 2. Body lines.
 	lines := buildBodyLines(row.buffer, detailScroll, bodyHeight, termWidth)
@@ -112,12 +87,7 @@ func detailView(row agentRow, detailScroll, termWidth, termHeight int) string {
 
 	// 3. Footer line.
 	footerText := "←/→ switch agent · Esc back · ↑/↓ scroll"
-	footer := stringutil.TruncateRunes(footerText, termWidth, "")
-	// Pad footer to termWidth.
-	footerRunes := len([]rune(footer))
-	if footerRunes < termWidth {
-		footer += strings.Repeat(" ", termWidth-footerRunes)
-	}
+	footer := padDisplayWidth(footerText, termWidth)
 
 	// Assemble: header + body + footer = termHeight lines total.
 	var b strings.Builder
