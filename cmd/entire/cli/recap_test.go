@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -138,6 +140,25 @@ func TestRecapFlags_ColorEnabled(t *testing.T) {
 
 	if _, err := (&recapFlags{color: "rainbow"}).colorEnabled(&out); err == nil {
 		t.Fatal("colorEnabled(invalid) error = nil, want error")
+	}
+}
+
+func TestRunRecap_PrerequisiteErrorsUseErrorWriter(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	err := runRecap(context.Background(), &out, &errOut, &recapFlags{})
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Fatalf("error = %T %v, want SilentError", err, err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", out.String())
+	}
+	if !strings.Contains(errOut.String(), "Not a git repository") {
+		t.Fatalf("stderr missing git prerequisite message: %q", errOut.String())
 	}
 }
 
@@ -290,5 +311,39 @@ func TestRecapLoadErrorMessage_NetworkError(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("message missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestRecapLoadErrorMessage_ContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	canceled := fmt.Errorf("me/recap get: %w", &url.Error{
+		Op:  "Get",
+		URL: "https://entire.io/api/v1/me/recap",
+		Err: context.Canceled,
+	})
+	got := recapLoadErrorMessage(canceled)
+	if strings.Contains(got, "Could not reach entire.io") {
+		t.Fatalf("cancellation should not be reported as a network failure:\n%s", got)
+	}
+	if !strings.Contains(got, "Recap request was canceled") {
+		t.Fatalf("message missing cancellation explanation:\n%s", got)
+	}
+}
+
+func TestRecapLoadErrorMessage_ContextDeadlineExceeded(t *testing.T) {
+	t.Parallel()
+
+	deadline := fmt.Errorf("me/recap get: %w", &url.Error{
+		Op:  "Get",
+		URL: "https://entire.io/api/v1/me/recap",
+		Err: context.DeadlineExceeded,
+	})
+	got := recapLoadErrorMessage(deadline)
+	if strings.Contains(got, "Could not reach entire.io") {
+		t.Fatalf("timeout should not be reported as a generic network failure:\n%s", got)
+	}
+	if !strings.Contains(got, "Recap request timed out") {
+		t.Fatalf("message missing timeout explanation:\n%s", got)
 	}
 }
