@@ -40,6 +40,13 @@ const (
 	// (e.g., Gemini CLI's BeforeModel). The framework stores the model as a hint
 	// for subsequent TurnStart/TurnEnd events in the same session.
 	ModelUpdate
+
+	// ToolUse indicates the agent ran a tool that touched files mid-turn.
+	// Carries ModifiedFiles/NewFiles/DeletedFiles so the framework can populate
+	// state.FilesTouched incrementally — without this, agents like Codex that
+	// commit mid-turn (before TurnEnd fires) have no per-tool file accounting,
+	// and the carry-forward path falls back to whole-transcript extraction.
+	ToolUse
 )
 
 // String returns a human-readable name for the event type.
@@ -61,6 +68,8 @@ func (e EventType) String() string {
 		return "SubagentEnd"
 	case ModelUpdate:
 		return "ModelUpdate"
+	case ToolUse:
+		return "ToolUse"
 	default:
 		return "Unknown"
 	}
@@ -109,10 +118,20 @@ type Event struct {
 	SubagentType    string
 	TaskDescription string
 
-	// ModifiedFiles is a list of file paths modified by a subagent.
-	// Populated on SubagentEnd events when the agent provides this data
-	// directly via hook payload (e.g., Cursor's subagentStop).
+	// ModifiedFiles is the list of file paths modified by a subagent (SubagentEnd)
+	// or a tool call (ToolUse). Paths may be absolute, cwd-relative, or
+	// repo-relative; lifecycle handlers normalize against the worktree root.
 	ModifiedFiles []string
+
+	// NewFiles and DeletedFiles carry create/delete paths for ToolUse events,
+	// kept separate from ModifiedFiles so consumers can reason about agent intent.
+	NewFiles     []string
+	DeletedFiles []string
+
+	// CWD is the working directory the agent was running in when the event fired.
+	// Set on ToolUse so cwd-relative payload paths can be resolved before
+	// repo-root normalization.
+	CWD string
 
 	// ResponseMessage is an optional message to display to the user via the agent.
 	ResponseMessage string

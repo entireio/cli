@@ -2047,6 +2047,14 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("failed to remove session states: %w", err)
 	}
 
+	// Sweep the per-session advisory lock files. These live alongside the
+	// state directory rather than inside it (see strategy.stateLockPath) so
+	// session-listing code doesn't have to filter them out. Best-effort:
+	// failing here doesn't undo the state-file removal.
+	if commonDir, cdErr := strategy.GetGitCommonDir(ctx); cdErr == nil {
+		_ = os.RemoveAll(filepath.Join(commonDir, "entire-session-locks"))
+	}
+
 	return count, nil
 }
 

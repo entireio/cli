@@ -156,18 +156,3 @@ func (s *ManualCommitStrategy) migrateShadowBranchToBaseCommit(ctx context.Conte
 	state.BaseCommit = newBaseCommit
 	return true, nil
 }
-
-// migrateAndPersistIfNeeded checks for HEAD changes, migrates the shadow branch if needed,
-// and persists the updated session state. Used by SaveStep and SaveTaskStep.
-func (s *ManualCommitStrategy) migrateAndPersistIfNeeded(ctx context.Context, repo *git.Repository, state *SessionState) error {
-	migrated, _, err := s.migrateShadowBranchIfNeeded(ctx, repo, state)
-	if err != nil {
-		return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
-	}
-	if migrated {
-		if err := s.saveSessionState(ctx, state); err != nil {
-			return fmt.Errorf("failed to save session state after migration: %w", err)
-		}
-	}
-	return nil
-}

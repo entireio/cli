@@ -54,7 +54,7 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	}
 
 	// Parse event types we manage
-	var sessionStart, userPromptSubmit, stop []MatcherGroup
+	var sessionStart, userPromptSubmit, stop, postToolUse []MatcherGroup
 	if err := parseHookType(rawHooks, "SessionStart", &sessionStart); err != nil {
 		return 0, err
 	}
@@ -64,11 +64,15 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	if err := parseHookType(rawHooks, "Stop", &stop); err != nil {
 		return 0, err
 	}
+	if err := parseHookType(rawHooks, "PostToolUse", &postToolUse); err != nil {
+		return 0, err
+	}
 
 	if force {
 		sessionStart = removeEntireHooks(sessionStart)
 		userPromptSubmit = removeEntireHooks(userPromptSubmit)
 		stop = removeEntireHooks(stop)
+		postToolUse = removeEntireHooks(postToolUse)
 	}
 
 	// Build hook commands
@@ -84,9 +88,11 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	}
 	userPromptSubmitCmd := cmdPrefix + "user-prompt-submit"
 	stopCmd := cmdPrefix + "stop"
+	postToolUseCmd := cmdPrefix + "post-tool-use"
 	if !localDev {
 		userPromptSubmitCmd = agent.WrapProductionSilentHookCommand(userPromptSubmitCmd)
 		stopCmd = agent.WrapProductionSilentHookCommand(stopCmd)
+		postToolUseCmd = agent.WrapProductionSilentHookCommand(postToolUseCmd)
 	}
 
 	count := 0
@@ -103,6 +109,10 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		stop = addHook(stop, stopCmd)
 		count++
 	}
+	if !hookCommandExists(postToolUse, postToolUseCmd) {
+		postToolUse = addHook(postToolUse, postToolUseCmd)
+		count++
+	}
 
 	if count == 0 {
 		// Still ensure the feature flag is configured even if hooks
@@ -117,6 +127,7 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 	marshalHookType(rawHooks, "SessionStart", sessionStart)
 	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
 	marshalHookType(rawHooks, "Stop", stop)
+	marshalHookType(rawHooks, "PostToolUse", postToolUse)
 
 	// Preserve existing top-level keys (e.g., $schema) by reusing the parsed file
 	topLevel := make(map[string]json.RawMessage)
@@ -181,7 +192,7 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 		return nil
 	}
 
-	var sessionStart, userPromptSubmit, stop []MatcherGroup
+	var sessionStart, userPromptSubmit, stop, postToolUse []MatcherGroup
 	if err := parseHookType(rawHooks, "SessionStart", &sessionStart); err != nil {
 		return err
 	}
@@ -191,14 +202,19 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	if err := parseHookType(rawHooks, "Stop", &stop); err != nil {
 		return err
 	}
+	if err := parseHookType(rawHooks, "PostToolUse", &postToolUse); err != nil {
+		return err
+	}
 
 	sessionStart = removeEntireHooks(sessionStart)
 	userPromptSubmit = removeEntireHooks(userPromptSubmit)
 	stop = removeEntireHooks(stop)
+	postToolUse = removeEntireHooks(postToolUse)
 
 	marshalHookType(rawHooks, "SessionStart", sessionStart)
 	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
 	marshalHookType(rawHooks, "Stop", stop)
+	marshalHookType(rawHooks, "PostToolUse", postToolUse)
 
 	if len(rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
@@ -240,7 +256,8 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
 
 	return hasEntireHook(hooksFile.Hooks.SessionStart) &&
 		hasEntireHook(hooksFile.Hooks.UserPromptSubmit) &&
-		hasEntireHook(hooksFile.Hooks.Stop)
+		hasEntireHook(hooksFile.Hooks.Stop) &&
+		hasEntireHook(hooksFile.Hooks.PostToolUse)
 }
 
 // --- Helpers ---
@@ -332,11 +349,19 @@ func removeEntireHooks(groups []MatcherGroup) []MatcherGroup {
 // configFileName is the Codex config file name.
 const configFileName = "config.toml"
 
-// featureLine is the TOML line that enables the codex_hooks feature.
-const featureLine = "codex_hooks = true"
+// featureLine is the TOML line that enables the hooks feature. The flag was
+// renamed from `codex_hooks` to `hooks` in Codex 0.129.0; the old name is
+// still accepted as a legacy alias but emits a deprecation warning at
+// every startup. ensureProjectFeatureEnabled rewrites the legacy form when
+// it sees it.
+const (
+	featureLine       = "hooks = true"
+	legacyFeatureLine = "codex_hooks = true"
+)
 
-// ensureProjectFeatureEnabled writes features.codex_hooks = true to the
+// ensureProjectFeatureEnabled writes features.hooks = true to the
 // project-level .codex/config.toml. This keeps the feature flag per-repo.
+// Replaces the deprecated codex_hooks = true line if it's present.
 func ensureProjectFeatureEnabled(repoRoot string) error {
 	configPath := filepath.Join(repoRoot, ".codex", configFileName)
 
@@ -346,13 +371,18 @@ func ensureProjectFeatureEnabled(repoRoot string) error {
 	}
 
 	content := string(data)
-	if strings.Contains(content, featureLine) {
+	hasNew := containsFeatureLine(content, featureLine)
+	hasLegacy := containsFeatureLine(content, legacyFeatureLine)
+	switch {
+	case hasNew && hasLegacy:
+		content = stripLegacyFeatureLine(content)
+	case hasNew:
 		return nil
-	}
-
-	if strings.Contains(content, "[features]") {
+	case hasLegacy:
+		content = strings.Replace(content, legacyFeatureLine, featureLine, 1)
+	case strings.Contains(content, "[features]"):
 		content = strings.Replace(content, "[features]", "[features]\n"+featureLine, 1)
-	} else {
+	default:
 		if len(content) > 0 && !strings.HasSuffix(content, "\n") {
 			content += "\n"
 		}
@@ -366,4 +396,32 @@ func ensureProjectFeatureEnabled(repoRoot string) error {
 		return fmt.Errorf("failed to write config.toml: %w", err)
 	}
 	return nil
+}
+
+// containsFeatureLine checks for an exact line match. A plain
+// strings.Contains is wrong because "hooks = true" is a substring of
+// "codex_hooks = true" — without the line-boundary anchor we'd treat the
+// legacy form as if the new form was already present.
+func containsFeatureLine(content, line string) bool {
+	for _, raw := range strings.Split(content, "\n") {
+		if strings.TrimSpace(raw) == line {
+			return true
+		}
+	}
+	return false
+}
+
+// stripLegacyFeatureLine removes the deprecated `codex_hooks = true` line
+// from a TOML config string, dropping a trailing blank line so the file
+// stays tidy. The new `hooks = true` is added separately by the caller.
+func stripLegacyFeatureLine(content string) string {
+	idx := strings.Index(content, legacyFeatureLine)
+	if idx < 0 {
+		return content
+	}
+	end := idx + len(legacyFeatureLine)
+	if end < len(content) && content[end] == '\n' {
+		end++
+	}
+	return content[:idx] + content[end:]
 }

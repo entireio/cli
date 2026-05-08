@@ -216,6 +216,97 @@ func TestExtractFilesFromApplyPatch(t *testing.T) {
 	}
 }
 
+func TestClassifyApplyPatchPaths(t *testing.T) {
+	t.Parallel()
+
+	added, modified, deleted := classifyApplyPatchPaths(
+		"*** Begin Patch\n*** Add File: a.txt\n+hi\n*** Update File: b.txt\n@@\n-old\n+new\n*** Delete File: c.txt\n*** End Patch\n",
+	)
+	require.Equal(t, []string{"a.txt"}, added)
+	require.Equal(t, []string{"b.txt"}, modified)
+	require.Equal(t, []string{"c.txt"}, deleted)
+}
+
+func TestClassifyApplyPatchPaths_AddWinsOverUpdate(t *testing.T) {
+	t.Parallel()
+	// If a path appears with both Add and Update verbs (envelopes shouldn't do
+	// this, but we're defensive), the more specific intent — Add — wins so
+	// callers route the file into NewFiles rather than ModifiedFiles.
+	added, modified, deleted := classifyApplyPatchPaths(
+		"*** Add File: a.txt\n*** Update File: a.txt\n",
+	)
+	require.Equal(t, []string{"a.txt"}, added)
+	require.Empty(t, modified)
+	require.Empty(t, deleted)
+}
+
+func TestClassifyApplyPatchPaths_Empty(t *testing.T) {
+	t.Parallel()
+	added, modified, deleted := classifyApplyPatchPaths("*** Begin Patch\n*** End Patch\n")
+	require.Empty(t, added)
+	require.Empty(t, modified)
+	require.Empty(t, deleted)
+}
+
+func TestClassifyApplyPatchPaths_MoveTo(t *testing.T) {
+	t.Parallel()
+	// Codex apply_patch encodes renames as "*** Update File: <old>\n*** Move
+	// to: <new>". Both paths must be tracked: the source is being deleted
+	// (renamed away), the destination is being created.
+	added, modified, deleted := classifyApplyPatchPaths(
+		"*** Begin Patch\n" +
+			"*** Update File: src/old.rs\n" +
+			"*** Move to: src/new.rs\n" +
+			"@@\n-old\n+new\n" +
+			"*** End Patch\n",
+	)
+	require.Equal(t, []string{"src/new.rs"}, added)
+	require.Empty(t, modified)
+	require.Equal(t, []string{"src/old.rs"}, deleted)
+}
+
+func TestClassifyApplyPatchPaths_MoveToWithSiblingHunks(t *testing.T) {
+	t.Parallel()
+	// A patch can mix Move-to renames with regular Add/Delete entries — the
+	// Move handler must scope to the most recent Update File, not collapse
+	// unrelated entries.
+	added, modified, deleted := classifyApplyPatchPaths(
+		"*** Begin Patch\n" +
+			"*** Delete File: gone.txt\n" +
+			"*** Update File: a.rs\n" +
+			"*** Move to: b.rs\n" +
+			"@@\n-x\n+y\n" +
+			"*** Add File: brand-new.go\n" +
+			"+package main\n" +
+			"*** End Patch\n",
+	)
+	require.Equal(t, []string{"b.rs", "brand-new.go"}, added)
+	require.Empty(t, modified)
+	require.Equal(t, []string{"a.rs", "gone.txt"}, deleted)
+}
+
+// TestClassifyApplyPatchPaths_MoveDoesNotOverwriteStickyAdd pins the
+// sticky-verb invariant against the Move-to handler. A path already
+// classified as Add must survive a later Update+Move-to that names it
+// as the source. Codex itself doesn't emit envelopes shaped like this,
+// but the invariant is documented and we don't want a quiet downgrade
+// if the grammar ever loosens.
+func TestClassifyApplyPatchPaths_MoveDoesNotOverwriteStickyAdd(t *testing.T) {
+	t.Parallel()
+	added, modified, deleted := classifyApplyPatchPaths(
+		"*** Begin Patch\n" +
+			"*** Add File: foo.txt\n" +
+			"+content\n" +
+			"*** Update File: foo.txt\n" +
+			"*** Move to: bar.txt\n" +
+			"@@\n-x\n+y\n" +
+			"*** End Patch\n",
+	)
+	require.Equal(t, []string{"bar.txt", "foo.txt"}, added)
+	require.Empty(t, modified)
+	require.Empty(t, deleted)
+}
+
 func TestSplitJSONL(t *testing.T) {
 	t.Parallel()
 
