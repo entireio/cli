@@ -671,7 +671,7 @@ func writePostReviewManifest(
 // terms the user can act on (or at least diagnose with debug logs).
 func warnManifestNotWritten(out io.Writer, reason string) {
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Note: review skills ran successfully but findings were not persisted.")
+	fmt.Fprintln(out, "Note: review skills ran but findings were not persisted.")
 	fmt.Fprintf(out, "  Reason: %s\n", reason)
 	fmt.Fprintln(out, "  `entire review --findings` and `entire review --fix` will not see this run.")
 	fmt.Fprintln(out, "  Re-run with `ENTIRE_LOG_LEVEL=debug` for diagnostic detail.")

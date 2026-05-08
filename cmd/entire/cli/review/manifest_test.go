@@ -387,7 +387,7 @@ func TestWarnManifestNotWritten_PrintsReasonAndDiagnosticHints(t *testing.T) {
 
 	got := b.String()
 	for _, want := range []string{
-		"Note: review skills ran successfully but findings were not persisted.",
+		"Note: review skills ran but findings were not persisted.",
 		"Reason: test reason text",
 		"`entire review --findings` and `entire review --fix` will not see this run.",
 		"`ENTIRE_LOG_LEVEL=debug`",
@@ -415,7 +415,7 @@ func TestWritePostReviewManifest_WarnsWhenNoMatchingSessions(t *testing.T) {
 	writePostReviewManifest(context.Background(), &out, repoRoot, "abc123", summary, "")
 
 	got := out.String()
-	if !strings.Contains(got, "Note: review skills ran successfully but findings were not persisted.") {
+	if !strings.Contains(got, "Note: review skills ran but findings were not persisted.") {
 		t.Fatalf("expected warning to fire when no sessions match; got:\n%s", got)
 	}
 	if !strings.Contains(got, "env-var handshake did not reach the hook") {
