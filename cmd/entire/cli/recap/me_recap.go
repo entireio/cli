@@ -28,11 +28,12 @@ type MeRecapResponse struct {
 
 // Summary contains top-level counts intended for CLI rendering.
 type Summary struct {
-	Me         SummaryTotals  `json:"me"`
-	Team       *SummaryTotals `json:"team"`
-	RepoCount  int            `json:"repoCount"`
-	ActiveDays int            `json:"activeDays"`
-	Analysis   AnalysisStatus `json:"analysis"`
+	Me          SummaryTotals     `json:"me"`
+	Team        *SummaryTotals    `json:"team"`
+	RepoCount   int               `json:"repoCount"`
+	ActiveDays  int               `json:"activeDays"`
+	Analysis    AnalysisStatus    `json:"analysis"`
+	Transcripts TranscriptSummary `json:"transcripts"`
 }
 
 type SummaryTotals struct {
@@ -45,6 +46,17 @@ type AnalysisStatus struct {
 	Complete int `json:"complete"`
 	Pending  int `json:"pending"`
 	Failed   int `json:"failed"`
+}
+
+type TranscriptSummary struct {
+	Me   TranscriptStatus  `json:"me"`
+	Team *TranscriptStatus `json:"team"`
+}
+
+type TranscriptStatus struct {
+	Failed  int `json:"failed"`
+	Pending int `json:"pending"`
+	Empty   int `json:"empty"`
 }
 
 type DailyCount struct {

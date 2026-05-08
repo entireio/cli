@@ -145,6 +145,12 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 				plural(team.Sessions, "session"), plural(team.Checkpoints, "checkpoint"), formatTokens(team.Tokens)+" tok"))
 		}
 	}
+	if noteLines := transcriptAvailabilityNote(resp.Summary.Transcripts, opts.View); len(noteLines) > 0 {
+		lines = append(lines, "")
+		for _, noteLine := range noteLines {
+			lines = append(lines, styles.muted.Render(noteLine))
+		}
+	}
 	if len(top) > 0 {
 		lines = append(lines, "", styles.muted.Render("top")+"  "+strings.Join(top, styles.muted.Render(" · ")))
 	}
@@ -157,6 +163,54 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 	}
 	lines = append(lines, "", styles.muted.Render(strings.Join(context, " · ")))
 	return renderBox("", lines, width, styles)
+}
+
+func transcriptAvailabilityNote(summary TranscriptSummary, view ViewMode) []string {
+	status := visibleTranscriptStatus(summary, view)
+	total := status.Failed + status.Pending + status.Empty
+	if total == 0 {
+		return nil
+	}
+	label := "unavailable transcripts"
+	if total == 1 {
+		label = "unavailable transcript"
+	}
+	parts := make([]string, 0, 3)
+	if status.Failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", status.Failed))
+	}
+	if status.Pending > 0 {
+		parts = append(parts, fmt.Sprintf("%d pending", status.Pending))
+	}
+	if status.Empty > 0 {
+		parts = append(parts, fmt.Sprintf("%d empty", status.Empty))
+	}
+	return []string{
+		fmt.Sprintf("%d %s", total, label),
+		strings.Join(parts, ", ") + "; session totals may be lower",
+	}
+}
+
+func visibleTranscriptStatus(summary TranscriptSummary, view ViewMode) TranscriptStatus {
+	switch view {
+	case ViewYou:
+		return summary.Me
+	case ViewTeam:
+		if summary.Team == nil {
+			return TranscriptStatus{}
+		}
+		return *summary.Team
+	case ViewBoth:
+		status := summary.Me
+		if summary.Team != nil {
+			status.Failed += summary.Team.Failed
+			status.Pending += summary.Team.Pending
+			status.Empty += summary.Team.Empty
+		}
+		return status
+	default:
+		return TranscriptStatus{}
+	}
 }
 
 func renderWindow(resp *MeRecapResponse, opts RenderOptions, styles staticStyles) string {

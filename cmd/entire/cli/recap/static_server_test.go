@@ -112,6 +112,62 @@ func TestRenderStaticRecap_ListsMultipleRepoNames(t *testing.T) {
 	}
 }
 
+func TestRenderStaticRecap_ShowsUnavailableTranscriptNote(t *testing.T) {
+	t.Parallel()
+
+	resp := &MeRecapResponse{
+		Summary: Summary{
+			Me: SummaryTotals{Sessions: 1, Checkpoints: 3},
+			Transcripts: TranscriptSummary{
+				Me: TranscriptStatus{Failed: 1, Pending: 1, Empty: 1},
+			},
+		},
+	}
+
+	got := RenderStaticRecap(resp, RenderOptions{
+		Range: RangeWeek,
+		View:  ViewYou,
+		Agent: AgentAll,
+		Width: 90,
+	})
+
+	if !strings.Contains(got, "3 unavailable transcripts") {
+		t.Fatalf("output should mention unavailable transcript count:\n%s", got)
+	}
+	if !strings.Contains(got, "1 failed, 1 pending, 1 empty") {
+		t.Fatalf("output should include transcript status breakdown:\n%s", got)
+	}
+	if !strings.Contains(got, "session totals may be lower") {
+		t.Fatalf("output should explain the mismatch risk:\n%s", got)
+	}
+}
+
+func TestRenderStaticRecap_WrapsUnavailableTranscriptNote(t *testing.T) {
+	t.Parallel()
+
+	resp := &MeRecapResponse{
+		Summary: Summary{
+			Me: SummaryTotals{Sessions: 6, Checkpoints: 38},
+			Transcripts: TranscriptSummary{
+				Me: TranscriptStatus{Failed: 19, Pending: 1, Empty: 124},
+			},
+		},
+	}
+
+	got := RenderStaticRecap(resp, RenderOptions{
+		Range: RangeWeek,
+		View:  ViewYou,
+		Agent: AgentAll,
+		Width: 78,
+	})
+
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "│") && displayLen(line) > 78 {
+			t.Fatalf("summary box line should fit width 78, got width %d:\n%s\n\nfull output:\n%s", displayLen(line), line, got)
+		}
+	}
+}
+
 func TestRenderStaticRecap_TeamViewOmitsYouSummary(t *testing.T) {
 	t.Parallel()
 	resp := &MeRecapResponse{
