@@ -118,6 +118,93 @@ func TestTUIModel_AgentEvent_RunError(t *testing.T) {
 	}
 }
 
+func TestTUIModel_DashboardShowsErrorPreviewForFailedAgent(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"codex"}, func() {})
+	m.termWidth = 200 // wide enough that preview isn't truncated to nothing
+
+	theErr := errors.New("auth: invalid API key — check ANTHROPIC_API_KEY")
+	updated, _ := m.Update(agentEventMsg{agent: "codex", ev: reviewtypes.RunError{Err: theErr}})
+	m = mustModel(t, updated)
+	out := m.dashboardView()
+
+	// When an agent has failed and we have an error message, the preview
+	// column must surface it rather than leaving the user staring at "✗ failed"
+	// with nothing else to read while other agents are still running.
+	if !strings.Contains(out, "auth: invalid API key") {
+		t.Errorf("expected error text in dashboard preview when agent failed, got:\n%s", out)
+	}
+}
+
+func TestTUIModel_DashboardErrorPreviewStripsProcessErrorWrapper(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"codex"}, func() {})
+	m.termWidth = 200
+
+	// *ProcessError carries agent name, exit error, and captured stderr.
+	// The dashboard already shows agent name (column 1) and status (column 2),
+	// so the preview should NOT prefix with "error:", "agent-name:", or
+	// "exit status N: stderr:" — those are noise. It should show the first
+	// non-empty stderr line directly so the column carries actionable info.
+	pe := &reviewtypes.ProcessError{
+		AgentName: "codex",
+		Err:       errors.New("exit status 1"),
+		Stderr:    "Error: rate limit exceeded (RPS quota)\nRetry after: 47s",
+	}
+	updated, _ := m.Update(agentEventMsg{agent: "codex", ev: reviewtypes.RunError{Err: pe}})
+	m = mustModel(t, updated)
+	out := m.dashboardView()
+
+	// First stderr line should appear.
+	if !strings.Contains(out, "Error: rate limit exceeded") {
+		t.Errorf("preview must show first stderr line, got:\n%s", out)
+	}
+	// No noisy wrapper text.
+	for _, noise := range []string{
+		"error: codex:",
+		"exit status 1:",
+		"stderr:",
+	} {
+		if strings.Contains(out, noise) {
+			t.Errorf("preview must not contain wrapper text %q, got:\n%s", noise, out)
+		}
+	}
+}
+
+func TestTUIModel_DashboardErrorPreviewFallsBackToErrStringForNonProcessError(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"codex"}, func() {})
+	m.termWidth = 200
+
+	// Generic errors (parser-emitted RunError, wrapped errors, etc.) don't
+	// have agent-name/stderr wrappers to strip. Just render the error string.
+	updated, _ := m.Update(agentEventMsg{agent: "codex", ev: reviewtypes.RunError{Err: errors.New("torn stdout stream")}})
+	m = mustModel(t, updated)
+	out := m.dashboardView()
+
+	if !strings.Contains(out, "torn stdout stream") {
+		t.Errorf("generic error should render verbatim in preview, got:\n%s", out)
+	}
+}
+
+func TestTUIModel_DashboardErrorPreviewYieldsToAssistantTextBeforeFailure(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"codex"}, func() {})
+	m.termWidth = 200
+
+	// Successful run: preview should still show the assistant's narrative,
+	// not be replaced by error text (there is no error).
+	updated, _ := m.Update(agentEventMsg{agent: "codex", ev: reviewtypes.AssistantText{Text: "Found a real issue worth fixing"}})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(agentEventMsg{agent: "codex", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+
+	out := m.dashboardView()
+	if !strings.Contains(out, "Found a real issue worth fixing") {
+		t.Errorf("happy-path preview must still show assistant text, got:\n%s", out)
+	}
+}
+
 func TestTUIModel_KeyCtrlC_NotDetailMode_CancelsAndQuits(t *testing.T) {
 	t.Parallel()
 	var called atomic.Bool

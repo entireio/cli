@@ -8,6 +8,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -402,7 +403,49 @@ func (m reviewTUIModel) renderRow(row agentRow) string {
 		tokStr = fmt.Sprintf("%s/%s", formatCompact(row.tokens.In), formatCompact(row.tokens.Out))
 	}
 
-	return m.renderTableLine(name, statusStr, durStr, tokStr, row.preview)
+	preview := row.preview
+	// When the agent has failed and we know why, surface the error in the
+	// preview column instead of leaving it blank. Without this the user
+	// sees "✗ failed" with no other signal while other agents are still
+	// running. Ctrl+O drill-in shows the full event buffer; this puts a
+	// hint on the dashboard itself.
+	if row.status == reviewtypes.AgentStatusFailed && row.err != nil {
+		preview = sanitizeDisplayText(formatErrorPreview(row.err))
+	}
+
+	return m.renderTableLine(name, statusStr, durStr, tokStr, preview)
+}
+
+// formatErrorPreview produces a terse one-line representation of an agent
+// failure for the dashboard PREVIEW column. The agent name is already shown
+// in column 1 and "✗ failed" in column 2, so wrapper text like
+// "agent-name: exit status 1: stderr: ..." is just noise that pushes the
+// actual error message off the right edge.
+//
+// For *ProcessError (non-zero process exit with captured stderr), returns
+// the first non-empty line of stderr — that's what the agent CLI itself
+// considered headline-worthy. Falls back to the wait error string when
+// stderr is empty (e.g., a process killed by a signal that emits no stderr).
+//
+// For other error types (parser-emitted RunError carrying torn-stream
+// errors, wrapped agentRunFailureError, etc.), returns err.Error() verbatim
+// — those messages don't have agent-name/stderr wrappers to strip.
+func formatErrorPreview(err error) string {
+	if err == nil {
+		return ""
+	}
+	var pe *reviewtypes.ProcessError
+	if errors.As(err, &pe) {
+		for _, line := range strings.Split(pe.Stderr, "\n") {
+			if trimmed := strings.TrimSpace(line); trimmed != "" {
+				return trimmed
+			}
+		}
+		if pe.Err != nil {
+			return pe.Err.Error()
+		}
+	}
+	return err.Error()
 }
 
 func (m reviewTUIModel) renderTableLine(agent, status, duration, tokens, preview string) string {

@@ -131,8 +131,18 @@ func RunMulti(
 			for ev := range p.Events() {
 				fanIn <- taggedEvent{agentIdx: idx, ev: ev}
 			}
-			states[idx].waitErr = p.Wait()
+			waitErr := p.Wait()
+			states[idx].waitErr = waitErr
 			states[idx].finishedAt = time.Now()
+			// Emit a synthetic RunError so sinks (TUI dashboard, dump) see
+			// the failure live rather than only via RunFinished. Otherwise
+			// the parser's clean-EOF Finished{Success:true} leaves a row
+			// showing "✓ done" even when the agent process exited non-zero,
+			// for the entire remaining duration of any other still-running
+			// agents.
+			if waitErr != nil {
+				fanIn <- taggedEvent{agentIdx: idx, ev: reviewtypes.RunError{Err: waitErr}}
+			}
 		}(i, proc)
 	}
 

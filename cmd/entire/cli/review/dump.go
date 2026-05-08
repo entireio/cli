@@ -12,6 +12,7 @@
 package review
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -63,15 +64,20 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 		// agent-level RunError events the parser emitted (typically a torn
 		// stdout stream — caught at the orchestrator level by classifyStatus
 		// even when the process itself exited 0).
-		if run.Err != nil {
-			fmt.Fprintf(&b, "**Failed:** `%v`\n\n", run.Err)
-		} else {
-			b.WriteString("**Failed**\n\n")
-		}
+		writeFailureHeader(&b, run.Err)
 		for _, ev := range run.Buffer {
-			if re, ok := ev.(reviewtypes.RunError); ok && re.Err != nil {
-				fmt.Fprintf(&b, "> agent error: `%v`\n\n", re.Err)
+			re, ok := ev.(reviewtypes.RunError)
+			if !ok || re.Err == nil {
+				continue
 			}
+			// Skip the synthetic RunError that the orchestrator emits to drive
+			// live TUI updates: it carries the same error as run.Err, which
+			// the failure header already rendered. Without this the same
+			// error text appears twice in adjacent output blocks.
+			if run.Err != nil && errors.Is(re.Err, run.Err) {
+				continue
+			}
+			fmt.Fprintf(&b, "> agent error: `%v`\n\n", re.Err)
 		}
 		// Render any narrative text the agent produced before the failure
 		// surfaced — useful when the parser tore mid-response so reviewers
@@ -95,6 +101,26 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 		rendered = b.String()
 	}
 	fmt.Fprint(s.W, rendered)
+}
+
+// writeFailureHeader formats the failure block for a failed agent run.
+// When run.Err is a *ProcessError carrying captured stderr, the stderr is
+// rendered in a fenced code block on its own — preserving newlines so multi-line
+// agent CLI output (auth errors, stack traces, etc.) is readable instead of
+// collapsed inside an inline-code span. Generic errors (non-ProcessError, or
+// ProcessError without stderr) keep the inline backtick rendering.
+func writeFailureHeader(b *strings.Builder, runErr error) {
+	if runErr == nil {
+		b.WriteString("**Failed**\n\n")
+		return
+	}
+	var pe *reviewtypes.ProcessError
+	if errors.As(runErr, &pe) && pe.Stderr != "" {
+		fmt.Fprintf(b, "**Failed:** `%s` exited (`%v`). Stderr:\n\n", pe.AgentName, pe.Err)
+		fmt.Fprintf(b, "```\n%s\n```\n\n", pe.Stderr)
+		return
+	}
+	fmt.Fprintf(b, "**Failed:** `%v`\n\n", runErr)
 }
 
 // joinAssistantText extracts AssistantText events from a buffer and joins

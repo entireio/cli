@@ -78,9 +78,12 @@ func TestRunMulti_OneSucceedsOneFails(t *testing.T) {
 	if len(summary.AgentRuns) != 2 {
 		t.Fatalf("expected 2 AgentRuns, got %d", len(summary.AgentRuns))
 	}
-	// Both agents delivered events to the sink.
-	if len(rec.agentEvents) != 4 {
-		t.Errorf("expected 4 AgentEvent calls (2 per agent), got %d", len(rec.agentEvents))
+	// Both agents delivered events to the sink. ok-agent emits 2 events
+	// (Started, Finished); fail-agent emits 2 events (Started, Finished)
+	// plus a synthetic RunError emitted by the orchestrator after Wait()
+	// returns the non-nil exit error — total 5.
+	if len(rec.agentEvents) != 5 {
+		t.Errorf("expected 5 AgentEvent calls (ok: 2, fail: 2 + synthetic RunError), got %d", len(rec.agentEvents))
 	}
 	// Verify per-agent statuses.
 	statusFor := func(name string) reviewtypes.AgentStatus {
@@ -345,6 +348,55 @@ func TestRunMulti_SinkFanOut(t *testing.T) {
 	}
 	if len(rec2.finishedCalls) != 1 {
 		t.Errorf("sink2: expected 1 RunFinished call, got %d", len(rec2.finishedCalls))
+	}
+}
+
+// TestRunMulti_EmitsSyntheticRunErrorWhenAgentWaitErrIsNonNil verifies that
+// when an individual agent's process exits non-zero, the orchestrator emits
+// a RunError event into the live sink stream — not only into the final
+// summary. This is what lets the TUI dashboard flip a row from "✓ done"
+// (from the parser's clean-EOF Finished{Success:true}) to "✗ failed" while
+// other agents are still running. Without this synthetic emission, multi-agent
+// runs would show stale "succeeded" status for the entire duration of any
+// later-finishing agents.
+func TestRunMulti_EmitsSyntheticRunErrorWhenAgentWaitErrIsNonNil(t *testing.T) {
+	t.Parallel()
+	failingWait := errors.New("exit status 1: stderr: invalid_api_key")
+	failer := &stubReviewer{
+		name: "claude-code",
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.Finished{Success: true}, // parser saw clean EOF
+		},
+		waitErr: failingWait,
+	}
+	succeeder := &stubReviewer{
+		name: "codex",
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.AssistantText{Text: "looks good"},
+			reviewtypes.Finished{Success: true},
+		},
+	}
+	rec := &stubSinkRecorder{}
+
+	_, err := RunMulti(context.Background(), []reviewtypes.AgentReviewer{failer, succeeder}, reviewtypes.RunConfig{}, []reviewtypes.Sink{rec})
+	if err == nil {
+		t.Fatal("expected non-nil firstErr from failing agent")
+	}
+
+	var found bool
+	for _, evt := range rec.agentEvents {
+		if evt.agent != "claude-code" {
+			continue
+		}
+		if re, ok := evt.ev.(reviewtypes.RunError); ok && re.Err != nil && re.Err.Error() == failingWait.Error() {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected synthetic RunError for failing agent in live sink stream, got events: %+v", rec.agentEvents)
 	}
 }
 

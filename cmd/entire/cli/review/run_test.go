@@ -342,6 +342,72 @@ func TestRun_TokenTracking(t *testing.T) {
 	}
 }
 
+func TestRun_EmitsSyntheticRunErrorWhenWaitErrIsNonNil(t *testing.T) {
+	t.Parallel()
+	// Common case: parser reads agent's stdout to clean EOF (no scanner error)
+	// and emits Finished{Success:true} — but the agent process actually exited
+	// non-zero with stderr. The waitErr captures that. Without a synthetic
+	// RunError emitted post-Wait, sinks (TUI, dump) only learn about the
+	// failure via RunFinished — too late for the live dashboard to flip from
+	// "✓ done" to "✗ failed" while other agents are still running.
+	waitErr := errors.New("exit status 1: stderr: invalid_api_key")
+	reviewer := &stubReviewer{
+		name: "claude-code",
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.Finished{Success: true},
+		},
+		waitErr: waitErr,
+	}
+	rec := &stubSinkRecorder{}
+
+	_, err := Run(context.Background(), reviewer, reviewtypes.RunConfig{}, []reviewtypes.Sink{rec})
+	if err == nil {
+		t.Fatal("expected non-nil error from failing run")
+	}
+
+	// Look for a RunError event in the live stream (forwarded to sinks via
+	// AgentEvent) carrying the wait error.
+	var found bool
+	for _, evt := range rec.agentEvents {
+		if re, ok := evt.ev.(reviewtypes.RunError); ok && re.Err != nil && re.Err.Error() == waitErr.Error() {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected synthetic RunError(waitErr) in live sink stream after Wait, got events: %+v", rec.agentEvents)
+	}
+}
+
+func TestRun_DoesNotEmitSyntheticRunErrorOnCleanExit(t *testing.T) {
+	t.Parallel()
+	// Happy path: process exits 0, parser sees clean EOF. No synthetic
+	// RunError should appear — the existing Finished{Success:true} is the
+	// authoritative signal.
+	reviewer := &stubReviewer{
+		name: "claude-code",
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.AssistantText{Text: "looks good"},
+			reviewtypes.Finished{Success: true},
+		},
+		waitErr: nil,
+	}
+	rec := &stubSinkRecorder{}
+
+	_, err := Run(context.Background(), reviewer, reviewtypes.RunConfig{}, []reviewtypes.Sink{rec})
+	if err != nil {
+		t.Fatalf("expected nil error on clean exit, got %v", err)
+	}
+
+	for _, evt := range rec.agentEvents {
+		if _, ok := evt.ev.(reviewtypes.RunError); ok {
+			t.Errorf("clean exit should not produce a synthetic RunError, got: %+v", evt.ev)
+		}
+	}
+}
+
 func TestRun_SinkFanOut(t *testing.T) {
 	t.Parallel()
 	events := []reviewtypes.Event{

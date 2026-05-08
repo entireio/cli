@@ -82,6 +82,23 @@ func Run(
 
 	waitErr := proc.Wait()
 	finished := time.Now()
+	// Emit a synthetic RunError carrying waitErr so sinks see the failure
+	// during the live event stream rather than only via RunFinished. Without
+	// this, the parser's typical clean-EOF Finished{Success:true} would leave
+	// the TUI dashboard showing "✓ done" until the orchestrator's summary
+	// arrives — for multi-agent runs that's the entire duration of the other
+	// agents, not just a flicker.
+	if waitErr != nil {
+		synthEvent := reviewtypes.RunError{Err: waitErr}
+		buffer = append(buffer, synthEvent)
+		sawRunError = true
+		if firstRunErr == nil {
+			firstRunErr = waitErr
+		}
+		for _, sink := range sinks {
+			sink.AgentEvent(reviewer.Name(), synthEvent)
+		}
+	}
 	status := classifyStatus(ctx, waitErr, eventOutcome{finishedSeen: finishedSeen, finishedOk: finishedOk, sawRunError: sawRunError})
 	runErr := waitErr
 	if runErr == nil && status == reviewtypes.AgentStatusFailed {
