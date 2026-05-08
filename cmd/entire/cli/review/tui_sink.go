@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
+	"golang.org/x/term"
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -52,6 +53,13 @@ var _ reviewtypes.Sink = (*TUISink)(nil)
 // OS signal path share a single cancel function with no race.
 func NewTUISink(agents []string, cancel context.CancelFunc, output io.Writer) *TUISink {
 	model := newReviewTUIModel(agents, cancel)
+	model.measureTerminal = terminalMeasurer(output)
+	if model.measureTerminal != nil {
+		if width, height, ok := model.measureTerminal(); ok {
+			model.termWidth = width
+			model.termHeight = height
+		}
+	}
 	prog := tea.NewProgram(
 		model,
 		tea.WithOutput(output),
@@ -60,6 +68,24 @@ func NewTUISink(agents []string, cancel context.CancelFunc, output io.Writer) *T
 	return &TUISink{
 		program: prog,
 		done:    make(chan struct{}),
+	}
+}
+
+type fdWriter interface {
+	Fd() uintptr
+}
+
+func terminalMeasurer(output io.Writer) func() (int, int, bool) {
+	f, ok := output.(fdWriter)
+	if !ok {
+		return nil
+	}
+	return func() (int, int, bool) {
+		width, height, err := term.GetSize(int(f.Fd())) //nolint:gosec // fd values fit in int on supported platforms
+		if err != nil || width <= 0 || height <= 0 {
+			return 0, 0, false
+		}
+		return width, height, true
 	}
 }
 

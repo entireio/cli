@@ -7,6 +7,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -82,13 +83,7 @@ func Run(
 
 	waitErr := proc.Wait()
 	finished := time.Now()
-	// Emit a synthetic RunError carrying waitErr so sinks see the failure
-	// during the live event stream rather than only via RunFinished. Without
-	// this, the parser's typical clean-EOF Finished{Success:true} would leave
-	// the TUI dashboard showing "✓ done" until the orchestrator's summary
-	// arrives — for multi-agent runs that's the entire duration of the other
-	// agents, not just a flicker.
-	if waitErr != nil {
+	if shouldEmitSyntheticRunError(ctx, waitErr) {
 		synthEvent := reviewtypes.RunError{Err: waitErr}
 		buffer = append(buffer, synthEvent)
 		sawRunError = true
@@ -119,10 +114,31 @@ func Run(
 			Err:       runErr,
 		}},
 	}
+	summary = enrichRunSummary(ctx, cfg, summary)
 	for _, sink := range sinks {
 		sink.RunFinished(summary)
 	}
 	return summary, runErr
+}
+
+func enrichRunSummary(ctx context.Context, cfg reviewtypes.RunConfig, summary reviewtypes.RunSummary) reviewtypes.RunSummary {
+	if cfg.EnrichSummary == nil {
+		return summary
+	}
+	return cfg.EnrichSummary(ctx, summary)
+}
+
+func shouldEmitSyntheticRunError(ctx context.Context, waitErr error) bool {
+	if waitErr == nil {
+		return false
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded) {
+		return false
+	}
+	return true
 }
 
 func agentRunFailureError(agent string, cause error) error {

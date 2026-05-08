@@ -64,6 +64,8 @@ type reviewTUIModel struct {
 	termWidth  int
 	termHeight int
 
+	measureTerminal func() (width int, height int, ok bool)
+
 	finished bool
 	summary  reviewtypes.RunSummary
 }
@@ -138,6 +140,9 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.rows[i].status == reviewtypes.AgentStatusUnknown {
 				m.rows[i].status = run.Status
 			}
+			if run.Tokens.In > 0 || run.Tokens.Out > 0 {
+				m.rows[i].tokens = run.Tokens
+			}
 			if m.rows[i].runEnd.IsZero() && !m.rows[i].runStart.IsZero() {
 				m.rows[i].runEnd = now
 			}
@@ -145,11 +150,17 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		if m.finished {
+			return m, nil
+		}
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		return m, tea.Batch(spinCmd, tickCmd())
 
 	case spinner.TickMsg:
+		if m.finished {
+			return m, nil
+		}
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		return m, spinCmd
@@ -322,13 +333,14 @@ func (m reviewTUIModel) clampScroll() reviewTUIModel {
 // View renders the current state.
 func (m reviewTUIModel) View() tea.View {
 	var content string
+	termWidth, termHeight := m.currentTerminalSize()
 	if m.detailMode && len(m.rows) > 0 {
-		content = detailView(m.rows[m.detailIdx], m.detailScroll, m.termWidth, m.termHeight)
+		content = detailView(m.rows[m.detailIdx], m.detailScroll, termWidth, termHeight)
 	} else {
 		content = m.dashboardView()
 	}
 	v := tea.NewView(content)
-	v.AltScreen = m.detailMode
+	v.AltScreen = true
 	return v
 }
 
@@ -358,10 +370,30 @@ func (m reviewTUIModel) writeDashboardLine(b *strings.Builder, line string) {
 }
 
 func (m reviewTUIModel) dashboardWidth() int {
-	if m.termWidth <= 0 {
-		return 80
+	width, _ := m.currentTerminalSize()
+	return width
+}
+
+func (m reviewTUIModel) currentTerminalSize() (int, int) {
+	width := m.termWidth
+	height := m.termHeight
+	if m.measureTerminal != nil {
+		if measuredWidth, measuredHeight, ok := m.measureTerminal(); ok {
+			if measuredWidth > 0 {
+				width = measuredWidth
+			}
+			if measuredHeight > 0 {
+				height = measuredHeight
+			}
+		}
 	}
-	return m.termWidth
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = 24
+	}
+	return width, height
 }
 
 // headerLine returns the column header row.
@@ -404,32 +436,13 @@ func (m reviewTUIModel) renderRow(row agentRow) string {
 	}
 
 	preview := row.preview
-	// When the agent has failed and we know why, surface the error in the
-	// preview column instead of leaving it blank. Without this the user
-	// sees "✗ failed" with no other signal while other agents are still
-	// running. Ctrl+O drill-in shows the full event buffer; this puts a
-	// hint on the dashboard itself.
 	if row.status == reviewtypes.AgentStatusFailed && row.err != nil {
-		preview = sanitizeDisplayText(formatErrorPreview(row.err))
+		preview = stringutil.CollapseWhitespace(sanitizeDisplayText(formatErrorPreview(row.err)))
 	}
 
 	return m.renderTableLine(name, statusStr, durStr, tokStr, preview)
 }
 
-// formatErrorPreview produces a terse one-line representation of an agent
-// failure for the dashboard PREVIEW column. The agent name is already shown
-// in column 1 and "✗ failed" in column 2, so wrapper text like
-// "agent-name: exit status 1: stderr: ..." is just noise that pushes the
-// actual error message off the right edge.
-//
-// For *ProcessError (non-zero process exit with captured stderr), returns
-// the first non-empty line of stderr — that's what the agent CLI itself
-// considered headline-worthy. Falls back to the wait error string when
-// stderr is empty (e.g., a process killed by a signal that emits no stderr).
-//
-// For other error types (parser-emitted RunError carrying torn-stream
-// errors, wrapped agentRunFailureError, etc.), returns err.Error() verbatim
-// — those messages don't have agent-name/stderr wrappers to strip.
 func formatErrorPreview(err error) string {
 	if err == nil {
 		return ""

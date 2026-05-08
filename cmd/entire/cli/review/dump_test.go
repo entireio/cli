@@ -110,12 +110,9 @@ func TestDumpSink_FailedAgentWithProcessErrorRendersStderrAsCodeFence(t *testing
 	sink.RunFinished(makeSummary(run))
 
 	out := buf.String()
-
-	// Failure header still mentions the exit error.
 	if !strings.Contains(out, "exit status 1") {
 		t.Errorf("expected exit status mention in failure header, got:\n%s", out)
 	}
-	// Each stderr line appears in output.
 	for _, line := range []string{
 		"Error: API key invalid",
 		"Please set ANTHROPIC_API_KEY",
@@ -125,16 +122,9 @@ func TestDumpSink_FailedAgentWithProcessErrorRendersStderrAsCodeFence(t *testing
 			t.Errorf("expected stderr line %q in output, got:\n%s", line, out)
 		}
 	}
-	// Stderr is rendered in a fenced code block (```), not crammed into a
-	// single inline-code span (`...`). The fence is the load-bearing fix:
-	// multi-line stderr inside backticks loses newlines under markdown rendering.
-	if !strings.Contains(out, "```") {
-		t.Errorf("expected fenced code block delimiting stderr, got:\n%s", out)
+	if !strings.Contains(out, "```\n"+stderr+"\n```") {
+		t.Errorf("expected stderr in fenced code block, got:\n%s", out)
 	}
-	// The whole error is NOT crammed into one inline-code span. The current
-	// (broken) rendering produces a single backticked line containing the
-	// full stderr; the fix moves stderr into its own fenced block, so the
-	// header line itself does not contain "stderr:".
 	if strings.Contains(out, "**Failed:** `claude-code: exit status 1: stderr:") {
 		t.Errorf("stderr must not be jammed into the inline failure header, got:\n%s", out)
 	}
@@ -145,12 +135,6 @@ func TestDumpSink_DoesNotDoublePrintSyntheticRunErrorMatchingRunErr(t *testing.T
 	var buf bytes.Buffer
 	sink := DumpSink{W: &buf}
 
-	// The orchestrator emits a synthetic RunError carrying waitErr so the live
-	// TUI sees the failure mid-run. That same waitErr is also stored on
-	// AgentRun.Err and rendered in the failure header (fenced stderr block).
-	// The dump must not also render a "> agent error: <err>" blockquote for
-	// the synthetic event — that produces visible duplication where the same
-	// error text appears twice in adjacent output.
 	waitErr := errors.New("exit status 1")
 	run := reviewtypes.AgentRun{
 		Name:   "claude-code",
@@ -159,7 +143,7 @@ func TestDumpSink_DoesNotDoublePrintSyntheticRunErrorMatchingRunErr(t *testing.T
 		Buffer: []reviewtypes.Event{
 			reviewtypes.Started{},
 			reviewtypes.Finished{Success: true},
-			reviewtypes.RunError{Err: waitErr}, // synthetic, same pointer as run.Err
+			reviewtypes.RunError{Err: waitErr},
 		},
 	}
 	sink.RunFinished(makeSummary(run))
@@ -168,7 +152,6 @@ func TestDumpSink_DoesNotDoublePrintSyntheticRunErrorMatchingRunErr(t *testing.T
 	if strings.Contains(out, "> agent error:") {
 		t.Errorf("synthetic RunError matching run.Err must not produce a blockquote, got:\n%s", out)
 	}
-	// Header should still be present.
 	if !strings.Contains(out, "**Failed:**") {
 		t.Errorf("expected failure header, got:\n%s", out)
 	}

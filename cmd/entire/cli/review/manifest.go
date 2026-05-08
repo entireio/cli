@@ -90,6 +90,134 @@ func localReviewManifestFromCurrentState(
 	return buildLocalReviewManifestFromSummary(worktreeRoot, headSHA, summary, states, aggregateOutput), nil
 }
 
+func hydrateReviewSummaryTokensFromCurrentState(
+	ctx context.Context,
+	worktreeRoot string,
+	headSHA string,
+	summary reviewtypes.RunSummary,
+) (reviewtypes.RunSummary, error) {
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		return summary, fmt.Errorf("create session state store: %w", err)
+	}
+	states, err := store.List(ctx)
+	if err != nil {
+		return summary, fmt.Errorf("list session states: %w", err)
+	}
+	return hydrateReviewSummaryTokensFromStates(ctx, worktreeRoot, headSHA, summary, states), nil
+}
+
+func hydrateReviewAgentRunTokensFromCurrentState(
+	ctx context.Context,
+	worktreeRoot string,
+	headSHA string,
+	run reviewtypes.AgentRun,
+) (reviewtypes.AgentRun, error) {
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		return run, fmt.Errorf("create session state store: %w", err)
+	}
+	states, err := store.List(ctx)
+	if err != nil {
+		return run, fmt.Errorf("list session states: %w", err)
+	}
+	return hydrateReviewAgentRunTokensFromStates(ctx, worktreeRoot, headSHA, run, states), nil
+}
+
+func hydrateReviewAgentRunTokensFromStates(
+	ctx context.Context,
+	worktreeRoot string,
+	headSHA string,
+	run reviewtypes.AgentRun,
+	states []*session.State,
+) reviewtypes.AgentRun {
+	st := matchReviewSessionState(worktreeRoot, headSHA, run.StartedAt, run.Name, states, map[string]bool{})
+	if st == nil || st.SessionID == "" {
+		return run
+	}
+	tokens := reviewTokensFromTokenUsage(reviewTokenUsageForSession(ctx, st))
+	if tokens.In == 0 && tokens.Out == 0 {
+		return run
+	}
+	run.Tokens = tokens
+	return run
+}
+
+func hydrateReviewSummaryTokensFromStates(
+	ctx context.Context,
+	worktreeRoot string,
+	headSHA string,
+	summary reviewtypes.RunSummary,
+	states []*session.State,
+) reviewtypes.RunSummary {
+	usedSessions := map[string]bool{}
+	for i, run := range summary.AgentRuns {
+		st := matchReviewSessionState(worktreeRoot, headSHA, summary.StartedAt, run.Name, states, usedSessions)
+		if st == nil || st.SessionID == "" {
+			continue
+		}
+		usedSessions[st.SessionID] = true
+		tokens := reviewTokensFromTokenUsage(reviewTokenUsageForSession(ctx, st))
+		if tokens.In == 0 && tokens.Out == 0 {
+			continue
+		}
+		summary.AgentRuns[i].Tokens = tokens
+	}
+	return summary
+}
+
+func reviewTokenUsageForSession(ctx context.Context, st *session.State) *agent.TokenUsage {
+	if st == nil {
+		return nil
+	}
+	if hasReviewTokenUsageData(st.TokenUsage) {
+		return st.TokenUsage
+	}
+	if st.TranscriptPath == "" || st.AgentType == "" {
+		return nil
+	}
+	ag, err := agent.GetByAgentType(st.AgentType)
+	if err != nil {
+		return nil
+	}
+	transcript, err := os.ReadFile(st.TranscriptPath)
+	if err != nil {
+		return nil
+	}
+	return agent.CalculateTokenUsage(ctx, ag, transcript, st.CheckpointTranscriptStart, reviewSubagentsDir(st))
+}
+
+func reviewSubagentsDir(st *session.State) string {
+	if st == nil || st.TranscriptPath == "" || st.SessionID == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(st.TranscriptPath), st.SessionID, "subagents")
+}
+
+func reviewTokensFromTokenUsage(usage *agent.TokenUsage) reviewtypes.Tokens {
+	if usage == nil {
+		return reviewtypes.Tokens{}
+	}
+	tokens := reviewtypes.Tokens{
+		In:  usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens,
+		Out: usage.OutputTokens,
+	}
+	subagentTokens := reviewTokensFromTokenUsage(usage.SubagentTokens)
+	tokens.In += subagentTokens.In
+	tokens.Out += subagentTokens.Out
+	return tokens
+}
+
+func hasReviewTokenUsageData(usage *agent.TokenUsage) bool {
+	if usage == nil {
+		return false
+	}
+	if usage.InputTokens != 0 || usage.CacheCreationTokens != 0 || usage.CacheReadTokens != 0 || usage.OutputTokens != 0 || usage.APICallCount != 0 {
+		return true
+	}
+	return hasReviewTokenUsageData(usage.SubagentTokens)
+}
+
 func matchReviewSessionState(
 	worktreeRoot string,
 	headSHA string,

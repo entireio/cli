@@ -121,16 +121,13 @@ func TestTUIModel_AgentEvent_RunError(t *testing.T) {
 func TestTUIModel_DashboardShowsErrorPreviewForFailedAgent(t *testing.T) {
 	t.Parallel()
 	m := newTestModel([]string{"codex"}, func() {})
-	m.termWidth = 200 // wide enough that preview isn't truncated to nothing
+	m.termWidth = 200
 
-	theErr := errors.New("auth: invalid API key — check ANTHROPIC_API_KEY")
+	theErr := errors.New("auth: invalid API key - check ANTHROPIC_API_KEY")
 	updated, _ := m.Update(agentEventMsg{agent: "codex", ev: reviewtypes.RunError{Err: theErr}})
 	m = mustModel(t, updated)
-	out := m.dashboardView()
 
-	// When an agent has failed and we have an error message, the preview
-	// column must surface it rather than leaving the user staring at "✗ failed"
-	// with nothing else to read while other agents are still running.
+	out := m.dashboardView()
 	if !strings.Contains(out, "auth: invalid API key") {
 		t.Errorf("expected error text in dashboard preview when agent failed, got:\n%s", out)
 	}
@@ -141,11 +138,6 @@ func TestTUIModel_DashboardErrorPreviewStripsProcessErrorWrapper(t *testing.T) {
 	m := newTestModel([]string{"codex"}, func() {})
 	m.termWidth = 200
 
-	// *ProcessError carries agent name, exit error, and captured stderr.
-	// The dashboard already shows agent name (column 1) and status (column 2),
-	// so the preview should NOT prefix with "error:", "agent-name:", or
-	// "exit status N: stderr:" — those are noise. It should show the first
-	// non-empty stderr line directly so the column carries actionable info.
 	pe := &reviewtypes.ProcessError{
 		AgentName: "codex",
 		Err:       errors.New("exit status 1"),
@@ -153,13 +145,11 @@ func TestTUIModel_DashboardErrorPreviewStripsProcessErrorWrapper(t *testing.T) {
 	}
 	updated, _ := m.Update(agentEventMsg{agent: "codex", ev: reviewtypes.RunError{Err: pe}})
 	m = mustModel(t, updated)
-	out := m.dashboardView()
 
-	// First stderr line should appear.
+	out := m.dashboardView()
 	if !strings.Contains(out, "Error: rate limit exceeded") {
 		t.Errorf("preview must show first stderr line, got:\n%s", out)
 	}
-	// No noisy wrapper text.
 	for _, noise := range []string{
 		"error: codex:",
 		"exit status 1:",
@@ -176,12 +166,10 @@ func TestTUIModel_DashboardErrorPreviewFallsBackToErrStringForNonProcessError(t 
 	m := newTestModel([]string{"codex"}, func() {})
 	m.termWidth = 200
 
-	// Generic errors (parser-emitted RunError, wrapped errors, etc.) don't
-	// have agent-name/stderr wrappers to strip. Just render the error string.
 	updated, _ := m.Update(agentEventMsg{agent: "codex", ev: reviewtypes.RunError{Err: errors.New("torn stdout stream")}})
 	m = mustModel(t, updated)
-	out := m.dashboardView()
 
+	out := m.dashboardView()
 	if !strings.Contains(out, "torn stdout stream") {
 		t.Errorf("generic error should render verbatim in preview, got:\n%s", out)
 	}
@@ -192,8 +180,6 @@ func TestTUIModel_DashboardErrorPreviewYieldsToAssistantTextBeforeFailure(t *tes
 	m := newTestModel([]string{"codex"}, func() {})
 	m.termWidth = 200
 
-	// Successful run: preview should still show the assistant's narrative,
-	// not be replaced by error text (there is no error).
 	updated, _ := m.Update(agentEventMsg{agent: "codex", ev: reviewtypes.AssistantText{Text: "Found a real issue worth fixing"}})
 	m = mustModel(t, updated)
 	updated, _ = m.Update(agentEventMsg{agent: "codex", ev: reviewtypes.Finished{Success: true}})
@@ -290,8 +276,33 @@ func TestTUIModel_KeyEsc_ExitsDrillIn(t *testing.T) {
 	if cmd != nil {
 		t.Error("Esc should not return an alt-screen command in Bubble Tea v2")
 	}
-	if m2.View().AltScreen {
-		t.Error("expected View().AltScreen=false outside detail mode")
+	if !m2.View().AltScreen {
+		t.Error("expected View().AltScreen=true outside detail mode")
+	}
+}
+
+func TestTUIModel_DashboardUsesAltScreen(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+
+	if !m.View().AltScreen {
+		t.Error("expected dashboard View().AltScreen=true")
+	}
+}
+
+func TestTUIModel_FinishedStopsTickRedraws(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+	m = mustModel(t, updated)
+
+	_, tickCmd := m.Update(tickMsg(time.Now()))
+	if tickCmd != nil {
+		t.Fatal("finished dashboard should not schedule duration ticks")
+	}
+	_, spinnerCmd := m.Update(m.spinner.Tick())
+	if spinnerCmd != nil {
+		t.Fatal("finished dashboard should not schedule spinner ticks")
 	}
 }
 
@@ -485,6 +496,16 @@ func TestTUIModel_WindowResizeKeepsDashboardWithinNewWidth(t *testing.T) {
 	assertDashboardFitsWidth(t, m)
 }
 
+func TestTUIModel_DashboardUsesMeasuredTerminalWidthBeforeResizeMsg(t *testing.T) {
+	t.Parallel()
+	m := runningDashboardModel(t, 80)
+	m.measureTerminal = func() (int, int, bool) {
+		return 30, 24, true
+	}
+
+	assertDashboardFitsWidthAt(t, m, 30)
+}
+
 func runningDashboardModel(t *testing.T, width int) reviewTUIModel {
 	t.Helper()
 	m := newReviewTUIModel([]string{"claude-code-with-a-long-name", "codex"}, nil)
@@ -504,9 +525,14 @@ func runningDashboardModel(t *testing.T, width int) reviewTUIModel {
 
 func assertDashboardFitsWidth(t *testing.T, m reviewTUIModel) {
 	t.Helper()
+	assertDashboardFitsWidthAt(t, m, m.termWidth)
+}
+
+func assertDashboardFitsWidthAt(t *testing.T, m reviewTUIModel, width int) {
+	t.Helper()
 	for _, line := range strings.Split(strings.TrimSuffix(m.dashboardView(), "\n"), "\n") {
-		if got := ansi.StringWidth(line); got > m.termWidth {
-			t.Fatalf("dashboard line width = %d, want <= %d:\n%s", got, m.termWidth, line)
+		if got := ansi.StringWidth(line); got > width {
+			t.Fatalf("dashboard line width = %d, want <= %d:\n%s", got, width, line)
 		}
 	}
 }
@@ -585,6 +611,26 @@ func TestTUIModel_RunFinishedMsg_SyncsStatusFromSummary(t *testing.T) {
 	}
 	if m.rows[1].status != reviewtypes.AgentStatusFailed {
 		t.Errorf("expected agent-b synced to Failed, got %v", m.rows[1].status)
+	}
+}
+
+func TestTUIModel_RunFinishedMsg_SyncsTokensFromSummary(t *testing.T) {
+	t.Parallel()
+	m := newReviewTUIModel([]string{"agent-a"}, nil)
+
+	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{
+		AgentRuns: []reviewtypes.AgentRun{
+			{
+				Name:   "agent-a",
+				Status: reviewtypes.AgentStatusSucceeded,
+				Tokens: reviewtypes.Tokens{In: 1200, Out: 345},
+			},
+		},
+	}})
+	m = mustModel(t, updated)
+
+	if got := m.rows[0].tokens; got.In != 1200 || got.Out != 345 {
+		t.Fatalf("tokens = {%d %d}, want {1200 345}", got.In, got.Out)
 	}
 }
 

@@ -102,6 +102,15 @@ type RunConfig struct {
 	// hook via ENTIRE_REVIEW_STARTING_SHA so checkpoint metadata records
 	// the commit that was reviewed.
 	StartingSHA string
+
+	// EnrichSummary optionally updates the completed run summary before sinks
+	// receive RunFinished. It is used for post-process data such as token
+	// totals that are only available after agent lifecycle hooks flush state.
+	EnrichSummary func(context.Context, RunSummary) RunSummary
+
+	// EnrichAgentRun optionally updates a single agent run after that agent
+	// exits, before the overall multi-agent run has necessarily completed.
+	EnrichAgentRun func(context.Context, AgentRun) AgentRun
 }
 
 // Event is the sealed sum type emitted by Process.Events. The unexported

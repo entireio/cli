@@ -344,12 +344,6 @@ func TestRun_TokenTracking(t *testing.T) {
 
 func TestRun_EmitsSyntheticRunErrorWhenWaitErrIsNonNil(t *testing.T) {
 	t.Parallel()
-	// Common case: parser reads agent's stdout to clean EOF (no scanner error)
-	// and emits Finished{Success:true} — but the agent process actually exited
-	// non-zero with stderr. The waitErr captures that. Without a synthetic
-	// RunError emitted post-Wait, sinks (TUI, dump) only learn about the
-	// failure via RunFinished — too late for the live dashboard to flip from
-	// "✓ done" to "✗ failed" while other agents are still running.
 	waitErr := errors.New("exit status 1: stderr: invalid_api_key")
 	reviewer := &stubReviewer{
 		name: "claude-code",
@@ -366,8 +360,6 @@ func TestRun_EmitsSyntheticRunErrorWhenWaitErrIsNonNil(t *testing.T) {
 		t.Fatal("expected non-nil error from failing run")
 	}
 
-	// Look for a RunError event in the live stream (forwarded to sinks via
-	// AgentEvent) carrying the wait error.
 	var found bool
 	for _, evt := range rec.agentEvents {
 		if re, ok := evt.ev.(reviewtypes.RunError); ok && re.Err != nil && re.Err.Error() == waitErr.Error() {
@@ -376,15 +368,12 @@ func TestRun_EmitsSyntheticRunErrorWhenWaitErrIsNonNil(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("expected synthetic RunError(waitErr) in live sink stream after Wait, got events: %+v", rec.agentEvents)
+		t.Errorf("expected synthetic RunError(waitErr) in live sink stream, got events: %+v", rec.agentEvents)
 	}
 }
 
 func TestRun_DoesNotEmitSyntheticRunErrorOnCleanExit(t *testing.T) {
 	t.Parallel()
-	// Happy path: process exits 0, parser sees clean EOF. No synthetic
-	// RunError should appear — the existing Finished{Success:true} is the
-	// authoritative signal.
 	reviewer := &stubReviewer{
 		name: "claude-code",
 		events: []reviewtypes.Event{
@@ -392,7 +381,6 @@ func TestRun_DoesNotEmitSyntheticRunErrorOnCleanExit(t *testing.T) {
 			reviewtypes.AssistantText{Text: "looks good"},
 			reviewtypes.Finished{Success: true},
 		},
-		waitErr: nil,
 	}
 	rec := &stubSinkRecorder{}
 
@@ -405,6 +393,63 @@ func TestRun_DoesNotEmitSyntheticRunErrorOnCleanExit(t *testing.T) {
 		if _, ok := evt.ev.(reviewtypes.RunError); ok {
 			t.Errorf("clean exit should not produce a synthetic RunError, got: %+v", evt.ev)
 		}
+	}
+}
+
+func TestRun_DoesNotEmitSyntheticRunErrorOnCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reviewer := &stubReviewer{
+		name: "claude-code",
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.Finished{Success: true},
+		},
+		waitErr: context.Canceled,
+	}
+	rec := &stubSinkRecorder{}
+
+	summary, err := Run(ctx, reviewer, reviewtypes.RunConfig{}, []reviewtypes.Sink{rec})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if got := summary.AgentRuns[0].Status; got != reviewtypes.AgentStatusCancelled {
+		t.Fatalf("summary status = %v, want Cancelled", got)
+	}
+	for _, evt := range rec.agentEvents {
+		if _, ok := evt.ev.(reviewtypes.RunError); ok {
+			t.Errorf("cancelled run should not produce synthetic RunError, got: %+v", evt.ev)
+		}
+	}
+}
+
+func TestRun_EnrichesSummaryBeforeRunFinished(t *testing.T) {
+	t.Parallel()
+	reviewer := &stubReviewer{
+		name:   "agent-a",
+		events: []reviewtypes.Event{reviewtypes.Started{}, reviewtypes.Finished{Success: true}},
+	}
+	rec := &stubSinkRecorder{}
+	cfg := reviewtypes.RunConfig{
+		EnrichSummary: func(_ context.Context, summary reviewtypes.RunSummary) reviewtypes.RunSummary {
+			summary.AgentRuns[0].Tokens = reviewtypes.Tokens{In: 42, Out: 7}
+			return summary
+		},
+	}
+
+	summary, err := Run(context.Background(), reviewer, cfg, []reviewtypes.Sink{rec})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := summary.AgentRuns[0].Tokens; got.In != 42 || got.Out != 7 {
+		t.Fatalf("summary tokens = {%d %d}, want {42 7}", got.In, got.Out)
+	}
+	if len(rec.finishedCalls) != 1 {
+		t.Fatalf("finished calls = %d, want 1", len(rec.finishedCalls))
+	}
+	if got := rec.finishedCalls[0].AgentRuns[0].Tokens; got.In != 42 || got.Out != 7 {
+		t.Fatalf("sink summary tokens = {%d %d}, want {42 7}", got.In, got.Out)
 	}
 }
 

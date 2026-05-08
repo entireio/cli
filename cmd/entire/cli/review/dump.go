@@ -70,10 +70,6 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 			if !ok || re.Err == nil {
 				continue
 			}
-			// Skip the synthetic RunError that the orchestrator emits to drive
-			// live TUI updates: it carries the same error as run.Err, which
-			// the failure header already rendered. Without this the same
-			// error text appears twice in adjacent output blocks.
 			if run.Err != nil && errors.Is(re.Err, run.Err) {
 				continue
 			}
@@ -103,12 +99,6 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 	fmt.Fprint(s.W, rendered)
 }
 
-// writeFailureHeader formats the failure block for a failed agent run.
-// When run.Err is a *ProcessError carrying captured stderr, the stderr is
-// rendered in a fenced code block on its own — preserving newlines so multi-line
-// agent CLI output (auth errors, stack traces, etc.) is readable instead of
-// collapsed inside an inline-code span. Generic errors (non-ProcessError, or
-// ProcessError without stderr) keep the inline backtick rendering.
 func writeFailureHeader(b *strings.Builder, runErr error) {
 	if runErr == nil {
 		b.WriteString("**Failed**\n\n")

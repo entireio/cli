@@ -132,17 +132,18 @@ func RunMulti(
 				fanIn <- taggedEvent{agentIdx: idx, ev: ev}
 			}
 			waitErr := p.Wait()
+			finishedAt := time.Now()
 			states[idx].waitErr = waitErr
-			states[idx].finishedAt = time.Now()
-			// Emit a synthetic RunError so sinks (TUI dashboard, dump) see
-			// the failure live rather than only via RunFinished. Otherwise
-			// the parser's clean-EOF Finished{Success:true} leaves a row
-			// showing "✓ done" even when the agent process exited non-zero,
-			// for the entire remaining duration of any other still-running
-			// agents.
-			if waitErr != nil {
+			states[idx].finishedAt = finishedAt
+			if shouldEmitSyntheticRunError(ctx, waitErr) {
 				fanIn <- taggedEvent{agentIdx: idx, ev: reviewtypes.RunError{Err: waitErr}}
 			}
+			emitEnrichedAgentTokens(ctx, cfg, fanIn, idx, reviewtypes.AgentRun{
+				Name:      states[idx].name,
+				StartedAt: states[idx].startedAt,
+				Duration:  finishedAt.Sub(states[idx].startedAt),
+				Err:       waitErr,
+			})
 		}(i, proc)
 	}
 
@@ -218,9 +219,27 @@ func RunMulti(
 		Cancelled:  cancelled,
 		AgentRuns:  agentRuns,
 	}
+	summary = enrichRunSummary(ctx, cfg, summary)
 	for _, sink := range sinks {
 		sink.RunFinished(summary)
 	}
 
 	return summary, firstErr
+}
+
+func emitEnrichedAgentTokens(
+	ctx context.Context,
+	cfg reviewtypes.RunConfig,
+	fanIn chan<- taggedEvent,
+	agentIdx int,
+	run reviewtypes.AgentRun,
+) {
+	if cfg.EnrichAgentRun == nil {
+		return
+	}
+	enriched := cfg.EnrichAgentRun(ctx, run)
+	if enriched.Tokens.In == 0 && enriched.Tokens.Out == 0 {
+		return
+	}
+	fanIn <- taggedEvent{agentIdx: agentIdx, ev: enriched.Tokens}
 }
