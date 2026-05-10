@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -184,7 +185,7 @@ func TestReviewCommandSmoke_IncludesCheckpointContextInPrompt(t *testing.T) {
 	prompt := string(promptBytes)
 	for _, want := range []string{
 		"/review",
-		"Scope: review only the commits unique to this branch vs master.",
+		"Scope: review the commits unique to this branch vs master, plus any uncommitted changes in the working tree. Ignore code outside this scope.",
 		"Checkpoint context from commits in scope:",
 		checkpointID,
 		"summary: smoke checkpoint summary; review smoke receives checkpoint summary",
@@ -192,6 +193,104 @@ func TestReviewCommandSmoke_IncludesCheckpointContextInPrompt(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("captured review prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+// TestReviewCommandSmoke_BaseFlagThreadsThroughToPromptAndBanner verifies
+// that the `--base <ref>` flag survives the full cobra → runReview →
+// runSingleAgentPath → detectScope → ComputeScopeStats → ComposeReviewPrompt
+// chain. Without a command-level test, regressions in the flag wiring (like
+// the silentErr suppression bug caught in smoke) wouldn't be caught by the
+// unit tests that exercise ComputeScopeStats in isolation.
+func TestReviewCommandSmoke_BaseFlagThreadsThroughToPromptAndBanner(t *testing.T) {
+	repoRoot := newReviewContextRepo(t)
+	t.Chdir(repoRoot)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	// Create feat/parent at the current HEAD (which is feat/review's branch
+	// point). --base feat/parent will then be a valid override.
+	//nolint:noctx // test helper
+	branchCmd := exec.Command("git", "branch", "feat/parent")
+	branchCmd.Dir = repoRoot
+	if out, err := branchCmd.CombinedOutput(); err != nil {
+		t.Fatalf("create feat/parent: %v\n%s", err, out)
+	}
+
+	// Add a commit on feat/review so the scope is non-empty.
+	commitReviewContextChange(t, repoRoot, "feature.go", "feat\n", "add feature", "")
+
+	installReviewContextClaudeHooks(t)
+	writeReviewContextSettings(t, repoRoot)
+
+	stubDir := t.TempDir()
+	promptPath := filepath.Join(t.TempDir(), "prompt.txt")
+	writeReviewContextClaudeStub(t, stubDir)
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ENTIRE_SMOKE_PROMPT_FILE", promptPath)
+
+	cmd := NewRootCmd()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"review", "--agent", string(agent.AgentNameClaudeCode), "--base", "feat/parent"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("entire review failed: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), errOut.String())
+	}
+
+	promptBytes, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatalf("read captured prompt: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), errOut.String())
+	}
+	prompt := string(promptBytes)
+	if !strings.Contains(prompt, "vs feat/parent") {
+		t.Errorf("agent prompt must include scope clause referencing the --base override; got:\n%s", prompt)
+	}
+	if !strings.Contains(out.String(), "vs feat/parent") {
+		t.Errorf("scope banner must reflect --base override; got stdout:\n%s", out.String())
+	}
+}
+
+// TestReviewCommandSmoke_BadBaseRefErrorsBeforeAgentSpawn verifies that a
+// non-existent --base ref aborts the run before the agent is invoked, with
+// an error message that names the bad ref so the user can fix it.
+// Regression guard for the silentErr-suppression bug where the validation
+// error existed but was swallowed by main.go's SilentError handling.
+func TestReviewCommandSmoke_BadBaseRefErrorsBeforeAgentSpawn(t *testing.T) {
+	repoRoot := newReviewContextRepo(t)
+	t.Chdir(repoRoot)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	installReviewContextClaudeHooks(t)
+	writeReviewContextSettings(t, repoRoot)
+
+	stubDir := t.TempDir()
+	promptPath := filepath.Join(t.TempDir(), "prompt.txt")
+	writeReviewContextClaudeStub(t, stubDir)
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ENTIRE_SMOKE_PROMPT_FILE", promptPath)
+
+	cmd := NewRootCmd()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"review", "--agent", string(agent.AgentNameClaudeCode), "--base", "no-such-ref"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected non-nil error for invalid --base ref; stdout:\n%s\nstderr:\n%s", out.String(), errOut.String())
+	}
+	if !strings.Contains(err.Error(), "no-such-ref") {
+		t.Errorf("error must name the bad ref so the user knows what to fix; got: %v", err)
+	}
+	// Agent stub must NOT have been invoked.
+	if _, statErr := os.Stat(promptPath); statErr == nil {
+		captured, _ := os.ReadFile(promptPath) //nolint:errcheck // best-effort debug read
+		t.Errorf("agent stub was invoked despite invalid --base; captured prompt:\n%s", string(captured))
 	}
 }
 

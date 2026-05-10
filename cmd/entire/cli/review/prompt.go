@@ -41,9 +41,15 @@ func ComposeReviewPrompt(cfg reviewtypes.RunConfig) string {
 		sections = append(sections, trimmed)
 	}
 
-	// Scope clause: only when a base ref was detected.
+	// Scope clause: only when a base ref was detected. Includes uncommitted
+	// working-tree changes alongside the committed branch diff so iterative
+	// edits-in-progress are reviewed too — without this, agents correctly
+	// follow "commits-only" wording and silently skip uncommitted work,
+	// which is the most common case when a developer is mid-feature.
 	if cfg.ScopeBaseRef != "" {
-		sections = append(sections, "Scope: review only the commits unique to this branch vs "+cfg.ScopeBaseRef+".")
+		sections = append(sections,
+			"Scope: review the commits unique to this branch vs "+cfg.ScopeBaseRef+
+				", plus any uncommitted changes in the working tree. Ignore code outside this scope.")
 	}
 	if trimmed := strings.TrimRight(cfg.CheckpointContext, "\n\r "); trimmed != "" {
 		sections = append(sections, trimmed)
