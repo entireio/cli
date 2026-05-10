@@ -434,6 +434,13 @@ func detectScope(ctx context.Context, worktreeRoot, baseOverride string, out io.
 	repo, openErr := git.PlainOpen(worktreeRoot)
 	if openErr != nil {
 		logging.Debug(ctx, "review repo open failed", slog.String("error", openErr.Error()))
+		// Fail-loud when the user explicitly asked for a base. Without this
+		// branch an explicit --base flag would be silently dropped on
+		// PlainOpen failure, inconsistent with the ComputeScopeStats error
+		// path below that aborts on bad overrides.
+		if baseOverride != "" {
+			return "", fmt.Errorf("--base %q given but cannot open repository at %q: %w", baseOverride, worktreeRoot, openErr)
+		}
 		return "", nil
 	}
 	stats, statsErr := ComputeScopeStats(ctx, repo, baseOverride)
