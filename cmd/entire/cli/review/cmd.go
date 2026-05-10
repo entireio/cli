@@ -127,8 +127,8 @@ Flags:
                  configured (default: alphabetically first)
   --base REF     scope the review against REF instead of mainline. Useful
                  for stacked PRs where the review base is the parent feature
-                 branch, not main. Default: first existing of origin/main,
-                 origin/master, main, master.
+                 branch, not main. Default: first existing of origin/HEAD,
+                 origin/main, origin/master, main, master.
 
 Subcommands:
   attach <id>    tag an existing session as a review (equivalent to
@@ -187,7 +187,7 @@ Subcommands:
 	cmd.Flags().BoolVar(&fix, "fix", false, "apply review findings in a normal agent session")
 	cmd.Flags().BoolVar(&all, "all", false, "with --fix, apply all sources/findings without selectors")
 	cmd.Flags().StringVar(&agentOverride, "agent", "", "select a specific configured agent (default: alphabetically first)")
-	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/main → main → master)")
+	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
 	if deps.AttachCmd != nil {
 		cmd.AddCommand(deps.AttachCmd)
 	}

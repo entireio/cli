@@ -159,10 +159,6 @@ func TestDetectScopeBaseRef_BranchOffMain(t *testing.T) {
 	}
 }
 
-// TestDetectScopeBaseRef_ClosestAncestorPreferred verifies that a branch
-// stacked on top of another feature branch returns the immediate parent
-// (more recent tip), not the more distant main.
-// Cannot use t.Parallel because it modifies the repo state.
 // TestDetectScopeBaseRef_PrefersMainOverAncestorBranches verifies that the
 // scope detection picks the mainline (origin/main → origin/master → main →
 // master) regardless of whether intermediate ancestor branches exist with
