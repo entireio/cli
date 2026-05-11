@@ -389,6 +389,14 @@ func isPostFinishExitKey(msg tea.KeyPressMsg) bool {
 }
 
 // View renders the current state.
+//
+// In detail mode we enable [tea.MouseModeCellMotion] so the embedded
+// [viewport.Model] receives mouse-wheel events natively — the viewport handles
+// them as scroll, but only if the Bubble Tea program is configured to deliver
+// mouse messages. Bubble Tea v2 expresses that config as a per-view field
+// rather than a Program option, so it lives here next to AltScreen.
+// Dashboard mode leaves the default [tea.MouseModeNone] in place so normal
+// terminal mouse selection still works on the summary table.
 func (m reviewTUIModel) View() tea.View {
 	var content string
 	if m.detailMode && len(m.rows) > 0 {
@@ -398,6 +406,9 @@ func (m reviewTUIModel) View() tea.View {
 	}
 	v := tea.NewView(content)
 	v.AltScreen = m.detailMode
+	if m.detailMode {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	return v
 }
 

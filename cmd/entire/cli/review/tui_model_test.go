@@ -193,6 +193,9 @@ func TestTUIModel_KeyCtrlO_EntersDrillIn(t *testing.T) {
 	if !m2.View().AltScreen {
 		t.Error("expected View().AltScreen=true in detail mode")
 	}
+	if got := m2.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Errorf("expected View().MouseMode=MouseModeCellMotion in detail mode (so viewport gets wheel events); got %v", got)
+	}
 }
 
 func TestTUIModel_KeyEsc_ExitsDrillIn(t *testing.T) {
@@ -210,6 +213,9 @@ func TestTUIModel_KeyEsc_ExitsDrillIn(t *testing.T) {
 	}
 	if m2.View().AltScreen {
 		t.Error("expected View().AltScreen=false outside detail mode")
+	}
+	if got := m2.View().MouseMode; got != tea.MouseModeNone {
+		t.Errorf("expected View().MouseMode=MouseModeNone outside detail mode (preserve normal terminal selection on dashboard); got %v", got)
 	}
 }
 
