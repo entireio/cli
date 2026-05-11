@@ -1,0 +1,100 @@
+{
+  "sessionId": "fa4593e0-f7e1-4dd1-b656-da95fb4d60fa",
+  "projectHash": "7e8989f71805c3147f6be9b7a71de2a156f8face69f9380beeeb8a777414f21c",
+  "startTime": "2026-01-10T20:00:21.501Z",
+  "lastUpdated": "2026-01-10T20:00:32.660Z",
+  "messages": [
+    {
+      "id": "01665c1b-14c0-4a3d-a48e-828153ec11c1",
+      "timestamp": "2026-01-10T20:00:21.501Z",
+      "type": "user",
+      "content": "write to test-gemini.txt \"hello, gemini\" only"
+    },
+    {
+      "id": "51a3e278-75ec-4444-a41b-daf33a49b230",
+      "timestamp": "2026-01-10T20:00:27.560Z",
+      "type": "gemini",
+      "content": "",
+      "toolCalls": [
+        {
+          "id": "write_file-1768075225055-902f304bae8ae",
+          "name": "write_file",
+          "args": {
+            "file_path": "test-gemini.txt",
+            "content": "hello, gemini"
+          },
+          "result": [
+            {
+              "functionResponse": {
+                "id": "write_file-1768075225055-902f304bae8ae",
+                "name": "write_file",
+                "response": {
+                  "output": "Successfully overwrote file: /Users/peytonmontei/Documents/entire/devenv/entireio/cli/test-gemini.txt."
+                }
+              }
+            }
+          ],
+          "status": "success",
+          "timestamp": "2026-01-10T20:00:27.560Z",
+          "displayName": "WriteFile",
+          "description": "Writes content to a specified file in the local filesystem.\n\n      The user has the ability to modify `content`. If modified, this will be stated in the response.",
+          "renderOutputAsMarkdown": true
+        }
+      ],
+      "thoughts": [
+        {
+          "subject": "Reflecting on Implementation",
+          "description": "I'm now contemplating how to execute this action. The `write_file` tool seems perfectly suited, and the necessary parameters are clear. I've pinpointed the `file_path` and the `content` accurately. I'm ready to proceed with the function call to make it happen.",
+          "timestamp": "2026-01-10T20:00:24.059Z"
+        },
+        {
+          "subject": "Formulating the Write Command",
+          "description": "I've got the data I need, and the correct tool is selected. My focus is now on the precise command syntax for the `write_file` tool. I'm verifying the argument structure to ensure the \"hello, gemini\" string gets written to the correct destination: test-gemini.txt.",
+          "timestamp": "2026-01-10T20:00:24.722Z"
+        }
+      ],
+      "model": "gemini-2.5-flash",
+      "tokens": {
+        "input": 12059,
+        "output": 17,
+        "cached": 0,
+        "thoughts": 75,
+        "tool": 0,
+        "total": 12151
+      }
+    },
+    {
+      "id": "afd7447c-a2cb-409a-a875-8048af60ba1c",
+      "timestamp": "2026-01-10T20:00:29.705Z",
+      "type": "user",
+      "content": "System: Please continue."
+    },
+    {
+      "id": "bb58d15c-8703-44cf-aa1f-8ac945f39452",
+      "timestamp": "2026-01-10T20:00:32.660Z",
+      "type": "gemini",
+      "content": "I've completed the previous request. What would you like to do next?",
+      "thoughts": [
+        {
+          "subject": "Anticipating Further Directives",
+          "description": "\\n\\n\n\nI'm currently poised, ready to receive and process the next command. My internal systems are refreshed, and I'm prepared to execute whatever task is assigned. The previous operation is finalized, and I'm eagerly awaiting the next instruction.",
+          "timestamp": "2026-01-10T20:00:32.006Z"
+        },
+        {
+          "subject": "Patiently Awaiting Command",
+          "description": "\\n\\n\n\nMy primary function is to await further input. The system is idle, pending the user's next directive. Having completed the prior instruction set, I am in a state of readiness, awaiting the initiation of a new task, or perhaps even another clarification request.",
+          "timestamp": "2026-01-10T20:00:32.616Z"
+        }
+      ],
+      "tokens": {
+        "input": 12117,
+        "output": 16,
+        "cached": 11835,
+        "thoughts": 45,
+        "tool": 0,
+        "total": 12178
+      },
+      "model": "gemini-2.5-flash"
+    }
+  ]
+}
