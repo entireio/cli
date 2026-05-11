@@ -70,7 +70,7 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 			if !ok || re.Err == nil {
 				continue
 			}
-			if run.Err != nil && errors.Is(re.Err, run.Err) {
+			if sameFailureError(re.Err, run.Err) {
 				continue
 			}
 			fmt.Fprintf(&b, "> agent error: `%v`\n\n", re.Err)
@@ -111,6 +111,13 @@ func writeFailureHeader(b *strings.Builder, runErr error) {
 		return
 	}
 	fmt.Fprintf(b, "**Failed:** `%v`\n\n", runErr)
+}
+
+func sameFailureError(a, b error) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return errors.Is(a, b) || errors.Is(b, a)
 }
 
 // joinAssistantText extracts AssistantText events from a buffer and joins

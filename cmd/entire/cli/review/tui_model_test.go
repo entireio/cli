@@ -496,12 +496,9 @@ func TestTUIModel_WindowResizeKeepsDashboardWithinNewWidth(t *testing.T) {
 	assertDashboardFitsWidth(t, m)
 }
 
-func TestTUIModel_DashboardUsesMeasuredTerminalWidthBeforeResizeMsg(t *testing.T) {
+func TestTUIModel_DashboardUsesCachedTerminalWidthBeforeResizeMsg(t *testing.T) {
 	t.Parallel()
-	m := runningDashboardModel(t, 80)
-	m.measureTerminal = func() (int, int, bool) {
-		return 30, 24, true
-	}
+	m := runningDashboardModel(t, 30)
 
 	assertDashboardFitsWidthAt(t, m, 30)
 }

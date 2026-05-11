@@ -37,8 +37,9 @@ import (
 // Write paths (no mutex; the close-after-wait protocol below provides
 // happens-before for both):
 //   - waitErr and finishedAt are written by the per-agent forwarding
-//     goroutine after its proc.Events range loop exits, immediately before
-//     wg.Done.
+//     goroutine after its proc.Events range loop exits. That goroutine may
+//     still send final derived events (synthetic RunError, enriched Tokens)
+//     before wg.Done.
 //   - All other mutable fields (events buffer, tokens, finishedSeen,
 //     finishedOk, sawRunError) are written from the single dispatch loop
 //     reading the fan-in channel.

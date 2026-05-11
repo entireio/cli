@@ -20,6 +20,8 @@ import (
 
 const localReviewManifestVersion = 1
 
+var reviewAgentByType = agent.GetByAgentType // overridable in tests without mutating the global agent registry
+
 // LocalReviewManifest records one local `entire review` invocation. It lets
 // `entire review --fix <session-id>` use a single session id as the lookup
 // handle while still loading sibling agent outputs from the same review run.
@@ -176,7 +178,7 @@ func reviewTokenUsageForSession(ctx context.Context, st *session.State) *agent.T
 	if st.TranscriptPath == "" || st.AgentType == "" {
 		return nil
 	}
-	ag, err := agent.GetByAgentType(st.AgentType)
+	ag, err := reviewAgentByType(st.AgentType)
 	if err != nil {
 		return nil
 	}

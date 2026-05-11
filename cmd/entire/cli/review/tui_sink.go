@@ -53,9 +53,8 @@ var _ reviewtypes.Sink = (*TUISink)(nil)
 // OS signal path share a single cancel function with no race.
 func NewTUISink(agents []string, cancel context.CancelFunc, output io.Writer) *TUISink {
 	model := newReviewTUIModel(agents, cancel)
-	model.measureTerminal = terminalMeasurer(output)
-	if model.measureTerminal != nil {
-		if width, height, ok := model.measureTerminal(); ok {
+	if measureTerminal := terminalMeasurer(output); measureTerminal != nil {
+		if width, height, ok := measureTerminal(); ok {
 			model.termWidth = width
 			model.termHeight = height
 		}

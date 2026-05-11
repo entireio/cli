@@ -157,6 +157,31 @@ func TestDumpSink_DoesNotDoublePrintSyntheticRunErrorMatchingRunErr(t *testing.T
 	}
 }
 
+func TestDumpSink_DoesNotDoublePrintRunErrorWrappedByRunErr(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	sink := DumpSink{W: &buf}
+
+	streamErr := errors.New("torn stdout stream")
+	run := reviewtypes.AgentRun{
+		Name:   "claude-code",
+		Status: reviewtypes.AgentStatusFailed,
+		Err:    agentRunFailureError("claude-code", streamErr),
+		Buffer: []reviewtypes.Event{
+			reviewtypes.RunError{Err: streamErr},
+		},
+	}
+	sink.RunFinished(makeSummary(run))
+
+	out := buf.String()
+	if strings.Contains(out, "> agent error:") {
+		t.Errorf("RunError wrapped by run.Err must not be printed again, got:\n%s", out)
+	}
+	if !strings.Contains(out, "review agent claude-code reported failure: torn stdout stream") {
+		t.Errorf("expected wrapped failure header, got:\n%s", out)
+	}
+}
+
 func TestDumpSink_FailedAgentRunErrorEvent(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer

@@ -64,8 +64,6 @@ type reviewTUIModel struct {
 	termWidth  int
 	termHeight int
 
-	measureTerminal func() (width int, height int, ok bool)
-
 	finished bool
 	summary  reviewtypes.RunSummary
 }
@@ -380,16 +378,6 @@ func (m reviewTUIModel) dashboardWidth() int {
 func (m reviewTUIModel) currentTerminalSize() (int, int) {
 	width := m.termWidth
 	height := m.termHeight
-	if m.measureTerminal != nil {
-		if measuredWidth, measuredHeight, ok := m.measureTerminal(); ok {
-			if measuredWidth > 0 {
-				width = measuredWidth
-			}
-			if measuredHeight > 0 {
-				height = measuredHeight
-			}
-		}
-	}
 	if width <= 0 {
 		width = 80
 	}

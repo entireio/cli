@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -58,7 +59,16 @@ func TestHydrateReviewSummaryTokensFromStates_PopulatesTokensFromSessionState(t 
 }
 
 func TestHydrateReviewSummaryTokensFromStates_FallsBackToTranscript(t *testing.T) {
-	agent.Register(manifestTokenTestAgentName, func() agent.Agent { return manifestTokenTestAgent{} })
+	originalReviewAgentByType := reviewAgentByType
+	reviewAgentByType = func(agentType agenttypes.AgentType) (agent.Agent, error) {
+		if agentType != manifestTokenTestAgentType {
+			return nil, errors.New("unexpected agent type")
+		}
+		return manifestTokenTestAgent{}, nil
+	}
+	t.Cleanup(func() {
+		reviewAgentByType = originalReviewAgentByType
+	})
 
 	started := time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
@@ -89,6 +99,9 @@ func TestHydrateReviewSummaryTokensFromStates_FallsBackToTranscript(t *testing.T
 	tokens := got.AgentRuns[0].Tokens
 	if tokens.In != 150 || tokens.Out != 50 {
 		t.Fatalf("tokens = {%d %d}, want {150 50}", tokens.In, tokens.Out)
+	}
+	if slices.Contains(agent.List(), manifestTokenTestAgentName) {
+		t.Fatalf("test agent %q leaked into global registry", manifestTokenTestAgentName)
 	}
 }
 
