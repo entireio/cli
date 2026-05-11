@@ -185,6 +185,20 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseWheelMsg, tea.MouseClickMsg, tea.MouseReleaseMsg, tea.MouseMotionMsg:
+		// Mouse events: only meaningful inside the drill-in viewport, which
+		// reads tea.MouseWheelMsg natively (see bubbles/v2/viewport.go:696).
+		// Without this delegation the events arrive at the Program (because
+		// View.MouseMode = MouseModeCellMotion is set during detail mode)
+		// but fall through Update unhandled — the user sees no scroll
+		// response to the wheel.
+		if m.detailMode {
+			var cmd tea.Cmd
+			m.detail, cmd = m.detail.Update(msg)
+			return m, cmd
+		}
+		return m, nil
 	}
 	return m, nil
 }
