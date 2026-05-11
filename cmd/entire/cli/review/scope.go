@@ -69,11 +69,11 @@ func formatScopeBanner(stats ScopeStats) string {
 // baseOverride, if non-empty, bypasses the mainline auto-detection and is
 // used as the scope base directly. This is the entry point for the
 // `--base <ref>` command-line flag. The override is verified via
-// `git rev-parse --verify <ref>^{commit}` (the `^{commit}` peel ensures
-// the ref resolves to a commit, not a tag or tree) before being used; an
-// unknown ref produces an error before any agents are spawned, so users
-// learn about the typo immediately instead of after a 10-minute review run
-// scoped against a default the flag was supposed to override.
+// `repo.ResolveRevision(plumbing.Revision(<ref>))` (matching the codebase
+// pattern in explain.go:156) before being used; an unknown ref produces an
+// error before any agents are spawned, so users learn about the typo
+// immediately instead of after a 10-minute review run scoped against a
+// default the flag was supposed to override.
 func ComputeScopeStats(ctx context.Context, repo *git.Repository, baseOverride string) (ScopeStats, error) {
 	repoRoot, err := repoWorktreePath(repo)
 	if err != nil {
