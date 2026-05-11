@@ -188,6 +188,30 @@ name: second
 `,
 			want: []string{"trailing"},
 		},
+		{
+			name:       "rule id with disallowed characters",
+			sourcePath: "bad-id.yaml",
+			body: `
+name: bad-id
+version: 1.0.0
+rules:
+  - id: 'has space'
+    regex: 'X+'
+`,
+			want: []string{"rules[0].id", "characters"},
+		},
+		{
+			name:       "rule id exceeds length cap",
+			sourcePath: "long-id.yaml",
+			body: `
+name: long-id
+version: 1.0.0
+rules:
+  - id: ` + strings.Repeat("a", maxIdentifierLen+1) + `
+    regex: 'X+'
+`,
+			want: []string{"rules[0].id", "limit"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -338,6 +362,33 @@ rules:
 	}
 	if !got["team"] || !got["personal"] {
 		t.Errorf("expected team+personal packs, got %v", got)
+	}
+}
+
+func TestLoadPacks_SkipsOversizedFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mustWrite(t, dir, "tiny.yaml", `
+name: tiny
+version: 1.0.0
+rules:
+  - id: t
+    regex: 'T+'
+`)
+	// Build a YAML body large enough to exceed maxPackFileBytes.
+	var b strings.Builder
+	b.WriteString("name: huge\nversion: 1.0.0\ndescription: ")
+	b.WriteString(strings.Repeat("x", maxPackFileBytes+1))
+	b.WriteString("\nrules:\n  - id: h\n    regex: 'H+'\n")
+	mustWrite(t, dir, "huge.yaml", b.String())
+
+	packs, err := LoadPacks(dir)
+	if err != nil {
+		t.Fatalf("LoadPacks: %v", err)
+	}
+	if len(packs) != 1 || packs[0].Name != "tiny" {
+		t.Fatalf("expected only tiny pack, got %#v", packs)
 	}
 }
 

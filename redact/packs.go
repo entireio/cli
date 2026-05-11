@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -17,6 +18,28 @@ import (
 
 // RedactorsDirName is the .entire subdirectory used for user-defined rule packs.
 const RedactorsDirName = "redactors"
+
+// maxIdentifierLen caps the length of pack Name and rule ID values. Both fields
+// flow into slog attrs and into directory-derived diagnostics; the bound prevents
+// a runaway YAML scalar from blowing up log lines.
+const maxIdentifierLen = 64
+
+// maxPackFileBytes caps the per-file size LoadPacks will parse. The trust
+// boundary is "user owns repo," so this is not a security barrier — it is a
+// runaway-input guard that keeps an accidentally large YAML out of the
+// redaction startup path.
+const maxPackFileBytes = 1 << 20 // 1 MiB
+
+// maxPackFiles caps how many pack files LoadPacks will accept under one
+// .entire/redactors/ tree. Same trust model as maxPackFileBytes: prevents a
+// runaway directory from stalling every CLI invocation.
+const maxPackFiles = 256
+
+// identifierPattern restricts pack Name and rule ID to a conservative set of
+// characters that play well with filesystems, log greps, and JSON. Disallowing
+// whitespace and control characters avoids log-line injection from a malformed
+// pack scalar.
+var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // Pack is a versioned bundle of redaction rules loaded from a single file
 // under .entire/redactors/. Both YAML and JSON encodings are accepted; the
@@ -50,6 +73,12 @@ type Sample struct {
 // ParsePack decodes a single pack file. sourcePath is used both to pick
 // the encoding (YAML by default; JSON only when the extension is .json)
 // and to enforce that the pack's `name` matches the filename stem.
+//
+// Precondition: sourcePath must be a vetted local file path (the production
+// caller is LoadPacks, which only invokes ParsePack with paths produced by
+// WalkDir under the configured .entire/redactors/ directory). Callers passing
+// arbitrary or remote paths must enforce their own trust model — ParsePack
+// does not sanitize sourcePath beyond reading its extension.
 func ParsePack(data []byte, sourcePath string) (*Pack, error) {
 	var pack Pack
 	switch strings.ToLower(filepath.Ext(sourcePath)) {
@@ -92,6 +121,9 @@ func validatePack(p *Pack) error {
 	if p.Name == "" {
 		return fmt.Errorf("%s: missing required field 'name'", p.sourcePath)
 	}
+	if err := validateIdentifier("name", p.Name, p.sourcePath); err != nil {
+		return err
+	}
 	if p.Version == "" {
 		return fmt.Errorf("%s: missing required field 'version'", p.sourcePath)
 	}
@@ -110,6 +142,9 @@ func validatePack(p *Pack) error {
 		if r.ID == "" {
 			return fmt.Errorf("%s: rules[%d] missing required field 'id'", p.sourcePath, i)
 		}
+		if err := validateIdentifier(fmt.Sprintf("rules[%d].id", i), r.ID, p.sourcePath); err != nil {
+			return err
+		}
 		if r.Regex == "" {
 			return fmt.Errorf("%s: rules[%d] (%s) missing required field 'regex'", p.sourcePath, i, r.ID)
 		}
@@ -121,6 +156,20 @@ func validatePack(p *Pack) error {
 	return nil
 }
 
+// validateIdentifier rejects pack Name / rule ID values that exceed the length
+// cap or contain characters outside identifierPattern. Both fields end up in
+// log attributes and (for Name) the filename comparison; bounding them keeps
+// diagnostics readable and prevents a malformed pack from polluting log lines.
+func validateIdentifier(field, value, sourcePath string) error {
+	if len(value) > maxIdentifierLen {
+		return fmt.Errorf("%s: %s %q exceeds %d-character limit", sourcePath, field, value, maxIdentifierLen)
+	}
+	if !identifierPattern.MatchString(value) {
+		return fmt.Errorf("%s: %s %q contains characters outside [A-Za-z0-9._-]", sourcePath, field, value)
+	}
+	return nil
+}
+
 // LoadPacks discovers and parses all rule packs in dir, including any
 // subdirectories (so the conventional .entire/redactors/local/ path for
 // personal/uncommitted rules is picked up automatically). Files with the
@@ -128,6 +177,10 @@ func validatePack(p *Pack) error {
 // ignored. A missing directory is treated as "no packs configured" and
 // returns no error. Per-file parse errors are slog.Warn'd and the file is
 // skipped — never fatal — so one bad file does not silence the rest.
+//
+// Soft caps: files larger than maxPackFileBytes are skipped with a warning,
+// and discovery stops after maxPackFiles parsed packs. The trust boundary is
+// "user owns repo," so these are runaway-input guards, not security limits.
 func LoadPacks(dir string) ([]*Pack, error) {
 	var packs []*Pack
 	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -139,6 +192,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 				return fmt.Errorf("read redactors dir %s: %w", dir, err)
 			}
 			slog.Warn("skipping unreadable redactor pack path",
+				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))
 			return nil
@@ -147,7 +201,9 @@ func LoadPacks(dir string) ([]*Pack, error) {
 			return fmt.Errorf("redactors path %s is not a directory", dir)
 		}
 		if d.Type()&fs.ModeSymlink != 0 {
-			slog.Warn("skipping symlinked redactor pack path", slog.String("path", path))
+			slog.Warn("skipping symlinked redactor pack path",
+				componentAttr,
+				slog.String("path", path))
 			return nil
 		}
 		if d.IsDir() {
@@ -159,9 +215,35 @@ func LoadPacks(dir string) ([]*Pack, error) {
 			return nil
 		}
 
+		if len(packs) >= maxPackFiles {
+			slog.Warn("skipping redactor pack: file cap reached",
+				componentAttr,
+				slog.String("path", path),
+				slog.Int("max_files", maxPackFiles))
+			return filepath.SkipAll
+		}
+
+		info, statErr := d.Info()
+		if statErr != nil {
+			slog.Warn("skipping redactor pack: stat failed",
+				componentAttr,
+				slog.String("path", path),
+				slog.String("error", statErr.Error()))
+			return nil
+		}
+		if info.Size() > maxPackFileBytes {
+			slog.Warn("skipping redactor pack: file exceeds size cap",
+				componentAttr,
+				slog.String("path", path),
+				slog.Int64("size_bytes", info.Size()),
+				slog.Int("max_bytes", maxPackFileBytes))
+			return nil
+		}
+
 		data, err := os.ReadFile(path) //nolint:gosec // path comes from WalkDir under a configured dir
 		if err != nil {
 			slog.Warn("skipping unreadable redactor pack",
+				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))
 			return nil
@@ -169,6 +251,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 		pack, err := ParsePack(data, path)
 		if err != nil {
 			slog.Warn("skipping invalid redactor pack",
+				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))
 			return nil

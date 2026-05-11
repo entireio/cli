@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -388,6 +389,12 @@ func EnsureRedactionConfigured() {
 		if lerr != nil {
 			logCtx := logging.WithComponent(ctx, "redaction")
 			logging.Warn(logCtx, "failed to load redactor packs", slog.String("error", lerr.Error()))
+			// Hooks log to .entire/logs/entire.log, where most users never
+			// look. Surface a one-line breadcrumb on stderr when we have a
+			// real terminal so the user can find the detail.
+			if interactive.IsTerminalWriter(os.Stderr) {
+				fmt.Fprintf(os.Stderr, "[entire] redactor packs failed to load (%v); see .entire/logs/entire.log or run `entire doctor`.\n", lerr)
+			}
 		}
 		if len(inline) > 0 || len(packs) > 0 {
 			redact.ConfigureCustomRules(redact.CustomRulesConfig{

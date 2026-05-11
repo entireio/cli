@@ -35,6 +35,11 @@ var (
 	customConfigMu sync.RWMutex
 )
 
+// componentAttr tags every warning emitted by this package so log aggregators
+// can filter redaction failures with the same key the CLI uses elsewhere
+// (`logging.WithComponent(ctx, "redaction")`).
+var componentAttr = slog.String("component", "redaction")
+
 // ConfigureCustomRules compiles user-defined redaction rules and stores the
 // result for use by redact.String(). Sample-validation runs here too, so
 // failures surface the next time any process initializes redaction.
@@ -79,8 +84,11 @@ func ConfigureCustomRules(cfg CustomRulesConfig) {
 func compileCustomRule(label, pattern, warning string, attrs ...any) (compiledCustomRule, bool) {
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
-		attrs = append(attrs, slog.String("error", err.Error()))
-		slog.Warn(warning, attrs...)
+		all := make([]any, 0, len(attrs)+2)
+		all = append(all, componentAttr)
+		all = append(all, attrs...)
+		all = append(all, slog.String("error", err.Error()))
+		slog.Warn(warning, all...)
 		return compiledCustomRule{}, false
 	}
 	return compiledCustomRule{label: label, regex: compiled}, true
@@ -94,6 +102,7 @@ func runRuleSamples(pack *Pack, rule Rule, compiled *regexp.Regexp) {
 		got := compiled.MatchString(s.Input)
 		if got != s.Redacted {
 			slog.Warn("redactor pack sample mismatch",
+				componentAttr,
 				slog.String("pack", pack.sourcePath),
 				slog.String("rule", rule.ID),
 				slog.Int("sample_index", i),

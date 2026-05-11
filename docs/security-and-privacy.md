@@ -16,7 +16,7 @@ If your repository is **public**, this data is visible to the entire internet.
 
 ### What Entire redacts automatically
 
-Entire automatically scans transcript and metadata content before writing it to the `entire/checkpoints/v1` branch. Five secret detection methods run during condensation, plus an opt-in sixth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below):
+Entire automatically scans transcript and metadata content before writing it to the `entire/checkpoints/v1` branch. Five always-on secret detection methods run during condensation, plus a conditional sixth pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below) and an opt-in seventh pass for PII (see [Optional PII redaction](#optional-pii-redaction) below):
 
 1. **Entropy scoring** — Identifies high-entropy strings (Shannon entropy > 4.5) that look like randomly generated secrets, even if they don't match a known pattern.
 2. **Pattern matching** — Uses [Betterleaks](https://github.com/betterleaks/betterleaks) built-in rules to detect known secret formats.
@@ -24,7 +24,7 @@ Entire automatically scans transcript and metadata content before writing it to 
 4. **Database connection-string detection** — Redacts JDBC, Postgres keyword DSN, SQL Server, and ODBC-style connection strings containing passwords.
 5. **Bounded credential value detection** — Redacts password-like config values such as `DB_PASSWORD=...` and `PGPASSWORD=...` while preserving the surrounding key.
 
-Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. The five secret-detection passes are **always on** and cannot be disabled.
+Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. The five secret-detection passes above are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add a sixth secret-detection pass that only runs when configured.
 
 ### Optional PII redaction
 
@@ -196,7 +196,7 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 
 ### Troubleshooting
 
-- **My rule doesn't redact anything.** Warnings about invalid patterns or sample mismatches appear on stderr when Entire initializes redaction, such as hooks that write checkpoints or `entire doctor`. Look for lines mentioning your label or pack path.
+- **My rule doesn't redact anything.** Warnings about invalid patterns or sample mismatches are emitted by the redaction layer when Entire initializes it. In the hook path (where checkpoints are actually written) these go to `.entire/logs/entire.log` — `grep component=redaction` and look for lines mentioning your label or pack path. When a hard pack-discovery failure happens during an interactive command, Entire also prints a one-line breadcrumb on stderr pointing back at the log.
 - **My pack file is silently ignored.** Filenames must end in `.yaml`, `.yml`, or `.json`. Other extensions are skipped.
 - **I want to disable a rule temporarily.** Comment it out (prefix the YAML key with `#`) or remove the entry from `custom_redactions`. The rule reloads on the next CLI invocation.
 
