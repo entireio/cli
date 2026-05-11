@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -1075,4 +1076,139 @@ func TestV2GitStore_BuildFullSessionArtifactsIndex_NilSafe(t *testing.T) {
 	t.Parallel()
 	var index FullSessionArtifactsIndex
 	assert.False(t, index.Has(id.MustCheckpointID("abc123def456"), 0))
+}
+
+// batchTestEntry describes one (checkpoint, session) write the batch tests
+// will perform. Sessions sharing a CheckpointID land in the same shard and
+// must be assigned distinct slot indexes when SessionIDs differ.
+type batchTestEntry struct {
+	cpID                id.CheckpointID
+	sessionID           string
+	transcript          string
+	prompts             []string
+	cpCount             int
+	filesTouched        []string
+	combinedAttribution *InitialAttribution
+	hasReview           bool
+}
+
+// fixedCreatedAt keeps batch-vs-sequential comparisons deterministic;
+// checkpointCreatedAt defaults to time.Now() when CreatedAt is zero, which
+// would cause unrelated tree-hash diffs between the two runs.
+var fixedCreatedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+var fixedBatchAttribution = &InitialAttribution{
+	CalculatedAt:      fixedCreatedAt,
+	AgentLines:        7,
+	TotalCommitted:    7,
+	TotalLinesChanged: 7,
+	AgentPercentage:   100,
+	MetricVersion:     2,
+}
+
+func (e batchTestEntry) toOpts() WriteCommittedOptions {
+	return WriteCommittedOptions{
+		CheckpointID:        e.cpID,
+		SessionID:           e.sessionID,
+		Strategy:            "manual-commit",
+		CreatedAt:           fixedCreatedAt,
+		Transcript:          redact.AlreadyRedacted([]byte(e.transcript)),
+		Prompts:             e.prompts,
+		CheckpointsCount:    e.cpCount,
+		FilesTouched:        e.filesTouched,
+		CombinedAttribution: e.combinedAttribution,
+		HasReview:           e.hasReview,
+		AuthorName:          "Test",
+		AuthorEmail:         "test@test.com",
+	}
+}
+
+// TestV2GitStore_WriteCommittedMainBatch_MatchesSequentialWrites is the core
+// correctness invariant for the batch path: writing N (checkpoint, session)
+// pairs in one batch must produce the same /main root tree as writing them
+// one-by-one. Same blobs, same metadata aggregation, same session slots.
+func TestV2GitStore_WriteCommittedMainBatch_MatchesSequentialWrites(t *testing.T) {
+	t.Parallel()
+
+	cpA := id.MustCheckpointID("a1b2c3d4e5f6")
+	cpB := id.MustCheckpointID("b2c3d4e5f6a1")
+	cpC := id.MustCheckpointID("c3d4e5f6a1b2")
+	entries := []batchTestEntry{
+		// cpA: two sessions. The first write carries checkpoint-level fields
+		// and the second omits them, pinning the sequential "preserve prior
+		// value" behavior in the fresh batch path.
+		{cpID: cpA, sessionID: "sess-A0", transcript: `{"line":"a0"}`, prompts: []string{"prompt-a0"}, cpCount: 1, filesTouched: []string{"a.txt"}, combinedAttribution: fixedBatchAttribution, hasReview: true},
+		{cpID: cpA, sessionID: "sess-A1", transcript: `{"line":"a1"}`, prompts: []string{"prompt-a1"}, cpCount: 2, filesTouched: []string{"a.txt", "b.txt"}},
+		// cpB: one session
+		{cpID: cpB, sessionID: "sess-B0", transcript: `{"line":"b0"}`, prompts: []string{"prompt-b0"}, cpCount: 4, filesTouched: []string{"c.txt"}},
+		// cpC: three sessions
+		{cpID: cpC, sessionID: "sess-C0", transcript: `{"line":"c0"}`, prompts: []string{"prompt-c0"}, cpCount: 1, filesTouched: nil},
+		{cpID: cpC, sessionID: "sess-C1", transcript: `{"line":"c1"}`, prompts: []string{"prompt-c1"}, cpCount: 2, filesTouched: []string{"d.txt"}},
+		{cpID: cpC, sessionID: "sess-C2", transcript: `{"line":"c2"}`, prompts: []string{"prompt-c2"}, cpCount: 3, filesTouched: []string{"d.txt", "e.txt"}},
+	}
+
+	ctx := context.Background()
+
+	// Sequential repo: today's per-session path.
+	repoSeq := initTestRepo(t)
+	storeSeq := NewV2GitStore(repoSeq, "origin")
+	for _, e := range entries {
+		_, err := storeSeq.writeCommittedMain(ctx, e.toOpts())
+		require.NoError(t, err)
+	}
+
+	// Batch repo: one call.
+	repoBatch := initTestRepo(t)
+	storeBatch := NewV2GitStore(repoBatch, "origin")
+	batchOpts := make([]WriteCommittedOptions, len(entries))
+	for i, e := range entries {
+		batchOpts[i] = e.toOpts()
+	}
+	require.NoError(t, storeBatch.WriteCommittedMainBatch(ctx, batchOpts))
+
+	// Tree equality is the strong invariant: blobs, metadata, summary
+	// aggregation, and session-slot assignment all roll up into the root
+	// tree hash. If batch session indexes diverged from sequential, the
+	// trees would differ.
+	treeSeq := v2MainTree(t, repoSeq).Hash
+	treeBatch := v2MainTree(t, repoBatch).Hash
+	require.Equal(t, treeSeq, treeBatch, "batch /main tree must match sequential /main tree")
+}
+
+// TestV2GitStore_WriteCommittedMainBatch_SingleCommit pins the perf invariant:
+// regardless of how many session writes are batched, /main grows by exactly
+// one commit per call.
+func TestV2GitStore_WriteCommittedMainBatch_SingleCommit(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	ctx := context.Background()
+
+	cpID := id.MustCheckpointID("d4e5f6a1b2c3")
+	batch := []WriteCommittedOptions{
+		batchTestEntry{cpID: cpID, sessionID: "s0", transcript: `{"l":0}`, cpCount: 1}.toOpts(),
+		batchTestEntry{cpID: cpID, sessionID: "s1", transcript: `{"l":1}`, cpCount: 1}.toOpts(),
+		batchTestEntry{cpID: id.MustCheckpointID("e5f6a1b2c3d4"), sessionID: "s2", transcript: `{"l":2}`, cpCount: 1}.toOpts(),
+	}
+
+	refName := plumbing.ReferenceName(paths.V2MainRefName)
+	require.NoError(t, store.ensureRef(ctx, refName))
+	beforeRef, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+
+	require.NoError(t, store.WriteCommittedMainBatch(ctx, batch))
+
+	// Walk the commit chain from the new tip until we hit the previous tip
+	// and count how many commits were added.
+	afterRef, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	added := 0
+	cur := afterRef.Hash()
+	for cur != beforeRef.Hash() {
+		commit, err := repo.CommitObject(cur)
+		require.NoError(t, err)
+		added++
+		require.NotEmpty(t, commit.ParentHashes, "commit chain should reach previous tip")
+		cur = commit.ParentHashes[0]
+	}
+	assert.Equal(t, 1, added, "batch must add exactly one /main commit")
 }

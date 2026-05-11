@@ -1,0 +1,39 @@
+name: CodeQL (GitHub Actions)
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze workflows
+    runs-on: ubuntu-latest
+
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
+        with:
+          languages: actions
+          queries: security-extended,security-and-quality
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
+        with:
+          category: /language:actions
+          # Fork PRs receive a read-only GITHUB_TOKEN, so SARIF upload to the
+          # code-scanning API would fail. Analyze still runs and surfaces
+          # findings in the job log; same-repo PRs upload as normal.
+          upload: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'always' || 'never' }}

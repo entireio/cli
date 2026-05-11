@@ -48,6 +48,9 @@ func PickAgents(ctx context.Context, eligible []AgentChoice) (PickedAgents, erro
 	if len(eligible) < 2 {
 		return PickedAgents{}, fmt.Errorf("PickAgents requires at least 2 eligible agents, got %d", len(eligible))
 	}
+	if ctx.Err() != nil {
+		return PickedAgents{}, ErrPickerCancelled
+	}
 
 	// Sort alphabetically for stable display order regardless of how the
 	// caller populated the slice.

@@ -13,16 +13,16 @@ run = "gofmt -s -w ."
 
 [tasks.test]
 description = "Run tests"
-run = "go test ./..."
+run = "gotestsum --format pkgname --format-icons text --format-hide-empty-pkg --hide-summary skipped -- ./..."
 
 [tasks."test:integration"]
 description = "Run integration tests"
-run = "go test -tags=integration ./cmd/entire/cli/integration_test/..."
+run = "gotestsum --format testname --format-icons text --hide-summary skipped -- -tags=integration,authfilestore ./cmd/entire/cli/integration_test/... ./cmd/entire/cli/auth/..."
 
 [tasks."test:ci"]
 description = "Run all tests (unit + integration + E2E canary) with race detection"
 run = """
-go test -tags=integration -race ./...
+go test -tags=integration,authfilestore -race ./...
 mise run test:e2e:canary
 """
 

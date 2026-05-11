@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -621,7 +622,7 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 		return []reviewtypes.Sink{DumpSink{W: in.out}}
 	}
 	sinks := []reviewtypes.Sink{
-		NewTUISink(in.agentNames, in.cancelRun, in.out),
+		NewTUISink(in.agentNames, in.cancelRun, in.out, os.Stdin),
 		DumpSink{W: in.out},
 	}
 	if in.synthesisProvider != nil && in.canPrompt {
@@ -709,7 +710,7 @@ func composeSingleAgentSinks(in singleAgentSinkInputs) []reviewtypes.Sink {
 		return []reviewtypes.Sink{DumpSink{W: in.out}}
 	}
 	return []reviewtypes.Sink{
-		NewTUISink([]string{in.agentName}, in.cancelRun, in.out),
+		NewTUISink([]string{in.agentName}, in.cancelRun, in.out, os.Stdin),
 		DumpSink{W: in.out},
 	}
 }
