@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -50,11 +51,14 @@ type tickMsg time.Time
 
 // reviewTUIModel is the Bubble Tea model for the review dashboard.
 type reviewTUIModel struct {
-	rows         []agentRow
-	rowIdx       map[string]int // agent name → row index (O(1) lookup)
-	detailMode   bool
-	detailIdx    int // which agent is shown in drill-in
-	detailScroll int
+	rows       []agentRow
+	rowIdx     map[string]int // agent name → row index (O(1) lookup)
+	detailMode bool
+	detailIdx  int // which agent is shown in drill-in
+	// detail is the pager backing the drill-in body. Width/Height are kept
+	// in sync with termWidth/termHeight (minus header+footer). Scroll
+	// position is internal state; AtBottom drives auto-tail.
+	detail viewport.Model
 
 	cancel     context.CancelFunc
 	cancelOnce *sync.Once
@@ -84,14 +88,25 @@ func newReviewTUIModel(agents []string, cancel context.CancelFunc) reviewTUIMode
 		}
 		rowIdx[name] = i
 	}
+	// Seed viewport with defaults that match termWidth/termHeight so an
+	// immediate Ctrl+O before any WindowSizeMsg still renders.
+	const (
+		defaultTermWidth  = 80
+		defaultTermHeight = 24
+	)
+	vp := viewport.New(
+		viewport.WithWidth(defaultTermWidth),
+		viewport.WithHeight(defaultTermHeight-2),
+	)
 	return reviewTUIModel{
 		rows:       rows,
 		rowIdx:     rowIdx,
+		detail:     vp,
 		cancel:     cancel,
 		cancelOnce: &sync.Once{},
 		spinner:    sp,
-		termWidth:  80,
-		termHeight: 24,
+		termWidth:  defaultTermWidth,
+		termHeight: defaultTermHeight,
 	}
 }
 
@@ -156,13 +171,56 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.termWidth = msg.Width
 		m.termHeight = msg.Height
-		m = m.clampScroll()
+		m.detail.SetWidth(m.detailViewportWidth())
+		m.detail.SetHeight(m.detailViewportHeight())
+		m = m.refreshDetailContent()
 		return m, nil
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
 	return m, nil
+}
+
+// detailViewportWidth returns the viewport's width, mirroring termWidth.
+func (m reviewTUIModel) detailViewportWidth() int {
+	if m.termWidth < 1 {
+		return 1
+	}
+	return m.termWidth
+}
+
+// detailViewportHeight returns the viewport's body height, reserving one line
+// for the header and one for the footer.
+func (m reviewTUIModel) detailViewportHeight() int {
+	h := m.termHeight - 2
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
+// refreshDetailContent re-renders the focused agent's events into the
+// viewport. It preserves auto-tail: if the viewport was sitting at the bottom
+// (or has no scrollable content), it jumps to the new bottom after the content
+// is replaced; otherwise the user's scroll position is left untouched.
+//
+// reviewTUIModel uses value receivers throughout (matching the Bubble Tea
+// idiom of returning an updated tea.Model from Update); the viewport is
+// mutated in place on the returned copy and the caller assigns the result
+// back.
+func (m reviewTUIModel) refreshDetailContent() reviewTUIModel {
+	if len(m.rows) == 0 || m.detailIdx < 0 || m.detailIdx >= len(m.rows) {
+		m.detail.SetContent("")
+		return m
+	}
+	wasAtBottom := m.detail.AtBottom()
+	lines := buildEventLines(m.rows[m.detailIdx].buffer, m.detailViewportWidth())
+	m.detail.SetContentLines(lines)
+	if wasAtBottom {
+		m.detail.GotoBottom()
+	}
+	return m
 }
 
 // handleAgentEvent processes an agentEventMsg, updating the relevant row.
@@ -214,15 +272,11 @@ func (m reviewTUIModel) handleAgentEvent(msg agentEventMsg) (tea.Model, tea.Cmd)
 		// No visible state update for tool calls in the dashboard.
 	}
 
-	// Auto-follow ONLY when the user is already at the bottom. This lets a
-	// user scroll up to inspect older events without each new event yanking
-	// them back to the tail. The pre-append max-scroll was for buffer
-	// length-1; if detailScroll was at-or-past that, the user was tailing.
+	// Re-render the focused agent's viewport content when a new event lands
+	// for it. refreshDetailContent's AtBottom check preserves user scroll if
+	// they've scrolled up; auto-tails otherwise.
 	if m.detailMode && m.detailIdx == idx {
-		preAppendMax := len(row.buffer) - 2 // -1 for the just-appended event, -1 for max-index
-		if preAppendMax < 0 || m.detailScroll >= preAppendMax {
-			m.detailScroll = m.maxDetailScroll()
-		}
+		m = m.refreshDetailContent()
 	}
 
 	return m, nil
@@ -253,7 +307,13 @@ func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if len(m.rows) > 0 && (m.detailIdx < 0 || m.detailIdx >= len(m.rows)) {
 			m.detailIdx = 0
 		}
-		m.detailScroll = m.maxDetailScroll()
+		// Resize viewport in case termWidth/termHeight have changed since
+		// last detail-mode entry, then load the focused agent's events and
+		// tail to the bottom.
+		m.detail.SetWidth(m.detailViewportWidth())
+		m.detail.SetHeight(m.detailViewportHeight())
+		m = m.refreshDetailContent()
+		m.detail.GotoBottom()
 		return m, nil
 
 	case msg.Code == tea.KeyEscape || msg.Code == tea.KeyEsc:
@@ -266,63 +326,36 @@ func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case msg.Code == tea.KeyLeft:
 		if m.detailMode && len(m.rows) > 0 {
 			m.detailIdx = (m.detailIdx - 1 + len(m.rows)) % len(m.rows)
-			m.detailScroll = m.maxDetailScroll()
+			m = m.refreshDetailContent()
+			m.detail.GotoBottom()
 		}
 		return m, nil
 
 	case msg.Code == tea.KeyRight:
 		if m.detailMode && len(m.rows) > 0 {
 			m.detailIdx = (m.detailIdx + 1) % len(m.rows)
-			m.detailScroll = m.maxDetailScroll()
-		}
-		return m, nil
-
-	case msg.Code == tea.KeyUp:
-		if m.detailMode && m.detailScroll > 0 {
-			m.detailScroll--
-		}
-		return m, nil
-
-	case msg.Code == tea.KeyDown:
-		if m.detailMode {
-			if maxScroll := m.maxDetailScroll(); m.detailScroll < maxScroll {
-				m.detailScroll++
-			}
+			m = m.refreshDetailContent()
+			m.detail.GotoBottom()
 		}
 		return m, nil
 	}
 
+	// Delegate any unhandled key to the viewport so PgUp/PgDn/Home/End/↑/↓
+	// reach its internal keymap. Only meaningful in detail mode — on the
+	// dashboard the viewport is inert.
+	if m.detailMode {
+		var cmd tea.Cmd
+		m.detail, cmd = m.detail.Update(msg)
+		return m, cmd
+	}
 	return m, nil
-}
-
-// maxDetailScroll returns the largest valid detailScroll value for the current
-// agent's buffer (0 when the buffer is empty or no rows exist).
-func (m reviewTUIModel) maxDetailScroll() int {
-	if len(m.rows) == 0 {
-		return 0
-	}
-	n := len(m.rows[m.detailIdx].buffer)
-	if n == 0 {
-		return 0
-	}
-	return n - 1
-}
-
-// clampScroll returns a copy of m with detailScroll clamped to valid bounds.
-// Used after resize or index change.
-func (m reviewTUIModel) clampScroll() reviewTUIModel {
-	maxScroll := m.maxDetailScroll()
-	if m.detailScroll > maxScroll {
-		m.detailScroll = maxScroll
-	}
-	return m
 }
 
 // View renders the current state.
 func (m reviewTUIModel) View() tea.View {
 	var content string
 	if m.detailMode && len(m.rows) > 0 {
-		content = detailView(m.rows[m.detailIdx], m.detailScroll, m.termWidth, m.termHeight)
+		content = detailFrame(m.rows[m.detailIdx], m.detail.View(), m.termWidth, m.termHeight)
 	} else {
 		content = m.dashboardView()
 	}

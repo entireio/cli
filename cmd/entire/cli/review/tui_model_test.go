@@ -232,35 +232,47 @@ func TestTUIModel_LeftRight_CycleDetailIdx(t *testing.T) {
 	}
 }
 
-func TestTUIModel_UpDown_Scroll(t *testing.T) {
+// TestTUIModel_InitializesDetailViewport pins that the viewport widget on the
+// model starts with non-zero default dimensions so that an immediate Ctrl+O
+// before a WindowSizeMsg still renders without panicking.
+func TestTUIModel_InitializesDetailViewport(t *testing.T) {
 	t.Parallel()
 	m := newTestModel([]string{"agent-a"}, func() {})
-	m.detailMode = true
-	// Populate buffer so max scroll > 0.
+	if w := m.detail.Width(); w <= 0 {
+		t.Errorf("expected detail viewport width > 0, got %d", w)
+	}
+	if h := m.detail.Height(); h <= 0 {
+		t.Errorf("expected detail viewport height > 0, got %d", h)
+	}
+}
+
+// TestTUIModel_DelegatesScrollKeysToViewport pins that pager keys (PgDn) in
+// detail mode reach the viewport's internal keymap and advance YOffset rather
+// than being swallowed by the model's switch.
+func TestTUIModel_DelegatesScrollKeysToViewport(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	// Size the window so the viewport has a sensible height.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	m = mustModel(t, updated)
+	// Populate enough content to scroll. AssistantText with long text wraps
+	// to many viewport lines.
+	long := strings.Repeat("paragraph of text ", 20)
 	for range 5 {
-		m.rows[0].buffer = append(m.rows[0].buffer, reviewtypes.Started{})
+		updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
+		m = mustModel(t, updated)
 	}
-	m.detailScroll = 4 // at max
-
-	// Down when at max: clamp.
-	updated, _ := m.Update(testKey(tea.KeyDown))
+	// Enter detail mode (auto-tails to bottom).
+	updated, _ = m.Update(testCtrlKey('o'))
 	m = mustModel(t, updated)
-	if m.detailScroll != 4 {
-		t.Errorf("scroll should stay at max on Down; got %d", m.detailScroll)
-	}
+	// Jump to top so PgDn has somewhere to scroll into.
+	m.detail.GotoTop()
+	startOffset := m.detail.YOffset()
 
-	// Up: 4 → 3.
-	updated, _ = m.Update(testKey(tea.KeyUp))
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	m = mustModel(t, updated)
-	if m.detailScroll != 3 {
-		t.Errorf("expected scroll=3 after Up; got %d", m.detailScroll)
-	}
-
-	// Down again: 3 → 4.
-	updated, _ = m.Update(testKey(tea.KeyDown))
-	m = mustModel(t, updated)
-	if m.detailScroll != 4 {
-		t.Errorf("expected scroll=4 after Down; got %d", m.detailScroll)
+	if m.detail.YOffset() <= startOffset {
+		t.Errorf("expected PgDn to advance viewport YOffset beyond %d; got %d", startOffset, m.detail.YOffset())
 	}
 }
 
@@ -305,22 +317,27 @@ func TestTUIModel_RunFinishedMsg_AnyKeyQuits(t *testing.T) {
 	}
 }
 
+// TestTUIModel_AutoFollow_DetailMode pins that when the viewport is sitting
+// at the bottom and a new event arrives, the model snaps back to bottom so
+// the user keeps seeing the tail. The viewport's AtBottom() drives this.
 func TestTUIModel_AutoFollow_DetailMode(t *testing.T) {
 	t.Parallel()
 	m := newTestModel([]string{"agent-a"}, func() {})
-	m.detailMode = true
-	m.detailIdx = 0
-	m.detailScroll = 0
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 8})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(testCtrlKey('o'))
+	m = mustModel(t, updated)
 
-	// Send 5 events; model should auto-scroll to bottom each time.
-	current := m
-	for i := range 5 {
-		updated, _ := current.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.Started{}})
-		current = mustModel(t, updated)
-		wantScroll := i // buffer has i+1 events; max scroll is i
-		if current.detailScroll != wantScroll {
-			t.Errorf("event %d: want detailScroll=%d, got %d", i, wantScroll, current.detailScroll)
-		}
+	// Send events that produce content taller than the viewport so a tail
+	// exists below the visible window.
+	long := strings.Repeat("review finding ", 10)
+	for range 6 {
+		updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
+		m = mustModel(t, updated)
+	}
+	if !m.detail.AtBottom() {
+		t.Errorf("expected viewport to track bottom after each event (auto-follow); YOffset=%d, total=%d",
+			m.detail.YOffset(), m.detail.TotalLineCount())
 	}
 }
 
@@ -425,41 +442,46 @@ func assertDashboardFitsWidth(t *testing.T, m reviewTUIModel) {
 }
 
 // TestTUIModel_AutoFollow_PreservesUserScroll pins the contract that new
-// agent events should NOT yank the user back to the tail when they have
+// agent events must NOT yank the user back to the tail when they have
 // scrolled up to inspect older events. Auto-follow only re-engages when
-// the user is already at the bottom.
+// the viewport is already at the bottom.
 func TestTUIModel_AutoFollow_PreservesUserScroll(t *testing.T) {
 	t.Parallel()
 	m := newReviewTUIModel([]string{"agent-a"}, nil)
-	m.termHeight = 10
-	m.detailMode = true
-	m.detailIdx = 0
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(testCtrlKey('o'))
+	m = mustModel(t, updated)
 
-	// Build up a buffer of 20 events.
+	// Build up enough wrapped content to overflow the viewport several times.
+	long := strings.Repeat("line of review text ", 10)
 	for range 20 {
-		updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: "line"}})
+		updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
 		m = mustModel(t, updated)
 	}
 
-	// Snap to bottom, then scroll up by 5.
-	m.detailScroll = m.maxDetailScroll() - 5
-	scrollBeforeNewEvent := m.detailScroll
-
-	// Send another event. The user is NOT at the bottom — scroll should not move.
-	updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: "new line"}})
-	m = mustModel(t, updated)
-	if m.detailScroll != scrollBeforeNewEvent {
-		t.Errorf("expected detailScroll to stay at %d (user scrolled up), got %d (auto-follow yanked back)",
-			scrollBeforeNewEvent, m.detailScroll)
+	// Scroll up away from the bottom.
+	m.detail.GotoTop()
+	startOffset := m.detail.YOffset()
+	if m.detail.AtBottom() {
+		t.Fatal("test setup: viewport unexpectedly at bottom after GotoTop")
 	}
 
-	// Now scroll to bottom and send another event — should auto-follow.
-	m.detailScroll = m.maxDetailScroll()
-	updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: "another"}})
+	// Send another event — the user is NOT at the bottom, so YOffset must not move.
+	updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
 	m = mustModel(t, updated)
-	if m.detailScroll != m.maxDetailScroll() {
-		t.Errorf("expected auto-follow to track bottom (got detailScroll=%d, max=%d)",
-			m.detailScroll, m.maxDetailScroll())
+	if m.detail.YOffset() != startOffset {
+		t.Errorf("expected viewport YOffset to stay at %d (user scrolled up); got %d (auto-follow yanked back)",
+			startOffset, m.detail.YOffset())
+	}
+
+	// Now jump to bottom and send another event — should auto-follow.
+	m.detail.GotoBottom()
+	updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
+	m = mustModel(t, updated)
+	if !m.detail.AtBottom() {
+		t.Errorf("expected auto-follow to track bottom after event; YOffset=%d, total=%d",
+			m.detail.YOffset(), m.detail.TotalLineCount())
 	}
 }
 
