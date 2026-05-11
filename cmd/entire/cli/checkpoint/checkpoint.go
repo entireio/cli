@@ -446,6 +446,11 @@ type SessionContent struct {
 	// Transcript is the session transcript content
 	Transcript []byte
 
+	// TranscriptBlobHashes are the stored raw transcript blob hashes in chunk
+	// order. Callers that rewrite the same transcript under a different path can
+	// reuse these content-addressed blobs instead of storing duplicate blobs.
+	TranscriptBlobHashes []plumbing.Hash
+
 	// Prompts contains user prompts from this session
 	Prompts string
 }

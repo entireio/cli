@@ -11,6 +11,7 @@ import (
 
 func newSessionCurrentCmd() *cobra.Command {
 	var jsonFlag bool
+	var transcriptFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "current",
@@ -22,9 +23,15 @@ preferring sessions from the current worktree and falling back to the most
 recent session if no state matches this worktree. Equivalent to running
 'sessions info' on the session ID returned by FindMostRecentSession.
 
+Output modes:
+  Default       Human-readable summary.
+  --json        Metadata-only JSON envelope (no transcript bytes).
+  --transcript  Stream the live raw agent transcript bytes to stdout.
+
 Examples:
   entire session current
-  entire session current --json`,
+  entire session current --json
+  entire session current --transcript > session.jsonl`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			if _, err := paths.WorktreeRoot(ctx); err != nil {
@@ -38,10 +45,12 @@ Examples:
 				return nil
 			}
 
-			return runSessionInfo(ctx, cmd, sessionID, jsonFlag)
+			return runSessionInfo(ctx, cmd, sessionID, sessionOutputModeFromFlags(jsonFlag, transcriptFlag))
 		},
 	}
 
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream raw agent transcript bytes to stdout")
+	cmd.MarkFlagsMutuallyExclusive("json", "transcript")
 	return cmd
 }

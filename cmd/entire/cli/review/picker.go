@@ -126,10 +126,12 @@ func RunReviewConfigPicker(ctx context.Context, out io.Writer, getInstalled func
 	// see why, but keep going with an empty prefill — runReview already
 	// surfaces the same error distinctly when it's the first load.
 	existing := map[string]settings.ReviewConfig{}
+	existingFixAgent := ""
 	if s, err := settings.Load(ctx); err != nil {
 		logging.Warn(ctx, "settings.Load failed when pre-filling picker", slog.String("error", err.Error()))
 	} else if s != nil {
 		existing = s.Review
+		existingFixAgent = s.ReviewFixAgent
 	}
 
 	// Up-front header: make the order and count obvious so users can spot
@@ -215,7 +217,11 @@ func RunReviewConfigPicker(ctx context.Context, out io.Writer, getInstalled func
 		return nil, errors.New("no review skills or prompt configured")
 	}
 
-	if err := SaveReviewConfig(ctx, merged); err != nil {
+	fixAgent, err := pickReviewFixAgentPreference(ctx, merged, existingFixAgent)
+	if err != nil {
+		return nil, err
+	}
+	if err := saveReviewConfigAndFixAgent(ctx, merged, fixAgent); err != nil {
 		return nil, err
 	}
 	fmt.Fprintln(out, "Saved review config to .entire/settings.json. Edit directly or run `entire review --edit`.")
@@ -261,6 +267,49 @@ func SaveReviewConfig(ctx context.Context, review map[string]settings.ReviewConf
 		return fmt.Errorf("save settings: %w", err)
 	}
 	return nil
+}
+
+func SaveReviewFixAgent(ctx context.Context, agentName string) error {
+	s, err := settings.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("load settings before save: %w", err)
+	}
+	if s == nil {
+		s = &settings.EntireSettings{}
+	}
+	s.ReviewFixAgent = agentName
+	if err := settings.Save(ctx, s); err != nil {
+		return fmt.Errorf("save settings: %w", err)
+	}
+	return nil
+}
+
+func saveReviewConfigAndFixAgent(ctx context.Context, review map[string]settings.ReviewConfig, fixAgent string) error {
+	s, err := settings.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("load settings before save: %w", err)
+	}
+	if s == nil {
+		s = &settings.EntireSettings{}
+	}
+	s.Review = review
+	s.ReviewFixAgent = fixAgent
+	if err := settings.Save(ctx, s); err != nil {
+		return fmt.Errorf("save settings: %w", err)
+	}
+	return nil
+}
+
+func pickReviewFixAgentPreference(ctx context.Context, review map[string]settings.ReviewConfig, current string) (string, error) {
+	choices := reviewFixAgentChoices(review)
+	switch len(choices) {
+	case 0:
+		return current, nil
+	case 1:
+		return choices[0].Name, nil
+	default:
+		return promptForReviewFixAgent(ctx, choices, current)
+	}
 }
 
 // ComputeEligibleConfigured returns the sorted list of agents that are both

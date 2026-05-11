@@ -14,7 +14,6 @@ type fakeDispatchProgram struct {
 	model tea.Model
 }
 
-//nolint:ireturn // dispatchProgram interface contract (mirrors tea.Program)
 func (p fakeDispatchProgram) Run() (tea.Model, error) {
 	model, ok := p.model.(dispatchStatusModel)
 	if !ok {

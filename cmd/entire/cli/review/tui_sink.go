@@ -45,16 +45,20 @@ var _ reviewtypes.Sink = (*TUISink)(nil)
 // the ordered list of agent names that will run; the dashboard pre-renders one
 // row per agent so the user sees the full run shape from the first frame.
 // output is the writer the Bubble Tea program renders into (typically
-// cmd.OutOrStdout()).
+// cmd.OutOrStdout()). input is the reader Bubble Tea reads keypresses from
+// (typically os.Stdin in production); tests must pass a non-TTY reader (e.g.
+// bytes.NewReader(nil)) so Bubble Tea does not put the inherited terminal
+// into raw mode and corrupt sibling test output.
 //
 // tea.WithoutSignalHandler keeps SIGINT routing on the cobra root's existing
 // handler (which cancels the run context), so the TUI's KeyCtrlC path and the
 // OS signal path share a single cancel function with no race.
-func NewTUISink(agents []string, cancel context.CancelFunc, output io.Writer) *TUISink {
+func NewTUISink(agents []string, cancel context.CancelFunc, output io.Writer, input io.Reader) *TUISink {
 	model := newReviewTUIModel(agents, cancel)
 	prog := tea.NewProgram(
 		model,
 		tea.WithOutput(output),
+		tea.WithInput(input),
 		tea.WithoutSignalHandler(), // SIGINT handled by cobra root; KeyCtrlC calls cancel directly
 	)
 	return &TUISink{

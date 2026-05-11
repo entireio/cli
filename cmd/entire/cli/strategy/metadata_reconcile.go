@@ -614,5 +614,5 @@ func getRepoPath(repo *git.Repository) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get worktree: %w", err)
 	}
-	return wt.Filesystem.Root(), nil
+	return wt.Filesystem().Root(), nil
 }

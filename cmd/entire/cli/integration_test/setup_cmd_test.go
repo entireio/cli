@@ -3,13 +3,14 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
@@ -21,7 +22,7 @@ func (env *TestEnv) RunEnableWithAccessibleMode() string {
 
 	// Run CLI with ACCESSIBLE=1 for non-interactive prompts
 	// Provide "no" for telemetry
-	cmd := exec.Command(getTestBinary(), "enable")
+	cmd := execx.NonInteractive(context.Background(), getTestBinary(), "enable")
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(env.cliEnv(), "ACCESSIBLE=1")
 	// Provide input for telemetry prompt

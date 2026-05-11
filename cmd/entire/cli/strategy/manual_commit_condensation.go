@@ -1311,93 +1311,84 @@ func clearFilesystemPrompt(ctx context.Context, sessionID string) {
 func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionID string) error {
 	logCtx := logging.WithComponent(ctx, "condense-by-id")
 
-	// Load session state
-	state, err := s.loadSessionState(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to load session state: %w", err)
-	}
-	if state == nil {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
-
-	// Open repository
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
 
-	// Generate a checkpoint ID
 	checkpointID, err := id.Generate()
 	if err != nil {
 		return fmt.Errorf("failed to generate checkpoint ID: %w", err)
 	}
 
-	// Check if shadow branch exists (required for condensation)
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	_, refErr := repo.Reference(refName, true)
-	hasShadowBranch := refErr == nil
+	var shadowBranchName string
+	var clearAfter bool
+	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+		refName := plumbing.NewBranchReferenceName(shadowBranchName)
+		_, refErr := repo.Reference(refName, true)
+		hasShadowBranch := refErr == nil
 
-	if !hasShadowBranch {
-		// No shadow branch means no checkpoint data to condense.
-		// Just clean up the state file.
-		logging.Info(logCtx, "no shadow branch for session, clearing state only",
+		if !hasShadowBranch {
+			logging.Info(logCtx, "no shadow branch for session, clearing state only",
+				slog.String("session_id", sessionID),
+				slog.String("shadow_branch", shadowBranchName),
+			)
+			clearAfter = true
+			return ErrMutationSkip
+		}
+
+		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil)
+		if err != nil {
+			return fmt.Errorf("failed to condense session: %w", err)
+		}
+
+		if result.Skipped {
+			logging.Info(logCtx, "session condensation skipped (no transcript or files), marking fully condensed",
+				slog.String("session_id", sessionID),
+			)
+			state.FullyCondensed = true
+			return nil
+		}
+
+		logging.Info(logCtx, "session condensed by ID",
 			slog.String("session_id", sessionID),
-			slog.String("shadow_branch", shadowBranchName),
+			slog.String("checkpoint_id", result.CheckpointID.String()),
+			slog.Int("checkpoints_condensed", result.CheckpointsCount),
 		)
+
+		state.StepCount = 0
+		state.CheckpointTranscriptStart = result.TotalTranscriptLines
+		state.CompactTranscriptStart += result.CompactTranscriptLines
+		state.CheckpointTranscriptSize = int64(len(result.Transcript))
+		state.Phase = session.PhaseIdle
+		state.LastCheckpointID = checkpointID
+		state.LastCheckpointCommitHash = state.BaseCommit
+		state.RealignAttributionBase(state.BaseCommit)
+		state.PromptAttributions = nil
+		state.PendingPromptAttribution = nil
+		return nil
+	})
+	if errors.Is(mutErr, ErrStateNotFound) {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	if mutErr != nil {
+		return mutErr
+	}
+
+	if clearAfter {
 		if err := s.clearSessionState(ctx, sessionID); err != nil {
 			return fmt.Errorf("failed to clear session state: %w", err)
 		}
 		return nil
 	}
 
-	// Condense the session
-	result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil)
-	if err != nil {
-		return fmt.Errorf("failed to condense session: %w", err)
-	}
-
-	if result.Skipped {
-		// Nothing to condense. Mark fully condensed so entire doctor doesn't
-		// keep retrying this empty session on every invocation.
-		logging.Info(logCtx, "session condensation skipped (no transcript or files), marking fully condensed",
-			slog.String("session_id", sessionID),
-		)
-		state.FullyCondensed = true
-		return s.saveSessionState(ctx, state)
-	}
-
-	logging.Info(logCtx, "session condensed by ID",
-		slog.String("session_id", sessionID),
-		slog.String("checkpoint_id", result.CheckpointID.String()),
-		slog.Int("checkpoints_condensed", result.CheckpointsCount),
-	)
-
-	// Update session state: reset step count and transition to idle
-	state.StepCount = 0
-	state.CheckpointTranscriptStart = result.TotalTranscriptLines
-	state.CompactTranscriptStart += result.CompactTranscriptLines
-	state.CheckpointTranscriptSize = int64(len(result.Transcript))
-	state.Phase = session.PhaseIdle
-	state.LastCheckpointID = checkpointID
-	state.LastCheckpointCommitHash = state.BaseCommit
-	state.RealignAttributionBase(state.BaseCommit)
-	state.PromptAttributions = nil
-	state.PendingPromptAttribution = nil
-
-	if err := s.saveSessionState(ctx, state); err != nil {
-		return fmt.Errorf("failed to save session state: %w", err)
-	}
-
-	// Clean up shadow branch if no other sessions need it
 	if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {
 		logging.Warn(logCtx, "failed to clean up shadow branch",
 			slog.String("shadow_branch", shadowBranchName),
 			slog.String("error", err.Error()),
 		)
-		// Non-fatal: condensation succeeded, shadow branch cleanup is best-effort
 	}
-
 	return nil
 }
 
@@ -1415,29 +1406,6 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context, sessionID string) error {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
-	state, err := s.loadSessionState(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to load session state: %w", err)
-	}
-	if state == nil {
-		return nil // No state file
-	}
-
-	// Sessions with FilesTouched must be processed by PostCommit for carry-forward
-	// tracking — each user commit that overlaps with tracked files gets its own
-	// checkpoint. Eagerly condensing here would prevent that 1:1 linkage.
-	if len(state.FilesTouched) > 0 {
-		return nil
-	}
-
-	// Only condense if there's uncondensed data
-	if state.StepCount <= 0 {
-		// No data and no files — mark FullyCondensed
-		state.FullyCondensed = true
-		return s.saveSessionState(ctx, state)
-	}
-
-	// Check if shadow branch exists — required for condensation
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		logging.Warn(logCtx, "eager condense: failed to open repository",
@@ -1447,24 +1415,6 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		return nil // fail-open
 	}
 
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	_, refErr := repo.Reference(refName, true)
-	hasShadowBranch := refErr == nil
-
-	if !hasShadowBranch {
-		// No shadow branch = no checkpoint data to condense.
-		// Unlike CondenseSessionByID, we do NOT delete the state file.
-		logging.Info(logCtx, "eager condense: no shadow branch",
-			slog.String("session_id", sessionID),
-			slog.String("shadow_branch", shadowBranchName),
-		)
-		state.StepCount = 0
-		state.FullyCondensed = true // FilesTouched is already empty (checked above)
-		return s.saveSessionState(ctx, state)
-	}
-
-	// Generate checkpoint ID and condense
 	checkpointID, err := id.Generate()
 	if err != nil {
 		logging.Warn(logCtx, "eager condense: failed to generate checkpoint ID",
@@ -1473,55 +1423,87 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		return nil // fail-open
 	}
 
-	// Condense with nil committedFiles (include all FilesTouched)
-	result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil)
-	if err != nil {
-		logging.Warn(logCtx, "eager condense on session stop failed, PostCommit will retry",
-			slog.String("session_id", sessionID),
-			slog.String("error", err.Error()),
-		)
-		return nil // fail-open
-	}
+	var shadowBranchName string
+	var didCondense bool
+	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		// Sessions with FilesTouched must be processed by PostCommit for
+		// carry-forward tracking — each user commit that overlaps with
+		// tracked files gets its own checkpoint. Eagerly condensing here
+		// would prevent that 1:1 linkage.
+		if len(state.FilesTouched) > 0 {
+			return ErrMutationSkip
+		}
 
-	if result.Skipped {
-		// No transcript or files — nothing to condense. Mark fully condensed
-		// so PostCommit doesn't keep retrying this empty session.
-		logging.Info(logCtx, "eager condense skipped (no transcript or files), marking fully condensed",
-			slog.String("session_id", sessionID),
-		)
+		if state.StepCount <= 0 {
+			state.FullyCondensed = true
+			return nil
+		}
+
+		shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+		refName := plumbing.NewBranchReferenceName(shadowBranchName)
+		_, refErr := repo.Reference(refName, true)
+		hasShadowBranch := refErr == nil
+
+		if !hasShadowBranch {
+			logging.Info(logCtx, "eager condense: no shadow branch",
+				slog.String("session_id", sessionID),
+				slog.String("shadow_branch", shadowBranchName),
+			)
+			state.StepCount = 0
+			state.FullyCondensed = true
+			return nil
+		}
+
+		result, condErr := s.CondenseSession(ctx, repo, checkpointID, state, nil)
+		if condErr != nil {
+			logging.Warn(logCtx, "eager condense on session stop failed, PostCommit will retry",
+				slog.String("session_id", sessionID),
+				slog.String("error", condErr.Error()),
+			)
+			return ErrMutationSkip // fail-open
+		}
+
+		if result.Skipped {
+			logging.Info(logCtx, "eager condense skipped (no transcript or files), marking fully condensed",
+				slog.String("session_id", sessionID),
+			)
+			state.FullyCondensed = true
+			return nil
+		}
+
+		state.StepCount = 0
+		state.CheckpointTranscriptStart = result.TotalTranscriptLines
+		state.CompactTranscriptStart += result.CompactTranscriptLines
+		state.LastCheckpointID = checkpointID
+		state.LastCheckpointCommitHash = state.BaseCommit
+		state.RealignAttributionBase(state.BaseCommit)
+		state.PromptAttributions = nil
+		state.PendingPromptAttribution = nil
 		state.FullyCondensed = true
-		return s.saveSessionState(ctx, state)
-	}
+		// Phase stays ENDED — do NOT set to IDLE
 
-	// Update state — keep Phase = ENDED (unlike CondenseSessionByID which sets IDLE)
-	state.StepCount = 0
-	state.CheckpointTranscriptStart = result.TotalTranscriptLines
-	state.CompactTranscriptStart += result.CompactTranscriptLines
-	state.LastCheckpointID = checkpointID
-	state.LastCheckpointCommitHash = state.BaseCommit
-	state.RealignAttributionBase(state.BaseCommit)
-	state.PromptAttributions = nil
-	state.PendingPromptAttribution = nil
-	state.FullyCondensed = true // FilesTouched is already empty (checked above)
-	// Phase stays ENDED — do NOT set to IDLE
-
-	logging.Info(logCtx, "eager condense on session stop succeeded",
-		slog.String("session_id", sessionID),
-		slog.String("checkpoint_id", result.CheckpointID.String()),
-	)
-
-	if err := s.saveSessionState(ctx, state); err != nil {
-		return fmt.Errorf("failed to save session state: %w", err)
-	}
-
-	// Clean up shadow branch
-	if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {
-		logging.Warn(logCtx, "eager condense: failed to clean up shadow branch",
-			slog.String("shadow_branch", shadowBranchName),
-			slog.String("error", err.Error()),
+		logging.Info(logCtx, "eager condense on session stop succeeded",
+			slog.String("session_id", sessionID),
+			slog.String("checkpoint_id", result.CheckpointID.String()),
 		)
+		didCondense = true
+		return nil
+	})
+	if errors.Is(mutErr, ErrStateNotFound) {
+		return nil
+	}
+	if mutErr != nil {
+		return fmt.Errorf("failed to save session state: %w", mutErr)
 	}
 
+	if didCondense && shadowBranchName != "" {
+		if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {
+			logging.Warn(logCtx, "eager condense: failed to clean up shadow branch",
+				slog.String("shadow_branch", shadowBranchName),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
 	return nil
 }
 

@@ -1,23 +1,158 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/huh/v2"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/spf13/cobra"
 )
+
+// streamTranscriptToStdout copies the contents of the file at path to w.
+// Cancellation is wired through a goroutine that closes the file on
+// <-ctx.Done(), so reads return promptly when the user hits Ctrl-C on a
+// multi-MB transcript instead of blocking until EOF.
+//
+// Snapshot semantics: the read is bounded to the file size observed at open
+// (via io.LimitReader) so writes the agent appends after command start are
+// excluded.
+//
+// Output shaping is agent-aware so the streaming path stays bounded-memory
+// for the unbounded case (JSONL transcripts grow with conversation length):
+//
+//   - JSONL agents (Claude Code, Cursor, Codex, etc.) — line-buffered copy.
+//     Only one line is held in memory at a time. A trailing partial line
+//     (agent mid-write) is silently dropped so consumers never see a
+//     truncated record.
+//   - Whole-document JSON agents (Gemini) — read snapshot into memory and
+//     validate with json.Valid before emitting. These transcripts are
+//     bounded by conversation size and rarely exceed a few MB even for
+//     long sessions, so buffering is acceptable here.
+//
+// path comes from a session-state file that Entire writes exclusively
+// under the user's own .git/. The path is therefore as trusted as any
+// other entry the local user has on disk; we do not validate it against a
+// confinement root.
+func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string, agentType types.AgentType) error {
+	f, err := os.Open(path) //nolint:gosec // see comment above on trust model
+	if err != nil {
+		return fmt.Errorf("open transcript: %w", err)
+	}
+
+	// Bound the snapshot to the file size at open. Without this, the read
+	// would also include bytes the agent appends while in flight, silently
+	// extending the "snapshot" past command-start. Stat() failure here means
+	// we can't honor the snapshot guarantee — fail loudly rather than
+	// emitting an unbounded read with a misleading "snapshot" promise.
+	info, statErr := f.Stat()
+	if statErr != nil {
+		_ = f.Close()
+		return fmt.Errorf("stat transcript (snapshot bound unavailable): %w", statErr)
+	}
+	snapshotSize := info.Size()
+
+	// Single owner of Close. Either the cancel goroutine fires it (to
+	// unblock the read) or the defer fires it (normal path); sync.Once
+	// prevents the double close that would otherwise trip the race
+	// detector under heavy fd reuse.
+	var closeOnce sync.Once
+	closeFn := func() { closeOnce.Do(func() { _ = f.Close() }) }
+
+	closeOnDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			closeFn()
+		case <-closeOnDone:
+		}
+	}()
+	defer func() {
+		close(closeOnDone)
+		closeFn()
+	}()
+
+	reader := io.LimitReader(f, snapshotSize)
+
+	if isWholeDocumentJSONAgent(agentType) {
+		return writeWholeDocumentJSONTranscript(ctx, w, reader)
+	}
+	return writeJSONLTranscript(ctx, w, reader)
+}
+
+// isWholeDocumentJSONAgent reports whether an agent's on-disk transcript is
+// a single JSON document (e.g. Gemini's session-*.json) versus JSONL.
+func isWholeDocumentJSONAgent(agentType types.AgentType) bool {
+	return agentType == agent.AgentTypeGemini
+}
+
+// writeJSONLTranscript copies a JSONL transcript line-by-line. Each completed
+// line (including its newline) is written to w. A trailing partial line at
+// EOF is dropped so consumers never see a truncated record.
+func writeJSONLTranscript(ctx context.Context, w io.Writer, r io.Reader) error {
+	br := bufio.NewReader(r)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			if _, werr := w.Write(line); werr != nil {
+				return fmt.Errorf("write transcript: %w", werr)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr //nolint:wrapcheck // propagating context cancellation
+			}
+			return fmt.Errorf("read transcript: %w", err)
+		}
+	}
+}
+
+// writeWholeDocumentJSONTranscript reads the snapshot, validates it parses as
+// JSON, and emits it intact. Trim-to-last-newline would cut the closing
+// brace and produce malformed output for these agents. An invalid snapshot
+// (agent mid-write or genuinely corrupt) is reported as an error rather
+// than emitting empty output, so machine consumers can distinguish "no
+// data" from "data unavailable, retry" — exit-code 0 + empty stdout would
+// otherwise look identical to a successfully-empty transcript.
+func writeWholeDocumentJSONTranscript(ctx context.Context, w io.Writer, r io.Reader) error {
+	buf, err := io.ReadAll(r)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr //nolint:wrapcheck // propagating context cancellation
+		}
+		return fmt.Errorf("read transcript: %w", err)
+	}
+	// Empty file is a valid snapshot for an agent that hasn't yet written
+	// anything; emit nothing and succeed. Non-empty but invalid is an error.
+	if len(buf) == 0 {
+		return nil
+	}
+	if !json.Valid(buf) {
+		return errors.New("transcript snapshot is not valid JSON (agent may be mid-write); retry the command")
+	}
+	if _, err := w.Write(buf); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
+	}
+	return nil
+}
 
 func newSessionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -181,6 +316,8 @@ func sessionPhaseLabel(s *strategy.SessionState) string {
 }
 
 func newListCmd() *cobra.Command {
+	var jsonFlag bool
+
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all sessions",
@@ -189,16 +326,18 @@ func newListCmd() *cobra.Command {
 For active sessions only, use 'entire status'.
 
 Examples:
-  entire sessions list    List all sessions across all worktrees`,
+  entire sessions list           List all sessions across all worktrees
+  entire sessions list --json    Same list as a metadata-only JSON array`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runSessionList(cmd.Context(), cmd)
+			return runSessionList(cmd.Context(), cmd, jsonFlag)
 		},
 	}
 
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
 	return cmd
 }
 
-func runSessionList(ctx context.Context, cmd *cobra.Command) error {
+func runSessionList(ctx context.Context, cmd *cobra.Command, jsonOutput bool) error {
 	states, err := strategy.ListSessionStates(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list sessions: %w", err)
@@ -211,17 +350,21 @@ func runSessionList(ctx context.Context, cmd *cobra.Command) error {
 		}
 	}
 
+	// Sort by StartedAt descending (newest first); same order as the prose view.
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].StartedAt.After(filtered[j].StartedAt)
+	})
+
 	w := cmd.OutOrStdout()
+
+	if jsonOutput {
+		return writeSessionListJSON(w, filtered)
+	}
 
 	if len(filtered) == 0 {
 		fmt.Fprintln(w, "No sessions.")
 		return nil
 	}
-
-	// Sort by StartedAt descending (newest first)
-	sort.Slice(filtered, func(i, j int) bool {
-		return filtered[i].StartedAt.After(filtered[j].StartedAt)
-	})
 
 	sty := newStatusStyles(w)
 
@@ -241,6 +384,24 @@ func runSessionList(ctx context.Context, cmd *cobra.Command) error {
 	}
 	fmt.Fprintln(w)
 
+	return nil
+}
+
+// writeSessionListJSON emits the list as a JSON array of the same per-session
+// envelope returned by `entire session info --json`. Always emits a valid
+// array (`[]` for the empty case) so consumers can pipe through `jq` without
+// special-casing "no sessions".
+func writeSessionListJSON(w io.Writer, states []*strategy.SessionState) error {
+	out := make([]sessionInfoJSON, 0, len(states))
+	for _, state := range states {
+		out = append(out, buildSessionInfoJSON(state, sessionPhaseLabel(state)))
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
+		return fmt.Errorf("failed to encode session list: %w", err)
+	}
 	return nil
 }
 
@@ -285,8 +446,21 @@ func writeSessionCard(w io.Writer, s *strategy.SessionState, sty statusStyles) {
 	fmt.Fprintln(w)
 }
 
+// sessionOutputMode describes how `entire session info` / `session current`
+// should render the resolved session. Cobra enforces mutual exclusion at the
+// flag layer; the enum makes the trichotomy total in code so we can't
+// accidentally combine modes by passing two booleans.
+type sessionOutputMode int
+
+const (
+	sessionOutputText sessionOutputMode = iota
+	sessionOutputJSON
+	sessionOutputTranscript
+)
+
 func newInfoCmd() *cobra.Command {
 	var jsonFlag bool
+	var transcriptFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "info <session-id>",
@@ -296,21 +470,44 @@ func newInfoCmd() *cobra.Command {
 Shows agent, model, status, worktree, timing, token usage, checkpoint linkage,
 and files touched. Works for both active and ended sessions.
 
+Output modes:
+  Default       Human-readable summary.
+  --json        Metadata-only JSON envelope (no transcript bytes).
+  --transcript  Stream the live raw agent transcript bytes to stdout in
+                the agent's native format (JSONL for Claude/Cursor/Codex,
+                JSON for Gemini). Snapshot is bounded to the file size
+                observed at open. JSONL streams have a trailing partial
+                line trimmed; JSON documents are emitted intact.
+
 Examples:
   entire sessions info <session-id>
-  entire sessions info <session-id> --json`,
+  entire sessions info <session-id> --json
+  entire sessions info <session-id> --transcript > session.jsonl`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionInfo(cmd.Context(), cmd, args[0], jsonFlag)
+			return runSessionInfo(cmd.Context(), cmd, args[0], sessionOutputModeFromFlags(jsonFlag, transcriptFlag))
 		},
 	}
 
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream raw agent transcript bytes to stdout")
+	cmd.MarkFlagsMutuallyExclusive("json", "transcript")
 
 	return cmd
 }
 
-func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, jsonOutput bool) error {
+func sessionOutputModeFromFlags(jsonFlag, transcriptFlag bool) sessionOutputMode {
+	switch {
+	case transcriptFlag:
+		return sessionOutputTranscript
+	case jsonFlag:
+		return sessionOutputJSON
+	default:
+		return sessionOutputText
+	}
+}
+
+func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, mode sessionOutputMode) error {
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to load session: %w", err)
@@ -323,10 +520,42 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, j
 
 	status := sessionPhaseLabel(state)
 
-	if jsonOutput {
+	switch mode {
+	case sessionOutputTranscript:
+		return writeSessionTranscript(ctx, cmd, state)
+	case sessionOutputJSON:
 		return writeSessionInfoJSON(cmd.OutOrStdout(), state, status)
+	case sessionOutputText:
+		return writeSessionInfoText(cmd.OutOrStdout(), state, status)
+	default:
+		return fmt.Errorf("unknown session output mode: %d", mode)
 	}
-	return writeSessionInfoText(cmd.OutOrStdout(), state, status)
+}
+
+// writeSessionTranscript streams the live raw agent transcript for a session
+// to stdout. The transcript bytes are exactly what the agent has written to
+// disk in its native per-agent format (JSONL for Claude Code/Cursor, JSON for
+// Gemini, etc.) — Entire performs no normalization here.
+func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *strategy.SessionState) error {
+	if state.TranscriptPath == "" {
+		cmd.SilenceUsage = true
+		msg := fmt.Sprintf("session %s has no transcript path recorded", state.SessionID)
+		fmt.Fprintln(cmd.ErrOrStderr(), msg)
+		return NewSilentError(errors.New(msg))
+	}
+
+	path, err := strategy.ResolveTranscriptPath(state)
+	if err != nil {
+		cmd.SilenceUsage = true
+		fmt.Fprintf(cmd.ErrOrStderr(), "transcript unavailable: %v\n", err)
+		return NewSilentError(fmt.Errorf("transcript unavailable: %w", err))
+	}
+
+	// Errors from streaming are runtime issues (Stat failure, mid-write JSON,
+	// etc.), not flag-usage problems — don't print cobra's usage block on top
+	// of any partial stdout output.
+	cmd.SilenceUsage = true
+	return streamTranscriptToStdout(ctx, cmd.OutOrStdout(), path, state.AgentType)
 }
 
 // sessionInfoJSON is the JSON output structure for sessions info --json.
@@ -356,7 +585,9 @@ type tokenInfoJSON struct {
 	Output     int `json:"output"`
 }
 
-func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status string) error {
+// buildSessionInfoJSON converts a SessionState into the JSON envelope shared
+// by `session info --json`, `session current --json`, and `session list --json`.
+func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionInfoJSON {
 	agentLabel := string(state.AgentType)
 	if agentLabel == "" {
 		agentLabel = unknownPlaceholder
@@ -386,10 +617,13 @@ func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status stri
 			Output:     state.TokenUsage.OutputTokens,
 		}
 	}
+	return info
+}
 
+func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status string) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(info); err != nil {
+	if err := enc.Encode(buildSessionInfoJSON(state, status)); err != nil {
 		return fmt.Errorf("failed to encode session info: %w", err)
 	}
 	return nil

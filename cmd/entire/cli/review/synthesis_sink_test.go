@@ -275,6 +275,26 @@ func TestSynthesisSink_UserPicksYes(t *testing.T) {
 	}
 }
 
+func TestSynthesisSink_OnResultReceivesSummary(t *testing.T) {
+	t.Parallel()
+	w := &bytes.Buffer{}
+	stub := &stubSynthesisProvider{response: "Unified verdict: fix H1."}
+	promptFn := func(_ context.Context, _ string, _ bool) (bool, error) {
+		return true, nil
+	}
+	var captured string
+	sink := buildSink(stub, w, true, promptFn, "")
+	sink.OnResult = func(result string) {
+		captured = result
+	}
+
+	sink.RunFinished(makeTwoAgentSummary())
+
+	if captured != "Unified verdict: fix H1." {
+		t.Fatalf("OnResult captured %q", captured)
+	}
+}
+
 // TestSynthesisSink_ProviderUsesRunContext verifies the provider receives the
 // cancellable context supplied by the orchestrator instead of Background.
 func TestSynthesisSink_ProviderUsesRunContext(t *testing.T) {

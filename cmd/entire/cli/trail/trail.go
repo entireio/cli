@@ -152,6 +152,7 @@ type Author struct {
 
 // Metadata represents the metadata for a trail, matching the web PR format.
 type Metadata struct {
+	Number    int        `json:"number,omitempty"`
 	TrailID   ID         `json:"trail_id"`
 	Branch    string     `json:"branch"`
 	Base      string     `json:"base"`

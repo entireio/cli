@@ -174,7 +174,6 @@ func (m dispatchStatusModel) Init() tea.Cmd {
 	return tea.Batch(m.spinner.Tick, m.runDispatch())
 }
 
-//nolint:ireturn // tea.Model interface contract
 func (m dispatchStatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:

@@ -358,7 +358,7 @@ func TestRunExplainAuto_CommitRefWithCheckpointTrailer(t *testing.T) {
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
-	tmpDir := wt.Filesystem.Root()
+	tmpDir := wt.Filesystem().Root()
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "feature.txt"), []byte("feature"), 0o644))
 	_, err = wt.Add("feature.txt")
 	require.NoError(t, err)

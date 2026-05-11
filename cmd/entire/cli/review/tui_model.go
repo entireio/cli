@@ -29,7 +29,7 @@ type agentRow struct {
 	runStart time.Time          // stamped on first event from this agent
 	runEnd   time.Time          // stamped on Finished/RunError event
 	tokens   reviewtypes.Tokens // cumulative
-	preview  string             // last ~80 runes of latest AssistantText
+	preview  string             // latest AssistantText preview, capped by display width
 	buffer   []reviewtypes.Event
 	err      error
 }
@@ -185,8 +185,8 @@ func (m reviewTUIModel) handleAgentEvent(msg agentEventMsg) (tea.Model, tea.Cmd)
 	case reviewtypes.Started:
 		// runStart already set; no other state update needed.
 	case reviewtypes.AssistantText:
-		collapsed := stringutil.CollapseWhitespace(e.Text)
-		row.preview = stringutil.TruncateRunes(collapsed, 80, "…")
+		collapsed := stringutil.CollapseWhitespace(sanitizeDisplayText(e.Text))
+		row.preview = truncateDisplayWidth(collapsed, 80)
 	case reviewtypes.Tokens:
 		row.tokens = e // cumulative: overwrite, not sum
 	case reviewtypes.Finished:
@@ -335,36 +335,42 @@ func (m reviewTUIModel) View() tea.View {
 func (m reviewTUIModel) dashboardView() string {
 	var b strings.Builder
 
-	b.WriteString(m.headerLine())
-	b.WriteString("\n")
+	m.writeDashboardLine(&b, m.headerLine())
 
 	for _, row := range m.rows {
-		b.WriteString(m.renderRow(row))
-		b.WriteString("\n")
+		m.writeDashboardLine(&b, m.renderRow(row))
 	}
 	b.WriteString("\n")
 
 	if m.finished {
-		b.WriteString(m.countsLine())
-		b.WriteString("\n")
-		b.WriteString("Press any key to exit.")
-		b.WriteString("\n")
+		m.writeDashboardLine(&b, m.countsLine())
+		m.writeDashboardLine(&b, "Press any key to exit.")
 	} else {
-		b.WriteString("Ctrl+O: drill in · Ctrl+C: cancel")
-		b.WriteString("\n")
+		m.writeDashboardLine(&b, "Ctrl+O: drill in · Ctrl+C: cancel")
 	}
 	return b.String()
 }
 
+func (m reviewTUIModel) writeDashboardLine(b *strings.Builder, line string) {
+	b.WriteString(truncateDisplayWidth(line, m.dashboardWidth()))
+	b.WriteString("\n")
+}
+
+func (m reviewTUIModel) dashboardWidth() int {
+	if m.termWidth <= 0 {
+		return 80
+	}
+	return m.termWidth
+}
+
 // headerLine returns the column header row.
 func (m reviewTUIModel) headerLine() string {
-	return fmt.Sprintf("%-20s  %-10s  %-8s  %-8s  %s",
-		"AGENT", "STATUS", "DURATION", "TOKENS", "PREVIEW")
+	return m.renderTableLine("AGENT", "STATUS", "DURATION", "TOKENS", "PREVIEW")
 }
 
 // renderRow renders one agent row.
 func (m reviewTUIModel) renderRow(row agentRow) string {
-	name := stringutil.TruncateRunes(row.name, 20, "…")
+	name := row.name
 
 	var statusStr string
 	switch row.status {
@@ -396,10 +402,31 @@ func (m reviewTUIModel) renderRow(row agentRow) string {
 		tokStr = fmt.Sprintf("%s/%s", formatCompact(row.tokens.In), formatCompact(row.tokens.Out))
 	}
 
-	preview := stringutil.TruncateRunes(row.preview, 40, "…")
+	return m.renderTableLine(name, statusStr, durStr, tokStr, row.preview)
+}
 
-	return fmt.Sprintf("%-20s  %-10s  %-8s  %-8s  %s",
-		name, statusStr, durStr, tokStr, preview)
+func (m reviewTUIModel) renderTableLine(agent, status, duration, tokens, preview string) string {
+	const (
+		agentWidth    = 20
+		statusWidth   = 10
+		durationWidth = 8
+		tokensWidth   = 8
+		minWidth      = agentWidth + statusWidth + durationWidth + tokensWidth + 8 // four two-space separators
+	)
+	termWidth := m.dashboardWidth()
+
+	previewWidth := termWidth - minWidth
+	if previewWidth < 0 {
+		previewWidth = 0
+	}
+
+	line := fmt.Sprintf("%s  %s  %s  %s  %s",
+		padDisplayWidth(agent, agentWidth),
+		padDisplayWidth(status, statusWidth),
+		padDisplayWidth(duration, durationWidth),
+		padDisplayWidth(tokens, tokensWidth),
+		truncateDisplayWidth(preview, previewWidth))
+	return truncateDisplayWidth(line, termWidth)
 }
 
 // countsLine produces the summary line shown after the run finishes.

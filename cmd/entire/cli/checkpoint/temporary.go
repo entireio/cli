@@ -1139,7 +1139,7 @@ func filterGitIgnoredFiles(ctx context.Context, repo *git.Repository, files []st
 			slog.String("error", err.Error()))
 		return nil
 	}
-	repoRoot := wt.Filesystem.Root()
+	repoRoot := wt.Filesystem().Root()
 
 	// Use git check-ignore to identify which files are ignored.
 	// Pass files via stdin (-z for NUL-separated, --stdin) to handle special characters.
@@ -1208,7 +1208,7 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 	if err != nil {
 		return changedFilesResult{}, fmt.Errorf("failed to get worktree: %w", err)
 	}
-	repoRoot := wt.Filesystem.Root()
+	repoRoot := wt.Filesystem().Root()
 
 	// Use -z for NUL-separated output (handles quoted filenames with spaces/special chars)
 	// Use -uall to list individual untracked files instead of collapsed directories.

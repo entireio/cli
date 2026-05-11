@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -217,30 +218,29 @@ func (s *ManualCommitStrategy) PostRewrite(ctx context.Context, rewriteType stri
 		return nil //nolint:nilerr // Hook must be resilient
 	}
 
-	for _, state := range sessions {
-		changed, err := s.remapSessionForRewrite(ctx, repo, state, rewrites)
-		if err != nil {
+	for _, sess := range sessions {
+		sessionID := sess.SessionID
+		mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+			changed, err := s.remapSessionForRewrite(ctx, repo, state, rewrites)
+			if err != nil {
+				return err
+			}
+			if !changed {
+				return ErrMutationSkip
+			}
+			logging.Info(logCtx, "post-rewrite: remapped session linkage",
+				slog.String("session_id", state.SessionID),
+				slog.String("rewrite_type", rewriteType),
+				slog.String("base_commit", truncateHash(state.BaseCommit)),
+			)
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
 			logging.Warn(logCtx, "post-rewrite: failed to remap session linkage",
-				slog.String("session_id", state.SessionID),
-				slog.String("error", err.Error()),
+				slog.String("session_id", sessionID),
+				slog.String("error", mutErr.Error()),
 			)
-			continue
 		}
-		if !changed {
-			continue
-		}
-		if err := s.saveSessionState(ctx, state); err != nil {
-			logging.Warn(logCtx, "post-rewrite: failed to save remapped session state",
-				slog.String("session_id", state.SessionID),
-				slog.String("error", err.Error()),
-			)
-			continue
-		}
-		logging.Info(logCtx, "post-rewrite: remapped session linkage",
-			slog.String("session_id", state.SessionID),
-			slog.String("rewrite_type", rewriteType),
-			slog.String("base_commit", truncateHash(state.BaseCommit)),
-		)
 	}
 
 	return nil
@@ -988,17 +988,24 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error { //nolint:
 	}
 
 	loopCtx, processSessionsLoop := perf.StartLoop(ctx, "process_sessions")
-	for _, state := range sessions {
-		// Skip fully-condensed ended sessions — no work remains.
-		// These sessions only persist for LastCheckpointID (amend trailer reuse).
-		if state.FullyCondensed && state.Phase == session.PhaseEnded {
+	for _, sess := range sessions {
+		if sess.FullyCondensed && sess.Phase == session.PhaseEnded {
 			continue
 		}
+		sessionID := sess.SessionID
 		iterCtx, iterSpan := processSessionsLoop.Iteration(loopCtx)
-		s.postCommitProcessSession(iterCtx, repo, state, &transitionCtx, checkpointID,
-			head, commit, newHead, worktreePath, headTree, parentTree,
-			committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
-			sessionsWithCommittedFiles)
+		mutErr := MutateSessionState(iterCtx, sessionID, func(state *SessionState) error {
+			s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
+				head, commit, newHead, worktreePath, headTree, parentTree,
+				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
+				sessionsWithCommittedFiles)
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
+			logging.Warn(logCtx, "post-commit: session mutation failed",
+				slog.String("session_id", sessionID),
+				slog.String("error", mutErr.Error()))
+		}
 		iterSpan.End()
 	}
 	processSessionsLoop.End()
@@ -1148,10 +1155,14 @@ func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
 	return nil
 }
 
-// postCommitProcessSession handles a single session within the PostCommit loop.
+// postCommitProcessSessionLocked handles a single session within the PostCommit loop.
 // Pre-resolved git objects (headTree, parentTree) are shared across all sessions;
 // per-session shadow ref/tree are resolved once here and threaded through sub-calls.
-func (s *ManualCommitStrategy) postCommitProcessSession(
+//
+// MUST be called from inside MutateSessionState. Mutations to state are persisted
+// by the caller's outer save — calling this function standalone silently loses
+// every field change (StepCount, FilesTouched, CheckpointTranscriptStart, …).
+func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	ctx context.Context,
 	repo *git.Repository,
 	state *SessionState,
@@ -1317,14 +1328,7 @@ func (s *ManualCommitStrategy) postCommitProcessSession(
 		state.FullyCondensed = true
 	}
 
-	// Save the updated state
-	_, saveSessionStateSpan := perf.Start(ctx, "save_session_state")
-	if err := s.saveSessionState(ctx, state); err != nil {
-		logging.Warn(logCtx, "failed to update session state",
-			slog.String("session_id", state.SessionID),
-			slog.String("error", err.Error()))
-	}
-	saveSessionStateSpan.End()
+	// State is saved by the outer MutateSessionState in PostCommit.
 
 	// Only preserve shadow branch for active sessions that were NOT condensed.
 	// Condensed sessions already have their data on entire/checkpoints/v1.
@@ -1450,16 +1454,19 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 	}
 
 	newHead := head.Hash().String()
-	for _, state := range sessions {
-		// Only update active sessions. Idle/ended sessions are kept around for
-		// LastCheckpointID reuse and should not be advanced to HEAD.
-		if !state.Phase.IsActive() {
+	for _, sess := range sessions {
+		if !sess.Phase.IsActive() || sess.BaseCommit == newHead {
 			continue
 		}
-		if state.BaseCommit != newHead {
+		sessionID := sess.SessionID
+		oldBase := sess.BaseCommit
+		mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+			if !state.Phase.IsActive() || state.BaseCommit == newHead {
+				return ErrMutationSkip
+			}
 			logging.Debug(logCtx, "post-commit (no trailer): updating BaseCommit and AttributionBaseCommit",
 				slog.String("session_id", state.SessionID),
-				slog.String("old_base", truncateHash(state.BaseCommit)),
+				slog.String("old_base", truncateHash(oldBase)),
 				slog.String("new_head", truncateHash(newHead)),
 			)
 			state.BaseCommit = newHead
@@ -1467,11 +1474,12 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 			// Without this, a subsequent condensation would diff from the old base,
 			// inflating human_added with lines from unrelated prior commits.
 			state.RealignAttributionBase(newHead)
-			if err := s.saveSessionState(ctx, state); err != nil {
-				logging.Warn(logCtx, "failed to update session state",
-					slog.String("session_id", state.SessionID),
-					slog.String("error", err.Error()))
-			}
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to update session state",
+				slog.String("session_id", sessionID),
+				slog.String("error", mutErr.Error()))
 		}
 	}
 }
@@ -1982,12 +1990,23 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 			fmt.Fprintln(stderrWriter, "entire: session attribution diverged after recent history movement; figures may be off until next checkpoint")
 			printed = true
 		}
-		sess.DivergenceNoticeShown = true
-		if err := s.saveSessionState(ctx, sess); err != nil {
+		sessionID := sess.SessionID
+		mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+			if state.DivergenceNoticeShown {
+				return ErrMutationSkip
+			}
+			state.DivergenceNoticeShown = true
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
 			logging.Warn(logCtx, "failed to save divergence notice flag",
-				slog.String("session_id", sess.SessionID),
-				slog.String("error", err.Error()))
+				slog.String("session_id", sessionID),
+				slog.String("error", mutErr.Error()))
+			continue
 		}
+		// Reflect the persisted change on the caller's slice so a same-call
+		// second pass observes the flag without reloading.
+		sess.DivergenceNoticeShown = true
 	}
 }
 
@@ -2225,32 +2244,28 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	// to claim the session ID).
 	resolvedAgentType := resolveSessionAgentType(ctx, sessionID, agentType, transcriptPath)
 
-	// Check if session already exists
-	state, err := s.loadSessionState(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to check session state: %w", err)
-	}
-
-	if state != nil && state.BaseCommit != "" {
-		// Session is fully initialized — apply phase transition for TurnStart.
+	// Try the existing-session path first. If MutateSessionState reports
+	// the state is missing (or the loaded state has an empty BaseCommit, a
+	// partial-state remnant from a concurrent warning), fall through to
+	// the initialize-new-session branch.
+	turnStartErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if state.BaseCommit == "" {
+			return errPartialState
+		}
 		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
 				slog.String("session_id", sessionID),
 				slog.String("error", transErr.Error()))
 		}
 
-		// Generate a new TurnID for each turn (correlates carry-forward checkpoints)
 		turnID, err := id.Generate()
 		if err != nil {
 			return fmt.Errorf("failed to generate turn ID: %w", err)
 		}
 		state.TurnID = turnID.String()
 
-		// Update AgentType when:
-		//   - it isn't yet set, or
-		//   - the resolved type came from a stronger signal (transcript path)
-		//     than what's currently stored. correctSessionAgentType handles the
-		//     "transcript path proves we're a different agent" case.
+		// Update AgentType when it isn't set yet, or when the transcript path
+		// proves we're a different agent than the one stored.
 		if state.AgentType == "" && resolvedAgentType != "" {
 			state.AgentType = resolvedAgentType
 		} else if corrected, changed := correctSessionAgentType(ctx, state.AgentType, transcriptPath); changed {
@@ -2261,92 +2276,62 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 				slog.String("transcript_path", transcriptPath))
 			state.AgentType = corrected
 		}
-
-		// Update ModelName if provided (model can change between turns)
 		if model != "" {
 			state.ModelName = model
 		}
-
-		// Update LastPrompt on every turn so condensation always has the current prompt
 		if userPrompt != "" {
 			state.LastPrompt = truncatePromptForStorage(userPrompt)
 		}
-
-		// Update transcript path if provided (may change on session resume)
 		if transcriptPath != "" && state.TranscriptPath != transcriptPath {
 			state.TranscriptPath = transcriptPath
 		}
 
 		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
-		// BaseCommit as the base tree (preserving correct agent-line counts when
-		// HEAD moved between turns via pull/rebase). Migrate runs BEFORE the
-		// LastCheckpointID clear so the reconcile guard can read the checkpoint ID.
-		//
-		// Sequence: attribution → migrate → clear
-		//
-		// 1. Attribution uses state.BaseCommit to locate the shadow branch and
-		//    base tree. Running it before migrate ensures it diffs against the
-		//    original base, not the post-migration HEAD.
-		// 2. Migrate/reconcile reads state.LastCheckpointID — clearing it first
-		//    would prevent the reconcile path from ever firing at turn start.
-
-		// Calculate attribution at prompt start (BEFORE agent makes any changes)
-		// This captures user edits since the last checkpoint (or base commit for first prompt).
-		// IMPORTANT: Always calculate attribution, even for the first checkpoint, to capture
-		// user edits made before the first prompt. The inner CalculatePromptAttribution handles
-		// nil lastCheckpointTree by falling back to baseTree.
+		// BaseCommit as the base tree (preserving correct agent-line counts
+		// when HEAD moved between turns via pull/rebase). Migrate runs BEFORE
+		// the LastCheckpointID clear so the reconcile guard can read it.
 		promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
 		state.PendingPromptAttribution = &promptAttr
 
-		// Check if HEAD has moved (user pulled/rebased or committed)
-		// migrateShadowBranchIfNeeded handles renaming the shadow branch and updating state.BaseCommit
 		_, reconciled, err := s.migrateShadowBranchIfNeeded(ctx, repo, state)
 		if err != nil {
 			return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
 		}
 		if reconciled {
-			// Reconcile advanced BaseCommit + AttributionBaseCommit to HEAD (the
-			// known checkpoint we reset to). The attribution just computed is
-			// against the stale pre-reset base and would count discarded-history
-			// edits as churn. Recompute against the new base so the next
-			// checkpoint sees accurate user-delta.
 			recomputed := s.calculatePromptAttributionAtStart(ctx, repo, state)
 			state.PendingPromptAttribution = &recomputed
 		}
 
-		// Clear checkpoint IDs on every new prompt.
-		// LastCheckpointID is set during PostCommit, cleared at new prompt.
-		// TurnCheckpointIDs tracks mid-turn checkpoints for stop-time finalization.
 		state.LastCheckpointID = ""
 		state.TurnCheckpointIDs = nil
-
-		if err := s.saveSessionState(ctx, state); err != nil {
-			return fmt.Errorf("failed to update session state: %w", err)
-		}
+		return nil
+	})
+	if turnStartErr == nil {
 		return nil
 	}
-	// If state exists but BaseCommit is empty, it's a partial state from concurrent warning
-	// Continue below to properly initialize it
+	if !errors.Is(turnStartErr, ErrStateNotFound) && !errors.Is(turnStartErr, errPartialState) {
+		return fmt.Errorf("failed to update session state: %w", turnStartErr)
+	}
 
-	// Initialize new session
-	state, err = s.initializeSession(ctx, repo, sessionID, resolvedAgentType, transcriptPath, userPrompt, model)
-	if err != nil {
+	// Initialize new session (or repair a partial state). The MutateSessionState
+	// call below reloads the freshly-persisted state under lock and runs the
+	// turn-start mutations on top of it.
+	if err := s.initializeSession(ctx, repo, sessionID, resolvedAgentType, transcriptPath, userPrompt, model); err != nil {
 		return fmt.Errorf("failed to initialize session: %w", err)
 	}
 
-	// Apply phase transition: new session starts as ACTIVE.
-	if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
-		logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
-			slog.String("session_id", sessionID),
-			slog.String("error", transErr.Error()))
-	}
-
-	// Calculate attribution for pre-prompt edits
-	// This captures any user edits made before the first prompt
-	promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
-	state.PendingPromptAttribution = &promptAttr
-	if err = s.saveSessionState(ctx, state); err != nil {
-		return fmt.Errorf("failed to save attribution: %w", err)
+	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
+				slog.String("session_id", sessionID),
+				slog.String("error", transErr.Error()))
+		}
+		promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
+		state.PendingPromptAttribution = &promptAttr
+		return nil
+	})
+	if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
+		return fmt.Errorf("failed to save attribution: %w", mutErr)
 	}
 
 	logging.Info(logging.WithComponent(ctx, "hooks"), "initialized shadow session",
@@ -2429,7 +2414,7 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 		return result
 	}
 
-	worktreeRoot := worktree.Filesystem.Root()
+	worktreeRoot := worktree.Filesystem().Root()
 
 	// Build map of changed files with their worktree content
 	// IMPORTANT: We read from worktree (not staging area) to match what WriteTemporary
@@ -2591,6 +2576,12 @@ func readPromptsFromShadowBranch(_ context.Context, repo *git.Repository, state 
 
 	return splitPromptContent(content)
 }
+
+// errPartialState signals InitializeSession's mutation callback that the
+// loaded state has an empty BaseCommit (left over from a concurrent warning
+// that wrote partial state). The caller falls through to initializeSession
+// to repair it.
+var errPartialState = errors.New("partial session state")
 
 // HandleTurnEnd dispatches strategy-specific actions emitted when an agent turn ends.
 // The primary job is to finalize all checkpoints from this turn with the full transcript.

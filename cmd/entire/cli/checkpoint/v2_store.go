@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -36,6 +37,10 @@ type V2GitStore struct {
 	// cat-file fallback covers partial-clone-filtered blobs that go-git's
 	// storer can't see).
 	blobFetcher BlobFetchFunc
+
+	commonDirOnce sync.Once
+	commonDir     string
+	commonDirErr  error
 }
 
 // maxCheckpoints returns the effective rotation threshold.

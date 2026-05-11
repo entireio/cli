@@ -250,7 +250,7 @@ func TestV2ReadSessionMetadata_FetchesMissingMetadataBlob(t *testing.T) {
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
-	repoRoot := wt.Filesystem.Root()
+	repoRoot := wt.Filesystem().Root()
 	mainTree := v2MainTree(t, repo)
 	sessionTree, err := mainTree.Tree(cpID.Path() + "/0")
 	require.NoError(t, err)

@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-05-07
+
+### Added
+
+- New `entire labs` command discovery for surfacing experimental commands ([#1130](https://github.com/entireio/cli/pull/1130))
+- `entire labs review` command — runs configured review skills inside an agent session, with single- and multi-agent picker flows, a Bubble Tea live dashboard, an optional cross-agent synthesis verdict, and `entire review attach` for post-hoc tagging. Reviews are recorded in checkpoint metadata so future commits know the code was reviewed ([#993](https://github.com/entireio/cli/pull/993), [#1105](https://github.com/entireio/cli/pull/1105), [#1106](https://github.com/entireio/cli/pull/1106), [#1107](https://github.com/entireio/cli/pull/1107), [#1111](https://github.com/entireio/cli/pull/1111), [#1112](https://github.com/entireio/cli/pull/1112))
+- `entire recap` command, with an interactive TUI for browsing recaps ([#1015](https://github.com/entireio/cli/pull/1015), [#1113](https://github.com/entireio/cli/pull/1113))
+- kubectl-style external command resolution: `entire <name>` falls through to `entire-<name>` on PATH ([#1104](https://github.com/entireio/cli/pull/1104))
+- Managed plugin install directory and `ENTIRE_PLUGIN_DATA_DIR` for plugin discovery ([#1121](https://github.com/entireio/cli/pull/1121))
+
+### Changed
+
+- Checkpoint commit signing now uses go-git's program signer for custom signing setups ([#1128](https://github.com/entireio/cli/pull/1128))
+- Checkpoints v2 (work in progress): dual-write to v1 and v2 during the transition; migration speedups via fast-path checks and rerun de-duplication; clearer completion message after the progress bar ([#1108](https://github.com/entireio/cli/pull/1108), [#1109](https://github.com/entireio/cli/pull/1109), [#1110](https://github.com/entireio/cli/pull/1110), [#1114](https://github.com/entireio/cli/pull/1114))
+
+### Fixed
+
+- `entire attach` now preserves `BaseCommit` and the active session phase ([#1102](https://github.com/entireio/cli/pull/1102))
+- Copilot CLI direct-prompt runs no longer fire session hooks unsafely ([#1100](https://github.com/entireio/cli/pull/1100))
+- `entire labs review` regressions: missing checkpoint context and review-flow correctness ([#1132](https://github.com/entireio/cli/pull/1132))
+- v2 transcripts are no longer sliced in final step ([#1120](https://github.com/entireio/cli/pull/1120))
+- Checkpoint signing: the orphan "Initialize metadata branch" commit is now signed ([#1119](https://github.com/entireio/cli/pull/1119))
+- Checkpoints v2 migration: generation packing fix ([#1124](https://github.com/entireio/cli/pull/1124))
+
+### Housekeeping
+
+- Refreshed `security-and-privacy.md` against current source ([#1097](https://github.com/entireio/cli/pull/1097))
+- Cursor-cli E2E stabilization ([#1101](https://github.com/entireio/cli/pull/1101), [#1103](https://github.com/entireio/cli/pull/1103))
+- Dependency bumps: go-dependencies group (`mattn/go-isatty` 0.0.20 → 0.0.22, `go-git/x/plugin/objectsigner/auto` → 0.1.0), `go-git/go-git/v6` 6.0.0-alpha.2 → 6.0.0-alpha.3 ([#1122](https://github.com/entireio/cli/pull/1122), [#1129](https://github.com/entireio/cli/pull/1129), [#1131](https://github.com/entireio/cli/pull/1131))
+
+### Thanks
+
+Thanks to @rkfir-dn for fixing `entire attach` so it preserves session base commit and active phase!
+Thanks to @LudovicTOURMAN for adding that the initial commit for the metadata tree will now be signed according to signing settings too!
+
 ## [0.6.0] - 2026-05-04
 
 ### Added

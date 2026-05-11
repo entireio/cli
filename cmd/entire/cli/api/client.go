@@ -59,7 +59,16 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // Get sends an authenticated GET request to the given API-relative path.
 func (c *Client) Get(ctx context.Context, path string) (*http.Response, error) {
-	return c.do(ctx, http.MethodGet, path, nil)
+	return c.do(ctx, http.MethodGet, path, nil, nil)
+}
+
+// GetStream sends an authenticated GET request with optional extra request
+// headers (e.g. Accept: text/event-stream, Last-Event-ID) and returns the
+// response with the body still open. Callers are responsible for reading and
+// closing resp.Body. Intended for streaming endpoints such as Server-Sent
+// Events; for normal JSON requests use Get.
+func (c *Client) GetStream(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
+	return c.do(ctx, http.MethodGet, path, nil, headers)
 }
 
 // Post sends an authenticated POST request with a JSON body to the given API-relative path.
@@ -72,7 +81,7 @@ func (c *Client) Post(ctx context.Context, path string, body any) (*http.Respons
 		}
 		reader = bytes.NewReader(data)
 	}
-	return c.do(ctx, http.MethodPost, path, reader)
+	return c.do(ctx, http.MethodPost, path, reader, nil)
 }
 
 // Put sends an authenticated PUT request with a JSON body to the given API-relative path.
@@ -85,7 +94,7 @@ func (c *Client) Put(ctx context.Context, path string, body any) (*http.Response
 		}
 		reader = bytes.NewReader(data)
 	}
-	return c.do(ctx, http.MethodPut, path, reader)
+	return c.do(ctx, http.MethodPut, path, reader, nil)
 }
 
 // Patch sends an authenticated PATCH request with a JSON body to the given API-relative path.
@@ -98,15 +107,15 @@ func (c *Client) Patch(ctx context.Context, path string, body any) (*http.Respon
 		}
 		reader = bytes.NewReader(data)
 	}
-	return c.do(ctx, http.MethodPatch, path, reader)
+	return c.do(ctx, http.MethodPatch, path, reader, nil)
 }
 
 // Delete sends an authenticated DELETE request to the given API-relative path.
 func (c *Client) Delete(ctx context.Context, path string) (*http.Response, error) {
-	return c.do(ctx, http.MethodDelete, path, nil)
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+func (c *Client) do(ctx context.Context, method, path string, body io.Reader, headers http.Header) (*http.Response, error) {
 	endpoint, err := ResolveURLFromBase(c.baseURL, path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve URL %s: %w", path, err)
@@ -115,6 +124,12 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader) (*
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	for k, vs := range headers {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 
 	if body != nil {

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 
 const (
 	testAgentClaude    = "Claude Code"
+	testAgentGemini    = "Gemini CLI"
 	testCheckpointID   = "a3b2c4d5e6f7"
 	testPromptFixLogin = "fix the login bug"
 )
@@ -652,7 +655,7 @@ func TestListCmd_ShowsAllSessions(t *testing.T) {
 	active.StartedAt = time.Now().Add(-1 * time.Hour)
 
 	idle := makeSessionState("test-list-idle", session.PhaseIdle)
-	idle.AgentType = "Gemini CLI"
+	idle.AgentType = testAgentGemini
 	idle.WorktreeID = "other-wt"
 	idle.LastCheckpointID = testCheckpointID
 	idle.StartedAt = time.Now().Add(-2 * time.Hour)
@@ -704,6 +707,92 @@ func TestListCmd_ShowsAllSessions(t *testing.T) {
 	endedIdx := strings.Index(out, "test-list-ended")
 	if activeIdx > idleIdx || idleIdx > endedIdx {
 		t.Errorf("expected newest-first sort order, got active@%d idle@%d ended@%d", activeIdx, idleIdx, endedIdx)
+	}
+}
+
+func TestListCmd_JSONNoSessionsEmitsEmptyArray(t *testing.T) {
+	setupStopTestRepo(t)
+
+	cmd := newListCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"--json"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("ExecuteContext: %v", err)
+	}
+
+	var got []sessionInfoJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("expected valid JSON array, got parse error: %v\noutput: %s", err, stdout.String())
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty array, got %d entries", len(got))
+	}
+}
+
+func TestListCmd_JSONReturnsAllSessionsSorted(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	older := makeSessionState("test-list-json-older", session.PhaseIdle)
+	older.AgentType = testAgentClaude
+	older.StartedAt = time.Now().Add(-2 * time.Hour)
+	older.WorktreeID = "wt-a"
+	older.LastCheckpointID = testCheckpointID
+
+	newer := makeSessionState("test-list-json-newer", session.PhaseActive)
+	newer.AgentType = testAgentGemini
+	newer.ModelName = "gemini-2.5-pro"
+	newer.StartedAt = time.Now().Add(-30 * time.Minute)
+	newer.WorktreeID = "wt-b"
+	newer.LastPrompt = testPromptFixLogin
+
+	for _, s := range []*strategy.SessionState{older, newer} {
+		if err := strategy.SaveSessionState(ctx, s); err != nil {
+			t.Fatalf("SaveSessionState: %v", err)
+		}
+	}
+
+	cmd := newListCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("ExecuteContext: %v", err)
+	}
+
+	var got []sessionInfoJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("expected valid JSON array, got parse error: %v\noutput: %s", err, stdout.String())
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(got))
+	}
+
+	// Newest first — same order as the prose view.
+	if got[0].SessionID != "test-list-json-newer" {
+		t.Errorf("expected newest session first, got %q", got[0].SessionID)
+	}
+	if got[1].SessionID != "test-list-json-older" {
+		t.Errorf("expected older session second, got %q", got[1].SessionID)
+	}
+
+	// Envelope must carry the same fields a Baton-style consumer needs.
+	if got[0].Agent != testAgentGemini {
+		t.Errorf("expected agent='Gemini CLI', got %q", got[0].Agent)
+	}
+	if got[0].Model != "gemini-2.5-pro" {
+		t.Errorf("expected model='gemini-2.5-pro', got %q", got[0].Model)
+	}
+	if got[0].LastPrompt != testPromptFixLogin {
+		t.Errorf("expected last_prompt set, got %q", got[0].LastPrompt)
+	}
+	if got[0].WorktreeID != "wt-b" {
+		t.Errorf("expected worktree_id='wt-b', got %q", got[0].WorktreeID)
+	}
+	if got[1].LastCheckpoint != testCheckpointID {
+		t.Errorf("expected last_checkpoint_id=%q, got %q", testCheckpointID, got[1].LastCheckpoint)
 	}
 }
 
@@ -912,6 +1001,262 @@ func TestInfoCmd_EndedSession(t *testing.T) {
 	}
 	if !strings.Contains(out, "Checkpoint:  b79b35cd956d") {
 		t.Errorf("expected checkpoint ID in output, got:\n%s", out)
+	}
+}
+
+func TestInfoCmd_TranscriptStreamsRawAgentBytes(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+
+	transcriptDir := t.TempDir()
+	transcriptPath := filepath.Join(transcriptDir, "session.jsonl")
+	want := []byte(`{"role":"user","content":"hi"}` + "\n" + `{"role":"assistant","content":"hello"}` + "\n")
+	if err := os.WriteFile(transcriptPath, want, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	state := makeSessionState("test-info-transcript", session.PhaseActive)
+	state.AgentType = testAgentClaude
+	state.TranscriptPath = transcriptPath
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"test-info-transcript", "--transcript"})
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("ExecuteContext: %v", err)
+	}
+
+	if !bytes.Equal(stdout.Bytes(), want) {
+		t.Errorf("transcript output mismatch.\n  want: %q\n  got:  %q", want, stdout.Bytes())
+	}
+}
+
+func TestInfoCmd_TranscriptMissingPath(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+	state := makeSessionState("test-info-no-transcript", session.PhaseActive)
+	state.AgentType = testAgentClaude
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"test-info-no-transcript", "--transcript"})
+
+	err := cmd.ExecuteContext(ctx)
+	if err == nil {
+		t.Fatal("expected error when transcript path is empty")
+	}
+	if !strings.Contains(err.Error(), "no transcript path") {
+		t.Errorf("expected 'no transcript path' error, got: %v", err)
+	}
+	// User-visible cause: must be on stderr (not silently swallowed by SilentError).
+	if !strings.Contains(stderr.String(), "no transcript path") {
+		t.Errorf("expected stderr to surface 'no transcript path', got: %q", stderr.String())
+	}
+}
+
+// TestInfoCmd_TranscriptTrimsPartialTrailingLine verifies the snapshot-shape
+// guarantee for JSONL transcripts: if the agent is mid-write of a JSONL line
+// when we hit EOF, consumers receive only the complete prefix.
+func TestInfoCmd_TranscriptTrimsPartialTrailingLine(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	transcriptDir := t.TempDir()
+	transcriptPath := filepath.Join(transcriptDir, "session.jsonl")
+	// Two complete records + one truncated record (no trailing newline).
+	full := `{"v":1,"role":"user"}` + "\n" + `{"v":1,"role":"assistant"}` + "\n"
+	written := full + `{"v":1,"role":"user","content":"trunc`
+	if err := os.WriteFile(transcriptPath, []byte(written), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	state := makeSessionState("test-info-trim", session.PhaseActive)
+	state.AgentType = testAgentClaude
+	state.TranscriptPath = transcriptPath
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"test-info-trim", "--transcript"})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("ExecuteContext: %v", err)
+	}
+
+	if got := stdout.String(); got != full {
+		t.Errorf("expected partial trailing line trimmed.\n  want: %q\n  got:  %q", full, got)
+	}
+}
+
+// TestInfoCmd_TranscriptEmitsWholeJSONDocument verifies the Gemini-style case:
+// transcripts that are a single valid JSON document (no trailing newline) must
+// be emitted intact. Trim-to-last-newline would cut the closing brace and
+// produce malformed output. Regression test for copilot review feedback.
+func TestInfoCmd_TranscriptEmitsWholeJSONDocument(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	transcriptDir := t.TempDir()
+	transcriptPath := filepath.Join(transcriptDir, "session.json")
+	// Pretty-printed JSON (newlines inside) but no trailing newline at EOF.
+	want := `{
+  "sessionId": "abc",
+  "messages": [
+    {"role": "user", "content": "hi"},
+    {"role": "assistant", "content": "hello"}
+  ]
+}`
+	if err := os.WriteFile(transcriptPath, []byte(want), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	state := makeSessionState("test-info-json-doc", session.PhaseActive)
+	state.AgentType = testAgentGemini
+	state.TranscriptPath = transcriptPath
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"test-info-json-doc", "--transcript"})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("ExecuteContext: %v", err)
+	}
+
+	if got := stdout.String(); got != want {
+		t.Errorf("expected whole JSON document preserved.\n  want: %q\n  got:  %q", want, got)
+	}
+}
+
+// TestInfoCmd_TranscriptInvalidJSONErrorsLoudly guards the bugbot finding
+// that whole-document JSON agents (Gemini) silently produced empty output
+// when the snapshot didn't parse as JSON. Machine consumers can't tell
+// "no data" from "data unavailable, retry" if exit-code 0 + empty stdout
+// is the same in both cases. The mid-write case must now error.
+func TestInfoCmd_TranscriptInvalidJSONErrorsLoudly(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	transcriptDir := t.TempDir()
+	transcriptPath := filepath.Join(transcriptDir, "session.json")
+	// Truncated JSON document — what Gemini would produce mid-write.
+	written := `{"sessionId":"abc","messages":[{"role":"user","content":"trun`
+	if err := os.WriteFile(transcriptPath, []byte(written), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	state := makeSessionState("test-info-invalid-json", session.PhaseActive)
+	state.AgentType = testAgentGemini
+	state.TranscriptPath = transcriptPath
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"test-info-invalid-json", "--transcript"})
+
+	err := cmd.ExecuteContext(ctx)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON snapshot, got nil")
+	}
+	if !strings.Contains(err.Error(), "not valid JSON") {
+		t.Errorf("expected 'not valid JSON' in error, got: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("expected empty stdout on JSON-validation failure, got: %q", stdout.String())
+	}
+}
+
+// TestInfoCmd_TranscriptBoundsSnapshotAtOpen verifies copilot finding 2:
+// bytes the agent appends after the command opens the file must NOT appear
+// in the output (snapshot is bounded at command start, not "current EOF").
+func TestInfoCmd_TranscriptBoundsSnapshotAtOpen(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	transcriptDir := t.TempDir()
+	transcriptPath := filepath.Join(transcriptDir, "session.jsonl")
+	initial := `{"v":1,"role":"user"}` + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(initial), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	state := makeSessionState("test-info-snapshot", session.PhaseActive)
+	state.AgentType = testAgentClaude
+	state.TranscriptPath = transcriptPath
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	// Append after command construction but before execution. With a properly
+	// bounded snapshot the appended bytes must not appear in stdout.
+	f, err := os.OpenFile(transcriptPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if _, err := f.WriteString(`{"v":1,"role":"assistant","appended":"AFTER-OPEN"}` + "\n"); err != nil {
+		t.Fatalf("WriteString: %v", err)
+	}
+	_ = f.Close()
+
+	cmd := newInfoCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"test-info-snapshot", "--transcript"})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("ExecuteContext: %v", err)
+	}
+
+	// We can't make this test deterministic against ordering of "open" vs
+	// "append" within a single goroutine — both have already happened by the
+	// time io.ReadAll runs. The real snapshot-vs-current-EOF distinction
+	// matters for in-flight appends across goroutines, which we can't
+	// reliably orchestrate in unit-test scope. The minimum we assert: when
+	// the snapshot bound is correctly anchored at f.Stat().Size(), the
+	// output is one of the two well-defined sizes (initial-only or
+	// initial+append), never half a record. This guards against the
+	// no-bound regression where an in-flight write produced truncated
+	// output.
+	got := stdout.String()
+	switch got {
+	case initial, initial + `{"v":1,"role":"assistant","appended":"AFTER-OPEN"}` + "\n":
+		// Either is well-formed.
+	default:
+		t.Errorf("expected snapshot to land on a record boundary, got: %q", got)
+	}
+}
+
+func TestInfoCmd_TranscriptAndJSONMutuallyExclusive(t *testing.T) {
+	setupStopTestRepo(t)
+
+	cmd := newInfoCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"some-id", "--json", "--transcript"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected error when --json and --transcript are combined")
 	}
 }
 

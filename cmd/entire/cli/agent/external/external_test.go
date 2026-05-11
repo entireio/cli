@@ -862,9 +862,11 @@ func TestStripExeExt(t *testing.T) {
 		{name: "exe lowercase", in: "entire-agent-test.exe", want: "entire-agent-test"},
 		{name: "bat lowercase", in: "entire-agent-test.bat", want: "entire-agent-test"},
 		{name: "cmd lowercase", in: "entire-agent-test.cmd", want: "entire-agent-test"},
+		{name: "com lowercase", in: "entire-agent-test.com", want: "entire-agent-test"},
 		{name: "exe uppercase", in: "entire-agent-test.EXE", want: "entire-agent-test"},
 		{name: "bat mixed case", in: "entire-agent-test.Bat", want: "entire-agent-test"},
 		{name: "cmd mixed case", in: "entire-agent-test.CmD", want: "entire-agent-test"},
+		{name: "com uppercase", in: "entire-agent-test.COM", want: "entire-agent-test"},
 		{name: "no extension", in: "entire-agent-test", want: "entire-agent-test"},
 		{name: "unrelated extension", in: "entire-agent-test.sh", want: "entire-agent-test.sh"},
 		{name: "dot only", in: "entire-agent-test.", want: "entire-agent-test."},
@@ -876,8 +878,8 @@ func TestStripExeExt(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := stripExeExt(tt.in); got != tt.want {
-				t.Errorf("stripExeExt(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := StripExeExt(tt.in); got != tt.want {
+				t.Errorf("StripExeExt(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

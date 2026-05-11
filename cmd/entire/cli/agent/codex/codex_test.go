@@ -60,6 +60,7 @@ func TestCodexAgent_HookNames(t *testing.T) {
 	require.Contains(t, names, "user-prompt-submit")
 	require.Contains(t, names, "stop")
 	require.Contains(t, names, "pre-tool-use")
+	require.Contains(t, names, "post-tool-use")
 }
 
 func TestCodexAgent_FormatResumeCommand(t *testing.T) {

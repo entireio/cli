@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -13,6 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -40,7 +43,7 @@ func newRecapCmd() *cobra.Command {
 		Use:   "recap",
 		Short: "Summarize recent checkpoint activity",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runRecap(cmd.Context(), cmd.OutOrStdout(), f)
+			return runRecap(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), f)
 		},
 	}
 	cmd.Flags().BoolVar(&f.day, "day", false, "Today only (default)")
@@ -107,9 +110,9 @@ func (f *recapFlags) useTUI(isTerminal, canPrompt, accessible bool) bool {
 	return isTerminal && canPrompt && !accessible && !f.static
 }
 
-func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
+func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	if _, err := paths.WorktreeRoot(ctx); err != nil {
-		fmt.Fprintln(w, "Not a git repository. Run 'entire recap' from within a git repository.")
+		fmt.Fprintln(errW, "Not a git repository. Run 'entire recap' from within a git repository.")
 		return NewSilentError(errors.New("not a git repository"))
 	}
 	mode := f.mode()
@@ -120,9 +123,17 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 	if err != nil {
 		return err
 	}
-	client, err := NewAuthenticatedAPIClient(f.insecureHTTP)
+	client, err := newRecapClient(f.insecureHTTP)
 	if err != nil {
-		fmt.Fprintln(w, "Sign in with `entire login` to use `entire recap`.")
+		var keyringErr *keyringReadError
+		switch {
+		case errors.Is(err, api.ErrInsecureHTTP):
+			fmt.Fprintf(errW, "ENTIRE_API_BASE_URL is set to an insecure http:// URL (%s). Use https:// for production, or pass --insecure-http-auth for local dev.\n", api.BaseURL())
+		case errors.As(err, &keyringErr):
+			fmt.Fprintf(errW, "Could not read your auth token from the system keyring: %v. Running `entire login` may not help — the keyring may be locked or inaccessible. Check your OS keychain settings.\n", keyringErr.Cause)
+		default:
+			return err
+		}
 		return NewSilentError(err)
 	}
 	rangeKey := f.rangeKey()
@@ -139,7 +150,7 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 	start, end := rangeKey.Bounds(time.Now())
 	resp, err := recap.FetchMeRecap(ctx, client, start, end, repoSlug, 0)
 	if err != nil {
-		return fmt.Errorf("fetch recap: %w", err)
+		return handleRecapFetchError(errW, err)
 	}
 	fmt.Fprint(w, recap.RenderStaticRecap(resp, recap.RenderOptions{
 		Range: rangeKey,
@@ -150,6 +161,53 @@ func runRecap(ctx context.Context, w io.Writer, f *recapFlags) error {
 	}))
 	fmt.Fprintln(w)
 	return nil
+}
+
+// keyringReadError marks a failure to read the auth token from the system
+// keyring (locked, permission denied, etc.) — distinct from "no token saved",
+// which keyring.ErrNotFound resolves to (token=="", err==nil) upstream.
+type keyringReadError struct{ Cause error }
+
+func (e *keyringReadError) Error() string {
+	return "read auth token from keyring: " + e.Cause.Error()
+}
+func (e *keyringReadError) Unwrap() error { return e.Cause }
+
+// newRecapClient does not gate on a missing token; FetchMeRecap surfaces 401s
+// via recapLoadErrorMessage so flag effects (--week, --agent, ...) and the
+// real auth error are not collapsed into one "sign in" hint. A keyring read
+// failure is surfaced as *keyringReadError so the caller can show a targeted
+// message instead of misattributing it to a missing login.
+func newRecapClient(insecureHTTP bool) (*api.Client, error) {
+	token, err := auth.LookupCurrentToken()
+	if err != nil {
+		return nil, &keyringReadError{Cause: err}
+	}
+	if token != "" && !insecureHTTP {
+		if err := api.RequireSecureURL(api.BaseURL()); err != nil {
+			return nil, fmt.Errorf("base URL check: %w", err)
+		}
+	}
+	return api.NewClient(token), nil
+}
+
+func handleRecapFetchError(w io.Writer, err error) error {
+	if shouldShowRecapLoadErrorMessage(err) {
+		fmt.Fprintln(w, recapLoadErrorMessage(err))
+		return NewSilentError(err)
+	}
+	return fmt.Errorf("fetch recap: %w", err)
+}
+
+func shouldShowRecapLoadErrorMessage(err error) bool {
+	var apiErr *api.HTTPError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusUnauthorized ||
+			apiErr.StatusCode == http.StatusBadRequest ||
+			apiErr.StatusCode == http.StatusNotFound ||
+			apiErr.StatusCode >= http.StatusInternalServerError
+	}
+	return isRecapNetworkError(err)
 }
 
 func terminalWidth(w io.Writer) int {

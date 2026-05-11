@@ -507,7 +507,7 @@ func listRemoteArchivedV2GenerationRefs(ctx context.Context, target string) (map
 	}
 
 	refs := make(map[string]string)
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
 		}

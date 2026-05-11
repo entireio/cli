@@ -95,7 +95,7 @@ func (m activityModel) Init() tea.Cmd {
 	return tea.Batch(m.spinner.Tick, m.fetchData)
 }
 
-func (m activityModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea interface
+func (m activityModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case activityDataMsg:
 		m.loading = false

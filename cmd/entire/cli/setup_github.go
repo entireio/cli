@@ -488,7 +488,7 @@ func resolveRepoName(ctx context.Context, w, errW io.Writer, runner bootstrapRun
 					Description(fmt.Sprintf("Press enter to use %q", name)).
 					Value(&input),
 			),
-		)
+		).WithOutput(w)
 		if err := form.Run(); err != nil {
 			if errors.Is(err, huh.ErrUserAborted) {
 				return "", errBootstrapInterrupted
@@ -642,12 +642,12 @@ func gitInit(ctx context.Context, runner bootstrapRunner, dir string) error {
 // commit was actually created (false if there were no files to stage).
 func doInitialCommit(ctx context.Context, runner bootstrapRunner, dir, message string) (bool, error) {
 	if _, err := runner.RunInDir(ctx, dir, "git", "add", "-A"); err != nil {
-		return false, fmt.Errorf("git add: %w", err)
+		return false, wrapExecError("git add", err)
 	}
 	// Check if the staging area has anything at all.
 	out, err := runner.RunInDir(ctx, dir, "git", "status", "--porcelain")
 	if err != nil {
-		return false, fmt.Errorf("git status: %w", err)
+		return false, wrapExecError("git status", err)
 	}
 	if strings.TrimSpace(out) == "" {
 		return false, nil
@@ -656,9 +656,21 @@ func doInitialCommit(ctx context.Context, runner bootstrapRunner, dir, message s
 	// have commit.gpgsign=true inherited from a global config but no
 	// working signer; passing -c keeps the user's global config intact.
 	if _, err := runner.RunInDir(ctx, dir, "git", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
-		return false, fmt.Errorf("git commit: %w", err)
+		return false, wrapExecError("git commit", err)
 	}
 	return true, nil
+}
+
+// wrapExecError formats err with stderr from *exec.ExitError when available,
+// so callers see git's actual complaint instead of an opaque "exit status N".
+func wrapExecError(prefix string, err error) error {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		if stderr := strings.TrimSpace(string(ee.Stderr)); stderr != "" {
+			return fmt.Errorf("%s: %w: %s", prefix, err, stderr)
+		}
+	}
+	return fmt.Errorf("%s: %w", prefix, err)
 }
 
 // ensureGitIdentity guarantees the repo has a user.name/user.email set at

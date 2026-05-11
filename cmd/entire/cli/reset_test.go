@@ -103,7 +103,7 @@ func TestResetCmd_WithForce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
-	worktreePath := wt.Filesystem.Root()
+	worktreePath := wt.Filesystem().Root()
 	worktreeID, err := paths.GetWorktreeID(worktreePath)
 	if err != nil {
 		t.Fatalf("failed to get worktree ID: %v", err)

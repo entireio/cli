@@ -105,6 +105,7 @@ linters:
         - error
         - empty
         - stdlib
+        - charm.land/bubbletea/v2.Model
         - grpc.DialOption
         - github.com/entireio/cli/cmd/entire/cli/summarize.Generator
         - github.com/entireio/cli/cmd/entire/cli/agent\..+

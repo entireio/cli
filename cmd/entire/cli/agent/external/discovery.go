@@ -84,7 +84,7 @@ func discoverAndRegister(ctx context.Context) {
 
 			// Strip Windows executable extensions (.exe, .bat) before deriving agent name.
 			// On Unix, binaries have no extension, so this is a no-op.
-			cleanName := stripExeExt(name)
+			cleanName := StripExeExt(name)
 			agentName := types.AgentName(strings.TrimPrefix(cleanName, binaryPrefix))
 			if registered[agentName] {
 				logging.Debug(ctx, "skipping external agent (name conflict with built-in)",
@@ -131,12 +131,17 @@ func discoverAndRegister(ctx context.Context) {
 	}
 }
 
-// stripExeExt removes Windows executable extensions (.exe, .bat, .cmd) from a
-// file name so that the agent name derived from the binary matches on all platforms.
-// On Unix this is effectively a no-op because binaries have no extension.
-func stripExeExt(name string) string {
+// StripExeExt removes Windows executable extensions (.exe, .bat, .cmd, .com)
+// from a file name so that the derived name matches on all platforms. On Unix
+// this is effectively a no-op because binaries have no extension.
+//
+// .com is included because Windows PATHEXT defaults to ".COM;.EXE;.BAT;.CMD;…",
+// so exec.LookPath can resolve a `.com` next to a `.exe`. Without stripping
+// it, a managed-plugin or agent-binary installer would treat foo.exe and
+// foo.com as distinct names while PATHEXT silently picks one.
+func StripExeExt(name string) string {
 	switch strings.ToLower(filepath.Ext(name)) {
-	case ".exe", ".bat", ".cmd":
+	case ".exe", ".bat", ".cmd", ".com":
 		return strings.TrimSuffix(name, filepath.Ext(name))
 	}
 	return name

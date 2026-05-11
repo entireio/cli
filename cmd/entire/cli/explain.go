@@ -225,6 +225,10 @@ func newExplainCmd() *cobra.Command {
 	var generateFlag bool
 	var forceFlag bool
 	var searchAllFlag bool
+	var jsonFlag bool
+	var transcriptFlag bool
+	sessionIndex := -1
+	listLimit := 0 // 0 means "use default (branchCheckpointsLimit)"
 
 	cmd := &cobra.Command{
 		Use:   "explain [checkpoint-id | commit-sha]",
@@ -250,6 +254,20 @@ Output verbosity levels (when explaining a specific item):
   --short          Summary only (ID, session, timestamp, tokens, intent)
   --full           Parsed full transcript (all prompts/responses from entire session)
   --raw-transcript Raw transcript file (JSONL format)
+
+Machine-readable export modes (additive surface for external consumers):
+  --json           Metadata-only JSON. Lists checkpoints when no target is given;
+                   emits a single checkpoint envelope when a target is supplied.
+                   Transcript bytes are NEVER embedded in the JSON envelope.
+  --transcript     Stream the normalized compact transcript bytes (JSONL on
+                   /main) to stdout for the selected session. Pair with
+                   --raw-transcript for the per-agent raw transcript instead.
+  --session-index  Pick a session within a multi-session checkpoint (0-based).
+                   Defaults to the latest session. Only meaningful with
+                   --transcript or --raw-transcript.
+  --limit          Cap the number of checkpoints returned by the list view.
+                   Defaults to 100. When the cap is hit, a stderr note
+                   says how many were skipped. Only meaningful with --json.
 
 Summary generation:
   --generate    Generate an AI summary for the checkpoint
@@ -307,6 +325,44 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 			if rawTranscriptFlag && !hasCheckpointTarget {
 				return errors.New("--raw-transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
 			}
+			if transcriptFlag && !hasCheckpointTarget {
+				return errors.New("--transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+			}
+			if cmd.Flags().Changed("session-index") {
+				if !transcriptFlag && !rawTranscriptFlag {
+					return errors.New("--session-index only applies with --transcript or --raw-transcript")
+				}
+				if sessionIndex < 0 {
+					return errors.New("--session-index must be non-negative")
+				}
+			}
+			if cmd.Flags().Changed("limit") {
+				if !jsonFlag {
+					return errors.New("--limit only applies with --json")
+				}
+				if listLimit <= 0 {
+					return errors.New("--limit must be positive")
+				}
+			}
+
+			// Export modes — emit machine-readable output and skip the prose pipeline.
+			// --raw-transcript also routes here when --session-index is explicit; the
+			// legacy raw-transcript path (with spinner + prefetch) handles the default
+			// case where the caller wants the latest session.
+			rawWithSessionIndex := rawTranscriptFlag && cmd.Flags().Changed("session-index")
+			if jsonFlag || transcriptFlag || rawWithSessionIndex {
+				return runExplainExport(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), explainExportOptions{
+					sessionFilter:  sessionFlag,
+					commitRef:      commitFlag,
+					checkpointFlag: checkpointFlag,
+					target:         positional,
+					json:           jsonFlag,
+					transcript:     transcriptFlag,
+					rawTranscript:  rawTranscriptFlag,
+					sessionIndex:   sessionIndex,
+					listLimit:      listLimit,
+				})
+			}
 
 			// Convert short flag to verbose (verbose = !short)
 			verbose := !shortFlag
@@ -324,11 +380,18 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&generateFlag, "generate", false, "Generate an AI summary for the checkpoint")
 	cmd.Flags().BoolVar(&forceFlag, "force", false, "Regenerate summary even if one already exists (requires --generate)")
 	cmd.Flags().BoolVar(&searchAllFlag, "search-all", false, "Search all commits (no branch/depth limit, may be slow)")
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output metadata as JSON (no transcript bytes)")
+	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream compact normalized transcript bytes to stdout (pair with --raw-transcript for the per-agent raw transcript)")
+	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
+	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100). Only meaningful with --json.")
 
-	// Make --short, --full, and --raw-transcript mutually exclusive
-	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript")
+	// Verbosity / transcript output modes are mutually exclusive
+	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")
 	// --generate and --raw-transcript are incompatible (summary would be generated but not shown)
 	cmd.MarkFlagsMutuallyExclusive("generate", "raw-transcript")
+	// --generate is a write op; export modes are reader-only
+	cmd.MarkFlagsMutuallyExclusive("generate", "json")
+	cmd.MarkFlagsMutuallyExclusive("generate", "transcript")
 
 	return cmd
 }
@@ -502,40 +565,8 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 		return lookupErr
 	}
 
-	// Collect all matching checkpoint IDs to detect ambiguity
-	var matches []id.CheckpointID
-	for _, info := range lookup.committed {
-		if strings.HasPrefix(info.CheckpointID.String(), checkpointIDPrefix) {
-			matches = append(matches, info.CheckpointID)
-		}
-	}
-
-	// If not found locally, fetch metadata from remote and retry. Reuses
-	// resume's getMetadataTree / getV2MetadataTree helpers — they already
-	// implement the checkpoint_remote → treeless origin → full origin chain
-	// and return a fresh repo handle (which we discard; the post-fetch
-	// rebuild via newExplainCheckpointLookup opens its own).
-	if len(matches) == 0 {
-		stop := startSpinner(errW, "Fetching checkpoint metadata from remote")
-		_, _, v1Err := getMetadataTree(ctx)
-		v2OK := false
-		if lookup.preferCheckpointsV2 {
-			if _, _, v2Err := getV2MetadataTree(ctx); v2Err == nil {
-				v2OK = true
-			}
-		}
-		stop(false)
-		if v1Err == nil || v2OK {
-			if freshLookup, freshErr := newExplainCheckpointLookup(ctx); freshErr == nil {
-				lookup = freshLookup
-				for _, info := range lookup.committed {
-					if strings.HasPrefix(info.CheckpointID.String(), checkpointIDPrefix) {
-						matches = append(matches, info.CheckpointID)
-					}
-				}
-			}
-		}
-	}
+	// Match the prefix locally; on miss, fetch from remote and retry once.
+	matches, lookup := matchCheckpointPrefixWithRemoteFallback(ctx, errW, lookup, checkpointIDPrefix)
 
 	var fullCheckpointID id.CheckpointID
 	switch len(matches) {
@@ -2549,6 +2580,21 @@ func upsertEnv(env []string, key, value string) []string {
 	}
 	if !replaced {
 		result = append(result, entry)
+	}
+	return result
+}
+
+// removeEnvKey returns env with every entry for key dropped. Useful when a
+// caller wants to guarantee a child process inherits no value for key, even
+// if the parent's environment has one set.
+func removeEnvKey(env []string, key string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(env))
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			continue
+		}
+		result = append(result, e)
 	}
 	return result
 }

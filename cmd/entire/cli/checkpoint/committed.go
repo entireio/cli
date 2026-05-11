@@ -1059,6 +1059,7 @@ func (s *GitStore) ReadSessionContent(ctx context.Context, checkpointID id.Check
 	// Read transcript (auto-fetches blobs if needed)
 	if transcript, transcriptErr := readTranscriptFromTree(ctx, sessionTree, agentType); transcriptErr == nil && transcript != nil {
 		result.Transcript = transcript
+		result.TranscriptBlobHashes = transcriptBlobHashesFromTreeEntries(sessionTree.RawEntries())
 	}
 
 	// Read prompts (auto-fetches blob if needed)
@@ -1979,6 +1980,54 @@ func readTranscriptFromTree(ctx context.Context, tree *FetchingTree, agentType t
 	}
 
 	return nil, nil
+}
+
+func transcriptBlobHashesFromTreeEntries(entries []object.TreeEntry) []plumbing.Hash {
+	hashesByName := make(map[string]plumbing.Hash)
+	var chunkFiles []string
+	var baseHash plumbing.Hash
+	var legacyHash plumbing.Hash
+	hasBaseFile := false
+	hasLegacyFile := false
+
+	for _, entry := range entries {
+		if !entry.Mode.IsFile() {
+			continue
+		}
+		switch {
+		case entry.Name == paths.TranscriptFileName:
+			hasBaseFile = true
+			baseHash = entry.Hash
+			hashesByName[entry.Name] = entry.Hash
+		case entry.Name == paths.TranscriptFileNameLegacy:
+			hasLegacyFile = true
+			legacyHash = entry.Hash
+		case strings.HasPrefix(entry.Name, paths.TranscriptFileName+"."):
+			if idx := agent.ParseChunkIndex(entry.Name, paths.TranscriptFileName); idx > 0 {
+				chunkFiles = append(chunkFiles, entry.Name)
+				hashesByName[entry.Name] = entry.Hash
+			}
+		}
+	}
+
+	if len(chunkFiles) > 0 {
+		chunkFiles = agent.SortChunkFiles(chunkFiles, paths.TranscriptFileName)
+		hashes := make([]plumbing.Hash, 0, len(chunkFiles)+1)
+		if hasBaseFile {
+			hashes = append(hashes, baseHash)
+		}
+		for _, chunkFile := range chunkFiles {
+			hashes = append(hashes, hashesByName[chunkFile])
+		}
+		return hashes
+	}
+	if hasBaseFile {
+		return []plumbing.Hash{baseHash}
+	}
+	if hasLegacyFile {
+		return []plumbing.Hash{legacyHash}
+	}
+	return nil
 }
 
 // Author contains author information for a checkpoint.

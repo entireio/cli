@@ -459,9 +459,9 @@ func TestEnsureSessionsBranch_WritesVercelConfigWhenEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repo.Worktree() error = %v", err)
 	}
-	t.Chdir(worktree.Filesystem.Root())
+	t.Chdir(worktree.Filesystem().Root())
 
-	entireDir := filepath.Join(worktree.Filesystem.Root(), ".entire")
+	entireDir := filepath.Join(worktree.Filesystem().Root(), ".entire")
 	if err := os.MkdirAll(entireDir, 0o755); err != nil {
 		t.Fatalf("mkdir .entire: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestWriteCommitted_MergesVercelConfigOnMetadataBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repo.Worktree() error = %v", err)
 	}
-	repoRoot := worktree.Filesystem.Root()
+	repoRoot := worktree.Filesystem().Root()
 	t.Chdir(repoRoot)
 
 	entireDir := filepath.Join(repoRoot, ".entire")

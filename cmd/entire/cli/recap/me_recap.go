@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"strconv"
 	"time"
@@ -126,9 +125,8 @@ func FetchMeRecap(
 		return nil, fmt.Errorf("me/recap get: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body) //nolint:errcheck // best-effort error body
-		return nil, fmt.Errorf("me/recap: http %d: %s", resp.StatusCode, string(body))
+	if err := api.CheckResponse(resp); err != nil {
+		return nil, fmt.Errorf("me/recap: %w", err)
 	}
 	var out MeRecapResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {

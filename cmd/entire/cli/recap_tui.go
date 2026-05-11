@@ -104,7 +104,7 @@ func (m recapTUIModel) fetch(requestID int) tea.Cmd {
 	}
 }
 
-func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:ireturn // bubbletea interface
+func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case recapDataMsg:
 		if msg.requestID != m.requestID {
@@ -177,7 +177,7 @@ func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:iretu
 func (m recapTUIModel) View() tea.View {
 	v := tea.View{AltScreen: true}
 	if m.loadErr != nil {
-		v.SetContent(fmt.Sprintf("\n  Failed to load recap: %s\n\n  Press r to retry or q to quit.\n", m.loadErr))
+		v.SetContent(fmt.Sprintf("\n  Failed to load recap: %s\n\n  Press r to retry or q to quit.\n", recapLoadErrorMessage(m.loadErr)))
 		return v
 	}
 	if m.loading && m.resp == nil {

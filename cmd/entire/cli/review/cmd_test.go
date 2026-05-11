@@ -55,7 +55,7 @@ func TestReviewCmd_Help(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"review", "--edit", "--agent", "attach", "Labs entry"} {
+	for _, want := range []string{"review", "--edit", "--findings", "--fix", "--all", "--agent", "attach", "Labs entry"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--help output missing %q: %s", want, out)
 		}
@@ -78,6 +78,48 @@ func TestNewReviewCmd_NoHiddenFlags(t *testing.T) {
 		if reviewCmd.Flags().Lookup(name) != nil {
 			t.Errorf("found removed flag: --%s", name)
 		}
+	}
+}
+
+func TestReviewFindings_NotGitRepoReturnsSilentError(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	rootCmd := cli.NewRootCmd()
+	errBuf := &bytes.Buffer{}
+	rootCmd.SetErr(errBuf)
+	rootCmd.SetArgs([]string{"review", "--findings"})
+
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error outside a git repo")
+	}
+	var silentErr *cli.SilentError
+	if !errors.As(err, &silentErr) {
+		t.Fatalf("expected SilentError, got %T: %v", err, err)
+	}
+	if got := strings.Count(errBuf.String(), "Not a git repository"); got != 1 {
+		t.Fatalf("not-git message count = %d, want 1; stderr:\n%s", got, errBuf.String())
+	}
+}
+
+func TestReviewFix_NotGitRepoReturnsSilentError(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	rootCmd := cli.NewRootCmd()
+	errBuf := &bytes.Buffer{}
+	rootCmd.SetErr(errBuf)
+	rootCmd.SetArgs([]string{"review", "--fix", "review-session"})
+
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error outside a git repo")
+	}
+	var silentErr *cli.SilentError
+	if !errors.As(err, &silentErr) {
+		t.Fatalf("expected SilentError, got %T: %v", err, err)
+	}
+	if got := strings.Count(errBuf.String(), "Not a git repository"); got != 1 {
+		t.Fatalf("not-git message count = %d, want 1; stderr:\n%s", got, errBuf.String())
 	}
 }
 
@@ -460,7 +502,7 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 			Skills: []string{"/review"},
 			Prompt: "Claude saved prompt.",
 		},
-		"codex": {
+		testCodexAgent: {
 			Skills: []string{"/review"},
 			Prompt: "Codex saved prompt.",
 		},
@@ -469,17 +511,17 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 	}
 
 	claudeReviewer := &captureRunConfigReviewer{name: "claude-code"}
-	codexReviewer := &captureRunConfigReviewer{name: "codex"}
+	codexReviewer := &captureRunConfigReviewer{name: testCodexAgent}
 	multiPickerFn := func(_ context.Context, _ []review.AgentChoice) (review.PickedAgents, error) {
 		return review.PickedAgents{
-			Names:  []string{"claude-code", "codex"},
+			Names:  []string{"claude-code", testCodexAgent},
 			PerRun: "Focus this run on regressions.",
 		}, nil
 	}
 
 	deps := review.Deps{
 		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
-			return []types.AgentName{"claude-code", "codex"}
+			return []types.AgentName{"claude-code", testCodexAgent}
 		},
 		NewSilentError: func(err error) error { return err },
 		MultiPickerFn:  multiPickerFn,
@@ -490,7 +532,7 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 			switch agentName {
 			case "claude-code":
 				return claudeReviewer
-			case "codex":
+			case testCodexAgent:
 				return codexReviewer
 			default:
 				return nil
@@ -873,6 +915,49 @@ func TestComposeSingleAgentSinks(t *testing.T) {
 				t.Errorf("expected no pre-run output, got:\n%s", out.String())
 			}
 		})
+	}
+}
+
+func TestComposeSinks_TUIWritersRunBeforePostRunWriters(t *testing.T) {
+	t.Parallel()
+	provider := &stubSynthesisProvider{}
+
+	multi := review.ExposedComposeMultiAgentSinks(review.SinkComposeInputs{
+		Out:               &bytes.Buffer{},
+		IsTTY:             true,
+		CanPrompt:         true,
+		AgentNames:        []string{"a", "b"},
+		CancelRun:         func() {},
+		SynthesisProvider: provider,
+	})
+	if len(multi) != 3 {
+		t.Fatalf("multi sinks len = %d, want 3", len(multi))
+	}
+	if _, ok := multi[0].(*review.TUISink); !ok {
+		t.Fatalf("multi sink[0] = %T, want *TUISink", multi[0])
+	}
+	if _, ok := multi[1].(review.DumpSink); !ok {
+		t.Fatalf("multi sink[1] = %T, want DumpSink", multi[1])
+	}
+	if _, ok := multi[2].(review.SynthesisSink); !ok {
+		t.Fatalf("multi sink[2] = %T, want SynthesisSink", multi[2])
+	}
+
+	single := review.ExposedComposeSingleAgentSinks(review.SingleAgentSinkComposeInputs{
+		Out:       &bytes.Buffer{},
+		IsTTY:     true,
+		CanPrompt: true,
+		AgentName: "a",
+		CancelRun: func() {},
+	})
+	if len(single) != 2 {
+		t.Fatalf("single sinks len = %d, want 2", len(single))
+	}
+	if _, ok := single[0].(*review.TUISink); !ok {
+		t.Fatalf("single sink[0] = %T, want *TUISink", single[0])
+	}
+	if _, ok := single[1].(review.DumpSink); !ok {
+		t.Fatalf("single sink[1] = %T, want DumpSink", single[1])
 	}
 }
 

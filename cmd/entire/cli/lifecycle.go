@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -85,6 +86,8 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return handleLifecycleSubagentEnd(ctx, ag, event)
 	case agent.ModelUpdate:
 		return handleLifecycleModelUpdate(ctx, ag, event)
+	case agent.ToolUse:
+		return handleLifecycleToolUse(ctx, ag, event)
 	default:
 		return fmt.Errorf("unknown lifecycle event type: %d", event.Type)
 	}
@@ -137,6 +140,19 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	}
 	countSessionsSpan.End()
 
+	// Codex-only: surface untrusted hooks. Reaching this point means
+	// SessionStart is itself trusted, but a newer entire release may have
+	// added hooks (e.g. PostToolUse) that the user hasn't approved on
+	// this machine. Trust state is keyed by the absolute hooks.json
+	// path, so missing entries here flag exactly that case.
+	if ag.Name() == agent.AgentNameCodex {
+		if root, err := paths.WorktreeRoot(ctx); err == nil {
+			if gaps := codex.HookTrustGaps(root); len(gaps) > 0 {
+				message += fmt.Sprintf(" %d new hook(s) await approval (%s). Open /hooks to trust them.", len(gaps), strings.Join(gaps, ", "))
+			}
+		}
+	}
+
 	// Output informational message if the agent supports hook responses.
 	// Claude Code reads JSON from stdout; agents that don't implement
 	// HookResponseWriter silently skip (avoids raw JSON in their terminal).
@@ -177,19 +193,20 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	}
 
 	// Fire EventSessionStart for the current session (if state exists).
-	if state, loadErr := strategy.LoadSessionState(ctx, event.SessionID); loadErr != nil {
-		logging.Warn(logCtx, "failed to load session state on start",
-			slog.String("error", loadErr.Error()))
-	} else if state != nil {
+	// SessionStart can fire before InitializeSession creates the state file,
+	// so ErrStateNotFound is the normal first-session path — only warn on
+	// genuinely unexpected errors, matching the rest of this file.
+	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
 		persistEventMetadataToState(event, state)
 		if transErr := strategy.TransitionAndLog(ctx, state, session.EventSessionStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logCtx, "session start transition failed",
 				slog.String("error", transErr.Error()))
 		}
-		if saveErr := strategy.SaveSessionState(ctx, state); saveErr != nil {
-			logging.Warn(logCtx, "failed to update session state on start",
-				slog.String("error", saveErr.Error()))
-		}
+		return nil
+	})
+	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to update session state on start",
+			slog.String("error", mutErr.Error()))
 	}
 
 	return nil
@@ -227,27 +244,95 @@ func handleLifecycleModelUpdate(ctx context.Context, ag agent.Agent, event *agen
 	}
 
 	// Prefer writing directly to session state when it exists
-	state, loadErr := strategy.LoadSessionState(ctx, event.SessionID)
-	if loadErr != nil {
-		logging.Debug(logCtx, "could not load session state for model update, using hint file",
-			slog.String("error", loadErr.Error()))
-	}
-	if loadErr == nil && state != nil {
+	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
 		state.ModelName = event.Model
-		if saveErr := strategy.SaveSessionState(ctx, state); saveErr != nil {
-			logging.Warn(logCtx, "failed to update session state with model",
-				slog.String("error", saveErr.Error()))
-		}
+		return nil
+	})
+	if mutErr == nil {
+		return nil
+	}
+	if !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to update session state with model",
+			slog.String("error", mutErr.Error()))
 		return nil
 	}
 
-	// State doesn't exist yet (or failed to load) — use hint file (see StoreModelHint doc)
+	// State doesn't exist yet — use hint file (see StoreModelHint doc)
 	if err := strategy.StoreModelHint(ctx, event.SessionID, event.Model); err != nil {
 		logging.Warn(logCtx, "failed to store model hint",
 			slog.String("error", err.Error()))
 	}
 
 	return nil
+}
+
+// handleLifecycleToolUse merges files reported by a per-tool-use hook into
+// the session's FilesTouched. Lightweight by design: no SaveStep, no shadow
+// branch commit — just enough so PostCommit's carry-forward decision sees
+// an accurate file list mid-turn.
+func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Event) error {
+	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
+
+	if event.SessionID == "" {
+		return nil
+	}
+	if err := validation.ValidateSessionID(event.SessionID); err != nil {
+		return fmt.Errorf("invalid %s event: %w", event.Type, err)
+	}
+
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		// Outside a repo or repo missing — nothing to track. Don't fail the hook.
+		logging.Debug(logCtx, "tool-use: no worktree root, skipping",
+			slog.String("session_id", event.SessionID),
+			slog.String("error", err.Error()),
+		)
+		return nil
+	}
+
+	modified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
+	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
+	deleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
+
+	if len(modified) == 0 && len(added) == 0 && len(deleted) == 0 {
+		return nil
+	}
+
+	logging.Debug(logCtx, "tool-use: recording files touched",
+		slog.String("session_id", event.SessionID),
+		slog.Int("modified", len(modified)),
+		slog.Int("added", len(added)),
+		slog.Int("deleted", len(deleted)),
+	)
+
+	if err := strategy.RecordFilesTouched(ctx, event.SessionID, modified, added, deleted); err != nil {
+		logging.Warn(logCtx, "tool-use: failed to record files touched",
+			slog.String("session_id", event.SessionID),
+			slog.String("error", err.Error()),
+		)
+	}
+	return nil
+}
+
+// normalizeToolUsePaths converts hook-payload paths to repo-root-relative form.
+// Codex apply_patch envelopes carry cwd-relative paths, so we join them against
+// eventCWD before FilterAndNormalizePaths rewrites against repoRoot.
+func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	resolved := make([]string, 0, len(files))
+	for _, f := range files {
+		if f == "" {
+			continue
+		}
+		if filepath.IsAbs(f) || eventCWD == "" {
+			resolved = append(resolved, f)
+			continue
+		}
+		resolved = append(resolved, filepath.Join(eventCWD, f))
+	}
+	return FilterAndNormalizePaths(resolved, repoRoot)
 }
 
 // handleLifecycleTurnStart handles turn start: captures pre-prompt state,
@@ -326,18 +411,20 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// Best-effort: adopt ENTIRE_REVIEW_* env vars set by `entire review` on
 	// the spawned agent process. Each agent process has its own env, so there
 	// is no file race across worktrees. Errors in load/save must not fail the turn.
-	if state, loadErr := strategy.LoadSessionState(ctx, sessionID); loadErr != nil {
-		logging.Warn(logCtx, "failed to load session state for review env adoption",
-			slog.String("error", loadErr.Error()))
-	} else if state != nil {
-		updated := *state
-		adoptReviewEnv(logCtx, &updated, string(ag.Name()))
-		if updated.Kind != state.Kind || updated.ReviewPrompt != state.ReviewPrompt || !slices.Equal(updated.ReviewSkills, state.ReviewSkills) {
-			if saveErr := strategy.SaveSessionState(ctx, &updated); saveErr != nil {
-				logging.Warn(logCtx, "failed to save session state after review env adoption",
-					slog.String("error", saveErr.Error()))
-			}
+	if mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		before := *state
+		// Slice fields share their backing array under struct copy. If
+		// adoptReviewEnv ever mutates ReviewSkills in place, the diff check
+		// below would silently miss it. Clone to keep the comparison honest.
+		before.ReviewSkills = slices.Clone(state.ReviewSkills)
+		adoptReviewEnv(logCtx, state, string(ag.Name()))
+		if state.Kind == before.Kind && state.ReviewPrompt == before.ReviewPrompt && slices.Equal(state.ReviewSkills, before.ReviewSkills) {
+			return strategy.ErrMutationSkip
 		}
+		return nil
+	}); mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to save session state after review env adoption",
+			slog.String("error", mutErr.Error()))
 	}
 	initSpan.End()
 
@@ -513,18 +600,22 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	lastPrompt := ""
 	if sessionState, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil && sessionState != nil {
 		lastPrompt = sessionState.LastPrompt
-		// Backfill LastPrompt so `entire status` shows the prompt even when
-		// no files were modified (before the early return below).
-		if lastPrompt == "" && backfilledPrompt != "" {
-			lastPrompt = backfilledPrompt
-			sessionState.LastPrompt = backfilledPrompt
-			if saveErr := strategy.SaveSessionState(ctx, sessionState); saveErr != nil {
-				logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
-					slog.String("error", saveErr.Error()))
-			}
-		}
-	} else if backfilledPrompt != "" {
+	}
+	// Backfill LastPrompt so `entire status` shows the prompt even when no
+	// files were modified (before the early return below).
+	if lastPrompt == "" && backfilledPrompt != "" {
 		lastPrompt = backfilledPrompt
+		mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+			if state.LastPrompt != "" {
+				return strategy.ErrMutationSkip
+			}
+			state.LastPrompt = backfilledPrompt
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
+				slog.String("error", mutErr.Error()))
+		}
 	}
 	commitMessage := generateCommitMessage(lastPrompt, ag.Type())
 	logging.Debug(logCtx, "using commit message",
@@ -639,12 +730,16 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Done after SaveStep because SaveStep may reinitialize session state,
 	// which would overwrite an earlier LastPrompt update.
 	if backfilledPrompt != "" {
-		if state, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil && state != nil && state.LastPrompt == "" {
-			state.LastPrompt = backfilledPrompt
-			if saveErr := strategy.SaveSessionState(ctx, state); saveErr != nil {
-				logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
-					slog.String("error", saveErr.Error()))
+		mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+			if state.LastPrompt != "" {
+				return strategy.ErrMutationSkip
 			}
+			state.LastPrompt = backfilledPrompt
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
+				slog.String("error", mutErr.Error()))
 		}
 	}
 
@@ -669,24 +764,17 @@ func handleLifecycleCompaction(ctx context.Context, ag agent.Agent, event *agent
 	)
 
 	// Fire EventCompaction to trigger ActionCondenseIfFilesTouched (stays in ACTIVE)
-	sessionID := event.SessionID
-	sessionState, loadErr := strategy.LoadSessionState(ctx, sessionID)
-	if loadErr != nil {
-		logging.Warn(logCtx, "failed to load session state for compaction",
-			slog.String("error", loadErr.Error()))
-	}
-	if sessionState != nil {
-		persistEventMetadataToState(event, sessionState)
-
-		if transErr := strategy.TransitionAndLog(ctx, sessionState, session.EventCompaction, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
+		persistEventMetadataToState(event, state)
+		if transErr := strategy.TransitionAndLog(ctx, state, session.EventCompaction, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logCtx, "compaction transition failed",
 				slog.String("error", transErr.Error()))
 		}
-
-		if saveErr := strategy.SaveSessionState(ctx, sessionState); saveErr != nil {
-			logging.Warn(logCtx, "failed to save session state after compaction",
-				slog.String("error", saveErr.Error()))
-		}
+		return nil
+	})
+	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to save session state after compaction",
+			slog.String("error", mutErr.Error()))
 	}
 
 	logging.Info(logCtx, "context compaction detected")
@@ -923,62 +1011,48 @@ func parseTranscriptForCheckpointUUID(transcriptPath string) ([]transcriptLine, 
 // transitionSessionTurnEnd transitions the session phase to IDLE and dispatches turn-end actions.
 func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agent.Event) {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
-	turnState, loadErr := strategy.LoadSessionState(ctx, sessionID)
-	if loadErr != nil {
-		logging.Warn(logCtx, "failed to load session state for turn end",
-			slog.String("error", loadErr.Error()))
-		return
-	}
-	if turnState == nil {
-		return
-	}
-
-	persistEventMetadataToState(event, turnState)
-
-	if err := strategy.TransitionAndLog(ctx, turnState, session.EventTurnEnd, session.TransitionContext{}, session.NoOpActionHandler{}); err != nil {
-		logging.Warn(logCtx, "turn-end transition failed",
-			slog.String("error", err.Error()))
-	}
-
-	// Always dispatch to strategy for turn-end handling. The strategy reads
-	// work items from state (e.g. TurnCheckpointIDs), not the action list.
-	strat := GetStrategy(ctx)
-	if err := strat.HandleTurnEnd(ctx, turnState); err != nil {
-		logging.Warn(logCtx, "turn-end action dispatch failed",
-			slog.String("error", err.Error()))
-	}
-
-	if updateErr := strategy.SaveSessionState(ctx, turnState); updateErr != nil {
+	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		persistEventMetadataToState(event, state)
+		if err := strategy.TransitionAndLog(ctx, state, session.EventTurnEnd, session.TransitionContext{}, session.NoOpActionHandler{}); err != nil {
+			logging.Warn(logCtx, "turn-end transition failed",
+				slog.String("error", err.Error()))
+		}
+		// HandleTurnEnd mutates state in-place; the outer MutateSessionState
+		// save flushes those changes. Any reentrant MutateSessionState calls
+		// it makes on this session ID share this state pointer via the gate.
+		strat := GetStrategy(ctx)
+		if err := strat.HandleTurnEnd(ctx, state); err != nil {
+			logging.Warn(logCtx, "turn-end action dispatch failed",
+				slog.String("error", err.Error()))
+		}
+		return nil
+	})
+	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to update session phase on turn end",
-			slog.String("error", updateErr.Error()))
+			slog.String("error", mutErr.Error()))
 	}
 }
 
 // markSessionEnded transitions the session to ENDED phase via the state machine.
 // If event is non-nil, hook-provided metrics are persisted to state before saving.
 func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string) error {
-	state, err := strategy.LoadSessionState(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to load session state: %w", err)
+	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if event != nil {
+			persistEventMetadataToState(event, state)
+		}
+		if transErr := strategy.TransitionAndLog(ctx, state, session.EventSessionStop, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
+			logging.Warn(logging.WithComponent(ctx, "lifecycle"), "session stop transition failed",
+				slog.String("error", transErr.Error()))
+		}
+		now := time.Now()
+		state.EndedAt = &now
+		return nil
+	})
+	if errors.Is(mutErr, strategy.ErrStateNotFound) {
+		return nil
 	}
-	if state == nil {
-		return nil // No state file, nothing to update
-	}
-
-	if event != nil {
-		persistEventMetadataToState(event, state)
-	}
-
-	if transErr := strategy.TransitionAndLog(ctx, state, session.EventSessionStop, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
-		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "session stop transition failed",
-			slog.String("error", transErr.Error()))
-	}
-
-	now := time.Now()
-	state.EndedAt = &now
-
-	if err := strategy.SaveSessionState(ctx, state); err != nil {
-		return fmt.Errorf("failed to save session state: %w", err)
+	if mutErr != nil {
+		return fmt.Errorf("failed to save session state: %w", mutErr)
 	}
 	return nil
 }
@@ -1039,7 +1113,10 @@ func adoptReviewEnv(ctx context.Context, state *session.State, expectedAgent str
 	if state.Kind != "" {
 		return
 	}
-	if os.Getenv(review.EnvSession) != "1" {
+	if envSession := os.Getenv(review.EnvSession); envSession != "1" {
+		logging.Debug(ctx, "review env adoption skipped: ENTIRE_REVIEW_SESSION is not \"1\"",
+			slog.String("expected_agent", expectedAgent),
+			slog.String("observed_value", envSession))
 		return
 	}
 	envAgent := os.Getenv(review.EnvAgent)
