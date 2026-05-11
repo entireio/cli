@@ -50,6 +50,7 @@ branch, or lists all trails if no trail exists for the current branch.`,
 	cmd.AddCommand(newTrailListCmd())
 	cmd.AddCommand(newTrailCreateCmd())
 	cmd.AddCommand(newTrailUpdateCmd())
+	cmd.AddCommand(newTrailWatchCmd())
 
 	return cmd
 }
