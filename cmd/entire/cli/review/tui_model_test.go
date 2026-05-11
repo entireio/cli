@@ -118,23 +118,28 @@ func TestTUIModel_AgentEvent_RunError(t *testing.T) {
 	}
 }
 
-func TestTUIModel_KeyCtrlC_NotDetailMode_CancelsAndQuits(t *testing.T) {
+func TestTUIModel_KeyCtrlC_NotDetailMode_CancelsAndMarksCancelling(t *testing.T) {
 	t.Parallel()
 	var called atomic.Bool
 	cancel := func() { called.Store(true) }
 
 	m := newTestModel([]string{"agent-a"}, cancel)
-	_, cmd := m.Update(testCtrlKey('c'))
+	updated, cmd := m.Update(testCtrlKey('c'))
 	if !called.Load() {
 		t.Error("expected cancel to be called on Ctrl+C outside detail mode")
 	}
-	if cmd == nil {
-		t.Error("expected a quit command to be returned")
+	m2 := mustModel(t, updated)
+	if !m2.cancelling {
+		t.Error("expected m.cancelling=true after first Ctrl+C")
 	}
-	// Verify it's the quit command by running it.
-	msg := cmd()
-	if _, ok := msg.(tea.QuitMsg); !ok {
-		t.Errorf("expected tea.QuitMsg from Ctrl+C cmd, got %T", msg)
+	// First Ctrl+C must NOT quit — the TUI stays up so agents can drain
+	// visibly. Only a second Ctrl+C (or natural finish) dismisses.
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			if _, ok := msg.(tea.QuitMsg); ok {
+				t.Error("first Ctrl+C must NOT send a quit command; it should wait for agents to drain")
+			}
+		}
 	}
 }
 
@@ -297,7 +302,7 @@ func TestTUIModel_TickMsg_ReSchedulesTick(t *testing.T) {
 	}
 }
 
-func TestTUIModel_RunFinishedMsg_AnyKeyQuits(t *testing.T) {
+func TestTUIModel_RunFinishedMsg_MarksFinished(t *testing.T) {
 	t.Parallel()
 	m := newTestModel([]string{"agent-a"}, func() {})
 
@@ -306,14 +311,198 @@ func TestTUIModel_RunFinishedMsg_AnyKeyQuits(t *testing.T) {
 	if !m2.finished {
 		t.Error("model should be finished after runFinishedMsg")
 	}
+}
 
-	// Any key should now quit.
-	_, cmd := m2.Update(testKey(tea.KeyEnter))
-	if cmd == nil {
-		t.Error("expected quit command after finished + any key")
+// TestTUIModel_PostFinishCtrlOEntersDetailMode pins that Ctrl+O still enters
+// drill-in after both agents finish so the user can inspect completed output.
+// Previously any-key-quits behavior swallowed Ctrl+O on the post-finish frame.
+func TestTUIModel_PostFinishCtrlOEntersDetailMode(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a", "agent-b"}, func() {})
+	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+	m = mustModel(t, updated)
+	if !m.finished {
+		t.Fatal("setup: expected model finished after runFinishedMsg")
 	}
-	if msg := cmd(); msg == nil {
-		t.Error("expected non-nil quit msg")
+
+	updated, cmd := m.Update(testCtrlKey('o'))
+	m2 := mustModel(t, updated)
+	if !m2.detailMode {
+		t.Error("expected Ctrl+O post-finish to enter detail mode")
+	}
+	// Ctrl+O must NOT quit post-finish.
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			if _, ok := msg.(tea.QuitMsg); ok {
+				t.Error("Ctrl+O post-finish must not produce a quit command")
+			}
+		}
+	}
+}
+
+// TestTUIModel_PostFinishQuitsOnExplicitKeys pins that q, Esc, Enter, and Ctrl+C
+// each produce tea.QuitMsg when finished and in dashboard mode.
+func TestTUIModel_PostFinishQuitsOnExplicitKeys(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		key  tea.KeyPressMsg
+	}{
+		{"q", testKey('q')},
+		{"Esc", testKey(tea.KeyEscape)},
+		{"Enter", testKey(tea.KeyEnter)},
+		{"Ctrl+C", testCtrlKey('c')},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel([]string{"agent-a"}, func() {})
+			updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+			m = mustModel(t, updated)
+
+			_, cmd := m.Update(tc.key)
+			if cmd == nil {
+				t.Fatalf("expected a command for explicit-exit key %q post-finish", tc.name)
+			}
+			msg := cmd()
+			if _, ok := msg.(tea.QuitMsg); !ok {
+				t.Errorf("expected tea.QuitMsg for key %q post-finish, got %T", tc.name, msg)
+			}
+		})
+	}
+}
+
+// TestTUIModel_PostFinishIgnoresRandomKeys pins that non-exit keys (e.g. 'x',
+// arrow keys) do NOT quit when finished on the dashboard. They fall through to
+// normal handling instead of the old any-key-quits shortcut.
+func TestTUIModel_PostFinishIgnoresRandomKeys(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		key  tea.KeyPressMsg
+	}{
+		{"x", testKey('x')},
+		{"Right", testKey(tea.KeyRight)},
+		{"Left", testKey(tea.KeyLeft)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel([]string{"agent-a", "agent-b"}, func() {})
+			updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+			m = mustModel(t, updated)
+
+			_, cmd := m.Update(tc.key)
+			if cmd != nil {
+				if msg := cmd(); msg != nil {
+					if _, ok := msg.(tea.QuitMsg); ok {
+						t.Errorf("key %q must not quit post-finish on dashboard", tc.name)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestTUIModel_PostFinishFooterUsesExplicitExitKeys pins the dashboard footer
+// switches from the old "Press any key to exit." prompt to an explicit-keys
+// hint that mentions Ctrl+O and the named exit keys.
+func TestTUIModel_PostFinishFooterUsesExplicitExitKeys(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	m.termWidth = 120
+	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+	m = mustModel(t, updated)
+
+	out := m.dashboardView()
+	if strings.Contains(out, "Press any key to exit.") {
+		t.Errorf("post-finish footer must not show legacy 'Press any key to exit.' line:\n%s", out)
+	}
+	if !strings.Contains(out, "Ctrl+O") {
+		t.Errorf("post-finish footer should mention Ctrl+O for drill-in:\n%s", out)
+	}
+	if !strings.Contains(out, "q/Esc/Enter") {
+		t.Errorf("post-finish footer should list q/Esc/Enter as exit keys:\n%s", out)
+	}
+}
+
+// TestTUIModel_CtrlCMarksAgentsCancelling pins that the first Ctrl+C while
+// agents are still running sets m.cancelling and renderRow reflects an
+// in-flight cancellation indicator (distinct from the terminal Cancelled
+// state).
+func TestTUIModel_CtrlCMarksAgentsCancelling(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	// Stamp runStart so the row is in the running branch of renderRow.
+	updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.Started{}})
+	m = mustModel(t, updated)
+	m.termWidth = 120
+
+	// Before Ctrl+C the running row should say "running".
+	if status := m.renderRow(m.rows[0]); !strings.Contains(status, "running") {
+		t.Fatalf("setup: expected running indicator pre-Ctrl+C; got %q", status)
+	}
+
+	updated, _ = m.Update(testCtrlKey('c'))
+	m = mustModel(t, updated)
+	if !m.cancelling {
+		t.Fatal("expected m.cancelling=true after first Ctrl+C")
+	}
+
+	got := m.renderRow(m.rows[0])
+	if strings.Contains(got, "running") {
+		t.Errorf("renderRow should drop the 'running' indicator once cancelling; got %q", got)
+	}
+	if !strings.Contains(got, "cancel") {
+		t.Errorf("renderRow should show a cancelling indicator; got %q", got)
+	}
+}
+
+// TestTUIModel_FooterDuringCancellation pins that the dashboard footer changes
+// while a cancel is in flight (cancelling && !finished) to signal the user
+// that draining is in progress and a second Ctrl+C will force quit.
+func TestTUIModel_FooterDuringCancellation(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	m.termWidth = 120
+	updated, _ := m.Update(testCtrlKey('c'))
+	m = mustModel(t, updated)
+
+	out := m.dashboardView()
+	if !strings.Contains(out, "Cancelling agents") {
+		t.Errorf("expected footer to announce cancellation in progress; got:\n%s", out)
+	}
+	if !strings.Contains(out, "Ctrl+C again") {
+		t.Errorf("expected footer to mention force-quit hint; got:\n%s", out)
+	}
+}
+
+// TestTUIModel_SecondCtrlCForceQuits pins that once cancelling is in flight,
+// a second Ctrl+C emits tea.QuitMsg immediately rather than waiting for
+// agents to drain.
+func TestTUIModel_SecondCtrlCForceQuits(t *testing.T) {
+	t.Parallel()
+	var count atomic.Int32
+	cancel := func() { count.Add(1) }
+
+	m := newTestModel([]string{"agent-a"}, cancel)
+	updated, _ := m.Update(testCtrlKey('c'))
+	m = mustModel(t, updated)
+	if !m.cancelling {
+		t.Fatal("setup: expected cancelling=true after first Ctrl+C")
+	}
+
+	_, cmd := m.Update(testCtrlKey('c'))
+	if cmd == nil {
+		t.Fatal("expected a command from second Ctrl+C")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Errorf("expected tea.QuitMsg from second Ctrl+C, got %T", msg)
+	}
+	// Shared CancelFunc still fires at most once thanks to cancelOnce.
+	if got := count.Load(); got != 1 {
+		t.Errorf("CancelFunc should fire exactly once across both Ctrl+Cs; got %d", got)
 	}
 }
 

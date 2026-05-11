@@ -28,7 +28,9 @@ func finishAndDismissTUI(t *testing.T, sink *TUISink, summary reviewtypes.RunSum
 		case <-done:
 			return
 		case <-ticker.C:
-			sink.program.Send(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
+			// 'q' is an explicit post-finish exit key. (Any-key-quits was
+			// removed so the user can still Ctrl+O into completed output.)
+			sink.program.Send(tea.KeyPressMsg(tea.Key{Code: 'q', Text: "q"}))
 		case <-timeout:
 			t.Fatal("RunFinished() did not return within 10 seconds")
 		}
@@ -98,7 +100,7 @@ func TestTUISink_AgentEvent_BeforeStart_IsNoOp(t *testing.T) {
 }
 
 // TestTUISink_RunFinished_EventuallyUnblocks verifies that RunFinished unblocks
-// once the finished TUI receives the same any-key dismissal used by a user.
+// once the finished TUI receives an explicit exit key (q) like a user would press.
 func TestTUISink_RunFinished_EventuallyUnblocks(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
