@@ -289,8 +289,8 @@ func TestBuildReviewPickerFields_SingleBuiltinDefaultsSelectedAndRenders(t *test
 	}
 }
 
-// TestSaveReviewConfig_PersistsSettings verifies SaveReviewConfig writes and
-// the settings can be read back.
+// TestSaveReviewConfig_PersistsSettings verifies SaveReviewConfig writes
+// clone-local preferences and the settings can be read back.
 func TestSaveReviewConfig_PersistsSettings(t *testing.T) {
 	tmp := t.TempDir()
 	testutil.InitRepo(t, tmp)
@@ -303,13 +303,13 @@ func TestSaveReviewConfig_PersistsSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := settings.Load(context.Background())
+	prefs, err := settings.LoadClonePreferences(context.Background())
 	if err != nil {
-		t.Fatalf("load settings: %v", err)
+		t.Fatalf("load preferences: %v", err)
 	}
-	cfg := s.Review[testAgentName]
+	cfg := prefs.Review[testAgentName]
 	if len(cfg.Skills) != 2 {
-		t.Errorf("expected 2 skills saved, got %v", cfg.Skills)
+		t.Fatalf("expected 2 skills saved, got %v", cfg.Skills)
 	}
 	if cfg.Skills[0] != testReviewSkill {
 		t.Errorf("first skill = %q", cfg.Skills[0])
@@ -321,13 +321,10 @@ func TestSaveReviewConfig_PreservesReviewFixAgent(t *testing.T) {
 	testutil.InitRepo(t, tmp)
 	t.Chdir(tmp)
 
-	entireDir := filepath.Join(tmp, ".entire")
-	if err := os.MkdirAll(entireDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	before := []byte(`{"enabled":true,"review_fix_agent":"` + testCodexAgent + `"}`)
-	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), before, 0o600); err != nil {
-		t.Fatal(err)
+	if err := settings.SaveClonePreferences(context.Background(), &settings.ClonePreferences{
+		ReviewFixAgent: testCodexAgent,
+	}); err != nil {
+		t.Fatalf("seed preferences: %v", err)
 	}
 
 	err := review.SaveReviewConfig(context.Background(), map[string]settings.ReviewConfig{
@@ -337,12 +334,15 @@ func TestSaveReviewConfig_PreservesReviewFixAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := settings.Load(context.Background())
+	prefs, err := settings.LoadClonePreferences(context.Background())
 	if err != nil {
-		t.Fatalf("load settings: %v", err)
+		t.Fatalf("load preferences: %v", err)
 	}
-	if s.ReviewFixAgent != testCodexAgent {
-		t.Fatalf("ReviewFixAgent = %q, want %s", s.ReviewFixAgent, testCodexAgent)
+	if prefs.ReviewFixAgent != testCodexAgent {
+		t.Fatalf("ReviewFixAgent = %q, want %s", prefs.ReviewFixAgent, testCodexAgent)
+	}
+	if _, ok := prefs.Review[testAgentName]; !ok {
+		t.Fatalf("review preferences missing %s: %+v", testAgentName, prefs.Review)
 	}
 }
 
@@ -355,31 +355,34 @@ func TestSaveReviewFixAgent_PersistsSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := settings.Load(context.Background())
+	prefs, err := settings.LoadClonePreferences(context.Background())
 	if err != nil {
-		t.Fatalf("load settings: %v", err)
+		t.Fatalf("load preferences: %v", err)
 	}
-	if s.ReviewFixAgent != testCodexAgent {
-		t.Fatalf("ReviewFixAgent = %q, want %s", s.ReviewFixAgent, testCodexAgent)
+	if prefs.ReviewFixAgent != testCodexAgent {
+		t.Fatalf("ReviewFixAgent = %q, want %s", prefs.ReviewFixAgent, testCodexAgent)
 	}
 }
 
 // TestSaveReviewConfig_ReturnsErrorOnMalformedSettings ensures SaveReviewConfig
-// does not overwrite existing settings when settings.json is malformed.
+// does not overwrite existing preferences when preferences.json is malformed.
 func TestSaveReviewConfig_ReturnsErrorOnMalformedSettings(t *testing.T) {
 	tmp := t.TempDir()
 	testutil.InitRepo(t, tmp)
 	t.Chdir(tmp)
 
-	entireDir := filepath.Join(tmp, ".entire")
-	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+	preferencesPath, err := settings.ClonePreferencesPath(context.Background())
+	if err != nil {
+		t.Fatalf("preferences path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(preferencesPath), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	malformed := []byte(`{"enabled": true, "strategy": "manual-commit", "review": {`)
-	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), malformed, 0o600); err != nil {
+	malformed := []byte(`{"review": {`)
+	if err := os.WriteFile(preferencesPath, malformed, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(filepath.Join(entireDir, "settings.json"))
+	before, err := os.ReadFile(preferencesPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,14 +391,14 @@ func TestSaveReviewConfig_ReturnsErrorOnMalformedSettings(t *testing.T) {
 		testAgentName: {Skills: []string{testReviewSkill}},
 	})
 	if err == nil {
-		t.Fatal("expected SaveReviewConfig to error on malformed settings")
+		t.Fatal("expected SaveReviewConfig to error on malformed preferences")
 	}
 
-	after, err := os.ReadFile(filepath.Join(entireDir, "settings.json"))
+	after, err := os.ReadFile(preferencesPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(before) != string(after) {
-		t.Errorf("settings.json was overwritten on load error:\nbefore=%q\nafter=%q", before, after)
+		t.Errorf("preferences.json was overwritten on load error:\nbefore=%q\nafter=%q", before, after)
 	}
 }

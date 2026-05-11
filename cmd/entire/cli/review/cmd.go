@@ -156,6 +156,15 @@ Subcommands:
 			if modes > 1 {
 				return errors.New("--edit, --findings, and --fix are mutually exclusive")
 			}
+			if err := maybePromptReviewSettingsMigration(
+				ctx,
+				cmd.OutOrStdout(),
+				cmd.ErrOrStderr(),
+				interactive.IsTerminalWriter(cmd.OutOrStdout()) && interactive.CanPromptInteractively(),
+				deps.PromptYN,
+			); err != nil {
+				return err
+			}
 			if edit {
 				_, err := RunReviewConfigPicker(ctx, cmd.OutOrStdout(), deps.GetAgentsWithHooksInstalled)
 				return err

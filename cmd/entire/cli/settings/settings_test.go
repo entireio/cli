@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 const (
@@ -1009,6 +1012,81 @@ func TestEntireSettings_ReviewRoundTrip(t *testing.T) {
 	}
 	if codex.Prompt != "" {
 		t.Fatalf("expected empty prompt for codex, got %q", codex.Prompt)
+	}
+}
+
+func TestMergeJSON_ReviewWholesaleReplacesBase(t *testing.T) {
+	t.Parallel()
+	s := &EntireSettings{Review: map[string]ReviewConfig{
+		"claude-code": {Skills: []string{"/old"}},
+	}}
+	raw := []byte(`{"review":{"codex":{"prompt":"new"}}}`)
+
+	if err := mergeJSON(s, raw); err != nil {
+		t.Fatalf("mergeJSON: %v", err)
+	}
+	if _, ok := s.Review["claude-code"]; ok {
+		t.Fatalf("base review entry survived wholesale replace: %+v", s.Review)
+	}
+	if got := s.Review["codex"].Prompt; got != "new" {
+		t.Fatalf("codex prompt = %q, want new", got)
+	}
+}
+
+func TestLoad_AppliesClonePreferencesBeforeLocalSettings(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+	session.ClearGitCommonDirCache()
+
+	entireDir := filepath.Join(tmp, ".entire")
+	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	projectSettings := []byte(`{
+		"enabled": true,
+		"review": {"project-agent": {"prompt": "project"}},
+		"review_fix_agent": "project-agent"
+	}`)
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), projectSettings, 0o600); err != nil {
+		t.Fatalf("write project settings: %v", err)
+	}
+
+	preferencesDir := filepath.Join(tmp, ".git", "entire")
+	if err := os.MkdirAll(preferencesDir, 0o750); err != nil {
+		t.Fatalf("mkdir preferences dir: %v", err)
+	}
+	preferences := []byte(`{
+		"review": {"clone-agent": {"prompt": "clone"}},
+		"review_fix_agent": "clone-agent"
+	}`)
+	if err := os.WriteFile(filepath.Join(preferencesDir, "preferences.json"), preferences, 0o600); err != nil {
+		t.Fatalf("write preferences: %v", err)
+	}
+
+	localSettings := []byte(`{
+		"review": {"local-agent": {"prompt": "local"}},
+		"review_fix_agent": "local-agent"
+	}`)
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), localSettings, 0o600); err != nil {
+		t.Fatalf("write local settings: %v", err)
+	}
+
+	s, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := s.Review["project-agent"]; ok {
+		t.Fatalf("project review survived overrides: %+v", s.Review)
+	}
+	if _, ok := s.Review["clone-agent"]; ok {
+		t.Fatalf("clone review survived local override: %+v", s.Review)
+	}
+	if got := s.Review["local-agent"].Prompt; got != "local" {
+		t.Fatalf("local-agent prompt = %q, want local", got)
+	}
+	if s.ReviewFixAgent != "local-agent" {
+		t.Fatalf("ReviewFixAgent = %q, want local-agent", s.ReviewFixAgent)
 	}
 }
 

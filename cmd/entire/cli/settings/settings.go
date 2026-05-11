@@ -17,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
 const (
@@ -24,6 +25,8 @@ const (
 	EntireSettingsFile = ".entire/settings.json"
 	// EntireSettingsLocalFile is the path to the local settings override file (not committed)
 	EntireSettingsLocalFile = ".entire/settings.local.json"
+	// ClonePreferencesFile is the path inside the git common dir for clone-local preferences.
+	ClonePreferencesFile = "entire/preferences.json"
 	// defaultGenerationRetentionDays is the default retention window for archived
 	// checkpoints v2 raw-transcript generations when no override is configured.
 	defaultGenerationRetentionDays = 14
@@ -109,6 +112,13 @@ type EntireSettings struct {
 	// Deprecated: no longer used. Exists to tolerate old settings files
 	// that still contain "strategy": "auto-commit" or similar.
 	Strategy string `json:"strategy,omitempty"`
+}
+
+// ClonePreferences stores clone-local, uncommitted preferences that should be
+// shared by linked worktrees in the same git clone.
+type ClonePreferences struct {
+	Review         map[string]ReviewConfig `json:"review,omitempty"`
+	ReviewFixAgent string                  `json:"review_fix_agent,omitempty"`
 }
 
 // SummaryGenerationSettings configures provider selection for on-demand
@@ -240,19 +250,31 @@ func Load(ctx context.Context) (*EntireSettings, error) {
 	if err != nil {
 		settingsFileAbs = EntireSettingsFile // Fallback to relative
 	}
+	preferencesFileAbs := ""
+	if path, prefErr := ClonePreferencesPath(ctx); prefErr == nil {
+		preferencesFileAbs = path
+	}
 	localSettingsFileAbs, err := paths.AbsPath(ctx, EntireSettingsLocalFile)
 	if err != nil {
 		localSettingsFileAbs = EntireSettingsLocalFile // Fallback to relative
 	}
 
-	return loadMergedSettings(settingsFileAbs, localSettingsFileAbs)
+	return loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
 }
 
-func loadMergedSettings(settingsFileAbs, localSettingsFileAbs string) (*EntireSettings, error) {
+func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAbs string) (*EntireSettings, error) {
 	// Load base settings
 	settings, err := loadFromFile(settingsFileAbs)
 	if err != nil {
 		return nil, fmt.Errorf("reading settings file: %w", err)
+	}
+
+	if preferencesFileAbs != "" {
+		preferences, err := loadClonePreferencesFromFile(preferencesFileAbs)
+		if err != nil {
+			return nil, fmt.Errorf("reading clone preferences file: %w", err)
+		}
+		applyClonePreferences(settings, preferences)
 	}
 
 	// Apply local overrides if they exist
@@ -284,6 +306,33 @@ func loadMergedSettings(settingsFileAbs, localSettingsFileAbs string) (*EntireSe
 // Use this when you need to display individual settings files separately.
 func LoadFromFile(filePath string) (*EntireSettings, error) {
 	return loadFromFile(filePath)
+}
+
+// ClonePreferencesPath returns the clone-local preferences path in the git common dir.
+func ClonePreferencesPath(ctx context.Context) (string, error) {
+	commonDir, err := session.GetGitCommonDir(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	return filepath.Join(commonDir, ClonePreferencesFile), nil
+}
+
+// LoadClonePreferences loads clone-local preferences from the git common dir.
+func LoadClonePreferences(ctx context.Context) (*ClonePreferences, error) {
+	path, err := ClonePreferencesPath(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return loadClonePreferencesFromFile(path)
+}
+
+// SaveClonePreferences saves clone-local preferences to the git common dir.
+func SaveClonePreferences(ctx context.Context, prefs *ClonePreferences) error {
+	path, err := ClonePreferencesPath(ctx)
+	if err != nil {
+		return err
+	}
+	return saveClonePreferencesToFile(prefs, path)
 }
 
 // LoadFromBytes parses settings from raw JSON bytes without merging local overrides.
@@ -331,6 +380,58 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 	return settings, nil
 }
 
+func loadClonePreferencesFromFile(filePath string) (*ClonePreferences, error) {
+	prefs := &ClonePreferences{}
+
+	data, err := os.ReadFile(filePath) //nolint:gosec // path is from caller
+	if err != nil {
+		if os.IsNotExist(err) {
+			return prefs, nil
+		}
+		return nil, fmt.Errorf("%w", err)
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(prefs); err != nil {
+		return nil, fmt.Errorf("parsing preferences file: %w", err)
+	}
+	return prefs, nil
+}
+
+func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error {
+	if prefs == nil {
+		prefs = &ClonePreferences{}
+	}
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("creating preferences directory: %w", err)
+	}
+
+	data, err := jsonutil.MarshalIndentWithNewline(prefs, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling preferences: %w", err)
+	}
+
+	//nolint:gosec // G306: preferences file is config, not secrets; 0o644 is appropriate
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		return fmt.Errorf("writing preferences file: %w", err)
+	}
+	return nil
+}
+
+func applyClonePreferences(settings *EntireSettings, prefs *ClonePreferences) {
+	if prefs == nil {
+		return
+	}
+	if prefs.Review != nil {
+		settings.Review = prefs.Review
+	}
+	if prefs.ReviewFixAgent != "" {
+		settings.ReviewFixAgent = prefs.ReviewFixAgent
+	}
+}
+
 // mergeJSON merges JSON data into existing settings.
 // Only non-zero values from the JSON override existing settings.
 func mergeJSON(settings *EntireSettings, data []byte) error {
@@ -359,6 +460,13 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 	}
 	if err := mergeCommitLinking(settings, raw); err != nil {
 		return err
+	}
+	if reviewRaw, ok := raw["review"]; ok {
+		var review map[string]ReviewConfig
+		if err := json.Unmarshal(reviewRaw, &review); err != nil {
+			return fmt.Errorf("parsing review field: %w", err)
+		}
+		settings.Review = review
 	}
 
 	// Merge redaction sub-fields if present (field-level, not wholesale replace).
