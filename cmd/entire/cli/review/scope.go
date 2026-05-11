@@ -82,7 +82,11 @@ func ComputeScopeStats(ctx context.Context, repo *git.Repository, baseOverride s
 
 	var baseRef string
 	if baseOverride != "" {
-		if _, vErr := runGit(ctx, repoRoot, "rev-parse", "--verify", baseOverride+"^{commit}"); vErr != nil {
+		// Validate via go-git rather than shelling out — matches the codebase
+		// pattern in explain.go:156 (resolveCommitUnambiguous). ResolveRevision
+		// handles branches, tags, abbreviated SHAs, and HEAD-relative refs, and
+		// dereferences annotated tags to their target commit automatically.
+		if _, vErr := repo.ResolveRevision(plumbing.Revision(baseOverride)); vErr != nil {
 			return ScopeStats{}, fmt.Errorf("base ref %q does not resolve to a commit: %w", baseOverride, vErr)
 		}
 		baseRef = baseOverride
