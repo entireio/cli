@@ -86,6 +86,7 @@ func parseCodexOutput(r io.Reader) <-chan reviewtypes.Event {
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 		var seenTurnComplete bool
+		var turnUsage codexUsage
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if len(line) == 0 {
@@ -110,15 +111,7 @@ func parseCodexOutput(r io.Reader) <-chan reviewtypes.Event {
 				// tool's stdout, not the model's narrative.
 			case "turn.completed":
 				seenTurnComplete = true
-				// codex reports cached_input_tokens as a subset of input_tokens
-				// and reasoning_output_tokens as a subset of output_tokens
-				// (matching OpenAI's chat-completions usage shape), so do NOT
-				// sum the subset fields — that would double-count.
-				out <- reviewtypes.Tokens{
-					In:  env.Usage.InputTokens,
-					Out: env.Usage.OutputTokens,
-				}
-				out <- reviewtypes.Finished{Success: true}
+				turnUsage = env.Usage
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -126,9 +119,19 @@ func parseCodexOutput(r io.Reader) <-chan reviewtypes.Event {
 			out <- reviewtypes.Finished{Success: false}
 			return
 		}
-		if !seenTurnComplete {
-			out <- reviewtypes.Finished{Success: false}
+		if seenTurnComplete {
+			// codex reports cached_input_tokens as a subset of input_tokens
+			// and reasoning_output_tokens as a subset of output_tokens
+			// (matching OpenAI's chat-completions usage shape), so do NOT
+			// sum the subset fields — that would double-count.
+			out <- reviewtypes.Tokens{
+				In:  turnUsage.InputTokens,
+				Out: turnUsage.OutputTokens,
+			}
+			out <- reviewtypes.Finished{Success: true}
+			return
 		}
+		out <- reviewtypes.Finished{Success: false}
 	}()
 	return out
 }

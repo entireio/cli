@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -242,6 +243,81 @@ func TestParseCodexOutput_DecodesJSONStream(t *testing.T) {
 	}
 	if tokensSeen != 1 {
 		t.Errorf("Tokens with Out>0 count = %d, want 1", tokensSeen)
+	}
+}
+
+func TestParseCodexOutput_StreamsEventsBeforeEOF(t *testing.T) {
+	t.Parallel()
+	pr, pw := io.Pipe()
+	events := parseCodexOutput(pr)
+
+	expect := func(t *testing.T, want string) reviewtypes.Event {
+		t.Helper()
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				t.Fatalf("event channel closed waiting for %s", want)
+			}
+			return ev
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s — parser did not stream before EOF", want)
+			return nil
+		}
+	}
+
+	// First emitted event is always Started — before we even write anything.
+	if _, ok := expect(t, "Started").(reviewtypes.Started); !ok {
+		t.Fatal("first event must be Started")
+	}
+
+	// Write thread.started — swallowed, so no event read here.
+	if _, err := pw.Write([]byte(`{"type":"thread.started","thread_id":"tid"}` + "\n")); err != nil {
+		t.Fatalf("pipe write: %v", err)
+	}
+
+	// Write item.started/command_execution — expect ToolCall before EOF.
+	if _, err := pw.Write([]byte(`{"type":"item.started","item":{"type":"command_execution","command":"git status"}}` + "\n")); err != nil {
+		t.Fatalf("pipe write: %v", err)
+	}
+	tc, ok := expect(t, "ToolCall").(reviewtypes.ToolCall)
+	if !ok {
+		t.Fatalf("event = %T, want ToolCall", tc)
+	}
+	if tc.Name != "exec" || tc.Args != "git status" {
+		t.Errorf("ToolCall = %+v, want {Name: exec, Args: git status}", tc)
+	}
+
+	// Write item.completed/agent_message — expect AssistantText before EOF.
+	if _, err := pw.Write([]byte(`{"type":"item.completed","item":{"type":"agent_message","text":"hello"}}` + "\n")); err != nil {
+		t.Fatalf("pipe write: %v", err)
+	}
+	at, ok := expect(t, "AssistantText").(reviewtypes.AssistantText)
+	if !ok {
+		t.Fatalf("event = %T, want AssistantText", at)
+	}
+	if at.Text != "hello" {
+		t.Errorf("AssistantText.Text = %q, want %q", at.Text, "hello")
+	}
+
+	// Write turn.completed and close — expect Tokens + Finished.
+	if _, err := pw.Write([]byte(`{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":42}}` + "\n")); err != nil {
+		t.Fatalf("pipe write: %v", err)
+	}
+	_ = pw.Close()
+
+	tk, ok := expect(t, "Tokens").(reviewtypes.Tokens)
+	if !ok {
+		t.Fatalf("event = %T, want Tokens", tk)
+	}
+	if tk.Out != 42 || tk.In != 100 {
+		t.Errorf("Tokens = %+v, want {In:100, Out:42}", tk)
+	}
+	fin, ok := expect(t, "Finished").(reviewtypes.Finished)
+	if !ok {
+		t.Fatalf("event = %T, want Finished", fin)
+	}
+	if !fin.Success {
+		t.Error("Finished.Success = false, want true")
 	}
 }
 
