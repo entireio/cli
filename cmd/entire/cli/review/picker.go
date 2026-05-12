@@ -97,7 +97,7 @@ func RunReviewConfigPicker(ctx context.Context, out io.Writer, getInstalled func
 	}
 
 	// Narrow to agents that have a curated skills list; others need manual
-	// editing of settings.json under review.<agent-name>.
+	// editing of clone-local preferences under review.<agent-name>.
 	type configurableAgent struct {
 		name types.AgentName
 		ag   agent.Agent
@@ -114,9 +114,19 @@ func RunReviewConfigPicker(ctx context.Context, out io.Writer, getInstalled func
 		configurable = append(configurable, configurableAgent{name: name, ag: ag})
 	}
 	if len(configurable) == 0 {
-		return nil, errors.New(
-			"no installed agents have curated review skills; " +
-				"edit local review preferences directly under review.<agent-name>",
+		prefsPath, pathErr := settings.ClonePreferencesPath(ctx)
+		if pathErr != nil {
+			return nil, errors.New(
+				"no installed agents have curated review skills; " +
+					"install an eligible agent and run `entire review --edit`, " +
+					"or edit clone-local review preferences under review.<agent-name>",
+			)
+		}
+		return nil, fmt.Errorf(
+			"no installed agents have curated review skills; "+
+				"install an eligible agent and run `entire review --edit`, "+
+				"or edit clone-local review preferences (%s) under review.<agent-name>",
+			prefsPath,
 		)
 	}
 

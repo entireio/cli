@@ -240,9 +240,10 @@ func (s *EntireSettings) ReviewConfigFor(agentName string) ReviewConfig {
 	return s.Review[agentName]
 }
 
-// Load loads the Entire settings from .entire/settings.json,
-// then applies any overrides from .entire/settings.local.json if it exists.
-// Returns default settings if neither file exists.
+// Load loads the Entire settings from .entire/settings.json, then applies
+// clone-local preferences from the git common dir, then applies any overrides
+// from .entire/settings.local.json if it exists.
+// Returns default settings if no settings or preferences file exists.
 // Works correctly from any subdirectory within the repository.
 func Load(ctx context.Context) (*EntireSettings, error) {
 	// Get absolute paths for settings files
@@ -433,7 +434,9 @@ func applyClonePreferences(settings *EntireSettings, prefs *ClonePreferences) {
 }
 
 // mergeJSON merges JSON data into existing settings.
-// Only non-zero values from the JSON override existing settings.
+// Most fields only apply non-zero values from JSON. The review map is replaced
+// whenever the key is present, so override files can clear or fully replace
+// project-level review configuration.
 func mergeJSON(settings *EntireSettings, data []byte) error {
 	// Validate that there are no unknown keys using strict decoding.
 	dec := json.NewDecoder(bytes.NewReader(data))

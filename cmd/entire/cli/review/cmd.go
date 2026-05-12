@@ -108,8 +108,9 @@ func NewCommand(deps Deps) *cobra.Command {
 		// review --help` and the command works normally.
 		Hidden: true,
 		Short:  "Run configured review skills against the current branch",
-		Long: `Run the review skills configured in .entire/settings.json against
-the current branch. On first run, an interactive picker writes the config.
+		Long: `Run configured review skills against the current branch. Review
+preferences are loaded from Entire settings and clone-local preferences. On
+first run, an interactive picker writes clone-local preferences.
 
 Labs entry: review is experimental. We are actively refining it based on user
 feedback.
@@ -218,7 +219,8 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride string, de
 	if err != nil {
 		cmd.SilenceUsage = true
 		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to load settings: %v\n", err)
-		fmt.Fprintln(cmd.ErrOrStderr(), "Fix `.entire/settings.json` and re-run `entire review`.")
+		fmt.Fprintln(cmd.ErrOrStderr(),
+			"Fix your Entire settings or clone-local review preferences and re-run `entire review`.")
 		return silentErr(err)
 	}
 	if s == nil || len(s.Review) == 0 {
