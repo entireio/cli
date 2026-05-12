@@ -714,3 +714,85 @@ func TestBuildLocalReviewManifestFromSummary_PartialMatch_NoWarning(t *testing.T
 		t.Errorf("expected the claude-code source to be matched; got %+v", manifest.Sources[0])
 	}
 }
+
+// TestExplainEmptyManifest_EmptySessionIDs locks the empty-SessionID
+// rejection cause. buildLocalReviewManifestFromSummary drops matches with
+// SessionID=="" before adding a manifest source, so the explainer must
+// model that path explicitly — otherwise the sentinel fires and surfaces
+// a misleading "report this as a bug" for a real (if rare) partial-write
+// or corrupt-state condition.
+func TestExplainEmptyManifest_EmptySessionIDs(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC)
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "", // partial write / corrupt state
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "empty SessionID") {
+		t.Errorf("reason = %q, want mention of 'empty SessionID'", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false — empty SessionID is a known cause, not drift")
+	}
+}
+
+// TestExplainEmptyManifest_AggregatesObservedAgentTypes locks the
+// deduplicated, sorted accumulation of observed AgentTypes when multiple
+// candidates have distinct mismatched types. Without this, the reported
+// state field depended on store.List iteration order — non-deterministic
+// and misleading (only one of the actual mismatched types was named).
+func TestExplainEmptyManifest_AggregatesObservedAgentTypes(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC)
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	// Two tagged states with distinct mismatched AgentTypes. Listed in
+	// reverse-sorted order so the test fails if the implementation reports
+	// the first iterated state instead of sorting the accumulated set.
+	states := []*session.State{
+		{
+			SessionID:    "s1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Gemini"),
+		},
+		{
+			SessionID:    "s2",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(2 * time.Second),
+			AgentType:    agenttypes.AgentType("Codex"),
+		},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "AgentType mismatch") {
+		t.Fatalf("reason = %q, want 'AgentType mismatch'", got)
+	}
+	// Both observed types must appear (not just one — that was the bug).
+	if !strings.Contains(got, "Codex") || !strings.Contains(got, "Gemini") {
+		t.Errorf("reason = %q, want both observed AgentTypes ('Codex' and 'Gemini')", got)
+	}
+	// Sorted order: "Codex" must appear before "Gemini" in the rendered list.
+	if idxCodex, idxGemini := strings.Index(got, "Codex"), strings.Index(got, "Gemini"); idxCodex == -1 || idxGemini == -1 || idxCodex > idxGemini {
+		t.Errorf("reason = %q, want observed types sorted (Codex before Gemini)", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false")
+	}
+}

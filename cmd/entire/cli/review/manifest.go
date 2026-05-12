@@ -126,8 +126,22 @@ func explainEmptyManifest(
 
 	candidates := tagged
 
+	// Empty-SessionID filter (cumulative). The matcher returns these states,
+	// but buildLocalReviewManifestFromSummary drops them on st.SessionID == ""
+	// before adding a manifest source — without an explicit explainer cause,
+	// the sentinel would fire and surface a misleading "report this as a bug"
+	// for what is really a partial-write or corrupt-state-file condition.
+	survivors, _ := applyExplainerFilter(candidates, func(st *session.State) bool {
+		return st.SessionID != ""
+	})
+	if len(survivors) == 0 {
+		return fmt.Sprintf("found %d tagged review session(s) but all have empty SessionID (partial write or corrupt state file)", len(tagged)), false
+	}
+	candidates = survivors
+
 	// Worktree filter (cumulative).
-	survivors, droppedExample := applyExplainerFilter(candidates, func(st *session.State) bool {
+	var droppedExample *session.State
+	survivors, droppedExample = applyExplainerFilter(candidates, func(st *session.State) bool {
 		return worktreeRoot == "" || st.WorktreePath == "" || st.WorktreePath == worktreeRoot
 	})
 	if len(survivors) == 0 {
@@ -156,23 +170,32 @@ func explainEmptyManifest(
 	// AgentType filter (per-agent). Each run's wantType is checked against
 	// the remaining candidates; if no candidate's AgentType matches, that
 	// specific agent is named. Lenient cases (state.AgentType=="" or
-	// wantType=="") count as a match, matching the matcher's behavior.
+	// wantType=="") count as a match, matching the matcher's behavior. The
+	// observed-type list deduplicates and sorts so the diagnostic is stable
+	// across store.List orderings and faithfully represents the full set of
+	// mismatched types rather than whichever happened to be iterated last.
 	for _, run := range summary.AgentRuns {
 		wantType := agentTypeForReviewAgent(run.Name)
 		if wantType == "" {
 			continue
 		}
-		var observedType string
+		seen := map[string]struct{}{}
+		observedTypes := []string{}
 		anyMatch := false
 		for _, st := range candidates {
 			if st.AgentType == "" || st.AgentType == wantType {
 				anyMatch = true
 				break
 			}
-			observedType = string(st.AgentType)
+			t := string(st.AgentType)
+			if _, ok := seen[t]; !ok {
+				seen[t] = struct{}{}
+				observedTypes = append(observedTypes, t)
+			}
 		}
 		if !anyMatch {
-			return fmt.Sprintf("found %d tagged review session(s) but AgentType mismatch for agent %q: state=%q, run=%q", len(tagged), run.Name, observedType, wantType), false
+			sort.Strings(observedTypes)
+			return fmt.Sprintf("found %d tagged review session(s) but AgentType mismatch for agent %q: state=%q, run=%q", len(tagged), run.Name, strings.Join(observedTypes, ", "), wantType), false
 		}
 	}
 
