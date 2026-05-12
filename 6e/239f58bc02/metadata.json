@@ -1,0 +1,27 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "6e239f58bc02",
+  "strategy": "manual-commit",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/investigate/multipicker.go",
+    "cmd/entire/cli/investigate/multipicker_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/6e/239f58bc02/0/metadata.json",
+      "transcript": "/6e/239f58bc02/0/transcript.jsonl",
+      "content_hash": "/6e/239f58bc02/0/transcript_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  },
+  "has_investigation": true
+}
