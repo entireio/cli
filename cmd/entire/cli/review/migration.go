@@ -6,10 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
+	"log/slog"
 
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -49,6 +48,13 @@ func maybePromptReviewSettingsMigration(
 	}
 
 	if !canPrompt {
+		// Log at Warn so operators tailing .entire/logs/ catch the pending
+		// migration on scripted/CI invocations where the stderr hint may
+		// scroll past unnoticed.
+		logging.Warn(ctx, "review migration pending: project settings has review keys that may be committed",
+			slog.String("project_settings_path", project.path),
+			slog.Bool("has_review", project.hasReview),
+			slog.Bool("has_fix_agent", project.hasFixAgent))
 		fmt.Fprintln(errOut, "Review preferences are stored in project settings (.entire/settings.json).")
 		fmt.Fprintln(errOut, "These are typically committed and may be visible to teammates.")
 		fmt.Fprintln(errOut, "Run `entire review --edit` interactively to move them to clone-local preferences.")
@@ -86,22 +92,12 @@ func maybePromptReviewSettingsMigration(
 }
 
 func loadProjectReviewSettings(ctx context.Context) (*projectReviewSettings, bool, error) {
-	path, err := paths.AbsPath(ctx, settings.EntireSettingsFile)
+	path, raw, exists, err := settings.LoadProjectRaw(ctx)
 	if err != nil {
-		path = settings.EntireSettingsFile
+		return nil, false, fmt.Errorf("review migration: %w", err)
 	}
-
-	data, err := os.ReadFile(path) //nolint:gosec // path is resolved from repo settings path
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("reading project settings for review migration: %w", err)
-	}
-
-	raw := map[string]json.RawMessage{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, false, fmt.Errorf("parsing project settings for review migration: %w", err)
+	if !exists {
+		return nil, false, nil
 	}
 
 	reviewRaw, hasReview := raw["review"]
@@ -194,12 +190,8 @@ func migrateProjectReviewSettings(ctx context.Context, project *projectReviewSet
 
 	delete(project.raw, "review")
 	delete(project.raw, "review_fix_agent")
-	data, err := jsonutil.MarshalIndentWithNewline(project.raw, "", "  ")
-	if err != nil {
-		return false, fmt.Errorf("marshal project settings after review migration: %w", err)
-	}
-	if err := jsonutil.WriteFileAtomic(project.path, data, 0o644); err != nil {
-		return false, fmt.Errorf("write project settings after review migration: %w", err)
+	if err := settings.SaveProjectRaw(project.path, project.raw); err != nil {
+		return false, fmt.Errorf("save project settings after review migration: %w", err)
 	}
 	return preferencesChanged, nil
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
@@ -264,6 +266,14 @@ func Load(ctx context.Context) (*EntireSettings, error) {
 	preferencesFileAbs := ""
 	if path, prefErr := ClonePreferencesPath(ctx); prefErr == nil {
 		preferencesFileAbs = path
+	} else {
+		// Log at Debug rather than silently dropping the preferences layer.
+		// "Not in a git repo" is a legitimate case (some commands run outside
+		// a repo), but a git PATH issue or .git/ permission failure is worth
+		// finding via `ENTIRE_LOG_LEVEL=debug` when users report "my picker
+		// choices vanished".
+		logging.Debug(ctx, "clone preferences path unresolved; skipping preferences layer",
+			slog.String("error", prefErr.Error()))
 	}
 	localSettingsFileAbs, err := paths.AbsPath(ctx, EntireSettingsLocalFile)
 	if err != nil {
@@ -317,6 +327,53 @@ func loadMergedSettings(settingsFileAbs, preferencesFileAbs, localSettingsFileAb
 // Use this when you need to display individual settings files separately.
 func LoadFromFile(filePath string) (*EntireSettings, error) {
 	return loadFromFile(filePath)
+}
+
+// LoadProjectRaw reads .entire/settings.json as a generic JSON object so
+// callers can inspect or mutate individual keys without losing unrelated
+// fields to round-trip decoding.
+//
+// Returns:
+//   - path: absolute path of the project settings file.
+//   - raw: parsed JSON object, or an empty map when the file is missing.
+//   - exists: false when the file does not exist (raw is empty); true otherwise.
+//   - err: parse error or read error other than ENOENT.
+//
+// Pair with SaveProjectRaw for read-modify-write flows like the review-key
+// migration. Owning the path resolution and raw IO here keeps callers from
+// duplicating settings parsing in violation of the "Settings access must go
+// through the settings package" rule in CLAUDE.md.
+func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
+	path, err = paths.AbsPath(ctx, EntireSettingsFile)
+	if err != nil {
+		path = EntireSettingsFile
+	}
+	data, readErr := os.ReadFile(path) //nolint:gosec // path is from AbsPath or a project-relative constant
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return path, map[string]json.RawMessage{}, false, nil
+		}
+		return path, nil, false, fmt.Errorf("reading project settings: %w", readErr)
+	}
+	raw = map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return path, nil, true, fmt.Errorf("parsing project settings: %w", err)
+	}
+	return path, raw, true, nil
+}
+
+// SaveProjectRaw writes a generic JSON object back to .entire/settings.json
+// atomically (temp file + rename). Callers should mutate the map returned by
+// LoadProjectRaw and pass it back here so unrelated fields are preserved.
+func SaveProjectRaw(path string, raw map[string]json.RawMessage) error {
+	data, err := jsonutil.MarshalIndentWithNewline(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal project settings: %w", err)
+	}
+	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
+		return fmt.Errorf("writing project settings: %w", err)
+	}
+	return nil
 }
 
 // ClonePreferencesPath returns the clone-local preferences path in the git common dir.
@@ -402,9 +459,12 @@ func loadClonePreferencesFromFile(filePath string) (*ClonePreferences, error) {
 		return nil, fmt.Errorf("%w", err)
 	}
 
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(prefs); err != nil {
+	// Lenient decoding: clone preferences live in .git/ and persist across CLI
+	// versions running against the same clone. A newer binary may write a
+	// field an older binary doesn't know about — strict decoding would brick
+	// the older binary's settings.Load. The trade-off is that typos in
+	// hand-edited fields are silently ignored; document & accept.
+	if err := json.Unmarshal(data, prefs); err != nil {
 		return nil, fmt.Errorf("parsing preferences file: %w", err)
 	}
 	return prefs, nil
