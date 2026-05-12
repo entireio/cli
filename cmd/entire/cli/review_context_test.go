@@ -280,7 +280,7 @@ func writeReviewContextClaudeStub(t *testing.T, stubDir string) {
 	t.Helper()
 	script := `#!/bin/sh
 printf '%s' "$2" > "$ENTIRE_SMOKE_PROMPT_FILE"
-printf 'smoke review ok\n'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":0,"output_tokens":0}}'
 `
 	if err := os.WriteFile(filepath.Join(stubDir, "claude"), []byte(script), 0o700); err != nil {
 		t.Fatalf("write claude stub: %v", err)
