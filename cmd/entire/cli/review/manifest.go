@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	agenttypes "github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -180,10 +182,21 @@ func reviewTokenUsageForSession(ctx context.Context, st *session.State) *agent.T
 	}
 	ag, err := reviewAgentByType(st.AgentType)
 	if err != nil {
+		// Distinct from "no token data" — the session references an agent
+		// that's not in the registry. Surfacing this at Debug lets operators
+		// triage "tokens missing" reports without source-diving.
+		logging.Debug(ctx, "review token usage: agent type not registered",
+			slog.String("session_id", st.SessionID),
+			slog.String("agent_type", string(st.AgentType)),
+			slog.String("error", err.Error()))
 		return nil
 	}
 	transcript, err := os.ReadFile(st.TranscriptPath)
 	if err != nil {
+		logging.Debug(ctx, "review token usage: transcript read failed",
+			slog.String("session_id", st.SessionID),
+			slog.String("path", st.TranscriptPath),
+			slog.String("error", err.Error()))
 		return nil
 	}
 	return agent.CalculateTokenUsage(ctx, ag, transcript, st.CheckpointTranscriptStart, reviewSubagentsDir(st))

@@ -440,8 +440,13 @@ func formatErrorPreview(err error) string {
 	}
 	var pe *reviewtypes.ProcessError
 	if errors.As(err, &pe) {
+		// Strip ANSI before the empty check — agents like codex/claude-code
+		// emit colored stderr banners whose first line can be escape codes
+		// only. TrimSpace doesn't drop those, so without stripping we'd pick
+		// the chrome and hide the real message on subsequent lines.
 		for _, line := range strings.Split(pe.Stderr, "\n") {
-			if trimmed := strings.TrimSpace(line); trimmed != "" {
+			trimmed := strings.TrimSpace(stripANSI(line))
+			if trimmed != "" {
 				return trimmed
 			}
 		}
