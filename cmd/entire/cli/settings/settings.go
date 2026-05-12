@@ -116,9 +116,19 @@ type EntireSettings struct {
 
 // ClonePreferences stores clone-local, uncommitted preferences that should be
 // shared by linked worktrees in the same git clone.
+//
+// Stored in the git common dir (not the worktree) so multiple worktrees of the
+// same clone see the same preferences. Not committed because the file lives
+// inside .git/.
 type ClonePreferences struct {
 	Review         map[string]ReviewConfig `json:"review,omitempty"`
 	ReviewFixAgent string                  `json:"review_fix_agent,omitempty"`
+
+	// ReviewMigrationDismissed records that the user declined the one-shot
+	// migration of review keys from project settings to clone-local prefs.
+	// Once true, `entire review` stops prompting on every invocation; the
+	// user can re-enable by editing this file or deleting the key.
+	ReviewMigrationDismissed bool `json:"review_migration_dismissed,omitempty"`
 }
 
 // SummaryGenerationSettings configures provider selection for on-demand

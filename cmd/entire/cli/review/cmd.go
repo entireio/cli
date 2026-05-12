@@ -157,14 +157,21 @@ Subcommands:
 			if modes > 1 {
 				return errors.New("--edit, --findings, and --fix are mutually exclusive")
 			}
-			if err := maybePromptReviewSettingsMigration(
-				ctx,
-				cmd.OutOrStdout(),
-				cmd.ErrOrStderr(),
-				interactive.IsTerminalWriter(cmd.OutOrStdout()) && interactive.CanPromptInteractively(),
-				deps.PromptYN,
-			); err != nil {
-				return err
+			// The migration prompt is only relevant for flows that write or
+			// read picker config (--edit and the default review run).
+			// --findings (read-only browsing) and --fix (uses
+			// ReviewFixAgent only) don't interact with the picker, so
+			// prompting in those paths interrupts the user for no reason.
+			if !findings && !fix {
+				if err := maybePromptReviewSettingsMigration(
+					ctx,
+					cmd.OutOrStdout(),
+					cmd.ErrOrStderr(),
+					interactive.IsTerminalWriter(cmd.OutOrStdout()) && interactive.CanPromptInteractively(),
+					deps.PromptYN,
+				); err != nil {
+					return err
+				}
 			}
 			if edit {
 				_, err := RunReviewConfigPicker(ctx, cmd.OutOrStdout(), deps.GetAgentsWithHooksInstalled)

@@ -37,6 +37,17 @@ func maybePromptReviewSettingsMigration(
 		return nil
 	}
 
+	// Skip the prompt entirely if the user has already declined. Without this,
+	// teams who intentionally commit review prefs would be re-prompted on
+	// every invocation of `entire review`.
+	prefs, prefsErr := settings.LoadClonePreferences(ctx)
+	if prefsErr != nil {
+		return fmt.Errorf("load review preferences for migration: %w", prefsErr)
+	}
+	if prefs != nil && prefs.ReviewMigrationDismissed {
+		return nil
+	}
+
 	if !canPrompt {
 		fmt.Fprintln(errOut, "Review preferences are stored in project settings (.entire/settings.json).")
 		fmt.Fprintln(errOut, "These are typically committed and may be visible to teammates.")
@@ -52,6 +63,13 @@ func maybePromptReviewSettingsMigration(
 		return fmt.Errorf("review settings migration prompt: %w", err)
 	}
 	if !migrate {
+		if prefs == nil {
+			prefs = &settings.ClonePreferences{}
+		}
+		prefs.ReviewMigrationDismissed = true
+		if err := settings.SaveClonePreferences(ctx, prefs); err != nil {
+			return fmt.Errorf("save migration dismissal: %w", err)
+		}
 		return nil
 	}
 

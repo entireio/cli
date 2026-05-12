@@ -254,6 +254,71 @@ func TestReviewSettingsMigration_NoMoveCleansUpKeys(t *testing.T) {
 	}
 }
 
+// TestReviewSettingsMigration_DeclinePersistsDismissal verifies that declining
+// the prompt records ReviewMigrationDismissed in clone-local prefs, and that a
+// subsequent invocation does NOT re-prompt. Without this, teams who
+// intentionally commit review prefs would be re-prompted on every command.
+func TestReviewSettingsMigration_DeclinePersistsDismissal(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+	session.ClearGitCommonDirCache()
+
+	entireDir := filepath.Join(tmp, ".entire")
+	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	projectPath := filepath.Join(entireDir, "settings.json")
+	projectSettings := []byte(`{
+		"enabled": true,
+		"review": {"claude-code": {"prompt": "project"}}
+	}`)
+	if err := os.WriteFile(projectPath, projectSettings, 0o600); err != nil {
+		t.Fatalf("write project settings: %v", err)
+	}
+
+	// First invocation: user declines.
+	var out bytes.Buffer
+	promptCount := 0
+	declineThenFail := func(context.Context, string, bool) (bool, error) {
+		promptCount++
+		return false, nil
+	}
+	if err := maybePromptReviewSettingsMigration(context.Background(), &out, &out, true, declineThenFail); err != nil {
+		t.Fatalf("first invocation: %v", err)
+	}
+	if promptCount != 1 {
+		t.Errorf("first invocation prompted %d times, want 1", promptCount)
+	}
+
+	// Dismissal must be persisted.
+	prefs, err := settings.LoadClonePreferences(context.Background())
+	if err != nil {
+		t.Fatalf("load preferences: %v", err)
+	}
+	if prefs == nil || !prefs.ReviewMigrationDismissed {
+		t.Fatalf("ReviewMigrationDismissed = false, want true after decline (prefs = %+v)", prefs)
+	}
+
+	// Project file must be untouched on decline.
+	data, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatalf("read project settings: %v", err)
+	}
+	if !bytes.Contains(data, []byte("claude-code")) {
+		t.Errorf("project file was modified on decline: %s", data)
+	}
+
+	// Second invocation: must NOT re-prompt.
+	failIfPrompted := func(context.Context, string, bool) (bool, error) {
+		t.Fatal("prompt should not be called when dismissal is persisted")
+		return false, nil
+	}
+	if err := maybePromptReviewSettingsMigration(context.Background(), &out, &out, true, failIfPrompted); err != nil {
+		t.Fatalf("second invocation: %v", err)
+	}
+}
+
 func TestReviewSettingsMigration_SkipsWhenProjectHasNoReviewKeys(t *testing.T) {
 	tmp := t.TempDir()
 	testutil.InitRepo(t, tmp)
