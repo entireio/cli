@@ -3,7 +3,7 @@
   "checkpoint_id": "4e825ed88af2",
   "strategy": "manual-commit",
   "branch": "entire-labs-investigate",
-  "checkpoints_count": 0,
+  "checkpoints_count": 1,
   "files_touched": [
     "cmd/entire/cli/investigate/picker.go"
   ],
@@ -13,14 +13,20 @@
       "transcript": "/4e/825ed88af2/0/transcript.jsonl",
       "content_hash": "/4e/825ed88af2/0/transcript_hash.txt",
       "prompt": "/4e/825ed88af2/0/prompt.txt"
+    },
+    {
+      "metadata": "/4e/825ed88af2/1/metadata.json",
+      "transcript": "/4e/825ed88af2/1/transcript.jsonl",
+      "content_hash": "/4e/825ed88af2/1/transcript_hash.txt",
+      "prompt": "/4e/825ed88af2/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 9,
-    "cache_creation_tokens": 67151,
-    "cache_read_tokens": 246859,
-    "output_tokens": 768,
-    "api_call_count": 5
+    "input_tokens": 191,
+    "cache_creation_tokens": 368776,
+    "cache_read_tokens": 19738080,
+    "output_tokens": 92422,
+    "api_call_count": 125
   },
   "has_investigation": true
 }
