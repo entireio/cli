@@ -107,10 +107,35 @@ func writeFailureHeader(b *strings.Builder, runErr error) {
 	var pe *reviewtypes.ProcessError
 	if errors.As(runErr, &pe) && pe.Stderr != "" {
 		fmt.Fprintf(b, "**Failed:** `%s` exited (`%v`). Stderr:\n\n", pe.AgentName, pe.Err)
-		fmt.Fprintf(b, "```\n%s\n```\n\n", pe.Stderr)
+		fence := codeFenceFor(pe.Stderr)
+		fmt.Fprintf(b, "%s\n%s\n%s\n\n", fence, pe.Stderr, fence)
 		return
 	}
 	fmt.Fprintf(b, "**Failed:** `%v`\n\n", runErr)
+}
+
+// codeFenceFor returns a backtick fence at least 3 long and at least one
+// longer than the longest backtick run in s — per CommonMark §4.5, the
+// closing fence must match or exceed the opening fence length, so this
+// prevents stderr content with embedded ``` lines from terminating the
+// fence early and rendering trailing content raw.
+func codeFenceFor(s string) string {
+	longest, current := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			current++
+			if current > longest {
+				longest = current
+			}
+			continue
+		}
+		current = 0
+	}
+	n := longest + 1
+	if n < 3 {
+		n = 3
+	}
+	return strings.Repeat("`", n)
 }
 
 func sameFailureError(a, b error) bool {

@@ -535,6 +535,42 @@ func TestRunMulti_EmitsEnrichedTokensWhenAgentFinishes(t *testing.T) {
 	}
 }
 
+// TestRunMulti_PreservesParserTokensWhenEnrichmentReturnsZero locks in the
+// dispatch-loop overwrite contract: when the parser emits Tokens during the
+// run and EnrichAgentRun later returns zero (e.g. no matching session state
+// found), the parser's tokens must be preserved in the final summary because
+// emitEnrichedAgentTokens short-circuits before sending the synthetic event.
+// Without that early-return, a zero overwrite would clobber the parser value.
+func TestRunMulti_PreservesParserTokensWhenEnrichmentReturnsZero(t *testing.T) {
+	t.Parallel()
+	events := []reviewtypes.Event{
+		reviewtypes.Started{},
+		reviewtypes.Tokens{In: 1000, Out: 500},
+		reviewtypes.Finished{Success: true},
+	}
+	reviewer := &stubReviewer{name: "agent-a", events: events}
+	cfg := reviewtypes.RunConfig{
+		EnrichAgentRun: func(_ context.Context, run reviewtypes.AgentRun) reviewtypes.AgentRun {
+			// Enricher couldn't find session state; returns zero tokens.
+			// The orchestrator must NOT propagate this back into the summary.
+			run.Tokens = reviewtypes.Tokens{}
+			return run
+		},
+	}
+
+	summary, err := RunMulti(context.Background(), []reviewtypes.AgentReviewer{reviewer}, cfg, nil)
+	if err != nil {
+		t.Fatalf("RunMulti: %v", err)
+	}
+	if len(summary.AgentRuns) != 1 {
+		t.Fatalf("expected 1 AgentRun, got %d", len(summary.AgentRuns))
+	}
+	got := summary.AgentRuns[0].Tokens
+	if got.In != 1000 || got.Out != 500 {
+		t.Fatalf("parser-emitted Tokens lost: got {%d %d}, want {1000 500}", got.In, got.Out)
+	}
+}
+
 type chanProcess struct {
 	events  chan reviewtypes.Event
 	waitErr error

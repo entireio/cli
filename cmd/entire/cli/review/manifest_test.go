@@ -51,7 +51,7 @@ func TestHydrateReviewSummaryTokensFromStates_PopulatesTokensFromSessionState(t 
 		},
 	}
 
-	got := hydrateReviewSummaryTokensFromStates(context.Background(), "/repo", "abc123", summary, states)
+	got := hydrateReviewSummaryTokensFromStates(context.Background(), "/repo", "abc123", summary, states, nil)
 	tokens := got.AgentRuns[0].Tokens
 	if tokens.In != 1235 || tokens.Out != 86 {
 		t.Fatalf("tokens = {%d %d}, want {1235 86}", tokens.In, tokens.Out)
@@ -59,16 +59,13 @@ func TestHydrateReviewSummaryTokensFromStates_PopulatesTokensFromSessionState(t 
 }
 
 func TestHydrateReviewSummaryTokensFromStates_FallsBackToTranscript(t *testing.T) {
-	originalReviewAgentByType := reviewAgentByType
-	reviewAgentByType = func(agentType agenttypes.AgentType) (agent.Agent, error) {
+	t.Parallel()
+	lookup := func(agentType agenttypes.AgentType) (agent.Agent, error) {
 		if agentType != manifestTokenTestAgentType {
 			return nil, errors.New("unexpected agent type")
 		}
 		return manifestTokenTestAgent{}, nil
 	}
-	t.Cleanup(func() {
-		reviewAgentByType = originalReviewAgentByType
-	})
 
 	started := time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
@@ -95,7 +92,7 @@ func TestHydrateReviewSummaryTokensFromStates_FallsBackToTranscript(t *testing.T
 		},
 	}
 
-	got := hydrateReviewSummaryTokensFromStates(context.Background(), "/repo", "abc123", summary, states)
+	got := hydrateReviewSummaryTokensFromStates(context.Background(), "/repo", "abc123", summary, states, lookup)
 	tokens := got.AgentRuns[0].Tokens
 	if tokens.In != 150 || tokens.Out != 50 {
 		t.Fatalf("tokens = {%d %d}, want {150 50}", tokens.In, tokens.Out)

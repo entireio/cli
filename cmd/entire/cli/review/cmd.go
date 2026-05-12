@@ -550,8 +550,12 @@ func runMultiAgentPath(
 		defer tuiSink.Wait()
 	}
 
+	// Multi-agent only wires EnrichAgentRun. The per-agent enricher emits a
+	// synthetic Tokens event as each agent finishes, which the dispatch loop
+	// overwrites onto st.tokens (run_multi.go:168). That value flows into
+	// agentRuns[i].Tokens in the final summary, so a summary-level pass would
+	// redo the same store.List + token hydration once per run.
 	summary, waitErr := RunMulti(runCtx, reviewers, reviewtypes.RunConfig{
-		EnrichSummary:  reviewSummaryTokenEnricher(worktreeRoot, headSHA),
 		EnrichAgentRun: reviewAgentRunTokenEnricher(worktreeRoot, headSHA),
 	}, sinks)
 	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput)
@@ -684,7 +688,7 @@ func warnManifestNotWritten(out io.Writer, reason string) {
 
 func reviewSummaryTokenEnricher(worktreeRoot, headSHA string) func(context.Context, reviewtypes.RunSummary) reviewtypes.RunSummary {
 	return func(ctx context.Context, summary reviewtypes.RunSummary) reviewtypes.RunSummary {
-		enriched, err := hydrateReviewSummaryTokensFromCurrentState(ctx, worktreeRoot, headSHA, summary)
+		enriched, err := hydrateReviewSummaryTokensFromCurrentState(ctx, worktreeRoot, headSHA, summary, agent.GetByAgentType)
 		if err != nil {
 			logging.Debug(ctx, "review token hydration skipped", slog.String("error", err.Error()))
 			return summary
@@ -695,7 +699,7 @@ func reviewSummaryTokenEnricher(worktreeRoot, headSHA string) func(context.Conte
 
 func reviewAgentRunTokenEnricher(worktreeRoot, headSHA string) func(context.Context, reviewtypes.AgentRun) reviewtypes.AgentRun {
 	return func(ctx context.Context, run reviewtypes.AgentRun) reviewtypes.AgentRun {
-		enriched, err := hydrateReviewAgentRunTokensFromCurrentState(ctx, worktreeRoot, headSHA, run)
+		enriched, err := hydrateReviewAgentRunTokensFromCurrentState(ctx, worktreeRoot, headSHA, run, agent.GetByAgentType)
 		if err != nil {
 			logging.Debug(ctx, "review agent token hydration skipped", slog.String("error", err.Error()))
 			return run

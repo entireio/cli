@@ -277,3 +277,61 @@ func TestDumpSink_EmptyAgentRuns(t *testing.T) {
 		t.Errorf("expected empty counts line, got:\n%s", out)
 	}
 }
+
+// TestDumpSink_FenceEscapesBackticksInStderr verifies that stderr containing
+// a 3-backtick line does not terminate the surrounding code fence early.
+// Per CommonMark §4.5 the closing fence must be at least as long as the
+// opening fence, so the fence has to widen to one more backtick than the
+// longest run in the content.
+func TestDumpSink_FenceEscapesBackticksInStderr(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	sink := DumpSink{W: &buf}
+
+	stderr := "before\n```\ninner content\n```\nafter"
+	pe := &reviewtypes.ProcessError{
+		AgentName: "claude-code",
+		Err:       errors.New("exit status 1"),
+		Stderr:    stderr,
+	}
+	sink.RunFinished(makeSummary(reviewtypes.AgentRun{
+		Name:   "claude-code",
+		Status: reviewtypes.AgentStatusFailed,
+		Err:    pe,
+	}))
+
+	out := buf.String()
+	// Fence must widen to 4 backticks, with the full stderr (including the
+	// embedded 3-backtick lines) sitting verbatim inside.
+	wantFence := "````\n" + stderr + "\n````"
+	if !strings.Contains(out, wantFence) {
+		t.Errorf("expected widened fence around stderr, got:\n%s", out)
+	}
+	// "after" must still be inside the fence (i.e., immediately followed by
+	// the closing fence), not orphaned outside.
+	if !strings.Contains(out, "after\n````") {
+		t.Errorf("trailing stderr content must remain inside the fence, got:\n%s", out)
+	}
+}
+
+func TestCodeFenceFor_MinimumThreeBackticks(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, in, want string
+	}{
+		{"empty", "", "```"},
+		{"no backticks", "hello world", "```"},
+		{"single backtick", "use `x` here", "```"},
+		{"two backticks", "matched ``code`` style", "```"},
+		{"three backticks on a line", "```\nfenced\n```", "````"},
+		{"four backticks", "````", "`````"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := codeFenceFor(tc.in); got != tc.want {
+				t.Errorf("codeFenceFor(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

@@ -22,7 +22,17 @@ import (
 
 const localReviewManifestVersion = 1
 
-var reviewAgentByType = agent.GetByAgentType // overridable in tests without mutating the global agent registry
+// reviewTokenMaxDepth caps recursion when summing SubagentTokens. Subagent
+// trees are shallow in practice (single-digit depth), so this is defensive
+// insurance against a malformed/cyclic *agent.TokenUsage causing stack
+// overflow during a review run.
+const reviewTokenMaxDepth = 16
+
+// agentTypeLookup resolves an agent.AgentType to its Agent implementation.
+// Threaded as an explicit dependency through the hydration helpers so tests
+// can inject a fake without mutating the package-level agent registry — and
+// without parallel-test footguns from a shared mutable variable.
+type agentTypeLookup func(agenttypes.AgentType) (agent.Agent, error)
 
 // LocalReviewManifest records one local `entire review` invocation. It lets
 // `entire review --fix <session-id>` use a single session id as the lookup
@@ -99,6 +109,7 @@ func hydrateReviewSummaryTokensFromCurrentState(
 	worktreeRoot string,
 	headSHA string,
 	summary reviewtypes.RunSummary,
+	lookup agentTypeLookup,
 ) (reviewtypes.RunSummary, error) {
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
@@ -108,7 +119,7 @@ func hydrateReviewSummaryTokensFromCurrentState(
 	if err != nil {
 		return summary, fmt.Errorf("list session states: %w", err)
 	}
-	return hydrateReviewSummaryTokensFromStates(ctx, worktreeRoot, headSHA, summary, states), nil
+	return hydrateReviewSummaryTokensFromStates(ctx, worktreeRoot, headSHA, summary, states, lookup), nil
 }
 
 func hydrateReviewAgentRunTokensFromCurrentState(
@@ -116,6 +127,7 @@ func hydrateReviewAgentRunTokensFromCurrentState(
 	worktreeRoot string,
 	headSHA string,
 	run reviewtypes.AgentRun,
+	lookup agentTypeLookup,
 ) (reviewtypes.AgentRun, error) {
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
@@ -125,7 +137,7 @@ func hydrateReviewAgentRunTokensFromCurrentState(
 	if err != nil {
 		return run, fmt.Errorf("list session states: %w", err)
 	}
-	return hydrateReviewAgentRunTokensFromStates(ctx, worktreeRoot, headSHA, run, states), nil
+	return hydrateReviewAgentRunTokensFromStates(ctx, worktreeRoot, headSHA, run, states, lookup), nil
 }
 
 func hydrateReviewAgentRunTokensFromStates(
@@ -134,12 +146,13 @@ func hydrateReviewAgentRunTokensFromStates(
 	headSHA string,
 	run reviewtypes.AgentRun,
 	states []*session.State,
+	lookup agentTypeLookup,
 ) reviewtypes.AgentRun {
 	st := matchReviewSessionState(worktreeRoot, headSHA, run.StartedAt, run.Name, states, map[string]bool{})
 	if st == nil || st.SessionID == "" {
 		return run
 	}
-	tokens := reviewTokensFromTokenUsage(reviewTokenUsageForSession(ctx, st))
+	tokens := reviewTokensFromTokenUsage(reviewTokenUsageForSession(ctx, st, lookup))
 	if tokens.In == 0 && tokens.Out == 0 {
 		return run
 	}
@@ -153,6 +166,7 @@ func hydrateReviewSummaryTokensFromStates(
 	headSHA string,
 	summary reviewtypes.RunSummary,
 	states []*session.State,
+	lookup agentTypeLookup,
 ) reviewtypes.RunSummary {
 	usedSessions := map[string]bool{}
 	for i, run := range summary.AgentRuns {
@@ -161,7 +175,7 @@ func hydrateReviewSummaryTokensFromStates(
 			continue
 		}
 		usedSessions[st.SessionID] = true
-		tokens := reviewTokensFromTokenUsage(reviewTokenUsageForSession(ctx, st))
+		tokens := reviewTokensFromTokenUsage(reviewTokenUsageForSession(ctx, st, lookup))
 		if tokens.In == 0 && tokens.Out == 0 {
 			continue
 		}
@@ -170,7 +184,7 @@ func hydrateReviewSummaryTokensFromStates(
 	return summary
 }
 
-func reviewTokenUsageForSession(ctx context.Context, st *session.State) *agent.TokenUsage {
+func reviewTokenUsageForSession(ctx context.Context, st *session.State, lookup agentTypeLookup) *agent.TokenUsage {
 	if st == nil {
 		return nil
 	}
@@ -180,7 +194,10 @@ func reviewTokenUsageForSession(ctx context.Context, st *session.State) *agent.T
 	if st.TranscriptPath == "" || st.AgentType == "" {
 		return nil
 	}
-	ag, err := reviewAgentByType(st.AgentType)
+	if lookup == nil {
+		lookup = agent.GetByAgentType
+	}
+	ag, err := lookup(st.AgentType)
 	if err != nil {
 		// Distinct from "no token data" — the session references an agent
 		// that's not in the registry. Surfacing this at Debug lets operators
@@ -210,27 +227,35 @@ func reviewSubagentsDir(st *session.State) string {
 }
 
 func reviewTokensFromTokenUsage(usage *agent.TokenUsage) reviewtypes.Tokens {
-	if usage == nil {
+	return reviewTokensFromTokenUsageAtDepth(usage, 0)
+}
+
+func reviewTokensFromTokenUsageAtDepth(usage *agent.TokenUsage, depth int) reviewtypes.Tokens {
+	if usage == nil || depth >= reviewTokenMaxDepth {
 		return reviewtypes.Tokens{}
 	}
 	tokens := reviewtypes.Tokens{
 		In:  usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens,
 		Out: usage.OutputTokens,
 	}
-	subagentTokens := reviewTokensFromTokenUsage(usage.SubagentTokens)
+	subagentTokens := reviewTokensFromTokenUsageAtDepth(usage.SubagentTokens, depth+1)
 	tokens.In += subagentTokens.In
 	tokens.Out += subagentTokens.Out
 	return tokens
 }
 
 func hasReviewTokenUsageData(usage *agent.TokenUsage) bool {
-	if usage == nil {
+	return hasReviewTokenUsageDataAtDepth(usage, 0)
+}
+
+func hasReviewTokenUsageDataAtDepth(usage *agent.TokenUsage, depth int) bool {
+	if usage == nil || depth >= reviewTokenMaxDepth {
 		return false
 	}
 	if usage.InputTokens != 0 || usage.CacheCreationTokens != 0 || usage.CacheReadTokens != 0 || usage.OutputTokens != 0 || usage.APICallCount != 0 {
 		return true
 	}
-	return hasReviewTokenUsageData(usage.SubagentTokens)
+	return hasReviewTokenUsageDataAtDepth(usage.SubagentTokens, depth+1)
 }
 
 func matchReviewSessionState(
