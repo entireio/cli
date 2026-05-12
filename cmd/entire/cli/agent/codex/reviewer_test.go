@@ -163,13 +163,12 @@ func TestCodexReviewer_NoBinaryRequiredAtConstruction(t *testing.T) {
 func TestParseCodexOutput_ReportsScannerError(t *testing.T) {
 	t.Parallel()
 	// Trigger bufio.Scanner's "token too long" error: produce a "line"
-	// that exceeds the 16MB max buffer without containing a newline.
-	// Strip's internal scanner has its own 16MB buffer, so we need to
-	// exceed that to propagate the error through the pipe chain.
+	// that exceeds parseCodexOutput's 16MB max buffer without containing
+	// a newline.
 	r, w := io.Pipe()
 	go func() {
 		defer w.Close()
-		// 17MB of contiguous bytes without a newline — exceeds Strip's scanner buffer
+		// 17MB of contiguous bytes without a newline — exceeds the parser's scanner buffer.
 		buf := make([]byte, 1024*1024)
 		for range 17 {
 			_, _ = w.Write(buf) //nolint:errcheck // best-effort write in test goroutine
