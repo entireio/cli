@@ -384,6 +384,7 @@ func TestTUIModel_PostFinishQuitsOnExplicitKeys(t *testing.T) {
 	}{
 		{"q", testKey('q')},
 		{"Esc", testKey(tea.KeyEscape)},
+		{"KeyEsc", testKey(tea.KeyEsc)},
 		{"Enter", testKey(tea.KeyEnter)},
 		{"Ctrl+C", testCtrlKey('c')},
 	}
@@ -560,6 +561,35 @@ func TestTUIModel_AutoFollow_DetailMode(t *testing.T) {
 	}
 	if !m.detail.AtBottom() {
 		t.Errorf("expected viewport to track bottom after each event (auto-follow); YOffset=%d, total=%d",
+			m.detail.YOffset(), m.detail.TotalLineCount())
+	}
+}
+
+// TestTUIModel_AutoFollow_ResizePreservesBottomWhenTailing pins that a user who
+// is tailing the detail viewport remains at the bottom after a resize changes
+// wrapping and increases the viewport's maximum scroll offset.
+func TestTUIModel_AutoFollow_ResizePreservesBottomWhenTailing(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(testCtrlKey('o'))
+	m = mustModel(t, updated)
+
+	long := strings.Repeat("resize-sensitive review finding ", 8)
+	for range 8 {
+		updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.AssistantText{Text: long}})
+		m = mustModel(t, updated)
+	}
+	m.detail.GotoBottom()
+	if !m.detail.AtBottom() {
+		t.Fatal("setup: expected viewport to be at bottom before resize")
+	}
+
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 30, Height: 8})
+	m = mustModel(t, updated)
+	if !m.detail.AtBottom() {
+		t.Errorf("expected viewport to stay at bottom after resize; YOffset=%d, total=%d",
 			m.detail.YOffset(), m.detail.TotalLineCount())
 	}
 }

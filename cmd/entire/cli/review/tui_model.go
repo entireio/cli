@@ -176,11 +176,12 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, spinCmd
 
 	case tea.WindowSizeMsg:
+		wasAtBottom := m.detail.AtBottom()
 		m.termWidth = msg.Width
 		m.termHeight = msg.Height
 		m.detail.SetWidth(m.detailViewportWidth())
 		m.detail.SetHeight(m.detailViewportHeight())
-		m = m.refreshDetailContent()
+		m = m.refreshDetailContentWithAutoTail(wasAtBottom)
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -188,7 +189,7 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseWheelMsg, tea.MouseClickMsg, tea.MouseReleaseMsg, tea.MouseMotionMsg:
 		// Mouse events: only meaningful inside the drill-in viewport, which
-		// reads tea.MouseWheelMsg natively (see bubbles/v2/viewport.go:696).
+		// handles tea.MouseWheelMsg natively.
 		// Without this delegation the events arrive at the Program (because
 		// View.MouseMode = MouseModeCellMotion is set during detail mode)
 		// but fall through Update unhandled — the user sees no scroll
@@ -231,11 +232,14 @@ func (m reviewTUIModel) detailViewportHeight() int {
 // mutated in place on the returned copy and the caller assigns the result
 // back.
 func (m reviewTUIModel) refreshDetailContent() reviewTUIModel {
+	return m.refreshDetailContentWithAutoTail(m.detail.AtBottom())
+}
+
+func (m reviewTUIModel) refreshDetailContentWithAutoTail(wasAtBottom bool) reviewTUIModel {
 	if len(m.rows) == 0 || m.detailIdx < 0 || m.detailIdx >= len(m.rows) {
 		m.detail.SetContent("")
 		return m
 	}
-	wasAtBottom := m.detail.AtBottom()
 	lines := buildEventLines(m.rows[m.detailIdx].buffer, m.detailViewportWidth())
 	m.detail.SetContentLines(lines)
 	if wasAtBottom {
@@ -388,15 +392,17 @@ func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // isPostFinishExitKey reports whether msg is one of the explicit exit keys
-// honored on the post-finish dashboard. Ctrl+C is handled separately in the
-// normal switch so duplicate-press semantics (cancelling → force-quit) still
-// apply; here we only need q/Esc/Enter without modifiers.
+// honored on the post-finish dashboard. Ctrl+C is handled by the caller because
+// it has a modifier; here we only need q/Esc/Enter without modifiers.
 func isPostFinishExitKey(msg tea.KeyPressMsg) bool {
 	if msg.Mod != 0 {
 		return false
 	}
+	if msg.Code == tea.KeyEscape || msg.Code == tea.KeyEsc {
+		return true
+	}
 	switch msg.Code {
-	case 'q', tea.KeyEnter, tea.KeyEscape:
+	case 'q', tea.KeyEnter:
 		return true
 	}
 	return false

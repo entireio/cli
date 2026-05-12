@@ -56,7 +56,7 @@ func eventLines(ev reviewtypes.Event, maxWidth int) []string {
 
 // buildEventLines returns every wrapped body line for the supplied event
 // buffer, in order. The result is suitable for feeding into a viewport via
-// SetContent.
+// SetContentLines.
 func buildEventLines(buffer []reviewtypes.Event, maxWidth int) []string {
 	if len(buffer) == 0 || maxWidth <= 0 {
 		return nil
