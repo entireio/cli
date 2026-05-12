@@ -3,7 +3,7 @@
   "checkpoint_id": "29a8946fad70",
   "strategy": "manual-commit",
   "branch": "entire-labs-investigate",
-  "checkpoints_count": 0,
+  "checkpoints_count": 1,
   "files_touched": [
     "cmd/entire/cli/investigate/loop.go",
     "cmd/entire/cli/investigate/loop_test.go",
@@ -17,14 +17,20 @@
       "transcript": "/29/a8946fad70/0/transcript.jsonl",
       "content_hash": "/29/a8946fad70/0/transcript_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/29/a8946fad70/1/metadata.json",
+      "transcript": "/29/a8946fad70/1/transcript.jsonl",
+      "content_hash": "/29/a8946fad70/1/transcript_hash.txt",
+      "prompt": "/29/a8946fad70/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 0,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 0,
-    "output_tokens": 0,
-    "api_call_count": 0
+    "input_tokens": 247,
+    "cache_creation_tokens": 350788,
+    "cache_read_tokens": 31555539,
+    "output_tokens": 125585,
+    "api_call_count": 165
   },
   "has_investigation": true
 }
