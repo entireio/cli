@@ -91,26 +91,25 @@ func localReviewManifestFromCurrentState(
 }
 
 // explainEmptyManifest returns a single-line diagnostic explaining why
-// matchReviewSessionState produced no matches for any agent run in summary.
-// It inspects the candidate session states against the same filters used by
-// the matcher and reports the most likely cause: missing tag, worktree path
-// mismatch, BaseCommit mismatch, StartedAt window, or AgentType mismatch.
+// matchReviewSessionState produced no matches for any agent run in summary,
+// plus a sentinel flag indicating the function fell through every known
+// rejection cause. The sentinel means matcher and explainer drifted and
+// callers should escalate logging.
 //
-// The diagnostic surfaces in the user-facing warning printed by
-// warnManifestNotWritten when the manifest has no sources, so the user can
-// distinguish a true env-handshake failure from one of the four other
-// post-tag filter rejections.
-//
-// Filter precedence in this function matches matchReviewSessionState so the
-// reported cause aligns with what the matcher actually decided.
+// Filter precedence mirrors matchReviewSessionState: worktree path,
+// BaseCommit, StartedAt window, then AgentType. The agent-independent
+// filters (worktree/SHA/time) get a single sweep; AgentType is checked
+// per-agent so a multi-agent run with heterogeneous type mismatches names
+// the specific failing agent rather than blaming the first one in the
+// run list.
 func explainEmptyManifest(
 	worktreeRoot string,
 	headSHA string,
 	summary reviewtypes.RunSummary,
 	states []*session.State,
-) string {
+) (reason string, sentinel bool) {
 	if len(states) == 0 {
-		return "no session states found (lifecycle hook never created session state for any agent in this run)"
+		return "no session states found (lifecycle hook never created session state for any agent in this run)", false
 	}
 	tagged := make([]*session.State, 0, len(states))
 	for _, st := range states {
@@ -119,38 +118,50 @@ func explainEmptyManifest(
 		}
 	}
 	if len(tagged) == 0 {
-		return fmt.Sprintf("found %d session state(s) but none tagged as a review session (env-var handshake did not reach the hook)", len(states))
+		return fmt.Sprintf("found %d session state(s) but none tagged as a review session (env-var handshake did not reach the hook)", len(states)), false
 	}
-	// At least one tagged session exists. Check each post-tag filter against
-	// any one of the run's agents — we just need one representative cause.
-	// Pick the first agent in summary.AgentRuns since they all share the
-	// same worktree/SHA/StartedAt window.
-	var runName string
-	if len(summary.AgentRuns) > 0 {
-		runName = summary.AgentRuns[0].Name
-	}
-	wantType := agentTypeForReviewAgent(runName)
+
+	// Agent-independent filters: same outcome regardless of which agent ran.
 	for _, st := range tagged {
 		if worktreeRoot != "" && st.WorktreePath != "" && st.WorktreePath != worktreeRoot {
-			return fmt.Sprintf("found %d tagged review session(s) but worktree path mismatch: state=%q, run=%q", len(tagged), st.WorktreePath, worktreeRoot)
+			return fmt.Sprintf("found %d tagged review session(s) but worktree path mismatch: state=%q, run=%q", len(tagged), st.WorktreePath, worktreeRoot), false
 		}
 	}
 	for _, st := range tagged {
 		if headSHA != "" && st.BaseCommit != "" && st.BaseCommit != headSHA {
-			return fmt.Sprintf("found %d tagged review session(s) but BaseCommit mismatch: state=%q, run=%q (HEAD moved between review start and first agent turn?)", len(tagged), st.BaseCommit, headSHA)
+			return fmt.Sprintf("found %d tagged review session(s) but BaseCommit mismatch: state=%q, run=%q (HEAD moved between review start and first agent turn?)", len(tagged), st.BaseCommit, headSHA), false
 		}
 	}
 	for _, st := range tagged {
 		if !summary.StartedAt.IsZero() && st.StartedAt.Before(summary.StartedAt.Add(-5*time.Second)) {
-			return fmt.Sprintf("found %d tagged review session(s) but they started before the review run window (stale session state from a prior run?)", len(tagged))
+			return fmt.Sprintf("found %d tagged review session(s) but they started before the review run window (stale session state from a prior run?)", len(tagged)), false
 		}
 	}
-	for _, st := range tagged {
-		if wantType != "" && st.AgentType != "" && st.AgentType != wantType {
-			return fmt.Sprintf("found %d tagged review session(s) but AgentType mismatch: state=%q, run=%q", len(tagged), st.AgentType, wantType)
+
+	// Agent-specific filter: AgentType. Check each run against the tagged
+	// states; report the first run whose wantType doesn't match any state's
+	// AgentType. Lenient cases (state.AgentType=="" or wantType=="") count
+	// as a match here, matching the matcher's lenient behavior.
+	for _, run := range summary.AgentRuns {
+		wantType := agentTypeForReviewAgent(run.Name)
+		if wantType == "" {
+			continue
+		}
+		var observedType string
+		anyMatch := false
+		for _, st := range tagged {
+			if st.AgentType == "" || st.AgentType == wantType {
+				anyMatch = true
+				break
+			}
+			observedType = string(st.AgentType)
+		}
+		if !anyMatch {
+			return fmt.Sprintf("found %d tagged review session(s) but AgentType mismatch for agent %q: state=%q, run=%q", len(tagged), run.Name, observedType, wantType), false
 		}
 	}
-	return fmt.Sprintf("found %d tagged review session(s) but matcher rejected all of them (no filter explained the rejection — please report this as a bug)", len(tagged))
+
+	return fmt.Sprintf("found %d tagged review session(s) but matcher rejected all of them (no filter explained the rejection — please report this as a bug)", len(tagged)), true
 }
 
 func matchReviewSessionState(

@@ -653,9 +653,20 @@ func writePostReviewManifest(
 		return
 	}
 	if len(manifest.Sources) == 0 {
-		reason := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
-		logging.Debug(ctx, "review manifest not written: no matching review sessions",
-			slog.String("reason", reason))
+		reason, sentinel := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
+		if sentinel {
+			// Matcher and explainer have drifted — the matcher rejected
+			// every tagged session for a reason none of the explainer's
+			// filters cover. Surface at Warn so this gets noticed without
+			// requiring debug logging.
+			logging.Warn(ctx, "review manifest matcher/explainer drift detected",
+				slog.String("reason", reason),
+				slog.Int("tagged_state_count", len(states)),
+				slog.Int("agent_run_count", len(summary.AgentRuns)))
+		} else {
+			logging.Debug(ctx, "review manifest not written: no matching review sessions",
+				slog.String("reason", reason))
+		}
 		warnManifestNotWritten(out, reason)
 		return
 	}

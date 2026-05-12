@@ -37,10 +37,8 @@ func buildGeminiReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.
 	// the actual prompt via stdin to avoid argv size limits.
 	cmd := exec.CommandContext(ctx, "gemini", "-p", " ")
 	cmd.Stdin = strings.NewReader(prompt)
-	// Use the registry-stable agent name (AgentNameGemini = "gemini") so the
-	// lifecycle hook's adoptReviewEnv check (which compares against
-	// string(ag.Name())) matches. A hardcoded "gemini-cli" here silently
-	// skipped adoption for every gemini review.
+	// Agent name must equal string(ag.Name()) — adoptReviewEnv compares
+	// ENTIRE_REVIEW_AGENT against it; any drift silently skips adoption.
 	cmd.Env = review.AppendReviewEnv(os.Environ(), string(agent.AgentNameGemini), cfg, prompt)
 	return cmd
 }

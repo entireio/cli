@@ -20,10 +20,9 @@ var _ reviewtypes.AgentReviewer = (*reviewtypes.ReviewerTemplate)(nil)
 const wantGeminiAgentName = "gemini"
 
 // TestGeminiReviewer_NameMatchesRegistryKey locks the reviewer's name to the
-// agent registry's stable key. The lifecycle hook's review-env adoption
-// (cmd/entire/cli/lifecycle.go:adoptReviewEnv) compares ENTIRE_REVIEW_AGENT
-// against string(ag.Name()); any drift between this constant and
-// AgentNameGemini silently breaks review-session tagging.
+// agent registry's stable key. adoptReviewEnv compares ENTIRE_REVIEW_AGENT
+// against string(ag.Name()); drift here silently breaks review-session
+// tagging for this agent.
 func TestGeminiReviewer_NameMatchesRegistryKey(t *testing.T) {
 	t.Parallel()
 	if wantGeminiAgentName != string(agent.AgentNameGemini) {
