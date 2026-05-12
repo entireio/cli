@@ -379,3 +379,49 @@ func TestBuildLocalReviewManifestFromSummary_GroupsAgentSessionsAndAggregate(t *
 		t.Fatalf("AggregateOutput = %q", manifest.AggregateOutput)
 	}
 }
+
+func TestWarnManifestNotWritten_PrintsReasonAndDiagnosticHints(t *testing.T) {
+	var b strings.Builder
+
+	warnManifestNotWritten(&b, "test reason text")
+
+	got := b.String()
+	for _, want := range []string{
+		"Note: review skills ran but findings were not persisted.",
+		"Reason: test reason text",
+		"`entire review --findings` and `entire review --fix` will not see this run.",
+		"`ENTIRE_LOG_LEVEL=debug`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("warning missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestWritePostReviewManifest_WarnsWhenNoMatchingSessions(t *testing.T) {
+	repoRoot := t.TempDir()
+	testutil.InitRepo(t, repoRoot)
+	t.Chdir(repoRoot)
+
+	var out strings.Builder
+	summary := reviewtypes.RunSummary{
+		StartedAt: time.Now(),
+		AgentRuns: []reviewtypes.AgentRun{
+			{Name: "claude-code", Status: reviewtypes.AgentStatusSucceeded},
+		},
+	}
+
+	// SHA is irrelevant: matcher never runs since no session states exist.
+	writePostReviewManifest(context.Background(), &out, repoRoot, "abc123", summary, "")
+
+	got := out.String()
+	if !strings.Contains(got, "Note: review skills ran but findings were not persisted.") {
+		t.Fatalf("expected warning to fire when no sessions match; got:\n%s", got)
+	}
+	if !strings.Contains(got, "env-var handshake did not reach the hook") {
+		t.Fatalf("expected handshake-failure reason; got:\n%s", got)
+	}
+	if strings.Contains(got, "Review complete.") {
+		t.Fatalf("happy-path footer must not print when manifest is empty; got:\n%s", got)
+	}
+}

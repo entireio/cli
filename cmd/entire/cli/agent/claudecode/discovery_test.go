@@ -380,3 +380,42 @@ func TestDiscoverReviewSkills_UserSkillsDir(t *testing.T) {
 		t.Errorf("user skill name = %q, want /my-review", skills[0].Name)
 	}
 }
+
+func TestDiscoverReviewSkills_DedupesSkillAndCommandSameName(t *testing.T) {
+	home := withFakeHome(t)
+	versionDir := filepath.Join(home, ".claude", "plugins", "cache",
+		"fake-market", "paxos", "0.1.0")
+
+	skillDir := filepath.Join(versionDir, "skills", "review")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: review\ndescription: real review skill\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmdDir := filepath.Join(versionDir, "commands")
+	if err := os.MkdirAll(cmdDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cmdDir, "review.md"),
+		[]byte("---\ndescription: \"thin command wrapper\"\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &claudecode.ClaudeCodeAgent{}
+	skills, err := a.DiscoverReviewSkills(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 1 {
+		t.Fatalf("expected 1 deduped entry, got %d: %+v", len(skills), skills)
+	}
+	if skills[0].Name != "/paxos:review" {
+		t.Errorf("Name = %q, want /paxos:review", skills[0].Name)
+	}
+	if skills[0].Description != "real review skill" {
+		t.Errorf("Description = %q; want skill description", skills[0].Description)
+	}
+}

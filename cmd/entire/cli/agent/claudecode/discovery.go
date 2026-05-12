@@ -45,10 +45,30 @@ func (c *ClaudeCodeAgent) DiscoverReviewSkills(ctx context.Context) ([]agent.Dis
 	found = append(found, scanUserSkills(ctx, filepath.Join(home, ".claude", "skills"))...)
 	found = append(found, scanFlatMarkdownDir(ctx, filepath.Join(home, ".claude", "commands"), "")...)
 	found = append(found, scanFlatMarkdownDir(ctx, filepath.Join(home, ".claude", "agents"), "")...)
+	found = dedupeByInvocation(found)
 	if len(found) == 0 {
 		return nil, nil
 	}
 	return found, nil
+}
+
+// dedupeByInvocation collapses entries sharing an invocation name. Plugins
+// can ship a skill and a same-named command wrapper that forwards to it;
+// scan order keeps the skill over its wrapper.
+func dedupeByInvocation(in []agent.DiscoveredSkill) []agent.DiscoveredSkill {
+	if len(in) < 2 {
+		return in
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]agent.DiscoveredSkill, 0, len(in))
+	for _, s := range in {
+		if _, dup := seen[s.Name]; dup {
+			continue
+		}
+		seen[s.Name] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 // scanPluginCache walks <root>/<marketplace>/<plugin>/<version>/{skills,commands,agents}/

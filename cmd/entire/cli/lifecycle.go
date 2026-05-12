@@ -1113,7 +1113,10 @@ func adoptReviewEnv(ctx context.Context, state *session.State, expectedAgent str
 	if state.Kind != "" {
 		return
 	}
-	if os.Getenv(review.EnvSession) != "1" {
+	if envSession := os.Getenv(review.EnvSession); envSession != "1" {
+		logging.Debug(ctx, "review env adoption skipped: ENTIRE_REVIEW_SESSION is not \"1\"",
+			slog.String("expected_agent", expectedAgent),
+			slog.String("observed_value", envSession))
 		return
 	}
 	envAgent := os.Getenv(review.EnvAgent)

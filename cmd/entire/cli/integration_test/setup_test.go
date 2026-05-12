@@ -22,7 +22,10 @@ func TestMain(m *testing.M) {
 	testBinaryPath = filepath.Join(tmpDir, "entire")
 
 	moduleRoot := findModuleRoot()
-	buildCmd := exec.Command("go", "build", "-o", testBinaryPath, ".")
+	// -tags=authfilestore enables the file-backed auth store backend so the
+	// subprocess can opt into ENTIRE_TEST_AUTH_STORE_FILE instead of touching
+	// the real OS keychain. Production builds omit this tag.
+	buildCmd := exec.Command("go", "build", "-tags=authfilestore", "-o", testBinaryPath, ".")
 	buildCmd.Dir = filepath.Join(moduleRoot, "cmd", "entire")
 
 	buildOutput, err := buildCmd.CombinedOutput()

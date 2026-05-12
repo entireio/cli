@@ -29,6 +29,9 @@ go.work.sum
 .env
 .envrc
 
+# Local mise overrides (per-developer task/env tweaks)
+mise.local.toml
+
 .DS_Store
 
 # Editor/IDE
