@@ -1,0 +1,10 @@
+for entire investigate can we make the output more like review intead of logs it should be better ui
+[Image #1] should show agent, status, duration, turn, approved/not approved
+
+---
+
+yes
+
+---
+
+yes continue without my help
