@@ -193,6 +193,31 @@ func TestRecapTUIModel_UppercaseRRefreshes(t *testing.T) {
 	}
 }
 
+func TestRecapTUIModel_SameRangeKeyRetriesAfterError(t *testing.T) {
+	t.Parallel()
+
+	// When a load error is on screen, pressing the current range key should
+	// retry the fetch rather than be silently swallowed — otherwise the user
+	// is stranded staring at an error with no obvious recovery path.
+	start := testRecapTUIModel()
+	start.rangeKey = recap.RangeMonth
+	start.loadErr = errors.New("boom")
+
+	m, cmd := updateRecapTUIModel(t, start, recapRuneKey('m'))
+	if m.rangeKey != recap.RangeMonth {
+		t.Fatalf("retry should not change range, got %q", m.rangeKey)
+	}
+	if m.loadErr != nil {
+		t.Fatalf("retry should clear loadErr, got %v", m.loadErr)
+	}
+	if !m.loading {
+		t.Fatal("retry should mark model loading")
+	}
+	if cmd == nil {
+		t.Fatal("retry should refetch recap data")
+	}
+}
+
 func TestRecapTUIModel_TogglesView(t *testing.T) {
 	t.Parallel()
 

@@ -178,8 +178,20 @@ func (m recapTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m recapTUIModel) setRange(next recap.RangeKey) (recapTUIModel, tea.Cmd) {
-	if next == "" || next == m.rangeKey {
-		return m.withViewport(), nil
+	if next == "" {
+		return m, nil
+	}
+	// Pressing the current range key while a load error is on screen acts as
+	// retry — otherwise the keystroke would be silently dropped and the user
+	// would be left staring at the error with no obvious way out.
+	if next == m.rangeKey {
+		if m.loadErr == nil {
+			return m, nil
+		}
+		m.requestID++
+		m.loading = true
+		m.loadErr = nil
+		return m, m.fetch(m.requestID)
 	}
 	m.rangeKey = next
 	m.requestID++

@@ -2,6 +2,7 @@ package recap
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -127,10 +128,11 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 		}
 	}
 	top := topSignals(resp, opts, styles)
-	lines := []string{opts.Range.Title(), ""}
+	lines := []string{opts.Range.Title()}
 	if window := renderWindow(resp, opts, styles); window != "" {
-		lines = []string{opts.Range.Title(), window, ""}
+		lines = append(lines, window)
 	}
+	lines = append(lines, "")
 	if opts.View != ViewTeam {
 		lines = append(lines, fmt.Sprintf("%s   %-12s  %-15s  %s",
 			styles.accent.Render("you"),
@@ -145,7 +147,7 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 				plural(team.Sessions, "session"), plural(team.Checkpoints, "checkpoint"), formatTokens(team.Tokens)+" tok"))
 		}
 	}
-	if noteLines := transcriptAvailabilityNote(resp.Summary.Transcripts, opts.View); len(noteLines) > 0 {
+	if noteLines := transcriptAvailabilityNote(resp.Summary.Transcripts, opts.View, summaryContentWidth(width)); len(noteLines) > 0 {
 		lines = append(lines, "")
 		for _, noteLine := range noteLines {
 			lines = append(lines, styles.muted.Render(noteLine))
@@ -165,7 +167,12 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 	return renderBox("", lines, width, styles)
 }
 
-func transcriptAvailabilityNote(summary TranscriptSummary, view ViewMode) []string {
+// transcriptAvailabilityNote builds the "X unavailable transcripts" hint shown
+// inside the summary box. The note is word-wrapped to the available content
+// width so it never tears the box at narrow widths or with large counts.
+// width is the renderable text width inside the box (already accounting for
+// the box borders and the leading two-space indent — see summaryContentWidth).
+func transcriptAvailabilityNote(summary TranscriptSummary, view ViewMode, width int) []string {
 	status := visibleTranscriptStatus(summary, view)
 	total := status.Failed + status.Pending + status.Empty
 	if total == 0 {
@@ -185,12 +192,18 @@ func transcriptAvailabilityNote(summary TranscriptSummary, view ViewMode) []stri
 	if status.Empty > 0 {
 		parts = append(parts, fmt.Sprintf("%d empty", status.Empty))
 	}
-	return []string{
-		fmt.Sprintf("%d %s", total, label),
-		strings.Join(parts, ", ") + "; session totals may be lower",
-	}
+	headline := fmt.Sprintf("%d %s", total, label)
+	detail := strings.Join(parts, ", ") + "; session totals may be lower"
+
+	out := wrapPlainLine(headline, width)
+	out = append(out, wrapPlainLine(detail, width)...)
+	return out
 }
 
+// visibleTranscriptStatus returns the transcript-availability counts that
+// apply to the current view. ViewBoth sums Me + Team so the displayed count
+// matches the sessions visible in that view; future ViewMode additions hit
+// the default arm and emit a debug log instead of silently zeroing.
 func visibleTranscriptStatus(summary TranscriptSummary, view ViewMode) TranscriptStatus {
 	switch view {
 	case ViewYou:
@@ -209,20 +222,69 @@ func visibleTranscriptStatus(summary TranscriptSummary, view ViewMode) Transcrip
 		}
 		return status
 	default:
+		slog.Default().Debug("recap: unknown view mode for transcript status", slog.String("view", string(view)))
 		return TranscriptStatus{}
 	}
 }
 
+// summaryContentWidth returns the renderable text width inside the summary
+// box, accounting for the two border columns and the leading two-space indent
+// that renderBox applies to every content line.
+func summaryContentWidth(width int) int {
+	inner := width - 2 - 2
+	if inner < 1 {
+		return 1
+	}
+	return inner
+}
+
+// wrapPlainLine word-wraps a plain (no ANSI) string at width on whitespace
+// boundaries. Returns at least one line, even if width is too small to fit a
+// single token — that token is emitted as its own (overflowing) line, which
+// renderBox will then truncate, rather than silently dropped.
+func wrapPlainLine(s string, width int) []string {
+	if width <= 0 {
+		return []string{s}
+	}
+	if displayLen(s) <= width {
+		return []string{s}
+	}
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return []string{s}
+	}
+	var out []string
+	current := words[0]
+	for _, word := range words[1:] {
+		if displayLen(current)+1+displayLen(word) <= width {
+			current += " " + word
+			continue
+		}
+		out = append(out, current)
+		current = word
+	}
+	if current != "" {
+		out = append(out, current)
+	}
+	return out
+}
+
+// renderWindow formats the recap window using the API's since/until. Parse
+// failures fall back to an empty window line (graceful degradation) but the
+// underlying error is logged via slog so the failure is diagnosable when
+// debug logging is enabled.
 func renderWindow(resp *MeRecapResponse, opts RenderOptions, styles staticStyles) string {
 	if resp.Since == "" || resp.Until == "" {
 		return ""
 	}
 	since, err := time.Parse(time.RFC3339, resp.Since)
 	if err != nil {
+		slog.Default().Debug("recap: failed to parse since", slog.String("value", resp.Since), slog.String("error", err.Error()))
 		return ""
 	}
 	until, err := time.Parse(time.RFC3339, resp.Until)
 	if err != nil {
+		slog.Default().Debug("recap: failed to parse until", slog.String("value", resp.Until), slog.String("error", err.Error()))
 		return ""
 	}
 	loc := opts.Location
@@ -255,6 +317,10 @@ func repoScopeText(resp *MeRecapResponse) string {
 	}
 }
 
+// recapRepoNames returns the deduplicated, trimmed repo names from the
+// response. Order is preserved from the API so that repos the server ranked
+// as most active appear first in the summary; if we sorted alphabetically
+// here, the +N more overflow would hide the user's primary repo.
 func recapRepoNames(resp *MeRecapResponse) []string {
 	if resp.Repo != nil && strings.TrimSpace(*resp.Repo) != "" {
 		return []string{strings.TrimSpace(*resp.Repo)}
@@ -275,7 +341,6 @@ func recapRepoNames(resp *MeRecapResponse) []string {
 		seen[repo] = struct{}{}
 		repos = append(repos, repo)
 	}
-	sort.Strings(repos)
 	return repos
 }
 
