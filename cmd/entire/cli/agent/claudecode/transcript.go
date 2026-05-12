@@ -40,7 +40,7 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 	var files []string
 
 	for _, line := range lines {
-		if line.Type != "assistant" {
+		if line.Type != envelopeTypeAssistant {
 			continue
 		}
 
@@ -147,7 +147,7 @@ func CalculateTokenUsage(transcript []TranscriptLine) *agent.TokenUsage {
 	usageByMessageID := make(map[string]messageUsage)
 
 	for _, line := range transcript {
-		if line.Type != "assistant" {
+		if line.Type != envelopeTypeAssistant {
 			continue
 		}
 

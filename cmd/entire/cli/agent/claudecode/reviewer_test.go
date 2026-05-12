@@ -81,9 +81,10 @@ func TestReviewer_ArgvShape(t *testing.T) {
 	}
 	cmd := buildReviewCmd(context.Background(), cfg)
 
-	// Expect: claude -p <prompt>
-	if len(cmd.Args) < 3 {
-		t.Fatalf("expected at least 3 args, got %d: %v", len(cmd.Args), cmd.Args)
+	// Expect: claude -p <prompt> --output-format stream-json --verbose
+	wantSuffix := []string{"--output-format", "stream-json", "--verbose"}
+	if len(cmd.Args) != 3+len(wantSuffix) {
+		t.Fatalf("expected %d args, got %d: %v", 3+len(wantSuffix), len(cmd.Args), cmd.Args)
 	}
 	if cmd.Args[0] != "claude" {
 		t.Errorf("Args[0] = %q, want %q", cmd.Args[0], "claude")
@@ -94,6 +95,12 @@ func TestReviewer_ArgvShape(t *testing.T) {
 	// Args[2] is the composed prompt — must be non-empty.
 	if cmd.Args[2] == "" {
 		t.Error("Args[2] (prompt) is empty")
+	}
+	for i, want := range wantSuffix {
+		got := cmd.Args[3+i]
+		if got != want {
+			t.Errorf("Args[%d] = %q, want %q", 3+i, got, want)
+		}
 	}
 	for _, arg := range cmd.Args {
 		if arg == "--continue" || arg == "-c" || arg == "--resume" || arg == "-r" {
@@ -182,56 +189,46 @@ func TestParseClaudeOutput_ReportsScannerError(t *testing.T) {
 	}
 }
 
-func TestReviewer_EventStream(t *testing.T) {
+func TestParseClaudeOutput_DecodesStreamJSON(t *testing.T) {
 	t.Parallel()
-
-	data, err := os.ReadFile("testdata/canned_session.txt")
+	data, err := os.ReadFile("testdata/stream_session.jsonl")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-
 	events := collectEvents(parseClaudeOutput(strings.NewReader(string(data))))
 
-	if len(events) < 3 {
-		t.Fatalf("expected at least 3 events (Started + at least one AssistantText + Finished), got %d", len(events))
-	}
-
-	// First event must be Started.
 	if _, ok := events[0].(reviewtypes.Started); !ok {
 		t.Errorf("events[0] = %T, want Started", events[0])
 	}
-
-	// Last event must be Finished{Success: true}.
 	last := events[len(events)-1]
 	fin, ok := last.(reviewtypes.Finished)
-	if !ok {
-		t.Errorf("last event = %T, want Finished", last)
-	} else if !fin.Success {
-		t.Errorf("Finished.Success = false, want true")
+	if !ok || !fin.Success {
+		t.Errorf("last event = %v, want Finished{Success:true}", last)
 	}
 
-	// All middle events must be AssistantText (no empty lines emitted).
-	for i := 1; i < len(events)-1; i++ {
-		at, ok := events[i].(reviewtypes.AssistantText)
-		if !ok {
-			t.Errorf("events[%d] = %T, want AssistantText", i, events[i])
-			continue
-		}
-		if at.Text == "" {
-			t.Errorf("events[%d].Text is empty (empty lines must be skipped)", i)
-		}
-	}
-
-	// Verify fixture content appears somewhere in the text events.
-	var combined strings.Builder
+	var sawText bool
 	for _, ev := range events {
-		if at, ok := ev.(reviewtypes.AssistantText); ok {
-			combined.WriteString(at.Text)
-			combined.WriteString("\n")
+		if at, ok := ev.(reviewtypes.AssistantText); ok && strings.Contains(at.Text, "Cats are") {
+			sawText = true
 		}
 	}
-	if !strings.Contains(combined.String(), "AgentReviewer") {
-		t.Error("expected fixture content mentioning 'AgentReviewer' to appear in AssistantText events")
+	if !sawText {
+		t.Error("expected AssistantText carrying fixture prose 'Cats are…'")
+	}
+
+	var tokensSeen int
+	var tokensOut int
+	for _, ev := range events {
+		if tk, ok := ev.(reviewtypes.Tokens); ok {
+			tokensSeen++
+			tokensOut = tk.Out
+		}
+	}
+	if tokensSeen != 1 {
+		t.Errorf("Tokens count = %d, want 1", tokensSeen)
+	}
+	if tokensOut == 0 {
+		t.Error("Tokens.Out = 0, want > 0")
 	}
 }
 
