@@ -18,7 +18,7 @@ import (
 // Argv shape: gemini -p " " (space placeholder to trigger headless mode).
 // Prompt is piped via stdin; per gemini --help the -p flag appends to stdin
 // content, so passing a single space lets stdin carry the actual prompt.
-// Stdout in this mode is clean assistant output — no chrome filtering needed.
+// Stdout in this mode is the assistant text directly — parsed line-by-line.
 func NewReviewer() *reviewtypes.ReviewerTemplate {
 	return &reviewtypes.ReviewerTemplate{
 		AgentName: "gemini-cli",

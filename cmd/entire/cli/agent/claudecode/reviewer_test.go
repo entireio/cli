@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -229,6 +230,132 @@ func TestParseClaudeOutput_DecodesStreamJSON(t *testing.T) {
 	}
 	if tokensOut == 0 {
 		t.Error("Tokens.Out = 0, want > 0")
+	}
+}
+
+func TestParseClaudeOutput_StreamsEventsBeforeEOF(t *testing.T) {
+	t.Parallel()
+	pr, pw := io.Pipe()
+	events := parseClaudeOutput(pr)
+
+	expect := func(t *testing.T, want string) reviewtypes.Event {
+		t.Helper()
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				t.Fatalf("event channel closed waiting for %s", want)
+			}
+			return ev
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s — parser did not stream before EOF", want)
+			return nil
+		}
+	}
+
+	// First emitted event is always Started — before we even write anything.
+	if _, ok := expect(t, "Started").(reviewtypes.Started); !ok {
+		t.Fatal("first event must be Started")
+	}
+
+	// Write a system/init envelope — swallowed, no event read here.
+	if _, err := pw.Write([]byte(`{"type":"system","subtype":"init","session_id":"sid"}` + "\n")); err != nil {
+		t.Fatalf("pipe write: %v", err)
+	}
+
+	// Write an assistant text envelope — expect AssistantText before EOF.
+	if _, err := pw.Write([]byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")); err != nil {
+		t.Fatalf("pipe write: %v", err)
+	}
+	at, ok := expect(t, "AssistantText").(reviewtypes.AssistantText)
+	if !ok {
+		t.Fatalf("event = %T, want AssistantText", at)
+	}
+	if at.Text != "hello" {
+		t.Errorf("AssistantText.Text = %q, want %q", at.Text, "hello")
+	}
+
+	// Write an assistant tool_use envelope — expect ToolCall before EOF.
+	// This also covers the unexercised tool_use branch that was flagged in
+	// the PR's fixture-coverage review.
+	if _, err := pw.Write([]byte(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{"file_path":"x"}}]}}` + "\n")); err != nil {
+		t.Fatalf("pipe write: %v", err)
+	}
+	tc, ok := expect(t, "ToolCall").(reviewtypes.ToolCall)
+	if !ok {
+		t.Fatalf("event = %T, want ToolCall", tc)
+	}
+	if tc.Name != "Read" {
+		t.Errorf("ToolCall.Name = %q, want %q", tc.Name, "Read")
+	}
+	if !strings.Contains(tc.Args, `"file_path":"x"`) {
+		t.Errorf("ToolCall.Args = %q, want to contain file_path:x", tc.Args)
+	}
+
+	// Write the result envelope and close — expect Tokens then Finished.
+	if _, err := pw.Write([]byte(`{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":100,"output_tokens":42,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}` + "\n")); err != nil {
+		t.Fatalf("pipe write: %v", err)
+	}
+	_ = pw.Close()
+
+	tk, ok := expect(t, "Tokens").(reviewtypes.Tokens)
+	if !ok {
+		t.Fatalf("event = %T, want Tokens", tk)
+	}
+	if tk.Out != 42 || tk.In != 100 {
+		t.Errorf("Tokens = %+v, want {In:100, Out:42}", tk)
+	}
+	fin, ok := expect(t, "Finished").(reviewtypes.Finished)
+	if !ok {
+		t.Fatalf("event = %T, want Finished", fin)
+	}
+	if !fin.Success {
+		t.Error("Finished.Success = false, want true")
+	}
+}
+
+func TestParseClaudeOutput_NoResultEnvelopeMeansFailed(t *testing.T) {
+	t.Parallel()
+	// A truncated session: assistant message but no `result` envelope.
+	// The parser must surface this as Finished{Success: false} so the
+	// caller distinguishes "agent exited mid-generation" from "agent
+	// completed successfully".
+	input := `{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}` + "\n"
+	events := collectEvents(parseClaudeOutput(strings.NewReader(input)))
+
+	last := events[len(events)-1]
+	fin, ok := last.(reviewtypes.Finished)
+	if !ok {
+		t.Fatalf("last event = %T, want Finished", last)
+	}
+	if fin.Success {
+		t.Error("Finished.Success = true, want false on missing result envelope")
+	}
+}
+
+func TestParseClaudeOutput_GarbledLineEmitsRunErrorAndContinues(t *testing.T) {
+	t.Parallel()
+	// A garbled non-JSON line between valid envelopes must not abort the
+	// parser. The bad line surfaces as RunError; the stream continues to
+	// consume subsequent envelopes including a clean result.
+	input := `{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}` + "\n" +
+		"this is not json" + "\n" +
+		`{"type":"result","subtype":"success","is_error":false,"usage":{"output_tokens":1}}` + "\n"
+	events := collectEvents(parseClaudeOutput(strings.NewReader(input)))
+
+	var sawRunError, sawSuccess bool
+	for _, ev := range events {
+		if _, ok := ev.(reviewtypes.RunError); ok {
+			sawRunError = true
+		}
+		if fin, ok := ev.(reviewtypes.Finished); ok && fin.Success {
+			sawSuccess = true
+		}
+	}
+	if !sawRunError {
+		t.Error("expected RunError for garbled line")
+	}
+	if !sawSuccess {
+		t.Error("expected Finished{Success:true} after recovering from garbled line")
 	}
 }
 

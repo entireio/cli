@@ -320,6 +320,49 @@ func TestParseCodexOutput_StreamsEventsBeforeEOF(t *testing.T) {
 	}
 }
 
+func TestParseCodexOutput_NoTurnCompletedMeansFailed(t *testing.T) {
+	t.Parallel()
+	// A truncated session: thread starts and an item completes, but no
+	// `turn.completed` envelope ever arrives. The parser must surface
+	// this as Finished{Success: false}.
+	input := `{"type":"thread.started","thread_id":"tid"}` + "\n" +
+		`{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}` + "\n"
+	events := collectCodexEvents(parseCodexOutput(strings.NewReader(input)))
+
+	last := events[len(events)-1]
+	fin, ok := last.(reviewtypes.Finished)
+	if !ok {
+		t.Fatalf("last event = %T, want Finished", last)
+	}
+	if fin.Success {
+		t.Error("Finished.Success = true, want false on missing turn.completed envelope")
+	}
+}
+
+func TestParseCodexOutput_GarbledLineEmitsRunErrorAndContinues(t *testing.T) {
+	t.Parallel()
+	input := `{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}` + "\n" +
+		"this is not json" + "\n" +
+		`{"type":"turn.completed","usage":{"output_tokens":1}}` + "\n"
+	events := collectCodexEvents(parseCodexOutput(strings.NewReader(input)))
+
+	var sawRunError, sawSuccess bool
+	for _, ev := range events {
+		if _, ok := ev.(reviewtypes.RunError); ok {
+			sawRunError = true
+		}
+		if fin, ok := ev.(reviewtypes.Finished); ok && fin.Success {
+			sawSuccess = true
+		}
+	}
+	if !sawRunError {
+		t.Error("expected RunError for garbled line")
+	}
+	if !sawSuccess {
+		t.Error("expected Finished{Success:true} after recovering from garbled line")
+	}
+}
+
 func collectCodexEvents(ch <-chan reviewtypes.Event) []reviewtypes.Event {
 	var events []reviewtypes.Event
 	for ev := range ch {

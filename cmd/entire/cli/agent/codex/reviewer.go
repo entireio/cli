@@ -64,7 +64,7 @@ func expandCodexBuiltinReview(skills []string) []string {
 // parseCodexOutput converts codex's `exec --json` stdout into a stream of
 // Events. Each stdout line is one JSON envelope (top-level "type" field).
 //
-// Envelope types observed in codex 0.130.0:
+// Envelope types this parser handles:
 //   - thread.started        session id; swallowed
 //   - turn.started          marker; swallowed
 //   - item.started          tool invocation begins → emits ToolCall when
@@ -128,6 +128,12 @@ func parseCodexOutput(r io.Reader) <-chan reviewtypes.Event {
 				In:  turnUsage.InputTokens,
 				Out: turnUsage.OutputTokens,
 			}
+			// Success is hard-coded true here because codex's `turn.completed`
+			// envelope has no turn-level error field in 0.130.0. If a future
+			// codex version adds one (e.g., an `error` or `is_error` field on
+			// the envelope), capture it into a local during the switch case and
+			// thread it through here as `!turnErr` — mirroring claude's
+			// `!resultErr` pattern.
 			out <- reviewtypes.Finished{Success: true}
 			return
 		}
