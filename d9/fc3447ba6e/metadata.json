@@ -3,7 +3,7 @@
   "checkpoint_id": "d9fc3447ba6e",
   "strategy": "manual-commit",
   "branch": "entire-labs-investigate",
-  "checkpoints_count": 0,
+  "checkpoints_count": 1,
   "files_touched": [
     "cmd/entire/cli/investigate/cmd.go",
     "cmd/entire/cli/investigate/cmd_test.go",
@@ -17,14 +17,20 @@
       "transcript": "/d9/fc3447ba6e/0/transcript.jsonl",
       "content_hash": "/d9/fc3447ba6e/0/transcript_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/d9/fc3447ba6e/1/metadata.json",
+      "transcript": "/d9/fc3447ba6e/1/transcript.jsonl",
+      "content_hash": "/d9/fc3447ba6e/1/transcript_hash.txt",
+      "prompt": "/d9/fc3447ba6e/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 0,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 0,
-    "output_tokens": 0,
-    "api_call_count": 0
+    "input_tokens": 323,
+    "cache_creation_tokens": 403597,
+    "cache_read_tokens": 49458768,
+    "output_tokens": 151364,
+    "api_call_count": 221
   },
   "has_investigation": true
 }
