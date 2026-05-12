@@ -10,16 +10,13 @@ package review
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 )
 
@@ -66,16 +63,37 @@ func formatScopeBanner(stats ScopeStats) string {
 }
 
 // ComputeScopeStats gathers the data formatScopeBanner needs.
-// Used by CU6 to build the banner before launching agents.
-func ComputeScopeStats(ctx context.Context, repo *git.Repository) (ScopeStats, error) {
-	baseRef, err := detectScopeBaseRef(ctx, repo)
-	if err != nil {
-		return ScopeStats{}, fmt.Errorf("detect scope base ref: %w", err)
-	}
-
+// Used to build the banner before launching agents.
+//
+// baseOverride, if non-empty, bypasses the mainline auto-detection and is
+// used as the scope base directly. This is the entry point for the
+// `--base <ref>` command-line flag. The override is verified via
+// `repo.ResolveRevision(plumbing.Revision(<ref>))` (matching the codebase
+// pattern in explain.go:156) before being used; an unknown ref produces an
+// error before any agents are spawned, so users learn about the typo
+// immediately instead of after a 10-minute review run scoped against a
+// default the flag was supposed to override.
+func ComputeScopeStats(ctx context.Context, repo *git.Repository, baseOverride string) (ScopeStats, error) {
 	repoRoot, err := repoWorktreePath(repo)
 	if err != nil {
 		return ScopeStats{}, fmt.Errorf("get repo root: %w", err)
+	}
+
+	var baseRef string
+	if baseOverride != "" {
+		// Validate via go-git rather than shelling out — matches the codebase
+		// pattern in explain.go:156 (resolveCommitUnambiguous). ResolveRevision
+		// handles branches, tags, abbreviated SHAs, and HEAD-relative refs, and
+		// dereferences annotated tags to their target commit automatically.
+		if _, vErr := repo.ResolveRevision(plumbing.Revision(baseOverride)); vErr != nil {
+			return ScopeStats{}, fmt.Errorf("base ref %q does not resolve to a commit: %w", baseOverride, vErr)
+		}
+		baseRef = baseOverride
+	} else {
+		baseRef, err = detectScopeBaseRef(ctx, repo)
+		if err != nil {
+			return ScopeStats{}, fmt.Errorf("detect scope base ref: %w", err)
+		}
 	}
 
 	currentBranch := currentBranchName(repo)
@@ -104,172 +122,33 @@ func ComputeScopeStats(ctx context.Context, repo *git.Repository) (ScopeStats, e
 	}, nil
 }
 
-// detectScopeBaseRef finds the closest non-self ancestor branch the
-// review should be scoped against. Strategy:
+// detectScopeBaseRef returns the mainline ref the review should be scoped
+// against, walking the fallback chain origin/HEAD → origin/main →
+// origin/master → main → master and returning the first that exists.
 //
-//  1. Find local + remote branches whose tips are ancestors of HEAD
-//     (i.e., branches the current branch is descended from). Exclude
-//     the current branch itself.
-//  2. Pick the one with the most recent commit timestamp at its tip.
-//     This handles stacked PRs where a feature branches off another
-//     feature: prefer the immediate parent over a more distant one.
-//  3. Fallback chain when no ancestor is found:
-//     origin/HEAD → origin/main → origin/master → main → master
-//  4. If none of those exist either, return an error.
+// A previous implementation tried to be clever: it picked the merged-into-HEAD
+// branch with the most recent committerdate, on the theory that stacked PRs
+// (feature B branched off feature A while A is still open) would benefit
+// from reviewing against the immediate parent rather than mainline. In
+// practice the heuristic routinely picked unrelated recently-merged feature
+// branches — `git fetch` mirrors all of origin's branches by default, and
+// any branch whose tip is newer than mainline AND merged into mainline
+// (i.e., every recently-merged PR branch not yet deleted on origin) was a
+// candidate. Reviews ended up scoped against random PR branches, dragging
+// in 30+ commits of unrelated upstream work and producing reviews with
+// nothing to do with the current branch.
 //
-// Returns the ref name (e.g., "main", "origin/main", "feat/parent")
-// suitable for use in `git diff <ref>...HEAD`.
-func detectScopeBaseRef(ctx context.Context, repo *git.Repository) (string, error) {
-	head, err := repo.Head()
-	if err != nil {
-		return fallbackScopeRef(repo)
-	}
-	headHash := head.Hash()
-
-	// Determine the current branch's symbolic ref name (empty for detached HEAD).
-	currentBranchShort := ""
-	if head.Name().IsBranch() {
-		currentBranchShort = head.Name().Short() // e.g. "feat/x"
-	}
-
-	repoRoot, rootErr := repoWorktreePath(repo)
-	if rootErr != nil {
-		return fallbackScopeRef(repo)
-	}
-
-	// Enumerate ancestor branches in a single git invocation. for-each-ref
-	// --merged HEAD lets git use its commit-graph index to answer "is this
-	// ref an ancestor of HEAD?" in O(1) per ref via packed reachability
-	// rather than the previous O(branches × commits) repo.Log walks.
-	type candidate struct {
-		name    string
-		tipUnix int64
-	}
-	var candidates []candidate
-
-	out, runErr := runGit(ctx, repoRoot,
-		"for-each-ref",
-		"--merged", "HEAD",
-		"--format=%(refname:short)%09%(committerdate:unix)",
-		"refs/heads/", "refs/remotes/",
-	)
-	if runErr != nil {
-		// git for-each-ref unavailable or repo state confused — fall back
-		// to a slow walk via go-git, mirroring the prior behaviour rather
-		// than failing the review launch.
-		return slowDetectScopeBaseRef(ctx, repo, headHash, currentBranchShort)
-	}
-
-	for _, line := range strings.Split(out, "\n") {
-		if ctx.Err() != nil {
-			return "", ctx.Err() //nolint:wrapcheck // propagate context cancellation
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		name := parts[0]
-		// Skip the current branch itself (and its full ref form, both shapes
-		// for-each-ref might emit).
-		if name == currentBranchShort {
-			continue
-		}
-		// Skip refs that resolve to the same commit as HEAD — same hash,
-		// different name (e.g. an unmoved freshly-merged feature).
-		if hash, lookupErr := repo.ResolveRevision(plumbing.Revision(name)); lookupErr == nil && hash != nil && *hash == headHash {
-			continue
-		}
-		unix, parseErr := strconv.ParseInt(parts[1], 10, 64)
-		if parseErr != nil {
-			continue
-		}
-		candidates = append(candidates, candidate{name: name, tipUnix: unix})
-	}
-
-	if len(candidates) > 0 {
-		// Pick the candidate with the most recent tip (closest ancestor).
-		best := candidates[0]
-		for _, c := range candidates[1:] {
-			if c.tipUnix > best.tipUnix {
-				best = c
-			}
-		}
-		return best.name, nil
-	}
-
-	return fallbackScopeRef(repo)
-}
-
-// slowDetectScopeBaseRef is the pre-optimization fallback used only when the
-// `git for-each-ref --merged` shell-out fails. It walks all refs and checks
-// ancestry via repo.Log per ref (O(branches × commits)). Kept as a defense
-// against environments where git CLI is unavailable but go-git can still
-// resolve refs.
-func slowDetectScopeBaseRef(ctx context.Context, repo *git.Repository, headHash plumbing.Hash, currentBranchShort string) (string, error) {
-	refs, err := repo.References()
-	if err != nil {
-		return fallbackScopeRef(repo)
-	}
-
-	type candidate struct {
-		name    string
-		tipTime time.Time
-	}
-	var candidates []candidate
-
-	_ = refs.ForEach(func(ref *plumbing.Reference) error { //nolint:errcheck // best-effort search
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if !ref.Name().IsBranch() && !ref.Name().IsRemote() {
-			return nil
-		}
-		if ref.Name().Short() == currentBranchShort {
-			return nil
-		}
-		tipHash := ref.Hash()
-		if tipHash == headHash {
-			return nil
-		}
-		isAnc, ancErr := isAncestorOf(ctx, repo, tipHash, headHash)
-		if ancErr != nil {
-			return nil //nolint:nilerr // best-effort: skip unresolvable refs
-		}
-		if !isAnc {
-			return nil
-		}
-		commit, cErr := repo.CommitObject(tipHash)
-		if cErr != nil {
-			return nil //nolint:nilerr // best-effort: skip refs with no commit object
-		}
-		candidates = append(candidates, candidate{
-			name:    ref.Name().Short(),
-			tipTime: commit.Committer.When,
-		})
-		return nil
-	})
-	if ctx.Err() != nil {
-		return "", ctx.Err() //nolint:wrapcheck // propagate context cancellation
-	}
-	if len(candidates) > 0 {
-		best := candidates[0]
-		for _, c := range candidates[1:] {
-			if c.tipTime.After(best.tipTime) {
-				best = c
-			}
-		}
-		return best.name, nil
-	}
+// Stacked PR review is now served by the explicit `--base <ref>` flag at
+// the command surface, not an inference. The default stays predictable
+// (always mainline); the override is explicit when users actually want it.
+func detectScopeBaseRef(_ context.Context, repo *git.Repository) (string, error) {
 	return fallbackScopeRef(repo)
 }
 
 // repoWorktreePath returns the working-tree path for repo, or an error if the
-// repo is bare or its worktree can't be resolved. detectScopeBaseRef needs
-// this to invoke `git for-each-ref` with the right working directory.
+// repo is bare or its worktree can't be resolved. ComputeScopeStats uses this
+// as the cwd for the runGit invocations in countCommits / countFilesChanged /
+// countUncommitted.
 func repoWorktreePath(repo *git.Repository) (string, error) {
 	wt, err := repo.Worktree()
 	if err != nil {
@@ -280,7 +159,7 @@ func repoWorktreePath(repo *git.Repository) (string, error) {
 
 // fallbackScopeRef returns the first existing ref from the fallback chain:
 // origin/HEAD → origin/main → origin/master → main → master.
-// Returns an error if none exist.
+// Returns an error naming the tried refs if none exist.
 func fallbackScopeRef(repo *git.Repository) (string, error) {
 	chain := []string{"origin/HEAD", "origin/main", "origin/master", "main", "master"}
 	for _, name := range chain {
@@ -288,7 +167,10 @@ func fallbackScopeRef(repo *git.Repository) (string, error) {
 			return name, nil
 		}
 	}
-	return "", errors.New("no suitable ancestor branch found; configure a base ref explicitly")
+	return "", fmt.Errorf(
+		"no mainline ref found (tried %s); pass --base <ref> to scope the review explicitly, "+
+			"or run `git fetch` to populate origin refs",
+		strings.Join(chain, ", "))
 }
 
 // refExists reports whether a ref with the given short name exists in repo.
@@ -306,37 +188,6 @@ func refExists(repo *git.Repository, shortName string) bool {
 		return nil
 	})
 	return found
-}
-
-// isAncestorOf checks if candidate is an ancestor of (or equal to) target
-// by walking the commit graph from target backwards.
-func isAncestorOf(ctx context.Context, repo *git.Repository, candidate, target plumbing.Hash) (bool, error) {
-	if candidate == target {
-		return true, nil
-	}
-
-	iter, err := repo.Log(&git.LogOptions{From: target})
-	if err != nil {
-		return false, fmt.Errorf("log from target: %w", err)
-	}
-	defer iter.Close()
-
-	found := false
-	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // storer.ErrStop is expected
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if c.Hash == candidate {
-			found = true
-			return storer.ErrStop
-		}
-		return nil
-	})
-	// Context cancellation: surface. storer.ErrStop or log exhaustion: ignore.
-	if ctx.Err() != nil {
-		return false, ctx.Err() //nolint:wrapcheck // propagate context cancellation
-	}
-	return found, nil
 }
 
 // currentBranchName returns the short branch name for the current HEAD,
@@ -366,9 +217,15 @@ func countCommits(ctx context.Context, repoRoot, baseRef string) (int, error) {
 	return n, nil
 }
 
-// countFilesChanged returns the number of unique files changed in <baseRef>..HEAD.
+// countFilesChanged returns the number of unique files changed on this
+// branch since it diverged from baseRef. Uses three-dot diff syntax
+// (`git diff base...HEAD`, equivalent to `git diff $(merge-base) HEAD`) so
+// upstream-only changes on baseRef after the branch point are NOT counted
+// as reversed deltas. Two-dot (`base..HEAD`) would over-count: every file
+// modified on mainline since the branch was cut would appear as a
+// "removed" change in the diff, inflating the banner's file count.
 func countFilesChanged(ctx context.Context, repoRoot, baseRef string) (int, error) {
-	out, err := runGit(ctx, repoRoot, "diff", "--name-only", baseRef+"..HEAD")
+	out, err := runGit(ctx, repoRoot, "diff", "--name-only", baseRef+"...HEAD")
 	if err != nil {
 		return 0, err
 	}

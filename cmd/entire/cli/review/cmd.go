@@ -98,6 +98,7 @@ type runReviewDeps struct {
 func NewCommand(deps Deps) *cobra.Command {
 	var edit bool
 	var agentOverride string
+	var baseOverride string
 	var findings bool
 	var fix bool
 	var all bool
@@ -125,6 +126,10 @@ Flags:
   --all          with --fix, apply all sources/findings without selectors
   --agent NAME   select a specific configured agent when more than one is
                  configured (default: alphabetically first)
+  --base REF     scope the review against REF instead of mainline. Useful
+                 for stacked PRs where the review base is the parent feature
+                 branch, not main. Default: first existing of origin/HEAD,
+                 origin/main, origin/master, main, master.
 
 Subcommands:
   attach <id>    tag an existing session as a review (equivalent to
@@ -175,7 +180,7 @@ Subcommands:
 				promptForAgentFn: deps.PromptForAgentFn,
 				multiPickerFn:    deps.MultiPickerFn,
 			}
-			return runReview(ctx, cmd, agentOverride, deps, innerDeps)
+			return runReview(ctx, cmd, agentOverride, baseOverride, deps, innerDeps)
 		},
 	}
 	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the review config picker")
@@ -183,6 +188,7 @@ Subcommands:
 	cmd.Flags().BoolVar(&fix, "fix", false, "apply review findings in a normal agent session")
 	cmd.Flags().BoolVar(&all, "all", false, "with --fix, apply all sources/findings without selectors")
 	cmd.Flags().StringVar(&agentOverride, "agent", "", "select a specific configured agent (default: alphabetically first)")
+	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
 	if deps.AttachCmd != nil {
 		cmd.AddCommand(deps.AttachCmd)
 	}
@@ -190,7 +196,7 @@ Subcommands:
 }
 
 // runReview executes the main review flow.
-func runReview(ctx context.Context, cmd *cobra.Command, agentOverride string, deps Deps, innerDeps runReviewDeps) error {
+func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, baseOverride string, deps Deps, innerDeps runReviewDeps) error {
 	out := cmd.OutOrStdout()
 	silentErr := deps.NewSilentError
 
@@ -243,7 +249,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride string, de
 	if agentOverride == "" {
 		launchableEligible := computeLaunchableEligible(s, installed, deps.ReviewerFor)
 		if len(launchableEligible) >= 2 {
-			return runMultiAgentPath(ctx, cmd, launchableEligible, s, innerDeps, deps, out)
+			return runMultiAgentPath(ctx, cmd, launchableEligible, baseOverride, s, innerDeps, deps, out)
 		}
 	}
 
@@ -294,7 +300,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride string, de
 		return silentErr(err)
 	}
 
-	return runSingleAgentPath(ctx, cmd, agentName, cfg, installed, deps, out)
+	return runSingleAgentPath(ctx, cmd, agentName, baseOverride, cfg, installed, deps, out)
 }
 
 // runSingleAgentPath completes a single-agent review: verifies hooks + skills,
@@ -303,7 +309,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride string, de
 func runSingleAgentPath(
 	ctx context.Context,
 	cmd *cobra.Command,
-	agentName string,
+	agentName, baseOverride string,
 	cfg settings.ReviewConfig,
 	installed []types.AgentName,
 	deps Deps,
@@ -360,15 +366,21 @@ func runSingleAgentPath(
 	// 5. Resolve HEAD SHA and worktree root.
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve worktree root: %w", err)
 	}
 
 	// 6. Resolve HEAD SHA and detect scope.
 	headSHA, shaErr := currentHeadSHA(ctx, worktreeRoot)
 	if shaErr != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
-	scopeBaseRef := detectScope(ctx, worktreeRoot, out)
+	scopeBaseRef, scopeErr := detectScope(ctx, worktreeRoot, baseOverride, out)
+	if scopeErr != nil {
+		cmd.SilenceUsage = true
+		return scopeErr
+	}
 	checkpointContext := ""
 	if deps.ReviewCheckpointContext != nil {
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
@@ -414,21 +426,40 @@ func runSingleAgentPath(
 	return nil
 }
 
-// detectScope computes the scope base ref for the current repo and prints a
-// scope banner to out on success. Best-effort: on any failure, returns an
-// empty string and prints no banner so the run proceeds in degraded mode.
-func detectScope(ctx context.Context, worktreeRoot string, out io.Writer) (scopeBaseRef string) {
-	if repo, openErr := git.PlainOpen(worktreeRoot); openErr == nil {
-		if stats, statsErr := ComputeScopeStats(ctx, repo); statsErr == nil {
-			fmt.Fprintln(out, formatScopeBanner(stats))
-			return stats.BaseRef
-		} else { //nolint:revive // else-after-return is clearer here for the error-path log
-			logging.Debug(ctx, "review scope detection failed", slog.String("error", statsErr.Error()))
-		}
-	} else {
+// detectScope computes the scope base ref for the current repo and prints
+// a scope banner to out on success. baseOverride, when non-empty, comes from
+// the `--base <ref>` flag and bypasses mainline auto-detection.
+//
+// Failure handling: when baseOverride is set and the ref is invalid,
+// returns ("", err) so the caller can fail-loudly before spawning agents.
+// Otherwise (auto-detection failed): returns "" and the caller proceeds in
+// degraded mode without a scope banner.
+func detectScope(ctx context.Context, worktreeRoot, baseOverride string, out io.Writer) (string, error) {
+	repo, openErr := git.PlainOpen(worktreeRoot)
+	if openErr != nil {
 		logging.Debug(ctx, "review repo open failed", slog.String("error", openErr.Error()))
+		// Fail-loud when the user explicitly asked for a base. Without this
+		// branch an explicit --base flag would be silently dropped on
+		// PlainOpen failure, inconsistent with the ComputeScopeStats error
+		// path below that aborts on bad overrides.
+		if baseOverride != "" {
+			return "", fmt.Errorf("--base %q given but cannot open repository at %q: %w", baseOverride, worktreeRoot, openErr)
+		}
+		return "", nil
 	}
-	return ""
+	stats, statsErr := ComputeScopeStats(ctx, repo, baseOverride)
+	if statsErr != nil {
+		// With an override, the user explicitly asked for a specific base.
+		// A bad ref must abort before agents spawn so the user learns about
+		// the typo immediately, not after a long review run.
+		if baseOverride != "" {
+			return "", statsErr
+		}
+		logging.Debug(ctx, "review scope detection failed", slog.String("error", statsErr.Error()))
+		return "", nil
+	}
+	fmt.Fprintln(out, formatScopeBanner(stats))
+	return stats.BaseRef, nil
 }
 
 // runMultiAgentPath handles the multi-agent review flow: shows the multi-select
@@ -442,6 +473,7 @@ func runMultiAgentPath(
 	ctx context.Context,
 	cmd *cobra.Command,
 	launchableEligible []AgentChoice,
+	baseOverride string,
 	s *settings.EntireSettings,
 	innerDeps runReviewDeps,
 	deps Deps,
@@ -467,14 +499,20 @@ func runMultiAgentPath(
 	// Resolve worktree root and HEAD SHA for scope detection.
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve worktree root: %w", err)
 	}
 	headSHA, shaErr := currentHeadSHA(ctx, worktreeRoot)
 	if shaErr != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
 
-	scopeBaseRef := detectScope(ctx, worktreeRoot, out)
+	scopeBaseRef, scopeErr := detectScope(ctx, worktreeRoot, baseOverride, out)
+	if scopeErr != nil {
+		cmd.SilenceUsage = true
+		return scopeErr
+	}
 	checkpointContext := ""
 	if deps.ReviewCheckpointContext != nil {
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)

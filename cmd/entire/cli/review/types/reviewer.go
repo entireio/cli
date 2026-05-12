@@ -86,9 +86,10 @@ type RunConfig struct {
 	// PerRunPrompt is optional textarea input from a single invocation.
 	PerRunPrompt string
 
-	// ScopeBaseRef is the git ref the review is scoped against (typically the
-	// closest ancestor branch). Used to compose the scope clause and as the
-	// base for `git diff` operations the agent may perform.
+	// ScopeBaseRef is the git ref the review is scoped against (mainline by
+	// default — origin/HEAD → origin/main → origin/master → main → master —
+	// or whatever `--base` overrides it to). Used to compose the scope clause
+	// and as the base for `git diff` operations the agent may perform.
 	ScopeBaseRef string
 
 	// CheckpointContext is best-effort context derived from checkpoints in the

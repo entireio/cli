@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -343,33 +344,64 @@ var (
 
 var initRedactionOnce sync.Once
 
-// EnsureRedactionConfigured loads PII redaction settings and configures the
-// redact package. No-op if PII is not enabled in settings.
-// Must be called at each process entry point before checkpoint writes
-// (e.g., hook PersistentPreRunE, doctor PreRun).
+// EnsureRedactionConfigured loads redaction settings and configures the
+// redact package: PII detection (opt-in), inline custom_redactions, and rule
+// packs auto-discovered from .entire/redactors/.
+//
+// Must be called at each process entry point before checkpoint writes.
 func EnsureRedactionConfigured() {
 	initRedactionOnce.Do(func() {
 		ctx := context.Background()
 		s, err := settings.Load(ctx)
 		if err != nil {
 			logCtx := logging.WithComponent(ctx, "redaction")
-			logging.Warn(logCtx, "failed to load settings for PII redaction", slog.String("error", err.Error()))
+			logging.Warn(logCtx, "failed to load settings for redaction", slog.String("error", err.Error()))
 			return
 		}
-		if s.Redaction == nil || s.Redaction.PII == nil || !s.Redaction.PII.Enabled {
-			return
+
+		// PII detection (opt-in).
+		if s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled {
+			pii := s.Redaction.PII
+			cfg := redact.PIIConfig{
+				Enabled:        true,
+				Categories:     make(map[redact.PIICategory]bool),
+				CustomPatterns: pii.CustomPatterns,
+			}
+			cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
+			cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
+			cfg.Categories[redact.PIIAddress] = pii.Address != nil && *pii.Address
+			redact.ConfigurePII(cfg)
 		}
-		pii := s.Redaction.PII
-		cfg := redact.PIIConfig{
-			Enabled:        true,
-			Categories:     make(map[redact.PIICategory]bool),
-			CustomPatterns: pii.CustomPatterns,
+
+		// Custom rules: inline + packs.
+		var inline map[string]string
+		if s.Redaction != nil {
+			inline = s.Redaction.CustomRedactions
 		}
-		// Email and phone default to true when PII is enabled; address defaults to false.
-		cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
-		cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
-		cfg.Categories[redact.PIIAddress] = pii.Address != nil && *pii.Address
-		redact.ConfigurePII(cfg)
+		packsRelPath := filepath.Join(paths.EntireDir, redact.RedactorsDirName)
+		packsDir, perr := paths.AbsPath(ctx, packsRelPath)
+		if perr != nil {
+			logCtx := logging.WithComponent(ctx, "redaction")
+			logging.Warn(logCtx, "failed to resolve redactors path", slog.String("error", perr.Error()))
+			packsDir = packsRelPath
+		}
+		packs, lerr := redact.LoadPacks(packsDir)
+		if lerr != nil {
+			logCtx := logging.WithComponent(ctx, "redaction")
+			logging.Warn(logCtx, "failed to load redactor packs", slog.String("error", lerr.Error()))
+			// Hooks log to .entire/logs/entire.log, where most users never
+			// look. Surface a one-line breadcrumb on stderr when we have a
+			// real terminal so the user can find the detail.
+			if interactive.IsTerminalWriter(os.Stderr) {
+				fmt.Fprintf(os.Stderr, "[entire] redactor packs failed to load (%v); see .entire/logs/entire.log or run `entire doctor`.\n", lerr)
+			}
+		}
+		if len(inline) > 0 || len(packs) > 0 {
+			redact.ConfigureCustomRules(redact.CustomRulesConfig{
+				Inline: inline,
+				Packs:  packs,
+			})
+		}
 	})
 }
 
@@ -1058,6 +1090,7 @@ func EnsureEntireGitignore(ctx context.Context) error {
 		"settings.local.json",
 		"metadata/",
 		"logs/",
+		redact.RedactorsDirName + "/local/",
 	}
 
 	// Track what needs to be added
