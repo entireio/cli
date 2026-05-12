@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -445,6 +447,65 @@ func TestRotateGeneration_ArchivesCurrentAndCreatesNewOrphan(t *testing.T) {
 	freshTree, err := freshCommit.Tree()
 	require.NoError(t, err)
 	assert.Empty(t, freshTree.Entries, "fresh tree should be empty (no generation.json)")
+}
+
+func TestRotateGeneration_FailsBeforeResetWhenPendingMarkerCannotBeRecorded(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	ctx := context.Background()
+
+	populateFullCurrent(t, store, 3, 0)
+
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+	blockingPath := filepath.Join(worktree.Filesystem().Root(), ".git", pendingV2FullGenerationPublicationDirName)
+	require.NoError(t, os.WriteFile(blockingPath, []byte("not a directory"), 0o600))
+
+	refName, rotated, err := store.RotateCurrentGenerationIfNeeded(ctx, 3)
+	require.Error(t, err)
+	require.False(t, rotated)
+	require.Empty(t, refName)
+	assert.Contains(t, err.Error(), "failed to record pending full rotation")
+
+	_, currentTreeHash, err := store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
+	require.NoError(t, err)
+	currentCount, err := store.CountCheckpointsInTree(currentTreeHash)
+	require.NoError(t, err)
+	assert.Equal(t, 3, currentCount)
+
+	_, _, err = store.GetRefState(ArchivedGenerationRefName(1))
+	require.Error(t, err)
+}
+
+func TestRemovePendingFullGenerationPublications_PreservesLaterQueuedEntries(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	store := NewV2GitStore(repo, "origin")
+	ctx := context.Background()
+
+	first := PendingV2FullGenerationPublication{
+		ArchiveRefName:    paths.V2FullRefPrefix + "0000000000001",
+		ArchiveCommitHash: "1111111111111111111111111111111111111111",
+		QueuedAt:          time.Date(2026, 3, 19, 1, 2, 3, 0, time.UTC),
+	}
+	later := PendingV2FullGenerationPublication{
+		ArchiveRefName:    paths.V2FullRefPrefix + "0000000000002",
+		ArchiveCommitHash: "2222222222222222222222222222222222222222",
+		QueuedAt:          time.Date(2026, 3, 19, 4, 5, 6, 0, time.UTC),
+	}
+
+	require.NoError(t, store.AppendPendingFullGenerationPublication(ctx, first))
+	snapshot, err := store.ReadPendingFullGenerationPublications(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []PendingV2FullGenerationPublication{first}, snapshot)
+
+	require.NoError(t, store.AppendPendingFullGenerationPublication(ctx, later))
+	require.NoError(t, store.RemovePendingFullGenerationPublications(ctx, snapshot))
+
+	remaining, err := store.ReadPendingFullGenerationPublications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []PendingV2FullGenerationPublication{later}, remaining)
 }
 
 func TestResetFullCurrentRefIfUnchangedRejectsConcurrentChange(t *testing.T) {

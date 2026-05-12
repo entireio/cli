@@ -410,6 +410,12 @@ func TestMigrateCheckpointsV2_PacksFullGenerationsOldestFirst(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"0000000000001", "0000000000002"}, archived)
 
+	pendingPublications, err := v2Store.ReadPendingFullGenerationPublications(ctx)
+	require.NoError(t, err)
+	require.Len(t, pendingPublications, 2)
+	assert.Equal(t, paths.V2FullRefPrefix+"0000000000001", pendingPublications[0].ArchiveRefName)
+	assert.Equal(t, paths.V2FullRefPrefix+"0000000000002", pendingPublications[1].ArchiveRefName)
+
 	expectedBatches := [][]int{
 		{0, 1},
 		{2, 3},
@@ -445,6 +451,43 @@ func TestMigrateCheckpointsV2_PacksFullGenerationsOldestFirst(t *testing.T) {
 	require.NoError(t, err)
 	_, err = currentTree.Tree(checkpointIDs[4].Path())
 	require.NoError(t, err, "/full/current should contain final partial checkpoint")
+}
+
+func TestMigrateCheckpointsV2_RollsBackArchiveWhenPublicationQueueFails(t *testing.T) {
+	oldMax := migrateMaxCheckpointsPerGeneration
+	migrateMaxCheckpointsPerGeneration = 2
+	t.Cleanup(func() {
+		migrateMaxCheckpointsPerGeneration = oldMax
+	})
+
+	repo := initMigrateTestRepo(t)
+	v1Store, v2Store := newMigrateStores(repo)
+	ctx := context.Background()
+
+	for i, cpID := range []id.CheckpointID{
+		id.MustCheckpointID("000000000301"),
+		id.MustCheckpointID("000000000302"),
+	} {
+		writeV1Checkpoint(t, v1Store, cpID, "session-queue-fail-"+strconv.Itoa(i),
+			[]byte(`{"type":"assistant","message":"checkpoint `+strconv.Itoa(i)+`"}`+"\n"),
+			[]string{"prompt " + strconv.Itoa(i)})
+	}
+
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+	blockingPath := filepath.Join(worktree.Filesystem().Root(), ".git", "entire-v2-rotations")
+	require.NoError(t, os.WriteFile(blockingPath, []byte("not a directory"), 0o600))
+
+	var stdout bytes.Buffer
+	result, writtenRefs, err := migrateCheckpointsV2(ctx, repo, v1Store, v2Store, &stdout, false)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to queue migrated raw transcript generation for push")
+	assert.Empty(t, writtenRefs)
+	assert.NotNil(t, result)
+
+	archived, listErr := v2Store.ListArchivedGenerations()
+	require.NoError(t, listErr)
+	assert.Empty(t, archived, "failed queueing must not leave an unqueued archive ref behind")
 }
 
 func TestUpdateV2FullCurrentRefRejectsConcurrentChange(t *testing.T) {
