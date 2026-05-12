@@ -12,6 +12,7 @@
 package review
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -63,15 +64,16 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 		// agent-level RunError events the parser emitted (typically a torn
 		// stdout stream — caught at the orchestrator level by classifyStatus
 		// even when the process itself exited 0).
-		if run.Err != nil {
-			fmt.Fprintf(&b, "**Failed:** `%v`\n\n", run.Err)
-		} else {
-			b.WriteString("**Failed**\n\n")
-		}
+		writeFailureHeader(&b, run.Err)
 		for _, ev := range run.Buffer {
-			if re, ok := ev.(reviewtypes.RunError); ok && re.Err != nil {
-				fmt.Fprintf(&b, "> agent error: `%v`\n\n", re.Err)
+			re, ok := ev.(reviewtypes.RunError)
+			if !ok || re.Err == nil {
+				continue
 			}
+			if sameFailureError(re.Err, run.Err) {
+				continue
+			}
+			fmt.Fprintf(&b, "> agent error: `%v`\n\n", re.Err)
 		}
 		// Render any narrative text the agent produced before the failure
 		// surfaced — useful when the parser tore mid-response so reviewers
@@ -95,6 +97,52 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 		rendered = b.String()
 	}
 	fmt.Fprint(s.W, rendered)
+}
+
+func writeFailureHeader(b *strings.Builder, runErr error) {
+	if runErr == nil {
+		b.WriteString("**Failed**\n\n")
+		return
+	}
+	var pe *reviewtypes.ProcessError
+	if errors.As(runErr, &pe) && pe.Stderr != "" {
+		fmt.Fprintf(b, "**Failed:** `%s` exited (`%v`). Stderr:\n\n", pe.AgentName, pe.Err)
+		fence := codeFenceFor(pe.Stderr)
+		fmt.Fprintf(b, "%s\n%s\n%s\n\n", fence, pe.Stderr, fence)
+		return
+	}
+	fmt.Fprintf(b, "**Failed:** `%v`\n\n", runErr)
+}
+
+// codeFenceFor returns a backtick fence at least 3 long and at least one
+// longer than the longest backtick run in s — per CommonMark §4.5, the
+// closing fence must match or exceed the opening fence length, so this
+// prevents stderr content with embedded ``` lines from terminating the
+// fence early and rendering trailing content raw.
+func codeFenceFor(s string) string {
+	longest, current := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			current++
+			if current > longest {
+				longest = current
+			}
+			continue
+		}
+		current = 0
+	}
+	n := longest + 1
+	if n < 3 {
+		n = 3
+	}
+	return strings.Repeat("`", n)
+}
+
+func sameFailureError(a, b error) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return errors.Is(a, b) || errors.Is(b, a)
 }
 
 // joinAssistantText extracts AssistantText events from a buffer and joins

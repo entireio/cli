@@ -342,6 +342,117 @@ func TestRun_TokenTracking(t *testing.T) {
 	}
 }
 
+func TestRun_EmitsSyntheticRunErrorWhenWaitErrIsNonNil(t *testing.T) {
+	t.Parallel()
+	waitErr := errors.New("exit status 1: stderr: invalid_api_key")
+	reviewer := &stubReviewer{
+		name: "claude-code",
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.Finished{Success: true},
+		},
+		waitErr: waitErr,
+	}
+	rec := &stubSinkRecorder{}
+
+	_, err := Run(context.Background(), reviewer, reviewtypes.RunConfig{}, []reviewtypes.Sink{rec})
+	if err == nil {
+		t.Fatal("expected non-nil error from failing run")
+	}
+
+	var found bool
+	for _, evt := range rec.agentEvents {
+		if re, ok := evt.ev.(reviewtypes.RunError); ok && re.Err != nil && re.Err.Error() == waitErr.Error() {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected synthetic RunError(waitErr) in live sink stream, got events: %+v", rec.agentEvents)
+	}
+}
+
+func TestRun_DoesNotEmitSyntheticRunErrorOnCleanExit(t *testing.T) {
+	t.Parallel()
+	reviewer := &stubReviewer{
+		name: "claude-code",
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.AssistantText{Text: "looks good"},
+			reviewtypes.Finished{Success: true},
+		},
+	}
+	rec := &stubSinkRecorder{}
+
+	_, err := Run(context.Background(), reviewer, reviewtypes.RunConfig{}, []reviewtypes.Sink{rec})
+	if err != nil {
+		t.Fatalf("expected nil error on clean exit, got %v", err)
+	}
+
+	for _, evt := range rec.agentEvents {
+		if _, ok := evt.ev.(reviewtypes.RunError); ok {
+			t.Errorf("clean exit should not produce a synthetic RunError, got: %+v", evt.ev)
+		}
+	}
+}
+
+func TestRun_DoesNotEmitSyntheticRunErrorOnCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reviewer := &stubReviewer{
+		name: "claude-code",
+		events: []reviewtypes.Event{
+			reviewtypes.Started{},
+			reviewtypes.Finished{Success: true},
+		},
+		waitErr: context.Canceled,
+	}
+	rec := &stubSinkRecorder{}
+
+	summary, err := Run(ctx, reviewer, reviewtypes.RunConfig{}, []reviewtypes.Sink{rec})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if got := summary.AgentRuns[0].Status; got != reviewtypes.AgentStatusCancelled {
+		t.Fatalf("summary status = %v, want Cancelled", got)
+	}
+	for _, evt := range rec.agentEvents {
+		if _, ok := evt.ev.(reviewtypes.RunError); ok {
+			t.Errorf("cancelled run should not produce synthetic RunError, got: %+v", evt.ev)
+		}
+	}
+}
+
+func TestRun_EnrichesSummaryBeforeRunFinished(t *testing.T) {
+	t.Parallel()
+	reviewer := &stubReviewer{
+		name:   "agent-a",
+		events: []reviewtypes.Event{reviewtypes.Started{}, reviewtypes.Finished{Success: true}},
+	}
+	rec := &stubSinkRecorder{}
+	cfg := reviewtypes.RunConfig{
+		EnrichSummary: func(_ context.Context, summary reviewtypes.RunSummary) reviewtypes.RunSummary {
+			summary.AgentRuns[0].Tokens = reviewtypes.Tokens{In: 42, Out: 7}
+			return summary
+		},
+	}
+
+	summary, err := Run(context.Background(), reviewer, cfg, []reviewtypes.Sink{rec})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := summary.AgentRuns[0].Tokens; got.In != 42 || got.Out != 7 {
+		t.Fatalf("summary tokens = {%d %d}, want {42 7}", got.In, got.Out)
+	}
+	if len(rec.finishedCalls) != 1 {
+		t.Fatalf("finished calls = %d, want 1", len(rec.finishedCalls))
+	}
+	if got := rec.finishedCalls[0].AgentRuns[0].Tokens; got.In != 42 || got.Out != 7 {
+		t.Fatalf("sink summary tokens = {%d %d}, want {42 7}", got.In, got.Out)
+	}
+}
+
 func TestRun_SinkFanOut(t *testing.T) {
 	t.Parallel()
 	events := []reviewtypes.Event{
