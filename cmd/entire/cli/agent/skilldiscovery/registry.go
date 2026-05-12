@@ -31,8 +31,8 @@ var curatedBuiltins = map[string][]CuratedSkill{
 		{Name: "/security-review", Desc: "Scan git diff for security issues"},
 		{Name: "/simplify", Desc: "Review recent changes for code quality"},
 	},
-	"codex":      {{Name: "/review", Desc: "Review current changes and find issues"}},
-	"gemini-cli": {},
+	"codex":  {{Name: "/review", Desc: "Review current changes and find issues"}},
+	"gemini": {},
 }
 
 // installHints lists the passive install pointers shown in the picker when
@@ -63,7 +63,7 @@ var installHints = map[string][]InstallHint{
 			ProvidesAny: []string{"/codex:adversarial-review"},
 		},
 	},
-	"gemini-cli": {
+	"gemini": {
 		{
 			Message:     "Install `gemini-code-review` via `gemini extensions install <url>`",
 			ProvidesAny: nil,

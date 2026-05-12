@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -16,7 +17,20 @@ import (
 // Compile-time interface check: ReviewerTemplate implements AgentReviewer.
 var _ reviewtypes.AgentReviewer = (*reviewtypes.ReviewerTemplate)(nil)
 
-const wantGeminiAgentName = "gemini-cli"
+const wantGeminiAgentName = "gemini"
+
+// TestGeminiReviewer_NameMatchesRegistryKey locks the reviewer's name to the
+// agent registry's stable key. The lifecycle hook's review-env adoption
+// (cmd/entire/cli/lifecycle.go:adoptReviewEnv) compares ENTIRE_REVIEW_AGENT
+// against string(ag.Name()); any drift between this constant and
+// AgentNameGemini silently breaks review-session tagging.
+func TestGeminiReviewer_NameMatchesRegistryKey(t *testing.T) {
+	t.Parallel()
+	if wantGeminiAgentName != string(agent.AgentNameGemini) {
+		t.Fatalf("wantGeminiAgentName = %q, agent.AgentNameGemini = %q — keep these aligned",
+			wantGeminiAgentName, string(agent.AgentNameGemini))
+	}
+}
 
 func TestGeminiReviewer_Name(t *testing.T) {
 	t.Parallel()

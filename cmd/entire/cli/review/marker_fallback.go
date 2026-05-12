@@ -5,7 +5,7 @@
 // non-launchable agents (cursor, opencode, factoryai-droid, copilot-cli) —
 // agents that don't (yet) implement AgentReviewer.
 //
-// For launchable agents (claude-code, codex, gemini-cli) the new
+// For launchable agents (claude-code, codex, gemini) the new
 // architecture uses env-var handshake (env.go) + AgentReviewer.Start, and
 // the lifecycle hook reads ENTIRE_REVIEW_* env vars off the spawned
 // process — there is no marker-file adoption code path.
