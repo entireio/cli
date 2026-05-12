@@ -2,8 +2,14 @@ package checkpoint
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"os/exec"
+	"strings"
 	"sync"
+
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -109,6 +115,9 @@ func (s *V2GitStore) ensureRef(ctx context.Context, refName plumbing.ReferenceNa
 }
 
 // GetRefState returns the parent commit hash and root tree hash for a ref.
+// Falls back to `git rev-parse <hash>^{tree}` when go-git can't load the
+// commit object — same partial-clone / stale-packfile-cache reason as
+// readTreeEntriesViaCLI in parse_tree.go.
 func (s *V2GitStore) GetRefState(refName plumbing.ReferenceName) (parentHash, treeHash plumbing.Hash, err error) {
 	ref, err := s.repo.Reference(refName, true)
 	if err != nil {
@@ -117,10 +126,34 @@ func (s *V2GitStore) GetRefState(refName plumbing.ReferenceName) (parentHash, tr
 
 	commit, err := s.repo.CommitObject(ref.Hash())
 	if err != nil {
-		return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get commit for ref %s: %w", refName, err)
+		cliTreeHash, cliErr := commitTreeHashViaCLI(context.Background(), ref.Hash())
+		if cliErr != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get commit for ref %s: %w", refName, errors.Join(err, cliErr))
+		}
+		logging.Warn(context.Background(), "GetRefState: go-git commit read failed, used git rev-parse fallback",
+			slog.String("ref", refName.String()),
+			slog.String("commit", ref.Hash().String()[:12]),
+			slog.String("gogit_error", err.Error()),
+		)
+		return ref.Hash(), cliTreeHash, nil
 	}
 
 	return ref.Hash(), commit.TreeHash, nil
+}
+
+// commitTreeHashViaCLI resolves the tree hash of a commit via
+// `git rev-parse <hash>^{tree}`. See GetRefState for the rationale.
+func commitTreeHashViaCLI(ctx context.Context, commitHash plumbing.Hash) (plumbing.Hash, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", commitHash.String()+"^{tree}")
+	output, err := cmd.Output()
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("git rev-parse %s^{tree}: %w", commitHash.String()[:12], err)
+	}
+	hex := strings.TrimSpace(string(output))
+	if hex == "" {
+		return plumbing.ZeroHash, fmt.Errorf("git rev-parse %s^{tree}: empty output", commitHash.String()[:12])
+	}
+	return plumbing.NewHash(hex), nil
 }
 
 // updateRef creates a new commit on a ref with the given tree, updating the ref to point to it.
