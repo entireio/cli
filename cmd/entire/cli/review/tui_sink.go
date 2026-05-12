@@ -24,10 +24,12 @@ import (
 // orchestrator's dispatch goroutine.
 //
 // Cancellation: cancel is the same context.CancelFunc that controls the
-// orchestrator's run context. KeyCtrlC in the dashboard calls this function
-// (gated by a sync.Once in the model). Out-of-TUI SIGINT routes through the
-// cobra root's context, which cancels the same function — no parallel
-// signal.Notify goroutine is needed here.
+// orchestrator's run context. The first KeyCtrlC in the dashboard fires this
+// function (guarded by a sync.Once in the model) and switches the dashboard
+// to a "Cancelling agents..." indicator while agents drain; a second KeyCtrlC
+// force-quits without waiting. Out-of-TUI SIGINT routes through the cobra
+// root's context, which cancels the same function — no parallel signal.Notify
+// goroutine is needed here.
 type TUISink struct {
 	program *tea.Program
 

@@ -74,7 +74,7 @@ func buildEventLines(buffer []reviewtypes.Event, maxWidth int) []string {
 //
 //  1. Header line: "─── <name> (<n> events) ─────────────" (filled to termWidth)
 //  2. Body: trimmed/padded to exactly bodyHeight lines, each padded to termWidth.
-//  3. Footer line: "←/→ switch agent · Esc back · PgUp/PgDn scroll"
+//  3. Footer line: "←/→ switch agent · Esc back · scroll: PgUp/PgDn/↑/↓/Home/End"
 //
 // CRITICAL: the rendered string is exactly termHeight lines. Bubble Tea's
 // alt-screen diff leaves ghost rows if the line count varies between frames.
@@ -98,7 +98,7 @@ func detailFrame(row agentRow, body string, termWidth, termHeight int) string {
 	// termWidth so frame width is stable.
 	bodyLines := splitBodyToHeight(body, bodyHeight, termWidth)
 
-	footerText := "←/→ switch agent · Esc back · PgUp/PgDn scroll"
+	footerText := "←/→ switch agent · Esc back · scroll: PgUp/PgDn/↑/↓/Home/End"
 	footer := padDisplayWidth(footerText, termWidth)
 
 	var b strings.Builder
