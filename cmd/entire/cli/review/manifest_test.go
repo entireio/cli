@@ -418,10 +418,183 @@ func TestWritePostReviewManifest_WarnsWhenNoMatchingSessions(t *testing.T) {
 	if !strings.Contains(got, "Note: review skills ran but findings were not persisted.") {
 		t.Fatalf("expected warning to fire when no sessions match; got:\n%s", got)
 	}
-	if !strings.Contains(got, "env-var handshake did not reach the hook") {
-		t.Fatalf("expected handshake-failure reason; got:\n%s", got)
+	if !strings.Contains(got, "no session states found") {
+		t.Fatalf("expected no-session-state reason; got:\n%s", got)
 	}
 	if strings.Contains(got, "Review complete.") {
 		t.Fatalf("happy-path footer must not print when manifest is empty; got:\n%s", got)
+	}
+}
+
+func TestExplainEmptyManifest_NoStates(t *testing.T) {
+	t.Parallel()
+	summary := reviewtypes.RunSummary{
+		StartedAt: time.Now(),
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	got := explainEmptyManifest("/repo", "abc123", summary, nil)
+	if !strings.Contains(got, "no session states found") {
+		t.Errorf("reason = %q, want mention of 'no session states found'", got)
+	}
+}
+
+func TestExplainEmptyManifest_NoneTagged(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{SessionID: "s1", WorktreePath: "/repo", BaseCommit: "abc123", StartedAt: started.Add(time.Second)},
+		{SessionID: "s2", WorktreePath: "/repo", BaseCommit: "abc123", StartedAt: started.Add(2 * time.Second)},
+	}
+	got := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "none tagged as a review session") {
+		t.Errorf("reason = %q, want 'none tagged as a review session'", got)
+	}
+	if !strings.Contains(got, "env-var handshake") {
+		t.Errorf("reason = %q, want mention of env-var handshake", got)
+	}
+}
+
+func TestExplainEmptyManifest_WorktreeMismatch(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "s1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/other/worktree",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	got := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "worktree path mismatch") {
+		t.Errorf("reason = %q, want 'worktree path mismatch'", got)
+	}
+	if !strings.Contains(got, "/other/worktree") || !strings.Contains(got, "/repo") {
+		t.Errorf("reason = %q, want both observed and expected worktree paths", got)
+	}
+}
+
+func TestExplainEmptyManifest_BaseCommitMismatch(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "s1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "deadbeef",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	got := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "BaseCommit mismatch") {
+		t.Errorf("reason = %q, want 'BaseCommit mismatch'", got)
+	}
+	if !strings.Contains(got, "deadbeef") || !strings.Contains(got, "abc123") {
+		t.Errorf("reason = %q, want both observed and expected SHAs", got)
+	}
+	if !strings.Contains(got, "HEAD moved") {
+		t.Errorf("reason = %q, want hint about HEAD movement", got)
+	}
+}
+
+func TestExplainEmptyManifest_StartedAtOutsideWindow(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "s1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(-time.Hour), // way before the review run
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	got := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "started before the review run") {
+		t.Errorf("reason = %q, want 'started before the review run'", got)
+	}
+}
+
+// TestExplainEmptyManifest_DumpAllReasons emits the diagnostic for every
+// known cause so a `-v` run shows the exact warning text users will see.
+// Useful for visual smoke checks when iterating on wording.
+func TestExplainEmptyManifest_DumpAllReasons(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	cases := []struct {
+		label  string
+		states []*session.State
+	}{
+		{"no states", nil},
+		{"none tagged", []*session.State{
+			{SessionID: "s1", WorktreePath: "/repo", BaseCommit: "abc123", StartedAt: started.Add(time.Second)},
+		}},
+		{"worktree mismatch", []*session.State{
+			{SessionID: "s1", Kind: session.KindAgentReview, WorktreePath: "/other", BaseCommit: "abc123", StartedAt: started.Add(time.Second), AgentType: agenttypes.AgentType("Claude Code")},
+		}},
+		{"SHA mismatch", []*session.State{
+			{SessionID: "s1", Kind: session.KindAgentReview, WorktreePath: "/repo", BaseCommit: "deadbeef", StartedAt: started.Add(time.Second), AgentType: agenttypes.AgentType("Claude Code")},
+		}},
+		{"started before window", []*session.State{
+			{SessionID: "s1", Kind: session.KindAgentReview, WorktreePath: "/repo", BaseCommit: "abc123", StartedAt: started.Add(-time.Hour), AgentType: agenttypes.AgentType("Claude Code")},
+		}},
+		{"AgentType mismatch", []*session.State{
+			{SessionID: "s1", Kind: session.KindAgentReview, WorktreePath: "/repo", BaseCommit: "abc123", StartedAt: started.Add(time.Second), AgentType: agenttypes.AgentType("Codex")},
+		}},
+	}
+	for _, c := range cases {
+		reason := explainEmptyManifest("/repo", "abc123", summary, c.states)
+		t.Logf("[%s] → %s", c.label, reason)
+	}
+}
+
+func TestExplainEmptyManifest_AgentTypeMismatch(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "s1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Codex"), // wrong agent
+		},
+	}
+	got := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "AgentType mismatch") {
+		t.Errorf("reason = %q, want 'AgentType mismatch'", got)
+	}
+	if !strings.Contains(got, "Codex") || !strings.Contains(got, "Claude Code") {
+		t.Errorf("reason = %q, want both observed and expected AgentTypes", got)
 	}
 }

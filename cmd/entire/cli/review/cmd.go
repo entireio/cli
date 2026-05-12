@@ -2,7 +2,7 @@
 //
 // cmd.go provides NewCommand(), the cobra entry point for `entire review`.
 // It routes through the new AgentReviewer / Sink / Run architecture for
-// launchable agents (claude-code, codex, gemini-cli) and falls back to
+// launchable agents (claude-code, codex, gemini) and falls back to
 // RunMarkerFallback for non-launchable agents (cursor, opencode,
 // factoryai-droid, copilot-cli).
 package review
@@ -646,15 +646,17 @@ func writePostReviewManifest(
 	if summary.Cancelled || len(summary.AgentRuns) == 0 {
 		return
 	}
-	manifest, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
+	manifest, states, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
 	if err != nil {
 		logging.Debug(ctx, "review manifest not written", slog.String("error", err.Error()))
 		warnManifestNotWritten(out, "could not load session state: "+err.Error())
 		return
 	}
 	if len(manifest.Sources) == 0 {
-		logging.Debug(ctx, "review manifest not written: no matching review sessions")
-		warnManifestNotWritten(out, "review session was not tagged as a review (env-var handshake did not reach the hook)")
+		reason := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
+		logging.Debug(ctx, "review manifest not written: no matching review sessions",
+			slog.String("reason", reason))
+		warnManifestNotWritten(out, reason)
 		return
 	}
 	if err := writeLocalReviewManifest(ctx, manifest); err != nil {
