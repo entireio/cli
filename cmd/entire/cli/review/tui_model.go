@@ -309,13 +309,24 @@ func (m reviewTUIModel) handleAgentEvent(msg agentEventMsg) (tea.Model, tea.Cmd)
 
 // handleKey processes keyboard input.
 func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Post-finish dashboard: only explicit exit keys dismiss. Any other key
-	// (including Ctrl+O) falls through to normal handling so the user can
-	// still drill into completed agent output. Ctrl+C also quits immediately
-	// — there are no agents left to drain.
-	if m.finished && !m.detailMode {
-		if isPostFinishExitKey(msg) || (msg.Code == 'c' && msg.Mod == tea.ModCtrl) {
+	// Post-finish: explicit exit keys dismiss the TUI from either the
+	// dashboard or detail mode. Esc retains its "back to dashboard" meaning
+	// while drilled in so the user can return to the finished dashboard
+	// before quitting. Other keys (including Ctrl+O and scroll keys) fall
+	// through to normal handling so post-mortem inspection still works.
+	if m.finished {
+		switch {
+		case msg.Mod == 0 && msg.Code == 'q':
 			return m, tea.Quit
+		case msg.Mod == 0 && msg.Code == tea.KeyEnter:
+			return m, tea.Quit
+		case msg.Mod == tea.ModCtrl && msg.Code == 'c':
+			return m, tea.Quit
+		case msg.Mod == 0 && (msg.Code == tea.KeyEscape || msg.Code == tea.KeyEsc):
+			if !m.detailMode {
+				return m, tea.Quit
+			}
+			// Detail mode: fall through to main switch where Esc returns to dashboard.
 		}
 	}
 
@@ -325,10 +336,17 @@ func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// In drill-in: Ctrl+C is intentionally ignored; Esc first.
 			return m, nil
 		}
-		// Second Ctrl+C while a cancellation is already in flight force-quits
-		// without waiting for agents to drain. The shared CancelFunc is
-		// guarded by cancelOnce, so the second press doesn't double-cancel.
 		if m.cancelling {
+			// Second Ctrl+C while a cancellation is already in flight
+			// force-quits without waiting for agents to drain. cancelOnce
+			// guards CancelFunc against the duplicate-firing case.
+			return m, tea.Quit
+		}
+		if m.allAgentsTerminal() {
+			// Race window: every agent emitted a terminal event but
+			// runFinishedMsg hasn't arrived yet. There's nothing left to
+			// cancel — quit immediately instead of flashing the
+			// "Cancelling agents..." footer until the runFinishedMsg lands.
 			return m, tea.Quit
 		}
 		m.cancelling = true
@@ -391,21 +409,21 @@ func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// isPostFinishExitKey reports whether msg is one of the explicit exit keys
-// honored on the post-finish dashboard. Ctrl+C is handled by the caller because
-// it has a modifier; here we only need q/Esc/Enter without modifiers.
-func isPostFinishExitKey(msg tea.KeyPressMsg) bool {
-	if msg.Mod != 0 {
+// allAgentsTerminal reports whether every agent row has reached a terminal
+// status. Used to short-circuit Ctrl+C cancellation in the race window between
+// the last agent emitting Finished/RunError and runFinishedMsg arriving — at
+// that point CancelFunc has nothing to do and the "Cancelling agents..."
+// footer would only flash briefly before runFinishedMsg dismisses it anyway.
+func (m reviewTUIModel) allAgentsTerminal() bool {
+	if len(m.rows) == 0 {
 		return false
 	}
-	if msg.Code == tea.KeyEscape || msg.Code == tea.KeyEsc {
-		return true
+	for _, r := range m.rows {
+		if r.status == reviewtypes.AgentStatusUnknown {
+			return false
+		}
 	}
-	switch msg.Code {
-	case 'q', tea.KeyEnter:
-		return true
-	}
-	return false
+	return true
 }
 
 // View renders the current state.

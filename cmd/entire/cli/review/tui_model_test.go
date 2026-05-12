@@ -796,3 +796,110 @@ func TestTUIModel_RunErrorSticky_FinishedDoesNotFlipToSucceeded(t *testing.T) {
 		t.Errorf("expected Failed to stick (RunError is sticky), got %v", m.rows[0].status)
 	}
 }
+
+// TestTUIModel_CtrlCAfterAllRowsTerminalQuitsImmediately pins that Ctrl+C
+// during the race window between an agent's terminal event (Finished or
+// RunError) and the orchestrator's runFinishedMsg short-circuits to tea.Quit
+// instead of flashing the "Cancelling agents..." indicator. The pre-fix
+// behavior fired CancelFunc and set m.cancelling=true even though every
+// agent had already finished — confusing the user for the brief window
+// before the dashboard transitioned to its post-finish state.
+func TestTUIModel_CtrlCAfterAllRowsTerminalQuitsImmediately(t *testing.T) {
+	t.Parallel()
+	var called atomic.Bool
+	cancel := func() { called.Store(true) }
+	m := newTestModel([]string{"agent-a", "agent-b"}, cancel)
+
+	// Drive both rows to a terminal status via events. runFinishedMsg is NOT
+	// sent — that's the race window we're testing.
+	updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(agentEventMsg{agent: "agent-b", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	if m.finished {
+		t.Fatal("setup: m.finished should be false (runFinishedMsg not sent)")
+	}
+
+	updated, cmd := m.Update(testCtrlKey('c'))
+	m = mustModel(t, updated)
+	if m.cancelling {
+		t.Error("Ctrl+C with all rows already terminal must NOT set cancelling=true")
+	}
+	if called.Load() {
+		t.Error("CancelFunc must not fire when there's nothing left to cancel")
+	}
+	if cmd == nil {
+		t.Fatal("expected a quit command when Ctrl+C arrives with all rows terminal")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Errorf("expected tea.QuitMsg, got %T", cmd())
+	}
+}
+
+// TestTUIModel_PostFinishInDetailMode_ExitKeysQuit pins that q/Enter/Ctrl+C
+// pressed while drilled in AFTER the run finished dismiss the TUI directly
+// instead of being swallowed by the viewport (which has no quit binding).
+// Pre-fix the user had to Esc out of detail mode first, then press an exit
+// key — a two-step dismissal with no on-screen hint that q/Enter were inert.
+func TestTUIModel_PostFinishInDetailMode_ExitKeysQuit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		key  tea.KeyPressMsg
+	}{
+		{"q", testKey('q')},
+		{"Enter", testKey(tea.KeyEnter)},
+		{"Ctrl+C", testCtrlKey('c')},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel([]string{"agent-a"}, func() {})
+			updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+			m = mustModel(t, updated)
+			updated, _ = m.Update(testCtrlKey('o'))
+			m = mustModel(t, updated)
+			if !m.detailMode {
+				t.Fatalf("setup: expected detailMode=true after Ctrl+O")
+			}
+
+			_, cmd := m.Update(tc.key)
+			if cmd == nil {
+				t.Fatalf("expected a command for key %q post-finish in detail mode", tc.name)
+			}
+			if _, ok := cmd().(tea.QuitMsg); !ok {
+				t.Errorf("expected tea.QuitMsg for key %q post-finish in detail mode, got %T", tc.name, cmd())
+			}
+		})
+	}
+}
+
+// TestTUIModel_PostFinishInDetailMode_EscReturnsToDashboard pins that Esc
+// preserves its "back to dashboard" meaning even after the run finishes,
+// rather than quitting outright. The user can then dismiss from the
+// dashboard via q/Esc/Enter/Ctrl+C. Regression guard for the post-finish
+// detail-mode dismissal change.
+func TestTUIModel_PostFinishInDetailMode_EscReturnsToDashboard(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(testCtrlKey('o'))
+	m = mustModel(t, updated)
+	if !m.detailMode {
+		t.Fatalf("setup: expected detailMode=true after Ctrl+O")
+	}
+
+	updated, cmd := m.Update(testKey(tea.KeyEscape))
+	m = mustModel(t, updated)
+	if m.detailMode {
+		t.Error("Esc post-finish in detail mode must return to dashboard, not quit")
+	}
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			if _, ok := msg.(tea.QuitMsg); ok {
+				t.Error("Esc post-finish in detail mode must NOT quit; it returns to dashboard")
+			}
+		}
+	}
+}
