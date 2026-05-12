@@ -1,0 +1,29 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "ceee2ec8b984",
+  "strategy": "manual-commit",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/investigate/cmd.go",
+    "cmd/entire/cli/investigate/cmd_test.go",
+    "cmd/entire/cli/investigate/migration.go",
+    "cmd/entire/cli/investigate/prompt_yn.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ce/ee2ec8b984/0/metadata.json",
+      "transcript": "/ce/ee2ec8b984/0/transcript.jsonl",
+      "content_hash": "/ce/ee2ec8b984/0/transcript_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  },
+  "has_investigation": true
+}
