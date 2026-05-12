@@ -106,10 +106,30 @@ type RunConfig struct {
 	// EnrichSummary optionally updates the completed run summary before sinks
 	// receive RunFinished. It is used for post-process data such as token
 	// totals that are only available after agent lifecycle hooks flush state.
+	//
+	// Timing: called on the orchestrator goroutine after every per-agent
+	// goroutine has exited, immediately before Sink.RunFinished is fanned
+	// out. The full RunSummary is consumed; any field the callback
+	// returns reaches the sinks.
+	//
+	// Contract: nil is valid (no enrichment). The callback must not block on
+	// a sink (deadlock), must not panic (no orchestrator-side recovery), and
+	// should honor ctx for cancellation when doing I/O.
 	EnrichSummary func(context.Context, RunSummary) RunSummary
 
 	// EnrichAgentRun optionally updates a single agent run after that agent
 	// exits, before the overall multi-agent run has necessarily completed.
+	//
+	// Timing: called on the per-agent forwarding goroutine in RunMulti,
+	// after proc.Wait() returns and after any synthetic RunError is queued.
+	// Only the returned Tokens field is consumed (emitted as a synthetic
+	// Tokens event so sinks see live token totals before sibling agents
+	// finish); other field changes are discarded. Returning Tokens{In:0,
+	// Out:0} suppresses emission entirely.
+	//
+	// Contract: nil is valid (no enrichment). The callback must be
+	// goroutine-safe across N agents and must not block on a sink. A panic
+	// is recovered; no synthetic Tokens event is emitted on panic.
 	EnrichAgentRun func(context.Context, AgentRun) AgentRun
 }
 

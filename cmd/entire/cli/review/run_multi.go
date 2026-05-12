@@ -25,9 +25,11 @@ package review
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
@@ -238,9 +240,25 @@ func emitEnrichedAgentTokens(
 	if cfg.EnrichAgentRun == nil {
 		return
 	}
-	enriched := cfg.EnrichAgentRun(ctx, run)
+	enriched, ok := callEnrichAgentRun(ctx, cfg.EnrichAgentRun, run)
+	if !ok {
+		return
+	}
 	if enriched.Tokens.In == 0 && enriched.Tokens.Out == 0 {
 		return
 	}
 	fanIn <- taggedEvent{agentIdx: agentIdx, ev: enriched.Tokens}
+}
+
+// callEnrichAgentRun invokes the caller-supplied EnrichAgentRun callback
+// with panic recovery. A panic in user-supplied enrichment must not leak
+// into the per-agent forwarding goroutine and bring down the whole run.
+func callEnrichAgentRun(ctx context.Context, fn func(context.Context, reviewtypes.AgentRun) reviewtypes.AgentRun, run reviewtypes.AgentRun) (out reviewtypes.AgentRun, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Warn(ctx, "review EnrichAgentRun panicked", slog.Any("panic", r))
+			ok = false
+		}
+	}()
+	return fn(ctx, run), true
 }
