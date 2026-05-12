@@ -421,7 +421,7 @@ func (s *V2GitStore) fetchRemoteFullRefs(ctx context.Context) error {
 	}
 
 	var refSpecs []string
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
 		}

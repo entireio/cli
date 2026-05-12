@@ -506,29 +506,13 @@ func (s *V2GitStore) RotateCurrentGenerationIfNeeded(ctx context.Context, maxChe
 		return "", false, fmt.Errorf("rotation: failed to determine next generation number: %w", err)
 	}
 
-	// Phase 1: Archive — create ref pointing to the current commit.
+	// Phase 1: Prepare archive and reset commits without changing refs yet.
 	// If the archive ref already exists, another instance already rotated — skip.
 	archiveRefName := ArchivedGenerationRefName(archiveNumber)
 	if _, refErr := s.repo.Reference(archiveRefName, true); refErr == nil {
 		logging.Info(ctx, "rotation: archive ref already exists, skipping",
 			slog.String("archive_ref", string(archiveRefName)),
 		)
-		return archiveRefName, false, nil
-	}
-	archiveRef := plumbing.NewHashReference(archiveRefName, currentRef.Hash())
-	if err := s.repo.Storer.SetReference(archiveRef); err != nil {
-		return "", false, fmt.Errorf("rotation: failed to create archived ref %s: %w", archiveRefName, err)
-	}
-
-	// Verify /full/current hasn't been advanced by another writer since we read it.
-	// If it changed, abort — the archive ref is harmless (points to a valid commit)
-	// and the next writer will trigger rotation again.
-	postArchiveRef, err := s.repo.Reference(refName, true)
-	if err != nil {
-		return "", false, fmt.Errorf("rotation: failed to re-read /full/current: %w", err)
-	}
-	if postArchiveRef.Hash() != currentRef.Hash() {
-		logging.Info(ctx, "rotation: /full/current changed during rotation, aborting reset")
 		return archiveRefName, false, nil
 	}
 
@@ -545,13 +529,7 @@ func (s *V2GitStore) RotateCurrentGenerationIfNeeded(ctx context.Context, maxChe
 		return "", false, fmt.Errorf("rotation: failed to create archive commit: %w", err)
 	}
 
-	// Update the archive ref to point to the commit with generation.json
-	archiveRef = plumbing.NewHashReference(archiveRefName, archiveCommitHash)
-	if err := s.repo.Storer.SetReference(archiveRef); err != nil {
-		return "", false, fmt.Errorf("rotation: failed to update archived ref %s: %w", archiveRefName, err)
-	}
-
-	// Phase 2: Create fresh orphan /full/current (empty tree, no generation.json)
+	// Create fresh orphan /full/current (empty tree, no generation.json).
 	emptyTreeHash, err := BuildTreeFromEntries(ctx, s.repo, make(map[string]object.TreeEntry))
 	if err != nil {
 		return "", false, fmt.Errorf("rotation: failed to build empty tree: %w", err)
@@ -562,6 +540,60 @@ func (s *V2GitStore) RotateCurrentGenerationIfNeeded(ctx context.Context, maxChe
 		return "", false, fmt.Errorf("rotation: failed to create orphan commit: %w", err)
 	}
 
+	// Verify /full/current hasn't been advanced by another writer since we read it.
+	// If it changed, abort before recording a publication marker.
+	postArchiveRef, err := s.repo.Reference(refName, true)
+	if err != nil {
+		return "", false, fmt.Errorf("rotation: failed to re-read /full/current: %w", err)
+	}
+	if postArchiveRef.Hash() != currentRef.Hash() {
+		logging.Info(ctx, "rotation: /full/current changed during rotation, aborting reset")
+		return archiveRefName, false, nil
+	}
+
+	publication := PendingV2FullGenerationPublication{
+		ArchiveRefName:           archiveRefName.String(),
+		ArchiveCommitHash:        archiveCommitHash.String(),
+		PreviousFullCurrentHash:  currentRef.Hash().String(),
+		ResetFullCurrentRootHash: orphanCommitHash.String(),
+		QueuedAt:                 time.Now().UTC(),
+	}
+
+	// The commit objects above are not reachable from the v2 refs yet. Record
+	// the pending publication before moving refs. Pre-push drops stale reset
+	// handoffs until the newest queued reset root is in local /full/current
+	// history, then publishes the queued archive refs together.
+	if err := s.AppendPendingFullGenerationPublication(ctx, publication); err != nil {
+		return "", false, fmt.Errorf("rotation: failed to record pending full rotation: %w", err)
+	}
+	keepPendingPublication := false
+	defer func() {
+		if keepPendingPublication {
+			return
+		}
+		if removeErr := s.RemovePendingFullGenerationPublications(ctx, []PendingV2FullGenerationPublication{publication}); removeErr != nil {
+			logging.Warn(ctx, "rotation: failed to remove pending full rotation after failed rotation",
+				slog.String("error", removeErr.Error()),
+				slog.String("archive_ref", string(archiveRefName)),
+				slog.String("previous_full_current_hash", currentRef.Hash().String()),
+				slog.String("archive_commit_hash", archiveCommitHash.String()),
+				slog.String("reset_full_current_root_hash", orphanCommitHash.String()),
+			)
+		}
+	}()
+
+	// Phase 2: publish local refs after the pending publication marker exists.
+	if _, refErr := s.repo.Reference(archiveRefName, true); refErr == nil {
+		logging.Info(ctx, "rotation: archive ref already exists, skipping",
+			slog.String("archive_ref", string(archiveRefName)),
+		)
+		return archiveRefName, false, nil
+	}
+	archiveRef := plumbing.NewHashReference(archiveRefName, archiveCommitHash)
+	if err := s.repo.Storer.SetReference(archiveRef); err != nil {
+		return "", false, fmt.Errorf("rotation: failed to update archived ref %s: %w", archiveRefName, err)
+	}
+
 	reset, err := s.resetFullCurrentRefIfUnchanged(ctx, refName, postArchiveRef, orphanCommitHash)
 	if err != nil {
 		return "", false, err
@@ -570,6 +602,7 @@ func (s *V2GitStore) RotateCurrentGenerationIfNeeded(ctx context.Context, maxChe
 		return archiveRefName, false, nil
 	}
 
+	keepPendingPublication = true
 	logging.Info(ctx, "generation rotation complete",
 		slog.Int("archived_generation", archiveNumber),
 		slog.String("archive_ref", string(archiveRefName)),
