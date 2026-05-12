@@ -266,9 +266,10 @@ func TestParseClaudeOutput_StreamsEventsBeforeEOF(t *testing.T) {
 	if _, err := pw.Write([]byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")); err != nil {
 		t.Fatalf("pipe write: %v", err)
 	}
-	at, ok := expect(t, "AssistantText").(reviewtypes.AssistantText)
+	ev := expect(t, "AssistantText")
+	at, ok := ev.(reviewtypes.AssistantText)
 	if !ok {
-		t.Fatalf("event = %T, want AssistantText", at)
+		t.Fatalf("event = %T (%+v), want AssistantText", ev, ev)
 	}
 	if at.Text != "hello" {
 		t.Errorf("AssistantText.Text = %q, want %q", at.Text, "hello")
@@ -280,9 +281,10 @@ func TestParseClaudeOutput_StreamsEventsBeforeEOF(t *testing.T) {
 	if _, err := pw.Write([]byte(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{"file_path":"x"}}]}}` + "\n")); err != nil {
 		t.Fatalf("pipe write: %v", err)
 	}
-	tc, ok := expect(t, "ToolCall").(reviewtypes.ToolCall)
+	ev = expect(t, "ToolCall")
+	tc, ok := ev.(reviewtypes.ToolCall)
 	if !ok {
-		t.Fatalf("event = %T, want ToolCall", tc)
+		t.Fatalf("event = %T (%+v), want ToolCall", ev, ev)
 	}
 	if tc.Name != "Read" {
 		t.Errorf("ToolCall.Name = %q, want %q", tc.Name, "Read")
@@ -297,16 +299,18 @@ func TestParseClaudeOutput_StreamsEventsBeforeEOF(t *testing.T) {
 	}
 	_ = pw.Close()
 
-	tk, ok := expect(t, "Tokens").(reviewtypes.Tokens)
+	ev = expect(t, "Tokens")
+	tk, ok := ev.(reviewtypes.Tokens)
 	if !ok {
-		t.Fatalf("event = %T, want Tokens", tk)
+		t.Fatalf("event = %T (%+v), want Tokens", ev, ev)
 	}
 	if tk.Out != 42 || tk.In != 100 {
 		t.Errorf("Tokens = %+v, want {In:100, Out:42}", tk)
 	}
-	fin, ok := expect(t, "Finished").(reviewtypes.Finished)
+	ev = expect(t, "Finished")
+	fin, ok := ev.(reviewtypes.Finished)
 	if !ok {
-		t.Fatalf("event = %T, want Finished", fin)
+		t.Fatalf("event = %T (%+v), want Finished", ev, ev)
 	}
 	if !fin.Success {
 		t.Error("Finished.Success = false, want true")

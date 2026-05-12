@@ -63,7 +63,7 @@ func parseClaudeOutput(r io.Reader) <-chan reviewtypes.Event {
 		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 		var sawResult bool
 		var resultErr bool
-		var resultUsage claudeUsage
+		var resultUsage messageUsage
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if len(line) == 0 {
@@ -116,7 +116,11 @@ type claudeEnvelope struct {
 	Type    string        `json:"type"`
 	Message claudeMessage `json:"message"`
 	IsError bool          `json:"is_error"`
-	Usage   claudeUsage   `json:"usage"`
+	// Usage reuses the package-local messageUsage type (declared in types.go)
+	// rather than a duplicate ad-hoc struct, so the two consumers of the
+	// Claude API usage shape (transcript parsing + stream-json review parser)
+	// can't drift apart.
+	Usage messageUsage `json:"usage"`
 }
 
 type claudeMessage struct {
@@ -128,11 +132,4 @@ type claudeBlock struct {
 	Text  string          `json:"text"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
-}
-
-type claudeUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 }
