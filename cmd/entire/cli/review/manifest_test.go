@@ -583,6 +583,56 @@ func TestExplainEmptyManifest_AgentTypeMismatch(t *testing.T) {
 	}
 }
 
+// TestExplainEmptyManifest_CumulativeFiltering locks the cumulative-filter
+// behavior: when one tagged state fails worktree but another passes worktree
+// yet fails SHA, the reported cause must be SHA (the filter that emptied
+// the candidate set), not worktree (the filter that found *some* mismatched
+// state but left a survivor). Without this, the diagnostic would mislead
+// users by reporting whichever filter happens to be checked first.
+func TestExplainEmptyManifest_CumulativeFiltering(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	// state-A: wrong worktree, right SHA. Eliminated by worktree filter.
+	// state-B: right worktree, wrong SHA. Survives worktree, eliminated by SHA.
+	// Both fail, so the manifest is empty. Reported cause should be SHA
+	// because that's the filter that emptied the set after state-A was dropped.
+	states := []*session.State{
+		{
+			SessionID:    "state-A",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/other/worktree",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+		{
+			SessionID:    "state-B",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "deadbeef",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "BaseCommit mismatch") {
+		t.Errorf("reason = %q, want 'BaseCommit mismatch' (the filter that emptied the candidate set), not worktree-mismatch", got)
+	}
+	if !strings.Contains(got, "deadbeef") {
+		t.Errorf("reason = %q, want the surviving state's wrong SHA (deadbeef) as the observed value", got)
+	}
+	if strings.Contains(got, "worktree") {
+		t.Errorf("reason = %q, must not blame worktree when state-B survived worktree filter", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false")
+	}
+}
+
 // TestExplainEmptyManifest_MultiAgentNamesFailingAgent locks the per-agent
 // AgentType iteration: when a 2-agent run sees one tagged state for claude
 // and the codex agent has no matching state, the reason must name "codex"

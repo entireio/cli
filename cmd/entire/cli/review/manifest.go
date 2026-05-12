@@ -97,11 +97,14 @@ func localReviewManifestFromCurrentState(
 // callers should escalate logging.
 //
 // Filter precedence mirrors matchReviewSessionState: worktree path,
-// BaseCommit, StartedAt window, then AgentType. The agent-independent
-// filters (worktree/SHA/time) get a single sweep; AgentType is checked
-// per-agent so a multi-agent run with heterogeneous type mismatches names
-// the specific failing agent rather than blaming the first one in the
-// run list.
+// BaseCommit, StartedAt window, then AgentType. Filters apply cumulatively
+// to a candidate set; the function reports the filter that empties the
+// set. This matters for heterogeneous failures across multiple tagged
+// states (e.g. one wrong-worktree, one right-worktree but wrong-SHA): the
+// reported cause is the filter that eliminated the last surviving
+// candidate, not the first filter to find any non-matching state.
+// AgentType is checked per-agent so a multi-agent run with heterogeneous
+// type mismatches names the specific failing agent.
 func explainEmptyManifest(
 	worktreeRoot string,
 	headSHA string,
@@ -121,27 +124,39 @@ func explainEmptyManifest(
 		return fmt.Sprintf("found %d session state(s) but none tagged as a review session (env-var handshake did not reach the hook)", len(states)), false
 	}
 
-	// Agent-independent filters: same outcome regardless of which agent ran.
-	for _, st := range tagged {
-		if worktreeRoot != "" && st.WorktreePath != "" && st.WorktreePath != worktreeRoot {
-			return fmt.Sprintf("found %d tagged review session(s) but worktree path mismatch: state=%q, run=%q", len(tagged), st.WorktreePath, worktreeRoot), false
-		}
-	}
-	for _, st := range tagged {
-		if headSHA != "" && st.BaseCommit != "" && st.BaseCommit != headSHA {
-			return fmt.Sprintf("found %d tagged review session(s) but BaseCommit mismatch: state=%q, run=%q (HEAD moved between review start and first agent turn?)", len(tagged), st.BaseCommit, headSHA), false
-		}
-	}
-	for _, st := range tagged {
-		if !summary.StartedAt.IsZero() && st.StartedAt.Before(summary.StartedAt.Add(-5*time.Second)) {
-			return fmt.Sprintf("found %d tagged review session(s) but they started before the review run window (stale session state from a prior run?)", len(tagged)), false
-		}
-	}
+	candidates := tagged
 
-	// Agent-specific filter: AgentType. Check each run against the tagged
-	// states; report the first run whose wantType doesn't match any state's
-	// AgentType. Lenient cases (state.AgentType=="" or wantType=="") count
-	// as a match here, matching the matcher's lenient behavior.
+	// Worktree filter (cumulative).
+	survivors, droppedExample := applyExplainerFilter(candidates, func(st *session.State) bool {
+		return worktreeRoot == "" || st.WorktreePath == "" || st.WorktreePath == worktreeRoot
+	})
+	if len(survivors) == 0 {
+		return fmt.Sprintf("found %d tagged review session(s) but worktree path mismatch: state=%q, run=%q", len(tagged), droppedExample.WorktreePath, worktreeRoot), false
+	}
+	candidates = survivors
+
+	// BaseCommit filter (cumulative).
+	survivors, droppedExample = applyExplainerFilter(candidates, func(st *session.State) bool {
+		return headSHA == "" || st.BaseCommit == "" || st.BaseCommit == headSHA
+	})
+	if len(survivors) == 0 {
+		return fmt.Sprintf("found %d tagged review session(s) but BaseCommit mismatch: state=%q, run=%q (HEAD moved between review start and first agent turn?)", len(tagged), droppedExample.BaseCommit, headSHA), false
+	}
+	candidates = survivors
+
+	// StartedAt window filter (cumulative).
+	survivors, _ = applyExplainerFilter(candidates, func(st *session.State) bool {
+		return summary.StartedAt.IsZero() || !st.StartedAt.Before(summary.StartedAt.Add(-5*time.Second))
+	})
+	if len(survivors) == 0 {
+		return fmt.Sprintf("found %d tagged review session(s) but they started before the review run window (stale session state from a prior run?)", len(tagged)), false
+	}
+	candidates = survivors
+
+	// AgentType filter (per-agent). Each run's wantType is checked against
+	// the remaining candidates; if no candidate's AgentType matches, that
+	// specific agent is named. Lenient cases (state.AgentType=="" or
+	// wantType=="") count as a match, matching the matcher's behavior.
 	for _, run := range summary.AgentRuns {
 		wantType := agentTypeForReviewAgent(run.Name)
 		if wantType == "" {
@@ -149,7 +164,7 @@ func explainEmptyManifest(
 		}
 		var observedType string
 		anyMatch := false
-		for _, st := range tagged {
+		for _, st := range candidates {
 			if st.AgentType == "" || st.AgentType == wantType {
 				anyMatch = true
 				break
@@ -162,6 +177,23 @@ func explainEmptyManifest(
 	}
 
 	return fmt.Sprintf("found %d tagged review session(s) but matcher rejected all of them (no filter explained the rejection — please report this as a bug)", len(tagged)), true
+}
+
+// applyExplainerFilter returns the subset of candidates for which keep is
+// true plus a pointer to the first dropped state (or nil if none dropped).
+// The dropped example is used to populate observed-vs-expected values in
+// the diagnostic when a filter empties the candidate set.
+func applyExplainerFilter(candidates []*session.State, keep func(*session.State) bool) (survivors []*session.State, droppedExample *session.State) {
+	for _, st := range candidates {
+		if keep(st) {
+			survivors = append(survivors, st)
+			continue
+		}
+		if droppedExample == nil {
+			droppedExample = st
+		}
+	}
+	return survivors, droppedExample
 }
 
 func matchReviewSessionState(
