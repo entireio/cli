@@ -1,0 +1,28 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "b9e664ce93dc",
+  "strategy": "manual-commit",
+  "branch": "entire-labs-investigate",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/investigate/tui_detail.go",
+    "cmd/entire/cli/investigate/tui_detail_test.go",
+    "cmd/entire/cli/investigate/tui_text.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b9/e664ce93dc/0/metadata.json",
+      "transcript": "/b9/e664ce93dc/0/transcript.jsonl",
+      "content_hash": "/b9/e664ce93dc/0/transcript_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  },
+  "has_investigation": true
+}
