@@ -10,7 +10,6 @@ package review
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -147,8 +146,9 @@ func detectScopeBaseRef(_ context.Context, repo *git.Repository) (string, error)
 }
 
 // repoWorktreePath returns the working-tree path for repo, or an error if the
-// repo is bare or its worktree can't be resolved. detectScopeBaseRef needs
-// this to invoke `git for-each-ref` with the right working directory.
+// repo is bare or its worktree can't be resolved. ComputeScopeStats uses this
+// as the cwd for the runGit invocations in countCommits / countFilesChanged /
+// countUncommitted.
 func repoWorktreePath(repo *git.Repository) (string, error) {
 	wt, err := repo.Worktree()
 	if err != nil {
@@ -159,7 +159,7 @@ func repoWorktreePath(repo *git.Repository) (string, error) {
 
 // fallbackScopeRef returns the first existing ref from the fallback chain:
 // origin/HEAD → origin/main → origin/master → main → master.
-// Returns an error if none exist.
+// Returns an error naming the tried refs if none exist.
 func fallbackScopeRef(repo *git.Repository) (string, error) {
 	chain := []string{"origin/HEAD", "origin/main", "origin/master", "main", "master"}
 	for _, name := range chain {
@@ -167,7 +167,10 @@ func fallbackScopeRef(repo *git.Repository) (string, error) {
 			return name, nil
 		}
 	}
-	return "", errors.New("no suitable ancestor branch found; configure a base ref explicitly")
+	return "", fmt.Errorf(
+		"no mainline ref found (tried %s); pass --base <ref> to scope the review explicitly, "+
+			"or run `git fetch` to populate origin refs",
+		strings.Join(chain, ", "))
 }
 
 // refExists reports whether a ref with the given short name exists in repo.

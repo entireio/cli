@@ -159,6 +159,56 @@ func TestDetectScopeBaseRef_BranchOffMain(t *testing.T) {
 	}
 }
 
+// TestCountFilesChanged_ThreeDotIgnoresUpstreamOnlyChanges verifies that
+// countFilesChanged uses three-dot diff syntax (base...HEAD = merge-base
+// diff) so files modified on baseRef AFTER the branch was cut are not
+// counted as part of the branch's file delta. With the buggy two-dot
+// variant (`base..HEAD`), every upstream-only change appears as a
+// "reversed" delta and inflates the banner's "files changed" count —
+// a user-visible numeric regression that no other test guards against
+// because they only exercise fast-forward branches.
+// Cannot use t.Parallel because it modifies disk state.
+func TestCountFilesChanged_ThreeDotIgnoresUpstreamOnlyChanges(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+
+	// Initial commit on main (the eventual merge-base).
+	commitFile(t, dir, "root.go", "package main", "init")
+
+	// Branch off main and commit one file unique to feat/x.
+	testutil.GitCheckoutNewBranch(t, dir, "feat/x")
+	commitFile(t, dir, "feat.go", "package main", "feat-only change")
+
+	// Switch back to main and add a commit AFTER the branch point. This is
+	// the upstream-only change that two-dot diff would mis-count.
+	//nolint:noctx // test helper
+	checkout := exec.Command("git", "checkout", defaultBranchName)
+	checkout.Dir = dir
+	if out, err := checkout.CombinedOutput(); err != nil {
+		t.Fatalf("checkout main: %v\n%s", err, out)
+	}
+	commitFile(t, dir, "main-only.go", "package main", "post-branch main change")
+
+	// Return to feat/x — this is the branch the user would be reviewing.
+	//nolint:noctx // test helper
+	checkout = exec.Command("git", "checkout", "feat/x")
+	checkout.Dir = dir
+	if out, err := checkout.CombinedOutput(); err != nil {
+		t.Fatalf("checkout feat/x: %v\n%s", err, out)
+	}
+
+	ctx := context.Background()
+	got, err := countFilesChanged(ctx, dir, defaultBranchName)
+	if err != nil {
+		t.Fatalf("countFilesChanged: %v", err)
+	}
+	// Three-dot: only `feat.go` (the file unique to feat/x's history). With
+	// two-dot, the count would be 2 (also `main-only.go` as a reverse delta).
+	if got != 1 {
+		t.Errorf("countFilesChanged = %d, want 1 (three-dot diff vs main; two-dot would return 2)", got)
+	}
+}
+
 // TestDetectScopeBaseRef_PrefersMainOverAncestorBranches verifies that the
 // scope detection picks the mainline (origin/main → origin/master → main →
 // master) regardless of whether intermediate ancestor branches exist with

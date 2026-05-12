@@ -365,12 +365,14 @@ func runSingleAgentPath(
 	// 5. Resolve HEAD SHA and worktree root.
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve worktree root: %w", err)
 	}
 
 	// 6. Resolve HEAD SHA and detect scope.
 	headSHA, shaErr := currentHeadSHA(ctx, worktreeRoot)
 	if shaErr != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
 	scopeBaseRef, scopeErr := detectScope(ctx, worktreeRoot, baseOverride, out)
@@ -495,10 +497,12 @@ func runMultiAgentPath(
 	// Resolve worktree root and HEAD SHA for scope detection.
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve worktree root: %w", err)
 	}
 	headSHA, shaErr := currentHeadSHA(ctx, worktreeRoot)
 	if shaErr != nil {
+		cmd.SilenceUsage = true
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
 
