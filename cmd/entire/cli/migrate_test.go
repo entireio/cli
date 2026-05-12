@@ -34,6 +34,15 @@ import (
 // initMigrateTestRepo creates a repo with an initial commit.
 func initMigrateTestRepo(t *testing.T) *git.Repository {
 	t.Helper()
+	repo, _ := initMigrateTestRepoWithDir(t)
+	return repo
+}
+
+// initMigrateTestRepoWithDir is like initMigrateTestRepo but also returns the
+// working tree directory, for tests that need to invoke the real `git` binary
+// (e.g., to exercise lookupV1CommitInfo's `git log` shell-out).
+func initMigrateTestRepoWithDir(t *testing.T) (*git.Repository, string) {
+	t.Helper()
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "README.md", "init")
@@ -43,7 +52,7 @@ func initMigrateTestRepo(t *testing.T) *git.Repository {
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	return repo
+	return repo, dir
 }
 
 // writeV1Checkpoint writes a checkpoint to the v1 branch for testing.
@@ -401,6 +410,12 @@ func TestMigrateCheckpointsV2_PacksFullGenerationsOldestFirst(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"0000000000001", "0000000000002"}, archived)
 
+	pendingPublications, err := v2Store.ReadPendingFullGenerationPublications(ctx)
+	require.NoError(t, err)
+	require.Len(t, pendingPublications, 2)
+	assert.Equal(t, paths.V2FullRefPrefix+"0000000000001", pendingPublications[0].ArchiveRefName)
+	assert.Equal(t, paths.V2FullRefPrefix+"0000000000002", pendingPublications[1].ArchiveRefName)
+
 	expectedBatches := [][]int{
 		{0, 1},
 		{2, 3},
@@ -436,6 +451,43 @@ func TestMigrateCheckpointsV2_PacksFullGenerationsOldestFirst(t *testing.T) {
 	require.NoError(t, err)
 	_, err = currentTree.Tree(checkpointIDs[4].Path())
 	require.NoError(t, err, "/full/current should contain final partial checkpoint")
+}
+
+func TestMigrateCheckpointsV2_RollsBackArchiveWhenPublicationQueueFails(t *testing.T) {
+	oldMax := migrateMaxCheckpointsPerGeneration
+	migrateMaxCheckpointsPerGeneration = 2
+	t.Cleanup(func() {
+		migrateMaxCheckpointsPerGeneration = oldMax
+	})
+
+	repo := initMigrateTestRepo(t)
+	v1Store, v2Store := newMigrateStores(repo)
+	ctx := context.Background()
+
+	for i, cpID := range []id.CheckpointID{
+		id.MustCheckpointID("000000000301"),
+		id.MustCheckpointID("000000000302"),
+	} {
+		writeV1Checkpoint(t, v1Store, cpID, "session-queue-fail-"+strconv.Itoa(i),
+			[]byte(`{"type":"assistant","message":"checkpoint `+strconv.Itoa(i)+`"}`+"\n"),
+			[]string{"prompt " + strconv.Itoa(i)})
+	}
+
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+	blockingPath := filepath.Join(worktree.Filesystem().Root(), ".git", "entire-v2-rotations")
+	require.NoError(t, os.WriteFile(blockingPath, []byte("not a directory"), 0o600))
+
+	var stdout bytes.Buffer
+	result, writtenRefs, err := migrateCheckpointsV2(ctx, repo, v1Store, v2Store, &stdout, false)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to queue migrated raw transcript generation for push")
+	assert.Empty(t, writtenRefs)
+	assert.NotNil(t, result)
+
+	archived, listErr := v2Store.ListArchivedGenerations()
+	require.NoError(t, listErr)
+	assert.Empty(t, archived, "failed queueing must not leave an unqueued archive ref behind")
 }
 
 func TestUpdateV2FullCurrentRefRejectsConcurrentChange(t *testing.T) {
@@ -564,8 +616,7 @@ func TestMigrateCheckpointsV2_RerunResumesInterruptedMigration(t *testing.T) {
 	require.NoError(t, migrateErr)
 	require.NotNil(t, fullCheckpoint)
 	require.NotEmpty(t, mainOpts)
-	_, err = v2Store.WriteCommittedMainBatch(ctx, mainOpts)
-	require.NoError(t, err)
+	require.NoError(t, v2Store.WriteCommittedMainBatch(ctx, mainOpts))
 
 	hasFullBefore, err := v2Store.HasFullSessionArtifacts(cpID, 0)
 	require.NoError(t, err)
@@ -2049,4 +2100,106 @@ func TestSortMigratableCheckpoints(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestDryRunCheckpointsV2_NoV1Checkpoints(t *testing.T) {
+	t.Parallel()
+	repo := initMigrateTestRepo(t)
+	v1Store, v2Store := newMigrateStores(repo)
+
+	var out bytes.Buffer
+	pending, total, err := dryRunCheckpointsV2(context.Background(), v1Store, v2Store, "", &out)
+	require.NoError(t, err)
+	assert.Equal(t, 0, pending)
+	assert.Equal(t, 0, total)
+	assert.Contains(t, out.String(), "No v1 checkpoints found")
+}
+
+func TestDryRunCheckpointsV2_AllAlreadyMigrated(t *testing.T) {
+	t.Parallel()
+	repo := initMigrateTestRepo(t)
+	v1Store, v2Store := newMigrateStores(repo)
+
+	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
+	writeV1Checkpoint(t, v1Store, cpID, "session-001",
+		[]byte("{\"type\":\"assistant\",\"message\":\"hi\"}\n"),
+		[]string{"prompt"},
+	)
+
+	// Migrate once so v2 has the entry, then dry-run should report nothing pending.
+	var migrateOut bytes.Buffer
+	_, _, err := migrateCheckpointsV2(context.Background(), repo, v1Store, v2Store, &migrateOut, false)
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	pending, total, err := dryRunCheckpointsV2(context.Background(), v1Store, v2Store, "", &out)
+	require.NoError(t, err)
+	assert.Equal(t, 0, pending)
+	assert.Equal(t, 1, total)
+	assert.Contains(t, out.String(), "All 1 v1 checkpoints are already in v2")
+}
+
+func TestDryRunCheckpointsV2_RendersV1CommitFromGit(t *testing.T) {
+	t.Parallel()
+	repo, dir := initMigrateTestRepoWithDir(t)
+	v1Store, v2Store := newMigrateStores(repo)
+
+	cpID := id.MustCheckpointID("abcdef012345")
+	writeV1Checkpoint(t, v1Store, cpID, "session-real",
+		[]byte("{\"type\":\"assistant\",\"message\":\"x\"}\n"),
+		[]string{"prompt"},
+	)
+
+	var out bytes.Buffer
+	pending, _, err := dryRunCheckpointsV2(context.Background(), v1Store, v2Store, dir, &out)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pending)
+
+	rendered := out.String()
+	assert.Contains(t, rendered, cpID.String())
+	// The path-scoped `git log` should resolve a real short SHA, not the placeholder.
+	assert.NotContains(t, rendered, "-------",
+		"expected lookupV1CommitInfo to find a v1 commit short hash, got placeholder")
+	// Investigation hint references the same path layout.
+	assert.Contains(t, rendered, "git show entire/checkpoints/v1:ab/cdef012345")
+}
+
+func TestDryRunCheckpointsV2_PendingListed(t *testing.T) {
+	t.Parallel()
+	repo := initMigrateTestRepo(t)
+	v1Store, v2Store := newMigrateStores(repo)
+
+	migratedID := id.MustCheckpointID("aaaaaaaaaaaa")
+	pendingID := id.MustCheckpointID("bbbbbbbbbbbb")
+	writeV1Checkpoint(t, v1Store, migratedID, "session-migrated",
+		[]byte("{\"type\":\"assistant\",\"message\":\"a\"}\n"),
+		[]string{"a"},
+	)
+	writeV1Checkpoint(t, v1Store, pendingID, "session-pending",
+		[]byte("{\"type\":\"assistant\",\"message\":\"b\"}\n"),
+		[]string{"b"},
+	)
+
+	// Migrate only the first checkpoint into v2 by writing it directly.
+	require.NoError(t, v2Store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+		CheckpointID: migratedID,
+		SessionID:    "session-migrated",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("{\"type\":\"assistant\",\"message\":\"a\"}\n")),
+		Prompts:      []string{"a"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}))
+
+	var out bytes.Buffer
+	pending, total, err := dryRunCheckpointsV2(context.Background(), v1Store, v2Store, "", &out)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pending)
+	assert.Equal(t, 2, total)
+
+	rendered := out.String()
+	assert.Contains(t, rendered, "1 of 2 v1 checkpoints not yet in v2")
+	assert.Contains(t, rendered, pendingID.String())
+	assert.NotContains(t, rendered, migratedID.String())
+	assert.Contains(t, rendered, "Run 'entire migrate --checkpoints v2'")
 }

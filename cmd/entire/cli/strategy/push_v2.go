@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -25,7 +26,7 @@ import (
 )
 
 // tryPushRef attempts to push a custom ref using an explicit refspec.
-func tryPushRef(ctx context.Context, target string, refName plumbing.ReferenceName) (pushResult, error) {
+func tryPushRef(ctx context.Context, target string, refName plumbing.ReferenceName) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -33,10 +34,10 @@ func tryPushRef(ctx context.Context, target string, refName plumbing.ReferenceNa
 	result, err := remote.Push(ctx, target, refSpec)
 	outputStr := result.Output
 	if err != nil {
-		return pushResult{}, classifyPushFailure(ctx, outputStr, err)
+		return classifyPushFailure(ctx, outputStr, err)
 	}
 
-	return parsePushResult(outputStr), nil
+	return nil
 }
 
 type v2RefPushResult struct {
@@ -45,7 +46,16 @@ type v2RefPushResult struct {
 	err     error
 }
 
+type pendingV2FullGenerationPublicationResult struct {
+	successfulRefs          []plumbing.ReferenceName
+	fullCurrentResetHandled bool
+}
+
 func tryPushV2Refs(ctx context.Context, target string, refs []plumbing.ReferenceName) []v2RefPushResult {
+	if len(refs) == 0 {
+		return nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -104,6 +114,180 @@ func pushV2RefsWithRecovery(ctx context.Context, target string, refs []plumbing.
 	return results
 }
 
+func publishPendingV2FullGenerationPublications(
+	ctx context.Context,
+	repo *git.Repository,
+	store *checkpoint.V2GitStore,
+	target string,
+	publications []checkpoint.PendingV2FullGenerationPublication,
+) (pendingV2FullGenerationPublicationResult, error) {
+	var result pendingV2FullGenerationPublicationResult
+	if len(publications) == 0 {
+		return result, nil
+	}
+
+	currentRefName := plumbing.ReferenceName(paths.V2FullCurrentRefName)
+	var localCurrentRef *plumbing.Reference
+	for {
+		latestResetPublicationIndex := latestPendingFullCurrentResetPublicationIndex(publications)
+		if latestResetPublicationIndex == -1 {
+			break
+		}
+		var err error
+		localCurrentRef, err = repo.Reference(currentRefName, true)
+		if err != nil {
+			return result, fmt.Errorf("read local %s: %w", shortRefName(currentRefName), err)
+		}
+		latestResetPublication := publications[latestResetPublicationIndex]
+		if pendingResetPublicationMatchesLocalCurrent(ctx, repo, latestResetPublication, localCurrentRef.Hash()) {
+			break
+		}
+		if err := store.RemovePendingFullGenerationPublications(ctx, []checkpoint.PendingV2FullGenerationPublication{latestResetPublication}); err != nil {
+			return result, fmt.Errorf("clear stale pending v2 full generation publications: %w", err)
+		}
+		publications = slices.Delete(publications, latestResetPublicationIndex, latestResetPublicationIndex+1)
+	}
+
+	archiveRefs := pendingFullArchiveRefs(publications)
+	if len(archiveRefs) > 0 {
+		var archivePushErr error
+		for _, pushResult := range tryPushV2Refs(ctx, target, archiveRefs) {
+			if pushResult.err != nil {
+				if archivePushErr == nil {
+					archivePushErr = fmt.Errorf("push pending archive %s: %w", shortRefName(pushResult.refName), pushResult.err)
+				}
+				continue
+			}
+			result.successfulRefs = append(result.successfulRefs, pushResult.refName)
+		}
+		if archivePushErr != nil {
+			return result, archivePushErr
+		}
+	}
+
+	resetPublications := pendingFullCurrentResetPublications(publications)
+	if len(resetPublications) == 0 {
+		if err := store.RemovePendingFullGenerationPublications(ctx, publications); err != nil {
+			return result, fmt.Errorf("clear pending v2 full generation publications: %w", err)
+		}
+		return result, nil
+	}
+
+	remoteCurrentHash, remoteCurrentFound, err := lsRemoteRefHash(ctx, target, currentRefName)
+	if err != nil {
+		return result, fmt.Errorf("read remote %s: %w", shortRefName(currentRefName), err)
+	}
+	if remoteCurrentFound && remoteCurrentHash == localCurrentRef.Hash() {
+		if err := store.RemovePendingFullGenerationPublications(ctx, publications); err != nil {
+			return result, fmt.Errorf("clear pending v2 full generation publications: %w", err)
+		}
+		result.fullCurrentResetHandled = true
+		return result, nil
+	}
+
+	if remoteCurrentFound && !pendingResetPublicationsContainAncestor(ctx, repo, resetPublications, remoteCurrentHash) {
+		return result, fmt.Errorf("remote %s at %s is not covered by pending local archives", shortRefName(currentRefName), remoteCurrentHash)
+	}
+
+	expectedRemoteHash := ""
+	if remoteCurrentFound {
+		expectedRemoteHash = remoteCurrentHash.String()
+	}
+	currentRefSpec := fmt.Sprintf("%s:%s", currentRefName, currentRefName)
+	if err := pushWithLease(ctx, target, currentRefSpec, currentRefName.String(), expectedRemoteHash, "push rotated "+shortRefName(currentRefName)); err != nil {
+		return result, fmt.Errorf("push rotated %s: %w", shortRefName(currentRefName), err)
+	}
+	result.successfulRefs = append(result.successfulRefs, currentRefName)
+	result.fullCurrentResetHandled = true
+
+	if err := store.RemovePendingFullGenerationPublications(ctx, publications); err != nil {
+		return result, fmt.Errorf("clear pending v2 full generation publications: %w", err)
+	}
+	return result, nil
+}
+
+func pendingFullArchiveRefs(publications []checkpoint.PendingV2FullGenerationPublication) []plumbing.ReferenceName {
+	seen := make(map[plumbing.ReferenceName]struct{}, len(publications))
+	refs := make([]plumbing.ReferenceName, 0, len(publications))
+	for _, publication := range publications {
+		suffix, ok := strings.CutPrefix(publication.ArchiveRefName, paths.V2FullRefPrefix)
+		if !ok || !checkpoint.GenerationRefPattern.MatchString(suffix) {
+			continue
+		}
+		refName := plumbing.ReferenceName(paths.V2FullRefPrefix + suffix)
+		if _, ok := seen[refName]; ok {
+			continue
+		}
+		seen[refName] = struct{}{}
+		refs = append(refs, refName)
+	}
+	return refs
+}
+
+func pendingFullCurrentResetPublications(publications []checkpoint.PendingV2FullGenerationPublication) []checkpoint.PendingV2FullGenerationPublication {
+	resetPublications := make([]checkpoint.PendingV2FullGenerationPublication, 0, len(publications))
+	for _, publication := range publications {
+		if publication.PreviousFullCurrentHash == "" && publication.ResetFullCurrentRootHash == "" {
+			continue
+		}
+		resetPublications = append(resetPublications, publication)
+	}
+	return resetPublications
+}
+
+func pendingResetPublicationsContainAncestor(ctx context.Context, repo *git.Repository, publications []checkpoint.PendingV2FullGenerationPublication, hash plumbing.Hash) bool {
+	for _, publication := range publications {
+		if publication.ArchiveCommitHash == "" {
+			continue
+		}
+		if IsAncestorOf(ctx, repo, hash, plumbing.NewHash(publication.ArchiveCommitHash)) {
+			return true
+		}
+	}
+	return false
+}
+
+func latestPendingFullCurrentResetPublicationIndex(publications []checkpoint.PendingV2FullGenerationPublication) int {
+	for i := len(publications) - 1; i >= 0; i-- {
+		if publications[i].PreviousFullCurrentHash == "" && publications[i].ResetFullCurrentRootHash == "" {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+func pendingResetPublicationMatchesLocalCurrent(ctx context.Context, repo *git.Repository, publication checkpoint.PendingV2FullGenerationPublication, localCurrentHash plumbing.Hash) bool {
+	if len(publication.ResetFullCurrentRootHash) != 40 {
+		return false
+	}
+	return IsAncestorOf(ctx, repo, plumbing.NewHash(publication.ResetFullCurrentRootHash), localCurrentHash)
+}
+
+func lsRemoteRefHash(ctx context.Context, target string, refName plumbing.ReferenceName) (plumbing.Hash, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	output, err := remote.LsRemote(ctx, target, refName.String())
+	if err != nil {
+		return plumbing.ZeroHash, false, fmt.Errorf("ls-remote %s: %w", refName, err)
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(output)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 || parts[1] != refName.String() {
+			continue
+		}
+		if len(parts[0]) != 40 {
+			return plumbing.ZeroHash, false, fmt.Errorf("invalid remote hash %q for %s", parts[0], refName)
+		}
+		return plumbing.NewHash(parts[0]), true, nil
+	}
+	return plumbing.ZeroHash, false, nil
+}
+
 func refSpecsForRefs(refs []plumbing.ReferenceName) []string {
 	refSpecs := make([]string, 0, len(refs))
 	for _, refName := range refs {
@@ -114,7 +298,7 @@ func refSpecsForRefs(refs []plumbing.ReferenceName) []string {
 
 func parsePushRefResults(ctx context.Context, output string, refs []plumbing.ReferenceName, pushErr error) []v2RefPushResult {
 	parsed := make(map[plumbing.ReferenceName]v2RefPushResult, len(refs))
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		result, ok := parsePushRefStatusLine(line)
 		if ok {
 			parsed[result.refName] = result
@@ -215,10 +399,13 @@ func fetchAndMergeRef(ctx context.Context, target string, refName plumbing.Refer
 	tmpRefName := plumbing.ReferenceName("refs/entire-fetch-tmp/" + tmpRefSuffix)
 	refSpec := fmt.Sprintf("+%s:%s", refName, tmpRefName)
 
+	// Recovery flattens fetched trees recursively, so it needs a complete object
+	// graph instead of the normal blobless sync fetch.
 	if output, err := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:    fetchTarget,
 		RefSpecs:  []string{refSpec},
 		NoTags:    true,
+		NoFilter:  true,
 		ExtraArgs: []string{"--no-write-fetch-head"},
 	}); err != nil {
 		return fmt.Errorf("fetch failed: %s", output)
@@ -234,9 +421,9 @@ func fetchAndMergeRef(ctx context.Context, target string, refName plumbing.Refer
 
 	// Check for rotation conflict on /full/current
 	if refName == plumbing.ReferenceName(paths.V2FullCurrentRefName) {
-		remoteOnlyArchives, detectErr := detectRemoteOnlyArchives(ctx, target, repo)
-		if detectErr == nil && len(remoteOnlyArchives) > 0 {
-			return handleRotationConflict(ctx, target, fetchTarget, repo, refName, tmpRefName, remoteOnlyArchives)
+		remoteRotationArchives, detectErr := detectRemoteRotationArchives(ctx, target, repo)
+		if detectErr == nil && len(remoteRotationArchives) > 0 {
+			return handleRotationConflict(ctx, target, fetchTarget, repo, refName, tmpRefName, remoteRotationArchives)
 		}
 	}
 
@@ -295,9 +482,10 @@ func fetchAndMergeRef(ctx context.Context, target string, refName plumbing.Refer
 	return nil
 }
 
-// detectRemoteOnlyArchives discovers archived generation refs on the remote
-// that don't exist locally. Returns them sorted ascending (oldest first).
-func detectRemoteOnlyArchives(ctx context.Context, target string, repo *git.Repository) ([]string, error) {
+// detectRemoteRotationArchives discovers archived generation refs on the remote
+// that are missing locally or whose local ref hash differs from the remote ref
+// hash. Returns them sorted ascending (oldest first).
+func detectRemoteRotationArchives(ctx context.Context, target string, repo *git.Repository) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -306,8 +494,8 @@ func detectRemoteOnlyArchives(ctx context.Context, target string, repo *git.Repo
 		return nil, fmt.Errorf("ls-remote failed: %w", err)
 	}
 
-	var remoteOnly []string
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	var remoteRotationArchives []string
+	for line := range strings.SplitSeq(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
 		}
@@ -320,57 +508,189 @@ func detectRemoteOnlyArchives(ctx context.Context, target string, repo *git.Repo
 		if suffix == "current" || !checkpoint.GenerationRefPattern.MatchString(suffix) {
 			continue
 		}
-		// Only check for existence, not hash equality. A locally-present archive
-		// could be stale if another machine updated it via rotation conflict recovery,
-		// but that's unlikely and the checkpoints are still on /main regardless.
-		if _, err := repo.Reference(plumbing.ReferenceName(refName), true); err != nil {
-			remoteOnly = append(remoteOnly, suffix)
+		if len(parts[0]) != 40 {
+			return nil, fmt.Errorf("invalid remote archive hash %q for %s", parts[0], refName)
+		}
+		remoteHash := plumbing.NewHash(parts[0])
+		localRef, err := repo.Reference(plumbing.ReferenceName(refName), true)
+		if err != nil || localRef.Hash() != remoteHash {
+			remoteRotationArchives = append(remoteRotationArchives, suffix)
 		}
 	}
 
-	sort.Strings(remoteOnly)
-	return remoteOnly, nil
+	sort.Strings(remoteRotationArchives)
+	return remoteRotationArchives, nil
 }
 
-// handleRotationConflict handles the case where remote /full/current was rotated.
-// Merges local /full/current into the latest remote archived generation to avoid
-// duplicating checkpoint data, then adopts remote's /full/current as local.
-func handleRotationConflict(ctx context.Context, target, fetchTarget string, repo *git.Repository, refName, tmpRefName plumbing.ReferenceName, remoteOnlyArchives []string) error {
-	// Use the latest remote-only archive
-	latestArchive := remoteOnlyArchives[len(remoteOnlyArchives)-1]
-	archiveRefName := plumbing.ReferenceName(paths.V2FullRefPrefix + latestArchive)
+type fetchedRemoteRotationArchive struct {
+	repo       *git.Repository
+	refName    plumbing.ReferenceName
+	tmpRefName plumbing.ReferenceName
+	ref        *plumbing.Reference
+	tree       *object.Tree
+}
 
-	// Fetch the latest archived generation
-	archiveTmpRef := plumbing.ReferenceName("refs/entire-fetch-tmp/archive-" + latestArchive)
-	archiveRefSpec := fmt.Sprintf("+%s:%s", archiveRefName, archiveTmpRef)
-	if output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
-		Remote:    fetchTarget,
-		RefSpecs:  []string{archiveRefSpec},
-		NoTags:    true,
-		ExtraArgs: []string{"--no-write-fetch-head"},
-	}); fetchErr != nil {
-		return fmt.Errorf("fetch archived generation failed: %s", output)
-	}
-	defer func() {
-		_ = repo.Storer.RemoveReference(archiveTmpRef) //nolint:errcheck // cleanup is best-effort
-	}()
-
-	// Get archived generation state
+func readFetchedRemoteRotationArchive(repo *git.Repository, archive string) (fetchedRemoteRotationArchive, error) {
+	archiveRefName := plumbing.ReferenceName(paths.V2FullRefPrefix + archive)
+	archiveTmpRef := archiveTmpRefName(archive)
 	archiveRef, err := repo.Reference(archiveTmpRef, true)
 	if err != nil {
-		return fmt.Errorf("failed to get archived ref: %w", err)
+		return fetchedRemoteRotationArchive{}, fmt.Errorf("failed to get archived ref: %w", err)
 	}
 	archiveCommit, err := repo.CommitObject(archiveRef.Hash())
 	if err != nil {
-		return fmt.Errorf("failed to get archive commit: %w", err)
+		return fetchedRemoteRotationArchive{}, fmt.Errorf("failed to get archive commit: %w", err)
 	}
 	archiveTree, err := archiveCommit.Tree()
 	if err != nil {
-		return fmt.Errorf("failed to get archive tree: %w", err)
+		return fetchedRemoteRotationArchive{}, fmt.Errorf("failed to get archive tree: %w", err)
 	}
 
-	// Get local /full/current state
+	return fetchedRemoteRotationArchive{
+		repo:       repo,
+		refName:    archiveRefName,
+		tmpRefName: archiveTmpRef,
+		ref:        archiveRef,
+		tree:       archiveTree,
+	}, nil
+}
+
+func fetchRelatedRemoteRotationArchive(ctx context.Context, fetchTarget string, archives []string, localCurrentHash plumbing.Hash) (fetchedRemoteRotationArchive, error) {
+	refSpecs := make([]string, 0, len(archives))
+	archiveTmpRefs := make([]plumbing.ReferenceName, 0, len(archives))
+
+	for _, archive := range archives {
+		archiveRefName := plumbing.ReferenceName(paths.V2FullRefPrefix + archive)
+		archiveTmpRef := archiveTmpRefName(archive)
+		refSpecs = append(refSpecs, fmt.Sprintf("+%s:%s", archiveRefName, archiveTmpRef))
+		archiveTmpRefs = append(archiveTmpRefs, archiveTmpRef)
+	}
+
+	// These archive commits are read immediately through go-git for tree
+	// flattening, so fetch the complete refs rather than blobless packfiles.
+	if output, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:    fetchTarget,
+		RefSpecs:  refSpecs,
+		NoTags:    true,
+		NoFilter:  true,
+		ExtraArgs: []string{"--no-write-fetch-head"},
+	}); fetchErr != nil {
+		if repo, openErr := OpenRepository(ctx); openErr == nil {
+			cleanupFetchedArchiveTmpRefs(repo, archiveTmpRefs)
+		}
+		return fetchedRemoteRotationArchive{}, fmt.Errorf("fetch archived generations failed: %s", output)
+	}
+
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return fetchedRemoteRotationArchive{}, fmt.Errorf("reopen repository after fetching archived generations: %w", err)
+	}
+	tmpRefsToCleanup := archiveTmpRefs
+	defer func() {
+		cleanupFetchedArchiveTmpRefs(repo, tmpRefsToCleanup)
+	}()
+
+	localCurrentAncestors, ok := currentGenerationAncestors(ctx, repo, localCurrentHash)
+	if !ok {
+		return fetchedRemoteRotationArchive{}, errors.New("failed to read local /full/current history")
+	}
+	for _, archive := range archives {
+		fetched, err := readFetchedRemoteRotationArchive(repo, archive)
+		if err != nil {
+			return fetchedRemoteRotationArchive{}, err
+		}
+		if archiveSharesHistoryWithCurrentGeneration(ctx, repo, localCurrentAncestors, fetched.ref.Hash()) {
+			tmpRefsToCleanup = removeRef(tmpRefsToCleanup, fetched.tmpRefName)
+			return fetched, nil
+		}
+	}
+	return fetchedRemoteRotationArchive{}, errors.New("no remote archive shares history with local /full/current")
+}
+
+func archiveTmpRefName(archive string) plumbing.ReferenceName {
+	return plumbing.ReferenceName("refs/entire-fetch-tmp/archive-" + archive)
+}
+
+func cleanupFetchedArchiveTmpRefs(repo *git.Repository, tmpRefs []plumbing.ReferenceName) {
+	for _, tmpRef := range tmpRefs {
+		_ = repo.Storer.RemoveReference(tmpRef) //nolint:errcheck // cleanup is best-effort
+	}
+}
+
+func currentGenerationAncestors(ctx context.Context, repo *git.Repository, currentHash plumbing.Hash) (map[plumbing.Hash]struct{}, bool) {
+	ancestors := make(map[plumbing.Hash]struct{})
+	iter, err := repo.Log(&git.LogOptions{From: currentHash})
+	if err != nil {
+		return nil, false
+	}
+	defer iter.Close()
+
+	count := 0
+	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best-effort search, errors are non-fatal
+		if err := ctx.Err(); err != nil {
+			return err //nolint:wrapcheck // Propagating context cancellation
+		}
+		count++
+		if count > MaxCommitTraversalDepth {
+			return errStop
+		}
+		ancestors[c.Hash] = struct{}{}
+		return nil
+	})
+	return ancestors, true
+}
+
+func archiveSharesHistoryWithCurrentGeneration(ctx context.Context, repo *git.Repository, currentAncestors map[plumbing.Hash]struct{}, archiveHash plumbing.Hash) bool {
+	if _, ok := currentAncestors[archiveHash]; ok {
+		return true
+	}
+
+	iter, err := repo.Log(&git.LogOptions{From: archiveHash})
+	if err != nil {
+		return false
+	}
+	defer iter.Close()
+
+	found := false
+	count := 0
+	_ = iter.ForEach(func(c *object.Commit) error { //nolint:errcheck // Best-effort search, errors are non-fatal
+		if err := ctx.Err(); err != nil {
+			return err //nolint:wrapcheck // Propagating context cancellation
+		}
+		count++
+		if count > MaxCommitTraversalDepth {
+			return errStop
+		}
+		if _, ok := currentAncestors[c.Hash]; ok {
+			found = true
+			return errStop
+		}
+		return nil
+	})
+	return found
+}
+
+// handleRotationConflict handles the case where remote /full/current was rotated.
+// Merges local /full/current into the related remote archived generation to avoid
+// duplicating checkpoint data, then adopts remote's /full/current as local.
+func handleRotationConflict(ctx context.Context, target, fetchTarget string, repo *git.Repository, refName, tmpRefName plumbing.ReferenceName, remoteRotationArchives []string) error {
 	localRef, err := repo.Reference(refName, true)
+	if err != nil {
+		return fmt.Errorf("failed to get local ref: %w", err)
+	}
+
+	archive, err := fetchRelatedRemoteRotationArchive(ctx, fetchTarget, remoteRotationArchives, localRef.Hash())
+	if err != nil {
+		return fmt.Errorf("failed to find related archived generation: %w", err)
+	}
+	// fetchRelatedRemoteRotationArchive fetches via git CLI, so continue with
+	// the fresh go-git handle it used to avoid stale pack indexes.
+	repo = archive.repo
+	defer func() {
+		_ = repo.Storer.RemoveReference(archive.tmpRefName) //nolint:errcheck // cleanup is best-effort
+	}()
+
+	localRef, err = repo.Reference(refName, true)
 	if err != nil {
 		return fmt.Errorf("failed to get local ref: %w", err)
 	}
@@ -386,7 +706,7 @@ func handleRotationConflict(ctx context.Context, target, fetchTarget string, rep
 	// Tree-merge local /full/current into archived generation.
 	// Git content-addressing deduplicates shared shard paths automatically.
 	entries := make(map[string]object.TreeEntry)
-	if err := checkpoint.FlattenTree(repo, archiveTree, "", entries); err != nil {
+	if err := checkpoint.FlattenTree(repo, archive.tree, "", entries); err != nil {
 		return fmt.Errorf("failed to flatten archive tree: %w", err)
 	}
 	if err := checkpoint.FlattenTree(repo, localTree, "", entries); err != nil {
@@ -413,19 +733,19 @@ func handleRotationConflict(ctx context.Context, target, fetchTarget string, rep
 
 	// Create commit parented on archive's commit (fast-forward)
 	mergeCommitHash, err := createMergeCommitCommon(ctx, repo, mergedTreeHash,
-		[]plumbing.Hash{archiveRef.Hash()},
+		[]plumbing.Hash{archive.ref.Hash()},
 		"Merge local checkpoints into archived generation")
 	if err != nil {
 		return fmt.Errorf("failed to create merge commit: %w", err)
 	}
 
 	// Update local archived ref and push it
-	newArchiveRef := plumbing.NewHashReference(archiveRefName, mergeCommitHash)
+	newArchiveRef := plumbing.NewHashReference(archive.refName, mergeCommitHash)
 	if err := repo.Storer.SetReference(newArchiveRef); err != nil {
 		return fmt.Errorf("failed to update archive ref: %w", err)
 	}
 
-	if _, pushErr := tryPushRef(ctx, target, archiveRefName); pushErr != nil {
+	if pushErr := tryPushRef(ctx, target, archive.refName); pushErr != nil {
 		return fmt.Errorf("failed to push updated archive: %w", pushErr)
 	}
 
@@ -489,39 +809,66 @@ func updateGenerationTimestamps(repo *git.Repository, genBlobHash plumbing.Hash,
 }
 
 // pushV2Refs pushes v2 checkpoint refs to the target.
-// Pushes /main, /full/current, and the latest archived generation (if any) in
-// one git push. Older archived generations are immutable and were pushed when created.
+// Pushes active refs in one git push. Pending full-generation publications are
+// handled separately before /full/current recovery.
 func pushV2Refs(ctx context.Context, target string) {
-	refs := v2RefsToPush(ctx)
-	if len(refs) == 0 {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		printV2PushFailures(ctx, target, nil, []error{fmt.Errorf("open repository: %w", err)}, false)
+		return
+	}
+	store := checkpoint.NewV2GitStore(repo, target)
+
+	refs := v2RefsToPush(repo)
+	pendingPublications, pendingReadErr := readPendingV2FullGenerationPublications(ctx, store)
+	if pendingReadErr != nil {
+		printV2PushFailures(ctx, target, nil, []error{pendingReadErr}, false)
+		return
+	}
+
+	if len(refs) == 0 && len(pendingPublications) == 0 {
 		return
 	}
 
 	fmt.Fprintln(os.Stderr, "[entire] Syncing and pushing v2 checkpoints...")
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %s...\n", strings.Join(shortRefNames(refs), ", "))
+	pushNames := shortRefNames(refs)
+	if len(pushNames) == 0 {
+		pushNames = []string{"pending v2/full generations"}
+	}
+	fmt.Fprintf(os.Stderr, "[entire] Pushing %s...\n", strings.Join(pushNames, ", "))
 
-	results := pushV2RefsWithRecovery(ctx, target, refs)
 	var failures []error
 	var successfulRefs []plumbing.ReferenceName
 	pushedContent := false
+
+	pendingPublicationResult, pendingPublishErr := publishPendingV2FullGenerationPublications(ctx, repo, store, target, pendingPublications)
+	successfulRefs = append(successfulRefs, pendingPublicationResult.successfulRefs...)
+	if len(pendingPublicationResult.successfulRefs) > 0 {
+		pushedContent = true
+	}
+	if pendingPublishErr != nil {
+		failures = append(failures, fmt.Errorf("couldn't publish pending v2 full generation refs: %w", pendingPublishErr))
+		printV2PushFailures(ctx, target, successfulRefs, failures, pushedContent)
+		return
+	}
+	if pendingPublicationResult.fullCurrentResetHandled {
+		refs = removeRef(refs, plumbing.ReferenceName(paths.V2FullCurrentRefName))
+	}
+
+	results := pushV2RefsWithRecovery(ctx, target, refs)
 	for _, result := range results {
 		if result.err != nil {
 			failures = append(failures, result.err)
 			continue
 		}
-		successfulRefs = append(successfulRefs, result.refName)
+		successfulRefs = appendUniqueRef(successfulRefs, result.refName)
 		if !result.result.upToDate {
 			pushedContent = true
 		}
 	}
 
 	if len(failures) > 0 {
-		printV2PartialPushResult(os.Stderr, successfulRefs, failures)
-		printCheckpointRemoteHint(target)
-		if pushedContent {
-			printSettingsCommitHint(ctx, target)
-		}
-		printCheckpointsV2MigrationHint(ctx)
+		printV2PushFailures(ctx, target, successfulRefs, failures, pushedContent)
 		return
 	}
 
@@ -530,6 +877,14 @@ func pushV2Refs(ctx context.Context, target string) {
 		printSettingsCommitHint(ctx, target)
 	}
 	printCheckpointsV2MigrationHint(ctx)
+}
+
+func readPendingV2FullGenerationPublications(ctx context.Context, store *checkpoint.V2GitStore) ([]checkpoint.PendingV2FullGenerationPublication, error) {
+	publications, err := store.ReadPendingFullGenerationPublications(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read pending v2 full generation publications: %w", err)
+	}
+	return publications, nil
 }
 
 func printV2PartialPushResult(w io.Writer, successfulRefs []plumbing.ReferenceName, failures []error) {
@@ -541,12 +896,16 @@ func printV2PartialPushResult(w io.Writer, successfulRefs []plumbing.ReferenceNa
 	}
 }
 
-func v2RefsToPush(ctx context.Context) []plumbing.ReferenceName {
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil
+func printV2PushFailures(ctx context.Context, target string, successfulRefs []plumbing.ReferenceName, failures []error, pushedContent bool) {
+	printV2PartialPushResult(os.Stderr, successfulRefs, failures)
+	printCheckpointRemoteHint(target)
+	if pushedContent {
+		printSettingsCommitHint(ctx, target)
 	}
+	printCheckpointsV2MigrationHint(ctx)
+}
 
+func v2RefsToPush(repo *git.Repository) []plumbing.ReferenceName {
 	var refs []plumbing.ReferenceName
 	for _, refName := range []plumbing.ReferenceName{
 		plumbing.ReferenceName(paths.V2MainRefName),
@@ -557,15 +916,6 @@ func v2RefsToPush(ctx context.Context) []plumbing.ReferenceName {
 		}
 	}
 
-	// Push only the latest archived generation (most likely to be newly created).
-	store := checkpoint.NewV2GitStore(repo, "")
-	archived, err := store.ListArchivedGenerations()
-	if err != nil || len(archived) == 0 {
-		return refs
-	}
-	latest := archived[len(archived)-1]
-	refs = append(refs, plumbing.ReferenceName(paths.V2FullRefPrefix+latest))
-
 	return refs
 }
 
@@ -575,6 +925,19 @@ func shortRefNames(refs []plumbing.ReferenceName) []string {
 		names = append(names, shortRefName(refName))
 	}
 	return names
+}
+
+func appendUniqueRef(refs []plumbing.ReferenceName, refName plumbing.ReferenceName) []plumbing.ReferenceName {
+	if slices.Contains(refs, refName) {
+		return refs
+	}
+	return append(refs, refName)
+}
+
+func removeRef(refs []plumbing.ReferenceName, refToRemove plumbing.ReferenceName) []plumbing.ReferenceName {
+	return slices.DeleteFunc(refs, func(refName plumbing.ReferenceName) bool {
+		return refName == refToRemove
+	})
 }
 
 // shortRefName returns a human-readable short form of a ref name for log output.

@@ -2,11 +2,13 @@ package lockfile_test
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/lockfile"
 	"github.com/stretchr/testify/assert"
@@ -63,6 +65,36 @@ func TestRelease_PermitsReacquire(t *testing.T) {
 	lk2, err := lockfile.Acquire(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = lk2.Release() }) //nolint:errcheck // test cleanup
+}
+
+func TestWithTimeout_RunsCallback(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "test.lock")
+	called := false
+
+	err := lockfile.WithTimeout(context.Background(), path, time.Second, func() error {
+		called = true
+		assert.Equal(t, os.Getpid(), lockfile.ReadHolderPID(path))
+		return nil
+	})
+
+	require.NoError(t, err)
+	assert.True(t, called)
+}
+
+func TestWithTimeout_ReturnsErrLockedOnTimeout(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "test.lock")
+	lk, err := lockfile.Acquire(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lk.Release() }) //nolint:errcheck // test cleanup
+
+	err = lockfile.WithTimeout(context.Background(), path, time.Nanosecond, func() error {
+		t.Fatal("callback should not run")
+		return nil
+	})
+
+	require.ErrorIs(t, err, lockfile.ErrLocked)
 }
 
 func TestReadHolderPID_EmptyFile(t *testing.T) {

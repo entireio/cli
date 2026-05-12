@@ -46,10 +46,15 @@ func TestNormalizeAgentString(t *testing.T) {
 
 func TestGroupCommitsByDay_SortsNewestFirst(t *testing.T) {
 	t.Parallel()
+
+	localDate := func(year int, month time.Month, day int) *string {
+		return strPtr(time.Date(year, month, day, 12, 0, 0, 0, time.Local).Format(time.RFC3339))
+	}
+
 	commits := []userCommit{
-		{CommitSHA: "aaa", CommitDate: strPtr("2026-01-10T12:00:00Z")},
-		{CommitSHA: "bbb", CommitDate: strPtr("2026-01-12T08:00:00Z")},
-		{CommitSHA: "ccc", CommitDate: strPtr("2026-01-11T15:00:00Z")},
+		{CommitSHA: "aaa", CommitDate: localDate(2026, time.January, 10)},
+		{CommitSHA: "bbb", CommitDate: localDate(2026, time.January, 12)},
+		{CommitSHA: "ccc", CommitDate: localDate(2026, time.January, 11)},
 	}
 	days := groupCommitsByDay(commits)
 

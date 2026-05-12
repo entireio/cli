@@ -1151,11 +1151,9 @@ func TestV2GitStore_WriteCommittedMainBatch_MatchesSequentialWrites(t *testing.T
 	// Sequential repo: today's per-session path.
 	repoSeq := initTestRepo(t)
 	storeSeq := NewV2GitStore(repoSeq, "origin")
-	seqIndexes := make([]int, len(entries))
-	for i, e := range entries {
-		idx, err := storeSeq.writeCommittedMain(ctx, e.toOpts())
+	for _, e := range entries {
+		_, err := storeSeq.writeCommittedMain(ctx, e.toOpts())
 		require.NoError(t, err)
-		seqIndexes[i] = idx
 	}
 
 	// Batch repo: one call.
@@ -1165,12 +1163,12 @@ func TestV2GitStore_WriteCommittedMainBatch_MatchesSequentialWrites(t *testing.T
 	for i, e := range entries {
 		batchOpts[i] = e.toOpts()
 	}
-	batchIndexes, err := storeBatch.WriteCommittedMainBatch(ctx, batchOpts)
-	require.NoError(t, err)
-	require.Equal(t, seqIndexes, batchIndexes, "session indexes must match sequential writes")
+	require.NoError(t, storeBatch.WriteCommittedMainBatch(ctx, batchOpts))
 
 	// Tree equality is the strong invariant: blobs, metadata, summary
-	// aggregation all roll up into the root tree hash.
+	// aggregation, and session-slot assignment all roll up into the root
+	// tree hash. If batch session indexes diverged from sequential, the
+	// trees would differ.
 	treeSeq := v2MainTree(t, repoSeq).Hash
 	treeBatch := v2MainTree(t, repoBatch).Hash
 	require.Equal(t, treeSeq, treeBatch, "batch /main tree must match sequential /main tree")
@@ -1197,9 +1195,7 @@ func TestV2GitStore_WriteCommittedMainBatch_SingleCommit(t *testing.T) {
 	beforeRef, err := repo.Reference(refName, true)
 	require.NoError(t, err)
 
-	indexes, err := store.WriteCommittedMainBatch(ctx, batch)
-	require.NoError(t, err)
-	require.Len(t, indexes, len(batch))
+	require.NoError(t, store.WriteCommittedMainBatch(ctx, batch))
 
 	// Walk the commit chain from the new tip until we hit the previous tip
 	// and count how many commits were added.

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	agenttypes "github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -38,6 +39,7 @@ import (
 func newMigrateCmd() *cobra.Command {
 	var checkpointsFlag string
 	var forceFlag bool
+	var dryRunFlag bool
 
 	cmd := &cobra.Command{
 		Use:    "migrate",
@@ -50,6 +52,9 @@ func newMigrateCmd() *cobra.Command {
 			}
 			if checkpointsFlag != "v2" {
 				return fmt.Errorf("unsupported checkpoints version: %q (only \"v2\" is supported)", checkpointsFlag)
+			}
+			if dryRunFlag && forceFlag {
+				return errors.New("--dry-run and --force cannot be combined")
 			}
 
 			ctx := cmd.Context()
@@ -73,12 +78,17 @@ func newMigrateCmd() *cobra.Command {
 			}
 			defer release()
 
+			if dryRunFlag {
+				return runMigrateCheckpointsV2DryRun(ctx, cmd)
+			}
+
 			return runMigrateCheckpointsV2(ctx, cmd, forceFlag)
 		},
 	}
 
 	cmd.Flags().StringVar(&checkpointsFlag, "checkpoints", "", "Target checkpoint format version (e.g., \"v2\")")
 	cmd.Flags().BoolVar(&forceFlag, "force", false, "Force re-migration of all checkpoints, overwriting existing v2 data")
+	cmd.Flags().BoolVar(&dryRunFlag, "dry-run", false, "List v1 checkpoints not yet in v2 without migrating")
 
 	return cmd
 }
@@ -193,6 +203,137 @@ func runMigrateCheckpointsV2(ctx context.Context, cmd *cobra.Command, force bool
 	}
 
 	return nil
+}
+
+// runMigrateCheckpointsV2DryRun reports v1 checkpoints that have no matching
+// entry on the v2 /main ref. It performs no writes to either checkpoint store
+// (only stdout is touched) and exits zero on success; only setup or git
+// failures produce a non-zero exit.
+func runMigrateCheckpointsV2DryRun(ctx context.Context, cmd *cobra.Command) error {
+	repo, err := strategy.OpenRepository(ctx)
+	if err != nil {
+		cmd.SilenceUsage = true
+		fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run from within a git repository.")
+		return NewSilentError(err)
+	}
+
+	v1Store := checkpoint.NewGitStore(repo)
+	v2Store := checkpoint.NewV2GitStore(repo, migrateRemoteName)
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		// Already validated in RunE; treat any race here as "no SHA lookup".
+		root = ""
+	}
+
+	_, _, err = dryRunCheckpointsV2(ctx, v1Store, v2Store, root, cmd.OutOrStdout())
+	return err
+}
+
+// dryRunCheckpointsV2 inspects v1 vs v2 stores and prints a report. Returns
+// (pendingCount, totalV1, error). The pending set is the same as the trigger
+// for the post-push migration hint: any v1 checkpoint ID absent from v2's
+// /main ref. Output goes to `out`; nothing is written to either store.
+func dryRunCheckpointsV2(ctx context.Context, v1Store *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, repoRoot string, out io.Writer) (int, int, error) {
+	v1List, err := v1Store.ListCommitted(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to list v1 checkpoints: %w", err)
+	}
+	if len(v1List) == 0 {
+		fmt.Fprintln(out, "No v1 checkpoints found.")
+		return 0, 0, nil
+	}
+
+	v2List, err := v2Store.ListCommitted(ctx)
+	if err != nil {
+		return 0, len(v1List), fmt.Errorf("failed to list v2 checkpoints: %w", err)
+	}
+	v2Set := make(map[string]struct{}, len(v2List))
+	for _, info := range v2List {
+		v2Set[info.CheckpointID.String()] = struct{}{}
+	}
+
+	pending := make([]checkpoint.CommittedInfo, 0)
+	for _, info := range v1List {
+		if _, ok := v2Set[info.CheckpointID.String()]; !ok {
+			pending = append(pending, info)
+		}
+	}
+
+	if len(pending) == 0 {
+		fmt.Fprintf(out, "All %d v1 checkpoints are already in v2. Nothing to migrate.\n", len(v1List))
+		return 0, len(v1List), nil
+	}
+
+	sortMigratableCheckpoints(pending)
+
+	fmt.Fprintf(out, "%d of %d v1 checkpoints not yet in v2:\n\n", len(pending), len(v1List))
+	fmt.Fprintf(out, "  %-12s  %-16s  %s\n", "CHECKPOINT", "CREATED", "V1 COMMIT")
+	firstID := pending[0].CheckpointID
+	for _, info := range pending {
+		commit := lookupV1CommitInfo(ctx, repoRoot, info.CheckpointID)
+		when := "(unknown time)  "
+		switch {
+		case !info.CreatedAt.IsZero():
+			when = info.CreatedAt.Local().Format("2006-01-02 15:04")
+		case !commit.authorTime.IsZero():
+			when = commit.authorTime.Local().Format("2006-01-02 15:04")
+		}
+		sha := "-------"
+		if commit.shortHash != "" {
+			sha = commit.shortHash
+		}
+		fmt.Fprintf(out, "  %-12s  %-16s  %s\n", info.CheckpointID, when, sha)
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "To investigate, e.g.:")
+	fmt.Fprintf(out, "  entire checkpoint explain %s\n", firstID)
+	fmt.Fprintf(out, "  git show entire/checkpoints/v1:%s/%s\n", string(firstID[:2]), string(firstID[2:]))
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Run 'entire migrate --checkpoints v2' to migrate these.")
+
+	return len(pending), len(v1List), nil
+}
+
+// v1CommitInfo carries the short hash and author time of the most recent
+// commit on entire/checkpoints/v1 that touched a given checkpoint's folder.
+// Either field can be zero/empty when the lookup fails.
+type v1CommitInfo struct {
+	shortHash  string
+	authorTime time.Time
+}
+
+// lookupV1CommitInfo returns the most recent commit on entire/checkpoints/v1
+// that touched the checkpoint's sharded folder. We use path-scoped log rather
+// than --grep so older subject formats and trailers-only matches still
+// resolve. Failure (branch absent, no commit, parse error) returns a zero
+// value — callers fall back to placeholder rendering.
+func lookupV1CommitInfo(ctx context.Context, repoRoot string, cpID id.CheckpointID) v1CommitInfo {
+	if repoRoot == "" {
+		return v1CommitInfo{}
+	}
+	pathArg := string(cpID[:2]) + "/" + string(cpID[2:]) + "/"
+	gitCmd := exec.CommandContext(ctx, "git", "log", "entire/checkpoints/v1",
+		"-n", "1", "--pretty=%h %aI", "--", pathArg)
+	gitCmd.Dir = repoRoot
+	output, err := gitCmd.Output()
+	if err != nil {
+		return v1CommitInfo{}
+	}
+	line := strings.TrimSpace(string(output))
+	if line == "" {
+		return v1CommitInfo{}
+	}
+	fields := strings.SplitN(line, " ", 2)
+	if len(fields) == 0 {
+		return v1CommitInfo{}
+	}
+	info := v1CommitInfo{shortHash: fields[0]}
+	if len(fields) == 2 {
+		if t, err := time.Parse(time.RFC3339, fields[1]); err == nil {
+			info.authorTime = t
+		}
+	}
+	return info
 }
 
 const migrationLogFile = logging.LogsDir + "/entire.log"
@@ -418,7 +559,7 @@ func (s *migrateLoopState) flushMain(ctx context.Context, v2Store *checkpoint.V2
 	if len(s.pendingMain) == 0 {
 		return nil
 	}
-	if _, err := v2Store.WriteCommittedMainBatch(ctx, s.pendingMain); err != nil {
+	if err := v2Store.WriteCommittedMainBatch(ctx, s.pendingMain); err != nil {
 		return fmt.Errorf("failed to write batched v2 /main entries: %w", err)
 	}
 	s.pendingMain = s.pendingMain[:0]
@@ -443,8 +584,18 @@ func (s *migrateLoopState) packCurrentBatch(ctx context.Context, repo *git.Repos
 		s.nextGeneration = next
 	}
 	refName := checkpoint.ArchivedGenerationRefName(s.nextGeneration)
-	if err := writeMigratedFullGeneration(ctx, repo, refName, s.pendingFull); err != nil {
+	archiveCommitHash, err := writeMigratedFullGeneration(ctx, repo, v2Store, refName, s.pendingFull)
+	if err != nil {
 		return fmt.Errorf("failed to pack migrated raw transcripts: %w", err)
+	}
+	if queueErr := queueMigratedFullGenerationPublication(ctx, v2Store, refName, archiveCommitHash); queueErr != nil {
+		// The archive ref and pending publication record must move together.
+		// If queueing fails, leave no archive ref behind so a retry can
+		// repack the generation and queue it again.
+		if removeErr := repo.Storer.RemoveReference(refName); removeErr != nil {
+			queueErr = fmt.Errorf("%w; failed to remove unqueued generation ref %s: %w", queueErr, refName, removeErr)
+		}
+		return fmt.Errorf("failed to queue migrated raw transcript generation for push: %w", queueErr)
 	}
 	s.writtenRefs = append(s.writtenRefs, refName)
 	s.nextGeneration++
@@ -791,17 +942,17 @@ func repoWorktreeRoot(repo *git.Repository) (string, error) {
 	return root, nil
 }
 
-func writeMigratedFullGeneration(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, checkpoints []migratedFullCheckpoint) error {
+func writeMigratedFullGeneration(ctx context.Context, repo *git.Repository, v2Store *checkpoint.V2GitStore, refName plumbing.ReferenceName, checkpoints []migratedFullCheckpoint) (plumbing.Hash, error) {
 	fullEntries, err := buildMigratedFullEntrySet(ctx, repo, checkpoints)
 	if err != nil {
-		return fmt.Errorf("write migrated generation entries: %w", err)
+		return plumbing.ZeroHash, fmt.Errorf("write migrated generation entries: %w", err)
 	}
 
 	entries := make(map[string]object.TreeEntry, len(fullEntries.rawEntries)+len(fullEntries.taskEntries))
 	fullEntries.mergeInto(entries)
 	treeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, entries)
 	if err != nil {
-		return fmt.Errorf("build migrated generation tree: %w", err)
+		return plumbing.ZeroHash, fmt.Errorf("build migrated generation tree: %w", err)
 	}
 
 	gen, found := generationMetadataFromMigratedSessions(checkpoints)
@@ -809,32 +960,41 @@ func writeMigratedFullGeneration(ctx context.Context, repo *git.Repository, refN
 		gen, found = checkpoint.AggregateTranscriptTimestamps(migratedTranscripts(checkpoints))
 	}
 	if !found {
-		v2Store := checkpoint.NewV2GitStore(repo, migrateRemoteName)
 		var err error
 		gen, found, err = v2Store.ComputeGenerationCheckpointTimestamps(treeHash)
 		if err != nil {
-			return fmt.Errorf("compute checkpoint timestamps: %w", err)
+			return plumbing.ZeroHash, fmt.Errorf("compute checkpoint timestamps: %w", err)
 		}
 	}
 	if !found {
-		return fmt.Errorf("no timestamps found for migrated generation %s", refName)
+		return plumbing.ZeroHash, fmt.Errorf("no timestamps found for migrated generation %s", refName)
 	}
 
-	v2Store := checkpoint.NewV2GitStore(repo, migrateRemoteName)
 	treeHash, err = v2Store.AddGenerationJSONToTree(treeHash, gen)
 	if err != nil {
-		return fmt.Errorf("add generation metadata: %w", err)
+		return plumbing.ZeroHash, fmt.Errorf("add generation metadata: %w", err)
 	}
 
 	commitHash, err := checkpoint.CreateCommit(ctx, repo, treeHash, plumbing.ZeroHash,
 		fmt.Sprintf("Archive migrated generation: %s\n", refName),
 		migrateAuthorName, migrateAuthorEmail)
 	if err != nil {
-		return fmt.Errorf("create migrated generation commit: %w", err)
+		return plumbing.ZeroHash, fmt.Errorf("create migrated generation commit: %w", err)
 	}
 
 	if err := repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)); err != nil {
-		return fmt.Errorf("update migrated generation ref %s: %w", refName, err)
+		return plumbing.ZeroHash, fmt.Errorf("update migrated generation ref %s: %w", refName, err)
+	}
+	return commitHash, nil
+}
+
+func queueMigratedFullGenerationPublication(ctx context.Context, v2Store *checkpoint.V2GitStore, refName plumbing.ReferenceName, archiveCommitHash plumbing.Hash) error {
+	if err := v2Store.AppendPendingFullGenerationPublication(ctx, checkpoint.PendingV2FullGenerationPublication{
+		ArchiveRefName:    refName.String(),
+		ArchiveCommitHash: archiveCommitHash.String(),
+		QueuedAt:          time.Now().UTC(),
+	}); err != nil {
+		return fmt.Errorf("append pending archive publication for %s: %w", refName, err)
 	}
 	return nil
 }
