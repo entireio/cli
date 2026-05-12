@@ -414,8 +414,7 @@ func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error 
 		return fmt.Errorf("marshaling preferences: %w", err)
 	}
 
-	//nolint:gosec // G306: preferences file is config, not secrets; 0o644 is appropriate
-	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+	if err := jsonutil.WriteFileAtomic(filePath, data, 0o644); err != nil {
 		return fmt.Errorf("writing preferences file: %w", err)
 	}
 	return nil
@@ -1062,8 +1061,7 @@ func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) 
 		return fmt.Errorf("marshaling settings: %w", err)
 	}
 
-	//nolint:gosec // G306: settings file is config, not secrets; 0o644 is appropriate
-	if err := os.WriteFile(filePathAbs, data, 0o644); err != nil {
+	if err := jsonutil.WriteFileAtomic(filePathAbs, data, 0o644); err != nil {
 		return fmt.Errorf("writing settings file: %w", err)
 	}
 	return nil

@@ -48,13 +48,10 @@ func TestReviewSettingsMigration_MovesProjectReviewToClonePreferences(t *testing
 	if !prompted {
 		t.Fatal("expected migration prompt")
 	}
-	for _, want := range []string{"project settings", "local preferences"} {
+	for _, want := range []string{"project settings", "clone-local preferences", "typically committed"} {
 		if !strings.Contains(promptQuestion, want) {
 			t.Fatalf("migration prompt = %q, want it to mention %q", promptQuestion, want)
 		}
-	}
-	if strings.Contains(promptQuestion, "can be committed") {
-		t.Fatalf("migration prompt = %q, should not mention commit risk", promptQuestion)
 	}
 
 	prefs, err := settings.LoadClonePreferences(context.Background())
@@ -87,7 +84,11 @@ func TestReviewSettingsMigration_MovesProjectReviewToClonePreferences(t *testing
 	}
 }
 
-func TestReviewSettingsMigration_DoesNotOverwriteExistingClonePreferences(t *testing.T) {
+// TestReviewSettingsMigration_MergesNonOverlappingPrefs verifies that when the
+// project file has review keys for an agent NOT present in clone-local prefs,
+// the migration merges them in. Previously the migration silently dropped any
+// project config when prefs already had any review entry — that was data loss.
+func TestReviewSettingsMigration_MergesNonOverlappingPrefs(t *testing.T) {
 	tmp := t.TempDir()
 	testutil.InitRepo(t, tmp)
 	t.Chdir(tmp)
@@ -100,8 +101,7 @@ func TestReviewSettingsMigration_DoesNotOverwriteExistingClonePreferences(t *tes
 	projectPath := filepath.Join(entireDir, "settings.json")
 	projectSettings := []byte(`{
 		"enabled": true,
-		"review": {"project-agent": {"prompt": "project"}},
-		"review_fix_agent": "project-agent"
+		"review": {"project-agent": {"prompt": "project"}}
 	}`)
 	if err := os.WriteFile(projectPath, projectSettings, 0o600); err != nil {
 		t.Fatalf("write project settings: %v", err)
@@ -110,7 +110,6 @@ func TestReviewSettingsMigration_DoesNotOverwriteExistingClonePreferences(t *tes
 		Review: map[string]settings.ReviewConfig{
 			"local-agent": {Prompt: "local"},
 		},
-		ReviewFixAgent: "local-agent",
 	}); err != nil {
 		t.Fatalf("seed preferences: %v", err)
 	}
@@ -127,21 +126,131 @@ func TestReviewSettingsMigration_DoesNotOverwriteExistingClonePreferences(t *tes
 		t.Fatalf("load preferences: %v", err)
 	}
 	if got := prefs.Review["local-agent"].Prompt; got != "local" {
-		t.Fatalf("local prompt = %q, want local", got)
+		t.Fatalf("local prompt = %q, want preserved as %q", got, "local")
 	}
-	if _, ok := prefs.Review["project-agent"]; ok {
-		t.Fatalf("project review overwrote existing preferences: %+v", prefs.Review)
-	}
-	if prefs.ReviewFixAgent != "local-agent" {
-		t.Fatalf("ReviewFixAgent = %q, want local-agent", prefs.ReviewFixAgent)
+	if got := prefs.Review["project-agent"].Prompt; got != "project" {
+		t.Fatalf("project prompt = %q, want merged in as %q", got, "project")
 	}
 
 	data, err := os.ReadFile(projectPath)
 	if err != nil {
 		t.Fatalf("read project settings: %v", err)
 	}
-	if bytes.Contains(data, []byte("review")) {
-		t.Fatalf("project review keys were not removed: %s", data)
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal project settings: %v", err)
+	}
+	if _, ok := raw["review"]; ok {
+		t.Fatalf("project review key was not removed: %s", data)
+	}
+}
+
+// TestReviewSettingsMigration_RefusesConflictingPrefs verifies that when both
+// the project file and clone-local prefs have review config for the SAME agent
+// with DIFFERENT values, the migration aborts with a clear error rather than
+// silently dropping one side. The user must reconcile manually.
+func TestReviewSettingsMigration_RefusesConflictingPrefs(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+	session.ClearGitCommonDirCache()
+
+	entireDir := filepath.Join(tmp, ".entire")
+	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	projectPath := filepath.Join(entireDir, "settings.json")
+	projectSettings := []byte(`{
+		"enabled": true,
+		"review": {"claude-code": {"prompt": "project"}}
+	}`)
+	if err := os.WriteFile(projectPath, projectSettings, 0o600); err != nil {
+		t.Fatalf("write project settings: %v", err)
+	}
+	if err := settings.SaveClonePreferences(context.Background(), &settings.ClonePreferences{
+		Review: map[string]settings.ReviewConfig{
+			"claude-code": {Prompt: "local"},
+		},
+	}); err != nil {
+		t.Fatalf("seed preferences: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := maybePromptReviewSettingsMigration(context.Background(), &out, &out, true, func(context.Context, string, bool) (bool, error) {
+		return true, nil
+	})
+	if err == nil {
+		t.Fatal("expected migration to refuse conflicting prefs")
+	}
+	if !strings.Contains(err.Error(), "claude-code") {
+		t.Errorf("error = %q, want it to name the conflicting agent (claude-code)", err.Error())
+	}
+	if !strings.Contains(err.Error(), "reconcile manually") {
+		t.Errorf("error = %q, want it to guide manual reconciliation", err.Error())
+	}
+
+	// Project file must NOT have been rewritten on the conflict path.
+	data, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatalf("read project settings: %v", err)
+	}
+	if !bytes.Contains(data, []byte("claude-code")) {
+		t.Fatalf("project file was modified despite conflict abort: %s", data)
+	}
+
+	// Clone prefs must be unchanged.
+	prefs, err := settings.LoadClonePreferences(context.Background())
+	if err != nil {
+		t.Fatalf("load preferences: %v", err)
+	}
+	if got := prefs.Review["claude-code"].Prompt; got != "local" {
+		t.Errorf("local prompt = %q, want unchanged as %q", got, "local")
+	}
+}
+
+// TestReviewSettingsMigration_NoMoveCleansUpKeys verifies the cleanup-only
+// path: project has only `null` values for review keys, so nothing actually
+// moves, but the project keys are still stripped and the success message
+// reflects that distinction.
+func TestReviewSettingsMigration_NoMoveCleansUpKeys(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+	session.ClearGitCommonDirCache()
+
+	entireDir := filepath.Join(tmp, ".entire")
+	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	projectPath := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(projectPath, []byte(`{
+		"enabled": true,
+		"review": null,
+		"review_fix_agent": null
+	}`), 0o600); err != nil {
+		t.Fatalf("write project settings: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := maybePromptReviewSettingsMigration(context.Background(), &out, &out, true, func(context.Context, string, bool) (bool, error) {
+		return true, nil
+	}); err != nil {
+		t.Fatalf("migration: %v", err)
+	}
+	if !strings.Contains(out.String(), "Removed unused review keys") {
+		t.Errorf("output = %q, want the cleanup-only message", out.String())
+	}
+
+	data, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatalf("read project settings: %v", err)
+	}
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal project settings: %v", err)
+	}
+	if _, ok := raw["review"]; ok {
+		t.Fatalf("project review key was not removed: %s", data)
 	}
 }
 
