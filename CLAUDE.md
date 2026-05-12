@@ -758,7 +758,7 @@ The redesign eliminated several constructs from the prior implementation. None s
 - `--track-only` flag (intentionally removed by #1009)
 - `--postreview` / `--finalize` / empty review commits / `/entire-review:finish` skill installer
 - `Launcher` + `HeadlessLauncher` as separate interfaces (single `AgentReviewer`)
-- `filterCodexOutput` in shared multi-agent code (lives in codex's adapter)
+- Codex chrome-line filtering or any agent-specific stdout post-processing in shared multi-agent code (per-agent parsers own their format; shared code only sees `Event` variants)
 - `sync.Once`-guarded onCancel + parallel `signal.Notify` goroutine (single cancel from start)
 
 #### Key Files
@@ -772,7 +772,7 @@ The redesign eliminated several constructs from the prior implementation. None s
 - `cmd/entire/cli/review/synthesis_sink.go` / `synthesis_prompt.go` — opt-in cross-agent verdict
 - `cmd/entire/cli/review/types/{reviewer,sink,template}.go` — interface contracts (CU2 + CU4 + CU5b)
 - `cmd/entire/cli/review/env.go` — `ENTIRE_REVIEW_*` constants + `EncodeSkills`/`DecodeSkills` + `AppendReviewEnv`
-- `cmd/entire/cli/agent/{claudecode,codex,geminicli}/reviewer.go` — per-agent `AgentReviewer` implementations (claude-code, codex with chrome filter, gemini-cli)
+- `cmd/entire/cli/agent/{claudecode,codex,geminicli}/reviewer.go` — per-agent `AgentReviewer` implementations (claude-code, codex, gemini-cli)
 - `cmd/entire/cli/agent/claudecode/discovery.go` — skill discovery + `pickLatestVersion` plugin-cache dedupe
 - `cmd/entire/cli/lifecycle.go` — `adoptReviewEnv` reads `ENTIRE_REVIEW_*` from process env; replaces marker-file adoption
 - `cmd/entire/cli/review_bridge.go` / `review_helpers.go` — bridge code in `cli` package for cycle-bound functions (`headHasReviewCheckpoint`, `launchableReviewerFor`, `newReviewAttachCmd`, `lazySynthesisProvider`)
