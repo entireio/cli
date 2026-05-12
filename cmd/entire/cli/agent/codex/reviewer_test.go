@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -71,8 +70,8 @@ func TestCodexReviewer_ArgvShape(t *testing.T) {
 	cfg := reviewtypes.RunConfig{Skills: []string{"/skill"}}
 	cmd := buildCodexReviewCmd(context.Background(), cfg)
 
-	// Expect: codex exec --skip-git-repo-check -
-	want := []string{wantCodexAgentName, "exec", "--skip-git-repo-check", "-"}
+	// Expect: codex exec --skip-git-repo-check --json -
+	want := []string{wantCodexAgentName, "exec", "--skip-git-repo-check", "--json", "-"}
 	if len(cmd.Args) != len(want) {
 		t.Fatalf("len(Args) = %d, want %d: %v", len(cmd.Args), len(want), cmd.Args)
 	}
@@ -97,7 +96,7 @@ func TestCodexReviewer_BuiltinReviewExpandsToScopedExecPrompt(t *testing.T) {
 	}
 	cmd := buildCodexReviewCmd(context.Background(), cfg)
 
-	want := []string{wantCodexAgentName, "exec", "--skip-git-repo-check", "-"}
+	want := []string{wantCodexAgentName, "exec", "--skip-git-repo-check", "--json", "-"}
 	if len(cmd.Args) != len(want) {
 		t.Fatalf("len(Args) = %d, want %d: %v", len(cmd.Args), len(want), cmd.Args)
 	}
@@ -202,161 +201,47 @@ func TestParseCodexOutput_ReportsScannerError(t *testing.T) {
 	}
 }
 
-func TestCodexReviewer_EventStream(t *testing.T) {
+func TestParseCodexOutput_DecodesJSONStream(t *testing.T) {
 	t.Parallel()
-
-	data, err := os.ReadFile("testdata/canned_exec.txt")
+	data, err := os.ReadFile("testdata/json_session.jsonl")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-
 	events := collectCodexEvents(parseCodexOutput(strings.NewReader(string(data))))
 
-	if len(events) < 3 {
-		t.Fatalf("expected at least 3 events (Started + AssistantText + Finished), got %d", len(events))
-	}
-
-	// First event must be Started.
 	if _, ok := events[0].(reviewtypes.Started); !ok {
 		t.Errorf("events[0] = %T, want Started", events[0])
 	}
-
-	// Last event must be Finished{Success: true}.
 	last := events[len(events)-1]
 	fin, ok := last.(reviewtypes.Finished)
-	if !ok {
-		t.Errorf("last event = %T, want Finished", last)
-	} else if !fin.Success {
-		t.Errorf("Finished.Success = false, want true")
+	if !ok || !fin.Success {
+		t.Errorf("last event = %v, want Finished{Success:true}", last)
 	}
 
-	// Verify narrative content appears and chrome is absent.
-	var combined strings.Builder
-	sawToolCall := false
+	var sawTool, sawText bool
 	for _, ev := range events {
-		switch e := ev.(type) {
-		case reviewtypes.AssistantText:
-			at := e
-			combined.WriteString(at.Text)
-			combined.WriteString("\n")
-		case reviewtypes.ToolCall:
-			if e.Name == codexExecCommand && strings.Contains(e.Args, "git status --short") {
-				sawToolCall = true
-			}
+		if tc, ok := ev.(reviewtypes.ToolCall); ok && tc.Name == "exec" {
+			sawTool = true
+		}
+		if at, ok := ev.(reviewtypes.AssistantText); ok && at.Text == "Hi" {
+			sawText = true
 		}
 	}
-	text := combined.String()
-
-	// Narrative should appear.
-	if !strings.Contains(text, "No findings.") {
-		t.Error("expected fixture final response in AssistantText events")
+	if !sawTool {
+		t.Error("expected ToolCall{Name: exec} from item.started/command_execution")
 	}
-	if !strings.Contains(text, "Important finding: all error paths are covered.") {
-		t.Error("expected ANSI-cleaned fixture content in AssistantText events")
+	if !sawText {
+		t.Error("expected AssistantText{Text: Hi} from item.completed/agent_message")
 	}
 
-	// Chrome must be absent.
-	chromePatterns := []string{
-		"OpenAI Codex",
-		"workdir:",
-		"[hooks]",
-		"firing user-prompt-submit",
-		"git status",
-		"go test ./cmd/entire/cli/review",
-		"TestExample",
-		"tokens used",
-	}
-	for _, pattern := range chromePatterns {
-		if strings.Contains(text, pattern) {
-			t.Errorf("chrome pattern %q must not appear in AssistantText events", pattern)
-		}
-	}
-	if strings.Count(text, "No findings.") != 1 {
-		t.Errorf("final response should appear once after duplicate summary filtering; got:\n%s", text)
-	}
-	if !strings.Contains(text, "I will inspect the reviewer contracts.") {
-		t.Error("expected live assistant progress in AssistantText events")
-	}
-	if !sawToolCall {
-		t.Errorf("expected exec block to emit a ToolCall event; got %#v", events)
-	}
-
-	// CSI escape sequences must not leak into AssistantText events.
+	var tokensSeen int
 	for _, ev := range events {
-		if at, ok := ev.(reviewtypes.AssistantText); ok {
-			if strings.Contains(at.Text, "\x1b[") {
-				t.Errorf("CSI bytes leaked into AssistantText: %q", at.Text)
-			}
+		if tk, ok := ev.(reviewtypes.Tokens); ok && tk.Out > 0 {
+			tokensSeen++
 		}
 	}
-}
-
-func TestParseCodexOutput_StreamsEventsBeforeEOF(t *testing.T) {
-	t.Parallel()
-
-	r, w := io.Pipe()
-	events := parseCodexOutput(r)
-
-	select {
-	case ev, ok := <-events:
-		if !ok {
-			t.Fatal("events closed before Started event arrived")
-		}
-		if _, ok := ev.(reviewtypes.Started); !ok {
-			t.Fatalf("first event = %T, want Started", ev)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for Started event")
-	}
-
-	input := strings.Join([]string{
-		"codex",
-		"I will inspect the code before finalizing.",
-		"exec",
-		`/bin/zsh -lc "git status --short" in /repo`,
-	}, "\n") + "\n"
-	if _, err := w.Write([]byte(input)); err != nil {
-		t.Fatalf("write streaming input: %v", err)
-	}
-
-	sawText := false
-	sawToolCall := false
-	deadline := time.After(2 * time.Second)
-	for !sawText || !sawToolCall {
-		select {
-		case ev, ok := <-events:
-			if !ok {
-				t.Fatalf("events closed before streaming assertions passed")
-			}
-			switch e := ev.(type) {
-			case reviewtypes.AssistantText:
-				if strings.Contains(e.Text, "I will inspect the code") {
-					sawText = true
-				}
-			case reviewtypes.ToolCall:
-				if e.Name == codexExecCommand && strings.Contains(e.Args, "git status --short") {
-					sawToolCall = true
-				}
-			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for streaming events before EOF; sawText=%v sawToolCall=%v", sawText, sawToolCall)
-		}
-	}
-
-	if err := w.Close(); err != nil {
-		t.Fatalf("close writer: %v", err)
-	}
-	sawFinished := false
-	for ev := range events {
-		if fin, ok := ev.(reviewtypes.Finished); ok {
-			if !fin.Success {
-				t.Fatalf("Finished.Success = false, want true")
-			}
-			sawFinished = true
-		}
-	}
-	if !sawFinished {
-		t.Fatal("expected Finished event after EOF")
+	if tokensSeen != 1 {
+		t.Errorf("Tokens with Out>0 count = %d, want 1", tokensSeen)
 	}
 }
 
