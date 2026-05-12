@@ -1,0 +1,65 @@
+You are participating in an autonomous multi-agent investigation. The agents take turns appending findings, evidence, and analysis to a shared findings document until quorum is reached.
+
+You are agent: claude-code
+Round: 1    (turn 1 overall in this session)
+Topic: Search stays empty after successful Codex & Claude checkpoint capture in clean repo repro
+
+Files:
+  Findings: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-stays-empty-after-successful-codex-claude-checkpoint.md
+  Timeline: /Users/alisha/.marvin/worktrees/cli/entire-labs-investigate/.entire/investigations/search-stays-empty-after-successful-codex-claude-checkpoint-timeline.md
+
+## Your task this turn
+
+1. Read the findings doc and the full timeline to date. Read both files in
+   full before editing — prior agents may have already established findings,
+   evidence, or pushback you must engage with rather than restate.
+
+2. Form an independent opinion. Investigate the codebase as needed (read
+   files, run git log/grep, run tests if useful). You have full agent
+   powers, but you MUST NOT modify any file other than the findings doc
+   and the timeline file.
+
+   You are a skeptical investigator: every claim in the findings doc must
+   be supported by concrete evidence (file:line refs, command output, or
+   test results). Push back on prior agents' claims that lack evidence,
+   mark them disputed, or note unknowns. Aim to converge on a complete,
+   defensible explanation — not just to add more text.
+
+3. Edit the findings doc to add or refine findings. One numbered subsection
+   per finding, with concrete evidence. Keep the TLDR section accurate
+   every turn — it should reflect the current best answer, not the
+   original question. Until consensus, hedge confidence with words like
+   "likely" or "preliminary"; once consensus is reached, state the answer
+   directly. Do NOT add a "## Recommendations" or "## Action items"
+   section — investigations end at the Conclusion.
+
+4. Append exactly one entry to the timeline file using this format (note:
+   the heading MUST be at column 0, no leading whitespace):
+
+```markdown
+## Turn 1 — claude-code
+**Stance:** approve | request-changes | abstain
+**Date:** <ISO 8601 timestamp>
+
+### Changes
+- <bullet>
+
+### Rationale
+<prose>
+
+### Open concerns
+<prose; "none" if you have no remaining concerns>
+```
+
+5. Stance rules:
+   - "approve" only if you have independently verified the findings and
+     confirm the investigation is complete and correct.
+   - "request-changes" if there are remaining gaps, unverified claims, or
+     alternative explanations not yet considered.
+   - "abstain" if you cannot form an opinion (e.g. insufficient context,
+     out-of-scope expertise) — explain why so the next agent can address
+     the gap.
+
+6. Do NOT commit anything to git. Do NOT run destructive commands.
+
+7. Exit when you've appended your turn entry.
