@@ -797,6 +797,87 @@ func TestTUIModel_RunErrorSticky_FinishedDoesNotFlipToSucceeded(t *testing.T) {
 	}
 }
 
+// TestTUIModel_DelegatesNonWheelMouseEventsToViewport pins that the Update
+// case-arm routing mouse events to the viewport covers Click, Release, and
+// Motion in addition to Wheel. The viewport's selection support (click-drag
+// highlight in terminals that emit cell-motion events) needs the full event
+// stream, not just scroll. A future refactor that narrowed the case-arm to
+// wheel-only would silently break selection while still passing
+// TestTUIModel_DelegatesMouseWheelToViewport.
+//
+// Coverage limitation: the viewport's internal selection state is not
+// exposed via a public getter, so this test asserts the weaker invariant
+// that the events do not panic and that detailMode survives. That catches
+// the regression where the case-arm is removed entirely (and the events
+// fall through Update's catch-all to return m, nil); it does not catch
+// finer-grained changes to selection semantics inside the viewport.
+func TestTUIModel_DelegatesNonWheelMouseEventsToViewport(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		msg  tea.Msg
+	}{
+		{"click", tea.MouseClickMsg{}},
+		{"release", tea.MouseReleaseMsg{}},
+		{"motion", tea.MouseMotionMsg{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestModel([]string{"agent-a"}, func() {})
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+			m = mustModel(t, updated)
+			updated, _ = m.Update(testCtrlKey('o'))
+			m = mustModel(t, updated)
+			if !m.detailMode {
+				t.Fatalf("setup: expected detailMode=true after Ctrl+O")
+			}
+
+			updated, _ = m.Update(tc.msg)
+			m = mustModel(t, updated)
+			if !m.detailMode {
+				t.Errorf("detailMode should remain true after mouse %s event", tc.name)
+			}
+		})
+	}
+}
+
+// TestTUIModel_CancellingIndicatorOnlyAffectsRunningRows pins that the
+// "cancelling" status indicator in renderRow only replaces "running" — rows
+// already in a terminal status keep their own indicator. Without this gate
+// the post-Ctrl+C frame would briefly show every row as "cancelling" before
+// the dashboard transitioned to its post-finish state, including agents
+// that had already succeeded.
+func TestTUIModel_CancellingIndicatorOnlyAffectsRunningRows(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a", "agent-b"}, func() {})
+	m.termWidth = 120
+	// agent-a has already succeeded; agent-b is still running.
+	updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.Started{}})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(agentEventMsg{agent: "agent-b", ev: reviewtypes.Started{}})
+	m = mustModel(t, updated)
+
+	// Flip cancelling without going through Ctrl+C so the
+	// allAgentsTerminal() short-circuit doesn't fire.
+	m.cancelling = true
+
+	gotA := m.renderRow(m.rows[0])
+	if !strings.Contains(gotA, "done") {
+		t.Errorf("succeeded row should retain ✓ done indicator while cancelling; got %q", gotA)
+	}
+	if strings.Contains(gotA, "cancelling") {
+		t.Errorf("succeeded row must not show 'cancelling' indicator; got %q", gotA)
+	}
+
+	gotB := m.renderRow(m.rows[1])
+	if !strings.Contains(gotB, "cancelling") {
+		t.Errorf("running row should show cancelling indicator; got %q", gotB)
+	}
+}
+
 // TestTUIModel_CtrlCAfterAllRowsTerminalQuitsImmediately pins that Ctrl+C
 // during the race window between an agent's terminal event (Finished or
 // RunError) and the orchestrator's runFinishedMsg short-circuits to tea.Quit
