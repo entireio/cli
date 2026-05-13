@@ -8,15 +8,23 @@ import (
 )
 
 // WriteFileAtomic writes data to filePath atomically by writing to a temp file
-// in the same directory, fsyncing it, and renaming into place. A crash or
-// signal mid-write leaves the original file intact rather than a truncated
-// partial — important for config files like .entire/settings.json that
-// callers expect to remain parseable across interrupted writes.
+// in the same directory, fsyncing it, renaming into place, and fsyncing the
+// parent directory. A crash or signal mid-write leaves the original file
+// intact rather than a truncated partial — important for config files like
+// .entire/settings.json that callers expect to remain parseable across
+// interrupted writes.
 //
 // The fsync between Write and Close guarantees the temp file's bytes are on
 // disk before the rename takes effect; without it, some filesystems (notably
 // ext4 with non-default mount options) can surface the rename as completed
 // while the file is still empty after a hard crash.
+//
+// The parent-directory fsync after rename guarantees the rename's directory
+// entry is durable. Without it, the file contents are on disk but the
+// directory may still point to the pre-rename state after a crash, so the
+// "leaves the original intact" promise would silently break. Windows does
+// not support directory fsync; we make this step best-effort so the call
+// does not fail on platforms where the operation is a no-op.
 //
 // perm is applied to the temp file via Chmod before rename so the final file
 // lands with the requested permission regardless of the temp file's default.
@@ -52,5 +60,13 @@ func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 		return fmt.Errorf("rename temp to %s: %w", filePath, err)
 	}
 	removeTmp = false
+	// Best-effort: the rename succeeded, so don't propagate failures here.
+	// Directory fsync isn't supported on Windows, and on POSIX an error
+	// after a successful rename would mislead callers who already have the
+	// file in place.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }
