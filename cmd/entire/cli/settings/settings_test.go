@@ -1005,7 +1005,9 @@ func TestLoadMerged_CustomRedactionsPerKeyOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	merged, err := loadMergedSettings(base, local)
+	// preferencesFileAbs="" skips the clone-preferences layer; this test only
+	// exercises the project + local merge.
+	merged, err := loadMergedSettings(base, "", local)
 	if err != nil {
 		t.Fatalf("loadMergedSettings: %v", err)
 	}
