@@ -306,6 +306,71 @@ func TestExplainCmd_PositionalArgConflictsWithFlags(t *testing.T) {
 	}
 }
 
+// TestExplainCmd_SummaryTimeoutSecondsValidation verifies the
+// --summary-timeout-seconds flag is rejected when it can't take effect —
+// regardless of whether the invocation routes to the prose pipeline or
+// to an export mode (--json / --transcript / --raw-transcript). The
+// validation must run before the export-mode early return so the flag
+// never silently no-ops.
+func TestExplainCmd_SummaryTimeoutSecondsValidation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			"no --generate, prose path",
+			[]string{"--summary-timeout-seconds", "10"},
+			"--summary-timeout-seconds only applies with --generate",
+		},
+		{
+			"no --generate, --json export",
+			[]string{"--json", "--summary-timeout-seconds", "10"},
+			"--summary-timeout-seconds only applies with --generate",
+		},
+		{
+			"no --generate, --transcript export",
+			[]string{"--transcript", "abc123", "--summary-timeout-seconds", "10"},
+			"--summary-timeout-seconds only applies with --generate",
+		},
+		{
+			"no --generate, --raw-transcript with --session-index export",
+			[]string{"--raw-transcript", "abc123", "--session-index", "0", "--summary-timeout-seconds", "10"},
+			"--summary-timeout-seconds only applies with --generate",
+		},
+		{
+			"negative value with --generate",
+			[]string{"--generate", "abc123", "--summary-timeout-seconds", "-5"},
+			"--summary-timeout-seconds must be non-negative",
+		},
+		{
+			"negative value with --json",
+			[]string{"--json", "--summary-timeout-seconds", "-5"},
+			"--summary-timeout-seconds only applies with --generate",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := newExplainCmd()
+			var stdout, stderr bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			cmd.SetArgs(tt.args)
+
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatalf("expected error, got nil (stdout=%q stderr=%q)", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
 // runExplainAutoTestRepo seeds a git repo and returns the initial commit's hash.
 func runExplainAutoTestRepo(t *testing.T) (repo *git.Repository, initialCommit plumbing.Hash) {
 	t.Helper()

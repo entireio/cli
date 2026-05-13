@@ -368,6 +368,15 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 					return errors.New("--limit must be positive")
 				}
 			}
+			// --summary-timeout-seconds only makes sense with --generate.
+			if cmd.Flags().Changed("summary-timeout-seconds") {
+				if !generateFlag {
+					return errors.New("--summary-timeout-seconds only applies with --generate")
+				}
+				if summaryTimeoutSecondsFlag < 0 {
+					return errors.New("--summary-timeout-seconds must be non-negative")
+				}
+			}
 
 			// Export modes — emit machine-readable output and skip the prose pipeline.
 			// --raw-transcript also routes here when --session-index is explicit; the
@@ -386,16 +395,6 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 					sessionIndex:   sessionIndex,
 					listLimit:      listLimit,
 				})
-			}
-
-			// --summary-timeout-seconds only makes sense with --generate.
-			if cmd.Flags().Changed("summary-timeout-seconds") {
-				if !generateFlag {
-					return errors.New("--summary-timeout-seconds only applies with --generate")
-				}
-				if summaryTimeoutSecondsFlag < 0 {
-					return errors.New("--summary-timeout-seconds must be non-negative")
-				}
 			}
 
 			// Convert short flag to verbose (verbose = !short)
