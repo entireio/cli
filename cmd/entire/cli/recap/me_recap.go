@@ -13,6 +13,13 @@ import (
 )
 
 // MeRecapResponse mirrors GET /api/v1/me/recap.
+//
+// Repo/Repos contract: at most one of these scopes the recap.
+//   - When Repo is non-nil and non-empty, the recap is scoped to that single
+//     repo and Repos is ignored.
+//   - Otherwise Repos lists the repos contributing to a multi-repo recap,
+//     ordered by the server's "most active first" ranking (rendering code
+//     relies on that order when truncating to "+N more").
 type MeRecapResponse struct {
 	Timeframe    string                `json:"timeframe"`
 	Repo         *string               `json:"repo"`

@@ -1,6 +1,7 @@
 package recap
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 const (
@@ -222,7 +225,7 @@ func visibleTranscriptStatus(summary TranscriptSummary, view ViewMode) Transcrip
 		}
 		return status
 	default:
-		slog.Default().Debug("recap: unknown view mode for transcript status", slog.String("view", string(view)))
+		logging.Debug(context.Background(), "recap: unknown view mode for transcript status", slog.String("view", string(view)))
 		return TranscriptStatus{}
 	}
 }
@@ -279,12 +282,12 @@ func renderWindow(resp *MeRecapResponse, opts RenderOptions, styles staticStyles
 	}
 	since, err := time.Parse(time.RFC3339, resp.Since)
 	if err != nil {
-		slog.Default().Debug("recap: failed to parse since", slog.String("value", resp.Since), slog.String("error", err.Error()))
+		logging.Debug(context.Background(), "recap: failed to parse since", slog.String("value", resp.Since), slog.String("error", err.Error()))
 		return ""
 	}
 	until, err := time.Parse(time.RFC3339, resp.Until)
 	if err != nil {
-		slog.Default().Debug("recap: failed to parse until", slog.String("value", resp.Until), slog.String("error", err.Error()))
+		logging.Debug(context.Background(), "recap: failed to parse until", slog.String("value", resp.Until), slog.String("error", err.Error()))
 		return ""
 	}
 	loc := opts.Location

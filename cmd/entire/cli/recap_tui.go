@@ -184,6 +184,13 @@ func (m recapTUIModel) setRange(next recap.RangeKey) (recapTUIModel, tea.Cmd) {
 	// Pressing the current range key while a load error is on screen acts as
 	// retry — otherwise the keystroke would be silently dropped and the user
 	// would be left staring at the error with no obvious way out.
+	//
+	// Same-range retry intentionally preserves m.resp (no nil-out) and skips
+	// withViewport: the user is asking for the same data, so if a previous
+	// successful response is on screen we keep showing it under the loading
+	// state instead of blanking the viewport. This matches the 'R' reload
+	// path. The new-range branch below clears m.resp because the displayed
+	// data no longer matches the requested range.
 	if next == m.rangeKey {
 		if m.loadErr == nil {
 			return m, nil

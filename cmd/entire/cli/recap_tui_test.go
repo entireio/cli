@@ -202,6 +202,12 @@ func TestRecapTUIModel_SameRangeKeyRetriesAfterError(t *testing.T) {
 	start := testRecapTUIModel()
 	start.rangeKey = recap.RangeMonth
 	start.loadErr = errors.New("boom")
+	// Seed a prior response so we can assert that same-range retry preserves
+	// it (instead of nil-ing it like the new-range path does). The user is
+	// asking for the same data, so anything already on screen stays visible
+	// under the loading state — no blank flicker mid-retry.
+	priorResp := &recap.MeRecapResponse{Summary: recap.Summary{Me: recap.SummaryTotals{Sessions: 7}}}
+	start.resp = priorResp
 
 	m, cmd := updateRecapTUIModel(t, start, recapRuneKey('m'))
 	if m.rangeKey != recap.RangeMonth {
@@ -215,6 +221,9 @@ func TestRecapTUIModel_SameRangeKeyRetriesAfterError(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("retry should refetch recap data")
+	}
+	if m.resp != priorResp {
+		t.Fatalf("same-range retry must preserve m.resp so previously displayed data stays visible during retry; got %+v want %+v", m.resp, priorResp)
 	}
 }
 
