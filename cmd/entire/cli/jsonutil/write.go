@@ -8,10 +8,15 @@ import (
 )
 
 // WriteFileAtomic writes data to filePath atomically by writing to a temp file
-// in the same directory and renaming into place. A crash or signal mid-write
-// leaves the original file intact rather than a truncated partial — important
-// for config files like .entire/settings.json that callers expect to remain
-// parseable across interrupted writes.
+// in the same directory, fsyncing it, and renaming into place. A crash or
+// signal mid-write leaves the original file intact rather than a truncated
+// partial — important for config files like .entire/settings.json that
+// callers expect to remain parseable across interrupted writes.
+//
+// The fsync between Write and Close guarantees the temp file's bytes are on
+// disk before the rename takes effect; without it, some filesystems (notably
+// ext4 with non-default mount options) can surface the rename as completed
+// while the file is still empty after a hard crash.
 //
 // perm is applied to the temp file via Chmod before rename so the final file
 // lands with the requested permission regardless of the temp file's default.
@@ -32,6 +37,10 @@ func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write temp for %s: %w", filePath, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temp for %s: %w", filePath, err)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp for %s: %w", filePath, err)

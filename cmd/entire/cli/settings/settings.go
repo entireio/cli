@@ -362,6 +362,33 @@ func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMe
 	return path, raw, true, nil
 }
 
+// LoadLocalRaw reads .entire/settings.local.json as a generic JSON object,
+// mirroring LoadProjectRaw for the per-developer overrides file. Returns
+// exists=false (and an empty raw map) when the file does not exist — the
+// common case for users who haven't created the local override file.
+//
+// Pair with the migration flow: callers can use this to detect when local
+// overrides would mask a freshly-migrated setting, then warn the user
+// before performing the migration.
+func LoadLocalRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
+	path, err = paths.AbsPath(ctx, EntireSettingsLocalFile)
+	if err != nil {
+		path = EntireSettingsLocalFile
+	}
+	data, readErr := os.ReadFile(path) //nolint:gosec // path is from AbsPath or a project-relative constant
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return path, map[string]json.RawMessage{}, false, nil
+		}
+		return path, nil, false, fmt.Errorf("reading local settings: %w", readErr)
+	}
+	raw = map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return path, nil, true, fmt.Errorf("parsing local settings: %w", err)
+	}
+	return path, raw, true, nil
+}
+
 // SaveProjectRaw writes a generic JSON object back to .entire/settings.json
 // atomically (temp file + rename). Callers should mutate the map returned by
 // LoadProjectRaw and pass it back here so unrelated fields are preserved.
@@ -459,11 +486,17 @@ func loadClonePreferencesFromFile(filePath string) (*ClonePreferences, error) {
 		return nil, fmt.Errorf("%w", err)
 	}
 
-	// Lenient decoding: clone preferences live in .git/ and persist across CLI
-	// versions running against the same clone. A newer binary may write a
-	// field an older binary doesn't know about — strict decoding would brick
-	// the older binary's settings.Load. The trade-off is that typos in
-	// hand-edited fields are silently ignored; document & accept.
+	// Lenient decoding here (vs. strict via DisallowUnknownFields in
+	// loadFromFile for EntireSettings). Two reasons clone preferences need
+	// the looser contract:
+	//   1. They are rewritten on every picker save — a newer binary can
+	//      introduce a field the older binary then sees as unknown, which
+	//      under strict decoding would brick settings.Load for that older
+	//      binary across the whole clone.
+	//   2. The file lives in .git/, so users rarely hand-edit it; the
+	//      typo-silently-ignored downside is theoretical here.
+	// EntireSettings stays strict because it's committed and team-edited,
+	// where unknown keys usually mean typos worth surfacing immediately.
 	if err := json.Unmarshal(data, prefs); err != nil {
 		return nil, fmt.Errorf("parsing preferences file: %w", err)
 	}

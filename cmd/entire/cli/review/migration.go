@@ -47,6 +47,27 @@ func maybePromptReviewSettingsMigration(
 		return nil
 	}
 
+	// Bail before prompting if .entire/settings.local.json already has review
+	// keys. settings.local.json overrides clone-local preferences (mergeJSON
+	// wholesale-replaces the review map), so migrating without cleaning the
+	// local file first would silently nullify the migration on the very next
+	// settings.Load — the user clicks "yes", their config moves to clone
+	// prefs, then the local override hides it. Better to surface the
+	// precondition up front than to leave the user wondering why their
+	// migrated config disappeared.
+	//
+	// Intentionally does NOT set ReviewMigrationDismissed: this is a fixable
+	// precondition, not a user-rejected migration; the prompt should fire
+	// again on the next run after the user cleans settings.local.json.
+	if localHas, localPath, localErr := localSettingsHasReviewKeys(ctx); localErr != nil {
+		return fmt.Errorf("inspect local settings for migration: %w", localErr)
+	} else if localHas {
+		fmt.Fprintln(errOut, "Cannot migrate review preferences: .entire/settings.local.json also has review keys.")
+		fmt.Fprintf(errOut, "Those override clone-local preferences and would mask the migration. Remove the\n")
+		fmt.Fprintf(errOut, "`review` / `review_fix_agent` keys from %s, then re-run `entire review`.\n", localPath)
+		return nil
+	}
+
 	if !canPrompt {
 		// Log at Warn so operators tailing .entire/logs/ catch the pending
 		// migration on scripted/CI invocations where the stderr hint may
@@ -240,4 +261,25 @@ func reviewConfigEqual(a, b settings.ReviewConfig) bool {
 
 func isJSONNull(raw json.RawMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+// localSettingsHasReviewKeys reports whether .entire/settings.local.json
+// exists and contains either a "review" or "review_fix_agent" key. Both keys
+// override clone-local preferences via mergeJSON's wholesale-replace path,
+// so the migration must surface their presence rather than silently produce
+// a state where the migrated config never takes effect.
+//
+// Returns the absolute path of the local settings file too, so callers can
+// quote the exact location in the warning they show the user.
+func localSettingsHasReviewKeys(ctx context.Context) (has bool, path string, err error) {
+	path, raw, exists, loadErr := settings.LoadLocalRaw(ctx)
+	if loadErr != nil {
+		return false, path, fmt.Errorf("local settings review-keys check: %w", loadErr)
+	}
+	if !exists {
+		return false, path, nil
+	}
+	_, hasReview := raw["review"]
+	_, hasFixAgent := raw["review_fix_agent"]
+	return hasReview || hasFixAgent, path, nil
 }

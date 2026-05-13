@@ -350,3 +350,72 @@ func TestReviewSettingsMigration_SkipsWhenProjectHasNoReviewKeys(t *testing.T) {
 		t.Fatalf("preferences file exists after no-op migration: %v", err)
 	}
 }
+
+// TestReviewSettingsMigration_BailsOnLocalSettingsReviewKeys pins the
+// precondition: when .entire/settings.local.json has review keys, those
+// override clone-local preferences via mergeJSON's wholesale-replace path,
+// so the migration must surface the conflict up front rather than silently
+// produce a migrated-but-masked state. Bailing also intentionally does NOT
+// set ReviewMigrationDismissed — this is a fixable precondition, not a
+// rejected migration, and the user should be re-prompted after cleaning
+// settings.local.json.
+func TestReviewSettingsMigration_BailsOnLocalSettingsReviewKeys(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+	session.ClearGitCommonDirCache()
+
+	entireDir := filepath.Join(tmp, ".entire")
+	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	projectPath := filepath.Join(entireDir, "settings.json")
+	projectSettings := []byte(`{
+		"enabled": true,
+		"review": {"claude-code": {"prompt": "project"}}
+	}`)
+	if err := os.WriteFile(projectPath, projectSettings, 0o600); err != nil {
+		t.Fatalf("write project settings: %v", err)
+	}
+	localPath := filepath.Join(entireDir, "settings.local.json")
+	localSettings := []byte(`{"review": {"local-agent": {"prompt": "local"}}}`)
+	if err := os.WriteFile(localPath, localSettings, 0o600); err != nil {
+		t.Fatalf("write local settings: %v", err)
+	}
+
+	var out, errOut bytes.Buffer
+	if err := maybePromptReviewSettingsMigration(context.Background(), &out, &errOut, true, func(context.Context, string, bool) (bool, error) {
+		t.Fatal("prompt should not be called when settings.local.json has review keys")
+		return false, nil
+	}); err != nil {
+		t.Fatalf("migration: %v", err)
+	}
+
+	stderr := errOut.String()
+	for _, want := range []string{"settings.local.json", "review", "Remove"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to mention %q", stderr, want)
+		}
+	}
+
+	// Project file must NOT have been rewritten — the bail path leaves
+	// everything in place so the user can clean settings.local.json and
+	// re-run.
+	got, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatalf("read project settings: %v", err)
+	}
+	if !bytes.Contains(got, []byte(`"claude-code"`)) {
+		t.Fatalf("project file was modified despite bail; got: %s", got)
+	}
+
+	// Dismissal must NOT be persisted — the user didn't choose to dismiss,
+	// they hit a fixable precondition. Next run should re-prompt.
+	prefs, err := settings.LoadClonePreferences(context.Background())
+	if err != nil {
+		t.Fatalf("load preferences: %v", err)
+	}
+	if prefs != nil && prefs.ReviewMigrationDismissed {
+		t.Fatalf("ReviewMigrationDismissed = true after bail; should not persist a fixable precondition as dismissal")
+	}
+}
