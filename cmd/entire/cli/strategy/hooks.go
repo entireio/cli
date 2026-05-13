@@ -18,6 +18,7 @@ const entireHookMarker = "Entire CLI hooks"
 
 const backupSuffix = ".pre-entire"
 const chainComment = "# Chain: run pre-existing hook"
+const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
 
 // gitHookNames are the git hooks managed by Entire CLI
 var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"}
@@ -166,37 +167,43 @@ func isGitHookInstalledInHooksDir(hooksDir string) bool {
 
 // buildHookSpecs returns the hook specifications for all managed hooks.
 func buildHookSpecs(cmdPrefix string) []hookSpec {
+	prepareCommitMsgCmd := gitHookCommand(cmdPrefix, `prepare-commit-msg "$1" "$2" 2>/dev/null || true`, false)
+	commitMsgCmd := gitHookCommand(cmdPrefix, `commit-msg "$1" || true`, true)
+	postCommitCmd := gitHookCommand(cmdPrefix, `post-commit 2>/dev/null || true`, false)
+	postRewriteCmd := gitHookCommand(cmdPrefix, `post-rewrite "$1" 2>/dev/null || true`, false)
+	prePushCmd := gitHookCommand(cmdPrefix, `pre-push "$1" || true`, false)
+
 	return []hookSpec{
 		{
 			name: "prepare-commit-msg",
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
-%s hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true
-`, entireHookMarker, cmdPrefix),
+%s
+`, entireHookMarker, prepareCommitMsgCmd),
 		},
 		{
 			name: "commit-msg",
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
 # Commit-msg hook: strip trailer if no user content (allows aborting empty commits)
-%s hooks git commit-msg "$1" || exit 1
-`, entireHookMarker, cmdPrefix),
+%s
+`, entireHookMarker, commitMsgCmd),
 		},
 		{
 			name: "post-commit",
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
 # Post-commit hook: condense session data if commit has Entire-Checkpoint trailer
-%s hooks git post-commit 2>/dev/null || true
-`, entireHookMarker, cmdPrefix),
+%s
+`, entireHookMarker, postCommitCmd),
 		},
 		{
 			name: "post-rewrite",
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
 # Post-rewrite hook: remap session linkage after amend/rebase rewrites
-%s hooks git post-rewrite "$1" 2>/dev/null || true
-`, entireHookMarker, cmdPrefix),
+%s
+`, entireHookMarker, postRewriteCmd),
 		},
 		{
 			name: "pre-push",
@@ -204,10 +211,49 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 # %s
 # Pre-push hook: push session logs alongside user's push
 # $1 is the remote name (e.g., "origin")
-%s hooks git pre-push "$1" || true
-`, entireHookMarker, cmdPrefix),
+%s
+`, entireHookMarker, prePushCmd),
 		},
 	}
+}
+
+func gitHookCommand(cmdPrefix, args string, warnMissing bool) string {
+	invocation := fmt.Sprintf("%s hooks git %s", cmdPrefix, args)
+	availableTest, ok := gitHookCommandAvailableTest(cmdPrefix)
+	if !ok {
+		return invocation
+	}
+
+	missingAction := ":"
+	if warnMissing {
+		missingAction = fmt.Sprintf("printf '%%s\\n' %s >&2 || :", shellQuote(missingEntireGitHookWarning))
+	}
+	return fmt.Sprintf("if %s; then %s; else %s; fi", availableTest, invocation, missingAction)
+}
+
+func gitHookCommandAvailableTest(cmdPrefix string) (string, bool) {
+	if cmdPrefix == "entire" {
+		return "command -v entire >/dev/null 2>&1", true
+	}
+	if isWindowsAbsoluteHookCommand(cmdPrefix) {
+		return fmt.Sprintf("[ -f %s ]", cmdPrefix), true
+	}
+	if strings.HasPrefix(cmdPrefix, "/") || strings.HasPrefix(cmdPrefix, "'/") {
+		return fmt.Sprintf("[ -x %s ]", cmdPrefix), true
+	}
+	return "", false
+}
+
+func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
+	path := strings.TrimPrefix(cmdPrefix, "'")
+	if len(path) < len("C:\\") || path[1] != ':' {
+		return false
+	}
+	driveLetter := path[0]
+	if (driveLetter < 'A' || driveLetter > 'Z') && (driveLetter < 'a' || driveLetter > 'z') {
+		return false
+	}
+	return path[2] == '\\' || path[2] == '/'
 }
 
 // InstallGitHook installs generic git hooks that delegate to `entire hook` commands.
@@ -355,15 +401,19 @@ fi
 }
 
 func generatePostRewriteChainedContent(baseContent string) string {
-	const original = `entire hooks git post-rewrite "$1" 2>/dev/null || true`
-	const replacement = `entire hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`
+	const original = `hooks git post-rewrite "$1" 2>/dev/null || true`
+	const replacement = `hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`
 
-	replayPrefix := `_entire_stdin="$(mktemp "${TMPDIR:-/tmp}/entire-post-rewrite.XXXXXX")"
+	replayPrefix := `#!/bin/sh
+_entire_stdin="$(mktemp "${TMPDIR:-/tmp}/entire-post-rewrite.XXXXXX")"
 cat > "$_entire_stdin"
 trap 'rm -f "$_entire_stdin"' EXIT
-` + replacement
+`
 
-	return strings.Replace(baseContent, original, replayPrefix, 1) + fmt.Sprintf(`
+	body := strings.TrimPrefix(baseContent, "#!/bin/sh\n")
+	body = strings.Replace(body, original, replacement, 1)
+
+	return replayPrefix + body + fmt.Sprintf(`
 %s
 _entire_hook_dir="$(dirname "$0")"
 if [ -x "$_entire_hook_dir/post-rewrite%s" ]; then

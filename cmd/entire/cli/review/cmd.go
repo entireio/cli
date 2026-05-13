@@ -2,7 +2,7 @@
 //
 // cmd.go provides NewCommand(), the cobra entry point for `entire review`.
 // It routes through the new AgentReviewer / Sink / Run architecture for
-// launchable agents (claude-code, codex, gemini-cli) and falls back to
+// launchable agents (claude-code, codex, gemini) and falls back to
 // RunMarkerFallback for non-launchable agents (cursor, opencode,
 // factoryai-droid, copilot-cli).
 package review
@@ -692,15 +692,28 @@ func writePostReviewManifest(
 	if summary.Cancelled || len(summary.AgentRuns) == 0 {
 		return
 	}
-	manifest, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
+	manifest, states, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
 	if err != nil {
 		logging.Debug(ctx, "review manifest not written", slog.String("error", err.Error()))
 		warnManifestNotWritten(out, "could not load session state: "+err.Error())
 		return
 	}
 	if len(manifest.Sources) == 0 {
-		logging.Debug(ctx, "review manifest not written: no matching review sessions")
-		warnManifestNotWritten(out, "review session was not tagged as a review (env-var handshake did not reach the hook)")
+		reason, sentinel := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
+		if sentinel {
+			// Matcher and explainer have drifted — the matcher rejected
+			// every tagged session for a reason none of the explainer's
+			// filters cover. Surface at Warn so this gets noticed without
+			// requiring debug logging.
+			logging.Warn(ctx, "review manifest matcher/explainer drift detected",
+				slog.String("reason", reason),
+				slog.Int("tagged_state_count", len(states)),
+				slog.Int("agent_run_count", len(summary.AgentRuns)))
+		} else {
+			logging.Debug(ctx, "review manifest not written: no matching review sessions",
+				slog.String("reason", reason))
+		}
+		warnManifestNotWritten(out, reason)
 		return
 	}
 	if err := writeLocalReviewManifest(ctx, manifest); err != nil {

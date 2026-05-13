@@ -92,16 +92,145 @@ func localReviewManifestFromCurrentState(
 	headSHA string,
 	summary reviewtypes.RunSummary,
 	aggregateOutput string,
-) (LocalReviewManifest, error) {
+) (LocalReviewManifest, []*session.State, error) {
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
-		return LocalReviewManifest{}, fmt.Errorf("create session state store: %w", err)
+		return LocalReviewManifest{}, nil, fmt.Errorf("create session state store: %w", err)
 	}
 	states, err := store.List(ctx)
 	if err != nil {
-		return LocalReviewManifest{}, fmt.Errorf("list session states: %w", err)
+		return LocalReviewManifest{}, nil, fmt.Errorf("list session states: %w", err)
 	}
-	return buildLocalReviewManifestFromSummary(worktreeRoot, headSHA, summary, states, aggregateOutput), nil
+	return buildLocalReviewManifestFromSummary(worktreeRoot, headSHA, summary, states, aggregateOutput), states, nil
+}
+
+// explainEmptyManifest returns a single-line diagnostic explaining why
+// matchReviewSessionState produced no matches for any agent run in summary,
+// plus a sentinel flag indicating the function fell through every known
+// rejection cause. The sentinel means matcher and explainer drifted and
+// callers should escalate logging.
+//
+// Filter precedence mirrors matchReviewSessionState: worktree path,
+// BaseCommit, StartedAt window, then AgentType. Filters apply cumulatively
+// to a candidate set; the function reports the filter that empties the
+// set. This matters for heterogeneous failures across multiple tagged
+// states (e.g. one wrong-worktree, one right-worktree but wrong-SHA): the
+// reported cause is the filter that eliminated the last surviving
+// candidate, not the first filter to find any non-matching state.
+// AgentType is checked per-agent so a multi-agent run with heterogeneous
+// type mismatches names the specific failing agent.
+func explainEmptyManifest(
+	worktreeRoot string,
+	headSHA string,
+	summary reviewtypes.RunSummary,
+	states []*session.State,
+) (reason string, sentinel bool) {
+	if len(states) == 0 {
+		return "no session states found (lifecycle hook never created session state for any agent in this run)", false
+	}
+	tagged := make([]*session.State, 0, len(states))
+	for _, st := range states {
+		if st != nil && st.Kind == session.KindAgentReview {
+			tagged = append(tagged, st)
+		}
+	}
+	if len(tagged) == 0 {
+		return fmt.Sprintf("found %d session state(s) but none tagged as a review session (env-var handshake did not reach the hook)", len(states)), false
+	}
+
+	candidates := tagged
+
+	// Empty-SessionID filter (cumulative). The matcher returns these states,
+	// but buildLocalReviewManifestFromSummary drops them on st.SessionID == ""
+	// before adding a manifest source — without an explicit explainer cause,
+	// the sentinel would fire and surface a misleading "report this as a bug"
+	// for what is really a partial-write or corrupt-state-file condition.
+	survivors, _ := applyExplainerFilter(candidates, func(st *session.State) bool {
+		return st.SessionID != ""
+	})
+	if len(survivors) == 0 {
+		return fmt.Sprintf("found %d tagged review session(s) but all have empty SessionID (partial write or corrupt state file)", len(tagged)), false
+	}
+	candidates = survivors
+
+	// Worktree filter (cumulative).
+	var droppedExample *session.State
+	survivors, droppedExample = applyExplainerFilter(candidates, func(st *session.State) bool {
+		return worktreeRoot == "" || st.WorktreePath == "" || st.WorktreePath == worktreeRoot
+	})
+	if len(survivors) == 0 {
+		return fmt.Sprintf("found %d tagged review session(s) but worktree path mismatch: state=%q, run=%q", len(tagged), droppedExample.WorktreePath, worktreeRoot), false
+	}
+	candidates = survivors
+
+	// BaseCommit filter (cumulative).
+	survivors, droppedExample = applyExplainerFilter(candidates, func(st *session.State) bool {
+		return headSHA == "" || st.BaseCommit == "" || st.BaseCommit == headSHA
+	})
+	if len(survivors) == 0 {
+		return fmt.Sprintf("found %d tagged review session(s) but BaseCommit mismatch: state=%q, run=%q (HEAD moved between review start and first agent turn?)", len(tagged), droppedExample.BaseCommit, headSHA), false
+	}
+	candidates = survivors
+
+	// StartedAt window filter (cumulative).
+	survivors, _ = applyExplainerFilter(candidates, func(st *session.State) bool {
+		return summary.StartedAt.IsZero() || !st.StartedAt.Before(summary.StartedAt.Add(-5*time.Second))
+	})
+	if len(survivors) == 0 {
+		return fmt.Sprintf("found %d tagged review session(s) but they started before the review run window (stale session state from a prior run?)", len(tagged)), false
+	}
+	candidates = survivors
+
+	// AgentType filter (per-agent). Each run's wantType is checked against
+	// the remaining candidates; if no candidate's AgentType matches, that
+	// specific agent is named. Lenient cases (state.AgentType=="" or
+	// wantType=="") count as a match, matching the matcher's behavior. The
+	// observed-type list deduplicates and sorts so the diagnostic is stable
+	// across store.List orderings and faithfully represents the full set of
+	// mismatched types rather than whichever happened to be iterated last.
+	for _, run := range summary.AgentRuns {
+		wantType := agentTypeForReviewAgent(run.Name)
+		if wantType == "" {
+			continue
+		}
+		seen := map[string]struct{}{}
+		observedTypes := []string{}
+		anyMatch := false
+		for _, st := range candidates {
+			if st.AgentType == "" || st.AgentType == wantType {
+				anyMatch = true
+				break
+			}
+			t := string(st.AgentType)
+			if _, ok := seen[t]; !ok {
+				seen[t] = struct{}{}
+				observedTypes = append(observedTypes, t)
+			}
+		}
+		if !anyMatch {
+			sort.Strings(observedTypes)
+			return fmt.Sprintf("found %d tagged review session(s) but AgentType mismatch for agent %q: state=%q, run=%q", len(tagged), run.Name, strings.Join(observedTypes, ", "), wantType), false
+		}
+	}
+
+	return fmt.Sprintf("found %d tagged review session(s) but matcher rejected all of them (no filter explained the rejection — please report this as a bug)", len(tagged)), true
+}
+
+// applyExplainerFilter returns the subset of candidates for which keep is
+// true plus a pointer to the first dropped state (or nil if none dropped).
+// The dropped example is used to populate observed-vs-expected values in
+// the diagnostic when a filter empties the candidate set.
+func applyExplainerFilter(candidates []*session.State, keep func(*session.State) bool) (survivors []*session.State, droppedExample *session.State) {
+	for _, st := range candidates {
+		if keep(st) {
+			survivors = append(survivors, st)
+			continue
+		}
+		if droppedExample == nil {
+			droppedExample = st
+		}
+	}
+	return survivors, droppedExample
 }
 
 func hydrateReviewSummaryTokensFromCurrentState(

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -18,6 +19,18 @@ import (
 var _ reviewtypes.AgentReviewer = (*reviewtypes.ReviewerTemplate)(nil)
 
 const wantAgentName = "claude-code"
+
+// TestReviewer_NameMatchesRegistryKey locks the reviewer's name to the
+// agent registry's stable key. adoptReviewEnv compares ENTIRE_REVIEW_AGENT
+// against string(ag.Name()); drift here silently breaks review-session
+// tagging for this agent.
+func TestReviewer_NameMatchesRegistryKey(t *testing.T) {
+	t.Parallel()
+	if wantAgentName != string(agent.AgentNameClaudeCode) {
+		t.Fatalf("wantAgentName = %q, agent.AgentNameClaudeCode = %q — keep these aligned",
+			wantAgentName, string(agent.AgentNameClaudeCode))
+	}
+}
 
 func TestReviewer_Name(t *testing.T) {
 	t.Parallel()

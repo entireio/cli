@@ -634,7 +634,7 @@ func TestInstallGitHook_LocalDevCommandPrefix(t *testing.T) {
 		if strings.Contains(content, "go run") {
 			t.Errorf("hook %s should not use 'go run' prefix when localDev=false, got:\n%s", hook, content)
 		}
-		if !strings.Contains(content, "\nentire ") {
+		if !strings.Contains(content, "entire hooks git") {
 			t.Errorf("hook %s should use bare 'entire' prefix when localDev=false", hook)
 		}
 	}
@@ -696,6 +696,50 @@ func TestShellQuote(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestGitHookCommand_MissingWarningIsNonFatal(t *testing.T) {
+	t.Parallel()
+
+	command := gitHookCommand("entire", `commit-msg "$1" || true`, true)
+	if !strings.Contains(command, ">&2 || :") {
+		t.Fatalf("missing-entire warning should be explicitly non-fatal, got:\n%s", command)
+	}
+}
+
+func TestGitHookCommandAvailableTest_WindowsAbsolutePath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		cmdPrefix string
+		want      string
+	}{
+		{
+			name:      "backslash path",
+			cmdPrefix: shellQuote(`C:\Program Files\Entire\entire.exe`),
+			want:      `[ -f 'C:\Program Files\Entire\entire.exe' ]`,
+		},
+		{
+			name:      "slash path",
+			cmdPrefix: shellQuote(`z:/tools/entire.exe`),
+			want:      `[ -f 'z:/tools/entire.exe' ]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := gitHookCommandAvailableTest(tt.cmdPrefix)
+			if !ok {
+				t.Fatalf("gitHookCommandAvailableTest(%q) ok = false, want true", tt.cmdPrefix)
+			}
+			if got != tt.want {
+				t.Fatalf("gitHookCommandAvailableTest(%q) = %q, want %q", tt.cmdPrefix, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -963,6 +1007,161 @@ func TestInstallGitHook_InstallsPostRewrite(t *testing.T) {
 	if !strings.Contains(hookContent, `entire hooks git post-rewrite "$1" 2>/dev/null || true`) {
 		t.Errorf("installed post-rewrite hook content missing expected command:\n%s", hookContent)
 	}
+}
+
+func TestGitHookCommitMsg_MissingEntireWarnsAndAllowsCommit(t *testing.T) {
+	t.Parallel()
+
+	shPath := requireShell(t)
+	tempDir := t.TempDir()
+	msgFile := filepath.Join(tempDir, "COMMIT_EDITMSG")
+	if err := os.WriteFile(msgFile, []byte("commit message\n"), 0o600); err != nil {
+		t.Fatalf("failed to write commit message: %v", err)
+	}
+
+	hook := findHookSpec(t, buildHookSpecs("entire"), "commit-msg")
+	hookPath := filepath.Join(tempDir, "commit-msg")
+	if err := os.WriteFile(hookPath, []byte(hook.content), 0o755); err != nil {
+		t.Fatalf("failed to write hook: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), shPath, hookPath, msgFile)
+	cmd.Env = envWithPath(t.TempDir())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("commit-msg hook should allow commit when entire is missing: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), missingEntireGitHookWarning) {
+		t.Fatalf("missing entire warning not printed, got:\n%s", output)
+	}
+}
+
+func TestGitHookPrePush_MissingEntireSkipsSilentlyAndAllowsPush(t *testing.T) {
+	t.Parallel()
+
+	shPath := requireShell(t)
+	tempDir := t.TempDir()
+
+	hook := findHookSpec(t, buildHookSpecs("entire"), "pre-push")
+	hookPath := filepath.Join(tempDir, "pre-push")
+	if err := os.WriteFile(hookPath, []byte(hook.content), 0o755); err != nil {
+		t.Fatalf("failed to write hook: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), shPath, hookPath, "origin")
+	cmd.Env = envWithPath(t.TempDir())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pre-push hook should allow push when entire is missing: %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), missingEntireGitHookWarning) {
+		t.Fatalf("pre-push hook should skip missing entire silently, got:\n%s", output)
+	}
+}
+
+func TestGitHookCommitMsg_EntireFailureAllowsCommit(t *testing.T) {
+	t.Parallel()
+
+	shPath := requireShell(t)
+	tempDir := t.TempDir()
+	binDir := t.TempDir()
+	msgFile := filepath.Join(tempDir, "COMMIT_EDITMSG")
+	if err := os.WriteFile(msgFile, []byte("commit message\n"), 0o600); err != nil {
+		t.Fatalf("failed to write commit message: %v", err)
+	}
+
+	fakeEntire := filepath.Join(binDir, "entire")
+	if err := os.WriteFile(fakeEntire, []byte("#!/bin/sh\nexit 42\n"), 0o755); err != nil {
+		t.Fatalf("failed to write fake entire: %v", err)
+	}
+
+	hook := findHookSpec(t, buildHookSpecs("entire"), "commit-msg")
+	hookPath := filepath.Join(tempDir, "commit-msg")
+	if err := os.WriteFile(hookPath, []byte(hook.content), 0o755); err != nil {
+		t.Fatalf("failed to write hook: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), shPath, hookPath, msgFile)
+	cmd.Env = envWithPath(binDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("commit-msg hook should allow commit when entire handler fails: %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), missingEntireGitHookWarning) {
+		t.Fatalf("missing-entire warning should not print when entire exists, got:\n%s", output)
+	}
+}
+
+func TestGitHookCommitMsg_MissingEntireStillRunsChainedHook(t *testing.T) {
+	t.Parallel()
+
+	shPath := requireShell(t)
+	tempDir := t.TempDir()
+	binDir := t.TempDir()
+	msgFile := filepath.Join(tempDir, "COMMIT_EDITMSG")
+	markerFile := msgFile + ".backup-ran"
+	if err := os.WriteFile(msgFile, []byte("commit message\n"), 0o600); err != nil {
+		t.Fatalf("failed to write commit message: %v", err)
+	}
+	fakeDirname := "#!/bin/sh\ncase \"$1\" in */*) printf '%s\\n' \"${1%/*}\" ;; *) printf '.\\n' ;; esac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "dirname"), []byte(fakeDirname), 0o755); err != nil {
+		t.Fatalf("failed to write fake dirname: %v", err)
+	}
+
+	hook := findHookSpec(t, buildHookSpecs("entire"), "commit-msg")
+	hookPath := filepath.Join(tempDir, "commit-msg")
+	content := generateChainedContent(hook.content, "commit-msg")
+	if err := os.WriteFile(hookPath, []byte(content), 0o755); err != nil {
+		t.Fatalf("failed to write hook: %v", err)
+	}
+	backupPath := hookPath + backupSuffix
+	backupContent := "#!/bin/sh\nprintf 'backup ran\\n' > \"$1.backup-ran\"\n"
+	if err := os.WriteFile(backupPath, []byte(backupContent), 0o755); err != nil {
+		t.Fatalf("failed to write backup hook: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), shPath, hookPath, msgFile)
+	cmd.Env = envWithPath(binDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("chained commit-msg hook should allow commit when entire is missing: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(markerFile); err != nil {
+		t.Fatalf("backup hook did not run: %v\n%s", err, output)
+	}
+}
+
+func requireShell(t *testing.T) string {
+	t.Helper()
+
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not available")
+	}
+	return shPath
+}
+
+func findHookSpec(t *testing.T, specs []hookSpec, name string) hookSpec {
+	t.Helper()
+
+	for _, spec := range specs {
+		if spec.name == name {
+			return spec
+		}
+	}
+	t.Fatalf("hook spec %q not found", name)
+	return hookSpec{}
+}
+
+func envWithPath(path string) []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "PATH=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, "PATH="+path)
 }
 
 func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {

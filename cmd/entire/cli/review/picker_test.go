@@ -224,7 +224,7 @@ func TestBuildReviewPickerFields_StructureWithDiscovery(t *testing.T) {
 func TestBuildReviewPickerFields_EmptyBuiltinsRendersNote(t *testing.T) {
 	t.Parallel()
 	fields := review.BuildReviewPickerFields(
-		"gemini-cli",
+		"gemini",
 		nil,
 		nil,
 		[]skilldiscovery.InstallHint{{Message: "install gemini-code-review"}},
