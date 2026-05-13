@@ -1,0 +1,215 @@
+package index
+
+import (
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/kljensen/snowball"
+)
+
+var wordBoundaryRegex = regexp.MustCompile(`[^\pL\pN]+`)
+
+var stopWords = map[string]bool{
+	"a": true, "an": true, "and": true, "are": true, "as": true, "at": true,
+	"be": true, "but": true, "by": true, "for": true, "if": true, "in": true,
+	"into": true, "is": true, "it": true, "no": true, "not": true, "of": true,
+	"on": true, "or": true, "such": true, "that": true, "the": true,
+	"their": true, "then": true, "there": true, "these": true, "they": true,
+	"this": true, "to": true, "was": true, "were": true, "what": true,
+	"when": true, "where": true, "which": true, "who": true, "will": true, "with": true,
+}
+
+func Tokenize(text string) []string {
+	lower := strings.ToLower(text)
+	tokens := wordBoundaryRegex.Split(lower, -1)
+	stemmed := make([]string, 0, len(tokens))
+	for _, t := range tokens {
+		if len(t) < 2 {
+			continue
+		}
+		if stopWords[t] {
+			continue
+		}
+		result, err := snowball.Stem(t, "english", true)
+		if err != nil {
+			stemmed = append(stemmed, t)
+			continue
+		}
+		stemmed = append(stemmed, result)
+	}
+	return stemmed
+}
+
+var metaCharRegex = regexp.MustCompile(`[${}\[\]().*+?^|\\]`)
+
+func StripMetaChars(query string) string {
+	return metaCharRegex.ReplaceAllString(query, " ")
+}
+
+type SearchQuery struct {
+	Phrase  string
+	Tokens  []string
+	RawText string
+}
+
+func ParseQuery(raw string) SearchQuery {
+	var phrase string
+	var phraseTokens []string
+
+	for i, r := range raw {
+		if r == '"' {
+			end := strings.Index(raw[i+1:], "\"")
+			if end >= 0 {
+				phrase = raw[i+1 : i+1+end]
+				phraseTokens = Tokenize(phrase)
+				raw = raw[:i] + raw[i+1+end+1:]
+				break
+			}
+		}
+	}
+
+	tokens := Tokenize(raw)
+	if len(phraseTokens) > 0 {
+		tokens = append(phraseTokens, tokens...)
+	}
+
+	return SearchQuery{
+		Phrase:  phrase,
+		Tokens:  tokens,
+		RawText: raw,
+	}
+}
+
+type ScoredEntry struct {
+	Entry          PromptEntry
+	Score          float64
+	TruncatedMatch bool
+}
+
+func ScoreEntry(entry PromptEntry, query SearchQuery) ScoredEntry {
+	if len(query.Tokens) == 0 {
+		return ScoredEntry{Entry: entry, Score: 0}
+	}
+
+	promptTokens := Tokenize(entry.PromptText)
+	promptTokenSet := make(map[string]bool)
+	for _, t := range promptTokens {
+		promptTokenSet[t] = true
+	}
+
+	score := 0.0
+
+	if query.Phrase != "" && len(query.Tokens) > 0 {
+		lowerPrompt := strings.ToLower(entry.PromptText)
+		lowerPhrase := strings.ToLower(query.Phrase)
+		if strings.Contains(lowerPrompt, lowerPhrase) {
+			score += 10
+		}
+	}
+
+	allFound := true
+	for _, qt := range query.Tokens {
+		if !promptTokenSet[qt] {
+			allFound = false
+			break
+		}
+	}
+	if allFound && len(query.Tokens) > 0 {
+		score += 5
+	}
+
+	anyFound := false
+	matchCount := 0
+	for _, qt := range query.Tokens {
+		if promptTokenSet[qt] {
+			anyFound = true
+			matchCount++
+		}
+	}
+	if anyFound {
+		score++
+	}
+
+	if len(promptTokens) > 0 {
+		termDensity := float64(matchCount) / float64(len(promptTokens))
+		score += termDensity * 2
+	}
+
+	truncated := false
+	if entry.PromptTruncated && anyFound {
+		truncated = true
+	}
+
+	return ScoredEntry{
+		Entry:          entry,
+		Score:         score,
+		TruncatedMatch: truncated,
+	}
+}
+
+func Search(entries []PromptEntry, cfg SearchConfig) []ScoredEntry {
+	query := ParseQuery(cfg.Query)
+
+	scored := make([]ScoredEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !matchesFilter(entry, cfg) {
+			continue
+		}
+		result := ScoreEntry(entry, query)
+		if result.Score > 0 {
+			scored = append(scored, result)
+		}
+	}
+
+	sortByScoreAndTime(scored)
+
+	if cfg.Limit > 0 && len(scored) > cfg.Limit {
+		scored = scored[:cfg.Limit]
+	}
+	return scored
+}
+
+func matchesFilter(entry PromptEntry, cfg SearchConfig) bool {
+	if cfg.Agent != "" && !strings.EqualFold(entry.Agent, cfg.Agent) {
+		return false
+	}
+	if cfg.Branch != "" && !strings.EqualFold(entry.Branch, cfg.Branch) {
+		return false
+	}
+	if cfg.Kind != "" && !strings.EqualFold(entry.Kind, cfg.Kind) {
+		return false
+	}
+	if cfg.After != "" {
+		if t, err := time.Parse("2006-01-02", cfg.After); err == nil {
+			if entry.CreatedAt.Before(t) {
+				return false
+			}
+		}
+	}
+	if cfg.Files != "" {
+		found := false
+		fileFilter := strings.ToLower(cfg.Files)
+		for _, f := range entry.FilesTouched {
+			if strings.Contains(strings.ToLower(f), fileFilter) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func sortByScoreAndTime(entries []ScoredEntry) {
+	for i := 0; i < len(entries); i++ {
+		for j := i + 1; j < len(entries); j++ {
+			if entries[j].Score > entries[i].Score ||
+				(entries[j].Score == entries[i].Score && entries[j].Entry.CreatedAt.After(entries[i].Entry.CreatedAt)) {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+		}
+	}
+}

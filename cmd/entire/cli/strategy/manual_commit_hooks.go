@@ -26,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/prompts/index"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
@@ -1402,6 +1403,47 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 		slog.Int("checkpoints_condensed", result.CheckpointsCount),
 		slog.Int("transcript_lines", result.TotalTranscriptLines),
 	)
+
+	if len(result.Prompts) > 0 {
+		branchName := ""
+		if ref, err := repo.Head(); err == nil {
+			branchName = ref.Name().Short()
+		}
+		commitMsg := ""
+		if c, err := repo.CommitObject(head.Hash()); err == nil {
+			commitMsg = strings.Split(c.Message, "\n")[0]
+		}
+
+		repoRoot, err := paths.WorktreeRoot(ctx)
+		if err != nil {
+			logging.Warn(logCtx, "failed to get repo root for prompt index",
+				slog.String("error", err.Error()),
+			)
+		} else {
+			for i, prompt := range result.Prompts {
+				updateErr := index.UpdateIndexForCheckpoint(
+					ctx,
+					repoRoot,
+					checkpointID,
+					newHead,
+					commitMsg,
+					branchName,
+					string(state.AgentType),
+					state.ModelName,
+					result.FilesTouched,
+					i,
+					0,
+					prompt,
+				)
+				if updateErr != nil {
+					logging.Warn(logCtx, "failed to update prompt index",
+						slog.String("checkpoint_id", checkpointID.String()),
+						slog.String("error", updateErr.Error()),
+					)
+				}
+			}
+		}
+	}
 
 	return true
 }

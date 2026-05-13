@@ -6,6 +6,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
+	"github.com/entireio/cli/cmd/entire/cli/prompts"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
@@ -88,6 +89,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newDoctorCmd())          // 'doctor' (group: trace/logs/bundle)
 	cmd.AddCommand(newLabsCmd())            // 'labs' (experimental workflow discovery)
 	cmd.AddCommand(newPluginGroupCmd())     // 'plugin' (managed install/list/remove)
+	cmd.AddCommand(prompts.NewCommandGroup()) // 'prompts' (searchable prompt history)
 
 	// Top-level lifecycle and standalone commands.
 	cmd.AddCommand(cliReview.NewCommand(buildReviewDeps(newReviewAttachCmd()))) // hidden during maturation; runs configured review skills

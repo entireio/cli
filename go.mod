@@ -17,6 +17,7 @@ require (
 	github.com/go-git/x/plugin/objectsigner/auto v0.1.0
 	github.com/go-git/x/plugin/objectsigner/program v0.0.0-20260506121155-e7fc238fcab6
 	github.com/google/uuid v1.6.0
+	github.com/kljensen/snowball v0.10.0
 	github.com/mattn/go-isatty v0.0.22
 	github.com/muesli/termenv v0.16.0
 	github.com/posthog/posthog-go v1.12.5

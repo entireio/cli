@@ -67,3 +67,6 @@ docs/superpowers
 tmp/
 .tmp/
 .superpowers/
+
+# Entire CLI data
+.entire/
