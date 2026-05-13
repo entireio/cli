@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 const (
@@ -1117,5 +1119,65 @@ func TestReviewConfig_IsZero(t *testing.T) {
 				t.Errorf("IsZero() = %v, want %v (cfg=%+v)", got, tc.want, tc.cfg)
 			}
 		})
+	}
+}
+
+// setupSettingsRepo initializes a real git repository in a temp dir, writes
+// optional base/local settings files into .entire/, and chdirs into the
+// repo. Unlike setupSettingsDir it creates a real repo so that
+// paths.WorktreeRoot() (which calls `git rev-parse`) succeeds — required by
+// IsSetUp / IsSetUpAny / IsSetUpAndEnabled.
+func setupSettingsRepo(t *testing.T, base, local string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+	if base != "" {
+		if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(base), 0o644); err != nil {
+			t.Fatalf("failed to write settings file: %v", err)
+		}
+	}
+	if local != "" {
+		if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(local), 0o644); err != nil {
+			t.Fatalf("failed to write local settings file: %v", err)
+		}
+	}
+	t.Chdir(tmpDir)
+}
+
+// TestIsSetUpAndEnabled_LocalOnly is a regression test for issue #1123:
+// `entire enable --local` creates only .entire/settings.local.json, but
+// IsSetUpAndEnabled previously called IsSetUp which only checks for the
+// shared settings.json. Hooks calling IsSetUpAndEnabled then silently
+// no-op on every commit. Switching to IsSetUpAny fixes this; this test
+// locks the behavior in.
+func TestIsSetUpAndEnabled_LocalOnly(t *testing.T) {
+	setupSettingsRepo(t, "", `{"enabled": true}`)
+	if !IsSetUpAndEnabled(context.Background()) {
+		t.Fatal("IsSetUpAndEnabled() = false; want true when only settings.local.json exists with enabled: true")
+	}
+}
+
+func TestIsSetUpAndEnabled_LocalOnlyDisabled(t *testing.T) {
+	setupSettingsRepo(t, "", `{"enabled": false}`)
+	if IsSetUpAndEnabled(context.Background()) {
+		t.Fatal("IsSetUpAndEnabled() = true; want false when local-only settings have enabled: false")
+	}
+}
+
+func TestIsSetUpAndEnabled_NoFiles(t *testing.T) {
+	setupSettingsRepo(t, "", "")
+	if IsSetUpAndEnabled(context.Background()) {
+		t.Fatal("IsSetUpAndEnabled() = true; want false when no settings files exist")
+	}
+}
+
+func TestIsSetUpAndEnabled_BaseOnlyEnabled(t *testing.T) {
+	setupSettingsRepo(t, `{"enabled": true}`, "")
+	if !IsSetUpAndEnabled(context.Background()) {
+		t.Fatal("IsSetUpAndEnabled() = false; want true when settings.json has enabled: true")
 	}
 }

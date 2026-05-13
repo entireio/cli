@@ -660,10 +660,13 @@ func IsSetUpAny(ctx context.Context) bool {
 }
 
 // IsSetUpAndEnabled returns true if Entire is both set up and enabled.
-// This checks if .entire/settings.json exists AND has enabled: true.
+// This checks if either .entire/settings.json or .entire/settings.local.json
+// exists AND the merged settings have enabled: true. Using IsSetUpAny here
+// ensures hooks fire for `entire enable --local` setups, where only the
+// local settings file exists.
 // Use this for hooks that should be no-ops when Entire is not active.
 func IsSetUpAndEnabled(ctx context.Context) bool {
-	if !IsSetUp(ctx) {
+	if !IsSetUpAny(ctx) {
 		return false
 	}
 	s, err := Load(ctx)
