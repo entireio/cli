@@ -118,7 +118,7 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		// Still ensure the feature flag is configured even if hooks
 		// were already present (e.g., manually installed).
 		if err := ensureProjectFeatureEnabled(repoRoot); err != nil {
-			return 0, fmt.Errorf("failed to enable codex_hooks feature: %w", err)
+			return 0, fmt.Errorf("failed to enable hooks feature: %w", err)
 		}
 		return 0, nil
 	}
@@ -155,10 +155,10 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, localDev bool, force bool
 		return 0, fmt.Errorf("failed to write hooks.json: %w", err)
 	}
 
-	// Enable the codex_hooks feature in the project-level .codex/config.toml.
+	// Enable the hooks feature in the project-level .codex/config.toml.
 	// This keeps the feature flag per-repo rather than global.
 	if err := ensureProjectFeatureEnabled(repoRoot); err != nil {
-		return count, fmt.Errorf("failed to enable codex_hooks feature: %w", err)
+		return count, fmt.Errorf("failed to enable hooks feature: %w", err)
 	}
 
 	return count, nil

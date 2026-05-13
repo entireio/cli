@@ -432,7 +432,7 @@ Local settings override project settings field-by-field. When you run `entire st
 
 ### Agent-Specific Steps & Limitations
 
-- When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `codex_hooks = true` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. Or select Codex from the interactive agent picker when running `entire enable`.
+- When enabling Entire for Codex, the command will also create or update `.codex/config.toml` with `hooks = true` under `[features]` to enable Codex hooks. If you configure Codex manually, make sure this flag is set in your `.codex/config.toml`. (The older `codex_hooks` key still works as a deprecated alias but emits a startup warning; Entire migrates it to `hooks` automatically.) Or select Codex from the interactive agent picker when running `entire enable`.
 - Entire supports Cursor IDE and Cursor Agent CLI tool, but `entire rewind` is not available at this time. Other commands (`doctor`, `status` etc.) work the same as all other agents.
 - Entire supports Copilot CLI, but not Copilot in VS Code, in other IDEs, or on github.com.
 
