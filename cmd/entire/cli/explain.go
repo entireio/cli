@@ -45,7 +45,7 @@ import (
 	"golang.org/x/term"
 )
 
-const defaultCheckpointSummaryTimeout = 30 * time.Second
+const defaultCheckpointSummaryTimeout = 5 * time.Minute
 
 const (
 	pagerEnvVar       = "PAGER"
@@ -58,6 +58,29 @@ const (
 var checkpointSummaryTimeout = defaultCheckpointSummaryTimeout
 
 var generateTranscriptSummary = summarize.GenerateFromTranscript
+
+// resolveSummaryTimeout picks the effective deadline for `explain --generate`
+// using the precedence: per-run flag > settings.summary_timeout_seconds >
+// package default. Zero or negative values at any layer mean "unset; consult
+// the next layer down" — matching SummaryTimeoutValue() semantics.
+//
+// Settings load failures are logged at debug and fall through to the default;
+// a parsing hiccup must not break summary generation.
+func resolveSummaryTimeout(ctx context.Context, flagSeconds int) time.Duration {
+	if flagSeconds > 0 {
+		return time.Duration(flagSeconds) * time.Second
+	}
+	s, err := settings.Load(ctx)
+	if err != nil {
+		logging.Debug(ctx, "summary timeout: settings load failed, using default",
+			slog.String("error", err.Error()))
+		return checkpointSummaryTimeout
+	}
+	if v := s.SummaryTimeoutValue(); v > 0 {
+		return v
+	}
+	return checkpointSummaryTimeout
+}
 
 // errCannotGenerateTemporaryCheckpoint is returned by runExplainCheckpoint when
 // --generate is requested for a target that does not match any committed
@@ -227,6 +250,7 @@ func newExplainCmd() *cobra.Command {
 	var searchAllFlag bool
 	var jsonFlag bool
 	var transcriptFlag bool
+	var summaryTimeoutSecondsFlag int
 	sessionIndex := -1
 	listLimit := 0 // 0 means "use default (branchCheckpointsLimit)"
 
@@ -364,9 +388,19 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 				})
 			}
 
+			// --summary-timeout-seconds only makes sense with --generate.
+			if cmd.Flags().Changed("summary-timeout-seconds") {
+				if !generateFlag {
+					return errors.New("--summary-timeout-seconds only applies with --generate")
+				}
+				if summaryTimeoutSecondsFlag < 0 {
+					return errors.New("--summary-timeout-seconds must be non-negative")
+				}
+			}
+
 			// Convert short flag to verbose (verbose = !short)
 			verbose := !shortFlag
-			return runExplain(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), sessionFlag, commitFlag, checkpointFlag, positional, noPagerFlag, verbose, fullFlag, rawTranscriptFlag, generateFlag, forceFlag, searchAllFlag)
+			return runExplain(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), sessionFlag, commitFlag, checkpointFlag, positional, noPagerFlag, verbose, fullFlag, rawTranscriptFlag, generateFlag, forceFlag, searchAllFlag, summaryTimeoutSecondsFlag)
 		},
 	}
 
@@ -384,6 +418,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream compact normalized transcript bytes to stdout (pair with --raw-transcript for the per-agent raw transcript)")
 	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
 	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100). Only meaningful with --json.")
+	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting or 5m default.")
 
 	// Verbosity / transcript output modes are mutually exclusive
 	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")
@@ -398,7 +433,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 
 // runExplain routes to the appropriate explain function based on flags and the
 // optional positional target.
-func runExplain(ctx context.Context, w, errW io.Writer, sessionID, commitRef, checkpointID, target string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool) error {
+func runExplain(ctx context.Context, w, errW io.Writer, sessionID, commitRef, checkpointID, target string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, summaryTimeoutSeconds int) error {
 	// Count mutually exclusive flags (--commit and --checkpoint are mutually exclusive)
 	// --session is now a filter for the list view, not a separate mode
 	flagCount := 0
@@ -418,13 +453,13 @@ func runExplain(ctx context.Context, w, errW io.Writer, sessionID, commitRef, ch
 
 	// Route to appropriate handler
 	if target != "" {
-		return runExplainAuto(ctx, w, errW, target, noPager, verbose, full, rawTranscript, generate, force, searchAll)
+		return runExplainAuto(ctx, w, errW, target, noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds)
 	}
 	if commitRef != "" {
-		return runExplainCommit(ctx, w, errW, commitRef, noPager, verbose, full, rawTranscript, generate, force, searchAll)
+		return runExplainCommit(ctx, w, errW, commitRef, noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds)
 	}
 	if checkpointID != "" {
-		return runExplainCheckpoint(ctx, w, errW, checkpointID, noPager, verbose, full, rawTranscript, generate, force, searchAll)
+		return runExplainCheckpoint(ctx, w, errW, checkpointID, noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds)
 	}
 
 	// Default or with session filter: show list view (optionally filtered by session)
@@ -437,7 +472,7 @@ func runExplain(ctx context.Context, w, errW io.Writer, sessionID, commitRef, ch
 // resolution only on checkpoint.ErrCheckpointNotFound. --generate runs
 // an ambiguity pre-check to avoid writing a summary to the wrong
 // checkpoint on short-prefix collisions.
-func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool) error {
+func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, summaryTimeoutSeconds int) error {
 	stop := startSpinner(errW, "Loading checkpoints")
 	lookup, lookupErr := newExplainCheckpointLookup(ctx)
 	stop(false)
@@ -446,7 +481,7 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 			return err
 		}
 	}
-	checkpointErr := runExplainCheckpointWithLookup(ctx, w, errW, target, noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, lookupErr)
+	checkpointErr := runExplainCheckpointWithLookup(ctx, w, errW, target, noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, lookupErr, summaryTimeoutSeconds)
 	if checkpointErr == nil {
 		return nil
 	}
@@ -496,7 +531,7 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		slog.String("target", target),
 		slog.String("commit", abbreviateCommitHash(lookup.repo, hash)),
 		slog.String("checkpoint_id", cpID.String()))
-	return runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil)
+	return runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil, summaryTimeoutSeconds)
 }
 
 // runExplainAutoAmbiguityGuard refuses --generate when the positional
@@ -550,11 +585,11 @@ func runExplainAutoAmbiguityGuard(ctx context.Context, target string, lookup *ex
 // When searchAll is true, searches all commits without branch/depth limits (used for finding associated commits).
 //
 
-func runExplainCheckpoint(ctx context.Context, w, errW io.Writer, checkpointIDPrefix string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool) error {
-	return runExplainCheckpointWithLookup(ctx, w, errW, checkpointIDPrefix, noPager, verbose, full, rawTranscript, generate, force, searchAll, nil, nil)
+func runExplainCheckpoint(ctx context.Context, w, errW io.Writer, checkpointIDPrefix string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, summaryTimeoutSeconds int) error {
+	return runExplainCheckpointWithLookup(ctx, w, errW, checkpointIDPrefix, noPager, verbose, full, rawTranscript, generate, force, searchAll, nil, nil, summaryTimeoutSeconds)
 }
 
-func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, checkpointIDPrefix string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, lookup *explainCheckpointLookup, lookupErr error) error {
+func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, checkpointIDPrefix string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, lookup *explainCheckpointLookup, lookupErr error, summaryTimeoutSeconds int) error {
 	if lookup == nil {
 		var err error
 		lookup, err = newExplainCheckpointLookup(ctx)
@@ -625,7 +660,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	// Handle summary generation — uses raw transcript.
 	if generate {
 		stopLoad(false) // generation prints its own progress to w/errW
-		if err := generateCheckpointSummary(ctx, w, errW, lookup.v1Store, lookup.v2Store, fullCheckpointID, summary, content, force); err != nil {
+		if err := generateCheckpointSummary(ctx, w, errW, lookup.v1Store, lookup.v2Store, fullCheckpointID, summary, content, force, summaryTimeoutSeconds); err != nil {
 			return err
 		}
 		// Reload to get the updated summary. After generation we only need
@@ -966,7 +1001,11 @@ func readV2ContentFromMain(ctx context.Context, v2Reader *checkpoint.V2GitStore,
 // generateCheckpointSummary generates an AI summary for a checkpoint and persists it.
 // The summary is generated from the scoped transcript (only this checkpoint's portion),
 // not the entire session transcript.
-func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool) error {
+//
+// summaryTimeoutSeconds is the per-invocation --summary-timeout-seconds flag
+// value (0 = unset). Effective precedence for the deadline: flag > settings >
+// package default. See resolveSummaryTimeout for the resolution.
+func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *checkpoint.GitStore, v2Store *checkpoint.V2GitStore, checkpointID id.CheckpointID, cpSummary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent, force bool, summaryTimeoutSeconds int) error {
 	// Check if summary already exists
 	if content.Metadata.Summary != nil && !force {
 		return renderExplainFailure(errW, "Summary already exists", []explainRow{
@@ -1001,8 +1040,10 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, v1Store *
 		fmt.Fprintln(errW, "Generating checkpoint summary...")
 	}
 
+	timeout := resolveSummaryTimeout(ctx, summaryTimeoutSeconds)
+
 	start := time.Now()
-	summary, appliedDeadline, err := generateCheckpointAISummary(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent, provider.Generator)
+	summary, appliedDeadline, err := generateCheckpointAISummary(ctx, scopedTranscript, cpSummary.FilesTouched, content.Metadata.Agent, provider.Generator, timeout)
 	if err != nil {
 		label, rows, structured := formatCheckpointSummaryError(err, appliedDeadline)
 		styles := newStatusStyles(errW)
@@ -1131,14 +1172,14 @@ func transcriptHasSummaryContent(transcriptBytes []byte, agentType types.AgentTy
 }
 
 // generateCheckpointAISummary returns the generated summary, the effective
-// deadline applied to the underlying call (which may be shorter than
-// checkpointSummaryTimeout if the parent context had an earlier deadline),
-// and any error. The effective deadline is returned so the caller can render
-// the true timeout value in user-facing error messages instead of always
-// showing the package default.
-func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, filesTouched []string, agentType types.AgentType, generator summarize.Generator) (*checkpoint.Summary, time.Duration, error) {
-	timeoutCtx, cancel := context.WithTimeout(ctx, checkpointSummaryTimeout)
-	timeoutDuration := checkpointSummaryTimeout
+// deadline applied to the underlying call (which may be shorter than the
+// requested timeout if the parent context had an earlier deadline), and any
+// error. The effective deadline is returned so the caller can render the
+// true timeout value in user-facing error messages instead of always
+// showing the requested value.
+func generateCheckpointAISummary(ctx context.Context, scopedTranscript []byte, filesTouched []string, agentType types.AgentType, generator summarize.Generator, timeout time.Duration) (*checkpoint.Summary, time.Duration, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	timeoutDuration := timeout
 	if deadline, ok := timeoutCtx.Deadline(); ok {
 		timeoutDuration = time.Until(deadline)
 	}
@@ -2411,7 +2452,7 @@ func outputExplainContent(w io.Writer, content string, noPager bool) {
 // runExplainCommit looks up the checkpoint associated with a commit.
 // Extracts the Entire-Checkpoint trailer and delegates to checkpoint detail view.
 // If no trailer found, shows a message indicating no associated checkpoint.
-func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool) error {
+func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, summaryTimeoutSeconds int) error {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
@@ -2449,7 +2490,7 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 
 	// Delegate to checkpoint detail view, forwarding the full flag set so
 	// --generate / --raw-transcript / --force work via --commit as well.
-	return runExplainCheckpoint(ctx, w, errW, checkpointID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll)
+	return runExplainCheckpoint(ctx, w, errW, checkpointID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds)
 }
 
 // formatSessionInfo formats session information for display.

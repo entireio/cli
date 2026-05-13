@@ -38,6 +38,7 @@ const (
 	flagSkipPushSessions     = "skip-push-sessions"
 	flagSummarizeModel       = "summarize-model"
 	flagSummarizeAgent       = "summarize-provider"
+	flagSummarizeTimeout     = "summarize-timeout-seconds"
 	flagTelemetry            = "telemetry"
 	flagAbsoluteGitHookPath  = "absolute-git-hook-path"
 	flagForce                = "force"
@@ -101,6 +102,10 @@ func hasSummaryProviderFlags(cmd *cobra.Command) bool {
 	return cmd.Flags().Changed(flagSummarizeAgent) || cmd.Flags().Changed(flagSummarizeModel)
 }
 
+func hasSummaryTimeoutFlag(cmd *cobra.Command) bool {
+	return cmd.Flags().Changed(flagSummarizeTimeout)
+}
+
 // hasGlobalSettingsFlags reports whether any flag affects telemetry or
 // the entire-managed git hook (force / absolute path / local-dev).
 func hasGlobalSettingsFlags(cmd *cobra.Command) bool {
@@ -113,7 +118,7 @@ func hasGlobalSettingsFlags(cmd *cobra.Command) bool {
 // hasConfigureSettingsFlags reports whether configure was invoked with any
 // flag that mutates settings or hooks. Bare invocation prints help instead.
 func hasConfigureSettingsFlags(cmd *cobra.Command) bool {
-	return hasStrategyFlags(cmd) || hasSummaryProviderFlags(cmd) || hasGlobalSettingsFlags(cmd)
+	return hasStrategyFlags(cmd) || hasSummaryProviderFlags(cmd) || hasSummaryTimeoutFlag(cmd) || hasGlobalSettingsFlags(cmd)
 }
 
 // enableUsesSetupFlow reports whether `entire enable` should delegate to the
@@ -215,6 +220,41 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 	}
 
 	s.SummaryGeneration.SetProvider(provider, model)
+
+	if targetFile == settings.EntireSettingsLocalFile {
+		if err := SaveEntireSettingsLocal(ctx, s); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+	} else {
+		if err := SaveEntireSettings(ctx, s); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+	}
+
+	fmt.Fprintf(w, "✓ Settings updated (%s)\n", configDisplay)
+	return nil
+}
+
+// updateSummaryTimeoutSetting persists the --summarize-timeout-seconds flag
+// to settings. Pass 0 to clear (treated as "unset" by the generate path);
+// negative values are rejected.
+func updateSummaryTimeoutSetting(ctx context.Context, w io.Writer, timeoutSeconds int, opts EnableOptions) error {
+	if timeoutSeconds < 0 {
+		return errors.New("--summarize-timeout-seconds must be non-negative")
+	}
+
+	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	if err != nil {
+		targetFileAbs = targetFile
+	}
+
+	s, err := settings.LoadFromFile(targetFileAbs)
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+
+	s.SummaryTimeoutSeconds = timeoutSeconds
 
 	if targetFile == settings.EntireSettingsLocalFile {
 		if err := SaveEntireSettingsLocal(ctx, s); err != nil {
@@ -627,6 +667,7 @@ func newSetupCmd() *cobra.Command {
 	var opts EnableOptions
 	var summarizeProvider string
 	var summarizeModel string
+	var summarizeTimeoutSeconds int
 
 	cmd := &cobra.Command{
 		Use:   "configure",
@@ -642,7 +683,8 @@ Examples:
   entire configure --absolute-git-hook-path       # Reinstall git hook with absolute path
   entire configure --force                        # Reinstall git hook
   entire configure --checkpoint-remote github:org/checkpoints
-  entire configure --summarize-provider claude-code`,
+  entire configure --summarize-provider claude-code
+  entire configure --summarize-timeout-seconds 300   # 5m deadline for explain --generate`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 
@@ -676,6 +718,11 @@ Examples:
 					return err
 				}
 			}
+			if hasSummaryTimeoutFlag(cmd) {
+				if err := updateSummaryTimeoutSetting(ctx, cmd.OutOrStdout(), summarizeTimeoutSeconds, opts); err != nil {
+					return err
+				}
+			}
 			if hasGlobalSettingsFlags(cmd) {
 				if err := updateGlobalSettings(ctx, cmd, cmd.OutOrStdout(), opts); err != nil {
 					return err
@@ -694,6 +741,7 @@ Examples:
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
+	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 

@@ -333,7 +333,7 @@ func TestRunExplainAuto_NoMatchReturnsCompositeError(t *testing.T) {
 	runExplainAutoTestRepo(t)
 
 	var out, errOut bytes.Buffer
-	err := runExplainAuto(context.Background(), &out, &errOut, "abababababab", false, false, false, false, false, false, false)
+	err := runExplainAuto(context.Background(), &out, &errOut, "abababababab", false, false, false, false, false, false, false, 0)
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, `no checkpoint or commit found matching "abababababab"`)
@@ -368,7 +368,7 @@ func TestRunExplainAuto_CommitRefWithCheckpointTrailer(t *testing.T) {
 	require.NoError(t, err)
 
 	var out, errOut bytes.Buffer
-	err = runExplainAuto(ctx, &out, &errOut, commitHash.String(), true, false, false, false, false, false, false)
+	err = runExplainAuto(ctx, &out, &errOut, commitHash.String(), true, false, false, false, false, false, false, 0)
 	require.NoError(t, err)
 	require.Contains(t, out.String(), cpID.String(), "expected checkpoint header resolved via trailer")
 }
@@ -395,7 +395,7 @@ func TestRunExplainAuto_CommitWithoutTrailer(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, errOut bytes.Buffer
-			err := runExplainAuto(context.Background(), &out, &errOut, initial.String(), true, false, false, tc.rawTrans, tc.generate, false, false)
+			err := runExplainAuto(context.Background(), &out, &errOut, initial.String(), true, false, false, tc.rawTrans, tc.generate, false, false, 0)
 			if tc.wantErr {
 				require.Error(t, err)
 				require.ErrorContains(t, err, tc.wantContain)
@@ -420,7 +420,7 @@ func TestRunExplainCheckpoint_NotFoundSentinels(t *testing.T) {
 	for _, generate := range []bool{false, true} {
 		t.Run(fmt.Sprintf("generate=%v", generate), func(t *testing.T) {
 			var out, errOut bytes.Buffer
-			err := runExplainCheckpoint(context.Background(), &out, &errOut, "abababababab", false, false, false, false, generate, false, false)
+			err := runExplainCheckpoint(context.Background(), &out, &errOut, "abababababab", false, false, false, false, generate, false, false, 0)
 
 			require.Error(t, err)
 			require.ErrorIs(t, err, checkpoint.ErrCheckpointNotFound)
@@ -481,7 +481,7 @@ func TestRunExplainAuto_GenerateTemporaryCheckpointDoesNotFallBackToCommit(t *te
 	tempCheckpointSHA := writeTemporaryCheckpointForExplainTest(t)
 
 	var out, errOut bytes.Buffer
-	err := runExplainAuto(context.Background(), &out, &errOut, tempCheckpointSHA, true, false, false, false, true, false, false)
+	err := runExplainAuto(context.Background(), &out, &errOut, tempCheckpointSHA, true, false, false, false, true, false, false, 0)
 
 	require.Error(t, err)
 	require.ErrorIs(t, err, errCannotGenerateTemporaryCheckpoint)
@@ -499,7 +499,7 @@ func TestRunExplainAuto_TemporaryCheckpointRendersIdentityBullet(t *testing.T) {
 	var out, errOut bytes.Buffer
 	// noPager=true to suppress the pager's terminal-only path so output lands
 	// in the buffer; generate=false so we read (and don't try to summarize).
-	err := runExplainAuto(context.Background(), &out, &errOut, tempCheckpointSHA, true, false, false, false, false, false, false)
+	err := runExplainAuto(context.Background(), &out, &errOut, tempCheckpointSHA, true, false, false, false, false, false, false, 0)
 	require.NoError(t, err)
 
 	output := out.String()
@@ -575,7 +575,7 @@ func TestRunExplainCommit_AmbiguousPrintsToErrWAndReturnsSilent(t *testing.T) {
 	prefix := collidingShaPrefix(t, repo, tmpDir)
 
 	var out, errOut bytes.Buffer
-	err = runExplainCommit(context.Background(), &out, &errOut, prefix, true, false, false, false, false, false, false)
+	err = runExplainCommit(context.Background(), &out, &errOut, prefix, true, false, false, false, false, false, false, 0)
 
 	var silent *SilentError
 	if !errors.As(err, &silent) {
@@ -619,7 +619,7 @@ func TestRunExplainCheckpoint_AmbiguousCommittedPrefixPrintsToErrWAndReturnsSile
 	}
 
 	var out, errOut bytes.Buffer
-	err := runExplainCheckpoint(ctx, &out, &errOut, "e7", true, false, false, false, false, false, false)
+	err := runExplainCheckpoint(ctx, &out, &errOut, "e7", true, false, false, false, false, false, false, 0)
 
 	var silent *SilentError
 	if !errors.As(err, &silent) {
@@ -711,7 +711,7 @@ func TestRunExplainAuto_GenerateAmbiguousPrefixRefused(t *testing.T) {
 	}))
 
 	var out, errOut bytes.Buffer
-	err = runExplainAuto(ctx, &out, &errOut, commitPrefix, true, false, false, false, true, false, false)
+	err = runExplainAuto(ctx, &out, &errOut, commitPrefix, true, false, false, false, true, false, false, 0)
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, "ambiguous target")
@@ -770,7 +770,7 @@ func TestGenerateCheckpointAISummary_AddsDefaultTimeoutWithoutParentDeadline(t *
 	}
 
 	start := time.Now()
-	summary, _, err := generateCheckpointAISummary(context.Background(), []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil)
+	summary, _, err := generateCheckpointAISummary(context.Background(), []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
 	if err != nil {
 		t.Fatalf("generateCheckpointAISummary() error = %v", err)
 	}
@@ -861,7 +861,7 @@ func TestGenerateCheckpointAISummary_UsesParentDeadlineAndWrapsSentinel(t *testi
 		return nil, ctx.Err()
 	}
 
-	_, appliedDeadline, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil)
+	_, appliedDeadline, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -917,7 +917,7 @@ func TestGenerateCheckpointAISummary_PreservesClaudeErrorWhenCtxIsDone(t *testin
 		return nil, claudeErr
 	}
 
-	_, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil)
+	_, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
 	var ce *claudecode.ClaudeError
 	if !errors.As(err, &ce) {
 		t.Fatalf("errors.As did not recover *ClaudeError; got %v", err)
@@ -957,7 +957,7 @@ func TestGenerateCheckpointAISummary_ClampsLongParentDeadlineToDefaultTimeout(t 
 	}
 
 	start := time.Now()
-	summary, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil)
+	summary, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
 	if err != nil {
 		t.Fatalf("generateCheckpointAISummary() error = %v", err)
 	}
@@ -994,7 +994,7 @@ func TestGenerateCheckpointAISummary_UsesCancellationSentinel(t *testing.T) {
 		return nil, ctx.Err()
 	}
 
-	_, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil)
+	_, _, err := generateCheckpointAISummary(parentCtx, []byte("transcript"), nil, agent.AgentTypeClaudeCode, nil, checkpointSummaryTimeout)
 	if err == nil {
 		t.Fatal("expected cancellation error")
 	}
@@ -1006,6 +1006,86 @@ func TestGenerateCheckpointAISummary_UsesCancellationSentinel(t *testing.T) {
 	}
 }
 
+// writeSummaryTimeoutSettings creates an entire-recognized settings file with
+// the given timeout value (in seconds). Use 0 to omit the field entirely.
+func writeSummaryTimeoutSettings(t *testing.T, dir string, timeoutSeconds int) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
+	var body string
+	if timeoutSeconds == 0 {
+		body = `{"enabled":true}`
+	} else {
+		body = fmt.Sprintf(`{"enabled":true,"summary_timeout_seconds":%d}`, timeoutSeconds)
+	}
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".entire", "settings.json"),
+		[]byte(body),
+		0o644,
+	))
+}
+
+func TestResolveSummaryTimeout_FlagOverridesSetting(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+	writeSummaryTimeoutSettings(t, tmpDir, 60)
+
+	got := resolveSummaryTimeout(context.Background(), 120)
+
+	if want := 120 * time.Second; got != want {
+		t.Fatalf("resolveSummaryTimeout(flag=120, setting=60) = %s, want %s", got, want)
+	}
+}
+
+func TestResolveSummaryTimeout_SettingHonoredWhenFlagUnset(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+	writeSummaryTimeoutSettings(t, tmpDir, 60)
+
+	got := resolveSummaryTimeout(context.Background(), 0)
+
+	if want := 60 * time.Second; got != want {
+		t.Fatalf("resolveSummaryTimeout(flag=0, setting=60) = %s, want %s", got, want)
+	}
+}
+
+func TestResolveSummaryTimeout_DefaultWhenBothUnset(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+	writeSummaryTimeoutSettings(t, tmpDir, 0) // no summary_timeout_seconds field
+
+	got := resolveSummaryTimeout(context.Background(), 0)
+
+	if got != checkpointSummaryTimeout {
+		t.Fatalf("resolveSummaryTimeout(flag=0, setting=0) = %s, want %s (package default)", got, checkpointSummaryTimeout)
+	}
+}
+
+func TestResolveSummaryTimeout_NegativeSettingTreatedAsUnset(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+	writeSummaryTimeoutSettings(t, tmpDir, -1)
+
+	got := resolveSummaryTimeout(context.Background(), 0)
+
+	if got != checkpointSummaryTimeout {
+		t.Fatalf("resolveSummaryTimeout(flag=0, setting=-1) = %s, want %s (package default)", got, checkpointSummaryTimeout)
+	}
+}
+
+// Locks in 5 minutes as the package default so a casual edit doesn't silently
+// regress to the prior 30s — issue #1198 raised the default specifically
+// because 30s was too tight for large transcripts.
+func TestDefaultCheckpointSummaryTimeout_IsFiveMinutes(t *testing.T) {
+	t.Parallel()
+	if defaultCheckpointSummaryTimeout != 5*time.Minute {
+		t.Fatalf("defaultCheckpointSummaryTimeout = %s, want 5m (see issue #1198)", defaultCheckpointSummaryTimeout)
+	}
+}
+
 func TestExplainCommit_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -1014,7 +1094,7 @@ func TestExplainCommit_NotFound(t *testing.T) {
 	testutil.InitRepo(t, tmpDir)
 
 	var stdout bytes.Buffer
-	err := runExplainCommit(context.Background(), &stdout, &stdout, "nonexistent", false, false, false, false, false, false, false)
+	err := runExplainCommit(context.Background(), &stdout, &stdout, "nonexistent", false, false, false, false, false, false, false, 0)
 
 	if err == nil {
 		t.Error("expected error for nonexistent commit, got nil")
@@ -1057,7 +1137,7 @@ func TestExplainCommit_NoEntireData(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err = runExplainCommit(context.Background(), &stdout, &stdout, commitHash.String(), false, false, false, false, false, false, false)
+	err = runExplainCommit(context.Background(), &stdout, &stdout, commitHash.String(), false, false, false, false, false, false, false, 0)
 	if err != nil {
 		t.Fatalf("runExplainCommit() should not error for non-Entire commits, got: %v", err)
 	}
@@ -1129,7 +1209,7 @@ func TestExplainCommit_WithMetadataTrailerButNoCheckpoint(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err = runExplainCommit(context.Background(), &stdout, &stdout, commitHash.String(), false, false, false, false, false, false, false)
+	err = runExplainCommit(context.Background(), &stdout, &stdout, commitHash.String(), false, false, false, false, false, false, false, 0)
 	if err != nil {
 		t.Fatalf("runExplainCommit() error = %v", err)
 	}
@@ -1262,7 +1342,7 @@ func TestExplainDefault_NoCheckpoints_ShowsHelpfulMessage(t *testing.T) {
 func TestExplainBothFlagsError(t *testing.T) {
 	// Test that providing both --session and --commit returns an error
 	var stdout, stderr bytes.Buffer
-	err := runExplain(context.Background(), &stdout, &stderr, "session-id", "commit-sha", "", "", false, false, false, false, false, false, false)
+	err := runExplain(context.Background(), &stdout, &stderr, "session-id", "commit-sha", "", "", false, false, false, false, false, false, false, 0)
 
 	if err == nil {
 		t.Error("expected error when both flags provided, got nil")
@@ -1715,7 +1795,7 @@ func TestRunExplain_MutualExclusivityError(t *testing.T) {
 	var buf, errBuf bytes.Buffer
 
 	// Providing both --session and --checkpoint should error
-	err := runExplain(context.Background(), &buf, &errBuf, "session-id", "", "checkpoint-id", "", false, false, false, false, false, false, false)
+	err := runExplain(context.Background(), &buf, &errBuf, "session-id", "", "checkpoint-id", "", false, false, false, false, false, false, false, 0)
 
 	if err == nil {
 		t.Error("expected error when multiple flags provided")
@@ -1758,7 +1838,7 @@ func TestRunExplainCheckpoint_NotFound(t *testing.T) {
 	}
 
 	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(context.Background(), &buf, &errBuf, "nonexistent123", false, false, false, false, false, false, false)
+	err = runExplainCheckpoint(context.Background(), &buf, &errBuf, "nonexistent123", false, false, false, false, false, false, false, 0)
 
 	if err == nil {
 		t.Error("expected error for nonexistent checkpoint")
@@ -1820,7 +1900,7 @@ func TestRunExplainCheckpoint_V2OnlyCheckpoint(t *testing.T) {
 	}
 
 	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(context.Background(), &buf, &errBuf, "777777", false, false, false, false, false, false, false)
+	err = runExplainCheckpoint(context.Background(), &buf, &errBuf, "777777", false, false, false, false, false, false, false, 0)
 	if err != nil {
 		t.Fatalf("expected success for v2-only checkpoint, got error: %v", err)
 	}
@@ -1886,7 +1966,7 @@ func TestRunExplainCheckpoint_V2OnlyRawTranscript(t *testing.T) {
 	}
 
 	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(context.Background(), &buf, &errBuf, "888888", false, false, false, true, false, false, false)
+	err = runExplainCheckpoint(context.Background(), &buf, &errBuf, "888888", false, false, false, true, false, false, false, 0)
 	if err != nil {
 		t.Fatalf("expected success for v2-only raw transcript, got error: %v", err)
 	}
@@ -1967,7 +2047,7 @@ exec git-upload-pack "$repo"
 	))
 
 	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(ctx, &buf, &errBuf, "121212", false, false, false, true, false, false, false)
+	err = runExplainCheckpoint(ctx, &buf, &errBuf, "121212", false, false, false, true, false, false, false, 0)
 	require.NoError(t, err)
 	require.Contains(t, buf.String(), "raw from checkpoint_remote")
 }
@@ -2031,7 +2111,7 @@ func TestRunExplainCheckpoint_V2UsesCompactTranscriptForIntent(t *testing.T) {
 	}
 
 	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(context.Background(), &buf, &errBuf, "999999", false, false, false, false, false, false, false)
+	err = runExplainCheckpoint(context.Background(), &buf, &errBuf, "999999", false, false, false, false, false, false, false, 0)
 	if err != nil {
 		t.Fatalf("expected success for v2 checkpoint, got error: %v", err)
 	}
@@ -2098,7 +2178,7 @@ func TestRunExplainCheckpoint_V2PreferredGenerateWritesBothStores(t *testing.T) 
 
 	// generate=true, force=true — should succeed by writing to both v1 and v2 stores.
 	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(ctx, &buf, &errBuf, "aabbcc", false, false, false, false, true, true, false)
+	err = runExplainCheckpoint(ctx, &buf, &errBuf, "aabbcc", false, false, false, false, true, true, false, 0)
 	// Generation requires an AI summarizer which isn't available in unit tests,
 	// but the important thing is we don't get the old "only v1 checkpoints supported" error.
 	if err != nil && strings.Contains(err.Error(), "summary updates are currently supported only for v1 checkpoints") {
@@ -2151,7 +2231,7 @@ func TestRunExplainCheckpoint_V2OnlyGenerateSucceedsViaV2Store(t *testing.T) {
 	// generate=true, force=true — should not fail with "failed to save summary"
 	// because v2 store can persist even when v1 doesn't have the checkpoint.
 	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(ctx, &buf, &errBuf, "f1f2f3", false, false, false, false, true, true, false)
+	err = runExplainCheckpoint(ctx, &buf, &errBuf, "f1f2f3", false, false, false, false, true, true, false, 0)
 	if err != nil {
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "claude") || strings.Contains(errMsg, "executable file not found") {
@@ -2209,7 +2289,7 @@ func TestRunExplainCheckpoint_V2FallsBackToFullWhenCompactMissing(t *testing.T) 
 	// Default explain (not --full) should fall back to /full/current transcript
 	// when compact transcript is missing on /main.
 	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(ctx, &buf, &errBuf, "e1e2e3", false, false, false, false, false, false, false)
+	err = runExplainCheckpoint(ctx, &buf, &errBuf, "e1e2e3", false, false, false, false, false, false, false, 0)
 	require.NoError(t, err)
 
 	output := buf.String()
@@ -2273,7 +2353,7 @@ func TestRunExplainCheckpoint_V2CompactTranscriptNotUsedForGenerate(t *testing.T
 	// generate=true — should NOT fail with "no transcript content" which would
 	// indicate the compact transcript was incorrectly fed to the summarizer.
 	var buf, errBuf bytes.Buffer
-	err = runExplainCheckpoint(ctx, &buf, &errBuf, "c0c1c2", false, false, false, false, true, true, false)
+	err = runExplainCheckpoint(ctx, &buf, &errBuf, "c0c1c2", false, false, false, false, true, true, false, 0)
 	if err != nil && strings.Contains(err.Error(), "no transcript content for this checkpoint") {
 		t.Fatalf("compact transcript should not be used for --generate; raw transcript should be used instead: %v", err)
 	}
@@ -4386,7 +4466,7 @@ func TestRunExplainCommit_NoCheckpointTrailer(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err = runExplainCommit(context.Background(), &buf, &buf, hash.String()[:7], false, false, false, false, false, false, false)
+	err = runExplainCommit(context.Background(), &buf, &buf, hash.String()[:7], false, false, false, false, false, false, false, 0)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -4436,7 +4516,7 @@ func TestRunExplainCommit_WithCheckpointTrailer(t *testing.T) {
 	var buf bytes.Buffer
 	// This should try to look up the checkpoint and fail (checkpoint doesn't exist in store)
 	// but it should still attempt the lookup rather than showing commit details
-	err = runExplainCommit(context.Background(), &buf, &buf, hash.String()[:7], false, false, false, false, false, false, false)
+	err = runExplainCommit(context.Background(), &buf, &buf, hash.String()[:7], false, false, false, false, false, false, false, 0)
 
 	// Should error because the checkpoint doesn't exist in the store
 	if err == nil {
@@ -4565,7 +4645,7 @@ func TestRunExplain_SessionFlagFiltersListView(t *testing.T) {
 	// When session is specified alone, it should NOT error for mutual exclusivity
 	// It should route to the list view with a filter (which may fail for other reasons
 	// like not being in a git repo, but not for mutual exclusivity)
-	err := runExplain(context.Background(), &buf, &errBuf, "some-session", "", "", "", false, false, false, false, false, false, false)
+	err := runExplain(context.Background(), &buf, &errBuf, "some-session", "", "", "", false, false, false, false, false, false, false, 0)
 
 	// Should NOT be a mutual exclusivity error
 	if err != nil && strings.Contains(err.Error(), "cannot specify multiple") {
@@ -4577,7 +4657,7 @@ func TestRunExplain_SessionWithCheckpointStillMutuallyExclusive(t *testing.T) {
 	// Test that --session with --checkpoint is still an error
 	var buf, errBuf bytes.Buffer
 
-	err := runExplain(context.Background(), &buf, &errBuf, "some-session", "", "some-checkpoint", "", false, false, false, false, false, false, false)
+	err := runExplain(context.Background(), &buf, &errBuf, "some-session", "", "some-checkpoint", "", false, false, false, false, false, false, false, 0)
 
 	if err == nil {
 		t.Error("expected error when --session and --checkpoint both specified")
@@ -4591,7 +4671,7 @@ func TestRunExplain_SessionWithCommitStillMutuallyExclusive(t *testing.T) {
 	// Test that --session with --commit is still an error
 	var buf, errBuf bytes.Buffer
 
-	err := runExplain(context.Background(), &buf, &errBuf, "some-session", "some-commit", "", "", false, false, false, false, false, false, false)
+	err := runExplain(context.Background(), &buf, &errBuf, "some-session", "some-commit", "", "", false, false, false, false, false, false, false, 0)
 
 	if err == nil {
 		t.Error("expected error when --session and --commit both specified")

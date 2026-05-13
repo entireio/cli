@@ -102,9 +102,9 @@ type EntireSettings struct {
 
 	// SummaryTimeoutSeconds is an optional hard deadline (in seconds) for
 	// `entire explain --generate` summary generation. Zero or negative means
-	// "unset" -- the caller picks the default. Not yet consumed by the
-	// generate path; present so settings round-trip for a follow-up change
-	// that wires it into the deadline selection.
+	// "unset" -- falls back to the per-run --summary-timeout-seconds flag
+	// (if set) or the package default (5 minutes). Raise for very large
+	// transcripts; lower (e.g. 30) for fast-fail in CI.
 	SummaryTimeoutSeconds int `json:"summary_timeout_seconds,omitempty"`
 
 	// SignCheckpointCommits controls whether checkpoint commits are signed.
