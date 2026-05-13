@@ -56,7 +56,7 @@ var (
 	// credentialJSONKeyRegex operates on output of normalizeCredentialJSONKey
 	// (already lowercased, `-`/` `/`.` → `_`), so the `(?i)` flag is unnecessary.
 	credentialJSONKeyRegex  = regexp.MustCompile(`^` + dbPasswordKeyShape + `$`)
-	secretJSONKeyRegex      = regexp.MustCompile(`^(?:[a-z0-9]+_+)*(?:api_*key|auth_*token|access_*token|refresh_*token|client_*secret|consumer_*secret|secret_*key|private_*key|ssh_*key|secret|token)$`)
+	secretJSONKeyRegex      = regexp.MustCompile(`^` + secretValueKeyShape + `$`)
 	genericPasswordKeyRegex = regexp.MustCompile(`(?i)^(?:password|passwd|pwd)$`)
 )
 
