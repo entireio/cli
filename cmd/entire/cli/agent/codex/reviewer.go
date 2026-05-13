@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -77,14 +79,24 @@ func expandCodexBuiltinReview(skills []string) []string {
 // On a scanner error or a missing turn.completed envelope, emits RunError
 // (scanner) or Finished{Success: false} (missing turn) accordingly.
 //
-// Exposed for golden-file contract testing.
+// Tokens are emitted only at the terminal `turn.completed` envelope, not
+// incrementally — codex's usage fields land once at end-of-turn.
+//
+// Package-private; called directly from this package's tests so they can
+// drive raw stdout fixtures through the parser without going through the
+// ReviewerTemplate.Start spawn path.
 func parseCodexOutput(r io.Reader) <-chan reviewtypes.Event {
 	out := make(chan reviewtypes.Event, 32)
 	go func() {
 		defer close(out)
 		out <- reviewtypes.Started{}
 		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+		// 64MB max line. Codex packs the entire stdout of `command_execution`
+		// tools into the aggregated_output field on item.completed envelopes
+		// inline, so a chatty grep/cat/find over a large repo can put many
+		// MB into one envelope. 16MB was too tight; 64MB is generous without
+		// imposing real memory cost (one buffer per active review run).
+		scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
 		var seenTurnComplete bool
 		var turnUsage codexUsage
 		for scanner.Scan() {
@@ -97,7 +109,12 @@ func parseCodexOutput(r io.Reader) <-chan reviewtypes.Event {
 				out <- reviewtypes.RunError{Err: fmt.Errorf("codex --json: %w", err)}
 				continue
 			}
+			// Add cases here when codex's envelope or item types grow; the
+			// default arm logs unknown types at Debug so drift can be
+			// triaged via ENTIRE_LOG_LEVEL=debug.
 			switch env.Type {
+			case "thread.started", "turn.started":
+				// Session/turn markers — no event emitted.
 			case "item.started":
 				if env.Item.Type == "command_execution" {
 					out <- reviewtypes.ToolCall{Name: "exec", Args: env.Item.Command}
@@ -112,6 +129,9 @@ func parseCodexOutput(r io.Reader) <-chan reviewtypes.Event {
 			case "turn.completed":
 				seenTurnComplete = true
 				turnUsage = env.Usage
+			default:
+				logging.Debug(context.Background(), "codex parser: unknown envelope type",
+					slog.String("type", env.Type))
 			}
 		}
 		if err := scanner.Err(); err != nil {

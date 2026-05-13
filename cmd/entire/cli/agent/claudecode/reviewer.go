@@ -53,14 +53,25 @@ func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 // Emits Started first, Finished{Success:...} last (success follows result.is_error).
 // On a scanner error (torn stream), emits RunError then Finished{Success:false}.
 //
-// Exposed for golden-file contract testing.
+// Tokens are emitted only at the terminal `result` envelope, not
+// incrementally — claude's per-assistant `usage` fields aren't cumulative
+// and summing them across messages would double-count.
+//
+// Package-private; called directly from this package's tests so they can
+// drive raw stdout fixtures through the parser without going through the
+// ReviewerTemplate.Start spawn path.
 func parseClaudeOutput(r io.Reader) <-chan reviewtypes.Event {
 	out := make(chan reviewtypes.Event, 32)
 	go func() {
 		defer close(out)
 		out <- reviewtypes.Started{}
 		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+		// 64MB max line. Claude's stream-json envelopes are small per-message
+		// in practice, but we share the cap with codex (which can pack large
+		// command stdout into aggregated_output) so both parsers tolerate the
+		// same worst case. One buffer per active review run; memory cost is
+		// modest.
+		scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
 		var sawResult bool
 		var resultErr bool
 		var resultUsage messageUsage
