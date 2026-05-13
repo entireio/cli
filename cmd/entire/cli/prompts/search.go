@@ -17,13 +17,13 @@ import (
 
 func newSearchCmd() *cobra.Command {
 	var (
-		limitFlag   int
-		jsonFlag    bool
-		agentFlag   string
-		branchFlag  string
-		kindFlag    string
-		afterFlag   string
-		filesFlag   string
+		limitFlag  int
+		jsonFlag   bool
+		agentFlag  string
+		branchFlag string
+		kindFlag   string
+		afterFlag  string
+		filesFlag  string
 	)
 
 	cmd := &cobra.Command{
@@ -38,13 +38,13 @@ Examples:
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSearch(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), strings.Join(args, " "), index.SearchConfig{
-				Limit:   limitFlag,
-				JSON:    jsonFlag,
-				Agent:   agentFlag,
-				Branch:  branchFlag,
-				Kind:    kindFlag,
-				After:   afterFlag,
-				Files:   filesFlag,
+				Limit:  limitFlag,
+				JSON:   jsonFlag,
+				Agent:  agentFlag,
+				Branch: branchFlag,
+				Kind:   kindFlag,
+				After:  afterFlag,
+				Files:  filesFlag,
 			})
 		},
 	}
@@ -63,7 +63,7 @@ Examples:
 func runSearch(ctx context.Context, w io.Writer, ew io.Writer, query string, cfg index.SearchConfig) error {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return fmt.Errorf("not a git repository")
+		return errors.New("not a git repository")
 	}
 
 	if len(strings.TrimSpace(query)) < 2 {
@@ -137,7 +137,7 @@ func rebuildIndex(ctx context.Context, w io.Writer, repoRoot string) error {
 	}
 
 	if err := builder.Build(ctx, w, progressFn); err != nil {
-		return err
+		return fmt.Errorf("building index: %w", err)
 	}
 
 	fmt.Fprintln(w, "")
@@ -221,6 +221,12 @@ func writeJSONResults(w io.Writer, results []index.ScoredEntry, query string) er
 	if err != nil {
 		return fmt.Errorf("marshaling JSON: %w", err)
 	}
-	_, err = w.Write(data)
-	return err
+	n, err := w.Write(data)
+	if err != nil {
+		return fmt.Errorf("writing JSON: %w", err)
+	}
+	if n != len(data) {
+		return errors.New("incomplete write")
+	}
+	return nil
 }

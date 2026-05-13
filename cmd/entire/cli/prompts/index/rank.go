@@ -6,9 +6,11 @@ import (
 	"time"
 
 	"github.com/kljensen/snowball"
+	"golang.org/x/text/unicode/norm"
 )
 
 var wordBoundaryRegex = regexp.MustCompile(`[^\pL\pN]+`)
+var specialCharRegex = regexp.MustCompile(`[${}\[\]().*+?^|\\]`)
 
 var stopWords = map[string]bool{
 	"a": true, "an": true, "and": true, "are": true, "as": true, "at": true,
@@ -21,8 +23,8 @@ var stopWords = map[string]bool{
 }
 
 func Tokenize(text string) []string {
-	lower := strings.ToLower(text)
-	tokens := wordBoundaryRegex.Split(lower, -1)
+	normalized := norm.NFC.String(strings.ToLower(text))
+	tokens := wordBoundaryRegex.Split(normalized, -1)
 	stemmed := make([]string, 0, len(tokens))
 	for _, t := range tokens {
 		if len(t) < 2 {
@@ -41,12 +43,6 @@ func Tokenize(text string) []string {
 	return stemmed
 }
 
-var metaCharRegex = regexp.MustCompile(`[${}\[\]().*+?^|\\]`)
-
-func StripMetaChars(query string) string {
-	return metaCharRegex.ReplaceAllString(query, " ")
-}
-
 type SearchQuery struct {
 	Phrase  string
 	Tokens  []string
@@ -54,6 +50,13 @@ type SearchQuery struct {
 }
 
 func ParseQuery(raw string) SearchQuery {
+	cleaned := specialCharRegex.ReplaceAllString(raw, " ")
+	cleaned = strings.TrimSpace(cleaned)
+
+	if len(cleaned) < 2 {
+		return SearchQuery{}
+	}
+
 	var phrase string
 	var phraseTokens []string
 
@@ -136,14 +139,11 @@ func ScoreEntry(entry PromptEntry, query SearchQuery) ScoredEntry {
 		score += termDensity * 2
 	}
 
-	truncated := false
-	if entry.PromptTruncated && anyFound {
-		truncated = true
-	}
+	truncated := entry.PromptTruncated && anyFound
 
 	return ScoredEntry{
 		Entry:          entry,
-		Score:         score,
+		Score:          score,
 		TruncatedMatch: truncated,
 	}
 }

@@ -149,7 +149,7 @@ func walkCheckpointShards(repo *git.Repository, treeHash plumbing.Hash, fn func(
 			}
 
 			if err := fn(cpID, cpEntry.Hash); err != nil {
-				return err
+				return fmt.Errorf("processing checkpoint: %w", err)
 			}
 		}
 	}
@@ -164,43 +164,43 @@ func (b *IndexBuilder) loadCheckpoint(cpID id.CheckpointID) ([]PromptEntry, erro
 
 	ref, err := b.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting metadata branch ref: %w", err)
 	}
 
 	commit, err := b.repo.CommitObject(ref.Hash())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting commit object: %w", err)
 	}
 
 	tree, err := commit.Tree()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting commit tree: %w", err)
 	}
 
 	cpTree, err := tree.Tree(cpDir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting checkpoint tree: %w", err)
 	}
 
 	metaFile, err := cpTree.File("metadata.json")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting metadata file: %w", err)
 	}
 
 	metaContent, err := metaFile.Contents()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading metadata: %w", err)
 	}
 
 	var metadata checkpoint.CheckpointSummary
 	if err := json.Unmarshal([]byte(metaContent), &metadata); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parsing metadata: %w", err)
 	}
 
 	promptFile, err := cpTree.File("prompt.txt")
 	var allPrompts string
 	if err == nil {
-		allPrompts, _ = promptFile.Contents()
+		allPrompts, _ = promptFile.Contents() //nolint:errcheck // best-effort
 	}
 	prompts := splitPrompts(allPrompts)
 
