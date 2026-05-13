@@ -86,17 +86,27 @@ func expandCodexBuiltinReview(skills []string) []string {
 // drive raw stdout fixtures through the parser without going through the
 // ReviewerTemplate.Start spawn path.
 func parseCodexOutput(r io.Reader) <-chan reviewtypes.Event {
+	return parseCodexOutputBuf(r, codexReviewMaxScannerBuf)
+}
+
+// codexReviewMaxScannerBuf is the production bufio.Scanner cap for the codex
+// review parser. Codex packs the entire stdout of `command_execution` tools
+// into the aggregated_output field on item.completed envelopes inline, so a
+// chatty grep/cat/find over a large repo can put many MB into one envelope.
+// 16MB was too tight; 64MB is generous without imposing real memory cost
+// (one buffer per active review run).
+const codexReviewMaxScannerBuf = 64 * 1024 * 1024
+
+// parseCodexOutputBuf is the parameterized variant of parseCodexOutput, used
+// by tests to shrink the scanner cap so the "token too long" branch can be
+// exercised without writing 64MB of fixture data.
+func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 	out := make(chan reviewtypes.Event, 32)
 	go func() {
 		defer close(out)
 		out <- reviewtypes.Started{}
 		scanner := bufio.NewScanner(r)
-		// 64MB max line. Codex packs the entire stdout of `command_execution`
-		// tools into the aggregated_output field on item.completed envelopes
-		// inline, so a chatty grep/cat/find over a large repo can put many
-		// MB into one envelope. 16MB was too tight; 64MB is generous without
-		// imposing real memory cost (one buffer per active review run).
-		scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
+		scanner.Buffer(make([]byte, min(1024*1024, maxBuf)), maxBuf)
 		var seenTurnComplete bool
 		var turnUsage codexUsage
 		for scanner.Scan() {

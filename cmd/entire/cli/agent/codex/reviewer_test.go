@@ -162,20 +162,20 @@ func TestCodexReviewer_NoBinaryRequiredAtConstruction(t *testing.T) {
 
 func TestParseCodexOutput_ReportsScannerError(t *testing.T) {
 	t.Parallel()
-	// Trigger bufio.Scanner's "token too long" error: produce a "line"
-	// that exceeds parseCodexOutput's 16MB max buffer without containing
-	// a newline.
+	// Trigger bufio.Scanner's "token too long" error via parseCodexOutputBuf
+	// with a small cap, so we actually exercise the scanner.Err() branch
+	// (not the json.Unmarshal-on-a-huge-blob branch the prod 64MB cap would
+	// route us into). 8KB of contiguous bytes against a 4KB cap fires
+	// ErrTooLong before any newline lets the scanner emit a token.
+	const maxBuf = 4 * 1024
+	const payload = 8 * 1024
 	r, w := io.Pipe()
 	go func() {
 		defer w.Close()
-		// 17MB of contiguous bytes without a newline — exceeds the parser's scanner buffer.
-		buf := make([]byte, 1024*1024)
-		for range 17 {
-			_, _ = w.Write(buf) //nolint:errcheck // best-effort write in test goroutine
-		}
+		_, _ = w.Write(make([]byte, payload)) //nolint:errcheck // best-effort write in test goroutine
 	}()
 
-	events := collectCodexEvents(parseCodexOutput(r))
+	events := collectCodexEvents(parseCodexOutputBuf(r, maxBuf))
 
 	if len(events) < 2 {
 		t.Fatalf("expected at least Started + Finished, got %d events", len(events))
@@ -188,16 +188,24 @@ func TestParseCodexOutput_ReportsScannerError(t *testing.T) {
 	if fin.Success {
 		t.Error("Finished.Success must be false on scanner error")
 	}
-	// Also assert at least one RunError event was emitted before Finished.
-	sawRunError := false
+	// Require a RunError from the scanner branch specifically ("read stdout"
+	// prefix), not the unmarshal branch ("codex --json"). Without this the
+	// test would pass even if the scanner cap were widened back out and the
+	// huge blob just fell through json.Unmarshal — the exact regression the
+	// parameterized buffer is meant to prevent.
+	sawScannerErr := false
 	for _, ev := range events {
-		if _, ok := ev.(reviewtypes.RunError); ok {
-			sawRunError = true
+		re, ok := ev.(reviewtypes.RunError)
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(re.Err.Error(), "read stdout:") {
+			sawScannerErr = true
 			break
 		}
 	}
-	if !sawRunError {
-		t.Error("expected RunError event before Finished{Success: false}")
+	if !sawScannerErr {
+		t.Errorf("expected RunError from scanner branch (read stdout: ...), got events: %v", events)
 	}
 }
 

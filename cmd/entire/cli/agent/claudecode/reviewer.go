@@ -61,17 +61,26 @@ func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 // drive raw stdout fixtures through the parser without going through the
 // ReviewerTemplate.Start spawn path.
 func parseClaudeOutput(r io.Reader) <-chan reviewtypes.Event {
+	return parseClaudeOutputBuf(r, claudeReviewMaxScannerBuf)
+}
+
+// claudeReviewMaxScannerBuf is the production bufio.Scanner cap for the Claude
+// review parser. 64MB matches codex (which can pack large command stdout into
+// aggregated_output); Claude's stream-json envelopes are small in practice but
+// we share the cap so both parsers tolerate the same worst case. One buffer
+// per active review run; memory cost is modest.
+const claudeReviewMaxScannerBuf = 64 * 1024 * 1024
+
+// parseClaudeOutputBuf is the parameterized variant of parseClaudeOutput, used
+// by tests to shrink the scanner cap so the "token too long" branch can be
+// exercised without writing 64MB of fixture data.
+func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 	out := make(chan reviewtypes.Event, 32)
 	go func() {
 		defer close(out)
 		out <- reviewtypes.Started{}
 		scanner := bufio.NewScanner(r)
-		// 64MB max line. Claude's stream-json envelopes are small per-message
-		// in practice, but we share the cap with codex (which can pack large
-		// command stdout into aggregated_output) so both parsers tolerate the
-		// same worst case. One buffer per active review run; memory cost is
-		// modest.
-		scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
+		scanner.Buffer(make([]byte, min(1024*1024, maxBuf)), maxBuf)
 		var sawResult bool
 		var resultErr bool
 		var resultUsage messageUsage
