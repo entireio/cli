@@ -9,11 +9,12 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
-// NewReviewer returns the AgentReviewer for gemini-cli.
+// NewReviewer returns the AgentReviewer for gemini.
 //
 // Argv shape: gemini -p " " (space placeholder to trigger headless mode).
 // Prompt is piped via stdin; per gemini --help the -p flag appends to stdin
@@ -21,7 +22,7 @@ import (
 // Stdout in this mode is clean assistant output — no chrome filtering needed.
 func NewReviewer() *reviewtypes.ReviewerTemplate {
 	return &reviewtypes.ReviewerTemplate{
-		AgentName: "gemini-cli",
+		AgentName: string(agent.AgentNameGemini),
 		BuildCmd:  buildGeminiReviewCmd,
 		Parser:    parseGeminiOutput,
 	}
@@ -36,7 +37,9 @@ func buildGeminiReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.
 	// the actual prompt via stdin to avoid argv size limits.
 	cmd := exec.CommandContext(ctx, "gemini", "-p", " ")
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Env = review.AppendReviewEnv(os.Environ(), "gemini-cli", cfg, prompt)
+	// Agent name must equal string(ag.Name()) — adoptReviewEnv compares
+	// ENTIRE_REVIEW_AGENT against it; any drift silently skips adoption.
+	cmd.Env = review.AppendReviewEnv(os.Environ(), string(agent.AgentNameGemini), cfg, prompt)
 	return cmd
 }
 

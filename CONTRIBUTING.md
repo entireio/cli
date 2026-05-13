@@ -25,14 +25,9 @@ The fastest way to get a contribution merged is to align with maintainers before
 
 ## First-Time Contributors
 
-New to the project? Welcome! Here's how to get started:
+**New to open source or to Entire?** Start with the [First-Time Contributors Guide](docs/first-time-contributors.md). It walks through the full path: finding an issue, forking, setting up your dev environment, opening a PR, and what to expect afterwards.
 
-### Good First Issues
-
-We recommend starting with:
-- **Documentation improvements** - Fix typos, clarify explanations, add examples
-- **Test contributions** - Add test cases, improve coverage
-- **Small bug fixes** - Issues labeled `good-first-issue`
+The rest of this document is the reference for ongoing contributors.
 
 ---
 
@@ -270,6 +265,21 @@ Co-pilot agent reviews every PR and provides feedback on code quality, potential
 - **Question** -- Ask for clarification. We're happy to help.
 
 Addressing Copilot feedback upfront is the fastest path to maintainer review.
+
+---
+
+## Working with agents
+
+Entire exists to help you work with AI coding agents, so it would be odd if you weren't using one to contribute. There's no need to tell us you did. Our general thinking: use whatever agent and methodology you like, but until the robot revolution comes, you are responsible for the final code. Before submitting a PR for review, make sure you have reviewed it yourself. We'll close PRs that obviously skipped this step.
+
+Entire supports Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, and Pi, so feel free to use whichever one you're most comfortable with.
+
+One thing to watch out for is LLM eagerness. Agents like to please and they're in a hurry. A few common failure modes to push back on:
+
+- **Think first:** Agents tend to jump straight to writing code. Explain the architecture you want first, based on your own understanding, or have the agent explore the code and propose approaches before any edits happen. If the first implementation doesn't look right, just start over and use what you learned to do better next time. Re-rolling is cheaper than untangling.
+- **Spot the laziness:** LLMs will make their own job easy. They write trivial tests, make types wide and optional so the compiler doesn't complain, catch exceptions and log instead of handling errors, and copy local patterns whether or not they fit. When you notice this happening, push back and ask the agent to do the work properly.
+- **Spot the uncertainty:** As much as the bots declare "I see the issue now clearly," they often don't. Call them on it if you see the agent flailing. Another telltale sign: the agent starts listing the many ways it fixed an issue, or starts writing overly defensive code.
+- **Spot the bloat:** Agents like to insert redundant comments, or worse, comments that describe the change at hand rather than the resulting code. They write loads of tests that don't really test anything, and when they do, they test the implementation rather than the intention. They also like to log anything, just in case. When you see this in the diff, trim it back before opening your PR.
 
 ---
 

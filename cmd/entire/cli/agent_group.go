@@ -99,7 +99,7 @@ func newAgentAddCmd() *cobra.Command {
 
 Examples:
   entire agent add claude-code
-  entire agent add gemini-cli`,
+  entire agent add gemini`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]

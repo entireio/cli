@@ -553,11 +553,382 @@ func TestWritePostReviewManifest_WarnsWhenNoMatchingSessions(t *testing.T) {
 	if !strings.Contains(got, "Note: review skills ran but findings were not persisted.") {
 		t.Fatalf("expected warning to fire when no sessions match; got:\n%s", got)
 	}
-	if !strings.Contains(got, "env-var handshake did not reach the hook") {
-		t.Fatalf("expected handshake-failure reason; got:\n%s", got)
+	if !strings.Contains(got, "no session states found") {
+		t.Fatalf("expected no-session-state reason; got:\n%s", got)
 	}
 	if strings.Contains(got, "Review complete.") {
 		t.Fatalf("happy-path footer must not print when manifest is empty; got:\n%s", got)
+	}
+}
+
+func TestExplainEmptyManifest_NoStates(t *testing.T) {
+	t.Parallel()
+	summary := reviewtypes.RunSummary{
+		StartedAt: time.Now(),
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, nil)
+	if !strings.Contains(got, "no session states found") {
+		t.Errorf("reason = %q, want mention of 'no session states found'", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false (known cause should not trip the invariant flag)")
+	}
+}
+
+func TestExplainEmptyManifest_NoneTagged(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{SessionID: "s1", WorktreePath: "/repo", BaseCommit: "abc123", StartedAt: started.Add(time.Second)},
+		{SessionID: "s2", WorktreePath: "/repo", BaseCommit: "abc123", StartedAt: started.Add(2 * time.Second)},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "none tagged as a review session") {
+		t.Errorf("reason = %q, want 'none tagged as a review session'", got)
+	}
+	if !strings.Contains(got, "env-var handshake") {
+		t.Errorf("reason = %q, want mention of env-var handshake", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false")
+	}
+}
+
+func TestExplainEmptyManifest_WorktreeMismatch(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "s1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/other/worktree",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "worktree path mismatch") {
+		t.Errorf("reason = %q, want 'worktree path mismatch'", got)
+	}
+	if !strings.Contains(got, "/other/worktree") || !strings.Contains(got, "/repo") {
+		t.Errorf("reason = %q, want both observed and expected worktree paths", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false")
+	}
+}
+
+func TestExplainEmptyManifest_BaseCommitMismatch(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "s1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "deadbeef",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "BaseCommit mismatch") {
+		t.Errorf("reason = %q, want 'BaseCommit mismatch'", got)
+	}
+	if !strings.Contains(got, "deadbeef") || !strings.Contains(got, "abc123") {
+		t.Errorf("reason = %q, want both observed and expected SHAs", got)
+	}
+	if !strings.Contains(got, "HEAD moved") {
+		t.Errorf("reason = %q, want hint about HEAD movement", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false")
+	}
+}
+
+func TestExplainEmptyManifest_StartedAtOutsideWindow(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "s1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(-time.Hour), // way before the review run
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "started before the review run") {
+		t.Errorf("reason = %q, want 'started before the review run'", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false")
+	}
+}
+
+func TestExplainEmptyManifest_AgentTypeMismatch(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "s1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Codex"), // wrong agent
+		},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "AgentType mismatch") {
+		t.Errorf("reason = %q, want 'AgentType mismatch'", got)
+	}
+	if !strings.Contains(got, "Codex") || !strings.Contains(got, "Claude Code") {
+		t.Errorf("reason = %q, want both observed and expected AgentTypes", got)
+	}
+	if !strings.Contains(got, "claude-code") {
+		t.Errorf("reason = %q, want mention of the specific failing agent name", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false")
+	}
+}
+
+// TestExplainEmptyManifest_CumulativeFiltering locks the cumulative-filter
+// behavior: when one tagged state fails worktree but another passes worktree
+// yet fails SHA, the reported cause must be SHA (the filter that emptied
+// the candidate set), not worktree (the filter that found *some* mismatched
+// state but left a survivor). Without this, the diagnostic would mislead
+// users by reporting whichever filter happens to be checked first.
+func TestExplainEmptyManifest_CumulativeFiltering(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	// state-A: wrong worktree, right SHA. Eliminated by worktree filter.
+	// state-B: right worktree, wrong SHA. Survives worktree, eliminated by SHA.
+	// Both fail, so the manifest is empty. Reported cause should be SHA
+	// because that's the filter that emptied the set after state-A was dropped.
+	states := []*session.State{
+		{
+			SessionID:    "state-A",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/other/worktree",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+		{
+			SessionID:    "state-B",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "deadbeef",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "BaseCommit mismatch") {
+		t.Errorf("reason = %q, want 'BaseCommit mismatch' (the filter that emptied the candidate set), not worktree-mismatch", got)
+	}
+	if !strings.Contains(got, "deadbeef") {
+		t.Errorf("reason = %q, want the surviving state's wrong SHA (deadbeef) as the observed value", got)
+	}
+	if strings.Contains(got, "worktree") {
+		t.Errorf("reason = %q, must not blame worktree when state-B survived worktree filter", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false")
+	}
+}
+
+// TestExplainEmptyManifest_MultiAgentNamesFailingAgent locks the per-agent
+// AgentType iteration: when a 2-agent run sees one tagged state for claude
+// and the codex agent has no matching state, the reason must name "codex"
+// (the failing agent) rather than reporting against the first agent in the
+// run list. Without this, a heterogeneous mismatch silently misleads the user.
+func TestExplainEmptyManifest_MultiAgentNamesFailingAgent(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{
+			{Name: "claude-code"},
+			{Name: "codex"},
+		},
+	}
+	// Only one tagged state, AgentType=Claude Code. claude-code matches it
+	// (the matcher returned nil because the test setup forces the empty-
+	// manifest path). codex finds no matching AgentType — it should be named.
+	states := []*session.State{
+		{
+			SessionID:    "s1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "AgentType mismatch") {
+		t.Fatalf("reason = %q, want 'AgentType mismatch'", got)
+	}
+	if !strings.Contains(got, "codex") {
+		t.Errorf("reason = %q, want the failing agent (codex) to be named, not claude-code", got)
+	}
+	if !strings.Contains(got, "Claude Code") || !strings.Contains(got, "Codex") {
+		t.Errorf("reason = %q, want both observed (Claude Code) and expected (Codex) AgentTypes", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false")
+	}
+}
+
+// TestBuildLocalReviewManifestFromSummary_PartialMatch_NoWarning pins the
+// behavior that a partial-success run (one agent matched, another didn't)
+// produces a non-empty manifest. writePostReviewManifest only fires the
+// "findings were not persisted" warning when len(manifest.Sources) == 0,
+// so partial success silently succeeds — intentional behavior that this
+// test makes explicit. A future refactor that changes this would have to
+// update the test, forcing the change to be deliberate.
+func TestBuildLocalReviewManifestFromSummary_PartialMatch_NoWarning(t *testing.T) {
+	t.Parallel()
+	started := time.Now()
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{
+			{Name: "claude-code", Status: reviewtypes.AgentStatusSucceeded},
+			{Name: "codex", Status: reviewtypes.AgentStatusSucceeded},
+		},
+	}
+	// Only one tagged state with the right AgentType for claude-code. codex
+	// has no matching tagged state — its source will be missing from the
+	// manifest, but the manifest is not empty so no warning fires.
+	states := []*session.State{
+		{
+			SessionID:    "claude-session",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	manifest := buildLocalReviewManifestFromSummary("/repo", "abc123", summary, states, "")
+	if len(manifest.Sources) != 1 {
+		t.Fatalf("expected partial-success manifest with 1 source; got %d", len(manifest.Sources))
+	}
+	if manifest.Sources[0].SessionID != "claude-session" {
+		t.Errorf("expected the claude-code source to be matched; got %+v", manifest.Sources[0])
+	}
+}
+
+// TestExplainEmptyManifest_EmptySessionIDs locks the empty-SessionID
+// rejection cause. buildLocalReviewManifestFromSummary drops matches with
+// SessionID=="" before adding a manifest source, so the explainer must
+// model that path explicitly — otherwise the sentinel fires and surfaces
+// a misleading "report this as a bug" for a real (if rare) partial-write
+// or corrupt-state condition.
+func TestExplainEmptyManifest_EmptySessionIDs(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC)
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	states := []*session.State{
+		{
+			SessionID:    "", // partial write / corrupt state
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Claude Code"),
+		},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "empty SessionID") {
+		t.Errorf("reason = %q, want mention of 'empty SessionID'", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false — empty SessionID is a known cause, not drift")
+	}
+}
+
+// TestExplainEmptyManifest_AggregatesObservedAgentTypes locks the
+// deduplicated, sorted accumulation of observed AgentTypes when multiple
+// candidates have distinct mismatched types. Without this, the reported
+// state field depended on store.List iteration order — non-deterministic
+// and misleading (only one of the actual mismatched types was named).
+func TestExplainEmptyManifest_AggregatesObservedAgentTypes(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC)
+	summary := reviewtypes.RunSummary{
+		StartedAt: started,
+		AgentRuns: []reviewtypes.AgentRun{{Name: "claude-code"}},
+	}
+	// Two tagged states with distinct mismatched AgentTypes. Listed in
+	// reverse-sorted order so the test fails if the implementation reports
+	// the first iterated state instead of sorting the accumulated set.
+	states := []*session.State{
+		{
+			SessionID:    "s1",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(time.Second),
+			AgentType:    agenttypes.AgentType("Gemini"),
+		},
+		{
+			SessionID:    "s2",
+			Kind:         session.KindAgentReview,
+			WorktreePath: "/repo",
+			BaseCommit:   "abc123",
+			StartedAt:    started.Add(2 * time.Second),
+			AgentType:    agenttypes.AgentType("Codex"),
+		},
+	}
+	got, sentinel := explainEmptyManifest("/repo", "abc123", summary, states)
+	if !strings.Contains(got, "AgentType mismatch") {
+		t.Fatalf("reason = %q, want 'AgentType mismatch'", got)
+	}
+	// Both observed types must appear (not just one — that was the bug).
+	if !strings.Contains(got, "Codex") || !strings.Contains(got, "Gemini") {
+		t.Errorf("reason = %q, want both observed AgentTypes ('Codex' and 'Gemini')", got)
+	}
+	// Sorted order: "Codex" must appear before "Gemini" in the rendered list.
+	if idxCodex, idxGemini := strings.Index(got, "Codex"), strings.Index(got, "Gemini"); idxCodex == -1 || idxGemini == -1 || idxCodex > idxGemini {
+		t.Errorf("reason = %q, want observed types sorted (Codex before Gemini)", got)
+	}
+	if sentinel {
+		t.Errorf("sentinel = true, want false")
 	}
 }
 

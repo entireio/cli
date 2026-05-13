@@ -16,9 +16,9 @@ func TestCuratedBuiltinsFor_KnownAgents(t *testing.T) {
 	if len(codex) != 1 || codex[0].Name != "/review" {
 		t.Errorf("codex built-ins: got %+v, want 1x /review", codex)
 	}
-	gemini := skilldiscovery.CuratedBuiltinsFor("gemini-cli")
+	gemini := skilldiscovery.CuratedBuiltinsFor("gemini")
 	if len(gemini) != 0 {
-		t.Errorf("gemini-cli built-ins: got %d, want 0", len(gemini))
+		t.Errorf("gemini built-ins: got %d, want 0", len(gemini))
 	}
 }
 
@@ -52,7 +52,7 @@ func TestActiveInstallHintsFor_ShowsAllWhenNothingDiscovered(t *testing.T) {
 
 func TestActiveInstallHintsFor_GeminiAlwaysShownRegardlessOfDiscovery(t *testing.T) {
 	t.Parallel()
-	hints := skilldiscovery.ActiveInstallHintsFor("gemini-cli", map[string]struct{}{"/anything": {}})
+	hints := skilldiscovery.ActiveInstallHintsFor("gemini", map[string]struct{}{"/anything": {}})
 	if len(hints) == 0 {
 		t.Error("gemini hint with nil ProvidesAny should always show")
 	}
@@ -60,8 +60,8 @@ func TestActiveInstallHintsFor_GeminiAlwaysShownRegardlessOfDiscovery(t *testing
 
 func TestIsEligible_IncludesAgentWithOnlyInstallHint(t *testing.T) {
 	t.Parallel()
-	if !skilldiscovery.IsEligible("gemini-cli") {
-		t.Error("gemini-cli should be eligible via install hint alone")
+	if !skilldiscovery.IsEligible("gemini") {
+		t.Error("gemini should be eligible via install hint alone")
 	}
 	if !skilldiscovery.IsEligible("claude-code") {
 		t.Error("claude-code should be eligible via built-ins")
