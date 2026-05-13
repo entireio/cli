@@ -105,3 +105,7 @@ but don't we want the findings and timeline to be saved in git? where does entir
 
 discussion: explain this more "Review content itself
   ends up condensed into checkpoint metadata on the entire/checkpoints/v1 branch"
+
+---
+
+so the agent transcripts for the investigation same thing happens to them right? so do we need timeline.md?
