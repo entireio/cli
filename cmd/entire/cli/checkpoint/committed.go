@@ -1138,7 +1138,7 @@ func (s *GitStore) ListCommitted(ctx context.Context) ([]CommittedInfo, error) {
 	var checkpoints []CommittedInfo
 
 	// Scan sharded structure: <2-char-prefix>/<remaining-id>/metadata.json
-	_ = WalkCheckpointShards(s.repo, tree, func(checkpointID id.CheckpointID, cpTreeHash plumbing.Hash) error { //nolint:errcheck // callback never returns errors
+	_ = WalkCheckpointShards(ctx, s.repo, tree, func(checkpointID id.CheckpointID, cpTreeHash plumbing.Hash) error { //nolint:errcheck // callback never returns errors
 		checkpointTree, cpTreeErr := s.repo.TreeObject(cpTreeHash)
 		if cpTreeErr != nil {
 			return nil //nolint:nilerr // skip unreadable entries, continue walking

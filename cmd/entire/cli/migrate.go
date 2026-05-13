@@ -818,7 +818,7 @@ func listExistingV2Checkpoints(ctx context.Context, repo *git.Repository, v2Stor
 		return nil, fmt.Errorf("read v2 /main tree: %w", err)
 	}
 
-	if err := checkpoint.WalkCheckpointShards(repo, rootTree, func(cpID id.CheckpointID, _ plumbing.Hash) error {
+	if err := checkpoint.WalkCheckpointShards(ctx, repo, rootTree, func(cpID id.CheckpointID, _ plumbing.Hash) error {
 		existing[cpID] = struct{}{}
 		return nil
 	}); err != nil {
@@ -961,7 +961,7 @@ func writeMigratedFullGeneration(ctx context.Context, repo *git.Repository, v2St
 	}
 	if !found {
 		var err error
-		gen, found, err = v2Store.ComputeGenerationCheckpointTimestamps(treeHash)
+		gen, found, err = v2Store.ComputeGenerationCheckpointTimestamps(ctx, treeHash)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("compute checkpoint timestamps: %w", err)
 		}
@@ -1268,7 +1268,7 @@ func pruneV2ArchivedCheckpointRef(ctx context.Context, repo *git.Repository, v2S
 		return nil
 	}
 
-	count, err := v2Store.CountCheckpointsInTree(newRoot)
+	count, err := v2Store.CountCheckpointsInTree(ctx, newRoot)
 	if err != nil {
 		return fmt.Errorf("failed to count checkpoints in pruned %s: %w", refName, err)
 	}
@@ -1279,7 +1279,7 @@ func pruneV2ArchivedCheckpointRef(ctx context.Context, repo *git.Repository, v2S
 		return nil
 	}
 
-	newRoot, err = addRecomputedGenerationJSON(v2Store, newRoot)
+	newRoot, err = addRecomputedGenerationJSON(ctx, v2Store, newRoot)
 	if err != nil {
 		return fmt.Errorf("failed to recompute generation metadata for %s: %w", refName, err)
 	}
@@ -1297,13 +1297,13 @@ func pruneV2ArchivedCheckpointRef(ctx context.Context, repo *git.Repository, v2S
 	return nil
 }
 
-func addRecomputedGenerationJSON(v2Store *checkpoint.V2GitStore, treeHash plumbing.Hash) (plumbing.Hash, error) {
-	gen, found, err := v2Store.ComputeGenerationTimestampsFromTrees(treeHash, nil)
+func addRecomputedGenerationJSON(ctx context.Context, v2Store *checkpoint.V2GitStore, treeHash plumbing.Hash) (plumbing.Hash, error) {
+	gen, found, err := v2Store.ComputeGenerationTimestampsFromTrees(ctx, treeHash, nil)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("compute raw transcript timestamps: %w", err)
 	}
 	if !found {
-		gen, found, err = v2Store.ComputeGenerationCheckpointTimestamps(treeHash)
+		gen, found, err = v2Store.ComputeGenerationCheckpointTimestamps(ctx, treeHash)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("compute checkpoint timestamps: %w", err)
 		}

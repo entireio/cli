@@ -170,7 +170,7 @@ func TestCountCheckpointsInTree_EmptyTree(t *testing.T) {
 	repo := initTestRepo(t)
 	store := NewV2GitStore(repo, "origin")
 
-	count, err := store.CountCheckpointsInTree(plumbing.ZeroHash)
+	count, err := store.CountCheckpointsInTree(t.Context(), plumbing.ZeroHash)
 	require.NoError(t, err)
 	assert.Equal(t, 0, count)
 }
@@ -205,7 +205,7 @@ func TestCountCheckpointsInTree_CountsShardDirectories(t *testing.T) {
 	_, treeHash, err := store.GetRefState(refName)
 	require.NoError(t, err)
 
-	count, err := store.CountCheckpointsInTree(treeHash)
+	count, err := store.CountCheckpointsInTree(t.Context(), treeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 3, count)
 }
@@ -470,7 +470,7 @@ func TestRotateGeneration_FailsBeforeResetWhenPendingMarkerCannotBeRecorded(t *t
 
 	_, currentTreeHash, err := store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
 	require.NoError(t, err)
-	currentCount, err := store.CountCheckpointsInTree(currentTreeHash)
+	currentCount, err := store.CountCheckpointsInTree(t.Context(), currentTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 3, currentCount)
 
@@ -599,7 +599,7 @@ func TestComputeGenerationCheckpointTimestamps_FallsBackToRawTranscript(t *testi
 	})
 	require.NoError(t, err)
 
-	gen, ok, err := store.ComputeGenerationCheckpointTimestamps(rootTreeHash)
+	gen, ok, err := store.ComputeGenerationCheckpointTimestamps(t.Context(), rootTreeHash)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.True(t, gen.OldestCheckpointAt.Equal(oldest))
@@ -644,7 +644,7 @@ func TestComputeGenerationTimestampsFromTrees_IgnoresMainMetadataWhenNil(t *test
 	})
 	require.NoError(t, err)
 
-	gen, ok, err := store.ComputeGenerationTimestampsFromTrees(rootTreeHash, nil)
+	gen, ok, err := store.ComputeGenerationTimestampsFromTrees(t.Context(), rootTreeHash, nil)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.True(t, gen.OldestCheckpointAt.Equal(rawOldest))
@@ -693,7 +693,7 @@ func TestComputeGenerationCheckpointTimestamps_UnreadableCheckpointForcesFallbac
 	})
 	require.NoError(t, err)
 
-	gen, ok, err := store.ComputeGenerationCheckpointTimestamps(rootTreeHash)
+	gen, ok, err := store.ComputeGenerationCheckpointTimestamps(t.Context(), rootTreeHash)
 	require.NoError(t, err)
 	assert.False(t, ok, "partial checkpoint timestamp coverage should force fallback")
 	assert.True(t, gen.OldestCheckpointAt.IsZero())
@@ -725,7 +725,7 @@ func TestUpdateCommittedFullTranscript_UpdatesArchivedGeneration(t *testing.T) {
 
 	_, currentTreeHash, err := store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
 	require.NoError(t, err)
-	currentCount, err := store.CountCheckpointsInTree(currentTreeHash)
+	currentCount, err := store.CountCheckpointsInTree(t.Context(), currentTreeHash)
 	require.NoError(t, err)
 	require.Equal(t, 0, currentCount, "rotation should leave /full/current empty")
 
@@ -740,7 +740,7 @@ func TestUpdateCommittedFullTranscript_UpdatesArchivedGeneration(t *testing.T) {
 
 	_, currentTreeHash, err = store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
 	require.NoError(t, err)
-	currentCount, err = store.CountCheckpointsInTree(currentTreeHash)
+	currentCount, err = store.CountCheckpointsInTree(t.Context(), currentTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 0, currentCount, "finalization must not rehydrate archived checkpoints into /full/current")
 
@@ -783,7 +783,7 @@ func TestRotateGeneration_SequentialNumbering(t *testing.T) {
 		// Verify checkpoint count via tree walk
 		_, treeHash, refErr := store.GetRefState(refName)
 		require.NoError(t, refErr)
-		count, countErr := store.CountCheckpointsInTree(treeHash)
+		count, countErr := store.CountCheckpointsInTree(t.Context(), treeHash)
 		require.NoError(t, countErr)
 		assert.Equal(t, 2, count, "archive %s should have 2 checkpoints", name)
 	}

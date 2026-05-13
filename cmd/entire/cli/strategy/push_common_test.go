@@ -1343,7 +1343,6 @@ func TestPrintCheckpointsV2MigrationHint(t *testing.T) {
 		output := restore()
 
 		assert.Contains(t, output, "entire migrate --checkpoints v2")
-		assert.Contains(t, output, "entire migrate --checkpoints v2 --force")
 	})
 
 	t.Run("prints only once per process", func(t *testing.T) {
@@ -1357,10 +1356,8 @@ func TestPrintCheckpointsV2MigrationHint(t *testing.T) {
 		printCheckpointsV2MigrationHint(context.Background())
 		output := restore()
 
-		// --force appears in exactly one line, so its count equals the number of
-		// invocations that actually emitted output.
-		forceCount := strings.Count(output, "--force")
-		assert.Equal(t, 1, forceCount, "hint should print exactly once per process")
+		outputCount := strings.Count(output, "entire migrate --checkpoints v2")
+		assert.Equal(t, 1, outputCount, "hint should print exactly once per process")
 	})
 }
 

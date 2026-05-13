@@ -97,7 +97,7 @@ func (s *V2GitStore) WriteCommittedMainBatch(ctx context.Context, batch []WriteC
 		groups[opts.CheckpointID] = append(groups[opts.CheckpointID], opts)
 	}
 
-	existingCheckpoints, err := s.existingMainCheckpointIDs(rootTreeHash)
+	existingCheckpoints, err := s.existingMainCheckpointIDs(ctx, rootTreeHash)
 	if err != nil {
 		return err
 	}
@@ -144,7 +144,7 @@ func (s *V2GitStore) WriteCommittedMainBatch(ctx context.Context, batch []WriteC
 	return s.updateRef(ctx, refName, rootTreeHash, parentHash, commitMsg, authorName, authorEmail)
 }
 
-func (s *V2GitStore) existingMainCheckpointIDs(rootTreeHash plumbing.Hash) (map[id.CheckpointID]struct{}, error) {
+func (s *V2GitStore) existingMainCheckpointIDs(ctx context.Context, rootTreeHash plumbing.Hash) (map[id.CheckpointID]struct{}, error) {
 	existing := make(map[id.CheckpointID]struct{})
 	if rootTreeHash == plumbing.ZeroHash {
 		return existing, nil
@@ -153,7 +153,7 @@ func (s *V2GitStore) existingMainCheckpointIDs(rootTreeHash plumbing.Hash) (map[
 	if err != nil {
 		return nil, fmt.Errorf("failed to read /main root tree: %w", err)
 	}
-	if err := WalkCheckpointShards(s.repo, rootTree, func(cpID id.CheckpointID, _ plumbing.Hash) error {
+	if err := WalkCheckpointShards(ctx, s.repo, rootTree, func(cpID id.CheckpointID, _ plumbing.Hash) error {
 		existing[cpID] = struct{}{}
 		return nil
 	}); err != nil {
@@ -1078,7 +1078,7 @@ func (s *V2GitStore) writeCommittedFullTranscript(ctx context.Context, opts Writ
 }
 
 func (s *V2GitStore) rotateCurrentIfNeeded(ctx context.Context, treeHash plumbing.Hash) {
-	checkpointCount, countErr := s.CountCheckpointsInTree(treeHash)
+	checkpointCount, countErr := s.CountCheckpointsInTree(ctx, treeHash)
 	if countErr != nil {
 		logging.Warn(ctx, "failed to count checkpoints for rotation check",
 			slog.String("error", countErr.Error()),

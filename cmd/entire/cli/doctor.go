@@ -510,6 +510,7 @@ func checkDisconnectedV2Main(cmd *cobra.Command, force bool) error {
 // Checks: generation.json exists and is valid, timestamps are sane, generation has checkpoints,
 // and generation sequence numbers are contiguous.
 func checkV2GenerationHealth(cmd *cobra.Command, repo *git.Repository) error {
+	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
 	v2Store := checkpoint.NewV2GitStore(repo, "origin")
@@ -554,7 +555,7 @@ func checkV2GenerationHealth(cmd *cobra.Command, repo *git.Repository) error {
 			warnings = append(warnings, fmt.Sprintf("generation %s: WARNING — invalid timestamps (oldest > newest)", genName))
 		}
 
-		cpCount, countErr := v2Store.CountCheckpointsInTree(treeHash)
+		cpCount, countErr := v2Store.CountCheckpointsInTree(ctx, treeHash)
 		if countErr != nil {
 			warnings = append(warnings, fmt.Sprintf("generation %s: failed to count checkpoints: %v", genName, countErr))
 			continue
@@ -600,6 +601,7 @@ func checkV2GenerationHealth(cmd *cobra.Command, repo *git.Repository) error {
 // So main count >= full/current count. If full/current exceeds main, a dual-write partially failed.
 // Skips silently if either ref doesn't exist (already covered by checkV2RefExistence).
 func checkV2CheckpointCounts(cmd *cobra.Command, repo *git.Repository) error {
+	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
 	v2Store := checkpoint.NewV2GitStore(repo, "origin")
@@ -624,12 +626,12 @@ func checkV2CheckpointCounts(cmd *cobra.Command, repo *git.Repository) error {
 		return fmt.Errorf("failed to read /full/current ref: %w", fullErr)
 	}
 
-	mainCount, err := v2Store.CountCheckpointsInTree(mainTreeHash)
+	mainCount, err := v2Store.CountCheckpointsInTree(ctx, mainTreeHash)
 	if err != nil {
 		return fmt.Errorf("failed to count /main checkpoints: %w", err)
 	}
 
-	fullCount, err := v2Store.CountCheckpointsInTree(fullTreeHash)
+	fullCount, err := v2Store.CountCheckpointsInTree(ctx, fullTreeHash)
 	if err != nil {
 		return fmt.Errorf("failed to count /full/current checkpoints: %w", err)
 	}

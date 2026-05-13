@@ -1,9 +1,12 @@
 package remote
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -95,6 +98,124 @@ func FetchBlobs(ctx context.Context, remote string, hashes []string) error {
 		return fmt.Errorf("git fetch-pack from %s: %w", redactedURL, err)
 	}
 	return nil
+}
+
+// CatFilesOptions configures a git cat-file --batch read.
+type CatFilesOptions struct {
+	Specs     []string // one or more object names or revspecs
+	Dir       string   // working directory (empty = CWD)
+	ExtraArgs []string // additional flags before --batch
+}
+
+// CatFileResult is the result of reading one cat-file batch spec.
+type CatFileResult struct {
+	Content []byte
+	Missing bool
+	Err     error
+}
+
+// CatFiles reads specs through git cat-file --batch.
+func CatFiles(ctx context.Context, opts CatFilesOptions) map[string]CatFileResult {
+	specs := uniqueStrings(opts.Specs)
+	results := make(map[string]CatFileResult, len(specs))
+	if len(specs) == 0 {
+		return results
+	}
+
+	args := []string{"cat-file"}
+	args = append(args, opts.ExtraArgs...)
+	args = append(args, "--batch")
+	cmd := newCommand(ctx, args...)
+	if opts.Dir != "" {
+		cmd.Dir = opts.Dir
+	}
+	cmd.Stdin = strings.NewReader(strings.Join(specs, "\n") + "\n")
+	disableTerminalPrompt(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	output, err := cmd.Output()
+	if err != nil {
+		wrapped := catFilesError(err, stderr.String())
+		for _, spec := range specs {
+			results[spec] = CatFileResult{Err: wrapped}
+		}
+		return results
+	}
+
+	reader := bufio.NewReader(bytes.NewReader(output))
+	for i, spec := range specs {
+		result, parseErr := parseBlobBatchEntry(reader)
+		if parseErr != nil {
+			for _, s := range specs[i:] {
+				results[s] = CatFileResult{Err: parseErr}
+			}
+			break
+		}
+		results[spec] = result
+	}
+	return results
+}
+
+func parseBlobBatchEntry(reader *bufio.Reader) (CatFileResult, error) {
+	header, err := reader.ReadString('\n')
+	if err != nil {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
+	}
+	header = strings.TrimSuffix(header, "\n")
+
+	fields := strings.Fields(header)
+	if len(fields) == 2 && fields[1] == "missing" {
+		return CatFileResult{Missing: true}, nil
+	}
+	if len(fields) != 3 {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: unexpected header %q", header)
+	}
+
+	size, err := strconv.ParseInt(fields[2], 10, 64)
+	if err != nil {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: invalid size %q: %w", fields[2], err)
+	}
+	content := make([]byte, size)
+	if _, err := io.ReadFull(reader, content); err != nil {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
+	}
+	separator, err := reader.ReadByte()
+	if err != nil {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: %w", err)
+	}
+	if separator != '\n' {
+		return CatFileResult{}, fmt.Errorf("parse git cat-file batch: unexpected separator %q", separator)
+	}
+
+	if fields[1] != "blob" {
+		return CatFileResult{Err: fmt.Errorf("object %s is %s, want blob", fields[0], fields[1])}, nil
+	}
+	return CatFileResult{Content: content}, nil
+}
+
+func catFilesError(err error, stderr string) error {
+	msg := strings.TrimSpace(stderr)
+	if msg == "" {
+		return fmt.Errorf("git cat-file --batch: %w", err)
+	}
+	return fmt.Errorf("git cat-file --batch: %s: %w", msg, err)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	return unique
 }
 
 // PushResult holds raw porcelain output from git push.

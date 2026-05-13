@@ -8,6 +8,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -137,6 +138,12 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.rows[i].status == reviewtypes.AgentStatusUnknown {
 				m.rows[i].status = run.Status
 			}
+			if run.Tokens.In > 0 || run.Tokens.Out > 0 {
+				m.rows[i].tokens = run.Tokens
+			}
+			if m.rows[i].err == nil && run.Err != nil {
+				m.rows[i].err = run.Err
+			}
 			if m.rows[i].runEnd.IsZero() && !m.rows[i].runStart.IsZero() {
 				m.rows[i].runEnd = now
 			}
@@ -144,11 +151,17 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		if m.finished {
+			return m, nil
+		}
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		return m, tea.Batch(spinCmd, tickCmd())
 
 	case spinner.TickMsg:
+		if m.finished {
+			return m, nil
+		}
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		return m, spinCmd
@@ -321,13 +334,14 @@ func (m reviewTUIModel) clampScroll() reviewTUIModel {
 // View renders the current state.
 func (m reviewTUIModel) View() tea.View {
 	var content string
+	termWidth, termHeight := m.currentTerminalSize()
 	if m.detailMode && len(m.rows) > 0 {
-		content = detailView(m.rows[m.detailIdx], m.detailScroll, m.termWidth, m.termHeight)
+		content = detailView(m.rows[m.detailIdx], m.detailScroll, termWidth, termHeight)
 	} else {
 		content = m.dashboardView()
 	}
 	v := tea.NewView(content)
-	v.AltScreen = m.detailMode
+	v.AltScreen = true
 	return v
 }
 
@@ -357,10 +371,20 @@ func (m reviewTUIModel) writeDashboardLine(b *strings.Builder, line string) {
 }
 
 func (m reviewTUIModel) dashboardWidth() int {
-	if m.termWidth <= 0 {
-		return 80
+	width, _ := m.currentTerminalSize()
+	return width
+}
+
+func (m reviewTUIModel) currentTerminalSize() (int, int) {
+	width := m.termWidth
+	height := m.termHeight
+	if width <= 0 {
+		width = 80
 	}
-	return m.termWidth
+	if height <= 0 {
+		height = 24
+	}
+	return width, height
 }
 
 // headerLine returns the column header row.
@@ -402,7 +426,35 @@ func (m reviewTUIModel) renderRow(row agentRow) string {
 		tokStr = fmt.Sprintf("%s/%s", formatCompact(row.tokens.In), formatCompact(row.tokens.Out))
 	}
 
-	return m.renderTableLine(name, statusStr, durStr, tokStr, row.preview)
+	preview := row.preview
+	if row.status == reviewtypes.AgentStatusFailed && row.err != nil {
+		preview = stringutil.CollapseWhitespace(sanitizeDisplayText(formatErrorPreview(row.err)))
+	}
+
+	return m.renderTableLine(name, statusStr, durStr, tokStr, preview)
+}
+
+func formatErrorPreview(err error) string {
+	if err == nil {
+		return ""
+	}
+	var pe *reviewtypes.ProcessError
+	if errors.As(err, &pe) {
+		// Strip ANSI before the empty check — agents like codex/claude-code
+		// emit colored stderr banners whose first line can be escape codes
+		// only. TrimSpace doesn't drop those, so without stripping we'd pick
+		// the chrome and hide the real message on subsequent lines.
+		for _, line := range strings.Split(pe.Stderr, "\n") {
+			trimmed := strings.TrimSpace(stripANSI(line))
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+		if pe.Err != nil {
+			return pe.Err.Error()
+		}
+	}
+	return err.Error()
 }
 
 func (m reviewTUIModel) renderTableLine(agent, status, duration, tokens, preview string) string {

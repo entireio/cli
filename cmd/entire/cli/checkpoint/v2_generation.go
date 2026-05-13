@@ -120,7 +120,7 @@ func (s *V2GitStore) writeGeneration(gen GenerationMetadata, entries map[string]
 // CountCheckpointsInTree counts checkpoint shard directories in a /full/* tree.
 // The tree structure is <id[:2]>/<id[2:]>/ — we count second-level directories
 // across all shard prefixes. Returns 0 for an empty tree.
-func (s *V2GitStore) CountCheckpointsInTree(treeHash plumbing.Hash) (int, error) {
+func (s *V2GitStore) CountCheckpointsInTree(ctx context.Context, treeHash plumbing.Hash) (int, error) {
 	if treeHash == plumbing.ZeroHash {
 		return 0, nil
 	}
@@ -131,7 +131,7 @@ func (s *V2GitStore) CountCheckpointsInTree(treeHash plumbing.Hash) (int, error)
 	}
 
 	count := 0
-	if err := WalkCheckpointShards(s.repo, tree, func(_ id.CheckpointID, _ plumbing.Hash) error {
+	if err := WalkCheckpointShards(ctx, s.repo, tree, func(_ id.CheckpointID, _ plumbing.Hash) error {
 		count++
 		return nil
 	}); err != nil {
@@ -156,12 +156,12 @@ func (s *V2GitStore) AddGenerationJSONToTree(rootTreeHash plumbing.Hash, gen Gen
 // ComputeGenerationCheckpointTimestamps derives timestamps from the checkpoints
 // present in a /full/* tree. It prefers created_at from v2 /main metadata and
 // falls back to top-level transcript event timestamps for older or partial v2 data.
-func (s *V2GitStore) ComputeGenerationCheckpointTimestamps(rootTreeHash plumbing.Hash) (GenerationMetadata, bool, error) {
+func (s *V2GitStore) ComputeGenerationCheckpointTimestamps(ctx context.Context, rootTreeHash plumbing.Hash) (GenerationMetadata, bool, error) {
 	mainTree, mainTreeErr := s.v2MainTree()
 	if mainTreeErr != nil {
 		mainTree = nil
 	}
-	return s.ComputeGenerationTimestampsFromTrees(rootTreeHash, mainTree)
+	return s.ComputeGenerationTimestampsFromTrees(ctx, rootTreeHash, mainTree)
 }
 
 // ComputeGenerationTimestampsFromTrees walks every checkpoint in rootTreeHash
@@ -170,7 +170,7 @@ func (s *V2GitStore) ComputeGenerationCheckpointTimestamps(rootTreeHash plumbing
 // the checkpoint's full-tree. Returns found=false when any checkpoint cannot
 // produce a timestamp; callers decide their own fallback (e.g. read existing
 // generation.json, recompute from in-memory data, or surface an error).
-func (s *V2GitStore) ComputeGenerationTimestampsFromTrees(rootTreeHash plumbing.Hash, mainTree *object.Tree) (GenerationMetadata, bool, error) {
+func (s *V2GitStore) ComputeGenerationTimestampsFromTrees(ctx context.Context, rootTreeHash plumbing.Hash, mainTree *object.Tree) (GenerationMetadata, bool, error) {
 	if rootTreeHash == plumbing.ZeroHash {
 		return GenerationMetadata{}, false, nil
 	}
@@ -183,7 +183,7 @@ func (s *V2GitStore) ComputeGenerationTimestampsFromTrees(rootTreeHash plumbing.
 	var gen GenerationMetadata
 	found := false
 	missingCheckpointTimestamp := false
-	err = WalkCheckpointShards(s.repo, rootTree, func(cpID id.CheckpointID, cpTreeHash plumbing.Hash) error {
+	err = WalkCheckpointShards(ctx, s.repo, rootTree, func(cpID id.CheckpointID, cpTreeHash plumbing.Hash) error {
 		if mainTree != nil {
 			if cpGen, ok := s.checkpointTimestampRangeFromMain(mainTree, cpID); ok {
 				mergeGenerationRange(&gen, &found, cpGen)
@@ -216,8 +216,8 @@ func (s *V2GitStore) ComputeGenerationTimestampsFromTrees(rootTreeHash plumbing.
 // computeGenerationTimestamps derives timestamps for a generation being archived.
 // It uses checkpoint metadata/transcript timestamps rather than git commit times
 // so migration and ref-repair commits don't reset retention age.
-func (s *V2GitStore) computeGenerationTimestamps(rootTreeHash plumbing.Hash) GenerationMetadata {
-	if gen, ok, err := s.ComputeGenerationCheckpointTimestamps(rootTreeHash); err == nil && ok {
+func (s *V2GitStore) computeGenerationTimestamps(ctx context.Context, rootTreeHash plumbing.Hash) GenerationMetadata {
+	if gen, ok, err := s.ComputeGenerationCheckpointTimestamps(ctx, rootTreeHash); err == nil && ok {
 		return gen
 	}
 	return s.computeGenerationTimestampsFromCommitHistory()
@@ -488,7 +488,7 @@ func (s *V2GitStore) RotateCurrentGenerationIfNeeded(ctx context.Context, maxChe
 	if err != nil {
 		return "", false, fmt.Errorf("rotation: failed to read /full/current: %w", err)
 	}
-	checkpointCount, err := s.CountCheckpointsInTree(currentTreeHash)
+	checkpointCount, err := s.CountCheckpointsInTree(ctx, currentTreeHash)
 	if err != nil {
 		return "", false, fmt.Errorf("rotation: failed to count checkpoints: %w", err)
 	}
@@ -517,7 +517,7 @@ func (s *V2GitStore) RotateCurrentGenerationIfNeeded(ctx context.Context, maxChe
 	}
 
 	// Write generation.json to the current tree before archiving.
-	gen := s.computeGenerationTimestamps(currentTreeHash)
+	gen := s.computeGenerationTimestamps(ctx, currentTreeHash)
 	archiveTreeHash, err := s.AddGenerationJSONToTree(currentTreeHash, gen)
 	if err != nil {
 		return "", false, fmt.Errorf("rotation: failed to add generation.json: %w", err)
