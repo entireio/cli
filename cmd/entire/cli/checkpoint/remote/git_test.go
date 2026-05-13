@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -306,6 +307,48 @@ func TestAppendCheckpointTokenEnv(t *testing.T) {
 		assert.Contains(t, env, "GIT_CONFIG_COUNT=1")
 		assert.Contains(t, env, "GIT_CONFIG_KEY_0=http.extraHeader")
 	})
+}
+
+func TestCatFilesReadsBlobAndMissingSpec(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	blobHash := writeRemoteGitBlob(t, repoDir, "metadata")
+	missingHash := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+	results := CatFiles(context.Background(), CatFilesOptions{
+		Specs: []string{blobHash, missingHash},
+		Dir:   repoDir,
+	})
+
+	assert.Equal(t, []byte("metadata"), results[blobHash].Content)
+	assert.False(t, results[blobHash].Missing)
+	require.NoError(t, results[blobHash].Err)
+	assert.True(t, results[missingHash].Missing)
+	require.NoError(t, results[missingHash].Err)
+}
+
+func TestCatFilesErrorIncludesStderr(t *testing.T) {
+	t.Parallel()
+
+	err := catFilesError(errors.New("exit status 128"), "fatal: could not fetch blob\n")
+
+	assert.Contains(t, err.Error(), "fatal: could not fetch blob")
+}
+
+func writeRemoteGitBlob(t *testing.T, dir, content string) string {
+	t.Helper()
+
+	cmd := exec.CommandContext(t.Context(), "git", "hash-object", "-w", "--stdin")
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(content)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git hash-object failed: %v", err)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func TestIsValidToken(t *testing.T) {

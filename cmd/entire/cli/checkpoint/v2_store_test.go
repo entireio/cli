@@ -960,14 +960,14 @@ func TestWriteCommitted_TriggersRotationAtThreshold(t *testing.T) {
 	// Verify /full/current is now a fresh generation (empty tree, no generation.json)
 	_, freshTreeHash, err := store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
 	require.NoError(t, err)
-	freshCount, err := store.CountCheckpointsInTree(freshTreeHash)
+	freshCount, err := store.CountCheckpointsInTree(t.Context(), freshTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 0, freshCount, "fresh /full/current should have no checkpoints")
 
 	// Verify the archived generation has 3 checkpoints
 	_, archiveTreeHash, err := store.GetRefState(plumbing.ReferenceName(paths.V2FullRefPrefix + archived[0]))
 	require.NoError(t, err)
-	archiveCount, err := store.CountCheckpointsInTree(archiveTreeHash)
+	archiveCount, err := store.CountCheckpointsInTree(t.Context(), archiveTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 3, archiveCount)
 
@@ -986,7 +986,7 @@ func TestWriteCommitted_TriggersRotationAtThreshold(t *testing.T) {
 
 	_, newTreeHash, err := store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
 	require.NoError(t, err)
-	newCount, err := store.CountCheckpointsInTree(newTreeHash)
+	newCount, err := store.CountCheckpointsInTree(t.Context(), newTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 1, newCount, "new checkpoint should be on fresh generation")
 }
@@ -1020,7 +1020,7 @@ func TestWriteCommitted_NoRotationBelowThreshold(t *testing.T) {
 
 	_, noRotTreeHash, err := store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
 	require.NoError(t, err)
-	noRotCount, err := store.CountCheckpointsInTree(noRotTreeHash)
+	noRotCount, err := store.CountCheckpointsInTree(t.Context(), noRotTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 3, noRotCount)
 }

@@ -279,7 +279,7 @@ func TestMigrateCheckpointsV2_UnderThresholdKeepsFullGenerationInCurrent(t *test
 
 	_, currentTreeHash, err := v2Store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
 	require.NoError(t, err)
-	currentCount, err := v2Store.CountCheckpointsInTree(currentTreeHash)
+	currentCount, err := v2Store.CountCheckpointsInTree(t.Context(), currentTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 3, currentCount)
 
@@ -336,13 +336,13 @@ func TestMigrateCheckpointsV2_RotatesCurrentWhenFinalPartialReachesThreshold(t *
 	archiveRef := plumbing.ReferenceName(paths.V2FullRefPrefix + archived[0])
 	_, archiveTreeHash, err := v2Store.GetRefState(archiveRef)
 	require.NoError(t, err)
-	archiveCount, err := v2Store.CountCheckpointsInTree(archiveTreeHash)
+	archiveCount, err := v2Store.CountCheckpointsInTree(t.Context(), archiveTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 2, archiveCount)
 
 	_, currentTreeHash, err := v2Store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
 	require.NoError(t, err)
-	currentCount, err := v2Store.CountCheckpointsInTree(currentTreeHash)
+	currentCount, err := v2Store.CountCheckpointsInTree(t.Context(), currentTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 0, currentCount, "threshold rotation should reset /full/current")
 
@@ -429,7 +429,7 @@ func TestMigrateCheckpointsV2_PacksFullGenerationsOldestFirst(t *testing.T) {
 
 		_, treeHash, refErr := v2Store.GetRefState(refName)
 		require.NoError(t, refErr)
-		count, countErr := v2Store.CountCheckpointsInTree(treeHash)
+		count, countErr := v2Store.CountCheckpointsInTree(t.Context(), treeHash)
 		require.NoError(t, countErr)
 		assert.Equal(t, len(batch), count)
 
@@ -443,7 +443,7 @@ func TestMigrateCheckpointsV2_PacksFullGenerationsOldestFirst(t *testing.T) {
 
 	_, currentTreeHash, err := v2Store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
 	require.NoError(t, err)
-	currentCount, err := v2Store.CountCheckpointsInTree(currentTreeHash)
+	currentCount, err := v2Store.CountCheckpointsInTree(t.Context(), currentTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 1, currentCount, "fresh migration should leave final partial batch in /full/current")
 
@@ -715,7 +715,7 @@ func TestMigrateCheckpointsV2_ForceOverwritesExisting(t *testing.T) {
 
 	_, currentTreeHash, err := v2Store.GetRefState(plumbing.ReferenceName(paths.V2FullCurrentRefName))
 	require.NoError(t, err)
-	currentCount, err := v2Store.CountCheckpointsInTree(currentTreeHash)
+	currentCount, err := v2Store.CountCheckpointsInTree(t.Context(), currentTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 1, currentCount, "under-threshold force migration should leave raw transcripts in /full/current")
 }
@@ -799,7 +799,7 @@ func TestPruneV2CheckpointForForce_RecomputesPartialArchivedGeneration(t *testin
 	refName := plumbing.ReferenceName(paths.V2FullRefPrefix + archived[0])
 	_, treeHash, err := v2Store.GetRefState(refName)
 	require.NoError(t, err)
-	count, err := v2Store.CountCheckpointsInTree(treeHash)
+	count, err := v2Store.CountCheckpointsInTree(t.Context(), treeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
 

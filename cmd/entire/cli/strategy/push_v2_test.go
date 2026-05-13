@@ -105,7 +105,7 @@ func v2CheckpointCountInRef(t *testing.T, repo *git.Repository, refName plumbing
 	store := checkpoint.NewV2GitStore(repo, "origin")
 	_, treeHash, err := store.GetRefState(refName)
 	require.NoError(t, err)
-	count, err := store.CountCheckpointsInTree(treeHash)
+	count, err := store.CountCheckpointsInTree(t.Context(), treeHash)
 	require.NoError(t, err)
 	return count
 }
@@ -992,7 +992,7 @@ func TestFetchAndMergeRef_RotationConflict(t *testing.T) {
 	localStore := checkpoint.NewV2GitStore(localRepo, "origin")
 	_, freshTreeHash, err := localStore.GetRefState(fullCurrentRef)
 	require.NoError(t, err)
-	freshCount, err := localStore.CountCheckpointsInTree(freshTreeHash)
+	freshCount, err := localStore.CountCheckpointsInTree(t.Context(), freshTreeHash)
 	require.NoError(t, err)
 	assert.Equal(t, 0, freshCount, "local /full/current should be fresh orphan after rotation recovery")
 

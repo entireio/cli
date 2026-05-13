@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -1669,4 +1670,26 @@ func TestReadAgentTypeFromTree_MetadataJSON_OverridesDir(t *testing.T) {
 	tree := openRepoHeadTree(t, dir)
 	result := ReadAgentTypeFromTree(tree, "cp")
 	assert.Equal(t, agent.AgentTypeCursor, result)
+}
+
+func TestEnsureEntireGitignore_IncludesRedactorsLocal(t *testing.T) {
+	// Cannot t.Parallel(): EnsureEntireGitignore writes to the worktree root.
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	if err := EnsureEntireGitignore(context.Background()); err != nil {
+		t.Fatalf("EnsureEntireGitignore: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(dir, ".entire", ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .entire/.gitignore: %v", err)
+	}
+	if !strings.Contains(string(body), "redactors/local/") {
+		t.Errorf(".entire/.gitignore missing redactors/local/ entry; got:\n%s", body)
+	}
 }
