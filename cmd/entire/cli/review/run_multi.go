@@ -25,9 +25,11 @@ package review
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
@@ -37,8 +39,9 @@ import (
 // Write paths (no mutex; the close-after-wait protocol below provides
 // happens-before for both):
 //   - waitErr and finishedAt are written by the per-agent forwarding
-//     goroutine after its proc.Events range loop exits, immediately before
-//     wg.Done.
+//     goroutine after its proc.Events range loop exits. That goroutine may
+//     still send final derived events (synthetic RunError, enriched Tokens)
+//     before wg.Done.
 //   - All other mutable fields (events buffer, tokens, finishedSeen,
 //     finishedOk, sawRunError) are written from the single dispatch loop
 //     reading the fan-in channel.
@@ -131,8 +134,19 @@ func RunMulti(
 			for ev := range p.Events() {
 				fanIn <- taggedEvent{agentIdx: idx, ev: ev}
 			}
-			states[idx].waitErr = p.Wait()
-			states[idx].finishedAt = time.Now()
+			waitErr := p.Wait()
+			finishedAt := time.Now()
+			states[idx].waitErr = waitErr
+			states[idx].finishedAt = finishedAt
+			if shouldEmitSyntheticRunError(ctx, waitErr) {
+				fanIn <- taggedEvent{agentIdx: idx, ev: reviewtypes.RunError{Err: waitErr}}
+			}
+			emitEnrichedAgentTokens(ctx, cfg, fanIn, idx, reviewtypes.AgentRun{
+				Name:      states[idx].name,
+				StartedAt: states[idx].startedAt,
+				Duration:  finishedAt.Sub(states[idx].startedAt),
+				Err:       waitErr,
+			})
 		}(i, proc)
 	}
 
@@ -208,9 +222,43 @@ func RunMulti(
 		Cancelled:  cancelled,
 		AgentRuns:  agentRuns,
 	}
+	summary = enrichRunSummary(ctx, cfg, summary)
 	for _, sink := range sinks {
 		sink.RunFinished(summary)
 	}
 
 	return summary, firstErr
+}
+
+func emitEnrichedAgentTokens(
+	ctx context.Context,
+	cfg reviewtypes.RunConfig,
+	fanIn chan<- taggedEvent,
+	agentIdx int,
+	run reviewtypes.AgentRun,
+) {
+	if cfg.EnrichAgentRun == nil {
+		return
+	}
+	enriched, ok := callEnrichAgentRun(ctx, cfg.EnrichAgentRun, run)
+	if !ok {
+		return
+	}
+	if enriched.Tokens.In == 0 && enriched.Tokens.Out == 0 {
+		return
+	}
+	fanIn <- taggedEvent{agentIdx: agentIdx, ev: enriched.Tokens}
+}
+
+// callEnrichAgentRun invokes the caller-supplied EnrichAgentRun callback
+// with panic recovery. A panic in user-supplied enrichment must not leak
+// into the per-agent forwarding goroutine and bring down the whole run.
+func callEnrichAgentRun(ctx context.Context, fn func(context.Context, reviewtypes.AgentRun) reviewtypes.AgentRun, run reviewtypes.AgentRun) (out reviewtypes.AgentRun, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Warn(ctx, "review EnrichAgentRun panicked", slog.Any("panic", r))
+			ok = false
+		}
+	}()
+	return fn(ctx, run), true
 }

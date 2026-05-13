@@ -114,7 +114,7 @@ func TestCodexReviewer_BuiltinReviewExpandsToScopedExecPrompt(t *testing.T) {
 	for _, wantText := range []string{
 		"Review the current branch changes and report actionable findings.",
 		"Focus on auth regressions.",
-		"Scope: review only the commits unique to this branch vs main.",
+		"Scope: review the commits unique to this branch vs main, plus any uncommitted changes in the working tree. Ignore code outside this scope.",
 		"Commits in scope (newest first):",
 		"abc123 summary",
 	} {

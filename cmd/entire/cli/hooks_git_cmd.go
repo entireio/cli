@@ -78,7 +78,8 @@ func initHookLogging(ctx context.Context) func() {
 		return func() {}
 	}
 
-	// Configure PII redaction once at startup (reads settings, no-op if disabled).
+	// Configure redaction once at startup: PII (opt-in), inline custom_redactions,
+	// and rule packs discovered under .entire/redactors/. No-op if nothing is configured.
 	strategy.EnsureRedactionConfigured()
 
 	return logging.Close

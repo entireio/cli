@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 func cleanLongDescription(ctx context.Context) string {
@@ -278,27 +279,46 @@ func runCleanAll(ctx context.Context, cmd *cobra.Command, force, dryRun bool) er
 		s = &settings.EntireSettings{}
 	}
 
-	// List all items (sessions, shadow branches) — not just orphaned ones
-	items, err := strategy.ListAllItems(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list items: %w", err)
-	}
-
-	if s.IsCheckpointsV2Enabled() {
-		v2Items, warnings, err := strategy.ListEligibleV2Generations(ctx, s)
+	var (
+		items      []strategy.CleanupItem
+		v2Items    []strategy.CleanupItem
+		v2Warnings []string
+	)
+	g, gCtx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		var err error
+		items, err = strategy.ListAllItems(gCtx)
 		if err != nil {
-			return fmt.Errorf("failed to list v2 generations: %w", err)
+			return fmt.Errorf("failed to list items: %w", err)
 		}
-		items = append(items, v2Items...)
-		for _, warning := range warnings {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning)
+		return nil
+	})
+	if s.IsCheckpointsV2Enabled() {
+		g.Go(func() error {
+			var err error
+			v2Items, v2Warnings, err = strategy.ListEligibleV2Generations(gCtx, s)
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return err //nolint:wrapcheck // propagate cancellation unwrapped so callers map it to SilentError
+				}
+				return fmt.Errorf("failed to list v2 generations: %w", err)
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return NewSilentError(err)
 		}
+		return err //nolint:wrapcheck // already wrapped inside the goroutine closures
+	}
+	items = append(items, v2Items...)
+	for _, warning := range v2Warnings {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning)
 	}
 
-	// List temp files — skip active-session filter since --all deletes those sessions
 	tempFiles, err := listAllTempFiles(ctx)
 	if err != nil {
-		// Non-fatal: continue with other cleanup items
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to list temp files: %v\n", err)
 	}
 

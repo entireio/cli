@@ -83,7 +83,7 @@ func (s *V2GitStore) ListCommitted(ctx context.Context) ([]CommittedInfo, error)
 
 	var checkpoints []CommittedInfo
 
-	_ = WalkCheckpointShards(s.repo, rootTree, func(checkpointID id.CheckpointID, cpTreeHash plumbing.Hash) error { //nolint:errcheck // callback never returns errors
+	_ = WalkCheckpointShards(ctx, s.repo, rootTree, func(checkpointID id.CheckpointID, cpTreeHash plumbing.Hash) error { //nolint:errcheck // callback never returns errors
 		checkpointTree, cpTreeErr := s.repo.TreeObject(cpTreeHash)
 		if cpTreeErr != nil {
 			logging.Debug(ctx, "v2 ListCommitted: skipping unreadable checkpoint tree",

@@ -7,6 +7,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -82,6 +83,17 @@ func Run(
 
 	waitErr := proc.Wait()
 	finished := time.Now()
+	if shouldEmitSyntheticRunError(ctx, waitErr) {
+		synthEvent := reviewtypes.RunError{Err: waitErr}
+		buffer = append(buffer, synthEvent)
+		sawRunError = true
+		if firstRunErr == nil {
+			firstRunErr = waitErr
+		}
+		for _, sink := range sinks {
+			sink.AgentEvent(reviewer.Name(), synthEvent)
+		}
+	}
 	status := classifyStatus(ctx, waitErr, eventOutcome{finishedSeen: finishedSeen, finishedOk: finishedOk, sawRunError: sawRunError})
 	runErr := waitErr
 	if runErr == nil && status == reviewtypes.AgentStatusFailed {
@@ -102,10 +114,31 @@ func Run(
 			Err:       runErr,
 		}},
 	}
+	summary = enrichRunSummary(ctx, cfg, summary)
 	for _, sink := range sinks {
 		sink.RunFinished(summary)
 	}
 	return summary, runErr
+}
+
+func enrichRunSummary(ctx context.Context, cfg reviewtypes.RunConfig, summary reviewtypes.RunSummary) reviewtypes.RunSummary {
+	if cfg.EnrichSummary == nil {
+		return summary
+	}
+	return cfg.EnrichSummary(ctx, summary)
+}
+
+func shouldEmitSyntheticRunError(ctx context.Context, waitErr error) bool {
+	if waitErr == nil {
+		return false
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded) {
+		return false
+	}
+	return true
 }
 
 func agentRunFailureError(agent string, cause error) error {

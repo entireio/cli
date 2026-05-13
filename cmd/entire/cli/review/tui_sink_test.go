@@ -150,3 +150,44 @@ func TestTUISink_ImplementsSink(t *testing.T) {
 	var buf bytes.Buffer
 	var _ reviewtypes.Sink = NewTUISink(nil, func() {}, &buf, bytes.NewReader(nil))
 }
+
+// fakeFDWriter implements fdWriter with a controllable Fd, letting us drive
+// terminalMeasurer through both branches (non-fdWriter → nil; fdWriter → a
+// measurer that returns (0,0,false) for a non-terminal fd).
+type fakeFDWriter struct {
+	fd uintptr
+}
+
+func (f *fakeFDWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (f *fakeFDWriter) Fd() uintptr                 { return f.fd }
+
+// TestTerminalMeasurer_NonFDWriter verifies that a writer without an Fd()
+// method yields a nil measurer, which is the signal NewTUISink uses to skip
+// the early measurement and rely on the first tea.WindowSizeMsg.
+func TestTerminalMeasurer_NonFDWriter(t *testing.T) {
+	t.Parallel()
+	if got := terminalMeasurer(&bytes.Buffer{}); got != nil {
+		t.Errorf("terminalMeasurer for non-fdWriter = non-nil, want nil")
+	}
+}
+
+// TestTerminalMeasurer_FDWriter_InvalidFD verifies the happy-path shape:
+// when the output is an fdWriter, terminalMeasurer returns a non-nil
+// function. Calling it with a non-terminal fd surfaces ok=false (the
+// fallback contract that NewTUISink relies on to not over-set termWidth).
+func TestTerminalMeasurer_FDWriter_InvalidFD(t *testing.T) {
+	t.Parallel()
+	// fd=999999 is almost certainly not a real open descriptor on the test
+	// process, so term.GetSize returns an error → measurer reports ok=false.
+	measurer := terminalMeasurer(&fakeFDWriter{fd: 999999})
+	if measurer == nil {
+		t.Fatal("terminalMeasurer for fdWriter returned nil")
+	}
+	width, height, ok := measurer()
+	if ok {
+		t.Errorf("invalid fd should yield ok=false, got width=%d height=%d", width, height)
+	}
+	if width != 0 || height != 0 {
+		t.Errorf("invalid fd should yield zero dims, got width=%d height=%d", width, height)
+	}
+}

@@ -8,7 +8,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // defaultBranchName is the normalised default branch name used by initRepoOnMain.
@@ -114,53 +113,6 @@ func TestFormatScopeBanner_Pluralisation(t *testing.T) {
 	}
 }
 
-// TestIsAncestorOf tests the isAncestorOf helper with a real temp repo.
-func TestIsAncestorOf(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	initRepoOnMain(t, dir)
-
-	commitFile(t, dir, "a.go", "package main", "commit A")
-	hashAStr := testutil.GetHeadHash(t, dir)
-
-	commitFile(t, dir, "b.go", "package main", "commit B")
-	hashBStr := testutil.GetHeadHash(t, dir)
-
-	repo := openTestRepo(t, dir)
-	ctx := context.Background()
-
-	hashA := plumbing.NewHash(hashAStr)
-	hashB := plumbing.NewHash(hashBStr)
-
-	// A is an ancestor of B.
-	isAnc, err := isAncestorOf(ctx, repo, hashA, hashB)
-	if err != nil {
-		t.Fatalf("isAncestorOf(A, B): %v", err)
-	}
-	if !isAnc {
-		t.Error("A should be ancestor of B")
-	}
-
-	// B is NOT an ancestor of A.
-	isAnc, err = isAncestorOf(ctx, repo, hashB, hashA)
-	if err != nil {
-		t.Fatalf("isAncestorOf(B, A): %v", err)
-	}
-	if isAnc {
-		t.Error("B should not be ancestor of A")
-	}
-
-	// A is its own ancestor (equal hashes → true).
-	isAnc, err = isAncestorOf(ctx, repo, hashA, hashA)
-	if err != nil {
-		t.Fatalf("isAncestorOf(A, A): %v", err)
-	}
-	if !isAnc {
-		t.Error("A should be ancestor of itself (equal)")
-	}
-}
-
 // TestDetectScopeBaseRef_BranchOffMain checks that a feature branch off main
 // returns "main" and the commit/file counts are correct.
 // Cannot use t.Parallel because it modifies disk state.
@@ -207,22 +159,79 @@ func TestDetectScopeBaseRef_BranchOffMain(t *testing.T) {
 	}
 }
 
-// TestDetectScopeBaseRef_ClosestAncestorPreferred verifies that a branch
-// stacked on top of another feature branch returns the immediate parent
-// (more recent tip), not the more distant main.
-// Cannot use t.Parallel because it modifies the repo state.
-func TestDetectScopeBaseRef_ClosestAncestorPreferred(t *testing.T) {
+// TestCountFilesChanged_ThreeDotIgnoresUpstreamOnlyChanges verifies that
+// countFilesChanged uses three-dot diff syntax (base...HEAD = merge-base
+// diff) so files modified on baseRef AFTER the branch was cut are not
+// counted as part of the branch's file delta. With the buggy two-dot
+// variant (`base..HEAD`), every upstream-only change appears as a
+// "reversed" delta and inflates the banner's "files changed" count —
+// a user-visible numeric regression that no other test guards against
+// because they only exercise fast-forward branches.
+// Cannot use t.Parallel because it modifies disk state.
+func TestCountFilesChanged_ThreeDotIgnoresUpstreamOnlyChanges(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+
+	// Initial commit on main (the eventual merge-base).
+	commitFile(t, dir, "root.go", "package main", "init")
+
+	// Branch off main and commit one file unique to feat/x.
+	testutil.GitCheckoutNewBranch(t, dir, "feat/x")
+	commitFile(t, dir, "feat.go", "package main", "feat-only change")
+
+	// Switch back to main and add a commit AFTER the branch point. This is
+	// the upstream-only change that two-dot diff would mis-count.
+	//nolint:noctx // test helper
+	checkout := exec.Command("git", "checkout", defaultBranchName)
+	checkout.Dir = dir
+	if out, err := checkout.CombinedOutput(); err != nil {
+		t.Fatalf("checkout main: %v\n%s", err, out)
+	}
+	commitFile(t, dir, "main-only.go", "package main", "post-branch main change")
+
+	// Return to feat/x — this is the branch the user would be reviewing.
+	//nolint:noctx // test helper
+	checkout = exec.Command("git", "checkout", "feat/x")
+	checkout.Dir = dir
+	if out, err := checkout.CombinedOutput(); err != nil {
+		t.Fatalf("checkout feat/x: %v\n%s", err, out)
+	}
+
+	ctx := context.Background()
+	got, err := countFilesChanged(ctx, dir, defaultBranchName)
+	if err != nil {
+		t.Fatalf("countFilesChanged: %v", err)
+	}
+	// Three-dot: only `feat.go` (the file unique to feat/x's history). With
+	// two-dot, the count would be 2 (also `main-only.go` as a reverse delta).
+	if got != 1 {
+		t.Errorf("countFilesChanged = %d, want 1 (three-dot diff vs main; two-dot would return 2)", got)
+	}
+}
+
+// TestDetectScopeBaseRef_PrefersMainOverAncestorBranches verifies that the
+// scope detection picks the mainline (origin/main → origin/master → main →
+// master) regardless of whether intermediate ancestor branches exist with
+// more recent tip timestamps. This replaces a prior "closest ancestor wins"
+// behavior whose timestamp heuristic routinely picked unrelated
+// recently-merged feature branches as the review base — a structural bug
+// that affected every developer with stale remote refs (which is every
+// developer, because `git fetch` mirrors all of origin's branches by
+// default and merged feature branches often live on for a while before
+// deletion). Stacked PR review against a parent feature branch is now
+// served by the explicit `--base <ref>` flag instead of an inference.
+func TestDetectScopeBaseRef_PrefersMainOverAncestorBranches(t *testing.T) {
 	dir := t.TempDir()
 	initRepoOnMain(t, dir)
 
 	// main: one initial commit.
 	commitFile(t, dir, "root.go", "package main", "init")
 
-	// feat/parent: one commit off main.
+	// feat/parent: one commit off main (newer tip than main).
 	testutil.GitCheckoutNewBranch(t, dir, "feat/parent")
 	commitFile(t, dir, "parent.go", "package main", "parent commit")
 
-	// feat/child: two commits off feat/parent.
+	// feat/child: two commits off feat/parent (even newer tip).
 	testutil.GitCheckoutNewBranch(t, dir, "feat/child")
 	commitFile(t, dir, "child1.go", "package main", "child commit 1")
 	commitFile(t, dir, "child2.go", "package main", "child commit 2")
@@ -234,9 +243,9 @@ func TestDetectScopeBaseRef_ClosestAncestorPreferred(t *testing.T) {
 	if err != nil {
 		t.Fatalf("detectScopeBaseRef: %v", err)
 	}
-	// feat/parent has the most recent tip among ancestors of feat/child.
-	if baseRef != "feat/parent" {
-		t.Errorf("baseRef = %q, want %q", baseRef, "feat/parent")
+	// Mainline must win even though feat/parent's tip is newer.
+	if baseRef != defaultBranchName {
+		t.Errorf("baseRef = %q, want %q (mainline-first, no timestamp heuristic)", baseRef, defaultBranchName)
 	}
 }
 
@@ -392,6 +401,84 @@ func TestDetectScopeBaseRef_NoSuitableAncestor(t *testing.T) {
 	}
 }
 
+// TestComputeScopeStats_BaseOverrideUsed verifies that when a non-empty
+// baseOverride is passed, that ref is used as the scope base — bypassing the
+// mainline auto-detection. This is the entry point for the `--base <ref>`
+// command-line flag.
+func TestComputeScopeStats_BaseOverrideUsed(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+
+	// main: one commit.
+	commitFile(t, dir, "main.go", "package main", "init")
+
+	// feat/parent: one commit on top of main.
+	testutil.GitCheckoutNewBranch(t, dir, "feat/parent")
+	commitFile(t, dir, "p.go", "package main", "parent")
+
+	// feat/child: one commit on top of feat/parent.
+	testutil.GitCheckoutNewBranch(t, dir, "feat/child")
+	commitFile(t, dir, "c.go", "package main", "child")
+
+	ctx := context.Background()
+	repo := openTestRepo(t, dir)
+
+	stats, err := ComputeScopeStats(ctx, repo, "feat/parent")
+	if err != nil {
+		t.Fatalf("ComputeScopeStats with override: %v", err)
+	}
+	if stats.BaseRef != "feat/parent" {
+		t.Errorf("BaseRef = %q, want %q (override must take effect)", stats.BaseRef, "feat/parent")
+	}
+	// One commit unique to feat/child vs feat/parent.
+	if stats.Commits != 1 {
+		t.Errorf("Commits = %d, want 1", stats.Commits)
+	}
+}
+
+// TestComputeScopeStats_BaseOverrideUnknownRefErrors verifies that passing
+// a non-existent ref via --base errors loudly before agents are spawned,
+// rather than silently falling back to mainline.
+func TestComputeScopeStats_BaseOverrideUnknownRefErrors(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+	commitFile(t, dir, "f.go", "package main", "init")
+
+	ctx := context.Background()
+	repo := openTestRepo(t, dir)
+
+	_, err := ComputeScopeStats(ctx, repo, "no-such-ref-anywhere")
+	if err == nil {
+		t.Fatal("expected error for unknown override ref, got nil")
+	}
+	if !strings.Contains(err.Error(), "no-such-ref-anywhere") {
+		t.Errorf("error must name the bad ref so the user can fix it; got: %v", err)
+	}
+}
+
+// TestComputeScopeStats_EmptyOverrideUsesMainlineDetection verifies that the
+// empty-string override (i.e., no --base flag passed) still triggers the
+// mainline-first detection — preserving the default behavior.
+func TestComputeScopeStats_EmptyOverrideUsesMainlineDetection(t *testing.T) {
+	dir := t.TempDir()
+	initRepoOnMain(t, dir)
+	commitFile(t, dir, "main.go", "package main", "init")
+
+	testutil.GitCheckoutNewBranch(t, dir, "feat/x")
+	commitFile(t, dir, "x.go", "package main", "x")
+
+	ctx := context.Background()
+	repo := openTestRepo(t, dir)
+
+	stats, err := ComputeScopeStats(ctx, repo, "")
+	if err != nil {
+		t.Fatalf("ComputeScopeStats with empty override: %v", err)
+	}
+	if stats.BaseRef != defaultBranchName {
+		t.Errorf("BaseRef = %q, want %q (empty override → mainline)", stats.BaseRef, defaultBranchName)
+	}
+}
+
 // TestComputeScopeStats_Integration verifies the full ComputeScopeStats
 // function produces consistent results.
 // Cannot use t.Parallel because it modifies the filesystem.
@@ -410,7 +497,7 @@ func TestComputeScopeStats_Integration(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepo(t, dir)
 
-	stats, err := ComputeScopeStats(ctx, repo)
+	stats, err := ComputeScopeStats(ctx, repo, "")
 	if err != nil {
 		t.Fatalf("ComputeScopeStats: %v", err)
 	}
