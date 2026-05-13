@@ -9,9 +9,9 @@
 // Events flow as a stream: implementations spawn the agent process, parse
 // stdout into a sequence of typed Events (Started, AssistantText, ToolCall,
 // Tokens, Finished, RunError), and surface them via Process.Events. Per-agent
-// quirks (codex's chrome stripping, gemini's stdin requirement, claude's argv
-// shape) are entirely encapsulated inside each agent's adapter — shared code
-// only sees the cleaned event stream.
+// quirks (codex's JSONL envelope shape, gemini's stdin requirement, claude's
+// argv shape) are entirely encapsulated inside each agent's adapter — shared
+// code only sees the cleaned event stream.
 //
 // Living in a subpackage (not the review root package) avoids import cycles:
 // per-agent reviewers and the orchestrator both depend on these types
