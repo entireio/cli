@@ -1109,6 +1109,51 @@ func TestTUIModel_CtrlCAfterAllRowsTerminalQuitsImmediately(t *testing.T) {
 	}
 }
 
+// TestTUIModel_CtrlCInDetailModeAfterAllRowsTerminalQuits pins that Ctrl+C
+// pressed inside drill-in during the narrow race window where every agent
+// has emitted a terminal event but the orchestrator's runFinishedMsg has
+// not arrived yet quits the TUI instead of being swallowed. Without the
+// detail-mode gate on allAgentsTerminal(), the user reading a completed
+// agent's buffer would have to press Esc first to return to the dashboard
+// before Ctrl+C took effect — needlessly two-step when there is nothing
+// left to cancel. Companion to
+// [TestTUIModel_CtrlCAfterAllRowsTerminalQuitsImmediately] for the
+// dashboard-mode case.
+func TestTUIModel_CtrlCInDetailModeAfterAllRowsTerminalQuits(t *testing.T) {
+	t.Parallel()
+	var called atomic.Bool
+	cancel := func() { called.Store(true) }
+	m := newTestModel([]string{"agent-a", "agent-b"}, cancel)
+
+	updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(agentEventMsg{agent: "agent-b", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(testCtrlKey('o'))
+	m = mustModel(t, updated)
+	if !m.detailMode {
+		t.Fatal("setup: expected detailMode=true after Ctrl+O")
+	}
+	if m.finished {
+		t.Fatal("setup: m.finished should be false (runFinishedMsg not sent)")
+	}
+
+	updated, cmd := m.Update(testCtrlKey('c'))
+	m = mustModel(t, updated)
+	if m.cancelling {
+		t.Error("Ctrl+C in detail mode with all rows terminal must NOT set cancelling=true")
+	}
+	if called.Load() {
+		t.Error("CancelFunc must not fire when there is nothing left to cancel")
+	}
+	if cmd == nil {
+		t.Fatal("expected a quit command when Ctrl+C arrives in detail mode with all rows terminal")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Errorf("expected tea.QuitMsg, got %T", cmd())
+	}
+}
+
 // TestTUIModel_PostFinishInDetailMode_ExitKeysQuit pins that q/Enter/Ctrl+C
 // pressed while drilled in AFTER the run finished dismiss the TUI directly
 // instead of being swallowed by the viewport (which has no quit binding).

@@ -113,8 +113,10 @@ func detailFrame(row agentRow, body string, termWidth, termHeight int) string {
 }
 
 // splitBodyToHeight normalizes a multi-line body string to exactly bodyHeight
-// lines, each truncated and padded to termWidth. Lines beyond bodyHeight are
-// dropped; missing lines are padded with spaces.
+// lines, each truncated and padded to termWidth. Missing lines are padded
+// with spaces. The bodyHeight cap is a defensive guard: viewport.View()
+// should already clip to its Height(), so the overflow-truncation path is
+// not expected to trigger in normal use.
 func splitBodyToHeight(body string, bodyHeight, termWidth int) []string {
 	if bodyHeight <= 0 {
 		return nil

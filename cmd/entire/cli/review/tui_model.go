@@ -360,18 +360,21 @@ func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// CancelFunc against the duplicate-firing case.
 			return m, tea.Quit
 		}
-		if m.detailMode {
-			// Idle drill-in: Ctrl+C is intentionally ignored so the user
-			// reading content can't accidentally fire a cancel. Esc first
-			// to return to the dashboard.
-			return m, nil
-		}
 		if m.allAgentsTerminal() {
 			// Race window: every agent emitted a terminal event but
 			// runFinishedMsg hasn't arrived yet. There's nothing left to
 			// cancel — quit immediately instead of flashing the
 			// "Cancelling agents..." footer until the runFinishedMsg lands.
+			// Checked before m.detailMode so the user reading a finished
+			// agent's buffer doesn't have to press Esc first to dismiss.
 			return m, tea.Quit
+		}
+		if m.detailMode {
+			// Idle drill-in with at least one agent still running: Ctrl+C
+			// is intentionally ignored so the user reading content can't
+			// accidentally fire a cancel. Esc first to return to the
+			// dashboard.
+			return m, nil
 		}
 		m.cancelling = true
 		m.cancelOnce.Do(m.cancel)

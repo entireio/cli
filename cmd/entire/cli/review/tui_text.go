@@ -63,9 +63,17 @@ func truncateDisplayWidth(s string, width int) string {
 // wraps to nothing still contributes an empty line, preserving blank-line
 // structure between paragraphs.
 //
-// Returns nil for width <= 0 or empty input.
+// Trailing newlines are stripped before splitting so "text\n" yields a single
+// line, not a phantom blank tail — matching how splitBodyToHeight trims its
+// input.
+//
+// Returns nil for width <= 0 or input that is empty (or only newlines).
 func wrapDisplayWidth(s string, width int) []string {
-	if width <= 0 || s == "" {
+	if width <= 0 {
+		return nil
+	}
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
 		return nil
 	}
 	paragraphs := strings.Split(s, "\n")
