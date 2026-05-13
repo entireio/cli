@@ -113,6 +113,56 @@ func TestRenderStaticRecap_ListsMultipleRepoNames(t *testing.T) {
 	}
 }
 
+func TestRenderStaticRecap_WrapsContextLineWithLongRepoNames(t *testing.T) {
+	t.Parallel()
+
+	// Three long repo names so the joined context line (agents · repos … ·
+	// active days) exceeds the available content width at minWidth (60).
+	// Without wrap-aware rendering, the line would tear the box border.
+	// Names chosen so each is under the content width on its own (~56 at
+	// width 60) — the wrap point is whitespace between names.
+	resp := &MeRecapResponse{
+		Repos: []string{
+			"entireio/very-long-monorepo-name",
+			"entireio/another-very-long-repo",
+			"entireio/yet-another-long-one",
+		},
+		Summary: Summary{
+			Me:         SummaryTotals{Sessions: 1},
+			RepoCount:  3,
+			ActiveDays: 5,
+		},
+	}
+
+	got := RenderStaticRecap(resp, RenderOptions{
+		Range: RangeWeek,
+		View:  ViewBoth,
+		Agent: AgentAll,
+		Width: 60,
+	})
+
+	// Positive assertion: all three repos and the active-days segment are
+	// rendered somewhere — without this the test would pass if context
+	// rendering were deleted.
+	for _, want := range append([]string{}, resp.Repos...) {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output should include repo %q:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "5 active days") {
+		t.Fatalf("output should include active-days segment:\n%s", got)
+	}
+	// Width assertion: nothing tears the box at width 60. This is the
+	// regression guard — pre-fix, the joined context line was rendered
+	// verbatim and spilled past the right border.
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "│") && displayLen(line) > 60 {
+			t.Fatalf("summary box line should fit width 60, got width %d:\n%s\n\nfull output:\n%s",
+				displayLen(line), line, got)
+		}
+	}
+}
+
 func TestRenderStaticRecap_ShowsUnavailableTranscriptNote(t *testing.T) {
 	t.Parallel()
 

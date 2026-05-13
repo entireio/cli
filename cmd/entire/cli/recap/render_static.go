@@ -166,7 +166,15 @@ func renderSummary(resp *MeRecapResponse, opts RenderOptions, width int, styles 
 	if !agentFiltered {
 		context = append(context, plural(resp.Summary.ActiveDays, "active day"))
 	}
-	lines = append(lines, "", styles.muted.Render(strings.Join(context, " · ")))
+	// Wrap on whitespace at the box's content width so long repo names don't
+	// tear the border at narrow widths. wrapPlainLine breaks on whitespace
+	// only — a single ultra-long repo name (> contentWidth) overflows its
+	// line and renderBox truncates it, the same fallback the transcript note
+	// relies on.
+	lines = append(lines, "")
+	for _, line := range wrapPlainLine(strings.Join(context, " · "), summaryContentWidth(width)) {
+		lines = append(lines, styles.muted.Render(line))
+	}
 	return renderBox("", lines, width, styles)
 }
 
