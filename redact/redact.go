@@ -159,8 +159,9 @@ var connectionStringRules = []connectionStringRule{
 // 2. Pattern-based: betterleaks regex rules (260+ known secret formats)
 // 3. Credentialed URIs: URLs containing userinfo passwords
 // 4. Database connection strings: JDBC, keyword DSNs, and semicolon strings
-// 5. Bounded credential key/value pairs: DB_PASSWORD=...
-// 6. PII detection: email, phone, address patterns (only when configured via ConfigurePII)
+// 5. User-defined custom rules: configured via ConfigureCustomRules
+// 6. Bounded credential key/value pairs: DB_PASSWORD=...
+// 7. PII detection: email, phone, address patterns (only when configured via ConfigurePII)
 // A string is redacted if ANY method flags it.
 func String(s string) string {
 	var regions []taggedRegion
@@ -217,10 +218,13 @@ func String(s string) string {
 	// 4. Database and connection-string detection (secrets — always on).
 	regions = append(regions, detectConnectionStrings(s)...)
 
-	// 5. Bounded credential key/value detection (secrets — always on).
+	// 5. User-defined custom rules (secrets — only runs when configured).
+	regions = append(regions, detectCustomRules(getCustomRulesConfig(), s)...)
+
+	// 6. Bounded credential key/value detection (secrets — always on).
 	regions = append(regions, detectCredentialValues(s)...)
 
-	// 6. PII detection (opt-in — only runs when configured).
+	// 7. PII detection (opt-in — only runs when configured).
 	regions = append(regions, detectPII(getPIIConfig(), s)...)
 
 	if len(regions) == 0 {

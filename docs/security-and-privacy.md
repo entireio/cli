@@ -16,7 +16,7 @@ If your repository is **public**, this data is visible to the entire internet.
 
 ### What Entire redacts automatically
 
-Entire automatically scans transcript and metadata content before writing it to the `entire/checkpoints/v1` branch. Five secret detection methods run during condensation, plus an opt-in sixth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below):
+Entire automatically scans transcript and metadata content before writing it to the `entire/checkpoints/v1` branch. Five always-on secret detection methods run during condensation, plus a conditional sixth pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below) and an opt-in seventh pass for PII (see [Optional PII redaction](#optional-pii-redaction) below):
 
 1. **Entropy scoring** — Identifies high-entropy strings (Shannon entropy > 4.5) that look like randomly generated secrets, even if they don't match a known pattern.
 2. **Pattern matching** — Uses [Betterleaks](https://github.com/betterleaks/betterleaks) built-in rules to detect known secret formats.
@@ -24,7 +24,7 @@ Entire automatically scans transcript and metadata content before writing it to 
 4. **Database connection-string detection** — Redacts JDBC, Postgres keyword DSN, SQL Server, and ODBC-style connection strings containing passwords.
 5. **Bounded credential value detection** — Redacts password-like config values such as `DB_PASSWORD=...` and `PGPASSWORD=...` while preserving the surrounding key.
 
-Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. The five secret-detection passes are **always on** and cannot be disabled.
+Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. The five secret-detection passes above are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add a sixth secret-detection pass that only runs when configured.
 
 ### Optional PII redaction
 
@@ -77,6 +77,128 @@ Betterleaks pattern matching covers cloud providers (AWS, GCP, Azure), version c
 All detected secrets are replaced with `REDACTED`. PII matches are replaced with category-tagged tokens like `[REDACTED_EMAIL]` (see [Optional PII redaction](#optional-pii-redaction)).
 
 To reduce over-redaction, Entire preserves structural transcript fields such as IDs and paths, leaves placeholder values alone, and redacts only credential values for bounded key/value forms. Placeholders are detected by exact match (e.g. `changeme`, `example`, `placeholder`, `your_password`, `your_secret`, prior `REDACTED`/`[REDACTED]`/`<REDACTED>` markers) or by shape: shell expansions like `${DB_PASSWORD}`, bracketed names like `<password>` or `<your-db-password>`, and mask runs of three or more `*`/`x`/`.`/`-` (so `***`, `xxxx`, `....`, `----` all match). When a connection string contains a real password, it is redacted as a unit because partial fragments can still expose sensitive material; connection strings whose passwords are placeholders are left intact.
+
+## Customizing redaction
+
+The built-in detectors handle well-known secret formats. For anything else you don't want stored in transcripts — internal credential shapes the bundled scanners don't know about, project codenames, or specific words and phrases you'd rather keep out of session archives — Entire offers two extension surfaces. Both run plain regex matching against transcript content, so the rules can target any string pattern, not just credentials. Both feed the same engine and run as their own layer between connection-string detection and bounded credential KV detection.
+
+### Surface 1: Inline `redaction.custom_redactions`
+
+Add a label → regex map under `redaction.custom_redactions` in `.entire/settings.json`:
+
+```json
+{
+  "redaction": {
+    "custom_redactions": {
+      "acme_token":  "ACME_TOKEN_[A-Za-z0-9]{20,}",
+      "internal_id": "INTERNAL_[a-z]{6}_[0-9]{4}"
+    }
+  }
+}
+```
+
+- The label is for diagnostics only; matches are replaced with the bare `REDACTED` token (matching the built-in secret layers, not the `[REDACTED_<LABEL>]` token used for PII).
+- Regexes follow [Go's RE2 syntax](https://pkg.go.dev/regexp/syntax). No lookarounds, no backreferences.
+- A failed compile is logged once at startup and the rule is skipped — it will never crash the redactor.
+- Override in `.entire/settings.local.json` for personal additions; entries merge per-key (override replaces the same key, leaves other keys intact).
+
+### Surface 2: Rule packs
+
+Drop a YAML or JSON file into `.entire/redactors/`:
+
+```yaml
+# .entire/redactors/acme-internal.yaml
+name: acme-internal              # MUST match the filename stem
+version: 1.0.0
+description: Internal ACME service tokens
+rules:
+  - id: acme-token
+    description: Long-lived ACME service tokens
+    regex: 'ACME_TOKEN_[A-Za-z0-9]{20,}'
+    samples:
+      - { input: "key=ACME_TOKEN_abc123def456ghi789jkl", redacted: true  }
+      - { input: "ACME_TOKEN_short",                     redacted: false }
+  - id: acme-session
+    regex: 'asess_[a-f0-9]{32}'
+```
+
+Equivalent JSON form:
+
+```json
+{
+  "name": "acme-internal",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "acme-token",
+      "regex": "ACME_TOKEN_[A-Za-z0-9]{20,}",
+      "samples": [
+        { "input": "key=ACME_TOKEN_abc123def456ghi789jkl", "redacted": true  },
+        { "input": "ACME_TOKEN_short",                     "redacted": false }
+      ]
+    }
+  ]
+}
+```
+
+**Required fields:** `name` (must equal the filename stem — `acme-internal.yaml` → `acme-internal`), `version` (any string; semver recommended), and `rules[]` (at least one entry, each with `id` and `regex`).
+
+**Optional fields:** `description` (pack-level and rule-level), and `rules[].samples[]` (see "Self-tests" below).
+
+A pack does not have to target credentials. The same shape works for any string pattern you don't want stored in transcripts — for example, a project codename or a small word list:
+
+```yaml
+# .entire/redactors/local/private-words.yaml
+name: private-words
+version: 1.0.0
+description: Project codenames and personal words to keep out of transcripts
+rules:
+  - id: codename-falcon
+    description: Internal project codename
+    regex: '(?i)\bproject[- ]?falcon\b'
+    samples:
+      - { input: "rolling out Project Falcon next week", redacted: true  }
+      - { input: "the falcon flew over",                  redacted: false }
+  - id: personal-words
+    description: Words I'd rather not see archived
+    regex: '(?i)\b(word_one|word_two)\b'
+```
+
+Putting personal lists under `.entire/redactors/local/` keeps them out of team commits (see "Distribution" below).
+
+### Self-tests via `samples[]`
+
+Each rule may declare an array of `{input, redacted}` pairs. On the next process startup after editing the pack, Entire runs each sample and emits a `slog.Warn` for any mismatch:
+
+```
+WARN  redactor pack sample mismatch  pack=.entire/redactors/acme-internal.yaml
+      rule=acme-token sample_index=0 sample_length=42 expected=true got=false
+```
+
+A failing sample never disables the rule — sample validation is informational. Use it to catch typos and false positives before they ship.
+
+### Distribution
+
+- **Within a team:** commit `.entire/settings.json` and/or `.entire/redactors/*` to your repo. Teammates pull and the rules apply.
+- **Across teams:** copy the pack file or share a link to a gist; recipients drop the file into their `.entire/redactors/`.
+- **Personal-only:** put the file in `.entire/redactors/local/` — `entire enable` writes that path into `.entire/.gitignore` so personal rules don't pollute team commits.
+
+### When to write a rule vs. file an issue
+
+Write a rule for:
+
+- Internal service tokens (`ACME_*`, `INTERNAL_*`) and custom env-var prefixes the bundled detectors don't know about.
+- Project-specific session formats.
+- Project codenames or other identifiers you don't want stored in transcripts.
+- Specific words or phrases you'd rather keep out of session archives.
+
+File an issue when the rule would benefit every Entire user (e.g., a major SaaS issued a new token format), when a built-in is producing false positives on common idioms in your codebase, or when a built-in is *not* catching a well-known shared format (we'd rather fix the built-in than have everyone ship the same custom rule).
+
+### Troubleshooting
+
+- **My rule doesn't redact anything.** Warnings about invalid patterns or sample mismatches are emitted by the redaction layer when Entire initializes it. In the hook path (where checkpoints are actually written) these go to `.entire/logs/entire.log` — `grep component=redaction` and look for lines mentioning your label or pack path. When a hard pack-discovery failure happens during an interactive command, Entire also prints a one-line breadcrumb on stderr pointing back at the log.
+- **My pack file is silently ignored.** Filenames must end in `.yaml`, `.yml`, or `.json`. Other extensions are skipped.
+- **I want to disable a rule temporarily.** Comment it out (prefix the YAML key with `#`) or remove the entry from `custom_redactions`. The rule reloads on the next CLI invocation.
 
 ## Limitations
 

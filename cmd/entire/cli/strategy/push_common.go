@@ -171,8 +171,8 @@ func printCheckpointsV2MigrationHint(ctx context.Context) {
 		if !hasUnmigratedV1Checkpoints(ctx) {
 			return
 		}
-		fmt.Fprintln(os.Stderr, "[entire] Note: .entire/settings.json sets checkpoints_version: 2. Run 'entire migrate --checkpoints v2' to migrate existing checkpoints to v2.")
-		fmt.Fprintln(os.Stderr, "[entire] Use 'entire migrate --checkpoints v2 --force' to rewrite all checkpoints in v2.")
+		fmt.Fprintln(os.Stderr, "[entire] Note: .entire/settings.json sets checkpoints_version: 2, but there are some v1 checkpoints that have not been migrated to v2.")
+		fmt.Fprintln(os.Stderr, "[entire] Run 'entire migrate --checkpoints v2' to migrate missing checkpoints to v2.")
 	})
 }
 

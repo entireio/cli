@@ -8,6 +8,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -165,6 +166,12 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.rows[i].status == reviewtypes.AgentStatusUnknown {
 				m.rows[i].status = run.Status
 			}
+			if run.Tokens.In > 0 || run.Tokens.Out > 0 {
+				m.rows[i].tokens = run.Tokens
+			}
+			if m.rows[i].err == nil && run.Err != nil {
+				m.rows[i].err = run.Err
+			}
 			if m.rows[i].runEnd.IsZero() && !m.rows[i].runStart.IsZero() {
 				m.rows[i].runEnd = now
 			}
@@ -172,11 +179,17 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		if m.finished {
+			return m, nil
+		}
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		return m, tea.Batch(spinCmd, tickCmd())
 
 	case spinner.TickMsg:
+		if m.finished {
+			return m, nil
+		}
 		var spinCmd tea.Cmd
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		return m, spinCmd
@@ -212,16 +225,15 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // detailViewportWidth returns the viewport's width, mirroring termWidth.
 func (m reviewTUIModel) detailViewportWidth() int {
-	if m.termWidth < 1 {
-		return defaultTermWidth
-	}
-	return m.termWidth
+	width, _ := m.currentTerminalSize()
+	return width
 }
 
 // detailViewportHeight returns the viewport's body height, reserving one line
 // for the header and one for the footer.
 func (m reviewTUIModel) detailViewportHeight() int {
-	h := m.termHeight - 2
+	_, termHeight := m.currentTerminalSize()
+	h := termHeight - 2
 	if h < 1 {
 		return 1
 	}
@@ -449,13 +461,14 @@ func (m reviewTUIModel) allAgentsTerminal() bool {
 // terminal mouse selection still works on the summary table.
 func (m reviewTUIModel) View() tea.View {
 	var content string
+	termWidth, termHeight := m.currentTerminalSize()
 	if m.detailMode && len(m.rows) > 0 {
-		content = detailFrame(m.rows[m.detailIdx], m.detail.View(), m.termWidth, m.termHeight)
+		content = detailFrame(m.rows[m.detailIdx], m.detail.View(), termWidth, termHeight)
 	} else {
 		content = m.dashboardView()
 	}
 	v := tea.NewView(content)
-	v.AltScreen = m.detailMode
+	v.AltScreen = true
 	if m.detailMode {
 		v.MouseMode = tea.MouseModeCellMotion
 	}
@@ -491,10 +504,20 @@ func (m reviewTUIModel) writeDashboardLine(b *strings.Builder, line string) {
 }
 
 func (m reviewTUIModel) dashboardWidth() int {
-	if m.termWidth <= 0 {
-		return defaultTermWidth
+	width, _ := m.currentTerminalSize()
+	return width
+}
+
+func (m reviewTUIModel) currentTerminalSize() (int, int) {
+	width := m.termWidth
+	height := m.termHeight
+	if width <= 0 {
+		width = defaultTermWidth
 	}
-	return m.termWidth
+	if height <= 0 {
+		height = defaultTermHeight
+	}
+	return width, height
 }
 
 // headerLine returns the column header row.
@@ -542,7 +565,35 @@ func (m reviewTUIModel) renderRow(row agentRow) string {
 		tokStr = fmt.Sprintf("%s/%s", formatCompact(row.tokens.In), formatCompact(row.tokens.Out))
 	}
 
-	return m.renderTableLine(name, statusStr, durStr, tokStr, row.preview)
+	preview := row.preview
+	if row.status == reviewtypes.AgentStatusFailed && row.err != nil {
+		preview = stringutil.CollapseWhitespace(sanitizeDisplayText(formatErrorPreview(row.err)))
+	}
+
+	return m.renderTableLine(name, statusStr, durStr, tokStr, preview)
+}
+
+func formatErrorPreview(err error) string {
+	if err == nil {
+		return ""
+	}
+	var pe *reviewtypes.ProcessError
+	if errors.As(err, &pe) {
+		// Strip ANSI before the empty check — agents like codex/claude-code
+		// emit colored stderr banners whose first line can be escape codes
+		// only. TrimSpace doesn't drop those, so without stripping we'd pick
+		// the chrome and hide the real message on subsequent lines.
+		for _, line := range strings.Split(pe.Stderr, "\n") {
+			trimmed := strings.TrimSpace(stripANSI(line))
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+		if pe.Err != nil {
+			return pe.Err.Error()
+		}
+	}
+	return err.Error()
 }
 
 func (m reviewTUIModel) renderTableLine(agent, status, duration, tokens, preview string) string {
