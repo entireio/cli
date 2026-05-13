@@ -23,6 +23,16 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
+// Default terminal dimensions used before the first tea.WindowSizeMsg
+// arrives. Shared by the constructor and the dashboardWidth /
+// detailViewportWidth fallbacks so both views render at the same width when
+// termWidth is uninitialized — a 1-cell viewport falls back here would
+// collapse to a single column, which is not what we want.
+const (
+	defaultTermWidth  = 80
+	defaultTermHeight = 24
+)
+
 // agentRow holds per-agent live state during the TUI run.
 type agentRow struct {
 	name     string
@@ -97,10 +107,6 @@ func newReviewTUIModel(agents []string, cancel context.CancelFunc) reviewTUIMode
 	}
 	// Seed viewport with defaults that match termWidth/termHeight so an
 	// immediate Ctrl+O before any WindowSizeMsg still renders.
-	const (
-		defaultTermWidth  = 80
-		defaultTermHeight = 24
-	)
 	vp := viewport.New(
 		viewport.WithWidth(defaultTermWidth),
 		viewport.WithHeight(defaultTermHeight-2),
@@ -207,7 +213,7 @@ func (m reviewTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // detailViewportWidth returns the viewport's width, mirroring termWidth.
 func (m reviewTUIModel) detailViewportWidth() int {
 	if m.termWidth < 1 {
-		return 1
+		return defaultTermWidth
 	}
 	return m.termWidth
 }
@@ -237,7 +243,7 @@ func (m reviewTUIModel) refreshDetailContent() reviewTUIModel {
 
 func (m reviewTUIModel) refreshDetailContentWithAutoTail(wasAtBottom bool) reviewTUIModel {
 	if len(m.rows) == 0 || m.detailIdx < 0 || m.detailIdx >= len(m.rows) {
-		m.detail.SetContent("")
+		m.detail.SetContentLines(nil)
 		return m
 	}
 	lines := buildEventLines(m.rows[m.detailIdx].buffer, m.detailViewportWidth())
@@ -322,7 +328,7 @@ func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case msg.Mod == tea.ModCtrl && msg.Code == 'c':
 			return m, tea.Quit
-		case msg.Mod == 0 && (msg.Code == tea.KeyEscape || msg.Code == tea.KeyEsc):
+		case msg.Mod == 0 && (msg.Code == tea.KeyEscape):
 			if !m.detailMode {
 				return m, tea.Quit
 			}
@@ -332,15 +338,21 @@ func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case msg.Code == 'c' && msg.Mod == tea.ModCtrl:
-		if m.detailMode {
-			// In drill-in: Ctrl+C is intentionally ignored; Esc first.
-			return m, nil
-		}
 		if m.cancelling {
 			// Second Ctrl+C while a cancellation is already in flight
-			// force-quits without waiting for agents to drain. cancelOnce
-			// guards CancelFunc against the duplicate-firing case.
+			// force-quits without waiting for agents to drain. Checked
+			// before m.detailMode so the force-quit escape hatch works
+			// from drill-in too — the dashboard footer hint promises this
+			// path and a user drilled into a hanging agent's buffer is
+			// exactly when they need force-quit most. cancelOnce guards
+			// CancelFunc against the duplicate-firing case.
 			return m, tea.Quit
+		}
+		if m.detailMode {
+			// Idle drill-in: Ctrl+C is intentionally ignored so the user
+			// reading content can't accidentally fire a cancel. Esc first
+			// to return to the dashboard.
+			return m, nil
 		}
 		if m.allAgentsTerminal() {
 			// Race window: every agent emitted a terminal event but
@@ -374,7 +386,7 @@ func (m reviewTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.detail.GotoBottom()
 		return m, nil
 
-	case msg.Code == tea.KeyEscape || msg.Code == tea.KeyEsc:
+	case msg.Code == tea.KeyEscape:
 		if m.detailMode {
 			m.detailMode = false
 			return m, nil
@@ -480,7 +492,7 @@ func (m reviewTUIModel) writeDashboardLine(b *strings.Builder, line string) {
 
 func (m reviewTUIModel) dashboardWidth() int {
 	if m.termWidth <= 0 {
-		return 80
+		return defaultTermWidth
 	}
 	return m.termWidth
 }

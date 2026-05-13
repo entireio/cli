@@ -541,6 +541,46 @@ func TestTUIModel_SecondCtrlCForceQuits(t *testing.T) {
 	}
 }
 
+// TestTUIModel_SecondCtrlCForceQuits_FromDetailMode locks the force-quit
+// escape hatch from inside the drill-in view. When cancelling is already
+// in flight, the dashboard footer promises "Ctrl+C again: force quit" —
+// a user who drilled into a hanging agent's buffer to diagnose the hang
+// needs that promise to hold from drill-in too. Without the cancelling-
+// before-detailMode precedence in handleKey, Ctrl+C in this state was
+// silently swallowed.
+func TestTUIModel_SecondCtrlCForceQuits_FromDetailMode(t *testing.T) {
+	t.Parallel()
+	var count atomic.Int32
+	cancel := func() { count.Add(1) }
+
+	m := newTestModel([]string{"agent-a"}, cancel)
+	// First Ctrl+C on dashboard initiates cancellation.
+	updated, _ := m.Update(testCtrlKey('c'))
+	m = mustModel(t, updated)
+	if !m.cancelling {
+		t.Fatal("setup: expected cancelling=true after first Ctrl+C")
+	}
+	// Drill in to inspect the hanging agent.
+	updated, _ = m.Update(testCtrlKey('o'))
+	m = mustModel(t, updated)
+	if !m.detailMode {
+		t.Fatal("setup: expected detailMode=true after Ctrl+O")
+	}
+
+	// Second Ctrl+C while cancelling AND in drill-in must force-quit.
+	_, cmd := m.Update(testCtrlKey('c'))
+	if cmd == nil {
+		t.Fatal("expected a command from second Ctrl+C in detail mode while cancelling")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Errorf("expected tea.QuitMsg from second Ctrl+C in detail mode while cancelling, got %T", msg)
+	}
+	if got := count.Load(); got != 1 {
+		t.Errorf("CancelFunc should fire exactly once; got %d", got)
+	}
+}
+
 // TestTUIModel_AutoFollow_DetailMode pins that when the viewport is sitting
 // at the bottom and a new event arrives, the model snaps back to bottom so
 // the user keeps seeing the tail. The viewport's AtBottom() drives this.
