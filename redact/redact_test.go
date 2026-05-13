@@ -792,6 +792,11 @@ func TestString_BoundedCredentialValueRedaction(t *testing.T) {
 			input: "DB__PASSWORD=secret123",
 			want:  "DB__PASSWORD=REDACTED",
 		},
+		{
+			name:  "github client secret env var",
+			input: "GITHUB_CLIENT_SECRET=correct-horse-client",
+			want:  "GITHUB_CLIENT_SECRET=REDACTED",
+		},
 	})
 }
 
@@ -882,6 +887,11 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			name:  "placeholder literal is preserved",
 			input: "DB_PASSWORD=placeholder",
 			want:  "DB_PASSWORD=placeholder",
+		},
+		{
+			name:  "google adsense account is preserved as identifier",
+			input: "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
+			want:  "GOOGLE_ADSENSE_ACCOUNT=pub-1234567890123456",
 		},
 	})
 }
@@ -995,19 +1005,20 @@ func TestJSONLContent_DatabaseCredentialRedaction(t *testing.T) {
 
 func TestJSONLContent_StructuredCredentialFieldsRedacted(t *testing.T) {
 	t.Parallel()
-	input := `{"type":"assistant","env":{"DB_PASSWORD":"correct-horse-db","REDIS_PASSWORD":"${REDIS_PASSWORD}","note":"correct-horse-db"},"db":{"password":"correct-horse-db","host":"db.example.com","user":"svc"},"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0"}`
+	input := `{"type":"assistant","env":{"DB_PASSWORD":"correct-horse-db","GITHUB_CLIENT_SECRET":"correct-horse-client","REDIS_PASSWORD":"${REDIS_PASSWORD}","note":"correct-horse-db"},"db":{"password":"correct-horse-db","host":"db.example.com","user":"svc"},"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0"}`
 
 	result, err := JSONLContent(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, leaked := range []string{`"DB_PASSWORD":"correct-horse-db"`, `"password":"correct-horse-db"`} {
+	for _, leaked := range []string{`"DB_PASSWORD":"correct-horse-db"`, `"GITHUB_CLIENT_SECRET":"correct-horse-client"`, `"password":"correct-horse-db"`} {
 		if strings.Contains(result, leaked) {
 			t.Fatalf("expected structured credential field %q to be redacted, got: %s", leaked, result)
 		}
 	}
 	for _, preserved := range []string{
 		`"DB_PASSWORD":"REDACTED"`,
+		`"GITHUB_CLIENT_SECRET":"REDACTED"`,
 		`"REDIS_PASSWORD":"${REDIS_PASSWORD}"`,
 		`"password":"REDACTED"`,
 		`"host":"db.example.com"`,
@@ -1040,6 +1051,44 @@ func TestJSONLContent_NormalizedCredentialKeysRedacted(t *testing.T) {
 	}
 	if strings.Contains(result, `"DB Password":"correct-horse-db"`) {
 		t.Fatalf("expected normalized credential key to be redacted, got: %s", result)
+	}
+}
+
+func TestJSONLContent_ShellStdinSecretCommandRedactsPrintfLiteral(t *testing.T) {
+	t.Parallel()
+	keyName := strings.Join([]string{"EXAMPLE", "API", "KEY"}, "_")
+	secret := "correct-horse-client"
+	input := `{"type":"user","message":{"content":[{"type":"tool_result","content":"tail -2 && printf '` + secret + `' | examplectl secret put ` + keyName + ` 2>&1 | tail -2"}]}}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(result, secret) {
+		t.Fatalf("expected shell stdin secret literal to be redacted, got: %s", result)
+	}
+	if !strings.Contains(result, "printf 'REDACTED' | examplectl secret put "+keyName) {
+		t.Fatalf("expected command context to be preserved, got: %s", result)
+	}
+}
+
+func TestJSONLContent_ShellStdinSecretCommandOverRedactionGuards(t *testing.T) {
+	t.Parallel()
+	keyName := strings.Join([]string{"EXAMPLE", "API", "KEY"}, "_")
+	clientIDName := strings.Join([]string{"EXAMPLE", "CLIENT", "ID"}, "_")
+	input := `{"type":"user","message":{"content":[{"type":"tool_result","content":"printf 'example-client-id.apps.example.test' | examplectl secret put ` + clientIDName + `\nprintf \"$` + keyName + `\" | examplectl secret put ` + keyName + `"}]}}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, preserved := range []string{
+		"printf 'example-client-id.apps.example.test' | examplectl secret put " + clientIDName,
+		`printf \"$` + keyName + `\" | examplectl secret put ` + keyName,
+	} {
+		if !strings.Contains(result, preserved) {
+			t.Fatalf("expected %q to be preserved, got: %s", preserved, result)
+		}
 	}
 }
 
