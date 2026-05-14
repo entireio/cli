@@ -47,6 +47,53 @@ func runSearchLocal(ctx context.Context, w io.Writer, query, branch string, json
 	return nil
 }
 
+// maybePrintLocalFallbackHint writes a one-line stderr hint when the remote
+// search came back empty but the local entire/checkpoints/v1 branch has
+// content. This closes the discoverability gap reported in #1171 / #1195:
+// users seeing 0 results from the service have no signal that --local
+// exists or that their data is captured locally.
+//
+// The hint is silent in three cases — when results were returned, when no
+// local checkpoints exist, or when the lookup itself errors — so it never
+// fires misleadingly and never breaks the search command.
+func maybePrintLocalFallbackHint(ctx context.Context, errW io.Writer, resp *search.Response, query string) {
+	writeLocalFallbackHint(errW, resp, query, countLocalCheckpoints(ctx))
+}
+
+// writeLocalFallbackHint is the pure rendering half, separated so tests can
+// supply a fixed local count instead of opening a real repo.
+func writeLocalFallbackHint(errW io.Writer, resp *search.Response, query string, localCount int) {
+	if resp == nil || resp.Total > 0 || localCount <= 0 {
+		return
+	}
+	suggested := strings.TrimSpace(query)
+	if suggested == "" {
+		fmt.Fprintf(errW,
+			"Hint: 0 results from the search service. %d local checkpoint(s) are present on entire/checkpoints/v1 — try `entire search --local` to grep them directly.\n",
+			localCount)
+		return
+	}
+	fmt.Fprintf(errW,
+		"Hint: 0 results from the search service. %d local checkpoint(s) are present on entire/checkpoints/v1 — try `entire search --local %q` to grep them directly.\n",
+		localCount, suggested)
+}
+
+// countLocalCheckpoints returns the number of committed checkpoints on
+// entire/checkpoints/v1, or 0 if anything goes wrong (no repo, no branch,
+// store unreadable). Used by maybePrintLocalFallbackHint as a cheap "is
+// there anything to fall back to?" probe.
+func countLocalCheckpoints(ctx context.Context) int {
+	repo, err := strategy.OpenRepository(ctx)
+	if err != nil {
+		return 0
+	}
+	infos, err := checkpoint.NewGitStore(repo).ListCommitted(ctx)
+	if err != nil {
+		return 0
+	}
+	return len(infos)
+}
+
 // localOriginIdentity resolves the GitHub owner/repo from the local
 // origin remote on a best-effort basis. Failures are silently swallowed
 // because local search must work even when there's no GitHub origin

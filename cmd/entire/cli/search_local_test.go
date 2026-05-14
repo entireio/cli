@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 
@@ -197,6 +199,72 @@ func TestLocalSearch_NoMatches(t *testing.T) {
 	}
 	if resp.Total != 0 {
 		t.Errorf("expected 0 matches, got %d", resp.Total)
+	}
+}
+
+func TestWriteLocalFallbackHint_PrintsWhenRemoteEmptyAndLocalHasCheckpoints(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	writeLocalFallbackHint(&buf, &search.Response{Total: 0}, "lefthook", 3)
+
+	out := buf.String()
+	if !strings.Contains(out, "0 results from the search service") {
+		t.Fatalf("hint missing service-empty phrase: %q", out)
+	}
+	if !strings.Contains(out, "3 local checkpoint") {
+		t.Fatalf("hint missing local count: %q", out)
+	}
+	if !strings.Contains(out, "--local \"lefthook\"") {
+		t.Fatalf("hint missing suggested --local invocation: %q", out)
+	}
+}
+
+func TestWriteLocalFallbackHint_OmitsQuotesForEmptyQuery(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	writeLocalFallbackHint(&buf, &search.Response{Total: 0}, "   ", 1)
+
+	out := buf.String()
+	if !strings.Contains(out, "--local`") {
+		t.Fatalf("hint should suggest bare --local for empty query: %q", out)
+	}
+	if strings.Contains(out, "\"\"") {
+		t.Fatalf("hint should not include empty quoted arg: %q", out)
+	}
+}
+
+func TestWriteLocalFallbackHint_SilentWhenResultsExist(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	writeLocalFallbackHint(&buf, &search.Response{Total: 5}, "anything", 10)
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output when remote returned results, got %q", buf.String())
+	}
+}
+
+func TestWriteLocalFallbackHint_SilentWhenNoLocalCheckpoints(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	writeLocalFallbackHint(&buf, &search.Response{Total: 0}, "anything", 0)
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output when local store is empty, got %q", buf.String())
+	}
+}
+
+func TestWriteLocalFallbackHint_SilentOnNilResponse(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	writeLocalFallbackHint(&buf, nil, "anything", 5)
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output on nil response, got %q", buf.String())
 	}
 }
 

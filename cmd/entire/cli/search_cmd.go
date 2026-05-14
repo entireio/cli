@@ -169,6 +169,7 @@ prompts, transcripts, file paths, and the checkpoint branch name.`,
 
 			// JSON output: explicit flag or piped/redirected stdout
 			if jsonOutput || !isTerminal {
+				maybePrintLocalFallbackHint(ctx, cmd.ErrOrStderr(), resp, query)
 				return writeSearchJSON(w, resp, requestedLimit, requestedPage)
 			}
 
@@ -178,6 +179,7 @@ prompts, transcripts, file paths, and the checkpoint branch name.`,
 			if IsAccessibleMode() {
 				if len(resp.Results) == 0 {
 					fmt.Fprintln(w, "No results found.")
+					maybePrintLocalFallbackHint(ctx, cmd.ErrOrStderr(), resp, query)
 					return nil
 				}
 				renderSearchStatic(w, resp.Results, query, resp.Total, styles)
