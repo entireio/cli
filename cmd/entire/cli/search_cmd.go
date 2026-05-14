@@ -26,6 +26,7 @@ func newSearchCmd() *cobra.Command {
 		dateFlag   string
 		branchFlag string
 		repoFlag   string
+		localFlag  bool
 	)
 
 	cmd := &cobra.Command{
@@ -40,7 +41,12 @@ Run without arguments to open an interactive search. Results are
 displayed in an interactive table. Use --json for machine-readable output.
 
 CLI queries also support inline filters like author:<name>, date:<week|month>,
-branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
+branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.
+
+Pass --local to search the local entire/checkpoints/v1 branch directly,
+skipping the remote service. Useful when the remote index is lagging or
+unavailable. Local search does case-insensitive substring matching over
+prompts, transcripts, file paths, and the checkpoint branch name.`,
 		Args:   cobra.ArbitraryArgs,
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -74,6 +80,10 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			// Fast-fail: no query + non-interactive mode = error (before auth/git checks)
 			if query == "" && !hasFilters && (jsonOutput || !isTerminal || IsAccessibleMode()) {
 				return errors.New("query required when using --json, accessible mode, or piped output. Usage: entire search <query>")
+			}
+
+			if localFlag {
+				return runSearchLocal(ctx, w, query, branchFlag, jsonOutput, isTerminal, limitFlag, pageFlag)
 			}
 
 			ghToken, err := auth.LookupCurrentToken()
@@ -191,6 +201,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	cmd.Flags().StringVar(&dateFlag, "date", "", "Filter by time period (week or month)")
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Filter by branch name")
 	cmd.Flags().StringVar(&repoFlag, "repo", "", "Filter by repository (owner/name or *)")
+	cmd.Flags().BoolVar(&localFlag, "local", false, "Search local checkpoints only (skip the remote search service)")
 
 	cmd.RegisterFlagCompletionFunc("date", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) { //nolint:errcheck,gosec // only fails if the flag isn't defined; defined directly above
 		return []string{"week", "month"}, cobra.ShellCompDirectiveNoFileComp
